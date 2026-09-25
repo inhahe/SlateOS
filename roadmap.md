@@ -1867,8 +1867,12 @@ word; text inside them that says "lane C" is history.
   recording and playing wait on `known-issues.md` → `[E] Applications can
   neither record nor play sound`), `metronome` (2026-09-25 — every control;
   says it is silent, a settable practice start, practice settings as rows, and
-  accents for every beat).
-  **Next:** email — then tmux and pinball. (`reminders` was
+  accents for every beat), `email` (2026-09-25 — every control; reads mbox
+  and `.eml` mail kept in files, whole, with its attachments; a compose form
+  that is drawn at last, drafts saved and opened again, Save as file; marks
+  kept apart from mail it never rewrites; and a builder that writes what it
+  declares).
+  **Next:** tmux and pinball. (`reminders` was
   examined 2026-09-18: keyboard-driven by design, its two gaps fixed.)
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
@@ -7746,7 +7750,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - The month-grid start offset was written out three times as the same `if first_dow == 0 { 6 } else { first_dow - 1 }`; it is now one method. Fixed the crate's ten pre-existing `arithmetic_side_effects` violations along the way — it had never passed the lane's clippy gate.
 - [x] IRC client (apps/ircclient: full IRC protocol parser, CTCP support, channel management, user prefix modes, 12 slash commands, multi-panel UI with sidebar/chat/nick list, numeric reply handling, 40 tests)
 - [x] Torrent client (apps/torrent: bencode parser/encoder, SHA-1 implementation, .torrent file parsing, magnet link support BEP 9, peer wire protocol BEP 3, piece management with rarest-first, tracker announce/scrape, bandwidth limiting, speed tracking, multi-tab UI, 50 tests)
-- [x] Email client (apps/email: MIME parsing with multipart, RFC 5322 address parser, IMAP/SMTP protocol commands, base64/quoted-printable encoding, mailbox management, composition with reply/forward, attachments, filter rules, signatures, multi-panel UI, 45 tests)
+- [x] Email client (apps/email: MIME parsing with multipart, RFC 5322 address parser, IMAP/SMTP protocol commands, base64/quoted-printable encoding, mailbox management, composition with reply/forward, attachments, filter rules, signatures, multi-panel UI, 45 tests) — *no network, so it has never fetched or sent; since 2026-09-25 it reads mail kept in files, writes drafts and `.eml` files, and its compose form is drawn -- it was not, and every key typed into it went nowhere visible. See the email paragraph of `known-issues.md` → `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`*
 - [x] File search (apps/filesearch: glob pattern matching, simple regex engine, file type categorization with 11 categories and 100+ extensions, file index, search filters, history with bookmarks, duplicate detection, statistics, multi-panel UI, 40 tests)
 - [x] Notes & Wiki (apps/notes: plain text/markdown/checklist/table note types, notebook organization with nesting, full-text search, 8 templates, export to text/md/html, favorites/pinning, word count/reading time, multi-panel UI that answers a click on all four panels -- a version restores, a note selects, right-click offers tag/delete/move, a notebook renames or deletes, a tag filters; wiki-style `[[...]]` linking is syntax only, `resolve_links` having no caller; 111 tests)
 - [x] Presentation/Slides (apps/slides: slide elements with text boxes/shapes/images, 6 slide layouts, 3 themes, slide sorter view, transitions, speaker notes, undo/redo, HTML export, multi-panel UI, 65 tests)

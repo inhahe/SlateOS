@@ -160060,6 +160060,39 @@ Left and Right change, set before practice starts, with a start above the
 target pulling it up; and F1 or `?` lists every key. 82 tests;
 `apps/metronome/mutate.py` has 15 rows. Eighteen examined; three to go.
 
+**`apps/email`, 2026-09-25 -- a mail client with no mail it could show, and a
+compose form it never drew.** It cannot send or receive (no network, no TLS),
+which it said -- in a notice the header then painted over. Worse, Ctrl+N opened
+a compose panel that nothing drew: every key typed after it went into a draft
+no one could see, and Escape threw it away. Nothing answered the pointer. The
+reading pane showed a message's one-line preview as the message; "below", one
+of the three pane positions Ctrl+P steps through, drew no pane at all. And no
+message could ever be in the window, from anywhere. Reading its parser to give
+it some found more: it took only text and read a part only if it was UTF-8;
+encoded words stayed `=?UTF-8?B?...?=` in subjects and names; an address list
+split at every comma, so `"Doe, Jane"` became two broken addresses; parameters
+split at every semicolon; attachments named only in `Content-Type` were not
+attachments; an HTML-only message showed nothing; and **the builder declared
+its body quoted-printable and wrote it raw**, so `x=41` read back as `xA`,
+while non-ASCII subjects and file names went into the headers as raw UTF-8.
+Now: it reads mail kept in files -- `~/Mail`'s mbox files (Thunderbird's
+extensionless folders too) and folders of `.eml` messages, and any file opened
+with Ctrl+O -- through a reader that decodes charsets, RFC 2047 words, RFC 2231
+names, HTML as text and mbox quoting (`apps/email/src/decode.rs`); a message
+is shown whole, with its attachments saved where the dialog says; marks (read,
+flagged) are kept in a file of its own under the configuration directory,
+because **it never rewrites mail it did not make**, and deleting such mail is
+refused with the reason; the compose form is drawn, with real text fields and a
+many-line body (`apps/textarea`, shared with the regular-expression tester),
+Tab between From, To, Cc, Subject and the body, attachments added and taken
+off, a draft saved to `~/Mail/Drafts` and opened again to go on writing, Save
+as file for an `.eml` to send from elsewhere, Send checking the message and
+saying plainly it cannot be sent, and closing over unsaved work asking first;
+and every control answers the pointer, the list and the message scroll, and
+all three pane positions draw. A message written here reads back exactly as
+written, which a test checks. 109 tests; `apps/email/mutate.py` has 35 rows
+over the window, the codings and the store. Nineteen examined; two to go.
+
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 
 **In short:** a `cargo test --workspace` failed with exactly one failing test,

@@ -157,7 +157,7 @@ pub fn folders(root: &Path) -> Result<Vec<Folder>, String> {
             }
         }
     }
-    found.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    found.sort_by_key(|f| f.name.to_lowercase());
     found.push(Folder {
         name: String::from(DRAFTS),
         source: FolderSource::Dir(root.join(DRAFTS)),

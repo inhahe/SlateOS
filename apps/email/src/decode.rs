@@ -875,7 +875,8 @@ mod tests {
         assert_eq!(p["format"], "flowed");
         let p = params(" filename*=UTF-8''%E2%82%AC%20rates.pdf");
         assert_eq!(p["filename"], "\u{20AC} rates.pdf");
-        let p = params(" filename*0*=utf-8''caf%C3%A9; filename*1=\"-menu.txt\"");
+        // The pieces in any order: they are numbered so they can be.
+        let p = params(" filename*1=\"-menu.txt\"; filename*0*=utf-8''caf%C3%A9");
         assert_eq!(p["filename"], "caf\u{e9}-menu.txt");
         let p = params(" filename=\"=?UTF-8?B?Q2Fmw6kucGRm?=\"");
         assert_eq!(p["filename"], "Caf\u{e9}.pdf");

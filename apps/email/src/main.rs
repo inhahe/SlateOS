@@ -18,12 +18,23 @@
 //!
 //! **This client cannot send or receive mail, and the window says so.** It has
 //! no network access, so no account is connected and no server has been
-//! contacted. The line that matters most is the one about silence:
-//! *"An empty mailbox here does not mean no new mail -- nothing was ever
-//! fetched."* An empty inbox is otherwise read as a report about the mail that
-//! exists, which is a claim about the world.
+//! contacted -- and an empty folder here is not "no new mail", which is a
+//! claim about the world it has not earned. The IMAP and SMTP builders above
+//! wait on a socket.
 //!
-//! The list above is what the layouts draw when something supplies a model.
+//! **What it does is read and write mail kept in files.** `~/Mail`'s mbox
+//! files and folders of `.eml` messages are its folders, and any message or
+//! mbox can be opened with Ctrl+O (`store`). Messages are read through
+//! `decode`: the charset each part names, encoded words in headers, RFC 2231
+//! names, HTML read as text, mbox quoting. A message is shown whole and its
+//! attachments saved where the dialog says. A message is written in a drawn
+//! form -- From, To, Cc, Subject and a many-line body -- saved as a draft in
+//! `~/Mail/Drafts` or as an `.eml` file anywhere, and "sent" only as far as
+//! checking it and saying it cannot go.
+//!
+//! **It never writes mail it did not make.** Read and flagged marks are kept
+//! in a file of its own under the configuration directory, and deleting mail
+//! read from files is refused; its own drafts are its to replace and delete.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
@@ -1823,35 +1834,61 @@ pub struct Signature {
 
 // ─── Application ─────────────────────────────────────────────────────
 
-use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::Color;
+use guitk::dialog::{FilePicker, Picked};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
 use guitk::render::RenderTree;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::style::CornerRadii;
+use guitk::text;
+use guitk::textedit;
+use guitk::textinput::TextInput;
+use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use textarea::TextArea;
+
+/// What the window says above the mail, before anything is pressed.
+///
+/// Two lines. The second exists because an empty inbox is a *believable*
+/// empty inbox -- it reads as "no new mail", which is a fact about the
+/// user's correspondence rather than about this program -- and because the
+/// user should learn from the window, not the manual, where mail it can read
+/// comes from.
+const CANNOT_FETCH_LINES: [&str; 2] = [
+    "This client cannot send or receive mail: it has no network, so no server has ever been contacted.",
+    "An empty folder here is not \u{201C}no new mail\u{201D}. It reads mail kept in files -- mbox files and folders of .eml messages in ~/Mail, or any opened with Ctrl+O -- and saves what you write as .eml files.",
+];
 
 /// The window size to ask for.
 ///
 /// A request, not a promise: `render` is handed the size it is actually being
-/// drawn at and lays out from that, which is why nothing else in this file
-/// stores a width.
-/// What the window says instead of listing mail.
-///
-/// Three lines. The third exists because an empty inbox is a *believable*
-/// empty inbox -- it reads as "no new mail", which is a fact about the user's
-/// correspondence rather than about this program. That is the one reading
-/// this client has not earned: it has never contacted a server.
-const CANNOT_FETCH_LINES: [&str; 3] = [
-    "This client cannot send or receive mail.",
-    "It has no network access, so no account is connected and no server has been contacted.",
-    "An empty mailbox here does not mean no new mail -- nothing was ever fetched.",
-];
-
+/// drawn at and lays out from that.
 const WINDOW_WIDTH: f32 = 1400.0;
 /// As [`WINDOW_WIDTH`].
 const WINDOW_HEIGHT: f32 = 900.0;
-use guitk::style::CornerRadii;
-use guitk::text;
+
+const HEADER_H: f32 = 48.0;
+const NOTICE_H: f32 = 40.0;
+const TOOLBAR_H: f32 = 40.0;
+const SIDEBAR_W: f32 = 210.0;
+const STATUS_H: f32 = 24.0;
+const ROW_H: f32 = 64.0;
+const FOLDER_ROW_H: f32 = 30.0;
+const BODY_LINE_H: f32 = 18.0;
+const BODY_TEXT: f32 = 13.0;
+const FIELD_H: f32 = 28.0;
+
+/// The largest file attached to a message written here.
+const MAX_ATTACHMENT_BYTES: usize = 25 << 20;
+/// The longest a single-line field (an address list, a subject) may be.
+const FIELD_CAPACITY: usize = 2_000;
+/// The longest a message body may be, in characters.
+const BODY_CAPACITY: usize = 1_000_000;
 
 /// Active UI panel
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1906,79 +1943,74 @@ pub enum SortOrder {
     SizeDesc,
 }
 
-/// Main email application
 /// The keys this program answers, raised by `F1`.
 ///
 /// `?` is not a second way in: the search box and the compose form both take
 /// typed text, so a `?` has somewhere to go -- the `apps/spreadsheet` case in
 /// design-decisions 863.
-///
-/// The app named none of these before the list existed. The survey reported
-/// six of them and there were more, because it matched a key name as a
-/// substring: any capital `S` in any string counted as naming `S`.
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Up / Down", "Move through the messages"),
-    ("Left / Right", "Previous / next mailbox"),
+    ("Left / Right", "Previous / next folder"),
+    ("Enter", "Read the message (a draft: go on writing it)"),
+    ("Page Up / Page Down", "Scroll the message being read"),
     ("R", "Reply to this message"),
     ("F", "Forward it"),
     ("U", "Mark it unread"),
     ("S", "Flag it"),
-    ("Delete", "Delete it"),
+    ("Delete", "Delete a draft (mail read from files is kept)"),
     ("Ctrl+N", "Compose"),
+    ("Ctrl+O", "Open a message or an mbox file"),
     ("Ctrl+F", "Search"),
     ("Ctrl+S", "Change the sort order"),
     ("Ctrl+P", "Move the reading pane"),
+    ("F5", "Look in the mail folder again"),
     ("F1", "This list"),
 ];
 
-pub struct EmailApp {
-    pub accounts: Vec<EmailAccount>,
-    pub mailboxes: Vec<Mailbox>,
-    pub messages: Vec<MessageSummary>,
-    pub threads: Vec<MessageThread>,
-    pub selected_mailbox: Option<String>,
-    pub selected_message: Option<u64>,
-    pub selected_account: Option<u32>,
-    pub active_panel: Panel,
-    pub search_query: String,
-    pub sort_order: SortOrder,
-    pub compose_draft: Option<EmailDraft>,
-    pub filter_rules: Vec<FilterRule>,
-    pub signatures: Vec<Signature>,
-    pub next_account_id: u32,
-    pub next_message_id: u64,
-    pub next_rule_id: u32,
-    pub next_sig_id: u32,
-    pub status_message: String,
-    pub show_cc: bool,
-    pub show_bcc: bool,
-    pub threaded_view: bool,
-    pub reading_pane_position: ReadingPanePosition,
-    pub unread_count: u32,
-    /// Whether the search box has the keyboard.
-    pub searching: bool,
-    /// Which field of the open draft the keyboard is typing into.
-    pub compose_field: ComposeField,
-    /// The user's colours, replaced whenever the theme changes.
-    ///
-    /// Seeded from the defaults so the field is never absent; the framework
-    /// calls `App::theme_changed` before the first frame, so nothing is drawn
-    /// with this initial value in a real window.
-    palette: Palette,
-    /// Whether the shortcut card is up.
-    show_help: bool,
-}
+/// The keys of the compose form, listed on the form itself.
+const COMPOSE_KEYS: &str = "Tab: next field  \u{00B7}  Ctrl+S: save draft  \u{00B7}  Ctrl+Enter: send  \u{00B7}  Esc: close";
 
 /// A field of the compose form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ComposeField {
+    /// Who it is from: a name and an address, as they will be written.
+    From,
     /// The recipient list.
     #[default]
     To,
+    /// The copied recipients.
+    Cc,
     /// The subject line.
     Subject,
     /// The message itself.
     Body,
+}
+
+impl ComposeField {
+    /// The order Tab walks the fields in: the recipients first, as a new
+    /// message is written, and the sender last, since it is usually set.
+    const ORDER: [Self; 5] = [Self::To, Self::Cc, Self::Subject, Self::Body, Self::From];
+
+    fn step(self, back: bool) -> Self {
+        let at = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        let len = Self::ORDER.len();
+        let next = if back {
+            at.checked_sub(1).unwrap_or(len.saturating_sub(1))
+        } else {
+            at.saturating_add(1).checked_rem(len).unwrap_or(0)
+        };
+        Self::ORDER.get(next).copied().unwrap_or(Self::To)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::From => "From",
+            Self::To => "To",
+            Self::Cc => "Cc",
+            Self::Subject => "Subject",
+            Self::Body => "Message",
+        }
+    }
 }
 
 /// Stepping for [`ReadingPanePosition`].
@@ -1994,6 +2026,15 @@ impl ReadingPanePosition {
         let wrapped = if ahead >= Self::ALL.len() { 0 } else { ahead };
         Self::ALL.get(wrapped).copied().unwrap_or(Self::Right)
     }
+
+    /// What the toolbar calls it.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Right => "Reading pane: right",
+            Self::Bottom => "Reading pane: below",
+            Self::Off => "Reading pane: off",
+        }
+    }
 }
 
 /// Reading pane position
@@ -2002,6 +2043,345 @@ pub enum ReadingPanePosition {
     Right,
     Bottom,
     Off,
+}
+
+/// A message being written.
+///
+/// Its fields are text fields -- a caret, a selection, a clipboard -- and
+/// its body is a field of many lines; `EmailDraft`, which the message builder
+/// takes, is made from it when the message is saved or checked.
+pub struct Compose {
+    pub from: TextInput,
+    pub to: TextInput,
+    pub cc: TextInput,
+    pub subject: TextInput,
+    pub body: TextArea,
+    pub attachments: Vec<Attachment>,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+    /// The field the keys type into.
+    pub field: ComposeField,
+    /// The draft file this was saved to, or opened from, which saving again
+    /// replaces. `None` until the first save.
+    pub saved_as: Option<PathBuf>,
+    /// The form as last saved, to tell whether closing it loses anything.
+    saved: String,
+    /// Escape was pressed once over unsaved work: a second press discards.
+    pub confirm_close: bool,
+    /// How far the body is scrolled, in lines, and across, in pixels.
+    pub body_scroll: usize,
+    pub body_hscroll: f32,
+}
+
+/// A text field holding `text`, with the caret at its end.
+fn field_with(text: &str) -> TextInput {
+    let mut input = TextInput::new();
+    input.set_text(text);
+    input
+}
+
+/// Split an address list at the commas outside quotes and angle brackets.
+fn split_list(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut piece = String::new();
+    let mut quoted = false;
+    let mut angle = false;
+    for c in s.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            '<' if !quoted => angle = true,
+            '>' if !quoted => angle = false,
+            ',' | ';' if !quoted && !angle => {
+                if !piece.trim().is_empty() {
+                    out.push(piece.trim().to_owned());
+                }
+                piece.clear();
+                continue;
+            }
+            _ => {}
+        }
+        piece.push(c);
+    }
+    if !piece.trim().is_empty() {
+        out.push(piece.trim().to_owned());
+    }
+    out
+}
+
+impl Compose {
+    /// An empty message from `from`.
+    fn new(from: &str) -> Self {
+        let mut compose = Self {
+            from: field_with(from),
+            to: TextInput::new(),
+            cc: TextInput::new(),
+            subject: TextInput::new(),
+            body: TextArea::new(BODY_TEXT),
+            attachments: Vec::new(),
+            in_reply_to: None,
+            references: Vec::new(),
+            field: ComposeField::To,
+            saved_as: None,
+            saved: String::new(),
+            confirm_close: false,
+            body_scroll: 0,
+            body_hscroll: 0.0,
+        };
+        compose.saved = compose.fingerprint();
+        compose
+    }
+
+    /// A message from a draft `EmailDraft` -- a reply or a forward -- with
+    /// the caret where writing starts: the top of the body.
+    fn from_draft(draft: &EmailDraft, from: &str) -> Self {
+        let mut compose = Self::new(from);
+        compose.to = field_with(&draft.to.join(", "));
+        compose.cc = field_with(&draft.cc.join(", "));
+        compose.subject = field_with(&draft.subject);
+        compose.body.set_text(&draft.body);
+        compose.body.move_to(0, false);
+        compose.in_reply_to.clone_from(&draft.in_reply_to);
+        compose.references.clone_from(&draft.references);
+        compose.attachments.clone_from(&draft.attachments);
+        compose.field = if draft.to.is_empty() {
+            ComposeField::To
+        } else {
+            ComposeField::Body
+        };
+        compose.saved = compose.fingerprint();
+        compose
+    }
+
+    /// A saved draft, opened to go on writing it.
+    fn from_saved(stored: &store::Stored) -> Self {
+        let message = &stored.message;
+        let mut compose = Self::new(
+            &message
+                .from
+                .as_ref()
+                .map(EmailAddress::to_string)
+                .unwrap_or_default(),
+        );
+        let list = |addrs: &[EmailAddress]| {
+            addrs
+                .iter()
+                .map(EmailAddress::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        compose.to = field_with(&list(&message.to));
+        compose.cc = field_with(&list(&message.cc));
+        compose.subject = field_with(if message.subject == "(no subject)" {
+            ""
+        } else {
+            &message.subject
+        });
+        compose.body.set_text(&message.readable_body().text);
+        compose.in_reply_to.clone_from(&message.in_reply_to);
+        compose.references.clone_from(&message.references);
+        compose.attachments = message
+            .attachments()
+            .iter()
+            .map(|part| {
+                Attachment::new(
+                    part.filename().unwrap_or("attachment"),
+                    &part.content_type.mime_type(),
+                    part.body.clone(),
+                )
+            })
+            .collect();
+        compose.saved_as = Some(stored.origin.clone());
+        compose.saved = compose.fingerprint();
+        compose
+    }
+
+    /// Everything the form holds, to compare with what was saved.
+    fn fingerprint(&self) -> String {
+        let names: Vec<&str> = self
+            .attachments
+            .iter()
+            .map(|a| a.filename.as_str())
+            .collect();
+        format!(
+            "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
+            self.from.text(),
+            self.to.text(),
+            self.cc.text(),
+            self.subject.text(),
+            self.body.text(),
+            names.join("\u{1}")
+        )
+    }
+
+    /// Whether the form holds anything not saved.
+    #[must_use]
+    pub fn unsaved(&self) -> bool {
+        self.fingerprint() != self.saved
+    }
+
+    /// The draft the message builder takes.
+    #[must_use]
+    pub fn draft(&self) -> EmailDraft {
+        let mut draft = EmailDraft::new(0);
+        draft.to = split_list(self.to.text());
+        draft.cc = split_list(self.cc.text());
+        draft.subject = self.subject.text().to_owned();
+        draft.body = self.body.text().to_owned();
+        draft.attachments.clone_from(&self.attachments);
+        draft.in_reply_to.clone_from(&self.in_reply_to);
+        draft.references.clone_from(&self.references);
+        draft
+    }
+
+    /// The sender, when the From field holds an address.
+    fn sender(&self) -> Option<EmailAddress> {
+        EmailAddress::parse(self.from.text()).map(decoded_name)
+    }
+
+    /// The single-line field for `field`.
+    fn line_mut(&mut self, field: ComposeField) -> Option<&mut TextInput> {
+        match field {
+            ComposeField::From => Some(&mut self.from),
+            ComposeField::To => Some(&mut self.to),
+            ComposeField::Cc => Some(&mut self.cc),
+            ComposeField::Subject => Some(&mut self.subject),
+            ComposeField::Body => None,
+        }
+    }
+
+    fn line(&self, field: ComposeField) -> Option<&TextInput> {
+        match field {
+            ComposeField::From => Some(&self.from),
+            ComposeField::To => Some(&self.to),
+            ComposeField::Cc => Some(&self.cc),
+            ComposeField::Subject => Some(&self.subject),
+            ComposeField::Body => None,
+        }
+    }
+}
+
+/// What a file dialog is up for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerFor {
+    /// A message or an mbox to read.
+    Open,
+    /// Where to save the attachment at this place in the message's list.
+    SaveAttachment(usize),
+    /// Where to save the message being written, as an `.eml` file.
+    SaveAs,
+    /// A file to attach.
+    Attach,
+}
+
+/// What a press can land on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Help,
+    HelpCard,
+    SearchBox,
+    Compose,
+    Reply,
+    Forward,
+    Delete,
+    OpenFile,
+    Refresh,
+    Sort,
+    PanePosition,
+    /// A folder in the sidebar, by its place among the ones shown.
+    Folder(usize),
+    MessageList,
+    /// A message, by its id.
+    Message(u64),
+    ReadingPane,
+    MarkUnread,
+    Flag,
+    EditDraft,
+    /// An attachment of the message being read, by its place in the list.
+    SaveAttachment(usize),
+    // The compose form.
+    Field(ComposeField),
+    Send,
+    SaveDraft,
+    SaveAs,
+    Attach,
+    /// An attachment of the message being written, by its place: a press
+    /// takes it off.
+    Unattach(usize),
+    CloseCompose,
+}
+
+pub struct EmailApp {
+    pub accounts: Vec<EmailAccount>,
+    pub mailboxes: Vec<Mailbox>,
+    pub messages: Vec<MessageSummary>,
+    pub threads: Vec<MessageThread>,
+    pub selected_mailbox: Option<String>,
+    pub selected_message: Option<u64>,
+    pub selected_account: Option<u32>,
+    pub active_panel: Panel,
+    pub search_query: String,
+    pub sort_order: SortOrder,
+    /// The message being written, when one is.
+    pub compose: Option<Compose>,
+    pub filter_rules: Vec<FilterRule>,
+    pub signatures: Vec<Signature>,
+    pub next_account_id: u32,
+    pub next_message_id: u64,
+    pub next_rule_id: u32,
+    pub next_sig_id: u32,
+    pub status_message: String,
+    pub show_cc: bool,
+    pub show_bcc: bool,
+    pub threaded_view: bool,
+    pub reading_pane_position: ReadingPanePosition,
+    pub unread_count: u32,
+    /// Whether the search box has the keyboard.
+    pub searching: bool,
+
+    // -- Mail kept in files ------------------------------------------------------
+    /// Where the folders are: `~/Mail`. `None` with no home to find it in.
+    pub mail_dir: Option<PathBuf>,
+    /// The folders it holds, and "Opened" once a file has been.
+    pub folders: Vec<store::Folder>,
+    /// The files opened this session, read as the "Opened" folder.
+    pub opened: Vec<PathBuf>,
+    /// The folders whose messages have been read in.
+    loaded: BTreeSet<String>,
+    /// Each message read from a file, by its id.
+    pub stored: std::collections::BTreeMap<u64, store::Stored>,
+    /// The marks set on mail read from files, kept apart from it.
+    pub flags: store::Flags,
+    /// Where the marks are kept; `None` keeps them for the session only --
+    /// the tests, and a marks file that would not read, which is not written
+    /// over.
+    flags_path: Option<PathBuf>,
+    /// The From of the last message written, for the next.
+    pub identity: String,
+    /// A draft asked to be deleted once: a second Delete deletes it.
+    doomed: Option<u64>,
+
+    pub picker: FilePicker,
+    pub picker_for: PickerFor,
+    /// What a copy or a cut in a field took, for a paste.
+    clipboard: String,
+    /// How far the list is scrolled, in rows, and the message read, in lines.
+    pub list_scroll: usize,
+    pub read_scroll: usize,
+    hover: Option<Target>,
+    last_hits: Vec<(Target, Rect)>,
+    wheel: wheel::Accumulator,
+    /// The window's size, as last drawn -- a `Cell` so drawing at another
+    /// size for a test needs no `&mut`.
+    size: std::cell::Cell<(f32, f32)>,
+
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 impl Default for EmailApp {
@@ -2026,7 +2406,7 @@ impl EmailApp {
             active_panel: Panel::MessageList,
             search_query: String::new(),
             sort_order: SortOrder::DateDesc,
-            compose_draft: None,
+            compose: None,
             filter_rules: Vec::new(),
             signatures: Vec::new(),
             next_account_id: 1,
@@ -2040,8 +2420,795 @@ impl EmailApp {
             reading_pane_position: ReadingPanePosition::Right,
             unread_count: 0,
             searching: false,
-            compose_field: ComposeField::To,
+            mail_dir: None,
+            folders: Vec::new(),
+            opened: Vec::new(),
+            loaded: BTreeSet::new(),
+            stored: std::collections::BTreeMap::new(),
+            flags: store::Flags::default(),
+            flags_path: None,
+            identity: String::new(),
+            doomed: None,
+            picker: FilePicker::default(),
+            picker_for: PickerFor::Open,
+            clipboard: String::new(),
+            list_scroll: 0,
+            read_scroll: 0,
+            hover: None,
+            last_hits: Vec::new(),
+            wheel: wheel::Accumulator::default(),
+            size: std::cell::Cell::new((WINDOW_WIDTH, WINDOW_HEIGHT)),
         }
+    }
+
+    /// The client `main` opens: `~/Mail` listed and its first folder read,
+    /// with the marks set before put back.
+    ///
+    /// Everything it writes is its own -- the marks under the configuration
+    /// directory, the drafts under `~/Mail/Drafts` -- and a marks file that
+    /// will not read is left alone rather than written over.
+    #[must_use]
+    pub fn from_settings() -> Self {
+        let mut app = Self::new();
+        app.mail_dir = std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Mail"));
+        if let Some(dir) = settingsfile::config_dir() {
+            let path = dir.join("email").join("flags.txt");
+            match safeio::read_to_string_capped(&path, 16 << 20) {
+                Ok(read) if read.truncated => {
+                    app.status_message = String::from(
+                        "The saved marks are too long to read; they are kept for this session only.",
+                    );
+                }
+                Ok(read) => match store::Flags::parse(&read.text) {
+                    Ok(flags) => {
+                        app.flags = flags;
+                        app.flags_path = Some(path);
+                    }
+                    Err(why) => {
+                        app.status_message = format!(
+                            "{} is not a marks file this reads ({why}); marks are kept for this session only.",
+                            path.display()
+                        );
+                    }
+                },
+                // Not there yet: the first mark makes it.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => app.flags_path = Some(path),
+                Err(e) => {
+                    app.status_message = format!(
+                        "Could not read the saved marks ({e}); marks are kept for this session only."
+                    );
+                }
+            }
+        }
+        app.rescan();
+        app
+    }
+
+    // -----------------------------------------------------------------------
+    // Mail kept in files
+    // -----------------------------------------------------------------------
+
+    /// List the mail directory again, and read the folder on screen afresh.
+    pub fn rescan(&mut self) {
+        let keep = self.selected_mailbox.clone();
+        // What was read from files goes; mail the model holds otherwise (an
+        // account's, in the tests) stays.
+        let from_files: BTreeSet<u64> = self.stored.keys().copied().collect();
+        self.messages.retain(|m| !from_files.contains(&m.id));
+        self.stored.clear();
+        self.loaded.clear();
+        self.folders = match &self.mail_dir {
+            Some(dir) => match store::folders(dir) {
+                Ok(found) => found,
+                Err(why) => {
+                    self.status_message = format!("Cannot list the mail folder: {why}");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+        if !self.opened.is_empty() {
+            self.folders.push(store::Folder {
+                name: String::from("Opened"),
+                source: store::FolderSource::Opened(self.opened.clone()),
+                own: false,
+            });
+        }
+        self.mailboxes.retain(|m| m.account_id != 0);
+        for folder in &self.folders {
+            self.mailboxes.push(Mailbox {
+                name: folder.name.clone(),
+                mailbox_type: if folder.own {
+                    MailboxType::Drafts
+                } else if folder.name.eq_ignore_ascii_case("inbox") {
+                    MailboxType::Inbox
+                } else {
+                    MailboxType::Custom
+                },
+                total_messages: 0,
+                unread_messages: 0,
+                account_id: 0,
+                imap_path: String::new(),
+            });
+        }
+        self.recount_unread();
+        let still_there = keep
+            .as_ref()
+            .is_some_and(|name| self.mailboxes.iter().any(|m| &m.name == name));
+        if let Some(name) = keep.filter(|_| still_there) {
+            self.select_mailbox(&name);
+        } else if let Some(first) = self.folders.first().map(|f| f.name.clone()) {
+            self.select_mailbox(&first);
+        }
+    }
+
+    /// Show the folder `name`, reading its messages in the first time.
+    pub fn select_mailbox(&mut self, name: &str) {
+        self.selected_mailbox = Some(name.to_owned());
+        self.selected_message = None;
+        self.list_scroll = 0;
+        self.read_scroll = 0;
+        self.doomed = None;
+        self.load_folder(name);
+        self.reanchor_selection();
+    }
+
+    /// Read folder `name`'s messages in, unless they are already.
+    fn load_folder(&mut self, name: &str) {
+        if self.loaded.contains(name) {
+            return;
+        }
+        let Some(folder) = self.folders.iter().find(|f| f.name == name).cloned() else {
+            return;
+        };
+        self.loaded.insert(name.to_owned());
+        let loaded = store::load(&folder);
+        for stored in loaded.messages {
+            let marks = self.flags.get(&stored.key());
+            let summary = summary_of(&stored, &folder.name, marks, folder.own);
+            let id = self.add_message(summary);
+            self.stored.insert(id, stored);
+        }
+        if !loaded.notes.is_empty() {
+            self.status_message = loaded.notes.join(" ");
+        }
+    }
+
+    /// Put a folder's messages back as they are on disk now.
+    fn reload_folder(&mut self, name: &str) {
+        let ids: BTreeSet<u64> = self
+            .messages
+            .iter()
+            .filter(|m| m.mailbox == name && m.account_id == 0)
+            .map(|m| m.id)
+            .collect();
+        self.messages.retain(|m| !ids.contains(&m.id));
+        self.stored.retain(|id, _| !ids.contains(id));
+        if let Some(mb) = self
+            .mailboxes
+            .iter_mut()
+            .find(|m| m.name == name && m.account_id == 0)
+        {
+            mb.total_messages = 0;
+            mb.unread_messages = 0;
+        }
+        self.loaded.remove(name);
+        self.load_folder(name);
+        self.recount_unread();
+        self.reanchor_selection();
+    }
+
+    /// The unread count, from the messages as they stand.
+    fn recount_unread(&mut self) {
+        self.unread_count = u32::try_from(self.messages.iter().filter(|m| !m.flags.seen).count())
+            .unwrap_or(u32::MAX);
+    }
+
+    /// Keep message `id`'s marks, if it came from a file: in the marks file,
+    /// not in the file, which is never rewritten.
+    fn remember(&mut self, id: u64) {
+        let (Some(stored), Some(summary)) = (
+            self.stored.get(&id),
+            self.messages.iter().find(|m| m.id == id),
+        ) else {
+            return;
+        };
+        self.flags.set(
+            &stored.key(),
+            store::Marks {
+                seen: summary.flags.seen,
+                flagged: summary.flags.flagged,
+            },
+        );
+        if let Some(path) = &self.flags_path {
+            let saved = path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| safeio::write_str_atomically(path, &self.flags.to_text()));
+            if let Err(e) = saved {
+                self.status_message = format!("The mark was set, but could not be saved: {e}");
+            }
+        }
+    }
+
+    /// Open message `id` to read -- or, a draft, to go on writing it.
+    pub fn open_message(&mut self, id: u64) {
+        self.selected_message = Some(id);
+        self.read_scroll = 0;
+        let own = self
+            .messages
+            .iter()
+            .find(|m| m.id == id)
+            .is_some_and(|m| m.flags.draft && m.account_id == 0);
+        if own && let Some(stored) = self.stored.get(&id) {
+            self.compose = Some(Compose::from_saved(stored));
+            self.active_panel = Panel::Compose;
+            return;
+        }
+        self.mark_read(id);
+        self.remember(id);
+        self.active_panel = Panel::Reading;
+    }
+
+    /// The text a reply or a forward quotes: the whole message when it was
+    /// read from a file, the preview otherwise.
+    fn quote_of(&self, id: u64) -> Option<String> {
+        if let Some(stored) = self.stored.get(&id) {
+            return Some(stored.message.readable_body().text);
+        }
+        self.messages
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.preview.clone())
+    }
+
+    /// Delete message `id` -- a draft of this client's own, after a second
+    /// press. Mail read from files is never changed, and says so.
+    fn delete(&mut self, id: u64) {
+        let Some(summary) = self.messages.iter().find(|m| m.id == id) else {
+            return;
+        };
+        let from_file = self.stored.get(&id).map(|s| s.origin.clone());
+        match from_file {
+            Some(origin) if summary.flags.draft => {
+                if self.doomed != Some(id) {
+                    self.doomed = Some(id);
+                    self.status_message = format!(
+                        "Delete the draft \u{201C}{}\u{201D}? Press Delete again to delete it.",
+                        summary.subject
+                    );
+                    return;
+                }
+                self.doomed = None;
+                match std::fs::remove_file(&origin) {
+                    Ok(()) => {
+                        let folder = summary.mailbox.clone();
+                        self.status_message = String::from("Draft deleted");
+                        self.reload_folder(&folder);
+                    }
+                    Err(e) => self.status_message = format!("Could not delete the draft: {e}"),
+                }
+            }
+            Some(_) => {
+                self.status_message = String::from(
+                    "Mail read from files is never changed here; only drafts written here can be deleted.",
+                );
+            }
+            None => {
+                self.delete_message(id);
+                self.reanchor_selection();
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Writing
+    // -----------------------------------------------------------------------
+
+    /// Start composing a new email
+    pub fn compose_new(&mut self) {
+        self.compose = Some(Compose::new(&self.identity));
+        self.active_panel = Panel::Compose;
+    }
+
+    /// Start composing a reply, quoting the whole message.
+    pub fn compose_reply(&mut self, message_id: u64) {
+        let Some(quote) = self.quote_of(message_id) else {
+            return;
+        };
+        if let Some(msg) = self.messages.iter().find(|m| m.id == message_id) {
+            let draft = EmailDraft::reply(msg, &quote, msg.account_id);
+            self.compose = Some(Compose::from_draft(&draft, &self.identity));
+            self.active_panel = Panel::Compose;
+        }
+    }
+
+    /// Start composing a forward of the whole message, its attachments with
+    /// it.
+    pub fn compose_forward(&mut self, message_id: u64) {
+        let Some(quote) = self.quote_of(message_id) else {
+            return;
+        };
+        if let Some(msg) = self.messages.iter().find(|m| m.id == message_id) {
+            let mut draft = EmailDraft::forward(msg, &quote, msg.account_id);
+            if let Some(stored) = self.stored.get(&message_id) {
+                draft.attachments = stored
+                    .message
+                    .attachments()
+                    .iter()
+                    .map(|part| {
+                        Attachment::new(
+                            part.filename().unwrap_or("attachment"),
+                            &part.content_type.mime_type(),
+                            part.body.clone(),
+                        )
+                    })
+                    .collect();
+            }
+            self.compose = Some(Compose::from_draft(&draft, &self.identity));
+            self.active_panel = Panel::Compose;
+        }
+    }
+
+    /// The message being written, as it would be sent: checked, and built.
+    fn built(&mut self) -> Result<BuiltMessage, String> {
+        let Some(compose) = self.compose.as_ref() else {
+            return Err(String::from("nothing is being written"));
+        };
+        let draft = compose.draft();
+        let from = compose.sender();
+        if !compose.from.text().trim().is_empty() && from.is_none() {
+            return Err(format!(
+                "\u{201C}{}\u{201D} is not an address to send from",
+                compose.from.text().trim()
+            ));
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+        let built = draft.build_message_at(from.as_ref(), Some(&decode::rfc5322_date(now)));
+        if !built.rejected_recipients.is_empty() {
+            return Err(format!(
+                "bad address {}",
+                built.rejected_recipients.join(", ")
+            ));
+        }
+        self.identity = compose.from.text().trim().to_owned();
+        Ok(built)
+    }
+
+    /// Check the message and say plainly that it cannot be sent.
+    ///
+    /// The draft stays open: the composing window is the only place an
+    /// unsaved message exists. It used to be cleared, the panel switched
+    /// away, and the status line read `sent "..." to 3 recipient(s)` --
+    /// the message destroyed, nothing transmitted, and a delivery reported.
+    fn send(&mut self) {
+        let Some(compose) = self.compose.as_ref() else {
+            return;
+        };
+        let draft = compose.draft();
+        let recipients = draft.to.len().saturating_add(draft.cc.len());
+        let subject = draft.subject.clone();
+        match self.built() {
+            Err(why) => self.status_message = format!("not sent: {why}"),
+            Ok(_) if recipients == 0 => {
+                self.status_message = String::from("not sent: no recipients");
+            }
+            Ok(_) => {
+                self.status_message = format!(
+                    "\u{201C}{subject}\u{201D} was not sent -- nothing here can reach a mail server. \
+                     {recipients} recipient(s) checked out; Ctrl+S keeps it as a draft, \
+                     Save as file writes an .eml to send from elsewhere."
+                );
+            }
+        }
+    }
+
+    /// Save the message being written as a draft in `~/Mail/Drafts`: over
+    /// its own draft file when it has one, as a new file otherwise.
+    fn save_draft(&mut self) {
+        let Some(dir) = self.mail_dir.as_ref().map(|d| d.join(store::DRAFTS)) else {
+            self.status_message =
+                String::from("No mail folder to keep drafts in (no home folder is set)");
+            return;
+        };
+        let built = match self.built() {
+            Ok(built) => built,
+            Err(why) => {
+                self.status_message = format!("Draft not saved: {why}");
+                return;
+            }
+        };
+        let Some(compose) = self.compose.as_mut() else {
+            return;
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.status_message = format!("Draft not saved: {}: {e}", dir.display());
+            return;
+        }
+        let result = match &compose.saved_as {
+            Some(own) => safeio::write_str_atomically(own, &built.text).map(|()| own.clone()),
+            None => {
+                let stem = store::draft_stem(compose.subject.text());
+                let mut result = Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+                for n in 1..=999_u32 {
+                    let name = if n == 1 {
+                        format!("{stem}.eml")
+                    } else {
+                        format!("{stem} ({n}).eml")
+                    };
+                    let path = dir.join(name);
+                    match safeio::write_new_atomically(&path, built.text.as_bytes()) {
+                        Ok(()) => {
+                            result = Ok(path);
+                            break;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(e) => {
+                            result = Err(e);
+                            break;
+                        }
+                    }
+                }
+                result
+            }
+        };
+        match result {
+            Ok(path) => {
+                compose.saved_as = Some(path.clone());
+                compose.saved = compose.fingerprint();
+                compose.confirm_close = false;
+                self.status_message = format!("Draft saved as {}", path.display());
+                self.reload_folder(store::DRAFTS);
+            }
+            Err(e) => self.status_message = format!("Draft not saved: {e}"),
+        }
+    }
+
+    /// Close the form -- at once when nothing is unsaved, and on a second
+    /// press when something is.
+    fn close_compose(&mut self) {
+        let Some(compose) = self.compose.as_mut() else {
+            return;
+        };
+        if compose.unsaved() && !compose.confirm_close {
+            compose.confirm_close = true;
+            self.status_message = String::from(
+                "This message is not saved. Ctrl+S keeps it as a draft; close again to discard it.",
+            );
+            return;
+        }
+        self.compose = None;
+        self.active_panel = Panel::MessageList;
+    }
+
+    /// Put a file dialog up for `purpose`.
+    fn ask(&mut self, purpose: PickerFor) {
+        self.picker_for = purpose;
+        match purpose {
+            PickerFor::Open | PickerFor::Attach => self.picker.open_to_read(),
+            PickerFor::SaveAs => {
+                let stem = self.compose.as_ref().map_or_else(
+                    || String::from("Message"),
+                    |c| store::draft_stem(c.subject.text()),
+                );
+                self.picker.open_to_write(format!("{stem}.eml"));
+            }
+            PickerFor::SaveAttachment(i) => {
+                let name = self
+                    .selected_message
+                    .and_then(|id| self.stored.get(&id))
+                    .and_then(|s| {
+                        s.message
+                            .attachments()
+                            .get(i)
+                            .map(|p| p.filename().unwrap_or("attachment").to_owned())
+                    })
+                    .unwrap_or_else(|| String::from("attachment"));
+                // A name out of a message is a stranger's: only its last part
+                // is used, so it cannot name a place outside the folder chosen.
+                let name = Path::new(&name).file_name().map_or_else(
+                    || String::from("attachment"),
+                    |n| Path::new(n).display().to_string(),
+                );
+                self.picker.open_to_write(name);
+            }
+        }
+    }
+
+    /// What the file dialog chose.
+    fn picked(&mut self, path: &Path) {
+        match self.picker_for {
+            PickerFor::Open => {
+                if !self.opened.iter().any(|p| p == path) {
+                    self.opened.push(path.to_path_buf());
+                }
+                self.rescan();
+                self.select_mailbox("Opened");
+                self.status_message = format!("Opened {}", path.display());
+            }
+            PickerFor::SaveAs => match self.built() {
+                Ok(built) => {
+                    self.status_message = match safeio::write_str_atomically(path, &built.text) {
+                        Ok(()) => format!("Saved as {}", path.display()),
+                        Err(e) => format!("Could not save {}: {e}", path.display()),
+                    };
+                }
+                Err(why) => self.status_message = format!("Not saved: {why}"),
+            },
+            PickerFor::Attach => match safeio::read_capped(path, MAX_ATTACHMENT_BYTES) {
+                Ok(read) if read.truncated => {
+                    self.status_message = format!(
+                        "{} is larger than {} MiB, more than a message here attaches",
+                        path.display(),
+                        MAX_ATTACHMENT_BYTES >> 20
+                    );
+                }
+                Ok(read) => {
+                    let name = path.file_name().map_or_else(
+                        || String::from("attachment"),
+                        |n| Path::new(n).display().to_string(),
+                    );
+                    let mime = mime_for(&name);
+                    if let Some(compose) = self.compose.as_mut() {
+                        compose
+                            .attachments
+                            .push(Attachment::new(&name, mime, read.bytes));
+                        compose.confirm_close = false;
+                    }
+                    self.status_message = format!("Attached {name}");
+                }
+                Err(e) => self.status_message = format!("Could not attach {}: {e}", path.display()),
+            },
+            PickerFor::SaveAttachment(i) => {
+                let bytes = self
+                    .selected_message
+                    .and_then(|id| self.stored.get(&id))
+                    .and_then(|s| s.message.attachments().get(i).map(|p| p.body.clone()));
+                self.status_message = match bytes {
+                    Some(bytes) => match safeio::write_atomically(path, &bytes) {
+                        Ok(()) => format!("Saved {}", path.display()),
+                        Err(e) => format!("Could not save {}: {e}", path.display()),
+                    },
+                    None => String::from("That attachment is no longer on screen"),
+                };
+            }
+        }
+    }
+
+    // ====================================================================
+    // Input
+    // ====================================================================
+
+    /// Handle one event from the window.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The dialog takes input first while it is up, or a name typed into it
+        // would reach the window behind.
+        match self.picker.handle(event, self.width(), self.height()) {
+            Picked::Chose(path) => {
+                self.picked(&path);
+                return EventResult::Consumed;
+            }
+            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+            Picked::Ignored => {}
+        }
+        match event {
+            Event::Key(key) if key.pressed => {
+                let before = self.selected_message;
+                let result = self.handle_key(key);
+                if self.selected_message != before {
+                    self.follow_selection();
+                }
+                result
+            }
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Resize { width, height } => {
+                self.size.set((*width as f32, *height as f32));
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Handle a key press.
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Above the compose form and the search box, because `F1` is not text
+        // and a reader may want the keys from either.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal: letting keys through would mean deleting a message you
+            // cannot see.
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+        if self.compose.is_some() {
+            return self.handle_compose_key(key);
+        }
+        if self.searching {
+            return self.handle_search_key(key);
+        }
+
+        if key.modifiers.ctrl {
+            return match key.key {
+                Key::N => {
+                    self.compose_new();
+                    EventResult::Consumed
+                }
+                Key::O => {
+                    self.ask(PickerFor::Open);
+                    EventResult::Consumed
+                }
+                // The sort order and the reading pane, both drawn from and
+                // neither changeable before `scripts/frozen-flag-survey.py`
+                // found them.
+                Key::S => {
+                    self.sort_order = self.sort_order.next();
+                    EventResult::Consumed
+                }
+                Key::P => {
+                    self.reading_pane_position = self.reading_pane_position.next();
+                    EventResult::Consumed
+                }
+                Key::F => {
+                    self.searching = true;
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
+
+        match key.key {
+            Key::Up | Key::Down => {
+                self.move_selection(if key.key == Key::Down { 1 } else { -1 });
+                self.read_scroll = 0;
+            }
+            // Read it. `mark_read` was called from nowhere else, so a message
+            // opened stayed unread and the count in the title never moved.
+            Key::Enter => {
+                if let Some(id) = self.selected_message {
+                    self.open_message(id);
+                }
+            }
+            Key::Escape => {
+                if self.active_panel == Panel::Reading {
+                    self.active_panel = Panel::MessageList;
+                } else if !self.search_query.is_empty() {
+                    self.search_query.clear();
+                    self.reanchor_selection();
+                } else {
+                    return EventResult::Ignored;
+                }
+            }
+            Key::PageUp | Key::PageDown => {
+                let page = self.read_rows().saturating_sub(2).max(1);
+                self.read_scroll = if key.key == Key::PageDown {
+                    self.read_scroll.saturating_add(page)
+                } else {
+                    self.read_scroll.saturating_sub(page)
+                };
+                self.clamp_read_scroll();
+            }
+            // Reply and forward. Both existed, both were tested, and neither
+            // had a key -- so a mail client could read mail and not answer it.
+            Key::R => {
+                if let Some(id) = self.selected_message {
+                    self.compose_reply(id);
+                }
+            }
+            Key::F => {
+                if let Some(id) = self.selected_message {
+                    self.compose_forward(id);
+                }
+            }
+            Key::U => {
+                if let Some(id) = self.selected_message {
+                    self.mark_unread(id);
+                    self.remember(id);
+                }
+            }
+            Key::S => {
+                if let Some(id) = self.selected_message {
+                    self.toggle_flagged(id);
+                    self.remember(id);
+                }
+            }
+            Key::Delete => {
+                if let Some(id) = self.selected_message {
+                    self.delete(id);
+                }
+            }
+            Key::F5 => {
+                self.rescan();
+                self.status_message = String::from("Looked in the mail folder again");
+            }
+            // Through the mailboxes.
+            Key::Left | Key::Right => {
+                self.move_mailbox(if key.key == Key::Right { 1 } else { -1 });
+            }
+            _ => return EventResult::Ignored,
+        }
+        EventResult::Consumed
+    }
+
+    /// Keys while the search box is open.
+    fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape => {
+                self.searching = false;
+                self.search_query.clear();
+                self.reanchor_selection();
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                self.searching = false;
+                EventResult::Consumed
+            }
+            Key::Backspace => {
+                self.search_query.pop();
+                self.reanchor_selection();
+                EventResult::Consumed
+            }
+            _ => {
+                let typed: String = key.typed().collect();
+                if typed.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.search_query.push_str(&typed);
+                self.reanchor_selection();
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Keys while a message is being written.
+    ///
+    /// Tab walks the fields, Ctrl+S saves a draft, Ctrl+Enter checks and
+    /// says it cannot send, Escape closes (asking first over unsaved work),
+    /// and everything else types into the field.
+    fn handle_compose_key(&mut self, key: &KeyEvent) -> EventResult {
+        let ctrl = key.modifiers.ctrl;
+        match key.key {
+            Key::Escape => self.close_compose(),
+            Key::Enter if ctrl => self.send(),
+            Key::S if ctrl => self.save_draft(),
+            Key::Tab => {
+                if let Some(compose) = self.compose.as_mut() {
+                    compose.field = compose.field.step(key.modifiers.shift);
+                }
+            }
+            _ => {
+                let page = self.body_rows().saturating_sub(1).max(1);
+                let clipboard = self.clipboard.clone();
+                let Some(compose) = self.compose.as_mut() else {
+                    return EventResult::Ignored;
+                };
+                let copied = if compose.field == ComposeField::Body {
+                    let edited = compose.body.apply_key(key, BODY_CAPACITY, &clipboard, page);
+                    if !edited.handled {
+                        return EventResult::Ignored;
+                    }
+                    edited.copied
+                } else {
+                    let field = compose.field;
+                    let Some(input) = compose.line_mut(field) else {
+                        return EventResult::Ignored;
+                    };
+                    edit_line(input, key, FIELD_CAPACITY, &clipboard)
+                };
+                compose.confirm_close = false;
+                if let Some(text) = copied {
+                    self.clipboard = text;
+                }
+                self.keep_body_caret_visible();
+            }
+        }
+        EventResult::Consumed
     }
 
     /// Add an email account
@@ -2201,345 +3368,6 @@ impl EmailApp {
         }
     }
 
-    /// Start composing a new email
-    pub fn compose_new(&mut self) {
-        let account_id = self.selected_account.unwrap_or(0);
-        let mut draft = EmailDraft::new(account_id);
-        if let Some(acct) = self.accounts.iter().find(|a| a.id == account_id) {
-            draft.signature = acct.signature.clone();
-        }
-        self.compose_draft = Some(draft);
-        self.active_panel = Panel::Compose;
-    }
-
-    /// Start composing a reply
-    pub fn compose_reply(&mut self, message_id: u64) {
-        if let Some(msg) = self.messages.iter().find(|m| m.id == message_id) {
-            let account_id = self.selected_account.unwrap_or(msg.account_id);
-            let draft = EmailDraft::reply(msg, &msg.preview, account_id);
-            self.compose_draft = Some(draft);
-            self.active_panel = Panel::Compose;
-        }
-    }
-
-    /// Start composing a forward
-    pub fn compose_forward(&mut self, message_id: u64) {
-        if let Some(msg) = self.messages.iter().find(|m| m.id == message_id) {
-            let account_id = self.selected_account.unwrap_or(msg.account_id);
-            let draft = EmailDraft::forward(msg, &msg.preview, account_id);
-            self.compose_draft = Some(draft);
-            self.active_panel = Panel::Compose;
-        }
-    }
-
-    // ====================================================================
-    // Input
-    //
-    // This program had none. Thirty-four functions had no caller outside the
-    // tests: about twenty of them are the IMAP and SMTP command builders,
-    // which have nowhere to send a string because this tree has no network --
-    // and the rest are the client's own verbs, which is what is wired below.
-    // ====================================================================
-
-    /// Handle one event from the window.
-    pub fn handle_event(&mut self, event: &Event) -> EventResult {
-        match event {
-            Event::Key(key) if key.pressed => self.handle_key(key),
-            _ => EventResult::Ignored,
-        }
-    }
-
-    /// Handle a key press.
-    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
-        // The compose window takes every key while it is open, or typing a
-        // subject containing `d` would delete the message behind it.
-        // Above the compose form and the search box, because `F1` is not text
-        // and a reader may want the keys from either.
-        if key.key == Key::F1 {
-            self.show_help = !self.show_help;
-            return EventResult::Consumed;
-        }
-        if self.show_help {
-            // Modal: letting keys through would mean deleting a message you
-            // cannot see.
-            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
-                self.show_help = false;
-            }
-            return EventResult::Consumed;
-        }
-
-        if self.active_panel == Panel::Compose {
-            return self.handle_compose_key(key);
-        }
-        if self.searching {
-            return self.handle_search_key(key);
-        }
-
-        if key.modifiers.ctrl {
-            return match key.key {
-                Key::N => {
-                    self.compose_new();
-                    EventResult::Consumed
-                }
-                // The sort order and the reading pane, both drawn from
-                // and neither changeable: `sort_order` was `DateDesc` with no
-                // writer and five comparator arms, `reading_pane_position` was
-                // `Right` with no writer and decides the layout. Found by
-                // `scripts/frozen-flag-survey.py`.
-                Key::S => {
-                    self.sort_order = self.sort_order.next();
-                    return EventResult::Consumed;
-                }
-                Key::P => {
-                    self.reading_pane_position = self.reading_pane_position.next();
-                    return EventResult::Consumed;
-                }
-                Key::F => {
-                    self.searching = true;
-                    EventResult::Consumed
-                }
-                _ => EventResult::Ignored,
-            };
-        }
-
-        match key.key {
-            // Through the message list.
-            Key::Up | Key::Down => {
-                self.move_selection(if key.key == Key::Down { 1 } else { -1 });
-                EventResult::Consumed
-            }
-            // Read it. `mark_read` was called from nowhere else, so a message
-            // opened stayed unread and the count in the title never moved.
-            Key::Enter => {
-                if let Some(id) = self.selected_message {
-                    self.mark_read(id);
-                    self.active_panel = Panel::Reading;
-                }
-                EventResult::Consumed
-            }
-            Key::Escape => {
-                if self.active_panel == Panel::Reading {
-                    self.active_panel = Panel::MessageList;
-                    EventResult::Consumed
-                } else if !self.search_query.is_empty() {
-                    self.search_query.clear();
-                    self.reanchor_selection();
-                    EventResult::Consumed
-                } else {
-                    EventResult::Ignored
-                }
-            }
-            // Reply and forward. Both existed, both were tested, and neither
-            // had a key -- so a mail client could read mail and not answer it.
-            Key::R => {
-                if let Some(id) = self.selected_message {
-                    self.compose_reply(id);
-                }
-                EventResult::Consumed
-            }
-            Key::F => {
-                if let Some(id) = self.selected_message {
-                    self.compose_forward(id);
-                }
-                EventResult::Consumed
-            }
-            // Mark unread again, and flag. `mark_unread` and `toggle_flagged`
-            // had a test each and no caller.
-            Key::U => {
-                if let Some(id) = self.selected_message {
-                    self.mark_unread(id);
-                }
-                EventResult::Consumed
-            }
-            Key::S => {
-                if let Some(id) = self.selected_message {
-                    self.toggle_flagged(id);
-                }
-                EventResult::Consumed
-            }
-            Key::Delete => {
-                if let Some(id) = self.selected_message {
-                    self.delete_message(id);
-                    self.reanchor_selection();
-                }
-                EventResult::Consumed
-            }
-            // Through the mailboxes.
-            Key::Left | Key::Right => {
-                self.move_mailbox(if key.key == Key::Right { 1 } else { -1 });
-                EventResult::Consumed
-            }
-            _ => EventResult::Ignored,
-        }
-    }
-
-    /// Keys while the search box is open.
-    fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
-        match key.key {
-            Key::Escape => {
-                self.searching = false;
-                self.search_query.clear();
-                self.reanchor_selection();
-                EventResult::Consumed
-            }
-            Key::Enter => {
-                self.searching = false;
-                EventResult::Consumed
-            }
-            Key::Backspace => {
-                self.search_query.pop();
-                self.reanchor_selection();
-                EventResult::Consumed
-            }
-            _ => {
-                let typed: String = key.typed().collect();
-                if typed.is_empty() {
-                    return EventResult::Ignored;
-                }
-                self.search_query.push_str(&typed);
-                self.reanchor_selection();
-                EventResult::Consumed
-            }
-        }
-    }
-
-    /// Keys while a draft is open.
-    ///
-    /// Tab moves between the fields, Escape abandons the draft, and Ctrl+Enter
-    /// sends it -- through `EmailDraft::build_message`, which has twelve tests
-    /// and had no caller, so nothing this client composed was ever turned into
-    /// a message.
-    fn handle_compose_key(&mut self, key: &KeyEvent) -> EventResult {
-        match key.key {
-            Key::Escape => {
-                self.compose_draft = None;
-                self.active_panel = Panel::MessageList;
-                EventResult::Consumed
-            }
-            Key::Enter if key.modifiers.ctrl => {
-                self.send_draft();
-                EventResult::Consumed
-            }
-            Key::Tab => {
-                self.compose_field = match self.compose_field {
-                    ComposeField::To => ComposeField::Subject,
-                    ComposeField::Subject => ComposeField::Body,
-                    ComposeField::Body => ComposeField::To,
-                };
-                EventResult::Consumed
-            }
-            Key::Backspace => {
-                if let Some(text) = self.compose_text_mut() {
-                    text.pop();
-                }
-                EventResult::Consumed
-            }
-            _ => {
-                let typed: String = key.typed().collect();
-                if typed.is_empty() || key.modifiers.ctrl {
-                    return EventResult::Ignored;
-                }
-                if let Some(text) = self.compose_text_mut() {
-                    text.push_str(&typed);
-                }
-                EventResult::Consumed
-            }
-        }
-    }
-
-    /// The draft field the keyboard is typing into.
-    ///
-    /// `To` is a list of addresses in the draft, so typing edits the last one:
-    /// a comma starts the next, which is how every mail client behaves and
-    /// what keeps the address list a list rather than one long string.
-    fn compose_text_mut(&mut self) -> Option<&mut String> {
-        let field = self.compose_field;
-        let draft = self.compose_draft.as_mut()?;
-        match field {
-            ComposeField::To => {
-                if draft.to.is_empty() {
-                    draft.to.push(String::new());
-                }
-                draft.to.last_mut()
-            }
-            ComposeField::Subject => Some(&mut draft.subject),
-            ComposeField::Body => Some(&mut draft.body),
-        }
-    }
-
-    /// Check the open draft, and say plainly that it cannot be sent.
-    ///
-    /// This is the one place `build_message` is called, and it is what makes
-    /// the twelve tests over it worth having: a draft with a malformed
-    /// recipient is *rejected* rather than silently repaired -- the builder
-    /// partitions the addresses and hands back the ones it would not accept,
-    /// and the status line says so.
-    ///
-    /// **What it used to do after that is the defect.** The doc comment said
-    /// "file it under Sent". Nothing in this program files anything under
-    /// Sent -- `MailboxType::Sent` appears twice in the whole file, once as a
-    /// sidebar label and once as an icon. So `built.text`, the RFC-822 message
-    /// this crate assembles carefully and tests for forged headers and BCC
-    /// leakage, was used only to read `rejected_recipients` off and was then
-    /// dropped. The draft was cleared, the panel switched away, and the status
-    /// line read `sent "..." to 3 recipient(s)`.
-    ///
-    /// Three things wrong at once, and the order matters: **the user's
-    /// composed message was destroyed**, nothing was transmitted, and they
-    /// were told it had been delivered. This app has no `std::net` and there
-    /// is no SMTP client anywhere in the tree, so the last of those could
-    /// never have been true.
-    ///
-    /// The draft now stays open. Filing it under Drafts was considered and
-    /// rejected: nothing reads that mailbox either, so it would move the
-    /// message from one place it is lost to another.
-    fn send_draft(&mut self) {
-        let Some(draft) = self.compose_draft.as_ref() else {
-            return;
-        };
-        // Through `EmailAddress::parse`, which is the one place this file
-        // decides what an address is -- rather than filling the struct's three
-        // fields by hand and getting a different answer for the same string.
-        let from = self
-            .accounts
-            .iter()
-            .find(|a| a.id == draft.account_id)
-            .and_then(|a| EmailAddress::parse(&format!("{} <{}>", a.display_name, a.email)));
-        let Some(from) = from else {
-            self.status_message = "no account to send from".to_string();
-            return;
-        };
-
-        let built = draft.build_message(&from);
-        if !built.rejected_recipients.is_empty() {
-            self.status_message = format!(
-                "not sent: bad address {}",
-                built.rejected_recipients.join(", ")
-            );
-            return;
-        }
-        let recipients = draft
-            .to
-            .iter()
-            .chain(draft.cc.iter())
-            .chain(draft.bcc.iter())
-            .filter(|a| !a.trim().is_empty())
-            .count();
-        if recipients == 0 {
-            self.status_message = "not sent: no recipients".to_string();
-            return;
-        }
-
-        let subject = draft.subject.clone();
-        // The draft is deliberately left open and the panel deliberately not
-        // switched: the composing window is the only place this message
-        // exists.
-        self.status_message = format!(
-            "\"{subject}\" was not sent -- nothing here can reach a mail server. \
-             The draft is still open; {recipients} recipient(s) checked out."
-        );
-    }
-
     /// Move the message selection by `delta` rows through what is on screen.
     ///
     /// Held as an id rather than an index, so a message arriving or being
@@ -2565,7 +3393,11 @@ impl EmailApp {
 
     /// Move to another mailbox, and take the selection with it.
     fn move_mailbox(&mut self, delta: isize) {
-        let names: Vec<String> = self.mailboxes.iter().map(|m| m.name.clone()).collect();
+        let names: Vec<String> = self
+            .visible_mailboxes()
+            .iter()
+            .map(|m| m.name.clone())
+            .collect();
         if names.is_empty() {
             return;
         }
@@ -2578,9 +3410,11 @@ impl EmailApp {
             Some(index) => (index as isize).saturating_add(delta).clamp(0, last),
             None => 0,
         };
-        self.selected_mailbox = names.get(next.unsigned_abs()).cloned();
-        self.selected_message = None;
-        self.reanchor_selection();
+        // Through `select_mailbox`, which reads a folder in the first time it
+        // is shown.
+        if let Some(name) = names.get(next.unsigned_abs()).cloned() {
+            self.select_mailbox(&name);
+        }
     }
 
     /// Keep the selection on a message that is still on screen.
@@ -2702,22 +3536,229 @@ impl EmailApp {
         applied
     }
 
-    /// Render the UI
-    #[must_use]
-    /// Draw the whole window.
-    ///
-    /// Not `render`: [`App::render`] is the one the window calls, and this one
-    /// takes the same two arguments -- so at equal arity the inherent method
-    /// wins method lookup outright and the trait's is never called, silently.
-    pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-        let header_h = 48.0;
-        let toolbar_h = 40.0;
-        let sidebar_w = 200.0;
-        let status_h = 24.0;
+    // ====================================================================
+    // Layout
+    // ====================================================================
 
-        // Background
-        cmds.push(RenderCommand::FillRect {
+    fn width(&self) -> f32 {
+        self.size.get().0
+    }
+
+    fn height(&self) -> f32 {
+        self.size.get().1
+    }
+
+    /// Where the mail starts, under the header, the notice and the toolbar.
+    fn content_top() -> f32 {
+        HEADER_H + NOTICE_H + TOOLBAR_H
+    }
+
+    /// The message list's box and, when the reading pane is shown beside or
+    /// under it, the pane's.
+    fn panes(&self) -> (Rect, Option<Rect>) {
+        let top = Self::content_top();
+        let bottom = self.height() - STATUS_H;
+        let x = SIDEBAR_W;
+        let w = (self.width() - x).max(0.0);
+        let h = (bottom - top).max(0.0);
+        match self.reading_pane_position {
+            ReadingPanePosition::Right => {
+                let list_w = (w * 0.4).floor();
+                (
+                    Rect::new(x, top, list_w, h),
+                    Some(Rect::new(x + list_w, top, (w - list_w).max(0.0), h)),
+                )
+            }
+            ReadingPanePosition::Bottom => {
+                let list_h = (h * 0.45).floor();
+                (
+                    Rect::new(x, top, w, list_h),
+                    Some(Rect::new(x, top + list_h, w, (h - list_h).max(0.0))),
+                )
+            }
+            // Off: the list, or the message read in its place.
+            ReadingPanePosition::Off => {
+                let whole = Rect::new(x, top, w, h);
+                if self.active_panel == Panel::Reading {
+                    (Rect::new(x, top, 0.0, 0.0), Some(whole))
+                } else {
+                    (whole, None)
+                }
+            }
+        }
+    }
+
+    /// How many whole rows the list shows.
+    fn list_rows(&self) -> usize {
+        let (list, _) = self.panes();
+        ((list.h - 4.0) / ROW_H).floor().max(1.0) as usize
+    }
+
+    /// The lines of the message being read, wrapped to the pane.
+    fn read_lines(&self) -> Vec<String> {
+        let (_, Some(pane)) = self.panes() else {
+            return Vec::new();
+        };
+        let Some(id) = self.selected_message else {
+            return Vec::new();
+        };
+        let body = match self.stored.get(&id) {
+            Some(stored) => stored.message.readable_body().text,
+            None => self
+                .messages
+                .iter()
+                .find(|m| m.id == id)
+                .map(|m| m.preview.clone())
+                .unwrap_or_default(),
+        };
+        text::wrap_hard(
+            &body,
+            (pane.w - 32.0).max(1.0),
+            BODY_TEXT,
+            FontWeightHint::Regular,
+        )
+    }
+
+    /// Where the body of the message being read starts in its pane: under
+    /// the subject, four header lines, the buttons and the attachments.
+    fn read_body_top(&self, pane: Rect) -> f32 {
+        let attachments = self
+            .selected_message
+            .and_then(|id| self.stored.get(&id))
+            .map_or(0, |s| s.message.attachments().len());
+        let chips = if attachments == 0 { 0.0 } else { 34.0 };
+        pane.y + 16.0 + 26.0 + 18.0 * 4.0 + 8.0 + 36.0 + chips + 12.0
+    }
+
+    /// How many lines of the message being read show.
+    fn read_rows(&self) -> usize {
+        let (_, Some(pane)) = self.panes() else {
+            return 1;
+        };
+        let top = self.read_body_top(pane);
+        (((pane.y + pane.h) - top - 8.0) / BODY_LINE_H)
+            .floor()
+            .max(1.0) as usize
+    }
+
+    fn clamp_read_scroll(&mut self) {
+        let total = self.read_lines().len();
+        self.read_scroll = self.read_scroll.min(total.saturating_sub(self.read_rows()));
+    }
+
+    /// Scroll the list so the chosen message is on screen.
+    fn follow_selection(&mut self) {
+        let Some(id) = self.selected_message else {
+            return;
+        };
+        if let Some(at) = self.current_messages().iter().position(|m| m.id == id) {
+            let rows = self.list_rows();
+            if at < self.list_scroll {
+                self.list_scroll = at;
+            } else if at >= self.list_scroll.saturating_add(rows) {
+                self.list_scroll = at.saturating_add(1).saturating_sub(rows);
+            }
+        }
+    }
+
+    /// The compose form's box, over the list and the reading pane.
+    fn compose_rect(&self) -> Rect {
+        let top = Self::content_top();
+        Rect::new(
+            SIDEBAR_W,
+            top,
+            (self.width() - SIDEBAR_W).max(0.0),
+            (self.height() - STATUS_H - top).max(0.0),
+        )
+    }
+
+    /// The box of a compose field.
+    fn field_rect(&self, field: ComposeField) -> Rect {
+        let r = self.compose_rect();
+        let label_w = 80.0;
+        let row = |i: f32| {
+            Rect::new(
+                r.x + 16.0 + label_w,
+                r.y + 44.0 + i * 36.0,
+                (r.w - 32.0 - label_w).max(0.0),
+                FIELD_H,
+            )
+        };
+        match field {
+            ComposeField::From => row(0.0),
+            ComposeField::To => row(1.0),
+            ComposeField::Cc => row(2.0),
+            ComposeField::Subject => row(3.0),
+            ComposeField::Body => {
+                let top = r.y + 44.0 + 4.0 * 36.0 + 8.0;
+                let attachments = self.compose.as_ref().map_or(0, |c| c.attachments.len());
+                let chips = if attachments == 0 { 0.0 } else { 32.0 };
+                Rect::new(
+                    r.x + 16.0,
+                    top,
+                    (r.w - 32.0).max(0.0),
+                    (r.y + r.h - top - 56.0 - chips).max(BODY_LINE_H),
+                )
+            }
+        }
+    }
+
+    /// How many lines of the body being written show.
+    fn body_rows(&self) -> usize {
+        let body = self.field_rect(ComposeField::Body);
+        ((body.h - 8.0) / BODY_LINE_H).floor().max(1.0) as usize
+    }
+
+    /// Scroll the body being written so its caret shows, down and across.
+    fn keep_body_caret_visible(&mut self) {
+        let rows = self.body_rows();
+        let width = (self.field_rect(ComposeField::Body).w - 16.0).max(1.0);
+        let Some(compose) = self.compose.as_mut() else {
+            return;
+        };
+        let caret = compose.body.caret();
+        let line = compose.body.line_index(caret);
+        if line < compose.body_scroll {
+            compose.body_scroll = line;
+        } else if line >= compose.body_scroll.saturating_add(rows) {
+            compose.body_scroll = line.saturating_add(1).saturating_sub(rows);
+        }
+        let start = compose.body.line_start(caret);
+        let x = text::measure(
+            compose.body.text().get(start..caret).unwrap_or(""),
+            BODY_TEXT,
+            FontWeightHint::Regular,
+        );
+        if x < compose.body_hscroll {
+            compose.body_hscroll = (x - 40.0).max(0.0);
+        } else if x > compose.body_hscroll + width - 8.0 {
+            compose.body_hscroll = x - width + 40.0;
+        }
+    }
+
+    // ====================================================================
+    // Drawing
+    // ====================================================================
+
+    /// Everything the window draws, at `width` by `height`, for the tests
+    /// that read what was drawn.
+    #[cfg(test)]
+    pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+        self.frame_at(width, height).into_tree().commands
+    }
+
+    /// The window at its own size.
+    fn frame(&self) -> Frame<Target> {
+        self.frame_at(self.width(), self.height())
+    }
+
+    /// The window at `width` by `height`, and where every control in it is.
+    fn frame_at(&self, width: f32, height: f32) -> Frame<Target> {
+        // Laid out at the size asked for, and the window's own put back: a
+        // test draws at any size without the window's changing under it.
+        let own = self.size.replace((width, height));
+        let mut f = Frame::new(width, height);
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width,
@@ -2725,42 +3766,135 @@ impl EmailApp {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
-
-        // After the background, or it would be painted over -- which is the
-        // mistake `apps/screenrecorder` made an hour ago and a test caught.
-        for (i, line) in CANNOT_FETCH_LINES.iter().enumerate() {
-            cmds.push(RenderCommand::Text {
-                x: 10.0,
-                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
-                y: 2.0 + i as f32 * 14.0,
-                text: (*line).to_string(),
-                color: if i == 0 {
-                    self.palette.ink(self.palette.yellow)
-                } else {
-                    self.palette.subtext0
-                },
-                font_size: if i == 0 { 12.0 } else { 10.0 },
-                font_weight: if i == 0 {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(width - 20.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        self.render_header(&mut f);
+        self.render_toolbar(&mut f);
+        self.render_sidebar(&mut f);
+        if self.compose.is_some() {
+            self.render_compose(&mut f);
+        } else {
+            let (list, pane) = self.panes();
+            if list.w > 0.0 && list.h > 0.0 {
+                self.render_message_list(&mut f, list);
+            }
+            if let Some(pane) = pane {
+                self.render_reading_pane(&mut f, pane);
+            }
         }
+        self.render_status(&mut f);
+        self.size.set(own);
+        if self.picker.is_open() {
+            f.extend(self.picker.render(&self.palette, width, height));
+        }
+        // Over the reading pane and the compose form both.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+            f.hit(Target::HelpCard, Rect::new(0.0, 0.0, width, height));
+        }
+        f
+    }
 
-        // Header
+    /// A button: a press on it does `target`; a disabled one takes no press.
+    fn button(
+        &self,
+        f: &mut Frame<Target>,
+        rect: Rect,
+        label: &str,
+        target: Target,
+        enabled: bool,
+    ) {
+        let lit = enabled && self.hover == Some(target);
+        f.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: if lit {
+                self.palette.surface2
+            } else {
+                self.palette.surface1
+            },
+            corner_radii: CornerRadii::all(4.0),
+        });
+        f.push(RenderCommand::Text {
+            x: text::center_x(label, rect.x + rect.w / 2.0, 12.0, FontWeightHint::Regular)
+                .max(rect.x + 4.0),
+            y: rect.y + (rect.h - 12.0) / 2.0,
+            text: label.to_string(),
+            font_size: 12.0,
+            color: if enabled {
+                self.palette.text
+            } else {
+                self.palette.overlay0
+            },
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((rect.w - 8.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if enabled {
+            f.hit(target, rect);
+        }
+    }
+
+    /// Buttons left to right from `x`, each as wide as its label; answers
+    /// where the last ended.
+    fn buttons_from(
+        &self,
+        f: &mut Frame<Target>,
+        x: f32,
+        y: f32,
+        buttons: &[(&str, Target, bool)],
+    ) -> f32 {
+        let mut at = x;
+        for (label, target, enabled) in buttons {
+            let w = text::padded_width(label, 12.0, 12.0, FontWeightHint::Regular);
+            self.button(f, Rect::new(at, y, w, 28.0), label, *target, *enabled);
+            at += w + 6.0;
+        }
+        at
+    }
+
+    /// One line of text.
+    fn line(
+        &self,
+        f: &mut Frame<Target>,
+        x: f32,
+        y: f32,
+        text: String,
+        size: f32,
+        color: Color,
+        max: f32,
+    ) {
+        f.push(RenderCommand::Text {
+            x,
+            y,
+            text,
+            font_size: size,
+            color,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(max.max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    fn render_header(&self, f: &mut Frame<Target>) {
+        let width = self.width();
         self.palette.push_surface(
-            &mut cmds,
+            f,
             0.0,
             0.0,
             width,
-            header_h,
+            HEADER_H,
             0.0,
             Surface::Strip(Edge::Bottom),
         );
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: 16.0,
             y: 14.0,
             text: "Mail".to_string(),
@@ -2770,191 +3904,233 @@ impl EmailApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-
-        // Unread badge
         if self.unread_count > 0 {
-            cmds.push(RenderCommand::FillRect {
+            f.push(RenderCommand::FillRect {
                 x: 70.0,
-                y: 10.0,
-                width: 32.0,
+                y: 12.0,
+                width: 40.0,
                 height: 22.0,
                 color: self.palette.red,
                 corner_radii: CornerRadii::all(11.0),
             });
-            cmds.push(RenderCommand::Text {
-                x: 78.0,
-                y: 14.0,
+            f.push(RenderCommand::Text {
+                x: text::center_x(
+                    &self.unread_count.to_string(),
+                    90.0,
+                    12.0,
+                    FontWeightHint::Bold,
+                ),
+                y: 16.0,
                 text: self.unread_count.to_string(),
                 font_size: 12.0,
-                color: self.palette.base,
+                color: self.palette.ink(self.palette.red),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
         }
-
-        // Search bar
-        self.palette
-            .push_surface(&mut cmds, 120.0, 10.0, 300.0, 28.0, 6.0, Surface::Card);
-        let search_text = if self.search_query.is_empty() {
-            "Search mail...".to_string()
-        } else {
-            self.search_query.clone()
-        };
-        cmds.push(RenderCommand::Text {
-            x: 132.0,
-            y: 17.0,
-            text: search_text,
-            font_size: 12.0,
-            color: if self.search_query.is_empty() {
-                self.palette.subtext0
-            } else {
-                self.palette.text
-            },
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(276.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Toolbar
-        let ty = header_h;
+        // The search box: a press puts the keyboard in it.
+        let search = Rect::new(128.0, 10.0, 320.0, 28.0);
         self.palette.push_surface(
-            &mut cmds,
+            f,
+            search.x,
+            search.y,
+            search.w,
+            search.h,
+            6.0,
+            Surface::Card,
+        );
+        if self.searching {
+            f.push(RenderCommand::StrokeRect {
+                x: search.x,
+                y: search.y,
+                width: search.w,
+                height: search.h,
+                color: self.palette.blue,
+                line_width: 2.0,
+                corner_radii: CornerRadii::all(6.0),
+            });
+        }
+        let (shown, color) = if self.search_query.is_empty() && !self.searching {
+            ("Search mail (Ctrl+F)".to_string(), self.palette.subtext0)
+        } else if self.searching {
+            (format!("{}\u{258F}", self.search_query), self.palette.text)
+        } else {
+            (self.search_query.clone(), self.palette.text)
+        };
+        self.line(
+            f,
+            search.x + 12.0,
+            search.y + 7.0,
+            shown,
+            12.0,
+            color,
+            search.w - 24.0,
+        );
+        f.hit(Target::SearchBox, search);
+        self.button(
+            f,
+            Rect::new(width - 44.0, 10.0, 32.0, 28.0),
+            "?",
+            Target::Help,
+            true,
+        );
+        // Why there is no mail from a server, before anybody wonders.
+        for (i, text) in CANNOT_FETCH_LINES.iter().enumerate() {
+            let first = i == 0;
+            f.push(RenderCommand::Text {
+                x: 16.0,
+                y: HEADER_H + 4.0 + i as f32 * 17.0,
+                text: (*text).to_string(),
+                color: if first {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if first { 12.0 } else { 11.0 },
+                font_weight: if first {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some((width - 32.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+    }
+
+    fn render_toolbar(&self, f: &mut Frame<Target>) {
+        let width = self.width();
+        let y = HEADER_H + NOTICE_H;
+        self.palette.push_surface(
+            f,
             0.0,
-            ty,
+            y,
             width,
-            toolbar_h,
+            TOOLBAR_H,
             0.0,
             Surface::Strip(Edge::Bottom),
         );
-        let buttons = ["Compose", "Reply", "Forward", "Delete", "Archive", "Spam"];
-        let mut bx = 16.0;
-        for label in &buttons {
-            let bw = text::padded_width(label, 10.0, 12.0, FontWeightHint::Regular);
-            cmds.push(RenderCommand::FillRect {
-                x: bx,
-                y: ty + 6.0,
-                width: bw,
-                height: 28.0,
-                color: if *label == "Compose" {
-                    self.palette.blue
-                } else {
-                    self.palette.surface0
-                },
-                corner_radii: CornerRadii::all(4.0),
-            });
-            cmds.push(RenderCommand::Text {
-                x: bx + 10.0,
-                y: ty + 12.0,
-                text: label.to_string(),
-                font_size: 12.0,
-                color: if *label == "Compose" {
-                    self.palette.base
-                } else {
-                    self.palette.text
-                },
-                font_weight: if *label == "Compose" {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            bx += bw + 8.0;
-        }
+        let chosen = self.selected_message.is_some();
+        let composing = self.compose.is_some();
+        let end = self.buttons_from(
+            f,
+            16.0,
+            y + 6.0,
+            &[
+                ("Compose", Target::Compose, !composing),
+                ("Reply", Target::Reply, chosen && !composing),
+                ("Forward", Target::Forward, chosen && !composing),
+                ("Delete", Target::Delete, chosen && !composing),
+                ("Open file\u{2026}", Target::OpenFile, !composing),
+                (
+                    "Refresh",
+                    Target::Refresh,
+                    !composing && self.mail_dir.is_some(),
+                ),
+            ],
+        );
+        let sort = format!("Sort: {}", self.sort_order.label());
+        let pane = self.reading_pane_position.label();
+        let right = width - 16.0;
+        let pane_w = text::padded_width(pane, 12.0, 12.0, FontWeightHint::Regular);
+        let sort_w = text::padded_width(&sort, 12.0, 12.0, FontWeightHint::Regular);
+        let sort_x = (right - pane_w - 6.0 - sort_w).max(end + 12.0);
+        self.button(
+            f,
+            Rect::new(sort_x, y + 6.0, sort_w, 28.0),
+            &sort,
+            Target::Sort,
+            true,
+        );
+        self.button(
+            f,
+            Rect::new(sort_x + sort_w + 6.0, y + 6.0, pane_w, 28.0),
+            pane,
+            Target::PanePosition,
+            true,
+        );
+    }
 
-        // Sidebar (mailbox list)
-        let content_y = header_h + toolbar_h;
-        let content_h = height - content_y - status_h;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: content_y,
-            width: sidebar_w,
-            height: content_h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
+    fn render_sidebar(&self, f: &mut Frame<Target>) {
+        let top = Self::content_top();
+        let h = (self.height() - STATUS_H - top).max(0.0);
+        self.palette
+            .push_surface(f, 0.0, top, SIDEBAR_W, h, 0.0, Surface::Sidebar);
+        f.push(RenderCommand::Text {
+            x: 12.0,
+            y: top + 10.0,
+            text: String::from("FOLDERS"),
+            font_size: 11.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(SIDEBAR_W - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
-
-        // Account name
-        if let Some(acct) = self
-            .selected_account
-            .and_then(|id| self.accounts.iter().find(|a| a.id == id))
-        {
-            cmds.push(RenderCommand::Text {
-                x: 12.0,
-                y: content_y + 8.0,
-                text: acct.name.clone(),
-                font_size: 12.0,
-                color: acct.color,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(sidebar_w - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cmds.push(RenderCommand::Text {
-                x: 12.0,
-                y: content_y + 24.0,
-                text: acct.email.clone(),
-                font_size: 10.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(sidebar_w - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
-        // Mailbox list
-        let mut my = content_y + 48.0;
-        let account_id = self.selected_account;
-        for mb in &self.mailboxes {
-            if account_id.is_some_and(|aid| mb.account_id != aid) {
-                continue;
+        let place = match (
+            &self.mail_dir,
+            self.selected_account
+                .and_then(|id| self.accounts.iter().find(|a| a.id == id)),
+        ) {
+            (_, Some(account)) => account.email.clone(),
+            (Some(dir), None) => dir.display().to_string(),
+            (None, None) => String::from("No mail folder"),
+        };
+        self.line(
+            f,
+            12.0,
+            top + 26.0,
+            place,
+            10.0,
+            self.palette.subtext1,
+            SIDEBAR_W - 24.0,
+        );
+        let mut y = top + 48.0;
+        for (i, mb) in self.visible_mailboxes().into_iter().enumerate() {
+            let chosen = self.selected_mailbox.as_deref() == Some(mb.name.as_str());
+            let row = Rect::new(4.0, y, SIDEBAR_W - 8.0, FOLDER_ROW_H - 2.0);
+            if chosen || self.hover == Some(Target::Folder(i)) {
+                self.palette.push_surface(
+                    f,
+                    row.x,
+                    row.y,
+                    row.w,
+                    row.h,
+                    4.0,
+                    if chosen {
+                        Surface::Selected
+                    } else {
+                        Surface::Card
+                    },
+                );
             }
-            let is_sel = self.selected_mailbox.as_deref() == Some(&mb.name);
-            if is_sel {
-                cmds.push(RenderCommand::FillRect {
-                    x: 4.0,
-                    y: my,
-                    width: sidebar_w - 8.0,
-                    height: 28.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
-            }
-
             let icon = match mb.mailbox_type {
-                MailboxType::Inbox => "📥",
-                MailboxType::Sent => "📤",
-                MailboxType::Drafts => "📝",
-                MailboxType::Trash => "🗑",
-                MailboxType::Spam => "⚠",
-                MailboxType::Archive => "📦",
-                MailboxType::Custom => "📁",
+                MailboxType::Inbox => "\u{1F4E5}",
+                MailboxType::Sent => "\u{1F4E4}",
+                MailboxType::Drafts => "\u{1F4DD}",
+                MailboxType::Trash => "\u{1F5D1}",
+                MailboxType::Spam => "\u{26A0}",
+                MailboxType::Archive => "\u{1F4E6}",
+                MailboxType::Custom => "\u{1F4C1}",
             };
-
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: 12.0,
-                y: my + 7.0,
+                y: y + 7.0,
                 text: format!("{icon} {}", mb.name),
                 font_size: 12.0,
-                color: if is_sel {
-                    self.palette.ink(self.palette.blue)
-                } else {
-                    self.palette.subtext1
-                },
-                font_weight: if is_sel {
+                color: self.palette.text,
+                font_weight: if chosen {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(sidebar_w - 60.0),
+                max_width: Some(SIDEBAR_W - 60.0),
                 overflow: TextOverflow::Ellipsis,
             });
-
             if mb.unread_messages > 0 {
-                cmds.push(RenderCommand::Text {
-                    x: sidebar_w - 40.0,
-                    y: my + 7.0,
+                f.push(RenderCommand::Text {
+                    x: SIDEBAR_W - 40.0,
+                    y: y + 7.0,
                     text: mb.unread_messages.to_string(),
                     font_size: 11.0,
                     color: self.palette.ink(self.palette.blue),
@@ -2963,295 +4139,168 @@ impl EmailApp {
                     overflow: TextOverflow::Clip,
                 });
             }
-
-            my += 32.0;
+            f.hit(Target::Folder(i), row);
+            y += FOLDER_ROW_H;
         }
-
-        // Message list area
-        let list_x = sidebar_w;
-        let list_w = match self.reading_pane_position {
-            ReadingPanePosition::Right => (width - sidebar_w) * 0.4,
-            ReadingPanePosition::Bottom => width - sidebar_w,
-            ReadingPanePosition::Off => width - sidebar_w,
-        };
-
-        self.render_message_list(&mut cmds, list_x, content_y, list_w, content_h);
-
-        // Reading pane
-        if self.reading_pane_position == ReadingPanePosition::Right {
-            let reading_x = list_x + list_w;
-            let reading_w = width - reading_x;
-            self.render_reading_pane(&mut cmds, reading_x, content_y, reading_w, content_h);
-        }
-
-        // Status bar
-        let sy = height - status_h;
-        self.palette
-            .push_surface(&mut cmds, 0.0, sy, width, status_h, 0.0, Surface::Card);
-        let total_msgs: u32 = self
-            .mailboxes
-            .iter()
-            .filter(|mb| self.selected_account.is_none_or(|aid| mb.account_id == aid))
-            .map(|mb| mb.total_messages)
-            .sum();
-        cmds.push(RenderCommand::Text {
-            x: 12.0,
-            y: sy + 6.0,
-            text: format!(
-                "{} messages, {} unread  |  {}  |  {}",
-                total_msgs,
-                self.unread_count,
-                self.accounts.len(),
-                self.status_message,
-            ),
-            font_size: 11.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(width - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Over the reading pane and the compose form both.
-        if self.show_help {
-            guitk::shortcut::render_card(
-                &mut cmds,
-                &self.palette,
-                (width, height),
-                0.0,
-                SHORTCUTS,
-                "F1 closes this",
-            );
-        }
-
-        cmds
     }
 
-    fn render_message_list(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
-        let messages = self.current_messages();
-        let row_h = 64.0;
-        let mut ry = y + 4.0;
+    /// The folders the sidebar shows: the chosen account's, or all.
+    fn visible_mailboxes(&self) -> Vec<&Mailbox> {
+        self.mailboxes
+            .iter()
+            .filter(|mb| self.selected_account.is_none_or(|aid| mb.account_id == aid))
+            .collect()
+    }
 
+    fn render_message_list(&self, f: &mut Frame<Target>, r: Rect) {
+        f.hit(Target::MessageList, r);
+        let messages = self.current_messages();
         if messages.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: x + w / 2.0 - 60.0,
-                y: y + h / 2.0 - 10.0,
-                text: "No messages".to_string(),
-                font_size: 14.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            let why = match &self.selected_mailbox {
+                Some(name) if !self.search_query.is_empty() => {
+                    format!(
+                        "Nothing in {name} matches \u{201C}{}\u{201D}.",
+                        self.search_query
+                    )
+                }
+                Some(name) => format!("No messages in {name}."),
+                None => String::from("Choose a folder."),
+            };
+            self.line(
+                f,
+                r.x + 16.0,
+                r.y + 16.0,
+                why,
+                13.0,
+                self.palette.subtext0,
+                r.w - 32.0,
+            );
             return;
         }
-
-        for msg in messages.iter().take(((h - 4.0) / row_h) as usize) {
-            if ry + row_h > y + h {
-                break;
-            }
-
-            let is_sel = self.selected_message == Some(msg.id);
-            let is_unread = !msg.flags.seen;
-
-            if is_sel {
+        let rows = self.list_rows();
+        for (shown, msg) in messages
+            .iter()
+            .skip(self.list_scroll)
+            .take(rows)
+            .enumerate()
+        {
+            let y = r.y + 4.0 + shown as f32 * ROW_H;
+            let row = Rect::new(r.x + 4.0, y, (r.w - 8.0).max(0.0), ROW_H - 2.0);
+            let chosen = self.selected_message == Some(msg.id);
+            if chosen || self.hover == Some(Target::Message(msg.id)) {
                 self.palette.push_surface(
-                    cmds,
-                    x + 4.0,
-                    ry,
-                    w - 8.0,
-                    row_h - 2.0,
+                    f,
+                    row.x,
+                    row.y,
+                    row.w,
+                    row.h,
                     4.0,
-                    Surface::Card,
+                    if chosen {
+                        Surface::Selected
+                    } else {
+                        Surface::Card
+                    },
                 );
             }
-
-            // Unread indicator
-            if is_unread {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 6.0,
-                    y: ry + 24.0,
-                    width: 6.0,
-                    height: 6.0,
+            if !msg.flags.seen {
+                f.push(RenderCommand::FillRect {
+                    x: row.x + 6.0,
+                    y: y + 12.0,
+                    width: 8.0,
+                    height: 8.0,
                     color: self.palette.blue,
-                    corner_radii: CornerRadii::all(3.0),
+                    corner_radii: CornerRadii::all(4.0),
                 });
             }
-
-            // Flagged indicator
-            if msg.flags.flagged {
-                cmds.push(RenderCommand::Text {
-                    x: x + w - 24.0,
-                    y: ry + 6.0,
-                    text: "★".to_string(),
-                    font_size: 14.0,
-                    color: self.palette.ink(self.palette.yellow),
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-            }
-
-            let text_x = x + 20.0;
-            let max_w = w - 48.0;
-
-            // Sender
-            cmds.push(RenderCommand::Text {
-                x: text_x,
-                y: ry + 6.0,
-                text: msg
-                    .from
-                    .display_name
-                    .clone()
-                    .unwrap_or_else(|| msg.from.address()),
-                font_size: 12.0,
-                color: if is_unread {
-                    self.palette.text
-                } else {
-                    self.palette.subtext1
-                },
-                font_weight: if is_unread {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(max_w * 0.6),
+            let weight = if msg.flags.seen {
+                FontWeightHint::Regular
+            } else {
+                FontWeightHint::Bold
+            };
+            f.push(RenderCommand::Text {
+                x: row.x + 20.0,
+                y: y + 6.0,
+                text: msg.from.to_string(),
+                font_size: 13.0,
+                color: self.palette.text,
+                font_weight: weight,
+                max_width: Some((row.w - 150.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            // Date
-            cmds.push(RenderCommand::Text {
-                x: x + w - 80.0,
-                y: ry + 6.0,
-                text: msg.date.clone(),
-                font_size: 10.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(70.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Subject
-            cmds.push(RenderCommand::Text {
-                x: text_x,
-                y: ry + 24.0,
-                text: msg.subject.clone(),
-                font_size: 12.0,
-                color: if is_unread {
-                    self.palette.text
-                } else {
-                    self.palette.subtext1
-                },
-                font_weight: if is_unread {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(max_w),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Preview
-            cmds.push(RenderCommand::Text {
-                x: text_x,
-                y: ry + 42.0,
-                text: msg.preview.clone(),
+            let date = short_date(msg);
+            f.push(RenderCommand::Text {
+                x: text::right_x(&date, row.x + row.w - 8.0, 11.0, FontWeightHint::Regular),
+                y: y + 8.0,
+                text: date,
                 font_size: 11.0,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(max_w),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Attachment indicator
-            if msg.flags.has_attachment {
-                cmds.push(RenderCommand::Text {
-                    x: x + w - 44.0,
-                    y: ry + 24.0,
-                    text: "📎".to_string(),
-                    font_size: 12.0,
-                    color: self.palette.subtext0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-            }
-
-            // Priority indicator
-            if msg.priority == Priority::High {
-                cmds.push(RenderCommand::Text {
-                    x: x + w - 44.0,
-                    y: ry + 42.0,
-                    text: "❗".to_string(),
-                    font_size: 12.0,
-                    color: self.palette.ink(self.palette.red),
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-            }
-
-            // Labels
-            let mut lx = text_x;
-            for label in &msg.labels {
-                let lw = text::padded_width(label, 5.0, 9.0, FontWeightHint::Regular);
-                if lx + lw > x + max_w {
-                    break;
-                }
-                self.palette
-                    .push_surface(cmds, lx, ry + 54.0, lw, 14.0, 3.0, Surface::Card);
-                cmds.push(RenderCommand::Text {
-                    x: lx + 5.0,
-                    y: ry + 55.0,
-                    text: label.clone(),
-                    font_size: 9.0,
-                    color: self.palette.ink(self.palette.peach),
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-                lx += lw + 4.0;
-            }
-
-            ry += row_h;
-        }
-    }
-
-    fn render_reading_pane(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, _h: f32) {
-        // Separator line
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: 1.0,
-            height: _h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        let msg = if let Some(m) = self
-            .selected_message
-            .and_then(|id| self.messages.iter().find(|m| m.id == id))
-        {
-            m
-        } else {
-            cmds.push(RenderCommand::Text {
-                x: x + w / 2.0 - 80.0,
-                y: y + _h / 2.0 - 10.0,
-                text: "Select a message to read".to_string(),
-                font_size: 13.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
+            let mut marks = String::new();
+            if msg.flags.flagged {
+                marks.push_str("\u{2691} ");
+            }
+            if msg.flags.has_attachment {
+                marks.push_str("\u{1F4CE} ");
+            }
+            if msg.flags.draft {
+                marks.push_str("[Draft] ");
+            }
+            f.push(RenderCommand::Text {
+                x: row.x + 20.0,
+                y: y + 24.0,
+                text: format!("{marks}{}", msg.subject),
+                font_size: 12.0,
+                color: self.palette.text,
+                font_weight: weight,
+                max_width: Some((row.w - 28.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+            self.line(
+                f,
+                row.x + 20.0,
+                y + 42.0,
+                msg.preview.clone(),
+                11.0,
+                self.palette.subtext0,
+                row.w - 28.0,
+            );
+            f.hit(Target::Message(msg.id), row);
+        }
+    }
+
+    fn render_reading_pane(&self, f: &mut Frame<Target>, r: Rect) {
+        f.push(RenderCommand::FillRect {
+            x: r.x,
+            y: r.y,
+            width: 1.0,
+            height: r.h,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
+        f.hit(Target::ReadingPane, r);
+        let Some(msg) = self
+            .selected_message
+            .and_then(|id| self.messages.iter().find(|m| m.id == id))
+        else {
+            self.line(
+                f,
+                r.x + 16.0,
+                r.y + 16.0,
+                String::from("Choose a message to read."),
+                13.0,
+                self.palette.subtext0,
+                r.w - 32.0,
+            );
             return;
         };
-
-        let px = x + 16.0;
-        let max_w = w - 32.0;
-        let mut py = y + 16.0;
-
-        // Subject
-        cmds.push(RenderCommand::Text {
+        let stored = self.stored.get(&msg.id);
+        let px = r.x + 16.0;
+        let max_w = (r.w - 32.0).max(0.0);
+        let mut py = r.y + 16.0;
+        f.push(RenderCommand::Text {
             x: px,
             y: py,
             text: msg.subject.clone(),
@@ -3261,96 +4310,774 @@ impl EmailApp {
             max_width: Some(max_w),
             overflow: TextOverflow::Ellipsis,
         });
-        py += 28.0;
-
-        // From
-        cmds.push(RenderCommand::Text {
-            x: px,
-            y: py,
-            text: format!("From: {}", msg.from),
-            font_size: 12.0,
-            color: self.palette.subtext1,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(max_w),
-            overflow: TextOverflow::Ellipsis,
-        });
-        py += 18.0;
-
-        // To
-        let to_str = msg
-            .to
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        cmds.push(RenderCommand::Text {
-            x: px,
-            y: py,
-            text: format!("To: {to_str}"),
-            font_size: 12.0,
-            color: self.palette.subtext1,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(max_w),
-            overflow: TextOverflow::Ellipsis,
-        });
-        py += 18.0;
-
-        // CC
-        if !msg.cc.is_empty() {
-            let cc_str = msg
-                .cc
+        py += 26.0;
+        let list = |addrs: &[EmailAddress]| {
+            addrs
                 .iter()
                 .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>()
-                .join(", ");
-            cmds.push(RenderCommand::Text {
-                x: px,
-                y: py,
-                text: format!("Cc: {cc_str}"),
-                font_size: 12.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(max_w),
-                overflow: TextOverflow::Ellipsis,
-            });
+                .join(", ")
+        };
+        for text in [
+            format!("From: {}", msg.from),
+            format!("To: {}", list(&msg.to)),
+            if msg.cc.is_empty() {
+                String::new()
+            } else {
+                format!("Cc: {}", list(&msg.cc))
+            },
+            format!("Date: {}", msg.date),
+        ] {
+            self.line(f, px, py, text, 12.0, self.palette.subtext1, max_w);
             py += 18.0;
         }
-
-        // Date
-        cmds.push(RenderCommand::Text {
+        py += 8.0;
+        let draft = msg.flags.draft && stored.is_some();
+        let mut buttons = vec![
+            ("Reply", Target::Reply, true),
+            ("Forward", Target::Forward, true),
+            (
+                if msg.flags.seen {
+                    "Mark unread"
+                } else {
+                    "Mark read"
+                },
+                Target::MarkUnread,
+                true,
+            ),
+            (
+                if msg.flags.flagged { "Unflag" } else { "Flag" },
+                Target::Flag,
+                true,
+            ),
+        ];
+        if draft {
+            buttons.insert(0, ("Edit draft", Target::EditDraft, true));
+        }
+        self.buttons_from(f, px, py, &buttons);
+        py += 36.0;
+        if let Some(stored) = stored {
+            let attachments = stored.message.attachments();
+            if !attachments.is_empty() {
+                let mut x = px;
+                for (i, part) in attachments.iter().enumerate() {
+                    let label = format!(
+                        "\u{1F4CE} {} ({})  Save\u{2026}",
+                        part.filename().unwrap_or("attachment"),
+                        guitk::bytes::iec(u64::try_from(part.body.len()).unwrap_or(u64::MAX))
+                    );
+                    let w =
+                        text::padded_width(&label, 12.0, 11.0, FontWeightHint::Regular).min(max_w);
+                    if x + w > px + max_w && x > px {
+                        break;
+                    }
+                    self.button(
+                        f,
+                        Rect::new(x, py, w, 26.0),
+                        &label,
+                        Target::SaveAttachment(i),
+                        true,
+                    );
+                    x += w + 6.0;
+                }
+                py += 34.0;
+            }
+        }
+        let body_top = self.read_body_top(r);
+        let _ = py;
+        f.push(RenderCommand::FillRect {
             x: px,
-            y: py,
-            text: format!("Date: {}", msg.date),
-            font_size: 11.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        py += 24.0;
-
-        // Separator
-        cmds.push(RenderCommand::FillRect {
-            x: px,
-            y: py,
+            y: body_top - 8.0,
             width: max_w,
             height: 1.0,
             color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
-        py += 12.0;
+        if let Some(note) = stored.and_then(|s| s.message.readable_body().note) {
+            self.line(
+                f,
+                px,
+                body_top - 26.0,
+                note,
+                11.0,
+                self.palette.ink(self.palette.yellow),
+                max_w,
+            );
+        }
+        let rows = self.read_rows();
+        for (i, line) in self
+            .read_lines()
+            .into_iter()
+            .skip(self.read_scroll)
+            .take(rows)
+            .enumerate()
+        {
+            f.push(RenderCommand::Text {
+                x: px,
+                y: body_top + i as f32 * BODY_LINE_H,
+                text: line,
+                font_size: BODY_TEXT,
+                color: self.palette.text,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(max_w),
+                overflow: TextOverflow::Clip,
+            });
+        }
+    }
 
-        // Body preview
-        cmds.push(RenderCommand::Text {
-            x: px,
-            y: py,
-            text: msg.preview.clone(),
-            font_size: 13.0,
+    fn render_compose(&self, f: &mut Frame<Target>) {
+        let Some(compose) = &self.compose else {
+            return;
+        };
+        let r = self.compose_rect();
+        self.palette
+            .push_surface(f, r.x, r.y, r.w, r.h, 0.0, Surface::Card);
+        let title = match (&compose.saved_as, compose.unsaved()) {
+            (None, _) => String::from("New message"),
+            (Some(_), true) => String::from("Draft \u{2014} changes not saved"),
+            (Some(_), false) => String::from("Draft \u{2014} saved"),
+        };
+        f.push(RenderCommand::Text {
+            x: r.x + 16.0,
+            y: r.y + 12.0,
+            text: title,
+            font_size: 15.0,
             color: self.palette.text,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(max_w),
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
         });
+        self.line(
+            f,
+            r.x + 340.0,
+            r.y + 15.0,
+            String::from(COMPOSE_KEYS),
+            11.0,
+            self.palette.subtext0,
+            r.w - 356.0,
+        );
+        for field in [
+            ComposeField::From,
+            ComposeField::To,
+            ComposeField::Cc,
+            ComposeField::Subject,
+        ] {
+            let rect = self.field_rect(field);
+            self.line(
+                f,
+                r.x + 16.0,
+                rect.y + 7.0,
+                field.label().to_owned(),
+                12.0,
+                self.palette.subtext1,
+                76.0,
+            );
+            if let Some(input) = compose.line(field) {
+                self.render_field(f, input, rect, compose.field == field, field);
+            }
+        }
+        self.render_body(f, compose);
+        let body = self.field_rect(ComposeField::Body);
+        let mut y = body.y + body.h + 8.0;
+        if !compose.attachments.is_empty() {
+            let mut x = r.x + 16.0;
+            for (i, att) in compose.attachments.iter().enumerate() {
+                let label = format!(
+                    "\u{1F4CE} {} ({})  \u{2715}",
+                    att.filename,
+                    guitk::bytes::iec(u64::try_from(att.size()).unwrap_or(u64::MAX))
+                );
+                let w = text::padded_width(&label, 12.0, 11.0, FontWeightHint::Regular);
+                if x + w > r.x + r.w - 16.0 && x > r.x + 16.0 {
+                    break;
+                }
+                self.button(
+                    f,
+                    Rect::new(x, y, w, 24.0),
+                    &label,
+                    Target::Unattach(i),
+                    true,
+                );
+                x += w + 6.0;
+            }
+            y += 32.0;
+        }
+        self.buttons_from(
+            f,
+            r.x + 16.0,
+            y,
+            &[
+                ("Send", Target::Send, true),
+                ("Save draft", Target::SaveDraft, self.mail_dir.is_some()),
+                ("Save as file\u{2026}", Target::SaveAs, true),
+                ("Attach\u{2026}", Target::Attach, true),
+                ("Close", Target::CloseCompose, true),
+            ],
+        );
+    }
+
+    /// A single-line field of the compose form.
+    fn render_field(
+        &self,
+        f: &mut Frame<Target>,
+        input: &TextInput,
+        rect: Rect,
+        focused: bool,
+        field: ComposeField,
+    ) {
+        self.palette
+            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
+        f.push(RenderCommand::StrokeRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: if focused {
+                self.palette.blue
+            } else {
+                self.palette.surface1
+            },
+            line_width: if focused { 2.0 } else { 1.0 },
+            corner_radii: CornerRadii::all(4.0),
+        });
+        if input.text().is_empty() && !focused {
+            let hint = match field {
+                ComposeField::From => "Your name <you@example.com>",
+                ComposeField::To => "Who it is to, separated by commas",
+                ComposeField::Cc => "Who else sees it",
+                ComposeField::Subject | ComposeField::Body => "",
+            };
+            self.line(
+                f,
+                rect.x + 8.0,
+                rect.y + 7.0,
+                hint.to_owned(),
+                12.0,
+                self.palette.subtext0,
+                rect.w - 16.0,
+            );
+        } else {
+            let mut tree = RenderTree::new();
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: input.text(),
+                    cursor: if focused {
+                        input.cursor()
+                    } else {
+                        text::TextCursor::default()
+                    },
+                    selection_anchor: if focused {
+                        input.selection_anchor()
+                    } else {
+                        None
+                    },
+                    focused,
+                    x: rect.x + 8.0,
+                    y: rect.y + 6.0,
+                    width: (rect.w - 16.0).max(0.0),
+                    line_height: 16.0,
+                    font_size: 13.0,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.blue,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+            f.extend(tree.commands);
+        }
+        f.hit(Target::Field(field), rect);
+    }
+
+    /// The body being written: its lines from the scroll, its selection and
+    /// its caret, clipped to its box.
+    fn render_body(&self, f: &mut Frame<Target>, compose: &Compose) {
+        let rect = self.field_rect(ComposeField::Body);
+        let focused = compose.field == ComposeField::Body;
+        self.palette
+            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
+        f.push(RenderCommand::StrokeRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: if focused {
+                self.palette.blue
+            } else {
+                self.palette.surface1
+            },
+            line_width: if focused { 2.0 } else { 1.0 },
+            corner_radii: CornerRadii::all(4.0),
+        });
+        f.hit(Target::Field(ComposeField::Body), rect);
+        let area = Rect::new(
+            rect.x + 8.0,
+            rect.y + 4.0,
+            (rect.w - 16.0).max(0.0),
+            (rect.h - 8.0).max(0.0),
+        );
+        let origin = area.x - compose.body_hscroll;
+        let body = &compose.body;
+        let selection = if focused { body.selection() } else { None };
+        let rows = self.body_rows();
+        f.clip(area);
+        let mut start = 0_usize;
+        for (i, line) in body.text().split('\n').enumerate() {
+            let end = start.saturating_add(line.len());
+            if i >= compose.body_scroll && i < compose.body_scroll.saturating_add(rows) {
+                let y = area.y + i.saturating_sub(compose.body_scroll) as f32 * BODY_LINE_H;
+                if let Some((from, to)) = selection {
+                    let a = from.clamp(start, end).saturating_sub(start);
+                    let b = to.clamp(start, end).saturating_sub(start);
+                    if a < b {
+                        for (left, w) in
+                            text::selection_boxes(line, a, b, BODY_TEXT, FontWeightHint::Regular)
+                        {
+                            f.push(RenderCommand::FillRect {
+                                x: origin + left,
+                                y,
+                                width: w,
+                                height: BODY_LINE_H,
+                                color: self.palette.surface2,
+                                corner_radii: CornerRadii::ZERO,
+                            });
+                        }
+                    }
+                }
+                f.push(RenderCommand::Text {
+                    x: origin,
+                    y: y + 2.0,
+                    text: line.to_owned(),
+                    font_size: BODY_TEXT,
+                    color: self.palette.text,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
+                    overflow: TextOverflow::Clip,
+                });
+                if focused && (start..=end).contains(&body.caret()) {
+                    let x = text::measure(
+                        line.get(..body.caret().saturating_sub(start)).unwrap_or(""),
+                        BODY_TEXT,
+                        FontWeightHint::Regular,
+                    );
+                    f.push(RenderCommand::FillRect {
+                        x: origin + x,
+                        y,
+                        width: textedit::CARET_WIDTH,
+                        height: BODY_LINE_H,
+                        color: self.palette.text,
+                        corner_radii: CornerRadii::ZERO,
+                    });
+                }
+            }
+            start = end.saturating_add(1);
+        }
+        f.unclip();
+    }
+
+    fn render_status(&self, f: &mut Frame<Target>) {
+        let y = self.height() - STATUS_H;
+        let width = self.width();
+        self.palette
+            .push_surface(f, 0.0, y, width, STATUS_H, 0.0, Surface::Card);
+        let total = self.current_messages().len();
+        self.line(
+            f,
+            12.0,
+            y + 6.0,
+            format!(
+                "{total} messages, {} unread  |  {}",
+                self.unread_count, self.status_message
+            ),
+            11.0,
+            self.palette.subtext0,
+            width - 24.0,
+        );
+    }
+
+    // ====================================================================
+    // The pointer
+    // ====================================================================
+
+    /// What is under `(x, y)` in the frame last shown.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        if self.last_hits.is_empty() {
+            return self.frame().hit_test(x, y);
+        }
+        self.last_hits
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(target, _)| *target)
+    }
+
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                let Some(target) = self.frame().hit_test(event.x, event.y) else {
+                    return EventResult::Ignored;
+                };
+                let result = self.press(target, event.x, event.y);
+                self.follow_selection();
+                result
+            }
+            MouseEventKind::Move => {
+                let over = self.target_at(event.x, event.y);
+                if over == self.hover {
+                    return EventResult::Ignored;
+                }
+                self.hover = over;
+                EventResult::Consumed
+            }
+            MouseEventKind::Leave => {
+                if self.hover.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            MouseEventKind::Scroll { dy, .. } => self.wheel_at(event.x, event.y, dy),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// A press on `target`, at `(x, y)`.
+    fn press(&mut self, target: Target, x: f32, y: f32) -> EventResult {
+        match target {
+            Target::HelpCard => self.show_help = false,
+            Target::Help => self.show_help = true,
+            Target::SearchBox => {
+                if self.searching {
+                    return EventResult::Ignored;
+                }
+                self.searching = true;
+            }
+            Target::Compose => self.compose_new(),
+            Target::Reply => {
+                let Some(id) = self.selected_message else {
+                    return EventResult::Ignored;
+                };
+                self.compose_reply(id);
+            }
+            Target::Forward => {
+                let Some(id) = self.selected_message else {
+                    return EventResult::Ignored;
+                };
+                self.compose_forward(id);
+            }
+            Target::Delete => {
+                let Some(id) = self.selected_message else {
+                    return EventResult::Ignored;
+                };
+                self.delete(id);
+            }
+            Target::OpenFile => self.ask(PickerFor::Open),
+            Target::Refresh => {
+                self.rescan();
+                self.status_message = String::from("Looked in the mail folder again");
+            }
+            Target::Sort => self.sort_order = self.sort_order.next(),
+            Target::PanePosition => self.reading_pane_position = self.reading_pane_position.next(),
+            Target::Folder(i) => {
+                let Some(name) = self.visible_mailboxes().get(i).map(|m| m.name.clone()) else {
+                    return EventResult::Ignored;
+                };
+                self.searching = false;
+                self.active_panel = Panel::MessageList;
+                self.select_mailbox(&name);
+            }
+            Target::MessageList => {
+                self.searching = false;
+                return EventResult::Ignored;
+            }
+            // A press on a message opens it: reading changes nothing on disk.
+            Target::Message(id) => {
+                self.searching = false;
+                self.open_message(id);
+            }
+            Target::ReadingPane => return EventResult::Ignored,
+            Target::MarkUnread => {
+                let Some(id) = self.selected_message else {
+                    return EventResult::Ignored;
+                };
+                let seen = self
+                    .messages
+                    .iter()
+                    .find(|m| m.id == id)
+                    .is_some_and(|m| m.flags.seen);
+                if seen {
+                    self.mark_unread(id);
+                } else {
+                    self.mark_read(id);
+                }
+                self.remember(id);
+            }
+            Target::Flag => {
+                let Some(id) = self.selected_message else {
+                    return EventResult::Ignored;
+                };
+                self.toggle_flagged(id);
+                self.remember(id);
+            }
+            Target::EditDraft => {
+                let Some(id) = self.selected_message else {
+                    return EventResult::Ignored;
+                };
+                self.open_message(id);
+            }
+            Target::SaveAttachment(i) => self.ask(PickerFor::SaveAttachment(i)),
+            Target::Field(field) => {
+                let rect = self.field_rect(field);
+                let Some(compose) = self.compose.as_mut() else {
+                    return EventResult::Ignored;
+                };
+                let was_focused = compose.field == field;
+                compose.field = field;
+                if field == ComposeField::Body {
+                    let line = compose.body_scroll.saturating_add(
+                        ((y - rect.y - 4.0) / BODY_LINE_H).floor().max(0.0) as usize,
+                    );
+                    compose
+                        .body
+                        .click(line, x - rect.x - 8.0 + compose.body_hscroll, false);
+                } else if let Some(input) = compose.line_mut(field) {
+                    // Measured against the field as it was drawn: from its
+                    // start unfocused, scrolled to its caret focused.
+                    let drawn = if was_focused {
+                        input.cursor()
+                    } else {
+                        text::TextCursor::default()
+                    };
+                    let at = textedit::cursor_at_click(
+                        input.text(),
+                        drawn,
+                        (rect.w - 16.0).max(0.0),
+                        13.0,
+                        FontWeightHint::Regular,
+                        x - rect.x - 8.0,
+                    );
+                    input.set_selection_anchor(None);
+                    input.set_cursor(at);
+                }
+            }
+            Target::Send => self.send(),
+            Target::SaveDraft => self.save_draft(),
+            Target::SaveAs => self.ask(PickerFor::SaveAs),
+            Target::Attach => self.ask(PickerFor::Attach),
+            Target::Unattach(i) => {
+                if let Some(compose) = self.compose.as_mut()
+                    && i < compose.attachments.len()
+                {
+                    let gone = compose.attachments.remove(i);
+                    compose.confirm_close = false;
+                    self.status_message = format!("Took {} off", gone.filename);
+                }
+            }
+            Target::CloseCompose => self.close_compose(),
+        }
+        EventResult::Consumed
+    }
+
+    /// The wheel over the list, or over the message being read or written.
+    fn wheel_at(&mut self, x: f32, y: f32, dy: f32) -> EventResult {
+        let rows = self.wheel.rows(dy);
+        if rows == 0 {
+            return EventResult::Ignored;
+        }
+        let step = |now: usize, max: usize| {
+            if rows < 0 {
+                now.saturating_sub(rows.unsigned_abs())
+            } else {
+                now.saturating_add(rows.unsigned_abs()).min(max)
+            }
+        };
+        match self.target_at(x, y) {
+            Some(Target::MessageList | Target::Message(_)) => {
+                let max = self
+                    .current_messages()
+                    .len()
+                    .saturating_sub(self.list_rows());
+                let next = step(self.list_scroll, max);
+                if next == self.list_scroll {
+                    return EventResult::Ignored;
+                }
+                self.list_scroll = next;
+            }
+            Some(Target::ReadingPane | Target::SaveAttachment(_)) => {
+                let max = self.read_lines().len().saturating_sub(self.read_rows());
+                let next = step(self.read_scroll, max);
+                if next == self.read_scroll {
+                    return EventResult::Ignored;
+                }
+                self.read_scroll = next;
+            }
+            Some(Target::Field(ComposeField::Body)) => {
+                let rows_shown = self.body_rows();
+                let Some(compose) = self.compose.as_mut() else {
+                    return EventResult::Ignored;
+                };
+                let max = compose.body.line_count().saturating_sub(rows_shown);
+                let next = step(compose.body_scroll, max);
+                if next == compose.body_scroll {
+                    return EventResult::Ignored;
+                }
+                compose.body_scroll = next;
+            }
+            _ => return EventResult::Ignored,
+        }
+        EventResult::Consumed
+    }
+}
+
+/// A message read from a file, as the list shows it.
+fn summary_of(
+    stored: &store::Stored,
+    folder: &str,
+    marks: store::Marks,
+    own: bool,
+) -> MessageSummary {
+    let message = &stored.message;
+    let body = message.readable_body().text;
+    let preview: String = body
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(160)
+        .collect();
+    let date = message.date.clone().unwrap_or_default();
+    // The Status header an mbox writer leaves is the mark until one is set
+    // here: "R" is read.
+    let seen_in_file = message
+        .headers
+        .get("Status")
+        .is_some_and(|s| s.contains('R'));
+    MessageSummary {
+        id: 0,
+        uid: 0,
+        from: message.from.clone().unwrap_or(EmailAddress {
+            display_name: Some(String::from("(no sender)")),
+            local_part: String::new(),
+            domain: String::new(),
+        }),
+        to: message.to.clone(),
+        cc: message.cc.clone(),
+        subject: message.subject.clone(),
+        timestamp: decode::parse_date(&date).map_or(0, |t| u64::try_from(t).unwrap_or(0)),
+        date,
+        preview,
+        flags: MessageFlags {
+            seen: marks.seen || seen_in_file || own,
+            answered: false,
+            flagged: marks.flagged,
+            deleted: false,
+            draft: own,
+            has_attachment: !message.attachments().is_empty(),
+        },
+        priority: Priority::Normal,
+        account_id: 0,
+        mailbox: folder.to_owned(),
+        message_id: message.message_id.clone(),
+        in_reply_to: message.in_reply_to.clone(),
+        thread_id: None,
+        size: stored.size,
+        labels: Vec::new(),
+    }
+}
+
+/// The date a list row shows: the day and month, or the time for today --
+/// the header as written when it is not a date this reads.
+fn short_date(msg: &MessageSummary) -> String {
+    if msg.timestamp == 0 {
+        return msg.date.chars().take(16).collect();
+    }
+    let secs = i64::try_from(msg.timestamp).unwrap_or(0);
+    let date = guitk::date::Date::from_unix_utc(secs);
+    let (y, m, d) = date.ymd();
+    format!("{y}-{m:02}-{d:02}")
+}
+
+/// A media type for an attached file, from its name.
+fn mime_for(name: &str) -> &'static str {
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    match ext.as_str() {
+        "txt" => "text/plain",
+        "html" | "htm" => "text/html",
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "zip" => "application/zip",
+        "wav" => "audio/wav",
+        "eml" => "message/rfc822",
+        "csv" => "text/csv",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Apply a keystroke to a one-line field, as `apps/finance` and five more
+/// do (see `requests/e-c-a-text-field-that-takes-its-own-keys.md`); answers
+/// what a copy or a cut took.
+fn edit_line(
+    input: &mut TextInput,
+    key: &KeyEvent,
+    capacity: usize,
+    clipboard: &str,
+) -> Option<String> {
+    let shift = key.modifiers.shift;
+    let ctrl = key.modifiers.ctrl;
+    let mut copied = None;
+    match key.key {
+        Key::Left => input.move_cursor_left(shift, 13.0, FontWeightHint::Regular),
+        Key::Right => input.move_cursor_right(shift, 13.0, FontWeightHint::Regular),
+        Key::Home => input.move_home(shift),
+        Key::End => input.move_end(shift),
+        Key::Backspace => input.backspace(),
+        Key::Delete => input.delete(),
+        Key::A if ctrl => input.select_all(),
+        Key::C if ctrl => {
+            if input.has_selection() {
+                copied = Some(input.selected_text().to_string());
+            }
+        }
+        Key::X if ctrl => {
+            if input.has_selection() {
+                copied = Some(input.selected_text().to_string());
+                input.delete_selection();
+            }
+        }
+        Key::V if ctrl => insert_limited(input, clipboard, capacity),
+        _ => {
+            if !ctrl {
+                insert_limited(input, &key.text, capacity);
+            }
+        }
+    }
+    copied
+}
+
+/// Type `typed` into `input` over its selection, up to `capacity`
+/// characters, leaving control characters out.
+fn insert_limited(input: &mut TextInput, typed: &str, capacity: usize) {
+    if typed.chars().all(char::is_control) {
+        return;
+    }
+    if input.has_selection() {
+        input.delete_selection();
+    }
+    for ch in typed.chars() {
+        if ch.is_control() {
+            continue;
+        }
+        if input.text().chars().count() >= capacity {
+            break;
+        }
+        input.insert_char(ch);
     }
 }
 
@@ -3373,27 +5100,14 @@ impl App for EmailApp {
     }
 
     fn initial_size(&self) -> (u32, u32) {
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "both are positive constants well inside u32"
-        )]
-        {
-            (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
-        }
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
     /// No clock.
     ///
-    /// Nothing here ages. Mail arrives over a network and this tree has none:
-    /// every IMAP and SMTP command this file can build -- `login`, `select`,
-    /// `fetch`, `ehlo`, `mail_from` and fifteen more -- returns a protocol
-    /// string with nowhere to send it, so no message will arrive while the
-    /// window is open and a tick would redraw an identical frame.
-    ///
-    /// The line to add when a socket exists is a poll interval here; see
-    /// `known-issues.md` ->
-    /// `TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES`.
+    /// Nothing here ages. Mail arrives over a network and this tree has none,
+    /// so no message arrives while the window is open, and the files it reads
+    /// are read again when asked (F5).
     fn tick_interval(&self) -> Option<Duration> {
         None
     }
@@ -3409,18 +5123,14 @@ impl App for EmailApp {
     }
 
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
-        RenderTree {
-            commands: self.render_commands(width, height),
-        }
+        self.size.set((width, height));
+        let frame = self.frame();
+        self.last_hits = frame.hits().to_vec();
+        frame.into_tree()
     }
 }
 
 impl EmailApp {
-    /// The account, mail, filter rule and signature the window opens on.
-    ///
-    /// In a method rather than in `main` because a test cannot call `main`, and
-    /// a mail client that opens on an empty inbox looks broken rather than
-    /// idle.
     /// An account and a handful of messages, for tests.
     ///
     /// `#[cfg(test)]` since 2026-09-15. `main` called it, so every launch
@@ -3432,17 +5142,11 @@ impl EmailApp {
     /// program has been given.
     #[cfg(test)]
     pub fn seed_sample_mail(&mut self) {
-        // Add sample account
         let acct = EmailAccount::gmail("user@gmail.com", "John Doe");
         let acct_id = self.add_account(acct);
-
-        // Add sample messages
-        let sample_messages = create_sample_messages(acct_id);
-        for msg in sample_messages {
+        for msg in create_sample_messages(acct_id) {
             self.add_message(msg);
         }
-
-        // Add a filter rule
         self.add_filter_rule(FilterRule {
             id: 0,
             name: "Newsletter to Archive".to_string(),
@@ -3455,8 +5159,6 @@ impl EmailApp {
             ],
             stop_processing: true,
         });
-
-        // Add a signature
         self.add_signature(Signature {
             id: 0,
             name: "Default".to_string(),
@@ -3468,8 +5170,7 @@ impl EmailApp {
 }
 
 fn main() -> ExitCode {
-    // Opens empty. It used to call `seed_sample_mail`.
-    let mut app = EmailApp::new();
+    let mut app = EmailApp::from_settings();
     app::launch("email", &mut app)
 }
 
@@ -3817,8 +5518,12 @@ mod tests {
         assert!(
             CANNOT_FETCH_LINES
                 .iter()
-                .any(|l| l.contains("nothing was ever fetched")),
+                .any(|l| l.contains("is not \u{201C}no new mail\u{201D}")),
             "nothing forecloses reading the empty inbox as no new mail",
+        );
+        assert!(
+            CANNOT_FETCH_LINES.iter().any(|l| l.contains("~/Mail")),
+            "nothing says where the mail it can read comes from",
         );
     }
 
@@ -4128,18 +5833,20 @@ mod tests {
 
         app.handle_event(&press(Key::R));
         assert_eq!(app.active_panel, Panel::Compose);
-        let draft = app.compose_draft.as_ref().expect("a reply draft");
+        let draft = app.compose.as_ref().expect("a reply draft").draft();
         assert!(
             draft.subject.contains(&subject) || draft.subject.starts_with("Re:"),
             "a reply should quote the subject, got {:?}",
             draft.subject
         );
 
+        // Nothing typed yet: the reply is as it was made, so one Escape
+        // closes it.
         app.handle_event(&press(Key::Escape));
-        assert!(app.compose_draft.is_none(), "Escape should abandon it");
+        assert!(app.compose.is_none(), "Escape should abandon it");
 
         app.handle_event(&press(Key::F));
-        let draft = app.compose_draft.as_ref().expect("a forward draft");
+        let draft = app.compose.as_ref().expect("a forward draft").draft();
         assert!(draft.subject.starts_with("Fwd:"), "got {:?}", draft.subject);
     }
 
@@ -4169,6 +5876,11 @@ mod tests {
         for c in "bob@example.com".chars() {
             app.handle_event(&types(c));
         }
+        // To, then Cc, then the subject, then the body.
+        app.handle_event(&press(Key::Tab));
+        for c in "carol@example.com".chars() {
+            app.handle_event(&types(c));
+        }
         app.handle_event(&press(Key::Tab));
         for c in "Hello".chars() {
             app.handle_event(&types(c));
@@ -4177,11 +5889,16 @@ mod tests {
         for c in "Body".chars() {
             app.handle_event(&types(c));
         }
+        app.handle_event(&press(Key::Enter));
+        for c in "two".chars() {
+            app.handle_event(&types(c));
+        }
 
-        let draft = app.compose_draft.as_ref().expect("a draft");
-        assert_eq!(draft.to.last().map(String::as_str), Some("bob@example.com"));
+        let draft = app.compose.as_ref().expect("a draft").draft();
+        assert_eq!(draft.to, ["bob@example.com"]);
+        assert_eq!(draft.cc, ["carol@example.com"]);
         assert_eq!(draft.subject, "Hello");
-        assert_eq!(draft.body, "Body");
+        assert_eq!(draft.body, "Body\ntwo", "Enter is a line break in the body");
     }
 
     /// Ctrl+Enter checks the draft, keeps it, and does not claim to have sent it.
@@ -4207,13 +5924,14 @@ mod tests {
             app.handle_event(&types(c));
         }
         app.handle_event(&press(Key::Tab));
+        app.handle_event(&press(Key::Tab));
         for c in "Hi".chars() {
             app.handle_event(&types(c));
         }
 
         app.handle_event(&key_ev(Key::Enter, true));
         assert!(
-            app.compose_draft.is_some(),
+            app.compose.is_some(),
             "the draft was destroyed; it is the only place this message exists"
         );
         assert_eq!(
@@ -4234,15 +5952,13 @@ mod tests {
         let mut app = seeded();
         app.handle_event(&key_ev(Key::N, true));
         app.handle_event(&press(Key::Tab));
+        app.handle_event(&press(Key::Tab));
         for c in "Subject only".chars() {
             app.handle_event(&types(c));
         }
 
         app.handle_event(&key_ev(Key::Enter, true));
-        assert!(
-            app.compose_draft.is_some(),
-            "the draft should still be open"
-        );
+        assert!(app.compose.is_some(), "the draft should still be open");
         assert!(
             app.status_message.contains("no recipients"),
             "got {:?}",
@@ -4259,13 +5975,15 @@ mod tests {
         app.handle_event(&key_ev(Key::N, true));
         // A header value cannot contain a newline; the builder rejects it
         // rather than folding it into a second header.
-        if let Some(draft) = app.compose_draft.as_mut() {
-            draft.to = vec!["bad\nname@example.com".to_string()];
-            draft.subject = "Hi".to_string();
+        // Typed, a line break never reaches a single-line field; this is the
+        // builder's own guard, reached as a paste of stored text would.
+        if let Some(compose) = app.compose.as_mut() {
+            compose.to.set_text("bad\nname@example.com");
+            compose.subject.set_text("Hi");
         }
 
         app.handle_event(&key_ev(Key::Enter, true));
-        assert!(app.compose_draft.is_some(), "it should not have been sent");
+        assert!(app.compose.is_some(), "it should not have been sent");
         assert!(
             app.status_message.contains("bad address"),
             "got {:?}",
@@ -4309,7 +6027,7 @@ mod tests {
         let mut app = seeded();
         app.handle_event(&key_ev(Key::F, true));
         app.handle_event(&types('r'));
-        assert!(app.compose_draft.is_none(), "typing `r` opened a reply");
+        assert!(app.compose.is_none(), "typing `r` opened a reply");
         assert_eq!(app.search_query, "r");
     }
 
@@ -4613,8 +6331,7 @@ mod tests {
         let msg = create_sample_messages(acct_id).into_iter().next().unwrap();
         let id = app.add_message(msg);
         app.compose_reply(id);
-        assert!(app.compose_draft.is_some());
-        let draft = app.compose_draft.as_ref().unwrap();
+        let draft = app.compose.as_ref().unwrap().draft();
         assert!(draft.subject.starts_with("Re: "));
     }
 
@@ -4625,8 +6342,7 @@ mod tests {
         let msg = create_sample_messages(acct_id).into_iter().next().unwrap();
         let id = app.add_message(msg);
         app.compose_forward(id);
-        assert!(app.compose_draft.is_some());
-        let draft = app.compose_draft.as_ref().unwrap();
+        let draft = app.compose.as_ref().unwrap().draft();
         assert!(draft.subject.starts_with("Fwd: "));
     }
 
@@ -5090,5 +6806,501 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // -- The window over mail kept in files ------------------------------------
+
+    use guitk::probe::{self, Probe};
+
+    impl Probe for EmailApp {
+        type Target = Target;
+        type Outcome = EventResult;
+        const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+        fn draw(&self, _size: (f32, f32)) -> Frame<Target> {
+            self.frame()
+        }
+
+        fn click_at(
+            &mut self,
+            x: f32,
+            y: f32,
+            button: MouseButton,
+            _size: (f32, f32),
+        ) -> EventResult {
+            self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }))
+        }
+
+        fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> EventResult {
+            self.handle_event(&Event::Key(key.clone()))
+        }
+
+        fn scroll_at(&mut self, x: f32, y: f32, dy: f32, _size: (f32, f32)) -> Option<EventResult> {
+            Some(self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })))
+        }
+    }
+
+    /// A directory for one test, removed when it ends.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("email-app-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            // Best effort: a leftover temporary directory is harmless.
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const INBOX: &str = "From alice@example.com Thu Sep 24 09:00:00 2026\n\
+        From: Alice <alice@example.com>\n\
+        To: me@example.com\n\
+        Subject: Lunch\n\
+        Date: Thu, 24 Sep 2026 09:00:00 +0000\n\
+        Message-ID: <lunch@example.com>\n\n\
+        Soup at noon?\n\n\
+        From bob@example.com Fri Sep 25 10:00:00 2026\n\
+        From: Bob <bob@example.com>\n\
+        To: me@example.com\n\
+        Subject: Report\n\
+        Date: Fri, 25 Sep 2026 10:00:00 +0000\n\
+        Message-ID: <report@example.com>\n\
+        Status: RO\n\
+        MIME-Version: 1.0\n\
+        Content-Type: multipart/mixed; boundary=\"b\"\n\n\
+        --b\n\
+        Content-Type: text/plain; charset=utf-8\n\n\
+        The totals are attached.\n\
+        --b\n\
+        Content-Type: text/csv\n\
+        Content-Disposition: attachment; filename=\"totals.csv\"\n\
+        Content-Transfer-Encoding: base64\n\n\
+        YSxiCjEsMgo=\n\
+        --b--\n";
+
+    /// `~/Mail` with an mbox of two messages and a folder holding one long
+    /// saved message; the marks kept beside it.
+    fn mail_fixture(tag: &str) -> (Scratch, EmailApp) {
+        let dir = Scratch::new(tag);
+        let mail = dir.0.join("Mail");
+        std::fs::create_dir_all(mail.join("Saved")).unwrap();
+        std::fs::write(mail.join("Inbox.mbox"), INBOX).unwrap();
+        let mut note = String::from(
+            "From: Carol <carol@example.com>\nSubject: Saved note\nDate: Wed, 23 Sep 2026 08:00:00 +0000\n\n",
+        );
+        for i in 0..120 {
+            note.push_str(&format!("Line {i} of a long saved note.\n"));
+        }
+        std::fs::write(mail.join("Saved").join("note.eml"), note).unwrap();
+        let mut app = EmailApp::new();
+        app.mail_dir = Some(mail);
+        app.flags_path = Some(dir.0.join("flags.txt"));
+        app.rescan();
+        (dir, app)
+    }
+
+    fn message_id(app: &EmailApp, subject: &str) -> u64 {
+        app.messages
+            .iter()
+            .find(|m| m.subject == subject)
+            .unwrap_or_else(|| panic!("no message {subject:?}"))
+            .id
+    }
+
+    /// The mail directory's folders are listed and the first read in; a
+    /// message's Status header is its read mark until one is set here, and a
+    /// mark set here is kept -- in a file of the client's own, never in the
+    /// mail, which is not rewritten.
+    #[test]
+    fn a_mail_folder_is_read_and_its_marks_are_kept() {
+        let (dir, mut app) = mail_fixture("marks");
+        let names: Vec<&str> = app.mailboxes.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["Inbox", "Saved", "Drafts"]);
+        assert_eq!(app.selected_mailbox.as_deref(), Some("Inbox"));
+        assert_eq!(app.current_messages().len(), 2);
+        assert_eq!(
+            app.unread_count, 1,
+            "Report is marked read by its Status header"
+        );
+        let before = std::fs::read(dir.0.join("Mail").join("Inbox.mbox")).unwrap();
+        let lunch = message_id(&app, "Lunch");
+        probe::click(&mut app, Target::Message(lunch));
+        assert_eq!(app.active_panel, Panel::Reading);
+        assert_eq!(app.unread_count, 0);
+        app.handle_event(&press(Key::S));
+        assert!(
+            app.messages
+                .iter()
+                .find(|m| m.id == lunch)
+                .unwrap()
+                .flags
+                .flagged
+        );
+        assert_eq!(
+            std::fs::read(dir.0.join("Mail").join("Inbox.mbox")).unwrap(),
+            before,
+            "the mail was rewritten"
+        );
+        let kept = std::fs::read_to_string(dir.0.join("flags.txt")).unwrap();
+        assert!(kept.contains("11\tid:lunch@example.com"), "{kept}");
+        // A new window finds them.
+        let mut again = EmailApp::new();
+        again.mail_dir = app.mail_dir.clone();
+        again.flags = store::Flags::parse(&kept).unwrap();
+        again.rescan();
+        let lunch = message_id(&again, "Lunch");
+        let m = again.messages.iter().find(|m| m.id == lunch).unwrap();
+        assert!(m.flags.seen && m.flags.flagged);
+    }
+
+    /// A message is read whole -- not the one-line preview it was -- and its
+    /// attachment saved where the dialog says.
+    #[test]
+    fn a_message_is_read_whole_and_its_attachment_saved() {
+        let (dir, mut app) = mail_fixture("read");
+        let report = message_id(&app, "Report");
+        probe::click(&mut app, Target::Message(report));
+        let text = drawn(&app);
+        assert!(text.contains("The totals are attached."), "{text}");
+        assert!(text.contains("totals.csv"), "the attachment is not listed");
+        probe::click(&mut app, Target::SaveAttachment(0));
+        assert!(app.picker.is_open() && app.picker_for == PickerFor::SaveAttachment(0));
+        app.picker.close();
+        let to = dir.0.join("saved.csv");
+        app.picked(&to);
+        assert_eq!(std::fs::read(&to).unwrap(), b"a,b\n1,2\n");
+        // A long message scrolls, by key and by wheel.
+        app.select_mailbox("Saved");
+        app.handle_event(&press(Key::Down));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press(Key::PageDown));
+        assert!(app.read_scroll > 0);
+        let after_key = app.read_scroll;
+        probe::scroll_at_point(&mut app, Target::ReadingPane, -3.0);
+        assert!(app.read_scroll > after_key);
+        // A reply quotes the whole of it, not the line the list shows.
+        app.handle_event(&press(Key::R));
+        let quoted = app.compose.as_ref().unwrap().body.text().to_owned();
+        assert!(
+            quoted.contains("> Line 119 of a long saved note."),
+            "{quoted}"
+        );
+    }
+
+    /// Mail read from files is never deleted here, and the window says so.
+    #[test]
+    fn mail_read_from_files_is_never_deleted() {
+        let (dir, mut app) = mail_fixture("keep");
+        let before = std::fs::read(dir.0.join("Mail").join("Inbox.mbox")).unwrap();
+        app.handle_event(&press(Key::Down));
+        app.handle_event(&press(Key::Delete));
+        app.handle_event(&press(Key::Delete));
+        assert!(
+            app.status_message.contains("never changed"),
+            "{}",
+            app.status_message
+        );
+        assert_eq!(app.current_messages().len(), 2);
+        assert_eq!(
+            std::fs::read(dir.0.join("Mail").join("Inbox.mbox")).unwrap(),
+            before
+        );
+    }
+
+    fn type_into(app: &mut EmailApp, text: &str) {
+        for c in text.chars() {
+            app.handle_event(&types(c));
+        }
+    }
+
+    /// A draft is saved into Drafts, listed there, opened to go on writing,
+    /// saved over its own file, and deleted after a second Delete.
+    #[test]
+    fn a_draft_is_saved_edited_and_deleted() {
+        let (dir, mut app) = mail_fixture("draft");
+        app.handle_event(&key_ev(Key::N, true));
+        type_into(&mut app, "bob@example.com");
+        app.handle_event(&press(Key::Tab));
+        app.handle_event(&press(Key::Tab));
+        type_into(&mut app, "Plans");
+        app.handle_event(&press(Key::Tab));
+        type_into(&mut app, "First line");
+        app.handle_event(&key_ev(Key::S, true));
+        let file = dir.0.join("Mail").join("Drafts").join("Plans.eml");
+        let saved = EmailMessage::parse_bytes(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(saved.subject, "Plans");
+        assert_eq!(saved.readable_body().text, "First line");
+        assert_eq!(
+            app.compose.as_ref().unwrap().saved_as.as_deref(),
+            Some(file.as_path())
+        );
+        // Saved: one Escape closes it.
+        app.handle_event(&press(Key::Escape));
+        assert!(app.compose.is_none());
+        app.select_mailbox("Drafts");
+        assert_eq!(app.current_messages().len(), 1);
+        let draft = app.current_messages()[0].id;
+        app.handle_event(&press(Key::Enter));
+        let compose = app
+            .compose
+            .as_ref()
+            .expect("the draft did not open to be written");
+        assert_eq!(compose.subject.text(), "Plans");
+        assert_eq!(compose.body.text(), "First line");
+        if let Some(compose) = app.compose.as_mut() {
+            compose.field = ComposeField::Body;
+        }
+        type_into(&mut app, ", more");
+        app.handle_event(&key_ev(Key::S, true));
+        let names: Vec<_> = std::fs::read_dir(dir.0.join("Mail").join("Drafts"))
+            .unwrap()
+            .collect();
+        assert_eq!(names.len(), 1, "saving again made a second file");
+        let saved = EmailMessage::parse_bytes(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(saved.readable_body().text, "First line, more");
+        app.handle_event(&press(Key::Escape));
+        let draft = app.current_messages().first().map_or(draft, |m| m.id);
+        app.selected_message = Some(draft);
+        app.handle_event(&press(Key::Delete));
+        assert!(file.exists(), "one Delete deleted it");
+        app.handle_event(&press(Key::Delete));
+        assert!(!file.exists());
+        assert!(app.current_messages().is_empty());
+    }
+
+    /// Closing over unsaved work asks first; a second close discards.
+    #[test]
+    fn closing_unsaved_work_asks_first() {
+        let mut app = EmailApp::new();
+        app.handle_event(&key_ev(Key::N, true));
+        type_into(&mut app, "x@example.com");
+        app.handle_event(&press(Key::Escape));
+        assert!(app.compose.is_some(), "unsaved work was discarded at once");
+        assert!(
+            app.status_message.contains("not saved"),
+            "{}",
+            app.status_message
+        );
+        probe::click(&mut app, Target::CloseCompose);
+        assert!(app.compose.is_none());
+    }
+
+    /// Save as writes an .eml file that reads back as the message written,
+    /// with a Date and the attachment it was given.
+    #[test]
+    fn save_as_writes_a_message_that_reads_back() {
+        let dir = Scratch::new("saveas");
+        let attached = dir.0.join("data.txt");
+        std::fs::write(&attached, b"payload").unwrap();
+        let mut app = EmailApp::new();
+        app.handle_event(&key_ev(Key::N, true));
+        if let Some(compose) = app.compose.as_mut() {
+            compose.from.set_text("Me <me@example.com>");
+            compose.to.set_text("you@example.com");
+            compose.subject.set_text("Caf\u{e9}");
+            compose.body.set_text("Hello");
+        }
+        app.picker_for = PickerFor::Attach;
+        app.picked(&attached);
+        assert_eq!(app.compose.as_ref().unwrap().attachments.len(), 1);
+        app.picker_for = PickerFor::SaveAs;
+        let out = dir.0.join("message.eml");
+        app.picked(&out);
+        let back = EmailMessage::parse_bytes(&std::fs::read(&out).unwrap()).unwrap();
+        assert_eq!(back.subject, "Caf\u{e9}");
+        assert_eq!(back.readable_body().text, "Hello");
+        assert!(back.date.is_some(), "no Date header");
+        assert_eq!(back.attachments()[0].body, b"payload");
+        assert_eq!(
+            app.identity, "Me <me@example.com>",
+            "the next message is not from the same sender"
+        );
+    }
+
+    /// A message file or an mbox from anywhere is opened, into a folder of
+    /// its own.
+    #[test]
+    fn a_file_is_opened_from_anywhere() {
+        let dir = Scratch::new("open");
+        let file = dir.0.join("forwarded.eml");
+        std::fs::write(&file, "From: d@example.com\nSubject: From elsewhere\n\nHi").unwrap();
+        let mut app = EmailApp::new();
+        app.handle_event(&key_ev(Key::O, true));
+        assert!(app.picker.is_open() && app.picker_for == PickerFor::Open);
+        app.picker.close();
+        app.picked(&file);
+        assert_eq!(app.selected_mailbox.as_deref(), Some("Opened"));
+        let subjects: Vec<&str> = app
+            .current_messages()
+            .iter()
+            .map(|m| m.subject.as_str())
+            .collect();
+        assert_eq!(subjects, ["From elsewhere"]);
+    }
+
+    /// The reading pane is drawn beside, under, or in place of the list;
+    /// "below" drew nothing at all.
+    #[test]
+    fn the_reading_pane_is_drawn_wherever_it_is() {
+        let (_dir, mut app) = mail_fixture("pane");
+        let lunch = message_id(&app, "Lunch");
+        app.open_message(lunch);
+        for position in ReadingPanePosition::ALL {
+            app.reading_pane_position = position;
+            assert!(
+                drawn(&app).contains("Soup at noon?"),
+                "{position:?} did not show the message"
+            );
+        }
+        app.reading_pane_position = ReadingPanePosition::Off;
+        assert!(
+            probe::rect_of(&app, Target::Message(lunch)).is_none(),
+            "with the pane off, the message is read in the list's place"
+        );
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            probe::rect_of(&app, Target::ReadingPane).is_none(),
+            "with the pane off, Escape goes back to the list alone"
+        );
+        assert!(probe::rect_of(&app, Target::Message(lunch)).is_some());
+    }
+
+    /// Every control answers the pointer, in the window and in the form.
+    #[test]
+    fn every_control_answers_the_pointer() {
+        let (_dir, mut app) = mail_fixture("pointer");
+        probe::click(&mut app, Target::Folder(1));
+        assert_eq!(app.selected_mailbox.as_deref(), Some("Saved"));
+        probe::click(&mut app, Target::Folder(0));
+        let report = message_id(&app, "Report");
+        probe::click(&mut app, Target::Message(report));
+        assert_eq!(app.selected_message, Some(report));
+        probe::click(&mut app, Target::Flag);
+        assert!(
+            app.messages
+                .iter()
+                .find(|m| m.id == report)
+                .unwrap()
+                .flags
+                .flagged
+        );
+        probe::click(&mut app, Target::MarkUnread);
+        assert!(
+            !app.messages
+                .iter()
+                .find(|m| m.id == report)
+                .unwrap()
+                .flags
+                .seen
+        );
+        let sort = app.sort_order;
+        probe::click(&mut app, Target::Sort);
+        assert_ne!(app.sort_order, sort);
+        let pane = app.reading_pane_position;
+        probe::click(&mut app, Target::PanePosition);
+        assert_ne!(app.reading_pane_position, pane);
+        app.reading_pane_position = ReadingPanePosition::Right;
+        probe::click(&mut app, Target::SearchBox);
+        assert!(app.searching);
+        app.handle_event(&press(Key::Escape));
+        probe::click(&mut app, Target::OpenFile);
+        assert!(app.picker.is_open());
+        app.picker.close();
+        assert_eq!(
+            probe::click(&mut app, Target::Refresh),
+            EventResult::Consumed
+        );
+        probe::click(&mut app, Target::Help);
+        assert!(app.show_help);
+        probe::click(&mut app, Target::HelpCard);
+        let report = message_id(&app, "Report");
+        probe::click(&mut app, Target::Message(report));
+        probe::click(&mut app, Target::Reply);
+        let compose = app.compose.as_ref().expect("Reply did not open the form");
+        assert!(
+            compose.body.text().contains("> The totals are attached."),
+            "the reply does not quote the message"
+        );
+        probe::click(&mut app, Target::Field(ComposeField::Subject));
+        assert_eq!(app.compose.as_ref().unwrap().field, ComposeField::Subject);
+        probe::click(&mut app, Target::Field(ComposeField::Body));
+        assert_eq!(app.compose.as_ref().unwrap().field, ComposeField::Body);
+        probe::click(&mut app, Target::Send);
+        assert!(
+            app.status_message.contains("was not sent"),
+            "{}",
+            app.status_message
+        );
+        probe::click(&mut app, Target::Attach);
+        assert!(app.picker.is_open() && app.picker_for == PickerFor::Attach);
+        app.picker.close();
+        probe::click(&mut app, Target::SaveAs);
+        assert!(app.picker.is_open() && app.picker_for == PickerFor::SaveAs);
+        app.picker.close();
+        probe::click(&mut app, Target::SaveDraft);
+        assert!(
+            app.status_message.contains("Draft saved"),
+            "{}",
+            app.status_message
+        );
+        probe::click(&mut app, Target::CloseCompose);
+        assert!(app.compose.is_none(), "a saved draft closes at once");
+        let report = message_id(&app, "Report");
+        probe::click(&mut app, Target::Message(report));
+        probe::click(&mut app, Target::Forward);
+        assert_eq!(
+            app.compose.as_ref().unwrap().attachments.len(),
+            1,
+            "the attachment was not forwarded"
+        );
+        probe::click(&mut app, Target::Unattach(0));
+        assert!(app.compose.as_ref().unwrap().attachments.is_empty());
+    }
+
+    /// The list scrolls under the wheel and follows the keys.
+    #[test]
+    fn the_message_list_scrolls_and_follows_the_keys() {
+        let dir = Scratch::new("scroll");
+        let mail = dir.0.join("Mail");
+        std::fs::create_dir_all(&mail).unwrap();
+        let mut mbox = String::new();
+        for i in 0..40 {
+            mbox.push_str(&format!(
+                "From x@example.com Thu Sep 24 09:{:02}:00 2026\nFrom: x@example.com\nSubject: Message {i}\nDate: Thu, 24 Sep 2026 09:{:02}:00 +0000\n\nbody {i}\n\n",
+                i % 60,
+                i % 60
+            ));
+        }
+        std::fs::write(mail.join("Inbox.mbox"), mbox).unwrap();
+        let mut app = EmailApp::new();
+        app.mail_dir = Some(mail);
+        app.rescan();
+        assert_eq!(app.current_messages().len(), 40);
+        let rows = app.list_rows();
+        assert!(rows < 40);
+        for _ in 0..30 {
+            probe::scroll_at_point(&mut app, Target::MessageList, -3.0);
+        }
+        assert_eq!(app.list_scroll, 40 - rows);
+        app.handle_event(&press(Key::Down));
+        app.handle_event(&press(Key::Up));
+        let first = app.current_messages()[0].id;
+        assert_eq!(app.selected_message, Some(first));
+        assert_eq!(app.list_scroll, 0, "the choice was left off screen");
     }
 }

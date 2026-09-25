@@ -954,6 +954,39 @@ if [ "$skip_tmw" != "1" ]; then
     fi
 fi
 
+# Gate 44b: refuse a truncating write, under `scripts/`, aimed at a tree file.
+#
+# check-destructive-writes.py, gate 44's companion, and the reason the two sit
+# together: gate 44 makes every write under scripts/ spell out `newline=`, and
+# a *mistyped* `newline=` is what emptied this very hook on 2026-09-17 --
+# `io.open(path, "w")` truncates first and validates its arguments second. So
+# gate 44 raises the odds of a bad argument, and this one makes sure a bad one
+# costs a temporary file (`safewrite.write_text`) rather than a tracked one.
+#
+# Written by lane C on 2026-09-22 and wired to nothing: check-gates-are-wired
+# refused lane C's next boot test for exactly that, which is what it is for.
+# Wired here on 2026-09-24, beside its sibling and on the same terms -- scoped
+# to pushes that touch scripts/, which is all it reads, and self-tested before
+# its verdict is believed. `boot-test.sh` is lane A's; the request to run it
+# there too is requests/c-a-wire-check-destructive-writes-into-the-boot-test.md.
+skip_dw=0
+dw="${repo_root:-.}/scripts/check-destructive-writes.py"
+[ -f "$dw" ] || skip_dw=1
+[ -n "$py" ] || skip_dw=1
+# No `pushed_shas` guard, as gate 44: one run against the working tree.
+touches scripts/ || skip_dw=1
+note_gate destructive-writes "$skip_dw"
+
+dw_failed=0
+if [ "$skip_dw" != "1" ]; then
+    if ! run_checker destructive-writes-selftest "$py" "$dw" --self-test; then
+        echo "pre-push: check-destructive-writes.py FAILED ITS OWN SELF-TEST — its result is not trustworthy." >&2
+        dw_failed=1
+    elif ! run_checker destructive-writes "$py" "$dw"; then
+        dw_failed=1
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # check-read-defaults.py -- a read whose failure is indistinguishable from an
 # empty file.
@@ -1467,6 +1500,25 @@ EOF
     else
         exit 1
     fi
+fi
+
+if [ "$dw_failed" = "1" ]; then
+    cat >&2 <<'EOF'
+
+pre-push: REFUSING to push — a script truncates a file the tree already has.
+
+The write is named above. `open(path, "w")` and `Path.write_text(...)` empty
+the target *before* they check their arguments, so a mistyped `newline=`
+destroys the file and then raises -- which is how scripts/hooks/pre-push was
+emptied on 2026-09-17.
+
+Write through `safewrite.write_text(path, text)` instead: it writes beside the
+target and renames over it, so any failure leaves the original as it was.
+
+Reproduce exactly what the hook saw:
+    python scripts/check-destructive-writes.py
+EOF
+    exit 1
 fi
 
 if [ "$tmw_failed" = "1" ]; then

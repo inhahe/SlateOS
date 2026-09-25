@@ -11,5 +11,11 @@ guitk = { path = "../../gui/toolkit" }
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
 
+# Recordings are read and written as WAV -- a take stored exactly, markers as
+# `cue ` chunks, a kept part cut without decoding -- and saved without ever
+# replacing a file nobody chose to replace.
+wavpcm = { path = "../wavpcm" }
+safeio = { path = "../safeio" }
+
 [lints]
 workspace = true

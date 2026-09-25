@@ -24,7 +24,9 @@
 //! stretch cut out as a file of its own, its samples copied as stored
 //! ([`cut`]).
 //!
-//! `apps/mediaconvert` is the first user.
+//! `apps/mediaconvert` converts with it; `apps/soundrecorder` lists, opens,
+//! marks and cuts recordings with it, and writes its takes through
+//! [`encode_pcm16`].
 
 use std::fmt;
 

@@ -1,9 +1,9 @@
 # E → C: a `TextInput` that takes its own keys
 
 **From:** lane E · **To:** lane C · **Filed:** 2026-09-25
-**Status:** open — nothing in lane E is blocked; five applications carry a copy
+**Status:** open — nothing in lane E is blocked; six applications carry a copy
 of the same fifty lines until this lands (two when filed; `finance`,
-`qrcode` and `torrent` added 2026-09-25)
+`qrcode`, `torrent` and `soundrecorder` added 2026-09-25)
 
 ## In short
 
@@ -21,6 +21,7 @@ Lane E has now written it twice, the same both times:
 - `apps/finance/src/main.rs` -> `edit_line`, `insert_limited` (2026-09-25)
 - `apps/qrcode/src/main.rs` -> `edit_line`, `insert_limited` (2026-09-25)
 - `apps/torrent/src/main.rs` -> `edit_line`, `insert_limited` (2026-09-25)
+- `apps/soundrecorder/src/main.rs` -> `edit_line`, `insert_limited` (2026-09-25, a marker's name)
 
 and each further rework of an application with a text field (lane E has six
 left in `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`) adds

@@ -1,38 +1,47 @@
 //! Slate OS Sound Recorder
 //!
-//! A sound recording utility providing WAV capture with real-time waveform
-//! visualization, VU metering, markers, trim tool, playback, and a file
-//! browser for saved recordings. Uses the guitk library for UI rendering
-//! with Catppuccin Mocha theme.
+//! A recorder, and the place to look after what it records: the WAV files in
+//! a recordings folder, any of which opens as a waveform of the whole file to
+//! be marked and trimmed.
 //!
-//! **This program has no audio input, and the window says so.** Nothing here
-//! can enumerate or open a capture device. The distinction it draws is the one
-//! that matters: *"This is not a missing microphone -- this program has no way
-//! to open a capture device at all."* Told only that there is no input, a user
-//! goes looking for a hardware fault they do not have.
+//! **It cannot record or play here, and the window says so.** No application
+//! can open a capture device -- the kernel's ALSA capture node hands back
+//! silence, because the mixer behind it has no input -- and nothing gives an
+//! application a way to play sound either. "No audio input" on its own reads as
+//! an unplugged microphone and sends a user after a hardware fault they do not
+//! have, so the window says it is this program that cannot, not the machine.
+//! The take itself -- the state machine, the timer, the VU meter, the noise
+//! gate, markers dropped as it runs, the save when it stops -- is written and
+//! tested against samples the tests hand in, and waits on a capture source.
+//!
+//! **What works is everything after a take.** The recordings folder is listed
+//! with each file's length and format, read through `wavpcm` from its first
+//! megabyte. A recording opens as its whole waveform, drawn from the stored
+//! samples; markers are added, named, moved and removed, and saved into the
+//! file as the `cue ` and `labl` chunks sound editors share; a stretch is kept
+//! by setting its start and end, and saved as a new file with its samples
+//! copied as they are stored. The only file this ever writes over is the
+//! recording whose markers are being saved -- and not if another program has
+//! changed it since it was opened.
 
 #![allow(dead_code, clippy::too_many_arguments, clippy::vec_init_then_push)]
 
 use appearance::Palette;
 use appearance::Surface;
-#[allow(unused_imports)]
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent};
-#[allow(unused_imports)]
+use guitk::dialog::{FileDialog, FilePicker, Picked};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
-#[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::textedit;
+use guitk::textinput::TextInput;
+use guitk::wheel;
 use oswindow::app::{self, App, Response};
-use std::process::ExitCode;
-use std::time::Duration;
-
 use std::collections::VecDeque;
-
-// ============================================================================
-// Catppuccin Mocha color palette
-// ============================================================================
-
-mod colors {}
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
 // Recording state machine
@@ -197,19 +206,21 @@ impl QualityPreset {
 // Audio input device
 // ============================================================================
 
-/// Why no take can be started, in one line.
-const CANNOT_RECORD: &str = "No audio input: nothing here can enumerate or open a capture device";
+/// Why no take can start, in one line: drawn beside the transport when
+/// Record is pressed.
+const CANNOT_RECORD: &str = "Cannot record: no application can open a capture device here yet";
 
-/// What the window says instead of a timer that would not be measuring audio.
+/// Why a recording cannot be heard, drawn when Play is pressed.
+const CANNOT_PLAY: &str = "Cannot play: no application can send sound to a device here yet";
+
+/// What the window says above everything else, before anything is pressed.
 ///
-/// Two lines. The second exists because the first, on its own, is read as a
-/// hardware fault -- "no audio input" sounds like an unplugged microphone, and
-/// the user goes looking for one. The distinction between *this machine has no
-/// microphone* and *this program cannot look for one* is the entire content of
-/// the fix, so it has to be on screen.
-const CANNOT_RECORD_LINES: [&str; 2] = [
-    "Cannot record: no audio input is available.",
-    "This is not a missing microphone -- this program has no way to open a capture device at all.",
+/// Two lines. The second is the one that matters: "no audio input" on its own
+/// reads as an unplugged microphone, and sends the user looking for a fault in
+/// hardware they do not have.
+const NO_AUDIO_LINES: [&str; 2] = [
+    "This recorder cannot record or play sound here.",
+    "Not a missing microphone: no application can open an audio device yet. Recordings on disk can be opened, marked and trimmed.",
 ];
 
 /// Represents an audio input source.
@@ -337,108 +348,28 @@ impl WavFile {
         u32::try_from(self.samples.len().saturating_mul(2)).unwrap_or(u32::MAX)
     }
 
-    /// Generate the complete WAV file as a byte vector.
+    /// The take as a 16-bit WAV file: its samples stored exactly as they were
+    /// captured -- `wavpcm::encode` would dither them -- and the markers
+    /// dropped as it ran as the file's own `cue ` chunk, which any sound
+    /// editor reads.
     ///
-    /// Layout:
-    /// - RIFF header (12 bytes)
-    /// - fmt  sub-chunk (24 bytes)
-    /// - data sub-chunk header (8 bytes) + raw PCM data
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let data_size = self.data_size();
-        // Total RIFF chunk size = 4 (WAVE) + 24 (fmt) + 8 (data header) + data_size
-        let riff_size = data_size.saturating_add(36);
-
-        let mut buf = Vec::with_capacity((data_size as usize).saturating_add(44));
-
-        // RIFF header
-        buf.extend_from_slice(b"RIFF");
-        buf.extend_from_slice(&riff_size.to_le_bytes());
-        buf.extend_from_slice(b"WAVE");
-
-        // fmt sub-chunk
-        buf.extend_from_slice(b"fmt ");
-        buf.extend_from_slice(&16u32.to_le_bytes()); // sub-chunk size
-        buf.extend_from_slice(&1u16.to_le_bytes()); // PCM format
-        buf.extend_from_slice(&self.channels.to_le_bytes());
-        buf.extend_from_slice(&self.sample_rate.to_le_bytes());
-        buf.extend_from_slice(&self.byte_rate().to_le_bytes());
-        buf.extend_from_slice(&self.block_align().to_le_bytes());
-        buf.extend_from_slice(&self.bits_per_sample.to_le_bytes());
-
-        // data sub-chunk
-        buf.extend_from_slice(b"data");
-        buf.extend_from_slice(&data_size.to_le_bytes());
-        for &sample in &self.samples {
-            buf.extend_from_slice(&sample.to_le_bytes());
-        }
-
-        buf
-    }
-
-    /// Parse a WAV file from bytes. Returns `None` on invalid data.
-    pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        // Every read below is `get`, not `[i]`. They were all indexed, and all
-        // safe, on the strength of a single `data.len() < 44` twenty lines
-        // above the last of them — a guarantee that stops holding the moment
-        // someone moves that check or adds a field past byte 43. This parses a
-        // file the user was handed, so the failure mode of getting it wrong is
-        // a panic on a malformed download.
-        let at2 =
-            |i: usize| -> Option<[u8; 2]> { Some([*data.get(i)?, *data.get(i.checked_add(1)?)?]) };
-        let at4 = |i: usize| -> Option<[u8; 4]> {
-            Some([
-                *data.get(i)?,
-                *data.get(i.checked_add(1)?)?,
-                *data.get(i.checked_add(2)?)?,
-                *data.get(i.checked_add(3)?)?,
-            ])
-        };
-
-        // Validate RIFF header
-        if data.get(0..4)? != b"RIFF" || data.get(8..12)? != b"WAVE" {
-            return None;
-        }
-        // Validate fmt sub-chunk
-        if data.get(12..16)? != b"fmt " {
-            return None;
-        }
-        let format_tag = u16::from_le_bytes(at2(20)?);
-        if format_tag != 1 {
-            return None; // Only PCM supported
-        }
-        let channels = u16::from_le_bytes(at2(22)?);
-        let sample_rate = u32::from_le_bytes(at4(24)?);
-        let bits_per_sample = u16::from_le_bytes(at2(34)?);
-
-        // Find data sub-chunk
-        if data.get(36..40)? != b"data" {
-            return None;
-        }
-        let data_size = u32::from_le_bytes(at4(40)?) as usize;
-
-        // `checked_add`: `data_size` is four bytes out of the file, and on a
-        // 32-bit target `44 + data_size` wraps to a *small* number that sails
-        // through the length check below — which is the check that exists to
-        // reject it.
-        let pcm_end = 44usize.checked_add(data_size)?;
-        let pcm_data = data.get(44..pcm_end)?;
-
-        let mut samples = Vec::with_capacity(data_size / 2);
-        for pair in pcm_data.chunks_exact(2) {
-            // `chunks_exact` guarantees two bytes; taking them through `get`
-            // says so in the expression rather than in the iterator's name.
-            samples.push(i16::from_le_bytes([
-                *pair.first()?,
-                *pair.get(1).copied().as_ref().unwrap_or(&0),
-            ]));
-        }
-
-        Some(Self {
-            sample_rate,
-            channels,
-            bits_per_sample,
-            samples,
-        })
+    /// It wrote its own header before, and a reader of its own that took only
+    /// a 44-byte canonical header; `wavpcm` reads and writes every WAV here.
+    ///
+    /// # Errors
+    ///
+    /// When the take is longer than a WAV file can hold.
+    pub fn to_wav(&self, markers: &MarkerList) -> Result<Vec<u8>, wavpcm::WavError> {
+        let bytes = wavpcm::encode_pcm16(self.sample_rate, self.channels, &self.samples)?;
+        let cues: Vec<wavpcm::Cue> = markers
+            .sorted()
+            .iter()
+            .map(|m| wavpcm::Cue {
+                frame: u32::try_from(m.frame_position).unwrap_or(u32::MAX),
+                label: m.label.clone().into_bytes(),
+            })
+            .collect();
+        wavpcm::with_cues(&bytes, &cues)
     }
 }
 
@@ -1522,225 +1453,446 @@ impl AutoSave {
 }
 
 // ============================================================================
-// Recording entry (file browser / history)
+// The recordings folder
 // ============================================================================
 
-/// An entry in the recording history/file browser.
+/// How much of a file is read to list it: its header, and the start of its
+/// samples.
+const HEADER_BYTES: usize = 1 << 20;
+
+/// The largest recording this opens -- an hour and forty minutes of
+/// CD-quality stereo. It is held whole, to draw it and to cut from it.
+const MAX_RECORDING_BYTES: usize = 1 << 30;
+
+/// How many stretches a recording's waveform is measured in when it opens;
+/// the window draws them at whatever width it has.
+const PEAK_COLUMNS: usize = 4096;
+
+/// A recording in the folder.
 #[derive(Clone, Debug, PartialEq)]
-pub struct RecordingEntry {
-    /// Unique identifier.
-    pub id: u32,
-    /// File name.
-    pub filename: String,
-    /// File path.
-    pub path: String,
-    /// Duration in seconds.
-    pub duration_secs: f64,
-    /// File size in bytes.
-    pub size_bytes: u64,
-    /// Sample rate.
-    pub sample_rate: u32,
-    /// Number of channels.
-    pub channels: u16,
-    /// Timestamp (seconds since epoch).
-    pub created_timestamp: u64,
+pub struct LibraryEntry {
+    pub path: PathBuf,
+    /// The file's name, as it is shown.
+    pub name: String,
+    pub size: u64,
+    /// Its length and format -- or why it is not a WAV this reads.
+    pub detail: Result<wavpcm::Info, String>,
 }
 
-impl RecordingEntry {
-    /// Format the duration as MM:SS.
-    pub fn format_duration(&self) -> String {
-        let total_secs = self.duration_secs as u32;
-        let minutes = total_secs / 60;
-        let seconds = total_secs % 60;
-        format!("{minutes:02}:{seconds:02}")
+impl LibraryEntry {
+    /// What `path` is, read from its first part.
+    ///
+    /// # Errors
+    ///
+    /// When it cannot be read at all.
+    pub fn read(path: &Path) -> Result<Self, String> {
+        let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let head = safeio::read_capped(path, HEADER_BYTES)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            name: shown_name(path),
+            size: meta.len(),
+            detail: wavpcm::parse_header_prefix(&head.bytes, meta.len()).map_err(|e| e.to_string()),
+        })
     }
 
-    /// Format the file size in human-readable form.
-    pub fn format_size(&self) -> String {
-        guitk::bytes::iec(self.size_bytes)
-    }
-}
-
-/// Recording history list.
-pub struct RecordingHistory {
-    entries: Vec<RecordingEntry>,
-    next_id: u32,
-    /// Index of the currently selected entry, if any.
-    pub selected: Option<usize>,
-}
-
-impl RecordingHistory {
-    pub fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-            next_id: 0,
-            selected: None,
+    /// The line under its name: its length and format, or why it will not
+    /// open.
+    pub fn summary(&self) -> String {
+        match &self.detail {
+            Ok(info) => format!(
+                "{}  \u{00B7}  {}  \u{00B7}  {}",
+                clock(info.seconds()),
+                format_line(info),
+                guitk::bytes::iec(self.size)
+            ),
+            Err(why) => format!("Will not open: {why}"),
         }
     }
+}
 
-    /// Add a recording entry.
-    pub fn add(&mut self, entry: RecordingEntry) -> u32 {
-        let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
-        let mut e = entry;
-        e.id = id;
-        self.entries.push(e);
-        id
+/// The WAV files in `dir`, in the order of their names.
+///
+/// # Errors
+///
+/// When the folder cannot be listed.
+pub fn scan(dir: &Path) -> Result<Vec<LibraryEntry>, String> {
+    let listing = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut out = Vec::new();
+    for entry in listing {
+        // An entry the listing cannot describe is not a recording this could
+        // open; the rest of the folder is still worth showing.
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        let is_wav = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("wav"));
+        // A file that vanished between the listing and the read is skipped
+        // for the same reason.
+        if is_wav
+            && path.is_file()
+            && let Ok(found) = LibraryEntry::read(&path)
+        {
+            out.push(found);
+        }
+    }
+    out.sort_by(|a, b| a.path.file_name().cmp(&b.path.file_name()));
+    Ok(out)
+}
+
+/// A file's name as the window shows it.
+fn shown_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| Path::new(n).display().to_string(),
+    )
+}
+
+/// A marker's name as the window shows it. The name is bytes -- the format
+/// does not say which encoding -- so what is not UTF-8 is shown as `\xNN`
+/// rather than replaced, and the bytes themselves are left as they are.
+fn shown_label(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for chunk in bytes.utf8_chunks() {
+        out.push_str(chunk.valid());
+        for b in chunk.invalid() {
+            out.push_str(&format!("\\x{b:02X}"));
+        }
+    }
+    out
+}
+
+/// "44.1 kHz stereo, 16-bit".
+fn format_line(info: &wavpcm::Info) -> String {
+    let channels = match info.channels {
+        1 => String::from("mono"),
+        2 => String::from("stereo"),
+        n => format!("{n} channels"),
+    };
+    let khz = format!("{:.3}", f64::from(info.sample_rate) / 1000.0);
+    let khz = khz.trim_end_matches('0').trim_end_matches('.');
+    format!("{khz} kHz {channels}, {}", info.format.label())
+}
+
+/// Seconds as `m:ss.t`, or `h:mm:ss.t` from an hour.
+fn clock(seconds: f64) -> String {
+    let tenths = (seconds.max(0.0) * 10.0).round() as u64;
+    let part = |every: u64, of: u64| {
+        tenths
+            .checked_div(every)
+            .unwrap_or(0)
+            .checked_rem(of)
+            .unwrap_or(0)
+    };
+    let hours = tenths.checked_div(36_000).unwrap_or(0);
+    let (minutes, secs, tenth) = (part(600, 60), part(10, 60), part(1, 10));
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{secs:02}.{tenth}")
+    } else {
+        format!("{minutes}:{secs:02}.{tenth}")
+    }
+}
+
+/// Whether two paths name one file: compared as the filesystem resolves
+/// them where it can, as written where it cannot.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// A take's file name: "Recording 2026-09-25 14-03-07", in UTC -- there is
+/// no time zone an application can read -- and with dashes, since a colon is
+/// not a name every filesystem a recording may be copied to allows.
+fn take_name(now: SystemTime) -> String {
+    let secs = now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let date = guitk::date::Date::from_unix_utc(i64::try_from(secs).unwrap_or(i64::MAX));
+    let (y, m, d) = date.ymd();
+    let day = secs.checked_rem(86_400).unwrap_or(0);
+    let (hh, mm, ss) = (
+        day.checked_div(3_600).unwrap_or(0),
+        day.checked_div(60)
+            .unwrap_or(0)
+            .checked_rem(60)
+            .unwrap_or(0),
+        day.checked_rem(60).unwrap_or(0),
+    );
+    format!("Recording {y:04}-{m:02}-{d:02} {hh:02}-{mm:02}-{ss:02}")
+}
+
+// ============================================================================
+// The recording on screen
+// ============================================================================
+
+/// A marker's colour: fixed, not a theme role, for the reason [`MarkerList`]
+/// gives -- a mark is the user's own, and a theme change must not recolour
+/// the ones made before it.
+const MARKER_COLORS: [u32; 4] = [0x0089_B4FA, 0x00FA_B387, 0x00F9_E2AF, 0x00A6_E3A1];
+
+/// What a file looked like when it was read: enough to notice that another
+/// program has written it since.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl Stamp {
+    fn of(path: &Path) -> Result<Self, String> {
+        let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Self {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+        })
+    }
+}
+
+/// A recording opened from disk: its bytes, its waveform, its markers, the
+/// cursor and the stretch being kept.
+pub struct OpenRecording {
+    pub path: PathBuf,
+    pub name: String,
+    /// The file as it was read -- and as it was written, after markers are
+    /// saved into it.
+    bytes: Vec<u8>,
+    pub info: wavpcm::Info,
+    /// The waveform, in [`PEAK_COLUMNS`] stretches of the whole file.
+    peaks: Vec<wavpcm::Peak>,
+    /// The markers, in frame order.
+    pub markers: Vec<wavpcm::Cue>,
+    /// Whether the markers differ from the ones in the file.
+    pub markers_changed: bool,
+    /// The frame the cursor is on.
+    pub cursor: u64,
+    /// The stretch a "save the kept part" writes.
+    pub kept: TrimRegion,
+    /// The marker the keys act on, as its place in `markers`; every change
+    /// to the list sets it again.
+    pub chosen_marker: Option<usize>,
+    stamp: Stamp,
+}
+
+impl OpenRecording {
+    /// Read `path` whole.
+    ///
+    /// # Errors
+    ///
+    /// When it cannot be read, is over a gigabyte, or is not a WAV this reads.
+    pub fn open(path: &Path) -> Result<Self, String> {
+        let stamp = Stamp::of(path)?;
+        let read = safeio::read_capped(path, MAX_RECORDING_BYTES)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        if read.truncated {
+            return Err(format!(
+                "{} is larger than 1 GiB, more than this opens",
+                shown_name(path)
+            ));
+        }
+        let bytes = read.bytes;
+        let fail = |e: wavpcm::WavError| format!("{}: {e}", shown_name(path));
+        let info = wavpcm::parse_header(&bytes).map_err(fail)?;
+        let peaks = wavpcm::peaks(&bytes, PEAK_COLUMNS).map_err(fail)?;
+        let markers = wavpcm::cues(&bytes).map_err(fail)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            name: shown_name(path),
+            bytes,
+            info,
+            peaks,
+            markers,
+            markers_changed: false,
+            cursor: 0,
+            kept: TrimRegion::full(info.frames),
+            chosen_marker: None,
+            stamp,
+        })
     }
 
-    /// Remove an entry by id.
-    pub fn remove(&mut self, id: u32) -> bool {
-        let before = self.entries.len();
-        self.entries.retain(|e| e.id != id);
-        if self.entries.len() < before {
-            // Fix selected index
-            if let Some(sel) = self.selected
-                && sel >= self.entries.len()
-            {
-                self.selected = if self.entries.is_empty() {
-                    None
-                } else {
-                    self.entries.len().checked_sub(1)
-                };
-            }
-            true
+    /// Seconds from the start to `frame`.
+    pub fn seconds_at(&self, frame: u64) -> f64 {
+        frame as f64 / f64::from(self.info.sample_rate.max(1))
+    }
+
+    /// Frames in `seconds`.
+    fn frames_in(&self, seconds: f64) -> u64 {
+        (seconds * f64::from(self.info.sample_rate))
+            .round()
+            .max(0.0) as u64
+    }
+
+    /// Move the cursor by `seconds`, stopping at the ends.
+    pub fn nudge(&mut self, seconds: f64) {
+        let by = self.frames_in(seconds.abs());
+        self.cursor = if seconds < 0.0 {
+            self.cursor.saturating_sub(by)
         } else {
-            false
+            self.cursor.saturating_add(by)
         }
+        .min(self.info.frames);
     }
 
-    /// Get all entries.
-    pub fn entries(&self) -> &[RecordingEntry] {
-        &self.entries
+    /// Put the cursor on the marker after it (or before), and choose that
+    /// marker. Answers whether there was one.
+    pub fn to_marker(&mut self, forward: bool) -> bool {
+        let at = self.cursor;
+        let found = if forward {
+            self.markers.iter().position(|m| u64::from(m.frame) > at)
+        } else {
+            self.markers.iter().rposition(|m| u64::from(m.frame) < at)
+        };
+        let Some((i, frame)) = found.and_then(|i| Some((i, self.markers.get(i)?.frame))) else {
+            return false;
+        };
+        self.cursor = u64::from(frame);
+        self.chosen_marker = Some(i);
+        true
     }
 
-    /// Get entry by id.
-    pub fn get(&self, id: u32) -> Option<&RecordingEntry> {
-        self.entries.iter().find(|e| e.id == id)
+    /// Choose marker `i` and put the cursor on it.
+    pub fn choose_marker(&mut self, i: usize) -> bool {
+        let Some(frame) = self.markers.get(i).map(|m| m.frame) else {
+            return false;
+        };
+        self.chosen_marker = Some(i);
+        self.cursor = u64::from(frame);
+        true
     }
 
-    /// Get the selected entry.
-    pub fn selected_entry(&self) -> Option<&RecordingEntry> {
-        self.selected.and_then(|i| self.entries.get(i))
-    }
-
-    /// Number of entries.
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Whether the history is empty.
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Select the next entry.
-    pub fn select_next(&mut self) {
-        if self.entries.is_empty() {
-            return;
+    /// Put a marker at the cursor -- or choose the one already there -- and
+    /// answer its place in the list.
+    pub fn add_marker(&mut self) -> usize {
+        let frame = u32::try_from(self.cursor).unwrap_or(u32::MAX);
+        if let Some(i) = self.markers.iter().position(|m| m.frame == frame) {
+            self.chosen_marker = Some(i);
+            return i;
         }
-        self.selected = Some(match self.selected {
-            Some(i) if i.saturating_add(1) < self.entries.len() => i.saturating_add(1),
-            _ => 0,
+        let number = (1..=self.markers.len().saturating_add(1))
+            .find(|n| {
+                let name = format!("Marker {n}").into_bytes();
+                !self.markers.iter().any(|m| m.label == name)
+            })
+            .unwrap_or(1);
+        let at = self.markers.partition_point(|m| m.frame < frame);
+        self.markers.insert(
+            at,
+            wavpcm::Cue {
+                frame,
+                label: format!("Marker {number}").into_bytes(),
+            },
+        );
+        self.markers_changed = true;
+        self.chosen_marker = Some(at);
+        at
+    }
+
+    /// Take the chosen marker away.
+    pub fn remove_marker(&mut self) -> bool {
+        let Some(i) = self.chosen_marker.filter(|i| *i < self.markers.len()) else {
+            return false;
+        };
+        self.markers.remove(i);
+        self.markers_changed = true;
+        self.chosen_marker = None;
+        true
+    }
+
+    /// Name the chosen marker.
+    pub fn rename_marker(&mut self, label: &str) -> bool {
+        let Some(marker) = self.chosen_marker.and_then(|i| self.markers.get_mut(i)) else {
+            return false;
+        };
+        let label = label.as_bytes().to_vec();
+        if marker.label != label {
+            marker.label = label;
+            self.markers_changed = true;
+        }
+        true
+    }
+
+    /// Move marker `i` to `frame`, keep the list in frame order and the
+    /// marker chosen, and answer its new place.
+    pub fn move_marker(&mut self, i: usize, frame: u64) -> Option<usize> {
+        if i >= self.markers.len() {
+            return None;
+        }
+        let mut marker = self.markers.remove(i);
+        marker.frame = u32::try_from(frame.min(self.info.frames)).unwrap_or(u32::MAX);
+        let at = self.markers.partition_point(|m| m.frame <= marker.frame);
+        self.markers.insert(at, marker);
+        self.markers_changed = true;
+        self.chosen_marker = Some(at);
+        self.cursor = frame.min(self.info.frames);
+        Some(at)
+    }
+
+    /// The kept stretch starts at the cursor.
+    pub fn keep_from_cursor(&mut self) {
+        self.kept.set_start(self.cursor);
+    }
+
+    /// The kept stretch ends at the cursor.
+    pub fn keep_to_cursor(&mut self) {
+        self.kept.set_end(self.cursor);
+    }
+
+    /// Keep the whole recording.
+    pub fn keep_all(&mut self) {
+        self.kept = TrimRegion::full(self.info.frames);
+    }
+
+    /// Save the markers into the file -- unless another program has written
+    /// it since it was read, in which case the file is left as it is and the
+    /// answer says so.
+    ///
+    /// # Errors
+    ///
+    /// Why nothing was written.
+    pub fn save_markers(&mut self) -> Result<(), String> {
+        if Stamp::of(&self.path)? != self.stamp {
+            return Err(format!(
+                "{} has changed on disk since it was opened; open it again before saving markers into it",
+                self.name
+            ));
+        }
+        let marked = wavpcm::with_cues(&self.bytes, &self.markers)
+            .map_err(|e| format!("{}: {e}", self.name))?;
+        safeio::write_atomically(&self.path, &marked)
+            .map_err(|e| format!("could not save the markers into {}: {e}", self.name))?;
+        let len = u64::try_from(marked.len()).unwrap_or(u64::MAX);
+        self.bytes = marked;
+        self.markers_changed = false;
+        // A stamp that cannot be read back is recorded as one no file has, so
+        // the next save refuses rather than trusting a file it cannot see.
+        self.stamp = Stamp::of(&self.path).unwrap_or(Stamp {
+            len,
+            modified: None,
         });
+        Ok(())
     }
 
-    /// Select the previous entry.
-    pub fn select_prev(&mut self) {
-        if self.entries.is_empty() {
-            return;
+    /// Save the kept stretch, with the markers in it, as a file of its own at
+    /// `to`; answer its size.
+    ///
+    /// # Errors
+    ///
+    /// Why nothing was written -- including `to` being this recording, whose
+    /// every frame outside the stretch would be lost.
+    pub fn save_kept(&self, to: &Path) -> Result<u64, String> {
+        if same_file(to, &self.path) {
+            return Err(format!(
+                "That is {} itself, and keeping part of it there would lose the rest; choose another name",
+                self.name
+            ));
         }
-        self.selected = Some(match self.selected {
-            Some(0) | None => self.entries.len().saturating_sub(1),
-            Some(i) => i.saturating_sub(1),
-        });
-    }
-
-    /// Render the recording history list.
-    pub fn render(&self, pal: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
-        let mut commands = Vec::new();
-        let row_height = 36.0;
-
-        // Header
-        commands.push(RenderCommand::Text {
-            x,
-            y,
-            text: "Recording History".into(),
-            color: pal.text,
-            font_size: 14.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        if self.entries.is_empty() {
-            commands.push(RenderCommand::Text {
-                x,
-                y: y + 24.0,
-                text: "No recordings yet.".into(),
-                color: pal.subtext0,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            return commands;
-        }
-
-        for (i, entry) in self.entries.iter().enumerate() {
-            let ey = y + 24.0 + i as f32 * row_height;
-            let is_selected = self.selected == Some(i);
-
-            // Row background
-            if is_selected {
-                pal.push_surface(
-                    &mut commands,
-                    x,
-                    ey,
-                    width,
-                    row_height - 2.0,
-                    4.0,
-                    Surface::Selected,
-                );
-            }
-
-            // Filename
-            commands.push(RenderCommand::Text {
-                x: x + 8.0,
-                y: ey + 4.0,
-                text: entry.filename.clone(),
-                color: if is_selected {
-                    pal.ink(pal.blue)
-                } else {
-                    pal.text
-                },
-                font_size: 13.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width * 0.5),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Duration and size
-            let info = format!("{} | {}", entry.format_duration(), entry.format_size());
-            commands.push(RenderCommand::Text {
-                x: x + 8.0,
-                y: ey + 19.0,
-                text: info,
-                color: pal.subtext0,
-                font_size: 11.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-        }
-
-        commands
-    }
-}
-
-impl Default for RecordingHistory {
-    fn default() -> Self {
-        Self::new()
+        let fail = |e: wavpcm::WavError| format!("{}: {e}", self.name);
+        let current = wavpcm::with_cues(&self.bytes, &self.markers).map_err(fail)?;
+        let part =
+            wavpcm::cut(&current, self.kept.start_frame, self.kept.end_frame).map_err(fail)?;
+        safeio::write_atomically(to, &part)
+            .map_err(|e| format!("could not write {}: {e}", to.display()))?;
+        Ok(u64::try_from(part.len()).unwrap_or(u64::MAX))
     }
 }
 
@@ -1749,58 +1901,151 @@ impl Default for RecordingHistory {
 // ============================================================================
 
 /// The keys this window answers, as a reader sees them.
-///
-/// Three keys, none of them named. `M` drops a marker into the recording as
-/// it runs, which is the one a reader cannot guess and cannot discover after
-/// the fact.
 const SHORTCUTS: &[(&str, &str)] = &[
-    ("F1", "This list"),
-    ("Space", "Record, pause, or carry on"),
-    ("S", "Stop"),
-    ("M", "Drop a marker here"),
+    ("F1 / ?", "This list"),
+    ("Ctrl+O", "Open a recording from anywhere"),
+    ("F5", "Look in the recordings folder again"),
+    ("Tab", "Recordings list, or the recording"),
+    ("Up / Down", "Move through the recordings, or the markers"),
+    ("Enter", "Open the chosen recording"),
+    ("Left / Right", "Cursor back or on a tenth of a second"),
+    ("Shift+Left / Shift+Right", "Cursor back or on a second"),
+    ("Home / End", "Cursor to the start or the end"),
+    (
+        "Ctrl+Left / Ctrl+Right",
+        "Cursor to the marker before or after",
+    ),
+    ("M", "Put a marker at the cursor"),
+    ("F2", "Name the chosen marker"),
+    ("Delete", "Take the chosen marker away"),
+    ("[ / ]", "Keep from the cursor, or up to it"),
+    ("Ctrl+A", "Keep the whole recording"),
+    ("Ctrl+S", "Save the markers into the file"),
+    ("Ctrl+Shift+S", "Save the kept part as a new file"),
+    ("Space", "Record (or say why it cannot)"),
+    ("P", "Play (or say why it cannot)"),
 ];
+
+/// The longest marker name the field takes, in characters.
+const LABEL_CAPACITY: usize = 120;
+
+/// Which half of the window has the keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Panel {
+    Library,
+    Recording,
+}
+
+/// What a file picker is up for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerFor {
+    Open,
+    Folder,
+    SaveKept,
+}
+
+/// What the pointer is dragging across the waveform.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Drag {
+    Cursor,
+    KeptStart,
+    KeptEnd,
+    Marker(usize),
+}
+
+/// What a press can land on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Help,
+    HelpCard,
+    Panel(Panel),
+    OpenFile,
+    ChooseFolder,
+    Refresh,
+    LibraryList,
+    /// A recording in the list, by its place in it.
+    LibraryRow(usize),
+    Waveform,
+    MarkerList,
+    /// A marker in the list, by its place in it.
+    MarkerRow(usize),
+    AddMarker,
+    RenameMarker,
+    RemoveMarker,
+    KeepFrom,
+    KeepTo,
+    KeepAll,
+    SaveMarkers,
+    SaveKept,
+    Record,
+    Pause,
+    Stop,
+    DropMarker,
+    Play,
+}
 
 /// Top-level application state for the sound recorder.
 pub struct SoundRecorderApp {
-    /// Current recording state.
     /// Whether the shortcut card is up.
     pub show_help: bool,
+
+    // -- The take ------------------------------------------------------------
+    /// Where the take is: idle, recording, paused.
     pub state: RecordingState,
-    /// Selected quality preset.
     pub preset: QualityPreset,
-    /// Selected sample rate (can override preset).
     pub sample_rate: SampleRate,
-    /// Available input devices.
-    /// Why the last transport press did nothing, if it did nothing.
+    /// Why the last Record or Play did nothing, if it did nothing.
     ///
-    /// Carries a reason rather than a flag: "could not start" and "could not
-    /// start *because there is no input device*" send the user to different
-    /// places, and only the second one is any use.
+    /// A reason rather than a flag: a press that changes nothing visible
+    /// reads as a broken button and sends the user hunting the wrong fault.
     pub blocked_reason: Option<String>,
+    /// Input devices. Empty: nothing here can enumerate one.
     pub input_devices: Vec<AudioInputDevice>,
-    /// Index of the selected input device.
     pub selected_device: usize,
-    /// WAV file being recorded.
+    /// The take's samples.
     pub wav: WavFile,
-    /// Waveform display.
     pub waveform: WaveformDisplay,
-    /// VU meter.
     pub vu_meter: VuMeter,
-    /// Recording timer.
     pub timer: RecordingTimer,
-    /// Markers placed during recording.
+    /// Markers dropped into the take as it runs.
     pub markers: MarkerList,
-    /// Trim region for the current recording.
-    pub trim: Option<TrimRegion>,
-    /// Noise gate.
     pub noise_gate: NoiseGate,
-    /// Playback controller.
     pub playback: PlaybackController,
-    /// Auto-save manager.
     pub auto_save: AutoSave,
-    /// Recording history.
-    pub history: RecordingHistory,
-    /// Window dimensions.
+
+    // -- The recordings ------------------------------------------------------
+    /// Where takes are saved and recordings listed: `~/Recordings` unless
+    /// another folder was chosen. `None` with no home to put one in.
+    pub recordings_dir: Option<PathBuf>,
+    pub library: Vec<LibraryEntry>,
+    /// Why the list is empty, or could not be read.
+    pub library_note: Option<String>,
+    /// The recording the keys are on in the list, by path: a rescan that
+    /// reorders the list keeps it on the same file.
+    pub chosen_entry: Option<PathBuf>,
+    pub library_scroll: usize,
+    /// The recording on screen.
+    pub open: Option<OpenRecording>,
+    /// A recording asked for while the open one has unsaved markers: asking
+    /// again for the same one leaves them.
+    leave_for: Option<PathBuf>,
+    pub marker_scroll: usize,
+    /// The chosen marker's name, while it is being written.
+    pub rename: Option<TextInput>,
+    /// What a copy or a cut in the name field took, for a paste.
+    clipboard: String,
+    pub picker: FilePicker,
+    pub picker_for: PickerFor,
+    pub panel: Panel,
+    /// What the last action said.
+    pub status_line: String,
+
+    drag: Option<Drag>,
+    /// Where the press that began the drag landed.
+    press_x: f32,
+    hover: Option<Target>,
+    last_hits: Vec<(Target, Rect)>,
+    wheel: wheel::Accumulator,
     pub window_width: f32,
     pub window_height: f32,
     /// The user's colours, replaced whenever the theme changes.
@@ -1812,7 +2057,8 @@ pub struct SoundRecorderApp {
 }
 
 impl SoundRecorderApp {
-    /// Create a new sound recorder application with default settings.
+    /// A recorder with no folder and nothing open, which touches no file:
+    /// what the tests build on. `main` uses [`Self::from_env`].
     pub fn new() -> Self {
         let preset = QualityPreset::Music;
         Self {
@@ -1821,8 +2067,8 @@ impl SoundRecorderApp {
             state: RecordingState::Idle,
             preset,
             sample_rate: preset.sample_rate(),
-            // Empty. Nothing here can enumerate an audio device.
             blocked_reason: None,
+            // Empty. Nothing here can enumerate an audio device.
             input_devices: Vec::new(),
             selected_device: 0,
             wav: WavFile::from_preset(preset),
@@ -1832,25 +2078,49 @@ impl SoundRecorderApp {
             // left. It was a flat 1_000_000_000.
             timer: RecordingTimer::new(None, preset.bytes_per_second()),
             markers: MarkerList::new(),
-            trim: None,
             noise_gate: NoiseGate::new(0.02),
             playback: PlaybackController::new(),
             auto_save: AutoSave::new(60),
-            history: RecordingHistory::new(),
-            window_width: 600.0,
-            window_height: 500.0,
+            recordings_dir: None,
+            library: Vec::new(),
+            library_note: None,
+            chosen_entry: None,
+            library_scroll: 0,
+            open: None,
+            leave_for: None,
+            marker_scroll: 0,
+            rename: None,
+            clipboard: String::new(),
+            picker: FilePicker::default(),
+            picker_for: PickerFor::Open,
+            panel: Panel::Library,
+            status_line: String::new(),
+            drag: None,
+            press_x: 0.0,
+            hover: None,
+            last_hits: Vec::new(),
+            wheel: wheel::Accumulator::default(),
+            window_width: 980.0,
+            window_height: 640.0,
         }
     }
 
-    /// Transition to a new recording state if the transition is valid.
-    /// Returns true if the transition was performed.
+    /// The recorder `main` opens: `~/Recordings`, listed.
+    pub fn from_env() -> Self {
+        let mut app = Self::new();
+        app.recordings_dir =
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Recordings"));
+        app.rescan();
+        app
+    }
+
     /// A recorder with input devices, for tests.
     ///
-    /// `#[cfg(test)]`. Most of this app's tests are about the transport, the
-    /// timer, markers and trimming, and need *an* input to exist rather than
-    /// a specific invented one. Before 2026-09-15 they got it from `new`,
-    /// which is exactly the problem: the device list production could reach
-    /// was the device list that shipped.
+    /// `#[cfg(test)]`. Most of the take's tests are about the transport, the
+    /// timer and markers, and need *an* input to exist rather than a specific
+    /// invented one. Before 2026-09-15 they got it from `new`, which is
+    /// exactly the problem: the device list production could reach was the
+    /// device list that shipped.
     #[cfg(test)]
     fn with_mock_input() -> Self {
         let mut app = Self::new();
@@ -1858,6 +2128,12 @@ impl SoundRecorderApp {
         app
     }
 
+    // -----------------------------------------------------------------------
+    // The take
+    // -----------------------------------------------------------------------
+
+    /// Transition to a new recording state if the transition is valid.
+    /// Returns true if the transition was performed.
     pub fn transition_to(&mut self, target: RecordingState) -> bool {
         if !self.state.can_transition_to(target) {
             return false;
@@ -1865,59 +2141,86 @@ impl SoundRecorderApp {
 
         // Refuse to start a take there is no input for.
         //
-        // This is the whole of the 2026-09-15 fix and it is worth being precise
-        // about what was wrong, because the app was not obviously broken.
-        //
         // `process_samples` is the door audio comes in through, and nothing in
-        // production calls it -- there is no capture device to call it from. So
-        // `wav.samples` stayed empty for the whole take. But `tick` advanced
-        // the timer regardless, so the window showed a clock climbing through
-        // 00:03:47 while zero audio existed; the auto-save fired on its
-        // schedule and incremented `save_count`, so the user was also told
-        // their work was being written to disk; and the state read "Recording".
-        //
-        // A person recording an interview would have watched all three, stopped,
-        // and had nothing. The event is not repeatable. That is worse than any
-        // wrong *number* in this sweep, because the loss is of something that
-        // existed only while the program claimed to be keeping it.
-        //
-        // The VU meter staying flat was the one honest signal on screen, and it
-        // is indistinguishable from a quiet room.
+        // production calls it -- there is no capture device to call it from.
+        // Before 2026-09-15 the take started anyway: the clock climbed through
+        // minutes while zero audio existed, the auto-save counted saves of
+        // nothing, and the state read "Recording". A person recording an
+        // interview would have watched all three and had nothing, and the
+        // event is not repeatable.
         if target == RecordingState::Recording && self.current_device().is_none() {
             self.blocked_reason = Some(String::from(CANNOT_RECORD));
             return false;
         }
 
-        match target {
-            RecordingState::Recording => {
-                if self.state == RecordingState::Idle {
-                    // Starting new recording: reset everything
-                    self.wav = WavFile::from_preset(self.preset);
-                    self.waveform.clear();
-                    self.vu_meter.reset();
-                    self.timer.reset();
-                    self.markers.clear();
-                    self.trim = None;
-                    self.noise_gate.reset();
-                    self.auto_save.reset_timer();
-                }
-                // Paused -> Recording is a resume: just change state
-            }
-            RecordingState::Stopped => {
-                // Set up trim region and playback for the finished recording
-                let frame_count = self.wav.frame_count() as u64;
-                self.trim = Some(TrimRegion::full(frame_count));
-                self.playback.load(frame_count, self.wav.sample_rate);
-            }
-            RecordingState::Idle => {
-                // Reset from Stopped back to Idle
-                self.trim = None;
-            }
-            RecordingState::Paused => {}
+        if target == RecordingState::Recording && self.state == RecordingState::Idle {
+            // A new take: everything from the last one goes.
+            self.wav = WavFile::from_preset(self.preset);
+            self.waveform.clear();
+            self.vu_meter.reset();
+            self.timer.reset();
+            self.markers.clear();
+            self.noise_gate.reset();
+            self.auto_save.reset_timer();
         }
-
         self.state = target;
         true
+    }
+
+    /// End the take: save it as a new file in the recordings folder, open it
+    /// to be marked and trimmed, and go back to idle. The take is kept in
+    /// memory if the save fails, so a second Stop can try again.
+    pub fn stop_take(&mut self) -> bool {
+        if !matches!(
+            self.state,
+            RecordingState::Recording | RecordingState::Paused
+        ) {
+            return false;
+        }
+        self.transition_to(RecordingState::Stopped);
+        match self.save_take() {
+            Ok(path) => {
+                self.transition_to(RecordingState::Idle);
+                self.rescan();
+                self.open_now(&path);
+                self.status_line = format!("Saved the take as {}", shown_name(&path));
+            }
+            Err(why) => {
+                self.status_line =
+                    format!("The take is not saved: {why}. Press Stop to try again.");
+                self.state = RecordingState::Paused;
+            }
+        }
+        true
+    }
+
+    /// Write the take as a new file in the recordings folder, named for the
+    /// moment, never over another; answer where it went.
+    fn save_take(&self) -> Result<PathBuf, String> {
+        let dir = self
+            .recordings_dir
+            .clone()
+            .ok_or_else(|| String::from("there is no recordings folder (no home folder is set)"))?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let bytes = self.wav.to_wav(&self.markers).map_err(|e| e.to_string())?;
+        let stem = take_name(SystemTime::now());
+        for n in 1..=999_u32 {
+            let name = if n == 1 {
+                format!("{stem}.wav")
+            } else {
+                format!("{stem} ({n}).wav")
+            };
+            let path = dir.join(name);
+            match safeio::write_new_atomically(&path, &bytes) {
+                Ok(()) => return Ok(path),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(format!("{}: {e}", path.display())),
+            }
+        }
+        Err(format!(
+            "every name for this take in {} is taken",
+            dir.display()
+        ))
     }
 
     /// Set the quality preset and update related settings.
@@ -1947,20 +2250,11 @@ impl SoundRecorderApp {
         if self.state != RecordingState::Recording {
             return;
         }
-
         let mut processed = samples.to_vec();
-
-        // Apply noise gate
         self.noise_gate.process(&mut processed);
-
-        // Add to WAV data
         self.wav.push_samples(&processed);
-
-        // Update waveform display
         let amplitude = WaveformDisplay::amplitude_from_samples(samples);
         self.waveform.push_amplitude(amplitude);
-
-        // Update VU meter
         self.vu_meter.update(amplitude);
     }
 
@@ -1990,352 +2284,1620 @@ impl SoundRecorderApp {
         }
     }
 
-    /// Save the current recording (with optional trim) to the history.
-    pub fn save_recording(&mut self, filename: String) -> Option<u32> {
-        if self.state != RecordingState::Stopped {
-            return None;
+    /// Record: start, pause or carry on -- or, with nothing to record from,
+    /// say so.
+    fn record_key(&mut self) -> bool {
+        match self.state {
+            RecordingState::Idle | RecordingState::Stopped => {
+                self.transition_to(RecordingState::Recording);
+            }
+            RecordingState::Recording => {
+                self.transition_to(RecordingState::Paused);
+            }
+            RecordingState::Paused => {
+                self.transition_to(RecordingState::Recording);
+            }
         }
-
-        let wav_data = if let Some(ref trim) = self.trim {
-            let trimmed_samples = trim.apply(&self.wav.samples, self.wav.channels);
-            let mut trimmed_wav = WavFile::new(
-                self.wav.sample_rate,
-                self.wav.channels,
-                self.wav.bits_per_sample,
-            );
-            trimmed_wav.push_samples(&trimmed_samples);
-            trimmed_wav.to_bytes()
-        } else {
-            self.wav.to_bytes()
-        };
-
-        let entry = RecordingEntry {
-            id: 0, // Will be set by history.add()
-            filename: filename.clone(),
-            path: format!("/recordings/{filename}"),
-            duration_secs: self.wav.duration_secs(),
-            size_bytes: wav_data.len() as u64,
-            sample_rate: self.wav.sample_rate,
-            channels: self.wav.channels,
-            created_timestamp: 0,
-        };
-
-        Some(self.history.add(entry))
+        true
     }
 
-    /// Render the full application UI.
-    /// Route one event.
-    ///
-    /// **This app had no event handling of any kind until 2026-09-03** — the
-    /// same gap `apps/paint` had, and for the same reason: `main` constructed
-    /// the app and returned. `tick`, `transition_to`, `process_samples` and
-    /// `check_auto_save` were all written and tested against arguments handed
-    /// in by the tests themselves.
-    ///
-    /// Returns whether anything changed, which `App::on_event` turns into a
-    /// repaint.
-    pub fn handle_event(&mut self, event: &Event) -> bool {
-        match event {
-            Event::Resize { width, height } => {
-                #[allow(clippy::cast_precision_loss)]
+    /// Play: there is nothing an application can play through.
+    fn play(&mut self) {
+        self.blocked_reason = Some(String::from(CANNOT_PLAY));
+    }
+
+    // -----------------------------------------------------------------------
+    // The recordings
+    // -----------------------------------------------------------------------
+
+    /// List the recordings folder again.
+    pub fn rescan(&mut self) {
+        let Some(dir) = self.recordings_dir.clone() else {
+            self.library.clear();
+            self.library_note = Some(String::from(
+                "There is no recordings folder: no home folder is set.",
+            ));
+            return;
+        };
+        match scan(&dir) {
+            Ok(found) => {
+                self.library_note = found.is_empty().then(|| {
+                    String::from("No recordings here yet. Ctrl+O opens one from anywhere.")
+                });
+                self.library = found;
+            }
+            Err(_) if !dir.exists() => {
+                self.library.clear();
+                self.library_note = Some(format!(
+                    "{} does not exist yet; the first take will make it.",
+                    dir.display()
+                ));
+            }
+            Err(why) => {
+                self.library.clear();
+                self.library_note = Some(format!("Cannot list the folder: {why}"));
+            }
+        }
+        if let Some(chosen) = &self.chosen_entry
+            && !self.library.iter().any(|e| &e.path == chosen)
+        {
+            self.chosen_entry = None;
+        }
+        self.clamp_scrolls();
+    }
+
+    /// Where the chosen recording sits in the list.
+    fn chosen_index(&self) -> Option<usize> {
+        let chosen = self.chosen_entry.as_ref()?;
+        self.library.iter().position(|e| &e.path == chosen)
+    }
+
+    /// Move the choice in the list by `delta`, stopping at the ends.
+    fn move_entry(&mut self, delta: isize) {
+        if self.library.is_empty() {
+            self.chosen_entry = None;
+            return;
+        }
+        let last = (self.library.len() as isize).saturating_sub(1);
+        let next = match self.chosen_index() {
+            Some(i) => (i as isize).saturating_add(delta).clamp(0, last),
+            None if delta < 0 => last,
+            None => 0,
+        };
+        self.chosen_entry = self
+            .library
+            .get(next.unsigned_abs())
+            .map(|e| e.path.clone());
+    }
+
+    /// Open `path` -- unless the recording on screen has markers not saved,
+    /// in which case the first request says so and a second one leaves them.
+    pub fn open_path(&mut self, path: &Path) -> bool {
+        if let Some(open) = &self.open
+            && open.markers_changed
+            && open.path != path
+            && self.leave_for.as_deref() != Some(path)
+        {
+            self.status_line = format!(
+                "The markers in {} are not saved. Ctrl+S saves them; open {} again to leave them.",
+                open.name,
+                shown_name(path)
+            );
+            self.leave_for = Some(path.to_path_buf());
+            return false;
+        }
+        self.open_now(path)
+    }
+
+    /// Open `path`, replacing whatever is on screen.
+    fn open_now(&mut self, path: &Path) -> bool {
+        self.leave_for = None;
+        match OpenRecording::open(path) {
+            Ok(rec) => {
+                self.status_line = format!(
+                    "Opened {}: {}, {}",
+                    rec.name,
+                    clock(rec.info.seconds()),
+                    format_line(&rec.info)
+                );
+                self.open = Some(rec);
+                self.rename = None;
+                self.marker_scroll = 0;
+                self.panel = Panel::Recording;
+                true
+            }
+            Err(why) => {
+                self.status_line = why;
+                false
+            }
+        }
+    }
+
+    /// Save the open recording's markers into it, and say how that went.
+    pub fn save_markers(&mut self) -> bool {
+        let Some(open) = self.open.as_mut() else {
+            self.status_line = String::from("Nothing is open to save markers into");
+            return false;
+        };
+        match open.save_markers() {
+            Ok(()) => {
+                self.status_line = format!(
+                    "Saved {} marker{} into {}",
+                    open.markers.len(),
+                    if open.markers.len() == 1 { "" } else { "s" },
+                    open.name
+                );
+                let path = open.path.clone();
+                // The list shows sizes; this one has changed.
+                if let Ok(entry) = LibraryEntry::read(&path)
+                    && let Some(slot) = self.library.iter_mut().find(|e| e.path == path)
                 {
-                    self.window_width = *width as f32;
-                    self.window_height = *height as f32;
+                    *slot = entry;
                 }
                 true
             }
+            Err(why) => {
+                self.status_line = why;
+                false
+            }
+        }
+    }
+
+    /// Ask where the kept part should go.
+    fn ask_where_to_keep(&mut self) {
+        let Some(open) = &self.open else {
+            self.status_line = String::from("Nothing is open to keep a part of");
+            return;
+        };
+        let stem = open.path.file_stem().map_or_else(
+            || String::from("recording"),
+            |s| Path::new(s).display().to_string(),
+        );
+        let folder = open.path.parent().map(Path::to_path_buf);
+        let mut dialog = FileDialog::save().with_filename(format!("{stem} (part).wav"));
+        if let Some(folder) = folder {
+            dialog = dialog.with_initial_path(folder);
+        }
+        self.picker_for = PickerFor::SaveKept;
+        self.picker.put_up(dialog, true);
+    }
+
+    /// Put a file dialog up for `purpose`.
+    fn open_picker(&mut self, purpose: PickerFor) {
+        self.picker_for = purpose;
+        match purpose {
+            PickerFor::Open => self.picker.open_to_read(),
+            PickerFor::Folder => self.picker.put_up(
+                FileDialog::select_folder().with_initial_path(
+                    self.recordings_dir
+                        .clone()
+                        .filter(|d| d.exists())
+                        .unwrap_or_else(FilePicker::default_start),
+                ),
+                false,
+            ),
+            PickerFor::SaveKept => self.ask_where_to_keep(),
+        }
+    }
+
+    /// What the file dialog chose.
+    fn picked(&mut self, path: &Path) {
+        match self.picker_for {
+            PickerFor::Open => {
+                self.open_path(path);
+            }
+            PickerFor::Folder => {
+                self.recordings_dir = Some(path.to_path_buf());
+                self.chosen_entry = None;
+                self.library_scroll = 0;
+                self.rescan();
+                self.status_line = format!(
+                    "Listing {}; takes are saved there too, until the window closes",
+                    path.display()
+                );
+            }
+            PickerFor::SaveKept => {
+                let Some(open) = &self.open else { return };
+                self.status_line = match open.save_kept(path) {
+                    Ok(size) => {
+                        let kept = open.seconds_at(open.kept.length_frames());
+                        format!(
+                            "Saved {} of {} as {} ({})",
+                            clock(kept),
+                            open.name,
+                            shown_name(path),
+                            guitk::bytes::iec(size)
+                        )
+                    }
+                    Err(why) => why,
+                };
+                self.rescan();
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Keys
+    // -----------------------------------------------------------------------
+
+    /// Route one event.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The dialog takes input first while it is up, or a name typed into
+        // it would reach the window behind.
+        match self
+            .picker
+            .handle(event, self.window_width, self.window_height)
+        {
+            Picked::Chose(path) => {
+                self.picked(&path);
+                return EventResult::Consumed;
+            }
+            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+            Picked::Ignored => {}
+        }
+        match event {
+            Event::Resize { width, height } => {
+                self.window_width = *width as f32;
+                self.window_height = *height as f32;
+                self.clamp_scrolls();
+                EventResult::Consumed
+            }
             Event::Tick { elapsed_ms } => {
-                // `elapsed_ms`, never the interval asked for: the interval is a
-                // floor and a busy frame delivers one long tick. A recorder
-                // that counted ticks rather than milliseconds would report a
-                // duration that drifts from the audio it actually captured,
-                // which is the one number a recording has to get right.
+                // `elapsed_ms`, never the interval asked for: a busy frame
+                // delivers one long tick, and a recorder that counted ticks
+                // would report a duration that drifts from the audio.
                 self.tick(*elapsed_ms);
                 let saved = self.check_auto_save(*elapsed_ms);
-                self.state == RecordingState::Recording || saved
+                if self.state == RecordingState::Recording || saved {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
             }
-            Event::Key(key) if key.pressed => self.handle_key(key),
-            _ => false,
+            Event::Key(key) if key.pressed => {
+                let before = (self.chosen_entry.clone(), self.chosen_marker());
+                let result = self.handle_key(key);
+                self.follow_choice(
+                    self.chosen_entry != before.0 || matches!(key.key, Key::Up | Key::Down),
+                    self.chosen_marker() != before.1,
+                );
+                result
+            }
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            _ => EventResult::Ignored,
         }
+    }
+
+    /// The chosen marker, if a recording is open.
+    fn chosen_marker(&self) -> Option<usize> {
+        self.open.as_ref().and_then(|o| o.chosen_marker)
     }
 
     /// Keyboard control.
-    ///
-    /// Space is the transport, as it is in every recorder: it starts, pauses
-    /// and resumes. Stop is separate because it is the destructive one — it
-    /// ends the take — and a key that both pauses and ends depending on state
-    /// is how a take gets lost.
-    fn handle_key(&mut self, key: &KeyEvent) -> bool {
-        if key.key == Key::F1 {
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if self.rename.is_some() {
+            return self.rename_key(key);
+        }
+        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
             self.show_help = !self.show_help;
-            return true;
+            return EventResult::Consumed;
         }
         if self.show_help {
-            // Modal: Space starts a recording.
+            // Modal: Space would start a take from behind the card.
             if matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
-            return true;
+            return EventResult::Consumed;
         }
+        let ctrl = key.modifiers.ctrl;
+        let shift = key.modifiers.shift;
         match key.key {
-            Key::Space => match self.state {
-                RecordingState::Idle | RecordingState::Stopped => {
-                    self.transition_to(RecordingState::Recording)
+            Key::O if ctrl => self.open_picker(PickerFor::Open),
+            Key::S if ctrl && shift => self.open_picker(PickerFor::SaveKept),
+            Key::S if ctrl => {
+                self.save_markers();
+            }
+            Key::A if ctrl => self.with_open(OpenRecording::keep_all),
+            Key::F5 => {
+                self.rescan();
+                self.status_line = String::from("Looked in the folder again");
+            }
+            Key::Tab => {
+                self.panel = match self.panel {
+                    Panel::Library => Panel::Recording,
+                    Panel::Recording => Panel::Library,
+                };
+            }
+            Key::Up | Key::Down if self.panel == Panel::Library => {
+                self.move_entry(if key.key == Key::Down { 1 } else { -1 });
+            }
+            Key::Up | Key::Down => {
+                let down = key.key == Key::Down;
+                if let Some(open) = self.open.as_mut() {
+                    let last = open.markers.len().checked_sub(1);
+                    let next = match (open.chosen_marker, last) {
+                        (_, None) => None,
+                        (Some(i), Some(last)) if down => Some(i.saturating_add(1).min(last)),
+                        (Some(i), Some(_)) => Some(i.saturating_sub(1)),
+                        (None, Some(last)) => Some(if down { 0 } else { last }),
+                    };
+                    if let Some(i) = next {
+                        open.choose_marker(i);
+                    }
                 }
-                RecordingState::Recording => self.transition_to(RecordingState::Paused),
-                RecordingState::Paused => self.transition_to(RecordingState::Recording),
-            },
-            Key::S if !key.modifiers.ctrl => self.transition_to(RecordingState::Stopped),
-            Key::M => self
-                .add_marker(format!("Marker {}", self.markers.len().saturating_add(1)))
-                .is_some(),
-            _ => false,
+            }
+            Key::Enter if self.panel == Panel::Library => {
+                let Some(path) = self.chosen_entry.clone() else {
+                    return EventResult::Ignored;
+                };
+                self.open_path(&path);
+            }
+            Key::Left | Key::Right => {
+                let forward = key.key == Key::Right;
+                if ctrl {
+                    self.with_open(|o| {
+                        o.to_marker(forward);
+                    });
+                } else {
+                    let step = if shift { 1.0 } else { 0.1 };
+                    self.with_open(|o| o.nudge(if forward { step } else { -step }));
+                }
+            }
+            Key::Home => self.with_open(|o| o.cursor = 0),
+            Key::End => self.with_open(|o| o.cursor = o.info.frames),
+            Key::M if self.state != RecordingState::Idle => {
+                let n = self.markers.len().saturating_add(1);
+                self.add_marker(format!("Marker {n}"));
+            }
+            Key::M => self.with_open(|o| {
+                o.add_marker();
+            }),
+            Key::F2 => self.start_rename(),
+            Key::Delete => self.with_open(|o| {
+                o.remove_marker();
+            }),
+            Key::LeftBracket => self.with_open(OpenRecording::keep_from_cursor),
+            Key::RightBracket => self.with_open(OpenRecording::keep_to_cursor),
+            Key::Space => {
+                self.record_key();
+            }
+            Key::S if !ctrl && self.state != RecordingState::Idle => {
+                self.stop_take();
+            }
+            Key::P => self.play(),
+            _ => return EventResult::Ignored,
+        }
+        EventResult::Consumed
+    }
+
+    /// Do `act` to the open recording -- or say there is none.
+    fn with_open(&mut self, act: impl FnOnce(&mut OpenRecording)) {
+        match self.open.as_mut() {
+            Some(open) => act(open),
+            None => {
+                self.status_line = String::from("Nothing is open: choose a recording, or Ctrl+O");
+            }
         }
     }
 
-    /// Named `render_commands` and not `render`: at equal arity an inherent
-    /// method silently wins method lookup over `oswindow::app::App::render`.
-    pub fn render_commands(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+    /// Start writing the chosen marker's name.
+    fn start_rename(&mut self) {
+        let Some(label) = self
+            .open
+            .as_ref()
+            .and_then(|o| o.markers.get(o.chosen_marker?))
+            .map(|m| shown_label(&m.label))
+        else {
+            self.status_line = String::from("Choose a marker to name first");
+            return;
+        };
+        let mut input = TextInput::new();
+        input.set_text(&label);
+        input.select_all();
+        self.rename = Some(input);
+        self.panel = Panel::Recording;
+    }
 
-        // Window background
-        cmds.push(RenderCommand::FillRect {
+    /// A key while a marker's name is being written: Enter keeps it, Escape
+    /// leaves the old one.
+    fn rename_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Enter => self.commit_rename(),
+            Key::Escape => self.rename = None,
+            _ => {
+                if let Some(input) = self.rename.as_mut()
+                    && let Some(copied) = edit_line(input, key, LABEL_CAPACITY, &self.clipboard)
+                {
+                    self.clipboard = copied;
+                }
+            }
+        }
+        EventResult::Consumed
+    }
+
+    /// Keep the name being written.
+    fn commit_rename(&mut self) {
+        if let Some(input) = self.rename.take() {
+            let name = input.text().trim().to_owned();
+            self.with_open(|o| {
+                o.rename_marker(&name);
+            });
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Scrolling
+    // -----------------------------------------------------------------------
+
+    /// The recordings list's rows, and how many whole ones fit.
+    fn library_pane(&self) -> (Rect, usize) {
+        let top = self.content_top() + 96.0;
+        let bottom = self.window_height - STATUS_H;
+        let pane = Rect::new(0.0, top, SIDEBAR_W, (bottom - top).max(0.0));
+        (pane, ((pane.h / LIB_ROW_H).floor().max(1.0)) as usize)
+    }
+
+    /// The markers list's rows, and how many whole ones fit.
+    fn marker_pane(&self) -> (Rect, usize) {
+        let x = SIDEBAR_W;
+        let top = self.content_top() + 56.0 + WAVE_H + 128.0;
+        let bottom = self.window_height - STATUS_H - TRANSPORT_H;
+        let pane = Rect::new(
+            x,
+            top,
+            (self.window_width - x).max(0.0),
+            (bottom - top).max(0.0),
+        );
+        (pane, ((pane.h / MARKER_ROW_H).floor().max(1.0)) as usize)
+    }
+
+    /// Scroll a list whose choice the keys just moved, so the choice is on
+    /// screen -- only then, so a list the wheel moved stays where it went.
+    fn follow_choice(&mut self, entry_moved: bool, marker_moved: bool) {
+        if entry_moved && let Some(at) = self.chosen_index() {
+            let (_, rows) = self.library_pane();
+            self.library_scroll = scrolled_to(self.library_scroll, at, rows);
+        }
+        if marker_moved && let Some(at) = self.chosen_marker() {
+            let (_, rows) = self.marker_pane();
+            self.marker_scroll = scrolled_to(self.marker_scroll, at, rows);
+        }
+        self.clamp_scrolls();
+    }
+
+    /// Keep each list's scroll inside the list.
+    fn clamp_scrolls(&mut self) {
+        let (_, rows) = self.library_pane();
+        self.library_scroll = self
+            .library_scroll
+            .min(self.library.len().saturating_sub(rows));
+        let (_, rows) = self.marker_pane();
+        let markers = self.open.as_ref().map_or(0, |o| o.markers.len());
+        self.marker_scroll = self.marker_scroll.min(markers.saturating_sub(rows));
+    }
+
+    /// The wheel over a list.
+    fn wheel_at(&mut self, x: f32, y: f32, dy: f32) -> EventResult {
+        let library = match self.target_at(x, y) {
+            Some(Target::LibraryList | Target::LibraryRow(_)) => true,
+            Some(Target::MarkerList | Target::MarkerRow(_)) => false,
+            _ => return EventResult::Ignored,
+        };
+        let rows = self.wheel.rows(dy);
+        let (now, count, visible) = if library {
+            (
+                self.library_scroll,
+                self.library.len(),
+                self.library_pane().1,
+            )
+        } else {
+            (
+                self.marker_scroll,
+                self.open.as_ref().map_or(0, |o| o.markers.len()),
+                self.marker_pane().1,
+            )
+        };
+        let next = if rows < 0 {
+            now.saturating_sub(rows.unsigned_abs())
+        } else {
+            now.saturating_add(rows.unsigned_abs())
+        }
+        .min(count.saturating_sub(visible));
+        if next == now {
+            return EventResult::Ignored;
+        }
+        if library {
+            self.library_scroll = next;
+        } else {
+            self.marker_scroll = next;
+        }
+        EventResult::Consumed
+    }
+}
+
+/// The scroll that shows row `at` in a pane of `rows` rows, moving `scroll`
+/// as little as it can.
+fn scrolled_to(scroll: usize, at: usize, rows: usize) -> usize {
+    if at < scroll {
+        at
+    } else if at >= scroll.saturating_add(rows) {
+        at.saturating_add(1).saturating_sub(rows)
+    } else {
+        scroll
+    }
+}
+
+/// Apply a keystroke to a one-line field, as `apps/finance`, `apps/qrcode`
+/// and three more do (see `requests/e-c-a-text-field-that-takes-its-own-keys.md`);
+/// answers what a copy or a cut took.
+fn edit_line(
+    input: &mut TextInput,
+    key: &KeyEvent,
+    capacity: usize,
+    clipboard: &str,
+) -> Option<String> {
+    let shift = key.modifiers.shift;
+    let ctrl = key.modifiers.ctrl;
+    let mut copied = None;
+    match key.key {
+        Key::Left => input.move_cursor_left(shift, 13.0, FontWeightHint::Regular),
+        Key::Right => input.move_cursor_right(shift, 13.0, FontWeightHint::Regular),
+        Key::Home => input.move_home(shift),
+        Key::End => input.move_end(shift),
+        Key::Backspace => input.backspace(),
+        Key::Delete => input.delete(),
+        Key::A if ctrl => input.select_all(),
+        Key::C if ctrl => {
+            if input.has_selection() {
+                copied = Some(input.selected_text().to_string());
+            }
+        }
+        Key::X if ctrl => {
+            if input.has_selection() {
+                copied = Some(input.selected_text().to_string());
+                input.delete_selection();
+            }
+        }
+        Key::V if ctrl => insert_limited(input, clipboard, capacity),
+        _ => {
+            if !ctrl {
+                insert_limited(input, &key.text, capacity);
+            }
+        }
+    }
+    copied
+}
+
+/// Type `typed` into `input` over its selection, up to `capacity`
+/// characters, leaving control characters out.
+fn insert_limited(input: &mut TextInput, typed: &str, capacity: usize) {
+    if typed.chars().all(char::is_control) {
+        return;
+    }
+    if input.has_selection() {
+        input.delete_selection();
+    }
+    for ch in typed.chars() {
+        if ch.is_control() {
+            continue;
+        }
+        if input.text().chars().count() >= capacity {
+            break;
+        }
+        input.insert_char(ch);
+    }
+}
+
+// ============================================================================
+// Drawing
+// ============================================================================
+
+const TITLE_H: f32 = 40.0;
+const NOTICE_H: f32 = 40.0;
+const SIDEBAR_W: f32 = 300.0;
+const STATUS_H: f32 = 24.0;
+const LIB_ROW_H: f32 = 40.0;
+const MARKER_ROW_H: f32 = 26.0;
+const WAVE_H: f32 = 160.0;
+const TRANSPORT_H: f32 = 56.0;
+/// How near a press must land to a marker or a handle to take it.
+const HANDLE_REACH: f32 = 5.0;
+/// How far a marker must be dragged before it moves: a press on a marker
+/// chooses it, and a hand that shakes must not move it as well.
+const DRAG_SLOP: f32 = 3.0;
+
+/// A marker's colour, by its place in the list.
+fn marker_color(i: usize) -> Color {
+    let slot = i.checked_rem(MARKER_COLORS.len()).unwrap_or(0);
+    Color::from_hex(MARKER_COLORS.get(slot).copied().unwrap_or(0x0089_B4FA))
+}
+
+/// Where `frame` of `frames` falls across `r`.
+fn frame_x(r: Rect, frame: u64, frames: u64) -> f32 {
+    if frames == 0 {
+        return r.x;
+    }
+    r.x + (frame as f64 / frames as f64) as f32 * r.w
+}
+
+/// The frame under `x` across `r`.
+fn frame_at(r: Rect, x: f32, frames: u64) -> u64 {
+    if r.w <= 0.0 {
+        return 0;
+    }
+    let f = f64::from(((x - r.x) / r.w).clamp(0.0, 1.0)) * frames as f64;
+    (f.round() as u64).min(frames)
+}
+
+impl SoundRecorderApp {
+    /// Where the window's content starts, under the title and the notice.
+    fn content_top(&self) -> f32 {
+        if self.input_devices.is_empty() {
+            TITLE_H + NOTICE_H
+        } else {
+            TITLE_H
+        }
+    }
+
+    /// The waveform's box.
+    fn wave_rect(&self) -> Rect {
+        let x = SIDEBAR_W + 16.0;
+        Rect::new(
+            x,
+            self.content_top() + 56.0,
+            (self.window_width - x - 16.0).max(1.0),
+            WAVE_H,
+        )
+    }
+
+    /// The whole window, and where every control in it is.
+    fn frame(&self) -> Frame<Target> {
+        let (w, h) = (self.window_width, self.window_height);
+        let mut f = Frame::new(w, h);
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: self.window_width,
-            height: self.window_height,
+            width: w,
+            height: h,
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
+        self.render_title(&mut f);
+        self.render_library(&mut f);
+        self.render_recording(&mut f);
+        self.render_transport(&mut f);
+        self.render_status(&mut f);
+        if self.picker.is_open() {
+            f.extend(self.picker.render(&self.palette, w, h));
+        }
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (w, h),
+                TITLE_H,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+            f.hit(Target::HelpCard, Rect::new(0.0, 0.0, w, h));
+        }
+        f
+    }
 
-        // Title bar
-        self.palette.push_surface(
-            &mut cmds,
-            0.0,
-            0.0,
-            self.window_width,
-            40.0,
-            0.0,
-            Surface::Card,
+    /// A button: a press on it does `target`; a disabled one takes no press.
+    fn button(
+        &self,
+        f: &mut Frame<Target>,
+        rect: Rect,
+        label: &str,
+        target: Target,
+        enabled: bool,
+    ) {
+        let lit = enabled && self.hover == Some(target);
+        f.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: if lit {
+                self.palette.surface2
+            } else {
+                self.palette.surface1
+            },
+            corner_radii: CornerRadii::all(6.0),
+        });
+        f.push(RenderCommand::Text {
+            x: guitk::text::center_x(label, rect.x + rect.w / 2.0, 12.0, FontWeightHint::Regular)
+                .max(rect.x + 4.0),
+            y: rect.y + (rect.h - 12.0) / 2.0,
+            text: label.to_string(),
+            font_size: 12.0,
+            color: if enabled {
+                self.palette.text
+            } else {
+                self.palette.overlay0
+            },
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((rect.w - 8.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if enabled {
+            f.hit(target, rect);
+        }
+    }
+
+    /// Buttons left to right from `x`, each as wide as it says.
+    fn buttons_from(
+        &self,
+        f: &mut Frame<Target>,
+        x: f32,
+        y: f32,
+        buttons: &[(&str, f32, Target, bool)],
+    ) {
+        let mut at = x;
+        for (label, width, target, enabled) in buttons {
+            self.button(f, Rect::new(at, y, *width, 28.0), label, *target, *enabled);
+            at += width + 6.0;
+        }
+    }
+
+    /// One line of text.
+    fn text(
+        &self,
+        f: &mut Frame<Target>,
+        x: f32,
+        y: f32,
+        text: String,
+        size: f32,
+        color: Color,
+        max: f32,
+    ) {
+        f.push(RenderCommand::Text {
+            x,
+            y,
+            text,
+            font_size: size,
+            color,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(max.max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    /// A small heading.
+    fn heading(&self, f: &mut Frame<Target>, x: f32, y: f32, text: String, max: f32) {
+        f.push(RenderCommand::Text {
+            x,
+            y,
+            text,
+            font_size: 11.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(max.max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    /// The border that says which half has the keys; a press in a half gives
+    /// it them.
+    fn panel_focus(&self, f: &mut Frame<Target>, panel: Panel, rect: Rect) {
+        f.hit(Target::Panel(panel), rect);
+        if self.panel == panel {
+            f.push(RenderCommand::StrokeRect {
+                x: rect.x + 1.0,
+                y: rect.y + 1.0,
+                width: (rect.w - 2.0).max(0.0),
+                height: (rect.h - 2.0).max(0.0),
+                color: self.palette.blue,
+                line_width: 2.0,
+                corner_radii: CornerRadii::ZERO,
+            });
+        }
+    }
+
+    fn render_title(&self, f: &mut Frame<Target>) {
+        let w = self.window_width;
+        self.palette
+            .push_surface(f, 0.0, 0.0, w, TITLE_H, 0.0, Surface::Card);
+        f.push(RenderCommand::Text {
+            x: 16.0,
+            y: 11.0,
+            text: String::from("Sound Recorder"),
+            font_size: 16.0,
+            color: self.palette.text,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(200.0),
+            overflow: TextOverflow::Clip,
+        });
+        if self.state != RecordingState::Idle {
+            f.push(RenderCommand::FillRect {
+                x: 190.0,
+                y: 15.0,
+                width: 10.0,
+                height: 10.0,
+                color: self.state.color(&self.palette),
+                corner_radii: CornerRadii::all(5.0),
+            });
+            self.text(
+                f,
+                206.0,
+                12.0,
+                self.state.label().to_owned(),
+                14.0,
+                self.palette.ink(self.state.color(&self.palette)),
+                160.0,
+            );
+        }
+        self.button(
+            f,
+            Rect::new(w - 44.0, 6.0, 32.0, 28.0),
+            "?",
+            Target::Help,
+            true,
         );
-        // Why there is no take, above everything else in the window.
-        //
-        // Unconditional on the device list rather than on `blocked_reason`,
-        // because it has to be visible *before* the user presses Record and
-        // starts timing something. A message that appears only after the press
-        // has already let them believe the take began.
+        // Why there is no take, above everything else, and before Record is
+        // pressed: a message that appears only after the press has already let
+        // the user believe the take began.
         if self.input_devices.is_empty() {
-            for (i, line) in CANNOT_RECORD_LINES.iter().enumerate() {
-                cmds.push(RenderCommand::Text {
+            for (i, line) in NO_AUDIO_LINES.iter().enumerate() {
+                let first = i == 0;
+                f.push(RenderCommand::Text {
                     x: 16.0,
-                    #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0..2")]
-                    y: 44.0 + i as f32 * 16.0,
+                    y: TITLE_H + 4.0 + i as f32 * 17.0,
                     text: (*line).to_string(),
-                    color: if i == 0 {
+                    color: if first {
                         self.palette.ink(self.palette.yellow)
                     } else {
                         self.palette.subtext0
                     },
-                    font_size: if i == 0 { 13.0 } else { 11.0 },
-                    font_weight: if i == 0 {
+                    font_size: if first { 13.0 } else { 11.0 },
+                    font_weight: if first {
                         FontWeightHint::Bold
                     } else {
                         FontWeightHint::Regular
                     },
-                    max_width: Some(self.window_width - 32.0),
+                    max_width: Some((w - 32.0).max(0.0)),
                     overflow: TextOverflow::Ellipsis,
                 });
             }
         }
+    }
 
-        cmds.push(RenderCommand::Text {
-            x: 16.0,
-            y: 10.0,
-            text: "Sound Recorder".into(),
-            color: self.palette.text,
-            font_size: 16.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // State indicator
-        cmds.push(RenderCommand::FillRect {
-            x: 160.0,
-            y: 12.0,
-            width: 10.0,
-            height: 10.0,
-            color: self.state.color(&self.palette),
-            corner_radii: CornerRadii::all(5.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: 176.0,
-            y: 10.0,
-            text: self.state.label().into(),
-            color: self.palette.ink(self.state.color(&self.palette)),
-            font_size: 14.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Device selector area
-        if let Some(device) = self.current_device() {
-            cmds.push(RenderCommand::Text {
-                x: 20.0,
-                y: 50.0,
-                text: format!("Input: {}", device.name),
-                color: self.palette.subtext0,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(300.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
-        // Preset label
-        cmds.push(RenderCommand::Text {
-            x: 350.0,
-            y: 50.0,
-            text: format!("Quality: {}", self.preset.label()),
-            color: self.palette.subtext0,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(240.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Timer display
-        cmds.extend(self.timer.render(&self.palette, 20.0, 75.0));
-
-        // Waveform
-        cmds.extend(self.waveform.render(&self.palette));
-
-        // VU meter
-        cmds.extend(self.vu_meter.render(&self.palette));
-
-        // Markers overlay on waveform
-        let wf = &self.waveform;
-        cmds.extend(self.markers.render(
-            self.wav.frame_count() as u64,
-            wf.x,
-            wf.y,
-            wf.width,
-            wf.height,
-        ));
-
-        // Trim handles when stopped
-        if let Some(ref trim) = self.trim {
-            cmds.extend(trim.render(&self.palette, wf.x, wf.y, wf.width, wf.height));
-        }
-
-        // Noise gate control
-        cmds.extend(self.noise_gate.render(&self.palette, 20.0, 260.0, 200.0));
-
-        // Playback bar when stopped
-        if self.state == RecordingState::Stopped {
-            cmds.extend(self.playback.render(&self.palette, 20.0, 300.0, 560.0));
-        }
-
-        // Control buttons
-        let button_y = 340.0;
-        self.render_controls(&mut cmds, 20.0, button_y);
-
-        // Recording history (right side or below)
-        cmds.extend(self.history.render(&self.palette, 20.0, 390.0, 560.0));
-
-        if self.show_help {
-            guitk::shortcut::render_card(
-                &mut cmds,
-                &self.palette,
-                (self.window_width, self.window_height),
-                0.0,
-                SHORTCUTS,
-                "F1 closes this",
+    fn render_library(&self, f: &mut Frame<Target>) {
+        let top = self.content_top();
+        let bottom = self.window_height - STATUS_H;
+        let panel = Rect::new(0.0, top, SIDEBAR_W, (bottom - top).max(0.0));
+        self.palette
+            .push_surface(f, panel.x, panel.y, panel.w, panel.h, 0.0, Surface::Sidebar);
+        self.panel_focus(f, Panel::Library, panel);
+        self.heading(
+            f,
+            16.0,
+            top + 12.0,
+            String::from("RECORDINGS"),
+            SIDEBAR_W - 32.0,
+        );
+        let folder = self
+            .recordings_dir
+            .as_ref()
+            .map_or_else(|| String::from("No folder"), |d| d.display().to_string());
+        self.text(
+            f,
+            16.0,
+            top + 30.0,
+            folder,
+            11.0,
+            self.palette.subtext1,
+            SIDEBAR_W - 32.0,
+        );
+        self.buttons_from(
+            f,
+            16.0,
+            top + 54.0,
+            &[
+                ("Open\u{2026}", 84.0, Target::OpenFile, true),
+                ("Folder\u{2026}", 84.0, Target::ChooseFolder, true),
+                (
+                    "Refresh",
+                    84.0,
+                    Target::Refresh,
+                    self.recordings_dir.is_some(),
+                ),
+            ],
+        );
+        let (pane, rows) = self.library_pane();
+        f.hit(Target::LibraryList, pane);
+        if let Some(note) = &self.library_note {
+            self.text(
+                f,
+                16.0,
+                pane.y + 8.0,
+                note.clone(),
+                11.0,
+                self.palette.subtext0,
+                SIDEBAR_W - 32.0,
             );
         }
-
-        cmds
-    }
-
-    /// Render control buttons based on the current state.
-    fn render_controls(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) {
-        // What the last transport press did, under the buttons.
-        //
-        // The banner at the top already says why no take can start, so this
-        // looks redundant -- and it is not, for the reason netscan's Send
-        // button taught earlier the same day: a press that changes nothing
-        // visible reads as a *broken button*, and sends the user hunting a
-        // fault in the wrong place. The banner explains the situation; this
-        // confirms the press was received and refused.
-        //
-        // Caught by `check-fields-written-never-read`, which is the third time
-        // in one day it has found a field of mine that production writes and
-        // nothing draws.
-        if let Some(reason) = &self.blocked_reason {
-            cmds.push(RenderCommand::Text {
-                x,
-                y: y + 38.0,
-                text: reason.clone(),
-                color: self.palette.ink(self.palette.yellow),
-                font_size: 11.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(self.window_width - x - 16.0),
+        let chosen = self.chosen_index();
+        let open = self.open.as_ref().map(|o| o.path.as_path());
+        for (shown, (i, entry)) in self
+            .library
+            .iter()
+            .enumerate()
+            .skip(self.library_scroll)
+            .take(rows)
+            .enumerate()
+        {
+            let y = pane.y + shown as f32 * LIB_ROW_H;
+            let row = Rect::new(4.0, y, SIDEBAR_W - 8.0, LIB_ROW_H - 2.0);
+            if chosen == Some(i) || self.hover == Some(Target::LibraryRow(i)) {
+                self.palette.push_surface(
+                    f,
+                    row.x,
+                    row.y,
+                    row.w,
+                    row.h,
+                    4.0,
+                    if chosen == Some(i) {
+                        Surface::Selected
+                    } else {
+                        Surface::Card
+                    },
+                );
+            }
+            let is_open = open == Some(entry.path.as_path());
+            f.push(RenderCommand::Text {
+                x: 14.0,
+                y: y + 4.0,
+                text: entry.name.clone(),
+                font_size: 13.0,
+                color: self.palette.text,
+                font_weight: if is_open {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(SIDEBAR_W - 28.0),
                 overflow: TextOverflow::Ellipsis,
             });
-        }
-
-        match self.state {
-            RecordingState::Idle => {
-                self.render_button(cmds, x, y, 100.0, 32.0, "Record", self.palette.red);
-            }
-            RecordingState::Recording => {
-                self.render_button(cmds, x, y, 80.0, 32.0, "Pause", self.palette.yellow);
-                self.render_button(cmds, x + 90.0, y, 80.0, 32.0, "Stop", self.palette.peach);
-                self.render_button(cmds, x + 180.0, y, 100.0, 32.0, "Marker", self.palette.blue);
-            }
-            RecordingState::Paused => {
-                self.render_button(cmds, x, y, 80.0, 32.0, "Resume", self.palette.green);
-                self.render_button(cmds, x + 90.0, y, 80.0, 32.0, "Stop", self.palette.peach);
-                self.render_button(cmds, x + 180.0, y, 100.0, 32.0, "Marker", self.palette.blue);
-            }
-            RecordingState::Stopped => {
-                self.render_button(cmds, x, y, 80.0, 32.0, "New", self.palette.green);
-                self.render_button(cmds, x + 90.0, y, 80.0, 32.0, "Save", self.palette.blue);
-                self.render_button(cmds, x + 180.0, y, 80.0, 32.0, "Play", self.palette.peach);
-            }
+            self.text(
+                f,
+                14.0,
+                y + 21.0,
+                entry.summary(),
+                10.0,
+                if entry.detail.is_ok() {
+                    self.palette.subtext0
+                } else {
+                    self.palette.ink(self.palette.red)
+                },
+                SIDEBAR_W - 28.0,
+            );
+            f.hit(Target::LibraryRow(i), row);
         }
     }
 
-    /// Render a single button.
-    fn render_button(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        label: &str,
-        color: Color,
-    ) {
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height,
-            color,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: x + 10.0,
-            y: y + 8.0,
-            text: label.into(),
-            color: self.palette.base,
-            font_size: 13.0,
+    fn render_recording(&self, f: &mut Frame<Target>) {
+        let top = self.content_top();
+        let x = SIDEBAR_W;
+        let w = (self.window_width - x).max(0.0);
+        let bottom = self.window_height - STATUS_H - TRANSPORT_H;
+        let panel = Rect::new(x, top, w, (bottom - top).max(0.0));
+        self.panel_focus(f, Panel::Recording, panel);
+        let Some(open) = &self.open else {
+            self.text(
+                f,
+                x + 24.0,
+                top + 24.0,
+                String::from("Nothing is open."),
+                15.0,
+                self.palette.text,
+                w - 48.0,
+            );
+            self.text(
+                f,
+                x + 24.0,
+                top + 46.0,
+                String::from(
+                    "Choose a recording on the left, or press Ctrl+O to open one from anywhere.",
+                ),
+                12.0,
+                self.palette.subtext0,
+                w - 48.0,
+            );
+            return;
+        };
+        f.push(RenderCommand::Text {
+            x: x + 16.0,
+            y: top + 10.0,
+            text: open.name.clone(),
+            font_size: 16.0,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some((w - 200.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
         });
+        self.text(
+            f,
+            x + 16.0,
+            top + 32.0,
+            format!(
+                "{}  \u{00B7}  {}",
+                clock(open.info.seconds()),
+                format_line(&open.info)
+            ),
+            12.0,
+            self.palette.subtext0,
+            w - 200.0,
+        );
+        if open.markers_changed {
+            let note = "Markers not saved";
+            f.push(RenderCommand::Text {
+                x: guitk::text::right_x(note, x + w - 16.0, 12.0, FontWeightHint::Bold),
+                y: top + 14.0,
+                text: note.to_owned(),
+                font_size: 12.0,
+                color: self.palette.ink(self.palette.yellow),
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+        }
+        let r = self.wave_rect();
+        self.render_waveform(f, open, r);
+
+        let kept = &open.kept;
+        self.text(
+            f,
+            r.x,
+            r.y + r.h + 8.0,
+            format!(
+                "Cursor {}    Kept {} \u{2013} {} ({})",
+                clock(open.seconds_at(open.cursor)),
+                clock(open.seconds_at(kept.start_frame)),
+                clock(open.seconds_at(kept.end_frame)),
+                clock(open.seconds_at(kept.length_frames())),
+            ),
+            12.0,
+            self.palette.subtext1,
+            r.w,
+        );
+        let chosen = open.chosen_marker.is_some();
+        self.buttons_from(
+            f,
+            r.x,
+            r.y + r.h + 32.0,
+            &[
+                ("Add marker", 96.0, Target::AddMarker, true),
+                ("Name", 64.0, Target::RenameMarker, chosen),
+                ("Remove", 72.0, Target::RemoveMarker, chosen),
+                ("Start here", 88.0, Target::KeepFrom, true),
+                ("End here", 80.0, Target::KeepTo, true),
+                ("Keep all", 76.0, Target::KeepAll, !kept.is_full()),
+            ],
+        );
+        self.buttons_from(
+            f,
+            r.x,
+            r.y + r.h + 66.0,
+            &[
+                (
+                    "Save markers",
+                    112.0,
+                    Target::SaveMarkers,
+                    open.markers_changed,
+                ),
+                (
+                    "Save kept part\u{2026}",
+                    128.0,
+                    Target::SaveKept,
+                    kept.length_frames() > 0,
+                ),
+            ],
+        );
+        self.render_markers(f, open);
+    }
+
+    fn render_waveform(&self, f: &mut Frame<Target>, open: &OpenRecording, r: Rect) {
+        self.palette
+            .push_surface(f, r.x, r.y, r.w, r.h, 4.0, Surface::Card);
+        let mid = r.y + r.h / 2.0;
+        let half = (r.h / 2.0 - 4.0).max(1.0);
+        f.push(RenderCommand::FillRect {
+            x: r.x,
+            y: mid,
+            width: r.w,
+            height: 1.0,
+            color: self.palette.surface1,
+            corner_radii: CornerRadii::ZERO,
+        });
+        let peaks = &open.peaks;
+        let columns = (r.w.floor() as usize).max(1);
+        if !peaks.is_empty() && open.info.frames > 0 {
+            for c in 0..columns {
+                let edge = |c: usize| {
+                    c.saturating_mul(peaks.len())
+                        .checked_div(columns)
+                        .unwrap_or(0)
+                };
+                let from = edge(c);
+                let to = edge(c.saturating_add(1))
+                    .max(from.saturating_add(1))
+                    .min(peaks.len());
+                let (low, high) = peaks
+                    .get(from..to)
+                    .unwrap_or(&[])
+                    .iter()
+                    .fold((0.0_f32, 0.0_f32), |(lo, hi), p| {
+                        (lo.min(p.low), hi.max(p.high))
+                    });
+                let top = mid - high * half;
+                let bottom = mid - low * half;
+                f.push(RenderCommand::FillRect {
+                    x: r.x + c as f32,
+                    y: top,
+                    width: 1.0,
+                    height: (bottom - top).max(1.0),
+                    color: self.palette.blue,
+                    corner_radii: CornerRadii::ZERO,
+                });
+            }
+        }
+        f.extend(open.kept.render(&self.palette, r.x, r.y, r.w, r.h));
+        let frames = open.info.frames;
+        for (i, marker) in open.markers.iter().enumerate() {
+            let mx = frame_x(r, u64::from(marker.frame), frames);
+            let chosen = open.chosen_marker == Some(i);
+            f.push(RenderCommand::Line {
+                x1: mx,
+                y1: r.y,
+                x2: mx,
+                y2: r.y + r.h,
+                color: marker_color(i),
+                width: if chosen { 3.0 } else { 2.0 },
+            });
+            self.text(
+                f,
+                mx + 4.0,
+                r.y + 3.0,
+                shown_label(&marker.label),
+                10.0,
+                self.palette.text,
+                90.0,
+            );
+        }
+        let cx = frame_x(r, open.cursor, frames);
+        f.push(RenderCommand::Line {
+            x1: cx,
+            y1: r.y,
+            x2: cx,
+            y2: r.y + r.h,
+            color: self.palette.peach,
+            width: 2.0,
+        });
+        f.hit(Target::Waveform, r);
+    }
+
+    fn render_markers(&self, f: &mut Frame<Target>, open: &OpenRecording) {
+        let (pane, rows) = self.marker_pane();
+        self.heading(
+            f,
+            pane.x + 16.0,
+            pane.y - 22.0,
+            format!("MARKERS ({})", open.markers.len()),
+            pane.w - 32.0,
+        );
+        f.hit(Target::MarkerList, pane);
+        if open.markers.is_empty() {
+            self.text(
+                f,
+                pane.x + 16.0,
+                pane.y + 4.0,
+                String::from(
+                    "None. M puts one at the cursor; a press on the waveform moves the cursor.",
+                ),
+                11.0,
+                self.palette.subtext0,
+                pane.w - 32.0,
+            );
+        }
+        for (shown, (i, marker)) in open
+            .markers
+            .iter()
+            .enumerate()
+            .skip(self.marker_scroll)
+            .take(rows)
+            .enumerate()
+        {
+            let y = pane.y + shown as f32 * MARKER_ROW_H;
+            let row = Rect::new(
+                pane.x + 12.0,
+                y,
+                (pane.w - 24.0).max(0.0),
+                MARKER_ROW_H - 2.0,
+            );
+            let chosen = open.chosen_marker == Some(i);
+            if chosen || self.hover == Some(Target::MarkerRow(i)) {
+                self.palette.push_surface(
+                    f,
+                    row.x,
+                    row.y,
+                    row.w,
+                    row.h,
+                    4.0,
+                    if chosen {
+                        Surface::Selected
+                    } else {
+                        Surface::Card
+                    },
+                );
+            }
+            f.push(RenderCommand::FillRect {
+                x: row.x + 6.0,
+                y: y + 8.0,
+                width: 8.0,
+                height: 8.0,
+                color: marker_color(i),
+                corner_radii: CornerRadii::all(4.0),
+            });
+            self.text(
+                f,
+                row.x + 22.0,
+                y + 5.0,
+                clock(open.seconds_at(u64::from(marker.frame))),
+                12.0,
+                self.palette.subtext1,
+                80.0,
+            );
+            let name = Rect::new(
+                row.x + 104.0,
+                y + 1.0,
+                (row.w - 110.0).max(0.0),
+                MARKER_ROW_H - 4.0,
+            );
+            match (&self.rename, chosen) {
+                (Some(input), true) => self.render_field(f, input, name),
+                _ => self.text(
+                    f,
+                    name.x,
+                    y + 5.0,
+                    shown_label(&marker.label),
+                    12.0,
+                    self.palette.text,
+                    name.w,
+                ),
+            }
+            f.hit(Target::MarkerRow(i), row);
+        }
+    }
+
+    /// The marker name being written.
+    fn render_field(&self, f: &mut Frame<Target>, input: &TextInput, rect: Rect) {
+        self.palette
+            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
+        f.push(RenderCommand::StrokeRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: self.palette.blue,
+            line_width: 2.0,
+            corner_radii: CornerRadii::all(4.0),
+        });
+        let mut tree = RenderTree::new();
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text: input.text(),
+                cursor: input.cursor(),
+                selection_anchor: input.selection_anchor(),
+                focused: true,
+                x: rect.x + 6.0,
+                y: rect.y + 3.0,
+                width: (rect.w - 12.0).max(0.0),
+                line_height: 16.0,
+                font_size: 13.0,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.blue,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        f.extend(tree.commands);
+    }
+
+    fn render_transport(&self, f: &mut Frame<Target>) {
+        let y = self.window_height - STATUS_H - TRANSPORT_H;
+        let x = SIDEBAR_W;
+        let w = (self.window_width - x).max(0.0);
+        self.palette
+            .push_surface(f, x, y, w, TRANSPORT_H, 0.0, Surface::Card);
+        let by = y + 14.0;
+        let mut after = x + 16.0;
+        match self.state {
+            RecordingState::Idle | RecordingState::Stopped => {
+                self.buttons_from(
+                    f,
+                    x + 16.0,
+                    by,
+                    &[
+                        ("\u{25CF} Record", 96.0, Target::Record, true),
+                        ("\u{25B6} Play", 80.0, Target::Play, true),
+                    ],
+                );
+                after += 96.0 + 6.0 + 80.0 + 12.0;
+            }
+            RecordingState::Recording | RecordingState::Paused => {
+                let pause = if self.state == RecordingState::Recording {
+                    "Pause"
+                } else {
+                    "Resume"
+                };
+                self.buttons_from(
+                    f,
+                    x + 16.0,
+                    by,
+                    &[
+                        (pause, 80.0, Target::Pause, true),
+                        ("Stop", 72.0, Target::Stop, true),
+                        ("Marker", 80.0, Target::DropMarker, true),
+                    ],
+                );
+                after += 80.0 + 6.0 + 72.0 + 6.0 + 80.0 + 12.0;
+                self.text(
+                    f,
+                    after,
+                    by + 6.0,
+                    format!(
+                        "{}  \u{00B7}  {}",
+                        self.timer.format_elapsed(),
+                        self.preset.label()
+                    ),
+                    13.0,
+                    self.palette.text,
+                    180.0,
+                );
+                after += 190.0;
+            }
+        }
+        if let Some(reason) = &self.blocked_reason {
+            self.text(
+                f,
+                after,
+                by + 7.0,
+                reason.clone(),
+                11.0,
+                self.palette.ink(self.palette.yellow),
+                x + w - after - 16.0,
+            );
+        }
+    }
+
+    fn render_status(&self, f: &mut Frame<Target>) {
+        let y = self.window_height - STATUS_H;
+        self.palette.push_surface(
+            f,
+            0.0,
+            y,
+            self.window_width,
+            STATUS_H,
+            0.0,
+            Surface::Strip(appearance::Edge::Top),
+        );
+        self.text(
+            f,
+            12.0,
+            y + 5.0,
+            self.status_line.clone(),
+            11.0,
+            self.palette.subtext1,
+            self.window_width - 24.0,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The pointer
+    // -----------------------------------------------------------------------
+
+    /// What is under `(x, y)` in the frame last shown.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        if self.last_hits.is_empty() {
+            return self.frame().hit_test(x, y);
+        }
+        self.last_hits
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(target, _)| *target)
+    }
+
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                self.drag = None;
+                let Some(target) = self.frame().hit_test(event.x, event.y) else {
+                    return EventResult::Ignored;
+                };
+                // A press anywhere else keeps the name being written.
+                if self.rename.is_some() && !matches!(target, Target::MarkerRow(_)) {
+                    self.commit_rename();
+                }
+                let result = self.press(target, event.x);
+                self.clamp_scrolls();
+                result
+            }
+            MouseEventKind::Release(MouseButton::Left) => {
+                if self.drag.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            MouseEventKind::Move => {
+                if self.drag.is_some() {
+                    return self.drag_to(event.x);
+                }
+                let over = self.target_at(event.x, event.y);
+                if over == self.hover {
+                    return EventResult::Ignored;
+                }
+                self.hover = over;
+                EventResult::Consumed
+            }
+            MouseEventKind::Leave => {
+                self.drag = None;
+                if self.hover.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            MouseEventKind::Scroll { dy, .. } => self.wheel_at(event.x, event.y, dy),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// A press on `target`, at `x` across the window.
+    fn press(&mut self, target: Target, x: f32) -> EventResult {
+        match target {
+            Target::HelpCard => self.show_help = false,
+            Target::Help => self.show_help = true,
+            Target::Panel(panel) => {
+                if self.panel == panel {
+                    return EventResult::Ignored;
+                }
+                self.panel = panel;
+            }
+            Target::OpenFile => self.open_picker(PickerFor::Open),
+            Target::ChooseFolder => self.open_picker(PickerFor::Folder),
+            Target::Refresh => {
+                self.rescan();
+                self.status_line = String::from("Looked in the folder again");
+            }
+            Target::LibraryList => {
+                if self.panel == Panel::Library {
+                    return EventResult::Ignored;
+                }
+                self.panel = Panel::Library;
+            }
+            // A press opens a recording: it changes nothing on disk, so it
+            // needs no second press to confirm.
+            Target::LibraryRow(i) => {
+                let Some(path) = self.library.get(i).map(|e| e.path.clone()) else {
+                    return EventResult::Ignored;
+                };
+                self.chosen_entry = Some(path.clone());
+                self.open_path(&path);
+            }
+            Target::Waveform => return self.press_waveform(x),
+            Target::MarkerList => {
+                if self.panel == Panel::Recording {
+                    return EventResult::Ignored;
+                }
+                self.panel = Panel::Recording;
+            }
+            Target::MarkerRow(i) => {
+                self.panel = Panel::Recording;
+                if self.rename.is_some() && self.chosen_marker() == Some(i) {
+                    return EventResult::Ignored;
+                }
+                self.rename = None;
+                self.with_open(|o| {
+                    o.choose_marker(i);
+                });
+            }
+            Target::AddMarker => self.with_open(|o| {
+                o.add_marker();
+            }),
+            Target::RenameMarker => self.start_rename(),
+            Target::RemoveMarker => self.with_open(|o| {
+                o.remove_marker();
+            }),
+            Target::KeepFrom => self.with_open(OpenRecording::keep_from_cursor),
+            Target::KeepTo => self.with_open(OpenRecording::keep_to_cursor),
+            Target::KeepAll => self.with_open(OpenRecording::keep_all),
+            Target::SaveMarkers => {
+                self.save_markers();
+            }
+            Target::SaveKept => self.open_picker(PickerFor::SaveKept),
+            Target::Record => {
+                self.record_key();
+            }
+            Target::Pause => {
+                self.record_key();
+            }
+            Target::Stop => {
+                self.stop_take();
+            }
+            Target::DropMarker => {
+                let n = self.markers.len().saturating_add(1);
+                self.add_marker(format!("Marker {n}"));
+            }
+            Target::Play => self.play(),
+        }
+        EventResult::Consumed
+    }
+
+    /// A press on the waveform: on a marker it chooses the marker (and a
+    /// drag moves it); on a handle of the kept stretch, a drag moves the
+    /// handle; anywhere else the cursor goes there and follows a drag.
+    fn press_waveform(&mut self, x: f32) -> EventResult {
+        let r = self.wave_rect();
+        self.panel = Panel::Recording;
+        self.press_x = x;
+        let Some(open) = self.open.as_mut() else {
+            return EventResult::Ignored;
+        };
+        let frames = open.info.frames;
+        let near = |frame: u64| (frame_x(r, frame, frames) - x).abs() <= HANDLE_REACH;
+        let drag = if let Some(i) = open.markers.iter().position(|m| near(u64::from(m.frame))) {
+            open.choose_marker(i);
+            Drag::Marker(i)
+        } else if near(open.kept.start_frame) {
+            Drag::KeptStart
+        } else if near(open.kept.end_frame) {
+            Drag::KeptEnd
+        } else {
+            open.cursor = frame_at(r, x, frames);
+            Drag::Cursor
+        };
+        self.drag = Some(drag);
+        EventResult::Consumed
+    }
+
+    /// The pointer moved with the button down on the waveform.
+    fn drag_to(&mut self, x: f32) -> EventResult {
+        let Some(drag) = self.drag else {
+            return EventResult::Ignored;
+        };
+        let r = self.wave_rect();
+        let slop = (x - self.press_x).abs() < DRAG_SLOP;
+        let Some(open) = self.open.as_mut() else {
+            self.drag = None;
+            return EventResult::Ignored;
+        };
+        let frame = frame_at(r, x, open.info.frames);
+        match drag {
+            Drag::Cursor => open.cursor = frame,
+            Drag::KeptStart => {
+                open.kept.set_start(frame);
+                open.cursor = open.kept.start_frame;
+            }
+            Drag::KeptEnd => {
+                open.kept.set_end(frame);
+                open.cursor = open.kept.end_frame;
+            }
+            Drag::Marker(i) => {
+                if slop {
+                    return EventResult::Ignored;
+                }
+                if let Some(at) = open.move_marker(i, frame) {
+                    self.drag = Some(Drag::Marker(at));
+                }
+            }
+        }
+        EventResult::Consumed
     }
 }
 
@@ -2355,25 +3917,27 @@ impl App for SoundRecorderApp {
     }
 
     fn title(&self) -> String {
-        "Sound Recorder".to_string()
+        match &self.open {
+            Some(open) if open.markers_changed => {
+                format!("{} (markers not saved) - Sound Recorder", open.name)
+            }
+            Some(open) => format!("{} - Sound Recorder", open.name),
+            None => String::from("Sound Recorder"),
+        }
     }
 
     fn initial_size(&self) -> (u32, u32) {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         (self.window_width as u32, self.window_height as u32)
     }
 
     /// A clock only while recording.
     ///
-    /// Gated on the state rather than returned unconditionally, because `tick`
-    /// and `check_auto_save` both return immediately unless recording — so an
-    /// unconditional interval would wake the machine ten times a second to do
-    /// nothing for as long as the window is open. The recipe in
-    /// `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` asks for exactly this.
+    /// Gated on the state rather than returned unconditionally, because
+    /// `tick` and `check_auto_save` both return immediately unless recording
+    /// -- so an unconditional interval would wake the machine ten times a
+    /// second to do nothing for as long as the window is open.
     ///
-    /// 100 ms: the elapsed readout shows tenths, and the auto-save deadline is
-    /// measured in minutes. Anything faster would be redrawing a digit that has
-    /// not changed.
+    /// 100 ms: the elapsed readout shows tenths.
     fn tick_interval(&self) -> Option<Duration> {
         (self.state == RecordingState::Recording).then(|| Duration::from_millis(100))
     }
@@ -2382,24 +3946,24 @@ impl App for SoundRecorderApp {
         if matches!(event, Event::CloseRequested) {
             return Response::Exit;
         }
-        if self.handle_event(event) {
-            Response::Redraw
-        } else {
-            Response::Idle
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
         }
     }
 
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
         self.window_width = width;
         self.window_height = height;
-        let mut tree = RenderTree::new();
-        tree.commands = self.render_commands();
-        tree
+        self.clamp_scrolls();
+        let frame = self.frame();
+        self.last_hits = frame.hits().to_vec();
+        frame.into_tree()
     }
 }
 
 fn main() -> ExitCode {
-    app::launch("soundrecorder", &mut SoundRecorderApp::new())
+    app::launch("soundrecorder", &mut SoundRecorderApp::from_env())
 }
 
 // ============================================================================
@@ -2408,7 +3972,6 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-
     #![allow(
         clippy::unwrap_used,
         clippy::expect_used,
@@ -2420,211 +3983,7 @@ mod tests {
 
     use super::*;
 
-    /// Unmeasured free space reads as unknown, not as full and not as plenty.
-    ///
-    /// The transport used to show `-01:26:48` beside the elapsed clock, which
-    /// is 1 GB divided by the bitrate -- a gigabyte nothing had looked up. It
-    /// is the number a person plans a session around: it says whether the take
-    /// will fit. `00:00:00` would have been just as wrong in the other
-    /// direction, saying the disk is about to fill.
-    #[test]
-    fn unmeasured_free_space_reads_as_unknown() {
-        let t = RecordingTimer::new(None, 192_000);
-        assert_eq!(t.remaining_secs(), None);
-        assert_eq!(t.format_remaining(), "--:--:--");
-
-        let app = SoundRecorderApp::new();
-        assert_eq!(
-            app.timer.remaining_secs(),
-            None,
-            "a fresh recorder knows the free space"
-        );
-
-        // And the countdown drops its minus sign: "-​--:--:--" reads as a
-        // negative duration rather than an absent one.
-        let drawn = t.render(
-            &Palette::from_settings(&appearance::AppearanceSettings::default()),
-            0.0,
-            0.0,
-        );
-        assert!(
-            drawn.iter().any(|c| matches!(
-                c,
-                RenderCommand::Text { text, .. } if text == "--:--:--"
-            )),
-            "the unknown figure did not reach the screen unadorned",
-        );
-    }
-
-    fn key_of(k: Key) -> KeyEvent {
-        KeyEvent {
-            key: k,
-            pressed: true,
-            modifiers: guitk::event::Modifiers::NONE,
-            text: String::new(),
-        }
-    }
-
-    /// **Every key the card advertises is answered by this window.**
-    ///
-    /// The recording state is set directly rather than reached by pressing
-    /// Space, and that is the finding rather than a convenience. There is no
-    /// input device in this tree, so `transition_to(Recording)` refuses and
-    /// Space from Idle answers nothing -- which is correct, and is what the
-    /// banner at the top of the window exists to explain. Every row on this
-    /// card is a key this program answers *once a take is running*, a state
-    /// the machine cannot enter. The keys are named anyway, for the same
-    /// reason `apps/screenrecorder`'s are: the note explains the situation
-    /// and the card explains the keyboard.
-    #[test]
-    fn every_advertised_key_does_something() {
-        for (label, what) in SHORTCUTS {
-            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
-                let answered = [false, true].into_iter().any(|recording| {
-                    let mut app = SoundRecorderApp::new();
-                    if recording {
-                        app.state = RecordingState::Recording;
-                    }
-                    app.handle_key(&key_of(stroke.key))
-                });
-                assert!(
-                    answered,
-                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
-                    stroke.key
-                );
-            }
-        }
-    }
-
-    /// **The card reaches the window, and nothing records behind it.**
-    #[test]
-    fn the_shortcut_list_reaches_the_window() {
-        let drawn = |app: &SoundRecorderApp| -> Vec<String> {
-            app.render_commands()
-                .iter()
-                .filter_map(|c| match c {
-                    RenderCommand::Text { text, .. } => Some(text.clone()),
-                    _ => None,
-                })
-                .collect()
-        };
-
-        let mut app = SoundRecorderApp::new();
-        assert!(
-            !drawn(&app).iter().any(|t| t.contains("F1 closes this")),
-            "the card is up before anybody asked for it"
-        );
-
-        app.handle_key(&key_of(Key::F1));
-        let missing = guitk::shortcut::missing_rows(&drawn(&app), SHORTCUTS);
-        assert!(missing.is_empty(), "{missing:?}");
-
-        // `S` and a running take, not Space and an idle one: Space cannot
-        // start a take on a machine with no input, so "the state did not
-        // change" would be satisfied by the card *and* by its absence.
-        app.state = RecordingState::Recording;
-        let state = app.state;
-        app.handle_key(&key_of(Key::S));
-        assert_eq!(
-            app.state, state,
-            "S stopped the take through the shortcut card"
-        );
-
-        app.handle_key(&key_of(Key::F1));
-        app.handle_key(&key_of(Key::S));
-        assert_ne!(
-            app.state, state,
-            "control: S does nothing even with the card down"
-        );
-    }
-
-    /// A take cannot be started, and the timer does not run.
-    ///
-    /// The defect this whole change exists for. `process_samples` is the door
-    /// audio comes in through and nothing in production calls it, so a take
-    /// captured nothing -- while `tick` advanced the clock, the auto-save
-    /// incremented its count, and the state read "Recording". Someone
-    /// recording an interview would have watched all three, stopped, and had
-    /// nothing, with no second chance at the event.
-    #[test]
-    fn a_take_cannot_be_started_without_an_input_and_no_clock_runs() {
-        let mut app = SoundRecorderApp::new();
-        assert!(app.input_devices.is_empty());
-
-        assert!(
-            !app.transition_to(RecordingState::Recording),
-            "a take began with nothing to capture from",
-        );
-        assert_ne!(app.state, RecordingState::Recording);
-
-        // The clock is the strongest false signal on the screen, so it is the
-        // one to pin: a minute of ticks must not move it.
-        for _ in 0..60 {
-            app.tick(1000);
-            assert!(
-                !app.check_auto_save(1000),
-                "auto-save fired for a take that never began"
-            );
-        }
-        assert_eq!(
-            app.timer.elapsed_ms, 0,
-            "the clock ran on a take that never began"
-        );
-        assert_eq!(
-            app.auto_save.save_count, 0,
-            "saves were counted that never happened"
-        );
-
-        let why = app
-            .blocked_reason
-            .clone()
-            .expect("refused and said nothing");
-        assert!(why.contains("No audio input"), "{why}");
-
-        // And it reaches the window. A press that changes nothing visible
-        // reads as a broken button -- the lesson netscan's Send button taught
-        // earlier the same day.
-        assert!(
-            app.render_commands().iter().any(|c| matches!(
-                c,
-                RenderCommand::Text { text, .. } if text == &why
-            )),
-            "the refusal never reached the screen",
-        );
-    }
-
-    /// And the window says so before the user presses anything.
-    ///
-    /// Drawn on the device list being empty rather than on a previous refusal,
-    /// because a message that appears only after the press has already let the
-    /// user believe the take began.
-    #[test]
-    fn the_window_says_it_cannot_record_before_record_is_pressed() {
-        let app = SoundRecorderApp::new();
-        let cmds = app.render_commands();
-        let texts: Vec<&str> = cmds
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        for line in CANNOT_RECORD_LINES {
-            assert!(texts.contains(&line), "the window never said {line:?}");
-        }
-        assert!(
-            CANNOT_RECORD_LINES
-                .iter()
-                .any(|l| l.contains("not a missing microphone")),
-            "nothing distinguishes an absent device from an absent capability",
-        );
-    }
-
-    // A test that overflows or indexes out of range should fail loudly and
-    // point at the line that did it — that is the diagnosis. The defensive
-    // lints exist to keep panics out of code that runs on a user's data.
-
-    // -- RecordingState tests ------------------------------------------------
+    // -- The take's model ------------------------------------------------------
 
     #[test]
     fn test_state_idle_transitions() {
@@ -2678,8 +4037,6 @@ mod tests {
         assert_ne!(paused, stopped);
     }
 
-    // -- SampleRate tests ----------------------------------------------------
-
     #[test]
     fn test_sample_rate_values() {
         assert_eq!(SampleRate::Hz8000.hz(), 8000);
@@ -2707,8 +4064,6 @@ mod tests {
             assert!(!rate.label().is_empty());
         }
     }
-
-    // -- QualityPreset tests -------------------------------------------------
 
     #[test]
     fn test_preset_voice() {
@@ -2747,8 +4102,6 @@ mod tests {
         assert_eq!(QualityPreset::all().len(), 3);
     }
 
-    // -- AudioInputDevice tests -----------------------------------------------
-
     #[test]
     fn test_mock_devices_not_empty() {
         let devices = AudioInputDevice::mock_devices();
@@ -2769,8 +4122,6 @@ mod tests {
             assert!(!ids[i + 1..].contains(id), "duplicate device id {id}");
         }
     }
-
-    // -- WavFile tests -------------------------------------------------------
 
     #[test]
     fn test_wav_new_empty() {
@@ -2817,41 +4168,6 @@ mod tests {
     }
 
     #[test]
-    fn test_wav_to_bytes_header() {
-        let wav = WavFile::new(44100, 1, 16);
-        let bytes = wav.to_bytes();
-        assert!(bytes.len() >= 44);
-        assert_eq!(&bytes[0..4], b"RIFF");
-        assert_eq!(&bytes[8..12], b"WAVE");
-        assert_eq!(&bytes[12..16], b"fmt ");
-        assert_eq!(&bytes[36..40], b"data");
-    }
-
-    #[test]
-    fn test_wav_roundtrip() {
-        let mut wav = WavFile::new(48000, 2, 16);
-        wav.push_samples(&[1000, -2000, 3000, -4000, 5000, -6000]);
-        let bytes = wav.to_bytes();
-        let parsed = WavFile::from_bytes(&bytes).expect("parse failed");
-        assert_eq!(parsed.sample_rate, 48000);
-        assert_eq!(parsed.channels, 2);
-        assert_eq!(parsed.bits_per_sample, 16);
-        assert_eq!(parsed.samples, wav.samples);
-    }
-
-    #[test]
-    fn test_wav_parse_invalid_too_short() {
-        assert!(WavFile::from_bytes(&[0; 10]).is_none());
-    }
-
-    #[test]
-    fn test_wav_parse_invalid_header() {
-        let mut data = vec![0u8; 44];
-        data[0..4].copy_from_slice(b"NOPE");
-        assert!(WavFile::from_bytes(&data).is_none());
-    }
-
-    #[test]
     fn test_wav_from_preset() {
         let wav = WavFile::from_preset(QualityPreset::Voice);
         assert_eq!(wav.sample_rate, 8000);
@@ -2870,8 +4186,6 @@ mod tests {
         let wav = WavFile::new(0, 1, 16);
         assert_eq!(wav.duration_secs(), 0.0);
     }
-
-    // -- WaveformDisplay tests -----------------------------------------------
 
     #[test]
     fn test_waveform_push_and_len() {
@@ -2923,8 +4237,6 @@ mod tests {
         let cmds = wf.render(&pal);
         assert!(!cmds.is_empty());
     }
-
-    // -- VuMeter tests -------------------------------------------------------
 
     #[test]
     fn test_vu_meter_initial_zero() {
@@ -2983,8 +4295,6 @@ mod tests {
         assert_eq!(VuMeter::level_color(0.95, &pal), pal.red);
     }
 
-    // -- RecordingTimer tests ------------------------------------------------
-
     #[test]
     fn test_timer_initial_zero() {
         let t = RecordingTimer::new(Some(1_000_000), 192000);
@@ -3038,8 +4348,6 @@ mod tests {
         let cmds = t.render(&pal, 0.0, 0.0);
         assert!(!cmds.is_empty());
     }
-
-    // -- MarkerList tests ----------------------------------------------------
 
     #[test]
     fn test_markers_empty() {
@@ -3107,8 +4415,6 @@ mod tests {
         let cmds = m.render(1000, 0.0, 0.0, 100.0, 50.0);
         assert!(!cmds.is_empty());
     }
-
-    // -- TrimRegion tests ----------------------------------------------------
 
     #[test]
     fn test_trim_full() {
@@ -3198,8 +4504,6 @@ mod tests {
         assert_eq!(cmds.len(), 4);
     }
 
-    // -- NoiseGate tests -----------------------------------------------------
-
     #[test]
     fn test_noise_gate_creation() {
         let ng = NoiseGate::new(0.05);
@@ -3262,8 +4566,6 @@ mod tests {
         let cmds = ng.render(&pal, 0.0, 0.0, 100.0);
         assert!(!cmds.is_empty());
     }
-
-    // -- PlaybackController tests --------------------------------------------
 
     #[test]
     fn test_playback_initial_state() {
@@ -3368,8 +4670,6 @@ mod tests {
         assert!(!cmds.is_empty());
     }
 
-    // -- AutoSave tests ------------------------------------------------------
-
     #[test]
     fn test_autosave_disabled() {
         let mut auto = AutoSave::new(0);
@@ -3400,159 +4700,6 @@ mod tests {
         auto.reset_timer();
         assert!(!auto.tick(2000)); // only 2s since reset, not 5
     }
-
-    // -- RecordingEntry tests ------------------------------------------------
-
-    #[test]
-    fn test_entry_format_duration() {
-        let e = RecordingEntry {
-            id: 0,
-            filename: "test.wav".into(),
-            path: "/test.wav".into(),
-            duration_secs: 125.0,
-            size_bytes: 0,
-            sample_rate: 48000,
-            channels: 2,
-            created_timestamp: 0,
-        };
-        assert_eq!(e.format_duration(), "02:05");
-    }
-
-    #[test]
-    fn test_entry_format_size_bytes() {
-        let e = RecordingEntry {
-            id: 0,
-            filename: "x".into(),
-            path: "x".into(),
-            duration_secs: 0.0,
-            size_bytes: 512,
-            sample_rate: 48000,
-            channels: 1,
-            created_timestamp: 0,
-        };
-        assert_eq!(e.format_size(), "512 B");
-    }
-
-    #[test]
-    fn test_entry_format_size_kb() {
-        let e = RecordingEntry {
-            id: 0,
-            filename: "x".into(),
-            path: "x".into(),
-            duration_secs: 0.0,
-            size_bytes: 2048,
-            sample_rate: 48000,
-            channels: 1,
-            created_timestamp: 0,
-        };
-        assert_eq!(e.format_size(), "2.0 KiB");
-    }
-
-    #[test]
-    fn test_entry_format_size_mb() {
-        let e = RecordingEntry {
-            id: 0,
-            filename: "x".into(),
-            path: "x".into(),
-            duration_secs: 0.0,
-            size_bytes: 5_242_880,
-            sample_rate: 48000,
-            channels: 1,
-            created_timestamp: 0,
-        };
-        assert_eq!(e.format_size(), "5.0 MiB");
-    }
-
-    // -- RecordingHistory tests ----------------------------------------------
-
-    #[test]
-    fn test_history_empty() {
-        let h = RecordingHistory::new();
-        assert!(h.is_empty());
-        assert_eq!(h.len(), 0);
-        assert!(h.selected_entry().is_none());
-    }
-
-    #[test]
-    fn test_history_add_and_get() {
-        let mut h = RecordingHistory::new();
-        let entry = RecordingEntry {
-            id: 0,
-            filename: "rec1.wav".into(),
-            path: "/rec1.wav".into(),
-            duration_secs: 10.0,
-            size_bytes: 1000,
-            sample_rate: 48000,
-            channels: 2,
-            created_timestamp: 0,
-        };
-        let id = h.add(entry);
-        assert_eq!(h.len(), 1);
-        assert!(h.get(id).is_some());
-    }
-
-    #[test]
-    fn test_history_remove() {
-        let mut h = RecordingHistory::new();
-        let entry = RecordingEntry {
-            id: 0,
-            filename: "x.wav".into(),
-            path: "/x.wav".into(),
-            duration_secs: 1.0,
-            size_bytes: 100,
-            sample_rate: 48000,
-            channels: 1,
-            created_timestamp: 0,
-        };
-        let id = h.add(entry);
-        assert!(h.remove(id));
-        assert!(h.is_empty());
-    }
-
-    #[test]
-    fn test_history_select_next_wrap() {
-        let mut h = RecordingHistory::new();
-        for i in 0..3 {
-            h.add(RecordingEntry {
-                id: 0,
-                filename: format!("rec{i}.wav"),
-                path: format!("/rec{i}.wav"),
-                duration_secs: 1.0,
-                size_bytes: 100,
-                sample_rate: 48000,
-                channels: 1,
-                created_timestamp: 0,
-            });
-        }
-        h.select_next(); // -> 0
-        h.select_next(); // -> 1
-        h.select_next(); // -> 2
-        h.select_next(); // -> wrap to 0
-        assert_eq!(h.selected, Some(0));
-    }
-
-    #[test]
-    fn test_history_select_prev() {
-        let mut h = RecordingHistory::new();
-        for i in 0..3 {
-            h.add(RecordingEntry {
-                id: 0,
-                filename: format!("rec{i}.wav"),
-                path: format!("/rec{i}.wav"),
-                duration_secs: 1.0,
-                size_bytes: 100,
-                sample_rate: 48000,
-                channels: 1,
-                created_timestamp: 0,
-            });
-        }
-        h.select_prev(); // None -> last (2)
-        assert_eq!(h.selected, Some(2));
-        h.select_prev(); // 2 -> 1
-        assert_eq!(h.selected, Some(1));
-    }
-
-    // -- SoundRecorderApp tests ----------------------------------------------
 
     #[test]
     fn test_app_creation() {
@@ -3632,32 +4779,6 @@ mod tests {
     }
 
     #[test]
-    fn test_app_stop_sets_trim() {
-        let mut app = SoundRecorderApp::with_mock_input();
-        app.transition_to(RecordingState::Recording);
-        app.process_samples(&[1000; 100]);
-        app.transition_to(RecordingState::Stopped);
-        assert!(app.trim.is_some());
-    }
-
-    #[test]
-    fn test_app_save_recording() {
-        let mut app = SoundRecorderApp::with_mock_input();
-        app.transition_to(RecordingState::Recording);
-        app.process_samples(&[1000; 100]);
-        app.transition_to(RecordingState::Stopped);
-        let id = app.save_recording("test.wav".into());
-        assert!(id.is_some());
-        assert_eq!(app.history.len(), 1);
-    }
-
-    #[test]
-    fn test_app_save_recording_idle_fails() {
-        let mut app = SoundRecorderApp::with_mock_input();
-        assert!(app.save_recording("test.wav".into()).is_none());
-    }
-
-    #[test]
     fn test_app_tick() {
         let mut app = SoundRecorderApp::with_mock_input();
         app.transition_to(RecordingState::Recording);
@@ -3670,24 +4791,6 @@ mod tests {
         let mut app = SoundRecorderApp::with_mock_input();
         app.tick(5000);
         assert_eq!(app.timer.elapsed_secs(), 0.0);
-    }
-
-    #[test]
-    fn test_app_render_produces_commands() {
-        let app = SoundRecorderApp::with_mock_input();
-        let cmds = app.render_commands();
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_app_render_stopped_has_playback() {
-        let mut app = SoundRecorderApp::with_mock_input();
-        app.transition_to(RecordingState::Recording);
-        app.process_samples(&[1000; 100]);
-        app.transition_to(RecordingState::Stopped);
-        let cmds = app.render_commands();
-        // Should have more commands due to playback bar + trim handles
-        assert!(cmds.len() > 10);
     }
 
     #[test]
@@ -3713,97 +4816,386 @@ mod tests {
         assert!(!app.check_auto_save(5000));
     }
 
-    // -- Events, and the parser they reach -----------------------------------
+    // -- The window, driven as a user drives it --------------------------------
 
-    fn key(k: Key) -> Event {
-        Event::Key(KeyEvent {
-            key: k,
-            pressed: true,
-            modifiers: guitk::event::Modifiers::NONE,
-            text: String::new(),
-        })
+    use guitk::probe::{self, Probe};
+
+    impl Probe for SoundRecorderApp {
+        type Target = Target;
+        type Outcome = EventResult;
+        const SIZE: (f32, f32) = (980.0, 640.0);
+
+        fn draw(&self, _size: (f32, f32)) -> Frame<Target> {
+            self.frame()
+        }
+
+        fn click_at(
+            &mut self,
+            x: f32,
+            y: f32,
+            button: MouseButton,
+            _size: (f32, f32),
+        ) -> EventResult {
+            self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }))
+        }
+
+        fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> EventResult {
+            self.handle_event(&Event::Key(key.clone()))
+        }
+
+        fn scroll_at(&mut self, x: f32, y: f32, dy: f32, _size: (f32, f32)) -> Option<EventResult> {
+            Some(self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })))
+        }
     }
 
-    /// Space is the transport: start, pause, resume.
+    fn mouse(app: &mut SoundRecorderApp, x: f32, y: f32, kind: MouseEventKind) -> EventResult {
+        app.handle_event(&Event::Mouse(MouseEvent { x, y, kind }))
+    }
+
+    fn texts(app: &SoundRecorderApp) -> Vec<String> {
+        app.frame()
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn key(k: Key) -> Event {
+        Event::Key(probe::press(k))
+    }
+
+    /// A directory for one test, removed when it ends.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("soundrecorder-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        /// A 16-bit WAV of a tone, `seconds` long, with `marks` as markers.
+        fn wav(
+            &self,
+            name: &str,
+            rate: u32,
+            channels: u16,
+            seconds: f32,
+            marks: &[(u32, &[u8])],
+        ) -> PathBuf {
+            let frames = (rate as f32 * seconds) as usize;
+            let mut samples = Vec::with_capacity(frames * usize::from(channels));
+            for i in 0..frames {
+                let v = (8_000.0 * (i as f32 * 0.05).sin()) as i16;
+                for _ in 0..channels {
+                    samples.push(v);
+                }
+            }
+            let bytes = wavpcm::encode_pcm16(rate, channels, &samples).unwrap();
+            let cues: Vec<wavpcm::Cue> = marks
+                .iter()
+                .map(|(frame, label)| wavpcm::Cue {
+                    frame: *frame,
+                    label: label.to_vec(),
+                })
+                .collect();
+            let bytes = wavpcm::with_cues(&bytes, &cues).unwrap();
+            let path = self.0.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            // Best effort: a leftover temporary directory is harmless.
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A recorder listing a folder of two recordings, the first open, with a
+    /// marker at a quarter of a second.
+    fn fixture(tag: &str) -> (Scratch, SoundRecorderApp) {
+        let dir = Scratch::new(tag);
+        let a = dir.wav("a.wav", 8_000, 1, 2.0, &[(2_000, b"intro")]);
+        dir.wav("b.wav", 8_000, 2, 1.0, &[]);
+        let mut app = SoundRecorderApp::new();
+        app.recordings_dir = Some(dir.0.clone());
+        app.rescan();
+        assert!(app.open_path(&a));
+        (dir, app)
+    }
+
+    /// The take model's clock and the free space it cannot measure.
     ///
-    /// This app had no event handling at all until 2026-09-03, so every one of
-    /// its transitions was exercised by tests calling `transition_to` directly
-    /// — which proves the state machine and says nothing about whether a
-    /// keystroke can reach it.
+    /// The transport used to show `-01:26:48` beside the elapsed clock, which
+    /// is 1 GB divided by the bitrate -- a gigabyte nothing had looked up.
+    #[test]
+    fn unmeasured_free_space_reads_as_unknown() {
+        let t = RecordingTimer::new(None, 192_000);
+        assert_eq!(t.remaining_secs(), None);
+        assert_eq!(t.format_remaining(), "--:--:--");
+        let app = SoundRecorderApp::new();
+        assert_eq!(app.timer.remaining_secs(), None);
+        let drawn = t.render(
+            &Palette::from_settings(&appearance::AppearanceSettings::default()),
+            0.0,
+            0.0,
+        );
+        assert!(drawn.iter().any(|c| matches!(
+            c,
+            RenderCommand::Text { text, .. } if text == "--:--:--"
+        )));
+    }
+
+    /// **Every key the card advertises is answered by this window**, with a
+    /// recording open and one in each panel.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [Panel::Library, Panel::Recording].into_iter().any(|panel| {
+                    let (_dir, mut app) = fixture("keys");
+                    app.panel = panel;
+                    app.chosen_entry = app.library.first().map(|e| e.path.clone());
+                    if let Some(open) = app.open.as_mut() {
+                        open.choose_marker(0);
+                        open.cursor = 4_000;
+                    }
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing records behind it.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = SoundRecorderApp::with_mock_input();
+        assert!(!texts(&app).iter().any(|t| t.contains("F1 closes this")));
+        app.handle_event(&key(Key::F1));
+        let missing = guitk::shortcut::missing_rows(&texts(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+        app.handle_event(&key(Key::Space));
+        assert_eq!(
+            app.state,
+            RecordingState::Idle,
+            "Space recorded through the card"
+        );
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&key(Key::Space));
+        assert_eq!(
+            app.state,
+            RecordingState::Recording,
+            "control: Space records with the card down"
+        );
+    }
+
+    /// A take cannot be started with nothing to record from, and no clock
+    /// runs: the defect behind all of this, a clock that climbed and an
+    /// auto-save that counted while nothing was captured.
+    #[test]
+    fn a_take_cannot_be_started_without_an_input_and_no_clock_runs() {
+        let mut app = SoundRecorderApp::new();
+        assert!(!app.transition_to(RecordingState::Recording));
+        assert_eq!(app.handle_event(&key(Key::Space)), EventResult::Consumed);
+        assert_eq!(app.state, RecordingState::Idle);
+        for _ in 0..60 {
+            app.tick(1000);
+            assert!(!app.check_auto_save(1000));
+        }
+        assert_eq!(app.timer.elapsed_ms, 0);
+        assert_eq!(app.auto_save.save_count, 0);
+        let why = app
+            .blocked_reason
+            .clone()
+            .expect("refused and said nothing");
+        assert_eq!(why, CANNOT_RECORD);
+        assert!(
+            texts(&app).contains(&why),
+            "the refusal never reached the screen"
+        );
+    }
+
+    /// And the window says so before anything is pressed, distinguishing a
+    /// program that cannot from a machine without a microphone.
+    #[test]
+    fn the_window_says_it_cannot_record_before_record_is_pressed() {
+        let drawn = texts(&SoundRecorderApp::new());
+        for line in NO_AUDIO_LINES {
+            assert!(
+                drawn.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
+        }
+        assert!(
+            NO_AUDIO_LINES
+                .iter()
+                .any(|l| l.contains("Not a missing microphone"))
+        );
+        assert!(
+            !texts(&SoundRecorderApp::with_mock_input())
+                .iter()
+                .any(|t| t == NO_AUDIO_LINES[0]),
+            "with an input the notice goes"
+        );
+    }
+
+    /// Play says why it cannot, by key and by press: a button that does
+    /// nothing visible reads as broken.
+    #[test]
+    fn play_says_why_it_cannot() {
+        let mut app = SoundRecorderApp::new();
+        assert_eq!(app.handle_event(&key(Key::P)), EventResult::Consumed);
+        assert_eq!(app.blocked_reason.as_deref(), Some(CANNOT_PLAY));
+        let mut app = SoundRecorderApp::new();
+        probe::click(&mut app, Target::Play);
+        assert_eq!(app.blocked_reason.as_deref(), Some(CANNOT_PLAY));
+        assert!(texts(&app).iter().any(|t| t == CANNOT_PLAY));
+    }
+
+    /// Space is the take's transport: start, pause, resume.
     #[test]
     fn space_starts_pauses_and_resumes() {
         let mut app = SoundRecorderApp::with_mock_input();
-        assert_eq!(app.state, RecordingState::Idle);
-        assert!(app.handle_event(&key(Key::Space)));
-        assert_eq!(app.state, RecordingState::Recording);
-        assert!(app.handle_event(&key(Key::Space)));
-        assert_eq!(app.state, RecordingState::Paused);
-        assert!(app.handle_event(&key(Key::Space)));
-        assert_eq!(app.state, RecordingState::Recording);
+        for want in [
+            RecordingState::Recording,
+            RecordingState::Paused,
+            RecordingState::Recording,
+        ] {
+            assert_eq!(app.handle_event(&key(Key::Space)), EventResult::Consumed);
+            assert_eq!(app.state, want);
+        }
     }
 
-    /// Stop is its own key, because it is the destructive one.
-    ///
-    /// A single key that pauses or ends depending on state is how a take gets
-    /// lost: the user means "hold on a moment" and the app hears "finish".
+    /// Stop ends the take and saves it -- samples as captured, markers as the
+    /// file's own -- as a new file in the recordings folder, which it lists
+    /// and opens; a second take in the same second gets a name of its own.
     #[test]
-    fn stop_is_a_separate_key_from_pause() {
+    fn stop_saves_the_take_and_opens_it() {
+        let dir = Scratch::new("take");
+        let mut app = SoundRecorderApp::with_mock_input();
+        let folder = dir.0.join("Recordings");
+        app.recordings_dir = Some(folder.clone());
+        // Somebody's files already hold the names a take made in the next
+        // few seconds would take: the take goes beside them, not over them.
+        std::fs::create_dir_all(&folder).unwrap();
+        let now = SystemTime::now();
+        let theirs: Vec<PathBuf> = (0..3)
+            .map(|s| folder.join(format!("{}.wav", take_name(now + Duration::from_secs(s)))))
+            .collect();
+        for path in &theirs {
+            std::fs::write(path, b"somebody's").unwrap();
+        }
+        app.handle_event(&key(Key::Space));
+        // Loud enough to open the noise gate, which zeroes what is quieter.
+        let samples: Vec<i16> = (0..4_410).map(|i| 1_000 + (i % 300) as i16).collect();
+        app.process_samples(&samples);
+        app.handle_event(&key(Key::M));
+        app.process_samples(&samples);
+        assert_eq!(app.handle_event(&key(Key::S)), EventResult::Consumed);
+        assert_eq!(app.state, RecordingState::Idle);
+        let open = app.open.as_ref().expect("the take was not opened");
+        assert!(open.name.starts_with("Recording "), "{}", open.name);
+        assert!(open.name.ends_with(" (2).wav"), "{}", open.name);
+        for path in &theirs {
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                b"somebody's",
+                "a take replaced {}",
+                path.display()
+            );
+        }
+        let bytes = std::fs::read(&open.path).unwrap();
+        let info = wavpcm::parse_header(&bytes).unwrap();
+        assert_eq!((info.sample_rate, info.channels), (44_100, 2));
+        let stored: Vec<i16> = bytes[info.data_offset..info.data_offset + info.data_len]
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let mut both = samples.clone();
+        both.extend_from_slice(&samples);
+        assert_eq!(stored, both, "the take was not stored as captured");
+        let cues = wavpcm::cues(&bytes).unwrap();
+        assert_eq!(
+            cues,
+            vec![wavpcm::Cue {
+                frame: 2_205,
+                label: b"Marker 1".to_vec()
+            }]
+        );
+        assert_eq!(app.library.len(), 4, "the take and the three already there");
+        let first = open.path.clone();
+        // Another take, the same second: never over the first.
+        app.handle_event(&key(Key::Space));
+        app.process_samples(&samples);
+        app.handle_event(&key(Key::S));
+        let second = app.open.as_ref().unwrap().path.clone();
+        assert_ne!(second, first);
+        assert_eq!(
+            std::fs::read(&first).unwrap(),
+            bytes,
+            "the first take was written over"
+        );
+        assert_eq!(app.library.len(), 5);
+    }
+
+    /// With nowhere to save, Stop keeps the take and says so, and a second
+    /// Stop can try again.
+    #[test]
+    fn a_take_that_cannot_be_saved_is_kept() {
         let mut app = SoundRecorderApp::with_mock_input();
         app.handle_event(&key(Key::Space));
-        assert_eq!(app.state, RecordingState::Recording);
-        assert!(app.handle_event(&key(Key::S)));
-        assert_eq!(app.state, RecordingState::Stopped);
+        app.process_samples(&[100; 64]);
+        app.handle_event(&key(Key::S));
+        assert_eq!(app.state, RecordingState::Paused);
+        assert_eq!(app.wav.samples.len(), 64);
+        assert!(app.status_line.contains("not saved"), "{}", app.status_line);
     }
 
     /// The clock is asked for only while recording.
-    ///
-    /// Both halves matter. `None` while recording ships a recorder whose
-    /// elapsed time never advances and whose auto-save never fires, with its
-    /// tests still green. `Some` while idle wakes the machine ten times a
-    /// second to call a `tick` that returns immediately.
     #[test]
     fn the_recorder_asks_for_a_clock_only_while_recording() {
+        let dir = Scratch::new("clock");
         let mut app = SoundRecorderApp::with_mock_input();
-        assert_eq!(
-            app.tick_interval(),
-            None,
-            "an idle recorder must let the desktop park"
-        );
+        app.recordings_dir = Some(dir.0.clone());
+        assert_eq!(app.tick_interval(), None);
         app.handle_event(&key(Key::Space));
         assert_eq!(app.tick_interval(), Some(Duration::from_millis(100)));
         app.handle_event(&key(Key::S));
-        assert_eq!(
-            app.tick_interval(),
-            None,
-            "a stopped recorder must park too"
-        );
+        assert_eq!(app.tick_interval(), None);
     }
 
     /// Elapsed time follows the milliseconds delivered, not the tick count.
-    ///
-    /// The interval is a floor: a busy frame delivers one long tick where a
-    /// quiet one delivers two short ones. A recorder that counted ticks would
-    /// report a duration that drifts from the audio it captured, which is the
-    /// one number a recording has to get right.
     #[test]
     fn elapsed_time_follows_milliseconds_and_not_tick_count() {
         let mut app = SoundRecorderApp::with_mock_input();
         app.handle_event(&key(Key::Space));
-
         for _ in 0..3 {
             app.handle_event(&Event::Tick { elapsed_ms: 100 });
         }
-        let after_three_short = app.timer.elapsed_secs();
-
         let mut other = SoundRecorderApp::with_mock_input();
         other.handle_event(&key(Key::Space));
         other.handle_event(&Event::Tick { elapsed_ms: 300 });
-
-        assert_eq!(
-            after_three_short,
-            other.timer.elapsed_secs(),
-            "three 100ms ticks and one 300ms tick must agree"
-        );
+        assert_eq!(app.timer.elapsed_secs(), other.timer.elapsed_secs());
     }
 
     /// A paused recorder does not accumulate time.
@@ -3813,77 +5205,427 @@ mod tests {
         app.handle_event(&key(Key::Space));
         app.handle_event(&Event::Tick { elapsed_ms: 500 });
         let while_recording = app.timer.elapsed_secs();
-        app.handle_event(&key(Key::Space)); // pause
+        app.handle_event(&key(Key::Space));
         app.handle_event(&Event::Tick { elapsed_ms: 500 });
+        assert_eq!(app.timer.elapsed_secs(), while_recording);
+    }
+
+    /// The take's WAV is its samples exactly and its markers.
+    #[test]
+    fn the_take_is_stored_as_it_was_captured() {
+        let mut wav = WavFile::new(8_000, 1, 16);
+        wav.push_samples(&[i16::MIN, -1, 0, 1, i16::MAX]);
+        let mut marks = MarkerList::new();
+        marks.add(3, String::from("here"));
+        let bytes = wav.to_wav(&marks).unwrap();
+        let info = wavpcm::parse_header(&bytes).unwrap();
+        assert_eq!(info.frames, 5);
         assert_eq!(
-            app.timer.elapsed_secs(),
-            while_recording,
-            "a paused recorder counted time"
+            &bytes[info.data_offset..info.data_offset + 10],
+            &[0x00, 0x80, 0xFF, 0xFF, 0, 0, 1, 0, 0xFF, 0x7F]
         );
+        assert_eq!(wavpcm::cues(&bytes).unwrap()[0].label, b"here");
     }
 
-    /// No prefix of a WAV header panics the parser.
-    ///
-    /// Every read in `WavFile::from_bytes` was a bare `data[i]`, safe on the
-    /// strength of a single `data.len() < 44` twenty lines above the last of
-    /// them. They are all `get` now, and this is the sweep that says so: a
-    /// missed bound shows up only at the length that reaches it, so sampling
-    /// would not find one.
+    /// The folder is listed with each file's real length and format; what is
+    /// not a WAV this reads says why; what is not a WAV at all is left out;
+    /// and a file past the megabyte read for its header has its whole length.
     #[test]
-    fn no_prefix_of_a_wav_header_panics_the_parser() {
-        let mut wav = Vec::new();
-        wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&100u32.to_le_bytes());
-        wav.extend_from_slice(b"WAVEfmt ");
-        wav.extend_from_slice(&16u32.to_le_bytes());
-        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
-        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
-        wav.extend_from_slice(&44_100u32.to_le_bytes());
-        wav.extend_from_slice(&88_200u32.to_le_bytes());
-        wav.extend_from_slice(&2u16.to_le_bytes());
-        wav.extend_from_slice(&16u16.to_le_bytes());
-        wav.extend_from_slice(b"data");
-        wav.extend_from_slice(&8u32.to_le_bytes());
-        wav.extend_from_slice(&[0u8; 8]);
-
-        for len in 0..=wav.len() {
-            let _ = WavFile::from_bytes(wav.get(..len).unwrap_or(&[]));
-        }
-        // The whole thing still parses, or the fixture is not a WAV and the
-        // sweep above proved nothing.
+    fn the_folder_lists_its_recordings_as_they_are() {
+        let dir = Scratch::new("list");
+        dir.wav("b.WAV", 8_000, 2, 1.0, &[]);
+        dir.wav("a.wav", 8_000, 1, 2.0, &[]);
+        dir.wav("long.wav", 8_000, 1, 70.0, &[]);
+        std::fs::write(dir.0.join("broken.wav"), b"not a riff at all").unwrap();
+        std::fs::write(dir.0.join("notes.txt"), b"hello").unwrap();
+        let mut app = SoundRecorderApp::new();
+        app.recordings_dir = Some(dir.0.clone());
+        app.rescan();
+        let names: Vec<&str> = app.library.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["a.wav", "b.WAV", "broken.wav", "long.wav"]);
+        let summary = |i: usize| app.library[i].summary();
+        assert!(summary(0).starts_with("0:02.0"), "{}", summary(0));
+        assert!(summary(0).contains("8 kHz mono, 16-bit"), "{}", summary(0));
+        assert!(summary(1).contains("stereo"), "{}", summary(1));
+        assert!(summary(2).starts_with("Will not open: "), "{}", summary(2));
+        assert!(summary(3).starts_with("1:10.0"), "{}", summary(3));
+        assert!(app.library_note.is_none());
+        let drawn = texts(&app);
+        assert!(drawn.iter().any(|t| t == &summary(3)));
+        // A folder that is not there yet says the first take will make it.
+        app.recordings_dir = Some(dir.0.join("missing"));
+        app.rescan();
+        assert!(app.library.is_empty());
         assert!(
-            WavFile::from_bytes(&wav).is_some(),
-            "the fixture is not a valid WAV"
+            app.library_note
+                .as_deref()
+                .unwrap()
+                .contains("does not exist yet")
         );
     }
 
-    /// A WAV claiming more data than it carries is refused, not sliced.
+    /// A recording opens as its whole waveform, drawn from its samples.
     #[test]
-    fn a_wav_that_lies_about_its_length_is_refused() {
-        let mut wav = Vec::new();
-        wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&100u32.to_le_bytes());
-        wav.extend_from_slice(b"WAVEfmt ");
-        wav.extend_from_slice(&16u32.to_le_bytes());
-        wav.extend_from_slice(&1u16.to_le_bytes());
-        wav.extend_from_slice(&1u16.to_le_bytes());
-        wav.extend_from_slice(&44_100u32.to_le_bytes());
-        wav.extend_from_slice(&88_200u32.to_le_bytes());
-        wav.extend_from_slice(&2u16.to_le_bytes());
-        wav.extend_from_slice(&16u16.to_le_bytes());
-        wav.extend_from_slice(b"data");
-        wav.extend_from_slice(&u32::MAX.to_le_bytes()); // claims 4 GB
-        wav.extend_from_slice(&[0u8; 8]);
-        assert!(WavFile::from_bytes(&wav).is_none());
+    fn a_recording_opens_as_its_whole_waveform() {
+        let (_dir, app) = fixture("open");
+        let open = app.open.as_ref().unwrap();
+        assert_eq!(open.peaks.len(), PEAK_COLUMNS);
+        assert!(
+            open.peaks.iter().any(|p| p.high > 0.2),
+            "the tone is not in the peaks"
+        );
+        assert_eq!(open.markers.len(), 1);
+        assert_eq!(app.panel, Panel::Recording);
+        let drawn = texts(&app);
+        assert!(drawn.iter().any(|t| t == "a.wav"));
+        assert!(
+            drawn.iter().any(|t| t == "intro"),
+            "the file's marker is not drawn"
+        );
+        let wave = probe::rect_of(&app, Target::Waveform).unwrap();
+        let bars = app
+            .frame()
+            .commands()
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::FillRect { width, x, .. } if *width == 1.0 && *x >= wave.x && *x < wave.x + wave.w))
+            .count();
+        assert!(
+            bars as f32 >= wave.w - 1.0,
+            "{bars} columns in {} px",
+            wave.w
+        );
     }
 
-    // -- Following the user's theme -------------------------------------------
+    /// The cursor keys: tenths, seconds, the ends, the markers.
+    #[test]
+    fn the_cursor_moves_by_the_keys() {
+        let (_dir, mut app) = fixture("cursor");
+        let at = |app: &SoundRecorderApp| app.open.as_ref().unwrap().cursor;
+        app.handle_event(&key(Key::Right));
+        assert_eq!(at(&app), 800);
+        app.handle_event(&Event::Key(probe::shift(Key::Right)));
+        assert_eq!(at(&app), 8_800);
+        app.handle_event(&key(Key::End));
+        assert_eq!(at(&app), 16_000);
+        app.handle_event(&Event::Key(probe::shift(Key::Right)));
+        assert_eq!(at(&app), 16_000, "past the end");
+        app.handle_event(&Event::Key(probe::ctrl(Key::Left)));
+        assert_eq!(at(&app), 2_000, "to the marker before");
+        assert_eq!(app.open.as_ref().unwrap().chosen_marker, Some(0));
+        app.handle_event(&key(Key::Home));
+        assert_eq!(at(&app), 0);
+        app.handle_event(&key(Key::Left));
+        assert_eq!(at(&app), 0, "past the start");
+    }
 
-    /// The window draws in the user's colours rather than in constants of its
+    /// Markers are put down, named, taken away and saved into the file --
+    /// the same samples, the markers the only change.
+    #[test]
+    fn markers_are_named_removed_and_saved_into_the_file() {
+        let (_dir, mut app) = fixture("markers");
+        let path = app.open.as_ref().unwrap().path.clone();
+        let before = wavpcm::decode(&std::fs::read(&path).unwrap()).unwrap();
+        app.handle_event(&key(Key::End));
+        app.handle_event(&key(Key::M));
+        assert!(app.open.as_ref().unwrap().markers_changed);
+        assert!(texts(&app).iter().any(|t| t == "Markers not saved"));
+        app.handle_event(&key(Key::F2));
+        assert!(app.rename.is_some());
+        probe::type_str(&mut app, "Outro");
+        app.handle_event(&key(Key::Enter));
+        assert!(app.rename.is_none());
+        app.handle_event(&Event::Key(probe::ctrl(Key::S)));
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            wavpcm::cues(&bytes).unwrap(),
+            vec![
+                wavpcm::Cue {
+                    frame: 2_000,
+                    label: b"intro".to_vec()
+                },
+                wavpcm::Cue {
+                    frame: 16_000,
+                    label: b"Outro".to_vec()
+                },
+            ]
+        );
+        assert_eq!(
+            wavpcm::decode(&bytes).unwrap(),
+            before,
+            "the samples changed"
+        );
+        assert!(!app.open.as_ref().unwrap().markers_changed);
+        // Delete takes the chosen one away; saved again, the file agrees.
+        app.handle_event(&key(Key::Delete));
+        app.handle_event(&Event::Key(probe::ctrl(Key::S)));
+        assert_eq!(
+            wavpcm::cues(&std::fs::read(&path).unwrap()).unwrap().len(),
+            1
+        );
+        // A marker before the others takes its place in frame order.
+        app.handle_event(&key(Key::Home));
+        app.handle_event(&key(Key::M));
+        let open = app.open.as_ref().unwrap();
+        assert_eq!(open.markers[0].frame, 0);
+        assert_eq!(open.chosen_marker, Some(0));
+    }
+
+    /// A file another program wrote since it was opened is not written over
+    /// by a save of markers made against the old one.
+    #[test]
+    fn markers_are_not_saved_over_a_file_changed_on_disk() {
+        let (dir, mut app) = fixture("stale");
+        let path = app.open.as_ref().unwrap().path.clone();
+        std::thread::sleep(Duration::from_millis(20));
+        let replacement = std::fs::read(dir.wav("other.wav", 8_000, 1, 0.5, &[])).unwrap();
+        std::fs::write(&path, &replacement).unwrap();
+        app.handle_event(&key(Key::M));
+        assert!(!app.save_markers());
+        assert!(
+            app.status_line.contains("changed on disk"),
+            "{}",
+            app.status_line
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), replacement);
+    }
+
+    /// The kept part goes to a new file, its samples copied as stored, and
+    /// never over the recording itself.
+    #[test]
+    fn the_kept_part_is_saved_as_a_file_of_its_own() {
+        let (dir, mut app) = fixture("kept");
+        let path = app.open.as_ref().unwrap().path.clone();
+        let original = std::fs::read(&path).unwrap();
+        app.handle_event(&Event::Key(probe::shift(Key::Right)));
+        app.handle_event(&key(Key::LeftBracket));
+        app.handle_event(&key(Key::Right));
+        app.handle_event(&key(Key::Right));
+        app.handle_event(&key(Key::RightBracket));
+        let kept = app.open.as_ref().unwrap().kept.clone();
+        assert_eq!((kept.start_frame, kept.end_frame), (8_000, 9_600));
+        // A marker not yet saved into the recording still goes with the part.
+        app.handle_event(&key(Key::Left));
+        app.handle_event(&key(Key::M));
+        app.picker_for = PickerFor::SaveKept;
+        let part = dir.0.join("part.wav");
+        app.picked(&part);
+        let bytes = std::fs::read(&part).unwrap();
+        let info = wavpcm::parse_header(&bytes).unwrap();
+        assert_eq!(info.frames, 1_600);
+        assert_eq!(
+            wavpcm::cues(&bytes).unwrap(),
+            vec![wavpcm::Cue {
+                frame: 800,
+                label: b"Marker 1".to_vec()
+            }],
+            "the part's markers are the ones inside it, moved to its start"
+        );
+        let src = wavpcm::parse_header(&original).unwrap();
+        assert_eq!(
+            &bytes[info.data_offset..info.data_offset + info.data_len],
+            &original[src.data_offset + 16_000..src.data_offset + 19_200]
+        );
+        assert!(
+            app.library.iter().any(|e| e.path == part),
+            "the new file is not listed"
+        );
+        // Over the recording itself: refused, and the recording untouched.
+        app.picked(&path);
+        assert!(app.status_line.contains("itself"), "{}", app.status_line);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        app.handle_event(&Event::Key(probe::ctrl(Key::A)));
+        assert!(app.open.as_ref().unwrap().kept.is_full());
+    }
+
+    /// Unsaved markers are not left behind by one press on another file: the
+    /// first asks, the second goes.
+    #[test]
+    fn unsaved_markers_are_not_left_by_a_single_press() {
+        let (_dir, mut app) = fixture("leave");
+        app.handle_event(&key(Key::End));
+        app.handle_event(&key(Key::M));
+        probe::click(&mut app, Target::LibraryRow(1));
+        assert_eq!(app.open.as_ref().unwrap().name, "a.wav");
+        assert!(app.status_line.contains("not saved"), "{}", app.status_line);
+        probe::click(&mut app, Target::LibraryRow(1));
+        assert_eq!(app.open.as_ref().unwrap().name, "b.wav");
+    }
+
+    /// A marker name that is not UTF-8 is shown escaped, and kept as its
+    /// bytes when the file's markers are saved again.
+    #[test]
+    fn a_marker_name_that_is_not_utf8_is_shown_and_kept() {
+        let dir = Scratch::new("bytes");
+        let path = dir.wav("x.wav", 8_000, 1, 1.0, &[(10, b"\xE9t\xE9")]);
+        let mut app = SoundRecorderApp::new();
+        assert!(app.open_path(&path));
+        assert!(texts(&app).iter().any(|t| t == "\\xE9t\\xE9"));
+        app.handle_event(&key(Key::End));
+        app.handle_event(&key(Key::M));
+        app.handle_event(&Event::Key(probe::ctrl(Key::S)));
+        let cues = wavpcm::cues(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(cues[0].label, b"\xE9t\xE9");
+    }
+
+    /// Every control answers the pointer.
+    #[test]
+    fn every_control_answers_the_pointer() {
+        let (_dir, mut app) = fixture("pointer");
+        probe::click(&mut app, Target::OpenFile);
+        assert!(app.picker.is_open() && app.picker_for == PickerFor::Open);
+        app.picker.close();
+        probe::click(&mut app, Target::ChooseFolder);
+        assert!(app.picker.is_open() && app.picker_for == PickerFor::Folder);
+        app.picker.close();
+        assert_eq!(
+            probe::click(&mut app, Target::Refresh),
+            EventResult::Consumed
+        );
+        probe::click(&mut app, Target::LibraryRow(1));
+        assert_eq!(app.open.as_ref().unwrap().name, "b.wav");
+        probe::click(&mut app, Target::LibraryRow(0));
+        assert_eq!(app.open.as_ref().unwrap().name, "a.wav");
+        probe::click(&mut app, Target::Waveform);
+        let mid = app.open.as_ref().unwrap().cursor;
+        assert!(
+            (7_900..=8_100).contains(&mid),
+            "the press put the cursor at {mid}"
+        );
+        probe::click(&mut app, Target::AddMarker);
+        assert_eq!(app.open.as_ref().unwrap().markers.len(), 2);
+        probe::click(&mut app, Target::MarkerRow(0));
+        assert_eq!(app.open.as_ref().unwrap().cursor, 2_000);
+        probe::click(&mut app, Target::RenameMarker);
+        assert!(app.rename.is_some());
+        probe::click(&mut app, Target::RemoveMarker);
+        assert!(
+            app.rename.is_none(),
+            "a press elsewhere keeps the name and ends the field"
+        );
+        assert_eq!(app.open.as_ref().unwrap().markers.len(), 1);
+        probe::click(&mut app, Target::MarkerRow(0));
+        probe::click(&mut app, Target::KeepTo);
+        probe::click(&mut app, Target::Waveform);
+        probe::click(&mut app, Target::KeepFrom);
+        let kept = app.open.as_ref().unwrap().kept.clone();
+        assert!(!kept.is_full());
+        probe::click(&mut app, Target::KeepAll);
+        assert!(app.open.as_ref().unwrap().kept.is_full());
+        probe::click(&mut app, Target::SaveMarkers);
+        assert!(!app.open.as_ref().unwrap().markers_changed);
+        assert!(
+            probe::rect_of(&app, Target::SaveMarkers).is_none(),
+            "nothing left to save"
+        );
+        probe::click(&mut app, Target::SaveKept);
+        assert!(app.picker.is_open() && app.picker_for == PickerFor::SaveKept);
+        app.picker.close();
+        probe::click(&mut app, Target::Record);
+        assert_eq!(app.blocked_reason.as_deref(), Some(CANNOT_RECORD));
+        probe::click(&mut app, Target::Help);
+        assert!(app.show_help);
+        probe::click(&mut app, Target::HelpCard);
+        assert!(!app.show_help);
+        probe::click(&mut app, Target::Panel(Panel::Library));
+        assert_eq!(app.panel, Panel::Library);
+    }
+
+    /// A drag on the waveform moves the cursor, a marker, or a handle of the
+    /// kept stretch; a release ends it.
+    #[test]
+    fn the_waveform_is_dragged() {
+        let (_dir, mut app) = fixture("drag");
+        let wave = probe::rect_of(&app, Target::Waveform).unwrap();
+        let x_of = |f: u64| frame_x(wave, f, 16_000);
+        let y = wave.y + wave.h / 2.0;
+        // The marker at 2,000: chosen by the press, moved by the drag.
+        mouse(
+            &mut app,
+            x_of(2_000),
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        assert_eq!(app.open.as_ref().unwrap().chosen_marker, Some(0));
+        mouse(&mut app, x_of(2_000) + 1.0, y, MouseEventKind::Move);
+        assert_eq!(
+            app.open.as_ref().unwrap().markers[0].frame,
+            2_000,
+            "a shake moved it"
+        );
+        mouse(&mut app, x_of(6_000), y, MouseEventKind::Move);
+        let moved = app.open.as_ref().unwrap().markers[0].frame;
+        assert!((5_950..=6_050).contains(&moved), "{moved}");
+        mouse(
+            &mut app,
+            x_of(6_000),
+            y,
+            MouseEventKind::Release(MouseButton::Left),
+        );
+        mouse(&mut app, x_of(9_000), y, MouseEventKind::Move);
+        assert_eq!(
+            app.open.as_ref().unwrap().markers[0].frame,
+            moved,
+            "the drag outlived the release"
+        );
+        // The kept stretch's start handle, from 0.
+        mouse(
+            &mut app,
+            wave.x + 1.0,
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        mouse(&mut app, x_of(4_000), y, MouseEventKind::Move);
+        mouse(
+            &mut app,
+            x_of(4_000),
+            y,
+            MouseEventKind::Release(MouseButton::Left),
+        );
+        let start = app.open.as_ref().unwrap().kept.start_frame;
+        assert!((3_950..=4_050).contains(&start), "{start}");
+        // Anywhere else the cursor follows.
+        mouse(
+            &mut app,
+            x_of(10_000),
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        mouse(&mut app, x_of(12_000), y, MouseEventKind::Move);
+        let cursor = app.open.as_ref().unwrap().cursor;
+        assert!((11_950..=12_050).contains(&cursor), "{cursor}");
+    }
+
+    /// The recordings list scrolls under the wheel and follows the keys.
+    #[test]
+    fn the_list_scrolls_and_follows_the_keys() {
+        let dir = Scratch::new("scroll");
+        for i in 0..40 {
+            dir.wav(&format!("take{i:02}.wav"), 8_000, 1, 0.01, &[]);
+        }
+        let mut app = SoundRecorderApp::new();
+        app.recordings_dir = Some(dir.0.clone());
+        app.rescan();
+        let (_, rows) = app.library_pane();
+        assert!(rows < 40);
+        for _ in 0..30 {
+            probe::scroll_at_point(&mut app, Target::LibraryList, -3.0);
+        }
+        assert_eq!(app.library_scroll, 40 - rows);
+        app.render(app.window_width, app.window_height);
+        assert_eq!(app.library_scroll, 40 - rows, "a frame moved the list");
+        app.panel = Panel::Library;
+        app.handle_event(&key(Key::Down));
+        assert_eq!(
+            app.chosen_entry.as_deref(),
+            Some(dir.0.join("take00.wav").as_path())
+        );
+        assert_eq!(app.library_scroll, 0, "the choice was left off screen");
+        app.handle_event(&key(Key::Enter));
+        assert_eq!(app.open.as_ref().unwrap().name, "take00.wav");
+    }
+
+    /// The window draws in the user's colours rather than constants of its
     /// own.
-    ///
-    /// Asserted on the rectangles emitted, not on the `palette` field: a field
-    /// that was assigned proves nothing a user would see.
     #[test]
     fn the_window_draws_in_the_theme_it_is_given() {
         fn theme(
@@ -3896,20 +5638,7 @@ mod tests {
                 ..appearance::AppearanceSettings::default()
             })
         }
-
-        // Named explicitly rather than relied on from the file's own imports.
-        // The sixteen applications that declare their palette inside a
-        // `mod mocha` block import `Color` *there*, so it is not in scope at
-        // file level at all -- and once the module is emptied and removed, the
-        // import goes with it.
-        use guitk::Color;
-
         fn fills(app: &mut SoundRecorderApp) -> Vec<Color> {
-            // Fully qualified. Several applications also have an *inherent*
-            // `render`, with different arguments, and an inherent method wins
-            // resolution over a trait one -- so `app.render(&pal, w, h)` calls the
-            // wrong function and fails to compile in a way that looks like the
-            // trait is missing.
             oswindow::app::App::render(app, 800.0, 600.0)
                 .commands
                 .iter()
@@ -3919,24 +5648,14 @@ mod tests {
                 })
                 .collect()
         }
-
-        let mut app = SoundRecorderApp::with_mock_input();
-
+        let mut app = SoundRecorderApp::new();
         oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);
-        assert!(!dark.is_empty(), "the window drew no filled rectangles");
-
+        assert!(!dark.is_empty());
         oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Light, None));
         let light = fills(&mut app);
         assert_eq!(dark.len(), light.len(), "the theme changed the layout");
-        assert_ne!(
-            dark, light,
-            "the window drew identically on the dark and light themes, so it \
-             is still painting from constants"
-        );
-
-        // High contrast is the case a hardcoded palette fails silently: the
-        // user asks for maximum legibility and this window alone ignores them.
+        assert_ne!(dark, light);
         oswindow::app::App::theme_changed(
             &mut app,
             &theme(
@@ -3944,10 +5663,6 @@ mod tests {
                 Some(appearance::HighContrastScheme::WhiteOnBlack),
             ),
         );
-        assert_ne!(
-            dark,
-            fills(&mut app),
-            "high contrast reached every other surface but not this window"
-        );
+        assert_ne!(dark, fills(&mut app));
     }
 }

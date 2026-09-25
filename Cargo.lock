@@ -2730,6 +2730,8 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "safeio",
+ "wavpcm",
 ]
 
 [[package]]

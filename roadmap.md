@@ -1861,8 +1861,12 @@ word; text inside them that says "lane C" is history.
   files and folders added, jobs on a worker thread that can be cancelled,
   every setting changeable, outputs that never replace a file, and real
   conversions: WAV to WAV and PNG or JPEG to BMP, through the new
-  `apps/wavpcm`).
-  **Next:** soundrecorder (onto `wavpcm`), email — then the rest. (`reminders` was
+  `apps/wavpcm`), `soundrecorder` (2026-09-25 — every control; the recordings
+  folder listed, any WAV opened as its whole waveform, markers saved into the
+  file, a kept part saved as a new one, and a take saved and opened on Stop;
+  recording and playing wait on `known-issues.md` → `[E] Applications can
+  neither record nor play sound`).
+  **Next:** email, metronome — then tmux and pinball. (`reminders` was
   examined 2026-09-18: keyboard-driven by design, its two gaps fixed.)
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
@@ -7704,7 +7708,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Clipboard manager (apps/clipmanager: 500-entry history, dedup, search, type/tag filters, pin, templates, code snippet detection, export/import, 80 tests)
 - [x] Network connections manager (apps/netmanager: interface list, IP config, DNS, WiFi scanning, VPN, traffic graph, diagnostics, 78 tests)
 - [x] Archive manager (apps/archivemanager: ZIP/TAR/GZ/BZ2/7Z formats, tree-view browser, extract/create/add/remove, compression levels, password, split archives)
-- [x] Sound recorder (apps/soundrecorder: WAV output, waveform visualization, VU meter, markers, trim, quality presets, noise gate, playback, auto-save, 122 tests)
+- [x] Sound recorder (apps/soundrecorder: WAV output, waveform visualization, VU meter, markers, trim, quality presets, noise gate, playback, auto-save, 122 tests) — *it has never recorded or played: no application can open a capture device or play sound (`known-issues.md` → `[E] Applications can neither record nor play sound`). Since 2026-09-25 it lists, opens, marks and trims recordings already on disk*
 - [x] Sticky notes (apps/stickynotes: 8 colors, drag/resize, rich text, search, pin/archive, categories, auto-save, export)
 - [x] PDF viewer (apps/pdfviewer: **windowed** — `app::launch`, `Frame` hit boxes, `Layout` from the live size; multi-tab, bookmarks, search, zoom modes, page rotation, print settings, dark mode, 183 tests. **"annotations" was listed here and removed 2026-09-18: nothing can create one.** `add_highlight`, `add_note` and `add_freehand` have no production caller, and they are the only callers of `add_annotation`, which holds the only `annotations.push` -- so the chain is dead at the top. The module doc is the honest version and says "Annotation support **model**", which claims a data model rather than a feature; this line dropped the word. **Dark mode only became true on the same day** -- `dark_mode` was `true` at construction with no writer, so every page rendered inverted until `D` was bound. No PDF parser and no print spooler yet — held open by `OpenFn`/`PrintFn` seams, see `known-issues.md` → `C-PDFVIEWER-HAS-NO-PDF-PARSER-AND-NO-PRINT-SPOOLER`)
 - [x] Device manager (apps/devicemanager: device tree with 8 categories, driver info, resource view, search/filter, hardware report export, 105 tests)

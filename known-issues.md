@@ -160016,6 +160016,33 @@ megabyte it reads for the header, so anything longer showed the wrong length;
 read and write WAV with their own code; moving them onto `wavpcm` is part of
 examining the recorder, next. Sixteen examined; five to go.
 
+**`apps/soundrecorder`, 2026-09-25 -- a recorder that can neither record nor
+play here, and could reach nothing after a take.** No application can open a
+capture device -- the kernel's ALSA capture node hands back silence, because
+the mixer behind it has no input -- and nothing gives an application a way to
+play sound; the window said the first and not the second. Nothing answered the
+pointer. Everything after a take was out of reach even in principle: Save added
+a history entry naming `/recordings/<name>`, a file nothing wrote; trim handles
+and a playback bar were drawn over a take that could not exist; and no
+recording already on disk could be opened, so on this system the program had
+no use at all. Now: the recordings folder (`~/Recordings`, or one chosen for
+the session) is listed with each file's length and format, read by `wavpcm`
+from its first megabyte; any WAV opens -- from the list, or from anywhere with
+Ctrl+O -- as the waveform of the whole file, drawn from its stored samples;
+markers are put down (M or a press), named (F2), dragged, removed (Delete) and
+saved into the file as the `cue ` and `labl` chunks sound editors share -- but
+not over a file another program has changed since it was opened; a stretch is
+kept by setting its start and end (`[`, `]`, or dragging the handles) and saved
+as a new file, its samples copied as stored and its markers moved to its start,
+never over the recording itself; and unsaved markers are not left behind by one
+press on another file. Record and Play say why they cannot, by key and by
+press. The take is kept for the day a capture source exists, and Stop now
+saves it -- samples exactly as captured (the recorder's own WAV writer, and its
+reader that took only a 44-byte header, are gone for `wavpcm`), markers as cue
+points -- as a new file named for the moment, never over another, and opens
+it. 129 tests; `apps/soundrecorder/mutate.py` has 27 rows. The missing sound
+path for applications is its own entry below. Seventeen examined; four to go.
+
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 
 **In short:** a `cargo test --workspace` failed with exactly one failing test,
@@ -165829,3 +165856,41 @@ name on purpose, which overwrites.
 (2026-09-25), which refuses a name in use atomically, until one is claimed --
 and never fall back to replacing. Saving a capture again over its own file
 keeps `write_atomically`, which is right for that.
+
+### [E] Applications can neither record nor play sound -- 2026-09-25
+**Status:** OPEN -- playback: lane E (a client crate for `apps/**`), then a
+QEMU check that the mixer's output reaches a device; capture: lane A (the
+kernel mixer has no input).
+
+**In short:** a program here cannot make a sound or hear one. The recorder
+cannot record, the music player and the metronome cannot play, and every one of
+them says so. Nothing is broken in any of them: the path from an application
+to a speaker, and from a microphone to an application, is what is missing.
+
+**What exists.** The kernel speaks the Linux sound interface: `/dev/snd/pcmC0D0p`
+(playback) and `/dev/snd/pcmC0D0c` (capture), driven by the usual ALSA ioctls
+(`HW_PARAMS`, `PREPARE`, `WRITEI_FRAMES`/`READI_FRAMES`), in
+`kernel/src/syscall/linux.rs` and `kernel/src/ipc/alsa_pcm.rs`. A playback
+stream feeds `kernel/src/audio_mixer.rs`, whose documentation routes its
+output to HDA, virtio-sound or AC97. A capture stream reads
+**synthesised silence** -- `alsa_pcm_ioctl_readi` says so: the mixer is
+output-only.
+
+**What is missing.**
+1. **No application opens `/dev/snd` at all.** There is no client crate, so
+   each program would need its own ALSA ioctl bindings. The proper fix is one
+   small crate in `apps/` (a `pcmout`: open, negotiate 48 kHz 16-bit stereo,
+   write frames; on the host build, "no device") that `musicplayer`,
+   `metronome`, `soundrecorder` and `videoplayer` share -- and a boot-test rung
+   that plays a known buffer and reads back what the mixer produced, since
+   nothing on the host can observe it.
+2. **Whether the mixer's output reaches a device under QEMU is unverified.**
+   Its documentation names the drivers; this entry has not traced the path.
+3. **Capture has no source.** Until the mixer (or a driver beside it) has an
+   input, `READI_FRAMES` is silence, and a recorder that took it would record
+   nothing while its level meter sat still -- the failure
+   `TD-C-A-RECORDER-THAT-RAN-A-CLOCK-OVER-NO-AUDIO` describes. Lane A's.
+
+**Until then** the recorder refuses a take with the reason on screen, and is
+useful only for what is already on disk (see the soundrecorder paragraph of
+`TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`).

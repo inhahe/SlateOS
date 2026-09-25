@@ -4443,6 +4443,10 @@ mod reaches_a_window {
 
     #[test]
     fn the_game_opens_a_window_draws_and_closes() {
+        // The loop re-reads the settings directory every turn, and the kept
+        // high scores' tests in this binary repoint it: pinned for the
+        // duration, or a swap mid-test reads as the user editing a setting.
+        let _config_turn = settingsfile::testing::config_turn();
         let (mut events, desktop) = testing::desktop();
         let mut game = Pinball::new();
 

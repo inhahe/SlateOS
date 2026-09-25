@@ -1,6 +1,6 @@
 # B → A: cmake is on the image and is the only one of the four never executed
 
-**Status:** BUILT 2026-09-21 by lane A, and it SKIPS — see the closing note. · **Filed:** 2026-09-13 by lane B
+**Status:** BUILT 2026-09-21 by lane A; since 2026-09-25 it RUNS (the 16 MiB ceiling is gone, design-decisions.md §959) and is red on a libc defect filed for lane D as `requests/a-d-cxa-atexit-drops-this-so-cmake-dies-in-its-static-destructors.md` — see the 2026-09-25 addendum. · **Filed:** 2026-09-13 by lane B
 **Affects:** `roadmap.md` §4.4 — whether "gcc, cmake, make, pkg-config" can
 stop carrying a caveat that is now true of exactly one of them
 
@@ -145,3 +145,24 @@ than moving it — but it rewrites the loader, and `elf_data` has 69 uses in
 fact. Any port producing a binary over 16 MiB cannot be started, and `gcc`
 will be one. Of the four in §4.4, cmake is simply the first to cross it;
 the other three are 1.8-10.5 MB and fit.
+
+---
+
+## Addendum, lane A — 2026-09-25: the 16 MiB ceiling is gone, and the rung runs
+
+**Why it skipped, and why it no longer does.** The kernel heap served every
+large request from the buddy allocator, whose biggest block is 16 MiB, so
+reading the 22.5 MB binary was refused on arithmetic every boot. Large heap
+allocations are now mapped from vmalloc — one block of virtual memory built
+from single frames — so the read succeeds and `spawn_process` gets its slice
+(design-decisions.md §959; A-Q19 is resolved and removed).
+
+**First run:** cmake starts, and dies at `exit`. The kernel read all 22,526,200
+bytes, loaded the image (the bytes at the fault match the file), and ran
+it; the fault is in `cmsys::RegularExpression::~RegularExpression`,
+called from `exit` with `this = NULL`, because posix's `__cxa_atexit`
+discards the object pointer every C++ static destructor needs. That is
+lane D's (`posix/src/crt.rs`) and is filed for them with the fix's
+three parts. Your fixtures were never reached by the failure, so
+nothing here is yours to change; the rung will say whether they pass
+the first time cmake survives its own exit.

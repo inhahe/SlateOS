@@ -314,12 +314,18 @@ def summarise_occupancy(before, after, window_seconds, barrier_wait=None):
     """
     if not before or not after or len(before) != len(after):
         return None
-    burned = [max(0.0, b[0] - a[0]) for a, b in zip(before, after)]
+    # A `None` pair is a spinner the snapshot could not read -- it died
+    # holding its slot's lock (see `snapshot`). It burned nothing for the
+    # window, and it has no span of its own to report.
+    readable = [(a, b) for a, b in zip(before, after)
+                if a is not None and b is not None]
+    burned = [max(0.0, b[0] - a[0]) if a is not None and b is not None else 0.0
+              for a, b in zip(before, after)]
     # Each spinner's own elapsed time, from the clock reading it published
     # *with* the CPU figure above.  This is the denominator that makes the
     # ceiling a bound: it is the interval the numerator covers, not an
     # interval the controller timed around it.
-    elapsed = [max(0.0, b[1] - a[1]) for a, b in zip(before, after)]
+    elapsed = [max(0.0, b[1] - a[1]) for a, b in readable]
     total = sum(burned)
     # Wall time is the denominator per spinner, so the ideal total is
     # spinners x window.  A zero-length window would make the ratio
@@ -440,6 +446,59 @@ SPINNER_READY_TIMEOUT_S = 30.0
 SPINNER_EDGE_TIMEOUT_S = 2.0
 
 
+#: How long one attempt on a lock shared between the controller and a spinner
+#: may wait. Each side holds these locks only to copy a pair of numbers or bump
+#: a counter, so an attempt that times out means the holder was descheduled
+#: -- or is dead. See `_locked` for which, and why the difference matters.
+LOCK_SLICE_S = 1.0
+
+
+def _locked(lock, fn, orphaned):
+    """Run `fn()` holding `lock`, and return whether it ran.
+
+    Waits in `LOCK_SLICE_S` slices, and stops waiting only once `orphaned()`
+    says there is no one left to wait for -- never on a timeout alone.
+
+    The bound is the fix. A process killed with `TerminateProcess` while it
+    holds one of these locks leaves it held for good: a multiprocessing lock
+    on Windows is a semaphore, and a semaphore has no abandoned owner. Every
+    spinner then blocked in its next `publish()`, where neither the
+    dead-parent check nor the deadline could run, and outlived its controller
+    indefinitely -- lane D, 2026-09-25, found two alive thirty minutes after
+    theirs died, long past their `--timeout 30`.
+
+    The loop is the refinement. A controller that is merely starved can hold a
+    lock for over a second as well, and giving up on the first timeout would
+    then lose a counter increment its barrier is waiting for. So a spinner
+    waits for as long as its controller lives and its deadline has not
+    passed, and not a slice longer.
+    """
+    while not lock.acquire(timeout=LOCK_SLICE_S):
+        if orphaned():
+            return False
+    try:
+        fn()
+    finally:
+        lock.release()
+    return True
+
+
+def _read_shared(lock, read):
+    """`read()` under `lock` if it can be had within one slice, else `None`.
+
+    The controller's side of `_locked`. It has deadlines of its own on every
+    loop that reads a counter or a slot, so it never needs to wait long: a
+    spinner killed while holding its lock is simply a spinner that stopped,
+    which `idle_spinners` already reports.
+    """
+    if not lock.acquire(timeout=LOCK_SLICE_S):
+        return None
+    try:
+        return read()
+    finally:
+        lock.release()
+
+
 def _spin(go, stop, deadline, cpu_slot=None, ready_count=None,
           fired_count=None, done_count=None):
     """One CPU burner: block until `go`, then loop until `stop`.
@@ -483,6 +542,18 @@ def _spin(go, stop, deadline, cpu_slot=None, ready_count=None,
     """
     parent = multiprocessing.parent_process()
 
+    def orphaned():
+        """The controller is gone, or the deadline it set has passed."""
+        if time.monotonic() > deadline:
+            return True
+        return parent is not None and not parent.is_alive()
+
+    def bump(counter):
+        """Count this spinner at a barrier -- never waiting on a dead one."""
+        def increment():
+            counter.value += 1
+        _locked(counter.get_lock(), increment, orphaned)
+
     def publish():
         # Written on every chunk boundary, on both sides of the wait, and once
         # more on the way out.  `process_time` is this process's own CPU clock,
@@ -506,14 +577,15 @@ def _spin(go, stop, deadline, cpu_slot=None, ready_count=None,
         # host in a 10-run probe: not a clock that rounds, but a ratio whose
         # two halves were measuring different intervals.
         if cpu_slot is not None:
-            with cpu_slot.get_lock():
+            def write():
                 cpu_slot[0] = time.process_time()
                 cpu_slot[1] = time.monotonic()
+            # Bounded: see `_locked`. A publication skipped because the
+            # controller died holding the lock has no reader to miss it.
+            _locked(cpu_slot.get_lock(), write, orphaned)
 
     def should_quit():
-        if stop.is_set() or time.monotonic() > deadline:
-            return True
-        return parent is not None and not parent.is_alive()
+        return stop.is_set() or orphaned()
 
     # Wait with a timeout rather than forever: an orphan that never receives
     # `go` would otherwise sit blocked for the life of the machine.  The
@@ -539,8 +611,7 @@ def _spin(go, stop, deadline, cpu_slot=None, ready_count=None,
     # controller consider it ready.  Signalling before the publish would
     # reintroduce the race the barrier exists to close.
     if ready_count is not None:
-        with ready_count.get_lock():
-            ready_count.value += 1
+        bump(ready_count)
     while not go.is_set():
         if should_quit():
             publish()
@@ -557,8 +628,7 @@ def _spin(go, stop, deadline, cpu_slot=None, ready_count=None,
     # spinner to be slow off the mark -- which is when the measurement matters.
     publish()
     if fired_count is not None:
-        with fired_count.get_lock():
-            fired_count.value += 1
+        bump(fired_count)
 
     while True:
         for _ in range(SPIN_CHUNK):
@@ -569,8 +639,7 @@ def _spin(go, stop, deadline, cpu_slot=None, ready_count=None,
             # spinner announces it has stopped, so the controller's closing
             # snapshot covers the final chunk instead of truncating it.
             if done_count is not None:
-                with done_count.get_lock():
-                    done_count.value += 1
+                bump(done_count)
             return
 
 
@@ -710,10 +779,11 @@ def run(args):
     # barrier is what makes the sentence true.
     barrier_deadline = time.monotonic() + SPINNER_READY_TIMEOUT_S
     while True:
-        with ready_count.get_lock():
-            up = ready_count.value
-        if up >= args.spinners:
+        # Bounded: a spinner killed mid-increment holds this lock for good.
+        up = _read_shared(ready_count.get_lock(), lambda: ready_count.value)
+        if up is not None and up >= args.spinners:
             break
+        up = up or 0
         if time.monotonic() > barrier_deadline:
             # Not fatal: a spinner that never starts is exactly what
             # `idle_spinners` and OCCUPANCY_FLOOR exist to report, and failing
@@ -797,11 +867,16 @@ def run(args):
     barrier_wait = [None, None]
 
     def snapshot():
-        """Read every spinner's (cpu, clock) pair, each under its own lock."""
+        """Read every spinner's (cpu, clock) pair, each under its own lock.
+
+        A slot whose lock cannot be had is a spinner that died holding it; its
+        pair is `None`, which `summarise_occupancy` counts as a spinner that
+        burned nothing -- what it was.
+        """
         pairs = []
         for slot in cpu:
-            with slot.get_lock():
-                pairs.append((slot[0], slot[1]))
+            pairs.append(_read_shared(slot.get_lock(),
+                                      lambda slot=slot: (slot[0], slot[1])))
         return pairs
 
     def await_barrier(counter, index):
@@ -818,9 +893,9 @@ def run(args):
         began = time.monotonic()
         limit = began + SPINNER_EDGE_TIMEOUT_S
         while time.monotonic() < limit:
-            with counter.get_lock():
-                if counter.value >= len(cpu):
-                    break
+            seen = _read_shared(counter.get_lock(), lambda: counter.value)
+            if seen is not None and seen >= len(cpu):
+                break
             time.sleep(0.0005)
         barrier_wait[index] = time.monotonic() - began
 
@@ -1171,7 +1246,55 @@ def report_unreachable_scored(live, aliases, scored):
     return orphans
 
 
+def self_test():
+    """A spinner whose slot lock is never released must still exit by its deadline.
+
+    The regression for `_locked`: the lock is taken here and held for good --
+    what a controller killed with `TerminateProcess` mid-snapshot leaves
+    behind -- and a real `_spin` is started beside it with a deadline two
+    seconds out. Before the bound, it blocked in its first `publish()` and
+    never came back. Run here, as a mode of this script, because a spawned
+    child re-imports the module that defines its target, and this is the one
+    module it can import by name.
+
+    Returns a process exit code: 0 if the spinner exited within the bound.
+    """
+    ctx = multiprocessing.get_context("spawn")
+    go, stop = ctx.Event(), ctx.Event()
+    slot = ctx.Array("d", 2)
+    lock = slot.get_lock()
+    lock.acquire()
+    deadline_s = 2.0
+    worker = ctx.Process(target=_spin,
+                         args=(go, stop, time.monotonic() + deadline_s, slot),
+                         daemon=True)
+    worker.start()
+    go.set()
+    # The deadline, a few slices' worth of publications that each wait one
+    # slice before noticing it has passed, and room for an interpreter to
+    # start on a busy host.
+    bound = deadline_s + 4 * LOCK_SLICE_S + 30
+    worker.join(bound)
+    stranded = worker.is_alive()
+    if stranded:
+        worker.kill()
+        worker.join(10)
+    lock.release()
+    if stranded:
+        print(f"self-test FAIL: a spinner whose slot lock was never released "
+              f"was still alive {bound:.0f}s later, {deadline_s:.0f}s past "
+              f"its deadline -- stranded in publish()")
+        return 1
+    print("self-test: ok -- a spinner exits by its deadline though its slot "
+          "lock is never released (the lane D stranding)")
+    return 0
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    # Before the parser, which requires --serial: the self-test needs none.
+    if "--self-test" in argv or "--selftest" in argv:
+        return self_test()
     parser = argparse.ArgumentParser(
         description="Load the host CPU across a named window of a --bench "
                     "run (the stimulus for prediction P22).")
@@ -1216,6 +1339,10 @@ def main(argv=None):
                         help="validate --at/--until against --known-names and "
                              "exit; used before the boot starts, so a bad "
                              "name costs a second rather than a whole run")
+    parser.add_argument("--self-test", "--selftest", action="store_true",
+                        help="check that a spinner cannot be stranded by a "
+                             "lock a dead process left held, and exit "
+                             "(handled before the other options are read)")
     args = parser.parse_args(argv)
 
     if args.until is not None and args.at is None:

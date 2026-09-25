@@ -625,6 +625,21 @@ with timing_case("orphan defence") as tmpdir:
                f"still alive: {[p for p in pids if pid_alive(p)]}")
 
 
+# A lock a dead process left held must not strand a spinner either. The
+# controller above is killed between chunks; one killed while it holds a
+# spinner's slot lock left every spinner blocked in publish() with no way to
+# reach its dead-parent check or its deadline -- lane D found two alive thirty
+# minutes after their controller died. The case lives in the controller's own
+# `--self-test`, because a spawned `_spin` can only import the module it came
+# from.
+with timing_case("orphan defence: a lock left held") as tmpdir:
+    proc = subprocess.run([sys.executable, CANARY_LOAD, "--self-test"],
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True, timeout=120)
+    check_true("a spinner exits by its deadline though its slot lock is "
+               "never released", proc.returncode == 0, proc.stdout[-400:])
+
+
 # --------------------------------------------------------------------------
 # 5. A window with no right-hand edge is a failure, not a footnote
 # --------------------------------------------------------------------------

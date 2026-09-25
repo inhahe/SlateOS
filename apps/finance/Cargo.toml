@@ -12,5 +12,8 @@ guitk = { path = "../../gui/toolkit" }
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
 
+# Today's date, in the zone the rest of the desktop uses.
+tzrules = { path = "../../tzrules" }
+
 [lints]
 workspace = true

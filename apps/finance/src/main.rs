@@ -9,24 +9,27 @@
 //! Track income and expenses across categories, set budgets, view spending
 //! trends, manage accounts, and get financial summaries.
 //!
-//! **This program cannot record your finances, and the window says so.** It
-//! has no filesystem access; `add_account`, `add_transaction` and `set_budget`
-//! exist and have no production caller, so nothing above can actually be done.
-//! It opened on an invented Main Checking of 3,500 and Savings of 12,000 until
-//! 2026-09-15, and nothing replaced them.
-//!
-//! The list above is what the layouts draw when something supplies a model,
-//! which today only tests do.
+//! Accounts, transactions and budgets are entered through forms (`Form`), and
+//! every control answers the pointer as well as the keys (F1 lists them).
+//! "Today" is the clock's. It could record nothing until 2026-09-25:
+//! `add_account`, `add_transaction` and `set_budget` had no production caller,
+//! and the window said so from under the sidebar and header that painted over
+//! the notice.
 
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
-use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::textinput::TextInput;
+use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 
@@ -144,6 +147,21 @@ impl SimpleDate {
         format!("{:04}-{:02}-{:02}", self.year, self.month, self.day)
     }
 
+    /// A date typed as `YYYY-MM-DD`, or `None` if it is not one.
+    fn parse(text: &str) -> Option<Self> {
+        let mut parts = text.trim().splitn(3, '-');
+        let year: u16 = parts.next()?.trim().parse().ok()?;
+        let month: u8 = parts.next()?.trim().parse().ok()?;
+        let day: u8 = parts.next()?.trim().parse().ok()?;
+        if !(1..=12).contains(&month) || day == 0 {
+            return None;
+        }
+        if u32::from(day) > guitk::date::days_in_month(i32::from(year), u32::from(month)) {
+            return None;
+        }
+        Some(Self::new(year, month, day))
+    }
+
     fn month_label(&self) -> &'static str {
         match self.month {
             1 => "January",
@@ -226,31 +244,24 @@ struct Account {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-/// The kinds of account this app can model.
-///
-/// No variant is constructed in production, because nothing in production
-/// creates an account. That is the honest state of this program: the ledger,
-/// the budget arithmetic and the category rollups are written and tested, and
-/// there is no way to put a figure into them.
-#[allow(
-    dead_code,
-    reason = "a data model with no input path; see NO_DATA_LINES"
-)]
+/// The kinds of account this app can model, each chosen in the account form.
 enum AccountType {
     Checking,
     Savings,
     CreditCard,
     Cash,
-    /// Nothing constructs this, and that is a statement about the app rather
-    /// than about the variant: there is no account-creation UI at all, so every
-    /// account in existence comes from `create_sample_data`, and the sample set
-    /// happens to cover the other four. Deleting it would encode "the sample
-    /// data has no brokerage account" as "SlateOS has no such account type".
-    /// See known-issues.md -> TD-C-FINANCE-IS-A-VIEWER-OVER-SAMPLE-DATA.
     Investment,
 }
 
 impl AccountType {
+    const ALL: [Self; 5] = [
+        Self::Checking,
+        Self::Savings,
+        Self::CreditCard,
+        Self::Cash,
+        Self::Investment,
+    ];
+
     fn label(self) -> &'static str {
         match self {
             Self::Checking => "Checking",
@@ -299,6 +310,202 @@ impl Screen {
     }
 }
 
+// ── Forms ───────────────────────────────────────────────────────────
+
+/// A field of one of the three forms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FormField {
+    Date,
+    Description,
+    Amount,
+    /// Income or expense.
+    Kind,
+    Category,
+    Account,
+    Notes,
+    Recurring,
+    Name,
+    AccountKind,
+    Opening,
+    Limit,
+}
+
+impl FormField {
+    /// Whether the field is typed into; the others are chosen, a press or
+    /// Left and Right stepping through their values.
+    fn is_text(self) -> bool {
+        matches!(
+            self,
+            Self::Date
+                | Self::Description
+                | Self::Amount
+                | Self::Notes
+                | Self::Name
+                | Self::Opening
+                | Self::Limit
+        )
+    }
+}
+
+/// What a form is entering.
+///
+/// There was no way to put a figure into this program: `add_account`,
+/// `add_transaction` and `set_budget` were written, tested, and called by
+/// nothing but the tests.
+#[derive(Clone, Debug)]
+enum Form {
+    /// A transaction, new (`id: None`) or being changed.
+    Transaction {
+        id: Option<u32>,
+        date: TextInput,
+        description: TextInput,
+        amount: TextInput,
+        notes: TextInput,
+        income: bool,
+        category: Category,
+        account: Option<u32>,
+        recurring: bool,
+    },
+    /// An account, new or being changed.
+    Account {
+        id: Option<u32>,
+        name: TextInput,
+        kind: AccountType,
+        opening: TextInput,
+    },
+    /// A category's monthly budget. Empty or zero takes it off.
+    Budget {
+        category: Category,
+        limit: TextInput,
+    },
+}
+
+impl Form {
+    /// The fields, in the order Tab walks them.
+    fn fields(&self) -> &'static [FormField] {
+        match self {
+            Self::Transaction { .. } => &[
+                FormField::Date,
+                FormField::Description,
+                FormField::Amount,
+                FormField::Kind,
+                FormField::Category,
+                FormField::Account,
+                FormField::Notes,
+                FormField::Recurring,
+            ],
+            Self::Account { .. } => &[FormField::Name, FormField::AccountKind, FormField::Opening],
+            Self::Budget { .. } => &[FormField::Limit],
+        }
+    }
+
+    /// The text field `which`, if this form has it.
+    fn input(&mut self, which: FormField) -> Option<&mut TextInput> {
+        match (self, which) {
+            (Self::Transaction { date, .. }, FormField::Date) => Some(date),
+            (Self::Transaction { description, .. }, FormField::Description) => Some(description),
+            (Self::Transaction { amount, .. }, FormField::Amount) => Some(amount),
+            (Self::Transaction { notes, .. }, FormField::Notes) => Some(notes),
+            (Self::Account { name, .. }, FormField::Name) => Some(name),
+            (Self::Account { opening, .. }, FormField::Opening) => Some(opening),
+            (Self::Budget { limit, .. }, FormField::Limit) => Some(limit),
+            _ => None,
+        }
+    }
+
+    /// The text field `which`, to read.
+    fn input_ref(&self, which: FormField) -> Option<&TextInput> {
+        match (self, which) {
+            (Self::Transaction { date, .. }, FormField::Date) => Some(date),
+            (Self::Transaction { description, .. }, FormField::Description) => Some(description),
+            (Self::Transaction { amount, .. }, FormField::Amount) => Some(amount),
+            (Self::Transaction { notes, .. }, FormField::Notes) => Some(notes),
+            (Self::Account { name, .. }, FormField::Name) => Some(name),
+            (Self::Account { opening, .. }, FormField::Opening) => Some(opening),
+            (Self::Budget { limit, .. }, FormField::Limit) => Some(limit),
+            _ => None,
+        }
+    }
+}
+
+/// What a delete waiting on its answer would remove.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Doomed {
+    Transaction(u32),
+    /// An account, with every transaction in it.
+    Account(u32),
+}
+
+/// Everything in the window a pointer can press, as the renderer records it.
+///
+/// The program drew five screens in a sidebar, a month with arrows, a search
+/// box and rows of transactions, budgets and accounts, and handled no pointer
+/// event (`known-issues.md` ->
+/// `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    Screen(Screen),
+    MonthPrev,
+    MonthNext,
+    ThisMonth,
+    Help,
+    NewTransaction,
+    NewAccount,
+    Edit,
+    Delete,
+    Search,
+    FilterChip,
+    TxList,
+    TxRow(u32),
+    AccountList,
+    AccountRow(u32),
+    BudgetList,
+    /// A budget, by its category's place in `Category::EXPENSE_CATS`.
+    BudgetRow(usize),
+    /// A transaction in the dashboard's recent list: a press shows it in the
+    /// transactions screen.
+    RecentRow(u32),
+    Field(FormField),
+    /// The arrows either side of a chosen field.
+    StepBack(FormField),
+    StepForward(FormField),
+    Save,
+    Cancel,
+    /// Around and behind a form's controls: a press does nothing.
+    FormBackdrop,
+    ConfirmDelete,
+    KeepIt,
+    QuestionBackdrop,
+    QuestionCard,
+    HelpCard,
+}
+
+/// Every key this program answers, and what it does.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    (
+        "1-5",
+        "Dashboard / transactions / budgets / accounts / reports",
+    ),
+    (
+        "Left / Right",
+        "Previous / next month; in a form, the choice",
+    ),
+    ("Home", "This month"),
+    ("Up / Down", "Choose a transaction, a budget or an account"),
+    ("N", "New transaction; on the accounts screen, new account"),
+    ("Enter", "Change what is chosen; in a form, save"),
+    ("Delete / Ctrl+D", "Delete what is chosen (asks first)"),
+    ("/", "Search the transactions"),
+    ("C", "Show one category"),
+    ("PgUp / PgDn", "Scroll the list"),
+    ("Tab / Shift+Tab", "Next / previous field in a form"),
+    ("Esc", "Close the form, the search or this list"),
+    ("F1", "This list"),
+];
+
 // ── App ─────────────────────────────────────────────────────────────
 struct FinanceApp {
     width: f32,
@@ -326,6 +533,34 @@ struct FinanceApp {
     search_active: bool,
     category_filter: Option<Category>,
     status_msg: String,
+    /// The form that is up, the field the keyboard is in, and what its last
+    /// save said was wrong.
+    form: Option<Form>,
+    field: FormField,
+    form_error: Option<String>,
+    /// The fields' clipboard.
+    clipboard: String,
+    /// A delete waiting on its answer.
+    pending_delete: Option<Doomed>,
+    /// The chosen account, by id, and budget, by its category's place in
+    /// `Category::EXPENSE_CATS`.
+    selected_account: Option<u32>,
+    selected_budget: usize,
+    /// How far each list is scrolled, in rows. None of them scrolled: rows
+    /// past the bottom edge were simply not drawn, and the transaction arrows
+    /// were held to the rows on screen, so an older transaction could never
+    /// be seen at all.
+    tx_scroll: usize,
+    account_scroll: usize,
+    budget_scroll: usize,
+    /// Whether the list of keys is up.
+    show_help: bool,
+    /// What the pointer is over, so it can be drawn lit.
+    hover: Option<Target>,
+    /// Every box the last paint recorded, for hover and the wheel.
+    last_hits: Vec<(Target, Rect)>,
+    /// The wheel's remainder.
+    wheel: wheel::Accumulator,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -365,11 +600,18 @@ struct Fingerprint {
     category_filter: Option<Category>,
     year: u16,
     month: u8,
+    form_open: bool,
+    pending_delete: Option<Doomed>,
+    selected_account: Option<u32>,
+    selected_budget: usize,
+    scrolls: (usize, usize, usize),
 }
 
 impl FinanceApp {
     fn new() -> Self {
-        let today = SimpleDate::new(2026, 5, 18);
+        // The clock's day. It was 18 May 2026 in every run, so "this month"
+        // was May for good and a new entry was dated then.
+        let today = today_from_clock().unwrap_or(SimpleDate::new(1970, 1, 1));
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width: 1100.0,
@@ -387,6 +629,20 @@ impl FinanceApp {
             search_active: false,
             category_filter: None,
             status_msg: String::from("Personal Finance"),
+            form: None,
+            field: FormField::Date,
+            form_error: None,
+            clipboard: String::new(),
+            pending_delete: None,
+            selected_account: None,
+            selected_budget: 0,
+            tx_scroll: 0,
+            account_scroll: 0,
+            budget_scroll: 0,
+            show_help: false,
+            hover: None,
+            last_hits: Vec::new(),
+            wheel: wheel::Accumulator::default(),
         }
     }
 
@@ -395,9 +651,14 @@ impl FinanceApp {
     /// `#[cfg(test)]`. Most of this app's tests are about the ledger, the
     /// budget arithmetic, the category filter, the month view and the search
     /// -- all of which need *transactions*, not specifically invented ones.
+    ///
+    /// Dated as the app used to date every run, 18 May 2026, so the month on
+    /// screen is the month the sample was entered in whatever the clock says.
     #[cfg(test)]
     fn with_sample_data() -> Self {
         let mut app = Self::new();
+        app.current_date = SimpleDate::new(2026, 5, 18);
+        app.view_month = SimpleDate::new(2026, 5, 1);
         app.create_sample_data();
         app
     }
@@ -605,8 +866,7 @@ impl FinanceApp {
         );
     }
 
-    /// One of the two doors data would come in through.
-    #[allow(dead_code, reason = "a door with no caller; see NO_DATA_LINES")]
+    /// A new account, by the account form.
     pub fn add_account(&mut self, name: &str, atype: AccountType, initial: i64) -> u32 {
         let id = self.next_account_id;
         // Saturating rather than wrapping: a wrapped counter hands out an id
@@ -625,8 +885,7 @@ impl FinanceApp {
     // owning account, note, and recurring flag; these are independent scalar
     // fields with no natural grouping, so they are passed positionally.
     #[allow(clippy::too_many_arguments)]
-    /// One of the two doors data would come in through.
-    #[allow(dead_code, reason = "a door with no caller; see NO_DATA_LINES")]
+    /// A new transaction, by the transaction form.
     pub fn add_transaction(
         &mut self,
         date: SimpleDate,
@@ -657,14 +916,22 @@ impl FinanceApp {
         let Some(idx) = self.transactions.iter().position(|tx| tx.id == id) else {
             return;
         };
+        // Its place in the list on screen -- not in `transactions`, which is
+        // in the order things were entered. The two used to be confused, so
+        // with a filter on, the selection after a delete jumped.
+        let at = self
+            .visible_ids()
+            .iter()
+            .position(|v| *v == id)
+            .unwrap_or(0);
         self.transactions.remove(idx);
         // Prefer the row that took its place, then the one before it; the point
         // is that repeated deletes walk down the list rather than jumping to
         // the end or landing on nothing.
         let visible = self.visible_ids();
         self.selected_id = visible
-            .get(idx)
-            .or_else(|| visible.get(idx.saturating_sub(1)))
+            .get(at)
+            .or_else(|| visible.get(at.saturating_sub(1)))
             .or_else(|| visible.first())
             .copied();
         self.status_msg = String::from("Transaction deleted");
@@ -690,31 +957,15 @@ impl FinanceApp {
             self.selected_id = None;
             return;
         }
+        // Not on screen (the filter just changed under it): the first visible
+        // row is where the selection belongs, whichever way the user pressed.
+        // Otherwise the move stops at either end, so a page from near the top
+        // lands on the top rather than refusing to move at all.
         let current = self
             .selected_id
             .and_then(|id| visible.iter().position(|&v| v == id));
-        let next = match current {
-            // Not on screen (the filter just changed under it): the first
-            // visible row is where the selection belongs, whichever way the
-            // user pressed.
-            None => 0,
-            Some(pos) => {
-                let Ok(pos) = isize::try_from(pos) else {
-                    return;
-                };
-                let Some(moved) = pos.checked_add(delta) else {
-                    return;
-                };
-                let Ok(moved) = usize::try_from(moved) else {
-                    return; // stepped off the top; stay put
-                };
-                if moved >= visible.len() {
-                    return; // stepped off the bottom; stay put
-                }
-                moved
-            }
-        };
-        self.selected_id = visible.get(next).copied();
+        let next = step_index(current, delta, visible.len());
+        self.selected_id = next.and_then(|i| visible.get(i)).copied();
     }
 
     /// Put the selection back on a visible row after the view changed.
@@ -728,8 +979,12 @@ impl FinanceApp {
         }
     }
 
-    #[allow(dead_code, reason = "a door with no caller; see NO_DATA_LINES")]
+    /// A category's monthly budget; zero takes it off.
     fn set_budget(&mut self, category: Category, monthly_limit: i64) {
+        if monthly_limit <= 0 {
+            self.budgets.retain(|b| b.category != category);
+            return;
+        }
         if let Some(b) = self.budgets.iter_mut().find(|b| b.category == category) {
             b.monthly_limit = monthly_limit;
         } else {
@@ -824,8 +1079,16 @@ impl FinanceApp {
             .sum()
     }
 
+    /// The transactions the list shows, newest first: the month in the
+    /// header, or -- while there is a search -- every month, so "when did I
+    /// last pay the plumber" has an answer.
+    ///
+    /// It showed every month in the order things were typed in, under a
+    /// header naming one month whose arrows changed nothing in the list.
     fn filtered_transactions(&self) -> Vec<(usize, &Transaction)> {
-        self.transactions
+        let query = self.search_query.to_lowercase();
+        let mut rows: Vec<(usize, &Transaction)> = self
+            .transactions
             .iter()
             .enumerate()
             .filter(|(_, tx)| {
@@ -834,17 +1097,15 @@ impl FinanceApp {
                 {
                     return false;
                 }
-                if !self.search_query.is_empty() {
-                    let q = self.search_query.to_ascii_lowercase();
-                    if !tx.description.to_ascii_lowercase().contains(&q)
-                        && !tx.notes.to_ascii_lowercase().contains(&q)
-                    {
-                        return false;
-                    }
+                if query.is_empty() {
+                    return tx.date.same_month(&self.view_month);
                 }
-                true
+                tx.description.to_lowercase().contains(&query)
+                    || tx.notes.to_lowercase().contains(&query)
             })
-            .collect()
+            .collect();
+        rows.sort_by(|(_, a), (_, b)| b.date.cmp(&a.date).then(b.id.cmp(&a.id)));
+        rows
     }
 
     fn top_expense_categories(&self) -> Vec<(Category, i64)> {
@@ -855,6 +1116,617 @@ impl FinanceApp {
             .collect();
         cats.sort_by_key(|c| std::cmp::Reverse(c.1));
         cats
+    }
+
+    // ── Forms ───────────────────────────────────────────────────────
+
+    /// A new transaction, dated today, in the chosen account (or the first).
+    /// With no account there is nowhere for one to go, so the account form
+    /// comes up instead, saying why.
+    fn open_new_transaction(&mut self) {
+        let Some(account) = self
+            .selected_account
+            .filter(|id| self.accounts.iter().any(|a| a.id == *id))
+            .or_else(|| self.accounts.first().map(|a| a.id))
+        else {
+            self.open_new_account();
+            self.form_error = Some(String::from(
+                "Add an account first: a transaction goes into one",
+            ));
+            return;
+        };
+        let mut date = TextInput::new();
+        date.set_text(&self.current_date.format());
+        self.form = Some(Form::Transaction {
+            id: None,
+            date,
+            description: TextInput::new(),
+            amount: TextInput::new(),
+            notes: TextInput::new(),
+            income: false,
+            category: Category::Food,
+            account: Some(account),
+            recurring: false,
+        });
+        self.field = FormField::Description;
+        self.form_error = None;
+    }
+
+    /// Change transaction `id`.
+    fn open_edit_transaction(&mut self, id: u32) {
+        let Some(tx) = self.transactions.iter().find(|t| t.id == id) else {
+            return;
+        };
+        let text = |s: &str| {
+            let mut input = TextInput::new();
+            input.set_text(s);
+            input
+        };
+        let magnitude = Self::format_currency(tx.amount.saturating_abs());
+        self.form = Some(Form::Transaction {
+            id: Some(id),
+            date: text(&tx.date.format()),
+            description: text(&tx.description),
+            amount: text(magnitude.trim_start_matches('$')),
+            notes: text(&tx.notes),
+            income: tx.amount > 0,
+            category: tx.category,
+            account: Some(tx.account_id),
+            recurring: tx.recurring,
+        });
+        self.field = FormField::Description;
+        self.form_error = None;
+    }
+
+    fn open_new_account(&mut self) {
+        self.form = Some(Form::Account {
+            id: None,
+            name: TextInput::new(),
+            kind: AccountType::Checking,
+            opening: TextInput::new(),
+        });
+        self.field = FormField::Name;
+        self.form_error = None;
+    }
+
+    fn open_edit_account(&mut self, id: u32) {
+        let Some(account) = self.accounts.iter().find(|a| a.id == id) else {
+            return;
+        };
+        let mut name = TextInput::new();
+        name.set_text(&account.name);
+        let mut opening = TextInput::new();
+        opening.set_text(
+            Self::format_currency(account.initial_balance)
+                .replace('$', "")
+                .as_str(),
+        );
+        self.form = Some(Form::Account {
+            id: Some(id),
+            name,
+            kind: account.account_type,
+            opening,
+        });
+        self.field = FormField::Name;
+        self.form_error = None;
+    }
+
+    /// Set the budget of the category at `index` in `EXPENSE_CATS`.
+    fn open_budget(&mut self, index: usize) {
+        let Some(&category) = Category::EXPENSE_CATS.get(index) else {
+            return;
+        };
+        let mut limit = TextInput::new();
+        if let Some(b) = self.budgets.iter().find(|b| b.category == category) {
+            limit.set_text(Self::format_currency(b.monthly_limit).trim_start_matches('$'));
+        }
+        self.form = Some(Form::Budget { category, limit });
+        self.field = FormField::Limit;
+        self.form_error = None;
+    }
+
+    /// Keep what the form holds, or say in the form what is wrong with it.
+    fn save_form(&mut self) {
+        let Some(form) = self.form.clone() else {
+            return;
+        };
+        let result = match form {
+            Form::Transaction {
+                id,
+                date,
+                description,
+                amount,
+                notes,
+                income,
+                category,
+                account,
+                recurring,
+            } => self.save_transaction(
+                id,
+                &date,
+                &description,
+                &amount,
+                &notes,
+                income,
+                category,
+                account,
+                recurring,
+            ),
+            Form::Account {
+                id,
+                name,
+                kind,
+                opening,
+            } => self.save_account(id, &name, kind, &opening),
+            Form::Budget { category, limit } => match parse_cents(limit.text(), false) {
+                Ok(cents) => {
+                    self.set_budget(category, cents);
+                    self.status_msg = if cents > 0 {
+                        format!("Budget for {} set", category.label())
+                    } else {
+                        format!("Budget for {} taken off", category.label())
+                    };
+                    Ok(())
+                }
+                Err(why) => Err(why),
+            },
+        };
+        match result {
+            Ok(()) => {
+                self.form = None;
+                self.form_error = None;
+                self.after_change();
+            }
+            Err(why) => self.form_error = Some(why),
+        }
+    }
+
+    // A transaction form's fields, read and checked; grouped by nothing but
+    // being one form, so they arrive as themselves.
+    #[allow(clippy::too_many_arguments)]
+    fn save_transaction(
+        &mut self,
+        id: Option<u32>,
+        date: &TextInput,
+        description: &TextInput,
+        amount: &TextInput,
+        notes: &TextInput,
+        income: bool,
+        category: Category,
+        account: Option<u32>,
+        recurring: bool,
+    ) -> Result<(), String> {
+        let Some(date) = SimpleDate::parse(date.text()) else {
+            return Err(String::from("That is not a date; write it YYYY-MM-DD"));
+        };
+        let description = description.text().trim().to_owned();
+        if description.is_empty() {
+            return Err(String::from("A transaction needs a description"));
+        }
+        let magnitude = parse_cents(amount.text(), false)?;
+        if magnitude == 0 {
+            return Err(String::from("The amount is zero"));
+        }
+        let Some(account) = account.filter(|a| self.accounts.iter().any(|x| x.id == *a)) else {
+            return Err(String::from("Choose an account"));
+        };
+        let cents = if income {
+            magnitude
+        } else {
+            magnitude.saturating_neg()
+        };
+        let notes = notes.text().trim().to_owned();
+        match id {
+            Some(id) => {
+                let Some(tx) = self.transactions.iter_mut().find(|t| t.id == id) else {
+                    return Err(String::from("That transaction is gone"));
+                };
+                tx.date = date;
+                tx.description = description;
+                tx.amount = cents;
+                tx.category = category;
+                tx.account_id = account;
+                tx.notes = notes;
+                tx.recurring = recurring;
+                self.selected_id = Some(id);
+                self.status_msg = String::from("Transaction changed");
+            }
+            None => {
+                let id = self.add_transaction(
+                    date,
+                    &description,
+                    cents,
+                    category,
+                    account,
+                    &notes,
+                    recurring,
+                );
+                self.selected_id = Some(id);
+                self.status_msg = String::from("Transaction added");
+            }
+        }
+        Ok(())
+    }
+
+    fn save_account(
+        &mut self,
+        id: Option<u32>,
+        name: &TextInput,
+        kind: AccountType,
+        opening: &TextInput,
+    ) -> Result<(), String> {
+        let name = name.text().trim().to_owned();
+        if name.is_empty() {
+            return Err(String::from("An account needs a name"));
+        }
+        let opening = if opening.text().trim().is_empty() {
+            0
+        } else {
+            parse_cents(opening.text(), true)?
+        };
+        match id {
+            Some(id) => {
+                let Some(account) = self.accounts.iter_mut().find(|a| a.id == id) else {
+                    return Err(String::from("That account is gone"));
+                };
+                account.name.clone_from(&name);
+                account.account_type = kind;
+                account.initial_balance = opening;
+                self.status_msg = format!("Account {name} changed");
+            }
+            None => {
+                let id = self.add_account(&name, kind, opening);
+                self.selected_account = Some(id);
+                self.status_msg = format!("Account {name} added");
+            }
+        }
+        Ok(())
+    }
+
+    /// Step a chosen field's value: forward, or back.
+    fn step_choice(&mut self, which: FormField, forward: bool) -> bool {
+        let accounts: Vec<u32> = self.accounts.iter().map(|a| a.id).collect();
+        let Some(form) = self.form.as_mut() else {
+            return false;
+        };
+        let step = |at: usize, len: usize| -> usize {
+            if forward {
+                at.saturating_add(1).checked_rem(len).unwrap_or(0)
+            } else {
+                at.checked_sub(1).unwrap_or(len.saturating_sub(1))
+            }
+        };
+        match (form, which) {
+            (
+                Form::Transaction {
+                    income, category, ..
+                },
+                FormField::Kind,
+            ) => {
+                *income = !*income;
+                // Money in filed under Food, or money out under Income, is
+                // never what was meant; the other categories go either way.
+                if *income && Category::EXPENSE_CATS.contains(category) {
+                    *category = Category::Income;
+                } else if !*income && *category == Category::Income {
+                    *category = Category::Food;
+                }
+            }
+            (Form::Transaction { recurring, .. }, FormField::Recurring) => *recurring = !*recurring,
+            (Form::Transaction { category, .. }, FormField::Category) => {
+                let at = Category::ALL
+                    .iter()
+                    .position(|c| c == category)
+                    .unwrap_or(0);
+                *category = Category::ALL
+                    .get(step(at, Category::ALL.len()))
+                    .copied()
+                    .unwrap_or(*category);
+            }
+            (Form::Transaction { account, .. }, FormField::Account) => {
+                if accounts.is_empty() {
+                    return false;
+                }
+                let at = account
+                    .and_then(|id| accounts.iter().position(|a| *a == id))
+                    .unwrap_or(0);
+                *account = accounts.get(step(at, accounts.len())).copied();
+            }
+            (Form::Account { kind, .. }, FormField::AccountKind) => {
+                let at = AccountType::ALL.iter().position(|k| k == kind).unwrap_or(0);
+                *kind = AccountType::ALL
+                    .get(step(at, AccountType::ALL.len()))
+                    .copied()
+                    .unwrap_or(*kind);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Keys while a form is up: Tab between fields, Enter saves, Escape
+    /// leaves, Left/Right/Space step a choice, the rest edit a text field.
+    fn handle_form_key(&mut self, key: &KeyEvent) -> EventResult {
+        let Some(form) = self.form.as_ref() else {
+            return EventResult::Ignored;
+        };
+        let fields = form.fields();
+        if !fields.contains(&self.field) {
+            self.field = fields.first().copied().unwrap_or(FormField::Description);
+        }
+        match key.key {
+            Key::Tab => {
+                let at = fields.iter().position(|f| *f == self.field).unwrap_or(0);
+                let next = if key.modifiers.shift {
+                    at.checked_sub(1).unwrap_or(fields.len().saturating_sub(1))
+                } else {
+                    at.saturating_add(1).checked_rem(fields.len()).unwrap_or(0)
+                };
+                self.field = fields.get(next).copied().unwrap_or(self.field);
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                self.save_form();
+                EventResult::Consumed
+            }
+            Key::Escape => {
+                self.form = None;
+                self.form_error = None;
+                self.status_msg = String::from("Cancelled");
+                EventResult::Consumed
+            }
+            Key::Left | Key::Right | Key::Space if !self.field.is_text() => {
+                if self.step_choice(self.field, key.key != Key::Left) {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            _ => {
+                let which = self.field;
+                let clipboard = self.clipboard.clone();
+                let Some(input) = self.form.as_mut().and_then(|f| f.input(which)) else {
+                    return EventResult::Ignored;
+                };
+                let done = edit_line(input, key, 200, &clipboard);
+                if let Some(copied) = done.copied {
+                    self.clipboard = copied;
+                }
+                if done.handled {
+                    self.form_error = None;
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+        }
+    }
+
+    // ── Deleting ────────────────────────────────────────────────────
+
+    /// Ask before deleting what is chosen on this screen. A transaction went
+    /// at once on Ctrl+D; an account could not be deleted at all.
+    fn ask_to_delete(&mut self) {
+        self.pending_delete = match self.screen {
+            Screen::Accounts => self
+                .selected_account
+                .filter(|id| self.accounts.iter().any(|a| a.id == *id))
+                .map(Doomed::Account),
+            // Only a row the user can see: Ctrl+D on the dashboard deleted a
+            // transaction chosen on another screen, unseen.
+            Screen::Transactions => self.chosen_transaction().map(Doomed::Transaction),
+            Screen::Dashboard | Screen::Budgets | Screen::Reports => None,
+        };
+    }
+
+    /// The chosen transaction, if the list on screen shows it.
+    fn chosen_transaction(&self) -> Option<u32> {
+        self.selected_id
+            .filter(|id| self.visible_ids().contains(id))
+    }
+
+    /// Change what is chosen on this screen.
+    fn edit_chosen(&mut self) {
+        match self.screen {
+            Screen::Transactions => {
+                if let Some(id) = self.chosen_transaction() {
+                    self.open_edit_transaction(id);
+                }
+            }
+            Screen::Accounts => {
+                if let Some(id) = self.selected_account {
+                    self.open_edit_account(id);
+                }
+            }
+            Screen::Budgets => self.open_budget(self.selected_budget),
+            Screen::Dashboard | Screen::Reports => {}
+        }
+    }
+
+    /// Show transaction `id` in the transactions screen, chosen: a press on
+    /// the dashboard's recent list.
+    fn show_transaction(&mut self, id: u32) {
+        let Some(tx) = self.transactions.iter().find(|t| t.id == id) else {
+            return;
+        };
+        let month = SimpleDate::new(tx.date.year, tx.date.month, 1);
+        self.screen = Screen::Transactions;
+        if !self.visible_ids().contains(&id) {
+            // A filter or a search would hide it: show its month, whole.
+            self.category_filter = None;
+            self.search_query.clear();
+            self.search_active = false;
+            self.view_month = month;
+        }
+        self.selected_id = Some(id);
+        self.keep_lists_in_view();
+    }
+
+    /// The next category the list shows, and then all of them again.
+    fn cycle_category_filter(&mut self) {
+        // `get` on the next position rather than an index guarded by a
+        // separate length test: running off the end is how the cycle returns
+        // to "All", so it is the normal path and not an error.
+        self.category_filter = match self.category_filter {
+            None => Category::ALL.first().copied(),
+            Some(cat) => Category::ALL
+                .iter()
+                .position(|&c| c == cat)
+                .and_then(|idx| idx.checked_add(1))
+                .and_then(|next| Category::ALL.get(next))
+                .copied(),
+        };
+        self.status_msg = match self.category_filter {
+            Some(cat) => format!("Showing {}", cat.label()),
+            None => String::from("Showing every category"),
+        };
+        self.reanchor_selection();
+    }
+
+    fn delete_doomed(&mut self, doomed: Doomed) {
+        match doomed {
+            Doomed::Transaction(id) => self.delete_transaction(id),
+            Doomed::Account(id) => {
+                let Some(pos) = self.accounts.iter().position(|a| a.id == id) else {
+                    return;
+                };
+                let gone = self.accounts.remove(pos);
+                let before = self.transactions.len();
+                self.transactions.retain(|t| t.account_id != id);
+                self.status_msg = format!(
+                    "Deleted {} and its {} transaction(s)",
+                    gone.name,
+                    before.saturating_sub(self.transactions.len())
+                );
+                self.selected_account = self
+                    .accounts
+                    .get(pos)
+                    .or_else(|| self.accounts.last())
+                    .map(|a| a.id);
+                self.reanchor_selection();
+            }
+        }
+        self.after_change();
+    }
+
+    /// What every change to the ledger is followed by.
+    fn after_change(&mut self) {
+        self.keep_lists_in_view();
+    }
+
+    // ── The lists ───────────────────────────────────────────────────
+
+    /// A list's pane in the content area from `top` down, `margin` in from
+    /// each side, and how many whole rows of `row_h` it holds.
+    fn list_pane(&self, top: f32, row_h: f32, margin: f32) -> (Rect, usize) {
+        let pane = Rect::new(
+            self.content_x() + margin,
+            top,
+            (self.content_w() - 2.0 * margin).max(0.0),
+            (self.content_bottom() - top).max(0.0),
+        );
+        (pane, ((pane.h / row_h).floor().max(1.0)) as usize)
+    }
+
+    /// Where the transaction rows are drawn: under the toolbar and the column
+    /// heads.
+    fn tx_pane(&self) -> (Rect, usize) {
+        self.list_pane(self.content_y() + 80.0, TX_ROW_H, 8.0)
+    }
+
+    /// Where the account rows are drawn: under the title row.
+    fn account_pane(&self) -> (Rect, usize) {
+        self.list_pane(self.content_y() + 56.0, ACCOUNT_ROW_H, 16.0)
+    }
+
+    /// Where the budget rows are drawn: under the title row.
+    fn budget_pane(&self) -> (Rect, usize) {
+        self.list_pane(self.content_y() + 56.0, BUDGET_ROW_H, 16.0)
+    }
+
+    /// Scroll each list so what is chosen in it is on screen, and no list
+    /// past its end.
+    fn keep_lists_in_view(&mut self) {
+        let follow = |scroll: &mut usize, at: Option<usize>, count: usize, visible: usize| {
+            if let Some(at) = at {
+                if at < *scroll {
+                    *scroll = at;
+                } else if at >= scroll.saturating_add(visible) {
+                    *scroll = at.saturating_add(1).saturating_sub(visible);
+                }
+            }
+            *scroll = (*scroll).min(count.saturating_sub(visible));
+        };
+        let visible_ids = self.visible_ids();
+        let (_, tx_rows) = self.tx_pane();
+        let at = self
+            .selected_id
+            .and_then(|id| visible_ids.iter().position(|v| *v == id));
+        follow(&mut self.tx_scroll, at, visible_ids.len(), tx_rows);
+        let (_, account_rows) = self.account_pane();
+        let at = self
+            .selected_account
+            .and_then(|id| self.accounts.iter().position(|a| a.id == id));
+        let accounts = self.accounts.len();
+        follow(&mut self.account_scroll, at, accounts, account_rows);
+        let (_, budget_rows) = self.budget_pane();
+        follow(
+            &mut self.budget_scroll,
+            Some(self.selected_budget),
+            Category::EXPENSE_CATS.len(),
+            budget_rows,
+        );
+    }
+
+    /// No list scrolled past its end, as a resize can leave one; unlike
+    /// `keep_lists_in_view`, leaves the wheel's position alone otherwise.
+    fn clamp_scrolls(&mut self) {
+        let tx_last = self.visible_ids().len().saturating_sub(self.tx_pane().1);
+        self.tx_scroll = self.tx_scroll.min(tx_last);
+        let account_last = self.accounts.len().saturating_sub(self.account_pane().1);
+        self.account_scroll = self.account_scroll.min(account_last);
+        let budget_last = Category::EXPENSE_CATS
+            .len()
+            .saturating_sub(self.budget_pane().1);
+        self.budget_scroll = self.budget_scroll.min(budget_last);
+    }
+
+    /// Up or Down on the list this screen shows.
+    fn move_in_list(&mut self, delta: isize) {
+        match self.screen {
+            Screen::Accounts => {
+                let ids: Vec<u32> = self.accounts.iter().map(|a| a.id).collect();
+                let at = self
+                    .selected_account
+                    .and_then(|id| ids.iter().position(|v| *v == id));
+                let next = step_index(at, delta, ids.len());
+                self.selected_account = next.and_then(|i| ids.get(i)).copied();
+            }
+            Screen::Budgets => {
+                if let Some(next) = step_index(
+                    Some(self.selected_budget),
+                    delta,
+                    Category::EXPENSE_CATS.len(),
+                ) {
+                    self.selected_budget = next;
+                }
+            }
+            Screen::Transactions => self.move_selection(delta),
+            // Nothing is chosen on these two, so there is nothing to move.
+            Screen::Dashboard | Screen::Reports => {}
+        }
+        self.keep_lists_in_view();
+    }
+
+    /// Page Down and Page Up: a page of the list on screen.
+    fn page(&mut self, down: bool) {
+        let rows = match self.screen {
+            Screen::Accounts => self.account_pane().1,
+            Screen::Budgets => self.budget_pane().1,
+            _ => self.tx_pane().1,
+        };
+        let delta = isize::try_from(rows).unwrap_or(1);
+        self.move_in_list(if down { delta } else { delta.saturating_neg() });
     }
 
     // ── Key handling ────────────────────────────────────────────────
@@ -870,8 +1742,12 @@ impl FinanceApp {
                     self.search_query.pop();
                     self.reanchor_selection();
                 }
+                // Out of the box with the search kept, so the rows it found
+                // can be walked.
+                "Return" => self.search_active = false,
                 _ => {}
             }
+            self.keep_lists_in_view();
             return;
         }
         match key {
@@ -895,40 +1771,29 @@ impl FinanceApp {
                     SimpleDate::new(self.current_date.year, self.current_date.month, 1);
                 self.reanchor_selection();
             }
-            "Up" | "k" => self.move_selection(-1),
-            "Down" | "j" => self.move_selection(1),
+            "Up" | "k" => self.move_in_list(-1),
+            "Down" | "j" => self.move_in_list(1),
+            "PageUp" => self.page(false),
+            "PageDown" => self.page(true),
             "/" => {
+                self.screen = Screen::Transactions;
                 self.search_active = true;
                 self.search_query.clear();
             }
-            "c" => {
-                // Cycle category filter
-                // `get` on the next position rather than an index guarded by a
-                // separate length test: running off the end is how the cycle
-                // returns to "All", so it is the normal path and not an error.
-                self.category_filter = match self.category_filter {
-                    None => Category::ALL.first().copied(),
-                    Some(cat) => Category::ALL
-                        .iter()
-                        .position(|&c| c == cat)
-                        .and_then(|idx| idx.checked_add(1))
-                        .and_then(|next| Category::ALL.get(next))
-                        .copied(),
-                };
-                if let Some(cat) = self.category_filter {
-                    self.status_msg = format!("Filter: {}", cat.label());
+            "c" | "C" => self.cycle_category_filter(),
+            "n" | "N" if !ctrl => {
+                if self.screen == Screen::Accounts {
+                    self.open_new_account();
                 } else {
-                    self.status_msg = String::from("Filter: All");
-                }
-                self.reanchor_selection();
-            }
-            "Delete" | "d" if ctrl => {
-                if let Some(id) = self.selected_id {
-                    self.delete_transaction(id);
+                    self.open_new_transaction();
                 }
             }
+            "Return" => self.edit_chosen(),
+            "Delete" => self.ask_to_delete(),
+            "d" if ctrl => self.ask_to_delete(),
             _ => {}
         }
+        self.keep_lists_in_view();
     }
 
     fn handle_search_text(&mut self, text: &str) {
@@ -994,6 +1859,22 @@ impl FinanceApp {
     fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
             Event::Key(key_ev) => self.handle_key_event(key_ev),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            // Midnight, or near enough to check.
+            Event::Tick { .. } => {
+                let Some(today) = today_from_clock() else {
+                    return EventResult::Ignored;
+                };
+                if today == self.current_date {
+                    return EventResult::Ignored;
+                }
+                // The view follows the month if it was on this one.
+                if self.view_month.same_month(&self.current_date) {
+                    self.view_month = SimpleDate::new(today.year, today.month, 1);
+                }
+                self.current_date = today;
+                EventResult::Consumed
+            }
             Event::Resize { width, height } => {
                 #[allow(
                     clippy::cast_precision_loss,
@@ -1021,6 +1902,34 @@ impl FinanceApp {
         }
         let ctrl = key.modifiers.ctrl;
         let shift = key.modifiers.shift;
+        // The list of keys, from anywhere; modal while it is up.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
+        // A delete waiting on its answer takes the next key; only Y deletes.
+        if let Some(doomed) = self.pending_delete.take() {
+            let yes = key
+                .single_char()
+                .map_or(key.key == Key::Y, |c| c.eq_ignore_ascii_case(&'y'));
+            if yes {
+                self.delete_doomed(doomed);
+            } else {
+                self.status_msg = String::from("Kept");
+            }
+            return EventResult::Consumed;
+        }
+        // A form takes every key, or a `1` in an amount would switch screens.
+        if self.form.is_some() {
+            return self.handle_form_key(key);
+        }
 
         // While searching, a typed character is search text and not a shortcut:
         // a search for "1" must not be read as "switch to the dashboard".
@@ -1048,6 +1957,9 @@ impl FinanceApp {
     /// rather than duplicating the whole key table in a second form.
     fn key_name(key: &KeyEvent) -> Option<String> {
         let named = match key.key {
+            Key::PageUp => "PageUp",
+            Key::PageDown => "PageDown",
+            Key::Home => "Home",
             Key::Up => "Up",
             Key::Down => "Down",
             Key::Left => "Left",
@@ -1059,8 +1971,14 @@ impl FinanceApp {
             Key::Tab => "Tab",
             _ => {
                 // Everything else is only interesting as the character typed,
-                // which is how the shortcuts below are written.
-                let typed = key.text.chars().next()?;
+                // which is how the shortcuts below are written -- or, with no
+                // text on it (as a keystroke built from its key alone
+                // arrives), the character its key types.
+                let typed = key
+                    .text
+                    .chars()
+                    .next()
+                    .or_else(|| key_char(key.key, key.modifiers.shift))?;
                 return Some(typed.to_string());
             }
         };
@@ -1084,6 +2002,11 @@ impl FinanceApp {
             category_filter: self.category_filter,
             year: self.view_month.year,
             month: self.view_month.month,
+            form_open: self.form.is_some(),
+            pending_delete: self.pending_delete,
+            selected_account: self.selected_account,
+            selected_budget: self.selected_budget,
+            scrolls: (self.tx_scroll, self.account_scroll, self.budget_scroll),
         }
     }
 
@@ -1092,63 +2015,254 @@ impl FinanceApp {
     /// Named `render_commands` and not `render`: at equal arity an inherent
     /// method silently wins method lookup over `oswindow::app::App::render`,
     /// so an app that keeps the name draws nothing and says nothing about it.
+    ///
+    /// For the tests: the window draws `frame()`, whose boxes it keeps.
+    #[cfg(test)]
     fn render_commands(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::with_capacity(512);
+        self.frame().into_tree().commands
+    }
 
-        cmds.push(RenderCommand::FillRect {
+    /// The area the screens draw in: right of the sidebar, below the header,
+    /// above the status bar.
+    fn content_rect(&self) -> Rect {
+        Rect::new(
+            self.content_x(),
+            self.content_y(),
+            self.content_w(),
+            self.content_h(),
+        )
+    }
+
+    /// Draw the window, recording every control where it is drawn: both the
+    /// picture and the hit test.
+    fn frame(&self) -> Frame<Target> {
+        let (w, h) = (self.width, self.height);
+        let mut f = Frame::new(w, h);
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: self.width,
-            height: self.height,
+            width: w,
+            height: h,
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
-
-        // After the background, or it would be painted over.
-        //
-        // Keyed on there being no accounts, so it retires itself as soon as the
-        // user enters one rather than sitting there contradicting their data.
-        if self.accounts.is_empty() {
-            for (i, line) in NO_DATA_LINES.iter().enumerate() {
-                cmds.push(RenderCommand::Text {
-                    x: 10.0,
-                    #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
-                    y: 2.0 + i as f32 * 13.0,
-                    text: (*line).to_string(),
-                    color: if i == 0 {
-                        self.palette.ink(self.palette.yellow)
-                    } else {
-                        self.palette.subtext0
-                    },
-                    font_size: if i == 0 { 12.0 } else { 10.0 },
-                    font_weight: if i == 0 {
-                        FontWeightHint::Bold
-                    } else {
-                        FontWeightHint::Regular
-                    },
-                    max_width: Some(self.width - 20.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-        }
-
-        self.render_sidebar(&mut cmds);
-        self.render_header(&mut cmds);
-
+        self.render_sidebar(&mut f);
+        self.render_header(&mut f);
+        // Each screen is held to its area: the lists ran on under the status
+        // bar, and the dashboard's last section off the bottom of the window.
+        f.clip(self.content_rect());
         match self.screen {
-            Screen::Dashboard => self.render_dashboard(&mut cmds),
-            Screen::Transactions => self.render_transactions(&mut cmds),
-            Screen::Budgets => self.render_budgets(&mut cmds),
-            Screen::Accounts => self.render_accounts(&mut cmds),
-            Screen::Reports => self.render_reports(&mut cmds),
+            Screen::Dashboard => self.render_dashboard(&mut f),
+            Screen::Transactions => self.render_transactions(&mut f),
+            Screen::Budgets => self.render_budgets(&mut f),
+            Screen::Accounts => self.render_accounts(&mut f),
+            Screen::Reports => self.render_reports(&mut f),
         }
-
-        self.render_status(&mut cmds);
-        cmds
+        f.unclip();
+        self.render_status(&mut f);
+        if let Some(form) = &self.form {
+            self.render_form(&mut f, form);
+        }
+        if let Some(doomed) = self.pending_delete {
+            self.render_question(&mut f, doomed);
+        }
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (w, h),
+                Self::HEADER_H,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+            f.hit(Target::HelpCard, Rect::new(0.0, 0.0, w, h));
+        }
+        f
     }
 
-    fn render_sidebar(&self, cmds: &mut Vec<RenderCommand>) {
-        cmds.push(RenderCommand::FillRect {
+    /// A button, lit while the pointer is on it; one with nothing to do is
+    /// drawn dim and records no box.
+    fn button(
+        &self,
+        f: &mut Frame<Target>,
+        rect: Rect,
+        label: &str,
+        target: Target,
+        enabled: bool,
+    ) {
+        let lit = enabled && self.hover == Some(target);
+        f.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: if lit {
+                self.palette.surface2
+            } else {
+                self.palette.surface1
+            },
+            corner_radii: CornerRadii::all(6.0),
+        });
+        f.push(RenderCommand::Text {
+            x: guitk::text::center_x(label, rect.x + rect.w / 2.0, 12.0, FontWeightHint::Regular)
+                .max(rect.x + 4.0),
+            y: rect.y + (rect.h - 12.0) / 2.0,
+            text: label.to_string(),
+            font_size: 12.0,
+            color: if enabled {
+                self.palette.text
+            } else {
+                self.palette.overlay0
+            },
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((rect.w - 8.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if enabled {
+            f.hit(target, rect);
+        }
+    }
+
+    /// Buttons ending at `right`, each as wide as it says, in the order
+    /// named.
+    fn buttons_to(
+        &self,
+        f: &mut Frame<Target>,
+        right: f32,
+        y: f32,
+        buttons: &[(&str, f32, Target, bool)],
+    ) {
+        let total: f32 = buttons.iter().map(|(_, w, _, _)| w + 6.0).sum();
+        let mut x = right - (total - 6.0).max(0.0);
+        for (label, width, target, enabled) in buttons {
+            self.button(f, Rect::new(x, y, *width, 28.0), label, *target, *enabled);
+            x += width + 6.0;
+        }
+    }
+
+    /// A title at the top left of a screen.
+    fn screen_title(f: &mut Frame<Target>, x: f32, y: f32, text: String, color: Color) {
+        f.push(RenderCommand::Text {
+            x,
+            y,
+            text,
+            font_size: 18.0,
+            color,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(420.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    /// A section's heading.
+    fn heading(&self, f: &mut Frame<Target>, x: f32, y: f32, text: &str, width: f32) {
+        f.push(RenderCommand::Text {
+            x,
+            y,
+            text: text.to_string(),
+            font_size: 15.0,
+            color: self.palette.text,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(width.max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    /// A line of quiet text.
+    fn note(&self, f: &mut Frame<Target>, x: f32, y: f32, text: String, width: f32) {
+        f.push(RenderCommand::Text {
+            x,
+            y,
+            text,
+            font_size: 12.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width.max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    /// Text whose right edge is at `right`.
+    fn right_text(
+        f: &mut Frame<Target>,
+        right: f32,
+        y: f32,
+        text: String,
+        (size, weight, color): (f32, FontWeightHint, Color),
+    ) {
+        f.push(RenderCommand::Text {
+            x: guitk::text::right_x(&text, right, size, weight),
+            y,
+            text,
+            font_size: size,
+            color,
+            font_weight: weight,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+    }
+
+    /// A progress bar `usage` full, red past the limit and yellow near it.
+    fn usage_bar(&self, f: &mut Frame<Target>, rect: Rect, usage: f32) {
+        f.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: self.palette.surface2,
+            corner_radii: CornerRadii::all(rect.h / 2.0),
+        });
+        let fill = (rect.w * usage.min(1.0)).max(0.0);
+        if fill > 0.0 {
+            f.push(RenderCommand::FillRect {
+                x: rect.x,
+                y: rect.y,
+                width: fill,
+                height: rect.h,
+                color: if usage > 1.0 {
+                    self.palette.red
+                } else if usage > 0.8 {
+                    self.palette.yellow
+                } else {
+                    self.palette.green
+                },
+                corner_radii: CornerRadii::all(rect.h / 2.0),
+            });
+        }
+    }
+
+    /// A thumb at the right edge of `pane` when the list is longer than it.
+    fn scroll_thumb(
+        &self,
+        f: &mut Frame<Target>,
+        pane: Rect,
+        count: usize,
+        visible: usize,
+        scroll: usize,
+    ) {
+        if count <= visible {
+            return;
+        }
+        let h = (pane.h * visible as f32 / count as f32).clamp(16.0_f32.min(pane.h), pane.h);
+        let last = count.saturating_sub(visible).max(1);
+        let y = pane.y + (pane.h - h) * (scroll.min(last) as f32 / last as f32);
+        f.push(RenderCommand::FillRect {
+            x: pane.right() - 5.0,
+            y,
+            width: 4.0,
+            height: h,
+            color: self.palette.surface2,
+            corner_radii: CornerRadii::all(2.0),
+        });
+    }
+
+    /// The sidebar entry for the `i`th screen.
+    fn nav_rect(i: usize) -> Rect {
+        Rect::new(8.0, 52.0 + i as f32 * 40.0, Self::SIDEBAR_W - 16.0, 36.0)
+    }
+
+    fn render_sidebar(&self, f: &mut Frame<Target>) {
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width: Self::SIDEBAR_W,
@@ -1156,9 +2270,7 @@ impl FinanceApp {
             color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
-
-        // Logo
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: 16.0,
             y: 16.0,
             text: String::from("\u{1F4B0} Finance"),
@@ -1168,53 +2280,60 @@ impl FinanceApp {
             max_width: Some(Self::SIDEBAR_W - 24.0),
             overflow: TextOverflow::Ellipsis,
         });
-
-        // Nav items
-        let nav_y = 52.0;
         for (i, screen) in Screen::ALL.iter().enumerate() {
-            let iy = nav_y + i as f32 * 40.0;
+            let rect = Self::nav_rect(i);
+            let target = Target::Screen(*screen);
             let is_active = *screen == self.screen;
-            let bg = if is_active {
-                self.palette.surface1
-            } else {
-                Color::rgba(0, 0, 0, 0)
-            };
-            let tc = if is_active {
-                self.palette.blue
-            } else {
-                self.palette.subtext0
-            };
-
-            cmds.push(RenderCommand::FillRect {
-                x: 8.0,
-                y: iy,
-                width: Self::SIDEBAR_W - 16.0,
-                height: 36.0,
-                color: bg,
+            f.push(RenderCommand::FillRect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.w,
+                height: rect.h,
+                color: if is_active {
+                    self.palette.surface1
+                } else if self.hover == Some(target) {
+                    self.palette.surface0
+                } else {
+                    Color::rgba(0, 0, 0, 0)
+                },
                 corner_radii: CornerRadii::all(6.0),
             });
-            cmds.push(RenderCommand::Text {
-                x: 20.0,
-                y: iy + 9.0,
+            f.push(RenderCommand::Text {
+                x: rect.x + 12.0,
+                y: rect.y + 9.0,
                 text: format!("{} {}", i.saturating_add(1), screen.label()),
                 font_size: 13.0,
-                color: tc,
+                color: if is_active {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(Self::SIDEBAR_W - 40.0),
+                max_width: Some(rect.w - 24.0),
                 overflow: TextOverflow::Ellipsis,
             });
+            f.hit(target, rect);
         }
+        let keys = Self::nav_rect(Screen::ALL.len());
+        self.button(
+            f,
+            Rect::new(keys.x, keys.y + 6.0, keys.w, 28.0),
+            "Keys  (F1)",
+            Target::Help,
+            true,
+        );
 
-        // Quick stats at bottom
-        let total = self.total_balance();
-        let (total_str, total_color) = Self::format_currency_colored(total, &self.palette);
-        cmds.push(RenderCommand::Text {
+        // The total, above the status bar that used to cover half of it.
+        let total_y = self.height - Self::STATUS_H - 52.0;
+        let (total_str, total_color) =
+            Self::format_currency_colored(self.total_balance(), &self.palette);
+        f.push(RenderCommand::Text {
             x: 16.0,
-            y: self.height - 60.0,
+            y: total_y,
             text: String::from("Total Balance"),
             font_size: 11.0,
             color: self.palette.subtext0,
@@ -1222,9 +2341,9 @@ impl FinanceApp {
             max_width: Some(Self::SIDEBAR_W - 24.0),
             overflow: TextOverflow::Ellipsis,
         });
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: 16.0,
-            y: self.height - 42.0,
+            y: total_y + 18.0,
             text: total_str,
             font_size: 18.0,
             color: total_color,
@@ -1234,9 +2353,10 @@ impl FinanceApp {
         });
     }
 
-    fn render_header(&self, cmds: &mut Vec<RenderCommand>) {
-        cmds.push(RenderCommand::FillRect {
-            x: Self::SIDEBAR_W,
+    fn render_header(&self, f: &mut Frame<Target>) {
+        let x0 = Self::SIDEBAR_W;
+        f.push(RenderCommand::FillRect {
+            x: x0,
             y: 0.0,
             width: self.content_w(),
             height: Self::HEADER_H,
@@ -1244,27 +2364,46 @@ impl FinanceApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // Month navigation
-        cmds.push(RenderCommand::Text {
-            x: Self::SIDEBAR_W + 16.0,
+        // The month, between arrows that are buttons now: they were drawn
+        // into the month's own text.
+        self.button(
+            f,
+            Rect::new(x0 + 12.0, 10.0, 30.0, 30.0),
+            "\u{25C0}",
+            Target::MonthPrev,
+            true,
+        );
+        f.push(RenderCommand::Text {
+            x: x0 + 50.0,
             y: 14.0,
-            text: format!(
-                "\u{25C0} {} {} \u{25B6}",
-                self.view_month.month_label(),
-                self.view_month.year
-            ),
+            text: format!("{} {}", self.view_month.month_label(), self.view_month.year),
             font_size: 18.0,
             color: self.palette.text,
             font_weight: FontWeightHint::Bold,
-            max_width: Some(300.0),
+            max_width: Some(150.0),
             overflow: TextOverflow::Ellipsis,
         });
+        self.button(
+            f,
+            Rect::new(x0 + 204.0, 10.0, 30.0, 30.0),
+            "\u{25B6}",
+            Target::MonthNext,
+            true,
+        );
+        self.button(
+            f,
+            Rect::new(x0 + 242.0, 10.0, 96.0, 30.0),
+            "This month",
+            Target::ThisMonth,
+            !self.view_month.same_month(&self.current_date),
+        );
 
-        // Monthly summary in header
+        // The month's figures, as far right as there is room, never over the
+        // month's controls.
         let income = self.month_income();
         let expenses = self.month_expenses();
         let savings = self.month_savings();
-        let hx = self.width - 460.0;
+        let hx = (self.width - 460.0).max(x0 + 350.0);
         for (label, amount, color, offset) in [
             // The three figures are the whole of what this header says, so
             // each is inked. Income green, expenses red, savings teal or red
@@ -1292,7 +2431,7 @@ impl FinanceApp {
                 300.0,
             ),
         ] {
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: hx + offset,
                 y: 6.0,
                 text: label.to_string(),
@@ -1309,7 +2448,7 @@ impl FinanceApp {
             } else {
                 Self::format_currency(amount)
             };
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: hx + offset,
                 y: 22.0,
                 text: val,
@@ -1322,267 +2461,294 @@ impl FinanceApp {
         }
     }
 
-    fn render_dashboard(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_dashboard(&self, f: &mut Frame<Target>) {
         let cx = self.content_x() + 16.0;
         let cy = self.content_y() + 16.0;
-        let cw = self.content_w() - 32.0;
+        let cw = (self.content_w() - 32.0).max(0.0);
+        if self.accounts.is_empty() {
+            self.render_first_run(f, cx, cy, cw);
+            return;
+        }
+        Self::screen_title(f, cx, cy, String::from("Overview"), self.palette.text);
+        self.buttons_to(
+            f,
+            cx + cw,
+            cy - 4.0,
+            &[
+                ("+ Transaction", 120.0, Target::NewTransaction, true),
+                ("+ Account", 100.0, Target::NewAccount, true),
+            ],
+        );
+        let top = cy + 40.0;
+        let col_w = ((cw - 24.0) / 2.0).max(0.0);
+        self.render_budget_overview(f, cx, top, col_w);
+        let right_x = cx + col_w + 24.0;
+        let recent_top = self.render_top_spending(f, right_x, top, col_w);
+        self.render_recent(f, right_x, recent_top, col_w);
+    }
 
-        // Budget overview cards
-        cmds.push(RenderCommand::Text {
-            x: cx,
-            y: cy,
-            text: String::from("Budget Overview"),
-            font_size: 16.0,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+    /// What the dashboard says before there is anything to show: why it is
+    /// empty, and the one control that begins.
+    fn render_first_run(&self, f: &mut Frame<Target>, cx: f32, cy: f32, cw: f32) {
+        let card = Rect::new(cx, cy, cw, 128.0);
+        self.palette
+            .push_surface(f, card.x, card.y, card.w, card.h, 8.0, Surface::Card);
+        for (i, line) in NO_DATA_LINES.iter().enumerate() {
+            f.push(RenderCommand::Text {
+                x: card.x + 16.0,
+                y: card.y + 14.0 + i as f32 * 22.0,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 15.0 } else { 12.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some((card.w - 32.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        self.button(
+            f,
+            Rect::new(card.x + 16.0, card.bottom() - 40.0, 120.0, 28.0),
+            "+ Account",
+            Target::NewAccount,
+            true,
+        );
+    }
 
-        let card_w = (cw - 16.0) / 2.0;
-        let card_h = 60.0;
-        let mut card_y = cy + 28.0;
-
-        for (i, budget) in self.budgets.iter().enumerate() {
-            let col = i % 2;
-            let card_x = cx + col as f32 * (card_w + 16.0);
-            if col == 0 && i > 0 {
-                card_y += card_h + 8.0;
-            }
-
-            let spent = self.category_spending(budget.category);
-            let usage = Self::usage_ratio(spent, budget.monthly_limit);
-            let bar_color = if usage > 1.0 {
-                self.palette.red
-            } else if usage > 0.8 {
-                self.palette.yellow
-            } else {
-                self.palette.green
+    /// Each budget set, in the order the categories are listed, with how
+    /// much of it is gone.
+    fn render_budget_overview(&self, f: &mut Frame<Target>, x: f32, top: f32, w: f32) {
+        self.heading(f, x, top, "Budgets", w);
+        if self.budgets.is_empty() {
+            self.note(
+                f,
+                x,
+                top + 28.0,
+                String::from("None set. The budgets screen (3) takes one per category."),
+                w,
+            );
+            return;
+        }
+        let mut y = top + 28.0;
+        for cat in Category::EXPENSE_CATS {
+            let Some(budget) = self.budgets.iter().find(|b| b.category == cat) else {
+                continue;
             };
-
-            self.palette
-                .push_surface(cmds, card_x, card_y, card_w, card_h, 8.0, Surface::Card);
-
-            cmds.push(RenderCommand::Text {
-                x: card_x + 8.0,
-                y: card_y + 6.0,
-                text: format!("{} {}", budget.category.icon(), budget.category.label()),
+            let spent = self.category_spending(cat);
+            f.push(RenderCommand::Text {
+                x,
+                y,
+                text: format!("{} {}", cat.icon(), cat.label()),
                 font_size: 12.0,
                 color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
-                max_width: Some(card_w - 16.0),
+                max_width: Some((w - 150.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            cmds.push(RenderCommand::Text {
-                x: card_x + 8.0,
-                y: card_y + 24.0,
-                text: format!(
+            Self::right_text(
+                f,
+                x + w,
+                y + 1.0,
+                format!(
                     "{} / {}",
                     Self::format_currency(spent),
                     Self::format_currency(budget.monthly_limit)
                 ),
-                font_size: 11.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(card_w - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Progress bar
-            let bar_x = card_x + 8.0;
-            let bar_y = card_y + 42.0;
-            let bar_w = card_w - 16.0;
-            let bar_h = 8.0;
-            cmds.push(RenderCommand::FillRect {
-                x: bar_x,
-                y: bar_y,
-                width: bar_w,
-                height: bar_h,
-                color: self.palette.surface2,
-                corner_radii: CornerRadii::all(4.0),
-            });
-            let fill_w = (bar_w * usage.min(1.0)).max(0.0);
-            if fill_w > 0.0 {
-                cmds.push(RenderCommand::FillRect {
-                    x: bar_x,
-                    y: bar_y,
-                    width: fill_w,
-                    height: bar_h,
-                    color: bar_color,
-                    corner_radii: CornerRadii::all(4.0),
-                });
-            }
+                (11.0, FontWeightHint::Regular, self.palette.subtext0),
+            );
+            self.usage_bar(
+                f,
+                Rect::new(x, y + 20.0, w, 8.0),
+                Self::usage_ratio(spent, budget.monthly_limit),
+            );
+            y += 40.0;
         }
+    }
 
-        // Top spending categories
-        let section_y = card_y + card_h + 24.0;
-        cmds.push(RenderCommand::Text {
-            x: cx,
-            y: section_y,
-            text: String::from("Top Spending Categories"),
-            font_size: 16.0,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(300.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
+    /// The month's five largest categories of spending; answers where the
+    /// section below it starts.
+    fn render_top_spending(&self, f: &mut Frame<Target>, x: f32, top: f32, w: f32) -> f32 {
+        self.heading(f, x, top, "Top spending", w);
         let top_cats = self.top_expense_categories();
+        if top_cats.is_empty() {
+            self.note(
+                f,
+                x,
+                top + 28.0,
+                String::from("Nothing spent this month."),
+                w,
+            );
+            return top + 28.0 + 30.0 + 16.0;
+        }
         let max_amount = top_cats.first().map_or(1, |(_, a)| *a).max(1);
+        let shown = top_cats.len().min(5);
+        let bar_room = (w - 136.0 - 90.0).max(0.0);
         for (i, (cat, amount)) in top_cats.iter().take(5).enumerate() {
-            let ry = section_y + 28.0 + i as f32 * 36.0;
-            let bar_ratio = *amount as f32 / max_amount as f32;
-            let bar_w = (cw - 200.0) * bar_ratio;
-
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 4.0,
+            let ry = top + 28.0 + i as f32 * 30.0;
+            let bar_w = bar_room * (*amount as f32 / max_amount as f32);
+            f.push(RenderCommand::Text {
+                x,
+                y: ry + 3.0,
                 text: format!("{} {}", cat.icon(), cat.label()),
                 font_size: 12.0,
                 color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(140.0),
+                max_width: Some(130.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            cmds.push(RenderCommand::FillRect {
-                x: cx + 150.0,
-                y: ry + 2.0,
+            f.push(RenderCommand::FillRect {
+                x: x + 136.0,
+                y: ry,
                 width: bar_w.max(4.0),
                 height: 20.0,
                 color: cat.color(&self.palette),
                 corner_radii: CornerRadii::all(4.0),
             });
-            cmds.push(RenderCommand::Text {
-                x: cx + 155.0 + bar_w,
-                y: ry + 4.0,
+            f.push(RenderCommand::Text {
+                x: x + 142.0 + bar_w,
+                y: ry + 3.0,
                 text: Self::format_currency(*amount),
-                font_size: 11.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(100.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
-        // Recent transactions
-        let recent_y = section_y + 28.0 + 5.0 * 36.0 + 16.0;
-        cmds.push(RenderCommand::Text {
-            x: cx,
-            y: recent_y,
-            text: String::from("Recent Transactions"),
-            font_size: 16.0,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(300.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        let mut sorted: Vec<&Transaction> = self.month_transactions();
-        sorted.sort_by_key(|tx| std::cmp::Reverse(tx.date));
-        for (i, tx) in sorted.iter().take(5).enumerate() {
-            let ry = recent_y + 28.0 + i as f32 * 28.0;
-            cmds.push(RenderCommand::Text {
-                x: cx + 4.0,
-                y: ry,
-                text: tx.date.format(),
                 font_size: 11.0,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(90.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            cmds.push(RenderCommand::Text {
-                x: cx + 100.0,
+        }
+        top + 28.0 + shown as f32 * 30.0 + 16.0
+    }
+
+    /// The month's latest transactions, as many as fit; a press shows one in
+    /// the transactions screen.
+    fn render_recent(&self, f: &mut Frame<Target>, x: f32, top: f32, w: f32) {
+        self.heading(f, x, top, "Recent transactions", w);
+        let mut recent = self.month_transactions();
+        recent.sort_by(|a, b| b.date.cmp(&a.date).then(b.id.cmp(&a.id)));
+        if recent.is_empty() {
+            self.note(
+                f,
+                x,
+                top + 28.0,
+                String::from("None this month. N adds one."),
+                w,
+            );
+            return;
+        }
+        let mut ry = top + 28.0;
+        for tx in recent {
+            if ry + 26.0 > self.content_bottom() {
+                break;
+            }
+            let row = Rect::new(x - 4.0, ry - 4.0, w + 8.0, 26.0);
+            let target = Target::RecentRow(tx.id);
+            if self.hover == Some(target) {
+                f.push(RenderCommand::FillRect {
+                    x: row.x,
+                    y: row.y,
+                    width: row.w,
+                    height: row.h,
+                    color: self.palette.surface0,
+                    corner_radii: CornerRadii::all(4.0),
+                });
+            }
+            f.push(RenderCommand::Text {
+                x,
+                y: ry + 1.0,
+                text: tx.date.format(),
+                font_size: 11.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(80.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            f.push(RenderCommand::Text {
+                x: x + 84.0,
                 y: ry,
                 text: tx.description.clone(),
                 font_size: 12.0,
                 color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(300.0),
+                max_width: Some((w - 84.0 - 110.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-            let (amt_str, amt_color) = Self::format_currency_colored(tx.amount, &self.palette);
-            cmds.push(RenderCommand::Text {
-                x: cx + cw - 120.0,
-                y: ry,
-                text: amt_str,
-                font_size: 12.0,
-                color: amt_color,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(110.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            let (amount, color) = Self::format_currency_colored(tx.amount, &self.palette);
+            Self::right_text(f, x + w, ry, amount, (12.0, FontWeightHint::Bold, color));
+            f.hit(target, row);
+            ry += 28.0;
         }
     }
 
-    fn render_transactions(&self, cmds: &mut Vec<RenderCommand>) {
+    /// Where the transaction columns start in a list `w` wide: the date, the
+    /// description, the category, and the amount's right edge.
+    fn tx_columns(w: f32) -> (f32, f32, f32, f32) {
+        let amount_right = (w - 32.0).max(0.0);
+        let category = (amount_right - 120.0 - 150.0).max(98.0);
+        (8.0, 98.0, category, amount_right)
+    }
+
+    /// What the transaction list says when it has no rows, which is never
+    /// the same thing twice: why it is empty, and what would fill it.
+    fn empty_list_text(&self) -> String {
+        let month = format!("{} {}", self.view_month.month_label(), self.view_month.year);
+        if self.accounts.is_empty() {
+            String::from(
+                "No accounts yet: a transaction goes into one. The accounts screen (4) adds one.",
+            )
+        } else if !self.search_query.is_empty() {
+            format!(
+                "Nothing in any month matches \u{201C}{}\u{201D}.",
+                self.search_query
+            )
+        } else if let Some(cat) = self.category_filter {
+            format!("No {} in {month}. C shows the next category.", cat.label())
+        } else {
+            format!("No transactions in {month}. N adds one.")
+        }
+    }
+
+    fn render_transactions(&self, f: &mut Frame<Target>) {
         let cx = self.content_x() + 8.0;
         let cy = self.content_y() + 8.0;
-        let cw = self.content_w() - 16.0;
+        let cw = (self.content_w() - 16.0).max(0.0);
+        let chosen = self.chosen_transaction().is_some();
 
-        // Search bar
+        // The toolbar: search, the category shown, and what can be done.
+        let buttons_w = 3.0 * 80.0 + 2.0 * 6.0;
+        let chip_w = 160.0;
+        let search = Rect::new(cx, cy, (cw - buttons_w - chip_w - 12.0).max(60.0), 32.0);
+        self.render_search(f, search);
+        self.render_filter_chip(f, Rect::new(search.right() + 6.0, cy, chip_w, 32.0));
+        self.buttons_to(
+            f,
+            cx + cw,
+            cy + 2.0,
+            &[
+                ("+ New", 80.0, Target::NewTransaction, true),
+                ("Edit", 80.0, Target::Edit, chosen),
+                ("Delete", 80.0, Target::Delete, chosen),
+            ],
+        );
+
+        // Column heads.
+        let head_y = cy + 40.0;
         self.palette
-            .push_surface(cmds, cx, cy, cw, 32.0, 6.0, Surface::Card);
-        let search_text = if self.search_query.is_empty() {
-            if self.search_active {
-                String::from("|")
-            } else {
-                String::from("Press / to search...")
-            }
-        } else {
-            format!("{}|", self.search_query)
-        };
-        cmds.push(RenderCommand::Text {
-            x: cx + 12.0,
-            y: cy + 8.0,
-            text: search_text,
-            font_size: 13.0,
-            color: if self.search_query.is_empty() && !self.search_active {
-                self.palette.subtext0
-            } else {
-                self.palette.text
-            },
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(cw - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Filter indicator
-        if let Some(cat) = self.category_filter {
-            cmds.push(RenderCommand::FillRect {
-                x: cx + cw - 140.0,
-                y: cy + 4.0,
-                width: 130.0,
-                height: 24.0,
-                color: cat.color(&self.palette),
-                corner_radii: CornerRadii::all(12.0),
-            });
-            cmds.push(RenderCommand::Text {
-                x: cx + cw - 132.0,
-                y: cy + 8.0,
-                text: cat.label().to_string(),
-                font_size: 11.0,
-                color: self.palette.crust,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(120.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
-        // Column headers
-        let list_y = cy + 40.0;
-        self.palette
-            .push_surface(cmds, cx, list_y, cw, 28.0, 0.0, Surface::Card);
+            .push_surface(f, cx, head_y, cw, 28.0, 0.0, Surface::Card);
+        let (date_x, desc_x, cat_x, amount_right) = Self::tx_columns(cw);
         for (hx, label) in [
-            (0.0, "Date"),
-            (90.0, "Description"),
-            (380.0, "Category"),
-            (520.0, "Amount"),
+            (date_x, "Date"),
+            (desc_x, "Description"),
+            (cat_x, "Category"),
         ] {
-            cmds.push(RenderCommand::Text {
-                x: cx + hx + 8.0,
-                y: list_y + 6.0,
+            f.push(RenderCommand::Text {
+                x: cx + hx,
+                y: head_y + 7.0,
                 text: label.to_string(),
                 font_size: 11.0,
                 color: self.palette.subtext0,
@@ -1591,78 +2757,90 @@ impl FinanceApp {
                 overflow: TextOverflow::Ellipsis,
             });
         }
+        Self::right_text(
+            f,
+            cx + amount_right,
+            head_y + 7.0,
+            String::from("Amount"),
+            (11.0, FontWeightHint::Bold, self.palette.subtext0),
+        );
 
-        // Rows
+        // The rows.
+        let (pane, rows) = self.tx_pane();
+        f.hit(Target::TxList, pane);
         let filtered = self.filtered_transactions();
-        let row_h = 36.0;
-        let start = list_y + 32.0;
-        for (vi, (orig_idx, tx)) in filtered.iter().enumerate() {
-            let ry = start + vi as f32 * row_h;
-            if ry > self.content_bottom() {
-                break;
-            }
-            let is_sel = Some(tx.id) == self.selected_id;
-            let _ = orig_idx;
-            let bg = if is_sel {
-                self.palette.surface1
-            } else if vi % 2 == 0 {
-                self.palette.surface0
-            } else {
-                self.palette.base
-            };
-
-            cmds.push(RenderCommand::FillRect {
-                x: cx,
-                y: ry,
-                width: cw,
-                height: row_h,
-                color: bg,
+        if filtered.is_empty() {
+            self.note(
+                f,
+                pane.x + 8.0,
+                pane.y + 12.0,
+                self.empty_list_text(),
+                pane.w - 16.0,
+            );
+        }
+        for (vi, (_, tx)) in filtered
+            .iter()
+            .enumerate()
+            .skip(self.tx_scroll)
+            .take(rows.saturating_add(1))
+        {
+            let ry = pane.y + vi.saturating_sub(self.tx_scroll) as f32 * TX_ROW_H;
+            let row = Rect::new(pane.x, ry, pane.w, TX_ROW_H);
+            f.push(RenderCommand::FillRect {
+                x: row.x,
+                y: row.y,
+                width: row.w,
+                height: row.h,
+                color: if Some(tx.id) == self.selected_id {
+                    self.palette.surface1
+                } else if vi % 2 == 0 {
+                    self.palette.surface0
+                } else {
+                    self.palette.base
+                },
                 corner_radii: CornerRadii::ZERO,
             });
-            cmds.push(RenderCommand::Text {
-                x: cx + 8.0,
+            f.push(RenderCommand::Text {
+                x: row.x + date_x,
                 y: ry + 10.0,
                 text: tx.date.format(),
                 font_size: 12.0,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(80.0),
+                max_width: Some(84.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            cmds.push(RenderCommand::Text {
-                x: cx + 98.0,
+            f.push(RenderCommand::Text {
+                x: row.x + desc_x,
                 y: ry + 10.0,
                 text: tx.description.clone(),
                 font_size: 13.0,
                 color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(270.0),
+                max_width: Some((cat_x - desc_x - 8.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-            cmds.push(RenderCommand::Text {
-                x: cx + 388.0,
+            f.push(RenderCommand::Text {
+                x: row.x + cat_x,
                 y: ry + 10.0,
                 text: format!("{} {}", tx.category.icon(), tx.category.label()),
                 font_size: 11.0,
                 color: self.palette.ink(tx.category.color(&self.palette)),
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(120.0),
+                max_width: Some(144.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            let (amt_str, amt_color) = Self::format_currency_colored(tx.amount, &self.palette);
-            cmds.push(RenderCommand::Text {
-                x: cx + 528.0,
-                y: ry + 10.0,
-                text: amt_str,
-                font_size: 13.0,
-                color: amt_color,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(100.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            let (amount, color) = Self::format_currency_colored(tx.amount, &self.palette);
+            Self::right_text(
+                f,
+                row.x + amount_right,
+                ry + 10.0,
+                amount,
+                (13.0, FontWeightHint::Bold, color),
+            );
             if tx.recurring {
-                cmds.push(RenderCommand::Text {
-                    x: cx + cw - 24.0,
+                f.push(RenderCommand::Text {
+                    x: row.right() - 24.0,
                     y: ry + 10.0,
                     text: String::from("\u{1F501}"),
                     font_size: 11.0,
@@ -1672,221 +2850,372 @@ impl FinanceApp {
                     overflow: TextOverflow::Ellipsis,
                 });
             }
+            f.hit(Target::TxRow(tx.id), row);
         }
+        self.scroll_thumb(f, pane, filtered.len(), rows, self.tx_scroll);
     }
 
-    fn render_budgets(&self, cmds: &mut Vec<RenderCommand>) {
+    /// The search box: what is typed, a caret while typing, and -- once there
+    /// is a query -- that it reaches every month.
+    fn render_search(&self, f: &mut Frame<Target>, rect: Rect) {
+        self.palette
+            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 6.0, Surface::Card);
+        if self.search_active {
+            f.push(RenderCommand::StrokeRect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.w,
+                height: rect.h,
+                color: self.palette.blue,
+                line_width: 2.0,
+                corner_radii: CornerRadii::all(6.0),
+            });
+        }
+        let room = (rect.w - 110.0).max(0.0);
+        let placeholder = self.search_query.is_empty() && !self.search_active;
+        f.push(RenderCommand::Text {
+            x: rect.x + 12.0,
+            y: rect.y + 8.0,
+            text: if placeholder {
+                String::from("Search every month  ( / )")
+            } else {
+                self.search_query.clone()
+            },
+            font_size: 13.0,
+            color: if placeholder {
+                self.palette.subtext0
+            } else {
+                self.palette.text
+            },
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(room),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if self.search_active {
+            let typed = guitk::text::measure(&self.search_query, 13.0, FontWeightHint::Regular);
+            f.push(RenderCommand::FillRect {
+                x: rect.x + 12.0 + typed.min(room),
+                y: rect.y + 7.0,
+                width: textedit::CARET_WIDTH,
+                height: 18.0,
+                color: self.palette.text,
+                corner_radii: CornerRadii::ZERO,
+            });
+        }
+        if !self.search_query.is_empty() {
+            Self::right_text(
+                f,
+                rect.right() - 10.0,
+                rect.y + 10.0,
+                String::from("every month"),
+                (11.0, FontWeightHint::Regular, self.palette.subtext0),
+            );
+        }
+        f.hit(Target::Search, rect);
+    }
+
+    /// The category the list is showing; a press shows the next.
+    fn render_filter_chip(&self, f: &mut Frame<Target>, rect: Rect) {
+        let (fill, label, ink) = match self.category_filter {
+            Some(cat) => (
+                cat.color(&self.palette),
+                format!("{} {}", cat.icon(), cat.label()),
+                self.palette.crust,
+            ),
+            None => (
+                if self.hover == Some(Target::FilterChip) {
+                    self.palette.surface2
+                } else {
+                    self.palette.surface1
+                },
+                String::from("All categories  (C)"),
+                self.palette.text,
+            ),
+        };
+        f.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: fill,
+            corner_radii: CornerRadii::all(rect.h / 2.0),
+        });
+        f.push(RenderCommand::Text {
+            x: rect.x + 12.0,
+            y: rect.y + 9.0,
+            text: label,
+            font_size: 12.0,
+            color: ink,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some((rect.w - 24.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        f.hit(Target::FilterChip, rect);
+    }
+
+    fn render_budgets(&self, f: &mut Frame<Target>) {
         let cx = self.content_x() + 16.0;
         let cy = self.content_y() + 16.0;
-        let cw = self.content_w() - 32.0;
-
-        cmds.push(RenderCommand::Text {
-            x: cx,
-            y: cy,
-            text: format!(
+        let cw = (self.content_w() - 32.0).max(0.0);
+        Self::screen_title(
+            f,
+            cx,
+            cy,
+            format!(
                 "Budgets for {} {}",
                 self.view_month.month_label(),
                 self.view_month.year
             ),
-            font_size: 18.0,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(400.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+            self.palette.text,
+        );
+        self.buttons_to(
+            f,
+            cx + cw,
+            cy - 4.0,
+            &[("Set budget", 110.0, Target::Edit, true)],
+        );
 
-        let item_h = 80.0;
-        for (i, budget) in self.budgets.iter().enumerate() {
-            let iy = cy + 36.0 + i as f32 * (item_h + 8.0);
-            if iy + item_h > self.content_bottom() {
-                break;
-            }
-            let spent = self.category_spending(budget.category);
-            let usage = Self::usage_ratio(spent, budget.monthly_limit);
-            let remaining = budget.monthly_limit.saturating_sub(spent);
-            let bar_color = if usage > 1.0 {
-                self.palette.red
-            } else if usage > 0.8 {
-                self.palette.yellow
-            } else {
-                self.palette.green
-            };
-
-            self.palette
-                .push_surface(cmds, cx, iy, cw, item_h, 8.0, Surface::Card);
-
-            cmds.push(RenderCommand::Text {
-                x: cx + 12.0,
-                y: iy + 8.0,
-                text: format!("{} {}", budget.category.icon(), budget.category.label()),
-                font_size: 15.0,
+        // Every category, with a budget or not: only the ones with a budget
+        // were listed, so the first could never be set.
+        let (pane, rows) = self.budget_pane();
+        f.hit(Target::BudgetList, pane);
+        for (i, cat) in Category::EXPENSE_CATS
+            .iter()
+            .enumerate()
+            .skip(self.budget_scroll)
+            .take(rows.saturating_add(1))
+        {
+            let ry = pane.y + i.saturating_sub(self.budget_scroll) as f32 * BUDGET_ROW_H;
+            let row = Rect::new(pane.x, ry, pane.w, BUDGET_ROW_H);
+            f.push(RenderCommand::FillRect {
+                x: row.x,
+                y: row.y,
+                width: row.w,
+                height: row.h,
+                color: if i == self.selected_budget {
+                    self.palette.surface1
+                } else if i % 2 == 0 {
+                    self.palette.surface0
+                } else {
+                    self.palette.base
+                },
+                corner_radii: CornerRadii::ZERO,
+            });
+            f.push(RenderCommand::Text {
+                x: row.x + 12.0,
+                y: ry + 8.0,
+                text: format!("{} {}", cat.icon(), cat.label()),
+                font_size: 14.0,
                 color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
-                max_width: Some(250.0),
+                max_width: Some((row.w - 260.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            cmds.push(RenderCommand::Text {
-                x: cx + cw - 200.0,
-                y: iy + 8.0,
-                text: format!(
-                    "{} / {}",
-                    Self::format_currency(spent),
-                    Self::format_currency(budget.monthly_limit)
-                ),
-                font_size: 14.0,
-                color: if remaining >= 0 {
-                    self.palette.ink(self.palette.green)
-                } else {
-                    self.palette.ink(self.palette.red)
-                },
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(190.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Progress bar
-            let bar_x = cx + 12.0;
-            let bar_y = iy + 34.0;
-            let bar_w = cw - 24.0;
-            let bar_h = 12.0;
-            cmds.push(RenderCommand::FillRect {
-                x: bar_x,
-                y: bar_y,
-                width: bar_w,
-                height: bar_h,
-                color: self.palette.surface2,
-                corner_radii: CornerRadii::all(6.0),
-            });
-            let fill_w = (bar_w * usage.min(1.0)).max(0.0);
-            if fill_w > 0.0 {
-                cmds.push(RenderCommand::FillRect {
-                    x: bar_x,
-                    y: bar_y,
-                    width: fill_w,
-                    height: bar_h,
-                    color: bar_color,
-                    corner_radii: CornerRadii::all(6.0),
+            let spent = self.category_spending(*cat);
+            if let Some(budget) = self.budgets.iter().find(|b| b.category == *cat) {
+                let usage = Self::usage_ratio(spent, budget.monthly_limit);
+                let remaining = budget.monthly_limit.saturating_sub(spent);
+                let within = remaining >= 0;
+                Self::right_text(
+                    f,
+                    row.right() - 12.0,
+                    ry + 8.0,
+                    format!(
+                        "{} / {}",
+                        Self::format_currency(spent),
+                        Self::format_currency(budget.monthly_limit)
+                    ),
+                    (
+                        13.0,
+                        FontWeightHint::Bold,
+                        if within {
+                            self.palette.ink(self.palette.green)
+                        } else {
+                            self.palette.ink(self.palette.red)
+                        },
+                    ),
+                );
+                self.usage_bar(
+                    f,
+                    Rect::new(row.x + 12.0, ry + 30.0, (row.w - 24.0).max(0.0), 10.0),
+                    usage,
+                );
+                f.push(RenderCommand::Text {
+                    x: row.x + 12.0,
+                    y: ry + 45.0,
+                    text: format!("{:.0}% used", usage * 100.0),
+                    font_size: 11.0,
+                    color: self.palette.subtext0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(90.0),
+                    overflow: TextOverflow::Ellipsis,
                 });
-            }
-
-            // Usage percentage and remaining
-            cmds.push(RenderCommand::Text {
-                x: cx + 12.0,
-                y: iy + 54.0,
-                text: format!("{:.0}% used", usage * 100.0),
-                font_size: 11.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(100.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            let rem_text = if remaining >= 0 {
-                format!("{} remaining", Self::format_currency(remaining))
+                f.push(RenderCommand::Text {
+                    x: row.x + 104.0,
+                    y: ry + 45.0,
+                    text: if within {
+                        format!("{} remaining", Self::format_currency(remaining))
+                    } else {
+                        format!(
+                            "{} over budget",
+                            Self::format_currency(remaining.saturating_neg())
+                        )
+                    },
+                    font_size: 11.0,
+                    color: if within {
+                        self.palette.ink(self.palette.teal)
+                    } else {
+                        self.palette.ink(self.palette.red)
+                    },
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(220.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
             } else {
-                format!(
-                    "{} over budget!",
-                    Self::format_currency(remaining.saturating_neg())
-                )
-            };
-            cmds.push(RenderCommand::Text {
-                x: cx + 140.0,
-                y: iy + 54.0,
-                text: rem_text,
-                font_size: 11.0,
-                color: if remaining >= 0 {
-                    self.palette.ink(self.palette.teal)
+                Self::right_text(
+                    f,
+                    row.right() - 12.0,
+                    ry + 9.0,
+                    String::from("No budget"),
+                    (12.0, FontWeightHint::Regular, self.palette.subtext0),
+                );
+                let hint = if spent > 0 {
+                    format!(
+                        "{} spent. Enter sets a budget.",
+                        Self::format_currency(spent)
+                    )
                 } else {
-                    self.palette.ink(self.palette.red)
-                },
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(200.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+                    String::from("Enter sets a budget.")
+                };
+                self.note(f, row.x + 12.0, ry + 36.0, hint, row.w - 24.0);
+            }
+            f.hit(Target::BudgetRow(i), row);
         }
+        self.scroll_thumb(
+            f,
+            pane,
+            Category::EXPENSE_CATS.len(),
+            rows,
+            self.budget_scroll,
+        );
     }
 
-    fn render_accounts(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_accounts(&self, f: &mut Frame<Target>) {
         let cx = self.content_x() + 16.0;
         let cy = self.content_y() + 16.0;
-        let cw = self.content_w() - 32.0;
+        let cw = (self.content_w() - 32.0).max(0.0);
+        Self::screen_title(f, cx, cy, String::from("Accounts"), self.palette.text);
+        let chosen = self
+            .selected_account
+            .is_some_and(|id| self.accounts.iter().any(|a| a.id == id));
+        self.buttons_to(
+            f,
+            cx + cw,
+            cy - 4.0,
+            &[
+                ("+ Account", 100.0, Target::NewAccount, true),
+                ("Edit", 80.0, Target::Edit, chosen),
+                ("Delete", 80.0, Target::Delete, chosen),
+            ],
+        );
 
-        cmds.push(RenderCommand::Text {
-            x: cx,
-            y: cy,
-            text: String::from("Accounts"),
-            font_size: 18.0,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        let card_w = (cw - 16.0) / 2.0;
-        let card_h = 80.0;
-        for (i, account) in self.accounts.iter().enumerate() {
-            let col = i % 2;
-            let row = i / 2;
-            let ax = cx + col as f32 * (card_w + 16.0);
-            let ay = cy + 36.0 + row as f32 * (card_h + 12.0);
-
-            let balance = self.account_balance(account.id);
-            let (bal_str, bal_color) = Self::format_currency_colored(balance, &self.palette);
-
-            self.palette
-                .push_surface(cmds, ax, ay, card_w, card_h, 8.0, Surface::Card);
-            cmds.push(RenderCommand::Text {
-                x: ax + 12.0,
-                y: ay + 10.0,
+        let (pane, rows) = self.account_pane();
+        f.hit(Target::AccountList, pane);
+        if self.accounts.is_empty() {
+            self.note(
+                f,
+                pane.x + 8.0,
+                pane.y + 12.0,
+                String::from(
+                    "No accounts yet. + Account adds one: its name, its kind, and what it held when you started.",
+                ),
+                pane.w - 16.0,
+            );
+        }
+        for (i, account) in self
+            .accounts
+            .iter()
+            .enumerate()
+            .skip(self.account_scroll)
+            .take(rows.saturating_add(1))
+        {
+            let ry = pane.y + i.saturating_sub(self.account_scroll) as f32 * ACCOUNT_ROW_H;
+            let row = Rect::new(pane.x, ry, pane.w, ACCOUNT_ROW_H);
+            f.push(RenderCommand::FillRect {
+                x: row.x,
+                y: row.y,
+                width: row.w,
+                height: row.h,
+                color: if self.selected_account == Some(account.id) {
+                    self.palette.surface1
+                } else if i % 2 == 0 {
+                    self.palette.surface0
+                } else {
+                    self.palette.base
+                },
+                corner_radii: CornerRadii::ZERO,
+            });
+            f.push(RenderCommand::Text {
+                x: row.x + 12.0,
+                y: ry + 9.0,
                 text: account.name.clone(),
                 font_size: 15.0,
                 color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
-                max_width: Some(card_w - 24.0),
+                max_width: Some((row.w - 260.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-            cmds.push(RenderCommand::Text {
-                x: ax + 12.0,
-                y: ay + 32.0,
+            f.push(RenderCommand::Text {
+                x: row.x + 12.0,
+                y: ry + 32.0,
                 text: account.account_type.label().to_string(),
                 font_size: 11.0,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(100.0),
+                max_width: Some(160.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            cmds.push(RenderCommand::Text {
-                x: ax + 12.0,
-                y: ay + 50.0,
-                text: bal_str,
-                font_size: 22.0,
-                color: bal_color,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(card_w - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            let (balance, color) =
+                Self::format_currency_colored(self.account_balance(account.id), &self.palette);
+            Self::right_text(
+                f,
+                row.right() - 12.0,
+                ry + 8.0,
+                balance,
+                (18.0, FontWeightHint::Bold, color),
+            );
+            let count = self
+                .transactions
+                .iter()
+                .filter(|t| t.account_id == account.id)
+                .count();
+            Self::right_text(
+                f,
+                row.right() - 12.0,
+                ry + 34.0,
+                format!("{count} transaction{}", if count == 1 { "" } else { "s" }),
+                (11.0, FontWeightHint::Regular, self.palette.subtext0),
+            );
+            f.hit(Target::AccountRow(account.id), row);
         }
+        self.scroll_thumb(f, pane, self.accounts.len(), rows, self.account_scroll);
     }
 
-    fn render_reports(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_reports(&self, f: &mut Frame<Target>) {
         let cx = self.content_x() + 16.0;
         let cy = self.content_y() + 16.0;
-        let cw = self.content_w() - 32.0;
-
-        cmds.push(RenderCommand::Text {
-            x: cx,
-            y: cy,
-            text: format!(
-                "Financial Report — {} {}",
+        let cw = (self.content_w() - 32.0).max(0.0);
+        Self::screen_title(
+            f,
+            cx,
+            cy,
+            format!(
+                "Financial Report \u{2014} {} {}",
                 self.view_month.month_label(),
                 self.view_month.year
             ),
-            font_size: 18.0,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(400.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+            self.palette.text,
+        );
 
         let income = self.month_income();
         let expenses = self.month_expenses();
@@ -1895,77 +3224,68 @@ impl FinanceApp {
 
         // Summary cards
         let summaries = [
-            ("Total Income", income, self.palette.green),
-            ("Total Expenses", expenses, self.palette.red),
+            ("Total Income", income, self.palette.ink(self.palette.green)),
+            (
+                "Total Expenses",
+                expenses,
+                self.palette.ink(self.palette.red),
+            ),
             (
                 "Net Savings",
                 net,
                 if net >= 0 {
-                    self.palette.teal
+                    self.palette.ink(self.palette.teal)
                 } else {
-                    self.palette.red
+                    self.palette.ink(self.palette.red)
                 },
             ),
         ];
         for (i, (label, amount, color)) in summaries.iter().enumerate() {
             let sx = cx + i as f32 * (cw / 3.0);
-            let sw = cw / 3.0 - 12.0;
+            let sw = (cw / 3.0 - 12.0).max(0.0);
             self.palette
-                .push_surface(cmds, sx, cy + 36.0, sw, 70.0, 8.0, Surface::Card);
-            cmds.push(RenderCommand::Text {
+                .push_surface(f, sx, cy + 36.0, sw, 70.0, 8.0, Surface::Card);
+            f.push(RenderCommand::Text {
                 x: sx + 12.0,
                 y: cy + 46.0,
                 text: (*label).to_string(),
                 font_size: 12.0,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(sw - 24.0),
+                max_width: Some((sw - 24.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: sx + 12.0,
                 y: cy + 66.0,
                 text: Self::format_currency(*amount),
                 font_size: 22.0,
                 color: *color,
                 font_weight: FontWeightHint::Bold,
-                max_width: Some(sw - 24.0),
+                max_width: Some((sw - 24.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         }
 
-        // Transaction count
-        cmds.push(RenderCommand::Text {
-            x: cx,
-            y: cy + 120.0,
-            text: format!("{tx_count} transactions this month"),
-            font_size: 13.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(300.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        self.note(
+            f,
+            cx,
+            cy + 120.0,
+            format!(
+                "{tx_count} transaction{} this month",
+                if tx_count == 1 { "" } else { "s" }
+            ),
+            300.0,
+        );
 
-        // Category breakdown
-        cmds.push(RenderCommand::Text {
-            x: cx,
-            y: cy + 150.0,
-            text: String::from("Expense Breakdown by Category"),
-            font_size: 16.0,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(400.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
+        self.heading(f, cx, cy + 150.0, "Expense Breakdown by Category", 400.0);
         let top = self.top_expense_categories();
         let total_exp = expenses.max(1) as f32;
         for (i, (cat, amount)) in top.iter().enumerate() {
             let ry = cy + 178.0 + i as f32 * 32.0;
             let pct = *amount as f32 / total_exp * 100.0;
-            let bar_w = (cw - 280.0) * (*amount as f32 / total_exp);
-
-            cmds.push(RenderCommand::Text {
+            let bar_w = (cw - 280.0).max(0.0) * (*amount as f32 / total_exp);
+            f.push(RenderCommand::Text {
                 x: cx,
                 y: ry + 4.0,
                 text: format!("{} {}", cat.icon(), cat.label()),
@@ -1975,7 +3295,7 @@ impl FinanceApp {
                 max_width: Some(140.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            cmds.push(RenderCommand::FillRect {
+            f.push(RenderCommand::FillRect {
                 x: cx + 150.0,
                 y: ry + 2.0,
                 width: bar_w.max(4.0),
@@ -1983,7 +3303,7 @@ impl FinanceApp {
                 color: cat.color(&self.palette),
                 corner_radii: CornerRadii::all(4.0),
             });
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: cx + 160.0 + bar_w,
                 y: ry + 4.0,
                 text: format!("{} ({pct:.1}%)", Self::format_currency(*amount)),
@@ -1999,7 +3319,7 @@ impl FinanceApp {
         if income > 0 {
             let savings_rate = net as f64 / income as f64 * 100.0;
             let sry = cy + 178.0 + top.len() as f32 * 32.0 + 24.0;
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: cx,
                 y: sry,
                 text: format!("Savings Rate: {savings_rate:.1}%"),
@@ -2018,27 +3338,612 @@ impl FinanceApp {
         }
     }
 
-    fn render_status(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_status(&self, f: &mut Frame<Target>) {
         let sy = self.height - Self::STATUS_H;
-        self.palette.push_surface(
-            cmds,
-            0.0,
-            sy,
-            self.width,
-            Self::STATUS_H,
-            0.0,
-            Surface::Card,
-        );
-        cmds.push(RenderCommand::Text {
+        self.palette
+            .push_surface(f, 0.0, sy, self.width, Self::STATUS_H, 0.0, Surface::Card);
+        f.push(RenderCommand::Text {
             x: Self::SIDEBAR_W + 8.0,
             y: sy + 6.0,
             text: self.status_msg.clone(),
             font_size: 12.0,
             color: self.palette.subtext1,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(400.0),
+            max_width: Some((self.width - Self::SIDEBAR_W - 16.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
+    }
+
+    // ── The form ────────────────────────────────────────────────────
+
+    /// A form row's height.
+    const FORM_ROW_H: f32 = 40.0;
+
+    /// Where the form's card is.
+    fn form_card(&self, form: &Form) -> Rect {
+        let (w, h) = (self.width, self.height);
+        let rows = form.fields().len() as f32;
+        let card_w = 540.0_f32.min(w - 24.0).max(0.0);
+        let card_h = (60.0 + rows * Self::FORM_ROW_H + 92.0)
+            .min(h - 24.0)
+            .max(0.0);
+        Rect::new((w - card_w) / 2.0, (h - card_h) / 2.0, card_w, card_h)
+    }
+
+    fn form_title(form: &Form) -> String {
+        match form {
+            Form::Transaction { id: None, .. } => String::from("New transaction"),
+            Form::Transaction { id: Some(_), .. } => String::from("Change transaction"),
+            Form::Account { id: None, .. } => String::from("New account"),
+            Form::Account { id: Some(_), .. } => String::from("Change account"),
+            Form::Budget { category, .. } => format!("Budget for {}", category.label()),
+        }
+    }
+
+    fn field_label(field: FormField) -> &'static str {
+        match field {
+            FormField::Date => "Date",
+            FormField::Description => "Description",
+            FormField::Amount => "Amount",
+            FormField::Kind => "Money",
+            FormField::Category => "Category",
+            FormField::Account => "Account",
+            FormField::Notes => "Notes",
+            FormField::Recurring => "Recurring",
+            FormField::Name => "Name",
+            FormField::AccountKind => "Kind",
+            FormField::Opening => "Opening balance",
+            FormField::Limit => "Monthly limit",
+        }
+    }
+
+    /// What an empty text field says it wants.
+    fn placeholder(field: FormField) -> &'static str {
+        match field {
+            FormField::Date => "YYYY-MM-DD",
+            FormField::Description => "What it was for",
+            FormField::Amount => "0.00",
+            FormField::Notes => "Optional",
+            FormField::Name => "What you call it",
+            FormField::Opening => "0.00 when you started; minus if owed",
+            FormField::Limit => "0.00 a month; empty takes it off",
+            FormField::Kind
+            | FormField::Category
+            | FormField::Account
+            | FormField::Recurring
+            | FormField::AccountKind => "",
+        }
+    }
+
+    /// What a chosen field shows.
+    fn choice_label(&self, form: &Form, field: FormField) -> String {
+        match (form, field) {
+            (Form::Transaction { income, .. }, FormField::Kind) => String::from(if *income {
+                "Income (money in)"
+            } else {
+                "Expense (money out)"
+            }),
+            (Form::Transaction { category, .. }, FormField::Category) => {
+                format!("{} {}", category.icon(), category.label())
+            }
+            (Form::Transaction { account, .. }, FormField::Account) => account
+                .and_then(|id| self.accounts.iter().find(|a| a.id == id))
+                .map_or_else(|| String::from("(no account)"), |a| a.name.clone()),
+            (Form::Transaction { recurring, .. }, FormField::Recurring) => {
+                String::from(if *recurring {
+                    "Yes \u{2014} marked \u{1F501} in the list"
+                } else {
+                    "No"
+                })
+            }
+            (Form::Account { kind, .. }, FormField::AccountKind) => kind.label().to_owned(),
+            _ => String::new(),
+        }
+    }
+
+    /// The form over the window: a row per field, what the last save said
+    /// was wrong, and Save and Cancel.
+    fn render_form(&self, f: &mut Frame<Target>, form: &Form) {
+        let (w, h) = (self.width, self.height);
+        f.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: w,
+            height: h,
+            color: Color::rgba(0, 0, 0, 150),
+            corner_radii: CornerRadii::ZERO,
+        });
+        // Around and behind the card a press does nothing: the form is modal,
+        // and a press reaching a row behind it would change what it is about.
+        f.hit(Target::FormBackdrop, Rect::new(0.0, 0.0, w, h));
+        let card = self.form_card(form);
+        self.palette
+            .push_surface(f, card.x, card.y, card.w, card.h, 12.0, Surface::Card);
+        f.push(RenderCommand::Text {
+            x: card.x + 20.0,
+            y: card.y + 18.0,
+            text: Self::form_title(form),
+            font_size: 16.0,
+            color: self.palette.text,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some((card.w - 40.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        let label_w = 116.0;
+        let control_w = (card.w - 40.0 - label_w).max(0.0);
+        let mut y = card.y + 56.0;
+        for &field in form.fields() {
+            f.push(RenderCommand::Text {
+                x: card.x + 20.0,
+                y: y + 9.0,
+                text: Self::field_label(field).to_owned(),
+                font_size: 12.0,
+                color: self.palette.subtext1,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(label_w - 8.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            let rect = Rect::new(card.x + 20.0 + label_w, y, control_w, 32.0);
+            if field.is_text() {
+                self.render_text_field(f, form, field, rect);
+            } else {
+                self.render_choice(f, form, field, rect);
+            }
+            y += Self::FORM_ROW_H;
+        }
+        if let Some(error) = &self.form_error {
+            f.push(RenderCommand::Text {
+                x: card.x + 20.0,
+                y: y + 4.0,
+                text: error.clone(),
+                font_size: 12.0,
+                color: self.palette.ink(self.palette.red),
+                font_weight: FontWeightHint::Bold,
+                max_width: Some((card.w - 40.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        let buttons_y = card.bottom() - 46.0;
+        self.note(
+            f,
+            card.x + 20.0,
+            buttons_y + 7.0,
+            String::from("Tab: next field  \u{00B7}  Enter: save  \u{00B7}  Esc: cancel"),
+            card.w - 40.0 - 180.0,
+        );
+        self.buttons_to(
+            f,
+            card.right() - 20.0,
+            buttons_y,
+            &[
+                ("Cancel", 80.0, Target::Cancel, true),
+                ("Save", 80.0, Target::Save, true),
+            ],
+        );
+    }
+
+    /// A text field: its box, and what is typed with the caret, or what it
+    /// wants while it is empty and the keys are elsewhere.
+    fn render_text_field(&self, f: &mut Frame<Target>, form: &Form, field: FormField, rect: Rect) {
+        let focused = self.field == field;
+        self.palette
+            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
+        f.push(RenderCommand::StrokeRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: if focused {
+                self.palette.blue
+            } else {
+                self.palette.surface1
+            },
+            line_width: if focused { 2.0 } else { 1.0 },
+            corner_radii: CornerRadii::all(4.0),
+        });
+        if let Some(input) = form.input_ref(field) {
+            if input.text().is_empty() && !focused {
+                f.push(RenderCommand::Text {
+                    x: rect.x + 8.0,
+                    y: rect.y + 8.0,
+                    text: Self::placeholder(field).to_owned(),
+                    font_size: 13.0,
+                    color: self.palette.subtext0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some((rect.w - 16.0).max(0.0)),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            } else {
+                let mut tree = RenderTree::new();
+                textedit::draw(
+                    &mut tree,
+                    &textedit::SingleLine {
+                        text: input.text(),
+                        cursor: if focused {
+                            input.cursor()
+                        } else {
+                            TextCursor::default()
+                        },
+                        selection_anchor: if focused {
+                            input.selection_anchor()
+                        } else {
+                            None
+                        },
+                        focused,
+                        x: rect.x + 8.0,
+                        y: rect.y + 7.0,
+                        width: (rect.w - 16.0).max(0.0),
+                        line_height: 18.0,
+                        font_size: 13.0,
+                        weight: FontWeightHint::Regular,
+                        color: self.palette.text,
+                        selection_bg: self.palette.blue,
+                        selection_fg: self.palette.crust,
+                        caret_width: textedit::CARET_WIDTH,
+                    },
+                );
+                f.extend(tree.commands);
+            }
+        }
+        // A press puts the keyboard in the field, and the caret under it.
+        f.hit(Target::Field(field), rect);
+    }
+
+    /// A chosen field: its value between arrows. A press on the value steps
+    /// it on, as the arrow after it does.
+    fn render_choice(&self, f: &mut Frame<Target>, form: &Form, field: FormField, rect: Rect) {
+        let focused = self.field == field;
+        let value = Rect::new(rect.x + 36.0, rect.y, (rect.w - 72.0).max(0.0), rect.h);
+        self.button(
+            f,
+            Rect::new(rect.x, rect.y, 32.0, rect.h),
+            "\u{25C0}",
+            Target::StepBack(field),
+            true,
+        );
+        self.button(
+            f,
+            Rect::new(rect.right() - 32.0, rect.y, 32.0, rect.h),
+            "\u{25B6}",
+            Target::StepForward(field),
+            true,
+        );
+        self.palette
+            .push_surface(f, value.x, value.y, value.w, value.h, 4.0, Surface::Card);
+        f.push(RenderCommand::StrokeRect {
+            x: value.x,
+            y: value.y,
+            width: value.w,
+            height: value.h,
+            color: if focused {
+                self.palette.blue
+            } else {
+                self.palette.surface1
+            },
+            line_width: if focused { 2.0 } else { 1.0 },
+            corner_radii: CornerRadii::all(4.0),
+        });
+        let label = self.choice_label(form, field);
+        f.push(RenderCommand::Text {
+            x: guitk::text::center_x(
+                &label,
+                value.x + value.w / 2.0,
+                13.0,
+                FontWeightHint::Regular,
+            )
+            .max(value.x + 8.0),
+            y: value.y + 8.0,
+            text: label,
+            font_size: 13.0,
+            color: self.palette.text,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((value.w - 16.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        f.hit(Target::Field(field), value);
+    }
+
+    /// The question before a delete, with a button for each answer.
+    fn render_question(&self, f: &mut Frame<Target>, doomed: Doomed) {
+        let (w, h) = (self.width, self.height);
+        f.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: w,
+            height: h,
+            color: Color::rgba(0, 0, 0, 160),
+            corner_radii: CornerRadii::ZERO,
+        });
+        f.hit(Target::QuestionBackdrop, Rect::new(0.0, 0.0, w, h));
+        let card = Rect::new((w - 480.0) / 2.0, (h - 150.0) / 2.0, 480.0, 150.0);
+        self.palette
+            .push_surface(f, card.x, card.y, card.w, card.h, 12.0, Surface::Card);
+        f.hit(Target::QuestionCard, card);
+        let (title, body) = match doomed {
+            Doomed::Transaction(id) => {
+                let tx = self.transactions.iter().find(|t| t.id == id);
+                (
+                    String::from("Delete this transaction?"),
+                    tx.map_or_else(String::new, |t| {
+                        format!(
+                            "{}, {}, {}. This cannot be undone.",
+                            t.date.format(),
+                            t.description,
+                            Self::format_currency(t.amount)
+                        )
+                    }),
+                )
+            }
+            Doomed::Account(id) => {
+                let name = self
+                    .accounts
+                    .iter()
+                    .find(|a| a.id == id)
+                    .map_or("", |a| a.name.as_str());
+                let count = self
+                    .transactions
+                    .iter()
+                    .filter(|t| t.account_id == id)
+                    .count();
+                (
+                    format!("Delete the account {name}?"),
+                    format!(
+                        "Its {count} transaction{} go with it, and this cannot be undone.",
+                        if count == 1 { "" } else { "s" }
+                    ),
+                )
+            }
+        };
+        f.push(RenderCommand::Text {
+            x: card.x + 20.0,
+            y: card.y + 20.0,
+            text: title,
+            font_size: 16.0,
+            color: self.palette.text,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(card.w - 40.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        f.push(RenderCommand::Text {
+            x: card.x + 20.0,
+            y: card.y + 50.0,
+            text: body,
+            font_size: 12.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(card.w - 40.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        let delete = Rect::new(
+            card.right() - 20.0 - 210.0,
+            card.bottom() - 50.0,
+            120.0,
+            32.0,
+        );
+        f.push(RenderCommand::FillRect {
+            x: delete.x,
+            y: delete.y,
+            width: delete.w,
+            height: delete.h,
+            color: self.palette.red,
+            corner_radii: CornerRadii::all(6.0),
+        });
+        f.push(RenderCommand::Text {
+            x: delete.x + 14.0,
+            y: delete.y + 9.0,
+            text: String::from("Delete (Y)"),
+            font_size: 12.0,
+            color: self.palette.crust,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(delete.w - 20.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        f.hit(Target::ConfirmDelete, delete);
+        self.button(
+            f,
+            Rect::new(card.right() - 20.0 - 80.0, card.bottom() - 50.0, 80.0, 32.0),
+            "Keep",
+            Target::KeepIt,
+            true,
+        );
+    }
+
+    // ── The pointer ─────────────────────────────────────────────────
+
+    /// What is under `(x, y)` in the frame last shown.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        if self.last_hits.is_empty() {
+            return self.frame().hit_test(x, y);
+        }
+        self.last_hits
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(target, _)| *target)
+    }
+
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                let frame = self.frame();
+                let Some(target) = frame.hit_test(event.x, event.y) else {
+                    return EventResult::Ignored;
+                };
+                if let Target::Field(field) = target
+                    && field.is_text()
+                    && let Some(rect) = frame.rect_of(|t| *t == target)
+                {
+                    self.place_caret(field, rect, event.x);
+                }
+                self.press(target)
+            }
+            MouseEventKind::Move => {
+                let over = self.target_at(event.x, event.y);
+                if over == self.hover {
+                    return EventResult::Ignored;
+                }
+                self.hover = over;
+                EventResult::Consumed
+            }
+            MouseEventKind::Leave => {
+                if self.hover.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            MouseEventKind::Scroll { dy, .. } => self.wheel_at(event.x, event.y, dy),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Put a text field's caret under the pointer at `x`.
+    fn place_caret(&mut self, field: FormField, rect: Rect, x: f32) {
+        let was_focused = self.field == field;
+        let Some(input) = self.form.as_mut().and_then(|form| form.input(field)) else {
+            return;
+        };
+        // Measured against the field as it was drawn: an unfocused field is
+        // drawn from its start, a focused one scrolled to its caret.
+        let drawn = if was_focused {
+            input.cursor()
+        } else {
+            TextCursor::default()
+        };
+        let cursor = textedit::cursor_at_click(
+            input.text(),
+            drawn,
+            (rect.w - 16.0).max(0.0),
+            13.0,
+            FontWeightHint::Regular,
+            x - rect.x - 8.0,
+        );
+        input.set_selection_anchor(None);
+        input.set_cursor(cursor);
+    }
+
+    /// A left press on `target`.
+    fn press(&mut self, target: Target) -> EventResult {
+        // A press anywhere but the search box takes the keys out of it; the
+        // search itself stays.
+        if target != Target::Search {
+            self.search_active = false;
+        }
+        match target {
+            Target::HelpCard => self.show_help = false,
+            Target::Help => self.show_help = true,
+            Target::Screen(screen) => self.screen = screen,
+            Target::MonthPrev => self.handle_key("Left", false, false),
+            Target::MonthNext => self.handle_key("Right", false, false),
+            Target::ThisMonth => self.handle_key("Home", false, false),
+            Target::NewTransaction => self.open_new_transaction(),
+            Target::NewAccount => self.open_new_account(),
+            Target::Edit => self.edit_chosen(),
+            Target::Delete => self.ask_to_delete(),
+            Target::Search => {
+                self.screen = Screen::Transactions;
+                self.search_active = true;
+            }
+            Target::FilterChip => self.cycle_category_filter(),
+            // A press chooses a row; a second press on it changes it.
+            Target::TxRow(id) => {
+                if self.selected_id == Some(id) {
+                    self.open_edit_transaction(id);
+                } else {
+                    self.selected_id = Some(id);
+                }
+            }
+            Target::AccountRow(id) => {
+                if self.selected_account == Some(id) {
+                    self.open_edit_account(id);
+                } else {
+                    self.selected_account = Some(id);
+                }
+            }
+            Target::BudgetRow(i) => {
+                if self.selected_budget == i {
+                    self.open_budget(i);
+                } else {
+                    self.selected_budget = i;
+                }
+            }
+            Target::RecentRow(id) => self.show_transaction(id),
+            Target::Field(field) => {
+                self.field = field;
+                if !field.is_text() {
+                    self.step_choice(field, true);
+                }
+            }
+            Target::StepBack(field) => {
+                self.field = field;
+                self.step_choice(field, false);
+            }
+            Target::StepForward(field) => {
+                self.field = field;
+                self.step_choice(field, true);
+            }
+            Target::Save => self.save_form(),
+            Target::Cancel => {
+                self.form = None;
+                self.form_error = None;
+                self.status_msg = String::from("Cancelled");
+            }
+            Target::ConfirmDelete => {
+                let Some(doomed) = self.pending_delete.take() else {
+                    return EventResult::Ignored;
+                };
+                self.delete_doomed(doomed);
+            }
+            Target::KeepIt | Target::QuestionBackdrop => {
+                if self.pending_delete.take().is_none() {
+                    return EventResult::Ignored;
+                }
+                self.status_msg = String::from("Kept");
+            }
+            Target::QuestionCard
+            | Target::FormBackdrop
+            | Target::TxList
+            | Target::AccountList
+            | Target::BudgetList => return EventResult::Ignored,
+        }
+        EventResult::Consumed
+    }
+
+    /// The wheel over one of the three lists.
+    fn wheel_at(&mut self, x: f32, y: f32, dy: f32) -> EventResult {
+        let (now, count, visible) = match self.target_at(x, y) {
+            Some(Target::TxList | Target::TxRow(_)) => {
+                (self.tx_scroll, self.visible_ids().len(), self.tx_pane().1)
+            }
+            Some(Target::AccountList | Target::AccountRow(_)) => (
+                self.account_scroll,
+                self.accounts.len(),
+                self.account_pane().1,
+            ),
+            Some(Target::BudgetList | Target::BudgetRow(_)) => (
+                self.budget_scroll,
+                Category::EXPENSE_CATS.len(),
+                self.budget_pane().1,
+            ),
+            _ => return EventResult::Ignored,
+        };
+        let rows = self.wheel.rows(dy);
+        let last = count.saturating_sub(visible);
+        let next = if rows < 0 {
+            now.saturating_sub(rows.unsigned_abs())
+        } else {
+            now.saturating_add(rows.unsigned_abs())
+        }
+        .min(last);
+        if next == now {
+            return EventResult::Ignored;
+        }
+        match self.screen {
+            Screen::Accounts => self.account_scroll = next,
+            Screen::Budgets => self.budget_scroll = next,
+            _ => self.tx_scroll = next,
+        }
+        EventResult::Consumed
     }
 }
 
@@ -2062,17 +3967,14 @@ impl App for FinanceApp {
         }
     }
 
-    /// No clock.
+    /// Until the next midnight, and at least hourly.
     ///
-    /// Nothing in this app ages: balances change only when a transaction is
-    /// added or deleted, and the month on screen moves only when the user moves
-    /// it. Asking for a tick would wake the machine to redraw an identical
-    /// frame. This is the opposite of `known-issues.md` lesson 47, and the
-    /// check is the same one — *is there state that advances on its own?* Here
-    /// there is not, and `current_date` is a constant besides, which is its own
-    /// entry.
+    /// Today is a new transaction's date and the month "This month" returns
+    /// to, and it was a constant: 18 May 2026 in every run. A tick that finds
+    /// the same day answers `Ignored` and costs a clock read, not a frame.
     fn tick_interval(&self) -> Option<Duration> {
-        None
+        let left = clock_now().map_or(3600, |(_, left)| left.saturating_add(1));
+        Some(Duration::from_secs(left.min(3600)))
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -2091,32 +3993,231 @@ impl App for FinanceApp {
         // for, and the first frame is drawn before any `Resize` arrives.
         self.width = width;
         self.height = height;
-        RenderTree {
-            commands: self.render_commands(),
-        }
+        self.clamp_scrolls();
+        let frame = self.frame();
+        self.last_hits = frame.hits().to_vec();
+        frame.into_tree()
     }
 }
 
-/// What the window says, which is that it cannot hold anyone's finances.
-///
-/// The first draft of this said "add an account and a transaction, and every
-/// figure below will be yours" -- on the assumption that this app was merely
-/// *empty*, the way a new notebook is. It is not. `add_account` and
-/// `add_transaction` have no caller outside the sample data: there is no
-/// control anywhere in this program that creates either, and no filesystem
-/// access to save one if there were.
-///
-/// So that draft would have been a new fabrication written into the fix for an
-/// old one, and a worse kind: a promise about what the user can do next.
-///
-/// The compiler caught it. Once the sample data stopped constructing them,
-/// `AccountType`'s variants were reported as never constructed -- which is
-/// only true if nothing else in the program ever builds an account.
+/// What the dashboard says with no accounts: that the emptiness is correct,
+/// and how to begin. It was drawn at the top of the window before the sidebar
+/// and header, which painted over all of it.
 const NO_DATA_LINES: [&str; 3] = [
-    "This app cannot record your finances.",
-    "There is no way to add an account or a transaction, and no way to save one -- it has no filesystem access.",
-    "It opened with an invented Main Checking of 3,500 and Savings of 12,000 until 2026-09-15. Nothing replaced them.",
+    "No accounts yet.",
+    "Start with + Account on the accounts screen (4, then N); then N adds a transaction.",
+    "Nothing here is invented: it opened on a made-up checking account until 2026-09-15.",
 ];
+
+/// Row heights of the three lists.
+const TX_ROW_H: f32 = 36.0;
+const ACCOUNT_ROW_H: f32 = 56.0;
+const BUDGET_ROW_H: f32 = 64.0;
+
+/// Today's date from the system clock, or `None` if it cannot be read.
+fn today_from_clock() -> Option<SimpleDate> {
+    clock_now().map(|(date, _)| date)
+}
+
+/// Today's date, and how many seconds are left of it.
+///
+/// The zone comes from `tzrules` as in `apps/habits`, so a real local zone is
+/// used on the day `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ` is fixed.
+fn clock_now() -> Option<(SimpleDate, u64)> {
+    let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    let utc = i64::try_from(since_epoch.as_secs()).ok()?;
+    let zone = tzrules::Tz::utc();
+    let local = utc.saturating_add(i64::from(zone.lookup(utc).gmtoff));
+    let into_day = u64::try_from(local.rem_euclid(86_400)).ok()?;
+    let (year, month, day) = guitk::date::Date::from_unix_utc(local).ymd();
+    let date = SimpleDate::new(
+        u16::try_from(year).ok()?,
+        u8::try_from(month).ok()?,
+        u8::try_from(day).ok()?,
+    );
+    Some((date, 86_400_u64.saturating_sub(into_day)))
+}
+
+/// An amount of money typed as `12`, `12.5`, `1,234.56` or `$12.34`, in
+/// cents. A leading `-` is taken only where `negative` allows it (an
+/// opening balance may be owed); elsewhere the form's Income/Expense says
+/// which way the money went.
+fn parse_cents(text: &str, negative: bool) -> Result<i64, String> {
+    let mut t = text.trim();
+    let minus = t.starts_with('-');
+    if minus {
+        if !negative {
+            return Err(String::from(
+                "Enter the amount without a sign; choose Income or Expense",
+            ));
+        }
+        t = t.get(1..).unwrap_or("").trim_start();
+    }
+    let t = t.strip_prefix('$').unwrap_or(t);
+    let t: String = t.chars().filter(|c| *c != ',').collect();
+    if t.is_empty() {
+        // Nothing is nothing; a sign on its own is not an amount.
+        return if minus {
+            Err(String::from("That is not an amount"))
+        } else {
+            Ok(0)
+        };
+    }
+    let (whole, frac) = t.split_once('.').unwrap_or((&t, ""));
+    if whole.is_empty() && frac.is_empty() {
+        return Err(String::from("That is not an amount"));
+    }
+    if !whole.chars().all(|c| c.is_ascii_digit()) || !frac.chars().all(|c| c.is_ascii_digit()) {
+        return Err(String::from("That is not an amount"));
+    }
+    if frac.len() > 2 {
+        return Err(String::from("An amount has at most two decimals"));
+    }
+    let whole: i64 = if whole.is_empty() {
+        0
+    } else {
+        whole
+            .parse()
+            .map_err(|_| String::from("That amount is too large"))?
+    };
+    let cents: i64 = match frac.len() {
+        0 => 0,
+        1 => frac.parse::<i64>().unwrap_or(0).saturating_mul(10),
+        _ => frac.parse().unwrap_or(0),
+    };
+    let total = whole
+        .checked_mul(100)
+        .and_then(|w| w.checked_add(cents))
+        .ok_or_else(|| String::from("That amount is too large"))?;
+    Ok(if minus { total.saturating_neg() } else { total })
+}
+
+/// `at` moved by `delta` in a list of `len`, stopping at the ends; the first
+/// row when nothing was chosen.
+fn step_index(at: Option<usize>, delta: isize, len: usize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let Some(at) = at else {
+        return Some(0);
+    };
+    let moved = if delta < 0 {
+        at.saturating_sub(delta.unsigned_abs())
+    } else {
+        at.saturating_add(delta.unsigned_abs())
+    };
+    Some(moved.min(len.saturating_sub(1)))
+}
+
+/// The character a letter or digit key types, shifted or not; `/`.
+fn key_char(key: Key, shift: bool) -> Option<char> {
+    const KEYS: [(Key, char); 37] = [
+        (Key::A, 'a'),
+        (Key::B, 'b'),
+        (Key::C, 'c'),
+        (Key::D, 'd'),
+        (Key::E, 'e'),
+        (Key::F, 'f'),
+        (Key::G, 'g'),
+        (Key::H, 'h'),
+        (Key::I, 'i'),
+        (Key::J, 'j'),
+        (Key::K, 'k'),
+        (Key::L, 'l'),
+        (Key::M, 'm'),
+        (Key::N, 'n'),
+        (Key::O, 'o'),
+        (Key::P, 'p'),
+        (Key::Q, 'q'),
+        (Key::R, 'r'),
+        (Key::S, 's'),
+        (Key::T, 't'),
+        (Key::U, 'u'),
+        (Key::V, 'v'),
+        (Key::W, 'w'),
+        (Key::X, 'x'),
+        (Key::Y, 'y'),
+        (Key::Z, 'z'),
+        (Key::Num0, '0'),
+        (Key::Num1, '1'),
+        (Key::Num2, '2'),
+        (Key::Num3, '3'),
+        (Key::Num4, '4'),
+        (Key::Num5, '5'),
+        (Key::Num6, '6'),
+        (Key::Num7, '7'),
+        (Key::Num8, '8'),
+        (Key::Num9, '9'),
+        (Key::Slash, '/'),
+    ];
+    let &(_, c) = KEYS.iter().find(|(k, _)| *k == key)?;
+    Some(if shift { c.to_ascii_uppercase() } else { c })
+}
+
+/// What one keystroke did to a one-line field.
+struct LineEdit {
+    handled: bool,
+    copied: Option<String>,
+}
+
+/// Apply a keystroke to a one-line field, as `apps/flashcards` does (see
+/// `requests/e-c-a-text-field-that-takes-its-own-keys.md`).
+fn edit_line(input: &mut TextInput, key: &KeyEvent, capacity: usize, clipboard: &str) -> LineEdit {
+    let shift = key.modifiers.shift;
+    let ctrl = key.modifiers.ctrl;
+    let mut copied = None;
+    match key.key {
+        Key::Left => input.move_cursor_left(shift, 13.0, FontWeightHint::Regular),
+        Key::Right => input.move_cursor_right(shift, 13.0, FontWeightHint::Regular),
+        Key::Home => input.move_home(shift),
+        Key::End => input.move_end(shift),
+        Key::Backspace => input.backspace(),
+        Key::Delete => input.delete(),
+        Key::A if ctrl => input.select_all(),
+        Key::C if ctrl => {
+            if input.has_selection() {
+                copied = Some(input.selected_text().to_string());
+            }
+        }
+        Key::X if ctrl => {
+            if input.has_selection() {
+                copied = Some(input.selected_text().to_string());
+                input.delete_selection();
+            }
+        }
+        Key::V if ctrl => insert_limited(input, clipboard, capacity),
+        _ => {
+            if key.text.is_empty() || ctrl {
+                return LineEdit {
+                    handled: false,
+                    copied: None,
+                };
+            }
+            insert_limited(input, &key.text, capacity);
+        }
+    }
+    LineEdit {
+        handled: true,
+        copied,
+    }
+}
+
+/// Type `typed` into `input` over its selection, up to `capacity`
+/// characters, leaving control characters out.
+fn insert_limited(input: &mut TextInput, typed: &str, capacity: usize) {
+    if input.has_selection() {
+        input.delete_selection();
+    }
+    for ch in typed.chars() {
+        if ch.is_control() {
+            continue;
+        }
+        if input.text().chars().count() >= capacity {
+            break;
+        }
+        input.insert_char(ch);
+    }
+}
 
 fn main() -> ExitCode {
     let mut finance = FinanceApp::new();
@@ -2169,38 +4270,34 @@ mod tests {
         );
     }
 
-    /// And the window says it cannot hold finances at all.
+    /// And the window says why it is empty, and how to begin.
     ///
-    /// This assertion exists because the first version of the message was
-    /// wrong in a way worth guarding against permanently. It said "add an
-    /// account and a transaction, and every figure below will be yours",
-    /// which assumed the app was merely empty. It has no control that creates
-    /// an account and no filesystem access to keep one.
-    ///
-    /// **A fix that promises a capability the program does not have is the
-    /// same defect it was fixing, pointed one step further into the future.**
+    /// The first version of this message said "add an account and a
+    /// transaction, and every figure below will be yours" while nothing in
+    /// the program could add either: **a fix that promises a capability the
+    /// program does not have is the same defect it was fixing, pointed one
+    /// step further into the future.** The second version said so, from under
+    /// the sidebar and the header, which painted over it. The capability
+    /// exists now, and the message names the control that begins -- which
+    /// this test presses, so the promise is checked rather than trusted.
     #[test]
     fn the_window_says_the_emptiness_is_correct() {
-        let app = FinanceApp::new();
-        let texts: Vec<String> = app
-            .render_commands()
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
+        let mut app = FinanceApp::new();
+        let drawn = texts(&app);
         for line in NO_DATA_LINES {
             assert!(
-                texts.iter().any(|t| t == line),
+                drawn.iter().any(|t| t == line),
                 "the window never said {line:?}"
             );
         }
         assert!(
-            NO_DATA_LINES
-                .iter()
-                .any(|l| l.contains("no way to add an account")),
-            "the message implies data can be entered, which it cannot",
+            NO_DATA_LINES.iter().any(|l| l.contains("+ Account")),
+            "the message does not name the control that begins"
+        );
+        probe::click(&mut app, Target::NewAccount);
+        assert!(
+            matches!(app.form, Some(Form::Account { id: None, .. })),
+            "the control the message names does not begin anything"
         );
     }
 
@@ -2267,6 +4364,7 @@ mod tests {
         // The old index-based selection re-pointed at whatever slid into the
         // gap; worse, deleting the last row left it past the end.
         let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Transactions;
         app.handle_key("Down", false, false);
         for _ in 0..3 {
             let Some(id) = app.selected_id else {
@@ -2293,6 +4391,7 @@ mod tests {
         // the highlight vanished for several presses and Ctrl+D then deleted
         // something the user could not see.
         let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Transactions;
         app.category_filter = Some(Category::Food);
         app.reanchor_selection();
         let visible = app.visible_ids();
@@ -2657,6 +4756,7 @@ mod tests {
     #[test]
     fn test_handle_key_navigation() {
         let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Transactions;
         let visible = app.visible_ids();
         assert!(visible.len() >= 2, "the sample data should fill the list");
         // Nothing is selected until the user moves, and the first move lands on
@@ -2776,13 +4876,31 @@ mod tests {
         assert!(txs.is_empty());
     }
 
+    /// Ctrl+D deleted the chosen transaction outright, from any screen.
     #[test]
-    fn test_handle_key_delete() {
+    fn ctrl_d_asks_before_deleting_and_only_y_deletes() {
         let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Transactions;
         let n = app.transactions.len();
         app.handle_key("Down", false, false);
-        app.handle_key("d", true, false);
+        let chosen = app.selected_id.expect("Down chose nothing");
+        probe::key(&mut app, &probe::ctrl(Key::D));
+        assert_eq!(app.pending_delete, Some(Doomed::Transaction(chosen)));
+        assert_eq!(app.transactions.len(), n, "deleted without asking");
+        assert!(
+            texts(&app).iter().any(|t| t == "Delete this transaction?"),
+            "the question was not drawn"
+        );
+        probe::key(&mut app, &probe::typing("n"));
+        assert_eq!(app.transactions.len(), n, "an answer of N deleted");
+        assert!(
+            app.pending_delete.is_none(),
+            "the question outlived its answer"
+        );
+        probe::key(&mut app, &probe::press(Key::Delete));
+        probe::key(&mut app, &probe::typing("y"));
         assert_eq!(app.transactions.len(), n - 1);
+        assert!(!app.transactions.iter().any(|t| t.id == chosen));
     }
 
     // -- Following the user's theme -------------------------------------------
@@ -2842,5 +4960,1062 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // ── Entering, changing and deleting, and the pointer ─────────────
+
+    use guitk::probe::{self, Probe};
+
+    impl Probe for FinanceApp {
+        type Target = Target;
+        type Outcome = EventResult;
+        const SIZE: (f32, f32) = (1100.0, 750.0);
+
+        /// Drawn at the app's own size, which these tests leave at `SIZE`.
+        fn draw(&self, _size: (f32, f32)) -> Frame<Target> {
+            self.frame()
+        }
+
+        fn click_at(
+            &mut self,
+            x: f32,
+            y: f32,
+            button: MouseButton,
+            _size: (f32, f32),
+        ) -> EventResult {
+            self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }))
+        }
+
+        fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> EventResult {
+            self.handle_event(&Event::Key(key.clone()))
+        }
+
+        fn scroll_at(&mut self, x: f32, y: f32, dy: f32, _size: (f32, f32)) -> Option<EventResult> {
+            Some(self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })))
+        }
+    }
+
+    /// Every string the window draws.
+    fn texts(app: &FinanceApp) -> Vec<String> {
+        app.frame()
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// An app holding one account and nothing else, on the transactions
+    /// screen.
+    fn one_account() -> FinanceApp {
+        let mut app = FinanceApp::new();
+        app.add_account("Everyday", AccountType::Checking, 10_000);
+        app.screen = Screen::Transactions;
+        app
+    }
+
+    /// A left press at `(x, y)`.
+    fn press_at(app: &mut FinanceApp, x: f32, y: f32) -> EventResult {
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }))
+    }
+
+    /// **Nothing could be entered**: `add_account`, `add_transaction` and
+    /// `set_budget` had no caller outside the tests.
+    #[test]
+    fn a_transaction_is_entered_from_the_keyboard() {
+        let mut app = one_account();
+        probe::key(&mut app, &probe::typing("n"));
+        assert!(
+            matches!(app.form, Some(Form::Transaction { id: None, .. })),
+            "N opened no form"
+        );
+        assert_eq!(
+            app.field,
+            FormField::Description,
+            "the keys did not start in the description"
+        );
+        probe::type_str(&mut app, "Coffee");
+        probe::key(&mut app, &probe::press(Key::Tab));
+        assert_eq!(app.field, FormField::Amount);
+        probe::type_str(&mut app, "4.50");
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert!(
+            app.form.is_none(),
+            "the form stayed up: {:?}",
+            app.form_error
+        );
+        let tx = app.transactions.last().expect("nothing was added");
+        assert_eq!(tx.description, "Coffee");
+        assert_eq!(tx.amount, -450, "an expense is money out");
+        assert_eq!(
+            tx.date, app.current_date,
+            "a new transaction is not dated today"
+        );
+        assert_eq!(tx.account_id, app.accounts[0].id);
+        assert_eq!(tx.category, Category::Food);
+        assert_eq!(
+            app.selected_id,
+            Some(tx.id),
+            "the new row is not the chosen one"
+        );
+        assert!(
+            app.visible_ids().contains(&tx.id),
+            "the new row is not in the list"
+        );
+        assert_eq!(app.account_balance(app.accounts[0].id), 10_000 - 450);
+    }
+
+    /// A refusal says why, in the form, and keeps what was typed.
+    #[test]
+    fn a_form_says_what_is_wrong_and_keeps_what_was_typed() {
+        let mut app = one_account();
+        app.open_new_transaction();
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert!(
+            app.form.is_some(),
+            "a transaction with no description was saved"
+        );
+        assert_eq!(
+            app.form_error.as_deref(),
+            Some("A transaction needs a description")
+        );
+        assert!(
+            texts(&app)
+                .iter()
+                .any(|t| t == "A transaction needs a description"),
+            "the reason was not drawn"
+        );
+
+        probe::type_str(&mut app, "Rent");
+        probe::key(&mut app, &probe::press(Key::Tab));
+        probe::type_str(&mut app, "12.345");
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert_eq!(
+            app.form_error.as_deref(),
+            Some("An amount has at most two decimals")
+        );
+        assert!(app.transactions.is_empty(), "a bad amount was saved");
+
+        app.field = FormField::Amount;
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        probe::type_str(&mut app, "1,200");
+        app.field = FormField::Date;
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        probe::type_str(&mut app, "2026-02-30");
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert_eq!(
+            app.form_error.as_deref(),
+            Some("That is not a date; write it YYYY-MM-DD")
+        );
+        let Some(Form::Transaction { description, .. }) = &app.form else {
+            panic!("the form went away on a refusal");
+        };
+        assert_eq!(description.text(), "Rent", "a refusal lost what was typed");
+
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        probe::type_str(&mut app, "2026-02-28");
+        assert!(
+            app.form_error.is_none(),
+            "typing did not clear the complaint"
+        );
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert!(app.form.is_none(), "{:?}", app.form_error);
+        let tx = app.transactions.last().expect("nothing was added");
+        assert_eq!(
+            (tx.amount, tx.date),
+            (-120_000, SimpleDate::new(2026, 2, 28))
+        );
+    }
+
+    #[test]
+    fn amounts_are_read_as_people_write_them() {
+        assert_eq!(parse_cents("12", false), Ok(1200));
+        assert_eq!(parse_cents("12.5", false), Ok(1250));
+        assert_eq!(parse_cents("12.05", false), Ok(1205));
+        assert_eq!(parse_cents(" 1,234.56 ", false), Ok(123_456));
+        assert_eq!(parse_cents("$3.07", false), Ok(307));
+        assert_eq!(parse_cents(".5", false), Ok(50));
+        assert_eq!(parse_cents("7.", false), Ok(700));
+        assert_eq!(parse_cents("", false), Ok(0));
+        assert_eq!(parse_cents("-25", true), Ok(-2500));
+        assert_eq!(parse_cents("-$25.10", true), Ok(-2510));
+        assert!(
+            parse_cents("-25", false).is_err(),
+            "a sign was taken where Income or Expense says the direction"
+        );
+        for nonsense in ["abc", "1.234", ".", "1.2.3", "12a", "-", "--5", "1 000"] {
+            assert!(
+                parse_cents(nonsense, true).is_err(),
+                "{nonsense:?} was read as an amount"
+            );
+        }
+        assert!(
+            parse_cents("99999999999999999999", false).is_err(),
+            "an overflow was not refused"
+        );
+        assert!(
+            parse_cents("92233720368547758.08", false).is_err(),
+            "an overflow was not refused"
+        );
+        assert_eq!(
+            parse_cents("92233720368547758.07", false),
+            Ok(i64::MAX),
+            "the largest amount there is was refused"
+        );
+    }
+
+    #[test]
+    fn dates_are_read_back_and_impossible_ones_refused() {
+        assert_eq!(
+            SimpleDate::parse("2026-09-25"),
+            Some(SimpleDate::new(2026, 9, 25))
+        );
+        assert_eq!(
+            SimpleDate::parse(" 2026-9-5 "),
+            Some(SimpleDate::new(2026, 9, 5))
+        );
+        assert_eq!(
+            SimpleDate::parse("2024-02-29"),
+            Some(SimpleDate::new(2024, 2, 29))
+        );
+        for impossible in [
+            "2026-02-29",
+            "2026-13-01",
+            "2026-04-31",
+            "2026-00-10",
+            "2026-01-00",
+            "25/09/2026",
+            "2026-09",
+            "2026-09-25-1",
+            "",
+        ] {
+            assert_eq!(
+                SimpleDate::parse(impossible),
+                None,
+                "{impossible:?} was read as a date"
+            );
+        }
+        for d in [SimpleDate::new(2026, 1, 31), SimpleDate::new(1999, 12, 1)] {
+            assert_eq!(
+                SimpleDate::parse(&d.format()),
+                Some(d),
+                "{d:?} did not survive a round trip"
+            );
+        }
+    }
+
+    #[test]
+    fn a_transaction_is_changed_in_place() {
+        let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Transactions;
+        let n = app.transactions.len();
+        let id = app.visible_ids()[2];
+        app.selected_id = Some(id);
+        probe::key(&mut app, &probe::press(Key::Enter));
+        let Some(Form::Transaction {
+            id: Some(editing),
+            description,
+            amount,
+            ..
+        }) = app.form.clone()
+        else {
+            panic!("Enter did not open the chosen transaction: {:?}", app.form);
+        };
+        let before = app
+            .transactions
+            .iter()
+            .find(|t| t.id == id)
+            .unwrap()
+            .clone();
+        assert_eq!(editing, id);
+        assert_eq!(description.text(), before.description);
+        assert_eq!(
+            amount.text(),
+            FinanceApp::format_currency(before.amount.abs()).trim_start_matches('$')
+        );
+        app.field = FormField::Amount;
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        probe::type_str(&mut app, "99.99");
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert!(app.form.is_none(), "{:?}", app.form_error);
+        let after = app.transactions.iter().find(|t| t.id == id).unwrap();
+        assert_eq!(after.amount, if before.amount > 0 { 9999 } else { -9999 });
+        assert_eq!(after.description, before.description);
+        assert_eq!(after.date, before.date);
+        assert_eq!(
+            app.transactions.len(),
+            n,
+            "a change added or lost a transaction"
+        );
+    }
+
+    #[test]
+    fn money_in_is_not_filed_under_food() {
+        let mut app = one_account();
+        app.open_new_transaction();
+        app.field = FormField::Kind;
+        probe::key(&mut app, &probe::press(Key::Right));
+        let Some(Form::Transaction {
+            income, category, ..
+        }) = app.form.clone()
+        else {
+            panic!("the form went away");
+        };
+        assert!(income, "Right did not make it income");
+        assert_eq!(category, Category::Income);
+        probe::key(&mut app, &probe::press(Key::Space));
+        let Some(Form::Transaction {
+            income, category, ..
+        }) = app.form.clone()
+        else {
+            panic!("the form went away");
+        };
+        assert!(!income);
+        assert_eq!(category, Category::Food);
+        // A category that goes either way is left where the user put it.
+        if let Some(Form::Transaction { category, .. }) = app.form.as_mut() {
+            *category = Category::Savings;
+        }
+        probe::key(&mut app, &probe::press(Key::Left));
+        let Some(Form::Transaction {
+            income, category, ..
+        }) = app.form.clone()
+        else {
+            panic!("the form went away");
+        };
+        assert!(income);
+        assert_eq!(category, Category::Savings);
+    }
+
+    #[test]
+    fn income_is_money_in() {
+        let mut app = one_account();
+        app.open_new_transaction();
+        probe::type_str(&mut app, "Salary");
+        probe::key(&mut app, &probe::press(Key::Tab));
+        probe::type_str(&mut app, "2500");
+        probe::key(&mut app, &probe::press(Key::Tab));
+        assert_eq!(app.field, FormField::Kind);
+        probe::key(&mut app, &probe::press(Key::Right));
+        probe::key(&mut app, &probe::press(Key::Enter));
+        let tx = app.transactions.last().expect("nothing was added");
+        assert_eq!(tx.amount, 250_000);
+        assert_eq!(tx.category, Category::Income);
+        assert_eq!(app.month_income(), 250_000);
+    }
+
+    #[test]
+    fn tab_walks_the_fields_and_comes_round() {
+        let mut app = one_account();
+        app.open_new_transaction();
+        let fields = app.form.as_ref().unwrap().fields().to_vec();
+        let start = fields.iter().position(|f| *f == app.field).unwrap();
+        for step in 1..=fields.len() {
+            probe::key(&mut app, &probe::press(Key::Tab));
+            assert_eq!(app.field, fields[(start + step) % fields.len()]);
+        }
+        probe::key(&mut app, &probe::shift(Key::Tab));
+        assert_eq!(app.field, fields[(start + fields.len() - 1) % fields.len()]);
+    }
+
+    /// A form takes every key: a `3` in an amount switched to the budgets.
+    #[test]
+    fn a_digit_typed_into_a_form_is_not_a_screen_switch() {
+        let mut app = one_account();
+        app.open_new_transaction();
+        app.field = FormField::Amount;
+        probe::type_str(&mut app, "3");
+        assert_eq!(app.screen, Screen::Transactions);
+        let Some(Form::Transaction { amount, .. }) = &app.form else {
+            panic!("the form went away");
+        };
+        assert_eq!(amount.text(), "3");
+    }
+
+    #[test]
+    fn escape_leaves_a_form_without_saving() {
+        let mut app = one_account();
+        app.open_new_transaction();
+        probe::type_str(&mut app, "Half typed");
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(app.form.is_none());
+        assert!(app.transactions.is_empty(), "Escape saved");
+    }
+
+    #[test]
+    fn a_transaction_with_nowhere_to_go_asks_for_an_account_first() {
+        let mut app = FinanceApp::new();
+        app.screen = Screen::Transactions;
+        probe::key(&mut app, &probe::typing("n"));
+        assert!(matches!(app.form, Some(Form::Account { id: None, .. })));
+        assert!(
+            app.form_error
+                .as_deref()
+                .is_some_and(|e| e.contains("account")),
+            "the account form came up without saying why"
+        );
+    }
+
+    #[test]
+    fn an_account_is_entered_with_what_it_held() {
+        let mut app = FinanceApp::new();
+        app.screen = Screen::Accounts;
+        probe::key(&mut app, &probe::typing("n"));
+        assert!(matches!(app.form, Some(Form::Account { id: None, .. })));
+        probe::type_str(&mut app, "Visa");
+        probe::key(&mut app, &probe::press(Key::Tab));
+        probe::key(&mut app, &probe::press(Key::Right));
+        probe::key(&mut app, &probe::press(Key::Right));
+        probe::key(&mut app, &probe::press(Key::Tab));
+        probe::type_str(&mut app, "-250.00");
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert!(app.form.is_none(), "{:?}", app.form_error);
+        let account = &app.accounts[0];
+        assert_eq!(account.name, "Visa");
+        assert_eq!(account.account_type, AccountType::CreditCard);
+        assert_eq!(account.initial_balance, -25_000);
+        assert_eq!(app.selected_account, Some(account.id));
+        assert_eq!(app.total_balance(), -25_000);
+    }
+
+    #[test]
+    fn an_account_is_changed_in_place() {
+        let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Accounts;
+        let id = app.accounts[1].id;
+        probe::click(&mut app, Target::AccountRow(id));
+        assert_eq!(app.selected_account, Some(id));
+        assert!(app.form.is_none(), "one press opened the form");
+        probe::click(&mut app, Target::AccountRow(id));
+        assert!(
+            matches!(app.form, Some(Form::Account { id: Some(x), .. }) if x == id),
+            "a second press did not open the account"
+        );
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        probe::type_str(&mut app, "Rainy day");
+        probe::click(&mut app, Target::Save);
+        assert!(app.form.is_none(), "{:?}", app.form_error);
+        assert_eq!(app.accounts[1].name, "Rainy day");
+        assert_eq!(app.accounts.len(), 4);
+    }
+
+    #[test]
+    fn deleting_an_account_asks_and_takes_its_transactions() {
+        let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Accounts;
+        let id = app.accounts[2].id;
+        let in_it = app
+            .transactions
+            .iter()
+            .filter(|t| t.account_id == id)
+            .count();
+        assert!(in_it > 1, "the sample's credit card should hold several");
+        probe::click(&mut app, Target::AccountRow(id));
+        probe::click(&mut app, Target::Delete);
+        assert_eq!(app.pending_delete, Some(Doomed::Account(id)));
+        let said = format!("Its {in_it} transactions go with it, and this cannot be undone.");
+        assert!(
+            texts(&app).contains(&said),
+            "the question did not say what goes with it"
+        );
+        probe::click(&mut app, Target::KeepIt);
+        assert_eq!(app.accounts.len(), 4, "Keep deleted");
+        probe::click(&mut app, Target::Delete);
+        probe::click(&mut app, Target::ConfirmDelete);
+        assert!(!app.accounts.iter().any(|a| a.id == id));
+        assert!(
+            !app.transactions.iter().any(|t| t.account_id == id),
+            "its transactions were left behind, in no account"
+        );
+        assert!(
+            app.selected_account.is_some_and(|s| s != id),
+            "nothing is chosen after the delete"
+        );
+    }
+
+    #[test]
+    fn nothing_is_deleted_from_a_screen_that_does_not_show_it() {
+        let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Transactions;
+        app.handle_key("Down", false, false);
+        assert!(app.selected_id.is_some());
+        for screen in [Screen::Dashboard, Screen::Budgets, Screen::Reports] {
+            app.screen = screen;
+            probe::key(&mut app, &probe::ctrl(Key::D));
+            probe::key(&mut app, &probe::press(Key::Delete));
+            assert!(
+                app.pending_delete.is_none(),
+                "{screen:?} asked to delete a transaction it does not show"
+            );
+            probe::key(&mut app, &probe::press(Key::Enter));
+            if screen != Screen::Budgets {
+                assert!(
+                    app.form.is_none(),
+                    "Enter on {screen:?} opened a transaction it does not show"
+                );
+            }
+            app.form = None;
+        }
+    }
+
+    /// Only budgets already set were listed, so none could be set at all.
+    #[test]
+    fn every_category_can_be_given_a_budget() {
+        let mut app = one_account();
+        app.screen = Screen::Budgets;
+        for i in 0..Category::EXPENSE_CATS.len() {
+            assert!(
+                probe::rect_of(&app, Target::BudgetRow(i)).is_some(),
+                "{:?} has no row",
+                Category::EXPENSE_CATS[i]
+            );
+        }
+        assert!(texts(&app).iter().any(|t| t == "No budget"));
+        let last = Category::EXPENSE_CATS.len() - 1;
+        probe::click(&mut app, Target::BudgetRow(last));
+        assert_eq!(app.selected_budget, last);
+        assert!(app.form.is_none(), "one press opened the form");
+        probe::click(&mut app, Target::BudgetRow(last));
+        assert!(matches!(
+            app.form,
+            Some(Form::Budget {
+                category: Category::Other,
+                ..
+            })
+        ));
+        probe::type_str(&mut app, "300");
+        probe::key(&mut app, &probe::press(Key::Enter));
+        let limit = |app: &FinanceApp| {
+            app.budgets
+                .iter()
+                .find(|b| b.category == Category::Other)
+                .map(|b| b.monthly_limit)
+        };
+        assert_eq!(limit(&app), Some(30_000));
+        // Emptied, it comes off.
+        probe::key(&mut app, &probe::press(Key::Enter));
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        probe::key(&mut app, &probe::press(Key::Backspace));
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert_eq!(limit(&app), None, "an emptied budget stayed");
+    }
+
+    #[test]
+    fn the_sidebar_switches_screens() {
+        let mut app = FinanceApp::with_sample_data();
+        for screen in Screen::ALL.iter().rev() {
+            assert_eq!(
+                probe::click(&mut app, Target::Screen(*screen)),
+                EventResult::Consumed
+            );
+            assert_eq!(app.screen, *screen);
+        }
+    }
+
+    #[test]
+    fn the_month_arrows_are_buttons() {
+        let mut app = FinanceApp::with_sample_data();
+        assert!(
+            probe::rect_of(&app, Target::ThisMonth).is_none(),
+            "This month is offered on this month"
+        );
+        probe::click(&mut app, Target::MonthPrev);
+        assert_eq!((app.view_month.year, app.view_month.month), (2026, 4));
+        probe::click(&mut app, Target::MonthNext);
+        probe::click(&mut app, Target::MonthNext);
+        assert_eq!((app.view_month.year, app.view_month.month), (2026, 6));
+        probe::click(&mut app, Target::ThisMonth);
+        assert_eq!((app.view_month.year, app.view_month.month), (2026, 5));
+    }
+
+    #[test]
+    fn a_row_press_chooses_it_and_a_second_changes_it() {
+        let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Transactions;
+        let id = app.visible_ids()[3];
+        probe::click(&mut app, Target::TxRow(id));
+        assert_eq!(app.selected_id, Some(id));
+        assert!(app.form.is_none(), "one press opened the form");
+        probe::click(&mut app, Target::TxRow(id));
+        assert!(matches!(app.form, Some(Form::Transaction { id: Some(x), .. }) if x == id));
+    }
+
+    #[test]
+    fn a_press_behind_a_form_reaches_nothing() {
+        let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Transactions;
+        let row = app.visible_ids()[0];
+        let behind = probe::rect_of(&app, Target::TxRow(row)).unwrap();
+        app.open_new_transaction();
+        let (x, y) = (behind.x + 10.0, behind.y + behind.h / 2.0);
+        assert_eq!(app.frame().hit_test(x, y), Some(Target::FormBackdrop));
+        let chosen = app.selected_id;
+        assert_eq!(press_at(&mut app, x, y), EventResult::Ignored);
+        assert!(app.form.is_some(), "a press behind the form closed it");
+        assert_eq!(
+            app.selected_id, chosen,
+            "a press behind the form chose a row"
+        );
+    }
+
+    #[test]
+    fn a_form_answers_the_pointer() {
+        let mut app = one_account();
+        app.add_account("Savings", AccountType::Savings, 0);
+        probe::click(&mut app, Target::NewTransaction);
+        probe::type_str(&mut app, "Lunch");
+        probe::click(&mut app, Target::Field(FormField::Amount));
+        assert_eq!(
+            app.field,
+            FormField::Amount,
+            "a press did not put the keys in the field"
+        );
+        probe::type_str(&mut app, "12");
+        probe::click(&mut app, Target::StepForward(FormField::Category));
+        probe::click(&mut app, Target::StepForward(FormField::Category));
+        probe::click(&mut app, Target::StepBack(FormField::Category));
+        probe::click(&mut app, Target::Field(FormField::Account));
+        probe::click(&mut app, Target::Field(FormField::Recurring));
+        probe::click(&mut app, Target::Save);
+        assert!(app.form.is_none(), "{:?}", app.form_error);
+        let tx = app.transactions.last().expect("nothing was added");
+        assert_eq!(tx.description, "Lunch");
+        assert_eq!(tx.amount, -1200);
+        assert_eq!(tx.category, Category::ALL[1]);
+        assert_eq!(
+            tx.account_id, app.accounts[1].id,
+            "the account press did not step it"
+        );
+        assert!(tx.recurring);
+        probe::click(&mut app, Target::NewTransaction);
+        probe::click(&mut app, Target::Cancel);
+        assert!(app.form.is_none(), "Cancel left the form up");
+    }
+
+    #[test]
+    fn a_recent_transaction_opens_in_the_list() {
+        let mut app = FinanceApp::with_sample_data();
+        app.category_filter = Some(Category::Housing);
+        let newest = app
+            .month_transactions()
+            .iter()
+            .max_by(|a, b| a.date.cmp(&b.date).then(a.id.cmp(&b.id)))
+            .unwrap()
+            .id;
+        probe::click(&mut app, Target::RecentRow(newest));
+        assert_eq!(app.screen, Screen::Transactions);
+        assert_eq!(app.selected_id, Some(newest));
+        assert!(
+            app.visible_ids().contains(&newest),
+            "the filter still hides it"
+        );
+    }
+
+    #[test]
+    fn the_search_box_takes_the_keys_and_reaches_every_month() {
+        let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Transactions;
+        probe::click(&mut app, Target::MonthNext);
+        probe::click(&mut app, Target::MonthNext);
+        assert!(app.visible_ids().is_empty(), "July has something in it");
+        probe::click(&mut app, Target::Search);
+        assert!(app.search_active);
+        probe::type_str(&mut app, "grocery");
+        assert_eq!(app.search_query, "grocery");
+        let found = app.visible_ids();
+        assert_eq!(found.len(), 2, "the search did not reach May from July");
+        assert!(texts(&app).iter().any(|t| t == "every month"));
+        // A press elsewhere takes the keys out of the box and keeps the search.
+        probe::click(&mut app, Target::TxRow(found[0]));
+        assert!(!app.search_active);
+        assert_eq!(app.search_query, "grocery");
+        assert_eq!(app.selected_id, Some(found[0]));
+    }
+
+    /// It listed every month in the order things were typed in, under a
+    /// header naming one month.
+    #[test]
+    fn the_list_is_the_month_on_screen_newest_first() {
+        let mut app = FinanceApp::with_sample_data();
+        app.add_transaction(
+            SimpleDate::new(2026, 6, 3),
+            "June thing",
+            -100,
+            Category::Other,
+            1,
+            "",
+            false,
+        );
+        let late = app.add_transaction(
+            SimpleDate::new(2026, 5, 9),
+            "Entered late",
+            -100,
+            Category::Other,
+            1,
+            "",
+            false,
+        );
+        let listed: Vec<(SimpleDate, u32)> = app
+            .filtered_transactions()
+            .iter()
+            .map(|(_, t)| (t.date, t.id))
+            .collect();
+        assert!(
+            listed.iter().all(|(d, _)| d.month == 5),
+            "another month is in May's list"
+        );
+        assert!(
+            listed.windows(2).all(|w| w[0] >= w[1]),
+            "not newest first: {listed:?}"
+        );
+        let at = listed.iter().position(|(_, id)| *id == late).unwrap();
+        assert_eq!(
+            listed[at].0,
+            SimpleDate::new(2026, 5, 9),
+            "listed by when it was typed"
+        );
+        assert!(listed[at + 1].0 <= SimpleDate::new(2026, 5, 9));
+        assert!(listed[at - 1].0 >= SimpleDate::new(2026, 5, 9));
+        probe::click(&mut app, Target::MonthNext);
+        assert_eq!(app.visible_ids().len(), 1, "June's list is not June's");
+    }
+
+    #[test]
+    fn the_category_chip_shows_one_category_then_the_next() {
+        let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Transactions;
+        probe::click(&mut app, Target::FilterChip);
+        assert_eq!(app.category_filter, Some(Category::ALL[0]));
+        probe::click(&mut app, Target::FilterChip);
+        assert_eq!(app.category_filter, Some(Category::ALL[1]));
+        for _ in 2..Category::ALL.len() {
+            probe::click(&mut app, Target::FilterChip);
+        }
+        assert_eq!(app.category_filter, Some(Category::Other));
+        probe::click(&mut app, Target::FilterChip);
+        assert_eq!(app.category_filter, None);
+    }
+
+    /// **Each row is a key this program actually answers.**
+    #[test]
+    fn every_advertised_key_does_something() {
+        let states = || {
+            let dash = FinanceApp::with_sample_data();
+            let mut list = FinanceApp::with_sample_data();
+            list.screen = Screen::Transactions;
+            list.handle_key("Down", false, false);
+            list.handle_key("Down", false, false);
+            let mut form = one_account();
+            form.open_new_transaction();
+            let mut away = FinanceApp::with_sample_data();
+            away.view_month = SimpleDate::new(2026, 1, 1);
+            vec![dash, list, form, away]
+        };
+        for (row, what) in SHORTCUTS {
+            let strokes = guitk::shortcut::keystrokes(row).unwrap_or_else(|e| panic!("{e}"));
+            for stroke in strokes {
+                let taken = states().iter_mut().any(|app| {
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    taken,
+                    "the list offers {row:?} ({what}) and nothing takes {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn f1_shows_the_keys_and_a_press_puts_them_away() {
+        let mut app = FinanceApp::with_sample_data();
+        probe::key(&mut app, &probe::press(Key::F1));
+        assert!(app.show_help);
+        assert!(texts(&app).iter().any(|t| t == "This list"));
+        let screen = app.screen;
+        let nav = FinanceApp::nav_rect(2);
+        press_at(&mut app, nav.x + 10.0, nav.y + 10.0);
+        assert!(!app.show_help, "a press left the card up");
+        assert_eq!(app.screen, screen, "the press went through the card");
+        probe::click(&mut app, Target::Help);
+        assert!(app.show_help, "the Keys button does not show them");
+    }
+
+    #[test]
+    fn a_button_lights_under_the_pointer() {
+        let mut app = FinanceApp::with_sample_data();
+        let r = probe::rect_of(&app, Target::MonthNext).unwrap();
+        let fill_at = |app: &FinanceApp| {
+            app.frame().commands().iter().find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if (*x - r.x).abs() < 0.01
+                    && (*y - r.y).abs() < 0.01
+                    && (*width - r.w).abs() < 0.01
+                    && (*height - r.h).abs() < 0.01 =>
+                {
+                    Some(*color)
+                }
+                _ => None,
+            })
+        };
+        let before = fill_at(&app);
+        assert!(before.is_some(), "no fill under the button");
+        let moved = app.handle_event(&Event::Mouse(MouseEvent {
+            x: r.x + 2.0,
+            y: r.y + 2.0,
+            kind: MouseEventKind::Move,
+        }));
+        assert_eq!(moved, EventResult::Consumed);
+        assert_ne!(fill_at(&app), before, "the button did not light");
+        let left = app.handle_event(&Event::Mouse(MouseEvent {
+            x: 0.0,
+            y: 0.0,
+            kind: MouseEventKind::Leave,
+        }));
+        assert_eq!(left, EventResult::Consumed);
+        assert_eq!(fill_at(&app), before);
+    }
+
+    /// A list of forty in a month: the rows past the bottom were not drawn,
+    /// and the arrows stopped at the last row on screen.
+    fn forty_this_month() -> FinanceApp {
+        let mut app = one_account();
+        let (today, account) = (app.current_date, app.accounts[0].id);
+        for i in 0..40 {
+            app.add_transaction(
+                today,
+                &format!("Item {i}"),
+                -100,
+                Category::Other,
+                account,
+                "",
+                false,
+            );
+        }
+        app
+    }
+
+    #[test]
+    fn the_wheel_scrolls_a_long_list() {
+        let mut app = forty_this_month();
+        let (_, rows) = app.tx_pane();
+        assert!(rows < 40, "the list is not long enough to scroll");
+        assert_eq!(
+            probe::scroll_at_point(&mut app, Target::TxList, -3.0),
+            EventResult::Consumed
+        );
+        assert!(app.tx_scroll > 0, "the wheel did not scroll");
+        let first = app.visible_ids()[app.tx_scroll];
+        assert!(probe::rect_of(&app, Target::TxRow(first)).is_some());
+        let top = app.visible_ids()[0];
+        assert!(
+            probe::rect_of(&app, Target::TxRow(top)).is_none(),
+            "a row scrolled away is still there to press"
+        );
+        for _ in 0..50 {
+            probe::scroll_at_point(&mut app, Target::TxList, -3.0);
+        }
+        assert_eq!(app.tx_scroll, 40 - rows, "the wheel ran past the end");
+        for _ in 0..50 {
+            probe::scroll_at_point(&mut app, Target::TxList, 3.0);
+        }
+        assert_eq!(app.tx_scroll, 0);
+    }
+
+    #[test]
+    fn the_chosen_row_stays_on_screen() {
+        let mut app = forty_this_month();
+        for _ in 0..30 {
+            probe::key(&mut app, &probe::press(Key::Down));
+        }
+        let chosen = app.selected_id.unwrap();
+        assert_eq!(
+            app.visible_ids().iter().position(|v| *v == chosen),
+            Some(29)
+        );
+        let (pane, _) = app.tx_pane();
+        let r = probe::rect_of(&app, Target::TxRow(chosen)).expect("the chosen row is off screen");
+        assert!(
+            r.bottom() <= pane.bottom() + 0.5,
+            "the chosen row is cut off: {r:?}"
+        );
+        probe::key(&mut app, &probe::press(Key::PageUp));
+        probe::key(&mut app, &probe::press(Key::PageUp));
+        probe::key(&mut app, &probe::press(Key::PageUp));
+        assert_eq!(app.selected_id, app.visible_ids().first().copied());
+        assert_eq!(app.tx_scroll, 0);
+        probe::key(&mut app, &probe::press(Key::PageDown));
+        assert!(probe::rect_of(&app, Target::TxRow(app.selected_id.unwrap())).is_some());
+    }
+
+    #[test]
+    fn the_budgets_scroll_in_a_short_window() {
+        let mut app = one_account();
+        app.screen = Screen::Budgets;
+        app.height = 420.0;
+        let (_, rows) = app.budget_pane();
+        assert!(rows < Category::EXPENSE_CATS.len());
+        for _ in 0..Category::EXPENSE_CATS.len() {
+            probe::key(&mut app, &probe::press(Key::Down));
+        }
+        let last = Category::EXPENSE_CATS.len() - 1;
+        assert_eq!(app.selected_budget, last);
+        let r =
+            probe::rect_of(&app, Target::BudgetRow(last)).expect("the chosen budget is off screen");
+        assert!(r.bottom() <= app.content_bottom() + 0.5);
+        assert_eq!(
+            probe::scroll_at_point(&mut app, Target::BudgetList, 30.0),
+            EventResult::Consumed
+        );
+        assert_eq!(app.budget_scroll, 0);
+    }
+
+    /// The notice was drawn at the top of the window and then the sidebar
+    /// and the header were drawn over it.
+    #[test]
+    fn the_first_run_notice_is_drawn_where_it_can_be_read() {
+        let app = FinanceApp::new();
+        let cmds = app.frame().into_tree().commands;
+        for line in NO_DATA_LINES {
+            let at = cmds
+                .iter()
+                .position(|c| matches!(c, RenderCommand::Text { text, .. } if text == line))
+                .unwrap_or_else(|| panic!("never drew {line:?}"));
+            let RenderCommand::Text { x, y, .. } = &cmds[at] else {
+                unreachable!()
+            };
+            assert!(
+                *x >= FinanceApp::SIDEBAR_W && *y >= FinanceApp::HEADER_H,
+                "{line:?} is drawn under the sidebar or the header, at ({x}, {y})"
+            );
+            for later in &cmds[at + 1..] {
+                if let RenderCommand::FillRect {
+                    x: fx,
+                    y: fy,
+                    width,
+                    height,
+                    color,
+                    ..
+                } = later
+                {
+                    let covers = *fx <= *x && *x < fx + width && *fy <= *y && *y < fy + height;
+                    assert!(!(covers && color.a == 255), "{line:?} is painted over");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_fresh_window_begins_with_an_account() {
+        let mut app = FinanceApp::new();
+        probe::click(&mut app, Target::NewAccount);
+        probe::type_str(&mut app, "Everyday");
+        probe::click(&mut app, Target::Save);
+        assert_eq!(app.accounts.len(), 1, "{:?}", app.form_error);
+        assert!(
+            !texts(&app).iter().any(|t| t == NO_DATA_LINES[0]),
+            "the empty-window notice outlived the emptiness"
+        );
+        probe::click(&mut app, Target::NewTransaction);
+        assert!(
+            matches!(app.form, Some(Form::Transaction { account: Some(a), .. }) if a == app.accounts[0].id),
+            "a new transaction does not go in the account there is"
+        );
+    }
+
+    /// The total was drawn half under the status bar.
+    #[test]
+    fn the_total_is_above_the_status_bar() {
+        let app = FinanceApp::with_sample_data();
+        let total = FinanceApp::format_currency(app.total_balance());
+        let y = app
+            .frame()
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text, y, font_size, ..
+                } if *text == total => Some(y + font_size),
+                _ => None,
+            })
+            .expect("the total is not drawn");
+        assert!(
+            y <= app.height - FinanceApp::STATUS_H,
+            "the total runs under the status bar"
+        );
+    }
+
+    #[test]
+    fn today_is_the_clocks() {
+        let before = today_from_clock();
+        let app = FinanceApp::new();
+        let after = today_from_clock();
+        assert!(before.is_some(), "the clock cannot be read");
+        assert!(
+            Some(app.current_date) == before || Some(app.current_date) == after,
+            "today is {:?}, the clock says {before:?}",
+            app.current_date
+        );
+        assert!(app.view_month.same_month(&app.current_date));
+        assert_eq!(app.view_month.day, 1);
+    }
+
+    #[test]
+    fn a_tick_on_the_same_day_draws_nothing() {
+        let mut app = FinanceApp::new();
+        app.handle_event(&Event::Tick { elapsed_ms: 1000 });
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 1000 }),
+            EventResult::Ignored,
+            "a tick that changed nothing drew a frame"
+        );
+        let wake = app
+            .tick_interval()
+            .expect("the window never wakes to notice midnight");
+        assert!(
+            wake >= Duration::from_secs(1) && wake <= Duration::from_hours(1),
+            "{wake:?}"
+        );
+    }
+
+    #[test]
+    fn midnight_moves_today_and_the_month_on_screen_with_it() {
+        let mut app = FinanceApp::new();
+        app.current_date = SimpleDate::new(2000, 1, 31);
+        app.view_month = SimpleDate::new(2000, 1, 1);
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 1000 }),
+            EventResult::Consumed
+        );
+        assert_eq!(Some(app.current_date), today_from_clock());
+        assert!(
+            app.view_month.same_month(&app.current_date),
+            "the view stayed on the old month"
+        );
+        // A view the user moved elsewhere stays where they put it.
+        app.current_date = SimpleDate::new(2000, 1, 31);
+        app.view_month = SimpleDate::new(1999, 6, 1);
+        app.handle_event(&Event::Tick { elapsed_ms: 1000 });
+        assert_eq!(app.view_month, SimpleDate::new(1999, 6, 1));
     }
 }

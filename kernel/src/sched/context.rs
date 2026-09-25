@@ -281,7 +281,5 @@ extern "C" fn sched_finish_task_switch() {
 
 #[unsafe(no_mangle)]
 extern "C" fn task_finished() -> ! {
-    super::task_exit();
-    // task_exit halts if it somehow returns (it shouldn't).
-    crate::cpu::halt_loop();
+    super::task_exit()
 }

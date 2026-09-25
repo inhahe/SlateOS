@@ -459,9 +459,7 @@ pub fn sys_exit(args: &SyscallArgs) -> SyscallResult {
     // (not owned by any process), this is a harmless no-op.
     crate::proc::thread::on_thread_exit(task_id);
 
-    sched::task_exit();
-    // Unreachable — task_exit never returns.
-    SyscallResult::ok(0)
+    sched::task_exit()
 }
 
 /// `SYS_TASK_ID` — get the current task's ID.

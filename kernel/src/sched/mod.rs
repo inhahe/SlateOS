@@ -1852,12 +1852,13 @@ pub fn detach_address_space(task_id: TaskId) -> bool {
     detached
 }
 
-/// Mark the current task as dead and yield to the next task.
+/// Mark the current task as dead and switch away from it for good.
 ///
 /// Called by `task_finished` (the context trampoline) when a task's
-/// entry function returns.  The task is NOT placed back in the run
-/// queue.
-pub fn task_exit() {
+/// entry function returns, and by every other self-termination path.  The
+/// task is NOT placed back in the run queue, and any entry it still has is
+/// removed here -- see below.
+pub fn task_exit() -> ! {
     let current_id = load_current_task();
 
     // Backstop for the address-space detach that `proc::thread::on_thread_exit`
@@ -1886,16 +1887,57 @@ pub fn task_exit() {
         let mut state = SCHED.lock();
         if let Some(task) = state.tasks.get_mut(&current_id) {
             task.state = TaskState::Dead;
+            // A dead task has no run-queue entry, and neither has a running
+            // one -- so any entry this task still has is stale, left by a
+            // removal that missed it.  Purge it under the same guard that
+            // publishes `Dead`, so no pick can ever see this task dead and
+            // queued at once.  This is the entry that hung the boot: the pick
+            // below found it, resumed this task in place, and the halt that
+            // followed stopped the CPU with interrupts off.
+            let (prio, queued_on) = (task.effective_priority(), task.last_cpu);
+            if PER_CPU_SCHED.dequeue(current_id, prio, queued_on) {
+                report_stale_rq_entry(
+                    current_id,
+                    Some(TaskState::Running),
+                    current_cpu_id(),
+                    "task_exit",
+                );
+            }
         }
     }
 
     // Yield without re-enqueuing.  Exit is not a counted context switch
     // (the outgoing task is dead).
-    schedule_inner(false, SwitchKind::Uncounted);
-
-    // Should never reach here — the task is dead and won't be
-    // scheduled again.  If somehow we do, halt.
-    cpu::halt_loop();
+    //
+    // `schedule_inner` does not come back to a dead task: it never dispatches
+    // one (`pick_runnable_locked`), and this task's own entries are gone.  If
+    // it nonetheless does, this loop is the backstop -- and what it replaces
+    // is the point.  This used to be `cpu::halt_loop()`, `cli; hlt` forever,
+    // which on a uniprocessor boot stopped the machine without a word: no
+    // panic, no fault, and no timer interrupt left for a watchdog to run on.
+    // Instead: say so, put the task back to `Dead` (whatever resumed it
+    // marked it `Running`), and switch away again.  With nothing runnable,
+    // `schedule_inner` idles with interrupts enabled, so the machine stays
+    // alive and diagnosable either way.
+    let mut resumes: u64 = 0;
+    loop {
+        schedule_inner(false, SwitchKind::Uncounted);
+        resumes = resumes.saturating_add(1);
+        DEAD_TASKS_RESUMED.fetch_add(1, Ordering::Relaxed);
+        if resumes <= 3 {
+            serial_println!(
+                "[sched] *** BUG: task {} was resumed after it exited (resume {}); \
+                 parking it again instead of halting.  See known-issues.md \
+                 B-FORKEXEC-BOOT-HANG.",
+                current_id,
+                resumes,
+            );
+        }
+        let mut state = SCHED.lock();
+        if let Some(task) = state.tasks.get_mut(&current_id) {
+            task.state = TaskState::Dead;
+        }
+    }
 }
 
 /// Get the ID of the currently running task.
@@ -3972,6 +4014,10 @@ fn unthrottle_expired() {
         if was_throttled && task.state == TaskState::Ready {
             let prio = task.effective_priority();
             let cpu = task.last_cpu;
+            // Removed first, so the task ends with exactly one entry whether
+            // or not it had one already: a throttled task that was woken
+            // rather than preempted was queued by the wake.
+            PER_CPU_SCHED.dequeue(id, prio, cpu);
             PER_CPU_SCHED.enqueue(id, prio, cpu);
         }
     }
@@ -4137,7 +4183,7 @@ fn check_starvation() {
 
     // Use try_lock to avoid blocking timer_tick if the scheduler is
     // already held (e.g., a context switch is in progress).
-    let Some(state) = SCHED.try_lock() else {
+    let Some(mut state) = SCHED.try_lock() else {
         return;
     };
 
@@ -4174,9 +4220,6 @@ fn check_starvation() {
         }
     }
 
-    // Release read-only lock, re-acquire for mutations.
-    drop(state);
-
     if boost_count == 0 {
         return;
     }
@@ -4186,14 +4229,15 @@ fn check_starvation() {
     // Two correctness points here, both guarding against duplicate run-queue
     // entries (the same task ID appearing twice in the priority-0 queue):
     //
-    // 1. We use `dequeue_any` instead of `dequeue(id, old_prio, cpu)`. A task
-    //    that was already boosted on a previous pass physically sits in
-    //    priority-queue 0, but `old_prio = effective_priority()` reports its
-    //    BASE priority, so a level-targeted dequeue would scan the wrong queue,
-    //    fail to remove it, and the following enqueue would duplicate the
-    //    entry. `dequeue_any` scans every level and removes ALL occurrences of
-    //    the id, so the subsequent single enqueue leaves exactly one queue-0
-    //    entry.
+    // 1. The removal is by id, at every level. A task that was already
+    //    boosted on a previous pass physically sits in priority-queue 0, but
+    //    `effective_priority()` reports its BASE priority, so a level-targeted
+    //    removal would scan the wrong queue, fail to remove it, and the
+    //    following enqueue would duplicate the entry. The booster was the
+    //    first place that bit, and got a by-id removal of its own
+    //    (`dequeue_any`); every other removal had the same flaw until
+    //    `dequeue` itself became by-id and absorbed it (2026-09-25,
+    //    known-issues.md B-FORKEXEC-BOOT-HANG).
     //
     // 2. We reset each boosted task's `ready_since_tick` to "now". Without this
     //    a task boosted on this pass but not yet dispatched would still satisfy
@@ -4203,27 +4247,18 @@ fn check_starvation() {
     //
     // Together these close the anti-starvation duplicate-enqueue bug (the W2
     // bench_pick_next-livelock amplifier).
+    //
+    // 3. The whole boost happens under the guard that saw each task `Ready`.
+    //    It used to drop that guard between choosing and boosting, and on SMP
+    //    another CPU could dispatch the task in between -- after which the
+    //    enqueue gave a *running* task a run-queue entry.
     let now_boost = crate::apic::tick_count();
-    let mut relock = SCHED.try_lock();
     for i in 0..boost_count {
         #[allow(clippy::indexing_slicing)]
         let (id, _old_prio, cpu) = boost_list[i];
-        // Remove every existing copy of this task from all priority levels,
-        // then place a single entry at priority 0.
-        PER_CPU_SCHED.dequeue_any(id, cpu);
-        PER_CPU_SCHED.enqueue(id, 0, cpu);
-        STARVATION_BOOSTS.fetch_add(1, Ordering::Relaxed);
-        // Reset the starvation clock so the task is not re-boosted before it
-        // has had a chance to be dispatched from priority 0. If we could not
-        // re-acquire the scheduler lock this pass, skip the reset: the worst
-        // case is a redundant boost next pass, which `dequeue_any` makes safe.
-        if let Some(state) = relock.as_mut() {
-            if let Some(task) = state.tasks.get_mut(&id) {
-                task.ready_since_tick = now_boost;
-            }
-        }
+        starvation_boost_locked(&mut state, id, cpu, now_boost);
     }
-    drop(relock);
+    drop(state);
 
     // Log the boosted task IDs (and their base priorities) so a perpetual
     // starvation loop can be attributed to specific tasks.  Printed
@@ -4244,6 +4279,28 @@ fn check_starvation() {
         }
     }
     serial_println!("]");
+}
+
+/// Move one starved task to priority level 0 and restart its starvation
+/// clock -- the step [`check_starvation`] takes for each task it picks.
+///
+/// The task's priority fields are left alone, so it sits at a level its
+/// fields do not compute: every removal must therefore be by id, which
+/// `dequeue` now is.  The caller holds `SCHED` and saw the task `Ready`
+/// under that same guard; `cpu` is the task's `last_cpu`, where it is
+/// re-queued.  Split out so the scheduler self-test boosts a task exactly
+/// as the booster does, not by an imitation of it.
+fn starvation_boost_locked(state: &mut SchedState, id: TaskId, cpu: usize, now: u64) {
+    // Every existing entry goes, at every level and on every CPU, then one
+    // goes back at level 0.
+    PER_CPU_SCHED.dequeue(id, 0, cpu);
+    PER_CPU_SCHED.enqueue(id, 0, cpu);
+    STARVATION_BOOSTS.fetch_add(1, Ordering::Relaxed);
+    // So the task is not re-boosted before it has had a chance to be
+    // dispatched from level 0.
+    if let Some(task) = state.tasks.get_mut(&id) {
+        task.ready_since_tick = now;
+    }
 }
 
 /// Number of anti-starvation boosts since boot (diagnostic).
@@ -4313,6 +4370,9 @@ pub fn set_cpu_quota(task_id: TaskId, quota_pct: u8) -> bool {
         if task.state == TaskState::Ready {
             let prio = task.effective_priority();
             let cpu = task.last_cpu;
+            // Exactly one entry afterwards, queued or not before -- see
+            // `unthrottle_expired`.
+            PER_CPU_SCHED.dequeue(task_id, prio, cpu);
             PER_CPU_SCHED.enqueue(task_id, prio, cpu);
         }
     }
@@ -4809,31 +4869,32 @@ pub fn kill_task(task_id: TaskId) -> bool {
         return false;
     };
 
-    match task.state {
-        TaskState::Dead => return false,
-        TaskState::Ready => {
-            // Remove from the run queue before marking Dead.
-            let prio = task.effective_priority();
-            let cpu = task.last_cpu;
-            task.state = TaskState::Dead;
-            PER_CPU_SCHED.dequeue(task_id, prio, cpu);
-        }
-        TaskState::Blocked | TaskState::Suspended => {
-            // Not in the run queue — just mark Dead.
-            // If anything tries to wake() this task later, it'll
-            // see it's not Blocked and return false.
-            task.state = TaskState::Dead;
-        }
-        TaskState::Running => {
-            // On SMP, the task may be Running on another CPU while
-            // we kill it from this CPU.  Mark it Dead — the other
-            // CPU will notice the state change at its next preemption
-            // or yield (schedule_inner checks state before re-enqueue).
-            //
-            // On single-CPU, this case shouldn't be reachable (we
-            // checked for current task above), but handle it safely.
-            task.state = TaskState::Dead;
-        }
+    if task.state == TaskState::Dead {
+        return false;
+    }
+    // Every other state ends the same way:
+    //
+    // * Ready -- it has a run-queue entry, removed below.
+    // * Blocked / Suspended -- no legitimate entry.  If anything tries to
+    //   wake() this task later, it'll see it's not Blocked and return false.
+    // * Running -- on SMP, the task may be Running on another CPU while we
+    //   kill it from this CPU.  Marking it Dead is enough: the other CPU will
+    //   notice the state change at its next preemption or yield
+    //   (schedule_inner checks state before re-enqueue).  On a single CPU
+    //   this shouldn't be reachable (the current task was refused above).
+    let prior = task.state;
+    task.state = TaskState::Dead;
+
+    // Whatever it was doing, a dead task has no run-queue entry.  A `Ready`
+    // task has one to remove; in any other state an entry is stale, and left
+    // in place it would bring this task back to life at the next pick.  The
+    // removal is by id, not by the level `effective_priority()` computes: the
+    // level-only scan this used to be missed a task the anti-starvation
+    // booster had moved to level 0, and left a dead task queued.  See
+    // `PriorityRoundRobin::dequeue`.
+    let (prio, queued_on) = (task.effective_priority(), task.last_cpu);
+    if PER_CPU_SCHED.dequeue(task_id, prio, queued_on) && prior != TaskState::Ready {
+        report_stale_rq_entry(task_id, Some(prior), current_cpu_id(), "kill_task");
     }
 
     // Drop the SCHED lock before notifying hooks — hooks may access
@@ -6667,6 +6728,306 @@ fn account_cycles(state: &mut SchedState, outgoing_id: TaskId, cpu: usize) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Stale run-queue entries
+// ---------------------------------------------------------------------------
+
+/// Run-queue entries found for a task that could not run, and discarded.
+///
+/// A run queue holds bare task IDs, so an entry that outlives the reason it
+/// was queued names a task that is `Dead`, `Blocked`, `Suspended`, already
+/// running, or gone from the task table.  [`pick_runnable_locked`] refuses to
+/// dispatch such an entry, and the paths that end a task's life purge any it
+/// still has; each one found is counted here.
+///
+/// Zero on a healthy boot, apart from the ones the scheduler self-test plants
+/// on purpose.  Anything more means some removal missed an entry -- which
+/// before 2026-09-25 was silent, and hung roughly one boot in a few dozen.
+/// See known-issues.md `B-FORKEXEC-BOOT-HANG`.
+static STALE_RQ_ENTRIES: AtomicU64 = AtomicU64::new(0);
+
+/// How many stale entries [`report_stale_rq_entry`] has described on serial.
+static STALE_RQ_REPORTED: AtomicU64 = AtomicU64::new(0);
+
+/// How many stale entries [`report_stale_rq_entry`] describes before it only
+/// counts.  Enough to identify a source; not enough to flood serial if one
+/// turns up on a hot path.
+const STALE_RQ_REPORTS: u64 = 8;
+
+/// Stale entries the scheduler self-test has planted and not yet seen found.
+///
+/// While non-zero, a found entry is counted but not reported: it is expected,
+/// and describing it would print a `*** BUG` line on every boot and spend the
+/// report budget a real one needs.  The self-test zeroes it when it is done,
+/// so a real entry found afterwards is reported as usual.
+static STALE_RQ_PLANTED: AtomicU64 = AtomicU64::new(0);
+
+/// Times [`task_exit`] was resumed after publishing its task `Dead`.
+///
+/// It re-parks the task rather than halting -- see its loop -- so this is the
+/// trace such a resume leaves besides the serial report.  Zero unless the
+/// scheduler dispatched a dead task, which [`pick_runnable_locked`] exists to
+/// prevent.
+static DEAD_TASKS_RESUMED: AtomicU64 = AtomicU64::new(0);
+
+/// Count, and describe on serial, a run-queue entry for a task that could not
+/// run.
+///
+/// `state` is the task's state, or `None` if it is no longer in the task
+/// table; `site` names where the entry was found.  Cold, and serial-bound
+/// only on a bug.
+#[cold]
+fn report_stale_rq_entry(task_id: TaskId, state: Option<TaskState>, cpu: usize, site: &str) {
+    STALE_RQ_ENTRIES.fetch_add(1, Ordering::Relaxed);
+    if STALE_RQ_PLANTED
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+        .is_ok()
+    {
+        return;
+    }
+    let reported = STALE_RQ_REPORTED.fetch_add(1, Ordering::Relaxed);
+    if reported < STALE_RQ_REPORTS {
+        serial_println!(
+            "[sched] *** BUG: stale run-queue entry for task {} (state {:?}) found by {} \
+             on cpu {} and discarded -- a removal missed it; see known-issues.md \
+             B-FORKEXEC-BOOT-HANG (report {} of at most {})",
+            task_id,
+            state,
+            site,
+            cpu,
+            reported.saturating_add(1),
+            STALE_RQ_REPORTS,
+        );
+    }
+}
+
+/// Stale run-queue entries found and discarded since boot.  See
+/// [`STALE_RQ_ENTRIES`].
+#[must_use]
+pub fn stale_rq_entries() -> u64 {
+    STALE_RQ_ENTRIES.load(Ordering::Relaxed)
+}
+
+/// Times an exiting task was resumed after it published itself `Dead`.  See
+/// [`DEAD_TASKS_RESUMED`].
+#[must_use]
+pub fn dead_tasks_resumed() -> u64 {
+    DEAD_TASKS_RESUMED.load(Ordering::Relaxed)
+}
+
+/// The CPU other than `cpu` that is executing `id` right now, or is still
+/// standing on its kernel stack mid-switch.
+///
+/// A task can be `Ready` and queued while it is still executing.  It is
+/// queued *before* it switches away (the requeue in [`schedule_inner`]), and
+/// it is queued by a wake that lands between its marking itself parked and
+/// its switching away.  A CPU that takes such an entry -- by work stealing,
+/// which takes from the back of a queue, i.e. the most recent requeue -- must
+/// not dispatch it: it would load a context the owning CPU has not finished
+/// saving, onto a stack that CPU is still running on.  `CURRENT_TASK_IDS`
+/// covers the time the owner is running the task, and `PREV_TASK_IDS` the
+/// switch itself, until [`finish_task_switch`] on that CPU releases it.
+///
+/// Only CPUs that have registered an idle task are consulted: an unregistered
+/// CPU's slots still read zero, which is also the BSP idle task's ID.
+/// `PREV_TASK_IDS` uses zero for "none", so it is not consulted for task 0
+/// either; task 0 runs only on the BSP.
+fn running_elsewhere(id: TaskId, cpu: usize) -> Option<usize> {
+    let online = PER_CPU_SCHED.num_cpus().max(1);
+    (0..online).filter(|&other| other != cpu).find(|&other| {
+        let registered = IDLE_TASK_IDS
+            .get(other)
+            .is_some_and(|slot| slot.load(Ordering::Acquire) != u64::MAX);
+        let current = || {
+            CURRENT_TASK_IDS
+                .get(other)
+                .is_some_and(|slot| slot.load(Ordering::Acquire) == id)
+        };
+        let switching_away = || {
+            id != 0
+                && PREV_TASK_IDS
+                    .get(other)
+                    .is_some_and(|slot| slot.load(Ordering::Acquire) == id)
+        };
+        registered && (current() || switching_away())
+    })
+}
+
+/// What [`pick_runnable_locked`] may do with a task it has just taken off a
+/// run queue.
+enum PickVerdict {
+    /// Dispatch it -- or, if it is the current task, resume it in place.
+    Run,
+    /// The entry was stale: the task may not run at all.  Drop the entry.
+    /// Carries the task's state, `None` if it has left the task table.
+    Stale(Option<TaskState>),
+    /// Runnable, but still executing on (or mid-switch away from) the given
+    /// CPU.  Hand it back to that CPU's queue.
+    Elsewhere(usize),
+    /// Runnable, but its affinity forbids this CPU and allows the given one,
+    /// which is online.  Move it there.
+    Rehome(usize),
+}
+
+/// Decide what may be done with `id`, just taken off a run queue on `cpu`,
+/// whose current task is `current_id`.  The caller holds `SCHED`, so the
+/// state read here is the state the dispatch will act on.
+fn classify_pick(state: &SchedState, id: TaskId, current_id: TaskId, cpu: usize) -> PickVerdict {
+    let Some(task) = state.tasks.get(&id) else {
+        return PickVerdict::Stale(None);
+    };
+    if id == current_id {
+        return match task.state {
+            // Requeued by this very call, or woken in the window between
+            // marking itself parked and getting here.
+            TaskState::Ready => PickVerdict::Run,
+            // Still running, and holding an entry a running task never has.
+            // Resuming it is what it was doing anyway, so that is the
+            // recovery -- but the entry is a missed removal all the same.
+            TaskState::Running => {
+                report_stale_rq_entry(id, Some(task.state), cpu, "pick (current task)");
+                PickVerdict::Run
+            }
+            // Dead, Blocked or Suspended: resuming it in place is the bug
+            // itself.  For a `Dead` task it returned into `task_exit`, which
+            // then halted the CPU with interrupts off.
+            parked => PickVerdict::Stale(Some(parked)),
+        };
+    }
+    if task.state != TaskState::Ready {
+        return PickVerdict::Stale(Some(task.state));
+    }
+    if let Some(owner) = running_elsewhere(id, cpu) {
+        return PickVerdict::Elsewhere(owner);
+    }
+    if !task.can_run_on(cpu) {
+        // Move it only to a CPU that exists.  With none of its allowed CPUs
+        // online -- a mask naming CPU 1 on a uniprocessor boot -- it runs
+        // here, as it always has: re-homing it onto a queue that `enqueue`
+        // clamps straight back to this one would only spin.
+        let target = choose_cpu_for_task(task);
+        if target != cpu && target < PER_CPU_SCHED.num_cpus() {
+            return PickVerdict::Rehome(target);
+        }
+    }
+    PickVerdict::Run
+}
+
+/// Most entries [`pick_runnable_locked`] examines in one call.
+///
+/// Each examination dispatches, drops a stale entry or moves one to another
+/// CPU, so this CPU's queue only shrinks and the loop ends on its own; the
+/// bound is for work stealing, whose victims other CPUs keep refilling.  Far
+/// above what a healthy pick needs, which is one.
+const PICK_ATTEMPTS: u32 = 256;
+
+/// Take one entry off this CPU's run queue or, failing that and if allowed,
+/// steal one -- fixing up `last_cpu` for the rest of what the steal moved
+/// onto this CPU's queue.
+///
+/// The stolen task that is returned is left alone: whether it may run here is
+/// [`classify_pick`]'s decision, and a fix-up that re-homed it as well would
+/// queue it twice.
+fn next_queued_locked(state: &mut SchedState, cpu: usize, may_steal: bool) -> Option<TaskId> {
+    if let Some(id) = PER_CPU_SCHED.pick_next_local(cpu) {
+        return Some(id);
+    }
+    if !may_steal {
+        return None;
+    }
+    // OPT: MigratedTasks is stack-allocated (no heap allocation under the
+    // SCHED lock on the work-stealing path).
+    let mut migrated = priority_rr::MigratedTasks::new();
+    let stolen = PER_CPU_SCHED.try_steal(cpu, &mut migrated)?;
+    WORK_STEALS.fetch_add(1, Ordering::Relaxed);
+    crate::ktrace::record(
+        crate::ktrace::Category::Sched,
+        crate::ktrace::event::WORK_STEAL,
+        stolen,
+        cpu as u64,
+    );
+    // The rest of the haul now sits on this CPU's queue.  Point `last_cpu`
+    // here, so a later wake or kill starts looking in the right place; a task
+    // whose affinity forbids this CPU goes on to one it allows.  Rare -- most
+    // tasks may run anywhere.
+    for &id in migrated.iter().filter(|&&id| id != stolen) {
+        if let Some(task) = state.tasks.get_mut(&id) {
+            if task.can_run_on(cpu) {
+                task.last_cpu = cpu;
+            } else {
+                let target = choose_cpu_for_task(task);
+                task.last_cpu = target;
+                let prio = task.effective_priority();
+                PER_CPU_SCHED.dequeue(id, prio, cpu);
+                PER_CPU_SCHED.enqueue(id, prio, target);
+            }
+        }
+    }
+    Some(stolen)
+}
+
+/// Pick the next task for `cpu` to run: its own queue first, then work
+/// stealing -- never an entry for a task that cannot run here.
+///
+/// # Why the pick checks what it picked
+///
+/// The queues hold bare task IDs, and nothing but this function stands
+/// between an entry and a CPU.  It used to trust every entry: whatever came
+/// off a queue was marked `Running` and switched to, and an entry for the
+/// current task resumed it in place whatever its state.  So an entry that
+/// outlived the reason it was queued -- left behind by a removal that looked
+/// at the wrong level, see [`PriorityRoundRobin::dequeue`] -- brought a
+/// killed task back to life, ran a suspended one, and, for a task in the
+/// middle of exiting, returned into [`task_exit`], which halted the CPU with
+/// interrupts disabled: the silent, timer-less hang of known-issues.md
+/// `B-FORKEXEC-BOOT-HANG`.  Now such an entry is dropped and reported
+/// ([`report_stale_rq_entry`]), and the pick moves on.
+///
+/// Two more kinds of entry are runnable but not *here*, and are moved rather
+/// than run: a task still executing on another CPU (see
+/// [`running_elsewhere`]) goes back to that CPU's queue, and a stolen task
+/// whose affinity forbids this CPU goes to one it allows.  Either way the CPU
+/// it lands on is added to `signals`, owed a reschedule once `SCHED` is
+/// released, and stealing stops for the rest of the call so the same entry
+/// cannot be stolen straight back.
+///
+/// [`PriorityRoundRobin::dequeue`]: priority_rr::PriorityRoundRobin::dequeue
+fn pick_runnable_locked(
+    state: &mut SchedState,
+    cpu: usize,
+    current_id: TaskId,
+    signals: &mut u64,
+) -> Option<TaskId> {
+    let mut may_steal = true;
+    for _ in 0..PICK_ATTEMPTS {
+        let id = next_queued_locked(state, cpu, may_steal)?;
+        match classify_pick(state, id, current_id, cpu) {
+            PickVerdict::Run => return Some(id),
+            PickVerdict::Stale(task_state) => {
+                report_stale_rq_entry(id, task_state, cpu, "pick");
+            }
+            PickVerdict::Elsewhere(target) | PickVerdict::Rehome(target) => {
+                if let Some(task) = state.tasks.get_mut(&id) {
+                    task.last_cpu = target;
+                    PER_CPU_SCHED.enqueue(id, task.effective_priority(), target);
+                }
+                *signals |= cpu_bit(target);
+                may_steal = false;
+            }
+        }
+    }
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        serial_println!(
+            "[sched] *** BUG: cpu {} examined {} run-queue entries without finding one \
+             it may run; idling until the next reschedule. (one-shot warning)",
+            cpu,
+            PICK_ATTEMPTS,
+        );
+    }
+    None
+}
+
 /// The inner scheduling function.
 ///
 /// `requeue` means **"re-enqueue the current task if it is still `Running`"** —
@@ -6832,49 +7193,15 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
             }
         }
 
-        // Pick the next task from the local CPU's queue.
-        // If local queue is empty, try work stealing from other CPUs.
-        // Stolen tasks need their last_cpu updated so wake()/kill_task()
-        // dequeue from the correct (new) CPU queue, not the stale one.
-        //
-        // OPT: MigratedTasks is stack-allocated (no heap allocation under
-        // the SCHED lock on the work-stealing path).
-        let mut migrated = priority_rr::MigratedTasks::new();
+        // Pick the next task: the local queue first, then work stealing,
+        // never an entry for a task that cannot run here.  See
+        // `pick_runnable_locked` -- the only thing between a queue entry and
+        // this CPU, which no longer takes an entry on trust.
         let _pick_t = crate::kprofile::begin(crate::kprofile::Slot::SchedPickNext);
-        let picked = match PER_CPU_SCHED.pick_next_local(cpu) {
-            Some(id) => Some(id),
-            None => {
-                let stolen = PER_CPU_SCHED.try_steal(cpu, &mut migrated);
-                if let Some(stolen_id) = stolen {
-                    WORK_STEALS.fetch_add(1, Ordering::Relaxed);
-                    crate::ktrace::record(
-                        crate::ktrace::Category::Sched,
-                        crate::ktrace::event::WORK_STEAL,
-                        stolen_id,
-                        cpu as u64,
-                    );
-                }
-                stolen
-            }
-        };
+        let mut pick_signals = 0u64;
+        let picked = pick_runnable_locked(&mut state, cpu, current_id, &mut pick_signals);
+        wake_signals.add(pick_signals);
         crate::kprofile::end(crate::kprofile::Slot::SchedPickNext, _pick_t);
-        // Update last_cpu for stolen tasks.  If a stolen task's affinity
-        // forbids this CPU, put it back on its original (or first allowed)
-        // CPU.  This is rare — most tasks have CPU_AFFINITY_ALL.
-        for &id in migrated.iter() {
-            if let Some(task) = state.tasks.get_mut(&id) {
-                if task.can_run_on(cpu) {
-                    task.last_cpu = cpu;
-                } else {
-                    // Can't run here — move it to the first allowed CPU.
-                    let target = choose_cpu_for_task(task);
-                    task.last_cpu = target;
-                    let prio = task.effective_priority();
-                    PER_CPU_SCHED.dequeue(id, prio, cpu);
-                    PER_CPU_SCHED.enqueue(id, prio, target);
-                }
-            }
-        }
 
         let Some(picked_id) = picked else {
             // Nothing to run.  The question this arm answers is "may we simply
@@ -6962,41 +7289,42 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     // dropping `s`.
                     wake_signals.add(drain_deferred_wakes_locked(&mut s, cpu));
 
-                    let mut idle_migrated = priority_rr::MigratedTasks::new();
-                    let ready_id = match PER_CPU_SCHED.pick_next_local(cpu) {
-                        Some(id) => id,
-                        None => match PER_CPU_SCHED.try_steal(cpu, &mut idle_migrated) {
-                            Some(id) => {
-                                WORK_STEALS.fetch_add(1, Ordering::Relaxed);
-                                id
-                            }
-                            None => {
-                                idle_spins = idle_spins.saturating_add(1);
-                                if idle_spins == IDLE_FALLBACK_WEDGE_TICKS
-                                    && !IDLE_FALLBACK_WEDGE_DUMPED.swap(true, Ordering::Relaxed)
-                                {
-                                    dump_idle_fallback_wedge(&s, cpu, current_id);
-                                }
-                                drop(s);
-                                wake_signals.flush();
-                                continue;
-                            }
-                        },
-                    };
-                    // Update last_cpu for stolen tasks (same affinity
-                    // check as the main path above).
-                    for &id in idle_migrated.iter() {
-                        if let Some(task) = s.tasks.get_mut(&id) {
-                            if task.can_run_on(cpu) {
-                                task.last_cpu = cpu;
-                            } else {
-                                let target = choose_cpu_for_task(task);
-                                task.last_cpu = target;
-                                let prio = task.effective_priority();
-                                PER_CPU_SCHED.dequeue(id, prio, cpu);
-                                PER_CPU_SCHED.enqueue(id, prio, target);
-                            }
+                    // The same checked pick as the main path: a stale entry
+                    // for a dead or parked task is dropped here too, rather
+                    // than switched to.
+                    let mut pick_signals = 0u64;
+                    let picked = pick_runnable_locked(&mut s, cpu, current_id, &mut pick_signals);
+                    wake_signals.add(pick_signals);
+                    let Some(ready_id) = picked else {
+                        idle_spins = idle_spins.saturating_add(1);
+                        if idle_spins == IDLE_FALLBACK_WEDGE_TICKS
+                            && !IDLE_FALLBACK_WEDGE_DUMPED.swap(true, Ordering::Relaxed)
+                        {
+                            dump_idle_fallback_wedge(&s, cpu, current_id);
                         }
+                        drop(s);
+                        wake_signals.flush();
+                        continue;
+                    };
+
+                    if ready_id == current_id {
+                        // The task this CPU is idling for became runnable
+                        // again: woken while its CPU sat here.  Resume it in
+                        // place.  "Switching" to itself, as this path used to,
+                        // hands `switch_context` a `&mut` and a `&` to the
+                        // same saved context -- undefined behaviour, however
+                        // harmless the registers make it look.
+                        if let Some(task) = s.tasks.get_mut(&current_id) {
+                            task.record_dispatch(crate::apic::tick_count());
+                            task.state = TaskState::Running;
+                            task.last_cpu = cpu;
+                        }
+                        drop(s);
+                        wake_signals.flush();
+                        if let Some(flag) = IDLE_FLAGS.get(cpu) {
+                            flag.store(false, Ordering::Release);
+                        }
+                        return;
                     }
 
                     // Extract context and FPU pointers for old (blocked/dead)
@@ -7266,7 +7594,9 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
         };
 
         if picked_id == current_id {
-            // Same task picked — no switch needed; resume as Running.
+            // Same task picked — no switch needed; resume as Running.  It is
+            // `Ready` or `Running` here: `pick_runnable_locked` drops an entry
+            // for a current task in any other state instead of returning it.
             //
             // On the requeue path this is the common "still the best task"
             // case.  On the block/exit path (`requeue == false`) the current
@@ -7621,6 +7951,7 @@ pub fn self_test() -> KernelResult<()> {
     test_stack_canary()?;
     test_cooperative_scheduling()?;
     test_kill_and_reap()?;
+    test_stale_run_queue_entries()?;
     test_suspend_resume()?;
     test_two_phase_self_suspend()?;
     test_set_priority()?;
@@ -8878,6 +9209,251 @@ fn test_kill_and_reap() -> KernelResult<()> {
     );
 
     Ok(())
+}
+
+/// Pin the fix for the second cause of `B-FORKEXEC-BOOT-HANG` (2026-09-25):
+/// a run-queue entry that outlived the reason it was queued.
+///
+/// Three halves, each failing on its own, and each driven deterministically
+/// rather than through the timing window that hung one boot in a few dozen:
+///
+/// 1. **Removal is by id.**  A `Ready` task is moved to level 0 by the real
+///    anti-starvation step, which leaves its priority alone, and is then
+///    killed; a second is re-prioritised instead.  The killed one must have no
+///    entry left, and the re-prioritised one exactly one.  Before the fix both
+///    removals scanned only the level the task's fields compute, missed, and
+///    left the level-0 entry: a dead task queued, and a live one queued twice.
+/// 2. **A pick never dispatches a task that cannot run.**  Entries are planted
+///    for a `Dead` task and a never-admitted `Blocked` one, at level 0 so they
+///    are picked first, and the test yields: neither may run.  The classifier
+///    is also asked directly about a *current* task in each state -- the case
+///    that hung was a `Dead` current task resumed in place.
+/// 3. **An exiting task with a stale entry of its own exits.**  A task plants
+///    an entry for itself and returns.  Before the fix, `task_exit`'s
+///    `schedule_inner` picked that entry, resumed the task in place, and
+///    `task_exit` halted with interrupts off -- on this uniprocessor boot, the
+///    end of the boot, which is how this test fails if it regresses.
+///
+/// Preemption is off from each spawn to the end of each plant-and-inspect
+/// window.  A tick in between would let a planted level-0 entry be picked by
+/// the timer instead of by the step under test, and make the result depend on
+/// timing -- the one thing this test exists not to do.
+fn test_stale_run_queue_entries() -> KernelResult<()> {
+    let cpu = current_cpu_id();
+
+    // --- 1a. Boosted, then killed: no entry may be left. ---
+    TEST_COUNTER.store(0, Ordering::SeqCst);
+    preempt_disable();
+    let killed = spawn(b"test-stale-kill", 16, test_task_incr, 1, 0);
+    let (boosted, accepted, left) = if let Ok(id) = killed.as_ref().copied() {
+        {
+            let mut state = SCHED.lock();
+            let queued_on = state.tasks.get(&id).map_or(cpu, |t| t.last_cpu);
+            starvation_boost_locked(&mut state, id, queued_on, crate::apic::tick_count());
+        }
+        let boosted = PER_CPU_SCHED.entries_for(id);
+        let accepted = kill_task(id);
+        (boosted, accepted, PER_CPU_SCHED.entries_for(id))
+    } else {
+        (0, false, 0)
+    };
+    preempt_enable();
+    let killed = killed?;
+    if boosted != 1 || !accepted || left != 0 {
+        serial_println!(
+            "[sched]   FAIL: boosted-then-killed task {}: {} entr(ies) after the boost \
+             (want 1), kill accepted: {}, {} entr(ies) after the kill (want 0 -- a \
+             dead task still queued)",
+            killed,
+            boosted,
+            accepted,
+            left
+        );
+        return Err(KernelError::InternalError);
+    }
+    yield_now();
+    yield_now();
+    if TEST_COUNTER.load(Ordering::SeqCst) != 0 {
+        serial_println!(
+            "[sched]   FAIL: boosted-then-killed task {} ran after it was killed",
+            killed
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[sched]   boosted, then killed: no entry left: OK");
+
+    // --- 1b. Boosted, then re-prioritised: exactly one entry. ---
+    preempt_disable();
+    let moved = spawn(b"test-stale-reprio", 16, test_task_incr, 1, 0);
+    let (old_prio, entries, accepted, left) = if let Ok(id) = moved.as_ref().copied() {
+        {
+            let mut state = SCHED.lock();
+            let queued_on = state.tasks.get(&id).map_or(cpu, |t| t.last_cpu);
+            starvation_boost_locked(&mut state, id, queued_on, crate::apic::tick_count());
+        }
+        let old_prio = set_priority(id, 20);
+        let entries = PER_CPU_SCHED.entries_for(id);
+        let accepted = kill_task(id);
+        (old_prio, entries, accepted, PER_CPU_SCHED.entries_for(id))
+    } else {
+        (None, 0, false, 0)
+    };
+    preempt_enable();
+    let moved = moved?;
+    if old_prio != Some(16) || entries != 1 || !accepted || left != 0 {
+        serial_println!(
+            "[sched]   FAIL: boosted-then-re-prioritised task {}: set_priority returned \
+             {:?} (want Some(16)), {} entr(ies) afterwards (want 1 -- two is the missed \
+             removal plus the new entry), kill accepted: {}, {} left after the kill",
+            moved,
+            old_prio,
+            entries,
+            accepted,
+            left
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[sched]   boosted, then re-prioritised: one entry: OK");
+
+    // --- 2. Planted entries for a dead and a parked task are never run. ---
+    preempt_disable();
+    let dead = spawn(b"test-stale-dead", 16, test_task_incr, 1, 0);
+    let parked = spawn_suspended(b"test-stale-parked", 16, test_task_incr, 1, 0);
+    let planted = if let (Ok(dead), Ok(parked)) = (&dead, &parked) {
+        let (dead, parked) = (*dead, *parked);
+        let killed_ok = kill_task(dead);
+        // Exactly what a missed removal leaves: an entry for a task that is
+        // `Dead`, and one for a task that is `Blocked` and was never even
+        // admitted, at level 0 so they are first in line.  Planted under
+        // `SCHED`, as every enqueue is: a queue lock held without it is one
+        // an interrupt's `try_wake` can deadlock on.
+        let state = SCHED.lock();
+        STALE_RQ_PLANTED.store(2, Ordering::Relaxed);
+        PER_CPU_SCHED.enqueue(dead, 0, cpu);
+        PER_CPU_SCHED.enqueue(parked, 0, cpu);
+        // The verdicts the pick below will act on, asked directly -- and the
+        // `current` ones, which a yield from here cannot reach: a dead or
+        // parked task picked as the current one must not be resumed.  That
+        // is the case that hung.
+        let current = current_task_id();
+        let verdicts_ok = matches!(
+            classify_pick(&state, dead, dead, cpu),
+            PickVerdict::Stale(Some(TaskState::Dead))
+        ) && matches!(
+            classify_pick(&state, parked, parked, cpu),
+            PickVerdict::Stale(Some(TaskState::Blocked))
+        ) && matches!(
+            classify_pick(&state, dead, current, cpu),
+            PickVerdict::Stale(Some(TaskState::Dead))
+        ) && matches!(
+            classify_pick(&state, parked, current, cpu),
+            PickVerdict::Stale(Some(TaskState::Blocked))
+        ) && matches!(
+            classify_pick(&state, TaskId::MAX, current, cpu),
+            PickVerdict::Stale(None)
+        );
+        Some((killed_ok, verdicts_ok))
+    } else {
+        None
+    };
+    preempt_enable();
+    let (dead, parked) = (dead?, parked?);
+    let (killed_ok, verdicts_ok) = planted.ok_or(KernelError::InternalError)?;
+    let stale_before = stale_rq_entries();
+    TEST_COUNTER.store(0, Ordering::SeqCst);
+    yield_now();
+    yield_now();
+    let ran = TEST_COUNTER.load(Ordering::SeqCst);
+    let discarded = stale_rq_entries().saturating_sub(stale_before);
+    let states = {
+        let state = SCHED.lock();
+        (
+            state.tasks.get(&dead).map(|t| t.state),
+            state.tasks.get(&parked).map(|t| t.state),
+        )
+    };
+    let left = PER_CPU_SCHED
+        .entries_for(dead)
+        .saturating_add(PER_CPU_SCHED.entries_for(parked));
+    STALE_RQ_PLANTED.store(0, Ordering::Relaxed);
+    kill_task(parked);
+    reap_dead_tasks();
+    if !killed_ok
+        || !verdicts_ok
+        || ran != 0
+        || discarded < 2
+        || states != (Some(TaskState::Dead), Some(TaskState::Blocked))
+        || left != 0
+    {
+        serial_println!(
+            "[sched]   FAIL: planted stale entries: kill accepted: {}, verdicts right: {}, \
+             {} planted task(s) ran (want 0), {} discarded (want >= 2), states {:?} \
+             (want Dead, Blocked), {} entr(ies) left (want 0)",
+            killed_ok,
+            verdicts_ok,
+            ran,
+            discarded,
+            states,
+            left
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[sched]   stale entries for a dead and a parked task never run: OK");
+
+    // --- 3. A task exiting with a stale entry of its own gets out. ---
+    TEST_COUNTER.store(0, Ordering::SeqCst);
+    let stale_before = stale_rq_entries();
+    let resumed_before = dead_tasks_resumed();
+    STALE_RQ_PLANTED.store(1, Ordering::Relaxed);
+    let exiting = spawn(b"test-stale-exit", 16, test_task_plant_own_entry, 1, 0)?;
+    for _ in 0..16 {
+        let dead_yet = SCHED
+            .lock()
+            .tasks
+            .get(&exiting)
+            .is_some_and(|t| t.state == TaskState::Dead);
+        if dead_yet {
+            break;
+        }
+        yield_now();
+    }
+    let exited = SCHED.lock().tasks.get(&exiting).map(|t| t.state);
+    let ran = TEST_COUNTER.load(Ordering::SeqCst);
+    let found = stale_rq_entries().saturating_sub(stale_before);
+    let resumed = dead_tasks_resumed().saturating_sub(resumed_before);
+    let left = PER_CPU_SCHED.entries_for(exiting);
+    STALE_RQ_PLANTED.store(0, Ordering::Relaxed);
+    reap_dead_tasks();
+    if exited != Some(TaskState::Dead) || ran != 1 || found < 1 || resumed != 0 || left != 0 {
+        serial_println!(
+            "[sched]   FAIL: task {} exiting with its own stale entry: state {:?} (want \
+             Dead), ran {} time(s) (want 1), {} stale entr(ies) found (want >= 1), \
+             resumed after exit {} time(s) (want 0), {} left (want 0)",
+            exiting,
+            exited,
+            ran,
+            found,
+            resumed,
+            left
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[sched]   a task exiting with its own stale entry exits: OK");
+
+    Ok(())
+}
+
+/// Test task: plant a run-queue entry for itself at level 0 -- first in line
+/// -- then return, so that `task_exit` meets a stale entry of its own: the
+/// entry that used to resume an exiting task in place and halt the CPU.  See
+/// `test_stale_run_queue_entries`.
+extern "C" fn test_task_plant_own_entry(arg: u64) {
+    {
+        // Under `SCHED`, as every enqueue is -- see the planting in the test.
+        let _sched = SCHED.lock();
+        PER_CPU_SCHED.enqueue(current_task_id(), 0, current_cpu_id());
+    }
+    TEST_COUNTER.fetch_add(arg, Ordering::SeqCst);
 }
 
 /// Test 2: Suspend and resume a task.

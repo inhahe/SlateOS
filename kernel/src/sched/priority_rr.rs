@@ -354,66 +354,65 @@ impl PriorityRoundRobin {
         }
     }
 
-    /// Remove a specific task from its queue.
+    /// Remove a task from the run queue: every entry it has, at whatever
+    /// level each one sits.
     ///
-    /// Used when a task blocks or is suspended.  Returns `true` if
-    /// the task was found and removed.
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn dequeue(&mut self, id: TaskId, priority: u8) -> bool {
-        let level = (priority as usize).min(NUM_PRIORITIES.saturating_sub(1));
-        let Some(queue) = self.queues.get_mut(level) else {
-            return false;
-        };
-
-        // Linear scan within the priority queue.  Each individual
-        // queue should be short (a few tasks), so this is acceptable.
-        if let Some(pos) = queue.iter().position(|&tid| tid == id) {
-            queue.remove(pos);
-            if queue.is_empty() {
-                self.bitmap &= !(1 << level);
-            }
-            return true;
-        }
-
-        false
-    }
-
-    /// Remove a task from whatever priority queue(s) it currently sits in,
-    /// scanning every level.  Returns `true` if at least one entry was
-    /// removed.
+    /// `_priority` is the level the caller computed from the task's fields,
+    /// and it is deliberately not trusted.  This used to scan that one level
+    /// and nothing else, but a queued task does not always sit at the level
+    /// its fields compute *now*: the anti-starvation booster moves a task to
+    /// level 0 without touching its priority, and a timer tick can drop the
+    /// interactive boost of a task that was queued while still on the CPU.
+    /// The removal then missed -- silently, since no caller checks the result
+    /// -- and left the entry behind for a task that had just been killed,
+    /// suspended or re-levelled.  The next pick ran it anyway: a killed task
+    /// came back to life, and a task that later exited was "resumed" by its
+    /// own stale entry and halted the CPU with interrupts off.  See
+    /// known-issues.md `B-FORKEXEC-BOOT-HANG` (2026-09-25).
     ///
-    /// Unlike [`dequeue`], the caller does not need to know the task's
-    /// current queue level.  This is required by the anti-starvation
-    /// booster, which moves a task to priority 0 without changing its
-    /// `priority` field: a subsequent `dequeue(id, base_priority)` would
-    /// scan the wrong level, fail to find the task (it is in queue 0), and
-    /// leave a stale entry behind while a fresh enqueue created a duplicate.
-    /// `dequeue_any` removes the task wherever it is and also sweeps up any
-    /// pre-existing duplicate entries, keeping the run queue consistent.
-    pub fn dequeue_any(&mut self, id: TaskId) -> bool {
+    /// Removing every entry, rather than the first one found, also sweeps up
+    /// a duplicate left by any earlier miss.  Only non-empty levels are
+    /// visited -- the bitmap names them -- so the cost is one pass over the
+    /// tasks actually queued on this CPU.
+    ///
+    /// The anti-starvation booster needed a removal like this first, being the
+    /// first place a task's level stopped matching its fields, and had its own
+    /// `dequeue_any` for it.  That is this method now; there is no other.
+    ///
+    /// Returns `true` if at least one entry was removed.
+    pub fn dequeue(&mut self, id: TaskId, _priority: u8) -> bool {
         let mut removed = false;
-        for level in 0..NUM_PRIORITIES {
-            let Some(queue) = self.queues.get_mut(level) else {
+        let mut pending = self.bitmap;
+        while pending != 0 {
+            let level = pending.trailing_zeros();
+            // Clear the lowest set bit.  `pending` is non-zero, so this
+            // cannot wrap.
+            pending &= pending.wrapping_sub(1);
+            let Some(queue) = self.queues.get_mut(level as usize) else {
                 continue;
             };
-            // Remove *all* occurrences at this level (defensive: clears any
-            // duplicates that an earlier wrong-level enqueue may have left).
-            let mut found_here = false;
-            while let Some(pos) = queue.iter().position(|&tid| tid == id) {
-                queue.remove(pos);
-                found_here = true;
-            }
-            if found_here {
+            let before = queue.len();
+            queue.retain(|&tid| tid != id);
+            if queue.len() != before {
                 removed = true;
                 if queue.is_empty() {
-                    #[allow(clippy::cast_possible_truncation)]
-                    {
-                        self.bitmap &= !(1u32 << (level as u32));
-                    }
+                    // `level` is the index of a set bit of a `u32`, so below
+                    // 32: the shift cannot overflow.
+                    self.bitmap &= !1u32.wrapping_shl(level);
                 }
             }
         }
         removed
+    }
+
+    /// How many entries name `id`, at every level: 0 or 1 in a consistent
+    /// queue.  A diagnostic for the scheduler self-test; O(queued tasks).
+    #[must_use]
+    pub fn entries_for(&self, id: TaskId) -> usize {
+        self.queues
+            .iter()
+            .map(|queue| queue.iter().filter(|&&tid| tid == id).count())
+            .sum()
     }
 
     /// Handle a timer tick for the current task.
@@ -775,28 +774,77 @@ impl PerCpuScheduler {
         }
     }
 
-    /// Dequeue a task from the specified CPU's run queue.
-    #[allow(clippy::arithmetic_side_effects)]
+    /// Take a task off the run queues entirely: every entry it has, on every
+    /// online CPU, at every level.
+    ///
+    /// `priority` and `cpu` are where the caller believes the task is queued,
+    /// and neither is trusted.  The backends ignore the level (see
+    /// [`PriorityRoundRobin::dequeue`] for why that became necessary), and
+    /// every online CPU's queue is swept, not only `cpu`'s: a push-balance
+    /// migration that could not take the task table leaves `last_cpu` naming
+    /// the CPU the task was moved *off*, and a removal that looked only there
+    /// would miss it exactly as the level-only scan did.
+    ///
+    /// Not a hot path -- nothing calls it per context switch -- so the sweep
+    /// costs one short lock per online CPU.  Each lock is taken and released
+    /// on its own; no two are ever held together.
+    ///
+    /// Returns `true` if any entry was removed.
     pub fn dequeue(&self, id: super::task::TaskId, priority: u8, cpu: usize) -> bool {
-        let n = self.num_cpus.load(Ordering::Relaxed);
-        let target = cpu.min(n.saturating_sub(1));
-        self.queues
-            .get(target)
-            .is_some_and(|q| q.lock().dequeue(id, priority))
+        let n = self.num_cpus.load(Ordering::Relaxed).max(1);
+        // The named CPU first, only so the common case touches the lock it
+        // always touched before any other.
+        let named = cpu.min(n.saturating_sub(1));
+        let mut removed = self
+            .queues
+            .get(named)
+            .is_some_and(|q| q.lock().dequeue(id, priority));
+        for other in (0..n).filter(|&c| c != named) {
+            if self
+                .queues
+                .get(other)
+                .is_some_and(|q| q.lock().dequeue(id, priority))
+            {
+                removed = true;
+            }
+        }
+        removed
     }
 
-    /// Dequeue a task from the specified CPU's run queue regardless of which
-    /// priority level it currently sits in.  See
-    /// [`PriorityQueue::dequeue_any`] — used by the anti-starvation booster,
-    /// which must remove a task whose live queue level no longer matches its
-    /// base `priority` field.
-    #[allow(clippy::arithmetic_side_effects)]
-    pub fn dequeue_any(&self, id: super::task::TaskId, cpu: usize) -> bool {
-        let n = self.num_cpus.load(Ordering::Relaxed);
-        let target = cpu.min(n.saturating_sub(1));
+    /// How many run-queue entries name `id`, over every online CPU: 0 or 1 in
+    /// a consistent scheduler.
+    ///
+    /// A diagnostic -- the scheduler self-test uses it to prove a removal left
+    /// nothing behind.  O(queued tasks), taking each queue lock in turn, with
+    /// interrupts off: its caller need not hold `SCHED` (see
+    /// [`locked_irqs_off`](Self::locked_irqs_off)).
+    #[must_use]
+    pub fn entries_for(&self, id: super::task::TaskId) -> usize {
+        let n = self.num_cpus.load(Ordering::Relaxed).max(1);
         self.queues
-            .get(target)
-            .is_some_and(|q| q.lock().dequeue_any(id))
+            .iter()
+            .take(n)
+            .map(|q| Self::locked_irqs_off(q, |backend| backend.entries_for(id)))
+            .sum()
+    }
+
+    /// Run `f` on one CPU's queue, holding its lock with interrupts disabled
+    /// -- the way to lock a queue from a path that does not hold `SCHED`.
+    ///
+    /// Interrupt handlers take these locks too, and block for them: an
+    /// hrtimer callback's `try_wake`, and the timer tick's anti-starvation
+    /// booster and `unthrottle_expired`.  Each takes `SCHED` first, with
+    /// `try_lock`, and that is what makes a holder of `SCHED` safe from them:
+    /// their `try_lock` fails and they back off.  A holder of only a queue
+    /// lock has no such protection.  An interrupt landing on its CPU while it
+    /// holds one gets `SCHED`, then spins on the queue lock with interrupts
+    /// disabled, and the holder never runs again to release it: a silent
+    /// wedge, total on a uniprocessor boot.
+    fn locked_irqs_off<R>(
+        queue: &Mutex<super::backend::SchedulerBackend>,
+        f: impl FnOnce(&mut super::backend::SchedulerBackend) -> R,
+    ) -> R {
+        crate::cpu::without_interrupts(|| f(&mut queue.lock()))
     }
 
     /// Handle a timer tick for the given CPU.

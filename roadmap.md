@@ -1141,7 +1141,16 @@ Known-issues (open, kernel-owned):
   ones freed). Fixed in `0ecd5ff03` by `sched::detach_address_space`, pinned by
   `proc::thread` test 11 (`test_exit_detaches_address_space`), and the WATCH was
   cleared after cycles 8/9/10 (`ab3d42901`, `b215b83c1`, `1422972ad`) each
-  reached `BOOT_OK` with a green `REAL glibc forkexec`.
+  reached `BOOT_OK` with a green `REAL glibc forkexec`. **It recurred on
+  2026-08-25 and 2026-09-15, on other rungs, with the same silence -- a second
+  cause, found and fixed 2026-09-25:** a stale run-queue entry, left by
+  removals that scanned only the level a task's priority computes (which the
+  anti-starvation booster invalidates), was picked by the exiting task itself
+  and resumed it in place, and `task_exit` then halted with interrupts off.
+  Removal is now by id, the pick refuses any task that cannot run, and
+  `task_exit` re-parks instead of halting; pinned by
+  `sched::test_stale_run_queue_entries` (design-decisions.md §964). WATCH
+  until a clean run of boots -- see `known-issues.md`.
 - ~~`BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES`~~ — found by lane B,
   **FIXED 2026-08-22** (`c58efa00d`). `fork_create` clones the parent's
   `cap_table`; `spawn_process` did not, and neither `SYS_PROCESS_SPAWN` nor

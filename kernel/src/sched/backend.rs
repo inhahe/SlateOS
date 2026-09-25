@@ -189,7 +189,12 @@ impl SchedulerBackend {
         }
     }
 
-    /// Remove a specific task from the run queue.
+    /// Remove a task from the run queue: every entry it has.
+    ///
+    /// `priority` is a hint no backend relies on.  The EEVDF and deadline
+    /// queues are keyed by id already, and the priority round-robin one
+    /// stopped trusting it on 2026-09-25 -- see
+    /// [`PriorityRoundRobin::dequeue`](super::priority_rr::PriorityRoundRobin::dequeue).
     #[inline]
     pub fn dequeue(&mut self, id: TaskId, priority: u8) -> bool {
         match self {
@@ -199,20 +204,14 @@ impl SchedulerBackend {
         }
     }
 
-    /// Remove a task from the run queue regardless of which priority level it
-    /// currently sits in, sweeping up any duplicate entries.
-    ///
-    /// Used by the anti-starvation booster, which relocates a task to priority
-    /// 0 without updating its base `priority` field — so a level-targeted
-    /// `dequeue(id, base_priority)` would scan the wrong level and leave the
-    /// task (and any stale duplicate) behind.  See
-    /// [`PriorityRoundRobin::dequeue_any`].
-    #[inline]
-    pub fn dequeue_any(&mut self, id: TaskId) -> bool {
+    /// How many run-queue entries name `id`: 0 or 1 in a consistent queue.
+    /// A diagnostic for the scheduler self-test.
+    #[must_use]
+    pub fn entries_for(&self, id: TaskId) -> usize {
         match self {
-            Self::PriorityRR(s) => s.dequeue_any(id),
-            Self::Eevdf(s) => s.dequeue_any(id),
-            Self::Deadline(s) => s.dequeue_any(id),
+            Self::PriorityRR(s) => s.entries_for(id),
+            Self::Eevdf(s) => s.entries_for(id),
+            Self::Deadline(s) => s.entries_for(id),
         }
     }
 

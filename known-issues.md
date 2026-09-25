@@ -13877,7 +13877,117 @@ is the worst possible place to discover that your code can fault, and only a
 boot test finds it — this would have shipped clean under a "it compiles and
 clippy is quiet" standard.
 
-### [REOPENED as WATCH 2026-08-25 — the PML4 cause is fixed and stays fixed; the *signature* recurred on a different rung] B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang after the last thread of a just-reaped process exits — one cause (a freed PML4 still live in CR3) found and fixed in `0ecd5ff03`; a second, still-unidentified cause produced the same silence on 2026-08-25 — 2026-07-15
+### [FIXED 2026-09-25 as WATCH — the second cause is found and fixed: a stale run-queue entry resumed the exiting task in place, and `task_exit` halted with interrupts off; no RIP was ever captured, so it stays watched] B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang after the last thread of a just-reaped process exits — the first cause (a freed PML4 still live in CR3) fixed in `0ecd5ff03`; the second (stale run-queue entries) fixed 2026-09-25 — 2026-07-15
+
+**[A] SECOND CAUSE FOUND AND FIXED 2026-09-25 — the exiting task's own
+leftover run-queue entry.** Fixed in the commit that adds
+`sched::test_stale_run_queue_entries`; design-decisions.md §964.
+
+*In short:* the scheduler's run queues hold bare task numbers, and several
+places that take a task *off* a queue looked for it only at the priority
+level they expected, not where it actually was. When they missed, the entry
+stayed behind. If that task later exited, its own leftover entry was the next
+thing picked: the scheduler "resumed" the dying task instead of switching
+away, and the exit path -- which assumed that could never happen -- halted
+the CPU with interrupts disabled. On the one-CPU boot machine that is the
+whole machine stopping without a word, which is this entry's signature.
+Removal now finds a task wherever it is, the scheduler refuses to run any
+task that cannot run, and the exit path no longer halts even if it is
+resumed.
+
+**The mechanism, end to end.**
+
+1. `PriorityRoundRobin::dequeue(id, priority)` scanned only level `priority`,
+   and every caller passed `task.effective_priority()`. A queued task is not
+   always at that level. The anti-starvation booster (`check_starvation`)
+   moves a `Ready` task to level 0 without changing any field
+   `effective_priority()` reads -- and on a loaded single-vCPU TCG guest a
+   user process waits the 2 s threshold routinely. A timer tick
+   (`tick_burst`) can also clear `interactive` on a task that is queued
+   while still on the CPU (woken between marking itself parked and
+   switching away), moving its computed level by `INTERACTIVE_BOOST`. The
+   booster had been given `dequeue_any` for its own case; nothing else had.
+2. So these removals could miss, silently -- no caller checked the result:
+   `kill_task` of a `Ready` task, `mark_suspended` of one,
+   `park_if_suspended`'s undo of a resume that beat the park, and the
+   remove-then-requeue moves in `set_priority`, `boost_priority`,
+   `set_inherited_priority` and `set_cpu_affinity`. The results: a dead or
+   suspended task still queued, or a live task queued twice -- and once one
+   copy is dispatched, a *running* task holding an entry.
+3. `schedule_inner` trusted every entry. What the pick returned was marked
+   `Running` and switched to -- a killed task came back to life -- and an
+   entry for the current task resumed it in place *whatever its state*.
+4. `task_exit` marks the task `Dead` and calls
+   `schedule_inner(false, Uncounted)`. With the exiting task's own entry at
+   the head of the queue, the pick returned the task itself, the
+   `picked_id == current_id` arm set it `Running` and **returned**, and
+   `task_exit` fell into `cpu::halt_loop()` -- `loop { cli; hlt }`. The same
+   end is reached if another task's pick switches *into* the dead task
+   later: its `schedule_inner` returns into `task_exit` just the same.
+
+Every property of the recurrences that the first cause could no longer
+explain matches: the last line is `[sched] Task N exiting`, `task_exit`'s own
+print, immediately before the pick; nothing follows it, because the halt is
+silent by construction; the BSP stops taking timer interrupts, because of the
+`cli` -- the 2026-08-25 narrowing's missing breadcrumbs; no lock is spinning,
+so no stall detector fires; it is intermittent and history-dependent, needing
+a missed removal earlier in the boot for the very task that later exits; and
+it is not specific to fork+exec -- three different rungs, each ending in a
+user thread's exit.
+
+**Status: WATCH, not proven by a RIP.** None was ever captured. What is
+proven: the missed removal, the trusted pick and the silent halt are each
+read directly from the code, and the regression test below reaches the halt
+deterministically on the pre-fix code (a task exiting with its own entry at
+the head of the queue). Close the watch after a clean run of boots with no
+`stale run-queue entry` report and no recurrence.
+
+**The fix** (`kernel/src/sched`):
+
+- **Removal is by id.** `PriorityRoundRobin::dequeue` removes every entry for
+  the task at every level, and `PerCpuScheduler::dequeue` sweeps every
+  online CPU's queue, not only `last_cpu`'s. `dequeue_any` is folded in.
+- **The pick checks what it picked.** `pick_runnable_locked`, for the main
+  switch and the idle fallback alike, drops and reports an entry for a task
+  that is `Dead`, `Blocked`, `Suspended`, gone from the table, or `Running`
+  on another CPU, and resumes the current task in place only if it is
+  `Ready` or `Running` (`classify_pick`). On SMP it also hands a task still
+  executing on another CPU back to that CPU (`running_elsewhere`, from
+  `CURRENT_TASK_IDS`/`PREV_TASK_IDS`) instead of dispatching it twice, and
+  re-homes a stolen task its affinity forbids here.
+- **Death purges.** `kill_task` and `task_exit` remove every entry of the
+  task under the guard that publishes it `Dead`, and report one found for a
+  task that should have had none.
+- **No silent halt.** `task_exit` is `-> !` and loops: resumed after exiting,
+  it prints `*** BUG: task N was resumed after it exited`, re-marks the task
+  `Dead` and switches away, idling with interrupts on when nothing is
+  runnable. `DEAD_TASKS_RESUMED` counts it.
+- The booster boosts under the guard that chose each task (on SMP the
+  released guard let a just-dispatched task be re-queued), and
+  `unthrottle_expired`/`set_cpu_quota` remove before re-queueing, so a
+  throttled task that was woken is not queued twice.
+- The idle fallback resumes a woken current task in place instead of
+  "switching" it to itself, which handed `switch_context` an aliasing
+  `&mut` and `&` to one saved context.
+
+**Regression test:** `sched::test_stale_run_queue_entries`, a boot self-test
+run right after `test_kill_and_reap`. Boosted-then-killed leaves no entry and
+never runs; boosted-then-re-prioritised leaves exactly one; planted entries
+for a `Dead` and a never-admitted `Blocked` task are never dispatched, and
+`classify_pick` refuses both as the current task; a task that exits with its
+own planted entry at the head of the queue reaches `Dead`, runs once and is
+never resumed. On the pre-fix code the last case halts the boot silently --
+this entry's signature, on demand.
+
+**If it recurs:** a stale entry is now reported instead of swallowed. Look
+for `[sched] *** BUG: stale run-queue entry for task N (state S) found by
+SITE` in the serial log: the site and the state name the removal that
+missed. `*** BUG: task N was resumed after it exited` means a dead task was
+dispatched in spite of the pick's check. Neither appears in a healthy boot --
+the self-test's planted entries are counted but not printed.
+
+---
+
 
 **Occurrence 2026-09-15 (lane A), on a DIFFERENT test with the same
 signature.** `spawn-test-dash-statpath` -- a real dash running

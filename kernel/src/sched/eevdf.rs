@@ -587,15 +587,15 @@ impl EevdfScheduler {
         false
     }
 
-    /// Remove a task by id regardless of priority level.
+    /// How many run-queue entries name `id`: 0 or 1 in a consistent queue.
     ///
-    /// EEVDF keys its run queue by virtual deadline + id (not by a discrete
-    /// priority level), so `dequeue` already locates the task purely by id and
-    /// the `_priority` argument is ignored.  This wrapper exists to satisfy the
-    /// `SchedulerBackend::dequeue_any` dispatch used by the anti-starvation
-    /// booster; here it is simply a priority-agnostic `dequeue`.
-    pub fn dequeue_any(&mut self, id: TaskId) -> bool {
-        self.dequeue(id, 0)
+    /// Counted from the tree itself, keyed by (virtual deadline, id), rather
+    /// than from the per-task deadline map, which holds one slot per task
+    /// whatever the tree holds.  A diagnostic for the scheduler self-test;
+    /// O(queued tasks).
+    #[must_use]
+    pub fn entries_for(&self, id: TaskId) -> usize {
+        self.tree.keys().filter(|&&(_, tid)| tid == id).count()
     }
 
     /// Check if the currently-running task should be preempted by a

@@ -1713,8 +1713,7 @@ fn kill_userspace_task_with_info(
         crate::proc::thread::on_thread_exit(task_id);
     }
 
-    sched::task_exit();
-    cpu::halt_loop();
+    sched::task_exit()
 }
 
 /// Try to dispatch a ring 3 exception to the user handler.  If no handler

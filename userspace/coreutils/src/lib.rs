@@ -478,8 +478,10 @@ pub mod getopt;
 pub mod grouplist;
 pub mod hardlink;
 pub mod human;
+pub mod ls;
 pub mod overwrite;
 pub mod pathname;
+pub mod randint;
 /// How a name is rendered inside a diagnostic — now `userspace/quoting`.
 ///
 /// Re-exported under its old path so that `use coreutils::quote::quotef_os`

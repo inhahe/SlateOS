@@ -65,6 +65,9 @@ sha1 = { path = "../../sha1" }
 md5 = { path = "../../md5" }
 blake2 = { path = "../../blake2" }
 sm3 = { path = "../../sm3" }
+# The kernel CSPRNG, for `shred` without `--random-source`: see
+# `coreutils::randint` for why it replaces the ISAAC generator upstream seeds.
+randrange = { path = "../../randrange" }
 # One `/etc/passwd` and `/etc/group` reader, shared with `id`, `chown`, `su` and
 # the login path. A utility that prints a *name* for a uid has to agree with the
 # utility that resolved that name to a uid, or `chown "$(stat -c %U f)" f` stops

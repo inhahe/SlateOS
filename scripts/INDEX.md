@@ -221,7 +221,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/lib/worktree.sh` | The directive above is load-bearing rather than decorative. This file has no |
 | `scripts/logname-diff.sh` | logname-diff.sh — compare our `logname` against the real GNU one, inside WSL. |
 | `scripts/lossy-decode.py` | Find lossy byte->text conversions that reach a VALUE, not a message. |
-| `scripts/ls-diff.sh` | Compare our `ls` against GNU's, case for case, inside WSL. |
+| `scripts/ls-diff.sh` | Compare our `ls` -- and `dir` and `vdir`, its other two builds -- against GNU's, inside WSL. |
 | `scripts/ls-quote-probe.py` | Measure all ten of GNU's quoting styles at once, byte for byte. |
 | `scripts/make-spike/run.sh` | Cross-compile upstream GNU make and link it against SlateOS's own libc.a. |
 | `scripts/merge-readiness.py` | Say whether incoming `origin/main` commits land in the part of the tree your |
@@ -323,6 +323,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/setup-toolchain.sh` | Install the Rust toolchain and other dependencies needed to build the kernel. |
 | `scripts/sh-diff.sh` | Differential test: our sh against dash. |
 | `scripts/shellcheck-all.sh` | Run shellcheck over every script in this directory and below it. |
+| `scripts/shred-diff.sh` | shred-diff.sh — compare our `shred` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/snapshot-todo2.sh` | Commit the current todo2.txt to local-only history on the orphan branch |
 | `scripts/soak-nmi-check.sh` | One-off soak: boot current kernel repeatedly under the i6300esb NMI watchdog |
 | `scripts/sort-diff.sh` | Differential test: our sort against the host's GNU sort. |
@@ -412,4 +413,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_402 scripts._
+_403 scripts._

@@ -437,6 +437,7 @@ dependencies = [
  "procinfo",
  "pwdb",
  "quoting",
+ "randrange",
  "scratchdir",
  "sha1",
  "sha2",

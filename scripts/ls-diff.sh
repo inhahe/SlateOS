@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# Compare our `ls` against GNU's, case for case, inside WSL.
+# Compare our `ls` -- and `dir` and `vdir`, its other two builds -- against GNU's, inside WSL.
+#
+# Upstream compiles `ls.c` three times with a different `ls_mode`, and so do
+# we (`coreutils::ls`, one `Mode` per bin). `dir` and `vdir` share every
+# option and every line of output code with `ls`; what differs is only the
+# defaults -- columns (`dir`) or the long format (`vdir`) and escape quoting,
+# whether or not the output is a terminal -- and the name in their
+# diagnostics. So they ride this harness, in their own section below, rather
+# than a copy of it.
 #
 # `ls` is the second utility that cannot be measured from the development host,
 # and for the same reason `du` could not (see `du-diff.sh`, and
@@ -54,6 +62,8 @@ DIFF_PROG='ls'
 # `DIFF_GNU_CACHE` moves it; `diff-wsl.sh` carries both across the re-exec
 # itself, so neither needs naming in `DIFF_FORWARD`.
 DIFF_GNU_SOURCE=9.5
+# All three builds, so `$bindir/{ours,gnu}` holds `ls`, `dir` and `vdir`.
+DIFF_BINS="ls dir vdir"
 # The socket fixture is made with python3, and a socket is the only way to
 # reach the `s` type letter, the `=` indicator and the `so` colour slot. If it
 # is missing the fixture silently is too, and eleven cases agree that a name
@@ -203,6 +213,8 @@ mkdir -p r/one/two
 # `set_program_name` keeps the whole of `argv[0]`, so a GNU reached by
 # absolute path prefixes every diagnostic with `/usr/bin/ls: `.
 ls() { PATH=$LS_PATH command ls "$@"; }
+dir() { PATH=$LS_PATH command dir "$@"; }
+vdir() { PATH=$LS_PATH command vdir "$@"; }
 
 run_case() {
     line=$1
@@ -501,9 +513,53 @@ COLORTERM=truecolor ls --color=always t
 ls --sort=width -1 y
 ls -C -w 22 y
 
+# --- dir and vdir: ls with other defaults ---
+# Neither side has a terminal, which is exactly what makes these worth
+# running: `ls` would print one name per line and literal names here, and
+# `dir` must still print columns and `vdir` the long format, both with
+# escape quoting (the tab and the 0xFF byte in `t/` come out as `\t` and
+# `\377`, the space as `\ `). Every explicit option overrides the mode.
+dir t
+dir -w 40 t
+dir -w 0 t
+dir -x -w 40 t
+dir -1 t
+dir -l t
+dir -m t
+dir -N t
+dir -Q t
+dir --quoting-style=shell t
+QUOTING_STYLE=literal dir t
+QUOTING_STYLE=shell-escape dir -w 40 t
+COLUMNS=30 dir t
+dir -a -F t
+dir --color=always t
+dir -R r
+dir w
+dir t/bb t/link nosuchfile
+dir --zzz
+dir -w
+vdir t
+vdir -1 t
+vdir -C -w 40 t
+vdir -h t
+vdir -n t
+vdir -N t
+vdir -Q t
+QUOTING_STYLE=literal vdir t
+vdir --dired t
+vdir -d t t/dir
+vdir --color=always t
+vdir nosuchfile
+vdir --zzz
+
 # --- deliberately different ---
 !--help text is ours|ls --help
 !--version text is ours|ls --version
+!--help text is ours|dir --help
+!--version text is ours|dir --version
+!--help text is ours|vdir --help
+!--version text is ours|vdir --version
 !hyperlinks are not implemented; known-issues TD-B-LS-ACCEPTS-HYPERLINK-WITHOUT-EMITTING-IT|ls --hyperlink=always t
 !hyperlinks are not implemented|ls --hyperlink=always -l t
 CASES

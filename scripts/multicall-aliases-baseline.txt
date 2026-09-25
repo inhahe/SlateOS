@@ -102,7 +102,6 @@ perf:perf-stat
 perf:perf-top
 plymouth:plymouthd
 prlimit:ulimit
-pv:shred
 resolvectl:host
 resolvectl:resolvconf
 resolvectl:systemd-resolve

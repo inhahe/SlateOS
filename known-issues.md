@@ -153550,6 +153550,7 @@ a measurement than any case where the resemblance was weak, because a weak
 resemblance is easy to resist.
 
 ## A-WRITING-TO-A-PTY-MASTER-FAILS-FOR-THE-PYTHON-REPL-FIXTURE (lane A, 2026-09-16) — **Status: OPEN**, one observation
+**Status:** ROOT-CAUSED 2026-09-24. The exit 2 below became exit 8 once lane B split it out, and 8 is this rung spawning the fixture with **no capability at all** (and no `PYTHONHOME`): libc's exec starts with `SYS_FS_STAT`, which needs (File, METADATA). See `A-TWO-RUNGS-COULD-NOT-EXEC-FOR-WANT-OF-METADATA` at the end of this file.
 
 `ctest-python-repl` exited **2**: writing the expression to the master failed. **This was predicted to be 3** ("no output at all", i.e. the same forkpty fault as `ctest-pty`) and the prediction was wrong -- which is the useful part, because 2 means `forkpty` SUCCEEDED and the master write failed. `ctest-pty`'s own master write returned 1 in the same boot, so two fixtures disagree about whether a master write works and the difference between them is what to look at next.
 
@@ -165366,7 +165367,7 @@ will key on `FileId` from the start, so this is the older table catching up
 rather than a new convention.
 
 ### [A] Three ring-3 self-tests have red-flagged every boot for days, and the guard that exists to prevent exactly this is green -- 2026-09-21
-**Status:** OPEN -- **and the diagnosis below is WRONG in its first half.**
+**Status:** ALL THREE ROOT-CAUSED 2026-09-24, in the kernel and in lane A's own rungs: `ctest-coreutils-runs` (11) and `ctest-python-repl` (8) were spawned without (File, METADATA), which libc's exec needs to stat the binary (`A-TWO-RUNGS-COULD-NOT-EXEC-FOR-WANT-OF-METADATA`); `ctest-pty` (45) was the line discipline running only inside a reader (`A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER`). Fixes committed; the boot that shows them green is pending. The text below, including its correction, predates this.
 Correction at the end of this entry, written within the hour. The binary is
 on the image. The failure is a kernel-side exec, which is lane A's
 
@@ -166619,7 +166620,7 @@ one-liner inside the ioctl.
 pointer to `[u64; 2]` = `{ start_byte, length_bytes }`, returning 0 or `-errno`.
 
 ### [A] exit 11 narrowed: the exec syscall is never reached, so the bug is upstream of exec -- 2026-09-21
-**Status:** OPEN, but four candidates eliminated by measurement. Needs one diagnostic from lane B to finish.
+**Status:** ROOT-CAUSED 2026-09-24 — the rung, not libc and not exec. `load_elf` begins with `SYS_FS_STAT`, gated on (File, METADATA), and the rung granted READ|EXECUTE only, so the stat was refused and the syscall this entry was waiting for never had a chance. Fix and record: `A-TWO-RUNGS-COULD-NOT-EXEC-FOR-WANT-OF-METADATA` at the end of this file.
 
 **In short:** a test program reports it could not run `/mnt/bin/true`. The
 message blames the file. The file is fine, the disk is mounted, the
@@ -167678,3 +167679,37 @@ process group — the state in which a `^C` has somebody to signal — and leave
 the ring raw otherwise, which is the kernel shell's state. What has to be
 settled first is who owns keystrokes when both a session and the kernel shell
 are live, since today they simply race for each key.
+
+### [A] `A-TWO-RUNGS-COULD-NOT-EXEC-FOR-WANT-OF-METADATA` — `ctest-coreutils-runs` (11) and `ctest-python-repl` (8) were spawned unable to stat -- 2026-09-24
+**Status:** FIXED 2026-09-24 (lane A, `kernel/src/proc/spawn.rs`); awaiting the boot that shows both green.
+
+**In short:** two tests start a program that then starts another program. The
+second start failed every time, and weeks of investigation looked for the
+reason in the disk image, the C library and the kernel's program loader. The
+reason was in the tests themselves: they launched their program without the
+permission needed to look up a file's size — the first thing the C library
+does when asked to run a file.
+
+**The mechanism.** `posix/src/spawn.rs::load_elf` sizes its buffer with
+`SYS_FS_STAT` before it reads anything, and native `sys_fs_stat` requires
+(File, METADATA). `self_test_coreutils_runs` granted (File, READ|EXECUTE) and
+`self_test_ctest_python_repl` granted nothing at all, so in both the forked
+child's `execl` returned -1 with EACCES and the child took `_exit(127)`. That
+is why the 2026-09-21 entry could establish that "the exec syscall is never
+reached" and go no further: nothing upstream of it printed, because a refused
+stat is not an event anyone logs.
+
+**It had been written down already.** `self_test_cpython_on_slateos_libc`
+records the identical trap in its own capability comment — *"native
+sys_fs_stat is gated on METADATA"*, learned from the same failure in the
+`make` rung — and the two rungs that repeated it were written from sketches
+that predate that note. A rung that runs a program is really describing a
+*session*, and the grant should be written as one: what does a program that
+execs, stats and reads need? The REPL rung also lacked `PYTHONHOME`, which the
+CPython rung calls MANDATORY; it now passes the same environment.
+
+**The general point, for the next rung.** Three faults in a row produced the
+same exit code 11 here (the image, the `/bin` vs `/mnt/bin` path, then this),
+and each fix was verified by the code *stopping* after the first cause — so
+the next cause looked like a failure to fix the previous one. The legend for
+11 now names all three.

@@ -8758,10 +8758,10 @@ pub fn self_test_ctest_keylayout() -> KernelResult<()> {
 /// reading back your own writes, in the fixture written to avoid exactly that.
 /// `6*7` does not contain `42`. Any replacement must keep that property.
 ///
-/// **Expect this to fail while `ctest-pty` does.** It `forkpty`s, so if the
-/// pty path is broken this exits 3 (no output at all) for the same reason
-/// ctest-pty exits 45, and the two are one finding rather than two. Do not
-/// bisect it twice.
+/// **Read `ctest-pty` first if both are red.** This `forkpty`s and types
+/// into the master, so a pty fault shows up here too — as 3 (no output at
+/// all) or 2 (the master write failed) — and the two are then one finding
+/// rather than two. Do not bisect it twice.
 pub fn self_test_ctest_python_repl() -> KernelResult<()> {
     let Some(ctest_elf) = pathz_test_elf("ctest-python-repl", "ctest-python-repl")? else {
         return Ok(());
@@ -8777,12 +8777,29 @@ pub fn self_test_ctest_python_repl() -> KernelResult<()> {
     const EXPECTED: i32 = 42;
 
     let argv: &[&[u8]] = &[b"ctest-python-repl"];
-    let envp: &[&[u8]] = &[];
+    // The fixture's child execs python3 with `execl`, which passes on the
+    // environment this process was given — so what the interpreter needs has
+    // to be here. PYTHONHOME is MANDATORY for the reason
+    // `self_test_cpython_on_slateos_libc` gives: without it the interpreter
+    // looks in a compiled-in prefix that does not exist here and dies in
+    // `init_fs_encoding`. The stdlib archive is read in place under /mnt.
+    let envp: &[&[u8]] = &[b"PYTHONHOME=/mnt/usr/local", b"PATH=/mnt/bin", b"LANG=C"];
+    // This rung held NOTHING until 2026-09-24, and exit 8 ("python3 could not
+    // be EXEC'd") was exactly that: libc's exec begins with SYS_FS_STAT, gated
+    // on (File, METADATA), so the exec failed before it reached the kernel's
+    // exec at all — the same fault as `ctest-coreutils-runs`' 11. An
+    // interactive interpreter then reads its archive (READ, METADATA); EXECUTE
+    // is what exec is, and WRITE is what a session normally holds.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA | Rights::EXECUTE,
+    )];
     let options = SpawnOptions {
         name: "ctest-python-repl",
         parent: 0,
         priority: DEFAULT_PRIORITY,
-        capabilities: &[],
+        capabilities: &caps,
         fd_map: &[],
         argv,
         envp,
@@ -8872,15 +8889,20 @@ pub fn self_test_ctest_python_repl() -> KernelResult<()> {
                 // is a cause nobody checked -- and the sentence telling
                 // the reader not to look at the image, which is how a
                 // wrong diagnosis costs someone else an afternoon.
+                //
+                // EXPLAINED 2026-09-24: this rung spawned the fixture holding
+                // no capability at all, and libc's exec starts with
+                // SYS_FS_STAT, which needs (File, METADATA). The grant above
+                // is the fix. If 8 comes back, the grant is the first thing to
+                // check -- the rung, not the image and not the interpreter.
                 concat!(
-                    "8: /bin/python3 could not be EXEC'd -- and it IS on the ",
+                    "8: /mnt/bin/python3 could not be EXEC'd, and it IS on the ",
                     "image (inode 80, mode 0755, 10,468,016 bytes, verified ",
-                    "with debugfs). So the image is NOT the thing to fix. ",
-                    "The cause is UNEXPLAINED: an earlier version of this ",
-                    "message blamed libc execl passing a NULL path, which ",
-                    "posix/src/spawn.rs disproves -- execl_body forwards ",
-                    "path unchanged to execv. Do not spend the afternoon ",
-                    "on that lead; it was mine and it was wrong."
+                    "with debugfs). The one cause seen so far is this rung's ",
+                    "own grant: libc's exec begins with SYS_FS_STAT, which ",
+                    "needs (File, METADATA), and until 2026-09-24 the rung ",
+                    "granted nothing. Check the capabilities passed above ",
+                    "before the image or the interpreter."
                 )
             }
             _ => "an unexpected code; see services/ctest-python-repl/main.c",
@@ -8971,10 +8993,20 @@ pub fn self_test_coreutils_runs() -> KernelResult<()> {
     // EXECUTE is granted alongside READ because executing is what this does,
     // even though nothing checks it today -- so a future gate that does check
     // it finds the grant already correct rather than this rung breaking.
+    //
+    // METADATA is the THIRD fault, found 2026-09-24, and the one that kept
+    // this rung at 11 after the path and the register fixes. libc's exec does
+    // not open the file first: `posix/src/spawn.rs::load_elf` begins with
+    // SYS_FS_STAT, to size the buffer, and native `sys_fs_stat` is gated on
+    // (File, METADATA). The stat was refused, `execl` returned -1 with
+    // EACCES, and the child took `_exit(127)` -- which is why "the exec
+    // syscall is never reached" was true. The CPython rung had already
+    // recorded this exact trap ("native sys_fs_stat is gated on METADATA");
+    // this rung was written from a sketch that did not know it.
     let caps = [(
         ResourceType::File,
         0u64,
-        Rights::READ.union(Rights::EXECUTE),
+        Rights::READ.union(Rights::EXECUTE).union(Rights::METADATA),
     )];
 
     let argv: &[&[u8]] = &[b"ctest-coreutils-runs"];
@@ -9045,13 +9077,21 @@ pub fn self_test_coreutils_runs() -> KernelResult<()> {
                 // ordinary status and fall through step 1's `rc != 0`. Now
                 // separated, and reported as a fact about the IMAGE rather
                 // than a verdict about the program.
+                //
+                // Three different faults have produced 11, and the legend now
+                // names all three: the image (lane B's case), this rung's path
+                // (/bin vs /mnt/bin), and this rung's grant -- libc's exec
+                // stats the file first, which needs METADATA (2026-09-24).
                 concat!(
-                    "11: a program could not be EXEC'd at all -- missing from ",
-                    "the image or not executable. NOT a finding about the Rust ",
-                    "userland: check that create-ext4-rootfs.sh staged the ",
-                    "manifest binaries, and that all five producing crates ",
-                    "(coreutils, ar, kill, logger, logrotate) were built for ",
-                    "the slateos target. The serial names the path."
+                    "11: a program could not be EXEC'd at all. NOT a finding ",
+                    "about the Rust userland. Three causes have produced it: ",
+                    "the binary is missing from the image (check that ",
+                    "create-ext4-rootfs.sh staged the manifest binaries and that ",
+                    "coreutils, ar, kill, logger and logrotate were built for the ",
+                    "slateos target); the path is wrong (the image mounts at ",
+                    "/mnt); or this rung's grant lacks what libc's exec uses -- ",
+                    "it stats the file first, and SYS_FS_STAT needs (File, ",
+                    "METADATA). The serial names the path."
                 )
             }
             Some(3) => {

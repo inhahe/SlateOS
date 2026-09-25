@@ -197,6 +197,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/hang-repro-loop.sh` | hang-repro-loop.sh — Repeatedly boot the (already-built) kernel to try to |
 | `scripts/head-diff.sh` | Differential test: our head against GNU head. |
 | `scripts/host-errmsg.py` | Find utilities that print the *host's* error text instead of POSIX's. |
+| `scripts/hostload.py` | How much CPU this host will give a process right now -- measured, not assumed. |
 | `scripts/hostname-diff.sh` | Differential test: our `hostname` against net-tools `hostname`. |
 | `scripts/install-hooks.sh` | Install this repo's git hooks into the shared .git dir, as trampolines. |
 | `scripts/interleave-diff.sh` | interleave-diff.sh — one question, asked of every utility that answers it: |
@@ -218,6 +219,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/make-spike/run.sh` | Cross-compile upstream GNU make and link it against SlateOS's own libc.a. |
 | `scripts/merge-readiness.py` | Say whether incoming `origin/main` commits land in the part of the tree your |
 | `scripts/more-diff.sh` | Differential test: our more against util-linux's more. |
+| `scripts/msysbash.py` | The bash this repository's shell scripts actually run under -- found, not assumed. |
 | `scripts/multicall-aliases.py` | Find command names that a program answers to but that nothing can invoke. |
 | `scripts/mutate-gate.py` | Break one piece of a Python gate at a time and demand its `--selftest` notice. |
 | `scripts/mutation_harness.py` | The mutation-sweep harness shared by every app's `mutate.py`. |
@@ -351,8 +353,10 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-diff.sh` | Differential test: our `test` against GNU `test`. |
 | `scripts/test-gittree.py` | Tests for `scripts/gittree.py` — reading many blobs out of one git process. |
 | `scripts/test-grade-positional.py` | Regression tests for `scripts/grade-positional.py`. |
+| `scripts/test-hostload.py` | Tests for `hostload.py`, the harness's measurement of how much CPU a process gets. |
 | `scripts/test-ki-dupes.py` | Regression tests for `scripts/ki_dupes.py` and its entry/subsection split. |
 | `scripts/test-layout-sweep.py` | Regression tests for `scripts/layout-sweep.py`. |
+| `scripts/test-msysbash.py` | Tests for `msysbash.py`, the one place that decides which bash runs our scripts. |
 | `scripts/test-open-requests.py` | Regression tests for `scripts/open-requests.py`. |
 | `scripts/test-pre-push-doclinks-gate.py` | Tests for pre-push gate 11 -- the dead-intra-doc-link gate. |
 | `scripts/test-pre-push-fmt-gate.py` | Behavioural tests for pre-push gate 7 (rustfmt drift), and specifically for |
@@ -395,4 +399,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_385 scripts._
+_389 scripts._

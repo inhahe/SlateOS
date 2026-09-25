@@ -56699,7 +56699,24 @@ the blanket `#![allow(dead_code)]` that used to cover the file.
 The sink available today is the clipboard, which is what `apps/credmanager`'s
 export wants too -- worth doing both the same way when either is done.
 
-## regextester: the pattern library and the history have no UI
+## ~~regextester: the pattern library and the history have no UI~~ -- DONE 2026-09-25 (lane E)
+
+**Resolved.** The library is wired: a row's Use button, a double press or
+Enter puts its pattern in the tester; Save… (Ctrl+S) asks for a name in a
+dialog -- the "modal to ask in" below -- and keeps the pattern *with its
+flags* in the user's settings (`regextester.yaml`, `library: <name>:
+{pattern, flags}`), so it outlives the window; a saved pattern has a Delete
+button. `MAX_LIBRARY_ENTRIES` is enforced and says so when reached.
+
+**The history was removed rather than wired** (judgment call, lane E): nothing
+the program advertises promises one -- the module doc lists a library, not a
+history -- and the question below about *when* a pattern counts as tried had
+no answer that was not noise (every prefix) or guesswork (an idle clock the
+app does not otherwise need). Saving is the explicit act of keeping a
+pattern. If a history is wanted, it is a feature to design, with that
+question answered first.
+
+The original entry, for the record:
 
 `App::save_to_library`, `load_library_entry` and `add_to_history` have no
 callers, so the library the module doc advertises ("Regex library (save/load

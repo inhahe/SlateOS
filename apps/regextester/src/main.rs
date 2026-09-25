@@ -1,20 +1,22 @@
 //! `Slate OS` Regex Tester & Debugger
 //!
 //! An interactive regex testing tool with:
-//! - Custom regex engine supporting common regex features
-//! - Real-time match highlighting as you type
-//! - Match groups and captures display
-//! - Regex syntax reference panel
-//! - Match statistics (count, positions, groups)
-//! - Find & replace with backreferences
-//! - Regex library (save/load named patterns)
-//! - Common regex patterns (email, URL, IP, date, etc.)
-//! - Regex explanation (break down pattern into readable description)
-//! - Multi-line test input support
-//! - Case-insensitive and other flags
-//! - Multi-panel UI with pattern, input, matches, and reference
+//! - Its own engine (a Pike VM) with the common syntax: classes, `\d \w \s
+//!   \b`, lazy quantifiers, non-capturing groups
+//! - Matches highlighted in the text as the pattern is typed, the current one
+//!   more strongly
+//! - Each match's capture groups, and the current match's in a table
+//! - A breakdown of the pattern, piece by piece
+//! - Find & replace with `$0`-`$9`, and the result shown
+//! - A library of common patterns, and the user's own, saved with their flags
+//!   and kept between sessions (`settingsfile`, `regextester.yaml`)
+//! - A multi-line test input with a caret, a selection and a clipboard
+//! - Case-insensitive, global and multiline flags
+//! - A syntax reference
 //!
-//! Uses the guitk library for UI rendering.
+//! Every control answers the pointer -- the renderer records a hit box where
+//! it draws each one (`guitk::frame::Frame`) -- and every key is on the F1
+//! card.
 
 #![deny(clippy::all, clippy::pedantic)]
 #![allow(clippy::too_many_lines)]
@@ -38,9 +40,16 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::textinput::TextInput;
+use guitk::theme::with_alpha;
+use guitk::wheel;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -850,8 +859,25 @@ fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
+/// Run `compiled` over `input` from `start_pos`. **Tests only**: a search
+/// collects the characters once and calls [`execute_regex_chars`].
+#[cfg(test)]
 fn execute_regex(compiled: &CompiledRegex, input: &str, start_pos: usize) -> Option<RegexMatch> {
     let chars: Vec<char> = input.chars().collect();
+    execute_regex_chars(compiled, &chars, start_pos)
+}
+
+/// [`execute_regex`] over the input's characters, collected by the caller.
+///
+/// `find_all_matches` called `execute_regex` once per match and each call
+/// collected the whole input into a new `Vec<char>`: with the input at its
+/// 16 384-character limit and a thousand matches, one keystroke copied
+/// sixteen million characters before it matched any.
+fn execute_regex_chars(
+    compiled: &CompiledRegex,
+    chars: &[char],
+    start_pos: usize,
+) -> Option<RegexMatch> {
     let len = chars.len();
     let group_count = compiled.group_count;
     let nodes = &compiled.nodes;
@@ -876,7 +902,7 @@ fn execute_regex(compiled: &CompiledRegex, input: &str, start_pos: usize) -> Opt
 
         // Epsilon-closure at the current position (resolves splits, jumps,
         // group markers and anchors before we attempt to consume a character).
-        add_epsilon_threads(&mut threads, nodes, &chars, i, len, compiled.multiline);
+        add_epsilon_threads(&mut threads, nodes, chars, i, len, compiled.multiline);
 
         let current_char = chars.get(i).copied();
         let mut new_threads: Vec<Thread> = Vec::new();
@@ -1072,7 +1098,7 @@ fn find_all_matches(compiled: &CompiledRegex, input: &str) -> Vec<RegexMatch> {
     let len = chars.len();
 
     while pos <= len && matches.len() < MAX_MATCHES {
-        if let Some(m) = execute_regex(compiled, input, pos) {
+        if let Some(m) = execute_regex_chars(compiled, &chars, pos) {
             if m.end == m.start {
                 // Zero-length match, advance by one
                 pos = m.start.saturating_add(1);
@@ -1282,6 +1308,10 @@ struct PatternEntry {
     pattern: String,
     description: String,
     category: PatternCategory,
+    /// The flags a saved pattern was saved with, which loading it restores:
+    /// what a pattern matches depends on them. `None` for the built-in ones,
+    /// which leave the flags as they are.
+    flags: Option<RegexFlags>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1328,108 +1358,126 @@ fn built_in_patterns() -> Vec<PatternEntry> {
             pattern: r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}".into(),
             description: "Match email addresses".into(),
             category: PatternCategory::Validation,
+            flags: None,
         },
         PatternEntry {
             name: "URL".into(),
             pattern: r"https?://[a-zA-Z0-9.\-]+(?:/[^\s]*)?".into(),
             description: "Match HTTP/HTTPS URLs".into(),
             category: PatternCategory::Network,
+            flags: None,
         },
         PatternEntry {
             name: "IPv4".into(),
             pattern: r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}".into(),
             description: "Match IPv4 addresses".into(),
             category: PatternCategory::Network,
+            flags: None,
         },
         PatternEntry {
             name: "Date (YYYY-MM-DD)".into(),
             pattern: r"\d{4}-\d{2}-\d{2}".into(),
             description: "Match ISO date format".into(),
             category: PatternCategory::DateTime,
+            flags: None,
         },
         PatternEntry {
             name: "Time (HH:MM:SS)".into(),
             pattern: r"\d{2}:\d{2}(:\d{2})?".into(),
             description: "Match time format".into(),
             category: PatternCategory::DateTime,
+            flags: None,
         },
         PatternEntry {
             name: "Phone (US)".into(),
             pattern: r"(\+1)?[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{4}".into(),
             description: "Match US phone numbers".into(),
             category: PatternCategory::Validation,
+            flags: None,
         },
         PatternEntry {
             name: "Hex Color".into(),
             pattern: r"#[0-9a-fA-F]{3,8}".into(),
             description: "Match hex color codes".into(),
             category: PatternCategory::Format,
+            flags: None,
         },
         PatternEntry {
             name: "Integer".into(),
             pattern: r"-?\d+".into(),
             description: "Match integers (with optional sign)".into(),
             category: PatternCategory::Extraction,
+            flags: None,
         },
         PatternEntry {
             name: "Float".into(),
             pattern: r"-?\d+\.\d+".into(),
             description: "Match floating point numbers".into(),
             category: PatternCategory::Extraction,
+            flags: None,
         },
         PatternEntry {
             name: "HTML Tag".into(),
             pattern: r"</?[a-zA-Z][a-zA-Z0-9]*[^>]*>".into(),
             description: "Match HTML tags".into(),
             category: PatternCategory::Programming,
+            flags: None,
         },
         PatternEntry {
             name: "Quoted String".into(),
             pattern: "\"[^\"]*\"".into(),
             description: "Match double-quoted strings".into(),
             category: PatternCategory::Programming,
+            flags: None,
         },
         PatternEntry {
             name: "C-style Comment".into(),
             pattern: r"/\*.*\*/".into(),
             description: "Match block comments".into(),
             category: PatternCategory::Programming,
+            flags: None,
         },
         PatternEntry {
             name: "Line Comment".into(),
             pattern: r"//.*$".into(),
             description: "Match line comments".into(),
             category: PatternCategory::Programming,
+            flags: None,
         },
         PatternEntry {
             name: "Words".into(),
             pattern: r"\b[a-zA-Z]+\b".into(),
             description: "Match individual words".into(),
             category: PatternCategory::Extraction,
+            flags: None,
         },
         PatternEntry {
             name: "UUID".into(),
             pattern: r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}".into(),
             description: "Match UUIDs".into(),
             category: PatternCategory::Format,
+            flags: None,
         },
         PatternEntry {
             name: "MAC Address".into(),
             pattern: r"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}".into(),
             description: "Match MAC addresses".into(),
             category: PatternCategory::Network,
+            flags: None,
         },
         PatternEntry {
             name: "ZIP Code (US)".into(),
             pattern: r"\d{5}(-\d{4})?".into(),
             description: "Match US ZIP codes".into(),
             category: PatternCategory::Validation,
+            flags: None,
         },
         PatternEntry {
             name: "Identifier".into(),
             pattern: r"[a-zA-Z_][a-zA-Z0-9_]*".into(),
             description: "Match programming identifiers".into(),
             category: PatternCategory::Programming,
+            flags: None,
         },
     ]
 }
@@ -1446,6 +1494,8 @@ enum ActiveTab {
 }
 
 impl ActiveTab {
+    const ALL: [Self; 3] = [Self::Tester, Self::Library, Self::Reference];
+
     fn label(self) -> &'static str {
         match self {
             Self::Tester => "Tester",
@@ -1462,19 +1512,40 @@ enum ActiveField {
     Replace,
 }
 
-#[derive(Debug, Clone)]
-/// A pattern that was tried, for the history panel.
+/// What the results panel beside the test input shows.
 ///
-/// Never constructed: `add_to_history` is the only thing that would build one
-/// and nothing calls it. See `todo.txt`.
-#[allow(dead_code, reason = "nothing writes to the history")]
-struct HistoryEntry {
-    pattern: String,
-    flags: RegexFlags,
-    match_count: usize,
+/// The panel drew a strip of three sub-tabs -- Matches, Groups, Explain --
+/// with the first always lit ("Simplified: always show matches") and nothing
+/// behind the other two. The breakdown was drawn under the matches instead,
+/// cut at six lines, so a longer pattern's explanation could not be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultsView {
+    Matches,
+    Groups,
+    Explain,
 }
 
-#[derive(Debug, Clone, Copy)]
+impl ResultsView {
+    const ALL: [Self; 3] = [Self::Matches, Self::Groups, Self::Explain];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Matches => "Matches",
+            Self::Groups => "Groups",
+            Self::Explain => "Explain",
+        }
+    }
+
+    /// How tall one of its rows is.
+    fn row_height(self) -> f32 {
+        match self {
+            Self::Matches => LINE_HEIGHT * 2.0,
+            Self::Groups | Self::Explain => LINE_HEIGHT,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RegexFlags {
     case_insensitive: bool,
     global: bool,
@@ -1491,21 +1562,77 @@ impl Default for RegexFlags {
     }
 }
 
-/// Every key this program answers, and what it does.
-///
-/// There is no `?` here and there cannot be: every printable character is
-/// typed into whichever field has focus, which is what makes this a tester
-/// rather than a viewer. So the list is raised by `F1`, as in
-/// `apps/spreadsheet` and `apps/hexeditor` for the same reason.
-///
-/// The three flag rows carry the tooltip strings the toolbar draws its buttons
-/// from. Those strings used to end at `let _ = tooltip; // used for hover
-/// tooltip` -- a comment describing what the value was *for*, above a line
-/// that threw it away, and there is no hover tooltip anywhere in the crate.
-/// They have a reader now.
-///
-/// **Each row is a key this program actually answers**, checked by
-/// `every_advertised_key_does_something`.
+impl RegexFlags {
+    /// The flags as the letters the toolbar labels them with, in its order:
+    /// how a saved pattern records them.
+    fn letters(self) -> String {
+        [
+            (self.case_insensitive, 'i'),
+            (self.global, 'g'),
+            (self.multiline, 'm'),
+        ]
+        .iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, c)| *c)
+        .collect()
+    }
+
+    /// The flags a saved pattern recorded; a letter this does not know is
+    /// ignored rather than refusing the pattern.
+    fn from_letters(letters: &str) -> Self {
+        Self {
+            case_insensitive: letters.contains('i'),
+            global: letters.contains('g'),
+            multiline: letters.contains('m'),
+        }
+    }
+
+    fn get(self, flag: Flag) -> bool {
+        match flag {
+            Flag::CaseInsensitive => self.case_insensitive,
+            Flag::Global => self.global,
+            Flag::Multiline => self.multiline,
+        }
+    }
+
+    fn toggle(&mut self, flag: Flag) {
+        match flag {
+            Flag::CaseInsensitive => self.case_insensitive = !self.case_insensitive,
+            Flag::Global => self.global = !self.global,
+            Flag::Multiline => self.multiline = !self.multiline,
+        }
+    }
+}
+
+/// One of the three flags, as the toolbar draws it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flag {
+    CaseInsensitive,
+    Global,
+    Multiline,
+}
+
+impl Flag {
+    const ALL: [Self; 3] = [Self::CaseInsensitive, Self::Global, Self::Multiline];
+
+    fn letter(self) -> &'static str {
+        match self {
+            Self::CaseInsensitive => "i",
+            Self::Global => "g",
+            Self::Multiline => "m",
+        }
+    }
+
+    /// What the button does, with its key, for the status bar.
+    fn tip(self) -> &'static str {
+        match self {
+            Self::CaseInsensitive => "Case insensitive (Ctrl+I)",
+            Self::Global => "Global: every match, not only the first (Ctrl+G)",
+            Self::Multiline => "Multiline: ^ and $ match at each line (Ctrl+M)",
+        }
+    }
+}
+
 /// The chips along the top of the Library tab, in the order they are drawn
 /// and the order `Ctrl+L` steps through them.
 ///
@@ -1524,30 +1651,472 @@ const LIBRARY_FILTERS: [Option<PatternCategory>; 8] = [
     Some(PatternCategory::Custom),
 ];
 
+/// Every key this program answers, and what it does.
+///
+/// There is no `?` here and there cannot be: every printable character is
+/// typed into whichever field has focus, which is what makes this a tester
+/// rather than a viewer. So the list is raised by `F1`, as in
+/// `apps/spreadsheet` and `apps/hexeditor` for the same reason.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`.
 const SHORTCUTS: &[(&str, &str)] = &[
     (
         "Ctrl+1 / Ctrl+2 / Ctrl+3",
         "The tester / the library / the reference",
     ),
     (
-        "Tab",
+        "Tab / Shift+Tab",
         "Move between the pattern, the text and the replacement",
     ),
-    ("Up / Down", "Previous / next match"),
-    ("Backspace", "Delete a character from the focused field"),
+    ("F3 / Shift+F3", "Next / previous match"),
+    (
+        "Enter",
+        "Next match, from the pattern; a new line, in the text",
+    ),
+    (
+        "Arrows / Home / End",
+        "Move the caret; Up and Down step through the matches from the pattern",
+    ),
+    (
+        "Backspace / Delete",
+        "Delete a character from the focused field",
+    ),
+    (
+        "Ctrl+A / Ctrl+C / Ctrl+X / Ctrl+V",
+        "Select all / copy / cut / paste",
+    ),
     ("Ctrl+I", "Case insensitive"),
     ("Ctrl+G", "Global"),
-    ("Ctrl+R", "Show or hide the replacement box"),
-    ("Ctrl+L", "Next category, in the library"),
-    ("Ctrl+Shift+G", "Show or hide the capture groups"),
     ("Ctrl+M", "Multiline"),
+    ("Ctrl+R", "Show or hide the replacement box"),
+    (
+        "Ctrl+Shift+G",
+        "Show or hide the capture groups in the match list",
+    ),
+    ("Ctrl+S", "Save the pattern to the library"),
+    ("Ctrl+L", "Next category, in the library"),
+    ("Delete", "Delete a saved pattern, in the library"),
     ("F1", "This list"),
 ];
+
+/// Where the user's own patterns are kept (`settingsfile`), under `library`,
+/// one map per name holding `pattern` and `flags`.
+const CONFIG_NAME: &str = "regextester";
+const LIBRARY_KEY: &str = "library";
+
+/// How many characters a library name holds.
+const MAX_NAME_LEN: usize = 60;
+
+/// Height of the status bar at the foot of the window.
+const STATUS_BAR_HEIGHT: f32 = 24.0;
+/// Height of a library row.
+const LIBRARY_ROW_HEIGHT: f32 = 60.0;
+/// Left gutter of the test input, where the line numbers go.
+const GUTTER: f32 = 40.0;
+
+// ============================================================================
+// The test input: a text field of any number of lines
+// ============================================================================
+
+/// The test input: a text field of any number of lines.
+///
+/// The toolkit's `TextInput` is one line, and the test input has to hold a
+/// log excerpt, a file, a list -- the thing a multi-line pattern is tried
+/// against. It could not take a newline at all: Enter's text is a control
+/// character and the typing path dropped every control character, so the
+/// multiline flag had nothing to act on, and the text could only be edited
+/// at its end.
+#[derive(Debug, Clone, Default)]
+struct TextArea {
+    text: String,
+    /// The caret, as a byte offset on a character boundary.
+    caret: usize,
+    /// Where a selection started, when there is one.
+    anchor: Option<usize>,
+    /// Where Up and Down aim, in pixels from the line's start: kept across a
+    /// run of them, so passing a short line does not pull the caret left.
+    goal_x: Option<f32>,
+}
+
+impl TextArea {
+    fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Replace the text, with the caret at its end. **Tests only.**
+    #[cfg(test)]
+    fn set_text(&mut self, text: &str) {
+        text.clone_into(&mut self.text);
+        self.caret = self.text.len();
+        self.anchor = None;
+        self.goal_x = None;
+    }
+
+    /// The selected bytes, in order, when any are selected.
+    fn selection(&self) -> Option<(usize, usize)> {
+        let anchor = self.anchor?;
+        (anchor != self.caret).then(|| (anchor.min(self.caret), anchor.max(self.caret)))
+    }
+
+    fn selected_text(&self) -> &str {
+        self.selection()
+            .and_then(|(a, b)| self.text.get(a..b))
+            .unwrap_or("")
+    }
+
+    /// Where the line holding byte `at` starts.
+    fn line_start(&self, at: usize) -> usize {
+        self.text
+            .get(..at)
+            .and_then(|head| head.rfind('\n'))
+            .map_or(0, |nl| nl.saturating_add(1))
+    }
+
+    /// Where the line holding byte `at` ends: its newline, or the end.
+    fn line_end(&self, at: usize) -> usize {
+        self.text
+            .get(at..)
+            .and_then(|tail| tail.find('\n'))
+            .map_or(self.text.len(), |nl| at.saturating_add(nl))
+    }
+
+    /// Which line byte `at` is on, counting from zero.
+    fn line_index(&self, at: usize) -> usize {
+        self.text
+            .get(..at)
+            .map_or(0, |head| head.bytes().filter(|b| *b == b'\n').count())
+    }
+
+    /// Where line `index` starts, or the start of the last line past the end.
+    fn start_of_line(&self, index: usize) -> usize {
+        if index == 0 {
+            return 0;
+        }
+        self.text
+            .match_indices('\n')
+            .nth(index.saturating_sub(1))
+            .map_or_else(
+                || self.line_start(self.text.len()),
+                |(nl, _)| nl.saturating_add(1),
+            )
+    }
+
+    fn line_count(&self) -> usize {
+        self.text.matches('\n').count().saturating_add(1)
+    }
+
+    /// Put the caret at `at`, extending the selection when `shift` is held.
+    fn move_to(&mut self, at: usize, shift: bool) {
+        if shift {
+            if self.anchor.is_none() {
+                self.anchor = Some(self.caret);
+            }
+        } else {
+            self.anchor = None;
+        }
+        self.caret = at.min(self.text.len());
+    }
+
+    fn left(&mut self, shift: bool) {
+        self.goal_x = None;
+        if !shift && let Some((from, _)) = self.selection() {
+            self.move_to(from, false);
+            return;
+        }
+        let at = self
+            .text
+            .get(..self.caret)
+            .and_then(|head| head.chars().next_back())
+            .map_or(0, |c| self.caret.saturating_sub(c.len_utf8()));
+        self.move_to(at, shift);
+    }
+
+    fn right(&mut self, shift: bool) {
+        self.goal_x = None;
+        if !shift && let Some((_, to)) = self.selection() {
+            self.move_to(to, false);
+            return;
+        }
+        let at = self
+            .text
+            .get(self.caret..)
+            .and_then(|tail| tail.chars().next())
+            .map_or(self.caret, |c| self.caret.saturating_add(c.len_utf8()));
+        self.move_to(at, shift);
+    }
+
+    fn home(&mut self, shift: bool) {
+        self.goal_x = None;
+        self.move_to(self.line_start(self.caret), shift);
+    }
+
+    fn end(&mut self, shift: bool) {
+        self.goal_x = None;
+        self.move_to(self.line_end(self.caret), shift);
+    }
+
+    /// Up (`down == false`) or down by `lines` lines, aiming at the column
+    /// the caret was at when the run of vertical moves began.
+    fn vertical(&mut self, down: bool, lines: usize, shift: bool) {
+        let start = self.line_start(self.caret);
+        let here = self.line_index(self.caret);
+        let goal = self.goal_x.unwrap_or_else(|| {
+            let line = self.text.get(start..self.caret).unwrap_or("");
+            text::measure(line, NORMAL_TEXT, FontWeightHint::Regular)
+        });
+        let last = self.line_count().saturating_sub(1);
+        let target = if down {
+            here.saturating_add(lines).min(last)
+        } else {
+            here.saturating_sub(lines)
+        };
+        if target == here {
+            // Past the first or the last line: to its start or its end, as
+            // every text box does.
+            let at = if down {
+                self.line_end(self.caret)
+            } else {
+                start
+            };
+            self.move_to(at, shift);
+            self.goal_x = None;
+            return;
+        }
+        let from = self.start_of_line(target);
+        let line = self.text.get(from..self.line_end(from)).unwrap_or("");
+        let within = text::cursor_at(line, goal, NORMAL_TEXT, FontWeightHint::Regular).byte;
+        self.move_to(from.saturating_add(within), shift);
+        self.goal_x = Some(goal);
+    }
+
+    fn select_all(&mut self) {
+        self.goal_x = None;
+        self.anchor = Some(0);
+        self.caret = self.text.len();
+    }
+
+    /// Take the selection out. Returns whether there was one.
+    fn delete_selection(&mut self) -> bool {
+        let Some((from, to)) = self.selection() else {
+            return false;
+        };
+        self.text.replace_range(from..to, "");
+        self.caret = from;
+        self.anchor = None;
+        true
+    }
+
+    /// Put `typed` where the caret is, over any selection, taking no more
+    /// than leaves the field at `capacity` characters. Returns whether the
+    /// text changed.
+    fn insert(&mut self, typed: &str, capacity: usize) -> bool {
+        self.goal_x = None;
+        let removed = self.delete_selection();
+        let room = capacity.saturating_sub(self.text.chars().count());
+        // Line breaks and tabs are text here; other control characters --
+        // a paste's carriage returns among them -- are not.
+        let taken: String = typed
+            .chars()
+            .filter(|c| matches!(c, '\n' | '\t') || !c.is_control())
+            .take(room)
+            .collect();
+        if taken.is_empty() {
+            return removed;
+        }
+        self.text.insert_str(self.caret, &taken);
+        self.caret = self.caret.saturating_add(taken.len());
+        true
+    }
+
+    fn backspace(&mut self) -> bool {
+        self.goal_x = None;
+        if self.delete_selection() {
+            return true;
+        }
+        let Some(c) = self
+            .text
+            .get(..self.caret)
+            .and_then(|h| h.chars().next_back())
+        else {
+            return false;
+        };
+        let from = self.caret.saturating_sub(c.len_utf8());
+        self.text.replace_range(from..self.caret, "");
+        self.caret = from;
+        true
+    }
+
+    fn delete(&mut self) -> bool {
+        self.goal_x = None;
+        if self.delete_selection() {
+            return true;
+        }
+        let Some(c) = self.text.get(self.caret..).and_then(|t| t.chars().next()) else {
+            return false;
+        };
+        let to = self.caret.saturating_add(c.len_utf8());
+        self.text.replace_range(self.caret..to, "");
+        true
+    }
+
+    /// Put the caret on line `line`, at `x` pixels from where the line's
+    /// text starts.
+    fn click(&mut self, line: usize, x: f32, shift: bool) {
+        self.goal_x = None;
+        let line = line.min(self.line_count().saturating_sub(1));
+        let from = self.start_of_line(line);
+        let text = self.text.get(from..self.line_end(from)).unwrap_or("");
+        let within = text::cursor_at(text, x, NORMAL_TEXT, FontWeightHint::Regular).byte;
+        self.move_to(from.saturating_add(within), shift);
+    }
+}
+
+// ============================================================================
+// Pointer targets
+// ============================================================================
+
+/// Everything in the window a pointer can press, as the renderer records it.
+///
+/// The tester drew three tabs, three flag buttons, three fields, a match list,
+/// three sub-tabs, eight library chips and a library of rows, and handled no
+/// pointer event (`known-issues.md` →
+/// `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`). A library
+/// row is named by its index in the library, not by where it is drawn: the
+/// chips filter the list and the wheel scrolls it, and neither renumbers the
+/// library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    Tab(ActiveTab),
+    Flag(Flag),
+    MatchPrev,
+    MatchNext,
+    ReplaceToggle,
+    SavePattern,
+    PatternField,
+    ReplaceField,
+    /// The test input's text, where a press puts the caret.
+    InputArea,
+    /// The replacement's result, which scrolls.
+    ResultArea,
+    ResultTab(ResultsView),
+    /// Whether the match list shows each match's groups.
+    GroupsInline,
+    MatchRow(usize),
+    /// The results panel's body, which scrolls.
+    ResultsBody,
+    Chip(usize),
+    LibraryRow(usize),
+    LibraryUse(usize),
+    LibraryDelete(usize),
+    /// The library's list, which scrolls.
+    LibraryBody,
+    /// The reference, which scrolls.
+    ReferenceBody,
+    SaveName,
+    SaveConfirm,
+    SaveCancel,
+    /// Everything behind the save dialog: a press there does nothing.
+    ModalBackdrop,
+    HelpCard,
+}
+
+impl Target {
+    /// What pressing this does, with its key, for the status bar.
+    fn tip(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Flag(flag) => flag.tip(),
+            Self::MatchPrev => "Previous match (Shift+F3)",
+            Self::MatchNext => "Next match (F3)",
+            Self::ReplaceToggle => "Show or hide the replacement (Ctrl+R)",
+            Self::SavePattern => "Save the pattern to the library (Ctrl+S)",
+            Self::GroupsInline => "Show or hide each match's groups (Ctrl+Shift+G)",
+            Self::LibraryUse(_) => "Try this pattern in the tester (Enter)",
+            Self::LibraryDelete(_) => "Delete this saved pattern (Delete)",
+            Self::Chip(_) => "Show one category (Ctrl+L steps through them)",
+            _ => return None,
+        })
+    }
+}
+
+/// Something that scrolls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pane {
+    Input,
+    Result,
+    Results(ResultsView),
+    Library,
+    Reference,
+}
+
+impl Pane {
+    /// The pane a wheel over `target` scrolls.
+    fn of(target: Target) -> Option<Self> {
+        Some(match target {
+            Target::InputArea => Self::Input,
+            Target::ResultArea => Self::Result,
+            Target::ResultsBody | Target::MatchRow(_) => Self::Results(ResultsView::Matches),
+            Target::LibraryBody
+            | Target::LibraryRow(_)
+            | Target::LibraryUse(_)
+            | Target::LibraryDelete(_) => Self::Library,
+            Target::ReferenceBody => Self::Reference,
+            _ => return None,
+        })
+    }
+}
+
+/// Where the tester's parts go, at the window's size: one statement of the
+/// layout, read by the drawing, the pointer and the scrolling alike.
+#[derive(Debug, Clone, Copy)]
+struct TesterLayout {
+    pattern: Rect,
+    status_y: f32,
+    replace: Option<Rect>,
+    result: Option<Rect>,
+    /// The test input, header included.
+    input: Rect,
+    results: Rect,
+}
+
+impl TesterLayout {
+    /// The test input's text area: the box under its header.
+    fn input_body(&self) -> Rect {
+        Rect::new(
+            self.input.x,
+            self.input.y + 24.0,
+            self.input.w,
+            (self.input.h - 24.0).max(0.0),
+        )
+    }
+
+    /// Where the input's lines are drawn: inside the body, right of the
+    /// gutter.
+    fn input_text(&self) -> Rect {
+        let body = self.input_body();
+        Rect::new(
+            body.x + GUTTER,
+            body.y + 6.0,
+            (body.w - GUTTER - 8.0).max(0.0),
+            (body.h - 10.0).max(0.0),
+        )
+    }
+
+    /// The results panel under its strip of sub-tabs.
+    fn results_body(&self) -> Rect {
+        Rect::new(
+            self.results.x,
+            self.results.y + 30.0,
+            self.results.w,
+            (self.results.h - 34.0).max(0.0),
+        )
+    }
+}
 
 struct App {
     /// The window size as the compositor granted it.
     ///
-    /// A field rather than the `self.window_width`/`self.window_height` constants the
+    /// A field rather than the `WINDOW_WIDTH`/`WINDOW_HEIGHT` constants the
     /// layout used to read directly: a compositor may grant a size that was
     /// never requested, and the first frame is drawn before any `Resize`
     /// arrives — so an app that lays out against a constant draws its first
@@ -1556,10 +2125,9 @@ struct App {
     /// See [`Self::window_width`].
     window_height: f32,
 
-    // Current state
-    pattern: String,
-    input_text: String,
-    replace_text: String,
+    pattern: TextInput,
+    input: TextArea,
+    replace: TextInput,
     flags: RegexFlags,
     /// Whether the shortcut list is up.
     show_help: bool,
@@ -1577,18 +2145,41 @@ struct App {
     library: Vec<PatternEntry>,
     selected_library_entry: Option<usize>,
     library_category_filter: Option<PatternCategory>,
+    /// The first row the library list shows, as a position in the filtered
+    /// list.
+    library_scroll: usize,
 
-    // History
-    /// Patterns tried before now. Always empty: see `add_to_history`.
-    #[allow(dead_code, reason = "nothing writes to the history -- see todo.txt")]
-    history: Vec<HistoryEntry>,
-
-    // UI state
-    scroll_offset: f32,
-    match_scroll_offset: f32,
+    /// The first line the test input shows.
+    input_scroll: usize,
+    /// The first line the replacement's result shows.
+    result_scroll: usize,
+    /// The first row each results view shows, by [`ResultsView::index`].
+    results_scroll: [usize; 3],
+    /// The first row the reference shows.
+    reference_scroll: usize,
     current_match_index: usize,
+    results_view: ResultsView,
     show_replace: bool,
     show_groups: bool,
+
+    /// The name being typed for a pattern about to be saved, while the dialog
+    /// asking for it is up.
+    save_name: Option<TextInput>,
+    /// Why the last save could not be made, shown in the dialog.
+    save_error: Option<String>,
+    /// What the last save, delete or copy said.
+    status: String,
+    /// What was last copied or cut, from any field: one clipboard for the
+    /// window, so a pattern can be pasted into the text and back.
+    clipboard: String,
+    /// Whether a press in the test input is being dragged into a selection.
+    dragging: bool,
+    /// The wheel's remainder, so a trackpad's small turns add up.
+    wheel: wheel::Accumulator,
+    /// What the pointer is over, so it can be drawn lit.
+    hover: Option<Target>,
+    /// Every box the last paint recorded, for hover and the wheel.
+    last_hits: Vec<(Target, Rect)>,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -1599,15 +2190,14 @@ struct App {
 
 impl App {
     fn new() -> Self {
-        let library = built_in_patterns();
         Self {
             show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
-            pattern: String::new(),
-            input_text: String::new(),
-            replace_text: String::new(),
+            pattern: TextInput::new(),
+            input: TextArea::default(),
+            replace: TextInput::new(),
             flags: RegexFlags::default(),
             active_tab: ActiveTab::Tester,
             active_field: ActiveField::Pattern,
@@ -1616,30 +2206,64 @@ impl App {
             matches: Vec::new(),
             replace_result: None,
             explanations: Vec::new(),
-            library,
+            library: built_in_patterns(),
             selected_library_entry: None,
             library_category_filter: None,
-            history: Vec::new(),
-            scroll_offset: 0.0,
-            match_scroll_offset: 0.0,
+            library_scroll: 0,
+            input_scroll: 0,
+            result_scroll: 0,
+            results_scroll: [0; 3],
+            reference_scroll: 0,
             current_match_index: 0,
+            results_view: ResultsView::Matches,
             show_replace: false,
             show_groups: true,
+            save_name: None,
+            save_error: None,
+            status: String::new(),
+            clipboard: String::new(),
+            dragging: false,
+            wheel: wheel::Accumulator::default(),
+            hover: None,
+            last_hits: Vec::new(),
         }
     }
 
+    // -- the three fields ---------------------------------------------------------
+
+    /// Put `text` in the pattern and run it. **Tests only.**
+    #[cfg(test)]
+    fn set_pattern(&mut self, text: &str) {
+        self.pattern.set_text(text);
+        self.update_regex();
+    }
+
+    /// Put `text` in the test input and run the pattern over it. **Tests only.**
+    #[cfg(test)]
+    fn set_input(&mut self, text: &str) {
+        self.input.set_text(text);
+        self.update_regex();
+    }
+
+    /// Put `text` in the replacement and apply it. **Tests only.**
+    #[cfg(test)]
+    fn set_replacement(&mut self, text: &str) {
+        self.replace.set_text(text);
+        self.update_regex();
+    }
+
     fn update_regex(&mut self) {
-        if self.pattern.is_empty() {
+        if self.pattern.text().is_empty() {
             self.compiled = None;
             self.compile_error = None;
             self.matches.clear();
             self.replace_result = None;
             self.explanations.clear();
+            self.current_match_index = 0;
             return;
         }
 
-        // Compile
-        let compiler = RegexCompiler::new(&self.pattern, self.flags.case_insensitive)
+        let compiler = RegexCompiler::new(self.pattern.text(), self.flags.case_insensitive)
             .multiline(self.flags.multiline);
         match compiler.compile() {
             Ok(regex) => {
@@ -1651,102 +2275,36 @@ impl App {
                 self.compile_error = Some(format!("{e}"));
                 self.matches.clear();
                 self.replace_result = None;
-                self.explanations = explain_regex(&self.pattern);
+                self.explanations = explain_regex(self.pattern.text());
+                self.current_match_index = 0;
                 return;
             }
         }
 
-        // Find matches
         if let Some(compiled) = &self.compiled {
-            self.matches = find_all_matches(compiled, &self.input_text);
+            self.matches = find_all_matches(compiled, self.input.text());
             if !self.flags.global && self.matches.len() > 1 {
                 self.matches.truncate(1);
             }
         }
 
-        // Replace
-        if self.show_replace && self.compiled.is_some() && !self.replace_text.is_empty() {
+        if self.show_replace && self.compiled.is_some() && !self.replace.text().is_empty() {
             self.replace_result = Some(apply_replacement(
-                &self.input_text,
+                self.input.text(),
                 &self.matches,
-                &self.replace_text,
+                self.replace.text(),
             ));
         } else {
             self.replace_result = None;
         }
 
-        // Explain
-        self.explanations = explain_regex(&self.pattern);
+        self.explanations = explain_regex(self.pattern.text());
 
-        // Clamp match index
         if self.matches.is_empty() {
             self.current_match_index = 0;
         } else if self.current_match_index >= self.matches.len() {
             self.current_match_index = self.matches.len().saturating_sub(1);
         }
-    }
-
-    /// Remember the pattern just tried.
-    ///
-    /// No caller. The natural moment is a successful compile in
-    /// `update_regex`, but that runs on every keystroke, so recording there
-    /// would fill the history with every prefix of what was typed -- which is
-    /// the design question that has to be answered before this is wired, and
-    /// why it is in `todo.txt` rather than done here.
-    #[allow(dead_code, reason = "no control writes to the history -- see todo.txt")]
-    fn add_to_history(&mut self) {
-        if self.pattern.is_empty() || self.compile_error.is_some() {
-            return;
-        }
-
-        // Don't add duplicates
-        if self
-            .history
-            .first()
-            .is_some_and(|h| h.pattern == self.pattern)
-        {
-            return;
-        }
-
-        self.history.insert(
-            0,
-            HistoryEntry {
-                pattern: self.pattern.clone(),
-                flags: self.flags,
-                match_count: self.matches.len(),
-            },
-        );
-
-        if self.history.len() > MAX_HISTORY {
-            self.history.truncate(MAX_HISTORY);
-        }
-    }
-
-    /// Put a saved pattern back in the fields. No caller: the library panel
-    /// is not drawn and there is no key that opens it. See `todo.txt`.
-    #[allow(dead_code, reason = "no library UI yet -- see todo.txt")]
-    fn load_library_entry(&mut self, index: usize) {
-        if let Some(entry) = self.library.get(index) {
-            self.pattern = entry.pattern.clone();
-            self.selected_library_entry = Some(index);
-            self.update_regex();
-        }
-    }
-
-    /// Save the current pattern under a name. No caller, and no way to type
-    /// the name. See `todo.txt`.
-    #[allow(dead_code, reason = "no library UI yet -- see todo.txt")]
-    fn save_to_library(&mut self, name: &str) {
-        if self.pattern.is_empty() || name.is_empty() || self.library.len() >= MAX_LIBRARY_ENTRIES {
-            return;
-        }
-
-        self.library.push(PatternEntry {
-            name: name.into(),
-            pattern: self.pattern.clone(),
-            description: format!("{} matches in test input", self.matches.len()),
-            category: PatternCategory::Custom,
-        });
     }
 
     fn next_match(&mut self) {
@@ -1756,6 +2314,7 @@ impl App {
                 .saturating_add(1)
                 .checked_rem(self.matches.len())
                 .unwrap_or(0);
+            self.reveal_current_match();
         }
     }
 
@@ -1766,6 +2325,24 @@ impl App {
             } else {
                 self.current_match_index = self.current_match_index.saturating_sub(1);
             }
+            self.reveal_current_match();
+        }
+    }
+
+    /// Scroll the match list and the test input to the current match.
+    ///
+    /// Stepping through matches changed a counter and a row's colour, and
+    /// neither list moved: the thousandth match could be current and on
+    /// neither screen.
+    fn reveal_current_match(&mut self) {
+        let rows = self.results_rows(ResultsView::Matches);
+        let current = self.current_match_index;
+        let slot = self.pane_scroll(Pane::Results(ResultsView::Matches));
+        *slot = keep_in_view(*slot, current, rows);
+        if let Some(m) = self.matches.get(self.current_match_index) {
+            let byte = char_to_byte(self.input.text(), m.start);
+            let line = self.input.line_index(byte);
+            self.input_scroll = keep_in_view(self.input_scroll, line, self.input_rows());
         }
     }
 
@@ -1781,10 +2358,9 @@ impl App {
             .iter()
             .map(|m| m.end.saturating_sub(m.start))
             .sum();
-        let group_count = self
-            .matches
-            .first()
-            .map_or(0, |m| m.groups.iter().filter(|g| g.is_some()).count());
+        let group_count = self.matches.first().map_or(0, |m| {
+            m.groups.iter().skip(1).filter(|g| g.is_some()).count()
+        });
 
         let mut stats = format!("{count} match");
         if count != 1 {
@@ -1800,13 +2376,313 @@ impl App {
         stats
     }
 
-    /// Named `render_commands` and not `render`: at equal arity an inherent
-    /// method silently wins method lookup over `oswindow::app::App::render`.
-    fn render_commands(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+    // -- the library ---------------------------------------------------------------
 
-        // Background
-        cmds.push(RenderCommand::FillRect {
+    /// Read the user's saved patterns from their settings.
+    ///
+    /// A saved entry with no pattern is not shown; it stays in the file, which
+    /// is the user's, and a later save or delete does not touch it -- each
+    /// writes only the entry it is about.
+    fn load_library(&mut self, doc: &yamldoc::Document) {
+        for name in doc.keys(&[LIBRARY_KEY]) {
+            if self.library.len() >= MAX_LIBRARY_ENTRIES {
+                break;
+            }
+            let Some(pattern) = doc.get_str(&[LIBRARY_KEY, &name, "pattern"]) else {
+                continue;
+            };
+            let flags = doc
+                .get_str(&[LIBRARY_KEY, &name, "flags"])
+                .map_or_else(RegexFlags::default, |f| RegexFlags::from_letters(&f));
+            self.library
+                .retain(|e| !(e.category == PatternCategory::Custom && e.name == name));
+            self.library.push(custom_entry(&name, &pattern, flags));
+        }
+    }
+
+    /// The entries the chips leave, with their indices in the library.
+    fn visible_library(&self) -> Vec<(usize, &PatternEntry)> {
+        self.library
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| self.library_category_filter.is_none_or(|f| e.category == f))
+            .collect()
+    }
+
+    /// Put library entry `index` in the tester: its pattern, and the flags it
+    /// was saved with if it was saved. `load_library_entry` existed with no
+    /// caller, so no pattern in the library could be tried.
+    fn use_library_entry(&mut self, index: usize) -> bool {
+        let Some(entry) = self.library.get(index) else {
+            return false;
+        };
+        let (name, pattern, flags) = (entry.name.clone(), entry.pattern.clone(), entry.flags);
+        self.selected_library_entry = Some(index);
+        if let Some(flags) = flags {
+            self.flags = flags;
+        }
+        self.pattern.set_text(&pattern);
+        self.active_tab = ActiveTab::Tester;
+        self.active_field = ActiveField::Pattern;
+        self.update_regex();
+        self.status = format!("Trying {name}");
+        true
+    }
+
+    /// Put the dialog up that asks what to call the pattern.
+    fn ask_to_save(&mut self) -> bool {
+        if self.pattern.text().is_empty() {
+            self.status = "Nothing to save: the pattern is empty".to_string();
+            return true;
+        }
+        let mut name = TextInput::new();
+        // Offered the name it was loaded under, when it was a saved one.
+        if let Some(entry) = self
+            .selected_library_entry
+            .and_then(|i| self.library.get(i))
+            .filter(|e| e.category == PatternCategory::Custom && e.pattern == self.pattern.text())
+        {
+            name.set_text(&entry.name);
+            name.select_all();
+        }
+        self.save_name = Some(name);
+        self.save_error = None;
+        true
+    }
+
+    /// Save the pattern under the name typed in the dialog, replacing a saved
+    /// pattern of that name. The library was a list in memory with
+    /// `save_to_library` never called and no way to type a name; a saved
+    /// pattern now outlives the window.
+    fn confirm_save(&mut self) -> bool {
+        let Some(name) = self.save_name.as_ref().map(|n| n.text().trim().to_string()) else {
+            return false;
+        };
+        if name.is_empty() {
+            self.save_error = Some("Give the pattern a name".to_string());
+            return true;
+        }
+        let existing = self
+            .library
+            .iter()
+            .position(|e| e.category == PatternCategory::Custom && e.name == name);
+        if existing.is_none() && self.library.len() >= MAX_LIBRARY_ENTRIES {
+            self.save_error = Some(format!(
+                "The library is full ({MAX_LIBRARY_ENTRIES} patterns); delete one first"
+            ));
+            return true;
+        }
+        let entry = custom_entry(&name, self.pattern.text(), self.flags);
+        let index = if let Some(i) = existing {
+            if let Some(slot) = self.library.get_mut(i) {
+                *slot = entry;
+            }
+            i
+        } else {
+            self.library.push(entry);
+            self.library.len().saturating_sub(1)
+        };
+        self.selected_library_entry = Some(index);
+        self.save_name = None;
+        self.save_error = None;
+        let mut doc = settingsfile::load(CONFIG_NAME);
+        doc.set_str(&[LIBRARY_KEY, &name, "pattern"], self.pattern.text());
+        doc.set_str(&[LIBRARY_KEY, &name, "flags"], &self.flags.letters());
+        self.status = match settingsfile::store(CONFIG_NAME, &doc) {
+            Ok(()) => format!("Saved {name} to the library"),
+            Err(e) => format!("{name} is in the library until the window closes: {e}"),
+        };
+        true
+    }
+
+    /// Delete saved pattern `index`. The built-in ones cannot be deleted.
+    fn delete_library_entry(&mut self, index: usize) -> bool {
+        let Some(entry) = self
+            .library
+            .get(index)
+            .filter(|e| e.category == PatternCategory::Custom)
+        else {
+            return false;
+        };
+        let name = entry.name.clone();
+        self.library.remove(index);
+        self.selected_library_entry = match self.selected_library_entry {
+            Some(s) if s == index => None,
+            Some(s) if s > index => Some(s.saturating_sub(1)),
+            other => other,
+        };
+        let mut doc = settingsfile::load(CONFIG_NAME);
+        doc.remove(&[LIBRARY_KEY, &name]);
+        self.status = match settingsfile::store(CONFIG_NAME, &doc) {
+            Ok(()) => format!("Deleted {name}"),
+            Err(e) => format!("Deleted {name} from the list, but not from your settings: {e}"),
+        };
+        let shown = self.visible_library().len();
+        self.library_scroll = self.library_scroll.min(shown.saturating_sub(1));
+        true
+    }
+
+    /// Move the library's selection by `delta` rows within what the chips
+    /// show.
+    fn step_library(&mut self, delta: isize) -> bool {
+        let shown: Vec<usize> = self.visible_library().iter().map(|(i, _)| *i).collect();
+        if shown.is_empty() {
+            return false;
+        }
+        let at = self
+            .selected_library_entry
+            .and_then(|s| shown.iter().position(|i| *i == s));
+        let next = match at {
+            None => 0,
+            Some(p) => p
+                .saturating_add_signed(delta)
+                .min(shown.len().saturating_sub(1)),
+        };
+        let Some(&index) = shown.get(next) else {
+            return false;
+        };
+        if Some(index) == self.selected_library_entry {
+            return false;
+        }
+        self.selected_library_entry = Some(index);
+        self.library_scroll = keep_in_view(self.library_scroll, next, self.library_rows());
+        true
+    }
+
+    /// Show one category of the library.
+    fn set_library_filter(&mut self, filter: Option<PatternCategory>) -> bool {
+        if self.library_category_filter == filter {
+            return false;
+        }
+        self.library_category_filter = filter;
+        self.library_scroll = 0;
+        true
+    }
+
+    // -- layout ------------------------------------------------------------------------
+
+    /// Where everything under the toolbar and over the status bar goes.
+    fn content_rect(&self) -> Rect {
+        let top = TOOLBAR_HEIGHT + PADDING;
+        Rect::new(
+            0.0,
+            top,
+            self.window_width,
+            (self.window_height - top - STATUS_BAR_HEIGHT - PADDING).max(0.0),
+        )
+    }
+
+    fn tester_layout(&self) -> TesterLayout {
+        let content = self.content_rect();
+        let width = (self.window_width - 2.0 * PADDING).max(0.0);
+        let pattern = Rect::new(PADDING + 80.0, content.y, (width - 80.0).max(0.0), 36.0);
+        let status_y = pattern.bottom() + 6.0;
+        let mut next_y = status_y + 20.0;
+        let (replace, result) = if self.show_replace {
+            let replace = Rect::new(PADDING + 80.0, next_y, (width - 80.0).max(0.0), 36.0);
+            next_y = replace.bottom() + 6.0;
+            let result = Rect::new(PADDING, next_y, width, 72.0);
+            next_y = result.bottom() + 6.0;
+            (Some(replace), Some(result))
+        } else {
+            (None, None)
+        };
+        let split_y = next_y + 4.0;
+        let split_h = (content.bottom() - split_y).max(0.0);
+        let left_w = ((self.window_width - 3.0 * PADDING) * 0.55).max(0.0);
+        let right_x = PADDING + left_w + PADDING;
+        TesterLayout {
+            pattern,
+            status_y,
+            replace,
+            result,
+            input: Rect::new(PADDING, split_y, left_w, split_h),
+            results: Rect::new(
+                right_x,
+                split_y,
+                (self.window_width - right_x - PADDING).max(0.0),
+                split_h,
+            ),
+        }
+    }
+
+    /// How many lines of the test input fit.
+    fn input_rows(&self) -> usize {
+        rows_in(self.tester_layout().input_text().h, LINE_HEIGHT)
+    }
+
+    /// How many rows of a results view fit.
+    fn results_rows(&self, view: ResultsView) -> usize {
+        rows_in(self.tester_layout().results_body().h, view.row_height())
+    }
+
+    /// The library's list, under its chips.
+    fn library_list_rect(&self) -> Rect {
+        let content = self.content_rect();
+        Rect::new(
+            PADDING,
+            content.y + 34.0,
+            (self.window_width - 2.0 * PADDING).max(0.0),
+            (content.h - 34.0).max(0.0),
+        )
+    }
+
+    fn library_rows(&self) -> usize {
+        rows_in(self.library_list_rect().h, LIBRARY_ROW_HEIGHT)
+    }
+
+    /// How many rows the results view `view` has.
+    fn results_len(&self, view: ResultsView) -> usize {
+        match view {
+            ResultsView::Matches => self.matches.len(),
+            ResultsView::Groups => self
+                .matches
+                .get(self.current_match_index)
+                .map_or(0, |m| m.groups.len()),
+            ResultsView::Explain => self.explanations.len(),
+        }
+    }
+
+    /// How far the test input is scrolled sideways, so the caret -- or, while
+    /// the keyboard is elsewhere, the current match -- is in view. Worked out
+    /// fresh from the point it follows, as a single-line field does
+    /// (`textedit::horizontal_scroll`), so it cannot go stale.
+    fn input_hscroll(&self, width: f32) -> f32 {
+        let text = self.input.text();
+        let at = if self.active_field == ActiveField::Input {
+            Some(self.input.caret)
+        } else {
+            self.matches
+                .get(self.current_match_index)
+                .map(|m| char_to_byte(text, m.start))
+        };
+        let Some(at) = at else {
+            return 0.0;
+        };
+        let start = self.input.line_start(at);
+        let line = text.get(start..self.input.line_end(at)).unwrap_or("");
+        let caret_px = text::measure(
+            text.get(start..at).unwrap_or(""),
+            NORMAL_TEXT,
+            FontWeightHint::Regular,
+        );
+        let line_w = text::measure(line, NORMAL_TEXT, FontWeightHint::Regular);
+        textedit::horizontal_scroll(line_w, width, caret_px)
+    }
+
+    /// Scroll the test input so its caret is on screen.
+    fn keep_caret_visible(&mut self) {
+        let line = self.input.line_index(self.input.caret);
+        self.input_scroll = keep_in_view(self.input_scroll, line, self.input_rows());
+    }
+
+    // -- drawing -------------------------------------------------------------------
+
+    /// Draw the window, recording every control where it is drawn: both the
+    /// picture and the hit test.
+    fn frame(&self) -> Frame<Target> {
+        let mut f = Frame::new(self.window_width, self.window_height);
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width: self.window_width,
@@ -1814,24 +2690,85 @@ impl App {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
-
-        // Toolbar
-        self.render_toolbar(&mut cmds);
-
-        // Tab content
+        self.draw_toolbar(&mut f);
         match self.active_tab {
-            ActiveTab::Tester => self.render_tester_tab(&mut cmds),
-            ActiveTab::Library => self.render_library_tab(&mut cmds),
-            ActiveTab::Reference => self.render_reference_tab(&mut cmds),
+            ActiveTab::Tester => self.draw_tester(&mut f),
+            ActiveTab::Library => self.draw_library(&mut f),
+            ActiveTab::Reference => self.draw_reference(&mut f),
         }
-
-        cmds
+        self.draw_status_bar(&mut f);
+        if self.save_name.is_some() {
+            self.draw_save_dialog(&mut f);
+        }
+        // Over everything, because it is the one thing a reader asked for.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (self.window_width, self.window_height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+            f.hit(
+                Target::HelpCard,
+                Rect::new(0.0, 0.0, self.window_width, self.window_height),
+            );
+        }
+        f
     }
 
-    fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>) {
-        // Toolbar background
+    /// The drawn commands. **Tests only**: the window's `render` takes the
+    /// frame itself, because it keeps the frame's boxes for the pointer.
+    ///
+    /// Named `render_commands` and not `render`: at equal arity an inherent
+    /// method silently wins method lookup over `oswindow::app::App::render`.
+    #[cfg(test)]
+    fn render_commands(&self) -> Vec<RenderCommand> {
+        self.frame().into_tree().commands
+    }
+
+    /// A compact button, lit while it is on or the pointer is on it.
+    fn button(&self, f: &mut Frame<Target>, rect: Rect, label: &str, lit: bool, target: Target) {
+        let hot = self.hover == Some(target);
         self.palette.push_surface(
-            cmds,
+            f,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            4.0,
+            if lit || hot {
+                Surface::Selected
+            } else {
+                Surface::Card
+            },
+        );
+        f.push(RenderCommand::Text {
+            x: rect.x + 8.0,
+            y: rect.y + (rect.h - SMALL_TEXT) / 2.0,
+            text: label.into(),
+            font_size: SMALL_TEXT,
+            color: if lit {
+                self.palette.text
+            } else {
+                self.palette.subtext0
+            },
+            font_weight: FontWeightHint::Bold,
+            max_width: Some((rect.w - 12.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        f.hit(target, rect);
+    }
+
+    /// Width of a [`Self::button`] labelled `label`.
+    fn button_width(label: &str) -> f32 {
+        text::measure(label, SMALL_TEXT, FontWeightHint::Bold) + 16.0
+    }
+
+    fn draw_toolbar(&self, f: &mut Frame<Target>) {
+        self.palette.push_surface(
+            f,
             0.0,
             0.0,
             self.window_width,
@@ -1839,9 +2776,7 @@ impl App {
             0.0,
             Surface::Strip(Edge::Bottom),
         );
-
-        // Title
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: PADDING,
             y: 13.0,
             text: "Regex Tester".into(),
@@ -1852,168 +2787,172 @@ impl App {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Tabs
-        let tabs = [ActiveTab::Tester, ActiveTab::Library, ActiveTab::Reference];
         let mut tab_x = 170.0;
-        for tab in &tabs {
-            let label = tab.label();
-            let active = *tab == self.active_tab;
-            // The active tab is drawn bold, so measure it bold — otherwise the
-            // one tab the user is looking at is the one that overflows.
-            let tab_weight = if active {
-                FontWeightHint::Bold
-            } else {
-                FontWeightHint::Regular
-            };
-            let w = text::measure(label, NORMAL_TEXT, tab_weight) + 20.0;
-
-            if active {
-                self.palette
-                    .push_surface(cmds, tab_x, 8.0, w, 28.0, 4.0, Surface::Selected);
+        for tab in ActiveTab::ALL {
+            let active = tab == self.active_tab;
+            // Measured bold whatever the state, so the strip does not reflow
+            // when the user switches tabs.
+            let w = text::measure(tab.label(), NORMAL_TEXT, FontWeightHint::Bold) + 20.0;
+            let rect = Rect::new(tab_x, 8.0, w, 28.0);
+            if active || self.hover == Some(Target::Tab(tab)) {
+                self.palette.push_surface(
+                    f,
+                    rect.x,
+                    rect.y,
+                    rect.w,
+                    rect.h,
+                    4.0,
+                    Surface::Selected,
+                );
             }
-
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: tab_x + 10.0,
                 y: 15.0,
-                text: label.into(),
+                text: tab.label().into(),
                 font_size: NORMAL_TEXT,
                 color: if active {
                     self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.subtext0
                 },
-                font_weight: tab_weight,
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(w),
                 overflow: TextOverflow::Ellipsis,
             });
-
+            f.hit(Target::Tab(tab), rect);
             tab_x += w + 6.0;
         }
 
-        // Flags on the right
-        let flags_x = self.window_width - 250.0;
-        // The names of these three live in `SHORTCUTS`, which is what the
-        // `F1` card draws and what the guard test presses. They used to be
-        // repeated here as a third element that ended at
-        // `let _ = tooltip; // used for hover tooltip` -- a comment saying what
-        // the value was *for*, above the line that threw it away, in a crate
-        // with no hover tooltip in it. One copy, with a reader.
-        let flag_items = [
-            ("i", self.flags.case_insensitive),
-            ("g", self.flags.global),
-            ("m", self.flags.multiline),
-        ];
+        // The right-hand group, from the right edge in.
+        let mut right = self.window_width - PADDING;
+        let next = Rect::new(right - 24.0, 8.0, 24.0, 28.0);
+        right = next.x - 2.0;
+        let count = if self.matches.is_empty() {
+            "0/0".to_string()
+        } else {
+            format!(
+                "{}/{}",
+                self.current_match_index.saturating_add(1),
+                self.matches.len()
+            )
+        };
+        let count_w = text::measure(&count, SMALL_TEXT, FontWeightHint::Regular) + 12.0;
+        right -= count_w;
+        f.push(RenderCommand::Text {
+            x: right + 6.0,
+            y: 16.0,
+            text: count,
+            font_size: SMALL_TEXT,
+            color: self.palette.subtext1,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(count_w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        let prev = Rect::new(right - 26.0, 8.0, 24.0, 28.0);
+        self.button(f, prev, "<", false, Target::MatchPrev);
+        self.button(f, next, ">", false, Target::MatchNext);
+        right = prev.x - 12.0;
 
-        for (fi, (label, active)) in flag_items.iter().enumerate() {
-            let fx = flags_x + (fi as f32) * 40.0;
-            cmds.push(RenderCommand::FillRect {
-                x: fx,
-                y: 8.0,
-                width: 30.0,
-                height: 28.0,
-                color: if *active {
+        for flag in Flag::ALL.iter().rev() {
+            let rect = Rect::new(right - 30.0, 8.0, 30.0, 28.0);
+            let on = self.flags.get(*flag);
+            f.push(RenderCommand::FillRect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.w,
+                height: rect.h,
+                color: if on {
                     self.palette.blue
+                } else if self.hover == Some(Target::Flag(*flag)) {
+                    self.palette.surface1
                 } else {
                     self.palette.surface0
                 },
                 corner_radii: CornerRadii::all(4.0),
             });
-            cmds.push(RenderCommand::Text {
-                x: fx + 11.0,
+            f.push(RenderCommand::Text {
+                x: rect.x + 11.0,
                 y: 15.0,
-                text: (*label).into(),
+                text: flag.letter().into(),
                 font_size: NORMAL_TEXT,
-                color: if *active {
+                color: if on {
                     self.palette.crust
                 } else {
                     self.palette.subtext0
                 },
                 font_weight: FontWeightHint::Bold,
-                max_width: Some(30.0),
+                max_width: Some(rect.w),
                 overflow: TextOverflow::Ellipsis,
             });
+            f.hit(Target::Flag(*flag), rect);
+            right = rect.x - 6.0;
         }
+        right -= 6.0;
 
-        // Match navigation on far right
-        if !self.matches.is_empty() {
-            let nav_text = format!(
-                "{}/{}",
-                self.current_match_index.saturating_add(1),
-                self.matches.len()
-            );
-            cmds.push(RenderCommand::Text {
-                x: self.window_width - 100.0,
-                y: 15.0,
-                text: nav_text,
-                font_size: SMALL_TEXT,
-                color: self.palette.subtext1,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(90.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        for (label, lit, target) in [
+            ("Save…", false, Target::SavePattern),
+            ("Replace", self.show_replace, Target::ReplaceToggle),
+        ] {
+            let w = Self::button_width(label);
+            let rect = Rect::new(right - w, 8.0, w, 28.0);
+            // Past the tabs there is no room; a button drawn over a tab would
+            // take its presses.
+            if rect.x < tab_x {
+                break;
+            }
+            self.button(f, rect, label, lit, target);
+            right = rect.x - 6.0;
         }
     }
 
-    fn render_tester_tab(&self, cmds: &mut Vec<RenderCommand>) {
-        let content_y = TOOLBAR_HEIGHT + PADDING;
-        let content_height = self.window_height - content_y - PADDING;
-
-        // Pattern input area
-        let pattern_y = content_y;
-        Self::render_input_field(
-            cmds,
-            &self.palette,
-            PADDING,
-            pattern_y,
-            self.window_width - 2.0 * PADDING,
-            36.0,
+    fn draw_tester(&self, f: &mut Frame<Target>) {
+        let l = self.tester_layout();
+        self.draw_field(
+            f,
             "Pattern:",
+            l.pattern,
             &self.pattern,
-            self.active_field == ActiveField::Pattern,
+            ActiveField::Pattern,
+            Target::PatternField,
         );
 
-        // Error or stats line
-        let status_y = pattern_y + 40.0;
         if let Some(err) = &self.compile_error {
-            cmds.push(RenderCommand::Text {
-                x: PADDING + 80.0,
-                y: status_y,
+            f.push(RenderCommand::Text {
+                x: l.pattern.x,
+                y: l.status_y,
                 text: format!("Error: {err}"),
                 font_size: SMALL_TEXT,
                 color: self.palette.ink(self.palette.red),
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(self.window_width - 100.0),
+                max_width: Some(l.pattern.w),
                 overflow: TextOverflow::Ellipsis,
             });
-        } else if !self.pattern.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: PADDING + 80.0,
-                y: status_y,
+        } else if !self.pattern.text().is_empty() {
+            f.push(RenderCommand::Text {
+                x: l.pattern.x,
+                y: l.status_y,
                 text: self.match_stats(),
                 font_size: SMALL_TEXT,
                 color: self.palette.ink(self.palette.green),
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(self.window_width - 100.0),
+                max_width: Some(l.pattern.w),
                 overflow: TextOverflow::Ellipsis,
             });
         }
 
-        // Replace input (optional)
-        let mut next_y = status_y + 20.0;
-        if self.show_replace {
-            Self::render_input_field(
-                cmds,
-                &self.palette,
-                PADDING,
-                next_y,
-                self.window_width - 2.0 * PADDING,
-                36.0,
+        if let (Some(replace), Some(result)) = (l.replace, l.result) {
+            self.draw_field(
+                f,
                 "Replace:",
-                &self.replace_text,
-                self.active_field == ActiveField::Replace,
+                replace,
+                &self.replace,
+                ActiveField::Replace,
+                Target::ReplaceField,
             );
-            next_y += 42.0;
-
             // The replacement itself. `apply_replacement` has produced this on
             // every keystroke since the program was written, into a field
             // nothing drew -- so a user typed a replacement into a regex
@@ -2024,158 +2963,92 @@ impl App {
             // Drawn even when there is nothing to draw, because a box that
             // appears and disappears as the pattern compiles and fails is
             // harder to read than an empty one that stays put.
-            let result_height = 72.0;
-            self.render_text_area(
-                cmds,
-                PADDING,
-                next_y,
-                self.window_width - 2.0 * PADDING,
-                result_height,
-                "Result:",
-                self.replace_result.as_deref().unwrap_or(""),
-                false,
-            );
-            next_y += result_height + 6.0;
+            self.draw_result(f, result);
         }
 
-        // Split: left = input text, right = results
-        let split_y = next_y + 4.0;
-        let split_height = content_height - (split_y - content_y) - PADDING;
-        let left_width = (self.window_width - 3.0 * PADDING) * 0.55;
-        let right_x = PADDING + left_width + PADDING;
-        let right_width = self.window_width - right_x - PADDING;
-
-        // Input text area
-        self.render_text_area(
-            cmds,
-            PADDING,
-            split_y,
-            left_width,
-            split_height,
-            "Test Input:",
-            &self.input_text,
-            self.active_field == ActiveField::Input,
-        );
-
-        // Results panel
-        self.render_results_panel(cmds, right_x, split_y, right_width, split_height);
+        self.draw_input(f, &l);
+        self.draw_results(f, &l);
     }
 
-    // Stateless render helper: takes the field geometry and content directly
-    // rather than reading from `self`, hence an associated function.
-    #[allow(clippy::too_many_arguments)]
-    fn render_input_field(
-        cmds: &mut Vec<RenderCommand>,
-        pal: &Palette,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
+    /// A labelled one-line field, drawn with the toolkit's single-line editor
+    /// so its caret, selection and sideways scroll are every other field's.
+    fn draw_field(
+        &self,
+        f: &mut Frame<Target>,
         label: &str,
-        value: &str,
-        focused: bool,
+        rect: Rect,
+        input: &TextInput,
+        field: ActiveField,
+        target: Target,
     ) {
-        // Label
-        cmds.push(RenderCommand::Text {
-            x,
-            y: y + 10.0,
+        let focused = self.active_tab == ActiveTab::Tester
+            && self.active_field == field
+            && self.save_name.is_none();
+        f.push(RenderCommand::Text {
+            x: PADDING,
+            y: rect.y + 10.0,
             text: label.into(),
             font_size: SMALL_TEXT,
-            color: pal.subtext0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(70.0),
             overflow: TextOverflow::Ellipsis,
         });
-
-        // Input background
-        let input_x = x + 80.0;
-        let input_width = width - 80.0;
-        pal.push_surface(cmds, input_x, y, input_width, height, 4.0, Surface::Card);
-
-        // Border
-        cmds.push(RenderCommand::StrokeRect {
-            x: input_x,
-            y,
-            width: input_width,
-            height,
-            color: if focused { pal.blue } else { pal.surface1 },
+        self.palette
+            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
+        f.push(RenderCommand::StrokeRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: if focused {
+                self.palette.blue
+            } else {
+                self.palette.surface1
+            },
             line_width: if focused { 2.0 } else { 1.0 },
             corner_radii: CornerRadii::all(4.0),
         });
-
-        // Text content
-        let display = if value.is_empty() && !focused {
-            "(empty)"
-        } else {
-            value
-        };
-        let text_color = if value.is_empty() && !focused {
-            pal.overlay0
-        } else {
-            pal.text
-        };
-
-        cmds.push(RenderCommand::Text {
-            x: input_x + 8.0,
-            y: y + 10.0,
-            text: text::elide(
-                display,
-                input_width - 16.0,
-                "...",
-                NORMAL_TEXT,
-                FontWeightHint::Regular,
-            ),
-            font_size: NORMAL_TEXT,
-            color: text_color,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(input_width - 16.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Cursor
-        if focused {
-            // The caret belongs at the end of the text as drawn. Capping a
-            // *byte* count at 60 and multiplying by a nominal cell put it
-            // somewhere in the middle of a non-ASCII value, and past the right
-            // edge of the box for anything longer than the box.
-            let drawn = text::elide(
-                value,
-                input_width - 16.0,
-                "...",
-                NORMAL_TEXT,
-                FontWeightHint::Regular,
-            );
-            let cursor_x =
-                input_x + 8.0 + text::measure(&drawn, NORMAL_TEXT, FontWeightHint::Regular);
-            cmds.push(RenderCommand::FillRect {
-                x: cursor_x,
-                y: y + 6.0,
-                width: 2.0,
-                height: height - 12.0,
-                color: pal.blue,
-                corner_radii: CornerRadii::ZERO,
-            });
-        }
+        let mut tree = RenderTree::new();
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text: input.text(),
+                cursor: if focused {
+                    input.cursor()
+                } else {
+                    TextCursor::default()
+                },
+                selection_anchor: if focused {
+                    input.selection_anchor()
+                } else {
+                    None
+                },
+                focused,
+                x: rect.x + 8.0,
+                y: rect.y + 9.0,
+                width: (rect.w - 16.0).max(0.0),
+                line_height: 18.0,
+                font_size: NORMAL_TEXT,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.blue,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        f.extend(tree.commands);
+        f.hit(target, rect);
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn render_text_area(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        label: &str,
-        text: &str,
-        focused: bool,
-    ) {
-        // Header
+    /// The header every text box here has: a strip with its label, and a
+    /// count on the right.
+    fn draw_box_header(&self, f: &mut Frame<Target>, rect: Rect, label: &str, count: &str) {
         self.palette.push_surface_radii(
-            cmds,
-            x,
-            y,
-            width,
+            f,
+            rect.x,
+            rect.y,
+            rect.w,
             24.0,
             CornerRadii {
                 top_left: 4.0,
@@ -2185,26 +3058,46 @@ impl App {
             },
             Surface::Card,
         );
-        cmds.push(RenderCommand::Text {
-            x: x + 8.0,
-            y: y + 5.0,
+        f.push(RenderCommand::Text {
+            x: rect.x + 8.0,
+            y: rect.y + 5.0,
             text: label.into(),
             font_size: SMALL_TEXT,
             color: self.palette.subtext1,
             font_weight: FontWeightHint::Bold,
-            max_width: Some(width - 16.0),
+            max_width: Some((rect.w - 100.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
+        f.push(RenderCommand::Text {
+            x: rect.right() - 90.0,
+            y: rect.y + 5.0,
+            text: count.into(),
+            font_size: SMALL_TEXT,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(84.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
 
-        // Body
-        let body_y = y + 24.0;
-        let body_height = height - 24.0;
+    /// The test input: the text, its line numbers, every match highlighted
+    /// (the current one more strongly), the selection and the caret.
+    fn draw_input(&self, f: &mut Frame<Target>, l: &TesterLayout) {
+        let text = self.input.text();
+        let focused = self.active_field == ActiveField::Input && self.save_name.is_none();
+        self.draw_box_header(
+            f,
+            l.input,
+            "Test Input:",
+            &format!("{} lines", self.input.line_count()),
+        );
+        let body = l.input_body();
         self.palette.push_surface_radii(
-            cmds,
-            x,
-            body_y,
-            width,
-            body_height,
+            f,
+            body.x,
+            body.y,
+            body.w,
+            body.h,
             CornerRadii {
                 top_left: 0.0,
                 top_right: 0.0,
@@ -2213,13 +3106,11 @@ impl App {
             },
             Surface::Card,
         );
-
-        // Border
-        cmds.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width,
-            height,
+        f.push(RenderCommand::StrokeRect {
+            x: l.input.x,
+            y: l.input.y,
+            width: l.input.w,
+            height: l.input.h,
             color: if focused {
                 self.palette.blue
             } else {
@@ -2228,348 +3119,483 @@ impl App {
             line_width: if focused { 2.0 } else { 1.0 },
             corner_radii: CornerRadii::all(4.0),
         });
+        f.hit(Target::InputArea, body);
 
-        // Render text with match highlighting
-        let lines: Vec<&str> = text.split('\n').collect();
-        let max_visible = ((body_height - 10.0) / LINE_HEIGHT) as usize;
-        let scroll = (self.scroll_offset / LINE_HEIGHT) as usize;
-
-        let text_width = width - 50.0;
-        let mut char_offset = 0usize;
-
-        for (li, line) in lines.iter().enumerate().skip(scroll).take(max_visible) {
-            let ly = body_y + 6.0 + (li.saturating_sub(scroll) as f32) * LINE_HEIGHT;
-
-            // Line number
-            cmds.push(RenderCommand::Text {
-                x: x + 4.0,
-                y: ly,
-                text: format!("{:>3}", li.saturating_add(1)),
-                font_size: SMALL_TEXT,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(30.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Render text with highlights
-            let line_start = char_offset;
-            let line_end = char_offset.saturating_add(line.len());
-
-            // Draw highlighted background segments
-            for m in &self.matches {
-                if m.end <= line_start || m.start >= line_end {
-                    continue;
-                }
-                let hl_start = m.start.max(line_start).saturating_sub(line_start);
-                let hl_end = m.end.min(line_end).saturating_sub(line_start);
-                // The highlight has to cover exactly the substring drawn
-                // beneath it, so it is measured from the same text rather
-                // than counted off a nominal cell: `hl_start`/`hl_end` are
-                // byte offsets, and multiplying those by a cell width slid
-                // the band right by one cell per extra byte.
-                let before = line.get(..hl_start).unwrap_or("");
-                let matched = line.get(hl_start..hl_end).unwrap_or("");
-                let hl_x = x + 40.0 + text::measure(before, NORMAL_TEXT, FontWeightHint::Regular);
-                let hl_w = text::measure(matched, NORMAL_TEXT, FontWeightHint::Regular);
-
-                cmds.push(RenderCommand::FillRect {
-                    x: hl_x,
-                    y: ly - 2.0,
-                    width: hl_w,
-                    height: LINE_HEIGHT,
-                    color: Color::rgba(137, 180, 250, 60), // Blue highlight
-                    corner_radii: CornerRadii::all(2.0),
+        let area = l.input_text();
+        let hscroll = self.input_hscroll(area.w);
+        let rows = self.input_rows();
+        // Every character's byte offset, once: the matches are counted in
+        // characters and the text is sliced in bytes. The highlight used a
+        // match's character index as a byte offset, so on any line with a
+        // character wider than a byte it painted the wrong letters, and
+        // `get` of a split character drew nothing at all.
+        let bytes = char_bytes(text);
+        let selection = if focused {
+            self.input.selection()
+        } else {
+            None
+        };
+        let mut line_start = 0usize;
+        let mut first_char = 0usize;
+        for (li, line) in text.split('\n').enumerate() {
+            let line_end = line_start.saturating_add(line.len());
+            let line_chars = line.chars().count();
+            if li >= self.input_scroll && li < self.input_scroll.saturating_add(rows) {
+                let ly = area.y + (li.saturating_sub(self.input_scroll)) as f32 * LINE_HEIGHT;
+                f.push(RenderCommand::Text {
+                    x: body.x + 4.0,
+                    y: ly,
+                    text: format!("{:>3}", li.saturating_add(1)),
+                    font_size: SMALL_TEXT,
+                    color: self.palette.subtext0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(GUTTER - 6.0),
+                    overflow: TextOverflow::Clip,
                 });
+                f.clip(area);
+                let origin = area.x - hscroll;
+                let last_char = first_char.saturating_add(line_chars);
+                for (mi, m) in self.matches.iter().enumerate() {
+                    // This line's characters are `first_char..last_char`, and
+                    // `last_char` is its line break. An empty match is a place
+                    // and is on the line if that place is; a match with width
+                    // is if it covers any of the line, its break included.
+                    let on_line = if m.start == m.end {
+                        (first_char..=last_char).contains(&m.start)
+                    } else {
+                        m.start <= last_char && m.end > first_char
+                    };
+                    if !on_line {
+                        continue;
+                    }
+                    let from = bytes
+                        .get(m.start.max(first_char))
+                        .copied()
+                        .unwrap_or(text.len())
+                        .saturating_sub(line_start)
+                        .min(line.len());
+                    let to = bytes
+                        .get(m.end.min(last_char))
+                        .copied()
+                        .unwrap_or(text.len())
+                        .saturating_sub(line_start)
+                        .min(line.len());
+                    // From the palette: the wash was Catppuccin's blue as a
+                    // literal, the same on every theme.
+                    let colour = if mi == self.current_match_index {
+                        with_alpha(self.palette.peach, 110)
+                    } else {
+                        with_alpha(self.palette.blue, 60)
+                    };
+                    if from >= to {
+                        // An empty match -- `^`, `\b`, `x*` between two
+                        // letters -- is a place, drawn as a bar; a match of
+                        // the line break alone is drawn as a block past the
+                        // line's end, where the break is.
+                        let x = text::measure(
+                            line.get(..from).unwrap_or(""),
+                            NORMAL_TEXT,
+                            FontWeightHint::Regular,
+                        );
+                        f.push(RenderCommand::FillRect {
+                            x: origin + x - 1.0,
+                            y: ly - 2.0,
+                            width: if m.start == m.end { 2.0 } else { 7.0 },
+                            height: LINE_HEIGHT,
+                            color: colour,
+                            corner_radii: CornerRadii::ZERO,
+                        });
+                        continue;
+                    }
+                    for (left, width) in
+                        text::selection_boxes(line, from, to, NORMAL_TEXT, FontWeightHint::Regular)
+                    {
+                        f.push(RenderCommand::FillRect {
+                            x: origin + left,
+                            y: ly - 2.0,
+                            width,
+                            height: LINE_HEIGHT,
+                            color: colour,
+                            corner_radii: CornerRadii::all(2.0),
+                        });
+                    }
+                }
+                if let Some((sel_from, sel_to)) = selection {
+                    let from = sel_from
+                        .clamp(line_start, line_end)
+                        .saturating_sub(line_start);
+                    let to = sel_to
+                        .clamp(line_start, line_end)
+                        .saturating_sub(line_start);
+                    if from < to {
+                        for (left, width) in text::selection_boxes(
+                            line,
+                            from,
+                            to,
+                            NORMAL_TEXT,
+                            FontWeightHint::Regular,
+                        ) {
+                            f.push(RenderCommand::FillRect {
+                                x: origin + left,
+                                y: ly - 2.0,
+                                width,
+                                height: LINE_HEIGHT,
+                                color: with_alpha(self.palette.blue, 90),
+                                corner_radii: CornerRadii::ZERO,
+                            });
+                        }
+                    }
+                }
+                f.push(RenderCommand::Text {
+                    x: origin,
+                    y: ly,
+                    text: line.to_string(),
+                    font_size: NORMAL_TEXT,
+                    color: self.palette.text,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
+                    overflow: TextOverflow::Clip,
+                });
+                if focused && (line_start..=line_end).contains(&self.input.caret) {
+                    let caret = text::measure(
+                        line.get(..self.input.caret.saturating_sub(line_start))
+                            .unwrap_or(""),
+                        NORMAL_TEXT,
+                        FontWeightHint::Regular,
+                    );
+                    f.push(RenderCommand::FillRect {
+                        x: origin + caret,
+                        y: ly - 1.0,
+                        width: textedit::CARET_WIDTH,
+                        height: LINE_HEIGHT - 2.0,
+                        color: self.palette.text,
+                        corner_radii: CornerRadii::ZERO,
+                    });
+                }
+                f.unclip();
             }
+            line_start = line_end.saturating_add(1);
+            first_char = first_char.saturating_add(line_chars).saturating_add(1);
+        }
+    }
 
-            // Line text
-            let display_line = text::elide(
-                line,
-                text_width,
-                "...",
-                NORMAL_TEXT,
-                FontWeightHint::Regular,
-            );
-            cmds.push(RenderCommand::Text {
-                x: x + 40.0,
+    /// The replacement's result: read-only text, which scrolls.
+    fn draw_result(&self, f: &mut Frame<Target>, rect: Rect) {
+        let result = self.replace_result.as_deref().unwrap_or("");
+        let lines: Vec<&str> = result.split('\n').collect();
+        self.draw_box_header(
+            f,
+            rect,
+            "Result:",
+            &if result.is_empty() {
+                String::new()
+            } else {
+                format!("{} lines", lines.len())
+            },
+        );
+        let body = Rect::new(rect.x, rect.y + 24.0, rect.w, (rect.h - 24.0).max(0.0));
+        self.palette
+            .push_surface(f, body.x, body.y, body.w, body.h, 4.0, Surface::Card);
+        f.hit(Target::ResultArea, body);
+        let rows = rows_in(body.h - 6.0, LINE_HEIGHT);
+        f.clip(body);
+        for (i, line) in lines.iter().enumerate().skip(self.result_scroll).take(rows) {
+            let ly = body.y + 4.0 + (i.saturating_sub(self.result_scroll)) as f32 * LINE_HEIGHT;
+            f.push(RenderCommand::Text {
+                x: body.x + 8.0,
                 y: ly,
-                text: display_line,
+                text: (*line).to_string(),
                 font_size: NORMAL_TEXT,
                 color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(width - 50.0),
+                max_width: Some((body.w - 16.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            char_offset = line_end.saturating_add(1); // +1 for the newline
         }
-
-        // Show line count
-        cmds.push(RenderCommand::Text {
-            x: x + width - 80.0,
-            y: y + 5.0,
-            text: format!("{} lines", lines.len()),
-            font_size: SMALL_TEXT,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(70.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        f.unclip();
     }
 
-    fn render_results_panel(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    ) {
-        // Panel background
+    /// The results panel: its three views' tabs, and the one showing.
+    fn draw_results(&self, f: &mut Frame<Target>, l: &TesterLayout) {
+        let panel = l.results;
         self.palette
-            .push_surface(cmds, x, y, width, height, 4.0, Surface::Card);
-
-        // Sub-tabs: Matches | Groups | Explanation | Replace
-        let tab_labels = ["Matches", "Groups", "Explain"];
-        let mut tx = x + 4.0;
-        for (ti, label) in tab_labels.iter().enumerate() {
-            let tw = text::width(label, SMALL_TEXT) + 16.0;
-            let selected = ti == 0; // Simplified: always show matches
-
-            if selected {
-                self.palette
-                    .push_surface(cmds, tx, y + 4.0, tw, 22.0, 3.0, Surface::Selected);
+            .push_surface(f, panel.x, panel.y, panel.w, panel.h, 4.0, Surface::Card);
+        let mut tx = panel.x + 4.0;
+        for view in ResultsView::ALL {
+            let w = text::measure(view.label(), SMALL_TEXT, FontWeightHint::Bold) + 16.0;
+            let rect = Rect::new(tx, panel.y + 4.0, w, 22.0);
+            let on = view == self.results_view;
+            if on || self.hover == Some(Target::ResultTab(view)) {
+                self.palette.push_surface(
+                    f,
+                    rect.x,
+                    rect.y,
+                    rect.w,
+                    rect.h,
+                    3.0,
+                    Surface::Selected,
+                );
             }
-
-            cmds.push(RenderCommand::Text {
-                x: tx + 8.0,
-                y: y + 8.0,
-                text: (*label).into(),
+            f.push(RenderCommand::Text {
+                x: rect.x + 8.0,
+                y: rect.y + 4.0,
+                text: view.label().into(),
                 font_size: SMALL_TEXT,
-                color: if selected {
+                color: if on {
                     self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.subtext0
                 },
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(tw),
-                overflow: TextOverflow::Ellipsis,
-            });
-            tx += tw + 4.0;
-        }
-
-        let content_y = y + 30.0;
-        let content_h = height - 34.0;
-
-        // Render matches list
-        if self.matches.is_empty() {
-            if self.pattern.is_empty() {
-                cmds.push(RenderCommand::Text {
-                    x: x + 12.0,
-                    y: content_y + 20.0,
-                    text: "Enter a pattern to begin".into(),
-                    font_size: NORMAL_TEXT,
-                    color: self.palette.subtext0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(width - 24.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            } else if self.compile_error.is_none() {
-                cmds.push(RenderCommand::Text {
-                    x: x + 12.0,
-                    y: content_y + 20.0,
-                    text: "No matches found".into(),
-                    font_size: NORMAL_TEXT,
-                    color: self.palette.ink(self.palette.yellow),
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(width - 24.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-        } else {
-            self.render_match_list(cmds, x, content_y, width, content_h);
-        }
-
-        // Explanation section at bottom
-        if !self.explanations.is_empty() {
-            let explain_y =
-                y + height - (self.explanations.len().min(6) as f32) * LINE_HEIGHT - 30.0;
-
-            self.palette.push_surface(
-                cmds,
-                x + 4.0,
-                explain_y - 4.0,
-                width - 8.0,
-                1.0,
-                0.0,
-                Surface::Card,
-            );
-
-            cmds.push(RenderCommand::Text {
-                x: x + 8.0,
-                y: explain_y + 2.0,
-                text: "Pattern Breakdown:".into(),
-                font_size: SMALL_TEXT,
-                color: self.palette.subtext1,
                 font_weight: FontWeightHint::Bold,
-                max_width: Some(width - 16.0),
+                max_width: Some(w),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            for (ei, explanation) in self.explanations.iter().take(6).enumerate() {
-                cmds.push(RenderCommand::Text {
-                    x: x + 12.0,
-                    y: explain_y + 20.0 + (ei as f32) * LINE_HEIGHT,
-                    text: explanation.clone(),
-                    font_size: SMALL_TEXT,
-                    color: self.palette.subtext0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(width - 24.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
+            f.hit(Target::ResultTab(view), rect);
+            tx += w + 4.0;
+        }
+        if self.results_view == ResultsView::Matches {
+            let label = if self.show_groups {
+                "Groups: shown"
+            } else {
+                "Groups: hidden"
+            };
+            let w = Self::button_width(label);
+            let rect = Rect::new(panel.right() - w - 6.0, panel.y + 4.0, w, 22.0);
+            if rect.x > tx {
+                self.button(f, rect, label, self.show_groups, Target::GroupsInline);
             }
+        }
+
+        let body = l.results_body();
+        f.hit(Target::ResultsBody, body);
+        f.clip(body);
+        match self.results_view {
+            ResultsView::Matches => self.draw_matches(f, body),
+            ResultsView::Groups => self.draw_groups(f, body),
+            ResultsView::Explain => self.draw_explanation(f, body),
+        }
+        f.unclip();
+    }
+
+    /// A line of text in the results panel's body.
+    fn body_text(f: &mut Frame<Target>, body: Rect, y: f32, line: String, colour: Color) {
+        f.push(RenderCommand::Text {
+            x: body.x + 12.0,
+            y,
+            text: line,
+            font_size: SMALL_TEXT,
+            color: colour,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((body.w - 24.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    /// What the results panel says when there is nothing to list.
+    fn empty_results(&self) -> Option<(&'static str, Color)> {
+        if self.pattern.text().is_empty() {
+            Some(("Enter a pattern to begin", self.palette.subtext0))
+        } else if self.compile_error.is_some() {
+            Some((
+                "The pattern does not compile -- see above",
+                self.palette.ink(self.palette.red),
+            ))
+        } else if self.matches.is_empty() {
+            Some(("No matches found", self.palette.ink(self.palette.yellow)))
+        } else {
+            None
         }
     }
 
-    fn render_match_list(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    ) {
-        let input_chars: Vec<char> = self.input_text.chars().collect();
-        let max_visible = ((height - 10.0) / (LINE_HEIGHT * 2.0)) as usize;
-        let scroll = (self.match_scroll_offset / (LINE_HEIGHT * 2.0)) as usize;
-
+    fn draw_matches(&self, f: &mut Frame<Target>, body: Rect) {
+        if let Some((message, colour)) = self.empty_results() {
+            Self::body_text(f, body, body.y + 20.0, message.to_string(), colour);
+            return;
+        }
+        let input_chars: Vec<char> = self.input.text().chars().collect();
+        let scroll = self.scroll_of(Pane::Results(ResultsView::Matches));
+        let row_h = ResultsView::Matches.row_height();
         for (mi, m) in self
             .matches
             .iter()
             .enumerate()
             .skip(scroll)
-            .take(max_visible)
+            .take(rows_in(body.h, row_h).saturating_add(1))
         {
-            let row_y = y + 4.0 + (mi.saturating_sub(scroll) as f32) * LINE_HEIGHT * 2.0;
-            let is_current = mi == self.current_match_index;
-
-            // Highlight current match row
-            if is_current {
-                self.palette.push_surface(
-                    cmds,
-                    x + 4.0,
-                    row_y,
-                    width - 8.0,
-                    LINE_HEIGHT * 2.0 - 4.0,
-                    4.0,
-                    Surface::Selected,
-                );
+            let row_y = body.y + 4.0 + (mi.saturating_sub(scroll)) as f32 * row_h;
+            let row = Rect::new(body.x + 4.0, row_y, (body.w - 8.0).max(0.0), row_h - 4.0);
+            let current = mi == self.current_match_index;
+            if current || self.hover == Some(Target::MatchRow(mi)) {
+                self.palette
+                    .push_surface(f, row.x, row.y, row.w, row.h, 4.0, Surface::Selected);
             }
-
-            // Match index and position
-            cmds.push(RenderCommand::Text {
-                x: x + 8.0,
+            f.push(RenderCommand::Text {
+                x: row.x + 4.0,
                 y: row_y + 2.0,
                 text: format!("#{} [{}-{}]", mi.saturating_add(1), m.start, m.end),
                 font_size: SMALL_TEXT,
-                color: if is_current {
+                color: if current {
                     self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.subtext0
                 },
                 font_weight: FontWeightHint::Bold,
-                max_width: Some(width - 16.0),
+                max_width: Some(110.0),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            // Matched text
             let matched: String = input_chars
                 .get(m.start..m.end.min(input_chars.len()))
                 .unwrap_or_default()
                 .iter()
-                .take(40)
                 .collect();
-            let display = if m.end.saturating_sub(m.start) > 40 {
-                format!("{matched}...")
-            } else {
-                matched
-            };
-
-            cmds.push(RenderCommand::Text {
-                x: x + 8.0,
+            f.push(RenderCommand::Text {
+                x: row.x + 4.0,
                 y: row_y + LINE_HEIGHT,
-                text: format!("\"{display}\""),
+                text: format!("\"{}\"", printable(&matched)),
                 font_size: SMALL_TEXT,
                 color: self.palette.ink(self.palette.green),
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(width - 16.0),
+                max_width: Some((row.w - 8.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            // Show groups if enabled
             if self.show_groups {
-                let group_texts: Vec<String> = m
+                let groups: Vec<String> = m
                     .groups
                     .iter()
                     .enumerate()
-                    .skip(1) // skip group 0 (whole match)
+                    .skip(1)
                     .filter_map(|(gi, g)| {
                         g.map(|(gs, ge)| {
                             let text: String = input_chars
                                 .get(gs..ge.min(input_chars.len()))
                                 .unwrap_or_default()
                                 .iter()
-                                .take(20)
                                 .collect();
-                            format!("${gi}=\"{text}\"")
+                            format!("${gi}=\"{}\"", printable(&text))
                         })
                     })
                     .collect();
-
-                if !group_texts.is_empty() {
-                    let groups_str = group_texts.join("  ");
-                    cmds.push(RenderCommand::Text {
-                        x: x + 120.0,
+                if !groups.is_empty() {
+                    f.push(RenderCommand::Text {
+                        x: row.x + 120.0,
                         y: row_y + 2.0,
-                        text: groups_str,
+                        text: groups.join("  "),
                         font_size: SMALL_TEXT,
                         color: self.palette.ink(self.palette.mauve),
                         font_weight: FontWeightHint::Regular,
-                        max_width: Some(width - 130.0),
+                        max_width: Some((row.w - 124.0).max(0.0)),
                         overflow: TextOverflow::Ellipsis,
                     });
                 }
             }
+            f.hit(Target::MatchRow(mi), row);
         }
     }
 
-    fn render_library_tab(&self, cmds: &mut Vec<RenderCommand>) {
-        let content_y = TOOLBAR_HEIGHT + PADDING;
+    /// The current match's groups, one to a row. "Groups" was a sub-tab
+    /// drawn with nothing behind it.
+    fn draw_groups(&self, f: &mut Frame<Target>, body: Rect) {
+        if let Some((message, colour)) = self.empty_results() {
+            Self::body_text(f, body, body.y + 20.0, message.to_string(), colour);
+            return;
+        }
+        let Some(m) = self.matches.get(self.current_match_index) else {
+            return;
+        };
+        let input_chars: Vec<char> = self.input.text().chars().collect();
+        let scroll = self.scroll_of(Pane::Results(ResultsView::Groups));
+        for (gi, g) in m
+            .groups
+            .iter()
+            .enumerate()
+            .skip(scroll)
+            .take(rows_in(body.h, LINE_HEIGHT).saturating_add(1))
+        {
+            let y = body.y + 6.0 + (gi.saturating_sub(scroll)) as f32 * LINE_HEIGHT;
+            // Group 0 is the whole match, which the engine keeps in the
+            // match's own span rather than in its group list.
+            let (what, g) = if gi == 0 {
+                (
+                    format!("Match #{}", self.current_match_index.saturating_add(1)),
+                    &Some((m.start, m.end)),
+                )
+            } else {
+                (format!("${gi}"), g)
+            };
+            let line = match g {
+                Some((gs, ge)) => {
+                    let text: String = input_chars
+                        .get(*gs..(*ge).min(input_chars.len()))
+                        .unwrap_or_default()
+                        .iter()
+                        .collect();
+                    format!("{what}  \"{}\"  [{gs}-{ge}]", printable(&text))
+                }
+                None => format!("{what}  took no part in this match"),
+            };
+            Self::body_text(
+                f,
+                body,
+                y,
+                line,
+                if g.is_some() {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
+            );
+        }
+    }
 
-        // Category filter bar
-        let mut cat_x = PADDING;
-        for cat in &LIBRARY_FILTERS {
+    /// The pattern, piece by piece -- all of it; it was cut at six lines.
+    fn draw_explanation(&self, f: &mut Frame<Target>, body: Rect) {
+        if self.explanations.is_empty() {
+            Self::body_text(
+                f,
+                body,
+                body.y + 20.0,
+                "Enter a pattern to begin".to_string(),
+                self.palette.subtext0,
+            );
+            return;
+        }
+        let scroll = self.scroll_of(Pane::Results(ResultsView::Explain));
+        for (i, line) in self
+            .explanations
+            .iter()
+            .enumerate()
+            .skip(scroll)
+            .take(rows_in(body.h, LINE_HEIGHT).saturating_add(1))
+        {
+            let y = body.y + 6.0 + (i.saturating_sub(scroll)) as f32 * LINE_HEIGHT;
+            Self::body_text(f, body, y, line.clone(), self.palette.subtext1);
+        }
+    }
+
+    fn draw_library(&self, f: &mut Frame<Target>) {
+        let content = self.content_rect();
+        let mut chip_x = PADDING;
+        for (ci, cat) in LIBRARY_FILTERS.iter().enumerate() {
             let label = cat.map_or("All", PatternCategory::label);
-            let w = text::width(label, SMALL_TEXT) + 16.0;
+            let w = text::measure(label, SMALL_TEXT, FontWeightHint::Bold) + 16.0;
+            let rect = Rect::new(chip_x, content.y, w, 24.0);
             let selected = self.library_category_filter == *cat;
-
             self.palette.push_surface(
-                cmds,
-                cat_x,
-                content_y,
-                w,
-                24.0,
+                f,
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
                 12.0,
-                if selected {
+                if selected || self.hover == Some(Target::Chip(ci)) {
                     Surface::Selected
                 } else {
                     Surface::Card
                 },
             );
-            cmds.push(RenderCommand::Text {
-                x: cat_x + 8.0,
-                y: content_y + 5.0,
+            f.push(RenderCommand::Text {
+                x: rect.x + 8.0,
+                y: rect.y + 5.0,
                 text: label.into(),
                 font_size: SMALL_TEXT,
                 color: if selected {
@@ -2587,54 +3613,74 @@ impl App {
                 max_width: Some(w),
                 overflow: TextOverflow::Ellipsis,
             });
-            cat_x += w + 6.0;
+            f.hit(Target::Chip(ci), rect);
+            chip_x += w + 6.0;
         }
 
-        // Library entries
-        let list_y = content_y + 34.0;
-        let filtered: Vec<(usize, &PatternEntry)> = self
-            .library
+        let list = self.library_list_rect();
+        f.hit(Target::LibraryBody, list);
+        let shown = self.visible_library();
+        if shown.is_empty() {
+            let message = if self.library_category_filter == Some(PatternCategory::Custom) {
+                "No saved patterns yet: save one from the tester with Save… or Ctrl+S"
+            } else {
+                "No patterns in this category"
+            };
+            f.push(RenderCommand::Text {
+                x: text::center_x(
+                    message,
+                    self.window_width / 2.0,
+                    NORMAL_TEXT,
+                    FontWeightHint::Regular,
+                ),
+                y: list.y + 40.0,
+                text: message.into(),
+                font_size: NORMAL_TEXT,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(list.w),
+                overflow: TextOverflow::Ellipsis,
+            });
+            return;
+        }
+        f.clip(list);
+        for (vi, (index, entry)) in shown
             .iter()
             .enumerate()
-            .filter(|(_, e)| self.library_category_filter.is_none_or(|f| e.category == f))
-            .collect();
-
-        for (vi, (original_idx, entry)) in filtered.iter().enumerate() {
-            let row_y = list_y + (vi as f32) * 60.0;
-            if row_y > self.window_height - 30.0 {
-                break;
-            }
-
-            let selected = self.selected_library_entry == Some(*original_idx);
-
-            // Row background
+            .skip(self.library_scroll)
+            .take(self.library_rows().saturating_add(1))
+        {
+            let row_y =
+                list.y + (vi.saturating_sub(self.library_scroll)) as f32 * LIBRARY_ROW_HEIGHT;
+            let row = Rect::new(list.x, row_y, list.w, LIBRARY_ROW_HEIGHT - 6.0);
+            let selected = self.selected_library_entry == Some(*index);
             self.palette.push_surface(
-                cmds,
-                PADDING,
-                row_y,
-                self.window_width - 2.0 * PADDING,
-                54.0,
+                f,
+                row.x,
+                row.y,
+                row.w,
+                row.h,
                 6.0,
-                if selected {
+                if selected || self.hover == Some(Target::LibraryRow(*index)) {
                     Surface::Selected
                 } else {
                     Surface::Card
                 },
             );
+            f.hit(Target::LibraryRow(*index), row);
 
-            // Category badge
             let cat_label = entry.category.label();
             let badge_w = text::measure(cat_label, BADGE_TEXT, FontWeightHint::Bold) + 12.0;
-            cmds.push(RenderCommand::FillRect {
-                x: PADDING + 8.0,
+            f.push(RenderCommand::FillRect {
+                x: row.x + 8.0,
                 y: row_y + 6.0,
                 width: badge_w,
                 height: 18.0,
                 color: entry.category.color(&self.palette),
                 corner_radii: CornerRadii::all(9.0),
             });
-            cmds.push(RenderCommand::Text {
-                x: PADDING + 14.0,
+            f.push(RenderCommand::Text {
+                x: row.x + 14.0,
                 y: row_y + 9.0,
                 text: cat_label.into(),
                 font_size: BADGE_TEXT,
@@ -2643,10 +3689,8 @@ impl App {
                 max_width: Some(badge_w),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            // Name
-            cmds.push(RenderCommand::Text {
-                x: PADDING + badge_w + 16.0,
+            f.push(RenderCommand::Text {
+                x: row.x + badge_w + 16.0,
                 y: row_y + 8.0,
                 text: entry.name.clone(),
                 font_size: NORMAL_TEXT,
@@ -2656,253 +3700,328 @@ impl App {
                 overflow: TextOverflow::Ellipsis,
             });
 
-            // Pattern
-            cmds.push(RenderCommand::Text {
-                x: PADDING + 8.0,
-                y: row_y + 30.0,
-                text: text::elide(
-                    &entry.pattern,
-                    self.window_width - 40.0,
-                    "...",
-                    SMALL_TEXT,
-                    FontWeightHint::Regular,
-                ),
-                font_size: SMALL_TEXT,
-                color: self.palette.ink(self.palette.sky),
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(self.window_width - 40.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Description on right
-            cmds.push(RenderCommand::Text {
-                x: self.window_width - 250.0,
+            // The buttons, from the right; the description stops short of
+            // them.
+            let mut right = row.right() - 8.0;
+            let mut buttons = vec![("Use", Target::LibraryUse(*index))];
+            if entry.category == PatternCategory::Custom {
+                buttons.push(("Delete", Target::LibraryDelete(*index)));
+            }
+            for (label, target) in buttons {
+                let w = Self::button_width(label);
+                let rect = Rect::new(right - w, row_y + 14.0, w, 26.0);
+                self.button(f, rect, label, false, target);
+                right = rect.x - 6.0;
+            }
+            let description = entry.flags.map_or_else(
+                || entry.description.clone(),
+                |flags| format!("{}  /{}", entry.description, flags.letters()),
+            );
+            f.push(RenderCommand::Text {
+                x: (right - 240.0).max(row.x + badge_w + 330.0),
                 y: row_y + 8.0,
-                text: entry.description.clone(),
+                text: description,
                 font_size: SMALL_TEXT,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(230.0),
                 overflow: TextOverflow::Ellipsis,
             });
-        }
-
-        if filtered.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: self.window_width / 2.0 - 80.0,
-                y: list_y + 40.0,
-                text: "No patterns in this category".into(),
-                font_size: NORMAL_TEXT,
-                color: self.palette.subtext0,
+            f.push(RenderCommand::Text {
+                x: row.x + 8.0,
+                y: row_y + 30.0,
+                text: entry.pattern.clone(),
+                font_size: SMALL_TEXT,
+                color: self.palette.ink(self.palette.sky),
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(300.0),
+                max_width: Some((right - row.x - 16.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         }
+        f.unclip();
     }
 
-    fn render_reference_tab(&self, cmds: &mut Vec<RenderCommand>) {
-        let content_y = TOOLBAR_HEIGHT + PADDING;
-        let col_width = (self.window_width - 3.0 * PADDING) / 2.0;
-
-        // Left column: Syntax reference
-        self.palette.push_surface(
-            cmds,
-            PADDING,
-            content_y,
-            col_width,
-            self.window_height - content_y - PADDING,
-            6.0,
-            Surface::Strip(Edge::Bottom),
-        );
-
-        cmds.push(RenderCommand::Text {
-            x: PADDING + 12.0,
-            y: content_y + 10.0,
-            text: "Syntax Reference".into(),
-            font_size: HEADER_TEXT,
-            color: self.palette.ink(self.palette.blue),
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(col_width - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        let syntax_items = [
-            (".       ", "Any character (except newline)"),
-            ("^       ", "Start of string"),
-            ("$       ", "End of string"),
-            ("*       ", "Zero or more"),
-            ("+       ", "One or more"),
-            ("?       ", "Zero or one"),
-            ("{n}     ", "Exactly n times"),
-            ("{n,}    ", "n or more times"),
-            ("{n,m}   ", "Between n and m times"),
-            ("*? +? ??", "Lazy quantifiers"),
-            ("(...)   ", "Capturing group"),
-            ("(?:...) ", "Non-capturing group"),
-            ("a|b     ", "Alternation (a or b)"),
-            ("[abc]   ", "Character class"),
-            ("[^abc]  ", "Negated class"),
-            ("[a-z]   ", "Character range"),
-            ("\\d      ", "Digit [0-9]"),
-            ("\\D      ", "Non-digit"),
-            ("\\w      ", "Word char [a-zA-Z0-9_]"),
-            ("\\W      ", "Non-word char"),
-            ("\\s      ", "Whitespace"),
-            ("\\S      ", "Non-whitespace"),
-            ("\\b      ", "Word boundary"),
-            ("\\n \\r \\t", "Newline, CR, Tab"),
-            ("\\\\     ", "Escaped backslash"),
-        ];
-
-        for (si, (syntax, desc)) in syntax_items.iter().enumerate() {
-            let sy = content_y + 36.0 + (si as f32) * LINE_HEIGHT;
-            if sy > self.window_height - 30.0 {
-                break;
-            }
-
-            cmds.push(RenderCommand::Text {
-                x: PADDING + 12.0,
-                y: sy,
-                text: (*syntax).into(),
-                font_size: SMALL_TEXT,
-                color: self.palette.ink(self.palette.green),
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(80.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cmds.push(RenderCommand::Text {
-                x: PADDING + 100.0,
-                y: sy,
-                text: (*desc).into(),
-                font_size: SMALL_TEXT,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(col_width - 112.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
-        // Right column: Replace reference
+    /// The reference: two columns, which scroll together when the window is
+    /// too short for them.
+    fn draw_reference(&self, f: &mut Frame<Target>) {
+        let content = self.content_rect();
+        let col_width = ((self.window_width - 3.0 * PADDING) / 2.0).max(0.0);
         let right_x = PADDING + col_width + PADDING;
+        f.hit(Target::ReferenceBody, content);
         self.palette.push_surface(
-            cmds,
-            right_x,
-            content_y,
+            f,
+            PADDING,
+            content.y,
             col_width,
-            self.window_height - content_y - PADDING,
+            content.h,
             6.0,
             Surface::Card,
         );
-
-        cmds.push(RenderCommand::Text {
-            x: right_x + 12.0,
-            y: content_y + 10.0,
-            text: "Replacement Reference".into(),
-            font_size: HEADER_TEXT,
-            color: self.palette.ink(self.palette.peach),
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(col_width - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        let replace_items = [
-            ("$0     ", "Entire match"),
-            ("$1-$9  ", "Capture group N"),
-            ("\\n     ", "Newline"),
-            ("\\t     ", "Tab"),
-            ("\\\\    ", "Literal backslash"),
-        ];
-
-        for (ri, (syntax, desc)) in replace_items.iter().enumerate() {
-            let ry = content_y + 36.0 + (ri as f32) * LINE_HEIGHT;
-
-            cmds.push(RenderCommand::Text {
-                x: right_x + 12.0,
-                y: ry,
-                text: (*syntax).into(),
-                font_size: SMALL_TEXT,
-                color: self.palette.ink(self.palette.peach),
+        self.palette.push_surface(
+            f,
+            right_x,
+            content.y,
+            col_width,
+            content.h,
+            6.0,
+            Surface::Card,
+        );
+        f.clip(content);
+        let top = content.y - self.reference_scroll as f32 * LINE_HEIGHT;
+        let heading = |f: &mut Frame<Target>, x: f32, y: f32, label: &str, colour: Color| {
+            f.push(RenderCommand::Text {
+                x,
+                y,
+                text: label.into(),
+                font_size: HEADER_TEXT,
+                color: colour,
                 font_weight: FontWeightHint::Bold,
-                max_width: Some(80.0),
+                max_width: Some((col_width - 24.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-            cmds.push(RenderCommand::Text {
-                x: right_x + 100.0,
-                y: ry,
-                text: (*desc).into(),
-                font_size: SMALL_TEXT,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(col_width - 112.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        };
+        let pair =
+            |f: &mut Frame<Target>, x: f32, y: f32, syntax: &str, desc: &str, colour: Color| {
+                f.push(RenderCommand::Text {
+                    x,
+                    y,
+                    text: syntax.into(),
+                    font_size: SMALL_TEXT,
+                    color: colour,
+                    font_weight: FontWeightHint::Bold,
+                    max_width: Some(80.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+                f.push(RenderCommand::Text {
+                    x: x + 88.0,
+                    y,
+                    text: desc.into(),
+                    font_size: SMALL_TEXT,
+                    color: self.palette.subtext0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some((col_width - 112.0).max(0.0)),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            };
+
+        heading(
+            f,
+            PADDING + 12.0,
+            top + 10.0,
+            "Syntax Reference",
+            self.palette.ink(self.palette.blue),
+        );
+        for (si, (syntax, desc)) in SYNTAX_REFERENCE.iter().enumerate() {
+            let y = top + 36.0 + si as f32 * LINE_HEIGHT;
+            pair(
+                f,
+                PADDING + 12.0,
+                y,
+                syntax,
+                desc,
+                self.palette.ink(self.palette.green),
+            );
         }
 
-        // Tips section
-        let tips_y = content_y + 140.0;
-        cmds.push(RenderCommand::Text {
-            x: right_x + 12.0,
-            y: tips_y,
-            text: "Tips & Tricks".into(),
-            font_size: HEADER_TEXT,
-            color: self.palette.ink(self.palette.teal),
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(col_width - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        let tips = [
-            "Use \\b for word boundaries to avoid partial matches",
-            "Character classes [] are faster than alternation |",
-            "Non-capturing groups (?:) when you don't need the capture",
-            "Use lazy quantifiers *? +? to match as little as possible",
-            "Anchors ^ $ don't consume characters",
-            "Escape special chars with \\ when matching literally",
-            "Test patterns incrementally - start simple, add complexity",
-        ];
-
-        for (ti, tip) in tips.iter().enumerate() {
-            let ty = tips_y + 26.0 + (ti as f32) * LINE_HEIGHT;
-            if ty > self.window_height - 30.0 {
-                break;
-            }
-
-            cmds.push(RenderCommand::Text {
+        heading(
+            f,
+            right_x + 12.0,
+            top + 10.0,
+            "Replacement Reference",
+            self.palette.ink(self.palette.peach),
+        );
+        for (ri, (syntax, desc)) in REPLACEMENT_REFERENCE.iter().enumerate() {
+            let y = top + 36.0 + ri as f32 * LINE_HEIGHT;
+            pair(
+                f,
+                right_x + 12.0,
+                y,
+                syntax,
+                desc,
+                self.palette.ink(self.palette.peach),
+            );
+        }
+        let tips_y = top + 140.0;
+        heading(
+            f,
+            right_x + 12.0,
+            tips_y,
+            "Tips & Tricks",
+            self.palette.ink(self.palette.teal),
+        );
+        for (ti, tip) in TIPS.iter().enumerate() {
+            let y = tips_y + 26.0 + ti as f32 * LINE_HEIGHT;
+            f.push(RenderCommand::Text {
                 x: right_x + 16.0,
-                y: ty,
+                y,
                 text: format!("- {tip}"),
                 font_size: SMALL_TEXT,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(col_width - 28.0),
+                max_width: Some((col_width - 28.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        f.unclip();
+    }
+
+    /// How many rows the reference is, at its tallest column.
+    fn reference_rows() -> usize {
+        // Header (36 px) and the syntax list; the right column is its list,
+        // the tips' heading at 140 px and the tips.
+        let left = SYNTAX_REFERENCE.len().saturating_add(2);
+        let right = TIPS.len().saturating_add(9);
+        left.max(right)
+    }
+
+    fn draw_status_bar(&self, f: &mut Frame<Target>) {
+        let y = self.window_height - STATUS_BAR_HEIGHT;
+        self.palette.push_surface(
+            f,
+            0.0,
+            y,
+            self.window_width,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
+        let message = self
+            .hover
+            .and_then(Target::tip)
+            .map(str::to_string)
+            .or_else(|| (!self.status.is_empty()).then(|| self.status.clone()));
+        if let Some(message) = message {
+            f.push(RenderCommand::Text {
+                x: PADDING,
+                y: y + 5.0,
+                text: message,
+                font_size: SMALL_TEXT,
+                color: self.palette.text,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((self.window_width - 2.0 * PADDING).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         }
     }
 
-    /// Route one event.
+    /// Where the save dialog's card goes.
+    fn save_dialog_rect(&self) -> Rect {
+        let (w, h) = (380.0_f32.min(self.window_width - 20.0).max(0.0), 150.0);
+        Rect::new(
+            (self.window_width - w) / 2.0,
+            (self.window_height - h) / 2.0,
+            w,
+            h,
+        )
+    }
+
+    fn draw_save_dialog(&self, f: &mut Frame<Target>) {
+        let Some(name) = &self.save_name else {
+            return;
+        };
+        f.hit(
+            Target::ModalBackdrop,
+            Rect::new(0.0, 0.0, self.window_width, self.window_height),
+        );
+        f.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: self.window_width,
+            height: self.window_height,
+            color: with_alpha(self.palette.crust, 140),
+            corner_radii: CornerRadii::ZERO,
+        });
+        let card = self.save_dialog_rect();
+        self.palette
+            .push_surface(f, card.x, card.y, card.w, card.h, 8.0, Surface::Card);
+        f.hit(Target::ModalBackdrop, card);
+        f.push(RenderCommand::Text {
+            x: card.x + 16.0,
+            y: card.y + 14.0,
+            text: "Save the pattern to the library".into(),
+            font_size: HEADER_TEXT,
+            color: self.palette.text,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some((card.w - 32.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        let field = Rect::new(card.x + 16.0, card.y + 44.0, (card.w - 32.0).max(0.0), 32.0);
+        self.palette
+            .push_surface(f, field.x, field.y, field.w, field.h, 4.0, Surface::Card);
+        f.push(RenderCommand::StrokeRect {
+            x: field.x,
+            y: field.y,
+            width: field.w,
+            height: field.h,
+            color: self.palette.blue,
+            line_width: 2.0,
+            corner_radii: CornerRadii::all(4.0),
+        });
+        let mut tree = RenderTree::new();
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text: name.text(),
+                cursor: name.cursor(),
+                selection_anchor: name.selection_anchor(),
+                focused: true,
+                x: field.x + 8.0,
+                y: field.y + 7.0,
+                width: (field.w - 16.0).max(0.0),
+                line_height: 18.0,
+                font_size: NORMAL_TEXT,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.blue,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        f.extend(tree.commands);
+        f.hit(Target::SaveName, field);
+        if let Some(error) = &self.save_error {
+            f.push(RenderCommand::Text {
+                x: card.x + 16.0,
+                y: field.bottom() + 8.0,
+                text: error.clone(),
+                font_size: SMALL_TEXT,
+                color: self.palette.ink(self.palette.red),
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((card.w - 32.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        let mut right = card.right() - 16.0;
+        for (label, lit, target) in [
+            ("Save", true, Target::SaveConfirm),
+            ("Cancel", false, Target::SaveCancel),
+        ] {
+            let w = Self::button_width(label);
+            let rect = Rect::new(right - w, card.bottom() - 40.0, w, 28.0);
+            self.button(f, rect, label, lit, target);
+            right = rect.x - 8.0;
+        }
+    }
+
+    // -- events --------------------------------------------------------------------
+
+    /// Route one event, answering whether anything changed.
     ///
     /// **This app had no event handling of any kind until 2026-09-03**: `main`
-    /// built an `App`, rendered one frame and returned. `update_regex`,
-    /// `next_match`, `load_library_entry` and the rest were exercised only by
-    /// tests calling them directly, so nothing had ever established that a
-    /// keystroke could reach them.
-    ///
-    /// Returns whether anything changed, which `App::on_event` turns into a
-    /// repaint.
-    fn handle_event(&mut self, event: &guitk::event::Event) -> bool {
-        use guitk::event::Event as GEvent;
+    /// built an `App`, rendered one frame and returned; and until 2026-09-25 no
+    /// pointer event reached it.
+    fn handle_event(&mut self, event: &Event) -> bool {
         match event {
-            GEvent::Resize { width, height } => {
-                #[allow(clippy::cast_precision_loss)]
+            Event::Resize { width, height } => {
                 {
                     self.window_width = *width as f32;
                     self.window_height = *height as f32;
                 }
+                self.keep_caret_visible();
                 true
             }
-            GEvent::Key(key) if key.pressed => self.handle_key(key),
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
             _ => false,
         }
     }
@@ -2912,68 +4031,59 @@ impl App {
     /// Typing goes to whichever field has focus, which is what makes this a
     /// tester rather than a viewer: the pattern is recompiled on every edit, so
     /// the match list under it follows the keystroke.
-    fn handle_key(&mut self, key: &guitk::event::KeyEvent) -> bool {
-        use guitk::event::Key as GKey;
-        match key.key {
-            GKey::Tab => {
-                // Cycles focus rather than inserting a tab: a regex tester's
-                // three fields are the whole interface, and Tab is how every
-                // form on every desktop moves between them.
-                // Skips the replacement while its pane is hidden. Until
-                // `Ctrl+R` existed the pane was *never* drawn -- `show_replace`
-                // was `false` with no writer -- so this cycle put the caret in
-                // a field nobody could see, and the shortcut list said Tab
-                // moved between three fields when one of them was invisible.
-                self.active_field = match self.active_field {
-                    ActiveField::Pattern => ActiveField::Input,
-                    ActiveField::Input if self.show_replace => ActiveField::Replace,
-                    ActiveField::Input | ActiveField::Replace => ActiveField::Pattern,
-                };
+    fn handle_key(&mut self, key: &KeyEvent) -> bool {
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return true;
+        }
+        if key.key == Key::Escape && self.show_help {
+            self.show_help = false;
+            return true;
+        }
+        if self.save_name.is_some() {
+            return self.handle_save_key(key);
+        }
+        if key.key == Key::F3 {
+            if key.modifiers.shift {
+                self.prev_match();
+            } else {
+                self.next_match();
+            }
+            return !self.matches.is_empty();
+        }
+        if key.modifiers.ctrl
+            && let Some(done) = self.handle_chord(key)
+        {
+            return done;
+        }
+        match self.active_tab {
+            ActiveTab::Tester => self.handle_tester_key(key),
+            ActiveTab::Library => self.handle_library_key(key),
+            ActiveTab::Reference => self.handle_reference_key(key),
+        }
+    }
+
+    /// A key with Ctrl held, or `None` for one that is an editing chord for
+    /// the field with the keyboard.
+    ///
+    /// Chords and not bare letters, because every printable character is
+    /// typed into whichever field has focus -- an `i` belongs in somebody's
+    /// pattern before it belongs to a setting.
+    fn handle_chord(&mut self, key: &KeyEvent) -> Option<bool> {
+        Some(match key.key {
+            Key::Num1 => self.set_tab(ActiveTab::Tester),
+            Key::Num2 => self.set_tab(ActiveTab::Library),
+            Key::Num3 => self.set_tab(ActiveTab::Reference),
+            Key::G if key.modifiers.shift => {
+                self.show_groups = !self.show_groups;
                 true
             }
-            // The three flags the toolbar draws. Chords and not bare
-            // letters, because the catch-all below types every printable
-            // character into whichever field has focus -- an `i` belongs in
-            // somebody's pattern before it belongs to a setting. The letters
-            // match the labels on the buttons: i, g, m.
-            //
-            // Until this existed the buttons were drawn, coloured by their
-            // state, read by the matcher, and changeable only from a test.
-            // The list, before the chords and well before the catch-all
-            // that types. `F1` carries no modifier, so nothing below claims it.
-            GKey::F1 => {
-                self.show_help = !self.show_help;
-                true
-            }
-            GKey::Escape if self.show_help => {
-                self.show_help = false;
-                true
-            }
-            // The three tabs the window draws. `active_tab` was
-            // `ActiveTab::Tester` at construction, matched to choose the view,
-            // drawn to highlight the strip -- and written only by tests, so
-            // the Library and Reference tabs were rendered code no user could
-            // reach. A tab strip with one tab highlighted looks exactly like a
-            // tab strip, which is why nobody noticed.
-            //
-            // Chords, because every printable character is typed into
-            // whichever field has focus. Found by
-            // `scripts/frozen-flag-survey.py` once it learned about enums.
-            // The two panes this window can draw and could not be asked
-            // for. `show_replace` was `false` with no writer, so the
-            // replacement box was never drawn and `replace_in_active` never
-            // ran; `show_groups` was `true` with no writer, so the capture
-            // groups could not be put away. Found by
-            // `scripts/frozen-flag-survey.py` on its third pass over this
-            // crate, after the flag buttons and the tabs.
-            // The chips along the top of the Library tab.
-            // `library_category_filter` was `None` at construction, read to
-            // highlight the selected chip and again to filter the entries,
-            // and written nowhere -- so eight chips were drawn and none could
-            // be chosen. Found on the fourth pass over this crate, by reading
-            // the line under a row the survey had reported as a false
-            // positive.
-            GKey::L if key.modifiers.ctrl => {
+            Key::I => self.toggle_flag(Flag::CaseInsensitive),
+            Key::G => self.toggle_flag(Flag::Global),
+            Key::M => self.toggle_flag(Flag::Multiline),
+            Key::R => self.toggle_replace(),
+            Key::S => self.ask_to_save(),
+            Key::L => {
                 let at = LIBRARY_FILTERS
                     .iter()
                     .position(|c| *c == self.library_category_filter)
@@ -2986,136 +4096,743 @@ impl App {
                 } else {
                     next
                 };
-                self.library_category_filter = LIBRARY_FILTERS.get(wrapped).copied().flatten();
-                true
+                self.set_library_filter(LIBRARY_FILTERS.get(wrapped).copied().flatten())
             }
-            GKey::R if key.modifiers.ctrl => {
-                self.show_replace = !self.show_replace;
-                // Hiding the pane takes the caret with it, rather than
-                // leaving it typing into something off screen.
-                if !self.show_replace && self.active_field == ActiveField::Replace {
-                    self.active_field = ActiveField::Pattern;
-                }
-                self.update_regex();
-                true
-            }
-            GKey::G if key.modifiers.ctrl && key.modifiers.shift => {
-                self.show_groups = !self.show_groups;
-                true
-            }
-            GKey::Num1 if key.modifiers.ctrl => {
-                self.active_tab = ActiveTab::Tester;
-                true
-            }
-            GKey::Num2 if key.modifiers.ctrl => {
-                self.active_tab = ActiveTab::Library;
-                true
-            }
-            GKey::Num3 if key.modifiers.ctrl => {
-                self.active_tab = ActiveTab::Reference;
-                true
-            }
-            GKey::I if key.modifiers.ctrl => {
-                self.flags.case_insensitive = !self.flags.case_insensitive;
-                self.update_regex();
-                true
-            }
-            GKey::G if key.modifiers.ctrl => {
-                self.flags.global = !self.flags.global;
-                self.update_regex();
-                true
-            }
-            GKey::M if key.modifiers.ctrl => {
-                self.flags.multiline = !self.flags.multiline;
-                self.update_regex();
-                true
-            }
-            GKey::Down => {
-                self.next_match();
-                true
-            }
-            GKey::Up => {
-                self.prev_match();
-                true
-            }
-            GKey::Backspace => {
-                let field = self.active_field_mut();
-                // `pop` and not `truncate(len - 1)`: a pattern can hold any
-                // character, and removing a byte would split a multi-byte one
-                // and panic on the next slice.
-                if field.pop().is_none() {
-                    return false;
-                }
-                self.update_regex();
-                true
-            }
-            _ => {
-                // Every character the keystroke produced, not just the first:
-                // one keypress can type none, one, or several -- a dead key
-                // followed by a letter composes into one character, and an
-                // input method can deliver a whole word. Taking
-                // `text.chars().next()` dropped everything after the first.
-                if !self.type_into_active_field(&key.text) {
-                    return false;
-                }
-                self.update_regex();
-                true
-            }
-        }
+            // Editing chords belong to the field with the keyboard.
+            Key::A | Key::C | Key::X | Key::V | Key::Home | Key::End => return None,
+            _ => false,
+        })
     }
 
-    /// The text of the field that currently has focus.
-    ///
-    /// One accessor rather than a `match` at each of the three call sites,
-    /// because three copies of "which field is focused" is three chances for
-    /// one of them to disagree with the renderer about where the caret is.
-    fn active_field_mut(&mut self) -> &mut String {
-        match self.active_field {
-            ActiveField::Pattern => &mut self.pattern,
-            ActiveField::Input => &mut self.input_text,
-            ActiveField::Replace => &mut self.replace_text,
+    fn set_tab(&mut self, tab: ActiveTab) -> bool {
+        if self.active_tab == tab {
+            return false;
         }
+        self.active_tab = tab;
+        self.dragging = false;
+        true
     }
 
-    /// How many characters a field will hold.
+    fn toggle_flag(&mut self, flag: Flag) -> bool {
+        self.flags.toggle(flag);
+        self.update_regex();
+        true
+    }
+
+    fn toggle_replace(&mut self) -> bool {
+        self.show_replace = !self.show_replace;
+        // Hiding the pane takes the caret with it, rather than leaving it
+        // typing into something off screen.
+        if !self.show_replace && self.active_field == ActiveField::Replace {
+            self.active_field = ActiveField::Pattern;
+        }
+        self.result_scroll = 0;
+        self.update_regex();
+        self.keep_caret_visible();
+        true
+    }
+
+    /// How many characters `field` holds.
     ///
     /// `MAX_PATTERN_LEN`, `MAX_INPUT_LEN` and `MAX_REPLACE_LEN` were declared
-    /// with the rest of the layout constants and consulted by nothing, so all
-    /// three fields were unbounded. That matters more here than in most text
-    /// boxes: `update_regex` compiles the pattern and runs a backtracking
-    /// engine across the whole input on *every keystroke*, so the cost of one
-    /// character is a function of everything typed before it.
-    fn active_field_capacity(&self) -> usize {
-        match self.active_field {
+    /// with the layout constants and consulted by nothing, so all three fields
+    /// were unbounded. That matters more here than in most text boxes: the
+    /// pattern is compiled and run across the whole input on *every
+    /// keystroke*, so the cost of one character is a function of everything
+    /// typed before it.
+    fn capacity(field: ActiveField) -> usize {
+        match field {
             ActiveField::Pattern => MAX_PATTERN_LEN,
             ActiveField::Input => MAX_INPUT_LEN,
             ActiveField::Replace => MAX_REPLACE_LEN,
         }
     }
 
-    /// Append what a keystroke typed, up to the field's limit.
-    ///
-    /// Returns whether anything was added, so a keystroke into a full field
-    /// costs no redraw and no recompile.
-    fn type_into_active_field(&mut self, text: &str) -> bool {
-        let capacity = self.active_field_capacity();
-        let field = self.active_field_mut();
-        let mut added = false;
-        for ch in text.chars() {
-            if ch.is_control() {
-                continue;
-            }
-            // Counted in characters, not bytes: a limit in bytes would cut a
-            // multi-byte character in half and the field holds any of them.
-            if field.chars().count() >= capacity {
-                break;
-            }
-            field.push(ch);
-            added = true;
+    /// Move the keyboard to the next or the previous field on screen.
+    fn cycle_field(&mut self, back: bool) {
+        let fields: &[ActiveField] = if self.show_replace {
+            &[
+                ActiveField::Pattern,
+                ActiveField::Input,
+                ActiveField::Replace,
+            ]
+        } else {
+            &[ActiveField::Pattern, ActiveField::Input]
+        };
+        let at = fields
+            .iter()
+            .position(|f| *f == self.active_field)
+            .unwrap_or(0);
+        let next = if back {
+            at.checked_sub(1).unwrap_or(fields.len().saturating_sub(1))
+        } else if at.saturating_add(1) >= fields.len() {
+            0
+        } else {
+            at.saturating_add(1)
+        };
+        self.active_field = fields.get(next).copied().unwrap_or(ActiveField::Pattern);
+    }
+
+    fn handle_tester_key(&mut self, key: &KeyEvent) -> bool {
+        if key.key == Key::Tab {
+            // Cycles focus rather than inserting a tab: a regex tester's
+            // fields are the whole interface, and Tab is how every form on
+            // every desktop moves between them. Skips the replacement while
+            // its pane is hidden.
+            self.cycle_field(key.modifiers.shift);
+            return true;
         }
-        added
+        match self.active_field {
+            ActiveField::Input => self.handle_input_key(key),
+            field @ (ActiveField::Pattern | ActiveField::Replace) => {
+                match key.key {
+                    // Up and Down have no meaning in a one-line box; they step
+                    // through the matches, as they always did here.
+                    Key::Down | Key::Enter => {
+                        self.next_match();
+                        return !self.matches.is_empty();
+                    }
+                    Key::Up => {
+                        self.prev_match();
+                        return !self.matches.is_empty();
+                    }
+                    _ => {}
+                }
+                let capacity = Self::capacity(field);
+                let clipboard = self.clipboard.clone();
+                let input = if field == ActiveField::Pattern {
+                    &mut self.pattern
+                } else {
+                    &mut self.replace
+                };
+                let before = (
+                    input.text().to_string(),
+                    input.cursor(),
+                    input.selection_anchor(),
+                );
+                let edited = edit_line(input, key, capacity, &clipboard);
+                let typed = input.text() != before.0;
+                let moved = (input.cursor(), input.selection_anchor()) != (before.1, before.2);
+                let copied = edited.copied.is_some();
+                if let Some(copied) = edited.copied {
+                    self.clipboard = copied;
+                }
+                if typed {
+                    self.update_regex();
+                }
+                // A key that changed nothing -- a letter into a full field, End
+                // at the end -- costs no frame and no recompile.
+                edited.handled && (typed || moved || copied)
+            }
+        }
+    }
+
+    /// A key while the test input has the keyboard.
+    fn handle_input_key(&mut self, key: &KeyEvent) -> bool {
+        let shift = key.modifiers.shift;
+        let ctrl = key.modifiers.ctrl;
+        let page = self.input_rows().saturating_sub(1).max(1);
+        let before = (self.input.caret, self.input.anchor, self.clipboard.len());
+        let changed = match key.key {
+            Key::Left => {
+                self.input.left(shift);
+                false
+            }
+            Key::Right => {
+                self.input.right(shift);
+                false
+            }
+            Key::Up => {
+                self.input.vertical(false, 1, shift);
+                false
+            }
+            Key::Down => {
+                self.input.vertical(true, 1, shift);
+                false
+            }
+            Key::PageUp => {
+                self.input.vertical(false, page, shift);
+                false
+            }
+            Key::PageDown => {
+                self.input.vertical(true, page, shift);
+                false
+            }
+            Key::Home if ctrl => {
+                self.input.move_to(0, shift);
+                false
+            }
+            Key::End if ctrl => {
+                self.input.move_to(self.input.text().len(), shift);
+                false
+            }
+            Key::Home => {
+                self.input.home(shift);
+                false
+            }
+            Key::End => {
+                self.input.end(shift);
+                false
+            }
+            Key::A if ctrl => {
+                self.input.select_all();
+                false
+            }
+            Key::C if ctrl => {
+                if self.input.selected_text().is_empty() {
+                    return false;
+                }
+                self.clipboard = self.input.selected_text().to_string();
+                return true;
+            }
+            Key::X if ctrl => {
+                if self.input.selected_text().is_empty() {
+                    return false;
+                }
+                self.clipboard = self.input.selected_text().to_string();
+                self.input.delete_selection()
+            }
+            Key::V if ctrl => {
+                let clipboard = self.clipboard.clone();
+                self.input
+                    .insert(&clipboard, Self::capacity(ActiveField::Input))
+            }
+            Key::Enter => self.input.insert("\n", Self::capacity(ActiveField::Input)),
+            Key::Backspace => self.input.backspace(),
+            Key::Delete => self.input.delete(),
+            _ => {
+                if key.text.is_empty() || ctrl {
+                    return false;
+                }
+                // Every character the keystroke produced, not just the first:
+                // a dead key followed by a letter composes into one, and an
+                // input method can deliver a whole word.
+                self.input
+                    .insert(&key.text, Self::capacity(ActiveField::Input))
+            }
+        };
+        if changed {
+            self.update_regex();
+        }
+        self.keep_caret_visible();
+        changed || (self.input.caret, self.input.anchor, self.clipboard.len()) != before
+    }
+
+    fn handle_library_key(&mut self, key: &KeyEvent) -> bool {
+        match key.key {
+            Key::Up => self.step_library(-1),
+            Key::Down => self.step_library(1),
+            Key::PageUp => self.step_library(
+                isize::try_from(self.library_rows())
+                    .unwrap_or(1)
+                    .saturating_neg(),
+            ),
+            Key::PageDown => self.step_library(isize::try_from(self.library_rows()).unwrap_or(1)),
+            Key::Enter => self
+                .selected_library_entry
+                .is_some_and(|i| self.use_library_entry(i)),
+            Key::Delete => self
+                .selected_library_entry
+                .is_some_and(|i| self.delete_library_entry(i)),
+            _ => false,
+        }
+    }
+
+    fn handle_reference_key(&mut self, key: &KeyEvent) -> bool {
+        let rows = Self::reference_rows();
+        let before = self.reference_scroll;
+        match key.key {
+            Key::Up => self.reference_scroll = self.reference_scroll.saturating_sub(1),
+            Key::Down => {
+                self.reference_scroll = self.reference_scroll.saturating_add(1).min(rows);
+            }
+            _ => return false,
+        }
+        self.reference_scroll != before
+    }
+
+    /// Keys while the save dialog is up: it has the keyboard.
+    fn handle_save_key(&mut self, key: &KeyEvent) -> bool {
+        match key.key {
+            Key::Escape => {
+                self.save_name = None;
+                self.save_error = None;
+                true
+            }
+            Key::Enter => self.confirm_save(),
+            _ => {
+                let clipboard = self.clipboard.clone();
+                let Some(name) = self.save_name.as_mut() else {
+                    return false;
+                };
+                let before = (
+                    name.text().to_string(),
+                    name.cursor(),
+                    name.selection_anchor(),
+                );
+                let edited = edit_line(name, key, MAX_NAME_LEN, &clipboard);
+                let changed = (
+                    name.text().to_string(),
+                    name.cursor(),
+                    name.selection_anchor(),
+                ) != before;
+                let copied = edited.copied.is_some();
+                if let Some(copied) = edited.copied {
+                    self.clipboard = copied;
+                }
+                if changed {
+                    self.save_error = None;
+                }
+                edited.handled && (changed || copied)
+            }
+        }
+    }
+
+    /// What is under `(x, y)` in the frame last shown.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        if self.last_hits.is_empty() {
+            return self.frame().hit_test(x, y);
+        }
+        self.last_hits
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(target, _)| *target)
+    }
+
+    fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        // The card is modal: a press anywhere puts it away, and nothing
+        // under it hears one.
+        if self.show_help {
+            if matches!(event.kind, MouseEventKind::Press(_)) {
+                self.show_help = false;
+                return true;
+            }
+            return false;
+        }
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                let Some(target) = self.frame().hit_test(event.x, event.y) else {
+                    return false;
+                };
+                self.activate(target, event.x, event.y)
+            }
+            MouseEventKind::DoubleClick(MouseButton::Left) => {
+                match self.frame().hit_test(event.x, event.y) {
+                    Some(Target::LibraryRow(i)) => self.use_library_entry(i),
+                    _ => false,
+                }
+            }
+            MouseEventKind::Release(MouseButton::Left) => std::mem::take(&mut self.dragging),
+            MouseEventKind::Move => {
+                let mut changed = false;
+                if self.dragging {
+                    let before = (self.input.caret, self.input.anchor);
+                    self.place_input_caret(event.x, event.y, true);
+                    changed = before != (self.input.caret, self.input.anchor);
+                }
+                let over = self.target_at(event.x, event.y);
+                if over != self.hover {
+                    self.hover = over;
+                    changed = true;
+                }
+                changed
+            }
+            MouseEventKind::Leave => {
+                self.dragging = false;
+                self.hover.take().is_some()
+            }
+            MouseEventKind::Scroll { dy, .. } => {
+                let Some(over) = self.target_at(event.x, event.y) else {
+                    return false;
+                };
+                self.scroll(over, dy)
+            }
+            _ => false,
+        }
+    }
+
+    /// Turn the wheel `dy` over `over`.
+    ///
+    /// Nothing here scrolled: `scroll_offset` and `match_scroll_offset` were
+    /// read by the drawing and written by nothing, so a text longer than its
+    /// box, the matches past the first screenful, the library's second half
+    /// and the end of the reference could not be seen at all.
+    fn scroll(&mut self, over: Target, dy: f32) -> bool {
+        let pane = match Pane::of(over) {
+            // The results panel's body is whichever view is showing.
+            Some(Pane::Results(_)) => Pane::Results(self.results_view),
+            Some(pane) => pane,
+            None => return false,
+        };
+        let step = self.wheel.rows(dy);
+        if step == 0 {
+            return false;
+        }
+        let (len, room) = self.pane_extent(pane);
+        let limit = len.saturating_sub(room.max(1));
+        let slot = self.pane_scroll(pane);
+        let before = *slot;
+        *slot = slot.saturating_add_signed(step).min(limit);
+        *slot != before
+    }
+
+    /// How many rows pane `pane` has, and how many fit.
+    fn pane_extent(&self, pane: Pane) -> (usize, usize) {
+        match pane {
+            Pane::Input => (self.input.line_count(), self.input_rows()),
+            Pane::Result => (
+                self.replace_result
+                    .as_deref()
+                    .map_or(0, |r| r.split('\n').count()),
+                self.tester_layout()
+                    .result
+                    .map_or(1, |r| rows_in(r.h - 30.0, LINE_HEIGHT)),
+            ),
+            Pane::Results(view) => (self.results_len(view), self.results_rows(view)),
+            Pane::Library => (self.visible_library().len(), self.library_rows()),
+            Pane::Reference => (
+                Self::reference_rows(),
+                rows_in(self.content_rect().h, LINE_HEIGHT),
+            ),
+        }
+    }
+
+    /// The first row pane `pane` shows, to change.
+    fn pane_scroll(&mut self, pane: Pane) -> &mut usize {
+        let [matches, groups, explain] = &mut self.results_scroll;
+        match pane {
+            Pane::Input => &mut self.input_scroll,
+            Pane::Result => &mut self.result_scroll,
+            Pane::Results(ResultsView::Matches) => matches,
+            Pane::Results(ResultsView::Groups) => groups,
+            Pane::Results(ResultsView::Explain) => explain,
+            Pane::Library => &mut self.library_scroll,
+            Pane::Reference => &mut self.reference_scroll,
+        }
+    }
+
+    /// The first row pane `pane` shows.
+    fn scroll_of(&self, pane: Pane) -> usize {
+        let [matches, groups, explain] = self.results_scroll;
+        match pane {
+            Pane::Input => self.input_scroll,
+            Pane::Result => self.result_scroll,
+            Pane::Results(ResultsView::Matches) => matches,
+            Pane::Results(ResultsView::Groups) => groups,
+            Pane::Results(ResultsView::Explain) => explain,
+            Pane::Library => self.library_scroll,
+            Pane::Reference => self.reference_scroll,
+        }
+    }
+
+    /// Put the test input's caret under the pointer at `(x, y)`.
+    fn place_input_caret(&mut self, x: f32, y: f32, extend: bool) {
+        let area = self.tester_layout().input_text();
+        let hscroll = self.input_hscroll(area.w);
+        let row = ((y - area.y) / LINE_HEIGHT).floor().max(0.0) as usize;
+        let line = self.input_scroll.saturating_add(row);
+        self.input.click(line, x - area.x + hscroll, extend);
+    }
+
+    /// Put a one-line field's caret under the pointer.
+    fn place_line_caret(input: &mut TextInput, rect: Rect, x: f32) {
+        let cursor = textedit::cursor_at_click(
+            input.text(),
+            input.cursor(),
+            (rect.w - 16.0).max(0.0),
+            NORMAL_TEXT,
+            FontWeightHint::Regular,
+            x - rect.x - 8.0,
+        );
+        input.set_selection_anchor(None);
+        input.set_cursor(cursor);
+    }
+
+    /// Do what pressing `target` at `(x, y)` means.
+    fn activate(&mut self, target: Target, x: f32, y: f32) -> bool {
+        if self.save_name.is_some() {
+            return match target {
+                Target::SaveConfirm => self.confirm_save(),
+                Target::SaveCancel => {
+                    self.save_name = None;
+                    self.save_error = None;
+                    true
+                }
+                Target::SaveName => {
+                    let field = self
+                        .frame()
+                        .rect_of(|t| *t == Target::SaveName)
+                        .unwrap_or_default();
+                    if let Some(name) = self.save_name.as_mut() {
+                        Self::place_line_caret(name, field, x);
+                    }
+                    true
+                }
+                // The dialog is modal: nothing behind it hears a press.
+                _ => false,
+            };
+        }
+        match target {
+            Target::Tab(tab) => self.set_tab(tab),
+            Target::Flag(flag) => self.toggle_flag(flag),
+            Target::MatchPrev => {
+                self.prev_match();
+                !self.matches.is_empty()
+            }
+            Target::MatchNext => {
+                self.next_match();
+                !self.matches.is_empty()
+            }
+            Target::ReplaceToggle => self.toggle_replace(),
+            Target::SavePattern => self.ask_to_save(),
+            Target::PatternField | Target::ReplaceField => {
+                let l = self.tester_layout();
+                let (field, rect) = if target == Target::PatternField {
+                    (ActiveField::Pattern, l.pattern)
+                } else {
+                    (ActiveField::Replace, l.replace.unwrap_or(l.pattern))
+                };
+                self.active_field = field;
+                let input = if field == ActiveField::Pattern {
+                    &mut self.pattern
+                } else {
+                    &mut self.replace
+                };
+                Self::place_line_caret(input, rect, x);
+                true
+            }
+            Target::InputArea => {
+                self.active_field = ActiveField::Input;
+                self.place_input_caret(x, y, false);
+                self.dragging = true;
+                true
+            }
+            Target::ResultTab(view) => {
+                if self.results_view == view {
+                    return false;
+                }
+                self.results_view = view;
+                true
+            }
+            Target::GroupsInline => {
+                self.show_groups = !self.show_groups;
+                true
+            }
+            Target::MatchRow(i) => {
+                if i == self.current_match_index || i >= self.matches.len() {
+                    return false;
+                }
+                self.current_match_index = i;
+                self.reveal_current_match();
+                true
+            }
+            Target::Chip(i) => self.set_library_filter(LIBRARY_FILTERS.get(i).copied().flatten()),
+            Target::LibraryRow(i) => {
+                if self.selected_library_entry == Some(i) {
+                    return false;
+                }
+                self.selected_library_entry = Some(i);
+                true
+            }
+            Target::LibraryUse(i) => self.use_library_entry(i),
+            Target::LibraryDelete(i) => self.delete_library_entry(i),
+            Target::HelpCard => {
+                self.show_help = false;
+                true
+            }
+            Target::SaveName
+            | Target::SaveConfirm
+            | Target::SaveCancel
+            | Target::ModalBackdrop
+            | Target::ResultArea
+            | Target::ResultsBody
+            | Target::LibraryBody
+            | Target::ReferenceBody => false,
+        }
     }
 }
+
+/// What one keystroke did to a one-line field.
+struct LineEdit {
+    /// Whether the key was an editing key.
+    handled: bool,
+    /// What was copied or cut, for the window's clipboard.
+    copied: Option<String>,
+}
+
+/// Apply a keystroke to a one-line field, as every text box in the tree
+/// does, taking no more than leaves it at `capacity` characters. Paste reads
+/// the window's `clipboard`; copy and cut hand theirs back in the result.
+fn edit_line(input: &mut TextInput, key: &KeyEvent, capacity: usize, clipboard: &str) -> LineEdit {
+    let shift = key.modifiers.shift;
+    let ctrl = key.modifiers.ctrl;
+    let mut copied = None;
+    match key.key {
+        Key::Left => input.move_cursor_left(shift, NORMAL_TEXT, FontWeightHint::Regular),
+        Key::Right => input.move_cursor_right(shift, NORMAL_TEXT, FontWeightHint::Regular),
+        Key::Home => input.move_home(shift),
+        Key::End => input.move_end(shift),
+        Key::Backspace => input.backspace(),
+        Key::Delete => input.delete(),
+        Key::A if ctrl => input.select_all(),
+        Key::C if ctrl => {
+            if input.has_selection() {
+                copied = Some(input.selected_text().to_string());
+            }
+        }
+        Key::X if ctrl => {
+            if input.has_selection() {
+                copied = Some(input.selected_text().to_string());
+                input.delete_selection();
+            }
+        }
+        Key::V if ctrl => insert_limited(input, clipboard, capacity),
+        _ => {
+            if key.text.is_empty() || ctrl {
+                return LineEdit {
+                    handled: false,
+                    copied: None,
+                };
+            }
+            insert_limited(input, &key.text, capacity);
+        }
+    }
+    LineEdit {
+        handled: true,
+        copied,
+    }
+}
+
+/// Type `typed` into `input` over its selection, stopping at `capacity`
+/// characters. A limit counted in characters, not bytes: a limit in bytes
+/// would cut a multi-byte character in half.
+///
+/// `MAX_PATTERN_LEN` and its siblings were declared and consulted by nothing,
+/// and it matters here more than in most text boxes: the pattern is compiled
+/// and run across the whole input on *every keystroke*.
+fn insert_limited(input: &mut TextInput, typed: &str, capacity: usize) {
+    if input.has_selection() {
+        input.delete_selection();
+    }
+    for ch in typed.chars() {
+        // A field is one line: a control character -- a newline in a paste
+        // included -- has no place in it.
+        if ch.is_control() {
+            continue;
+        }
+        if input.text().chars().count() >= capacity {
+            break;
+        }
+        input.insert_char(ch);
+    }
+}
+
+/// `text` with its line breaks and tabs shown as escapes, for a one-line
+/// cell: a match that spans lines would otherwise draw as one run with the
+/// break silently dropped.
+fn printable(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t")
+        .replace('\r', "\\r")
+}
+
+/// Every character's byte offset in `text`, and its length at the end: how
+/// a match counted in characters is found in the text.
+fn char_bytes(text: &str) -> Vec<usize> {
+    text.char_indices()
+        .map(|(b, _)| b)
+        .chain(std::iter::once(text.len()))
+        .collect()
+}
+
+/// The byte offset of character `index` in `text`.
+fn char_to_byte(text: &str, index: usize) -> usize {
+    text.char_indices()
+        .nth(index)
+        .map_or(text.len(), |(b, _)| b)
+}
+
+/// How many whole rows of `row_h` fit in `height`: at least one.
+fn rows_in(height: f32, row_h: f32) -> usize {
+    if row_h <= 0.0 || !height.is_finite() {
+        return 1;
+    }
+    let rows = (height / row_h).floor().max(0.0) as usize;
+    rows.max(1)
+}
+
+/// The first row to show so that row `index` is in view, given the first
+/// shown now and how many fit.
+fn keep_in_view(first: usize, index: usize, rows: usize) -> usize {
+    if index < first {
+        index
+    } else if index >= first.saturating_add(rows.max(1)) {
+        index.saturating_sub(rows.max(1).saturating_sub(1))
+    } else {
+        first
+    }
+}
+
+/// A library entry the user saved.
+fn custom_entry(name: &str, pattern: &str, flags: RegexFlags) -> PatternEntry {
+    PatternEntry {
+        name: name.to_string(),
+        pattern: pattern.to_string(),
+        description: "Saved".to_string(),
+        category: PatternCategory::Custom,
+        flags: Some(flags),
+    }
+}
+
+/// The syntax the engine understands, as the reference lists it.
+const SYNTAX_REFERENCE: &[(&str, &str)] = &[
+    (".", "Any character (except newline)"),
+    ("^", "Start of string (of a line, with m)"),
+    ("$", "End of string (of a line, with m)"),
+    ("*", "Zero or more"),
+    ("+", "One or more"),
+    ("?", "Zero or one"),
+    ("{n}", "Exactly n times"),
+    ("{n,}", "n or more times"),
+    ("{n,m}", "Between n and m times"),
+    ("*? +? ??", "Lazy quantifiers"),
+    ("(...)", "Capturing group"),
+    ("(?:...)", "Non-capturing group"),
+    ("a|b", "Alternation (a or b)"),
+    ("[abc]", "Character class"),
+    ("[^abc]", "Negated class"),
+    ("[a-z]", "Character range"),
+    ("\\d", "Digit [0-9]"),
+    ("\\D", "Non-digit"),
+    ("\\w", "Word char [a-zA-Z0-9_]"),
+    ("\\W", "Non-word char"),
+    ("\\s", "Whitespace"),
+    ("\\S", "Non-whitespace"),
+    ("\\b", "Word boundary"),
+    ("\\n \\r \\t", "Newline, CR, Tab"),
+    ("\\\\", "Escaped backslash"),
+];
+
+/// What a replacement can say, as the reference lists it.
+const REPLACEMENT_REFERENCE: &[(&str, &str)] = &[
+    ("$0", "Entire match"),
+    ("$1-$9", "Capture group N"),
+    ("\\n", "Newline"),
+    ("\\t", "Tab"),
+    ("\\\\", "Literal backslash"),
+];
+
+const TIPS: &[&str] = &[
+    "Use \\b for word boundaries to avoid partial matches",
+    "Character classes [] are faster than alternation |",
+    "Non-capturing groups (?:) when you don't need the capture",
+    "Use lazy quantifiers *? +? to match as little as possible",
+    "Anchors ^ $ don't consume characters",
+    "Escape special chars with \\ when matching literally",
+    "Test patterns incrementally - start simple, add complexity",
+];
 
 impl oswindow::app::App for App {
     fn theme_changed(&mut self, palette: &Palette) {
@@ -3131,9 +4848,9 @@ impl oswindow::app::App for App {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
-    fn on_event(&mut self, event: &guitk::event::Event) -> oswindow::app::Response {
+    fn on_event(&mut self, event: &Event) -> oswindow::app::Response {
         use oswindow::app::Response;
-        if matches!(event, guitk::event::Event::CloseRequested) {
+        if matches!(event, Event::CloseRequested) {
             return Response::Exit;
         }
         if self.handle_event(event) {
@@ -3143,33 +4860,23 @@ impl oswindow::app::App for App {
         }
     }
 
-    fn render(&mut self, width: f32, height: f32) -> guitk::render::RenderTree {
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
         self.window_width = width;
         self.window_height = height;
-        let mut tree = guitk::render::RenderTree::new();
-        tree.commands = self.render_commands();
-
-        // Over everything, because it is the one thing a reader asked for.
-        if self.show_help {
-            guitk::shortcut::render_card(
-                &mut tree,
-                &self.palette,
-                (width, height),
-                0.0,
-                SHORTCUTS,
-                "F1 closes this",
-            );
-        }
-        tree
+        let frame = self.frame();
+        self.last_hits = frame.hits().to_vec();
+        frame.into_tree()
     }
 
     // No `tick_interval`: nothing here ages. A regex tester recompiles on a
-    // keystroke and has no animation, no playback and no timer — checked by
-    // grepping for `elapsed` and finding none.
+    // keystroke and has no animation, no playback and no timer.
 }
 
 fn main() -> std::process::ExitCode {
-    oswindow::app::launch("regextester", &mut App::new())
+    let mut app = App::new();
+    // The user's own patterns, saved from an earlier session.
+    app.load_library(&settingsfile::load(CONFIG_NAME));
+    oswindow::app::launch("regextester", &mut app)
 }
 
 // ============================================================================
@@ -3205,9 +4912,9 @@ mod tests {
     /// An app with a pattern, some input and a replacement, all applied.
     fn replacing() -> App {
         let mut app = App::new();
-        app.pattern = "world".to_string();
-        app.input_text = "hello world".to_string();
-        app.replace_text = "earth".to_string();
+        app.pattern.set_text("world");
+        app.input.set_text("hello world");
+        app.replace.set_text("earth");
         app.show_replace = true;
         app.update_regex();
         app
@@ -3764,8 +5471,8 @@ mod tests {
     #[test]
     fn test_app_new() {
         let app = App::new();
-        assert!(app.pattern.is_empty());
-        assert!(app.input_text.is_empty());
+        assert!(app.pattern.text().is_empty());
+        assert!(app.input.text().is_empty());
         assert!(app.matches.is_empty());
         assert_eq!(app.active_tab, ActiveTab::Tester);
     }
@@ -3781,8 +5488,8 @@ mod tests {
     #[test]
     fn test_app_update_valid_pattern() {
         let mut app = App::new();
-        app.pattern = "\\d+".into();
-        app.input_text = "abc123def456".into();
+        app.pattern.set_text("\\d+");
+        app.input.set_text("abc123def456");
         app.update_regex();
         assert!(app.compiled.is_some());
         assert!(app.compile_error.is_none());
@@ -3792,7 +5499,7 @@ mod tests {
     #[test]
     fn test_app_update_invalid_pattern() {
         let mut app = App::new();
-        app.pattern = "(unclosed".into();
+        app.pattern.set_text("(unclosed");
         app.update_regex();
         assert!(app.compile_error.is_some());
         assert!(app.matches.is_empty());
@@ -3801,8 +5508,8 @@ mod tests {
     #[test]
     fn test_app_match_navigation() {
         let mut app = App::new();
-        app.pattern = "\\d".into();
-        app.input_text = "a1b2c3".into();
+        app.pattern.set_text("\\d");
+        app.input.set_text("a1b2c3");
         app.update_regex();
 
         let total = app.matches.len();
@@ -3819,52 +5526,43 @@ mod tests {
     }
 
     #[test]
-    fn test_app_history() {
-        let mut app = App::new();
-        app.pattern = "\\d+".into();
-        app.input_text = "123".into();
-        app.update_regex();
-        app.add_to_history();
-        assert_eq!(app.history.len(), 1);
-
-        // Don't add duplicates
-        app.add_to_history();
-        assert_eq!(app.history.len(), 1);
-
-        // Add different pattern
-        app.pattern = "\\w+".into();
-        app.update_regex();
-        app.add_to_history();
-        assert_eq!(app.history.len(), 2);
-    }
-
-    #[test]
     fn test_app_load_library() {
         let mut app = App::new();
-        app.load_library_entry(0);
+        assert!(app.use_library_entry(0));
         assert!(app.selected_library_entry.is_some());
-        assert!(!app.pattern.is_empty());
+        assert!(!app.pattern.text().is_empty());
     }
 
     #[test]
     fn test_app_save_to_library() {
-        let mut app = App::new();
-        let initial_len = app.library.len();
-        app.pattern = "custom_pattern".into();
-        app.save_to_library("My Pattern");
-        assert_eq!(app.library.len(), initial_len + 1);
+        settingsfile::testing::with_scratch_config("rt_save_basic", |_| {
+            let mut app = App::new();
+            let initial_len = app.library.len();
+            app.pattern.set_text("custom_pattern");
+            assert!(app.ask_to_save());
+            app.save_name.as_mut().unwrap().set_text("My Pattern");
+            assert!(app.confirm_save());
+            assert_eq!(app.library.len(), initial_len + 1);
+        });
     }
 
     #[test]
     fn test_app_save_empty_rejected() {
-        let mut app = App::new();
-        let initial_len = app.library.len();
-        app.save_to_library(""); // empty name
-        assert_eq!(app.library.len(), initial_len);
-
-        app.pattern = String::new();
-        app.save_to_library("Test"); // empty pattern
-        assert_eq!(app.library.len(), initial_len);
+        settingsfile::testing::with_scratch_config("rt_save_empty", |_| {
+            let mut app = App::new();
+            let initial_len = app.library.len();
+            // An empty pattern is not offered a name at all.
+            app.ask_to_save();
+            assert!(app.save_name.is_none());
+            assert!(app.status.starts_with("Nothing to save"), "{}", app.status);
+            // An empty name is refused, and the dialog stays up to say so.
+            app.pattern.set_text("x+");
+            app.ask_to_save();
+            app.confirm_save();
+            assert_eq!(app.library.len(), initial_len);
+            assert!(app.save_name.is_some());
+            assert!(app.save_error.is_some());
+        });
     }
 
     #[test]
@@ -3876,8 +5574,8 @@ mod tests {
     #[test]
     fn test_app_match_stats_with_matches() {
         let mut app = App::new();
-        app.pattern = "\\d+".into();
-        app.input_text = "abc123".into();
+        app.pattern.set_text("\\d+");
+        app.input.set_text("abc123");
         app.update_regex();
         let stats = app.match_stats();
         assert!(stats.contains("match"));
@@ -3886,9 +5584,9 @@ mod tests {
     #[test]
     fn test_app_replace() {
         let mut app = App::new();
-        app.pattern = "world".into();
-        app.input_text = "hello world".into();
-        app.replace_text = "earth".into();
+        app.pattern.set_text("world");
+        app.input.set_text("hello world");
+        app.replace.set_text("earth");
         app.show_replace = true;
         app.update_regex();
         assert!(app.replace_result.is_some());
@@ -4032,8 +5730,8 @@ mod tests {
     #[test]
     fn test_app_case_insensitive_matching() {
         let mut app = App::new();
-        app.pattern = "hello".into();
-        app.input_text = "Hello HELLO hello".into();
+        app.pattern.set_text("hello");
+        app.input.set_text("Hello HELLO hello");
         app.flags.case_insensitive = true;
         app.update_regex();
         assert!(app.matches.len() >= 2);
@@ -4057,26 +5755,54 @@ mod tests {
     /// The label is read by `guitk::shortcut` rather than matched against a
     /// table beside it here, which would be a third copy of the same fact.
     ///
-    /// One app is enough here: every arm in this handler acts whatever the
-    /// state, and `handle_event` answers `true` when it did. That is worth
-    /// saying rather than leaving implied -- it is also what makes the check
-    /// weaker here than in apps that decline on purpose.
+    /// A key answers `true` only when it changed something -- End at the end
+    /// does not -- so the check asks whether *some* state answers it, over
+    /// states chosen so that between them every key has work.
     #[test]
     fn every_advertised_key_does_something() {
-        for (label, what) in SHORTCUTS {
-            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
-                let mut app = App::new();
-                // Something to step through, so Up and Down have work.
-                app.pattern = String::from("a");
-                app.input_text = String::from("banana");
-                app.update_regex();
-                assert!(
-                    app.handle_event(&guitk::event::Event::Key(stroke.clone())),
-                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
-                    stroke.key
-                );
+        settingsfile::testing::with_scratch_config("rt_advertised", |_| {
+            for (label, what) in SHORTCUTS {
+                for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                    let answered = help_states()
+                        .iter_mut()
+                        .any(|app| app.handle_event(&guitk::event::Event::Key(stroke.clone())));
+                    assert!(
+                        answered,
+                        "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                        stroke.key
+                    );
+                }
             }
-        }
+        });
+    }
+
+    /// Testers chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<App> {
+        let base = || {
+            let mut app = App::new();
+            app.set_input("banana");
+            app.set_pattern("a");
+            app.clipboard = "x".to_string();
+            app
+        };
+        // The caret at the end of the pattern: Left, Home, Backspace, and a
+        // clipboard to paste.
+        let at_end = base();
+        // At its start: Right, End, Delete.
+        let mut at_start = base();
+        at_start.pattern.move_home(false);
+        // All of it selected: copy and cut.
+        let mut selected = base();
+        selected.pattern.select_all();
+        // In the library, with a saved pattern selected: Ctrl+1 has somewhere
+        // to go back to, and Delete something to delete.
+        let mut library = base();
+        library.active_tab = ActiveTab::Library;
+        library
+            .library
+            .push(custom_entry("mine", "m+", RegexFlags::default()));
+        library.selected_library_entry = Some(library.library.len() - 1);
+        vec![at_end, at_start, selected, library]
     }
 
     /// **All three tabs can be reached, and each draws something different.**
@@ -4371,7 +6097,7 @@ mod tests {
         for c in ['a', '+', 'b'] {
             assert!(press(&mut app, guitk::event::Key::A, &c.to_string()));
         }
-        assert_eq!(app.pattern, "a+b");
+        assert_eq!(app.pattern.text(), "a+b");
         assert!(app.compiled.is_some(), "the pattern was not compiled");
         assert!(app.compile_error.is_none());
     }
@@ -4407,7 +6133,7 @@ mod tests {
         assert_eq!(app.active_field, ActiveField::Replace);
 
         assert!(
-            app.pattern.is_empty(),
+            app.pattern.text().is_empty(),
             "Tab typed a character into the field"
         );
     }
@@ -4421,11 +6147,11 @@ mod tests {
     fn backspace_removes_a_whole_character() {
         let mut app = App::new();
         app.active_field = ActiveField::Input;
-        app.input_text = "aé".to_string();
+        app.input.set_text("aé");
         assert!(press(&mut app, guitk::event::Key::Backspace, ""));
-        assert_eq!(app.input_text, "a");
+        assert_eq!(app.input.text(), "a");
         assert!(press(&mut app, guitk::event::Key::Backspace, ""));
-        assert_eq!(app.input_text, "");
+        assert_eq!(app.input.text(), "");
         assert!(
             !press(&mut app, guitk::event::Key::Backspace, ""),
             "backspace on an empty field reported a change"
@@ -4461,9 +6187,9 @@ mod tests {
     fn replacement_survives_the_bounds_rewrite() {
         let mut app = App::new();
         app.active_field = ActiveField::Pattern;
-        app.pattern = "(a)(b)".to_string();
-        app.input_text = "ab".to_string();
-        app.replace_text = "$2$1".to_string();
+        app.pattern.set_text("(a)(b)");
+        app.input.set_text("ab");
+        app.replace.set_text("$2$1");
         // The replace pane has to be open, or `update_regex` deliberately leaves
         // `replace_result` empty — which is what this test first caught.
         app.show_replace = true;
@@ -4486,32 +6212,29 @@ mod tests {
     fn a_field_stops_accepting_at_its_limit() {
         let mut app = App::new();
         app.active_field = ActiveField::Pattern;
-        app.pattern = "a".repeat(MAX_PATTERN_LEN);
+        app.pattern.set_text(&"a".repeat(MAX_PATTERN_LEN));
         assert!(
             !press(&mut app, guitk::event::Key::A, "b"),
             "a keystroke into a full field costs no redraw and no recompile"
         );
-        assert_eq!(app.pattern.chars().count(), MAX_PATTERN_LEN);
+        assert_eq!(app.pattern.text().chars().count(), MAX_PATTERN_LEN);
     }
 
     #[test]
     fn each_field_has_its_own_limit() {
-        let mut app = App::new();
-        app.active_field = ActiveField::Pattern;
-        assert_eq!(app.active_field_capacity(), MAX_PATTERN_LEN);
-        app.active_field = ActiveField::Input;
-        assert_eq!(app.active_field_capacity(), MAX_INPUT_LEN);
-        app.active_field = ActiveField::Replace;
-        assert_eq!(app.active_field_capacity(), MAX_REPLACE_LEN);
+        assert_eq!(App::capacity(ActiveField::Pattern), MAX_PATTERN_LEN);
+        assert_eq!(App::capacity(ActiveField::Input), MAX_INPUT_LEN);
+        assert_eq!(App::capacity(ActiveField::Replace), MAX_REPLACE_LEN);
     }
 
     #[test]
     fn a_field_one_short_of_its_limit_still_accepts_one() {
         let mut app = App::new();
         app.active_field = ActiveField::Replace;
-        app.replace_text = "x".repeat(MAX_REPLACE_LEN.saturating_sub(1));
+        app.replace
+            .set_text(&"x".repeat(MAX_REPLACE_LEN.saturating_sub(1)));
         assert!(press(&mut app, guitk::event::Key::A, "y"));
-        assert_eq!(app.replace_text.chars().count(), MAX_REPLACE_LEN);
+        assert_eq!(app.replace.text().chars().count(), MAX_REPLACE_LEN);
     }
 
     #[test]
@@ -4520,9 +6243,10 @@ mod tests {
         // fields hold any character at all.
         let mut app = App::new();
         app.active_field = ActiveField::Replace;
-        app.replace_text = "é".repeat(MAX_REPLACE_LEN.saturating_sub(1));
+        app.replace
+            .set_text(&"é".repeat(MAX_REPLACE_LEN.saturating_sub(1)));
         assert!(press(&mut app, guitk::event::Key::A, "é"));
-        assert_eq!(app.replace_text.chars().count(), MAX_REPLACE_LEN);
+        assert_eq!(app.replace.text().chars().count(), MAX_REPLACE_LEN);
         assert!(!press(&mut app, guitk::event::Key::A, "é"));
     }
 
@@ -4530,11 +6254,12 @@ mod tests {
     fn a_long_keystroke_is_truncated_rather_than_refused() {
         let mut app = App::new();
         app.active_field = ActiveField::Replace;
-        app.replace_text = "x".repeat(MAX_REPLACE_LEN.saturating_sub(2));
+        app.replace
+            .set_text(&"x".repeat(MAX_REPLACE_LEN.saturating_sub(2)));
         // Three characters offered, two seats left.
         assert!(press(&mut app, guitk::event::Key::A, "abc"));
-        assert_eq!(app.replace_text.chars().count(), MAX_REPLACE_LEN);
-        assert!(app.replace_text.ends_with("ab"));
+        assert_eq!(app.replace.text().chars().count(), MAX_REPLACE_LEN);
+        assert!(app.replace.text().ends_with("ab"));
     }
 
     // --- Multi-character keystrokes ---
@@ -4547,7 +6272,7 @@ mod tests {
         let mut app = App::new();
         app.active_field = ActiveField::Input;
         assert!(press(&mut app, guitk::event::Key::A, "the"));
-        assert_eq!(app.input_text, "the");
+        assert_eq!(app.input.text(), "the");
     }
 
     #[test]
@@ -4559,7 +6284,7 @@ mod tests {
             !press(&mut app, guitk::event::Key::A, "\u{7}"),
             "a control character is not text"
         );
-        assert_eq!(app.input_text, "");
+        assert_eq!(app.input.text(), "");
     }
 
     #[test]
@@ -4567,7 +6292,7 @@ mod tests {
         let mut app = App::new();
         app.active_field = ActiveField::Input;
         assert!(press(&mut app, guitk::event::Key::A, "a\u{7}b"));
-        assert_eq!(app.input_text, "ab");
+        assert_eq!(app.input.text(), "ab");
     }
 
     // -- Following the user's theme -------------------------------------------
@@ -4628,5 +6353,808 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // The pointer, the fields, the library
+    //
+    // `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`: three
+    // tabs, three flag buttons, three fields, a match list, three sub-tabs,
+    // eight chips and a library, and no pointer event handled at all.
+    // ------------------------------------------------------------------
+
+    use guitk::probe::{self, Probe};
+
+    impl Probe for App {
+        type Target = Target;
+        type Outcome = bool;
+        const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+        /// Drawn at the window's own size, which these tests leave at `SIZE`
+        /// unless they resize it, and then read the frame directly.
+        fn draw(&self, _size: (f32, f32)) -> Frame<Target> {
+            self.frame()
+        }
+
+        fn click_at(&mut self, x: f32, y: f32, button: MouseButton, _size: (f32, f32)) -> bool {
+            self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }))
+        }
+
+        fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> bool {
+            self.handle_event(&Event::Key(key.clone()))
+        }
+
+        fn scroll_at(&mut self, x: f32, y: f32, dy: f32, _size: (f32, f32)) -> Option<bool> {
+            Some(self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })))
+        }
+    }
+
+    fn mouse(x: f32, y: f32, kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent { x, y, kind })
+    }
+
+    /// A tester with `pattern` run over `input`.
+    fn testing(pattern: &str, input: &str) -> App {
+        let mut app = App::new();
+        app.set_input(input);
+        app.set_pattern(pattern);
+        app
+    }
+
+    /// Every piece of text the window draws.
+    fn texts(app: &App) -> Vec<String> {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// States that between them draw every control there is.
+    fn pointer_states() -> Vec<(&'static str, App)> {
+        let mut tester = testing("(a)n", "banana");
+        tester.toggle_replace();
+        tester.set_replacement("<$1>");
+        let mut library = App::new();
+        library.active_tab = ActiveTab::Library;
+        library
+            .library
+            .push(custom_entry("mine", "m+", RegexFlags::default()));
+        // The saved one is last, past the rows that fit; the chip brings it up.
+        library.library_category_filter = Some(PatternCategory::Custom);
+        let mut reference = App::new();
+        reference.active_tab = ActiveTab::Reference;
+        let mut saving = testing("a", "banana");
+        saving.ask_to_save();
+        vec![
+            ("the tester", tester),
+            ("the library", library),
+            ("the reference", reference),
+            ("the save dialog", saving),
+        ]
+    }
+
+    /// **Every control drawn is the one a press on it reaches** -- none is
+    /// covered by another -- and between them the states draw every kind of
+    /// control there is. What each one does is the business of the tests
+    /// after this.
+    #[test]
+    fn every_control_drawn_is_the_one_a_press_on_it_reaches() {
+        let mut kinds = std::collections::BTreeSet::new();
+        for (what, app) in pointer_states() {
+            let frame = app.frame();
+            let modal = app.save_name.is_some();
+            for (target, rect) in frame.hits() {
+                kinds.insert(probe::variant_name(*target));
+                // Under the dialog everything is covered, which is the point
+                // of a modal; only its own controls must be reachable.
+                if modal
+                    && !matches!(
+                        target,
+                        Target::SaveName | Target::SaveConfirm | Target::SaveCancel
+                    )
+                {
+                    continue;
+                }
+                // Those that hold other controls, and are there for the wheel
+                // or to swallow a press rather than to answer one.
+                if matches!(
+                    target,
+                    Target::ResultsBody
+                        | Target::LibraryBody
+                        | Target::ReferenceBody
+                        | Target::ModalBackdrop
+                        | Target::LibraryRow(_)
+                ) {
+                    continue;
+                }
+                let (x, y) = rect.centre();
+                assert_eq!(
+                    frame.hit_test(x, y),
+                    Some(*target),
+                    "{target:?} in {what} is covered by something else"
+                );
+            }
+        }
+        let mut help = App::new();
+        help.handle_event(&Event::Key(probe::press(Key::F1)));
+        for (target, _) in help.frame().hits() {
+            kinds.insert(probe::variant_name(*target));
+        }
+        for kind in [
+            "Tab",
+            "Flag",
+            "MatchPrev",
+            "MatchNext",
+            "ReplaceToggle",
+            "SavePattern",
+            "PatternField",
+            "ReplaceField",
+            "InputArea",
+            "ResultArea",
+            "ResultTab",
+            "GroupsInline",
+            "MatchRow",
+            "ResultsBody",
+            "Chip",
+            "LibraryRow",
+            "LibraryUse",
+            "LibraryDelete",
+            "LibraryBody",
+            "ReferenceBody",
+            "SaveName",
+            "SaveConfirm",
+            "SaveCancel",
+            "ModalBackdrop",
+            "HelpCard",
+        ] {
+            assert!(kinds.contains(kind), "no state draws a {kind}: {kinds:?}");
+        }
+    }
+
+    #[test]
+    fn the_tabs_are_buttons() {
+        let mut app = App::new();
+        for tab in [ActiveTab::Library, ActiveTab::Reference, ActiveTab::Tester] {
+            assert!(probe::click(&mut app, Target::Tab(tab)));
+            assert_eq!(app.active_tab, tab);
+        }
+        assert!(
+            !probe::click(&mut app, Target::Tab(ActiveTab::Tester)),
+            "the tab already showing"
+        );
+    }
+
+    #[test]
+    fn the_flag_buttons_toggle_their_flags() {
+        let mut app = testing("A", "aA");
+        assert_eq!(app.matches.len(), 1);
+        probe::click(&mut app, Target::Flag(Flag::CaseInsensitive));
+        assert!(app.flags.case_insensitive);
+        assert_eq!(app.matches.len(), 2, "the match list was not run again");
+        probe::click(&mut app, Target::Flag(Flag::Global));
+        assert!(!app.flags.global);
+        assert_eq!(app.matches.len(), 1);
+        probe::click(&mut app, Target::Flag(Flag::Multiline));
+        assert!(app.flags.multiline);
+    }
+
+    #[test]
+    fn the_match_buttons_and_rows_step_through_the_matches() {
+        let mut app = testing("a", "banana");
+        assert_eq!(app.matches.len(), 3);
+        assert!(probe::click(&mut app, Target::MatchNext));
+        assert_eq!(app.current_match_index, 1);
+        assert!(probe::click(&mut app, Target::MatchPrev));
+        assert_eq!(app.current_match_index, 0);
+        assert!(probe::click(&mut app, Target::MatchRow(2)));
+        assert_eq!(app.current_match_index, 2);
+        assert!(
+            !probe::click(&mut app, Target::MatchRow(2)),
+            "the row already current"
+        );
+    }
+
+    #[test]
+    fn stepping_through_matches_brings_the_current_one_into_both_views() {
+        let lines: Vec<String> = (0..100).map(|i| format!("line {i} x")).collect();
+        let mut app = testing("x", &lines.join("\n"));
+        assert_eq!(app.matches.len(), 100);
+        for _ in 0..60 {
+            app.handle_event(&Event::Key(probe::press(Key::F3)));
+        }
+        assert_eq!(app.current_match_index, 60);
+        assert!(
+            probe::is_visible(&app, Target::MatchRow(60)),
+            "the current match is off the bottom of the list"
+        );
+        let rows = app.input_rows();
+        assert!(
+            (app.input_scroll..app.input_scroll + rows).contains(&60),
+            "line 60 is not in view: the input shows from {} for {rows}",
+            app.input_scroll
+        );
+        app.handle_event(&Event::Key(probe::shift(Key::F3)));
+        assert_eq!(app.current_match_index, 59);
+    }
+
+    #[test]
+    fn a_press_in_a_field_gives_it_the_keyboard_and_puts_the_caret_there() {
+        let mut app = testing("abcdef", "");
+        app.active_field = ActiveField::Input;
+        let rect = probe::rect_of(&app, Target::PatternField).unwrap();
+        let x = rect.x + 8.0 + text::measure("abc", NORMAL_TEXT, FontWeightHint::Regular);
+        app.handle_event(&mouse(
+            x,
+            rect.centre().1,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        assert_eq!(app.active_field, ActiveField::Pattern);
+        assert_eq!(app.pattern.cursor().byte, 3);
+        // And what is typed goes there, in the middle.
+        probe::type_str(&mut app, "X");
+        assert_eq!(app.pattern.text(), "abcXdef");
+    }
+
+    #[test]
+    fn the_test_input_takes_new_lines_and_can_be_edited_anywhere() {
+        let mut app = App::new();
+        probe::click(&mut app, Target::InputArea);
+        assert_eq!(app.active_field, ActiveField::Input);
+        probe::type_str(&mut app, "ab");
+        assert!(app.handle_event(&Event::Key(probe::press(Key::Enter))));
+        probe::type_str(&mut app, "cd");
+        assert_eq!(app.input.text(), "ab\ncd");
+        app.handle_event(&Event::Key(probe::press(Key::Up)));
+        probe::type_str(&mut app, "X");
+        assert_eq!(app.input.text(), "abX\ncd", "Up did not keep the column");
+        app.handle_event(&Event::Key(probe::press(Key::Home)));
+        probe::type_str(&mut app, "Y");
+        assert_eq!(app.input.text(), "YabX\ncd");
+        app.handle_event(&Event::Key(probe::press(Key::Down)));
+        app.handle_event(&Event::Key(probe::press(Key::End)));
+        app.handle_event(&Event::Key(probe::press(Key::Backspace)));
+        assert_eq!(app.input.text(), "YabX\nc");
+        app.handle_event(&Event::Key(probe::ctrl(Key::Home)));
+        app.handle_event(&Event::Key(probe::press(Key::Delete)));
+        assert_eq!(app.input.text(), "abX\nc");
+    }
+
+    /// The multiline flag had nothing to act on: no newline could be typed.
+    #[test]
+    fn multiline_can_be_tried_on_text_typed_in_the_window() {
+        let mut app = App::new();
+        app.set_pattern("^c");
+        probe::click(&mut app, Target::InputArea);
+        probe::type_str(&mut app, "ab");
+        app.handle_event(&Event::Key(probe::press(Key::Enter)));
+        probe::type_str(&mut app, "cd");
+        assert!(app.matches.is_empty(), "^ is the start of the text");
+        app.handle_event(&Event::Key(probe::ctrl(Key::M)));
+        assert_eq!(app.matches.len(), 1, "^ is the start of each line with m");
+    }
+
+    #[test]
+    fn a_press_in_the_test_input_puts_the_caret_under_it_and_a_drag_selects() {
+        let mut app = App::new();
+        app.set_input("first line\nsecond line\nthird");
+        let area = app.tester_layout().input_text();
+        let at = |line: f32, prefix: &str| {
+            (
+                area.x + text::measure(prefix, NORMAL_TEXT, FontWeightHint::Regular),
+                area.y + line * LINE_HEIGHT + LINE_HEIGHT / 2.0,
+            )
+        };
+        let (x, y) = at(1.0, "sec");
+        app.handle_event(&mouse(x, y, MouseEventKind::Press(MouseButton::Left)));
+        assert_eq!(app.active_field, ActiveField::Input);
+        assert_eq!(app.input.caret, "first line\nsec".len());
+        let (x2, y2) = at(2.0, "th");
+        assert!(app.handle_event(&mouse(x2, y2, MouseEventKind::Move)));
+        assert_eq!(app.input.selected_text(), "ond line\nth");
+        app.handle_event(&mouse(x2, y2, MouseEventKind::Release(MouseButton::Left)));
+        assert!(!app.dragging);
+        // A move after the release selects nothing more.
+        let (x3, y3) = at(0.0, "f");
+        app.handle_event(&mouse(x3, y3, MouseEventKind::Move));
+        assert_eq!(app.input.selected_text(), "ond line\nth");
+    }
+
+    #[test]
+    fn copy_and_paste_carry_text_between_the_fields() {
+        let mut app = testing("[0-9]+", "");
+        app.active_field = ActiveField::Pattern;
+        app.handle_event(&Event::Key(probe::ctrl(Key::A)));
+        assert!(app.handle_event(&Event::Key(probe::ctrl(Key::C))));
+        app.handle_event(&Event::Key(probe::press(Key::Tab)));
+        assert_eq!(app.active_field, ActiveField::Input);
+        assert!(app.handle_event(&Event::Key(probe::ctrl(Key::V))));
+        assert_eq!(app.input.text(), "[0-9]+");
+        // Cut from the input takes the text out, and it pastes back.
+        app.handle_event(&Event::Key(probe::ctrl(Key::A)));
+        app.handle_event(&Event::Key(probe::ctrl(Key::X)));
+        assert_eq!(app.input.text(), "");
+        app.handle_event(&Event::Key(probe::ctrl(Key::V)));
+        assert_eq!(app.input.text(), "[0-9]+");
+    }
+
+    #[test]
+    fn the_test_input_scrolls_and_follows_its_caret() {
+        let lines: Vec<String> = (0..120).map(|i| format!("row {i}")).collect();
+        let mut app = App::new();
+        app.set_input(&lines.join("\n"));
+        probe::click(&mut app, Target::InputArea);
+        app.handle_event(&Event::Key(probe::ctrl(Key::End)));
+        let rows = app.input_rows();
+        assert!(
+            app.input_scroll + rows > 119 && app.input_scroll <= 119,
+            "the caret's line is not in view"
+        );
+        let scrolled = app.input_scroll;
+        assert!(probe::scroll_at_point(&mut app, Target::InputArea, 2.0));
+        assert!(
+            app.input_scroll < scrolled,
+            "the wheel did not move the text"
+        );
+    }
+
+    /// A match's position is counted in characters; the highlight was placed
+    /// as if it were in bytes, so after an accented letter it marked the
+    /// wrong ones.
+    #[test]
+    fn the_highlight_covers_what_matched_after_a_wide_character() {
+        let app = testing("1", "é1");
+        let area = app.tester_layout().input_text();
+        let wash = with_alpha(app.palette.peach, 110);
+        let highlight = app
+            .render_commands()
+            .into_iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x, width, color, ..
+                } if color == wash => Some((x, width)),
+                _ => None,
+            })
+            .expect("the current match is highlighted");
+        let before = text::measure("é", NORMAL_TEXT, FontWeightHint::Regular);
+        let one = text::measure("1", NORMAL_TEXT, FontWeightHint::Regular);
+        assert!(
+            (highlight.0 - (area.x + before)).abs() < 0.5,
+            "the band starts at {} and the 1 at {}",
+            highlight.0,
+            area.x + before
+        );
+        assert!((highlight.1 - one).abs() < 0.5);
+    }
+
+    /// The replacement's result was drawn with the input's highlights on it,
+    /// at the input's positions -- over whatever the result had there.
+    #[test]
+    fn the_result_is_not_painted_with_the_inputs_highlights() {
+        let mut app = testing("a", "aaa");
+        app.toggle_replace();
+        app.set_replacement("bb");
+        assert_eq!(app.replace_result.as_deref(), Some("bbbbbb"));
+        let washes = [
+            with_alpha(app.palette.peach, 110),
+            with_alpha(app.palette.blue, 60),
+        ];
+        let bands = app
+            .render_commands()
+            .iter()
+            .filter(
+                |c| matches!(c, RenderCommand::FillRect { color, .. } if washes.contains(color)),
+            )
+            .count();
+        assert_eq!(bands, 3, "one band per match, and only in the input");
+    }
+
+    #[test]
+    fn the_sub_tabs_show_what_they_name() {
+        let mut app = testing("(b)(x)?an", "banana");
+        assert!(probe::click(
+            &mut app,
+            Target::ResultTab(ResultsView::Groups)
+        ));
+        let drawn = texts(&app);
+        assert!(
+            drawn.iter().any(|t| t.starts_with("$1  \"b\"")),
+            "{drawn:?}"
+        );
+        assert!(
+            drawn.iter().any(|t| t.starts_with("$2  took no part")),
+            "{drawn:?}"
+        );
+        assert!(probe::click(
+            &mut app,
+            Target::ResultTab(ResultsView::Explain)
+        ));
+        let drawn = texts(&app);
+        for line in &app.explanations {
+            assert!(drawn.contains(line), "{line:?} is not drawn");
+        }
+        assert!(probe::click(
+            &mut app,
+            Target::ResultTab(ResultsView::Matches)
+        ));
+        assert!(probe::is_visible(&app, Target::MatchRow(0)));
+    }
+
+    /// The breakdown was cut at six lines; all of it can be read now.
+    #[test]
+    fn a_long_explanation_can_be_read_to_its_end() {
+        // Forty different letters, so no two lines of the breakdown are the
+        // same and the last one is told apart from the rest.
+        let pattern = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN";
+        let mut app = testing(pattern, "");
+        assert!(app.explanations.len() > app.results_rows(ResultsView::Explain));
+        probe::click(&mut app, Target::ResultTab(ResultsView::Explain));
+        let last = app.explanations.last().unwrap().clone();
+        assert!(!texts(&app).contains(&last));
+        for _ in 0..40 {
+            probe::scroll_at_point(&mut app, Target::ResultsBody, -1.0);
+        }
+        assert!(
+            texts(&app).contains(&last),
+            "the end of the breakdown is out of reach"
+        );
+    }
+
+    #[test]
+    fn the_groups_button_shows_and_hides_the_groups_in_the_list() {
+        let mut app = testing("(n)a", "banana");
+        assert!(texts(&app).iter().any(|t| t.contains("$1=\"n\"")));
+        assert!(probe::click(&mut app, Target::GroupsInline));
+        assert!(!app.show_groups);
+        assert!(!texts(&app).iter().any(|t| t.contains("$1=\"n\"")));
+    }
+
+    #[test]
+    fn the_replace_button_shows_the_replacement_and_its_result() {
+        let mut app = testing("a", "banana");
+        assert!(!probe::is_visible(&app, Target::ReplaceField));
+        assert!(probe::click(&mut app, Target::ReplaceToggle));
+        assert!(app.show_replace);
+        probe::click(&mut app, Target::ReplaceField);
+        assert_eq!(app.active_field, ActiveField::Replace);
+        probe::type_str(&mut app, "o");
+        assert_eq!(app.replace_result.as_deref(), Some("bonono"));
+        assert!(texts(&app).contains(&"bonono".to_string()));
+    }
+
+    #[test]
+    fn a_long_result_scrolls() {
+        let lines: Vec<String> = (0..20).map(|i| format!("r{i}")).collect();
+        let mut app = testing("r", &lines.join("\n"));
+        app.toggle_replace();
+        app.set_replacement("s");
+        assert!(probe::scroll_at_point(&mut app, Target::ResultArea, -1.0));
+        assert!(app.result_scroll > 0);
+    }
+
+    #[test]
+    fn a_library_pattern_can_be_used_by_its_button_by_a_double_press_or_by_enter() {
+        let mut app = App::new();
+        probe::click(&mut app, Target::Tab(ActiveTab::Library));
+        assert!(probe::click(&mut app, Target::LibraryUse(0)));
+        assert_eq!(app.active_tab, ActiveTab::Tester);
+        assert_eq!(app.pattern.text(), app.library[0].pattern);
+
+        probe::click(&mut app, Target::Tab(ActiveTab::Library));
+        let (x, y) = probe::rect_of(&app, Target::LibraryRow(1))
+            .unwrap()
+            .centre();
+        app.handle_event(&mouse(x, y, MouseEventKind::DoubleClick(MouseButton::Left)));
+        assert_eq!(app.pattern.text(), app.library[1].pattern);
+
+        probe::click(&mut app, Target::Tab(ActiveTab::Library));
+        probe::click(&mut app, Target::LibraryRow(2));
+        assert_eq!(app.selected_library_entry, Some(2));
+        app.handle_event(&Event::Key(probe::press(Key::Enter)));
+        assert_eq!(app.pattern.text(), app.library[2].pattern);
+        assert_eq!(app.active_tab, ActiveTab::Tester);
+    }
+
+    #[test]
+    fn the_chips_filter_the_library_and_the_list_scrolls_to_its_end() {
+        let mut app = App::new();
+        app.active_tab = ActiveTab::Library;
+        let network = LIBRARY_FILTERS
+            .iter()
+            .position(|c| *c == Some(PatternCategory::Network))
+            .unwrap();
+        assert!(probe::click(&mut app, Target::Chip(network)));
+        assert!(
+            app.visible_library()
+                .iter()
+                .all(|(_, e)| e.category == PatternCategory::Network)
+        );
+        probe::click(&mut app, Target::Chip(0));
+        let last = app.library.len() - 1;
+        assert!(
+            !probe::is_visible(&app, Target::LibraryRow(last)),
+            "the whole library fits; nothing to scroll"
+        );
+        for _ in 0..20 {
+            probe::scroll_at_point(&mut app, Target::LibraryBody, -1.0);
+        }
+        assert!(
+            probe::is_visible(&app, Target::LibraryRow(last)),
+            "the end of the library is out of reach"
+        );
+    }
+
+    #[test]
+    fn a_pattern_saved_to_the_library_is_kept_with_its_flags() {
+        settingsfile::testing::with_scratch_config("rt_saved", |_| {
+            let mut app = testing("\\d+", "a1 b22");
+            app.toggle_flag(Flag::CaseInsensitive);
+            app.toggle_flag(Flag::Multiline);
+            assert!(probe::click(&mut app, Target::SavePattern));
+            assert!(probe::is_visible(&app, Target::SaveName));
+            probe::type_str(&mut app, "digits");
+            assert!(probe::click(&mut app, Target::SaveConfirm));
+            assert!(app.save_name.is_none());
+            assert!(app.status.starts_with("Saved digits"), "{}", app.status);
+
+            // A new window finds it, and using it brings its flags back.
+            let mut next = App::new();
+            next.load_library(&settingsfile::load(CONFIG_NAME));
+            let index = next
+                .library
+                .iter()
+                .position(|e| e.name == "digits")
+                .expect("the saved pattern is gone");
+            assert_eq!(next.library[index].category, PatternCategory::Custom);
+            assert!(!next.flags.case_insensitive);
+            next.use_library_entry(index);
+            assert_eq!(next.pattern.text(), "\\d+");
+            assert!(next.flags.case_insensitive && next.flags.multiline);
+        });
+    }
+
+    #[test]
+    fn saving_under_a_saved_name_replaces_it() {
+        settingsfile::testing::with_scratch_config("rt_resave", |_| {
+            let mut app = testing("a+", "");
+            let before = app.library.len();
+            app.ask_to_save();
+            probe::type_str(&mut app, "mine");
+            app.handle_event(&Event::Key(probe::press(Key::Enter)));
+            app.set_pattern("b+");
+            app.ask_to_save();
+            probe::type_str(&mut app, "mine");
+            app.handle_event(&Event::Key(probe::press(Key::Enter)));
+            assert_eq!(app.library.len(), before + 1, "a second entry of one name");
+            let mut next = App::new();
+            next.load_library(&settingsfile::load(CONFIG_NAME));
+            let mine: Vec<&PatternEntry> =
+                next.library.iter().filter(|e| e.name == "mine").collect();
+            assert_eq!(mine.len(), 1);
+            assert_eq!(mine[0].pattern, "b+");
+        });
+    }
+
+    #[test]
+    fn a_saved_pattern_can_be_deleted_and_stays_deleted() {
+        settingsfile::testing::with_scratch_config("rt_delete", |_| {
+            let mut app = testing("z+", "");
+            app.ask_to_save();
+            probe::type_str(&mut app, "gone");
+            app.confirm_save();
+            let index = app.library.iter().position(|e| e.name == "gone").unwrap();
+            app.active_tab = ActiveTab::Library;
+            app.library_category_filter = Some(PatternCategory::Custom);
+            assert!(probe::click(&mut app, Target::LibraryDelete(index)));
+            assert!(!app.library.iter().any(|e| e.name == "gone"));
+            let mut next = App::new();
+            next.load_library(&settingsfile::load(CONFIG_NAME));
+            assert!(!next.library.iter().any(|e| e.name == "gone"));
+            // The Delete key does the same to the one selected.
+            app.set_pattern("y+");
+            app.ask_to_save();
+            probe::type_str(&mut app, "keyed");
+            app.confirm_save();
+            app.active_tab = ActiveTab::Library;
+            let keyed = app.library.iter().position(|e| e.name == "keyed").unwrap();
+            app.selected_library_entry = Some(keyed);
+            assert!(app.handle_event(&Event::Key(probe::press(Key::Delete))));
+            assert!(!app.library.iter().any(|e| e.name == "keyed"));
+            // The built-in patterns have no Delete to press.
+            app.library_category_filter = None;
+            assert!(!probe::is_visible(&app, Target::LibraryDelete(0)));
+            assert!(!app.delete_library_entry(0));
+        });
+    }
+
+    #[test]
+    fn the_save_dialog_is_modal_and_cancel_saves_nothing() {
+        settingsfile::testing::with_scratch_config("rt_modal", |_| {
+            let mut app = testing("a", "");
+            let library_tab = probe::rect_of(&app, Target::Tab(ActiveTab::Library))
+                .unwrap()
+                .centre();
+            probe::click(&mut app, Target::SavePattern);
+            app.handle_event(&mouse(
+                library_tab.0,
+                library_tab.1,
+                MouseEventKind::Press(MouseButton::Left),
+            ));
+            assert_eq!(
+                app.active_tab,
+                ActiveTab::Tester,
+                "a press went through the dialog"
+            );
+            probe::type_str(&mut app, "never");
+            assert!(probe::click(&mut app, Target::SaveCancel));
+            assert!(app.save_name.is_none());
+            assert!(!app.library.iter().any(|e| e.name == "never"));
+            // Escape too.
+            app.ask_to_save();
+            app.handle_event(&Event::Key(probe::press(Key::Escape)));
+            assert!(app.save_name.is_none());
+        });
+    }
+
+    #[test]
+    fn the_library_says_when_it_is_full() {
+        settingsfile::testing::with_scratch_config("rt_full", |_| {
+            let mut app = testing("q", "");
+            while app.library.len() < MAX_LIBRARY_ENTRIES {
+                let n = app.library.len();
+                app.library
+                    .push(custom_entry(&format!("p{n}"), "x", RegexFlags::default()));
+            }
+            app.ask_to_save();
+            probe::type_str(&mut app, "one more");
+            app.confirm_save();
+            assert_eq!(app.library.len(), MAX_LIBRARY_ENTRIES);
+            assert!(
+                app.save_error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("full")),
+                "{:?}",
+                app.save_error
+            );
+        });
+    }
+
+    /// A saved entry this version cannot read is the user's, and a save of
+    /// another entry leaves it in the file.
+    #[test]
+    fn a_saved_entry_that_cannot_be_read_is_left_alone() {
+        settingsfile::testing::with_scratch_config("rt_foreign", |_| {
+            let mut doc = yamldoc::Document::new();
+            doc.set_str(&[LIBRARY_KEY, "odd", "note"], "no pattern here");
+            settingsfile::store(CONFIG_NAME, &doc).unwrap();
+            let mut app = testing("k", "");
+            app.load_library(&settingsfile::load(CONFIG_NAME));
+            assert!(!app.library.iter().any(|e| e.name == "odd"));
+            app.ask_to_save();
+            probe::type_str(&mut app, "kept");
+            app.confirm_save();
+            let doc = settingsfile::load(CONFIG_NAME);
+            assert_eq!(
+                doc.get_str(&[LIBRARY_KEY, "odd", "note"]).as_deref(),
+                Some("no pattern here")
+            );
+            assert_eq!(
+                doc.get_str(&[LIBRARY_KEY, "kept", "pattern"]).as_deref(),
+                Some("k")
+            );
+        });
+    }
+
+    /// Typing reached the tester's fields from any tab, so letters typed in
+    /// the library went into a pattern nobody could see.
+    #[test]
+    fn typing_in_the_library_or_the_reference_goes_nowhere() {
+        let mut app = testing("a", "banana");
+        for tab in [ActiveTab::Library, ActiveTab::Reference] {
+            app.active_tab = tab;
+            assert!(!app.handle_event(&Event::Key(probe::typing("x"))));
+            assert_eq!(app.pattern.text(), "a");
+        }
+    }
+
+    #[test]
+    fn the_reference_scrolls_in_a_short_window() {
+        let mut app = App::new();
+        app.active_tab = ActiveTab::Reference;
+        app.handle_event(&Event::Resize {
+            width: 900,
+            height: 300,
+        });
+        let (x, y) = app
+            .frame()
+            .rect_of(|t| *t == Target::ReferenceBody)
+            .unwrap()
+            .centre();
+        assert!(app.handle_event(&mouse(x, y, MouseEventKind::Scroll { dx: 0.0, dy: -1.0 })));
+        assert!(app.reference_scroll > 0);
+        assert!(app.handle_event(&Event::Key(probe::press(Key::Up))));
+    }
+
+    #[test]
+    fn the_pointer_lights_what_it_is_over_and_the_status_bar_says_what_it_does() {
+        let mut app = App::new();
+        let (x, y) = probe::rect_of(&app, Target::Flag(Flag::Global))
+            .unwrap()
+            .centre();
+        assert!(app.handle_event(&mouse(x, y, MouseEventKind::Move)));
+        assert_eq!(app.hover, Some(Target::Flag(Flag::Global)));
+        assert!(texts(&app).contains(&Flag::Global.tip().to_string()));
+        assert!(!app.handle_event(&mouse(x, y, MouseEventKind::Move)));
+        assert!(app.handle_event(&mouse(x, y, MouseEventKind::Leave)));
+        assert_eq!(app.hover, None);
+    }
+
+    #[test]
+    fn a_press_puts_the_shortcut_card_away_and_reaches_nothing_under_it() {
+        let mut app = App::new();
+        let (x, y) = probe::rect_of(&app, Target::Tab(ActiveTab::Library))
+            .unwrap()
+            .centre();
+        app.handle_event(&Event::Key(probe::press(Key::F1)));
+        assert_eq!(app.frame().hit_test(x, y), Some(Target::HelpCard));
+        assert!(app.handle_event(&mouse(x, y, MouseEventKind::Press(MouseButton::Left))));
+        assert!(!app.show_help);
+        assert_eq!(
+            app.active_tab,
+            ActiveTab::Tester,
+            "the press reached the tab"
+        );
+    }
+
+    #[test]
+    fn the_toolbar_is_laid_out_at_the_size_it_is_given() {
+        let mut app = App::new();
+        app.handle_event(&Event::Resize {
+            width: 1500,
+            height: 900,
+        });
+        let next = app.frame().rect_of(|t| *t == Target::MatchNext).unwrap();
+        assert!(
+            (next.right() - (1500.0 - PADDING)).abs() < 0.5,
+            "{next:?} is not at the right edge"
+        );
+    }
+
+    #[test]
+    fn a_chord_nobody_bound_types_nothing() {
+        let mut app = testing("a", "");
+        let mut chord = probe::ctrl(Key::D);
+        chord.text = "d".to_string();
+        assert!(!app.handle_event(&Event::Key(chord)));
+        assert_eq!(app.pattern.text(), "a");
+    }
+
+    #[test]
+    fn enter_and_the_arrows_step_through_matches_from_the_pattern() {
+        let mut app = testing("a", "banana");
+        app.active_field = ActiveField::Pattern;
+        assert!(app.handle_event(&Event::Key(probe::press(Key::Enter))));
+        assert_eq!(app.current_match_index, 1);
+        app.handle_event(&Event::Key(probe::press(Key::Down)));
+        assert_eq!(app.current_match_index, 2);
+        app.handle_event(&Event::Key(probe::press(Key::Up)));
+        assert_eq!(app.current_match_index, 1);
+    }
+
+    #[test]
+    fn a_match_that_spans_lines_is_shown_with_its_break() {
+        let app = testing("a\\nb", "a\nb");
+        assert_eq!(app.matches.len(), 1);
+        assert!(texts(&app).contains(&"\"a\\nb\"".to_string()));
     }
 }

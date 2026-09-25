@@ -159759,6 +159759,26 @@ the pointer. Following now stops when the reader selects an earlier entry, since
 on a busy log the next line would otherwise drag the selection away before it
 could be read. Six examined; fourteen to go.
 
+**`apps/regextester`, 2026-09-25 -- wholesale, and half of it was out of
+reach.** Beyond the missing pointer: the test input could not take a newline
+(Enter's text is a control character and the typing path dropped them all), so
+the multiline flag had nothing to act on; every field could be edited only at
+its end; nothing scrolled (`scroll_offset` and `match_scroll_offset` were read
+and never written), so a long text, the matches past the first screenful, half
+the library and the end of the reference could not be seen; the Groups and
+Explain sub-tabs were drawn with nothing behind them and the breakdown was cut
+at six lines; a library pattern could not be loaded and none could be saved
+(`load_library_entry` and `save_to_library` had no caller -- `todo.txt`'s
+entry, now done); and typing on the Library tab went into a pattern nobody
+could see. Also fixed: match highlights were placed by treating a character
+index as a byte offset (wrong letters after any accent), the replacement's
+result was painted with the input's highlights, and each match attempt copied
+the whole input into a new character vector (a thousand matches over the
+16 384-character limit copied sixteen million characters per keystroke). Now
+the test input is a real multi-line field (caret, selection, clipboard, drag),
+the library saves patterns with their flags to the user's settings, and every
+control answers the pointer. Seven examined; thirteen to go.
+
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 
 **In short:** a `cargo test --workspace` failed with exactly one failing test,

@@ -2398,6 +2398,8 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]

@@ -1,6 +1,7 @@
 # B → A: `blkdiscard` needs BLKDISCARD, or it stays a zero-fill only
 
-**Status:** OPEN · **Filed:** 2026-09-13 by lane B ·
+**Status:** ✅ LANDED 2026-09-21 by lane A — `BLKDISCARD` is dispatched; `BLKSECDISCARD` and `BLKZEROOUT` refuse on purpose. Reply: `requests/a-b-blkdiscard-dispatched-and-two-of-three-refuse.md`. (Stamped 2026-09-24: the reply was filed as its own file and this header was never updated.)
+**Filed:** 2026-09-13 by lane B ·
 **Affects:** `userspace/wipefs` (blkdiscard personality) — mine; the ioctl
 dispatch — yours
 

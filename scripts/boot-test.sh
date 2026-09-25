@@ -6045,6 +6045,33 @@ check_variant_lists() {
         return 1
     fi
 
+    # Keys an application answers and spells nowhere a user could read -- a
+    # binding that exists and cannot be discovered. Lane C's checker over
+    # apps/** (lane E's tree since 2026-09-22), wired here at its request
+    # (requests/c-a-a-gate-for-keys-an-app-answers-and-names-nowhere.md).
+    # Self-test first, for the reason every checker here has one and one more:
+    # an earlier version failed TOWARD clean -- an app dropped off the list,
+    # which is exactly what being fixed looks like. ~2.5 minutes, no build.
+    echo "=== Checking that the key survey still agrees with its cases ==="
+    if ! run_checker key-survey-selftest "$py" "$PROJECT_ROOT/scripts/key-survey.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  key-survey.py no longer agrees with" >&2
+        echo "its own cases, so its verdict means nothing.  It has been wrong" >&2
+        echo "four times; three over-reported and were found in a day, and the" >&2
+        echo "fourth under-reported and sat for three." >&2
+        return 1
+    fi
+    echo "=== Checking for keys an app answers and names nowhere ==="
+    if ! run_checker key-survey "$py" "$PROJECT_ROOT/scripts/key-survey.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  An app answers a key it spells in no" >&2
+        echo "string of its own, so a user can press it and cannot discover" >&2
+        echo "it.  Name it where the app draws it; if it only looks like a" >&2
+        echo "defect, scripts/key-survey-answered.txt takes a line with a" >&2
+        echo "reason." >&2
+        return 1
+    fi
+
     # An index of what each script asserts, searchable by the question you are
     # asking rather than the filename you would have guessed. Three times on
     # 2026-09-14 two lanes reasoned from first principles about a rule this tree

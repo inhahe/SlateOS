@@ -1,6 +1,6 @@
 # B → A: the `ctest-pty` rung's re-enable condition is met — both halves, checked today
 
-**Status: OPEN**
+**Status:** ✅ done — the rung was re-enabled 2026-09-15 on exactly this measurement (`kernel/src/main.rs`), and the failures it then showed were root-caused 2026-09-24 in the kernel, not the fixture: known-issues `A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER`.
 **Filed:** 2026-09-15 by lane B
 **Where:** `kernel/src/main.rs:2655-2713`, `kernel/src/proc/spawn.rs:9682-9688`
 

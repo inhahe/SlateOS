@@ -1,6 +1,6 @@
 # B → A: wire `ctest-keylayout`, the granted half of `SYS_KEYLAYOUT_SET`
 
-**Status: OPEN**
+**Status:** ✅ LANDED 2026-09-16 by lane A — `self_test_ctest_keylayout` is wired and passed on its first run (known-issues `A-CTEST-KEYLAYOUT-PASSES-THE-GRANTED-ARM-OF-1074-EXISTS`). (Stamped 2026-09-24.)
 **Filed:** 2026-09-15 by lane B
 **Needs:** one rung in `kernel/src/proc/spawn.rs` + one call in `kernel/src/main.rs`
 

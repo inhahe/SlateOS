@@ -1,5 +1,7 @@
 # A gate for keys an app answers and names nowhere
 
+**Status:** ✅ LANDED 2026-09-24 by lane A — wired in `scripts/boot-test.sh` beside `fields-written-never-read`, self-test first, with your messages verbatim. It now gates every lane's boot; `apps/**` is lane E's since the six-lane split, so a finding it raises is theirs to answer.
+
 **From:** lane C — **To:** lane A — **Raised:** 2026-09-21
 **Not touched by me:** `scripts/boot-test.sh` is yours. The checker, its
 self-test, its answers file and its baseline are all in place and green; the

@@ -84,6 +84,29 @@ impl TimeOfDay {
     pub fn minute(self) -> u8 {
         u8::try_from(self.minutes % 60).unwrap_or(0)
     }
+
+    /// A time of day written `HH:MM` -- the spelling the settings files store,
+    /// surrounding space allowed -- or `None` for anything else.
+    ///
+    /// Here rather than in each settings crate, where it was: `notifsettings`
+    /// had it privately, and the appearance settings needed it a second time.
+    /// One crate writing 22:00 one way and another reading it another is the
+    /// drift this crate exists to end, one layer up. [`Display`] writes the
+    /// same spelling back.
+    ///
+    /// [`Display`]: core::fmt::Display
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let (h, m) = text.trim().split_once(':')?;
+        Self::new(h.trim().parse().ok()?, m.trim().parse().ok()?)
+    }
+}
+
+/// `HH:MM`, zero-padded -- the spelling [`TimeOfDay::parse`] reads.
+impl core::fmt::Display for TimeOfDay {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:02}:{:02}", self.hour(), self.minute())
+    }
 }
 
 /// A window of the day that recurs daily and may wrap past midnight.
@@ -144,6 +167,32 @@ impl DailyWindow {
             // Overnight window, e.g. 22:00–07:00.
             now >= start || now < end
         }
+    }
+
+    /// Minutes from `at` until the window next opens or closes, counting an
+    /// edge at `at` itself as a whole day away (it has just happened). `None`
+    /// for a window that never changes -- one whose start and end are the
+    /// same time of day.
+    ///
+    /// For a schedule that sleeps until its next change rather than checking
+    /// the clock every minute to find that nothing has (`design-decisions.md`
+    /// 812: an idle desktop registers no wake-up at all).
+    #[must_use]
+    pub fn minutes_to_next_edge(self, at: TimeOfDay) -> Option<u16> {
+        if self.start == self.end {
+            return None;
+        }
+        let until = |edge: TimeOfDay| {
+            // Both are under a day, so neither step can saturate; the
+            // remainder is the distance forward around the clock.
+            let ahead = edge
+                .minutes
+                .saturating_add(MINUTES_PER_DAY)
+                .saturating_sub(at.minutes)
+                % MINUTES_PER_DAY;
+            if ahead == 0 { MINUTES_PER_DAY } else { ahead }
+        };
+        Some(until(self.start).min(until(self.end)))
     }
 
     /// Whether a wall-clock `hour:minute` falls inside the window.
@@ -208,6 +257,39 @@ mod tests {
     )]
 
     use super::*;
+
+    #[test]
+    fn a_time_of_day_is_written_and_read_as_hh_mm() {
+        for (text, hm) in [("07:00", (7, 0)), (" 9:5 ", (9, 5)), ("23:59", (23, 59))] {
+            let t = TimeOfDay::parse(text).unwrap();
+            assert_eq!((t.hour(), t.minute()), hm, "{text:?}");
+        }
+        assert_eq!(TimeOfDay::new(7, 5).unwrap().to_string(), "07:05");
+        for bad in ["24:00", "7", "07:60", "", "seven:00", "07:00:00"] {
+            assert_eq!(TimeOfDay::parse(bad), None, "{bad:?}");
+        }
+        // What `Display` writes, `parse` reads back.
+        let t = TimeOfDay::new(22, 30).unwrap();
+        assert_eq!(TimeOfDay::parse(&t.to_string()), Some(t));
+    }
+
+    #[test]
+    fn the_next_edge_is_the_nearer_of_the_two_ahead() {
+        let day = DailyWindow::from_hm(7, 0, 19, 0).unwrap();
+        let at = |h, m| TimeOfDay::new(h, m).unwrap();
+        assert_eq!(day.minutes_to_next_edge(at(6, 0)), Some(60));
+        assert_eq!(day.minutes_to_next_edge(at(12, 0)), Some(7 * 60));
+        assert_eq!(day.minutes_to_next_edge(at(18, 59)), Some(1));
+        // At an edge, that edge has just happened: the next is the other one.
+        assert_eq!(day.minutes_to_next_edge(at(19, 0)), Some(12 * 60));
+        // Round midnight, and for a window that wraps it.
+        assert_eq!(day.minutes_to_next_edge(at(23, 0)), Some(8 * 60));
+        let night = DailyWindow::from_hm(22, 0, 6, 0).unwrap();
+        assert_eq!(night.minutes_to_next_edge(at(23, 30)), Some(6 * 60 + 30));
+        // A window that never opens or closes has no next edge.
+        let never = DailyWindow::from_hm(8, 0, 8, 0).unwrap();
+        assert_eq!(never.minutes_to_next_edge(at(8, 0)), None);
+    }
 
     /// **The case both hand-written copies got wrong.**
     #[test]

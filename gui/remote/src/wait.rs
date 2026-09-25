@@ -797,6 +797,306 @@ mod platform {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Waking a wait from another thread
+// ---------------------------------------------------------------------------
+
+/// A way to end a wait from another thread: the self-pipe trick.
+///
+/// Returns the two halves. The [`WakeReceiver`] goes into a [`WaitSet`] like
+/// any socket; the [`WakeSender`] is `Send + Sync`, is shared by every thread
+/// that may need to wake the waiter, and makes the receiver readable with
+/// [`WakeSender::wake`]. The waiter [`drain`](WakeReceiver::drain)s the
+/// receiver once woken, so that its next wait blocks again.
+///
+/// A wake sent while nobody is waiting is not lost: it leaves the receiver
+/// readable, and the next wait returns at once.
+///
+/// It is a **pipe** on Linux and SlateOS — kernel-native, needing nothing of
+/// the network daemon, and on SlateOS one of the few objects a `poll` truly
+/// parks on — and a pair of **loopback UDP sockets** elsewhere, because a
+/// Windows wait takes only sockets.
+///
+/// # Errors
+///
+/// Whatever making the pipe or the sockets fails with — out of descriptors,
+/// most likely.
+pub fn wake_channel() -> io::Result<(WakeSender, WakeReceiver)> {
+    let (sender, receiver) = wake::channel()?;
+    Ok((
+        WakeSender { inner: sender },
+        WakeReceiver { inner: receiver },
+    ))
+}
+
+/// The half of a [`wake_channel`] that wakes. Share it — behind an `Arc`, or as
+/// a [`std::task::Waker`], which it converts into — with whatever thread will
+/// need to end the wait.
+#[derive(Debug)]
+pub struct WakeSender {
+    inner: wake::Sender,
+}
+
+impl WakeSender {
+    /// Make the receiver readable, ending the wait it is in, or the next one
+    /// to begin.
+    ///
+    /// Never blocks, and reports nothing, because nothing that can go wrong is
+    /// the waker's to act on: a full pipe already holds a wake, and a receiver
+    /// that has gone away has nobody left to wake.
+    pub fn wake(&self) {
+        self.inner.wake();
+    }
+}
+
+/// A [`WakeSender`] is a [`std::task::Waker`] — the standard handle for "tell
+/// whoever is waiting to look again" — so it can be handed to anything that
+/// already speaks that, an async executor included.
+impl std::task::Wake for WakeSender {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.inner.wake();
+    }
+
+    fn wake_by_ref(self: &std::sync::Arc<Self>) {
+        self.inner.wake();
+    }
+}
+
+/// The half of a [`wake_channel`] that is waited on.
+#[derive(Debug)]
+pub struct WakeReceiver {
+    inner: wake::Receiver,
+}
+
+impl WakeReceiver {
+    /// Consume every wake sent so far, so that the next wait blocks again.
+    ///
+    /// Bounded: a thread waking in a tight loop cannot hold the caller here.
+    /// Whatever is left over simply wakes the next wait at once.
+    pub fn drain(&self) {
+        self.inner.drain();
+    }
+}
+
+impl AsWaitHandle for WakeReceiver {
+    fn wait_handle(&self) -> WaitHandle {
+        self.inner.handle()
+    }
+}
+
+/// How many reads [`WakeReceiver::drain`] makes at most. Each takes up to
+/// [`DRAIN_CHUNK`] wakes.
+const DRAIN_READS: usize = 16;
+
+/// Bytes read per [`WakeReceiver::drain`] read.
+const DRAIN_CHUNK: usize = 64;
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod wake {
+    use std::io;
+
+    use super::{DRAIN_CHUNK, DRAIN_READS, WaitHandle};
+
+    const SYS_READ: u64 = 0;
+    const SYS_WRITE: u64 = 1;
+    const SYS_CLOSE: u64 = 3;
+    const SYS_PIPE2: u64 = 293;
+    /// Neither end may ever block: a waker that blocked on a full pipe would
+    /// stall the thread that was only trying to say it had finished.
+    const O_NONBLOCK: u64 = 0o4000;
+    /// A child the process starts must not inherit a way to wake it.
+    const O_CLOEXEC: u64 = 0o2_000_000;
+    const EINTR: i64 = 4;
+
+    /// A three-argument system call, returning the kernel's raw result:
+    /// `-errno` in `-4095..0`, anything else a success.
+    ///
+    /// # Safety
+    ///
+    /// The arguments must be valid for the call named by `n` — in particular
+    /// any pointer must cover the memory the kernel will read or write.
+    unsafe fn syscall3(n: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+        let ret: i64;
+        // SAFETY: the `syscall` instruction clobbers `rcx` and `r11`, both
+        // declared below, and returns in `rax`; the argument registers are the
+        // x86-64 Linux ABI's. Validity of the arguments is the caller's
+        // documented obligation.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                inlateout("rax") n => ret,
+                in("rdi") a1,
+                in("rsi") a2,
+                in("rdx") a3,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
+    }
+
+    /// A pipe end, closed exactly once, when this is dropped.
+    #[derive(Debug)]
+    struct Fd(i32);
+
+    impl Drop for Fd {
+        fn drop(&mut self) {
+            // SAFETY: `close` takes an integer and touches no memory; the
+            // descriptor came from `pipe2` and is closed only here, since `Fd`
+            // is neither `Clone` nor `Copy`. A failed close leaves nothing to
+            // do.
+            let _ = unsafe { syscall3(SYS_CLOSE, u64::from(self.0.cast_unsigned()), 0, 0) };
+        }
+    }
+
+    #[derive(Debug)]
+    pub(super) struct Sender(Fd);
+
+    #[derive(Debug)]
+    pub(super) struct Receiver(Fd);
+
+    pub(super) fn channel() -> io::Result<(Sender, Receiver)> {
+        let mut fds = [-1i32; 2];
+        // SAFETY: `pipe2` writes two `int`s at the pointer, which is a live,
+        // exclusively borrowed array of exactly two.
+        let ret = unsafe {
+            syscall3(
+                SYS_PIPE2,
+                fds.as_mut_ptr() as u64,
+                O_NONBLOCK | O_CLOEXEC,
+                0,
+            )
+        };
+        if ret < 0 {
+            return Err(io::Error::from_raw_os_error(
+                i32::try_from(ret.saturating_neg()).unwrap_or(i32::MAX),
+            ));
+        }
+        let [read_end, write_end] = fds;
+        Ok((Sender(Fd(write_end)), Receiver(Fd(read_end))))
+    }
+
+    impl Sender {
+        pub(super) fn wake(&self) {
+            let byte = [1u8];
+            loop {
+                // SAFETY: `write` reads one byte at the pointer, which is a
+                // live one-byte array.
+                let ret = unsafe {
+                    syscall3(
+                        SYS_WRITE,
+                        u64::from((self.0).0.cast_unsigned()),
+                        byte.as_ptr() as u64,
+                        1,
+                    )
+                };
+                // Retried only if a signal cut it short. `EAGAIN` is a full
+                // pipe, which already holds a wake; anything else means the
+                // reading end is gone, and there is nobody left to wake.
+                if ret != -EINTR {
+                    return;
+                }
+            }
+        }
+    }
+
+    impl Receiver {
+        pub(super) fn drain(&self) {
+            let mut buf = [0u8; DRAIN_CHUNK];
+            let mut reads = 0;
+            while reads < DRAIN_READS {
+                // SAFETY: `read` writes at most `DRAIN_CHUNK` bytes at the
+                // pointer, which is a live, exclusively borrowed array of that
+                // many.
+                let ret = unsafe {
+                    syscall3(
+                        SYS_READ,
+                        u64::from((self.0).0.cast_unsigned()),
+                        buf.as_mut_ptr() as u64,
+                        DRAIN_CHUNK as u64,
+                    )
+                };
+                if ret == -EINTR {
+                    continue;
+                }
+                reads = reads.saturating_add(1);
+                // Only a full read can have left more behind. Empty
+                // (`EAGAIN`), closed, failed, or a short read that took
+                // everything: done either way.
+                match usize::try_from(ret) {
+                    Ok(n) if n == DRAIN_CHUNK => {}
+                    _ => return,
+                }
+            }
+        }
+
+        pub(super) fn handle(&self) -> WaitHandle {
+            (self.0).0
+        }
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+mod wake {
+    use std::io::{self, ErrorKind};
+    use std::net::UdpSocket;
+
+    use super::{AsWaitHandle, DRAIN_CHUNK, DRAIN_READS, WaitHandle};
+
+    #[derive(Debug)]
+    pub(super) struct Sender(UdpSocket);
+
+    #[derive(Debug)]
+    pub(super) struct Receiver(UdpSocket);
+
+    pub(super) fn channel() -> io::Result<(Sender, Receiver)> {
+        let receiver = UdpSocket::bind(("127.0.0.1", 0))?;
+        let sender = UdpSocket::bind(("127.0.0.1", 0))?;
+        sender.connect(receiver.local_addr()?)?;
+        // Connected both ways, so that only the sender can wake the receiver:
+        // a stray datagram from elsewhere on the machine cannot, and cannot
+        // fill its buffer either.
+        receiver.connect(sender.local_addr()?)?;
+        // Neither end may ever block — see the pipe's `O_NONBLOCK`.
+        sender.set_nonblocking(true)?;
+        receiver.set_nonblocking(true)?;
+        Ok((Sender(sender), Receiver(receiver)))
+    }
+
+    impl Sender {
+        pub(super) fn wake(&self) {
+            loop {
+                match self.0.send(&[1]) {
+                    Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                    // A full buffer already holds a wake; any other failure
+                    // means the receiver is gone.
+                    _ => return,
+                }
+            }
+        }
+    }
+
+    impl Receiver {
+        pub(super) fn drain(&self) {
+            let mut buf = [0u8; DRAIN_CHUNK];
+            let mut reads = 0;
+            while reads < DRAIN_READS {
+                match self.0.recv(&mut buf) {
+                    Ok(_) => reads = reads.saturating_add(1),
+                    Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                    // Empty, or failed: done either way.
+                    Err(_) => return,
+                }
+            }
+        }
+
+        pub(super) fn handle(&self) -> WaitHandle {
+            self.0.wait_handle()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -1079,5 +1379,100 @@ mod tests {
         );
         assert_eq!(ready, 0, "a message is not a socket being ready");
         assert!(!set.is_ready(only));
+    }
+
+    // ---- waking a wait from another thread ------------------------------
+
+    #[test]
+    fn a_wake_from_another_thread_ends_a_wait() {
+        let (sender, receiver) = wake_channel().unwrap();
+        let waker = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            sender.wake();
+            sender
+        });
+        let mut set = WaitSet::new();
+        let at = set.add_source(&receiver);
+        let began = Instant::now();
+        // No timeout: only the wake can end this.
+        assert_eq!(set.wait(None).unwrap(), 1);
+        assert!(set.is_ready(at));
+        assert!(began.elapsed() < Duration::from_secs(5));
+        let _sender = waker.join().unwrap();
+    }
+
+    #[test]
+    fn a_wake_sent_before_anyone_waits_is_not_lost() {
+        let (sender, receiver) = wake_channel().unwrap();
+        sender.wake();
+        let mut set = WaitSet::new();
+        set.add_source(&receiver);
+        let began = Instant::now();
+        assert_eq!(set.wait(Some(Duration::from_secs(10))).unwrap(), 1);
+        assert!(
+            began.elapsed() < PROMPT,
+            "the wake was lost and the wait ran its course"
+        );
+    }
+
+    #[test]
+    fn a_drained_receiver_blocks_again() {
+        let (sender, receiver) = wake_channel().unwrap();
+        sender.wake();
+        let mut set = WaitSet::new();
+        set.add_source(&receiver);
+        assert_eq!(set.wait(Some(Duration::from_secs(10))).unwrap(), 1);
+        receiver.drain();
+        let timeout = Duration::from_millis(30);
+        let began = Instant::now();
+        assert_eq!(set.wait(Some(timeout)).unwrap(), 0, "one wake woke twice");
+        assert!(began.elapsed() >= timeout);
+    }
+
+    #[test]
+    fn waking_never_blocks_the_waker_however_often_it_wakes() {
+        // A pipe holds 64 KiB; past that a write would block, and a waker that
+        // blocked would stall the worker that was only saying it had finished.
+        let (sender, receiver) = wake_channel().unwrap();
+        let began = Instant::now();
+        for _ in 0..200_000 {
+            sender.wake();
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "waking took {:?}: something blocked",
+            began.elapsed()
+        );
+        // And the receiver can be emptied, a bounded drain at a time.
+        let mut set = WaitSet::new();
+        set.add_source(&receiver);
+        let mut drains = 0;
+        while set.wait(Some(Duration::ZERO)).unwrap() > 0 {
+            receiver.drain();
+            drains += 1;
+            assert!(drains < 10_000, "the receiver never emptied");
+        }
+    }
+
+    #[test]
+    fn a_standard_waker_made_from_the_sender_wakes_the_wait() {
+        let (sender, receiver) = wake_channel().unwrap();
+        let waker = std::task::Waker::from(std::sync::Arc::new(sender));
+        let from_elsewhere = waker.clone();
+        let worker = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            from_elsewhere.wake_by_ref();
+        });
+        let mut set = WaitSet::new();
+        set.add_source(&receiver);
+        assert_eq!(set.wait(Some(Duration::from_secs(10))).unwrap(), 1);
+        worker.join().unwrap();
+        drop(waker);
+    }
+
+    #[test]
+    fn the_sending_half_can_be_shared_between_threads() {
+        fn shareable<T: Send + Sync>() {}
+        shareable::<WakeSender>();
     }
 }

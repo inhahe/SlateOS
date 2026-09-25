@@ -158725,7 +158725,7 @@ one of these was introduced by an edit that added something and left the
 header alone.
 
 ## `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT` (lane C, 2026-09-17)
-**Status:** OPEN — 2026-09-24 (lane F): the stall is about 3.5x shorter, not gone. `imagecodec`'s JPEG decoder is now about 3.3x faster with bit-identical output (4000x5333: whole picture 3.65 s → ~1.1 s, 128-px thumbnail 1.25 s → ~0.34 s, release, this machine), but the decode still runs on the thread that draws; moving it off that thread is still the fix.
+**Status:** OPEN — 2026-09-24 (lane F): the stall is about 3.5x shorter, not gone. `imagecodec`'s JPEG decoder is now about 3.3x faster with bit-identical output (4000x5333: whole picture 3.65 s → ~1.1 s, 128-px thumbnail 1.25 s → ~0.34 s, release, this machine), but the decode still runs on the thread that draws; moving it off that thread is still the fix. — 2026-09-25 (lane F): **the missing piece this entry names, the wake, now exists.** An application that returns `true` from `App::wants_waker` is handed a `std::task::Waker` in `App::attach_waker` before its first frame; a worker that calls `wake()` gets the application an `App::on_wake` on the loop's thread, then a frame (`EventLoop::waker`, `Dispatch::Woken`; design-decisions §1303). What remains is lane E's: moving the two decodes onto a worker — `requests/f-ce-a-finished-decode-can-now-wake-the-window-that-asked-for-it.md`.
 
 **In short:** click a photograph and the window stops responding until the
 picture has been decoded -- about two thirds of a second for a photograph from

@@ -38,13 +38,22 @@
 //! blocks until a byte is *available* without consuming it — and switches
 //! forward again. The alternative, polling on a timer, would either add latency
 //! to every keystroke or wake an idle desktop hundreds of times a second.
+//!
+//! A socket that has handed out a [`Transport::waker`] waits differently,
+//! because it has two things to wait on: the stream, and the pipe another
+//! thread writes to wake it. Those go into a [`WaitSet`] together. The
+//! `peek` path stays for every socket that never asks for a waker — which is
+//! nearly all of them — since a lone blocking read is the one wait a platform
+//! can always carry out without polling.
 
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::Arc;
+use std::task::Waker;
 use std::time::Duration;
 
 use crate::client::Transport;
-use crate::wait::{AsWaitHandle, WaitHandle};
+use crate::wait::{AsWaitHandle, WaitHandle, WaitSet, WakeReceiver, WakeSender, wake_channel};
 
 /// The environment variable naming the compositor's address.
 pub const DISPLAY_VAR: &str = "SLATE_DISPLAY";
@@ -132,6 +141,20 @@ pub struct Socket {
     /// what an event-driven application wants and what keeps an idle desktop
     /// genuinely idle.
     wait_timeout: Option<Duration>,
+    /// Made the first time [`Transport::waker`] is asked for, and not before:
+    /// most applications never wake their loop from another thread, and need
+    /// not pay a pipe for it.
+    wake: Option<Wake>,
+}
+
+/// What a [`Socket`] needs to be woken from another thread: the waited-on
+/// half of a wake channel, the half handed out, and the set the two are waited
+/// on in together.
+#[derive(Debug)]
+struct Wake {
+    receiver: WakeReceiver,
+    sender: Arc<WakeSender>,
+    set: WaitSet,
 }
 
 impl Socket {
@@ -171,6 +194,7 @@ impl Socket {
             stream,
             open: true,
             wait_timeout: None,
+            wake: None,
         })
     }
 
@@ -356,6 +380,23 @@ impl Transport for Socket {
             // exactly when it is trying to notice the connection ended.
             return Ok(());
         }
+        if let Some(wake) = self.wake.as_mut() {
+            // Two things to wait on, which a blocking `peek` cannot do. Only a
+            // socket that has handed out a waker takes this path: a lone
+            // blocking read is the one wait the platform can always carry out
+            // without polling — on SlateOS it parks in the network daemon,
+            // where a `poll` of the same socket is rescanned on a backoff.
+            wake.set.clear();
+            wake.set.add_source(&self.stream);
+            let woken = wake.set.add_source(&wake.receiver);
+            wake.set.wait(self.wait_timeout)?;
+            if wake.set.is_ready(woken) {
+                wake.receiver.drain();
+            }
+            // Whatever made the stream ready — bytes, or the peer hanging up —
+            // the caller's next `read` finds, as it does after a `peek`.
+            return Ok(());
+        }
         self.stream.set_nonblocking(false)?;
         let parked = self.park();
         // Restored on every path, including the failing one: a socket left
@@ -386,6 +427,28 @@ impl Transport for Socket {
         }
         self.wait_timeout = timeout;
         Ok(())
+    }
+
+    /// A pipe (or, on Windows, a loopback socket pair) that ends
+    /// [`Transport::wait`] when written — made on first request and shared by
+    /// every waker handed out after it.
+    ///
+    /// # Errors
+    ///
+    /// Whatever making the pipe fails with — out of descriptors, most likely.
+    fn waker(&mut self) -> io::Result<Option<Waker>> {
+        if self.wake.is_none() {
+            let (sender, receiver) = wake_channel()?;
+            self.wake = Some(Wake {
+                receiver,
+                sender: Arc::new(sender),
+                set: WaitSet::new(),
+            });
+        }
+        Ok(self
+            .wake
+            .as_ref()
+            .map(|wake| Waker::from(Arc::clone(&wake.sender))))
     }
 }
 
@@ -873,5 +936,83 @@ mod tests {
             listener.accept().expect("accept").is_none(),
             "nobody dialled"
         );
+    }
+
+    #[test]
+    fn a_waker_ends_a_wait_from_another_thread() {
+        let (_client, mut server) = connected_pair();
+        let waker = server.waker().unwrap().expect("a socket can be woken");
+        let worker = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            waker.wake();
+        });
+        let began = Instant::now();
+        // No timeout, and nothing will arrive on the wire: only the wake can
+        // end this.
+        server.wait().unwrap();
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "the wake did not end the wait"
+        );
+        worker.join().unwrap();
+        assert!(server.is_open(), "a wake is not a hang-up");
+    }
+
+    #[test]
+    fn a_consumed_wake_does_not_wake_the_next_wait() {
+        let (_client, mut server) = connected_pair();
+        let waker = server.waker().unwrap().unwrap();
+        waker.wake_by_ref();
+        server.wait().unwrap();
+        server
+            .set_wait_timeout(Some(Duration::from_millis(40)))
+            .unwrap();
+        let began = Instant::now();
+        server.wait().unwrap();
+        assert!(
+            began.elapsed() >= Duration::from_millis(40),
+            "one wake ended two waits"
+        );
+    }
+
+    #[test]
+    fn a_socket_with_a_waker_still_wakes_for_bytes() {
+        let (mut client, mut server) = connected_pair();
+        let _waker = server.waker().unwrap().unwrap();
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            client.write(b"hi").unwrap();
+            client
+        });
+        server.wait().unwrap();
+        let _client = writer.join().unwrap();
+        let buf = read_at_least(&mut server, 2);
+        assert_eq!(&buf[..2], b"hi");
+    }
+
+    #[test]
+    fn every_waker_a_socket_hands_out_wakes_the_same_wait() {
+        let (_client, mut server) = connected_pair();
+        let first = server.waker().unwrap().unwrap();
+        let second = server.waker().unwrap().unwrap();
+        assert!(first.will_wake(&second), "two pipes for one socket");
+        second.wake();
+        let began = Instant::now();
+        server
+            .set_wait_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        server.wait().unwrap();
+        assert!(began.elapsed() < Duration::from_secs(5));
+        drop(first);
+    }
+
+    #[test]
+    fn a_waker_outliving_its_socket_wakes_nothing_and_does_not_fail() {
+        // The worker finishes after the window has closed: its wake goes
+        // nowhere, and must neither panic nor block.
+        let (_client, mut server) = connected_pair();
+        let waker = server.waker().unwrap().unwrap();
+        drop(server);
+        waker.wake();
     }
 }

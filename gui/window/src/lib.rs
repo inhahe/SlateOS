@@ -71,6 +71,9 @@
 //! ```
 
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Wake, Waker};
 use std::time::{Duration, Instant};
 
 pub mod app;
@@ -172,9 +175,9 @@ pub enum EventResponse {
 
 /// What [`EventLoop::run_batched`] is handing over.
 ///
-/// Two things rather than one because drawing and reacting happen at different
-/// rates: an application reacts to every event and should draw only once the
-/// events have run out. See [`EventLoop::run_batched`].
+/// Separate kinds rather than one because drawing and reacting happen at
+/// different rates: an application reacts to every event and should draw only
+/// once the events have run out. See [`EventLoop::run_batched`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum Dispatch {
     /// One event, and the window it is addressed to.
@@ -184,6 +187,15 @@ pub enum Dispatch {
         /// What happened.
         event: Event,
     },
+    /// A [`EventLoop::waker`] was woken — by the application's own work,
+    /// finishing on another thread — since the loop last looked.
+    ///
+    /// Not an [`Event`]: it did not come from the compositor and is addressed
+    /// to no window. It arrives after the batch's events and before its
+    /// [`Dispatch::Settled`], so an application that picks up a result here
+    /// draws it in the same frame. Several wakes between two looks arrive as
+    /// one.
+    Woken,
     /// Everything readable has now been dispatched, so the application's state
     /// has settled. This is the moment to draw it, and the loop is about to
     /// park.
@@ -800,6 +812,33 @@ pub struct EventLoop<T: Transport> {
     /// that tick was delivered. Consumed by the next [`EventLoop::wake_at`]
     /// for that window, and discarded if none arrives.
     ticked: Vec<(u64, Instant)>,
+    /// Set by a [`Self::waker`] when it wakes, and cleared when the loop hands
+    /// the wake over. `None` until a waker is asked for.
+    woken: Option<Arc<AtomicBool>>,
+    /// The waker handed out, so that every one handed out is the same.
+    waker: Option<Waker>,
+}
+
+/// What an [`EventLoop::waker`] does: note that a wake happened, then end the
+/// transport's wait.
+///
+/// The note is what lets the loop tell a wake from a stray return of the
+/// wait, which the transport alone cannot say. It is written *before* the
+/// transport is woken, so a loop that returns from its wait always sees it.
+struct LoopWake {
+    woken: Arc<AtomicBool>,
+    transport: Waker,
+}
+
+impl Wake for LoopWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.woken.store(true, Ordering::Release);
+        self.transport.wake_by_ref();
+    }
 }
 
 /// How far ahead [`EventLoop::wake_after`] will let a delay reach.
@@ -826,6 +865,8 @@ impl<T: Transport> EventLoop<T> {
             unrouted: 0,
             wakeups: Vec::new(),
             ticked: Vec::new(),
+            woken: None,
+            waker: None,
         }
     }
 
@@ -1495,6 +1536,56 @@ impl<T: Transport> EventLoop<T> {
             .collect()
     }
 
+    /// A handle any thread can use to wake this loop, or `None` if its
+    /// transport cannot be woken.
+    ///
+    /// For work an application does off the loop's thread — a photograph
+    /// decoding on a worker, a file being read — which must be able to say
+    /// "finished, draw again" to a loop parked with nothing on the wire. Hand
+    /// the [`Waker`] to the worker and call [`Waker::wake`] when the result is
+    /// ready; the loop wakes, and [`Self::run_batched`] hands the application a
+    /// [`Dispatch::Woken`] followed by [`Dispatch::Settled`], so the result is
+    /// drawn in that frame. A wake sent while the loop is busy is not lost: it
+    /// is handed over at the end of the batch in progress.
+    ///
+    /// [`Self::run`] does not report wakes — its handler is per event, and a
+    /// wake is not one. A caller driving the loop by hand asks
+    /// [`Self::take_woken`] after each [`Self::wait`].
+    ///
+    /// Every call returns the same waker. It costs a pipe, made on the first
+    /// call and not before, so a loop that never asks pays nothing.
+    ///
+    /// # Errors
+    ///
+    /// If the transport cannot make one — out of descriptors, most likely.
+    pub fn waker(&mut self) -> Result<Option<Waker>, Error<T>> {
+        if let Some(waker) = &self.waker {
+            return Ok(Some(waker.clone()));
+        }
+        let Some(transport) = self.conn.waker()? else {
+            return Ok(None);
+        };
+        let woken = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(LoopWake {
+            woken: Arc::clone(&woken),
+            transport,
+        }));
+        self.woken = Some(woken);
+        self.waker = Some(waker.clone());
+        Ok(Some(waker))
+    }
+
+    /// Whether a [`Self::waker`] has been woken since this was last asked,
+    /// clearing the answer.
+    ///
+    /// [`Self::run_batched`] asks this itself; only a caller driving the loop
+    /// by hand needs to.
+    pub fn take_woken(&mut self) -> bool {
+        self.woken
+            .as_ref()
+            .is_some_and(|woken| woken.swap(false, Ordering::AcqRel))
+    }
+
     /// Park until input arrives or the nearest wake-up comes due.
     ///
     /// The counterpart to [`Self::poll`], and the reason a caller driving the
@@ -1571,7 +1662,7 @@ impl<T: Transport> EventLoop<T> {
     {
         self.run_batched(|events, dispatch| match dispatch {
             Dispatch::Event { window, event } => handler(events, window, event),
-            Dispatch::Settled => EventResponse::Continue,
+            Dispatch::Woken | Dispatch::Settled => EventResponse::Continue,
         })
     }
 
@@ -1613,6 +1704,16 @@ impl<T: Transport> EventLoop<T> {
                 if verdict == EventResponse::Exit || requested_close {
                     self.running = false;
                     break;
+                }
+            }
+            // After the events and before `Settled`, so whatever the wake
+            // brought is drawn in the same frame as they are. Taken even when
+            // the batch was empty: a wake with nothing on the wire is the
+            // ordinary case, and is the whole reason the loop woke.
+            if self.running && self.take_woken() {
+                dispatched = true;
+                if handler(self, Dispatch::Woken) == EventResponse::Exit {
+                    self.running = false;
                 }
             }
             if dispatched && self.running && handler(self, Dispatch::Settled) == EventResponse::Exit
@@ -2099,6 +2200,14 @@ pub mod testing {
         fn set_wait_timeout(&mut self, timeout: Option<Duration>) -> Result<(), Self::Error> {
             self.asked.push(timeout);
             Ok(())
+        }
+
+        /// A waker with nothing to interrupt: this transport's `wait` never
+        /// blocks, it only gives the compositor a turn. The loop's own note of
+        /// the wake is what a test observes, which is also what an application
+        /// observes on a real socket.
+        fn waker(&mut self) -> Result<Option<std::task::Waker>, Self::Error> {
+            Ok(Some(std::task::Waker::noop().clone()))
         }
     }
 
@@ -3171,5 +3280,114 @@ mod tests {
         events.wait().unwrap();
         let bound = asked.borrow()[0].expect("the park should have been bounded");
         assert!(bound > Duration::ZERO, "a zero bound reached the transport");
+    }
+
+    // ---- waking from another thread ---------------------------------------
+
+    #[test]
+    fn a_wake_is_handed_over_before_the_frame_it_belongs_to() {
+        let (mut events, _desktop) = wired();
+        WindowBuilder::new("W", 100, 100)
+            .build(&mut events)
+            .unwrap();
+        let waker = events.waker().unwrap().expect("the test link can be woken");
+        waker.wake_by_ref();
+        let mut seen = Vec::new();
+        events
+            .run_batched(|_, dispatch| {
+                seen.push(dispatch);
+                EventResponse::Continue
+            })
+            .unwrap();
+        assert_eq!(seen, vec![Dispatch::Woken, Dispatch::Settled]);
+    }
+
+    #[test]
+    fn wakes_that_land_together_are_one() {
+        let (mut events, _desktop) = wired();
+        WindowBuilder::new("W", 100, 100)
+            .build(&mut events)
+            .unwrap();
+        let waker = events.waker().unwrap().unwrap();
+        waker.wake_by_ref();
+        waker.wake_by_ref();
+        // The consuming form too, through a clone of its own.
+        let another = waker.clone();
+        another.wake();
+        let mut wakes = 0;
+        events
+            .run_batched(|_, dispatch| {
+                if dispatch == Dispatch::Woken {
+                    wakes += 1;
+                }
+                EventResponse::Continue
+            })
+            .unwrap();
+        assert_eq!(wakes, 1);
+    }
+
+    #[test]
+    fn a_loop_nobody_can_wake_reports_no_wakes() {
+        let (mut events, _desktop) = wired();
+        assert!(!events.take_woken(), "no waker, so no wake");
+        let mut wakes = 0;
+        events
+            .run_batched(|_, dispatch| {
+                if dispatch == Dispatch::Woken {
+                    wakes += 1;
+                }
+                EventResponse::Continue
+            })
+            .unwrap();
+        assert_eq!(wakes, 0);
+    }
+
+    #[test]
+    fn every_waker_a_loop_hands_out_is_the_same() {
+        let (mut events, _desktop) = wired();
+        let first = events.waker().unwrap().unwrap();
+        let second = events.waker().unwrap().unwrap();
+        assert!(first.will_wake(&second));
+        second.wake_by_ref();
+        assert!(events.take_woken(), "a wake through either is a wake");
+        assert!(!events.take_woken(), "and it is taken once");
+    }
+
+    #[test]
+    fn a_link_that_cannot_be_woken_hands_out_no_waker() {
+        let (client, _server) = pipe();
+        let mut events = EventLoop::new(client);
+        assert!(events.waker().unwrap().is_none());
+    }
+
+    /// The whole path on a real socket: a loop parked with nothing on the wire
+    /// is woken from another thread and told why.
+    #[test]
+    fn a_parked_loop_is_woken_from_another_thread_over_a_real_socket() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let link = Link::connect(listener.local_addr().unwrap()).unwrap();
+        // Held, so the far end stays open and the only thing that can end the
+        // wait is the wake.
+        let (_far_end, _) = listener.accept().unwrap();
+        let mut events = EventLoop::new(link);
+        let waker = events.waker().unwrap().expect("a socket can be woken");
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            waker.wake();
+        });
+        let began = Instant::now();
+        let mut woken = false;
+        events
+            .run_batched(|_, dispatch| {
+                if dispatch == Dispatch::Woken {
+                    woken = true;
+                    return EventResponse::Exit;
+                }
+                EventResponse::Continue
+            })
+            .unwrap();
+        worker.join().unwrap();
+        assert!(woken, "the loop ended without being told of the wake");
+        assert!(began.elapsed() < Duration::from_secs(5));
     }
 }

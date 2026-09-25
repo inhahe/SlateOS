@@ -41,6 +41,7 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
+use std::task::Waker;
 use std::time::Duration;
 
 use guitk::event::{Key, Modifiers};
@@ -115,6 +116,31 @@ pub trait Transport {
     /// asked for a bound and did not get one has no way to find out otherwise.
     fn set_wait_timeout(&mut self, _timeout: Option<Duration>) -> Result<(), Self::Error> {
         Ok(())
+    }
+
+    /// A handle any thread can use to make [`Self::wait`] return early, or
+    /// `None` if this transport's wait has nothing to interrupt.
+    ///
+    /// For work done off the thread that drives the loop — a photograph
+    /// decoding on a worker — which has to be able to say "finished, look
+    /// again" to a loop parked with nothing on the wire. Without it the result
+    /// sits unseen until the user happens to move the mouse.
+    ///
+    /// A [`Waker`] because that is the standard handle for exactly this:
+    /// cloneable, `Send`, and understood by anything that already speaks
+    /// async. Every handle a transport gives out wakes the same wait, and a
+    /// wake sent while nobody is waiting is not lost — the next `wait` returns
+    /// at once. What a wake does *not* do is say why: `wait` promises only
+    /// that there may be something to do, as it always has.
+    ///
+    /// The default is `None`, which is right for a transport whose `wait`
+    /// never blocks and wrong for any transport that does.
+    ///
+    /// # Errors
+    ///
+    /// Whatever setting up the wake fails with.
+    fn waker(&mut self) -> Result<Option<Waker>, Self::Error> {
+        Ok(None)
     }
 }
 
@@ -288,6 +314,16 @@ impl<T: Transport> Connection<T> {
         self.transport
             .set_wait_timeout(timeout)
             .map_err(ClientError::Transport)
+    }
+
+    /// A handle another thread can use to end [`Self::wait`] early, if the
+    /// transport can be woken. See [`Transport::waker`].
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Transport`] if the transport cannot set the wake up.
+    pub fn waker(&mut self) -> Result<Option<Waker>, ClientError<T::Error>> {
+        self.transport.waker().map_err(ClientError::Transport)
     }
 
     /// How many replies arrived for a correlation id nobody was waiting on.

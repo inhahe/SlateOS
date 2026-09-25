@@ -90,6 +90,7 @@
 //! ```
 
 use std::process::ExitCode;
+use std::task::Waker;
 use std::time::Duration;
 
 use appearance::{AppearanceSettings, Palette};
@@ -439,6 +440,48 @@ pub trait App {
         Vec::new()
     }
 
+    /// Whether this application does work off the loop's thread and needs a
+    /// way to wake the loop when that work finishes.
+    ///
+    /// Asked once, before the first frame; `true` gets the application a
+    /// [`Waker`] through [`App::attach_waker`]. The default is `false`, so an
+    /// application that does everything on one thread — nearly all of them —
+    /// is not handed a pipe it would never write to.
+    fn wants_waker(&self) -> bool {
+        false
+    }
+
+    /// The handle for waking this application's loop from another thread,
+    /// given once, before the first frame, to an application whose
+    /// [`App::wants_waker`] says so.
+    ///
+    /// Give a clone to each worker and have it call [`Waker::wake`] when it has
+    /// something for the application — a decoded photograph, a file read.
+    /// [`App::on_wake`] then runs on the loop's thread, and a frame follows if
+    /// it asks for one. Without this, a finished result would sit unseen until
+    /// the user next moved the mouse: the loop is parked, and nothing on the
+    /// wire says anything happened.
+    ///
+    /// Not called when the link to the display cannot be woken (an in-process
+    /// test pipe), so an application must still work without one, if later: a
+    /// result that arrives unannounced is found the next time anything else
+    /// wakes the loop.
+    fn attach_waker(&mut self, _waker: Waker) {}
+
+    /// The loop was woken through the handle given to [`App::attach_waker`]:
+    /// work finished on another thread.
+    ///
+    /// Called on the loop's thread after the batch's events and before its
+    /// frame, so a result collected here is drawn at once. Wakes that land
+    /// together arrive as one call — collect everything that is ready, not one
+    /// item.
+    ///
+    /// The default asks for a frame, which is right for the simplest shape: a
+    /// worker that leaves its result where [`App::render`] looks for it.
+    fn on_wake(&mut self) -> Response {
+        Response::Redraw
+    }
+
     /// Draw the current state at the current window size.
     ///
     /// The size is the one the compositor last reported, so a frame drawn
@@ -541,6 +584,15 @@ pub fn drive<T: Transport, A: App + ?Sized>(
     // configuration -- the reason `Reloads` has two flags rather than one.
     let mut scroll = ScrollWatch::new();
     scroll.deliver();
+    // Before the first frame, so that a worker the application starts while
+    // drawing it already has a way to say it has finished. A transport that
+    // cannot be woken leaves the application without one, which it is
+    // documented to survive; a failure to make one is an error like any other.
+    if app.wants_waker()
+        && let Some(waker) = events.waker()?
+    {
+        app.attach_waker(waker);
+    }
 
     // Nothing has happened yet, so no event is going to ask for the first
     // frame, and a window that has never been drawn is blank.
@@ -608,6 +660,23 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             // boundary would be a setting the user changed with their last
             // click before closing the window, saved to disk, and never
             // announced — visibly not applied until the next login.
+            if let Err(e) = announce_reloads(events, app.take_reloads()) {
+                failure = Some(e);
+                return EventResponse::Exit;
+            }
+            match response {
+                Response::Idle => EventResponse::Continue,
+                Response::Redraw => {
+                    dirty = true;
+                    EventResponse::Continue
+                }
+                Response::Exit => EventResponse::Exit,
+            }
+        }
+        Dispatch::Woken => {
+            let response = app.on_wake();
+            // As after an event, and for the same reason: an application may
+            // write a shared file in answer to its own work finishing.
             if let Err(e) = announce_reloads(events, app.take_reloads()) {
                 failure = Some(e);
                 return EventResponse::Exit;
@@ -1079,7 +1148,8 @@ mod tests {
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        clippy::indexing_slicing
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
     )]
 
     use std::cell::RefCell;
@@ -2505,5 +2575,111 @@ mod tests {
                 "no file meant no palette, so the first frame would be undrawn"
             );
         });
+    }
+
+    // ---- waking from another thread ---------------------------------------
+
+    /// An application that runs work on a worker and is woken when it ends.
+    /// Its worker here finishes instantly — it wakes the loop the moment it is
+    /// handed the waker — which is the case with the least room for a race.
+    struct Worker {
+        wants: bool,
+        attached: Rc<RefCell<u32>>,
+        woken: Rc<RefCell<u32>>,
+        drawn: Rc<RefCell<u32>>,
+        answer: Response,
+    }
+
+    impl Worker {
+        fn new(wants: bool, answer: Response) -> Self {
+            Self {
+                wants,
+                attached: Rc::new(RefCell::new(0)),
+                woken: Rc::new(RefCell::new(0)),
+                drawn: Rc::new(RefCell::new(0)),
+                answer,
+            }
+        }
+    }
+
+    impl App for Worker {
+        fn title(&self) -> String {
+            "Worker".to_string()
+        }
+
+        fn on_event(&mut self, _event: &Event) -> Response {
+            Response::Idle
+        }
+
+        fn wants_waker(&self) -> bool {
+            self.wants
+        }
+
+        fn attach_waker(&mut self, waker: Waker) {
+            *self.attached.borrow_mut() += 1;
+            // The work is done already; say so.
+            waker.wake();
+        }
+
+        fn on_wake(&mut self) -> Response {
+            *self.woken.borrow_mut() += 1;
+            self.answer
+        }
+
+        fn render(&mut self, _width: f32, _height: f32) -> RenderTree {
+            *self.drawn.borrow_mut() += 1;
+            RenderTree::new()
+        }
+    }
+
+    fn worker_opened(app: &Worker) -> (EventLoop<TestConnection>, u64) {
+        let (mut events, _desktop) = desktop();
+        let window = open(&mut events, app).expect("the compositor should have granted it");
+        (events, window)
+    }
+
+    #[test]
+    fn work_finished_off_the_loop_is_handed_back_and_drawn() {
+        let mut app = Worker::new(true, Response::Redraw);
+        let (mut events, window) = worker_opened(&app);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+        assert_eq!(*app.attached.borrow(), 1, "handed a waker exactly once");
+        assert_eq!(*app.woken.borrow(), 1, "the wake reached the application");
+        assert_eq!(
+            *app.drawn.borrow(),
+            2,
+            "the first frame, then one for what the worker finished"
+        );
+    }
+
+    #[test]
+    fn a_wake_the_application_answers_with_idle_draws_nothing() {
+        let mut app = Worker::new(true, Response::Idle);
+        let (mut events, window) = worker_opened(&app);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+        assert_eq!(*app.woken.borrow(), 1);
+        assert_eq!(*app.drawn.borrow(), 1, "only the first frame");
+    }
+
+    #[test]
+    fn a_wake_can_end_the_application() {
+        let mut app = Worker::new(true, Response::Exit);
+        let (mut events, window) = worker_opened(&app);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+        assert_eq!(*app.woken.borrow(), 1);
+        assert_eq!(
+            *app.drawn.borrow(),
+            1,
+            "an application on its way out draws nothing"
+        );
+    }
+
+    #[test]
+    fn an_application_that_wants_no_waker_is_given_none() {
+        let mut app = Worker::new(false, Response::Redraw);
+        let (mut events, window) = worker_opened(&app);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+        assert_eq!(*app.attached.borrow(), 0);
+        assert_eq!(*app.woken.borrow(), 0);
     }
 }

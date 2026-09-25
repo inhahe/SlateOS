@@ -82,6 +82,14 @@ use guitk::theme::with_alpha;
 /// which program a folder opens in.
 pub const FILE_MANAGER: &str = "/usr/bin/explorer";
 
+/// The settings application: what the start menu's Settings button and the
+/// Settings shortcut start, and this database's entry for it.
+pub const SETTINGS: &str = "/usr/bin/settings";
+
+/// The terminal: what the start menu's Terminal button starts, and this
+/// database's entry for it.
+pub const TERMINAL: &str = "/usr/bin/terminal";
+
 /// How opaque the dialog itself is.
 ///
 /// Named because it is asserted: a floating panel that reached full opacity
@@ -875,7 +883,7 @@ pub fn builtin_app_database() -> Vec<AppEntry> {
         AppEntry {
             name: "Terminal".to_string(),
             description: "Command-line terminal emulator".to_string(),
-            executable_path: "/usr/bin/terminal".to_string(),
+            executable_path: TERMINAL.to_string(),
             keywords: vec![
                 "shell".into(),
                 "console".into(),
@@ -922,7 +930,7 @@ pub fn builtin_app_database() -> Vec<AppEntry> {
         AppEntry {
             name: "Settings".to_string(),
             description: "System preferences and configuration".to_string(),
-            executable_path: "/usr/bin/settings".to_string(),
+            executable_path: SETTINGS.to_string(),
             keywords: vec!["config".into(), "preferences".into(), "options".into()],
             category: Category::Setting,
             launch_count: 0,

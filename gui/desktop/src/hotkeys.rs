@@ -592,7 +592,7 @@ pub enum HotkeyAction {
 /// shortcut that starts `/usr/bin/procexploder` is a shortcut that silently does
 /// nothing, and the typo is invisible to every other test in this file.
 const TASK_MANAGER_COMMAND: &str = "/usr/bin/procexplorer";
-const SETTINGS_COMMAND: &str = "/usr/bin/settings";
+const SETTINGS_COMMAND: &str = crate::launcher::SETTINGS;
 /// The lock screen, named here and read by `ShellSession` too.
 ///
 /// `pub(crate)` rather than private because the session has to recognise a

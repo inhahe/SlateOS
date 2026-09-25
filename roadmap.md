@@ -1713,6 +1713,13 @@ live.
   exact bytes kept beside it. The applications' own labels are lane E's to
   move onto the same function.
 
+- `[C]` **The start menu's footer has Settings and Terminal beside Power** --
+  done 2026-09-25 (`design.txt` line 721: the start menu contains a "settings
+  icon" and a "terminal"). Two buttons share the footer's room to the right of
+  Power, shrinking before they overlap at large scales; each starts its
+  program and closes the menu. Their program paths are now `launcher`
+  constants, shared with the database and the Settings shortcut.
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's

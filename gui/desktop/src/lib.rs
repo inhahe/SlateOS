@@ -412,6 +412,10 @@ const START_MENU_SCROLLBAR_WIDTH: f32 = 4.0;
 const POWER_BUTTON_WIDTH: f32 = 110.0;
 /// Inset of the power button from the menu's left and bottom edges.
 const POWER_BUTTON_INSET: f32 = 8.0;
+/// Widest a start-menu footer button beside Power gets.
+const START_SHORTCUT_WIDTH: f32 = 80.0;
+/// Gap between the footer's buttons.
+const START_SHORTCUT_GAP: f32 = 6.0;
 const POWER_MENU_WIDTH: f32 = 170.0;
 const POWER_MENU_ROW_HEIGHT: f32 = 32.0;
 /// Space above the first and below the last row of the popup.
@@ -513,6 +517,42 @@ enum PinTarget {
     StartMenuRow(usize),
     /// An application already pinned, by index into the pinned list.
     Pinned(usize),
+}
+
+/// A button in the start menu's footer beside Power, starting a program the
+/// start menu is asked to keep at hand (`design.txt` line 721: "start menu,
+/// contains applications tree, settings icon, terminal, power off, ...").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartShortcut {
+    /// The settings application.
+    Settings,
+    /// A terminal.
+    Terminal,
+}
+
+impl StartShortcut {
+    /// Both, in the order they stand, left to right.
+    pub const ALL: &'static [Self] = &[Self::Settings, Self::Terminal];
+
+    /// The program the button starts.
+    #[must_use]
+    pub const fn program(self) -> &'static str {
+        match self {
+            Self::Settings => launcher::SETTINGS,
+            Self::Terminal => launcher::TERMINAL,
+        }
+    }
+
+    /// The word on the button. Words rather than icons: the UI face is not
+    /// guaranteed to have a gear, and a box where a gear should be says
+    /// nothing at all.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Settings => "Settings",
+            Self::Terminal => "Terminal",
+        }
+    }
 }
 
 /// Where a program carried from the start menu, the taskbar or the desktop
@@ -684,6 +724,8 @@ pub enum Hit {
     StartMenuPanel,
     /// The power button at the foot of the open start menu.
     PowerButton,
+    /// One of the buttons beside it -- Settings, Terminal.
+    StartMenuShortcut(StartShortcut),
     /// An entry of the open power menu, by index into
     /// [`power_menu_entries`](DesktopShell::power_menu_entries).
     PowerMenuEntry(usize),
@@ -2700,6 +2742,28 @@ impl DesktopShell {
         Rect::new(menu.x + inset, menu.y + menu.h - footer + inset, w, h)
     }
 
+    /// A footer button beside Power: the two share what is left of the footer
+    /// to its right, the terminal at the far end. They shrink before they
+    /// overlap -- a menu clamped narrow at a large scale gives them less room
+    /// -- and are the power button's height, so the footer reads as one row.
+    #[must_use]
+    pub fn start_shortcut_rect(&self, which: StartShortcut) -> Rect {
+        let menu = self.start_menu_rect();
+        let power = self.power_button_rect();
+        let inset = self.scale(POWER_BUTTON_INSET);
+        let gap = self.scale(START_SHORTCUT_GAP);
+        let right = menu.x + menu.w - inset;
+        let room = (right - (power.x + power.w + gap)).max(0.0);
+        let w = self
+            .scale(START_SHORTCUT_WIDTH)
+            .min(((room - gap) / 2.0).max(0.0));
+        let x = match which {
+            StartShortcut::Terminal => right - w,
+            StartShortcut::Settings => right - w - gap - w,
+        };
+        Rect::new(x, power.y, w, power.h)
+    }
+
     /// The power menu popup, rising from the power button.
     ///
     /// A submenu is allowed to cover the menu it opened from, so when there is
@@ -3097,6 +3161,11 @@ impl DesktopShell {
             let menu = self.start_menu_rect();
             if self.power_button_rect().contains(x, y) {
                 return Hit::PowerButton;
+            }
+            for which in StartShortcut::ALL {
+                if self.start_shortcut_rect(*which).contains(x, y) {
+                    return Hit::StartMenuShortcut(*which);
+                }
             }
             if menu.contains(x, y) {
                 for row in 0..self.start_menu_visible_rows() {
@@ -3791,6 +3860,7 @@ impl DesktopShell {
                 | Hit::StartMenuEntry(_)
                 | Hit::StartMenuPanel
                 | Hit::PowerButton
+                | Hit::StartMenuShortcut(_)
                 | Hit::PowerMenuEntry(_)
                 | Hit::PowerMenuPanel
         )
@@ -3954,6 +4024,12 @@ impl DesktopShell {
             Hit::PowerButton => {
                 self.toggle_power_menu();
                 ShellAction::Consumed
+            }
+            // Starts its program, as a row does, and the menu gets out of the
+            // way of the window it is about to open.
+            Hit::StartMenuShortcut(which) => {
+                self.close_start_menu();
+                ShellAction::Launch(hotkeys::Launch::program(which.program()))
             }
             // A system action starts a program like any other menu entry: the
             // shell has no more business shutting the machine down itself than
@@ -6312,6 +6388,21 @@ impl DesktopShell {
             },
             label_size,
         );
+
+        // Settings and Terminal beside it, in the same words-on-the-footer
+        // style, fitted to their buttons.
+        for which in StartShortcut::ALL {
+            let button = self.start_shortcut_rect(*which);
+            let inset = self.scale(6.0);
+            tree.text_in(
+                button.x + inset,
+                button.y + (button.h - label_size).max(0.0) / 2.0,
+                (button.w - inset * 2.0).max(0.0),
+                which.label(),
+                self.theme.start_menu_fg,
+                label_size,
+            );
+        }
 
         if self.power_menu_open {
             self.render_power_menu(&mut tree);

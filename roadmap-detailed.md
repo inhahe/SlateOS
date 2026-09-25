@@ -1706,8 +1706,8 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
 
 #### Start Menu
 - [ ] Applications tree
-- [ ] Settings icon
-- [ ] Terminal shortcut
+- [x] Settings icon — 2026-09-25: a Settings button in the start menu's footer beside Power (`StartShortcut::Settings`).
+- [x] Terminal shortcut — 2026-09-25: a Terminal button beside it (`StartShortcut::Terminal`).
 - [ ] Power options: off, logout, reboot, hibernate, sleep, reboot in safe mode
       _(the shell drives these directly as the user's own gesture; a program
       asking for the same transition needs the matching `power.*` capability —

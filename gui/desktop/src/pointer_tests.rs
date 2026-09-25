@@ -2969,3 +2969,85 @@ fn a_full_bar_with_a_divider_still_stops_short_of_the_tray() {
         );
     });
 }
+
+// ---- the start menu's footer: Settings and Terminal beside Power ----------------
+
+/// `design.txt` line 721: the start menu contains a "settings icon" and a
+/// "terminal". Each footer button starts its program and closes the menu.
+#[test]
+fn the_start_menus_footer_starts_settings_and_the_terminal() {
+    for (which, program) in [
+        (crate::StartShortcut::Settings, "/usr/bin/settings"),
+        (crate::StartShortcut::Terminal, "/usr/bin/terminal"),
+    ] {
+        let mut shell = shell();
+        shell.toggle_start_menu();
+        let rect = shell.start_shortcut_rect(which);
+        let (x, y) = centre(rect);
+        assert_eq!(shell.hit_test(x, y), Hit::StartMenuShortcut(which));
+        assert_eq!(
+            click_at(&mut shell, rect),
+            ShellAction::Launch(crate::hotkeys::Launch::program(program)),
+            "{which:?}"
+        );
+        assert!(!shell.start_menu_open, "{which:?} left the menu open");
+    }
+}
+
+/// The footer's three buttons fit the menu side by side at every scale,
+/// without overlapping, and are drawn where they are hit.
+#[test]
+fn the_footer_buttons_fit_beside_power_at_every_scale() {
+    for percent in [100, 150, 200] {
+        let mut shell = scaled(percent);
+        shell.toggle_start_menu();
+        let menu = shell.start_menu_rect();
+        let power = shell.power_button_rect();
+        let settings = shell.start_shortcut_rect(crate::StartShortcut::Settings);
+        let terminal = shell.start_shortcut_rect(crate::StartShortcut::Terminal);
+        for (name, rect) in [("settings", settings), ("terminal", terminal)] {
+            assert!(
+                rect.w > 0.0 && rect.h > 0.0,
+                "{name} is empty at {percent}%"
+            );
+            assert!(
+                rect.x >= menu.x && rect.x + rect.w <= menu.x + menu.w,
+                "{name} runs off the menu at {percent}%"
+            );
+            assert!(
+                rect.y >= menu.y && rect.y + rect.h <= menu.y + menu.h,
+                "{name} is outside the menu's height at {percent}%"
+            );
+        }
+        assert!(
+            power.x + power.w <= settings.x,
+            "settings overlaps power at {percent}%"
+        );
+        assert!(
+            settings.x + settings.w <= terminal.x,
+            "the two overlap at {percent}%"
+        );
+
+        let drawn = format!("{:?}", shell.render_start_menu().expect("the menu is open"));
+        assert!(drawn.contains("\"Settings\"") && drawn.contains("\"Terminal\""));
+    }
+}
+
+/// With the power menu open, a press on a footer button closes the power menu
+/// and nothing else -- the same as a press anywhere else in the start menu.
+#[test]
+fn a_press_on_a_footer_button_first_closes_the_power_menu() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    shell.toggle_power_menu();
+    let rect = shell.start_shortcut_rect(crate::StartShortcut::Terminal);
+    // Not under the power menu, which rises from the far side of the footer.
+    let (x, y) = centre(rect);
+    assert!(
+        !shell.power_menu_rect().contains(x, y),
+        "the fixture is covered"
+    );
+    assert_eq!(click_at(&mut shell, rect), ShellAction::Consumed);
+    assert!(!shell.power_menu_open);
+    assert!(shell.start_menu_open, "the start menu closed as well");
+}

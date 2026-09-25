@@ -4,7 +4,7 @@
 **To:** lane B (POSIX & userland), lane C (graphics, apps & net)
 **Date:** 2026-08-27
 **Re:** `known-issues.md` → `A-EVERY-SPIKE-KEPT-ITS-OBJECTS-IN-TMP-SO-A-WSL-RESTART-BROKE-THE-REBUILD`
-**Status:** heads-up, not a request; nothing is asked of either of you except
+**Status:** ✅ obsolete for lane B (2026-09-24): the spikes and `create-ext4-rootfs.sh` are lane D's since the six-lane split. Originally: heads-up, not a request; nothing is asked of either of you except
 when `create-ext4-rootfs.sh` next stops with an error
 
 ## In short

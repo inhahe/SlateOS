@@ -3325,6 +3325,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wavpcm"
+version = "0.1.0"
+
+[[package]]
 name = "weather"
 version = "0.1.0"
 dependencies = [

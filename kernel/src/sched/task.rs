@@ -258,6 +258,21 @@ pub const INTERACTIVE_THRESHOLD_TICKS: u64 = 5;
 /// that should be rethought.
 pub const PI_CHAIN_DEPTH_LIMIT: usize = 10;
 
+/// Most sleep credit a task can bank, in ticks (see `Task::sleep_credit`).
+///
+/// Bounds how long a task that slept a great deal can then run hot and keep
+/// the boost: at 100 Hz, one second of accumulated sleep. The burst rule
+/// (`INTERACTIVE_THRESHOLD_TICKS`) already cuts any single burst at five
+/// ticks, so this bounds the *aggregate* a formerly sleepy task can take
+/// across many short bursts before the credit runs out.
+pub const MAX_SLEEP_CREDIT: u64 = 100;
+
+/// Sleep credit a task must hold to be considered interactive.
+///
+/// Equal to one burst threshold: a task has to have been asleep, in the
+/// recent past, for at least as long as the longest burst the boost allows.
+pub const MIN_SLEEP_CREDIT: u64 = INTERACTIVE_THRESHOLD_TICKS;
+
 /// Number of priority levels to boost interactive tasks.
 ///
 /// A task at priority 16 that is detected as interactive will
@@ -452,7 +467,33 @@ pub struct Task {
     /// `INTERACTIVE_THRESHOLD_TICKS`: a task that has been on CPU that long
     /// without blocking is not interactive now, and one that keeps yielding
     /// must not keep a boost it earned before it started spinning.
+    ///
+    /// Short bursts are necessary but not sufficient: the task must also
+    /// hold at least [`MIN_SLEEP_CREDIT`] of [`Self::sleep_credit`] — it must
+    /// actually spend time asleep, not only block briefly and often. See
+    /// [`Self::interactive_verdict`].
     pub interactive: bool,
+
+    /// Ticks of recent sleep the task has banked, net of ticks it has run.
+    ///
+    /// Raised at each wake from `Blocked` by the ticks spent blocked
+    /// ([`Self::mark_ready`]), lowered by one for every tick charged while
+    /// running ([`Self::tick_burst`]), and held within
+    /// `0..=`[`MAX_SLEEP_CREDIT`]. Linux's O(1) scheduler kept the same
+    /// quantity as `sleep_avg`.
+    ///
+    /// **Why the burst average alone was not enough.** A task doing rapid
+    /// I/O — a few ticks of work, then a block that completes almost at once
+    /// — has short bursts and so read as interactive, while occupying nearly
+    /// all of the CPU: every time it woke it preempted its equal-priority
+    /// peers from two levels above them, and they ran only when the
+    /// anti-starvation check rescued them. Found 2026-09-25 with
+    /// `ctest-python-repl`: the interpreter child held the CPU while its
+    /// parent was rescued a dozen times. Tick sampling makes the credit an
+    /// unbiased measure even for work and sleep shorter than a tick: a task
+    /// running 90% of the time is charged ~90% of the ticks, and its
+    /// sub-tick sleeps rarely straddle a tick boundary, so it drains.
+    pub sleep_credit: u64,
 
     /// Priority inherited from higher-priority tasks blocked on a
     /// PI (Priority Inheritance) mutex held by this task.
@@ -739,13 +780,25 @@ impl Task {
                 .saturating_add(self.burst_ticks);
         }
 
-        // Interactive if average burst < threshold (compare x8 values).
-        #[allow(clippy::arithmetic_side_effects)]
-        let threshold_x8 = INTERACTIVE_THRESHOLD_TICKS * 8;
-        self.interactive = self.avg_burst_x8 < threshold_x8;
+        self.interactive = self.interactive_verdict();
 
         // Reset burst counter for the next wake cycle.
         self.burst_ticks = 0;
+    }
+
+    /// Whether the task has earned the interactive boost: its CPU bursts
+    /// average under [`INTERACTIVE_THRESHOLD_TICKS`] **and** it holds at
+    /// least [`MIN_SLEEP_CREDIT`] of sleep credit.
+    ///
+    /// Short bursts alone describe a task that blocks often, which a task
+    /// doing back-to-back fast I/O also does while using nearly all of the
+    /// CPU; the credit is what says it actually leaves the CPU to others.
+    /// See [`Self::sleep_credit`].
+    #[must_use]
+    pub fn interactive_verdict(&self) -> bool {
+        #[allow(clippy::arithmetic_side_effects)] // A small constant times 8.
+        let threshold_x8 = INTERACTIVE_THRESHOLD_TICKS * 8;
+        self.avg_burst_x8 < threshold_x8 && self.sleep_credit >= MIN_SLEEP_CREDIT
     }
 
     /// Increment the burst tick counter and total CPU time.
@@ -783,6 +836,14 @@ impl Task {
         if self.interactive && self.burst_ticks >= INTERACTIVE_THRESHOLD_TICKS {
             self.interactive = false;
         }
+        // Every tick on the CPU spends a tick of sleep credit. A task that
+        // runs most of the time drains it whatever its bursts look like, and
+        // loses the boost the moment it falls below the minimum rather than
+        // at its next block.
+        self.sleep_credit = self.sleep_credit.saturating_sub(1);
+        if self.interactive && self.sleep_credit < MIN_SLEEP_CREDIT {
+            self.interactive = false;
+        }
     }
 
     /// Mark this task as Ready and record the timestamp for wait
@@ -793,6 +854,19 @@ impl Task {
     /// starvation detection.
     #[inline]
     pub fn mark_ready(&mut self, current_tick: u64) {
+        // A wake from a real park banks the time spent parked as sleep
+        // credit (see `sleep_credit`), and the verdict is refreshed with it:
+        // this is the moment a task that has been asleep regains the boost.
+        // Other transitions to Ready (a new task, a preempted or yielding
+        // one) slept for nothing and earn nothing.
+        if self.state == TaskState::Blocked {
+            let slept = current_tick.saturating_sub(self.block_tick);
+            self.sleep_credit = self
+                .sleep_credit
+                .saturating_add(slept)
+                .min(MAX_SLEEP_CREDIT);
+            self.interactive = self.interactive_verdict();
+        }
         self.state = TaskState::Ready;
         self.pending_wake = false; // Clear stale flag on actual transition.
         self.ready_since_tick = current_tick;
@@ -956,6 +1030,7 @@ impl Task {
             gs_base: 0,        // Kernel task — never sets a userspace %gs base.
             burst_ticks: 0,
             avg_burst_x8: 0,
+            sleep_credit: 0,
             interactive: false,
             inherited_priority: None,
             blocked_on_pi_addr: None,
@@ -1042,6 +1117,7 @@ impl Task {
             gs_base: 0,        // Kernel task — never sets a userspace %gs base.
             burst_ticks: 0,
             avg_burst_x8: 0,
+            sleep_credit: 0,
             interactive: false,
             inherited_priority: None,
             blocked_on_pi_addr: None,
@@ -1196,6 +1272,7 @@ impl Task {
             gs_base: 0,
             burst_ticks: 0,
             avg_burst_x8: 0,
+            sleep_credit: 0,
             interactive: false,
             inherited_priority: None,
             blocked_on_pi_addr: None,

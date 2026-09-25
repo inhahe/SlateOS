@@ -1651,6 +1651,12 @@ fn spawn_inner(
         // scheduled until the caller finishes registration and calls admit().
         if !admit {
             new_task.state = task::TaskState::Blocked;
+            // Admission is a `wake`, and a wake from Blocked banks the ticks
+            // since `block_tick` as sleep credit. Left at its initial 0, that
+            // would credit a brand-new task with every tick since boot and
+            // hand it the interactive boost on its first run; stamped now, it
+            // is credited only with the moment it spent being registered.
+            new_task.block_tick = crate::apic::tick_count();
         }
         let id = new_task.id;
         let prio = new_task.priority;
@@ -9102,7 +9108,9 @@ fn test_set_priority() -> KernelResult<()> {
 /// Verifies that a task which frequently blocks with short CPU bursts
 /// gets marked as interactive (and thus receives a priority boost).
 fn test_interactive_detection() -> KernelResult<()> {
-    use task::{INTERACTIVE_BOOST, INTERACTIVE_THRESHOLD_TICKS};
+    use task::{
+        INTERACTIVE_BOOST, INTERACTIVE_THRESHOLD_TICKS, MAX_SLEEP_CREDIT, MIN_SLEEP_CREDIT,
+    };
 
     // Create a task directly to test the detection logic without
     // needing actual I/O blocking (which we can't easily simulate).
@@ -9114,17 +9122,33 @@ fn test_interactive_detection() -> KernelResult<()> {
     {
         let mut state = SCHED.lock();
         if let Some(task) = state.tasks.get_mut(&id) {
-            // Simulate 5 block events with 1-tick bursts each.
-            // After enough short bursts, avg should be < threshold.
-            for _ in 0..5 {
-                task.burst_ticks = 1;
+            // One block/wake cycle: `run` ticks charged on the CPU, a block,
+            // then a wake `slept` ticks later. The wake is replayed through
+            // `mark_ready` from `Blocked`, which is where sleep credit is
+            // banked; ending Ready leaves the task as the run queue has it.
+            let cycle = |task: &mut task::Task, run: u64, slept: u64| {
+                for _ in 0..run {
+                    task.tick_burst(true);
+                }
                 task.record_block();
+                let now = crate::apic::tick_count();
+                task.state = task::TaskState::Blocked;
+                task.block_tick = now.saturating_sub(slept);
+                task.mark_ready(now);
+            };
+
+            // Five 1-tick bursts, each followed by a 10-tick sleep: short
+            // bursts AND time actually spent asleep, so interactive.
+            for _ in 0..5 {
+                cycle(task, 1, 10);
             }
 
             if !task.interactive {
                 serial_println!(
-                    "[sched]   FAIL: task should be interactive after short bursts (avg_x8={})",
-                    task.avg_burst_x8
+                    "[sched]   FAIL: task should be interactive after short bursts with sleep \
+                     (avg_x8={}, credit={})",
+                    task.avg_burst_x8,
+                    task.sleep_credit
                 );
                 return Err(KernelError::InternalError);
             }
@@ -9175,8 +9199,7 @@ fn test_interactive_detection() -> KernelResult<()> {
                 if task.interactive {
                     break;
                 }
-                task.burst_ticks = 1;
-                task.record_block();
+                cycle(task, 1, 10);
             }
             if !task.interactive {
                 serial_println!("[sched]   FAIL: could not re-earn the interactive boost");
@@ -9206,6 +9229,64 @@ fn test_interactive_detection() -> KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
+
+            // The shape found 2026-09-25 with `ctest-python-repl`: bursts
+            // that stay short, but almost no sleep between them — a task
+            // doing back-to-back fast I/O, blocking often and waking at once,
+            // which holds the CPU while looking interactive. Start it boosted
+            // with full credit, then run 2-tick bursts with 0-tick sleeps.
+            // The burst rule never fires (2 < INTERACTIVE_THRESHOLD_TICKS), so
+            // the credit alone must take the boost away — at exactly the
+            // cycle it runs out, and for good while the task keeps not
+            // sleeping.
+            for _ in 0..64 {
+                cycle(task, 1, 10);
+            }
+            if !task.interactive || task.sleep_credit != MAX_SLEEP_CREDIT {
+                serial_println!(
+                    "[sched]   FAIL: setup for the no-sleep case: expected an interactive task \
+                     with full credit, got interactive={} credit={}",
+                    task.interactive,
+                    task.sleep_credit
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Each cycle spends 2 and banks 0, and the boost goes the first
+            // time the credit falls below MIN_SLEEP_CREDIT.
+            let expected = (MAX_SLEEP_CREDIT - MIN_SLEEP_CREDIT) / 2 + 1;
+            let mut lost_at = None;
+            for n in 1..=MAX_SLEEP_CREDIT {
+                cycle(task, 2, 0);
+                match (lost_at, task.interactive) {
+                    (None, false) => lost_at = Some(n),
+                    (Some(at), true) => {
+                        serial_println!(
+                            "[sched]   FAIL: a task that never sleeps lost the boost at cycle {} \
+                             and got it back at cycle {}",
+                            at,
+                            n
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    _ => {}
+                }
+            }
+            if lost_at != Some(expected) {
+                serial_println!(
+                    "[sched]   FAIL: 2-tick bursts with no sleep lost the boost at cycle {:?}, \
+                     expected {} (credit {} spent 2 a cycle, minimum {}) -- a task that \
+                     blocks often but barely sleeps would keep starving its peers",
+                    lost_at,
+                    expected,
+                    MAX_SLEEP_CREDIT,
+                    MIN_SLEEP_CREDIT
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[sched]   Short bursts without sleep lose the boost when the sleep credit runs out (cycle {}): OK",
+                expected
+            );
         }
     }
 

@@ -165489,9 +165489,10 @@ shared hook best made with its test suite in view.
 
 ### [E] The NUL-visibility gate ran in WSL by accident, and stopped the boot test whenever WSL was slow to start -- 2026-09-25 -- FIXED 2026-09-25
 **Status:** FIXED 2026-09-25 -- `scripts/check-cp-diff-sees-nul.py`, with a
-paired suite, `scripts/test-check-cp-diff-sees-nul.py`, which the pre-push hook
-runs whenever the checker changes. Four launches of the same shape in lane A's
-boot-test suites are open: `requests/e-a-bare-bash-in-boot-test-suites.md`.
+paired suite, `scripts/test-check-cp-diff-sees-nul.py` (which the pre-push hook
+is meant to run when the checker is pushed, and does not yet on most pushes:
+see the next entry). Four launches of the same shape in lane A's boot-test
+suites are open: `requests/e-a-bare-bash-in-boot-test-suites.md`.
 
 **In short:** one of the boot test's early gates checks that `cp-diff.sh` can
 still see a difference made only of NUL bytes. It started its probe with
@@ -165538,3 +165539,27 @@ bare word too, so they test extracted `boot-test.sh` functions under WSL's
 bash and git while production runs them under Git's. They run only when
 `boot-test.sh` changes, they are lane A's suites, and `scripts/**` is unowned
 (A-Q11) -- hence the request.
+
+### [E] The pre-push hook's paired suites run nothing on a push of three or more commits -- 2026-09-25
+**Status:** OPEN -- `scripts/hooks/pre-push` (gate 20 and the hook's own-suites
+block, lines ~1154 and ~1208). Filed as
+`requests/e-ab-pre-push-suites-never-run-on-a-multi-commit-push.md`; lane E has
+not edited the hook, because the hook's ownership is open question A-Q11.
+
+**In short:** when a script in `scripts/` is pushed, the hook is meant to run
+that script's own test suite, and when the hook itself is pushed, its six
+suites. Both steps list the pushed files by handing every pushed commit to a
+single `git diff-tree`, which takes at most two trees and reads the rest as
+path filters. On a push of three or more commits -- nearly every lane push --
+the list comes back empty, the hook prints "no scripts/*.py in this push has a
+paired test suite", and no suite runs.
+
+**How it was found.** A lane-E push of ten commits, three touching `scripts/`
+and one adding `scripts/test-check-cp-diff-sees-nul.py` beside the checker it
+tests, logged that sentence. Reproduced by running the hook's pipeline by hand
+against the same commits: nothing with `xargs -r git diff-tree`, the five
+`scripts/` files with `git diff-tree --stdin`.
+
+**The fix** is `git diff-tree --stdin` (or `xargs -r -n1`) in both places,
+given in the request with a regression case for `test-pre-push-gates.py`.
+Until then, run a script's `test-<stem>.py` by hand before pushing it.

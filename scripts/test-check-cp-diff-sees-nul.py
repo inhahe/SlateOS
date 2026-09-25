@@ -5,8 +5,10 @@ Run directly (no pytest dependency):
 
     python scripts/test-check-cp-diff-sees-nul.py
 
-The pre-push hook runs this whenever the checker changes (it pairs
-`test-<stem>.py` with `<stem>.py`).
+The pre-push hook's gate 20 pairs `test-<stem>.py` with `<stem>.py` and is
+meant to run this whenever the checker is pushed. Until
+`requests/e-ab-pre-push-suites-never-run-on-a-multi-commit-push.md` is fixed
+it does so only for a push of one or two commits; run it by hand.
 
 What it pins down, and why each is here:
 
@@ -42,6 +44,16 @@ sys.path.insert(0, str(HERE))
 import proctree  # noqa: E402  (needs the path above)
 
 FAILURES: list[str] = []
+
+# Both spellings of the checker's self-test flag, which it must treat alike
+# (`scripts/check-selftest-flag-spellings.py`): every self-test case below runs
+# under each, so a checker that answered only one would fail here rather than
+# pass a mistyped command by running its scan.
+SELF_TEST_SPELLINGS = ("--self-test", "--selftest")
+
+# Every way of running the checker: its self-test under each spelling, and the
+# gate proper.
+MODES = [(f"self-test ({flag})", [flag]) for flag in SELF_TEST_SPELLINGS] + [("gate", [])]
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -113,10 +125,11 @@ def test_probe_shell_is_resolved() -> None:
     check("...and not the bare word", all(argv[0] != "bash" for argv in seen), f"argv {seen!r}")
     check("...and reports the markers as a pass", code == 0, f"exit {code}")
 
-    seen.clear()
-    code, _, _ = run(mod.main, ["--self-test"])
-    check("the self-test launches the resolved shell for both probes",
-          len(seen) == 2 and all(argv[0] != "bash" for argv in seen), f"argv {seen!r}")
+    for flag in SELF_TEST_SPELLINGS:
+        seen.clear()
+        code, _, _ = run(mod.main, [flag])
+        check(f"the self-test ({flag}) launches the resolved shell for both probes",
+              len(seen) == 2 and all(argv[0] != "bash" for argv in seen), f"argv {seen!r}")
 
 
 def test_shell_on_this_host() -> None:
@@ -130,7 +143,7 @@ def test_shell_on_this_host() -> None:
 
 
 def test_exit_codes() -> None:
-    for mode, args in (("self-test", ["--self-test"]), ("gate", [])):
+    for mode, args in MODES:
         mod = load()
         stub_shell(mod, None)
         code, first, _ = run(mod.main, args)
@@ -186,16 +199,19 @@ def test_finding_is_still_a_finding() -> None:
 
 def test_live_self_test() -> None:
     """Live: the self-test passes on this host, or says why it cannot run."""
-    mod = load()
-    code, first, text = run(mod.main, ["--self-test"])
-    if proctree.find_unix_shell() is None:
-        check("with no shell, the live self-test skips with a reason",
-              code == 3 and "SKIPPED" in first, f"exit {code}: {text[-400:]}")
-        return
-    check("the live self-test passes, or has no sha256sum to grade with",
-          code == 0 or (code == 3 and "sha256sum" in first), f"exit {code}: {text[-400:]}")
-    check("...and names the shell it ran under", code != 0 or "probe shell:" in text,
-          text[-400:])
+    for flag in SELF_TEST_SPELLINGS:
+        mod = load()
+        code, first, text = run(mod.main, [flag])
+        if proctree.find_unix_shell() is None:
+            check(f"with no shell, the live self-test ({flag}) skips with a reason",
+                  code == 3 and "SKIPPED" in first, f"exit {code}: {text[-400:]}")
+            continue
+        check(f"the live self-test ({flag}) passes, or has no sha256sum to grade with",
+              code == 0 or (code == 3 and "sha256sum" in first), f"exit {code}: {text[-400:]}")
+        # The self-test ran, not the gate: only the self-test prints this.
+        check("...and it was the self-test that ran, under a named shell",
+              code != 0 or ("probe shell:" in text and "selftest: 3 case(s)" in text),
+              text[-400:])
 
 
 def main() -> int:

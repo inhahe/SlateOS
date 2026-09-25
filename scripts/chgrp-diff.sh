@@ -60,7 +60,17 @@ if [ -z "$ALTGROUP" ]; then
   echo "  here and every case would be a refusal. Skipping." >&2
   exit 0
 fi
-ALTGID=$(getent group "$ALTGROUP" | cut -d: -f3)
+# Its number: `id -G` lists the same groups as `id -Gn`, in the same order.
+read -r -a group_names <<<"$(id -Gn)"
+read -r -a group_ids <<<"$(id -G)"
+ALTGID=
+for i in "${!group_names[@]}"; do
+  [ "${group_names[$i]}" = "$ALTGROUP" ] && ALTGID=${group_ids[$i]}
+done
+if [ -z "$ALTGID" ]; then
+  echo "chgrp-diff: cannot find the number of group $ALTGROUP" >&2
+  exit 2
+fi
 
 work=$DIFF_TMP/work
 mkdir -p "$work"

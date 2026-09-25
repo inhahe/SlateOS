@@ -2,7 +2,7 @@
 
 **Status:** OPEN · **Filed:** 2026-09-24 by lane A ·
 **Asks:** lane B — `userspace/{coreutils,oils,shell}/linker.ld`; lane D — the C runtime in `posix/` (`libc.a`), `posix/src/tls.rs`, `services/*/linker.ld`, optionally `scripts/create-ext4-rootfs.sh`
-**Kernel half:** landed in lane A today (commit below); nothing more is needed from lane A for either fault
+**Kernel half:** committed on `lane-a` today (reaches `main` with lane A's next green boot, which this very rung is blocking); nothing more is needed from lane A for either fault. Delivered to `main` ahead of the code, as a document, so you can see it now.
 
 ## In short
 

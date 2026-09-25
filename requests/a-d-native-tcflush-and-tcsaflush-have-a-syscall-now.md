@@ -1,7 +1,7 @@
 # A → D: `tcflush` and `tcsetattr(TCSAFLUSH)` have a native syscall now — `SYS_TTY_FLUSH` (1076)
 
 **Status:** OPEN · **Filed:** 2026-09-24 by lane A ·
-**Affects:** `posix/` (yours) — `tcflush`, `tcsetattr`; the kernel side is done
+**Affects:** `posix/` (yours) — `tcflush`, `tcsetattr`; the kernel side is committed on `lane-a` and reaches `main` with lane A's next green boot. Until then the number returns `NoSuchSyscall` on `main`, so a libc wrapper written now should treat that as "nothing to flush" rather than an error.
 
 ## In short
 

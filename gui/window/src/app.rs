@@ -121,6 +121,18 @@ pub enum Response {
     Redraw,
     /// Close down: the loop finishes after this event.
     Exit,
+    /// Keep the window open although it was asked to close, and redraw.
+    ///
+    /// The answer to [`Event::CloseRequested`] of an application that is
+    /// asking the user something first -- "Save changes?" -- whose dialog is
+    /// what the redraw shows, and which will answer [`Response::Exit`] itself
+    /// from whichever event brings the user's decision. To any other event it
+    /// is [`Response::Redraw`].
+    ///
+    /// Declining is an explicit act. A close request answered with anything
+    /// else still closes the window, so an application that has not thought
+    /// about closing cannot leave the user a title-bar X that does nothing.
+    KeepOpen,
 }
 
 /// Shared configuration files an application has rewritten and must announce.
@@ -624,7 +636,7 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             // icon looks like a dead program rather than a lost event.
             if let guitk::event::Event::TrayIconClicked { id: icon, button } = *event {
                 let response = app.tray_icon_clicked(icon, button);
-                if matches!(response, Response::Redraw) {
+                if matches!(response, Response::Redraw | Response::KeepOpen) {
                     dirty = true;
                 }
                 if matches!(response, Response::Exit) {
@@ -655,8 +667,8 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             // so the drain must not sit behind the redraw decision.
             //
             // And a batch ending in `CloseRequested` never reaches `Settled`:
-            // the loop stops as soon as the close is dispatched (see
-            // `EventLoop::run_batched`). A notification held for the batch
+            // the loop stops as soon as the close is dispatched, unless the
+            // application declines it (see `EventLoop::run_batched`). A notification held for the batch
             // boundary would be a setting the user changed with their last
             // click before closing the window, saved to disk, and never
             // announced — visibly not applied until the next login.
@@ -671,6 +683,12 @@ pub fn drive<T: Transport, A: App + ?Sized>(
                     EventResponse::Continue
                 }
                 Response::Exit => EventResponse::Exit,
+                // The window stays, and shows whatever the application is
+                // asking the user: the dialog is the redraw.
+                Response::KeepOpen => {
+                    dirty = true;
+                    EventResponse::KeepOpen
+                }
             }
         }
         // The compositor's recovery: the whole window, drawn again, even if the
@@ -692,7 +710,8 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             }
             match response {
                 Response::Idle => EventResponse::Continue,
-                Response::Redraw => {
+                // Nothing was asked to close, so declining is only a redraw.
+                Response::Redraw | Response::KeepOpen => {
                     dirty = true;
                     EventResponse::Continue
                 }
@@ -1356,6 +1375,64 @@ mod tests {
         let w = events.window(window).expect("the loop should know it");
         assert_eq!(w.app_id(), "slateos-editor");
         assert_eq!(w.title(), "Untitled 1");
+    }
+
+    /// An editor with unsaved work, as `apps/markdowneditor` is one: the first
+    /// close request is declined and a dialog drawn; the user's answer --
+    /// here, a focus event -- is what lets the window go.
+    struct Guarded {
+        asked: bool,
+        drawn: Rc<RefCell<Vec<(f32, f32)>>>,
+    }
+
+    impl App for Guarded {
+        fn title(&self) -> String {
+            "Guarded".to_string()
+        }
+
+        fn on_event(&mut self, event: &Event) -> Response {
+            match event {
+                Event::CloseRequested if !self.asked => {
+                    self.asked = true;
+                    Response::KeepOpen
+                }
+                Event::FocusIn if self.asked => Response::Exit,
+                _ => Response::Idle,
+            }
+        }
+
+        fn render(&mut self, width: f32, height: f32) -> RenderTree {
+            self.drawn.borrow_mut().push((width, height));
+            RenderTree::new()
+        }
+    }
+
+    #[test]
+    fn a_declined_close_keeps_the_window_and_draws_the_question() {
+        let drawn = Rc::new(RefCell::new(Vec::new()));
+        let mut app = Guarded {
+            asked: false,
+            drawn: Rc::clone(&drawn),
+        };
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+        desktop
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
+        desktop
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(window, Event::FocusIn)]);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        assert!(app.asked, "the close request should have reached the app");
+        assert_eq!(
+            drawn.borrow().len(),
+            2,
+            "the first frame, and the one showing the question -- a close that \
+             ended the loop anyway would have drawn nothing after the first"
+        );
     }
 
     /// The first frame is the one no event asks for: nothing has happened yet,

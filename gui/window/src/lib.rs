@@ -171,6 +171,17 @@ pub enum EventResponse {
     Continue,
     /// Stop the event loop and return.
     Exit,
+    /// Keep the window open although it was asked to close.
+    ///
+    /// The answer to [`Event::CloseRequested`] of an application that has
+    /// something to ask the user first -- unsaved work -- and that will answer
+    /// [`Self::Exit`] itself, from whichever event brings the user's decision.
+    /// To any other event it is [`Self::Continue`].
+    ///
+    /// Declining is an explicit act. A close request answered with anything
+    /// else still closes the window, so an application that never thought
+    /// about closing cannot leave the user a title-bar X that does nothing.
+    KeepOpen,
 }
 
 /// What [`EventLoop::run_batched`] is handing over.
@@ -1769,12 +1780,17 @@ impl<T: Transport> EventLoop<T> {
             let mut dispatched = false;
             while let Some((window, event)) = self.poll()? {
                 dispatched = true;
-                // A close request the handler does not act on still closes the
-                // window. A title-bar X that does nothing is worse than an
-                // application that quits when it would rather not have.
+                // A close request closes the window unless the handler
+                // declines it in so many words. A title-bar X that does nothing
+                // is worse than an application that quits when it would rather
+                // not have, so doing nothing is not declining: only `KeepOpen`
+                // is, the answer of an application asking the user about
+                // unsaved work first (design-decisions §1309).
                 let requested_close = matches!(event, Event::CloseRequested);
                 let verdict = handler(self, Dispatch::Event { window, event });
-                if verdict == EventResponse::Exit || requested_close {
+                if verdict == EventResponse::Exit
+                    || (requested_close && verdict != EventResponse::KeepOpen)
+                {
                     self.running = false;
                     break;
                 }
@@ -2664,6 +2680,56 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         assert!(!events.is_running());
+    }
+
+    #[test]
+    fn a_close_request_answered_keep_open_leaves_the_window_open() {
+        // An editor with unsaved work: it declines the close, asks the user,
+        // and goes when the answer comes -- here, the focus event after.
+        let (mut events, server) = wired();
+        let id = open(&mut events, "A");
+        server.borrow_mut().script.push_back(vec![
+            InputEvent::new(id, Event::CloseRequested),
+            InputEvent::new(id, Event::FocusIn),
+        ]);
+
+        let mut seen = Vec::new();
+        events
+            .run(|_loop, _w, event| {
+                seen.push(event.clone());
+                match event {
+                    Event::CloseRequested => EventResponse::KeepOpen,
+                    _ => EventResponse::Exit,
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            seen,
+            vec![Event::CloseRequested, Event::FocusIn],
+            "the loop should have gone on past the declined close"
+        );
+    }
+
+    #[test]
+    fn keep_open_answering_anything_but_a_close_is_continue() {
+        let (mut events, server) = wired();
+        let id = open(&mut events, "A");
+        server.borrow_mut().script.push_back(vec![
+            InputEvent::new(id, Event::FocusIn),
+            InputEvent::new(id, Event::FocusOut),
+        ]);
+
+        let mut count = 0u32;
+        events
+            .run(|_loop, _w, _event| {
+                count += 1;
+                EventResponse::KeepOpen
+            })
+            .unwrap();
+        assert_eq!(
+            count, 2,
+            "both events, and the loop ended with the connection"
+        );
     }
 
     #[test]

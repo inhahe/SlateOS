@@ -20,8 +20,10 @@
 //!   the codecs -- none, PackBits, LZW (both styles), Deflate -- with the
 //!   horizontal predictor and big-endian 16-bit samples.
 //! - **Samples to pixels** ([`rgba`]): grey of 1 to 16 bits, palettes, RGB
-//!   of 8 and 16 bits with or without alpha, CMYK, in contiguous or
-//!   separate planes.
+//!   of 8 and 16 bits with or without alpha, CMYK, `YCbCr` at every
+//!   subsampling libtiff converts, and CIE L*a*b*, in contiguous or separate
+//!   planes -- the colour conversions ([`color`]) in libtiff's own single
+//!   precision, so they agree to the bit.
 //!
 //! Where libtiff's reader stops at a strip that will not read, this refuses
 //! the file: the viewers ask libtiff to stop on the first error, and show
@@ -45,11 +47,11 @@
 //!
 //! # What is not here yet
 //!
-//! `YCbCr` and CIELab samples, CCITT fax compression, JPEG and old-style
-//! JPEG, and the rarer codecs (NeXT, ThunderScan, SGI LogLuv, PixarLog) are
-//! refused by name. libtiff opens the first page only here too; the others
+//! CCITT fax compression, JPEG and old-style JPEG, and the rarer codecs
+//! (NeXT, ThunderScan, SGI LogLuv, PixarLog) are refused by name. libtiff opens the first page only here too; the others
 //! are not reached.
 
+mod color;
 mod dir;
 mod lzw;
 mod read;

@@ -11268,8 +11268,11 @@ of TIFF are not read yet (listed below) and are refused by name.
   `FillOrder`, and big-endian 16-bit samples.
 - `rgba.rs`: `tif_getimage.c` -- `TIFFRGBAImageOK`, `TIFFRGBAImageBegin`, the
   strip and tile readers and their pixel routines: grey of 1 to 16 bits,
-  palettes, RGB of 8 and 16 with each kind of alpha, CMYK, planes together or
-  apart.
+  palettes, RGB of 8 and 16 with each kind of alpha, CMYK, `YCbCr` (all seven
+  subsamplings libtiff converts), CIE L*a*b*, planes together or apart.
+- `color.rs`: `tif_color.c`'s `YCbCr` and L*a*b* conversions, in libtiff's
+  own single-precision order so they agree to the bit; its one call to
+  `pow` is a table generated with the C library libtiff runs on.
 
 ### The choices with two sides
 
@@ -11310,9 +11313,11 @@ of TIFF are not read yet (listed below) and are refused by name.
 
 ### Not yet read
 
-`YCbCr` and CIELab samples, CCITT (fax) compression, JPEG and old-style JPEG
-compression, and NeXT, ThunderScan, SGI LogLuv and PixarLog: libtiff reads
-them, and this refuses them by name, for now. Only the first page of a
+CCITT (fax) compression, JPEG and old-style JPEG compression, and NeXT,
+ThunderScan, SGI LogLuv and PixarLog: libtiff reads them, and this refuses
+them by name, for now. (`YCbCr` and CIE L*a*b* samples followed on the same
+day, held the same way: 23 more fixtures, and 12,000 mutants of them without
+a disagreement.) Only the first page of a
 multi-page TIFF is read -- as gdk-pixbuf reads it.
 
 ### How it is held

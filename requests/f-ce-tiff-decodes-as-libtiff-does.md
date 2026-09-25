@@ -6,12 +6,12 @@
 follow-ups below are yours.
 
 **In short:** `imagecodec::decode`, `decode_scaled` and `dimensions` now read
-TIFF (design-decisions.md §1317): grey, palette, RGB and CMYK pictures of
-every depth libtiff's viewer path takes, in strips or tiles, uncompressed,
+TIFF (design-decisions.md §1317): grey, palette, RGB, CMYK, `YCbCr` and
+CIE L*a*b* pictures of every depth libtiff's viewer path takes, in strips or tiles, uncompressed,
 PackBits, LZW or Deflate, turned by the `Orientation` tag. The picture is
 exactly what a libtiff-based viewer shows. Some TIFFs are refused for now by
-name -- `ImageError::Unsupported` -- until the rest lands: `YCbCr`, CIELab,
-fax (CCITT) and JPEG-compressed TIFFs, which are next. Anything that decodes
+name -- `ImageError::Unsupported` -- until the rest lands: fax (CCITT) and
+JPEG-compressed TIFFs, which are next. Anything that decodes
 through `imagecodec` needs no change; the few places that sniff formats
 themselves do.
 

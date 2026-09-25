@@ -165399,16 +165399,16 @@ Not a second inflater in `imagecodec`: design-decisions §555.
 
 **Status:** OPEN — lane F's, in progress.
 
-**In short:** TIFFs whose samples are `YCbCr` or CIELab, or compressed with
-CCITT fax, JPEG or old-style JPEG, NeXT, ThunderScan, SGI LogLuv or
-PixarLog, are refused (`ImageError::Unsupported`) though libtiff reads them.
+**In short:** TIFFs compressed with CCITT fax, JPEG or old-style JPEG,
+NeXT, ThunderScan, SGI LogLuv or PixarLog are refused
+(`ImageError::Unsupported`) though libtiff reads them. (`YCbCr` and CIELab
+samples were on this list; they decode now.)
 Fax (scanned documents) and JPEG (photographs) are the ones in real use.
 
 **Where.** `gui/imagecodec/src/tiff/read.rs` (`run_codec`) and `rgba.rs`
 (`pick_contig`, `pick_separate`, `begin`).
 
-**The proper fix.** Port the rest of libtiff's reader, as the first stage was
-(design-decisions §1317): `tif_color.c`'s `YCbCr` and CIELab conversions and
-`tif_getimage.c`'s `YCbCr` routines; `tif_fax3.c`; JPEG through this crate's
+**The proper fix.** Port the rest of libtiff's reader, as the first stages were
+(design-decisions §1317): `tif_fax3.c`; JPEG through this crate's
 JPEG decoder with the file's `JPEGTables`; then the rare codecs. Fixtures from
 the same libtiff oracle.

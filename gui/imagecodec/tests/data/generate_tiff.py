@@ -239,6 +239,7 @@ FORMATS = {BYTE: "B", SHORT: "H", LONG: "I", SBYTE: "b", SSHORT: "h", SLONG: "i"
  TILE_LENGTH, TILE_OFFSETS, TILE_BYTE_COUNTS, INK_SET, EXTRA_SAMPLES, SAMPLE_FORMAT,
  YCBCR_SUBSAMPLING) = (256, 257, 258, 259, 262, 266, 273, 274, 277, 278, 279, 284, 317, 320,
                        322, 323, 324, 325, 332, 338, 339, 530)
+WHITE_POINT, YCBCR_COEFFICIENTS, REFERENCE_BLACK_WHITE = 318, 529, 532
 
 NONE, LZW, ADOBE_DEFLATE, PACKBITS, DEFLATE = 1, 5, 8, 32773, 32946
 
@@ -521,6 +522,70 @@ def tiff(pixels: list[list[list[int]]], bits: int, photometric: int | None, layo
                       bigtiff=layout.bigtiff, **kw)
 
 
+def ycbcr_tiff(w: int, h: int, sub: tuple[int, int], seed: int, *, rows_per_strip: int = 4,
+               tile: tuple[int, int] | None = None, planar: int = 1, scheme: int = NONE,
+               extra: list[tuple[int, int, object]] | None = None) -> bytes:
+    """8-bit YCbCr, packed in blocks of sub[0] x sub[1] luma samples each
+    followed by one Cb and one Cr (TIFF 6.0 section 21), or in three planes."""
+    hs, vs = sub
+    px = picture(w, h, 3, 8, seed)
+
+    def sample(y: int, x: int, k: int) -> int:
+        # Past the edge, the edge sample: a writer pads its blocks so.
+        return px[min(y, h - 1)][min(x, w - 1)][k]
+
+    def blocks(y0: int, y1: int, x0: int, x1: int) -> bytes:
+        out = bytearray()
+        for by in range(y0, y1, vs):
+            for bx in range(x0, x1, hs):
+                out += bytes(sample(by + r, bx + c, 0) for r in range(vs) for c in range(hs))
+                out += bytes([sample(by, bx, 1), sample(by, bx, 2)])
+        return bytes(out)
+
+    def up(n: int, m: int) -> int:
+        return (n + m - 1) // m * m
+
+    chunks = []
+    if planar == 2:
+        for k in range(3):
+            for y0 in range(0, h, rows_per_strip):
+                rows = range(y0, min(h, y0 + rows_per_strip))
+                chunks.append(compress(bytes(px[y][x][k] for y in rows for x in range(w)), scheme))
+    elif tile:
+        tw, th = tile
+        for ty in range(0, h, th):
+            for tx in range(0, w, tw):
+                chunks.append(compress(blocks(ty, ty + th, tx, tx + tw), scheme))
+    else:
+        for y0 in range(0, h, rows_per_strip):
+            rows = min(h, y0 + rows_per_strip) - y0
+            chunks.append(compress(blocks(y0, y0 + up(rows, vs), 0, up(w, hs)), scheme))
+    entries = [(WIDTH, LONG, [w]), (LENGTH, LONG, [h]), (BITS, SHORT, [8, 8, 8]),
+               (COMPRESSION, SHORT, [scheme]), (PHOTOMETRIC, SHORT, [6]), (SAMPLES, SHORT, [3]),
+               (YCBCR_SUBSAMPLING, SHORT, [hs, vs])]
+    if planar == 2:
+        entries.append((PLANAR, SHORT, [2]))
+    kw = {}
+    if tile:
+        entries += [(TILE_WIDTH, LONG, [tile[0]]), (TILE_LENGTH, LONG, [tile[1]])]
+        kw = {"offsets_tag": TILE_OFFSETS, "counts_tag": TILE_BYTE_COUNTS}
+    else:
+        entries.append((ROWS_PER_STRIP, LONG, [rows_per_strip]))
+    ours = {tag for tag, _, _ in (extra or [])}
+    entries = [x for x in entries if x[0] not in ours] + list(extra or [])
+    return write_tiff(entries, chunks, **kw)
+
+
+def lab_tiff(w: int, h: int, bits: int, seed: int, extra: list[tuple[int, int, object]] | None = None,
+             big_endian: bool = False) -> bytes:
+    """CIE L*a*b*: L unsigned, a and b signed, 8 or 16 bits."""
+    px = picture(w, h, 3, bits, seed)
+    half = 1 << (bits - 1)
+    # a and b are signed: store the picture's values shifted to straddle 0.
+    signed = [[[p[0], (p[1] - half) % (1 << bits), (p[2] - half) % (1 << bits)] for p in row] for row in px]
+    return tiff(signed, bits, 8, Layout(big_endian=big_endian), extra=extra)
+
+
 def colour_map(bits: int, wide: bool = True, seed: int = 5) -> tuple[int, int, object]:
     rng = random.Random(seed)
     n = 1 << bits
@@ -664,6 +729,30 @@ def fixtures() -> dict[str, bytes]:
     f["lzw_garbage_refused"] = whole[:20] + bytes(b ^ 0x5A for b in whole[20:40]) + whole[40:]
     f["zero_width_refused"] = tiff(rgb, 8, 2, extra=[(WIDTH, LONG, [0])])
     f["ycbcr_subsampling_0_refused"] = tiff(rgb, 8, 2, extra=[(YCBCR_SUBSAMPLING, SHORT, [1, 0])])
+    # YCbCr: every subsampling libtiff converts, at sizes that cut blocks.
+    for hs, vs in ((1, 1), (2, 1), (2, 2), (4, 1), (4, 2), (4, 4), (1, 2)):
+        f[f"ycbcr{hs}{vs}"] = ycbcr_tiff(W, H, (hs, vs), 50 + hs * 5 + vs)
+    f["ycbcr22_odd_rows_per_strip"] = ycbcr_tiff(W, H, (2, 2), 60, rows_per_strip=3)
+    f["ycbcr42_tiled"] = ycbcr_tiff(37, 21, (4, 2), 61, tile=(16, 16))
+    f["ycbcr22_lzw"] = ycbcr_tiff(W, H, (2, 2), 62, scheme=LZW)
+    f["ycbcr11_separate"] = ycbcr_tiff(W, H, (1, 1), 63, planar=2)
+    f["ycbcr22_separate_refused"] = ycbcr_tiff(W, H, (2, 2), 64, planar=2)
+    f["ycbcr24_refused"] = ycbcr_tiff(W, H, (2, 4), 65)
+    f["ycbcr22_rec709"] = ycbcr_tiff(W, H, (2, 2), 66, extra=[
+        (YCBCR_COEFFICIENTS, RATIONAL, [(2126, 10000), (7152, 10000), (722, 10000)])])
+    f["ycbcr22_studio_range"] = ycbcr_tiff(W, H, (2, 2), 67, extra=[
+        (REFERENCE_BLACK_WHITE, RATIONAL, [(16, 1), (235, 1), (128, 1), (240, 1), (128, 1), (240, 1)])])
+    f["ycbcr22_zero_green_luma_refused"] = ycbcr_tiff(W, H, (2, 2), 68, extra=[
+        (YCBCR_COEFFICIENTS, RATIONAL, [(299, 1000), (0, 1), (114, 1000)])])
+    f["ycbcr22_float_reference"] = ycbcr_tiff(W, H, (2, 2), 69, extra=[
+        (REFERENCE_BLACK_WHITE, FLOAT, [0.5, 254.5, 127.25, 255.0, 128.0, 250.0])])
+    # CIE L*a*b*.
+    f["lab8"] = lab_tiff(W, H, 8, 70)
+    f["lab16"] = lab_tiff(W, H, 16, 71)
+    f["lab16_big_endian"] = lab_tiff(W, H, 16, 72, big_endian=True)
+    f["lab8_d65"] = lab_tiff(W, H, 8, 73, extra=[(WHITE_POINT, RATIONAL, [(3127, 10000), (3290, 10000)])])
+    f["lab8_white_point_zero_refused"] = lab_tiff(W, H, 8, 74, extra=[(WHITE_POINT, RATIONAL, [(3127, 10000), (0, 1)])])
+    f["lab8_separate_refused"] = tiff(picture(W, H, 3, 8, 75), 8, 8, Layout(planar=2))
     return f
 
 

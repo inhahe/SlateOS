@@ -109,9 +109,9 @@
 //! own rules for which is best and for when the mask applies. See [`ico`].
 //!
 //! TIFF, the first page, as libtiff's RGBA reader -- the one image viewers
-//! on free desktops use -- converts it: grey, palette, RGB and CMYK samples
-//! of every depth it takes, strips or tiles, planes together or apart,
-//! uncompressed or PackBits, LZW or Deflate. See [`tiff`].
+//! on free desktops use -- converts it: grey, palette, RGB, CMYK, `YCbCr`
+//! and CIE L*a*b* samples of every depth it takes, strips or tiles, planes
+//! together or apart, uncompressed or PackBits, LZW or Deflate. See [`tiff`].
 //!
 //! **EXIF orientation is applied**, as Chrome applies it: a JPEG's or PNG's
 //! EXIF saying the picture is on its side turns it, so [`decode`],

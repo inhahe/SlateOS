@@ -432,6 +432,44 @@ impl<'a> File<'a> {
             .collect())
     }
 
+    /// Numbers of a fixed count (`TIFFReadDirEntryFloatArray`, for a
+    /// `TIFF_SETGET_C0_FLOAT` field): the wrong count, or anything that will
+    /// not read, drops the field -- `None`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)] // As the C converts.
+    fn floats(&self, entry: &Entry, count: u64) -> Option<Vec<f32>> {
+        if entry.count != count || !kind::numeric(entry.kind) {
+            return None;
+        }
+        let (raw, n) = self.raw(entry, u64::MAX).ok()??;
+        let bytes = raw.bytes();
+        let mut out = Vec::with_capacity(n as usize);
+        for i in 0..n as usize {
+            let at = i.saturating_mul(usize::try_from(kind::width(entry.kind)).unwrap_or(0));
+            let here = bytes.get(at..).unwrap_or(&[]);
+            let v = match entry.kind {
+                // Numerator over denominator, each converted to single
+                // precision first; the denominator unsigned even in a
+                // signed rational; zero over zero is zero.
+                kind::RATIONAL | kind::SRATIONAL => {
+                    let den = self.u32(here.get(4..).unwrap_or(&[]));
+                    if den == 0 {
+                        0.0
+                    } else if entry.kind == kind::RATIONAL {
+                        self.u32(here) as f32 / den as f32
+                    } else {
+                        self.u32(here).cast_signed() as f32 / den as f32
+                    }
+                }
+                kind::FLOAT => f32::from_bits(self.u32(here)),
+                kind::DOUBLE => f64::from_bits(self.u64(here)) as f32,
+                // An integer straight to single precision, rounded once.
+                _ => self.integer_at(bytes, entry.kind, i) as f32,
+            };
+            out.push(v);
+        }
+        Some(out)
+    }
+
     /// A per-sample field of which libtiff keeps one value: at least one
     /// value per sample, and the first `samples` all equal
     /// (`TIFFReadDirEntryPersampleShort`).
@@ -543,6 +581,12 @@ pub(super) struct Directory {
     /// Red, green and blue, `1 << bits_per_sample` entries each.
     pub(super) color_map: Option<[Vec<u16>; 3]>,
     pub(super) ycbcr_subsampling: [u16; 2],
+    /// `YCbCrCoefficients`, when present and of three values.
+    pub(super) ycbcr_coefficients: Option<[f32; 3]>,
+    /// `ReferenceBlackWhite`, when present and of six values.
+    pub(super) reference_black_white: Option<[f32; 6]>,
+    /// `WhitePoint`, when present and of two values.
+    pub(super) white_point: Option<[f32; 2]>,
     pub(super) ink_set: u16,
     pub(super) predictor: u16,
     /// Whether a codec hands back this `YCbCr` image's chroma already
@@ -578,6 +622,9 @@ impl Directory {
             sample_info: Vec::new(),
             color_map: None,
             ycbcr_subsampling: [2, 2],
+            ycbcr_coefficients: None,
+            reference_black_white: None,
+            white_point: None,
             ink_set: 1,
             predictor: 1,
             upsampled: false,
@@ -1255,6 +1302,23 @@ fn second_pass_field(file: &File<'_>, entry: &Entry, dir: &mut Directory) {
         tag::PREDICTOR => {
             if let Ok(v) = file.short(entry) {
                 dir.predictor = v;
+            }
+        }
+        tag::YCBCR_COEFFICIENTS => {
+            if let Some([a, b, c]) = file.floats(entry, 3).as_deref() {
+                dir.ycbcr_coefficients = Some([*a, *b, *c]);
+            }
+        }
+        tag::REFERENCE_BLACK_WHITE => {
+            if let Some(v) = file.floats(entry, 6) {
+                if let Ok(six) = <[f32; 6]>::try_from(v.as_slice()) {
+                    dir.reference_black_white = Some(six);
+                }
+            }
+        }
+        tag::WHITE_POINT => {
+            if let Some([x, y]) = file.floats(entry, 2).as_deref() {
+                dir.white_point = Some([*x, *y]);
             }
         }
         tag::YCBCR_SUBSAMPLING => {

@@ -1,38 +1,18 @@
-//! Slate OS getopt/cksum — shell scripting helpers
+//! Slate OS getopt — parse command-line options for shell scripts, as
+//! util-linux's getopt(1) does.
 //!
-//! Multi-personality binary detected via argv[0]:
-//! - `getopt`: Parse command-line options for shell scripts
-//! - `cksum`: Print CRC32 checksum and byte count
-//!
-//! `printenv` and `sync` were personalities here too, which nothing could reach: no
-//! link was ever staged for either. Each is `userspace/coreutils`'s own bin
-//! since 2026-09-24/25 -- ports of GNU's, differentially tested -- and
-//! `coreutils` is the one home for such a name, the duplicate going
-//! (design-decisions.md §1005).
+//! This was a multi-personality binary chosen by argv[0], and is `getopt`
+//! alone now. `printenv`, `sync` and `cksum` were personalities here too,
+//! which nothing could reach: no link was ever staged for any of them. Each is
+//! `userspace/coreutils`'s own bin since 2026-09-24/25 -- ports of GNU's,
+//! differentially tested; `cksum` with all eleven of 9.4's `-a` algorithms
+//! where this one had the CRC alone -- and `coreutils` is the one home for such
+//! a name, the duplicate going (design-decisions.md §1005). With one mode
+//! left, the dispatch went too.
 
 use quoting::quoteaf_os;
 use std::env;
-use std::fs;
-use std::io::{self, Read};
 use std::process;
-
-// ── Personality detection ──────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Mode {
-    Getopt,
-    Cksum,
-}
-
-fn detect_mode(argv0: &str) -> Mode {
-    let name = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
-    let name = name.strip_suffix(".exe").unwrap_or(name);
-    let lower = name.to_ascii_lowercase();
-    match lower.as_str() {
-        "cksum" => Mode::Cksum,
-        _ => Mode::Getopt,
-    }
-}
 
 // ── getopt ─────────────────────────────────────────────────────────
 // Enhanced getopt(1) compatible with util-linux getopt
@@ -413,118 +393,10 @@ fn quote_for_shell(parts: &[String], shell: &str) -> String {
     out
 }
 
-// ── cksum ──────────────────────────────────────────────────────────
-
-/// CRC-32 using the standard polynomial (reversed: 0xEDB88320).
-/// Available for future use (e.g., `cksum --algorithm=crc32`).
-#[allow(dead_code)]
-fn crc32_table() -> [u32; 256] {
-    let mut table = [0u32; 256];
-    for i in 0..256u32 {
-        let mut crc = i;
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB88320;
-            } else {
-                crc >>= 1;
-            }
-        }
-        table[i as usize] = crc;
-    }
-    table
-}
-
-fn posix_cksum(data: &[u8]) -> u32 {
-    // POSIX cksum uses a different CRC than standard CRC-32.
-    // It processes bytes MSB first with polynomial 0x04C11DB7.
-    let mut crc: u32 = 0;
-
-    for &byte in data {
-        for bit in (0..8).rev() {
-            let b = ((byte >> bit) & 1) as u32;
-            if (crc >> 31) ^ b != 0 {
-                crc = (crc << 1) ^ 0x04C11DB7;
-            } else {
-                crc <<= 1;
-            }
-        }
-    }
-
-    // Process length
-    let mut len = data.len() as u64;
-    while len > 0 {
-        let byte = (len & 0xFF) as u8;
-        for bit in (0..8).rev() {
-            let b = ((byte >> bit) & 1) as u32;
-            if (crc >> 31) ^ b != 0 {
-                crc = (crc << 1) ^ 0x04C11DB7;
-            } else {
-                crc <<= 1;
-            }
-        }
-        len >>= 8;
-    }
-
-    !crc
-}
-
-fn run_cksum() -> Result<(), String> {
-    let argv: Vec<String> = env::args().collect();
-    let mut files: Vec<String> = Vec::new();
-
-    for arg in &argv[1..] {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                eprintln!("Usage: cksum [FILE]...");
-                eprintln!("Print CRC checksum and byte count of each FILE.");
-                process::exit(0);
-            }
-            _ => files.push(arg.clone()),
-        }
-    }
-
-    if files.is_empty() {
-        files.push("-".to_string());
-    }
-
-    for file in &files {
-        let (data, display_name) = if file == "-" {
-            let mut buf = Vec::new();
-            io::stdin()
-                .read_to_end(&mut buf)
-                .map_err(|e| format!("stdin: {e}"))?;
-            (buf, None)
-        } else {
-            let data = fs::read(file).map_err(|e| format!("{file}: {e}"))?;
-            (data, Some(file.as_str()))
-        };
-
-        let checksum = posix_cksum(&data);
-        let size = data.len();
-
-        match display_name {
-            Some(name) => println!("{checksum} {size} {name}"),
-            None => println!("{checksum} {size}"),
-        }
-    }
-
-    Ok(())
-}
-
 // ── Main ───────────────────────────────────────────────────────────
 
-fn run() -> Result<(), String> {
-    let argv0 = env::args().next().unwrap_or_else(|| "getopt".to_string());
-    let mode = detect_mode(&argv0);
-
-    match mode {
-        Mode::Getopt => run_getopt(),
-        Mode::Cksum => run_cksum(),
-    }
-}
-
 fn main() {
-    if let Err(e) = run() {
+    if let Err(e) = run_getopt() {
         let prog = env::args().next().unwrap_or_else(|| "getopt".to_string());
         let name = prog.rsplit(['/', '\\']).next().unwrap_or(&prog);
         eprintln!("{name}: {e}");
@@ -537,8 +409,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── Personality detection ──
 
     /// The flag exists so `run_getopt` can exit 1. Before it, a rejected
     /// option was printed and then reported as success.
@@ -555,32 +425,6 @@ mod tests {
     fn a_clean_line_does_not_set_the_error_flag() {
         let (_out, had_error) = parse_options("abc", &[], &["-a".to_string()], "test", false);
         assert!(!had_error);
-    }
-
-    #[test]
-    fn test_detect_getopt() {
-        assert_eq!(detect_mode("getopt"), Mode::Getopt);
-        assert_eq!(detect_mode("/usr/bin/getopt"), Mode::Getopt);
-    }
-
-    #[test]
-    fn test_detect_cksum() {
-        assert_eq!(detect_mode("cksum"), Mode::Cksum);
-        assert_eq!(detect_mode("/bin/cksum"), Mode::Cksum);
-    }
-
-    /// `printenv` and `sync` are coreutils' bins now; this binary no longer
-    /// answers to either, so each falls to the default like any other name it
-    /// does not know.
-    #[test]
-    fn printenv_and_sync_are_not_personalities_here() {
-        assert_eq!(detect_mode("printenv"), Mode::Getopt);
-        assert_eq!(detect_mode("sync"), Mode::Getopt);
-    }
-
-    #[test]
-    fn test_detect_default() {
-        assert_eq!(detect_mode("unknown"), Mode::Getopt);
     }
 
     // ── Longopt parsing ──
@@ -725,53 +569,6 @@ mod tests {
         let parts = vec!["it's".to_string()];
         let quoted = quote_for_shell(&parts, "bash");
         assert!(quoted.contains("'\\''"));
-    }
-
-    // ── POSIX cksum ──
-
-    #[test]
-    fn test_cksum_empty() {
-        let crc = posix_cksum(b"");
-        assert_eq!(crc, 4294967295); // Known CRC for empty input
-    }
-
-    #[test]
-    fn test_cksum_single_byte() {
-        let crc = posix_cksum(b"a");
-        // The POSIX cksum of "a" is a specific value
-        assert_ne!(crc, 0);
-    }
-
-    #[test]
-    fn test_cksum_deterministic() {
-        let data = b"Hello, World!";
-        let crc1 = posix_cksum(data);
-        let crc2 = posix_cksum(data);
-        assert_eq!(crc1, crc2);
-    }
-
-    #[test]
-    fn test_cksum_different_data() {
-        let crc1 = posix_cksum(b"hello");
-        let crc2 = posix_cksum(b"world");
-        assert_ne!(crc1, crc2);
-    }
-
-    // ── CRC32 table ──
-
-    #[test]
-    fn test_crc32_table_size() {
-        let table = crc32_table();
-        assert_eq!(table.len(), 256);
-        assert_eq!(table[0], 0); // CRC of 0 is 0
-    }
-
-    #[test]
-    fn test_crc32_table_nonzero() {
-        let table = crc32_table();
-        // Most entries should be nonzero
-        let nonzero_count = table.iter().filter(|&&v| v != 0).count();
-        assert!(nonzero_count > 200);
     }
 
     // ── Edge cases ──

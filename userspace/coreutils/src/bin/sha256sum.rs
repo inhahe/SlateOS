@@ -1,82 +1,59 @@
 //! `sha256sum` — print or check SHA-256 (256-bit) checksums.
 //!
-//! Everything except the hash lives in [`coreutils::digest`], which is
-//! upstream's `src/digest.c`: the option table, the three checksum-file
-//! formats, `--check`, the name escaping and the exit statuses. Upstream
-//! compiles that file eight times with a different `HASH_ALGO_*`; here the
-//! difference between this program and `md5sum` is the [`Algorithm`] constant
-//! below and nothing else.
+//! Everything lives in [`coreutils::digest`], which is upstream's
+//! `src/digest.c`: the option table, the three checksum-file formats,
+//! `--check`, the name escaping and the exit statuses. Upstream compiles that
+//! file once per `HASH_ALGO_*`; here the difference between this program and
+//! `md5sum` is the [`Build`] below and nothing else.
 //!
-//! The hash itself is `userspace/sha2`. This file used to carry its own — in
-//! the one utility whose entire output is a digest that another machine will
+//! The hash itself is the workspace's `sha2`. This file used to carry its own —
+//! in the one utility whose entire output is a digest that another machine will
 //! compare against its own — and the FIPS vectors below now check the shared
-//! implementation, through the incremental [`sha2::Sha256`] rather than the
-//! one-shot `sha2::sha256`, because the incremental one is what actually runs.
+//! implementation, through the incremental stream rather than the one-shot
+//! `sha2::sha256`, because the incremental one is what actually runs.
 
-use coreutils::digest::{Algorithm, Stream};
+use coreutils::digest::Build;
 use std::process::ExitCode;
 
 coreutils::guard_std_fds!();
 
-/// The `#if HASH_ALGO_SHA256` block of upstream's `digest.c`, as data.
-static SHA256: Algorithm = Algorithm {
-    program: "sha256sum",
-    tag: "SHA256",
-    bits: 256,
-    reference: "FIPS-180-2",
-    new: || Box::new(Sha256Stream(sha2::Sha256::new())),
-};
-
 fn main() -> ExitCode {
-    coreutils::digest::main(&SHA256)
-}
-
-/// [`sha2::Sha256`] under the shared module's trait.
-///
-/// A newtype rather than an `impl Stream for sha2::Sha256`, because that type
-/// belongs to another crate and this trait to this one — and because
-/// [`Stream::finish`] consumes the hash while `sha2`'s `finalize` takes `self`
-/// by value, which is exactly what `Box<Self>` unwraps to.
-struct Sha256Stream(sha2::Sha256);
-
-impl Stream for Sha256Stream {
-    fn update(&mut self, data: &[u8]) {
-        self.0.update(data);
-    }
-
-    fn finish(self: Box<Self>) -> Vec<u8> {
-        self.0.finalize().to_vec()
-    }
+    coreutils::digest::main(Build::Sha256sum)
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
-    use super::*;
+    use coreutils::digest::{Algo, Build};
 
     fn hex(digest: &[u8]) -> String {
-        digest.iter().map(|b| format!("{b:02x}")).collect()
+        use std::fmt::Write as _;
+        digest.iter().fold(String::new(), |mut out, b| {
+            // Formatting into a `String` cannot fail.
+            let _ = write!(out, "{b:02x}");
+            out
+        })
     }
 
     /// Through the same path the program uses, not through `sha2::sha256`: a
     /// vector that passes one-shot and fails incrementally would otherwise
     /// pass here and fail in the field.
     fn sha256_hex(data: &[u8]) -> String {
-        let mut h = (SHA256.new)();
+        let mut h = Algo::Sha256.stream(32);
         h.update(data);
         hex(&h.finish())
     }
 
-    // ------------ the constant the shared module cannot check for itself ------------
+    // ------------ the wiring ------------
 
     #[test]
-    fn digest_length_matches_the_declared_bits() {
-        // `Algorithm::bits` drives `hex_len`, which decides which check lines
-        // parse at all. Upstream gets this consistency from the preprocessor;
-        // here they are two independent statements and so need asserting.
-        assert_eq!((SHA256.new)().finish().len() * 8, SHA256.bits);
-        assert_eq!(SHA256.hex_len(), 64);
+    fn the_build_hashes_with_sha256() {
+        assert_eq!(Build::Sha256sum.algo(), Algo::Sha256);
+        assert_eq!(
+            Algo::Sha256.stream(32).finish().len() * 8,
+            Algo::Sha256.bits()
+        );
     }
 
     /// The newtype is the only place this program and `sha2` could drift, and
@@ -188,7 +165,7 @@ mod tests {
         let msg: Vec<u8> = (0u16..200).map(|i| (i % 251) as u8).collect();
         let want = sha256_hex(&msg);
         for cut in 0..=msg.len() {
-            let mut h = (SHA256.new)();
+            let mut h = Algo::Sha256.stream(32);
             h.update(&msg[..cut]);
             h.update(&msg[cut..]);
             assert_eq!(hex(&h.finish()), want, "split at {cut} disagreed");
@@ -199,7 +176,7 @@ mod tests {
     /// a zero-length read.
     #[test]
     fn empty_updates_are_ignored() {
-        let mut h = (SHA256.new)();
+        let mut h = Algo::Sha256.stream(32);
         h.update(b"");
         h.update(b"abc");
         h.update(b"");

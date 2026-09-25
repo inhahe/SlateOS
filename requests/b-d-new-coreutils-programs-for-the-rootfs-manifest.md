@@ -6,14 +6,15 @@
 
 ## In short
 
-The `coreutils` crate now builds twenty programs it did not build when the
-manifest was written: `sha1sum`, `printenv`, `link`, `unlink`, `sync`,
+The `coreutils` crate now builds twenty-five programs it did not build when
+the manifest was written: `sha1sum`, `printenv`, `link`, `unlink`, `sync`,
 `truncate`, `groups`, `arch`, `pathchk`, `users`, `nproc`, `chgrp`, `mknod`,
-`hostid`, `dircolors`, `numfmt`, `sum`, `base32`, `basenc` and `factor`. Each is a port of GNU coreutils 9.4 and has been checked against a
-build of 9.4 (a script runs both on the same inputs and compares their output,
-errors and exit status). A binary the manifest does not name does not go on
-the image, so today all twenty are built and then left out. Please add
-them.
+`hostid`, `dircolors`, `numfmt`, `sum`, `base32`, `basenc`, `factor`,
+`sha224sum`, `sha384sum`, `sha512sum`, `b2sum` and `cksum`. Each is a port of
+GNU coreutils 9.4 and is checked against a build of 9.4 (a script runs both on
+the same inputs and compares their output, errors and exit status). A binary
+the manifest does not name does not go on the image, so today all
+twenty-five are built and then left out. Please add them.
 
 ## Why they belong by the manifest's own rule
 
@@ -24,13 +25,13 @@ bin list. The only coreutils names it leaves out on purpose are:
 - `sort`, for the same reason;
 - `sh`, because `/bin/sh` is dash.
 
-These twenty are none of those. They are missing only because they did not
+These twenty-five are none of those. They are missing only because they did not
 exist when the list was generated. Nothing else stages these names:
 `create-ext4-rootfs.sh`'s `PROMOTED` map has none of them. So listing them
 takes no name away from anything.
 
 **Size.** At the manifest's own average of about 813 KiB per static binary,
-twenty come to roughly 16 MiB. The header records 59 MiB used of a 96 MiB
+twenty-five come to roughly 20 MiB. The header records 59 MiB used of a 96 MiB
 budget.
 
 ## The programs
@@ -57,6 +58,11 @@ budget.
 | `base32` | RFC 4648 base32 encoding and decoding, the partner of `base64` | `scripts/basenc-diff.sh` |
 | `basenc` | every RFC 4648 alphabet plus Z85 and bit strings, from one program | `scripts/basenc-diff.sh` |
 | `factor` | the prime factors of any integer, of any size | `scripts/factor-diff.sh` |
+| `sha224sum` | SHA-224 checksums and `-c` verification, the rest of the `md5sum` family | `scripts/digest-diff.sh` |
+| `sha384sum` | SHA-384 checksums and `-c` verification | `scripts/digest-diff.sh` |
+| `sha512sum` | SHA-512 checksums and `-c` verification, what most distributions now publish | `scripts/digest-diff.sh` |
+| `b2sum` | BLAKE2b checksums at any width `-l` picks, and `-c` verification | `scripts/digest-diff.sh` |
+| `cksum` | POSIX's CRC checksum, and since 9.0 every algorithm above through `-a` | `scripts/cksum-diff.sh` |
 
 **One alias as well: `[ = test`.** Our `test` already behaves as `[` when it
 is started under that name: it then insists on the closing `]`. But nothing
@@ -66,8 +72,8 @@ example `find . -exec [ -s {} ] \; -print` or `env [ -d /tmp ]`. The
 manifest's alias syntax (`name = producer`) covers it, and `test` is
 already listed.
 
-Nine of these names used to be answered, partly, by other crates that read
-`argv[0]` to decide what to be: `getopt` had `printenv` and `sync`, `pv` had
+Ten of these names used to be answered, partly, by other crates that read
+`argv[0]` to decide what to be: `getopt` had `printenv`, `sync` and `cksum`, `pv` had
 `truncate`, `nproc` had `arch`, `pathchk` and `users`, `shuf` had `numfmt`
 and `factor`, and `base64` had `base32`. Those branches were
 removed, because under design-decisions §1005 `coreutils` is the one home for
@@ -77,8 +83,8 @@ crates was on the image, so no name moves from one program to another there.
 
 ## This list may grow before you read it
 
-I am porting the rest of the programs GNU 9.4 has and we do not (`cksum`,
-`pinky`, `pr`, `ptx` and others). Each one that lands before
+I am porting the rest of the programs GNU 9.4 has and we do not (`pinky`,
+`pr`, `ptx`, `shred`, `dir` and `vdir`). Each one that lands before
 this request reaches `main` will be added to the table above, not filed as a
 separate request. Whatever the table says when you read it is the whole ask.
 

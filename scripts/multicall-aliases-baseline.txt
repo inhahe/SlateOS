@@ -56,7 +56,6 @@ firejail:firecfg
 firejail:firemon
 flock:lockfile
 fwupd:fwupdtool
-getopt:cksum
 getty:mingetty
 grub2:grub-editenv
 grub2:grub-install

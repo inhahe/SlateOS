@@ -6,14 +6,11 @@
 //!
 //! A port of GNU coreutils 9.4's `sum`, which upstream builds from two files:
 //! the two algorithms in `src/sum.c`, and the `HASH_ALGO_SUM` half of
-//! `src/digest.c`, the driver it shares with `md5sum` and the rest. The shared
-//! half here is [`coreutils::digest::feed_file`], which opens and reads an
-//! operand exactly as the hash programs do.
-//!
-//! Neither algorithm is a cryptographic hash -- one is a 16-bit rotate-and-add,
-//! the other a byte sum folded to 16 bits -- which is why `sum` is here while
-//! `cksum`, whose `-a` offers SHA-2, BLAKE2 and SM3, waits on
-//! `design-decisions.md` §539.
+//! `src/digest.c`, the driver it shares with `md5sum` and the rest. Here the
+//! algorithms and their output lines are [`coreutils::sum`] — which `cksum -a
+//! bsd` and `-a sysv` print through too, as upstream links `sum.c` into both —
+//! and the reading is [`coreutils::digest::feed_file`], which opens and reads
+//! an operand exactly as the hash programs do.
 //!
 //! # The two algorithms
 //!
@@ -41,6 +38,7 @@ use coreutils::digest::{Fed, feed_file};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::os_bytes;
 use coreutils::stdfd::{self, Stream};
+use coreutils::sum::{Bsd, Sysv, output_bsd, output_sysv};
 use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
@@ -115,66 +113,9 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     Ok(Request::Run { algorithm, files })
 }
 
-/// `bsd_sum_stream`'s checksum: rotate right one bit within 16, then add.
-#[derive(Default)]
-struct Bsd {
-    checksum: u16,
-}
-
-impl Bsd {
-    fn update(&mut self, data: &[u8]) {
-        for &byte in data {
-            // `(checksum >> 1) + ((checksum & 1) << 15)`, then `+= byte` and
-            // `&= 0xffff`: a 16-bit rotation and a 16-bit wrapping add.
-            self.checksum = self.checksum.rotate_right(1).wrapping_add(u16::from(byte));
-        }
-    }
-}
-
-/// `sysv_sum_stream`'s checksum: every byte summed in an `unsigned int`.
-#[derive(Default)]
-struct Sysv {
-    sum: u32,
-}
-
-impl Sysv {
-    fn update(&mut self, data: &[u8]) {
-        for &byte in data {
-            self.sum = self.sum.wrapping_add(u32::from(byte));
-        }
-    }
-
-    /// `r = (s & 0xffff) + (s >> 16); checksum = (r & 0xffff) + (r >> 16)`.
-    ///
-    /// Neither sum can overflow: `r` is at most `0x1fffe`, and the checksum at
-    /// most `0xffff`.
-    fn finish(&self) -> u32 {
-        let r = (self.sum & 0xffff).wrapping_add(self.sum >> 16);
-        (r & 0xffff).wrapping_add(r >> 16)
-    }
-}
-
-/// One output line, `output_bsd` or `output_sysv`.
-///
-/// `human_readable (length, …, human_ceiling, 1, BLOCK)` is the size in whole
-/// blocks, rounded up, and prints as a plain integer.
-fn render(algorithm: Algorithm, checksum: u32, length: u64, name: Option<&[u8]>) -> Vec<u8> {
-    let mut line = match algorithm {
-        Algorithm::Bsd => format!("{checksum:05} {:>5}", length.div_ceil(1024)),
-        Algorithm::Sysv => format!("{checksum} {}", length.div_ceil(512)),
-    }
-    .into_bytes();
-    if let Some(name) = name {
-        line.push(b' ');
-        line.extend_from_slice(name);
-    }
-    line.push(b'\n');
-    line
-}
-
 /// One operand: its checksum and its length, or `None` once `feed_file` has
 /// reported why not.
-fn sum_file(algorithm: Algorithm, name: &[u8], read_stdin: &mut bool) -> Option<(u32, u64)> {
+fn sum_file(algorithm: Algorithm, name: &[u8], read_stdin: &mut bool) -> Option<(u16, u64)> {
     let mut bsd = Bsd::default();
     let mut sysv = Sysv::default();
     // `uintmax_t total_bytes`, with upstream's `EOVERFLOW` check. A 64-bit
@@ -191,8 +132,8 @@ fn sum_file(algorithm: Algorithm, name: &[u8], read_stdin: &mut bool) -> Option<
     match fed {
         Fed::Ok => Some((
             match algorithm {
-                Algorithm::Bsd => u32::from(bsd.checksum),
-                Algorithm::Sysv => sysv.finish(),
+                Algorithm::Bsd => bsd.checksum(),
+                Algorithm::Sysv => sysv.checksum(),
             },
             length,
         )),
@@ -242,8 +183,12 @@ fn run() -> ExitCode {
         match sum_file(algorithm, &name, &mut read_stdin) {
             Some((checksum, length)) => {
                 let shown = named.then_some(&*name);
+                let line = match algorithm {
+                    Algorithm::Bsd => output_bsd(checksum, length, shown, false, b'\n'),
+                    Algorithm::Sysv => output_sysv(checksum, length, shown, false, b'\n'),
+                };
                 // Deliberately unread, as above.
-                let _ = out.write_all(&render(algorithm, checksum, length, shown));
+                let _ = out.write_all(&line);
             }
             None => ok = false,
         }
@@ -274,66 +219,6 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
-    }
-
-    fn bsd(data: &[u8]) -> u16 {
-        let mut b = Bsd::default();
-        b.update(data);
-        b.checksum
-    }
-
-    fn sysv(data: &[u8]) -> u32 {
-        let mut s = Sysv::default();
-        s.update(data);
-        s.finish()
-    }
-
-    /// Values measured from GNU 9.4's `sum` and `sum -s`.
-    #[test]
-    fn checksums_match_upstream() {
-        assert_eq!(bsd(b"hello\n"), 36979);
-        assert_eq!(sysv(b"hello\n"), 542);
-        assert_eq!(bsd(b""), 0);
-        assert_eq!(sysv(b""), 0);
-    }
-
-    /// Feeding in pieces is feeding in one: the rotation carries across.
-    #[test]
-    fn chunking_does_not_change_the_answer() {
-        let data: Vec<u8> = (0..=255u8).cycle().take(70_000).collect();
-        let mut b = Bsd::default();
-        let mut s = Sysv::default();
-        for piece in data.chunks(333) {
-            b.update(piece);
-            s.update(piece);
-        }
-        assert_eq!(b.checksum, bsd(&data));
-        assert_eq!(s.finish(), sysv(&data));
-    }
-
-    /// The fold: a sum past 16 bits comes back into range twice.
-    #[test]
-    fn the_sysv_fold_handles_carries() {
-        let s = Sysv { sum: 0xffff_ffff };
-        assert_eq!(s.finish(), 0xffff);
-        let s = Sysv { sum: 0x0001_ffff };
-        assert_eq!(s.finish(), 1);
-    }
-
-    #[test]
-    fn lines_are_upstreams_two_formats() {
-        assert_eq!(
-            render(Algorithm::Bsd, 36979, 6, Some(b"s1")),
-            b"36979     1 s1\n"
-        );
-        assert_eq!(render(Algorithm::Bsd, 7, 70_000, None), b"00007    69\n");
-        assert_eq!(render(Algorithm::Sysv, 542, 6, Some(b"-")), b"542 1 -\n");
-        assert_eq!(render(Algorithm::Sysv, 0, 0, None), b"0 0\n");
-        // A name is data here, byte for byte.
-        assert_eq!(
-            render(Algorithm::Sysv, 1, 1, Some(b"a b\xff")),
-            b"1 1 a b\xff\n"
-        );
     }
 
     #[test]

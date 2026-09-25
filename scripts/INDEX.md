@@ -133,6 +133,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-workspace-lints.py` | Find crates that are not subject to the project's own lint policy. |
 | `scripts/chgrp-diff.sh` | Differential test: our `chgrp` against GNU `chgrp`. |
 | `scripts/chown-diff.sh` | Differential test: our `chown` against GNU `chown`. |
+| `scripts/cksum-diff.sh` | cksum-diff.sh — compare our `cksum` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/clippy-diff.py` | Compare two clippy logs by diagnostic *kind*, so a refactor can be cleared. |
 | `scripts/clippy-sites.py` | Count and list distinct clippy warning sites. |
 | `scripts/cmake-spike/run.sh` | Cross-compile upstream CMake and link it against SlateOS's own libc.a. |
@@ -160,7 +161,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/df-diff.sh` | Differential test: our df against GNU df. |
 | `scripts/diff-diff.sh` | Differential test: our `diff` against GNU diffutils. |
 | `scripts/diff-wsl.sh` | shellcheck disable=SC3043  # `local`; see "Which dialect" below. |
-| `scripts/digest-diff.sh` | Differential test: our md5sum/sha1sum/sha256sum against GNU coreutils'. |
+| `scripts/digest-diff.sh` | Differential test: the digest.c family (md5sum ... sha512sum, b2sum) against GNU 9.4. |
 | `scripts/dircolors-diff.sh` | dircolors-diff.sh — compare our `dircolors` against GNU's, inside WSL. |
 | `scripts/display_rename.py` | Display-name pass: SlateOS -> "Slate OS" in user-facing text of .rs files. |
 | `scripts/du-diff.sh` | Differential test: our du against GNU du. |
@@ -411,4 +412,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_401 scripts._
+_402 scripts._

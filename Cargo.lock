@@ -183,6 +183,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
+name = "blake2"
+version = "0.1.0"
+
+[[package]]
 name = "blkid"
 version = "0.1.0"
 
@@ -423,9 +427,11 @@ name = "coreutils"
 version = "0.1.0"
 dependencies = [
  "bignum",
+ "blake2",
  "charwidth",
  "ere",
  "localtime",
+ "md5",
  "modechange",
  "optionalfile",
  "procinfo",
@@ -434,6 +440,7 @@ dependencies = [
  "scratchdir",
  "sha1",
  "sha2",
+ "sm3",
  "sysroot-dep",
  "userspec",
  "utmpfile",
@@ -2616,6 +2623,9 @@ dependencies = [
 [[package]]
 name = "sha2"
 version = "0.1.0"
+dependencies = [
+ "blockbuf",
+]
 
 [[package]]
 name = "shell"
@@ -2660,6 +2670,13 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
+]
+
+[[package]]
+name = "sm3"
+version = "0.1.0"
+dependencies = [
+ "blockbuf",
 ]
 
 [[package]]

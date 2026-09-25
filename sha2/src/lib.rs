@@ -1,4 +1,6 @@
-//! SHA-256, written once, checked against the FIPS 180-4 vectors.
+//! The SHA-2 family, checked against the FIPS 180-4 vectors: SHA-256 and
+//! SHA-224, written once, and SHA-512 and SHA-384, ported (see [`sha512`]'s
+//! module docs for where from).
 //!
 //! # Why this crate exists
 //!
@@ -38,8 +40,10 @@
 //! Everything else migrated: lane C's four (`apps/backup`, `apps/diskimager`,
 //! `apps/lockscreen`, `gui/credentials`) and lane B's ten under `userspace/`,
 //! which took about 1250 lines of round constants with them. The remaining
-//! duplication in the tree is of *other* algorithms — SHA-1, SHA-512, MD5 —
-//! which this crate deliberately does not provide (see below).
+//! duplication in the tree is of *other* algorithms — SHA-1 and MD5, which
+//! have crates of their own — and of SHA-512, which this crate did not
+//! provide until 2026-09-25 and whose older copies (`posix/src/sha2.rs`,
+//! `kernel/src/crypto.rs`) belong to the two lanes that own those files.
 //!
 //! # What this crate is not
 //!
@@ -49,9 +53,10 @@
 //! later. Whether this project should be writing its own cryptographic
 //! primitives at all is `open-questions.md` → C-Q5, and is not settled here.
 //!
-//! There is deliberately no HMAC, no HKDF and no truncated variant: adding
-//! surface that nothing calls yet would be the same speculative work this
-//! crate exists to undo.
+//! There is deliberately no HMAC and no HKDF: adding surface that nothing
+//! calls yet would be the same speculative work this crate exists to undo.
+//! The truncated variants were held back on the same ground and arrived with
+//! their first callers, `sha224sum` and `sha384sum` (2026-09-25).
 //!
 //! # Constant-time-ness
 //!
@@ -89,6 +94,10 @@
 #![no_std]
 
 use core::fmt;
+
+pub mod sha512;
+
+pub use sha512::{SHA384_DIGEST_LEN, SHA512_DIGEST_LEN, Sha384, Sha512, sha384, sha512};
 
 /// The block size SHA-256 compresses, in bytes.
 const BLOCK_LEN: usize = 64;
@@ -181,6 +190,24 @@ const K: [u32; 64] = [
     0xc671_78f2,
 ];
 
+/// SHA-224's initial hash value: the second 32 bits of the fractional parts of
+/// the square roots of the ninth through sixteenth primes (FIPS 180-4 §5.3.2).
+/// Everything else about SHA-224 is SHA-256's (§6.3), which is why it is a
+/// constructor argument rather than a second compression function.
+const INIT_224: [u32; 8] = [
+    0xc105_9ed8,
+    0x367c_d507,
+    0x3070_dd17,
+    0xf70e_5939,
+    0xffc0_0b31,
+    0x6858_1511,
+    0x64f9_8fa7,
+    0xbefa_4fa4,
+];
+
+/// Bytes of SHA-224 output: the first seven of SHA-256's eight words.
+pub const SHA224_DIGEST_LEN: usize = 28;
+
 /// Hash `data` in one call.
 ///
 /// The common case, and the one 24 of the 26 copies were being used for.
@@ -236,8 +263,14 @@ impl Sha256 {
     /// Start a new hash.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_init(INIT)
+    }
+
+    /// A hasher started from `init` rather than SHA-256's own initial value —
+    /// which is all SHA-224 is.
+    const fn with_init(init: [u32; 8]) -> Self {
         Self {
-            state: INIT,
+            state: init,
             buffer: [0; BLOCK_LEN],
             buffered: 0,
             total_len: 0,
@@ -406,6 +439,59 @@ fn compress(state: &mut [u32; 8], block: &[u8; BLOCK_LEN]) {
     }
 }
 
+/// Hash `data` with SHA-224 in one call.
+#[must_use]
+pub fn sha224(data: &[u8]) -> [u8; SHA224_DIGEST_LEN] {
+    let mut hasher = Sha224::new();
+    hasher.update(data);
+    hasher.finalize()
+}
+
+/// An incremental SHA-224 hasher: [`Sha256`] from other initial values,
+/// truncated to 28 bytes (FIPS 180-4 §6.3).
+#[derive(Clone)]
+pub struct Sha224(Sha256);
+
+impl Default for Sha224 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for Sha224 {
+    /// Deliberately opaque, for [`Sha256`]'s reason.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sha224")
+            .field("bytes_hashed", &self.0.total_len)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Sha224 {
+    /// Start a new hash.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(Sha256::with_init(INIT_224))
+    }
+
+    /// Feed `data` in. Splitting the same input differently across calls gives
+    /// the same digest.
+    pub fn update(&mut self, data: &[u8]) {
+        self.0.update(data);
+    }
+
+    /// Finish, returning the 28-byte digest.
+    #[must_use]
+    pub fn finalize(self) -> [u8; SHA224_DIGEST_LEN] {
+        let full = self.0.finalize();
+        let mut out = [0u8; SHA224_DIGEST_LEN];
+        if let Some(head) = full.first_chunk::<SHA224_DIGEST_LEN>() {
+            out = *head;
+        }
+        out
+    }
+}
+
 /// Compare two byte strings without revealing *where* they first differ.
 ///
 /// `a == b` stops at the first mismatch, so it takes measurably longer the
@@ -558,6 +644,71 @@ mod tests {
             hex(&hasher.finalize()).as_str(),
             "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
         );
+    }
+
+    // -- SHA-224: FIPS 180-4 examples, and the million-`a` vector --
+
+    fn hex224(digest: &[u8; SHA224_DIGEST_LEN]) -> std::string::String {
+        use core::fmt::Write as _;
+        let mut out = std::string::String::new();
+        for b in digest {
+            write!(out, "{b:02x}").unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn sha224_vectors() {
+        for (msg, want) in [
+            (
+                &b""[..],
+                "d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f",
+            ),
+            (
+                b"abc",
+                "23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7",
+            ),
+            (
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+                "75388b16512776cc5dba5da1fd890150b0c6455cb4f58b1952522525",
+            ),
+            // The two padding boundaries, cross-checked against Python's
+            // `hashlib`.
+            (
+                &[b'x'; 55],
+                "2791c7d25712eb5be75c30b2d45f6fce96e5a50ee64cf373056704a3",
+            ),
+            (
+                &[b'x'; 56],
+                "82199913c2712c46707ad08c8bfa2a69f68e9092dc5cdfaaaf07d77f",
+            ),
+            (
+                &[b'x'; 64],
+                "08c3050e95fe11eacb9dc7824bf6a92bcf2d59c21701321fba0e62c5",
+            ),
+        ] {
+            assert_eq!(hex224(&sha224(msg)), want, "{} bytes", msg.len());
+        }
+    }
+
+    #[test]
+    fn sha224_one_million_a() {
+        let mut hasher = Sha224::new();
+        let chunk = [b'a'; 1000];
+        for _ in 0..1000 {
+            hasher.update(&chunk);
+        }
+        assert_eq!(
+            hex224(&hasher.finalize()),
+            "20794655980c91d8bbb4c1ea97618a4bf03f42581948b2ee4ee7ad67"
+        );
+    }
+
+    #[test]
+    fn sha224_is_not_a_prefix_of_sha256() {
+        // A different initial value, so a different hash: reusing SHA-256's
+        // IV would pass every length test and fail this one.
+        assert_ne!(sha224(b"abc")[..], sha256(b"abc")[..SHA224_DIGEST_LEN]);
     }
 
     // -- Boundaries around the block size and the length field --

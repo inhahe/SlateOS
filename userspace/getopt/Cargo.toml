@@ -2,7 +2,7 @@
 name = "getopt"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS getopt/tsort/cksum - shell scripting helpers"
+description = "SlateOS getopt - parse command-line options for shell scripts"
 [dependencies]
 # getopt's usage diagnostics, spelled once -- fitting here, since this is
 # the program those diagnostics are named after. Pure formatting over

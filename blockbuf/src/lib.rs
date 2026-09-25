@@ -1,4 +1,4 @@
-//! The bookkeeping shared by MD5, SHA-1 and SHA-256, written once.
+//! The bookkeeping shared by MD5, SHA-1, the SHA-2 family and SM3, written once.
 //!
 //! # Why this crate exists
 //!
@@ -66,7 +66,8 @@ pub enum LengthOrder {
 
 /// Accumulates a byte stream and hands it out in `N`-byte blocks.
 ///
-/// `N` is the block size of the hash: 64 for MD5, SHA-1 and SHA-256. It must
+/// `N` is the block size of the hash: 64 for MD5, SHA-1, SHA-256 and SM3, 128
+/// for SHA-512 (whose length field is [`BlockBuffer::finalize_wide`]'s). It must
 /// be at least 9 (room for the `0x80` byte and the 8-byte length) and at most
 /// [`MAX_BLOCK_LEN`]; both are checked in [`BlockBuffer::new`].
 #[derive(Clone)]
@@ -242,6 +243,57 @@ impl<const N: usize> BlockBuffer<N> {
             "padding must end exactly on a block boundary"
         );
     }
+
+    /// [`finalize`](Self::finalize) with the **128-bit** length field of
+    /// SHA-384 and SHA-512 (FIPS 180-4 §5.1.2), which is always big-endian.
+    ///
+    /// A method of its own rather than a third [`LengthOrder`], because the
+    /// width is not an order: the field starts 16 bytes before the end of the
+    /// block instead of 8, and a variant would make MD5's little-endian order
+    /// askable at a width no hash uses.
+    ///
+    /// Why not simply [`finalize`](Self::finalize) with a 128-byte block, which
+    /// writes eight zero bytes where the high half of the field goes? Because
+    /// that is right only while the bit count fits in 64 bits — for every
+    /// message under 2^61 bytes — and silently wrong past it. Here the count is
+    /// widened before it is multiplied, so it is exact for every length the
+    /// byte counter can hold.
+    pub fn finalize_wide(&mut self, mut compress: impl FnMut(&[u8; N])) {
+        // Compile-time, per instantiation: the 0x80 byte and the 16-byte field
+        // must fit in one block. `new` checks the narrower 8-byte bound.
+        const {
+            assert!(
+                N > 16 && N <= MAX_BLOCK_LEN,
+                "a 128-bit length field needs a block of at least 17 bytes"
+            );
+        };
+
+        // Captured before any padding is absorbed. `u64` bytes times eight is
+        // below 2^67, so the product cannot wrap in a `u128`.
+        let bit_len = u128::from(self.total_len).wrapping_mul(8);
+
+        self.update(&[0x80], &mut compress);
+
+        // As in `finalize`, with the field 16 bytes from the end. `N > 16`
+        // (asserted above) keeps `N - 16 + N - buffered` positive, since
+        // `buffered < N`.
+        let zeros = N
+            .saturating_sub(16)
+            .saturating_add(N)
+            .saturating_sub(self.buffered)
+            .checked_rem(N)
+            .unwrap_or(0);
+        if let Some(run) = ZEROS.get(..zeros) {
+            self.update(run, &mut compress);
+        }
+
+        self.update(&bit_len.to_be_bytes(), &mut compress);
+
+        debug_assert_eq!(
+            self.buffered, 0,
+            "padding must end exactly on a block boundary"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -378,5 +430,65 @@ mod tests {
     #[should_panic(expected = "block length")]
     fn a_block_too_small_to_hold_the_length_is_rejected() {
         let _ = BlockBuffer::<8>::new();
+    }
+
+    // -- The 128-bit field of SHA-384 and SHA-512 --
+
+    /// Collect the blocks a whole message produces under `finalize_wide`.
+    fn wide_blocks_of(data: &[u8]) -> Vec<[u8; 128]> {
+        let mut out = Vec::new();
+        let mut buf = BlockBuffer::<128>::new();
+        buf.update(data, |b| out.push(*b));
+        buf.finalize_wide(|b| out.push(*b));
+        out
+    }
+
+    #[test]
+    fn the_wide_field_holds_the_bit_count_in_its_last_sixteen_bytes() {
+        let blocks = wide_blocks_of(b"abc");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(&blocks[0][..3], b"abc");
+        assert_eq!(blocks[0][3], 0x80);
+        assert!(blocks[0][4..127].iter().all(|&b| b == 0));
+        assert_eq!(blocks[0][127], 24);
+    }
+
+    #[test]
+    fn the_wide_field_moves_the_second_block_boundary_to_112_bytes() {
+        // 111 bytes + 0x80 + 16 is exactly one block; 112 is one too many.
+        assert_eq!(wide_blocks_of(&[b'y'; 111]).len(), 1);
+        assert_eq!(wide_blocks_of(&[b'z'; 112]).len(), 2);
+        assert_eq!(wide_blocks_of(&[b'x'; 128]).len(), 2);
+        assert_eq!(wide_blocks_of(b"").len(), 1);
+    }
+
+    #[test]
+    fn a_bit_count_past_64_bits_carries_into_the_high_half() {
+        // 2^61 bytes cannot be fed in a test, so the counter is set where a
+        // run that long would have left it. The narrow `finalize` would write
+        // `u64::MAX * 8` wrapped to 64 bits; the wide field keeps the carry.
+        let mut buf = BlockBuffer::<128>::new();
+        buf.total_len = u64::MAX;
+        let mut last = [0u8; 128];
+        buf.finalize_wide(|b| last = *b);
+        let field = u128::from_be_bytes(last[112..].try_into().unwrap());
+        assert_eq!(field, u128::from(u64::MAX) * 8);
+        assert_eq!(last[119], 0x07, "the carry out of the low 64 bits");
+    }
+
+    #[test]
+    fn every_split_yields_the_same_wide_blocks() {
+        for len in 0..=(128 * 2 + 17) {
+            let msg: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let whole = wide_blocks_of(&msg);
+            for split in (0..=len).step_by(7) {
+                let mut split_blocks = Vec::new();
+                let mut buf = BlockBuffer::<128>::new();
+                buf.update(&msg[..split], |b| split_blocks.push(*b));
+                buf.update(&msg[split..], |b| split_blocks.push(*b));
+                buf.finalize_wide(|b| split_blocks.push(*b));
+                assert_eq!(split_blocks, whole, "len {len} split at {split}");
+            }
+        }
     }
 }

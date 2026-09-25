@@ -558,6 +558,31 @@ impl Program {
         Ok(*first)
     }
 
+    /// gnulib's `XARGMATCH_EXACT`: [`argmatch`](Self::argmatch) with no
+    /// abbreviations. The word must be one of the table's spellings exactly.
+    ///
+    /// Upstream uses it where a prefix would be a trap rather than a
+    /// convenience — `cksum -a sha` must not quietly mean `sha1` when `sha224`
+    /// through `sha512` are listed beside it. A miss is reported exactly as
+    /// `argmatch` reports one, valid-argument list and status 1 included; an
+    /// exact match can never be ambiguous.
+    ///
+    /// # Errors
+    ///
+    /// The given word being none of the table's spellings.
+    pub fn argmatch_exact<T: Copy + PartialEq>(
+        self,
+        given: &[u8],
+        option: &str,
+        table: &[(&str, T)],
+    ) -> Result<T, Error> {
+        table
+            .iter()
+            .find(|(word, _)| word.as_bytes() == given)
+            .map(|&(_, value)| value)
+            .ok_or_else(|| bad_argument(self, "invalid", given, option, table))
+    }
+
     /// Walk argv the way `getopt_long` does. See the module docs.
     ///
     /// `shorts` is GNU's own `getopt_long` string for the utility, copied

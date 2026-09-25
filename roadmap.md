@@ -4087,11 +4087,15 @@ _Port ext4 first. Don't write a custom filesystem._
     but its bin waits on `uuencode`/`uudecode` leaving `userspace/base64` --
     TD-B-BASE64-IS-STILL-THE-OLD-CRATE-UNTIL-UUENCODE-MOVES), `factor` (any size: `u128` Montgomery
     arithmetic below 2^127 as upstream's single-precision path, `coreutils::bignat` above it as its GMP path,
-    and upstream's two output paths kept, down to which one a full disk is reported through); and `nproc`,
+    and upstream's two output paths kept, down to which one a full disk is reported through), the rest of the
+    `digest.c` family -- `sha224sum`, `sha384sum`, `sha512sum`, `b2sum` and `cksum`, the last with all eleven of
+    9.4's `-a` algorithms, `--base64`, `--raw` and per-line algorithm detection under `--check` -- on one
+    `coreutils::digest` for all eight programs, with SHA-512/384/224, BLAKE2b and SM3 *ported* into root crates
+    (§539; `sha2` extended, `blake2` and `sm3` new) and `md5sum` onto the shared `md5` crate it had duplicated;
+    and `nproc`,
     re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
-    names in part lost those branches (§1005: `getopt` printenv/sync, `pv` truncate, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32).
-    **Still missing:** `b2sum`, `cksum`, `dir`, `pinky`, `pr`, `ptx`,
-    `sha224sum`, `sha384sum`, `sha512sum`, `shred`, `vdir`. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
+    names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32).
+    **Still missing:** `dir`, `pinky`, `pr`, `ptx`, `shred`, `vdir`. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
     `LD_PRELOAD` into a dynamically linked program). `[` is `test` under another name and needs only the image alias. None
     ships until lane D lists it: `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.
 - [x] Port rsync (replaces robocopy need) — Rust implementation: recursive, archive mode, checksums, delete, exclude/include, dry-run, progress, stats

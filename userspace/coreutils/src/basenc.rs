@@ -162,7 +162,12 @@ fn b64(c: u8) -> Option<u8> {
     }
 }
 
-fn is_base64(c: u8) -> bool {
+/// gnulib's `isbase64`: is `c` in the base64 alphabet (padding excluded)?
+///
+/// Public because `cksum --check` uses it to recognise a base64 digest, as
+/// upstream's `digest.c` includes `base64.h` for.
+#[must_use]
+pub fn is_base64(c: u8) -> bool {
     b64(c).is_some()
 }
 
@@ -173,7 +178,11 @@ fn v64(c: u8) -> u32 {
 
 /// `base64_encode` with `outlen == BASE64_LENGTH (inlen)`: every group of three
 /// bytes to four characters, the last group padded with `=`.
-fn base64_encode(input: &[u8]) -> Vec<u8> {
+///
+/// Public because `cksum --base64` prints its digests through it, as upstream's
+/// `digest.c` calls gnulib's.
+#[must_use]
+pub fn base64_encode(input: &[u8]) -> Vec<u8> {
     let sym = |v: u32| {
         B64C.get(usize::try_from(v & 0x3f).unwrap_or(0))
             .copied()

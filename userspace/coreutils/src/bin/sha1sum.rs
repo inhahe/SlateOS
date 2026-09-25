@@ -1,71 +1,45 @@
 //! `sha1sum` — print or check SHA-1 (160-bit) checksums.
 //!
-//! Everything except the hash lives in [`coreutils::digest`], which is
-//! upstream's `src/digest.c`: the option table, the three checksum-file
-//! formats, `--check`, the name escaping and the exit statuses. The difference
-//! between this program and `sha256sum` is the [`Algorithm`] constant below and
-//! nothing else, which is what that module's shape was for.
-//!
-//! The hash is the shared `sha1` crate. Its documentation is blunt that SHA-1
-//! must not decide what to trust, and this program does not ask it to: it
-//! reproduces a checksum somebody else already chose to publish, so that a
-//! download can be compared against the page it came from. Refusing to compute
-//! it would not make anything safer; it would only leave that question
-//! unanswerable.
+//! Everything lives in [`coreutils::digest`], upstream's `src/digest.c`; this
+//! file is the [`Build`] and the vectors that check the wiring. The hash is the
+//! workspace's `sha1` crate, which says in its own docs why nothing should use
+//! SHA-1 to decide what to trust — and why reproducing a checksum somebody
+//! else published is the job it is here for.
 
-use coreutils::digest::{Algorithm, Stream};
+use coreutils::digest::Build;
 use std::process::ExitCode;
 
 coreutils::guard_std_fds!();
 
-/// The `#if HASH_ALGO_SHA1` block of upstream's `digest.c`, as data.
-static SHA1: Algorithm = Algorithm {
-    program: "sha1sum",
-    tag: "SHA1",
-    bits: 160,
-    reference: "FIPS-180-1",
-    new: || Box::new(Sha1Stream(sha1::Sha1::new())),
-};
-
 fn main() -> ExitCode {
-    coreutils::digest::main(&SHA1)
-}
-
-/// [`sha1::Sha1`] under the shared module's trait; a newtype for the reason
-/// `sha256sum`'s is one.
-struct Sha1Stream(sha1::Sha1);
-
-impl Stream for Sha1Stream {
-    fn update(&mut self, data: &[u8]) {
-        self.0.update(data);
-    }
-
-    fn finish(self: Box<Self>) -> Vec<u8> {
-        self.0.finalize().to_vec()
-    }
+    coreutils::digest::main(Build::Sha1sum)
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
-    use super::*;
+    use coreutils::digest::{Algo, Build};
 
     fn hex(digest: &[u8]) -> String {
-        digest.iter().map(|b| format!("{b:02x}")).collect()
+        use std::fmt::Write as _;
+        digest.iter().fold(String::new(), |mut out, b| {
+            // Formatting into a `String` cannot fail.
+            let _ = write!(out, "{b:02x}");
+            out
+        })
     }
 
     /// Through the incremental hash, because that is what `digest::main` runs.
     fn sha1_hex(data: &[u8]) -> String {
-        let mut h = (SHA1.new)();
+        let mut h = Algo::Sha1.stream(20);
         h.update(data);
         hex(&h.finish())
     }
 
     #[test]
-    fn digest_length_matches_the_declared_bits() {
-        assert_eq!((SHA1.new)().finish().len() * 8, SHA1.bits);
-        assert_eq!(SHA1.hex_len(), 40);
+    fn the_build_hashes_with_sha1() {
+        assert_eq!(Build::Sha1sum.algo(), Algo::Sha1);
     }
 
     #[test]
@@ -96,7 +70,7 @@ mod tests {
         let msg: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
         let whole = sha1_hex(&msg);
         for chunk in [1, 7, 63, 64, 65, 999] {
-            let mut h = (SHA1.new)();
+            let mut h = Algo::Sha1.stream(20);
             for piece in msg.chunks(chunk) {
                 h.update(piece);
             }

@@ -56,6 +56,15 @@ sha2 = { path = "../../sha2" }
 # a new hand-written primitive either (design-decisions.md §539): the crate
 # already existed for `apps/diskimager` and the WebSocket handshake.
 sha1 = { path = "../../sha1" }
+# The rest of what `cksum -a` names, and the three programs of the family
+# that are one algorithm each: MD5 for `md5sum` (which carried a private
+# copy until 2026-09-25, beside the shared crate `apps/diskimager` already
+# used), BLAKE2b for `b2sum`, SM3 for `cksum -a sm3`. `sha2` above also
+# serves `sha224sum`, `sha384sum` and `sha512sum`. All three are ports of
+# vetted implementations, not new primitives: design-decisions.md §539.
+md5 = { path = "../../md5" }
+blake2 = { path = "../../blake2" }
+sm3 = { path = "../../sm3" }
 # One `/etc/passwd` and `/etc/group` reader, shared with `id`, `chown`, `su` and
 # the login path. A utility that prints a *name* for a uid has to agree with the
 # utility that resolved that name to a uid, or `chown "$(stat -c %U f)" f` stops

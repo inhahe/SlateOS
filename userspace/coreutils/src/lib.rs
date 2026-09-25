@@ -464,6 +464,7 @@ pub mod bignat;
 pub mod canon;
 pub mod cfmt;
 pub mod chowncore;
+pub mod cksum;
 pub mod copy;
 pub mod digest;
 pub mod dirfd;
@@ -491,6 +492,7 @@ pub mod rename;
 pub mod setfields;
 pub mod shell;
 pub mod stdfd;
+pub mod sum;
 pub mod tabstops;
 pub mod umask;
 // `userspec` is its own crate as of 2026-09-12, and is re-exported here so

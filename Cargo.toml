@@ -216,6 +216,15 @@ members = [
     # `default-members` for the usual reason -- the workspace-root target is
     # x86_64-unknown-none, which has no `std` at all.
     "procinfo",
+    # BLAKE2b and SM3 for `b2sum` and `cksum -a` (lane B, 2026-09-25): each a
+    # *port* of a vetted implementation (design-decisions.md §539) -- BLAKE2b
+    # from the BLAKE2 reference code GNU coreutils builds `b2sum` from, SM3
+    # from RustCrypto's `sm3` -- and each `no_std` with no `alloc`, like
+    # `sha2`, so any caller that can link one can link them. Separate crates
+    # because they are separate primitives; BLAKE2b is also Argon2's inner
+    # hash, so the password-hash work in C-Q5 has a place to find it.
+    "blake2",
+    "sm3",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project

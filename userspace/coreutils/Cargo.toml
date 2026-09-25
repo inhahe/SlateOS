@@ -50,6 +50,12 @@ modechange = { path = "../modechange" }
 # private copy: the whole output of that utility is a digest another machine
 # will compare against its own.
 sha2 = { path = "../../sha2" }
+# The shared SHA-1, for `sha1sum`. Not a trust decision -- that crate says why
+# nothing should use SHA-1 to decide what to trust -- but reproducing a checksum
+# somebody else published, which is the job its documentation names first. Not
+# a new hand-written primitive either (design-decisions.md §539): the crate
+# already existed for `apps/diskimager` and the WebSocket handshake.
+sha1 = { path = "../../sha1" }
 # One `/etc/passwd` and `/etc/group` reader, shared with `id`, `chown`, `su` and
 # the login path. A utility that prints a *name* for a uid has to agree with the
 # utility that resolved that name to a uid, or `chown "$(stat -c %U f)" f` stops

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Differential test: our md5sum/sha256sum against GNU coreutils'.
+# Differential test: our md5sum/sha1sum/sha256sum against GNU coreutils'.
 #
 # ## One harness, two programs
 #
@@ -8,13 +8,14 @@
 # `Algorithm` constant. So there is one harness, and it runs the whole case list
 # once per program:
 #
-#     ./scripts/digest-diff.sh                 # md5sum, then sha256sum
+#     ./scripts/digest-diff.sh                 # md5sum, sha1sum, then sha256sum
 #     PROG=sha256sum ./scripts/digest-diff.sh  # just that one
 #
 # Nothing here hard-codes a digest width. The two places that would have —
 # a deliberately-wrong checksum, and a digest of the wrong length — derive
 # theirs from the reference binary's own output at startup, so adding
-# `sha1sum` later is one word in `PROGS` rather than a rewrite.
+# `sha1sum` was one word in `PROGS` rather than a rewrite -- and on 2026-09-24
+# it was.
 #
 # ## Why the checksum files are built per side
 #
@@ -65,7 +66,7 @@ export MSYS2_ARG_CONV_EXCL='*'
 # With `PROG` unset, both programs run — `scripts/all-diff.sh` reaches this
 # harness through a glob and cannot pass one, and a harness that silently
 # covered half of what it names is worse than no harness.
-PROGS=${PROG:-md5sum sha256sum}
+PROGS=${PROG:-md5sum sha1sum sha256sum}
 
 # Into WSL and build the family for Linux. See `scripts/diff-wsl.sh`.
 #
@@ -97,7 +98,7 @@ DIFF_PROG='digest'
 # with Debian rather than with GNU. See `diff-wsl.sh`'s "Why a built reference"
 # and `design-decisions.md` 726.
 DIFF_GNU_SOURCE=9.4
-DIFF_BINS="md5sum sha256sum"
+DIFF_BINS="md5sum sha1sum sha256sum"
 DIFF_FORWARD=PROG
 DIFF_NO_REF=1
 # shellcheck source=diff-wsl.sh

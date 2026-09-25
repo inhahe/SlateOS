@@ -431,6 +431,7 @@ dependencies = [
  "pwdb",
  "quoting",
  "scratchdir",
+ "sha1",
  "sha2",
  "sysroot-dep",
  "userspec",

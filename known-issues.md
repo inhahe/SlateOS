@@ -159662,6 +159662,23 @@ Three examined: `notes` (wholesale), `reminders` (keyboard-driven by
 construction, two specific gaps), `markdowneditor` (wholesale, plus five
 operations nothing reached by any route). Seventeen to go.
 
+**`apps/filesearch`, 2026-09-25 -- wholesale, and the search could not use
+what it found.** Enter was on the F1 card as "Open what is selected" and re-ran
+the search; the preview's four action buttons were wired to nothing; the
+results stopped at the panel's edge with no way to scroll, while the keyboard
+could select rows that were never drawn; the filters panel ran under the status
+bar; every keystroke was recorded into a search history nothing drew, and
+saving a search had no caller. Now: every control answers the pointer; Enter,
+Open and Ctrl+L open a result with the program File Associations names or its
+folder in the file manager; the results and the filters scroll; recent searches
+(the ones something was opened from) and saved searches (which outlive the
+window) are listed and run again on a press. Copy Path and Properties were
+removed rather than wired: the first needs an application-reachable clipboard
+that can carry a path (the explorer's clipboard entry), and the second was the
+preview pane itself. Also fixed: "now" was the constant `1_779_000_000`, so the
+date filters and every "3 hours ago" were measured from one day in May 2026.
+Four examined; sixteen to go.
+
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 
 **In short:** a `cargo test --workspace` failed with exactly one failing test,
@@ -165206,3 +165223,23 @@ the second press. Design-decisions §502 settled the edge cases for the title
 bar's own double-click, and they carry over. Until then, double-click in the
 markdown editor's source pane (select a word) is tested by delivering the event
 directly and does nothing in a real window.
+
+### [E] The file search's Content mode matches names, not contents -- 2026-09-25
+**Status:** OPEN -- lane E's, next in `apps/filesearch`
+
+**In short:** the file search offers four ways to match a query -- name, glob,
+regex, content -- and the fourth is not what it says. Choosing "Content" and
+typing a word finds files whose *names* contain the word, exactly as "Name"
+does, because the matcher's Content arm reads "Content search would need actual
+file reading. For now, match against name as fallback". A person searching
+their documents for a phrase is told, silently, that no document contains it.
+
+**Where.** `apps/filesearch/src/main.rs`, `SearchCriteria::matches`, the
+`SearchMode::Content` arm.
+
+**The proper fix** reads the files: a worker thread searching the candidates
+the other filters leave, bounded in the size of file it reads, streaming
+matches back while the window keeps drawing -- and cancelled when the query
+changes, because content search is too slow to run to completion on every
+keystroke the way a name match can. Until then the mode's label should not
+promise what it does not do.

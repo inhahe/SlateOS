@@ -1831,9 +1831,11 @@ word; text inside them that says "lane C" is history.
   says so" — is recorded in the known-issues entry as it is examined.
   **Done:** `markdowneditor` (2026-09-25 — every control, plus five
   operations no route reached; its close dialog waits on
-  `requests/e-f-let-an-application-decline-a-close-so-it-can-ask-about-unsaved-work.md`).
-  **Next:** filesearch, renamer, logviewer, regextester — local tools a
-  person opens with a mouse — then the rest.
+  `requests/e-f-let-an-application-decline-a-close-so-it-can-ask-about-unsaved-work.md`),
+  `filesearch` (2026-09-25 — every control; opening results, scrolling,
+  saved searches; its Content mode is the next piece, a known-issues entry).
+  **Next:** renamer, logviewer, regextester — local tools a person opens
+  with a mouse — then the rest.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane

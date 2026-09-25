@@ -849,9 +849,12 @@ name = "filesearch"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "associations",
  "globmatch",
  "guitk",
  "oswindow",
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]

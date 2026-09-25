@@ -4,16 +4,29 @@
 //! - Real-time search with instant results as you type
 //! - Glob pattern matching (wildcards: *, ?, [a-z])
 //! - Regex pattern matching
-//! - File content search (grep-like)
+//! - File content search (grep-like) -- **not yet**: the Content mode still
+//!   matches names; see `known-issues.md`, the [E] entry on it
 //! - Search filters (by extension, size, date, type)
 //! - File index for instant filename search
-//! - Recent searches history
-//! - Bookmarked searches (saved queries)
+//! - Recent searches (the ones something was opened from) and saved searches,
+//!   which outlive the window (`filesearch.yaml`)
 //! - Result statistics (count, total size)
 //! - File type detection and icons
-//! - Sort results by name, path, size, modified date
-//! - Open file location / open with default app
+//! - Sort results by name, path, size, modified date -- by key or by pressing a
+//!   column heading
+//! - Open with the program File Associations names, or open the folder a
+//!   result is in with the file manager
 //! - Multi-panel UI with search bar, filters sidebar, results list, preview
+//!
+//! # The pointer
+//!
+//! Every control is drawn and hit-tested by one walk, [`FileSearchApp::frame`],
+//! through [`guitk::frame::Frame`]: the folder button, the query box's save and
+//! mode switches, every filter chip and switch, the column headings, the
+//! result rows and the preview's actions. The results and the filters panel
+//! scroll under the wheel. Until 2026-09-25 none of it took a pointer, and the
+//! Open actions, Enter, the saved searches and scrolling past the first page
+//! of results were not reachable by any route.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
@@ -901,7 +914,7 @@ impl SearchCriteria {
             size_filter: SizeFilter::Any,
             date_filter: DateFilter::Any,
             path_contains: None,
-            current_time: 1_779_000_000,
+            current_time: unix_now(),
         }
     }
 
@@ -982,6 +995,21 @@ impl SearchCriteria {
     }
 }
 
+/// Seconds since the epoch, by the system clock.
+///
+/// "Now", for the date filters and for every "3 hours ago" in the window. It
+/// was the constant `1_779_000_000` -- the middle of May 2026 -- so "Today"
+/// meant that day forever, and a file saved this morning was listed as
+/// modified months in the future. A clock before the epoch reads as the
+/// epoch rather than failing: every age is then "just now", which is wrong
+/// in the direction that hides nothing.
+#[must_use]
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 // ─── Search History ──────────────────────────────────────────────────
 
 /// A saved/recent search
@@ -1022,12 +1050,190 @@ impl fmt::Display for SortColumn {
     }
 }
 
+// ─── Pointer targets and layout ──────────────────────────────────────
+
+/// Everything in the window a pointer can press, as the renderer records it.
+///
+/// This app drew a query box, three filter strips, four switches, a sortable
+/// table and a pane of action buttons, and handled no pointer event of any
+/// kind (`known-issues.md` →
+/// `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`). Each
+/// variant is recorded by the walk that paints it ([`FileSearchApp::frame`]),
+/// so a control and the place a press finds it cannot disagree.
+///
+/// A result is named by its index into the file index, not by its row: the
+/// rows are a sorted, filtered, scrolled view of the index, and the index is
+/// the one thing none of those operations renumbers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Target {
+    /// "Choose folder…", which puts the folder picker up.
+    ChooseFolder,
+    /// The query box. Typing always reaches it, so a press here only says so.
+    SearchBox,
+    /// The match-mode switch at the query box's right end.
+    SearchMode,
+    /// Save, or forget, the search in the query box.
+    SaveSearch,
+    /// The filters panel itself, which scrolls under the wheel.
+    Filters,
+    /// "All Types".
+    CategoryAll,
+    /// One file type.
+    Category(FileCategory),
+    /// One size band.
+    Size(SizeFilter),
+    /// One date range.
+    Date(DateFilter),
+    /// The match-mode row.
+    MatchMode,
+    /// The case-sensitivity row.
+    MatchCase,
+    /// The hidden-files row.
+    Hidden,
+    /// The folders row.
+    Folders,
+    /// A saved search, which runs it again.
+    Saved(u32),
+    /// A saved search's ×, which forgets it.
+    Unsave(u32),
+    /// A recent search, which runs it again.
+    Recent(u32),
+    /// The results panel itself, which scrolls under the wheel.
+    Results,
+    /// A column heading, which sorts by it.
+    Header(SortColumn),
+    /// A result, by its index into [`FileIndex::entries`].
+    Result(usize),
+    /// Open the selected result.
+    Open,
+    /// Open the folder the selected result is in.
+    OpenLocation,
+    /// The shortcut card; a press anywhere puts it away.
+    HelpCard,
+}
+
+impl Target {
+    /// What pressing this does, for the status bar while the pointer is on it,
+    /// where a button that has a key can name it.
+    #[must_use]
+    pub fn tip(self) -> Option<&'static str> {
+        Some(match self {
+            Self::ChooseFolder => "Choose the folder to search (Ctrl+O)",
+            Self::SearchMode => "What the query means: name, glob, regex or content (Ctrl+R)",
+            Self::SaveSearch => "Save this search, or forget it (Ctrl+D)",
+            Self::Header(_) => "Sort by this column; again to reverse it",
+            Self::Open => "Open it (Enter)",
+            Self::OpenLocation => "Open the folder it is in (Ctrl+L)",
+            Self::Unsave(_) => "Forget this saved search",
+            _ => return None,
+        })
+    }
+}
+
+/// The table columns a heading press sorts by, as `(column, sort)`.
+///
+/// Type sorts by extension, which is what the column shows. Category has no
+/// column of its own and is sorted from the keyboard (Ctrl+C).
+const HEADER_SORTS: [(usize, SortColumn); 5] = [
+    (COL_NAME, SortColumn::Name),
+    (COL_PATH, SortColumn::Path),
+    (COL_SIZE, SortColumn::Size),
+    (COL_MODIFIED, SortColumn::Modified),
+    (COL_TYPE, SortColumn::Extension),
+];
+
+/// Height of the header row above the results.
+const RESULTS_HEADER_H: f32 = 24.0;
+/// Height of one result row.
+const RESULT_ROW_H: f32 = 28.0;
+/// How many recent searches the filters panel lists.
+const RECENT_SHOWN: usize = 8;
+/// The folder button's label.
+const FOLDER_BUTTON_LABEL: &str = "Choose folder…  Ctrl+O";
+
+/// Where the window's regions go at a given size.
+///
+/// One function for the drawing and for everything that needs a region's size
+/// between frames -- how many result rows fit, how far the filters can scroll
+/// -- so neither has its own copy of the arithmetic.
+#[derive(Debug, Clone, Copy)]
+struct Layout {
+    header: Rect,
+    filters: Rect,
+    results: Rect,
+    preview: Rect,
+    status: Rect,
+}
+
+impl Layout {
+    fn of(app: &FileSearchApp, width: f32, height: f32) -> Self {
+        let header_h = 60.0;
+        let status_h = 24.0;
+        let sidebar_w = if app.show_filters { 200.0 } else { 0.0 };
+        let preview_w = if app.show_preview { 280.0 } else { 0.0 };
+        let content_y = header_h;
+        let content_h = (height - header_h - status_h).max(0.0);
+        let results_w = (width - sidebar_w - preview_w).max(0.0);
+        Self {
+            header: Rect::new(0.0, 0.0, width, header_h),
+            filters: Rect::new(0.0, content_y, sidebar_w, content_h),
+            results: Rect::new(sidebar_w, content_y, results_w, content_h),
+            preview: Rect::new(sidebar_w + results_w, content_y, preview_w, content_h),
+            status: Rect::new(0.0, height - status_h, width, status_h),
+        }
+    }
+
+    /// How many whole result rows the results panel shows.
+    fn result_rows(self) -> usize {
+        ((self.results.h - RESULTS_HEADER_H) / RESULT_ROW_H).max(0.0) as usize
+    }
+}
+
+/// The folder button's box, right-aligned on the title row.
+fn header_button_rect(width: f32, label: &str) -> Rect {
+    let w = guitk::text::width(label, 11.0) + 16.0;
+    Rect::new(width - 16.0 - w, 5.0, w, 20.0)
+}
+
+/// The query box.
+fn search_box_rect(width: f32) -> Rect {
+    Rect::new(16.0, 28.0, (width - 32.0).max(0.0), 28.0)
+}
+
+/// The save switch and the mode switch inside the query box's right end.
+fn search_switch_rects(search: Rect) -> (Rect, Rect) {
+    let mode = Rect::new(search.right() - 80.0, 30.0, 68.0, 24.0);
+    let save = Rect::new(mode.x - 84.0, 30.0, 78.0, 24.0);
+    (save, mode)
+}
+
+/// One row of the filters panel.
+#[derive(Debug, Clone)]
+struct FilterRow {
+    rect: Rect,
+    label: String,
+    kind: FilterRowKind,
+}
+
+/// What a filters-panel row is.
+#[derive(Debug, Clone, Copy)]
+enum FilterRowKind {
+    /// A section heading; not a target.
+    Heading,
+    /// A choice or a switch, drawn lit when `selected`.
+    Choice { target: Target, selected: bool },
+    /// A saved search: the row runs it, its × forgets it.
+    Saved { id: u32 },
+}
+
 // ─── Application ─────────────────────────────────────────────────────
 
-use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
+use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -1080,8 +1286,11 @@ const ROW_FONT_SMALL: f32 = 11.0;
 /// is the only reason they are letters rather than a menu.
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Up / Down", "Move through the results"),
+    ("PageUp / PageDown", "A page of results"),
     ("Home / End", "First / last result"),
     ("Enter", "Open what is selected"),
+    ("Ctrl+L", "Open the folder it is in"),
+    ("Ctrl+D", "Save this search, or forget it"),
     ("Backspace", "Rub out a letter of the query"),
     ("Esc", "Clear the query"),
     ("Ctrl+O", "Choose a folder to search"),
@@ -1135,6 +1344,30 @@ pub struct FileSearchApp {
     palette: Palette,
     /// Whether the shortcut card is up.
     show_help: bool,
+    /// The size the window was last drawn at: what a press is hit-tested
+    /// against, and what the picker is laid out in. The picker used to be
+    /// placed in the size the window *opened* at, whatever it had been
+    /// resized to since.
+    window: (f32, f32),
+    /// The first result row shown.
+    pub results_scroll: usize,
+    /// How far the filters panel is scrolled, in pixels.
+    pub filters_scroll: f32,
+    /// The folder the index was built from, for the header.
+    pub root: Option<std::path::PathBuf>,
+    /// What the pointer is over, so it can be drawn lit and named.
+    hover: Option<Target>,
+    /// Every box the last paint recorded; see [`FileSearchApp::target_at`].
+    last_hits: Vec<(Target, Rect)>,
+    /// The wheel's remainder over the results, so a trackpad's fractions add
+    /// up instead of vanishing.
+    results_wheel: wheel::Accumulator,
+    /// Saved-search entries in the settings file this version cannot read,
+    /// kept so they are written back as they were.
+    unreadable_saved: Vec<String>,
+    /// How a program is started on a path. A field so the tests can see what
+    /// would have been started without starting anything.
+    launch: fn(&str, &std::path::Path) -> std::io::Result<()>,
 }
 
 impl Default for FileSearchApp {
@@ -1164,6 +1397,15 @@ impl FileSearchApp {
             status_message: "Ready — type to search".to_string(),
             is_searching: false,
             search_time_ms: 0,
+            window: (window_width(), window_height()),
+            results_scroll: 0,
+            filters_scroll: 0.0,
+            root: None,
+            hover: None,
+            last_hits: Vec::new(),
+            results_wheel: wheel::Accumulator::default(),
+            unreadable_saved: Vec::new(),
+            launch: spawn_program,
         }
     }
 
@@ -1201,10 +1443,9 @@ impl FileSearchApp {
             self.search_time_ms
         );
 
-        // Add to history
-        self.add_to_history(count);
-
+        // A new answer starts at its top.
         self.selected_result = None;
+        self.results_scroll = 0;
     }
 
     /// Sort results according to current sort settings
@@ -1229,40 +1470,6 @@ impl FileSearchApp {
             };
             if asc { cmp } else { cmp.reverse() }
         });
-    }
-
-    /// Add current search to history
-    fn add_to_history(&mut self, result_count: usize) {
-        if self.criteria.query.is_empty() {
-            return;
-        }
-
-        let id = self.next_search_id;
-        self.next_search_id = self.next_search_id.saturating_add(1);
-
-        self.search_history.push(SavedSearch {
-            id,
-            query: self.criteria.query.clone(),
-            mode: self.criteria.mode,
-            result_count,
-            timestamp: self.criteria.current_time,
-            is_bookmarked: false,
-            name: None,
-        });
-
-        // Keep last 50 non-bookmarked
-        let bookmarked_count = self
-            .search_history
-            .iter()
-            .filter(|s| s.is_bookmarked)
-            .count();
-        while self.search_history.len().saturating_sub(bookmarked_count) > 50 {
-            if let Some(pos) = self.search_history.iter().position(|s| !s.is_bookmarked) {
-                self.search_history.remove(pos);
-            } else {
-                break;
-            }
-        }
     }
 
     /// Bookmark a search
@@ -1324,6 +1531,10 @@ impl FileSearchApp {
     pub fn index_directory(&mut self, root: &std::path::Path) {
         self.index.clear();
         self.skipped_unrepresentable = 0;
+        self.root = Some(root.to_path_buf());
+        // Ages are shown relative to the moment the index was taken, which is
+        // the moment its modification times were read.
+        self.criteria.current_time = unix_now();
         let mut queue = vec![root.to_path_buf()];
         let mut indexed = 0_usize;
         let mut truncated = false;
@@ -1380,7 +1591,7 @@ impl FileSearchApp {
         // below -- the guard arms this replaced had that property by
         // construction, and it is why neither of these two ever stopped
         // its application's clock.
-        match self.picker.handle(event, window_width(), window_height()) {
+        match self.picker.handle(event, self.window.0, self.window.1) {
             Picked::Chose(path) => {
                 self.index_directory(&path);
                 self.execute_search();
@@ -1393,10 +1604,28 @@ impl FileSearchApp {
         }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
-            Event::Resize { .. } => {
-                // The layout is computed from the size it is handed at render
-                // time, so there is nothing to store and nothing to redraw for.
-                EventResult::Ignored
+            Event::Mouse(mouse) => {
+                // The card is modal: a press anywhere puts it away, and nothing
+                // under it hears one.
+                if self.show_help {
+                    if matches!(mouse.kind, MouseEventKind::Press(_)) {
+                        self.show_help = false;
+                        return EventResult::Consumed;
+                    }
+                    return EventResult::Ignored;
+                }
+                self.handle_mouse(mouse)
+            }
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension is far below f32's integer-exact range"
+                )]
+                {
+                    self.window = (*width as f32, *height as f32);
+                }
+                self.keep_selection_visible();
+                EventResult::Consumed
             }
             _ => EventResult::Ignored,
         }
@@ -1437,6 +1666,8 @@ impl FileSearchApp {
         match key.key {
             Key::Up => self.step_selection(-1),
             Key::Down => self.step_selection(1),
+            Key::PageUp => self.step_selection(self.page_rows().saturating_neg()),
+            Key::PageDown => self.step_selection(self.page_rows()),
             Key::Home => self.select_edge(true),
             Key::End => self.select_edge(false),
             Key::Backspace => {
@@ -1454,10 +1685,20 @@ impl FileSearchApp {
                 self.execute_search();
                 EventResult::Consumed
             }
+            // What the F1 card has always said Enter does. It re-ran the
+            // search -- which had already run on the last keystroke -- so a
+            // search tool could find a file and do nothing with it. With
+            // nothing selected, Enter selects the first result, so a second
+            // Enter opens it.
             Key::Enter => {
-                self.execute_search();
-                EventResult::Consumed
+                if self.selected_result.is_some() {
+                    self.open_selected()
+                } else {
+                    self.select_edge(true)
+                }
             }
+            Key::L if ctrl => self.open_location(),
+            Key::D if ctrl => self.toggle_saved(),
             // Sorting, on Ctrl so the bare letters stay available as query
             // text. Pressing the current column again reverses it, which is
             // what a column header does everywhere else.
@@ -1498,12 +1739,7 @@ impl FileSearchApp {
             }
             // What the query means, and what the search reaches.
             Key::R if ctrl => {
-                self.criteria.mode = match self.criteria.mode {
-                    SearchMode::Substring => SearchMode::Glob,
-                    SearchMode::Glob => SearchMode::Regex,
-                    SearchMode::Regex => SearchMode::Content,
-                    SearchMode::Content => SearchMode::Substring,
-                };
+                self.criteria.mode = self.criteria.mode.next();
                 self.rerun_with_filters()
             }
             Key::U if ctrl => {
@@ -1572,23 +1808,27 @@ impl FileSearchApp {
                 let Ok(pos) = isize::try_from(pos) else {
                     return EventResult::Ignored;
                 };
-                let Some(moved) = pos.checked_add(delta) else {
-                    return EventResult::Ignored;
-                };
-                let Ok(moved) = usize::try_from(moved) else {
-                    return EventResult::Ignored; // off the top; stay put
-                };
-                if moved >= self.results.len() {
-                    return EventResult::Ignored; // off the bottom; stay put
-                }
-                moved
+                // Clamped to the list, so a page step near either end lands
+                // on the end rather than refusing to move; a single step off
+                // an end clamps to where it already is, and is ignored below.
+                let moved = pos.saturating_add(delta).max(0);
+                let last = self.results.len().saturating_sub(1);
+                usize::try_from(moved).map_or(last, |m| m.min(last))
             }
         };
         if Some(next) == self.selected_result {
             return EventResult::Ignored;
         }
         self.selected_result = Some(next);
+        self.keep_selection_visible();
         EventResult::Consumed
+    }
+
+    /// How many rows a page is: the rows the results panel shows, less one so
+    /// a page keeps a row of context, and never less than one.
+    fn page_rows(&self) -> isize {
+        let rows = Layout::of(self, self.window.0, self.window.1).result_rows();
+        isize::try_from(rows.saturating_sub(1).max(1)).unwrap_or(1)
     }
 
     /// Jump to the first or last result.
@@ -1605,6 +1845,7 @@ impl FileSearchApp {
             return EventResult::Ignored;
         }
         self.selected_result = target;
+        self.keep_selection_visible();
         EventResult::Consumed
     }
 
@@ -1616,14 +1857,22 @@ impl FileSearchApp {
     /// Renders the UI.
     #[must_use]
     pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-        let header_h = 60.0;
-        let sidebar_w = if self.show_filters { 200.0 } else { 0.0 };
-        let preview_w = if self.show_preview { 280.0 } else { 0.0 };
-        let status_h = 24.0;
+        self.frame(width, height).into_tree().commands
+    }
+
+    /// Draw the window at `width` by `height`, recording every control where
+    /// it is drawn.
+    ///
+    /// This is both the renderer and the hit test (see [`Target`]): a press is
+    /// resolved by drawing a frame and asking it what is at the point, so a
+    /// control and the place a click finds it cannot disagree.
+    #[must_use]
+    pub fn frame(&self, width: f32, height: f32) -> Frame<Target> {
+        let mut f = Frame::new(width, height);
+        let l = Layout::of(self, width, height);
 
         // Background
-        cmds.push(RenderCommand::FillRect {
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width,
@@ -1632,19 +1881,86 @@ impl FileSearchApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // Header with search bar
+        self.draw_header(&mut f, l.header);
+        if self.show_filters {
+            self.draw_filters(&mut f, l.filters);
+        }
+        self.draw_results(&mut f, l.results);
+        if self.show_preview {
+            self.draw_preview(&mut f, l.preview);
+        }
+
+        // Status bar
+        let sy = l.status.y;
+        self.palette
+            .push_surface(&mut f, 0.0, sy, width, l.status.h, 0.0, Surface::Card);
+        let status = match self.hover.and_then(Target::tip) {
+            Some(tip) => tip.to_string(),
+            None => format!("{} indexed  |  {}", self.index.count(), self.status_message),
+        };
+        f.push(RenderCommand::Text {
+            x: 12.0,
+            y: sy + 6.0,
+            text: status,
+            font_size: 11.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width - 24.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+            // A press anywhere puts the card away, and goes no further.
+            f.hit(Target::HelpCard, Rect::new(0.0, 0.0, width, height));
+        }
+        f
+    }
+
+    /// A compact button with a label, lit while the pointer is on it.
+    fn draw_button(&self, f: &mut Frame<Target>, rect: Rect, label: &str, target: Target) {
+        let surface = if self.hover == Some(target) {
+            Surface::Panel
+        } else {
+            Surface::Card
+        };
+        self.palette
+            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, surface);
+        f.push(RenderCommand::Text {
+            x: rect.x + 8.0,
+            y: rect.y + (rect.h - 11.0) / 2.0 - 1.0,
+            text: label.to_string(),
+            font_size: 11.0,
+            color: self.palette.ink(self.palette.teal),
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((rect.w - 16.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        f.hit(target, rect);
+    }
+
+    /// The header: title, the folder being searched and the button that
+    /// changes it, and the query box with its mode and save switches.
+    fn draw_header(&self, f: &mut Frame<Target>, header: Rect) {
+        let width = header.w;
         self.palette.push_surface(
-            &mut cmds,
+            f,
             0.0,
             0.0,
             width,
-            header_h,
+            header.h,
             0.0,
             Surface::Strip(Edge::Bottom),
         );
 
-        // App title
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: 16.0,
             y: 8.0,
             text: "File Search".to_string(),
@@ -1655,26 +1971,45 @@ impl FileSearchApp {
             overflow: TextOverflow::Clip,
         });
 
+        // The folder button, right-aligned on the title row. There was no
+        // way to choose a folder but Ctrl+O -- the status bar said so on
+        // launch, and nothing on screen could be pressed to do it.
+        let folder = header_button_rect(width, FOLDER_BUTTON_LABEL);
+        self.draw_button(f, folder, FOLDER_BUTTON_LABEL, Target::ChooseFolder);
+
+        // Which folder the index holds, between the title and the button.
+        let label = self.root_label();
+        f.push(RenderCommand::Text {
+            x: 110.0,
+            y: 10.0,
+            text: label,
+            font_size: 11.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((folder.x - 110.0 - 12.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+
         // Search input
-        let search_x = 16.0;
-        let search_w = width - 32.0;
+        let search = search_box_rect(width);
         self.palette.push_surface(
-            &mut cmds,
-            search_x,
-            28.0,
-            search_w,
-            28.0,
+            f,
+            search.x,
+            search.y,
+            search.w,
+            search.h,
             6.0,
             Surface::Card,
         );
+        f.hit(Target::SearchBox, search);
 
         let search_text = if self.criteria.query.is_empty() {
             "Search files...".to_string()
         } else {
             self.criteria.query.clone()
         };
-        cmds.push(RenderCommand::Text {
-            x: search_x + 12.0,
+        f.push(RenderCommand::Text {
+            x: search.x + 12.0,
             y: 36.0,
             text: search_text,
             font_size: 13.0,
@@ -1684,281 +2019,326 @@ impl FileSearchApp {
                 self.palette.text
             },
             font_weight: FontWeightHint::Regular,
-            max_width: Some(search_w - 120.0),
+            max_width: Some((search.w - 190.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Search mode indicator
-        self.palette.push_surface(
-            &mut cmds,
-            search_x + search_w - 80.0,
-            30.0,
-            68.0,
-            24.0,
-            4.0,
-            Surface::Card,
-        );
-        cmds.push(RenderCommand::Text {
-            x: search_x + search_w - 72.0,
+        // Save this search, then the match mode, both inside the box's right
+        // end. The mode was a label; it is the switch Ctrl+R turns now.
+        let (save, mode) = search_switch_rects(search);
+        let saved = self.current_search_is_saved();
+        let save_label = if saved { "★ Saved" } else { "☆ Save" };
+        self.draw_button(f, save, save_label, Target::SaveSearch);
+        self.palette
+            .push_surface(f, mode.x, mode.y, mode.w, mode.h, 4.0, Surface::Card);
+        f.push(RenderCommand::Text {
+            x: mode.x + 8.0,
             y: 36.0,
             text: self.criteria.mode.to_string(),
             font_size: 11.0,
             color: self.palette.ink(self.palette.mauve),
             font_weight: FontWeightHint::Bold,
-            max_width: None,
+            max_width: Some(mode.w - 12.0),
             overflow: TextOverflow::Clip,
         });
+        f.hit(Target::SearchMode, mode);
+    }
 
-        let content_y = header_h;
-        let content_h = height - header_h - status_h;
-
-        // Filters sidebar
-        if self.show_filters {
-            cmds.push(RenderCommand::FillRect {
-                x: 0.0,
-                y: content_y,
-                width: sidebar_w,
-                height: content_h,
-                color: self.palette.mantle,
-                corner_radii: CornerRadii::ZERO,
-            });
-
-            self.render_filters(&mut cmds, 0.0, content_y, sidebar_w, content_h);
-        }
-
-        // Results area
-        let results_x = sidebar_w;
-        let results_w = width - sidebar_w - preview_w;
-        self.render_results(&mut cmds, results_x, content_y, results_w, content_h);
-
-        // Preview pane
-        if self.show_preview {
-            let preview_x = results_x + results_w;
-            self.render_preview(&mut cmds, preview_x, content_y, preview_w, content_h);
-        }
-
-        // Status bar
-        let sy = height - status_h;
-        self.palette
-            .push_surface(&mut cmds, 0.0, sy, width, status_h, 0.0, Surface::Card);
-        cmds.push(RenderCommand::Text {
-            x: 12.0,
-            y: sy + 6.0,
-            text: format!("{} indexed  |  {}", self.index.count(), self.status_message),
-            font_size: 11.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(width - 24.0),
-            overflow: TextOverflow::Ellipsis,
+    /// The filters sidebar, every row of it a target, scrolled by
+    /// `filters_scroll` and clipped to its panel.
+    ///
+    /// Every chip here was drawn with a selection highlight that only the
+    /// keyboard could move, and the four "Search" rows were labels. The panel
+    /// was also taller than the window it is drawn in -- the last rows ran
+    /// under the status bar -- so it scrolls now.
+    fn draw_filters(&self, f: &mut Frame<Target>, panel: Rect) {
+        f.push(RenderCommand::FillRect {
+            x: panel.x,
+            y: panel.y,
+            width: panel.w,
+            height: panel.h,
+            color: self.palette.mantle,
+            corner_radii: CornerRadii::ZERO,
         });
+        f.hit(Target::Filters, panel);
+        f.clip(panel);
+        for row in self.filter_rows(panel) {
+            let rect = row.rect;
+            match row.kind {
+                FilterRowKind::Heading => {
+                    f.push(RenderCommand::Text {
+                        x: rect.x + 12.0,
+                        y: rect.y,
+                        text: row.label,
+                        font_size: 11.0,
+                        color: self.palette.subtext0,
+                        font_weight: FontWeightHint::Bold,
+                        max_width: Some(rect.w - 24.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
+                FilterRowKind::Choice { target, selected } => {
+                    if selected || self.hover == Some(target) {
+                        let surface = if selected {
+                            Surface::Card
+                        } else {
+                            Surface::Panel
+                        };
+                        self.palette.push_surface(
+                            f,
+                            rect.x + 4.0,
+                            rect.y,
+                            rect.w - 8.0,
+                            22.0,
+                            4.0,
+                            surface,
+                        );
+                    }
+                    f.push(RenderCommand::Text {
+                        x: rect.x + 12.0,
+                        y: rect.y + 4.0,
+                        text: row.label,
+                        font_size: 11.0,
+                        color: if selected {
+                            self.palette.ink(self.palette.blue)
+                        } else {
+                            self.palette.subtext1
+                        },
+                        font_weight: if selected {
+                            FontWeightHint::Bold
+                        } else {
+                            FontWeightHint::Regular
+                        },
+                        max_width: Some(rect.w - 24.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                    f.hit(target, Rect::new(rect.x + 4.0, rect.y, rect.w - 8.0, 22.0));
+                }
+                FilterRowKind::Saved { id } => {
+                    let run = Target::Saved(id);
+                    let forget = Target::Unsave(id);
+                    if self.hover == Some(run) {
+                        self.palette.push_surface(
+                            f,
+                            rect.x + 4.0,
+                            rect.y,
+                            rect.w - 8.0,
+                            22.0,
+                            4.0,
+                            Surface::Panel,
+                        );
+                    }
+                    f.push(RenderCommand::Text {
+                        x: rect.x + 12.0,
+                        y: rect.y + 4.0,
+                        text: row.label,
+                        font_size: 11.0,
+                        color: self.palette.subtext1,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(rect.w - 24.0 - 20.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                    f.hit(run, Rect::new(rect.x + 4.0, rect.y, rect.w - 8.0, 22.0));
+                    // The ×, recorded after the row so it wins where they
+                    // overlap.
+                    let x_box = Rect::new(rect.right() - 26.0, rect.y + 2.0, 18.0, 18.0);
+                    if self.hover == Some(forget) {
+                        f.push(RenderCommand::FillRect {
+                            x: x_box.x,
+                            y: x_box.y,
+                            width: x_box.w,
+                            height: x_box.h,
+                            color: self.palette.surface1,
+                            corner_radii: CornerRadii::all(4.0),
+                        });
+                    }
+                    f.push(RenderCommand::Text {
+                        x: x_box.x + 5.0,
+                        y: x_box.y + 2.0,
+                        text: "x".to_string(),
+                        font_size: 11.0,
+                        color: self.palette.subtext0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: None,
+                        overflow: TextOverflow::Clip,
+                    });
+                    f.hit(forget, x_box);
+                }
+            }
+        }
+        f.unclip();
+    }
 
-        if self.show_help {
-            guitk::shortcut::render_card(
-                &mut cmds,
-                &self.palette,
-                (width, height),
-                0.0,
-                SHORTCUTS,
-                "F1 closes this",
+    /// Every row of the filters panel, laid out from `panel`'s top with the
+    /// scroll applied: the drawing and the wheel's limit both read this.
+    fn filter_rows(&self, panel: Rect) -> Vec<FilterRow> {
+        let x = panel.x;
+        let w = panel.w;
+        let mut rows = Vec::new();
+        let mut fy = panel.y + 8.0 - self.filters_scroll;
+        let heading = |rows: &mut Vec<FilterRow>, fy: &mut f32, label: &str| {
+            rows.push(FilterRow {
+                rect: Rect::new(x, *fy, w, 20.0),
+                label: label.to_string(),
+                kind: FilterRowKind::Heading,
+            });
+            *fy += 20.0;
+        };
+        let choice = |rows: &mut Vec<FilterRow>,
+                      fy: &mut f32,
+                      label: String,
+                      target: Target,
+                      selected: bool,
+                      step: f32| {
+            rows.push(FilterRow {
+                rect: Rect::new(x, *fy, w, 22.0),
+                label,
+                kind: FilterRowKind::Choice { target, selected },
+            });
+            *fy += step;
+        };
+
+        heading(&mut rows, &mut fy, "File Type (Ctrl+1)");
+        choice(
+            &mut rows,
+            &mut fy,
+            "All Types".to_string(),
+            Target::CategoryAll,
+            self.criteria.category_filter.is_none(),
+            24.0,
+        );
+        for cat in FileCategory::ALL {
+            choice(
+                &mut rows,
+                &mut fy,
+                format!("{} {cat}", category_icon(cat)),
+                Target::Category(cat),
+                self.criteria.category_filter == Some(cat),
+                24.0,
             );
         }
 
-        cmds
-    }
-
-    fn render_filters(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, _h: f32) {
-        let mut fy = y + 8.0;
-
-        // Categories section
-        cmds.push(RenderCommand::Text {
-            x: x + 12.0,
-            y: fy,
-            text: "File Type (Ctrl+1)".to_string(),
-            font_size: 11.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        fy += 20.0;
-
-        // The "no filter" chip comes first, so the way out of a filter is
-        // as visible as the way in. Before this the strip drew only the
-        // eleven categories and clearing the filter had nothing to press.
-        let none_selected = self.criteria.category_filter.is_none();
-        if none_selected {
-            self.palette
-                .push_surface(cmds, x + 4.0, fy, w - 8.0, 22.0, 4.0, Surface::Card);
-        }
-        cmds.push(RenderCommand::Text {
-            x: x + 12.0,
-            y: fy + 4.0,
-            text: "All Types".to_string(),
-            font_size: 11.0,
-            color: if none_selected {
-                self.palette.ink(self.palette.blue)
-            } else {
-                self.palette.subtext1
-            },
-            font_weight: if none_selected {
-                FontWeightHint::Bold
-            } else {
-                FontWeightHint::Regular
-            },
-            max_width: Some(w - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        fy += 24.0;
-
-        for cat in &FileCategory::ALL {
-            let is_sel = self.criteria.category_filter == Some(*cat);
-            if is_sel {
-                self.palette
-                    .push_surface(cmds, x + 4.0, fy, w - 8.0, 22.0, 4.0, Surface::Card);
-            }
-            cmds.push(RenderCommand::Text {
-                x: x + 12.0,
-                y: fy + 4.0,
-                text: format!("{} {cat}", category_icon(*cat)),
-                font_size: 11.0,
-                color: if is_sel {
-                    self.palette.ink(self.palette.blue)
-                } else {
-                    self.palette.subtext1
-                },
-                font_weight: if is_sel {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(w - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            fy += 24.0;
-        }
-
-        // Size filter section
         fy += 12.0;
-        cmds.push(RenderCommand::Text {
-            x: x + 12.0,
-            y: fy,
-            text: "Size (Ctrl+2)".to_string(),
-            font_size: 11.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        fy += 20.0;
-
-        for sf in &SizeFilter::CHIPS {
-            let is_sel = self.criteria.size_filter == *sf;
-            if is_sel {
-                self.palette
-                    .push_surface(cmds, x + 4.0, fy, w - 8.0, 22.0, 4.0, Surface::Card);
-            }
-            cmds.push(RenderCommand::Text {
-                x: x + 12.0,
-                y: fy + 4.0,
-                text: sf.label().to_string(),
-                font_size: 11.0,
-                color: if is_sel {
-                    self.palette.ink(self.palette.blue)
-                } else {
-                    self.palette.subtext1
-                },
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(w - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            fy += 24.0;
+        heading(&mut rows, &mut fy, "Size (Ctrl+2)");
+        for sf in SizeFilter::CHIPS {
+            choice(
+                &mut rows,
+                &mut fy,
+                sf.label().to_string(),
+                Target::Size(sf),
+                self.criteria.size_filter == sf,
+                24.0,
+            );
         }
 
-        // Date filter section
         fy += 12.0;
-        cmds.push(RenderCommand::Text {
-            x: x + 12.0,
-            y: fy,
-            text: "Modified (Ctrl+3)".to_string(),
-            font_size: 11.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        fy += 20.0;
-
-        for df in &DateFilter::ALL {
-            let is_sel = self.criteria.date_filter == *df;
-            if is_sel {
-                self.palette
-                    .push_surface(cmds, x + 4.0, fy, w - 8.0, 22.0, 4.0, Surface::Card);
-            }
-            cmds.push(RenderCommand::Text {
-                x: x + 12.0,
-                y: fy + 4.0,
-                text: df.label().to_string(),
-                font_size: 11.0,
-                color: if is_sel {
-                    self.palette.ink(self.palette.blue)
-                } else {
-                    self.palette.subtext1
-                },
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(w - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            fy += 22.0;
+        heading(&mut rows, &mut fy, "Modified (Ctrl+3)");
+        for df in DateFilter::ALL {
+            choice(
+                &mut rows,
+                &mut fy,
+                df.label().to_string(),
+                Target::Date(df),
+                self.criteria.date_filter == df,
+                22.0,
+            );
         }
+
         // What the query means and what the walk reaches. These four were
-        // read by the matcher and drawn nowhere at all, so a search that
-        // silently skipped hidden files looked identical to one that found
-        // none.
+        // read by the matcher and, for a long time, drawn nowhere at all, so a
+        // search that silently skipped hidden files looked identical to one
+        // that found none. They are switches now as well as labels.
         fy += 12.0;
-        cmds.push(RenderCommand::Text {
-            x: x + 12.0,
-            y: fy,
-            text: "Search".to_string(),
-            font_size: 11.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        fy += 20.0;
-
+        heading(&mut rows, &mut fy, "Search");
         let yes_no = |on: bool| if on { "Yes" } else { "No" };
-        let options = [
-            format!("Match by (Ctrl+R): {}", self.criteria.mode),
-            format!(
-                "Case sensitive (Ctrl+U): {}",
-                yes_no(self.criteria.case_sensitive)
+        let switches = [
+            (
+                format!("Match by (Ctrl+R): {}", self.criteria.mode),
+                Target::MatchMode,
             ),
-            format!(
-                "Hidden files (Ctrl+H): {}",
-                yes_no(self.criteria.include_hidden)
+            (
+                format!(
+                    "Case sensitive (Ctrl+U): {}",
+                    yes_no(self.criteria.case_sensitive)
+                ),
+                Target::MatchCase,
             ),
-            format!(
-                "Folders (Ctrl+K): {}",
-                yes_no(self.criteria.include_directories)
+            (
+                format!(
+                    "Hidden files (Ctrl+H): {}",
+                    yes_no(self.criteria.include_hidden)
+                ),
+                Target::Hidden,
+            ),
+            (
+                format!(
+                    "Folders (Ctrl+K): {}",
+                    yes_no(self.criteria.include_directories)
+                ),
+                Target::Folders,
             ),
         ];
-        for line in options {
-            cmds.push(RenderCommand::Text {
-                x: x + 12.0,
-                y: fy + 4.0,
-                text: line,
-                font_size: 11.0,
-                color: self.palette.subtext1,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(w - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            fy += 22.0;
+        for (label, target) in switches {
+            choice(&mut rows, &mut fy, label, target, false, 22.0);
         }
+
+        // Saved searches, then recent ones: `search_history` was written on
+        // every keystroke and read by nothing, and `bookmark_search` had no
+        // caller at all.
+        let saved: Vec<&SavedSearch> = self
+            .search_history
+            .iter()
+            .filter(|s| s.is_bookmarked)
+            .collect();
+        if !saved.is_empty() {
+            fy += 12.0;
+            heading(&mut rows, &mut fy, "Saved searches (Ctrl+D)");
+            for s in saved {
+                rows.push(FilterRow {
+                    rect: Rect::new(x, fy, w, 22.0),
+                    label: format!("{} ({})", s.query, s.mode),
+                    kind: FilterRowKind::Saved { id: s.id },
+                });
+                fy += 24.0;
+            }
+        }
+        let recent: Vec<&SavedSearch> = self
+            .search_history
+            .iter()
+            .rev()
+            .filter(|s| !s.is_bookmarked)
+            .take(RECENT_SHOWN)
+            .collect();
+        if !recent.is_empty() {
+            fy += 12.0;
+            heading(&mut rows, &mut fy, "Recent");
+            for s in recent {
+                choice(
+                    &mut rows,
+                    &mut fy,
+                    format!("{} ({})", s.query, s.mode),
+                    Target::Recent(s.id),
+                    false,
+                    24.0,
+                );
+            }
+        }
+        rows
     }
 
-    /// Draw the results table.
+    /// How far the filters panel can scroll: its content's height past the
+    /// panel's own.
+    fn filters_scroll_limit(&self, panel: Rect) -> f32 {
+        let top = panel.y + 8.0 - self.filters_scroll;
+        let bottom = self
+            .filter_rows(panel)
+            .last()
+            .map_or(top, |row| row.rect.bottom());
+        (bottom - top + 16.0 - panel.h).max(0.0)
+    }
+
+    /// Draw the results table, recording each column heading (which sorts)
+    /// and each row (which selects).
     ///
     /// Every cell here holds something the filesystem chose, not something this
     /// app authored — a filename, a directory, an extension — and the two that
@@ -1968,12 +2348,35 @@ impl FileSearchApp {
     /// [`IndexEntry::new`] refuses extensions of ten characters or more, which
     /// is an incidental property of the parser and not something a table should
     /// be relying on. All five now go through [`Table::cell`].
-    fn render_results(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
+    ///
+    /// The rows start at `results_scroll`. They used to start at the first
+    /// result, always, and stop at the panel's bottom edge: a search with more
+    /// results than fitted showed the first page and nothing else, and the
+    /// keyboard could move the selection onto rows that were never drawn.
+    fn draw_results(&self, f: &mut Frame<Target>, area: Rect) {
+        let (x, y, w, h) = (area.x, area.y, area.w, area.h);
+        f.hit(Target::Results, area);
         let table = Table::new(RESULT_COLUMNS, x);
-        table.header(cmds, y + 4.0, self.palette.overlay0, ROW_FONT_SMALL);
-
-        let row_h = 28.0;
-        let mut ry = y + 24.0;
+        f.draw_with(|cmds| table.header(cmds, y + 4.0, self.palette.overlay0, ROW_FONT_SMALL));
+        for (col, sort) in HEADER_SORTS {
+            let rect = Rect::new(table.left(col), y, table.width(col), RESULTS_HEADER_H);
+            if sort == self.sort_column {
+                let label_w = RESULT_COLUMNS.get(col).map_or(0.0, |c| {
+                    guitk::text::measure(c.label, ROW_FONT_SMALL, FontWeightHint::Bold)
+                });
+                f.push(RenderCommand::Text {
+                    x: rect.x + label_w + 6.0,
+                    y: y + 4.0,
+                    text: if self.sort_ascending { "▲" } else { "▼" }.to_string(),
+                    font_size: 9.0,
+                    color: self.palette.overlay0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
+                    overflow: TextOverflow::Clip,
+                });
+            }
+            f.hit(Target::Header(sort), rect);
+        }
 
         if self.results.is_empty() {
             let msg = if self.criteria.query.is_empty() {
@@ -1981,7 +2384,7 @@ impl FileSearchApp {
             } else {
                 "No results found"
             };
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: x + w / 2.0 - 50.0,
                 y: y + h / 2.0,
                 text: msg.to_string(),
@@ -1994,27 +2397,28 @@ impl FileSearchApp {
             return;
         }
 
-        for (display_idx, &result_idx) in self.results.iter().enumerate() {
-            if ry + row_h > y + h {
+        let mut ry = y + RESULTS_HEADER_H;
+        for (display_idx, &result_idx) in self.results.iter().enumerate().skip(self.results_scroll)
+        {
+            if ry + RESULT_ROW_H > y + h {
                 break;
             }
 
-            let entry = match self.index.entries.get(result_idx) {
-                Some(e) => e,
-                None => continue,
+            let Some(entry) = self.index.entries.get(result_idx) else {
+                continue;
             };
 
+            let row = Rect::new(x + 2.0, ry, w - 4.0, RESULT_ROW_H - 2.0);
+            let target = Target::Result(result_idx);
             let is_sel = self.selected_result == Some(display_idx);
-            if is_sel {
-                self.palette.push_surface(
-                    cmds,
-                    x + 2.0,
-                    ry,
-                    w - 4.0,
-                    row_h - 2.0,
-                    4.0,
-                    Surface::Card,
-                );
+            if is_sel || self.hover == Some(target) {
+                let surface = if is_sel {
+                    Surface::Card
+                } else {
+                    Surface::Panel
+                };
+                self.palette
+                    .push_surface(f, row.x, row.y, row.w, row.h, 4.0, surface);
             }
 
             let cy = ry + 6.0;
@@ -2025,80 +2429,84 @@ impl FileSearchApp {
             } else {
                 category_icon(entry.category)
             };
-            table.cell(
-                cmds,
-                COL_NAME,
-                cy,
-                &format!("{icon} {}", entry.name),
-                if entry.is_directory {
-                    self.palette.blue
-                } else {
-                    self.palette.text
-                },
-                ROW_FONT,
-                Fit::Start,
-            );
-
-            // The directory is cut at the *front*: what distinguishes two
-            // results is the deepest directory, not the mount point they share.
-            table.cell(
-                cmds,
-                COL_PATH,
-                cy,
-                entry.parent_dir(),
-                self.palette.subtext0,
-                ROW_FONT_SMALL,
-                Fit::End,
-            );
-
-            table.cell(
-                cmds,
-                COL_SIZE,
-                cy,
-                &if entry.is_directory {
-                    "—".to_string()
-                } else {
-                    format_size(entry.size)
-                },
-                self.palette.subtext1,
-                ROW_FONT_SMALL,
-                Fit::Start,
-            );
-
+            let name_color = if entry.is_directory {
+                self.palette.blue
+            } else {
+                self.palette.text
+            };
+            let size = if entry.is_directory {
+                "—".to_string()
+            } else {
+                format_size(entry.size)
+            };
             let age = self.criteria.current_time.saturating_sub(entry.modified);
-            table.cell(
-                cmds,
-                COL_MODIFIED,
-                cy,
-                &format_relative_time(age),
-                self.palette.subtext0,
-                ROW_FONT_SMALL,
-                Fit::Start,
-            );
-
             // An extension is whatever follows the last dot in a name the app
             // did not choose, so its length is not ours to assume.
-            table.cell(
-                cmds,
-                COL_TYPE,
-                cy,
-                &if entry.extension.is_empty() {
-                    "—".to_string()
-                } else {
-                    entry.extension.to_uppercase()
-                },
-                self.palette.peach,
-                ROW_FONT_SMALL,
-                Fit::Start,
-            );
+            let kind = if entry.extension.is_empty() {
+                "—".to_string()
+            } else {
+                entry.extension.to_uppercase()
+            };
+            f.draw_with(|cmds| {
+                table.cell(
+                    cmds,
+                    COL_NAME,
+                    cy,
+                    &format!("{icon} {}", entry.name),
+                    name_color,
+                    ROW_FONT,
+                    Fit::Start,
+                );
+                // The directory is cut at the *front*: what distinguishes two
+                // results is the deepest directory, not the mount point they
+                // share.
+                table.cell(
+                    cmds,
+                    COL_PATH,
+                    cy,
+                    entry.parent_dir(),
+                    self.palette.subtext0,
+                    ROW_FONT_SMALL,
+                    Fit::End,
+                );
+                table.cell(
+                    cmds,
+                    COL_SIZE,
+                    cy,
+                    &size,
+                    self.palette.subtext1,
+                    ROW_FONT_SMALL,
+                    Fit::Start,
+                );
+                table.cell(
+                    cmds,
+                    COL_MODIFIED,
+                    cy,
+                    &format_relative_time(age),
+                    self.palette.subtext0,
+                    ROW_FONT_SMALL,
+                    Fit::Start,
+                );
+                table.cell(
+                    cmds,
+                    COL_TYPE,
+                    cy,
+                    &kind,
+                    self.palette.peach,
+                    ROW_FONT_SMALL,
+                    Fit::Start,
+                );
+            });
+            f.hit(target, row);
 
-            ry += row_h;
+            ry += RESULT_ROW_H;
         }
     }
 
-    fn render_preview(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
+    fn draw_preview(&self, f: &mut Frame<Target>, area: Rect) {
+        let (x, y, w, h) = (area.x, area.y, area.w, area.h);
         // Separator
-        cmds.push(RenderCommand::FillRect {
+        f.push(RenderCommand::FillRect {
             x,
             y,
             width: 1.0,
@@ -2107,10 +2515,8 @@ impl FileSearchApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        let entry = if let Some(e) = self.selected_entry() {
-            e
-        } else {
-            cmds.push(RenderCommand::Text {
+        let Some(entry) = self.selected_entry() else {
+            f.push(RenderCommand::Text {
                 x: x + w / 2.0 - 50.0,
                 y: y + h / 2.0,
                 text: "Select a file".to_string(),
@@ -2133,7 +2539,7 @@ impl FileSearchApp {
         } else {
             category_icon(entry.category)
         };
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: px,
             y: py,
             text: format!("{icon} {}", entry.name),
@@ -2172,7 +2578,7 @@ impl FileSearchApp {
         ];
 
         for (label, value) in &fields {
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: px,
                 y: py,
                 text: label.to_string(),
@@ -2182,7 +2588,7 @@ impl FileSearchApp {
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: px + 80.0,
                 y: py,
                 text: value.clone(),
@@ -2195,9 +2601,15 @@ impl FileSearchApp {
             py += 18.0;
         }
 
-        // Quick actions
+        // Actions. There were four -- Open, Open Location, Copy Path and
+        // Properties -- drawn as buttons and wired to nothing. Two are real
+        // now. Copy Path is gone until an application can reach the system
+        // clipboard with a path intact (known-issues.md, the explorer's
+        // clipboard entry), and Properties is gone because this pane *is* the
+        // properties: a button that shows what is already on screen is not an
+        // action.
         py += 16.0;
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: px,
             y: py,
             text: "Actions".to_string(),
@@ -2209,23 +2621,518 @@ impl FileSearchApp {
         });
         py += 20.0;
 
-        let actions = ["Open", "Open Location", "Copy Path", "Properties"];
-        for action in &actions {
-            self.palette
-                .push_surface(cmds, px, py, max_w, 24.0, 4.0, Surface::Card);
-            cmds.push(RenderCommand::Text {
-                x: px + 10.0,
-                y: py + 5.0,
-                text: action.to_string(),
-                font_size: 11.0,
-                color: self.palette.ink(self.palette.teal),
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+        for (label, target) in [
+            ("Open  Enter", Target::Open),
+            ("Open the folder it is in  Ctrl+L", Target::OpenLocation),
+        ] {
+            self.draw_button(f, Rect::new(px, py, max_w, 24.0), label, target);
             py += 28.0;
         }
     }
+}
+
+// ─── The pointer, opening, and saved searches ────────────────────────
+
+/// Start `program` on `path`. What [`FileSearchApp::launch`] does unless a
+/// test has put something else there.
+fn spawn_program(program: &str, path: &std::path::Path) -> std::io::Result<()> {
+    std::process::Command::new(program)
+        .arg(path)
+        .spawn()
+        .map(drop)
+}
+
+/// The program that shows a folder: the file manager, which takes the folder
+/// to open as its one argument for exactly this (see its `main`).
+const FILE_MANAGER: &str = "/usr/bin/explorer";
+
+/// The settings group saved searches are kept in.
+const CONFIG_NAME: &str = "filesearch";
+/// The key holding them, as `mode:query` strings.
+const SAVED_KEY: [&str; 1] = ["saved"];
+
+impl SearchMode {
+    /// The word a saved search records its mode as.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Substring => "name",
+            Self::Glob => "glob",
+            Self::Regex => "regex",
+            Self::Content => "content",
+        }
+    }
+
+    /// The mode a saved search's word names, if it names one.
+    #[must_use]
+    pub fn from_key(key: &str) -> Option<Self> {
+        [Self::Substring, Self::Glob, Self::Regex, Self::Content]
+            .into_iter()
+            .find(|m| m.key() == key)
+    }
+}
+
+impl FileSearchApp {
+    /// Draw the window at the size it was last given.
+    fn current_frame(&self) -> Frame<Target> {
+        self.frame(self.window.0, self.window.1)
+    }
+
+    /// What is under `(x, y)` in the frame last shown -- for the pointer's
+    /// movement and the wheel, which arrive in floods and should not each
+    /// draw a frame of their own. A press draws a fresh one instead.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        if self.last_hits.is_empty() {
+            return self.current_frame().hit_test(x, y);
+        }
+        self.last_hits
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(target, _)| *target)
+    }
+
+    /// Route a pointer event.
+    pub fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                let Some(target) = self.current_frame().hit_test(event.x, event.y) else {
+                    return EventResult::Ignored;
+                };
+                self.activate(target)
+            }
+            // A double press on a result opens it, which is what a double
+            // press on a file does everywhere else. (Nothing produces this
+            // event yet -- `oswindow` does not synthesise it; see
+            // known-issues.md -- but it is the one gesture a person will try
+            // first, and the day it arrives it should work.)
+            MouseEventKind::DoubleClick(MouseButton::Left) => {
+                match self.current_frame().hit_test(event.x, event.y) {
+                    Some(Target::Result(entry)) => {
+                        self.select_entry(entry);
+                        self.open_selected()
+                    }
+                    _ => EventResult::Ignored,
+                }
+            }
+            MouseEventKind::Move => {
+                let over = self.target_at(event.x, event.y);
+                if over == self.hover {
+                    return EventResult::Ignored;
+                }
+                self.hover = over;
+                EventResult::Consumed
+            }
+            MouseEventKind::Leave => {
+                if self.hover.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            MouseEventKind::Scroll { dy, .. } => {
+                let over = self.target_at(event.x, event.y);
+                self.scroll(over, dy)
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Turn the wheel over `over` by `dy` notches.
+    fn scroll(&mut self, over: Option<Target>, dy: f32) -> EventResult {
+        let l = Layout::of(self, self.window.0, self.window.1);
+        match over {
+            Some(Target::Results | Target::Result(_) | Target::Header(_)) => {
+                let rows = self.results_wheel.rows(dy);
+                let last_top = self.results.len().saturating_sub(l.result_rows());
+                let before = self.results_scroll;
+                self.results_scroll = self
+                    .results_scroll
+                    .saturating_add_signed(rows)
+                    .min(last_top);
+                if self.results_scroll == before {
+                    EventResult::Ignored
+                } else {
+                    EventResult::Consumed
+                }
+            }
+            Some(target) if self.show_filters && target.is_in_filters() => {
+                let limit = self.filters_scroll_limit(l.filters);
+                let before = self.filters_scroll;
+                self.filters_scroll =
+                    (self.filters_scroll + wheel::pixels(dy, 24.0)).clamp(0.0, limit);
+                if (self.filters_scroll - before).abs() > f32::EPSILON {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Do what pressing `target` means.
+    fn activate(&mut self, target: Target) -> EventResult {
+        match target {
+            Target::ChooseFolder => {
+                self.open_folder_dialog();
+                EventResult::Consumed
+            }
+            Target::SearchMode | Target::MatchMode => {
+                self.criteria.mode = self.criteria.mode.next();
+                self.rerun_with_filters()
+            }
+            Target::SaveSearch => self.toggle_saved(),
+            Target::CategoryAll => {
+                self.criteria.category_filter = None;
+                self.rerun_with_filters()
+            }
+            Target::Category(cat) => {
+                // Pressing the lit chip again turns it off, which is the way
+                // out the lit chip implies.
+                self.criteria.category_filter = if self.criteria.category_filter == Some(cat) {
+                    None
+                } else {
+                    Some(cat)
+                };
+                self.rerun_with_filters()
+            }
+            Target::Size(sf) => {
+                self.criteria.size_filter = sf;
+                self.rerun_with_filters()
+            }
+            Target::Date(df) => {
+                self.criteria.date_filter = df;
+                self.rerun_with_filters()
+            }
+            Target::MatchCase => {
+                self.criteria.case_sensitive = !self.criteria.case_sensitive;
+                self.rerun_with_filters()
+            }
+            Target::Hidden => {
+                self.criteria.include_hidden = !self.criteria.include_hidden;
+                self.rerun_with_filters()
+            }
+            Target::Folders => {
+                self.criteria.include_directories = !self.criteria.include_directories;
+                self.rerun_with_filters()
+            }
+            Target::Saved(id) | Target::Recent(id) => self.rerun_saved(id),
+            Target::Unsave(id) => {
+                self.unbookmark_search(id);
+                self.store_saved_searches();
+                EventResult::Consumed
+            }
+            Target::Header(column) => self.sort_by(column),
+            Target::Result(entry) => {
+                self.select_entry(entry);
+                EventResult::Consumed
+            }
+            Target::Open => self.open_selected(),
+            Target::OpenLocation => self.open_location(),
+            Target::HelpCard => {
+                self.show_help = false;
+                EventResult::Consumed
+            }
+            // Surfaces: the press is theirs, and stops there.
+            Target::SearchBox | Target::Filters | Target::Results => EventResult::Consumed,
+        }
+    }
+
+    /// Select the result that shows index entry `entry`.
+    fn select_entry(&mut self, entry: usize) {
+        if let Some(pos) = self.results.iter().position(|&r| r == entry) {
+            self.selected_result = Some(pos);
+            self.keep_selection_visible();
+        }
+    }
+
+    /// Scroll the results so the selected one is on screen.
+    fn keep_selection_visible(&mut self) {
+        let Some(selected) = self.selected_result else {
+            return;
+        };
+        let rows = Layout::of(self, self.window.0, self.window.1)
+            .result_rows()
+            .max(1);
+        if selected < self.results_scroll {
+            self.results_scroll = selected;
+        } else if selected >= self.results_scroll.saturating_add(rows) {
+            self.results_scroll = selected.saturating_sub(rows.saturating_sub(1));
+        }
+    }
+
+    /// Open the selected result: a folder in the file manager, a file with the
+    /// program the user has associated with its kind.
+    ///
+    /// `Enter` was listed on the F1 card as "Open what is selected" and re-ran
+    /// the search instead, and the preview's Open button was drawn and wired
+    /// to nothing -- so a search tool found files and could do nothing with
+    /// them. Opening is also what makes a search worth remembering, so this is
+    /// where it joins the recent list.
+    pub fn open_selected(&mut self) -> EventResult {
+        let Some(entry) = self.selected_entry() else {
+            return EventResult::Ignored;
+        };
+        let path = std::path::PathBuf::from(&entry.path);
+        let name = entry.name.clone();
+        let program = if entry.is_directory {
+            Some(FILE_MANAGER.to_string())
+        } else {
+            opener_for(&path)
+        };
+        self.remember_search();
+        self.status_message = match program {
+            Some(program) => match (self.launch)(&program, &path) {
+                Ok(()) => format!("Opening {name} with {program}"),
+                Err(e) => format!("Could not start {program}: {e}"),
+            },
+            None => format!("Nothing is set to open {name} -- File Associations can set one"),
+        };
+        EventResult::Consumed
+    }
+
+    /// Open the folder the selected result is in.
+    pub fn open_location(&mut self) -> EventResult {
+        let Some(path) = self.selected_entry().map(|e| e.path.clone()) else {
+            return EventResult::Ignored;
+        };
+        let Some(folder) = std::path::Path::new(&path)
+            .parent()
+            .map(std::path::Path::to_path_buf)
+        else {
+            return EventResult::Ignored;
+        };
+        self.remember_search();
+        self.status_message = match (self.launch)(FILE_MANAGER, &folder) {
+            Ok(()) => format!("Opening {}", entry_folder_label(&folder)),
+            Err(e) => format!("Could not start the file manager: {e}"),
+        };
+        EventResult::Consumed
+    }
+
+    /// Record the search in the query box as a recent one.
+    ///
+    /// On an open, not on every keystroke: `execute_search` used to record
+    /// here, so typing "report" left six searches -- "r", "re", "rep" and on --
+    /// in a history nothing ever showed. The same search again moves to the
+    /// front rather than appearing twice.
+    fn remember_search(&mut self) {
+        if self.criteria.query.is_empty() {
+            return;
+        }
+        let (query, mode) = (self.criteria.query.clone(), self.criteria.mode);
+        let count = self.results.len();
+        let now = self.criteria.current_time;
+        if let Some(pos) = self
+            .search_history
+            .iter()
+            .position(|s| s.query == query && s.mode == mode)
+        {
+            let mut again = self.search_history.remove(pos);
+            again.result_count = count;
+            again.timestamp = now;
+            self.search_history.push(again);
+            return;
+        }
+        let id = self.next_search_id;
+        self.next_search_id = self.next_search_id.saturating_add(1);
+        self.search_history.push(SavedSearch {
+            id,
+            query,
+            mode,
+            result_count: count,
+            timestamp: now,
+            is_bookmarked: false,
+            name: None,
+        });
+        // Keep the last 50 that are not saved.
+        while self
+            .search_history
+            .iter()
+            .filter(|s| !s.is_bookmarked)
+            .count()
+            > 50
+        {
+            match self.search_history.iter().position(|s| !s.is_bookmarked) {
+                Some(oldest) => {
+                    self.search_history.remove(oldest);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// Whether the search in the query box is a saved one.
+    fn current_search_is_saved(&self) -> bool {
+        self.search_history.iter().any(|s| {
+            s.is_bookmarked && s.query == self.criteria.query && s.mode == self.criteria.mode
+        })
+    }
+
+    /// Save the search in the query box, or forget it if it is saved.
+    ///
+    /// Saved searches outlive the window -- `filesearch.yaml` -- because a
+    /// saved search that is gone at the next launch was never saved.
+    pub fn toggle_saved(&mut self) -> EventResult {
+        if self.criteria.query.is_empty() {
+            self.status_message = "Type a search to save it".to_string();
+            return EventResult::Consumed;
+        }
+        let (query, mode) = (self.criteria.query.clone(), self.criteria.mode);
+        match self
+            .search_history
+            .iter()
+            .position(|s| s.query == query && s.mode == mode)
+        {
+            Some(pos) => {
+                let id = self.search_history.get(pos).map_or(0, |s| s.id);
+                if self.current_search_is_saved() {
+                    self.unbookmark_search(id);
+                } else {
+                    self.bookmark_search(id, &query);
+                }
+            }
+            None => {
+                self.remember_search();
+                let id = self.next_search_id.saturating_sub(1);
+                self.bookmark_search(id, &query);
+            }
+        }
+        self.store_saved_searches();
+        EventResult::Consumed
+    }
+
+    /// Put a saved or recent search back in the query box and run it.
+    fn rerun_saved(&mut self, id: u32) -> EventResult {
+        let Some(search) = self.search_history.iter().find(|s| s.id == id) else {
+            return EventResult::Ignored;
+        };
+        self.criteria.query = search.query.clone();
+        self.criteria.mode = search.mode;
+        self.execute_search();
+        EventResult::Consumed
+    }
+
+    /// Read the saved searches from the user's settings.
+    ///
+    /// Entries that do not parse -- an unknown mode word, an empty query -- are
+    /// not shown, and not invented into something else either. They are kept,
+    /// verbatim, and written back with the rest: the file is the user's, and a
+    /// search this version cannot run (one saved by a newer version, say) is
+    /// still theirs.
+    pub fn load_saved_searches(&mut self, doc: &yamldoc::Document) {
+        for item in doc.get_seq(&SAVED_KEY).unwrap_or_default() {
+            let parsed = item.split_once(':').and_then(|(word, query)| {
+                SearchMode::from_key(word)
+                    .filter(|_| !query.is_empty())
+                    .map(|mode| (mode, query.to_string()))
+            });
+            let Some((mode, query)) = parsed else {
+                self.unreadable_saved.push(item);
+                continue;
+            };
+            let id = self.next_search_id;
+            self.next_search_id = self.next_search_id.saturating_add(1);
+            self.search_history.push(SavedSearch {
+                id,
+                name: Some(query.clone()),
+                query,
+                mode,
+                result_count: 0,
+                timestamp: 0,
+                is_bookmarked: true,
+            });
+        }
+    }
+
+    /// The saved searches as the settings file records them.
+    fn saved_search_items(&self) -> Vec<String> {
+        self.search_history
+            .iter()
+            .filter(|s| s.is_bookmarked)
+            .map(|s| format!("{}:{}", s.mode.key(), s.query))
+            .chain(self.unreadable_saved.iter().cloned())
+            .collect()
+    }
+
+    /// Write the saved searches to the user's settings, saying so if that
+    /// fails: a save that silently did not happen is found out at the next
+    /// launch, when the search is gone.
+    fn store_saved_searches(&mut self) {
+        let items = self.saved_search_items();
+        let refs: Vec<&str> = items.iter().map(String::as_str).collect();
+        let mut doc = settingsfile::load(CONFIG_NAME);
+        doc.set_seq(&SAVED_KEY, &refs);
+        if let Err(e) = settingsfile::store(CONFIG_NAME, &doc) {
+            self.status_message = format!("Could not save your saved searches: {e}");
+        }
+    }
+
+    /// The folder the index holds, for the header.
+    fn root_label(&self) -> String {
+        match &self.root {
+            Some(root) => format!("in {}", entry_folder_label(root)),
+            None => "No folder chosen yet".to_string(),
+        }
+    }
+}
+
+impl Target {
+    /// Whether this target is part of the filters panel, which the wheel
+    /// scrolls as one.
+    fn is_in_filters(self) -> bool {
+        matches!(
+            self,
+            Self::Filters
+                | Self::CategoryAll
+                | Self::Category(_)
+                | Self::Size(_)
+                | Self::Date(_)
+                | Self::MatchMode
+                | Self::MatchCase
+                | Self::Hidden
+                | Self::Folders
+                | Self::Saved(_)
+                | Self::Unsave(_)
+                | Self::Recent(_)
+        )
+    }
+}
+
+impl SearchMode {
+    /// The next mode round the ring Ctrl+R steps through.
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::Substring => Self::Glob,
+            Self::Glob => Self::Regex,
+            Self::Regex => Self::Content,
+            Self::Content => Self::Substring,
+        }
+    }
+}
+
+/// A folder, for a message or a label: its path as the system would print
+/// it. Display only -- nothing is ever looked up by this string.
+fn entry_folder_label(folder: &std::path::Path) -> String {
+    folder.display().to_string()
+}
+
+/// The program the user has chosen for this kind of file, read from the File
+/// Associations program's configuration -- the same lookup the file manager
+/// makes, so a file opens with the same program from either.
+///
+/// Read on every open rather than cached, for the file manager's reason: an
+/// association changed in another window must be the one used next.
+fn opener_for(path: &std::path::Path) -> Option<String> {
+    // `to_str` rather than bytes: the associations are keys in a YAML
+    // document, so they are text by construction and an extension that is not
+    // UTF-8 could never match one. `None` here is a refusal, not a lossy
+    // conversion.
+    let ext = path.extension().and_then(|e| e.to_str())?;
+    let doc = settingsfile::load(associations::CONFIG_NAME);
+    associations::program_for(&doc, ext)
 }
 
 // ─── Formatting Helpers ──────────────────────────────────────────────
@@ -2293,7 +3200,11 @@ impl App for FileSearchApp {
     }
 
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
-        let mut commands = self.render_commands(width, height);
+        self.window = (width, height);
+        let frame = self.frame(width, height);
+        // Kept for the pointer's movement and the wheel; see `target_at`.
+        self.last_hits = frame.hits().to_vec();
+        let mut commands = frame.into_tree().commands;
         // Last, so it is on top -- the same order in which `handle_event`
         // gives it the click.
         commands.extend(self.picker.render(&self.palette, width, height));
@@ -2330,7 +3241,8 @@ fn main() -> ExitCode {
     // which was true, and the missing piece turned out to be nearer than the
     // `indexer` service that comment pointed at. Ctrl+O reads a real folder.
     let mut app = FileSearchApp::new();
-    app.status_message = String::from("Press Ctrl+O to choose a folder to search");
+    app.load_saved_searches(&settingsfile::load(CONFIG_NAME));
+    app.status_message = String::from("Choose a folder to search: the button above, or Ctrl+O");
     app::launch("filesearch", &mut app)
 }
 
@@ -2801,24 +3713,28 @@ mod tests {
     /// refused without them.
     #[test]
     fn every_advertised_key_does_something() {
-        for (label, what) in SHORTCUTS {
-            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
-                let mut app = FileSearchApp::new();
-                app.handle_event(&typed('a'));
-                // Results to step through. A test process has nothing
-                // indexed, so a typed query finds none, and Up/Down/Home/End
-                // and Enter are then correctly refused -- which is not the
-                // same as being unbound.
-                app.results = vec![0, 1, 2];
-                app.selected_result = Some(1);
-                assert_eq!(
-                    app.handle_event(&Event::Key(stroke.clone())),
-                    EventResult::Consumed,
-                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
-                    stroke.key
-                );
+        // Scratch settings: Ctrl+D saves a search, which writes them.
+        settingsfile::testing::with_scratch_config("fs_advertised", |_| {
+            for (label, what) in SHORTCUTS {
+                for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                    let mut app = FileSearchApp::new();
+                    app.launch = |_, _| Ok(());
+                    populate_sample_index(&mut app.index);
+                    app.handle_event(&typed('a'));
+                    // Results to step through, over real entries: Up, Down,
+                    // Home, End and Enter all act on a selection, and Enter
+                    // opens what it names.
+                    app.results = vec![0, 1, 2];
+                    app.selected_result = Some(1);
+                    assert_eq!(
+                        app.handle_event(&Event::Key(stroke.clone())),
+                        EventResult::Consumed,
+                        "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                        stroke.key
+                    );
+                }
             }
-        }
+        });
     }
 
     /// **The shortcut list reaches the window, and nothing acts behind it.**
@@ -3732,12 +4648,28 @@ mod tests {
         assert_eq!(app.results.len(), 2); // main.rs, lib.rs
     }
 
+    /// **A search is remembered when something is opened from it -- not on
+    /// every keystroke.** Every search used to be recorded as it ran, so
+    /// typing "report" left "r", "re", "rep" and on in the history.
     #[test]
-    fn test_app_search_history() {
+    fn a_search_is_remembered_when_it_is_used_not_as_it_is_typed() {
         let mut app = FileSearchApp::new();
+        app.launch = |_, _| Ok(());
         populate_sample_index(&mut app.index);
-        app.criteria.query = "test".to_string();
-        app.execute_search();
+        for c in "report".chars() {
+            app.handle_event(&typed(c));
+        }
+        assert!(app.search_history.is_empty(), "keystrokes were recorded");
+        app.handle_event(&Event::Key(guitk::probe::press(Key::Enter)));
+        app.handle_event(&Event::Key(guitk::probe::press(Key::Enter)));
+        assert_eq!(
+            app.search_history.len(),
+            1,
+            "opening a result recorded nothing"
+        );
+        assert_eq!(app.search_history[0].query, "report");
+        // The same search again moves; it is not listed twice.
+        app.handle_event(&Event::Key(guitk::probe::press(Key::Enter)));
         assert_eq!(app.search_history.len(), 1);
     }
 
@@ -3747,6 +4679,7 @@ mod tests {
         populate_sample_index(&mut app.index);
         app.criteria.query = "test".to_string();
         app.execute_search();
+        app.remember_search();
         let id = app.search_history[0].id;
         app.bookmark_search(id, "My Search");
         assert!(app.search_history[0].is_bookmarked);
@@ -3866,14 +4799,20 @@ mod tests {
         app
     }
 
+    /// The results panel alone, drawn 900 by 400 at the origin.
+    fn results_commands(app: &FileSearchApp) -> Vec<RenderCommand> {
+        let mut f = Frame::new(900.0, 400.0);
+        app.draw_results(&mut f, Rect::new(0.0, 0.0, 900.0, 400.0));
+        f.commands().to_vec()
+    }
+
     #[test]
     fn no_result_cell_escapes_its_column() {
         let app = app_with_a_shouting_result();
-        let mut cmds = Vec::new();
         // Render the results panel directly: a whole-app render puts sidebar
         // and search-bar text at x values that fall inside a column's range,
         // and the assertion would then fail on chrome that is not in the table.
-        app.render_results(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let cmds = results_commands(&app);
 
         let table = Table::new(RESULT_COLUMNS, 0.0);
         let spans = table.spans();
@@ -3927,8 +4866,7 @@ mod tests {
     #[test]
     fn an_overlong_filename_is_marked_as_cut() {
         let app = app_with_a_shouting_result();
-        let mut cmds = Vec::new();
-        app.render_results(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let cmds = results_commands(&app);
         let names = result_column_cells(&cmds, COL_NAME);
         assert!(
             names.iter().any(|n| n.ends_with('…')),
@@ -3943,8 +4881,7 @@ mod tests {
     #[test]
     fn an_overlong_directory_keeps_its_deepest_component() {
         let app = app_with_a_shouting_result();
-        let mut cmds = Vec::new();
-        app.render_results(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let cmds = results_commands(&app);
         let paths = result_column_cells(&cmds, COL_PATH);
         let deep = paths
             .iter()
@@ -4019,6 +4956,517 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // The pointer
+    //
+    // Driven through `handle_event`, at the point the renderer says it drew
+    // the control -- see `guitk::probe`.
+    // ------------------------------------------------------------------
+
+    use guitk::probe::{self, Probe};
+
+    impl Probe for FileSearchApp {
+        type Target = Target;
+        type Outcome = EventResult;
+        const SIZE: (f32, f32) = (1280.0, 800.0);
+
+        fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+            self.frame(size.0, size.1)
+        }
+
+        fn click_at(
+            &mut self,
+            x: f32,
+            y: f32,
+            button: MouseButton,
+            size: (f32, f32),
+        ) -> EventResult {
+            self.window = size;
+            self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }))
+        }
+
+        fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> EventResult {
+            self.window = size;
+            self.handle_event(&Event::Key(key.clone()))
+        }
+
+        fn scroll_at(&mut self, x: f32, y: f32, dy: f32, size: (f32, f32)) -> Option<EventResult> {
+            self.window = size;
+            Some(self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })))
+        }
+    }
+
+    thread_local! {
+        /// What the test launcher was asked to start, in order.
+        static LAUNCHED: std::cell::RefCell<Vec<(String, std::path::PathBuf)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// A launcher that starts nothing and writes down what it was asked.
+    ///
+    /// Returns a `Result` because it stands in for `FileSearchApp::launch`,
+    /// whose type that is; the real launcher can fail.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the signature is the launch field's, which the real spawn fills"
+    )]
+    fn record_launch(program: &str, path: &std::path::Path) -> std::io::Result<()> {
+        LAUNCHED.with(|l| {
+            l.borrow_mut()
+                .push((program.to_string(), path.to_path_buf()));
+        });
+        Ok(())
+    }
+
+    /// The sample index, searched for everything, with a launcher that starts
+    /// nothing.
+    fn wired() -> FileSearchApp {
+        let mut app = FileSearchApp::new();
+        app.launch = record_launch;
+        LAUNCHED.with(|l| l.borrow_mut().clear());
+        populate_sample_index(&mut app.index);
+        app.criteria.current_time = 1_779_000_000;
+        app.execute_search();
+        app
+    }
+
+    /// Scroll the filters panel with the wheel until `target` is on screen,
+    /// as a person would to reach a row below the window's edge.
+    fn reveal(app: &mut FileSearchApp, target: Target) {
+        for _ in 0..60 {
+            if probe::is_visible(app, target) {
+                return;
+            }
+            probe::scroll_at_point(app, Target::Filters, -1.0);
+        }
+        panic!("{target:?} could not be scrolled into view");
+    }
+
+    /// **Every chip and switch in the filters panel answers a press**, and
+    /// does what its key does. They were drawn with selection highlights only
+    /// the keyboard could move; the four Search rows were labels.
+    #[test]
+    fn every_filter_answers_the_pointer() {
+        let mut app = wired();
+        probe::click(&mut app, Target::Category(FileCategory::Image));
+        assert_eq!(app.criteria.category_filter, Some(FileCategory::Image));
+        assert!(!app.results.is_empty());
+        assert!(
+            app.results
+                .iter()
+                .all(|&i| app.index.entries[i].category == FileCategory::Image)
+        );
+        // The lit chip, pressed again, is the way back out.
+        probe::click(&mut app, Target::Category(FileCategory::Image));
+        assert_eq!(app.criteria.category_filter, None);
+        probe::click(&mut app, Target::Category(FileCategory::Code));
+        probe::click(&mut app, Target::CategoryAll);
+        assert_eq!(app.criteria.category_filter, None);
+
+        probe::click(&mut app, Target::Size(SizeFilter::Tiny));
+        assert_eq!(app.criteria.size_filter, SizeFilter::Tiny);
+        probe::click(&mut app, Target::Date(DateFilter::Today));
+        assert_eq!(app.criteria.date_filter, DateFilter::Today);
+
+        let mode = app.criteria.mode;
+        // The last of the four Search rows; the other three are above it.
+        reveal(&mut app, Target::Folders);
+        probe::click(&mut app, Target::MatchMode);
+        assert_eq!(app.criteria.mode, mode.next());
+        probe::click(&mut app, Target::SearchMode);
+        assert_eq!(
+            app.criteria.mode,
+            mode.next().next(),
+            "the mode chip is not a switch"
+        );
+        probe::click(&mut app, Target::MatchCase);
+        assert!(app.criteria.case_sensitive);
+        probe::click(&mut app, Target::Hidden);
+        assert!(app.criteria.include_hidden);
+        let folders = app.criteria.include_directories;
+        probe::click(&mut app, Target::Folders);
+        assert_eq!(app.criteria.include_directories, !folders);
+    }
+
+    /// The filters panel is taller than an 800-pixel window, so it scrolls,
+    /// and a row scrolled out of it cannot be pressed.
+    #[test]
+    fn the_filters_panel_scrolls_to_its_last_row() {
+        let mut app = wired();
+        assert!(
+            !probe::is_visible(&app, Target::Folders),
+            "the whole panel fits; this test needs a window it overflows"
+        );
+        for _ in 0..40 {
+            probe::scroll_at_point(&mut app, Target::Filters, -1.0);
+        }
+        assert!(
+            probe::is_visible(&app, Target::Folders),
+            "the last row is unreachable"
+        );
+        assert!(
+            !probe::is_visible(&app, Target::CategoryAll),
+            "a row scrolled away is still pressable"
+        );
+    }
+
+    /// **A column heading sorts by it, and again reverses it.**
+    #[test]
+    fn a_column_heading_sorts() {
+        let mut app = wired();
+        probe::click(&mut app, Target::Header(SortColumn::Size));
+        assert_eq!(app.sort_column, SortColumn::Size);
+        assert!(app.sort_ascending);
+        let sizes: Vec<u64> = app
+            .results
+            .iter()
+            .map(|&i| app.index.entries[i].size)
+            .collect();
+        assert!(sizes.windows(2).all(|w| w[0] <= w[1]), "{sizes:?}");
+        probe::click(&mut app, Target::Header(SortColumn::Size));
+        assert!(!app.sort_ascending, "the second press did not reverse it");
+    }
+
+    /// **A result is selected by a press, named by its entry and not its
+    /// row.**
+    #[test]
+    fn a_press_selects_the_result_under_it() {
+        let mut app = wired();
+        let entry = app.results[2];
+        probe::click(&mut app, Target::Result(entry));
+        assert_eq!(
+            app.selected_entry().map(|e| e.path.clone()),
+            Some(app.index.entries[entry].path.clone())
+        );
+        // Sorting moves the row; the target still names the same entry.
+        probe::click(&mut app, Target::Header(SortColumn::Size));
+        let before = app.selected_entry().map(|e| e.path.clone());
+        probe::click(&mut app, Target::Result(entry));
+        assert_eq!(app.selected_entry().map(|e| e.path.clone()), before);
+    }
+
+    /// Two hundred results: more than any window shows at once.
+    fn many_results() -> FileSearchApp {
+        let mut app = FileSearchApp::new();
+        app.launch = record_launch;
+        for i in 0..200 {
+            app.index.add(IndexEntry::new(
+                &format!("/data/file{i:03}.txt"),
+                &format!("file{i:03}.txt"),
+                10,
+                0,
+                0,
+                false,
+            ));
+        }
+        app.execute_search();
+        app
+    }
+
+    /// **The results scroll: with the wheel, and to follow the selection.**
+    /// They were cut off at the panel's bottom edge, and the keyboard could
+    /// move the selection onto rows that were never drawn.
+    #[test]
+    fn results_past_the_panel_can_be_reached() {
+        let mut app = many_results();
+        assert_eq!(app.results.len(), 200);
+        let last = *app.results.last().unwrap();
+        assert!(!probe::is_visible(&app, Target::Result(last)));
+
+        probe::key(&mut app, &probe::press(Key::End));
+        assert!(
+            probe::is_visible(&app, Target::Result(last)),
+            "the selection left the screen"
+        );
+        probe::key(&mut app, &probe::press(Key::Home));
+        assert!(probe::is_visible(&app, Target::Result(app.results[0])));
+
+        probe::scroll_at_point(&mut app, Target::Results, -5.0);
+        assert!(
+            app.results_scroll > 0,
+            "the wheel over the results scrolled nothing"
+        );
+        assert!(!probe::is_visible(&app, Target::Result(app.results[0])));
+
+        // Page Down moves a page, and lands on the end rather than refusing.
+        let mut app2 = many_results();
+        probe::key(&mut app2, &probe::press(Key::Down));
+        probe::key(&mut app2, &probe::press(Key::PageDown));
+        assert!(app2.selected_result.unwrap() > 1, "Page Down moved one row");
+        for _ in 0..20 {
+            probe::key(&mut app2, &probe::press(Key::PageDown));
+        }
+        assert_eq!(app2.selected_result, Some(199));
+    }
+
+    /// **Enter opens what is selected**, as the F1 card always said, and the
+    /// preview's two actions do what they say. Open used to re-run the search
+    /// and the action buttons were wired to nothing.
+    #[test]
+    fn enter_and_the_actions_open_what_is_selected() {
+        settingsfile::testing::with_scratch_config("fs_open", |root| {
+            // A program for PDFs, as File Associations would record it.
+            let mut doc = yamldoc::Document::new();
+            doc.set_str(&[associations::ASSOCIATIONS, "pdf"], "/usr/bin/pdfviewer");
+            settingsfile::store(associations::CONFIG_NAME, &doc).unwrap();
+            let _ = root;
+
+            let mut app = wired();
+            app.criteria.query = "report".to_string();
+            app.execute_search();
+            probe::key(&mut app, &probe::press(Key::Enter));
+            assert!(
+                app.selected_result.is_some(),
+                "Enter with nothing selected selected nothing"
+            );
+            probe::key(&mut app, &probe::press(Key::Enter));
+            let launched = LAUNCHED.with(|l| l.borrow().clone());
+            assert_eq!(
+                launched.len(),
+                1,
+                "Enter started nothing: {}",
+                app.status_message
+            );
+            assert_eq!(launched[0].0, "/usr/bin/pdfviewer");
+            assert!(launched[0].1.ends_with("report.pdf"));
+
+            probe::click(&mut app, Target::OpenLocation);
+            let launched = LAUNCHED.with(|l| l.borrow().clone());
+            assert_eq!(launched.len(), 2);
+            assert_eq!(launched[1].0, FILE_MANAGER);
+            assert!(launched[1].1.ends_with("Documents"), "{:?}", launched[1].1);
+
+            probe::click(&mut app, Target::Open);
+            assert_eq!(
+                LAUNCHED.with(|l| l.borrow().len()),
+                3,
+                "the Open button started nothing"
+            );
+        });
+    }
+
+    /// A folder among the results opens in the file manager, whatever the
+    /// associations say about anything.
+    #[test]
+    fn a_folder_result_opens_in_the_file_manager() {
+        settingsfile::testing::with_scratch_config("fs_open_folder", |_| {
+            let mut app = wired();
+            app.index.add(IndexEntry::new(
+                "/home/user/Projects",
+                "Projects",
+                0,
+                1_779_000_000,
+                1_779_000_000,
+                true,
+            ));
+            app.criteria.query = "Projects".to_string();
+            app.execute_search();
+            let folder = app
+                .results
+                .iter()
+                .position(|&i| app.index.entries[i].is_directory)
+                .expect("the folder is a result");
+            app.selected_result = Some(folder);
+            probe::key(&mut app, &probe::press(Key::Enter));
+            let launched = LAUNCHED.with(|l| l.borrow().clone());
+            assert_eq!(launched.len(), 1, "{}", app.status_message);
+            assert_eq!(launched[0].0, FILE_MANAGER);
+            assert!(launched[0].1.ends_with("Projects"));
+        });
+    }
+
+    /// A kind with no program says so, and starts nothing.
+    #[test]
+    fn a_file_nothing_opens_says_so() {
+        settingsfile::testing::with_scratch_config("fs_no_opener", |_| {
+            let mut app = wired();
+            app.criteria.query = "report".to_string();
+            app.execute_search();
+            app.selected_result = Some(0);
+            probe::key(&mut app, &probe::press(Key::Enter));
+            assert!(LAUNCHED.with(|l| l.borrow().is_empty()));
+            assert!(
+                app.status_message.contains("Nothing is set to open"),
+                "{}",
+                app.status_message
+            );
+        });
+    }
+
+    /// **A search can be saved, survives the window, and can be forgotten.**
+    /// `bookmark_search` had no caller; a saved search that is gone at the
+    /// next launch was never saved.
+    #[test]
+    fn a_saved_search_outlives_the_window() {
+        settingsfile::testing::with_scratch_config("fs_saved", |_| {
+            let mut app = wired();
+            app.criteria.query = "*.rs".to_string();
+            app.criteria.mode = SearchMode::Glob;
+            app.execute_search();
+            probe::click(&mut app, Target::SaveSearch);
+            assert!(app.current_search_is_saved());
+
+            // The next window finds it, and pressing it runs it.
+            let mut next = wired();
+            next.load_saved_searches(&settingsfile::load(CONFIG_NAME));
+            let id = next
+                .search_history
+                .iter()
+                .find(|s| s.is_bookmarked)
+                .map(|s| s.id)
+                .expect("the saved search did not survive");
+            reveal(&mut next, Target::Saved(id));
+            probe::click(&mut next, Target::Saved(id));
+            assert_eq!(next.criteria.query, "*.rs");
+            assert_eq!(next.criteria.mode, SearchMode::Glob);
+            assert_eq!(next.results.len(), 2);
+
+            // Its × forgets it, there and on disk.
+            reveal(&mut next, Target::Unsave(id));
+            probe::click(&mut next, Target::Unsave(id));
+            assert!(!next.current_search_is_saved());
+            let mut third = wired();
+            third.load_saved_searches(&settingsfile::load(CONFIG_NAME));
+            assert!(third.search_history.iter().all(|s| !s.is_bookmarked));
+        });
+    }
+
+    /// A saved search this version cannot read is kept, not rewritten away.
+    #[test]
+    fn an_unreadable_saved_search_is_written_back_as_it_was() {
+        settingsfile::testing::with_scratch_config("fs_saved_foreign", |_| {
+            let mut doc = yamldoc::Document::new();
+            doc.set_seq(&SAVED_KEY, &["fuzzy:repor", "glob:*.md"]);
+            settingsfile::store(CONFIG_NAME, &doc).unwrap();
+
+            let mut app = wired();
+            app.load_saved_searches(&settingsfile::load(CONFIG_NAME));
+            assert_eq!(
+                app.search_history
+                    .iter()
+                    .filter(|s| s.is_bookmarked)
+                    .count(),
+                1
+            );
+            app.criteria.query = "notes".to_string();
+            app.toggle_saved();
+            let kept = settingsfile::load(CONFIG_NAME).get_seq(&SAVED_KEY).unwrap();
+            assert!(kept.contains(&"fuzzy:repor".to_string()), "{kept:?}");
+            assert!(kept.contains(&"glob:*.md".to_string()), "{kept:?}");
+            assert!(kept.contains(&"name:notes".to_string()), "{kept:?}");
+        });
+    }
+
+    /// A recent search is offered back, and pressing it runs it again.
+    #[test]
+    fn a_recent_search_can_be_run_again() {
+        let mut app = wired();
+        app.criteria.query = "budget".to_string();
+        app.execute_search();
+        app.selected_result = Some(0);
+        app.open_selected();
+        app.criteria.query.clear();
+        app.execute_search();
+        let id = app.search_history[0].id;
+        reveal(&mut app, Target::Recent(id));
+        probe::click(&mut app, Target::Recent(id));
+        assert_eq!(app.criteria.query, "budget");
+        assert_eq!(app.results.len(), 1);
+    }
+
+    /// The folder button puts the picker up; the header names the folder.
+    #[test]
+    fn the_folder_button_asks_for_a_folder() {
+        let mut app = FileSearchApp::new();
+        probe::click(&mut app, Target::ChooseFolder);
+        assert!(app.picker.is_open(), "the button put nothing up");
+        let mut app = FileSearchApp::new();
+        let text = drawn(&app).join(" | ");
+        assert!(text.contains("No folder chosen yet"), "{text}");
+        app.root = Some(std::path::PathBuf::from("/home/user/docs"));
+        let text = drawn(&app).join(" | ");
+        assert!(text.contains("/home/user/docs"), "{text}");
+    }
+
+    /// **"Now" is the clock's now.** It was the constant `1_779_000_000`, so
+    /// "Today" meant one day in May 2026 forever.
+    #[test]
+    fn now_is_read_from_the_clock() {
+        let before = unix_now();
+        let app = FileSearchApp::new();
+        assert!(app.criteria.current_time >= before);
+        assert!(
+            app.criteria.current_time > 1_779_000_000,
+            "still the frozen date"
+        );
+
+        // And an index pass reads it again, so ages are measured from when the
+        // modification times were read.
+        let dir = std::env::temp_dir().join(format!("fs-now-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("fresh.txt"), b"x").unwrap();
+        let mut app = FileSearchApp::new();
+        app.criteria.current_time = 5;
+        app.index_directory(&dir);
+        assert!(
+            app.criteria.current_time >= before,
+            "indexing kept a stale clock"
+        );
+        app.execute_search();
+        app.criteria.date_filter = DateFilter::Today;
+        app.execute_search();
+        assert!(
+            app.results
+                .iter()
+                .any(|&i| app.index.entries[i].name == "fresh.txt"),
+            "a file written a moment ago is not \"Today\""
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Hovering an action names its key in the status bar.
+    #[test]
+    fn hovering_an_action_names_its_key() {
+        let mut app = wired();
+        app.selected_result = Some(0);
+        let (x, y) = probe::rect_of(&app, Target::OpenLocation).unwrap().centre();
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        assert!(drawn(&app).join(" | ").contains("(Ctrl+L)"));
+    }
+
+    /// A press while the shortcut card is up puts it away and reaches nothing
+    /// under it.
+    #[test]
+    fn a_press_puts_the_card_away() {
+        let mut app = wired();
+        app.handle_event(&Event::Key(probe::press(Key::F1)));
+        let (x, y) = probe::rect_of(&app, Target::CategoryAll).unwrap().centre();
+        app.criteria.category_filter = Some(FileCategory::Code);
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert!(!app.show_help);
+        assert_eq!(
+            app.criteria.category_filter,
+            Some(FileCategory::Code),
+            "the press went through"
         );
     }
 }

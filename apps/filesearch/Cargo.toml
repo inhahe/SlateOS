@@ -16,5 +16,18 @@ guitk = { path = "../../gui/toolkit" }
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
 
+# Opening a result: the program the user associated with its kind, read the
+# way the file manager reads it, so a file opens with the same program from
+# either. See gui/associations/src/lib.rs.
+associations = { path = "../../gui/associations" }
+# Where the associations live, and where saved searches are kept.
+settingsfile = { path = "../../gui/settingsfile" }
+yamldoc = { path = "../../yamldoc" }
+
+# `with_scratch_config`, so the saved-search tests write a scratch settings
+# directory and never the user's.
+[dev-dependencies]
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
+
 [lints]
 workspace = true

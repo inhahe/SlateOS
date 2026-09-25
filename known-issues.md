@@ -23235,6 +23235,7 @@ is the only way to tell afterwards that the fix worked.
 ---
 
 ### [B] D-POSIX-NULL-POINTER-ERRNO-NEEDS-A-PER-FUNCTION-AUDIT. The rest of `posix/`'s `is_null() -> EFAULT` checks have not been classified against glibc — 2026-08-13 — OPEN (tech debt)
+**Status:** OPEN — tech debt in `posix/**`, which lane D owns since the six-lane split of 2026-09-22; the entry keeps lane B's tag as the record of who found it.
 
 **Where:** `posix/src/**` — every `if p.is_null() { set_errno(EFAULT); … }`.
 
@@ -28185,6 +28186,7 @@ Changing it now would be a guess dressed as a measurement.
 ---
 
 ### [B] B-INIT-READS-A-KERNEL-ERROR-AS-A-CHILD-EXIT-CODE-AND-RESTARTS-ON-IT — ✅ FIXED 2026-08-14
+**Status:** FIXED 2026-08-14
 
 **Reported by lane-a** in
 `requests/a-b-init-conflates-syscall-error-with-exit-code.md`; fixed in
@@ -42934,6 +42936,7 @@ carries a test affordance.
 ---
 
 ## [B] `/etc/users.yaml` has two writers with incompatible schemas, so a password set by `useradm` is rejected by the login screen (2026-08-17)
+**Status:** FIXED 2026-08-17 (`cc0fa5da9`, `5ab46559a`, `3a3321a76`) — both writers go through `userspace/userdb`; see the FIXED section below and design-decisions.md §330.
 
 **In short:** SlateOS keeps its own user database at `/etc/users.yaml`, separate
 from the POSIX `/etc/shadow`. Seven programs read it and two of them write it —
@@ -43053,6 +43056,7 @@ can be seen to disagree, and the step none of the replaced tests took.
 ---
 
 ## [B] The login screen ignores `avatar_path` and always draws initials (2026-08-17)
+**Status:** OPEN — re-verified 2026-09-24: the user tile still draws only the initials circle.
 
 **In short:** An account can name a picture to show next to it on the login
 screen — the `avatar_path:` field in `/etc/users.yaml`, which `useradm mod
@@ -43324,6 +43328,7 @@ database, so an administrator who set root's shell had it ignored.
 ---
 
 ## [B] Two different `sudo` binaries are built from this workspace (2026-08-17)
+**Status:** FIXED 2026-08-21 (`f5d95fa2b`) — `su`'s built-in `sudo` personality was deleted, so `userspace/sudo` is the only `sudo`; `check-bin-collisions.py` (pre-push gate 51) now refuses a second one.
 
 **In short:** The build produces two separate programs both called `sudo`,
 from two crates that do not know about each other, implementing different
@@ -77067,6 +77072,7 @@ question B-Q7. This entry is only about the seven numbers they both needed.
 ---
 
 ### [B] TD-B-LS-INVENTS-A-POSITION-FOR-THE-DOT-ENTRIES — 2026-08-22 — OPEN (tech debt)
+**Status:** OPEN — re-verified 2026-09-24: `RealTree::read_dir` still puts the dots at the front of the stream.
 
 **What it is.** `ls -a` has to list `.` and `..`, and `std::fs::read_dir`
 discards them. `RealTree::read_dir` in `userspace/coreutils/src/bin/ls.rs`
@@ -77116,6 +77122,7 @@ with the dots prepended, which is self-consistent and merely not GNU's.
 `ls -f`'s order starts mattering to something (a test, a script in the image).
 
 ### [B] TD-B-LS-WRITES-A-DIAGNOSTIC-WITHOUT-FLUSHING-THE-LISTING-FIRST — 2026-08-22 — FIXED 2026-08-22
+**Status:** FIXED 2026-08-22
 
 **What it is.** `ls` accumulates its whole listing in `Out::buf` and writes it
 once, at the end of `main`. Diagnostics go to stderr the moment they happen. So
@@ -77174,6 +77181,7 @@ exit status is **1**, not 2: `t/noperm` was reached by recursing rather than
 named on the command line, and GNU reserves 2 for the latter.
 
 ### [B] TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT — 2026-08-22 — OPEN (tech debt, blocked on B-Q8)
+**Status:** OPEN — blocked on B-Q8, still open 2026-09-24.
 
 > **Measured 2026-09-12, and it dwarfs the 626 this is blocked on.** Our own
 > terminal (`apps/terminal`) has **no notion of character width at all**: it
@@ -77273,6 +77281,7 @@ drop the two `!` cases and the `y/` fixture from `scripts/ls-diff.sh`.
 `ls --sort=width -1 y` and `ls -C -w 20 y`, both marked `!`.
 
 ### [B] TD-B-LS-ACCEPTS-HYPERLINK-WITHOUT-EMITTING-IT — 2026-08-22 — OPEN (tech debt)
+**Status:** OPEN — re-verified 2026-09-24: `print_hyperlink` is still read only to cancel `--dired`.
 
 **What it is.** `ls --hyperlink[=WHEN]` parses, validates its argument and sets
 `Settings::print_hyperlink`, and then nothing reads it. GNU wraps each name in
@@ -77334,6 +77343,7 @@ when a terminal in the image starts honouring OSC 8.
 `ls --hyperlink=always -l t`, both marked `!`.
 
 ### [B] TD-B-LS-CANNOT-RESTORE-THE-TERMINAL-ON-AN-ABNORMAL-EXIT — 2026-08-22 — OPEN (tech debt)
+**Status:** OPEN — nothing to hook while SlateOS has no Unix signals, by design.
 
 **What it is.** GNU `ls --color` installs signal handlers the first time it
 writes a colour escape, so that a run killed or suspended part-way through

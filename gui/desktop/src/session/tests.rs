@@ -365,7 +365,7 @@ fn rebinding_a_shortcut_moves_the_grab_with_it() {
             .all_bindings()
             .position(|(h, _)| *h == old)
             .expect("the row is in the list");
-        session.shell_mut().shortcut_selected = row;
+        session.shell_mut().shortcut_editor.set_selected(row);
 
         let before = desktop.borrow().seen.len();
         drop(session.shell_mut().handle_hotkey(&KeyEvent {

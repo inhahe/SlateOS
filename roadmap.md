@@ -1616,6 +1616,16 @@ live.
   `requests/c-e-the-toolkit-has-a-treeview-now-and-five-apps-draw-their-own.md`.
   Until one does, this is one more toolkit module with tests and no user.
 
+- `[C]` **Hotkeys: choose what a chord does** — done 2026-09-24. The shortcut
+  card could re-record and delete; it could not point keys at a different
+  action or at a command, so `LaunchApp` was reachable only by hand-editing
+  the file. F2 changes a row's action, Insert adds a shortcut, both through a
+  searchable action list that shows each action's keys; "Run a program…"
+  binds any program; taken keys are offered for moving rather than
+  refused. `gui/desktop/src/shortcut_editor.rs`; the text fields use the new
+  `guitk::textinput::TextInput::edit_key`. What stays open is C-Q24 (how few
+  shortcuts to ship) and the emoji/Unicode hotkey action.
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's

@@ -126,16 +126,16 @@ use yamldoc::Document;
 // Rendering constants
 // ============================================================================
 
-const PANEL_WIDTH: f32 = 560.0;
+pub(crate) const PANEL_WIDTH: f32 = 560.0;
 const PANEL_RADIUS: f32 = 10.0;
-const PADDING: f32 = 16.0;
-const HEADER_HEIGHT: f32 = 44.0;
-const ROW_HEIGHT: f32 = 38.0;
+pub(crate) const PADDING: f32 = 16.0;
+pub(crate) const HEADER_HEIGHT: f32 = 44.0;
+pub(crate) const ROW_HEIGHT: f32 = 38.0;
 const KEY_BADGE_HEIGHT: f32 = 24.0;
 const KEY_BADGE_RADIUS: f32 = 4.0;
-const HEADER_FONT_SIZE: f32 = 16.0;
-const LABEL_FONT_SIZE: f32 = 13.0;
-const KEY_FONT_SIZE: f32 = 12.0;
+pub(crate) const HEADER_FONT_SIZE: f32 = 16.0;
+pub(crate) const LABEL_FONT_SIZE: f32 = 13.0;
+pub(crate) const KEY_FONT_SIZE: f32 = 12.0;
 
 // ============================================================================
 // Error type
@@ -303,7 +303,7 @@ impl Hotkey {
     ///    writing `super_key: _` in that one arm.
     ///
     /// Everything else matches exactly.
-    fn normalized(key: Key, modifiers: Modifiers) -> Self {
+    pub(crate) fn normalized(key: Key, modifiers: Modifiers) -> Self {
         if MODIFIER_AGNOSTIC_KEYS.contains(&key) {
             return Self::bare(key);
         }
@@ -593,6 +593,49 @@ const SCREENSHOT_FULLSCREEN_ARG: &str = "--fullscreen";
 const SCREENSHOT_REGION_ARG: &str = "--region";
 
 impl HotkeyAction {
+    /// Every action, once -- what the shortcut card's action picker offers.
+    ///
+    /// `LaunchApp` and `SwitchDesktop` carry data and stand here with
+    /// placeholder values; the picker turns the first into its "Run a
+    /// command..." field and the second into one entry per desktop. A list
+    /// claiming to be every variant is a claim the compiler cannot check, so
+    /// `scripts/check-variant-lists.py` checks it: an action added to the enum
+    /// and not here fails that gate rather than quietly being unbindable from
+    /// the card.
+    pub const ALL: [Self; 31] = [
+        Self::CloseWindow,
+        Self::MinimizeWindow,
+        Self::MaximizeWindow,
+        Self::RestoreOrMinimize,
+        Self::SnapLeft,
+        Self::SnapRight,
+        Self::ToggleZoneOverlay,
+        Self::ShowDesktop,
+        Self::SwitchInputLayout,
+        Self::CycleWindows,
+        Self::CycleWindowsBackwards,
+        Self::ToggleOverview,
+        Self::PreviousDesktop,
+        Self::NextDesktop,
+        Self::SwitchDesktop(0),
+        Self::ToggleStartMenu,
+        Self::ToggleRunDialog,
+        Self::ToggleNotifications,
+        Self::ToggleShortcutCard,
+        Self::DismissPopup,
+        Self::VolumeUp,
+        Self::VolumeDown,
+        Self::VolumeMute,
+        Self::BrightnessUp,
+        Self::BrightnessDown,
+        Self::LaunchApp(String::new()),
+        Self::ShowTaskManager,
+        Self::SystemSettings,
+        Self::ScreenLock,
+        Self::Screenshot,
+        Self::ScreenshotRegion,
+    ];
+
     /// Whether the press is claimed only when the shell has something to do.
     ///
     /// True for [`DismissPopup`](Self::DismissPopup) and nothing else. A key the
@@ -1714,6 +1757,61 @@ pub fn settings_panel_size(registry: &HotkeyRegistry, max_height: f32) -> (f32, 
     (layout.width, layout.height)
 }
 
+/// The card's shadow, background and edge.
+///
+/// One function for every card the shortcut card shows -- the list of bindings
+/// and the action picker (`crate::shortcut_editor`) -- so that switching
+/// between them reads as one card changing what it shows, not as two panels
+/// that disagree about a shadow.
+pub(crate) fn push_card(
+    cmds: &mut Vec<RenderCommand>,
+    p: &Palette,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) {
+    let radii = CornerRadii::all(PANEL_RADIUS);
+
+    // Shadow.
+    cmds.push(RenderCommand::BoxShadow {
+        x,
+        y,
+        width,
+        height,
+        offset_x: 0.0,
+        offset_y: 4.0,
+        blur: 20.0,
+        spread: 6.0,
+        // Black in both modes, which is why it does not flip with the theme:
+        // a shadow is an absence of light rather than a colour.
+        color: p.shadow(),
+        corner_radii: radii,
+    });
+
+    // Background.
+    cmds.push(RenderCommand::FillRect {
+        x,
+        y,
+        width,
+        height,
+        // Judgement 1: the transparency setting, not a baked-in alpha.
+        color: p.panel_bg(),
+        corner_radii: radii,
+    });
+
+    // Border.
+    cmds.push(RenderCommand::StrokeRect {
+        x,
+        y,
+        width,
+        height,
+        color: p.surface2,
+        line_width: 1.0,
+        corner_radii: radii,
+    });
+}
+
 /// Render a hotkey settings panel showing all bindings.
 ///
 /// Produces a self-contained list of `RenderCommand`s that can be composited
@@ -1739,48 +1837,10 @@ pub fn render_settings_panel(
     let binding_count = registry.len();
     let layout = panel_layout(registry, max_height);
     let (panel_width, panel_height) = (layout.width, layout.height);
-    let radii = CornerRadii::all(PANEL_RADIUS);
-
     let mut cmds: Vec<RenderCommand> =
         Vec::with_capacity(binding_count.saturating_mul(6).saturating_add(8));
 
-    // Shadow.
-    cmds.push(RenderCommand::BoxShadow {
-        x: panel_x,
-        y: panel_y,
-        width: panel_width,
-        height: panel_height,
-        offset_x: 0.0,
-        offset_y: 4.0,
-        blur: 20.0,
-        spread: 6.0,
-        // Black in both modes, which is why it does not flip with the theme:
-        // a shadow is an absence of light rather than a colour.
-        color: p.shadow(),
-        corner_radii: radii,
-    });
-
-    // Background.
-    cmds.push(RenderCommand::FillRect {
-        x: panel_x,
-        y: panel_y,
-        width: panel_width,
-        height: panel_height,
-        // Judgement 1: the transparency setting, not a baked-in alpha.
-        color: p.panel_bg(),
-        corner_radii: radii,
-    });
-
-    // Border.
-    cmds.push(RenderCommand::StrokeRect {
-        x: panel_x,
-        y: panel_y,
-        width: panel_width,
-        height: panel_height,
-        color: p.surface2,
-        line_width: 1.0,
-        corner_radii: radii,
-    });
+    push_card(&mut cmds, p, panel_x, panel_y, panel_width, panel_height);
 
     // Clip to panel bounds.
     cmds.push(RenderCommand::PushClip {

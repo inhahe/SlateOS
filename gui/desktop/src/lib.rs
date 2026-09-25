@@ -116,6 +116,7 @@ pub mod screen_capture;
 pub mod security_dialog;
 pub mod session;
 pub mod session_mgr;
+pub mod shortcut_editor;
 /// The horizontal value slider every settings panel draws, in one place.
 ///
 /// Five panels drew it by hand and disagreed about the thumb's colour; one of
@@ -339,6 +340,19 @@ const GHOST_ALPHA: u8 = 110;
 /// One constant for both, so the message is inset by the same amount it is
 /// lifted and cannot drift into a corner as the card resizes.
 const SHORTCUT_MESSAGE_INSET: f32 = 20.0;
+
+/// How far the shortcut card stays from the top and bottom of the screen.
+///
+/// A card that reaches the display's edges reads as a mode the desktop has
+/// entered rather than as a sheet laid over it, and the shadow it draws has
+/// nowhere to fall. One constant, because the card's layout, its placement and
+/// the editor's page size all derive from the room it leaves.
+const SHORTCUT_CARD_MARGIN: f32 = 48.0;
+
+/// What the card's bottom line says when nothing has happened yet: the keys it
+/// answers. Without it the editor's keys are discoverable only by reading the
+/// source, which is the fate of every keyboard feature nobody is told about.
+const SHORTCUT_CARD_HINT: &str = "Enter: new keys \u{b7} F2: change action \u{b7} Insert: add \u{b7} Delete: remove \u{b7} Esc: close";
 
 /// The bell the tray draws when nothing is being silenced.
 ///
@@ -1043,24 +1057,17 @@ pub struct DesktopShell {
     /// registry says right now — a shortcut rebound while the card is up is
     /// redrawn under its new chord without anyone telling the card.
     pub shortcut_card_open: bool,
-    /// Which row of the shortcut card the keyboard is on.
+    /// The shortcut card's editor: which row the keyboard is on, what it is in
+    /// the middle of -- recording keys, choosing an action, typing a command,
+    /// confirming a move -- and what the last change did.
     ///
-    /// An index into `hotkeys.all_bindings()`, which is the order the card
-    /// draws. Kept even while the card is shut, so reopening it returns to the
-    /// row the user was looking at rather than to the top.
-    pub shortcut_selected: usize,
-    /// The row whose chord is being re-recorded, if any.
-    ///
-    /// While this is `Some`, the next chord the user presses is **data**: the
-    /// shell must not run it, and must not let it reach the global table --
-    /// including chords the shell holds globally, and including Escape, which
-    /// here means "cancel the rebind" rather than "close the card". That
-    /// inverts the shell's usual input rule, which is why the check sits at the
-    /// very top of `handle_hotkey_inner` rather than beside the other modal
-    /// surfaces.
-    shortcut_capture: Option<usize>,
-    /// What the last rebind attempt did, shown under the card.
-    shortcut_message: Option<String>,
+    /// Kept while the card is shut, so reopening it returns to the row the
+    /// user was looking at; but whatever it was *in the middle of* is dropped
+    /// on reopening (`toggle_shortcut_card`), and keys reach it only while the
+    /// card is open. A card closed some other way mid-recording -- the start
+    /// menu opening, the notification pane -- must not leave a recording
+    /// behind that swallows the next keystroke on a desktop showing no card.
+    pub(crate) shortcut_editor: shortcut_editor::ShortcutEditor,
     /// The programs this desktop can start, shared with the search launcher so
     /// that the two front ends cannot offer different applications.
     pub apps: Vec<AppEntry>,
@@ -1656,9 +1663,7 @@ impl DesktopShell {
             start_menu_wheel: wheel::Accumulator::default(),
             power_menu_open: false,
             shortcut_card_open: false,
-            shortcut_selected: 0,
-            shortcut_capture: None,
-            shortcut_message: None,
+            shortcut_editor: shortcut_editor::ShortcutEditor::new(),
             apps: launcher::builtin_app_database(),
             // The layouts this machine has, from `keylayout`'s built-in set.
             // Which one is *active* is corrected from `input.yaml` by
@@ -4091,8 +4096,10 @@ impl DesktopShell {
     pub fn handle_modifier_chord(&mut self, modifiers: Modifiers) -> HotkeyOutcome {
         // While the user is recording a new shortcut, every keystroke belongs
         // to the recording. Letting go of Alt+Shift mid-capture must not also
-        // change the keyboard layout out from under them.
-        if self.shortcut_capture.is_some() {
+        // change the keyboard layout out from under them. Only while
+        // *recording*: typing a search into the card is exactly when a user
+        // may need the other layout.
+        if self.shortcut_card_open && self.shortcut_editor.is_recording() {
             return HotkeyOutcome::ignored();
         }
         if self.input_methods.switch_shortcut.as_modifier_chord() != Some(modifiers) {
@@ -4112,24 +4119,29 @@ impl DesktopShell {
             return HotkeyOutcome::ignored();
         }
 
-        // Before everything, including the modal surfaces below. While a chord
-        // is being recorded the keystroke is data, and the one thing that must
+        // Before everything, including the modal surfaces below. While the card
+        // is recording keys, a keystroke is data, and the one thing that must
         // not happen is the shell running it -- a user rebinding "close window"
         // would otherwise close a window while trying to say which keys mean
-        // it.
-        if self.shortcut_capture.is_some() {
-            self.capture_chord(key);
-            // Always consumed: while recording, every keystroke belongs to the
-            // recording, including the ones that are not part of a chord yet.
-            return HotkeyOutcome::ignored();
-        }
-
-        // The card, when it is open and not recording: arrows walk its rows,
-        // Enter starts recording, Escape shuts it.
-        if self.shortcut_card_open
-            && let Some(outcome) = self.shortcut_card_key(key)
-        {
-            return outcome;
+        // it. While it is choosing an action or taking a command, keystrokes
+        // are typing. Either way the editor owns them, and only on the plain
+        // list does it hand back what is not its own, so a shortcut still works
+        // with the card open.
+        if self.shortcut_card_open {
+            let cx = self.shortcut_context();
+            match self.shortcut_editor.handle_key(key, &mut self.hotkeys, cx) {
+                shortcut_editor::Outcome::NotMine => {}
+                shortcut_editor::Outcome::Handled => return HotkeyOutcome::ignored(),
+                shortcut_editor::Outcome::Changed => {
+                    self.save_edited_shortcuts();
+                    return HotkeyOutcome::ignored();
+                }
+                shortcut_editor::Outcome::Close => {
+                    self.shortcut_card_open = false;
+                    self.shortcut_editor.reset();
+                    return HotkeyOutcome::ignored();
+                }
+            }
         }
 
         // The pin menu, on the same terms as the two below it: a popup that
@@ -6341,6 +6353,50 @@ impl DesktopShell {
         self.notifications.show();
     }
 
+    /// What the shortcut editor needs to know about this desktop.
+    fn shortcut_context(&self) -> shortcut_editor::Context {
+        shortcut_editor::Context {
+            // Saturated rather than truncated: a desktop count past 255 is
+            // absurd, and 255 "Switch to Desktop" entries is the honest
+            // answer to it where `as u8` would offer a handful.
+            desktops: u8::try_from(self.num_desktops).unwrap_or(u8::MAX),
+            picker_rows: shortcut_editor::picker_rows(self.shortcut_card_budget()),
+        }
+    }
+
+    /// How tall the shortcut card may be: the screen less a margin top and
+    /// bottom. One function for the card's layout, its placement and the
+    /// editor's page size, since the three must agree.
+    fn shortcut_card_budget(&self) -> f32 {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a screen height is far inside f32's exact range"
+        )]
+        let screen_h = self.screen_height as f32;
+        (screen_h - SHORTCUT_CARD_MARGIN * 2.0).max(SHORTCUT_CARD_MARGIN)
+    }
+
+    /// Save the bindings after the editor changed them, and say so if saving
+    /// failed.
+    ///
+    /// Written now rather than on shutdown: a desktop that lost power between
+    /// the two would forget the change, and the user has no way to know saving
+    /// was still pending. A failure is appended to the editor's own message
+    /// rather than replacing it: the change *worked* -- only keeping it did not
+    /// -- and that is the difference between a shortcut that will be gone
+    /// tomorrow and one the user believes is set.
+    fn save_edited_shortcuts(&mut self) {
+        if let Err(e) = self.save_shortcuts() {
+            let done = self
+                .shortcut_editor
+                .message()
+                .unwrap_or("The change was made")
+                .to_string();
+            self.shortcut_editor
+                .set_message(Some(format!("{done}, but could not be saved: {e}")));
+        }
+    }
+
     /// Open the card listing every shortcut, or close it if it is already open.
     ///
     /// Clears the taskbar's own panels for the same reason
@@ -6350,178 +6406,6 @@ impl DesktopShell {
     /// are full-screen surfaces driven by their own chords, and a user who
     /// opens the card to find out what the overview's chord is should not have
     /// the overview shut in the act of looking it up.
-    /// How many rows the card has.
-    fn shortcut_row_count(&self) -> usize {
-        self.hotkeys.len()
-    }
-
-    /// Handle a key while the card is open and no chord is being recorded.
-    ///
-    /// `None` means "not one of the card's keys", which lets the global table
-    /// still run: the card is a sheet, not a mode, and a shortcut pressed with
-    /// it open should still work.
-    fn shortcut_card_key(&mut self, key: &KeyEvent) -> Option<HotkeyOutcome> {
-        let rows = self.shortcut_row_count();
-        match key.key {
-            Key::Up => {
-                self.shortcut_selected = self.shortcut_selected.saturating_sub(1);
-                self.shortcut_message = None;
-                Some(HotkeyOutcome::ignored())
-            }
-            Key::Down => {
-                // Clamped rather than wrapping, matching every other list in
-                // this shell: holding Down should stop at the last row.
-                let last = rows.saturating_sub(1);
-                self.shortcut_selected = self.shortcut_selected.saturating_add(1).min(last);
-                self.shortcut_message = None;
-                Some(HotkeyOutcome::ignored())
-            }
-            Key::Enter => {
-                if rows == 0 {
-                    return Some(HotkeyOutcome::ignored());
-                }
-                self.shortcut_capture = Some(self.shortcut_selected.min(rows.saturating_sub(1)));
-                self.shortcut_message = Some("Press the new keys, or Escape to cancel".to_string());
-                Some(HotkeyOutcome::ignored())
-            }
-            Key::Escape => {
-                self.shortcut_card_open = false;
-                self.shortcut_message = None;
-                Some(HotkeyOutcome::ignored())
-            }
-            Key::Delete => {
-                if rows == 0 {
-                    return Some(HotkeyOutcome::ignored());
-                }
-                self.delete_shortcut_row(self.shortcut_selected.min(rows.saturating_sub(1)));
-                Some(HotkeyOutcome::ignored())
-            }
-            _ => None,
-        }
-    }
-
-    /// Unbind the action on row `row`, and remember that it was unbound.
-    ///
-    /// Remembering is the whole of it. `load_shortcuts` merges the saved file
-    /// onto the shipped defaults — so that a shortcut added in a later
-    /// version reaches a user who has customised theirs — which means a
-    /// deletion that only removed a line would be undone by the very next
-    /// login, silently, with the registry looking correct in between.
-    /// `HotkeyConfig::from_registry` writes a `none=` line for every default
-    /// this registry no longer holds, and that line is what survives.
-    fn delete_shortcut_row(&mut self, row: usize) {
-        let Some((chord, action)) = self
-            .hotkeys
-            .all_bindings()
-            .nth(row)
-            .map(|(h, a)| (*h, a.clone()))
-        else {
-            self.shortcut_message = Some("That row is gone".to_string());
-            return;
-        };
-
-        self.hotkeys.unregister(&chord);
-        let label = action.display_label();
-        self.shortcut_message = Some(match self.save_shortcuts() {
-            Ok(()) => format!("{label} is no longer on any keys"),
-            // Said rather than swallowed, and said precisely: the shortcut is
-            // gone from this session either way, and the part that failed is
-            // the part that would have made it stay gone.
-            Err(e) => format!("{label} is unbound, but could not be saved: {e}"),
-        });
-    }
-
-    /// Read one keystroke as the new chord for the row being recorded.
-    ///
-    /// Returns whether the keystroke was consumed. A bare modifier is *not*:
-    /// the user is still assembling the chord, and taking `Super` alone as an
-    /// answer would bind the shortcut the instant they reached for it.
-    fn capture_chord(&mut self, key: &KeyEvent) -> bool {
-        let Some(row) = self.shortcut_capture else {
-            return false;
-        };
-
-        if matches!(
-            key.key,
-            Key::LeftCtrl
-                | Key::RightCtrl
-                | Key::LeftAlt
-                | Key::RightAlt
-                | Key::LeftShift
-                | Key::RightShift
-                | Key::LeftSuper
-                | Key::RightSuper
-        ) {
-            return true;
-        }
-
-        if key.key == Key::Escape {
-            self.shortcut_capture = None;
-            self.shortcut_message = Some("Unchanged".to_string());
-            return true;
-        }
-
-        self.shortcut_capture = None;
-        self.rebind_row(row, hotkeys::Hotkey::new(key.key, key.modifiers));
-        true
-    }
-
-    /// Move row `row`'s action onto `chord`, or refuse and say why.
-    fn rebind_row(&mut self, row: usize, chord: hotkeys::Hotkey) {
-        let Some((old, action)) = self
-            .hotkeys
-            .all_bindings()
-            .nth(row)
-            .map(|(h, a)| (*h, a.clone()))
-        else {
-            self.shortcut_message = Some("That row is gone".to_string());
-            return;
-        };
-
-        if old == chord {
-            self.shortcut_message = Some("Unchanged".to_string());
-            return;
-        }
-
-        if let Some(taken) = self.hotkeys.conflicts_with(&chord) {
-            // Named, not merely refused: "already in use" leaves the user
-            // hunting for which one.
-            self.shortcut_message = Some(format!(
-                "{} is already {}",
-                chord.display_name(),
-                taken.display_label()
-            ));
-            return;
-        }
-
-        let label = action.display_label().to_string();
-        self.hotkeys.unregister(&old);
-        match self.hotkeys.register(chord, action.clone()) {
-            Ok(()) => {
-                // Written now rather than on shutdown: a desktop that lost
-                // power between the two would forget the rebind, and the user
-                // has no way to know saving was still pending.
-                let saved = self.save_shortcuts();
-                self.shortcut_message = Some(match saved {
-                    Ok(()) => format!("{} is now {label}", chord.display_name()),
-                    // The rebind *worked*; only keeping it did not. Saying so
-                    // is the difference between a shortcut that will be gone
-                    // tomorrow and one the user believes is set.
-                    Err(e) => format!(
-                        "{} is now {label}, but could not be saved: {e}",
-                        chord.display_name()
-                    ),
-                });
-            }
-            Err(e) => {
-                // Put the old one back rather than leaving the action with no
-                // chord at all: a failed rebind must not lose the binding.
-                drop(self.hotkeys.register(old, action));
-                self.shortcut_message = Some(format!("Could not rebind: {e}"));
-            }
-        }
-    }
-
     pub fn toggle_shortcut_card(&mut self) {
         if self.shortcut_card_open {
             self.shortcut_card_open = false;
@@ -6531,6 +6415,9 @@ impl DesktopShell {
         self.power_menu_open = false;
         self.calendar.set_visible(false);
         self.notifications.hide();
+        // Whatever the editor was in the middle of when the card last went
+        // away is not what the user is opening it for.
+        self.shortcut_editor.reset();
         self.shortcut_card_open = true;
     }
 
@@ -7024,6 +6911,23 @@ impl DesktopShell {
             for old in stale {
                 self.hotkeys.unregister(&old);
             }
+            // The file says what this chord does, and that overrules whatever a
+            // default put on it -- overruling the default is what a saved
+            // binding *is*. `register` refuses a chord another action holds,
+            // so without this a chord the user pointed at a different action
+            // (F2 on the card) was dropped in silence on the next login, and
+            // the tombstone for the action it used to start then unbound it
+            // altogether. That could not happen until the card could change
+            // what a chord does, which is why nothing noticed.
+            if self
+                .hotkeys
+                .conflicts_with(chord)
+                .is_some_and(|held| held != action)
+            {
+                self.hotkeys.unregister(chord);
+            }
+            // Cannot fail now: the chord is free, or already this action's,
+            // which `register` accepts as a no-op.
             drop(self.hotkeys.register(*chord, action.clone()));
         }
 
@@ -7561,16 +7465,38 @@ impl DesktopShell {
         if !self.shortcut_card_open {
             return None;
         }
-        // The screen, less a margin at top and bottom: a card that reaches the
-        // display's edges reads as a mode the desktop has entered rather than as
-        // a sheet laid over it, and the shadow it draws has nowhere to fall.
-        const MARGIN: f32 = 48.0;
-        let screen_w = self.screen_width as f32;
-        let screen_h = self.screen_height as f32;
-        // Bound once and handed to both calls below, because they are only
-        // guaranteed to agree about the column count if they are given the same
-        // budget — the two functions say so in their own docs.
-        let budget = (screen_h - MARGIN * 2.0).max(MARGIN);
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "screen dimensions are far inside f32's exact-integer range"
+        )]
+        let (screen_w, screen_h) = (self.screen_width as f32, self.screen_height as f32);
+        // Bound once and handed to every call below, because the size, the
+        // drawing and the editor's paging only agree if they are given the
+        // same budget -- the functions say so in their own docs.
+        let budget = self.shortcut_card_budget();
+        let p = Palette::from_settings(&self.appearance);
+        let mut tree = RenderTree::new();
+
+        // Choosing an action, or typing a command: the card shows the action
+        // list instead of the bindings, at the same place a card is centred.
+        if self.shortcut_editor.is_picking() {
+            let (width, height) = self.shortcut_editor.picker_size(budget);
+            let x = ((screen_w - width) / 2.0).max(0.0);
+            let y = ((screen_h - height) / 2.0).max(0.0);
+            self.shortcut_editor.render_picker(
+                &mut tree,
+                &self.hotkeys,
+                &p,
+                x,
+                y,
+                budget,
+                self.shortcut_context(),
+                self.appearance.caret_width(),
+            );
+            self.push_shortcut_message(&mut tree, &p, x, y, width, height);
+            return Some(tree);
+        }
+
         let (width, height) = hotkeys::settings_panel_size(&self.hotkeys, budget);
         // Clamped at zero so a display narrower or shorter than the card puts
         // its top-left corner on screen rather than off it: a card that
@@ -7578,10 +7504,9 @@ impl DesktopShell {
         // centred at a negative origin is one whose header is gone.
         let x = ((screen_w - width) / 2.0).max(0.0);
         let y = ((screen_h - height) / 2.0).max(0.0);
-        let mut tree = RenderTree::new();
         tree.commands.extend(hotkeys::render_settings_panel(
             &self.hotkeys,
-            &Palette::from_settings(&self.appearance),
+            &p,
             x,
             y,
             // The row the keyboard is on. Clamped rather than trusted: the
@@ -7589,44 +7514,56 @@ impl DesktopShell {
             // unregistered while the card is shut, and a highlight drawn past
             // the last row is a highlight on nothing.
             Some(
-                self.shortcut_selected
+                self.shortcut_editor
+                    .selected()
                     .min(self.hotkeys.len().saturating_sub(1)),
             ),
             budget,
         ));
-        // What the last rebind did.
-        //
-        // `shortcut_message` has been composed on every outcome since the
-        // editor was written -- "Press the new keys, or Escape to cancel",
-        // "Unchanged", "That row is gone", "Ctrl+Alt+T is now Terminal", and
-        // the one that matters most, "...but could not be saved" -- and
-        // NOTHING DREW ANY OF IT. Rebinding a key was silent whether it
-        // worked, was refused, or worked and failed to persist.
-        //
-        // That last case is why this is not cosmetic. The handler's own
-        // comment calls it "the difference between a shortcut that will be
-        // gone tomorrow and one the user believes is set", and until now the
-        // user was always in the second state.
-        //
-        // Drawn by this function rather than passed into
-        // `hotkeys::render_settings_panel`: the message is the *shell's*
-        // record of what its editor just did, not a fact about the registry,
-        // and threading it through would make a general panel renderer carry
-        // one caller's state.
-        if let Some(message) = &self.shortcut_message {
-            let p = Palette::from_settings(&self.appearance);
-            tree.text(
-                x + SHORTCUT_MESSAGE_INSET,
-                y + height - SHORTCUT_MESSAGE_INSET,
-                message,
-                // `subtext0` and not the accent: this is an outcome, not an
-                // invitation, and the accent is what the card already uses for
-                // the row the keyboard is on.
-                p.subtext0,
-                self.font_size(TextRole::Body),
-            );
-        }
+        self.push_shortcut_message(&mut tree, &p, x, y, width, height);
         Some(tree)
+    }
+
+    /// The card's bottom line: what the last edit did, or -- on the plain list
+    /// with nothing to report -- the keys the card answers.
+    ///
+    /// The outcome has been composed on every edit since the editor was written
+    /// -- "Press the new keys", "Unchanged", "Ctrl+Alt+T is now Terminal", and
+    /// the one that matters most, "...but could not be saved" -- and until
+    /// 2026-09-14 nothing drew any of it, so a rebind was silent whether it
+    /// worked, was refused, or worked and failed to persist.
+    ///
+    /// Drawn here rather than by the card renderers: the message is the
+    /// *shell's* record of what its editor just did, not a fact about the
+    /// registry or the action list.
+    fn push_shortcut_message(
+        &self,
+        tree: &mut RenderTree,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
+        let (text, color) = match self.shortcut_editor.message() {
+            // `subtext0` and not the accent: an outcome, not an invitation, and
+            // the accent is what the card already uses for where the keyboard is.
+            Some(message) => (message.to_string(), p.subtext0),
+            None if !self.shortcut_editor.owns_keyboard() => {
+                (SHORTCUT_CARD_HINT.to_string(), p.subtext0)
+            }
+            None => return,
+        };
+        tree.push(guitk::render::RenderCommand::Text {
+            x: x + SHORTCUT_MESSAGE_INSET,
+            y: y + height - SHORTCUT_MESSAGE_INSET,
+            text,
+            color,
+            font_size: self.font_size(TextRole::Body),
+            font_weight: guitk::render::FontWeightHint::Regular,
+            max_width: Some((width - SHORTCUT_MESSAGE_INSET * 2.0).max(0.0)),
+            overflow: guitk::render::TextOverflow::Ellipsis,
+        });
     }
 
     /// Render the zone-tiling overlay, if it is open.
@@ -8431,7 +8368,9 @@ mod window_manager_tests {
         shell.shortcut_card_open = true;
         let quiet = card_text(&shell);
 
-        shell.shortcut_message = Some("Ctrl+Alt+T is now Terminal".to_string());
+        shell
+            .shortcut_editor
+            .set_message(Some("Ctrl+Alt+T is now Terminal".to_string()));
         let loud = card_text(&shell);
 
         assert!(
@@ -8455,8 +8394,9 @@ mod window_manager_tests {
     fn a_rebind_that_could_not_be_saved_says_so_on_the_card() {
         let mut shell = shell();
         shell.shortcut_card_open = true;
-        shell.shortcut_message =
-            Some("Super+K is now Search, but could not be saved: disk full".to_string());
+        shell.shortcut_editor.set_message(Some(
+            "Super+K is now Search, but could not be saved: disk full".to_string(),
+        ));
 
         let drawn = card_text(&shell);
 
@@ -13395,22 +13335,30 @@ mod run_box_wiring_tests {
     #[test]
     fn the_arrow_keys_walk_the_card_and_stop_at_the_ends() {
         let mut shell = card_shell();
-        assert_eq!(shell.shortcut_selected, 0);
+        assert_eq!(shell.shortcut_editor.selected(), 0);
 
         drop(shell.handle_hotkey(&tap(Key::Down)));
-        assert_eq!(shell.shortcut_selected, 1);
+        assert_eq!(shell.shortcut_editor.selected(), 1);
         drop(shell.handle_hotkey(&tap(Key::Up)));
-        assert_eq!(shell.shortcut_selected, 0);
+        assert_eq!(shell.shortcut_editor.selected(), 0);
 
         // Clamped at the top, as every other list in this shell is.
         drop(shell.handle_hotkey(&tap(Key::Up)));
-        assert_eq!(shell.shortcut_selected, 0, "no wrap to the last row");
+        assert_eq!(
+            shell.shortcut_editor.selected(),
+            0,
+            "no wrap to the last row"
+        );
 
         let last = shell.hotkeys.len().saturating_sub(1);
         for _ in 0..shell.hotkeys.len().saturating_add(5) {
             drop(shell.handle_hotkey(&tap(Key::Down)));
         }
-        assert_eq!(shell.shortcut_selected, last, "and none off the bottom");
+        assert_eq!(
+            shell.shortcut_editor.selected(),
+            last,
+            "and none off the bottom"
+        );
     }
 
     /// The whole point: while recording, the keystroke is data.
@@ -13422,22 +13370,31 @@ mod run_box_wiring_tests {
         settingsfile::testing::with_scratch_config(
             "hk-a-chord-pressed-while-recording-does-not",
             |_root| {
+                // The control, without which this proves nothing. The chord
+                // used here until 2026-09-24 was Super+D, Show Desktop -- which,
+                // in a shell with no windows, asks for nothing whether it runs
+                // or not, so "it asked for nothing" held either way. Super+R
+                // opens the Run box, and that is visible.
+                let mut control = DesktopShell::new(1920, 1080);
+                drop(control.handle_hotkey(&tap_with(Key::R, Modifiers::super_key())));
+                assert!(
+                    control.run_dialog.is_visible(),
+                    "Super+R obeyed must open the Run box, or this test cannot fail"
+                );
+
                 let mut shell = card_shell();
                 drop(shell.handle_hotkey(&tap(Key::Enter)));
-                assert!(shell.shortcut_capture.is_some(), "recording");
+                assert!(shell.shortcut_editor.is_recording(), "recording");
 
-                // Super+D is Show Desktop by default: run, it asks the compositor to
-                // minimise every window on the glass. Pressed as data it must ask for
-                // nothing at all.
-                let outcome = shell.handle_hotkey(&tap_with(Key::D, Modifiers::super_key()));
+                let outcome = shell.handle_hotkey(&tap_with(Key::R, Modifiers::super_key()));
 
                 assert!(
-                    outcome.requests.is_empty(),
-                    "the chord being recorded must not also be obeyed, got {:?}",
-                    outcome.requests
+                    !shell.run_dialog.is_visible(),
+                    "the chord being recorded must not also be obeyed"
                 );
+                assert!(outcome.requests.is_empty(), "and must ask for nothing");
                 assert!(outcome.launches.is_empty(), "and must start nothing");
-                assert!(shell.shortcut_capture.is_none(), "and recording ends");
+                assert!(!shell.shortcut_editor.is_recording(), "and recording ends");
             },
         );
     }
@@ -13486,7 +13443,7 @@ mod run_box_wiring_tests {
                     .expect("first");
                 // Skips any binding on a bare modifier. There is no such binding in
                 // the default table -- the first two rows are Escape and PrintScreen --
-                // so this currently skips nothing; it is here because `capture_chord`
+                // so this currently skips nothing; it is here because the recorder
                 // ignores bare modifiers by design, and a future default bound to one
                 // would otherwise make this test assert on a rebind that never
                 // happened, and pass for the wrong reason.
@@ -13522,7 +13479,11 @@ mod run_box_wiring_tests {
                     Some(&first_action),
                     "a refused rebind must leave the original binding alone"
                 );
-                let msg = shell.shortcut_message.clone().unwrap_or_default();
+                let msg = shell
+                    .shortcut_editor
+                    .message()
+                    .unwrap_or_default()
+                    .to_string();
                 assert!(msg.contains("already"), "and must say so, got {msg:?}");
             },
         );
@@ -13544,7 +13505,7 @@ mod run_box_wiring_tests {
                 drop(shell.handle_hotkey(&tap(Key::Enter)));
                 drop(shell.handle_hotkey(&tap(Key::Escape)));
 
-                assert!(shell.shortcut_capture.is_none(), "recording stopped");
+                assert!(!shell.shortcut_editor.is_recording(), "recording stopped");
                 assert!(shell.shortcut_card_open, "but the card stays open");
                 let after: Vec<_> = shell
                     .hotkeys
@@ -13571,7 +13532,7 @@ mod run_box_wiring_tests {
                 for key in [Key::LeftCtrl, Key::LeftAlt, Key::LeftShift, Key::LeftSuper] {
                     drop(shell.handle_hotkey(&tap(key)));
                     assert!(
-                        shell.shortcut_capture.is_some(),
+                        shell.shortcut_editor.is_recording(),
                         "{key:?} alone must not be taken as the answer"
                     );
                 }
@@ -13599,7 +13560,8 @@ mod run_box_wiring_tests {
                 .map(|(h, a)| (*h, a.clone()))
                 .expect("a binding to delete");
 
-            shell.delete_shortcut_row(0);
+            shell.shortcut_editor.set_selected(0);
+            drop(shell.handle_hotkey(&tap(Key::Delete)));
             assert_eq!(
                 shell.hotkeys.conflicts_with(&chord),
                 None,
@@ -13684,7 +13646,8 @@ mod run_box_wiring_tests {
                 .collect();
             assert!(before.len() > 2, "fixture too small to prove anything");
 
-            shell.delete_shortcut_row(0);
+            shell.shortcut_editor.set_selected(0);
+            drop(shell.handle_hotkey(&tap(Key::Delete)));
 
             let mut fresh = DesktopShell::new(1920, 1080);
             fresh.load_shortcuts();
@@ -13696,6 +13659,165 @@ mod run_box_wiring_tests {
                     action.display_label()
                 );
             }
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // The card's editor, end to end through the shell
+    //
+    // `shortcut_editor`'s own tests drive the state machine against a bare
+    // registry. These go through `handle_hotkey`, the way a keystroke really
+    // arrives, and through `save_shortcuts` and a fresh shell, the way a
+    // change really survives -- the two things a state machine test cannot
+    // see.
+    // ------------------------------------------------------------------
+
+    /// Every string the card draws right now.
+    fn drawn_on_card(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .render_shortcut_card()
+            .expect("the card is open")
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn type_into(shell: &mut DesktopShell, text: &str) {
+        for ch in text.chars() {
+            drop(shell.handle_hotkey(&typed(ch)));
+        }
+    }
+
+    /// **A card closed some other way mid-recording leaves nothing behind.**
+    ///
+    /// The editor keeps its state while the card is shut, and a recording is
+    /// the one state that swallows keystrokes. The start menu, the pane and
+    /// the tray overflow all close the card by clearing a flag, knowing
+    /// nothing about the editor; a recording that survived that would turn
+    /// the next shortcut on a desktop showing no card into a keystroke
+    /// recorded rather than obeyed.
+    #[test]
+    fn a_card_closed_mid_recording_does_not_swallow_the_next_shortcut() {
+        settingsfile::testing::with_scratch_config("hk-closed-mid-recording", |_root| {
+            let mut shell = card_shell();
+            drop(shell.handle_hotkey(&tap(Key::Enter)));
+            assert!(shell.shortcut_editor.is_recording(), "recording");
+
+            // Opening the start menu closes the card without a word to it.
+            shell.toggle_start_menu();
+            assert!(!shell.shortcut_card_open);
+            shell.toggle_start_menu();
+
+            // Super+R opens the Run box when obeyed -- visible, unlike Show
+            // Desktop, which asks for nothing in a shell with no windows.
+            drop(shell.handle_hotkey(&tap_with(Key::R, Modifiers::super_key())));
+            assert!(
+                shell.run_dialog.is_visible(),
+                "the shortcut was swallowed by a recording nobody can see"
+            );
+            shell.toggle_run_dialog();
+
+            // And the card comes back clean.
+            shell.toggle_shortcut_card();
+            assert!(!shell.shortcut_editor.owns_keyboard());
+        });
+    }
+
+    /// **F2 changes what keys do, and the change survives a login.**
+    #[test]
+    fn f2_on_the_card_changes_what_keys_do_and_it_survives_a_login() {
+        settingsfile::testing::with_scratch_config("hk-f2-retarget", |_root| {
+            let mut shell = card_shell();
+            let (row, keys) = shell
+                .hotkeys
+                .all_bindings()
+                .enumerate()
+                .find(|(_, (_, a))| **a == crate::hotkeys::HotkeyAction::Screenshot)
+                .map(|(row, (h, _))| (row, *h))
+                .expect("a Screenshot shortcut in the defaults");
+            shell.shortcut_editor.set_selected(row);
+
+            drop(shell.handle_hotkey(&tap(Key::F2)));
+            assert!(
+                drawn_on_card(&shell)
+                    .iter()
+                    .any(|t| t == "Choose an action"),
+                "the action list replaces the bindings while choosing"
+            );
+            type_into(&mut shell, "lock");
+            drop(shell.handle_hotkey(&tap(Key::Enter)));
+
+            assert_eq!(
+                shell.hotkeys.conflicts_with(&keys),
+                Some(&crate::hotkeys::HotkeyAction::ScreenLock)
+            );
+            let mut fresh = DesktopShell::new(1920, 1080);
+            fresh.load_shortcuts();
+            assert_eq!(
+                fresh.hotkeys.conflicts_with(&keys),
+                Some(&crate::hotkeys::HotkeyAction::ScreenLock),
+                "the change did not survive a login"
+            );
+        });
+    }
+
+    /// **A program added on the card is the program the keys start.**
+    ///
+    /// Through to the launch, not only to the registry: a binding stored
+    /// correctly and started wrongly is the screenshot shortcuts' old bug
+    /// (a program path with a space in it), and only the launch shows it.
+    #[test]
+    fn a_program_shortcut_added_on_the_card_starts_the_program() {
+        settingsfile::testing::with_scratch_config("hk-insert-program", |_root| {
+            let mut shell = card_shell();
+            drop(shell.handle_hotkey(&tap(Key::Insert)));
+            // "Run a program..." heads the unfiltered list.
+            drop(shell.handle_hotkey(&tap(Key::Enter)));
+            type_into(&mut shell, "/usr/bin/terminal");
+            drop(shell.handle_hotkey(&tap(Key::Enter)));
+            let chord = Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            };
+            drop(shell.handle_hotkey(&tap_with(Key::F9, chord)));
+
+            // Escape leaves the list and closes the card.
+            drop(shell.handle_hotkey(&tap(Key::Escape)));
+            assert!(!shell.shortcut_card_open);
+
+            let outcome = shell.handle_hotkey(&tap_with(Key::F9, chord));
+            let started: Vec<&std::path::Path> = outcome
+                .launches
+                .iter()
+                .map(|l| l.program.as_path())
+                .collect();
+            assert_eq!(started, [std::path::Path::new("/usr/bin/terminal")]);
+            assert!(outcome.launches.iter().all(|l| l.args.is_empty()));
+        });
+    }
+
+    /// **The card says which keys it answers until it has news.**
+    #[test]
+    fn the_card_lists_its_keys_until_there_is_something_to_report() {
+        settingsfile::testing::with_scratch_config("hk-card-hint", |_root| {
+            let mut shell = card_shell();
+            let hint = |shell: &DesktopShell| {
+                drawn_on_card(shell)
+                    .iter()
+                    .any(|t| t.starts_with("Enter: new keys"))
+            };
+            assert!(hint(&shell), "a fresh card names its keys");
+            drop(shell.handle_hotkey(&tap(Key::Enter)));
+            assert!(!hint(&shell), "while recording it says what to do instead");
+            drop(shell.handle_hotkey(&tap(Key::Escape)));
+            assert!(!hint(&shell), "and then what happened");
+            drop(shell.handle_hotkey(&tap(Key::Down)));
+            assert!(hint(&shell), "until the user moves on");
         });
     }
 

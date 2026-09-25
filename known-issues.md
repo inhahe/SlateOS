@@ -165231,8 +165231,11 @@ run in the same WSL.)
 
 ### [F] A scaled picture's translucent edges come out darker than they are -- 2026-09-25
 
-**Status:** OPEN — lane F's (`gui/imagecodec`), with lane C's thumbnailer to
-change in the same step so the two keep agreeing.
+**Status:** HALF FIXED 2026-09-25 — `gui/imagecodec`'s `BoxFilter` (the PNG
+and GIF scaled decodes) now weights colour by alpha. What remains is lane C's:
+the thumbnailer's second shrink, `Canvas::box_downscale` through
+`Color::mean`, still averages the channels separately, so a thumbnail's rim is
+halved rather than gone -- `requests/f-c-average-translucent-pixels-by-their-alpha.md`.
 
 **In short:** when a picture with see-through parts -- an icon, a transparent
 PNG, a GIF -- is shrunk for a thumbnail, the pixels along its see-through edges

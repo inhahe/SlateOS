@@ -8249,7 +8249,20 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
 
 ### 5.6 Additional software
 - [x] Archive support (zip, 7z, tar.gz/bz2/xz/zst/lz4, rar, cpio, ar, deb)
-- [ ] `[E]` Speech input / speech output
+- [-] `[E]` Speech input / speech output — **output, step 1 of 4 done
+  2026-09-24:** eSpeak NG 1.52.0 (the synthesizer Linux screen readers use;
+  GPL-3.0, like the bash, make and coreutils already shipped) links against
+  our `libc.a` with **zero missing and zero duplicate symbols** on the first
+  attempt — `scripts/espeak-spike/`. It writes WAV files; it opens no sound
+  device. Remaining for output: (2) staged on the image as `/bin/espeak-ng`
+  with its data — `requests/e-d-stage-espeak-ng-on-the-image.md`; (3) a
+  ring-3 rung that makes it speak into a file and checks the file —
+  `requests/e-a-espeak-ng-needs-a-ring-3-rung.md`; (4) a speech service that
+  takes text from the screen reader and applications and plays it, which
+  needs a userspace audio device (`kernel/src/audio_alsa.rs` is its kernel
+  half, in progress). **Input** is not started: every accurate engine needs a
+  40–150 MB model and the image has ~40 MB free, which is a question for the
+  operator once the candidates are measured.
 - [ ] `[E]` Cellphone camera/microphone integration
 - [x] Scripting language registration (Lua and/or WASM runtime for app extensibility) — implemented as fs::scriptlang with 5 built-in engines (Lua/Wasmtime/Shell/Fastpy/QuickJS), sandbox levels, resource limits, eval API
 - [x] Keyboard layout customizer (arbitrary remap, save named layouts) — implemented as fs::keylayout with per-key remap, disable keys, 64 max layouts

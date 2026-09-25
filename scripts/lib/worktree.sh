@@ -210,6 +210,29 @@ SLATE_CMAKE_SHA256="c46400618b4f1f2b43507f24fb22f3ae830c3416cf23b776e16e1d413aa8
 # shellcheck disable=SC2034
 SLATE_CMAKE_TARBALL="$SLATE_ZIG_CACHE/cmake-$SLATE_CMAKE_VERSION.tar.gz"
 
+# Upstream eSpeak NG, the speech synthesizer (scripts/espeak-spike/), and the
+# seventh port. 1.52.0 is the current release and the one both attestations
+# below carry. eSpeak NG publishes no digest of its own for the tarball, which
+# GitHub generates from the tag, so both of these are packagers' own
+# computations rather than copies of an upstream figure:
+#
+#   Alpine  community/espeak-ng/APKBUILD, sha512sums 28793503…5b0662 — a
+#           *different function* from the one pinned here, which is the
+#           stronger corroboration. Recomputed over the downloaded tarball and
+#           compared in full, 2026-09-24.
+#   Void    srcpkgs/espeak-ng/template, checksum=bb433810…130a23 — the
+#           identical sha256 below.
+#
+# The URL is GitHub's self-naming archive form, `archive/<tag>/<name>.tar.gz`,
+# rather than the `archive/refs/tags/<tag>.tar.gz` both packagers write: the
+# two serve byte-identical archives (checked), and slate_ensure_src names the
+# cached file after the URL's last component, which in the packagers' form is
+# a bare `1.52.0.tar.gz` sharing a cache with every other project's 1.52.0.
+SLATE_ESPEAK_VERSION="1.52.0"
+SLATE_ESPEAK_SHA256="bb4338102ff3b49a81423da8a1a158b420124b055b60fa76cfb4b18677130a23"
+# shellcheck disable=SC2034
+SLATE_ESPEAK_TARBALL="$SLATE_ZIG_CACHE/espeak-ng-$SLATE_ESPEAK_VERSION.tar.gz"
+
 # Scratch, keyed by worktree. The hard-coded paths were only half the problem:
 # these scripts also wrote fixed names like /tmp/libc_syms.txt and
 # /tmp/bash_needs.txt, and they hand results to each other through those files
@@ -508,6 +531,19 @@ slate_ensure_cmake_src() {
         "$SLATE_CMAKE_SHA256" \
         "https://github.com/Kitware/CMake/releases/download/v$SLATE_CMAKE_VERSION/cmake-$SLATE_CMAKE_VERSION.tar.gz" \
         "$SLATE_WORK/cmake-spike" "/tmp/cmake-spike-$SLATE_LANE" "$SLATE_SPIKE")" || return 1
+}
+
+# The eSpeak NG counterpart, for scripts/espeak-spike/.
+slate_ensure_espeak_src() {
+    # SLATE_ESPEAK_TARBALL is this function's OUTPUT PARAMETER, read by
+    # scripts/espeak-spike/run.sh (`tar xzf "$SLATE_ESPEAK_TARBALL"`).
+    # shellcheck cannot follow a `source`, so it sees the write and never the
+    # read.
+    # shellcheck disable=SC2034
+    SLATE_ESPEAK_TARBALL="$(slate_ensure_src espeak-ng "$SLATE_ESPEAK_VERSION" \
+        "$SLATE_ESPEAK_SHA256" \
+        "https://github.com/espeak-ng/espeak-ng/archive/$SLATE_ESPEAK_VERSION/espeak-ng-$SLATE_ESPEAK_VERSION.tar.gz" \
+        "$SLATE_WORK/espeak-spike" "$SLATE_SPIKE")" || return 1
 }
 
 slate_make_zig_wrappers() {

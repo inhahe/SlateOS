@@ -98,6 +98,12 @@
 //! [`webp::Animation`] composites each frame in turn exactly as libwebp's
 //! animation decoder does. See [`webp`].
 //!
+//! BMP, every kind Chrome shows -- OS/2 and Windows headers from 12 bytes to
+//! 124, palettes of 1 to 8 bits, 16- and 32-bit bit fields with or without
+//! alpha, 24- and 32-bit colour, and the run-length encodings -- decoding to
+//! exactly Chrome's pixels, and refusing exactly the files Chrome refuses.
+//! See [`bmp`].
+//!
 //! # Picture files for *other* crates' tests
 //!
 //! [`testing`] emits real, small PNGs. It is public rather than `#[cfg(test)]`
@@ -113,6 +119,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
+pub mod bmp;
 pub mod gif;
 pub mod jpeg;
 pub mod png;
@@ -319,6 +326,9 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
     if webp::is_webp(bytes) {
         return webp::decode(bytes, limits);
     }
+    if bmp::is_bmp(bytes) {
+        return bmp::decode(bytes, limits);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -356,6 +366,9 @@ pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> Im
     if webp::is_webp(bytes) {
         return webp::decode_scaled(bytes, limits, max_w, max_h);
     }
+    if bmp::is_bmp(bytes) {
+        return bmp::decode_scaled(bytes, limits, max_w, max_h);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -381,6 +394,9 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     }
     if webp::is_webp(bytes) {
         return webp::dimensions(bytes);
+    }
+    if bmp::is_bmp(bytes) {
+        return bmp::dimensions(bytes);
     }
     Err(ImageError::UnknownFormat)
 }

@@ -58733,6 +58733,14 @@ test of the fixture, not of the bound.
   the alpha flag is shown opaque, its uncovered canvas black. Chrome decides
   from the demuxer's flags instead; the two differ only on files no encoder
   writes. Reversible in `File::read`. design-decisions.md §1313.
+- 2026-09-25, BMP (`gui/imagecodec/src/bmp.rs`): the reference is Chrome's
+  *current* BMP decoder (image-rs 0.25.10 with Chromium's patches), not
+  Firefox's or Chrome's older one, where they differ: pixels a run-length
+  stream skips are black (Firefox: transparent), an all-zero V4/V5 alpha
+  channel is transparent (older Chrome: opaque), and a file short by even one
+  padding byte is refused (Pillow shows it). Reversible per rule in
+  `decode_rle`, `read_header` and `Reader::take`'s callers.
+  design-decisions.md §1314.
 - **JPEG colour is blended back to full resolution, not repeated**
   (`gui/imagecodec/src/jpeg/upsample.rs`, design-decisions §1306). This
   reverses the decoder's earlier call that interpolating "would be a better

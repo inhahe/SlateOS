@@ -2344,6 +2344,8 @@ pub struct TorrentApp {
     pub peer_id: [u8; 20],
     pub search_query: String,
     pub sort_column: SortColumn,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub sort_ascending: bool,
     pub filter: TorrentFilter,
     pub global_download_speed: SpeedTracker,
@@ -2465,6 +2467,32 @@ impl TorrentFilter {
     }
 }
 
+/// The keys this window answers, as a reader sees them.
+///
+/// Before this the window named two of them -- `(C, R)` in the status bar
+/// beside the sort -- and the seven filter digits, the streaming toggle and
+/// all three Ctrl chords were written down nowhere. The survey read `1`, `2`
+/// and `3` as named because those characters appear in drawn text like
+/// "1 downloading"; a lone digit is cheap to match by accident, which is why
+/// the count it reported was seven and the true number was ten.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1 / ?", "This list"),
+    ("Up / Down", "Move the selection"),
+    ("Space", "Pause or resume the selected transfer"),
+    ("S", "Download this one in order, for streaming"),
+    ("Delete", "Remove it from the list; the files stay"),
+    (
+        "1-7",
+        "Filter: all, downloading, seeding, done, paused, active, error",
+    ),
+    ("C", "Change the sort column"),
+    ("R", "Reverse the sort"),
+    ("Tab", "Next tab"),
+    ("Ctrl+O", "Open a .torrent file"),
+    ("Ctrl+P", "Pause every transfer"),
+    ("Ctrl+R", "Resume every transfer"),
+];
+
 impl Default for TorrentApp {
     fn default() -> Self {
         Self::new()
@@ -2496,6 +2524,7 @@ impl TorrentApp {
             peer_id,
             search_query: String::new(),
             sort_column: SortColumn::Added,
+            show_help: false,
             sort_ascending: false,
             filter: TorrentFilter::All,
             global_download_speed: SpeedTracker::new(60, 1000),
@@ -2777,6 +2806,15 @@ impl TorrentApp {
     /// twice does nothing the second time, and saying so is how every other
     /// key in this app behaves.
     fn set_filter(&mut self, filter: TorrentFilter) -> EventResult {
+        // `Ignored` when the filter does not change, and that is not a key
+        // being given away. I removed this early return on 2026-09-21 arguing
+        // that `Ignored` means "propagate to parent" and so handed 3 to
+        // whatever sits above this window. There is nothing above it:
+        // `handle_event` maps `Ignored` to `Response::Idle`, so in a
+        // top-level app the word means "nothing changed, do not redraw".
+        // Putting it back, because a redundant repaint of every row on a key
+        // that did nothing is a real if small cost, and the reason I took it
+        // out was simply wrong.
         if self.filter == filter {
             return EventResult::Ignored;
         }
@@ -2785,6 +2823,21 @@ impl TorrentApp {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Above the Ctrl branch, which returns for every Ctrl chord: placed
+        // after it, Ctrl+P would pause every transfer from behind the card.
+        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal. Delete removes the selected transfer, and doing that
+            // from behind a list the reader is consulting is the reason this
+            // does not let keys through.
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
         if key.modifiers.ctrl {
             return match key.key {
                 // Everything at once, which is what the toolbar buttons are
@@ -3346,6 +3399,17 @@ impl TorrentApp {
             max_width: Some(width - 24.0),
             overflow: TextOverflow::Ellipsis,
         });
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
 
         // Last, so it is above everything. Without this the picker
         // takes every keystroke with nothing on screen to say why --
@@ -4601,6 +4665,85 @@ about anything -- it drew {} text command(s)",
     ///
     /// Without this the two keys are as unreachable as the fields were: the
     /// sidebar shows its own selection, but nothing else on screen mentions
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Two filter states, and the reason is the one that took longest to
+    /// see. `Consumed` here asks whether the key *did* something, not whether
+    /// the window owns it: `Ignored` in a top-level app means "nothing
+    /// changed, do not redraw" -- `handle_event` maps it to `Response::Idle`
+    /// and there is no parent to propagate to. So `1` on a list already
+    /// showing All is answered and reports `Ignored`, correctly. Running the
+    /// guard from two different filters gives every digit a state in which it
+    /// changes something.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered =
+                    [TorrentFilter::All, TorrentFilter::Error]
+                        .into_iter()
+                        .any(|start| {
+                            let mut app = TorrentApp::new();
+                            app.filter = start;
+                            app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                        });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the last third: `C` behind the card must not move the
+    /// sort column, but asserting only that would pass just as well on a
+    /// window that had lost `C` altogether, so the same key is then pressed
+    /// with the card down and required to work.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &mut TorrentApp| -> String {
+            app.render(1200.0, 800.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+
+        let mut app = TorrentApp::new();
+        assert!(
+            !drawn(&mut app).contains("F1 or ? closes this"),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_event(&press(Key::F1));
+        let shown = drawn(&mut app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        let column = app.sort_column;
+        app.handle_event(&press(Key::C));
+        assert_eq!(
+            app.sort_column, column,
+            "C changed the sort column through the shortcut card"
+        );
+
+        app.handle_event(&press(Key::Escape));
+        app.handle_event(&press(Key::C));
+        assert_ne!(
+            app.sort_column, column,
+            "control: C does nothing even with the card down"
+        );
+    }
+
     /// the sort at all.
     #[test]
     fn the_status_bar_names_the_sort_and_its_keys() {

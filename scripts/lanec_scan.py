@@ -44,7 +44,10 @@ import re
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
-# Lane C's ten directories, per `scripts/which-lane.py`.
+# Lane C's ten directories, per `scripts/which-lane.py` under three lanes.
+# (Since the six-lane split of 2026-09-22 these directories are no longer one
+# lane's: gui/ is lanes C and F, apps/ lane E, the net crates, aes and hmac
+# lane A.  The population this scans is unchanged; only the label is history.)
 LANE_C_ROOTS = (
     "apps",
     "gui",

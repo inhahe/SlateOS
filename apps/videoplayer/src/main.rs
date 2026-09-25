@@ -3242,7 +3242,90 @@ impl VideoPlayerApp {
         // Tab bar at top
         self.render_tab_bar(&mut cmds);
 
+        // Over the tab bar as well: it is a list you asked for, and a panel
+        // under the bar would be half-hidden by it.
+        if self.chapter_list_visible {
+            self.render_chapter_list(&mut cmds);
+        }
+
         cmds
+    }
+
+    /// The chapter list, which `C` opens.
+    ///
+    /// Until 2026-09-22 `chapter_list_visible` was declared, initialised and
+    /// inverted by `C` and read by nothing, while `("C", "Toggle Chapter
+    /// List")` sat in the shortcut table this window both draws from and
+    /// dispatches on. The key was advertised and moved nothing.
+    ///
+    /// **It says so when there are none.** `chapters` is empty until a video
+    /// with chapter marks is loaded, and a panel that opens blank reads as a
+    /// broken control -- the lesson `apps/netscan`'s Send button and
+    /// `apps/soundrecorder`'s transport both taught: a press that changes
+    /// nothing visible sends someone hunting a fault in the wrong place.
+    fn render_chapter_list(&self, cmds: &mut Vec<RenderCommand>) {
+        let w = (self.width * 0.6).clamp(220.0, 460.0);
+        let h = (self.height * 0.6).clamp(120.0, 420.0);
+        let x = (self.width - w) / 2.0;
+        let y = (self.height - h) / 2.0;
+
+        self.palette
+            .push_surface(cmds, x, y, w, h, 6.0, Surface::Card);
+        cmds.push(RenderCommand::Text {
+            x: x + 12.0,
+            y: y + 10.0,
+            text: "Chapters  --  C closes this".into(),
+            font_size: 13.0,
+            color: self.palette.ink(self.palette.blue),
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(w - 24.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        if self.chapters.is_empty() {
+            cmds.push(RenderCommand::Text {
+                x: x + 12.0,
+                y: y + 34.0,
+                text: "This video has no chapter marks.".into(),
+                font_size: 11.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w - 24.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            return;
+        }
+
+        let here = self.current_chapter().map(|(idx, _)| idx);
+        for (i, chapter) in self.chapters.iter().enumerate() {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a video has tens of chapters, not millions"
+            )]
+            let row_y = y + 34.0 + i as f32 * 18.0;
+            if row_y + 18.0 > y + h {
+                break;
+            }
+            let current = here == Some(i);
+            cmds.push(RenderCommand::Text {
+                x: x + 12.0,
+                y: row_y,
+                text: format!("{}   {}", chapter.start.format(), chapter.title),
+                font_size: 11.0,
+                color: if current {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.text
+                },
+                font_weight: if current {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(w - 24.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
     }
 
     fn render_tab_bar(&self, cmds: &mut Vec<RenderCommand>) {
@@ -5170,6 +5253,78 @@ mod tests {
     /// the window. Relying on a reader having passed it before reaching a
     /// settings panel is exactly what `apps/mediaconvert` got wrong: three
     /// lines about the queue did not reach the panel that configured it.
+    /// **C opens the chapter list, and it says so when there are none.**
+    ///
+    /// `chapter_list_visible` was declared, initialised and inverted by `C`
+    /// and read by nothing, while `("C", "Toggle Chapter List")` sat in the
+    /// shortcut table this window both draws from and dispatches on -- so the
+    /// key was advertised and moved nothing. Third of the five dead toggles
+    /// where the card is what turned a dormant field into a claim.
+    ///
+    /// The empty case is asserted, not assumed: `chapters` is empty until a
+    /// video with marks is loaded, and a panel that opens blank reads as a
+    /// broken control rather than an empty one.
+    #[test]
+    fn the_chapter_list_opens_and_says_when_there_is_nothing_in_it() {
+        let drawn = |app: &mut VideoPlayerApp| -> Vec<String> {
+            app.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut app = VideoPlayerApp::new(1000.0, 700.0);
+        assert!(
+            !drawn(&mut app).iter().any(|t| t.starts_with("Chapters")),
+            "the list is up before anybody asked for it"
+        );
+
+        app.chapter_list_visible = true;
+        let shown = drawn(&mut app);
+        assert!(
+            shown.iter().any(|t| t.starts_with("Chapters")),
+            "C opened nothing: {shown:?}"
+        );
+        assert!(
+            shown
+                .iter()
+                .any(|t| t == "This video has no chapter marks."),
+            "an empty chapter list drew an empty box and said nothing"
+        );
+
+        // With chapters, each one is a row and the one being played is named.
+        app.chapters = vec![
+            Chapter {
+                title: String::from("Opening"),
+                start: Duration::from_secs(0),
+                end: Duration::from_secs(60),
+            },
+            Chapter {
+                title: String::from("The middle"),
+                start: Duration::from_secs(60),
+                end: Duration::from_secs(120),
+            },
+        ];
+        let shown = drawn(&mut app);
+        assert!(
+            shown.iter().any(|t| t.contains("Opening")),
+            "a chapter is missing from the list: {shown:?}"
+        );
+        assert!(
+            shown.iter().any(|t| t.contains("The middle")),
+            "a chapter is missing from the list: {shown:?}"
+        );
+        assert!(
+            !shown
+                .iter()
+                .any(|t| t == "This video has no chapter marks."),
+            "the list still claims there are none"
+        );
+    }
+
     #[test]
     fn the_screenshot_options_say_no_screenshot_can_be_taken() {
         let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);

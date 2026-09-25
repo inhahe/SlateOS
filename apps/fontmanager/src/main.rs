@@ -698,6 +698,18 @@ pub enum FilterMode {
 // FontManagerState — full application state
 // ============================================================================
 
+/// The keys this window answers, as a reader sees them.
+///
+/// `Delete` uninstalls the selected font, which is the row this card is for.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Up / Down", "Move through the fonts"),
+    ("Ctrl+F", "Clear the search"),
+    ("Ctrl+S", "Show or hide the settings"),
+    ("Delete", "Uninstall the selected font"),
+    ("Esc", "Close the settings, or clear the search"),
+];
+
 /// Complete state for the Font Manager application.
 pub struct FontManagerState {
     /// The font collection (all installed fonts).
@@ -715,6 +727,8 @@ pub struct FontManagerState {
     /// Search query string.
     pub search_query: String,
     /// Whether the rendering settings panel is visible.
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub show_settings: bool,
     /// Scroll offset for the font list (vertical pixels).
     pub list_scroll_y: f32,
@@ -750,6 +764,7 @@ impl FontManagerState {
             selected_category: None,
             filter_mode: FilterMode::All,
             search_query: String::new(),
+            show_help: false,
             show_settings: false,
             list_scroll_y: 0.0,
             window_width: DEFAULT_WINDOW_WIDTH,
@@ -933,6 +948,18 @@ impl FontManagerState {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal: Delete uninstalls a font.
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         match key.key {
             Key::Up => {
                 self.select_prev_font();
@@ -1047,6 +1074,17 @@ impl FontManagerState {
         // Settings overlay (if visible)
         if self.show_settings {
             self.render_settings_panel(&mut tree);
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                &self.palette,
+                (self.window_width, self.window_height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
         }
 
         tree
@@ -1781,6 +1819,96 @@ mod tests {
     /// was.
     ///
     /// Found by `scripts/find-echoed-settings.py`.
+    fn key_of(k: Key, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Two states, because `Esc` closes the settings or clears the search and
+    /// correctly reports nothing to do when neither is open.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [false, true].into_iter().any(|settings_open| {
+                    let mut state = FontManagerState::new();
+                    state.select_next_font();
+                    if settings_open {
+                        state.show_settings = true;
+                    }
+                    state.handle_key(&stroke) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing uninstalls behind it.**
+    ///
+    /// The control is Ctrl+S and the settings panel, not Delete: a leak that
+    /// reached Delete would uninstall a font rather than fail an assertion.
+    /// Fourth card whose control had to avoid its own most dangerous key.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |state: &FontManagerState| -> Vec<String> {
+            state
+                .render_tree()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut state = FontManagerState::new();
+        assert!(
+            !drawn(&state).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        state.handle_key(&key_of(Key::F1, Modifiers::NONE));
+        let missing = guitk::shortcut::missing_rows(&drawn(&state), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let settings = state.show_settings;
+        state.handle_key(&key_of(
+            Key::S,
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert_eq!(
+            state.show_settings, settings,
+            "Ctrl+S opened the settings through the shortcut card"
+        );
+
+        state.handle_key(&key_of(Key::F1, Modifiers::NONE));
+        state.handle_key(&key_of(
+            Key::S,
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert_ne!(
+            state.show_settings, settings,
+            "control: Ctrl+S does nothing even with the card down"
+        );
+    }
+
     #[test]
     fn the_render_settings_say_nothing_carries_them() {
         let mut app = FontManagerState::new();

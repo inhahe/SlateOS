@@ -738,12 +738,14 @@ impl SizeFilter {
     /// exist yet. A chip that cannot say *which* custom range it means would
     /// be a chip that does nothing.
     ///
-    /// `scripts/check-variant-lists.py` checks any list whose name claims
-    /// totality against its enum's variant count, and reported this one at
-    /// 7 of 8 the first time it ran after the strip was wired. The tree's
-    /// convention is the one it describes: name it `ALL` and it is checked,
-    /// name it anything else and the doc comment beside it says why it is
-    /// short. This is that doc comment.
+    /// `scripts/check-variant-lists.py` reported this one at 7 of 8 the first
+    /// time it ran after the strip was wired. It no longer decides what to
+    /// check by name -- every list of an enum's variants is checked now, and a
+    /// list that is deliberately short is recorded in
+    /// `scripts/variant-lists-partial.txt` with its reason, because a gate
+    /// whose population is chosen by name fails toward silence for every list
+    /// nobody thought to call `ALL`. This doc comment and that record say the
+    /// same thing in the two places somebody might look.
     pub const CHIPS: [SizeFilter; 7] = [
         Self::Any,
         Self::Empty,
@@ -1069,6 +1071,34 @@ const ROW_FONT: f32 = 12.0;
 const ROW_FONT_SMALL: f32 = 11.0;
 
 /// Main file search application
+/// The keys this program answers, raised by `F1`.
+///
+/// `?` is not a second way in: the search box takes a typed query, so a `?`
+/// has somewhere to go -- the `apps/spreadsheet` case in design-decisions 863.
+///
+/// The six sort chords are `Ctrl` plus the first letter of the column, which
+/// is the only reason they are letters rather than a menu.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Up / Down", "Move through the results"),
+    ("Home / End", "First / last result"),
+    ("Enter", "Open what is selected"),
+    ("Backspace", "Rub out a letter of the query"),
+    ("Esc", "Clear the query"),
+    ("Ctrl+O", "Choose a folder to search"),
+    ("Ctrl+N / Ctrl+S / Ctrl+M", "Sort by name / size / modified"),
+    (
+        "Ctrl+E / Ctrl+C / Ctrl+A",
+        "Sort by extension / category / path",
+    ),
+    ("Ctrl+F", "Show or hide the filters"),
+    ("Ctrl+P", "Show or hide the preview"),
+    ("Ctrl+1 / Ctrl+2 / Ctrl+3", "Next kind / size / date filter"),
+    ("Ctrl+R", "Cycle the match mode"),
+    ("Ctrl+U", "Match case"),
+    ("Ctrl+H", "Include hidden files"),
+    ("F1", "This list"),
+];
+
 pub struct FileSearchApp {
     pub index: FileIndex,
     pub criteria: SearchCriteria,
@@ -1103,6 +1133,8 @@ pub struct FileSearchApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 impl Default for FileSearchApp {
@@ -1115,6 +1147,7 @@ impl FileSearchApp {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             index: FileIndex::new(),
             picker: FilePicker::new(),
@@ -1375,9 +1408,30 @@ impl FileSearchApp {
     /// a keystroke before it will accept a query is a search program with an
     /// extra step. The shortcuts are therefore on Ctrl, and every plain
     /// printable key is query text.
+    pub fn handle_key_help_card(&mut self, key: &KeyEvent) -> Option<EventResult> {
+        // Above everything: the search box takes typed text and `F1` is not
+        // text, so a reader half-way through a query still gets the keys.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return Some(EventResult::Consumed);
+        }
+        if self.show_help {
+            // Modal. Letting keys through would mean re-running a search the
+            // reader cannot see.
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return Some(EventResult::Consumed);
+        }
+        None
+    }
+
     pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
         if !key.pressed {
             return EventResult::Ignored;
+        }
+        if let Some(answered) = self.handle_key_help_card(key) {
+            return answered;
         }
         let ctrl = key.modifiers.ctrl;
         match key.key {
@@ -1697,6 +1751,17 @@ impl FileSearchApp {
             max_width: Some(width - 24.0),
             overflow: TextOverflow::Ellipsis,
         });
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         cmds
     }
@@ -2714,6 +2779,86 @@ mod tests {
             modifiers: Modifiers::ctrl(),
             text: String::new(),
         })
+    }
+
+    /// Every string the window draws, joined. (The other `drawn` in this
+    /// module returns a `Vec`; this one joins for `contains`.)
+    fn card_text(app: &FileSearchApp) -> String {
+        app.render_commands(1200.0, 800.0)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// A query typed and results present, because `Up`, `Down`, `Home`, `End`,
+    /// `Enter` and `Backspace` all act on one or the other and are correctly
+    /// refused without them.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut app = FileSearchApp::new();
+                app.handle_event(&typed('a'));
+                // Results to step through. A test process has nothing
+                // indexed, so a typed query finds none, and Up/Down/Home/End
+                // and Enter are then correctly refused -- which is not the
+                // same as being unbound.
+                app.results = vec![0, 1, 2];
+                app.selected_result = Some(1);
+                assert_eq!(
+                    app.handle_event(&Event::Key(stroke.clone())),
+                    EventResult::Consumed,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the half that matters: `Ctrl+F` behind the card must not
+    /// toggle the filter panel, and asserting only that it does not would pass
+    /// on an app that had lost `Ctrl+F` altogether.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = FileSearchApp::new();
+        assert!(
+            !card_text(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&press(Key::F1));
+        let shown = card_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        let filters = app.show_filters;
+        app.handle_event(&press_ctrl(Key::F));
+        assert_eq!(
+            app.show_filters, filters,
+            "Ctrl+F toggled the filters through the shortcut card"
+        );
+
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            !card_text(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+
+        app.handle_event(&press_ctrl(Key::F));
+        assert_ne!(
+            app.show_filters, filters,
+            "control: Ctrl+F does nothing even with the card down"
+        );
     }
 
     fn typed(c: char) -> Event {

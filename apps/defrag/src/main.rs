@@ -1417,6 +1417,17 @@ pub fn sort_file_list(
 // Main UI state
 // ============================================================================
 
+/// The keys this window answers, as a reader sees them.
+///
+/// Two of them, and `Ctrl+Q` -- which closes the program -- was named
+/// nowhere.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Tab / Shift+Tab", "Next or previous view"),
+    ("Ctrl+Q", "Quit"),
+    ("Esc", "Close the warning or the exclude list"),
+];
+
 /// Complete UI state for the disk defragmenter.
 pub struct DefragUI {
     /// Available drives.
@@ -1449,6 +1460,8 @@ pub struct DefragUI {
     /// end is not an error, and shows the last full page.
     pub file_scroll_offset: usize,
     /// Whether the SSD warning dialog is shown.
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub show_ssd_warning: bool,
     /// Whether the exclude editor is shown.
     pub show_exclude_editor: bool,
@@ -1522,6 +1535,7 @@ impl DefragUI {
             file_sort_column: FileSortColumn::Severity,
             file_sort_direction: SortDirection::Descending,
             file_scroll_offset: 0,
+            show_help: false,
             show_ssd_warning: false,
             show_exclude_editor: false,
             exclude_input: String::new(),
@@ -1829,6 +1843,17 @@ impl DefragUI {
             return EventResult::Ignored;
         }
 
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         // The SSD dialog is modal, so it answers first and nothing else sees
         // the key. Escape cancels and Enter proceeds, which is the pairing the
         // buttons already have.
@@ -2059,6 +2084,17 @@ impl DefragUI {
             // recorded boxes go, and the scrim takes the whole window.
             frame.discard_hits();
             self.render_ssd_warning(&mut frame, &layout);
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
         }
 
         frame
@@ -3836,6 +3872,35 @@ mod tests {
             wide < ascii * 3.0,
             "tab width is tracking bytes, not glyphs ({ascii} vs {wide})"
         );
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// `Ctrl+Q` is checked through `on_event`, because quitting is decided a
+    /// level up and returns `Response::Exit` rather than an `EventResult`.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let quits = {
+                    let mut ui = DefragUI::new();
+                    matches!(ui.on_event(&Event::Key(stroke.clone())), Response::Exit)
+                };
+                let answered = quits
+                    || [false, true].into_iter().any(|modal| {
+                        let mut ui = DefragUI::new();
+                        if modal {
+                            ui.show_ssd_warning = true;
+                        }
+                        ui.handle_key(&stroke) == EventResult::Consumed
+                    });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
     }
 
     #[test]

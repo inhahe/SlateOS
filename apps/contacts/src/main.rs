@@ -2066,6 +2066,33 @@ pub const MAX_VCARD_BYTES: usize = 8 * 1024 * 1024;
 /// Leads a message about a file operation that did not happen.
 const FILE_FAILED_PREFIX: &str = "Could not";
 
+/// The keys this program answers, raised by `F1`.
+///
+/// `?` is not a second way in: the search box and the contact fields both take
+/// typed text, so a `?` has somewhere to go -- the `apps/spreadsheet` case in
+/// design-decisions 863.
+///
+/// `S` and `O` appear twice with different meanings, and the rows say which:
+/// unmodified they search and cycle the sort, and the handler's own comment
+/// records that the file dialogs had to take `Ctrl` *because* those two were
+/// already spoken for.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("N", "A new contact"),
+    ("E", "Edit the selected one"),
+    ("Delete", "Delete it"),
+    ("S", "Search"),
+    ("G", "Groups"),
+    ("D", "Duplicates"),
+    ("F", "Cycle the filter"),
+    ("O", "Cycle the sort order"),
+    ("Tab", "Move the keyboard on"),
+    ("Enter", "Open, or confirm what you typed"),
+    ("Backspace", "Rub out a letter"),
+    ("Esc", "Back, or give the keyboard up"),
+    ("Ctrl+S / Ctrl+O", "Export / import a file"),
+    ("F1", "This list"),
+];
+
 pub struct ContactsApp {
     /// The open or save picker. Holds the dialog, the saving flag and
     /// the routing eleven applications used to write out by hand.
@@ -2122,11 +2149,14 @@ pub struct ContactsApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 impl ContactsApp {
     pub fn new() -> Self {
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             picker: FilePicker::new(),
             last_file_action: None,
@@ -2378,6 +2408,18 @@ impl ContactsApp {
         // `handle_event` gives it the keystroke.
         f.extend(self.picker.render(&self.palette, l.window.w, l.window.h));
 
+        // Last, so it is over the file dialog too: the list is the one thing
+        // on screen a reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (l.window.w, l.window.h),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
         f
     }
 
@@ -4084,6 +4126,25 @@ impl ContactsApp {
         if !event.pressed {
             return;
         }
+
+        // At the very top, and that position is load-bearing. The `match`
+        // below claims `Escape`, `Enter`, `Tab` and `Backspace` before any
+        // modifier is looked at, so a card check placed lower -- where the
+        // `Ctrl` pair is handled -- never sees the keys that dismiss it. The
+        // first version of this went there and `Escape` could not close the
+        // card.
+        if event.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return;
+        }
+        if self.show_help {
+            // Modal. Letting keys through would mean deleting a contact the
+            // reader cannot see.
+            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return;
+        }
         match event.key {
             Key::Escape => {
                 if self.focus == Focus::None {
@@ -4295,6 +4356,139 @@ mod tests {
     ///
     /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
     /// routing and reports whose tests notice. Sixteen of twenty did not.
+    /// Every string the window draws, joined.
+    fn card_text(app: &ContactsApp) -> String {
+        app.frame(1000.0, 700.0)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    fn stroke_event(stroke: &KeyEvent) -> Event {
+        Event::Key(stroke.clone())
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// A contact selected and the keyboard free, because `E`, `Delete` and
+    /// `Enter` act on a selection and the letters are shortcuts only when
+    /// nothing has the keyboard. Both refusals are correct.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                // Two focus states. The letters are shortcuts only when
+                // nothing has the keyboard, and `Enter` and `Backspace` only
+                // mean anything when something does -- `Enter` with
+                // `Focus::None` assigns `Focus::None`, a no-op by
+                // construction. No single state can answer both halves.
+                let answered = [Focus::None, Focus::Field(FormField::FirstName)]
+                    .into_iter()
+                    .any(|focus| {
+                        let mut app = ContactsApp::new();
+                        app.focus = focus;
+                        // A contact open, because `selected_id()` reads the *view* --
+                        // `E` and `Delete` are refused with nothing selected, and that
+                        // refusal is correct rather than a missing binding. Added
+                        // rather than looked for: a fresh app has an empty store, so
+                        // the first version of this looked for a contact, found none,
+                        // and left the fixture exactly as it was.
+                        let id = app.store.add_contact(make_contact("Ada", "Lovelace"));
+                        app.view = DetailView::ViewContact(id);
+                        // With a field focused, put the app in an *edit*:
+                        // `save_form` matches on the view, so `Enter` does
+                        // nothing at all unless there is a form to save.
+                        if focus != Focus::None {
+                            app.view = DetailView::EditContact(id);
+                            app.edit_first_name = String::from("Changed");
+                        }
+                        // What a user could notice, which is wider than the frame.
+                        // `handle_key` returns `()` and there is no consumed signal to
+                        // assert on, so the test asks whether anything visible moved.
+                        // The frame alone is not enough: `Tab` moves the keyboard
+                        // focus, and with no form on screen that focus is drawn
+                        // nowhere, so two frames compare equal while the app has
+                        // plainly answered the key.
+                        let snapshot = |a: &ContactsApp| {
+                            format!(
+                                "{:?}|{:?}|{:?}|{}|{}",
+                                a.frame(1000.0, 700.0).commands(),
+                                a.focus,
+                                a.view,
+                                a.search_query,
+                                a.status
+                            )
+                        };
+                        let before = snapshot(&app);
+                        app.handle_event(&stroke_event(&stroke), (1000.0, 700.0));
+                        snapshot(&app) != before
+                    });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and {:?} changed nothing on screen",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the half that matters: `N` behind the card must not
+    /// start a new contact, and asserting only that it does not would pass on
+    /// an app that had lost `N` altogether.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = ContactsApp::new();
+        let size = (1000.0, 700.0);
+        assert!(
+            !card_text(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        let key = |k: Key| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: String::new(),
+            })
+        };
+
+        app.handle_event(&key(Key::F1), size);
+        let shown = card_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        // start_new_contact sets view; `editing` is not a field of this app at
+        // all. Read from the function rather than guessed from the key name.
+        let view = app.view.clone();
+        app.handle_event(&key(Key::N), size);
+        assert_eq!(
+            app.view, view,
+            "N started a new contact through the shortcut card"
+        );
+
+        app.handle_event(&key(Key::Escape), size);
+        assert!(
+            !card_text(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+
+        app.handle_event(&key(Key::N), size);
+        assert_ne!(
+            app.view, view,
+            "control: N does nothing even with the card down"
+        );
+    }
+
     #[test]
     fn an_open_picker_takes_the_keyboard_from_the_form() {
         let mut app = ContactsApp::new();

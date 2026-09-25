@@ -772,6 +772,25 @@ impl Default for EyedropperState {
 // ============================================================================
 
 /// Complete application state for the color picker.
+/// The keys this window answers, as a reader sees them.
+///
+/// None of them were named, and `Esc` is the one that earns the card on its
+/// own: with no eyedropper armed it closes the program.
+///
+/// **No `?` row.** `handle_edit_key` takes every character while the colour
+/// box is open, and that box is how a colour is typed or pasted in. Eighth
+/// app where `?` was not free.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Arrows", "Adjust the colour, a step at a time"),
+    ("Tab / Shift+Tab", "Next or previous colour format"),
+    ("Ctrl+C", "Copy the colour"),
+    ("Ctrl+V", "Open the box, to paste or type a colour"),
+    ("Ctrl+E", "Eyedropper on or off"),
+    ("Enter", "Accept what you typed in the box"),
+    ("Esc", "Put the eyedropper away, or quit"),
+];
+
 pub struct ColorPickerApp {
     /// The currently selected/active color.
     current: PickedColor,
@@ -792,6 +811,8 @@ pub struct ColorPickerApp {
     /// Hex input buffer.
     hex_input: String,
     /// Whether the value box has keyboard focus and is taking hex digits.
+    /// Whether the shortcut card is up.
+    show_help: bool,
     editing: bool,
     /// The slider the pointer is currently dragging, if any.
     ///
@@ -844,6 +865,7 @@ impl ColorPickerApp {
             contrast_bg: PickedColor::from_rgb(30, 30, 46), // Catppuccin Base
             clipboard: String::new(),
             hex_input: String::new(),
+            show_help: false,
             editing: false,
             dragging: None,
             status: String::new(),
@@ -1275,6 +1297,21 @@ impl ColorPickerApp {
             // A key *release* must not repeat the action of its press.
             return Action::None;
         }
+        // Above the editing branch, which takes every character. F1 types
+        // nothing, so a colour being typed keeps what it was given.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return Action::Redraw;
+        }
+        if self.show_help {
+            // Modal, and Escape especially: with no eyedropper armed it
+            // closes the program, which is not what dismissing a list means.
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return Action::Redraw;
+        }
+
         if self.editing {
             return self.handle_edit_key(key);
         }
@@ -1462,6 +1499,17 @@ impl ColorPickerApp {
 
         // Palette grid
         self.render_palette(&mut cmds, &mut y, width);
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         cmds
     }
@@ -2369,6 +2417,91 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// `Action::None` is this app's "nothing happened", so anything else
+    /// counts as answered. Two states, because `Enter` belongs to the colour
+    /// box and does nothing outside it.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [false, true].into_iter().any(|editing| {
+                    let mut app = ColorPickerApp::create();
+                    if editing {
+                        app.begin_edit();
+                    }
+                    app.handle_key(&stroke, ColorPickerApp::SIZE) != Action::None
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the last third: Ctrl+E behind the card must not arm the
+    /// eyedropper, and must arm it with the card down. Escape would be the
+    /// obvious control and is the wrong one -- with nothing armed it closes
+    /// the program, so a card that let it through would end the session
+    /// rather than fail a test.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &ColorPickerApp| -> Vec<String> {
+            app.frame(ColorPickerApp::SIZE.0, ColorPickerApp::SIZE.1)
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let press = |k: Key| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        };
+        let ctrl = |k: Key| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        };
+
+        let mut app = ColorPickerApp::create();
+        assert!(
+            !drawn(&app).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_key(&press(Key::F1), ColorPickerApp::SIZE);
+        let missing = guitk::shortcut::missing_rows(&drawn(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let armed = app.eyedropper.active;
+        app.handle_key(&ctrl(Key::E), ColorPickerApp::SIZE);
+        assert_eq!(
+            app.eyedropper.active, armed,
+            "Ctrl+E armed the eyedropper through the shortcut card"
+        );
+
+        app.handle_key(&press(Key::F1), ColorPickerApp::SIZE);
+        app.handle_key(&ctrl(Key::E), ColorPickerApp::SIZE);
+        assert_ne!(
+            app.eyedropper.active, armed,
+            "control: Ctrl+E does nothing even with the card down"
+        );
+    }
 
     // -- Hex conversion tests ----------------------------------------------
 

@@ -4,8 +4,8 @@
 #     powershell -NoProfile -ExecutionPolicy Bypass -File D:\tmp\migrate-slateos.ps1 -Src "D:\visual studio projects" -Dst "E:\visual studio projects" -DryRun
 #     powershell -NoProfile -ExecutionPolicy Bypass -File D:\tmp\migrate-slateos.ps1 -Src "D:\visual studio projects" -Dst "E:\visual studio projects"
 #
-# MOVES: os, os-lane-a, os-lane-b, os-lane-c -- the main repo and its three
-# worktrees, including each lane's UNCOMMITTED work and the per-worktree state
+# MOVES: os and os-lane-a .. os-lane-f -- the main repo and its six lane
+# worktrees (three until the six-lane split of 2026-09-22), including each lane's UNCOMMITTED work and the per-worktree state
 # under os\.git\worktrees\ (boot-test logs, gate timings, indexes).
 #
 # DOES NOT MOVE: target\ directories. Cargo bakes absolute paths into its
@@ -14,15 +14,15 @@
 #
 # WHY A SCRIPT: these are git worktrees. os-lane-a\.git is a FILE holding an
 # absolute path to os\.git\worktrees\os-lane-a, and that directory's gitdir
-# file holds an absolute path back. A plain folder copy leaves six absolute
-# paths aimed at the old drive and every lane's git breaks in a way that looks
+# file holds an absolute path back. A plain folder copy leaves two absolute
+# paths per worktree aimed at the old drive and every lane's git breaks in a way that looks
 # like repository corruption. "git worktree repair" rewrites both directions;
 # this script runs it and then proves it worked.
 
 param(
     [Parameter(Mandatory=$true)] [string] $Src,
     [Parameter(Mandatory=$true)] [string] $Dst,
-    [string[]] $Trees = @("os", "os-lane-a", "os-lane-b", "os-lane-c"),
+    [string[]] $Trees = @("os", "os-lane-a", "os-lane-b", "os-lane-c", "os-lane-d", "os-lane-e", "os-lane-f"),
     [switch] $DryRun,
     [switch] $SkipProcessCheck
 )

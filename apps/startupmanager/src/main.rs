@@ -1477,6 +1477,20 @@ impl Layout {
     }
 }
 
+/// The keys this window answers, as a reader sees them.
+///
+/// `Ctrl+Q` closes the program and `Delete` removes a startup entry; neither
+/// was named.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Up / Down", "Move through the entries"),
+    ("Enter", "Edit the selected entry"),
+    ("Delete", "Remove the selected entry"),
+    ("F5", "Look again"),
+    ("Ctrl+Q", "Quit"),
+    ("Esc", "Close the dialog"),
+];
+
 /// Full application state for the startup manager UI.
 pub struct StartupUI {
     pub manager: StartupManager,
@@ -1484,6 +1498,8 @@ pub struct StartupUI {
     pub sort_order: SortOrder,
     pub search_query: String,
     pub selected_id: Option<u64>,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub dialog: DialogState,
     /// First visible row of the table, as an index into the filtered list.
     pub scroll_offset: usize,
@@ -1516,6 +1532,7 @@ impl StartupUI {
             sort_order: SortOrder::Ascending,
             search_query: String::new(),
             selected_id: Option::None,
+            show_help: false,
             dialog: DialogState::Closed,
             scroll_offset: 0,
             window_width: WINDOW_WIDTH,
@@ -1947,6 +1964,17 @@ impl StartupUI {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal: Delete removes a startup entry.
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
         if matches!(self.dialog, DialogState::AddEdit(_)) {
             return self.handle_add_edit_key(key);
         }
@@ -2169,6 +2197,17 @@ impl StartupUI {
                 Self::draw_scrim(&mut frame, &l);
                 self.draw_confirm_delete_dialog(&mut frame, &l, *id);
             }
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
         }
 
         frame
@@ -3185,6 +3224,38 @@ mod tests {
     // the window hands it.
     use guitk::event::Modifiers;
     use guitk::probe;
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// `Ctrl+Q` is checked through `on_event`, because quitting is decided a
+    /// level up and returns `Response::Exit` rather than an `EventResult`.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let quits = {
+                    let mut ui = StartupUI::new();
+                    matches!(ui.on_event(&Event::Key(stroke.clone())), Response::Exit)
+                };
+                let answered = quits
+                    || [false, true].into_iter().any(|modal| {
+                        let mut ui = StartupUI::new();
+                        if modal {
+                            // A confirm dialog open, which is what Esc has to
+                            // close. The id need not exist: the dialog's key
+                            // handling does not look it up.
+                            ui.dialog = DialogState::ConfirmDelete(1);
+                        }
+                        ui.handle_key(&stroke) == EventResult::Consumed
+                    });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
 
     // -- StartupType tests --------------------------------------------------
 

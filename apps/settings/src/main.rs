@@ -466,6 +466,27 @@ impl NarratorVerbosity {
 // ============================================================================
 
 /// Complete application state for the settings UI.
+/// The keys this window answers, as a reader sees them.
+///
+/// Five chords, named in no string this program draws: the search box is
+/// reached with Ctrl+F and a focused text field takes the four editing
+/// chords. Everything else on this window is a pointer target or a
+/// conventional key cap.
+///
+/// **No `?` row.** A focused field takes every character, so `?` would cost
+/// a question mark in a search or an exclusion pattern to buy a list `F1`
+/// already opens. Third app where `?` was not free, after ebook and
+/// markdowneditor, and the reason is the same each time: this window can be
+/// typed into.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Ctrl+F", "Jump to the search box"),
+    ("Ctrl+A", "Select all, in a text box"),
+    ("Ctrl+C", "Copy"),
+    ("Ctrl+X", "Cut"),
+    ("Ctrl+V", "Paste"),
+];
+
 pub struct SettingsState {
     // Navigation
     pub current_category: SettingsCategory,
@@ -477,6 +498,8 @@ pub struct SettingsState {
     /// box drew no caret, because there was no caret to draw.
     pub search_query: TextInput,
     pub search_focused: bool,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub sidebar_hovered: Option<usize>,
 
     // Window dimensions
@@ -797,14 +820,27 @@ impl DropdownId {
     /// rather than trust that whoever adds one also wires it.
     ///
     /// **Named `FIXED` and not `ALL`, because it is deliberately a subset.**
-    /// `NotifImportance` is absent: it is one dropdown *per program*, in a list
-    /// that may be empty, so there is no fixed value to walk. That reason was
+    /// `NotifImportance` is absent, and it is the only one: it is one dropdown
+    /// *per program*, in a list that may be empty, so there is no fixed value
+    /// to walk.
+    ///
+    /// **Five more used to be absent for no reason anybody had written down**
+    /// -- `RotationInterval`, `LoginBackground`, `UiFont`, `LockAfter` and
+    /// `MonoFont`. Each is drawn by a `dropdown_row`, opens, and has a value
+    /// handler, so each was working; none of them was covered by the sweep
+    /// below, which is the guarantee this list exists to give. They were found
+    /// by `scripts/check-variant-lists.py` once it began asking which variants
+    /// a list omits rather than how many it holds -- the old count-based check
+    /// could not see them, because ten of sixteen looks exactly like a subset
+    /// that means it. The rule the sweep already states applies to them as it
+    /// does to the wallpaper rows: a dropdown left out for being awkward to
+    /// reach is precisely the one worth checking. That reason was
     /// already written here while the constant was still called `ALL` -- which
     /// is the shape `scripts/check-variant-lists.py` exists to refuse, and did:
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 10] = [
+    pub const FIXED: [Self; 15] = [
         Self::QuietStart,
         Self::QuietEnd,
         Self::WallpaperFit,
@@ -815,6 +851,11 @@ impl DropdownId {
         Self::CursorSize,
         Self::NarratorVerbosity,
         Self::HighContrast,
+        Self::RotationInterval,
+        Self::LoginBackground,
+        Self::UiFont,
+        Self::LockAfter,
+        Self::MonoFont,
     ];
 }
 
@@ -1280,6 +1321,7 @@ impl SettingsState {
             current_page: SettingsPage::Display,
             search_query: TextInput::new(),
             search_focused: false,
+            show_help: false,
             sidebar_hovered: None,
 
             window_width: 1200.0,
@@ -2950,6 +2992,17 @@ impl SettingsState {
         if let Some(picker) = self.color_dialog.as_ref() {
             tree.commands
                 .extend(picker.render(pal, self.window_width, self.window_height));
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                pal,
+                (self.window_width, self.window_height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
         }
 
         tree
@@ -5415,6 +5468,21 @@ impl SettingsState {
             return EventResult::Ignored;
         }
 
+        // Above the focused-field branch below, which takes the keyboard and
+        // returns. Placed after it, the card could be raised from a page and
+        // then not dismissed from a text box -- and on this window an
+        // unclaimed keystroke is a setting.
+        if evt.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            if matches!(evt.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         // A focused field takes the keyboard before the page does, for the
         // reason the modals do: on this window an unclaimed keystroke is a
         // setting. Ordered before the sidebar's search box because that one
@@ -6976,6 +7044,95 @@ mod tests {
         assert!(tree.len() > 20);
     }
 
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Two states, because four of the six are editing chords that only a
+    /// focused text box claims. With nothing focused, Ctrl+C reaches a page
+    /// that has no use for it.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [false, true].into_iter().any(|typing| {
+                    let mut state = SettingsState::new();
+                    if typing {
+                        state.search_focused = true;
+                    }
+                    state.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the last third: Ctrl+F behind the card must not focus
+    /// the search box, and must focus it with the card down. Asserting only
+    /// the first half would pass on a window where Ctrl+F had stopped
+    /// working.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |state: &SettingsState| -> String {
+            state
+                .render_tree()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+
+        let mut state = SettingsState::new();
+        assert!(
+            !drawn(&state).contains("F1 closes this"),
+            "the card is up before anybody asked for it"
+        );
+
+        state.handle_event(&Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }));
+        let shown = drawn(&state);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        let ctrl_f = Event::Key(KeyEvent {
+            key: Key::F,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        });
+        state.handle_event(&ctrl_f);
+        assert!(
+            !state.search_focused,
+            "Ctrl+F focused the search box through the shortcut card"
+        );
+
+        state.handle_event(&Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }));
+        state.handle_event(&ctrl_f);
+        assert!(
+            state.search_focused,
+            "control: Ctrl+F does nothing even with the card down"
+        );
+    }
+
     #[test]
     fn test_category_navigation() {
         let mut state = SettingsState::new();
@@ -8405,6 +8562,21 @@ mod tests {
         // exactly the one it should be checking.
         state.appearance.settings.wallpaper =
             Some(std::path::PathBuf::from("/pictures/example.png"));
+        // Likewise the Rotation section: its interval dropdown and shuffle
+        // switch appear only once a *folder* is chosen, because a rotation
+        // detail with nothing to rotate through is the same broken-looking
+        // control as the fit chooser above. `rotation_detail_rows_wait_for_a_folder`
+        // is where that is asserted from the other side.
+        state.appearance.settings.wallpaper_folder = Some(std::path::PathBuf::from("/pictures"));
+        // And the two font pickers, which are drawn only when the system has
+        // families to offer -- a chooser with nothing in it reads as broken,
+        // so the page says so in a note instead. A test enumerates no fonts,
+        // so without this the rows never exist and the sweep cannot see them.
+        // Fixtures rather than `load_font_families`, which would make the
+        // sweep's coverage depend on what happens to be installed on the
+        // machine running it.
+        state.font_families = vec!["Example Sans".to_owned(), "Example Serif".to_owned()];
+        state.mono_families = vec!["Example Mono".to_owned()];
         // Turning one switch on can reveal another, so repeat until the set
         // stops growing. Bounded because nothing here turns a switch back off.
         for _ in 0..8 {

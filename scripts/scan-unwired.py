@@ -43,7 +43,10 @@ import pathlib
 import re
 import sys
 
-# Lane C's tree.  Root-agnostic otherwise.
+# Lane C's tree as it was under three lanes.  Root-agnostic otherwise.
+# (Since the six-lane split of 2026-09-22 these directories are no longer one
+# lane's: gui/ is lanes C and F, apps/ lane E, the net crates, aes and hmac
+# lane A.  The population this scans is unchanged; only the label is history.)
 ROOTS = ["gui", "apps", "pkg"]
 
 FN = re.compile(

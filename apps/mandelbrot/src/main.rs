@@ -233,8 +233,17 @@ pub enum Action {
 /// The footer buttons, in the order they are drawn. Each label names the key
 /// that does the same thing, so the buttons double as the key legend the
 /// bottom bar used to be.
+///
+/// **Hyphen-minus, not U+2212.** Both of these read `-` where they used to
+/// read the typographic minus sign. It is the better character for a
+/// subtraction and the wrong one for a key legend: the cap says `-`, the row
+/// beside it already said `+` in ASCII, and a reader looking for the key they
+/// pressed should find the character that is on it. `key-survey.py` reported
+/// Minus as a key this program answers and names nowhere, and it was right --
+/// the name was there and was spelled in a character the keyboard does not
+/// have.
 const BUTTONS: [(Action, &str); 5] = [
-    (Action::ZoomOut, "\u{2212}  Out"),
+    (Action::ZoomOut, "-  Out"),
     (Action::ZoomIn, "+  In"),
     (Action::Reset, "R  Reset"),
     (Action::CycleScheme, "C  Colour"),
@@ -933,7 +942,7 @@ impl MandelbrotApp {
 const HELP_ROWS: [(&str, &str); 15] = [
     ("Arrow keys", "Pan the view"),
     ("Z  or  +", "Zoom in"),
-    ("X  or  \u{2212}", "Zoom out"),
+    ("X  or  -", "Zoom out"),
     ("Wheel", "Zoom about the pointer"),
     ("Click", "Centre there and zoom in"),
     ("R", "Reset the view"),

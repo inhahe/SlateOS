@@ -1,0 +1,74 @@
+# Variant lists that are NOT required to hold every variant, and why.
+#
+# Fields: path<TAB>Enum::NAME<TAB>reason
+#
+# WHY THIS FILE EXISTS. `check-variant-lists.py` checks that an array of an
+# enum's variants names every one of them. Some arrays legitimately do not, and
+# no scanner can tell which: a list of the promotions a pawn may choose is not
+# missing "King", it is right. Without somewhere to record that, the gate would
+# be unrunnable and would be switched off, which is the failure mode worth
+# avoiding above all others.
+#
+# Keyed by path and `Enum::NAME` rather than by line, so moving a list does not
+# rot its record. The element type is part of the key because a constant's name
+# is not unique within a file -- `apps/settings` has both a `DropdownId::FIXED`
+# and a `SliderId::FIXED`, and a record written for the first silently excused
+# the second, which was exhaustive and wanted checking.
+#
+# THE RULE THIS FILE REPLACES. Until 2026-09-22 the gate chose what to check by
+# *name*: a list called `ALL` or `EVERY_*` was checked and anything else was
+# not. That inherits the vocabulary of whoever wrote the code, and it fails
+# toward silence -- a list that ought to be total and is called `FLEET` or
+# `VIEW_MODES` gets no check, and nobody finds out. The default is now the
+# other way round: every list of variants is checked, and an exception is a
+# line in this file. Forgetting to opt in was invisible; forgetting to opt out
+# is a failing gate that asks you to write the reason down.
+#
+# Two rules, as for `key-survey-answered.txt`:
+#
+#   * Every line carries a reason, and the reason has to say what *makes* the
+#     list legitimately short -- not that somebody looked at it.
+#   * A line naming a list that is no longer there is an error, not a no-op.
+#     The tool says so. A record that has rotted reads as a decision somebody
+#     made about the code as it is now.
+#
+# A list named `ALL` or `EVERY_*` may not appear here at all: a name that
+# claims totality and a record saying totality is not required are a direct
+# contradiction, and the tool refuses it.
+#
+# Run `python scripts/check-variant-lists.py --list` to see these with their
+# reasons beside the lists that are checked.
+
+# --- the value is not a member of the category the list is about -------------
+apps/chess/src/main.rs	PieceKind::PROMOTION_KINDS	a pawn may not become a king, and staying a pawn is not a promotion
+apps/finance/src/main.rs	Category::EXPENSE_CATS	Savings, Income and Investment are where money comes from, not what it is spent on
+apps/pipes/src/main.rs	PipeKind::FILL	`Empty` is the absence of a pipe, so filling a cell with it would leave the cell unfilled
+userspace/coreutils/src/bin/ls.rs	Ind::FILETYPE_INDICATORS	lane B's. `Ind` also carries the colour-control entries (Reset, Norm, Left, Right, End...), which are not file types
+
+# --- the variant carries data a fixed list cannot express --------------------
+apps/filesearch/src/main.rs	SizeFilter::CHIPS	`Custom(min, max)` carries two numbers a strip of chips cannot say, so a chip for it would not name which range it meant
+apps/settings/src/main.rs	DropdownId::FIXED	`NotifImportance` is one dropdown per program, in a list that may be empty, so there is no fixed value to walk
+
+# --- the list is one category of a larger enum, by construction --------------
+# `Key` has 96 variants covering letters, digits, function keys, navigation,
+# modifiers, punctuation and media. Each of these three is one of those groups
+# and could not be anything else; a `LETTERS` holding `Key::Enter` would be the
+# defect, not the cure.
+gui/toolkit/src/shortcut.rs	Key::LETTERS	the 26 letter keys, one group of `Key`'s several
+gui/toolkit/src/shortcut.rs	Key::DIGITS	the 10 digit keys, one group of `Key`'s several
+gui/toolkit/src/shortcut.rs	Key::FUNCTION_KEYS	the 12 function keys, one group of `Key`'s several
+
+# --- the rest of the enum is drawn from somewhere else -----------------------
+apps/screenshot/src/main.rs	PreviewButton::PREVIEW_ACTIONS	the main toolbar row only; `Tool` is drawn once per tool from PREVIEW_TOOLS and `Undo` has its own rect
+apps/sudoku/src/main.rs	Target::KEYPAD	the keypad strip; Cell, Pause, Difficulty and NewGame are drawn elsewhere on the board
+apps/wordle/src/main.rs	Target::HEADER_BUTTONS	the header row; Key, Enter and Backspace belong to the on-screen keyboard below it
+gui/remote/src/control.rs	ShellControlAction::ZONELESS	`SnapToZone` is generated from `SnapSlot::all`, and listing it here is the stale hand-written list this array exists to avoid
+
+# --- "always drawn": the controls present in every state ---------------------
+# These three name the controls a test may expect a hit box for without setting
+# anything up. A row target needs a row, and a dialog target needs an open
+# dialog, so both are absent by definition rather than by oversight -- the list
+# would be wrong if they were in it.
+apps/fileassoc/src/main.rs	Target::ALWAYS_DRAWN	rows and dialog controls exist only once there is a row or an open dialog
+apps/speedtest/src/main.rs	Target::ALWAYS_DRAWN	ServerItem, HistoryRow and DropdownScrim need a server list, a finished run or an open dropdown
+apps/startupmanager/src/main.rs	Target::ALWAYS_DRAWN	rows and the six dialog fields exist only once there is a row or an open dialog

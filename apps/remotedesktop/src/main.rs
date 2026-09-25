@@ -637,6 +637,30 @@ impl DetailTab {
 // ============================================================================
 
 /// Complete application state for the remote desktop viewer.
+/// The keys this program answers, raised by `F1` or `?`.
+///
+/// Nothing here takes typed text -- the profile form is a set of fields with
+/// their own handling -- so `?` is free and design-decisions 863 says to bind
+/// it where it is.
+///
+/// Most rows name the view they belong to, because this app has four and most
+/// of its keys belong to one. Being refused on the other three is correct.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Ctrl+1-4", "Connections, sessions, transfers, history"),
+    ("Up / Down", "Choose a connection"),
+    ("Left / Right", "Another detail tab, on Connections"),
+    ("Enter", "Connect to the chosen one"),
+    ("Q", "Cycle the quality preset, on Connections"),
+    ("M", "Cycle the monitor mode, on Sessions"),
+    ("D", "Disconnect this session"),
+    ("R", "Reconnect it"),
+    ("Delete", "Remove what is selected, in any view"),
+    ("Y / N", "Answer a delete confirmation"),
+    ("Ctrl+N", "A new connection profile"),
+    ("Ctrl+Shift+S", "Take a screenshot"),
+    ("F1 / ?", "This list"),
+];
+
 pub struct RemoteDesktopApp {
     // --- Profiles ---
     pub profiles: Vec<ConnectionProfile>,
@@ -712,6 +736,8 @@ pub struct RemoteDesktopApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 impl Default for RemoteDesktopApp {
@@ -766,6 +792,7 @@ impl SidebarRow {
 impl RemoteDesktopApp {
     pub fn new() -> Self {
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             profiles: Vec::new(),
             selected_profile: None,
@@ -1648,6 +1675,19 @@ impl RemoteDesktopApp {
             return EventResult::Ignored;
         }
 
+        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal. Letting keys through would mean disconnecting a session
+            // the reader cannot see.
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         // Fullscreen toggle check
         if key.key == self.escape_hotkey && self.fullscreen {
             self.toggle_fullscreen();
@@ -1887,6 +1927,17 @@ impl RemoteDesktopApp {
 
         if self.show_perf_overlay {
             self.render_perf_overlay(&mut cmds);
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.window_width, self.window_height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
         }
 
         cmds
@@ -3808,6 +3859,101 @@ mod tests {
 
     fn press(k: Key) -> Event {
         key_ev(k, false)
+    }
+
+    /// Every string the window draws, joined.
+    fn card_text(app: &RemoteDesktopApp) -> String {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// One app per view, because most of these keys belong to one of the four:
+    /// `Q` and the arrows are Connections', `M`/`D`/`R` are Sessions'. Being
+    /// refused on the other views is correct, which is why the list names the
+    /// view. A pending delete confirmation is set up so `Y` and `N` have an
+    /// answer to give.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                // `confirm_delete` is set in exactly one state, not all of
+                // them. The confirmation arm matches `Y | Enter` *before* the
+                // connect arm, so a pending confirmation in every state would
+                // have `Enter` answered by the dialog -- and the row that says
+                // "Enter: connect to the chosen one" would be verified by a
+                // state where Enter does something else entirely.
+                let answered = [
+                    (MainView::Connections, false),
+                    (MainView::ActiveSessions, false),
+                    (MainView::FileTransfer, false),
+                    (MainView::Connections, true),
+                ]
+                .into_iter()
+                .any(|(view, confirming)| {
+                    let mut app = RemoteDesktopApp::with_sample_data();
+                    app.current_view = view;
+                    app.selected_profile = Some(0);
+                    app.selected_session = Some(0);
+                    app.confirm_delete = if confirming { Some(0) } else { None };
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and no view answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the half that matters: `Ctrl+N` behind the card must not
+    /// add a profile the reader cannot see, and asserting only that it does
+    /// not would pass on an app that had lost `Ctrl+N` altogether.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = RemoteDesktopApp::with_sample_data();
+        assert!(
+            !card_text(&app).contains("F1 or ? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&press(Key::F1));
+        let shown = card_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        let profiles = app.profiles.len();
+        app.handle_event(&key_ev(Key::N, true));
+        assert_eq!(
+            app.profiles.len(),
+            profiles,
+            "Ctrl+N added a profile through the shortcut card"
+        );
+
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            !card_text(&app).contains("F1 or ? closes this"),
+            "Escape did not close it"
+        );
+
+        app.handle_event(&key_ev(Key::N, true));
+        assert_ne!(
+            app.profiles.len(),
+            profiles,
+            "control: Ctrl+N does nothing even with the card down"
+        );
     }
 
     fn tick() -> Event {

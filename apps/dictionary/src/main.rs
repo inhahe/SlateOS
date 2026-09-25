@@ -1269,6 +1269,28 @@ pub fn blocks_height(blocks: &[Block]) -> f32 {
 
 // ── Model ──────────────────────────────────────────────────────────────────
 
+/// The keys this program answers, raised by `F1`.
+///
+/// `?` is not a second way in: the search screen takes a typed query, so a `?`
+/// has somewhere to go -- the `apps/spreadsheet` case in design-decisions 863.
+///
+/// The app named none of these before the list existed.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Ctrl+1-5", "Search, entry, history, favourites, featured"),
+    ("Tab", "The next screen"),
+    ("Up / Down", "Move through the list"),
+    ("PageUp / PageDown", "A screen at a time"),
+    ("Home / End", "First / last"),
+    ("Enter", "Open what is selected"),
+    ("Backspace", "Rub out a letter, or go back"),
+    ("Esc", "Clear the query, or go back"),
+    ("Ctrl+D", "Favourite this word"),
+    ("Ctrl+L / Ctrl+K / Ctrl+F", "Jump to the search box"),
+    ("Ctrl+S", "Save the favourites"),
+    ("Ctrl+O", "Open a word list"),
+    ("F1", "This list"),
+];
+
 pub struct Dictionary {
     entries: Vec<DictEntry>,
     query: String,
@@ -1315,6 +1337,8 @@ pub struct Dictionary {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 /// The longest history the program keeps.
@@ -1324,6 +1348,7 @@ impl Dictionary {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             entries: build_dictionary(),
             query: String::new(),
@@ -2159,6 +2184,16 @@ impl Dictionary {
         if l.shows_status() {
             self.draw_status(&mut f, &l);
         }
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
         f
     }
 
@@ -2749,6 +2784,22 @@ impl Dictionary {
         // the next keystroke so the status line goes back to the hint rather
         // than reporting an open from five minutes ago as if it were now.
         self.file_status = None;
+
+        // Above the search box: `F1` is not a character, and a reader
+        // half-way through a query still wants the keys.
+        if ev.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal. Letting keys through would mean opening a word the
+            // reader cannot see.
+            if matches!(ev.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         let m = ev.modifiers;
         if m.alt || m.super_key {
             return EventResult::Ignored;
@@ -3146,6 +3197,85 @@ mod tests {
     /// Everything was kept exactly as long as the window was open: no
     /// `std::fs`, no dialog, so a favourites list built over an afternoon went
     /// away when it closed.
+    /// Every string the window draws, joined.
+    fn drawn(app: &Dictionary) -> String {
+        app.draw(Dictionary::SIZE)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// Three screens, because most of these keys belong to one: `Backspace`
+    /// and `Esc` mean different things on the search screen and in an entry,
+    /// and `Left`/`Right` only move on the featured screen. Each refusal
+    /// elsewhere is correct.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [Screen::Search, Screen::Entry, Screen::Featured]
+                    .into_iter()
+                    .any(|screen| {
+                        let mut app = Dictionary::new();
+                        app.screen = screen;
+                        probe::key(&mut app, &stroke) == EventResult::Consumed
+                    });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and no screen answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the half that matters: `Tab` behind the card must not
+    /// change the screen, and asserting only that it does not would pass on an
+    /// app that had lost `Tab` altogether.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = Dictionary::new();
+        assert!(
+            !drawn(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        probe::key(&mut app, &probe::press(Key::F1));
+        let shown = drawn(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        let screen = app.screen;
+        probe::key(&mut app, &probe::press(Key::Tab));
+        assert_eq!(
+            app.screen, screen,
+            "Tab changed the screen through the card"
+        );
+
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(
+            !drawn(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+
+        probe::key(&mut app, &probe::press(Key::Tab));
+        assert_ne!(
+            app.screen, screen,
+            "control: Tab does nothing even with the card down"
+        );
+    }
+
     #[test]
     fn the_word_lists_survive_a_save_and_an_open() {
         let dir = dict_scratch("roundtrip");

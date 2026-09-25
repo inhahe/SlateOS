@@ -47,7 +47,7 @@ describing a different one.
 
 Usage
 -----
-    python scripts/open-requests.py            # your lane, from CLAUDE_CONFIG_DIR
+    python scripts/open-requests.py            # your lane, as which-lane.py decides it
     python scripts/open-requests.py --lane b   # a specific lane
     python scripts/open-requests.py --all      # every lane, grouped
     python scripts/open-requests.py --outgoing # what you filed on others
@@ -60,6 +60,7 @@ missing.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import re
 import sys
@@ -69,8 +70,37 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REQUESTS_DIR = REPO_ROOT / "requests"
 
-# `<from>-<to>-<slug>.md`, both lane letters single characters.
-NAME_RE = re.compile(r"^([a-z])-([a-z])-(.+)\.md$")
+#: The lane letters a request filename may use.  Must equal `which-lane.py`'s
+#: LANES (lower-cased); `test-open-requests.py` asserts it.
+LANE_LETTERS = "abcdef"
+
+# `<from>-<to>-<slug>.md`.  `<to>` is one lane letter, or several for a request
+# addressed to more than one lane at once (`a-bc-...`, `c-ab-...`).  Twenty
+# files were written in that second form under three lanes, and until the
+# six-lane split this pattern accepted only a single letter there -- so every
+# one of them was silently skipped, and never appeared in any lane's report.
+# With six lanes "to every other lane" is `a-bcdef-...`, which makes the form
+# commoner, not rarer.  See `parse_name` for what counts as well-formed.
+NAME_RE = re.compile(r"^([a-z])-([a-z]+)-(.+)\.md$")
+
+
+def parse_name(name: str) -> tuple[str, str] | None:
+    """``(sender, recipients)`` for a well-formed request filename, else None.
+
+    `recipients` is a string of one or more lane letters.  Every letter must be
+    a lane and none may repeat; a name that fails that is not a request name
+    (`a-bash-spike.md` is not "to lanes b, a, s, h") and is skipped, exactly as
+    a name that does not match the pattern at all always was.
+    """
+    m = NAME_RE.match(name)
+    if not m:
+        return None
+    frm, to = m.group(1), m.group(2)
+    if frm not in LANE_LETTERS:
+        return None
+    if any(c not in LANE_LETTERS for c in to) or len(set(to)) != len(to):
+        return None
+    return frm, to
 
 # How much of a file to read when looking for a status marker. A request has two
 # status-bearing regions -- a header stamp at the top and a reply section at the
@@ -338,19 +368,26 @@ def status_verdict(text: str) -> tuple[bool, str, bool] | None:
         return (True, f"unrecognised status: {blocks[0][1].strip()[:60]}", False)
     return None
 
-LANE_BY_CONFIG_DIR = {
-    "": "a",
-    ".claude": "a",
-    ".claude-account-b": "b",
-    ".claude-account-c": "c",
-}
-
-
 def detect_lane() -> str | None:
-    """Derive the current lane from ``CLAUDE_CONFIG_DIR``, as which-lane.py does."""
-    raw = os.environ.get("CLAUDE_CONFIG_DIR", "")
-    key = Path(raw).name if raw else ""
-    return LANE_BY_CONFIG_DIR.get(key)
+    """This session's lane, lower-case, as `which-lane.py` decides it -- or None.
+
+    Delegated, not re-derived.  This function used to carry its own copy of the
+    account -> lane table, keyed on ``CLAUDE_CONFIG_DIR``; with two lanes per
+    Claude account that key names two lanes, and a private copy would have gone
+    on answering for one of them.  `which-lane.py` identifies the lane from the
+    worktree this script runs in, or from `SLATEOS_LANE` / `ORCH2_AGENT_NAME`.
+    """
+    here = Path(__file__).resolve().parent / "which-lane.py"
+    try:
+        spec = importlib.util.spec_from_file_location("which_lane", here)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        letter, _how = module.detect_lane()
+    except (ImportError, OSError, SyntaxError):
+        return None
+    return letter.lower() if letter else None
 
 
 def blank_fences(lines: list[str]) -> list[str]:
@@ -456,13 +493,17 @@ def classify(path: Path) -> tuple[bool, str, str]:
 
 
 def collect() -> list[tuple[str, str, Path, bool, str, str]]:
-    """Every well-named request as ``(from, to, path, is_open, reason, title)``."""
+    """Every well-named request as ``(from, to, path, is_open, reason, title)``.
+
+    `to` is the recipients string -- one letter, or several (`"bc"`) for a
+    request addressed to more than one lane; test membership with `in`.
+    """
     out: list[tuple[str, str, Path, bool, str, str]] = []
     for path in sorted(REQUESTS_DIR.glob("*.md")):
-        m = NAME_RE.match(path.name)
-        if not m:
+        parsed = parse_name(path.name)
+        if parsed is None:
             continue
-        frm, to = m.group(1), m.group(2)
+        frm, to = parsed
         is_open, reason, title = classify(path)
         out.append((frm, to, path, is_open, reason, title))
     return out
@@ -543,7 +584,7 @@ UNRECOGNISED_HINT = tuple(
 
 def report(entries, *, lane: str, outgoing: bool, show_all: bool) -> None:
     if show_all:
-        groups = sorted({e[1] for e in entries})
+        groups = sorted({lane for e in entries for lane in e[1]})
     else:
         groups = [lane]
 
@@ -553,7 +594,7 @@ def report(entries, *, lane: str, outgoing: bool, show_all: bool) -> None:
             selected = [e for e in entries if e[0] == to]
             title = f"filed BY lane {to.upper()} on other lanes"
         else:
-            selected = [e for e in entries if e[1] == to and e[0] != to]
+            selected = [e for e in entries if to in e[1] and e[0] != to]
             title = f"addressed TO lane {to.upper()}"
         open_ones = [e for e in selected if e[3]]
         print(f"=== requests {title}: {len(open_ones)} unresolved of {len(selected)} ===")
@@ -587,10 +628,11 @@ def main() -> int:
         return 2
 
     lane = (args.lane or detect_lane() or "").lower()
-    if not args.all and lane not in {"a", "b", "c"}:
+    if not args.all and (len(lane) != 1 or lane not in LANE_LETTERS):
         print(
-            "open-requests: could not determine your lane from CLAUDE_CONFIG_DIR; "
-            "pass --lane a|b|c or --all",
+            "open-requests: could not determine your lane (run it from your lane "
+            "worktree, or see `python scripts/which-lane.py`); pass --lane "
+            f"<{LANE_LETTERS[0]}-{LANE_LETTERS[-1]}> or --all",
             file=sys.stderr,
         )
         return 2

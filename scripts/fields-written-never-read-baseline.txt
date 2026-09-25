@@ -414,3 +414,31 @@ net/httpclient/src/lib.rs:expires
 # struct is harder to check against the spec than one present and unused.
 net80211/src/supplicant.rs:key_data_len
 net80211/src/supplicant.rs:mic_algo
+
+# --- found 2026-09-21 by teaching the checker about self-toggles -----------
+#
+# These four were invisible until `SELF_TOGGLE` was added. A boolean flipped
+# against itself -- `self.find.use_regex = !self.find.use_regex;` -- READS the
+# field on the right-hand side, and that single read was enough to look used.
+# The checker now counts such a line as a write only.
+#
+# All four are the same user-facing defect and are tracked together in
+# `known-issues.md` -> `TD-C-FIVE-TOGGLES-THAT-READ-ONLY-THEMSELVES`: a control
+# the user can operate that nothing anywhere consults. They are listed here
+# rather than fixed on the spot because each needs its feature built or its
+# control removed, which is a decision per app and not a sweep. This file's own
+# header says it: a triage queue, not an amnesty.
+#
+# `apps/editor`'s was the worst of them and is FIXED: `Ctrl+E` turned on "use
+# regular expressions", no search code consulted the flag, and the find bar drew
+# no indicator, so the key did nothing and said nothing. The flag and the key
+# are deleted; regex searching stays wanted and needs `apps/regextester`'s
+# engine extracted first. Line removed from the list below.
+#
+# **And the other three are gone as well, 2026-09-22.** Each was a switch a
+# key flipped and nothing read, and each of those keys was on a shortcut card
+# -- `F` for camera's fullscreen preview, `L` for logviewer's line wrapping,
+# `C` for videoplayer's chapter list. Naming the keys is what made them
+# urgent: an unnamed working key is a discoverability defect, and a card row
+# for a key with no effect is a false claim on screen. All three do what
+# their rows say now, so all three lines are removed rather than annotated.

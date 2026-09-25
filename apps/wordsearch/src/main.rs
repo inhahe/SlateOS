@@ -113,6 +113,12 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Esc", "cancel"),
     ("H", "hint"),
     ("D", "level"),
+    // `D` steps through the three levels; Ctrl+1, Ctrl+2 and Ctrl+3 pick one
+    // outright. Both existed, only the stepping one was written down. Found
+    // by `key-survey.py` listing three digits this game answers and names
+    // nowhere -- inside a card that had been here all along, which is the
+    // second app where having a list was mistaken for having a complete one.
+    ("Ctrl+1-3", "set level"),
     ("C", "words"),
     ("F2", "new"),
 ];
@@ -3613,6 +3619,52 @@ mod tests {
             0,
             "the hint is still lit after it went out"
         );
+    }
+
+    /// **The footer's key line fits the footer.**
+    ///
+    /// `left_in` hands the label a `max_width`, so a line too long for the bar
+    /// is ellipsized rather than wrapped -- and the test beside this one asks
+    /// whether the *string* mentions each key, which stays true after the
+    /// glyphs have been cut off. So a row added to `SHORTCUTS` can push `F2`
+    /// off the right-hand end and every existing assertion still passes.
+    ///
+    /// Checked at every window shape *at least as wide as the default*, and
+    /// the qualifier is the honest part. `shows(l.footer)` is true at 2x400,
+    /// where the bar is one pixel wide and the line is four hundred -- no
+    /// arrangement of eight labels fits there, so asserting it would be
+    /// asserting that the window is bigger than it is. Clipping below the
+    /// size the game was laid out for is the correct behaviour and `left_in`
+    /// already does it.
+    ///
+    /// What this does catch is the thing that actually happens: rows get
+    /// added one at a time, each looks harmless, and the eighth pushes `F2`
+    /// off the end of a window somebody is really using.
+    #[test]
+    fn the_footer_key_line_fits_the_bar_it_is_drawn_in() {
+        let a = game(71);
+        for (w, h) in SIZES {
+            if w < WINDOW_WIDTH {
+                continue;
+            }
+            let l = Layout::new(w, h, a.grid_size(), a.total_words());
+            if !l.shows(l.footer) {
+                continue;
+            }
+            let inner = (l.footer.w - l.pad * 2.0).max(0.0);
+            for table in [SHORTCUTS, SELECTING_SHORTCUTS] {
+                let line = table
+                    .iter()
+                    .map(|(k, what)| format!("{k}:{what}"))
+                    .collect::<Vec<_>>()
+                    .join("   ");
+                let drawn = text::measure(&line, l.font, FontWeightHint::Regular);
+                assert!(
+                    drawn <= inner,
+                    "at {w}x{h} the bar is {inner} wide and the line is {drawn}: {line:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -109,11 +109,21 @@ pub fn keystrokes(label: &str) -> Result<Vec<KeyEvent>, UnknownKey> {
         }
         // "Arrows" is one word for four keys, and every app here that prints a
         // movement hint prints it that way.
-        if chord.eq_ignore_ascii_case("arrows") {
-            for key in [Key::Left, Key::Right, Key::Up, Key::Down] {
-                strokes.push(stroke(key, Modifiers::NONE));
+        //
+        // Through `split_modifiers`, so `Shift+Arrows` works: a word standing
+        // for several keys can carry a modifier for the same reason a range
+        // can -- `apps/photomanager` extends its selection with
+        // `Shift+Arrows` and spelling that as four rows would be the list
+        // bending to the parser. Without this the label was rejected outright
+        // rather than silently mis-parsed, which is the right failure and is
+        // how it was found.
+        if let Some((modifiers, word)) = split_modifiers(chord) {
+            if word.trim().eq_ignore_ascii_case("arrows") {
+                for key in [Key::Left, Key::Right, Key::Up, Key::Down] {
+                    strokes.push(stroke(key, modifiers));
+                }
+                continue;
             }
-            continue;
         }
         // `WASD` is the same abbreviation one step along: four keys under one
         // word, and the word is what a game prints. `apps/asteroids`,
@@ -126,11 +136,13 @@ pub fn keystrokes(label: &str) -> Result<Vec<KeyEvent>, UnknownKey> {
         // word names the keys in the order the keys sit under the hand, and a
         // reader comparing the label to the strokes should find them in the
         // order the label wrote them.
-        if chord.eq_ignore_ascii_case("wasd") {
-            for key in [Key::W, Key::A, Key::S, Key::D] {
-                strokes.push(stroke(key, Modifiers::NONE));
+        if let Some((modifiers, word)) = split_modifiers(chord) {
+            if word.trim().eq_ignore_ascii_case("wasd") {
+                for key in [Key::W, Key::A, Key::S, Key::D] {
+                    strokes.push(stroke(key, modifiers));
+                }
+                continue;
             }
-            continue;
         }
         // `0-9`, `A-F`, `1-8`: a run of keys written the way a person writes
         // one. Apps reach for this constantly -- a hex editor's digits, a
@@ -606,6 +618,41 @@ const FUNCTION_KEYS: [Key; 12] = [
     Key::F12,
 ];
 
+/// Which rows of a card are missing from what a window actually drew.
+///
+/// # Why this is not `contains`
+///
+/// The obvious check is to join every string a window drew and ask whether
+/// the haystack contains each row. For `Ctrl+Shift+K` that is fine. For a
+/// one-character key it is very nearly a tautology: `"N"` is inside `"Nudge
+/// the selection"`, so a card that had lost its `N` row entirely still
+/// passed. That happened in `apps/whiteboard`, in a test written by the same
+/// hand that had already fixed the identical defect in
+/// `scripts/key-survey.py` -- where `names_the_key` requires a standalone
+/// token for exactly this reason.
+///
+/// [`render_card`] draws each row's keys as their own `Text` command, so the
+/// honest question is whether some drawn string *equals* the keys, not
+/// whether some string contains them. Every app's card test asks it through
+/// here rather than spelling it out again and getting it wrong again.
+///
+/// Returns a description of each missing half, so a failure names the row.
+#[must_use]
+pub fn missing_rows(drawn: &[String], rows: &[(&str, &str)]) -> Vec<String> {
+    let mut missing = Vec::new();
+    for (keys, what) in rows {
+        if !drawn.iter().any(|t| t == keys) {
+            missing.push(format!("no row drew the keys {keys:?} (for {what:?})"));
+        }
+        if !drawn.iter().any(|t| t == what) {
+            missing.push(format!(
+                "no row drew the description {what:?} (for {keys:?})"
+            ));
+        }
+    }
+    missing
+}
+
 #[cfg(test)]
 mod tests {
     // A test module's job is to fail loudly the instant the code under test is
@@ -619,8 +666,83 @@ mod tests {
         clippy::arithmetic_side_effects
     )]
 
-    use super::{UnknownKey, keystrokes};
+    use super::{UnknownKey, keystrokes, missing_rows};
     use crate::event::Key;
+    use crate::event::Modifiers;
+
+    /// **A word standing for several keys can carry a modifier.**
+    ///
+    /// `Shift+Arrows` extends a selection in `apps/photomanager`, and before
+    /// this the label was rejected -- correctly, and loudly, which is how it
+    /// was found rather than mis-parsed into something plausible.
+    #[test]
+    fn a_multi_key_word_can_carry_a_modifier() {
+        let plain = keystrokes("Arrows").expect("arrows");
+        assert_eq!(plain.len(), 4);
+        assert!(plain.iter().all(|s| s.modifiers == Modifiers::NONE));
+
+        let shifted = keystrokes("Shift+Arrows").expect("shift+arrows");
+        assert_eq!(shifted.len(), 4);
+        assert!(shifted.iter().all(|s| s.modifiers.shift));
+        assert_eq!(
+            shifted.iter().map(|s| s.key).collect::<Vec<_>>(),
+            plain.iter().map(|s| s.key).collect::<Vec<_>>(),
+            "the modifier changed which keys the word names"
+        );
+
+        let wasd = keystrokes("Ctrl+WASD").expect("ctrl+wasd");
+        assert_eq!(wasd.len(), 4);
+        assert!(wasd.iter().all(|s| s.modifiers.ctrl));
+    }
+
+    /// **A one-character key is not found by `contains`.**
+    ///
+    /// The control is the first case: the card has lost its `N` row, and the
+    /// word "Nudge" in another row's description contains an `N`. A joined
+    /// haystack says the row is present. This says it is gone.
+    #[test]
+    fn a_missing_one_character_row_is_not_hidden_by_another_rows_words() {
+        let drawn = vec![
+            "Arrows".to_string(),
+            "Nudge the selection".to_string(),
+            "Esc".to_string(),
+            "Drop the selection".to_string(),
+        ];
+        let rows = [("N", "Note tool"), ("Esc", "Drop the selection")];
+        let missing = missing_rows(&drawn, &rows);
+        assert_eq!(
+            missing.len(),
+            2,
+            "the N row is absent in both halves: {missing:?}"
+        );
+        assert!(missing[0].contains("keys"), "{missing:?}");
+        assert!(missing[1].contains("description"), "{missing:?}");
+
+        // The control, stated as the thing that goes wrong: joined into one
+        // haystack, the absent `N` row is "found" inside the word "Nudge".
+        let joined = drawn.join(" | ");
+        assert!(
+            joined.contains('N'),
+            "control: the joined form finds an N that belongs to another row"
+        );
+        assert!(
+            !joined.contains("Note tool"),
+            "control: and the description really is absent"
+        );
+    }
+
+    /// **A card that drew every row reports nothing missing.**
+    #[test]
+    fn a_complete_card_has_no_missing_rows() {
+        let drawn = vec![
+            "N".to_string(),
+            "Note tool".to_string(),
+            "Ctrl+S".to_string(),
+            "Save".to_string(),
+        ];
+        let rows = [("N", "Note tool"), ("Ctrl+S", "Save")];
+        assert!(missing_rows(&drawn, &rows).is_empty());
+    }
 
     /// The keys a label names, with no modifiers involved.
     fn keys(label: &str) -> Vec<Key> {

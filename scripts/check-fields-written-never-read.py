@@ -98,6 +98,21 @@ BASELINE = (
 FIELD = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z_][a-z0-9_]*)\s*:\s*[A-Za-z_&<(\[]")
 STRUCT = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+([A-Z]\w*)")
 ACCESS = re.compile(r"\.([a-z_][a-z0-9_]*)")
+
+# `x.f = !x.f` -- a boolean flipped against itself.
+#
+# The read on the right-hand side is a read of the field, and counting it is
+# what let five of these hide: `apps/editor`'s `use_regex` has exactly three
+# mentions in its crate (declared, initialised, toggled by `Ctrl+E`) and no
+# search code consults it, so pressing the key does nothing -- yet the toggle
+# reads the flag once and that single read was enough to look used.
+#
+# The read is discounted only when the *whole* right-hand side is the negation
+# of the same path. `x.f = !x.f && y` still reads `x.f` for a reason, and
+# `x.f = !y.f` is not a self-toggle at all.
+SELF_TOGGLE = re.compile(
+    r"([A-Za-z_][\w.]*)\.([a-z_][a-z0-9_]*)\s*=\s*!\s*\1\.\2\s*;"
+)
 # `let Self { title, completed_at, .. } = self;` reads every name it binds,
 # and not one of them is written `.field`. Without this, a struct that
 # serialises itself by destructuring looks like a struct nobody reads --
@@ -324,7 +339,13 @@ def detect(roots=lanec_scan.LANE_C_ROOTS, root=None):
                 if depth <= 0:
                     in_struct = False
                 continue
+            # A line that is nothing but `x.f = !x.f;` writes the field and
+            # reads only itself; the read is not evidence of a user.
+            toggled = {m.group(2) for m in SELF_TOGGLE.finditer(line)}
             for m in ACCESS.finditer(line):
+                if m.group(1) in toggled:
+                    writes[(m.group(1), inside[n])] += 1
+                    continue
                 after = line[m.end() :].lstrip()
                 if after.startswith("("):
                     continue  # a method call, not a field
@@ -747,13 +768,28 @@ def self_test():
                 fn t() { let z = Zeta::new(); assert!(!z.broken); }
             }
             """,
+        "apps/theta/src/main.rs": """
+            struct Eta {
+                flipped: bool,
+                watched: bool,
+            }
+            impl Eta {
+                // `x.f = !x.f` reads `f` on the right, and that single read
+                // used to be enough to look used. `flipped` is a control
+                // nothing consults; `watched` is toggled the same way and is
+                // then actually read, so it must NOT be reported.
+                fn toggle(&mut self) { self.flipped = !self.flipped; }
+                fn toggle_watched(&mut self) { self.watched = !self.watched; }
+                fn show(&self) -> bool { self.watched }
+            }
+            """,
     }
 
     # Every one of these was verified by reintroducing the bug it stands for
     # and watching the self-test go red. The first version had only case 1,
     # passed, and was blind to both 4 and 5.
-    expected = {"last_export", "caption", "title"}
-    forbidden = {"shown", "counted", "scratch", "broken", "kept"}
+    expected = {"last_export", "caption", "title", "flipped"}
+    forbidden = {"shown", "counted", "scratch", "broken", "kept", "watched"}
 
     with tempfile.TemporaryDirectory(prefix="fieldscan_selftest_") as tmp:
         base = pathlib.Path(tmp)

@@ -2038,6 +2038,29 @@ pub enum DialogButton {
 }
 
 /// Main application UI state for the system restore manager.
+/// The keys this program answers, raised by `F1` or `?`.
+///
+/// Nothing here takes a `?`: the search box filters snapshot names and the
+/// create form takes a description, but both are reached through a dialog that
+/// the card sits above.
+///
+/// The five `Ctrl` chords are the actions, and the bare keys move around --
+/// that split is the app's own and is why `F` filters rather than finds.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Ctrl+N", "Take a snapshot"),
+    ("Ctrl+E / Ctrl+I", "Export / import one"),
+    ("Ctrl+L", "Lock or unlock the selected snapshot"),
+    ("Ctrl+F", "Cycle which kinds are listed"),
+    ("Tab", "The next view; Shift+Tab the one before"),
+    ("Up / Down", "Choose a snapshot"),
+    ("Home / End", "First / last"),
+    ("Enter", "Restore the chosen one"),
+    ("Delete", "Delete it"),
+    ("Backspace", "Rub out a letter of the search"),
+    ("Esc", "Clear the search, or close a dialog"),
+    ("F1 / ?", "This list"),
+];
+
 pub struct SystemRestoreUI {
     /// The snapshot manager.
     pub manager: SnapshotManager,
@@ -2094,6 +2117,8 @@ pub struct SystemRestoreUI {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 impl SystemRestoreUI {
@@ -2179,6 +2204,7 @@ impl SystemRestoreUI {
         };
 
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             manager,
             view_mode: ViewMode::Tree,
@@ -2262,6 +2288,16 @@ impl SystemRestoreUI {
             self.render_progress_overlay(&mut rt);
         }
 
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut rt,
+                &self.palette,
+                (self.window_width, self.window_height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
         rt
     }
 
@@ -2542,6 +2578,22 @@ impl SystemRestoreUI {
 
     /// Handle a key press.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Above the dialog branch below, which returns before the main match:
+        // a check placed after it could raise the card from the list and not
+        // dismiss it from a dialog.
+        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal. Letting keys through would mean restoring a snapshot the
+            // reader cannot see.
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         if self.progress.is_some() {
             // An operation is running and the window is showing a progress
             // overlay over everything. Escape abandons it; nothing else reaches
@@ -5450,6 +5502,94 @@ mod tests {
             modifiers: guitk::event::Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    fn ctrl(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    /// Every string the window draws, joined.
+    fn card_text(ui: &SystemRestoreUI) -> String {
+        ui.render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// Two states, because `Esc`, `Enter`, `Tab` and `Backspace` are claimed
+    /// by the dialog handler when a dialog is up and by the list when it is
+    /// not -- the same keys, two different jobs, and the dialog branch returns
+    /// before the main match.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [false, true].into_iter().any(|in_dialog| {
+                    let mut ui = SystemRestoreUI::new();
+                    if in_dialog {
+                        ui.open_create_dialog();
+                    }
+                    ui.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the half that matters: `Ctrl+N` behind the card must not
+    /// open the create dialog, and asserting only that it does not would pass
+    /// on an app that had lost `Ctrl+N` altogether.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut ui = SystemRestoreUI::new();
+        assert!(
+            !card_text(&ui).contains("F1 or ? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        ui.handle_event(&press(Key::F1));
+        let shown = card_text(&ui);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        let dialog = ui.dialog.clone();
+        ui.handle_event(&ctrl(Key::N));
+        assert_eq!(
+            ui.dialog, dialog,
+            "Ctrl+N opened a dialog through the shortcut card"
+        );
+
+        ui.handle_event(&press(Key::Escape));
+        assert!(
+            !card_text(&ui).contains("F1 or ? closes this"),
+            "Escape did not close it"
+        );
+
+        ui.handle_event(&ctrl(Key::N));
+        assert_ne!(
+            ui.dialog, dialog,
+            "control: Ctrl+N does nothing even with the card down"
+        );
     }
 
     /// The snapshot list can be narrowed by type, and the status bar says so.

@@ -54,7 +54,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import selftestflag  # noqa: E402  (needs the path above)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-# Lane C's ten directories, per `scripts/which-lane.py`. It listed six until
+# Lane C's ten directories, per `scripts/which-lane.py` at the time. It listed six until
 # 2026-09-14: `netipc`, `netring`, `aes` and `hmac` were simply missing, so the
 # gate reported "no half of a save/load pair is missing its caller" while never
 # having opened four of the trees that sentence covered.
@@ -63,6 +63,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 # verdict over a population the checker cannot enumerate. Nothing distinguishes
 # "looked and found nothing" from "did not look" in the output, which is why
 # the summary below now names the scope it examined.
+#
+# (Since the six-lane split of 2026-09-22 these directories are no longer one
+# lane's: gui/ is lanes C and F, apps/ lane E, the net crates, aes and hmac
+# lane A.  The population this scans is unchanged; only the label is history.)
 LANE_C_ROOTS = (
     "apps",
     "gui",

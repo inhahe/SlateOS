@@ -54,6 +54,9 @@ than silently believing there are no bands.
 | §800–§899 | **lane C** | **open** | immediately after §579; C's own run ascends |
 | §900–§999 | **lane A** | **open** | immediately after §679; A's own run ascends |
 | §1000–§1099 | **lane B** | **open** | the tail — B alone still appends at EOF |
+| §1100–§1199 | **lane D** | **open** | immediately after §360, the end of lane B's first band; D's own run ascends from there |
+| §1200–§1299 | **lane E** | **open** | immediately after §498, the end of lane C's first band; E's own run ascends from there |
+| §1300–§1399 | **lane F** | **open** | immediately after §127, the end of the single-agent history; F's own run ascends from there |
 
 Bands 200–499 are closed but **not free**: every number in them is spent, and
 spent numbers are never reissued (see §217–§220 and §626 below). A new entry
@@ -210,6 +213,25 @@ later edit that had no reason to think about it. Its metadata block now sits
 *above* the banner, which is where the rule wants it and where a reader
 resolving a band question would look. Worth knowing if you add a banner to an
 entry of your own: the window is measured from the heading, not from the prose.
+
+**Lanes D, E and F opened §1100–§1199, §1200–§1299 and §1300–§1399 on
+2026-09-22,** when the lanes went from three to six (§1100). A new lane has no
+earlier entry, so the rule that anchored every previous band — continue from
+your own previous band's tail — gives it nothing to follow, and the natural
+guess, end of file, is lane B's insertion point. So each new band's row names
+its anchor: D starts immediately after §360, E after §498, F after §127. All
+three are the ends of bands nobody can write in any more, and each is followed
+by another such band's heading, so no other lane will ever insert beside them —
+the property every band anchor has to have. The gate reads the anchor from the
+row (the words "after §N" in its region column) and prints the exact line to
+insert after, as it does for every other band; a row naming a section that does
+not exist is an error. No band closed, so nothing was grandfathered.
+
+**Two cautions for whoever writes the next band row**, both learned while
+adding these: the gate reads the status words anywhere in the row, so a region
+column that mentions a "closed" band beside an "**open**" status makes the row
+contradict itself and fails the gate; and an anchor must carry the section
+sign, so prose such as "after C's 500s" is deliberately not read as one.
 
 **The gate landed 2026-08-29: `scripts/check-design-decisions-bands.py`,** run
 by `scripts/boot-test.sh` before it builds anything. It requires each *new*
@@ -36551,6 +36573,160 @@ it is why the old value was a bug.
 something does, the cheap answer is that it almost certainly wants `GNU/Linux`,
 in which case this is a one-constant change. Recorded as a Claude decision
 precisely so it stays cheap to reverse.
+
+---
+
+## 1100. Six lanes, two per account: where the tree is cut, and how a session knows which lane it is
+
+**Date:** 2026-09-22
+**Lane:** D
+**Decided by:** Claude (operator-approved scope) — the operator decided six
+lanes, two sessions per Claude account, named "Lane A" … "Lane F"; Claude drew
+the split and made every call below it, and the operator may overrule any of
+them.
+
+**In short:** the project now runs six agents at once instead of three, two on
+each Claude account. Each agent owns part of the source tree, so that no two of
+them ever edit the same file. The operator chose the number and the names. This
+entry records how the tree was divided six ways, how an agent now works out
+which lane it is — the old way stopped working — and the handful of mechanical
+changes that had to follow. It is numbered as lane D's first entry only because
+it was written on `main` before any lane-D session existed, which made D's band
+the one place no other lane could be writing at the same moment.
+
+### The split
+
+| Lane | Name | Owns |
+|---|---|---|
+| A | Kernel, Core & Networking | `kernel/**`, `bench/**`, the boot test — and now `net/**`, `netipc/**`, `netproto/**`, `netring/**`, `net80211/**`, `aes/**`, `hmac/**`, `services/netstack/**` |
+| B | Userland | `userspace/**`, `init/**` |
+| C | Desktop & Toolkit | `gui/**` except F's crates |
+| D | POSIX, libc & Toolchain | `posix/**`, `services/**` except `netstack`, `toolchain/stubs/**`, `build-sysroot.ps1`, `create-ext4-rootfs.sh` |
+| E | Applications | `apps/**`, `randrange/**` |
+| F | Graphics Stack | `gui/compositor`, `gui/window`, `gui/remote`, `gui/font`, `gui/imagecodec`, `gui/vulkan` |
+
+Each old lane had one part with a deep backlog and one part coupled tightly to a
+*different* lane, and the cuts follow those seams:
+
+- **Networking went to the kernel lane.** The kernel links `netipc` and
+  `netring`; `services/netstack` is a thin daemon over the same crates; and the
+  WiFi work had been a request-and-reply loop between lanes A and C for weeks.
+  Every open networking item needed lane A already. Lane A was also the lane
+  with spare capacity — its own roadmap table said on 2026-09-14 and again on
+  2026-09-17 that it was down to operator-gated items.
+- **Lane B split at the libc boundary.** `posix/`, the sysroot, the C test
+  fixtures and the rootfs recipe are one pipeline with one owner, and the large
+  ports that stand on libc (gcc, CPython, fastpy self-hosting, the Rust
+  toolchain, WINE — B-Q18's list) belong with it. The userspace programs stayed
+  with lane B, which is where B's recent commits and nearly all of its open
+  questions were; so B-Q8 … B-Q21 still mean what they say.
+- **Lane C split three ways.** `apps/` (142 crates) was as busy as all of
+  `userspace/` — 572 commits in the 14 days before the split against 580 — and
+  became lane E. `gui/` divides at the display protocol: the compositor, the
+  protocol (`gui/remote`) and the window library every application links
+  (`gui/window`) stay together in lane F, so a protocol change never needs a
+  handshake, and F also takes text rendering, image decoding, the Vulkan loader
+  and the GPU ports that were C's deepest backlog. The desktop shell, toolkit,
+  appearance and desktop services stayed lane C.
+
+**Alternatives considered for the split:**
+
+- *Halve each old lane (A→A+D, B→B+E, C→C+F).* Symmetric and easy to remember.
+  Rejected: lane A was already short of unblocked work, so halving it makes two
+  idle lanes; and the kernel has no seam that avoids shared files (the syscall
+  tables, `main.rs`, the capability code), so kernel-core against kernel-drivers
+  would have been a constant stream of requests.
+- *Networking as a lane of its own.* Rejected: about 40 files and 8 commits in
+  the 14 days before the split, and every open item needs the kernel side — a
+  lane that would mostly have filed requests to lane A.
+- *A lane for `scripts/`.* It is the busiest directory by far (989 commits in
+  those 14 days), but lanes write gates for their own code, and a central owner
+  would turn every new gate into a request. Who owns `scripts/` is also
+  `open-questions.md` A-Q11, still with the operator; this split does not
+  answer it and does not assign `scripts/`.
+- *Split `apps/` or `userspace/` alphabetically.* Balanced by construction, but
+  the halves share nothing except a letter, so every sweep and every
+  cross-application change would span two lanes.
+
+### How a session knows its lane
+
+Under three lanes each Claude account ran one session, and
+`scripts/which-lane.py` read nothing but `CLAUDE_CONFIG_DIR`. With two sessions
+per account that names two lanes, so it now identifies nothing and is only
+printed. The lane comes from the **agent name** (`--agent-name`, or
+`SLATEOS_LANE` / `ORCH2_AGENT_NAME` in the environment) and from the
+**worktree** the script lives in (`os-lane-<x>`, with `lane-<x>` actually
+checked out, read from `.git` rather than by running git). Every source present
+must agree.
+
+- *Why not the worktree alone:* the operator's launcher starts all six sessions
+  in `os`, so for an agent's first command the worktree often says nothing.
+- *Why not the name alone:* orchestrator2 does not export the name to child
+  processes, so a script cannot see it unless it is passed or the launcher sets
+  it; the worktree covers every script an agent runs inside its own tree.
+- *Why refuse a disagreement instead of preferring one source:* a session named
+  Lane D running a script from `os-lane-a` is operating in lane A's tree, and
+  the one thing this arrangement exists to prevent is exactly that.
+
+The same file became the **single ownership table** (longest matching prefix
+wins, which is how `gui/compositor/` → F carves out of `gui/` → C), and the
+scripts that kept their own copies now import it. Two of those copies had
+already drifted from it — `merge-readiness.py` gave lane A all of `toolchain/`
+and `pre-boot.py` gave lane C a `pkg/` that has never existed — which is the
+usual fate of a mirror.
+
+### What else had to change
+
+1. **Deferred questions were renamed `D-Q<n>` → `DQ<n>`.** `D-` is lane D's
+   question prefix now, and the gates that parse question ids would have read
+   D-Q2 (install clang and enable CFI) as a lane-D question. DQ1 and DQ2 carry
+   their old names in their headings, and **lane D's own numbering starts at
+   D-Q3**, so D-Q1 and D-Q2 are never reissued — the rule the section numbers in
+   this file already follow. Old citations in `requests/` and in the entries of
+   this file were left as written; the live documents use the new names.
+2. **Empty bands take their anchor from the band row** (`check-design-decisions-
+   bands.py`): see the header of this file.
+3. **Every gate that parses a lane letter accepts A–F**, and
+   `scripts/open-requests.py` now parses requests addressed to several lanes
+   (`a-bc-…`) — twenty such files had been skipped by the three-lane parser.
+4. **The publish step follows §538.** The operator decided on 2026-08-21 that
+   lanes publish with a fast-forward `git push origin <sha>:main` from their
+   own worktree, but `CLAUDE.md` still told agents to merge inside `os`, and
+   agents may not edit `CLAUDE.md`. This rewrite was the operator's instruction
+   to edit it, and six lanes publishing make fifteen pairs that can race in the
+   shared checkout where three made three, so both documents now say §538.
+5. **Retagging.** Open roadmap items were retagged to their new owner; finished
+   items keep the letter of the lane that finished them, and prose inside an
+   item that names a lane is history.
+6. **Three worktrees** — `os-lane-d`, `os-lane-e`, `os-lane-f`, on branches
+   `lane-d`, `lane-e`, `lane-f` — were created from `main` at this change.
+7. **`CLAUDE.md`'s phantom `pkg/**` is gone**, which settles C-Q27 without a
+   decision: lane C had asked leave to delete it from a file only the operator
+   may edit, and the operator's instruction to rewrite the lane section covered
+   it. The new table was written from `scripts/which-lane.py`'s, which was
+   already right.
+
+### Left open, deliberately
+
+- **A-Q11** (who may edit `scripts/` and the small top-level library crates)
+  and **A-Q18** (every lane appends at the end of `known-issues.md`, which
+  conflicted eleven times in one day under three lanes) both get worse with six
+  lanes, and both are the operator's to answer.
+- orchestrator2 refuses a space in an agent name, so "Lane A" registers as
+  `Lane-A` unless orchestrator2 changes; the scripts accept both spellings.
+- `E:` had 312 GB free for six lanes' build caches. `roadmap.md` Step 0.6 says
+  so, but the constraint is physical, not procedural.
+
+**Where it lives:** `scripts/which-lane.py` (`OWNERSHIP`, `LANES`,
+`detect_lane`, `owner_of`); `roadmap.md` → "Six-Agent Parallel Execution";
+`CLAUDE.md` → "Six Sessions"; the band rows at the top of this file;
+`backups/three-lanes/`.
+
+**How to reverse:** `backups/three-lanes/README.md` describes going back to
+three lanes, including what must not be copied back wholesale. Changing the
+split without going back is one commit: edit `OWNERSHIP` in
+`scripts/which-lane.py` and the table in `roadmap.md` together, and retag the
+open items that move. The gates need nothing, because they accept A–F.
 
 ---
 
@@ -77238,6 +77414,114 @@ report candidates rather than verdicts, and this is the third app off that
 queue that turned out to need nothing -- after `apps/sokoban`, which prints its
 keys in a footer, and `apps/minesweeper`, which was counted unguarded because
 its guard has a different name.
+
+## 867. An instance-level extension command gets a fan-out policy per command, and `VK_EXT_debug_utils` gets "everyone, all or nothing"
+
+**Date:** 2026-09-22 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** A computer can have more than one graphics driver installed. Our
+Vulkan loader hides that: a program asks for one "connection to the graphics
+system" and gets a single handle that secretly stands for one connection per
+driver. That works until the program calls a function through that handle,
+because then somebody has to decide *which driver actually does the work*. For
+most functions there is no single right answer, and it differs per function.
+This records the answer for the first such function pair we implement — the one
+that subscribes a program to warning messages from the drivers — and, more
+importantly, records that "which driver answers" is a decision to be made once
+per function rather than a rule that can be written once for all of them.
+
+### What forced the decision
+
+§803 forwards extension commands the loader has never heard of, in three
+instructions of assembly, with no knowledge of their signatures. That works for
+a command whose first argument is a `VkPhysicalDevice` — one GPU, therefore one
+driver, therefore one right answer and no decision to make. Overwrite argument
+0 with the driver's own handle and jump.
+
+It cannot work for a command whose first argument is a `VkInstance`. That handle
+is the loader's own object standing in front of *several* driver instances at
+once, so there is no single driver to substitute. The question "who answers?"
+has to be answered, and the answer is different for different commands:
+
+| shape of command | plausible policies |
+|---|---|
+| a subscription (`vkCreateDebugUtilsMessengerEXT`) | everyone, so no driver's diagnostics go missing |
+| a surface (`vkCreateXlibSurfaceKHR`) | the loader owns one object every driver understands |
+| a query | first driver that answers, or a merge |
+
+No mechanism can pick between those, which is why §803's trampoline pool stops
+where it does. The roadmap and `known-issues.md` both described this as "a
+policy, not a forwarding rule", and this entry is the first policy.
+
+### The policy chosen for the messenger pair
+
+**Every driver that offers the command gets one, and the loader's handle stands
+for the whole set.** A debug messenger is a *subscription*: the program is
+asking to be told about anything any driver finds noteworthy, so leaving a
+driver out would silently narrow what it hears.
+
+Two rules give the policy its edges, and they are deliberately not the same
+rule:
+
+* **A driver that does not offer the command is not a failure.** It simply does
+  not implement `VK_EXT_debug_utils`, which is a legitimate thing for a driver
+  to be. It contributes nothing, exactly as a driver with no GPUs contributes
+  nothing to `vkEnumeratePhysicalDevices`.
+* **A driver that offers the command and then fails, fails the whole call.**
+  Everything already built is destroyed and the driver's own error is returned.
+
+### The alternative, and why it lost
+
+The obvious alternative was to reuse `instance::outcome`, the rule the loader
+already applies to `vkCreateInstance`: *any driver succeeding is a success*.
+Reusing it would have been one line and would have kept one policy in the crate
+instead of two.
+
+It is the wrong rule here, and the difference is what the command means. For
+`vkCreateInstance`, a driver that cannot participate is a driver the program was
+never going to use — dropping it loses nothing the program can observe. For a
+messenger, a driver that cannot participate is **a source of warnings going
+quiet**, and the C API gives the program no way to find out: it receives one
+handle and a success code, with no count and no list. It would be subscribed to
+a subset of its drivers, believe it was subscribed to all of them, and have no
+way to ask. That is the "instrument that fails toward clean" shape recorded as
+known-issues.md shape 23 — under-reporting that deletes its own evidence.
+
+Rolling back also matches what Vulkan already promises for a create command: on
+failure the program's handle is untouched and nothing is left allocated, which
+is what lets a caller keep a previous messenger in the same variable.
+
+The cost of the choice is real and worth stating: **a machine with one broken
+driver among three now gets no messenger at all, where the lenient rule would
+have given it two working ones.** That is the right trade only because the
+failure is loud — the program is handed an error code it must handle — whereas
+the lenient rule's failure is silent. A loud failure can be diagnosed; a quiet
+subscription cannot.
+
+### Two smaller calls that came with it
+
+**The loader answers null when no driver implements the extension.** It would
+have been simpler to always hand back a function pointer and let the call fail.
+But a non-null answer from `vkGetInstanceProcAddr` *is* the claim that the
+command exists, and null is what the C API already means by "no such entry
+point". Handing out a pointer that can only fail would be a new instance of the
+exact defect this whole line of work exists to close — advertising an extension
+whose entry points answer null.
+
+**§802's "declare no Vulkan structures" survives this command.** The
+create-info pointer is passed to each driver untouched; the loader never reads
+a field, so it needs no declaration of
+`VkDebugUtilsMessengerCreateInfoEXT`. This is worth recording because it is
+*not* generally true of what remains: a surface-creation command is one the
+loader has to read to know which platform it is for, and that is the command
+that will finally force the structure declarations. The messenger pair being
+free of them is a property of this command, not a reprieve.
+
+### What this does not settle
+
+The surface family is still open, and it is now clear that it is blocked on
+more than a policy. See `known-issues.md`
+`C-VKLOADER-ADVERTISES-EXTENSIONS-WHOSE-ENTRY-POINTS-IT-ANSWERS-NULL-FOR`.
 
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 

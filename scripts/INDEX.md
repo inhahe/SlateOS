@@ -387,7 +387,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/wdog-nmi-soak.sh` | wdog-nmi-soak.sh — DIAGNOSTIC (throwaway): boot repeatedly under the |
 | `scripts/wdog-reset-experiment.sh` | wdog-reset-experiment.sh — DIAGNOSTIC (throwaway) loop to discriminate, for the |
 | `scripts/wedge-soak.sh` | wedge-soak.sh — armed hang-repro soak for the still-open boot wedge race. |
-| `scripts/which-lane.py` | Print which of the three parallel-agent lanes *this* session owns. |
+| `scripts/which-lane.py` | Print which of the six parallel-agent lanes this session is, and what it owns. |
 | `scripts/who-holds-dir.py` | Report which processes are keeping a directory un-renamable, without admin. |
 | `scripts/whoami-diff.sh` | whoami-diff.sh — compare our `whoami` against the real GNU one, inside WSL. |
 | `scripts/workspace-test.py` | workspace-test.py — the workspace test gate, with the three mistakes |

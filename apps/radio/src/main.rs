@@ -487,6 +487,30 @@ enum Screen {
     Search,
 }
 
+/// The keys this window answers, as a reader sees them.
+///
+/// It had a hint already -- "[Space] Play/Stop [+/-] Vol [M] Mute" in the
+/// player bar -- naming three keys of a dozen. That is a worse state than
+/// naming none: a list that stops early reads as a complete one, and nothing
+/// on screen says otherwise. The bar now ends by pointing here, which is
+/// what a hint with room for four words should spend its last word on.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1 / ?", "This list"),
+    ("Space / Enter", "Play the selected station, or stop"),
+    ("S", "Stop"),
+    ("+ / -", "Volume"),
+    ("M", "Mute"),
+    ("F", "Favourite this station, or unfavourite it"),
+    ("R", "Start or stop recording"),
+    ("T", "Sleep timer"),
+    ("1 / 2 / 3", "Browse, favourites, recently played"),
+    ("/", "Search the stations"),
+    ("Up / Down", "Move through the list"),
+    ("PageUp / PageDown", "Move a screenful"),
+    ("Left / Right", "Genre filter, while browsing"),
+    ("Esc", "Close the search"),
+];
+
 struct RadioApp {
     stations: Vec<Station>,
     favorites: Vec<usize>, // indices into stations
@@ -542,6 +566,8 @@ struct RadioApp {
     search_query: String,
     search_results: Vec<usize>,
     search_selected: usize,
+    /// Whether the shortcut card is up.
+    show_help: bool,
     search_active: bool,
 
     // UI
@@ -604,6 +630,7 @@ impl RadioApp {
             search_query: String::new(),
             search_results: Vec::new(),
             search_selected: 0,
+            show_help: false,
             search_active: false,
             screen: Screen::Browse,
             status_message: "Select a station and press Enter to play".into(),
@@ -1104,6 +1131,23 @@ impl RadioApp {
     /// in the tree produces. Nothing could have called it without a
     /// translation table naming every key a second time.
     pub fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        // Above the search branch, which takes every keystroke while the
+        // overlay is up and returns. `?` is Shift and Slash, and plain Slash
+        // is what opens the search, so the two do not collide -- but only
+        // because this is checked before the typed path reads the character.
+        if event.key == Key::F1 || (event.key == Key::Slash && event.modifiers.shift) {
+            self.show_help = !self.show_help;
+            return true;
+        }
+        if self.show_help {
+            // Modal. R starts a recording and S stops the station; neither
+            // should happen from behind a list somebody is reading.
+            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return true;
+        }
+
         let ctrl = event.modifiers.ctrl;
 
         // Search mode
@@ -1277,6 +1321,17 @@ impl RadioApp {
         // Search overlay
         if self.search_active {
             self.render_search_overlay(&mut cmds);
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.width, self.height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
         }
 
         cmds
@@ -1799,7 +1854,7 @@ impl RadioApp {
         cmds.push(RenderCommand::Text {
             x: vol_x,
             y: y + 34.0,
-            text: "[Space] Play/Stop [+/-] Vol [M] Mute".into(),
+            text: "[Space] Play/Stop [+/-] Vol [M] Mute [F1] Keys".into(),
             font_size: 8.0,
             color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
@@ -2020,6 +2075,114 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: ch.to_string(),
         }
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Single characters are pressed with the text they typed, because the
+    /// letter and digit shortcuts read `typed()` rather than the key code.
+    /// Two states: `Esc` closes the search and correctly reports nothing to
+    /// do when no search is open, so one state opens one first.
+    /// The character a keystroke types, for the keys this card names.
+    ///
+    /// Only the ones that reach `handle_typed`; everything else is answered
+    /// on its key code and needs no text.
+    fn typed_char(k: Key, shift: bool) -> Option<char> {
+        let letters = [
+            (Key::S, 's'),
+            (Key::M, 'm'),
+            (Key::F, 'f'),
+            (Key::R, 'r'),
+            (Key::T, 't'),
+            (Key::Num1, '1'),
+            (Key::Num2, '2'),
+            (Key::Num3, '3'),
+        ];
+        if let Some((_, ch)) = letters.into_iter().find(|(want, _)| *want == k) {
+            return Some(ch);
+        }
+        match k {
+            Key::Minus => Some('-'),
+            Key::Equals => Some(if shift { '+' } else { '=' }),
+            Key::Slash if !shift => Some('/'),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [false, true].into_iter().any(|searching| {
+                    let mut app = RadioApp::new();
+                    app.handle_key(&key(Key::Down));
+                    if searching {
+                        app.handle_key(&typed(Key::Slash, '/'));
+                    }
+                    let mut event = key(stroke.key);
+                    event.modifiers = stroke.modifiers;
+                    // The character from the *stroke*, not from the row
+                    // label: a row reads "+ / -" and splits into two
+                    // alternatives, so the label is not the key. `+` also
+                    // arrives as Equals with Shift, which is the shape that
+                    // made this obvious.
+                    if let Some(ch) = typed_char(stroke.key, stroke.modifiers.shift) {
+                        event = typed(stroke.key, ch);
+                        event.modifiers = stroke.modifiers;
+                    }
+                    app.handle_key(&event)
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing plays behind it.**
+    ///
+    /// The control is the last third: Space behind the card must not start a
+    /// station, and must start one with the card down.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &RadioApp| -> Vec<String> {
+            app.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut app = RadioApp::new();
+        app.handle_key(&key(Key::Down));
+        assert!(
+            !drawn(&app)
+                .iter()
+                .any(|t| t.contains("F1 or ? closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_key(&key(Key::F1));
+        let missing = guitk::shortcut::missing_rows(&drawn(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let playing = app.play_state;
+        app.handle_key(&key(Key::Space));
+        assert_eq!(
+            app.play_state, playing,
+            "Space started a station through the shortcut card"
+        );
+
+        app.handle_key(&key(Key::F1));
+        app.handle_key(&key(Key::Space));
+        assert_ne!(
+            app.play_state, playing,
+            "control: Space does nothing even with the card down"
+        );
     }
 
     #[test]

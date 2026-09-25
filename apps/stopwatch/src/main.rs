@@ -303,9 +303,32 @@ pub struct SessionRecord {
 // App state
 // ---------------------------------------------------------------------------
 
+/// The keys this program answers, raised by `F1` or `?`.
+///
+/// Nothing here takes typed text -- the countdown is set with the arrows, not
+/// by typing -- so `?` is free and design-decisions 863 says to bind it where
+/// it is.
+///
+/// `H` appears twice on purpose: it opens the history and closes it again,
+/// which is what a reader expects of a key that shows a panel.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Space", "Start or pause"),
+    ("L", "Take a lap"),
+    ("R", "Reset"),
+    ("M", "Stopwatch or countdown"),
+    ("T", "Set the countdown"),
+    ("H", "Show the history, and close it"),
+    ("Up / Down", "Scroll the laps, or change a field"),
+    ("PageUp / PageDown", "A screenful of laps"),
+    ("Esc", "Back"),
+    ("F1 / ?", "This list"),
+];
+
 pub struct StopwatchApp {
     /// The user's colours, handed over by the framework (§822).
     pub palette: Palette,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     width: f32,
     height: f32,
 
@@ -348,6 +371,7 @@ impl StopwatchApp {
     #[must_use]
     pub fn new(width: f32, height: f32) -> Self {
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width,
             height,
@@ -1273,6 +1297,16 @@ impl StopwatchApp {
             AppView::History => self.draw_history(&mut frame, &layout),
             AppView::CountdownSetup => self.draw_setup(&mut frame, &layout),
         }
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
         frame
     }
 }
@@ -1333,6 +1367,25 @@ impl StopwatchApp {
         }
         EventResult::Consumed
     }
+}
+
+/// The shortcut card, answered before any view's own keys.
+///
+/// `Some` when the card took the keystroke, `None` to let the view have it.
+fn handle_help_key(state: &mut StopwatchApp, event: &KeyEvent) -> Option<EventResult> {
+    if event.key == Key::F1 || (event.key == Key::Slash && event.modifiers.shift) {
+        state.show_help = !state.show_help;
+        return Some(EventResult::Consumed);
+    }
+    if state.show_help {
+        // Modal. Letting keys through would mean resetting a run the reader
+        // cannot see.
+        if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+            state.show_help = false;
+        }
+        return Some(EventResult::Consumed);
+    }
+    None
 }
 
 fn handle_main_key(state: &mut StopwatchApp, event: &KeyEvent) -> EventResult {
@@ -1435,10 +1488,13 @@ fn handle_mouse(state: &mut StopwatchApp, mouse: &MouseEvent) -> EventResult {
 /// The one event body, shared by the window and the probe.
 pub fn handle_event(state: &mut StopwatchApp, event: &Event) -> EventResult {
     match event {
-        Event::Key(key) if key.pressed => match state.view {
-            AppView::Main => handle_main_key(state, key),
-            AppView::History => handle_history_key(state, key),
-            AppView::CountdownSetup => handle_setup_key(state, key),
+        Event::Key(key) if key.pressed => match handle_help_key(state, key) {
+            Some(answered) => answered,
+            None => match state.view {
+                AppView::Main => handle_main_key(state, key),
+                AppView::History => handle_history_key(state, key),
+                AppView::CountdownSetup => handle_setup_key(state, key),
+            },
         },
         Event::Mouse(mouse) => handle_mouse(state, mouse),
         Event::Resize { width, height } => {
@@ -1586,6 +1642,89 @@ mod tests {
     /// window would never deliver.
     fn press(app: &mut StopwatchApp, key: Key) -> EventResult {
         probe::key(app, &probe::press(key))
+    }
+
+    /// Every string the window draws, joined.
+    fn card_text(app: &StopwatchApp) -> String {
+        app.frame(DEFAULT_WIDTH, DEFAULT_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// Three views, because most of these keys belong to one: `L`, `R`, `M`
+    /// and `T` are the main view's, `Esc` closes the history, and the arrows
+    /// mean "scroll the laps" on one view and "change a field" on another.
+    /// Being refused elsewhere is correct.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [AppView::Main, AppView::History, AppView::CountdownSetup]
+                    .into_iter()
+                    .any(|view| {
+                        let mut app = StopwatchApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+                        app.view = view;
+                        probe::key(&mut app, &stroke) == EventResult::Consumed
+                    });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and no view answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the half that matters: `Space` behind the card must not
+    /// start the clock, and asserting only that it does not would pass on an
+    /// app that had lost `Space` altogether.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = StopwatchApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        assert!(
+            !card_text(&app).contains("F1 or ? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        press(&mut app, Key::F1);
+        let shown = card_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        // The observable is `state`, not `running`: `running` is the window's
+        // own loop flag and `StartPause` never touches it, so watching it
+        // would have compared true with true and passed on an app that had
+        // lost Space entirely.
+        let state = app.state;
+        press(&mut app, Key::Space);
+        assert_eq!(
+            app.state, state,
+            "Space started the clock through the shortcut card"
+        );
+
+        press(&mut app, Key::Escape);
+        assert!(
+            !card_text(&app).contains("F1 or ? closes this"),
+            "Escape did not close it"
+        );
+
+        press(&mut app, Key::Space);
+        assert_ne!(
+            app.state, state,
+            "control: Space does nothing even with the card down"
+        );
     }
 
     fn render(app: &StopwatchApp) -> Vec<RenderCommand> {

@@ -1,0 +1,120 @@
+# Keys this survey reports that have already been looked at and answered.
+#
+# Fields: crate<TAB>key<TAB>reason
+#
+# WHY THIS FILE EXISTS. The survey finds keys an app answers and never spells
+# in any string of its own. Some of those are not defects, and no scanner can
+# tell which: a key named by a string built at draw time, a table that spells
+# a key rather than answering one, a program whose whole job is to forward
+# keys somewhere else. Without somewhere to record that, every run re-offers
+# the same rows and the same reading happens again -- which it has, for five
+# of these crates, across three separate passes.
+#
+# This is NOT a suppression list. Two rules, the same two the frozen-flag
+# answers file carries:
+#
+#   * Every line says what *makes* it not a defect -- not that it is known.
+#   * A line naming a key the survey no longer reports is an error, not a
+#     no-op. The tool says so and exits 1. An answer that has rotted is worse
+#     than no answer, because it reads as a decision somebody made about the
+#     code as it is now.
+#
+# A THIRD RULE THIS FILE LEARNED THE HARD WAY: answer last, not first.
+# `launcher` was treated as answered for three passes on the grounds that its
+# hint is built at runtime. True -- and the hint read `^1`. Caret notation in
+# a desktop launcher is not a name, so the answer would have been covering a
+# defect rather than recording a non-defect. It was fixed first and is
+# answered now. `paint` went the same way: five of its six letters are a
+# spelling table, and the sixth, `M`, was a missing row in a card that
+# already existed.
+#
+# Run `python scripts/key-survey.py --answered` to see these with reasons.
+
+# --- a program whose job is to forward keys, not to answer them -----------
+# Every one of these is in `ctrl_key_code` or `func_key_seq`: tables that turn
+# a keystroke into the bytes a terminal sends to the program running inside
+# it. `Key::` appears nowhere else in the crate outside that block. A card
+# claiming "Ctrl+C -- interrupt" would be a claim this program cannot honour:
+# what Ctrl+C means belongs to whatever is running inside the terminal, and in
+# an editor it means something else entirely.
+terminal	A	sent to the program inside as a control byte, by ctrl_key_code; not answered here
+terminal	B	ditto
+terminal	C	ditto
+terminal	D	ditto
+terminal	E	ditto
+terminal	F	ditto
+terminal	G	ditto
+terminal	H	ditto
+terminal	I	ditto
+terminal	J	ditto
+terminal	K	ditto
+terminal	L	ditto
+terminal	M	ditto
+terminal	N	ditto
+terminal	O	ditto
+terminal	P	ditto
+terminal	Q	ditto
+terminal	R	ditto
+terminal	S	ditto
+terminal	T	ditto
+terminal	U	ditto
+terminal	V	ditto
+# `W` is missing from the run above and that is not an oversight. The survey
+# does not report it, because `text::measure("W", ...)` measures the widest
+# common glyph to size a cell, and a bare one-character literal is exactly
+# how an app names a key ("A: analog"). Nothing distinguishes the two from
+# the literal alone, so there is no rule to add -- and a line here for a key
+# the survey does not report would go stale immediately. Ctrl+W is forwarded
+# as 0x17 like the other twenty-five.
+terminal	X	ditto
+terminal	Y	ditto
+terminal	Z	ditto
+terminal	F1	encoded as an escape sequence and forwarded, by func_key_seq
+terminal	F2	ditto
+terminal	F3	ditto
+terminal	F4	ditto
+terminal	F5	ditto
+terminal	F6	ditto
+terminal	F7	ditto
+terminal	F8	ditto
+terminal	F9	ditto
+terminal	F10	ditto
+terminal	F11	ditto
+terminal	F12	ditto
+
+# --- named on screen, by a string built when it is drawn ------------------
+# The survey reads string *literals*. A name assembled with `format!` at draw
+# time is invisible to it and perfectly visible to a reader. This is the one
+# gap in this instrument that cannot be closed by parsing harder, since the
+# text does not exist until the program runs.
+launcher	Num1	drawn on each result row as a Ctrl+N hint; asserted by a_row_says_which_key_launches_it
+launcher	Num2	ditto
+launcher	Num3	ditto
+launcher	Num4	ditto
+launcher	Num5	ditto
+launcher	Num6	ditto
+launcher	Num7	ditto
+launcher	Num8	ditto
+sysmonitor	Num3	the tab caption is digit() plus label(), so the bar reads 3 CPU
+sysmonitor	Num4	ditto
+sysmonitor	Num5	ditto
+sysmonitor	Num6	ditto
+rssreader	Num4	the move-to-folder prompt numbers its own rows, one per folder that exists
+rssreader	Num5	ditto
+rssreader	Num6	ditto
+rssreader	Num7	ditto
+rssreader	Num9	ditto
+
+# --- a table that spells a key rather than answering one ------------------
+# This shape has turned up in three crates now and is worth recognising on
+# sight: a match over `Key::` whose arms produce a *spelling* -- a char, a
+# byte, another enum's variant -- and hand it on to something else to
+# dispatch. The survey counts the arm as a binding because it cannot see that
+# the value goes on to a second decision. `markdowneditor`'s event bridge was
+# the third, and is why the survey reads payload variants at all.
+paint	D	only in from_key, which spells a letter for chords that produce no text; handle_key_press answers no such letter
+paint	J	ditto
+paint	K	ditto
+paint	Q	ditto
+paint	W	ditto
+

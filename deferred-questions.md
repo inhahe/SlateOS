@@ -25,9 +25,16 @@ Same per-lane rules as the other shared documents: append your own entries,
 don't rewrite another lane's, and merge `origin/main` before trusting what you
 read here.
 
+**Entries are numbered `DQ<n>`.** They were `D-Q<n>` until 2026-09-22, when
+the project went to six lanes and `D-` became lane D's open-question prefix
+(`open-questions.md` ids are `<lane>-Q<n>`). The two entries that existed then
+carry their old names in their headings, so a search for an old citation still
+lands here, and lane D's own numbering starts at D-Q3 so that D-Q1 and D-Q2 are
+never reissued. See `design-decisions.md` §1100.
+
 ---
 
-## D-Q1 — Once a fastpy utility is proven as good as the Rust one, which does a stock install run by default?
+## DQ1 (was D-Q1) — Once a fastpy utility is proven as good as the Rust one, which does a stock install run by default?
 
 *(Was `open-questions.md` Q39, raised 2026-08-14 out of §108. Moved here
 2026-08-15 at the operator's direction — the entry itself said "ask again
@@ -81,7 +88,7 @@ makes it a user choice.
 
 ---
 
-## D-Q2 — Install `clang` + `lld` and turn on LLVM CFI for C code?
+## DQ2 (was D-Q2) — Install `clang` + `lld` and turn on LLVM CFI for C code?
 
 *(Was `open-questions.md` A-Q1's **option B**, raised 2026-08-14 by Lane A.
 Answered by the operator 2026-08-15 with **"not yet"** — a deferral, not a
@@ -135,7 +142,7 @@ it, with the prover*) was recorded by Lane A as `design-decisions.md` §201.
 **The answer does not change** — there is still no substantial C port, so the
 payoff is still near zero and "not yet" still stands. What changes is the
 **cost** side, which the entry above overstates in two specific ways. Recording
-this now, because whoever promotes D-Q2 will otherwise re-derive it.
+this now, because whoever promotes DQ2 will otherwise re-derive it.
 
 **1. "We do not have them installed" is no longer true — and never needed to be.**
 `zig cc` **is** clang, and `zig`'s linker **is** `ld.lld`. Zig has been a

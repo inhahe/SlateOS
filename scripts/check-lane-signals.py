@@ -20,11 +20,11 @@ different traffic class:
 
 WHY THE GIT COMMON DIR
 ----------------------
-Every worktree shares one git common directory -- verified: all three lanes
-report `E:/visual studio projects/os/.git`. (Re-verified 2026-09-21 after the
-D:-to-E: migration; it said `D:` until then, which was true when written and
-quietly wrong afterwards.) A file there is visible to all
-three *immediately*, on every branch, with no merge and no push. That is
+Every worktree shares one git common directory -- verified: every lane's
+worktree reports `E:/visual studio projects/os/.git`. (Re-verified 2026-09-21
+after the D:-to-E: migration; it said `D:` until then, which was true when
+written and quietly wrong afterwards.) A file there is visible to every lane
+*immediately*, on every branch, with no merge and no push. That is
 exactly the property an operational signal needs, and the boot lock
 (`$_common_git/slateos-boot-lock`) already relies on it, so the pattern is
 proven rather than novel.
@@ -53,7 +53,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-LANES = ("A", "B", "C")
+#: Every lane letter.  Must equal `which-lane.py`'s LANES -- the self-test
+#: asserts it, because a lane missing here is a lane the self-test never checks
+#: can see a halt.  Kept as a literal rather than imported so that this file,
+#: which `boot-test.sh` runs as its first gate, still works if which-lane.py
+#: itself is what is broken.
+LANES = ("A", "B", "C", "D", "E", "F")
 
 #: Presence of this file means: every lane stops at its next clean point.
 HALT = "HALT"
@@ -69,13 +74,10 @@ NOTICE_PREFIX = "notice-"
 NOTICE_MAX_AGE = _dt.timedelta(days=3)
 
 
-def _detect_lane() -> str | None:
-    """Reuse `which-lane.py`'s detector rather than re-deriving it.
+def _which_lane():
+    """`which-lane.py` as a module, or None if it cannot be loaded.
 
-    Imported by path because the module name has a hyphen. Duplicating the
-    suffix table would give this file a second, quietly diverging opinion about
-    which lane a session is -- and the table already carries a hard-won detail
-    (one config directory has a trailing space in its name).
+    Imported by path because the module name has a hyphen.
     """
     here = Path(__file__).resolve().parent / "which-lane.py"
     spec = importlib.util.spec_from_file_location("which_lane", here)
@@ -83,7 +85,23 @@ def _detect_lane() -> str | None:
         return None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    lane, _cfg = mod.detect_lane()
+    return mod
+
+
+def _detect_lane() -> str | None:
+    """Reuse `which-lane.py`'s detector rather than re-deriving it.
+
+    Duplicating it would give this file a second, quietly diverging opinion
+    about which lane a session is.  That detector no longer reads
+    `CLAUDE_CONFIG_DIR` -- two lanes share each account now -- but the worktree
+    this script runs from, `SLATEOS_LANE` and `ORCH2_AGENT_NAME`; see its
+    docstring.  None when it cannot tell, which `pending` treats as "show me
+    everything" rather than "nothing is for me".
+    """
+    mod = _which_lane()
+    if mod is None:
+        return None
+    lane, _how = mod.detect_lane()
     return lane
 
 
@@ -125,11 +143,22 @@ def clear_halt(d: Path) -> bool:
     return False
 
 
-def post_notice(d: Path, to: str, frm: str, text: str) -> Path:
+def post_notice(d: Path, to: str, frm: str | None, text: str) -> Path:
+    """Leave a notice for lane `to` (or `all`) from lane `frm`.
+
+    `frm` is None when the sender is not a lane -- the operator's integration
+    session, or a shell outside every lane worktree.  The sender goes into the
+    file NAME, so it has to be a legal path component everywhere: this used to
+    be passed as "?", which Windows refuses in a file name, so precisely the
+    sender least able to name itself could not leave a notice at all.
+    """
     d.mkdir(parents=True, exist_ok=True)
     stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    p = d / f"{NOTICE_PREFIX}{to.lower()}-{frm.lower()}-{stamp}.md"
-    p.write_bytes((f"from: lane {frm}\nto: {to}\nat: {_now()}\n\n{text}\n").encode("utf-8"))
+    known = bool(frm) and frm.isalnum()
+    tag = frm.lower() if known else "unknown"
+    who = f"lane {frm}" if known else "a session that is not a lane"
+    p = d / f"{NOTICE_PREFIX}{to.lower()}-{tag}-{stamp}.md"
+    p.write_bytes((f"from: {who}\nto: {to}\nat: {_now()}\n\n{text}\n").encode("utf-8"))
     return p
 
 
@@ -244,14 +273,15 @@ def _self_test() -> int:
             halt, _ = pending(d, lane)
             check(f"lane {lane} no longer sees a halt", halt, None)
 
-        # Addressing: a notice to B is for B, and is NOT for A or C.
+        # Addressing: a notice to B is for B, and is NOT for any other lane.
         post_notice(d, "b", "a", "stop when convenient")
         _, to_b = pending(d, "B")
         check("the addressee sees the notice", len(to_b), 1)
-        _, to_a = pending(d, "A")
-        check("a lane not addressed does not", len(to_a), 0)
-        _, to_c = pending(d, "C")
-        check("nor does a third lane", len(to_c), 0)
+        for lane in LANES:
+            if lane == "B":
+                continue
+            _, got = pending(d, lane)
+            check(f"lane {lane}, not addressed, does not", len(got), 0)
 
         # `all` reaches everyone.
         post_notice(d, "all", "a", "tree is moving")
@@ -259,6 +289,15 @@ def _self_test() -> int:
             _, got = pending(d, lane)
             want = 2 if lane == "B" else 1
             check(f"lane {lane} sees the broadcast", len(got), want)
+
+        # A sender that is not a lane still gets a notice through, under a
+        # file name every host accepts -- "?" used to go into the name.
+        anon = post_notice(d, "all", None, "the lanes changed")
+        check("a non-lane sender can post", anon.is_file(), True)
+        check("and is named in a portable way", "-unknown-" in anon.name, True)
+        check("and says so in the notice",
+              "not a lane" in anon.read_text(encoding="utf-8"), True)
+        anon.unlink()
 
         # --- Notice expiry ---
         # A notice that just landed is fresh.
@@ -288,6 +327,12 @@ def _self_test() -> int:
         check("unparseable stamp is treated as fresh",
               _notice_is_fresh(bad_file), True)
 
+    # The lane list here must be which-lane.py's, or a lane is silently left
+    # out of every loop above.
+    mod = _which_lane()
+    check("LANES matches which-lane.py",
+          tuple(mod.LANES) if mod is not None else None, LANES)
+
     print()
     if failures:
         print(f"{len(failures)} FAILURE(S)")
@@ -308,7 +353,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="ask every lane to stop at its next clean point")
     ap.add_argument("--clear-halt", action="store_true", help="lift the halt")
     ap.add_argument("--notice", metavar="TEXT", help="leave a one-way message")
-    ap.add_argument("--to", default="all", help="notice addressee: a, b, c, or all")
+    ap.add_argument("--to", default="all",
+                    help="notice addressee: a lane letter (a-f), or all")
     ap.add_argument("--quiet", action="store_true",
                     help="print nothing when there is nothing pending")
     ap.add_argument("--include-expired", action="store_true",
@@ -333,7 +379,15 @@ def main(argv: list[str] | None = None) -> int:
         print("halt lifted" if clear_halt(d) else "no halt was set")
         return 0
     if args.notice:
-        p = post_notice(d, args.to, lane or "?", args.notice)
+        # Refused rather than posted: a notice addressed to a lane that does
+        # not exist is shown to no session that knows its own lane, so it
+        # would be delivered to nobody and still report success.
+        valid = {x.lower() for x in LANES} | {"all"}
+        if args.to.lower() not in valid:
+            print(f"check-lane-signals: --to {args.to!r} is not a lane; use one "
+                  f"of {', '.join(sorted(valid))}", file=sys.stderr)
+            return 2
+        p = post_notice(d, args.to, lane, args.notice)
         print(f"notice left for {args.to}: {p}")
         return 0
 

@@ -1576,6 +1576,11 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("A", "Spray can tool"),
     ("S", "Selection tool"),
     ("X", "Swap FG/BG colors"),
+    // Found by `key-survey.py` reporting `M` as a key this app answers and
+    // names nowhere -- inside an app that already had a card. A card existing
+    // is not the same as a card being complete, and the guard beside it only
+    // checks the converse: that everything advertised works.
+    ("Shift+M", "Shape fill: outline, filled, both"),
     ("[", "Decrease brush size"),
     ("]", "Increase brush size"),
     ("H", "Flip horizontal"),

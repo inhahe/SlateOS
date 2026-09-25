@@ -800,9 +800,37 @@ pub struct Notification {
 }
 
 /// Top-level application state for the screenshot utility.
+/// The keys this program answers, raised by `F1` or `?`.
+///
+/// Every row says what the key *chooses*, not what it produces. `CANNOT_CAPTURE`
+/// is drawn unconditionally on every view of this program -- there is no state
+/// in which it can read the screen -- so a row promising "take a full-screen
+/// shot" would be the one claim on screen that the line above it contradicts.
+///
+/// The digits mean two different things and the rows say which: on the menu
+/// they pick what to capture, and once there is an image on screen they pick
+/// an annotation tool.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("1-5", "Choose full screen, window, region, 3s or 5s delay"),
+    (
+        "PrintScreen",
+        "Full screen; Alt, Ctrl or Shift for the others",
+    ),
+    (
+        "1-4",
+        "Rectangle, arrow, text or highlight, while annotating",
+    ),
+    ("Ctrl+Z", "Undo an annotation"),
+    ("Ctrl+S", "Save what is on screen"),
+    ("Esc", "Cancel, or close"),
+    ("F1 / ?", "This list"),
+];
+
 pub struct ScreenshotApp {
     /// The user's colours, handed over by the framework (§822).
     pub palette: Palette,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     /// Current capture mode selected in the menu.
     pub mode: CaptureMode,
     /// Current application view.
@@ -858,6 +886,7 @@ impl ScreenshotApp {
     /// Create a new screenshot application with the given window size.
     pub fn new(width: f32, height: f32) -> Self {
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             mode: CaptureMode::FullScreen,
             view: AppView::Menu,
@@ -1115,12 +1144,34 @@ impl ScreenshotApp {
 
     /// Handle a key press event.
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        if let Some(answered) = self.handle_help_key(event) {
+            return answered;
+        }
         match self.view {
             AppView::Menu => self.handle_key_menu(event),
             AppView::RegionSelect => self.handle_key_region(event),
             AppView::Countdown => self.handle_key_countdown(event),
             AppView::Preview => self.handle_key_preview(event),
         }
+    }
+
+    /// The shortcut card, answered before any view's own keys.
+    ///
+    /// `Some` when the card took the keystroke, `None` to let the view have it.
+    fn handle_help_key(&mut self, event: &KeyEvent) -> Option<bool> {
+        if event.key == Key::F1 || (event.key == Key::Slash && event.modifiers.shift) {
+            self.show_help = !self.show_help;
+            return Some(true);
+        }
+        if self.show_help {
+            // Modal. Letting keys through would mean discarding an image the
+            // reader cannot see.
+            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return Some(true);
+        }
+        None
     }
 
     fn handle_key_menu(&mut self, event: &KeyEvent) -> bool {
@@ -1544,6 +1595,17 @@ impl ScreenshotApp {
             max_width: Some((self.window_width - 16.0).max(120.0)),
             overflow: TextOverflow::Ellipsis,
         });
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                &self.palette,
+                (self.window_width, self.window_height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
 
         tree
     }
@@ -2387,6 +2449,93 @@ mod tests {
     /// this window sees three capture buttons, a save location and a file
     /// format, and nothing saying that none of it will produce a file --
     /// which is the question they came to have answered.
+    /// Every string the window draws, joined.
+    fn card_text(app: &ScreenshotApp) -> String {
+        app.render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    fn key(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// Two views, because the digits mean different things on each: on the
+    /// menu they pick what to capture, on the preview they pick an annotation
+    /// tool. That is why the list has two digit rows rather than one.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [AppView::Menu, AppView::Preview].into_iter().any(|view| {
+                    let mut app = ScreenshotApp::new(1280.0, 800.0);
+                    app.view = view;
+                    app.handle_key(&stroke)
+                });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and no view answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the half that matters: `1` behind the card must not
+    /// change the capture mode, and asserting only that it does not would pass
+    /// on an app that had lost the digit keys altogether.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = ScreenshotApp::new(1280.0, 800.0);
+        app.view = AppView::Menu;
+        app.mode = CaptureMode::Region;
+        assert!(
+            !card_text(&app).contains("F1 or ? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_key(&key(Key::F1));
+        let shown = card_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        let mode = app.mode;
+        app.handle_key(&key(Key::Num1));
+        assert_eq!(
+            app.mode, mode,
+            "1 changed the mode through the shortcut card"
+        );
+
+        app.handle_key(&key(Key::Escape));
+        assert!(
+            !card_text(&app).contains("F1 or ? closes this"),
+            "Escape did not close it"
+        );
+
+        app.handle_key(&key(Key::Num1));
+        assert_ne!(
+            app.mode, mode,
+            "control: 1 does nothing even with the card down"
+        );
+    }
+
     #[test]
     fn every_view_says_no_screenshot_can_be_taken() {
         for view in [

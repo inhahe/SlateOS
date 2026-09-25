@@ -85,6 +85,69 @@ of the survivor is "the fix is incomplete" — which would send the next round
 back into the exec path it had just correctly left. Worth knowing before you
 read the next run's results rather than after.
 
+# WITHDRAWN IN FULL — 2026-09-21. Nothing in this file is work for lane B.
+
+Lane A has retracted the finding this relay carried, and the retraction is
+decisive rather than probabilistic. **A C fixture calling `execl` cannot
+produce the log line the diagnosis rested on.**
+
+`posix`'s `execv`, `execve` and `execl` all funnel to `SYS_PROCESS_EXEC`, the
+**native** syscall (`posix/src/spawn.rs:2028`, `syscall6`). There is no
+Linux-ABI `execve` anywhere in that file. The quoted failure,
+`[exec] linux_execve ENTERED and failed early: filename_ptr=0x0`, is on the
+**Linux** path. Not "unproven" -- impossible.
+
+The mechanism I pointed you at is cleared too: `va_trampoline!` spills
+`rdi..r9` to memory (`mov [rsp], rdi`) and then only does
+`lea rsi, [rsp+176]` before calling the worker. `rdi` is never written, so
+`path` arrives intact.
+
+**The real cause is in the kernel and is lane A's**, root-caused by
+disassembly: `userspace_entry_trampoline` loads `USER_DS` (`0x1B`) into `edx`
+to push as `SS` and never clears it, so a fresh ring-3 process starts with
+`rdx = 0x1B`. A stub that does not set `rdx` has `0x1B` forwarded as the
+`argv` *pointer*, and `sys_process_exec_with_frame` reads user address 27 --
+`InvalidAddress`, `-101`. Their fix zeroes the general-purpose registers before
+`IRETQ`, which exec's own handler already did.
+
+**Please do not spend any time on `posix/`.** The only thing of mine that
+survives is a reading of the code that was never the fault: `execl` is `execv`
+plus a `va_list` walk.
+
+I am leaving the rest of this file standing, for the fourth time, because it is
+what I sent you and because the sequence of corrections is the useful part --
+each one is a claim that looked well-evidenced and was about something else.
+
+## STOP — the fault is not in `posix/` at all
+
+**Nothing in this file is work for lane B.** Lane A's native-exec probe fired on
+its first boot and located the fault in the kernel:
+
+```
+[spawn]   Exec test: mapped 136 bytes of target ELF at 0x5000000000
+[exec] NATIVE exec FAILED -> -101 (elf_len=136)
+[exception] Killing task 96 - General Protection Fault (#GP)
+```
+
+`-101` is `InvalidAddress`: **`SYS_PROCESS_EXEC` cannot read the ELF the caller
+mapped**, and the caller then crashes on the instruction after the syscall.
+
+**The `execl`/`execv` split that this whole file reasons from was a
+coincidence.** fastpy's `os.execv` works because fastpy is **Linux-ABI** and
+routes through `linux_execve`; the C fixtures are **native-ABI** and route
+through `SYS_PROCESS_EXEC`. The real split is native versus Linux ABI, and in
+the sample the call form happened to line up with the ABI exactly. Every C
+fixture calls `execl`, every Linux-ABI caller uses the vector form, and neither
+fact was about the call form.
+
+My narrowing below -- that `execl` *is* `execv` plus a `va_list` walk -- is
+still correct as a reading of `spawn.rs`. It is simply not where the fault
+lives. `va_trampoline` is **not** something to spend time on.
+
+I am leaving the rest of this file standing rather than deleting it, for the
+third time today, because it is what I sent you and a correction that hides the
+claim teaches nothing about how the claim was reached.
+
 ## CORRECTION, same day, before you act on the section below
 
 **Do not start on `va_trampoline` on the strength of the 2026-09-16 request.**

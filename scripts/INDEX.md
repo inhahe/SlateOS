@@ -327,6 +327,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/straddle-check.py` | Report which loops in a kernel binary straddle a 4 KiB guest page. |
 | `scripts/strings-diff.sh` | Differential test: our `strings` against GNU binutils `strings`. |
 | `scripts/symbolize.py` | Turn the raw addresses in a kernel panic into `symbol+offset`. |
+| `scripts/sync-diff.sh` | sync-diff.sh — compare our `sync` against the real GNU one, inside WSL. |
 | `scripts/tail-diff.sh` | Differential test: our tail against GNU tail. |
 | `scripts/tar-diff.sh` | Differential test: our tar against GNU tar. |
 | `scripts/tee-diff.sh` | Differential test: our tee against GNU coreutils' tee. |
@@ -396,4 +397,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_386 scripts._
+_387 scripts._

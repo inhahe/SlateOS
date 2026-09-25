@@ -1,13 +1,12 @@
-//! Slate OS getopt/cksum/sync — shell scripting helpers
+//! Slate OS getopt/cksum — shell scripting helpers
 //!
 //! Multi-personality binary detected via argv[0]:
 //! - `getopt`: Parse command-line options for shell scripts
 //! - `cksum`: Print CRC32 checksum and byte count
-//! - `sync`: Flush filesystem buffers
 //!
-//! `printenv` was a fourth personality here, which nothing could reach: no
-//! `/bin/printenv` link was ever staged. It is `userspace/coreutils`'s own bin
-//! since 2026-09-24 -- a port of GNU's, differentially tested -- and the name
+//! `printenv` and `sync` were personalities here too, which nothing could reach: no
+//! link was ever staged for either. Each is `userspace/coreutils`'s own bin
+//! since 2026-09-24/25 -- ports of GNU's, differentially tested -- and a name
 //! belongs to the one program that does the job (design-decisions.md §1019).
 
 use quoting::quoteaf_os;
@@ -22,7 +21,6 @@ use std::process;
 enum Mode {
     Getopt,
     Cksum,
-    Sync,
 }
 
 fn detect_mode(argv0: &str) -> Mode {
@@ -31,7 +29,6 @@ fn detect_mode(argv0: &str) -> Mode {
     let lower = name.to_ascii_lowercase();
     match lower.as_str() {
         "cksum" => Mode::Cksum,
-        "sync" => Mode::Sync,
         _ => Mode::Getopt,
     }
 }
@@ -513,106 +510,6 @@ fn run_cksum() -> Result<(), String> {
     Ok(())
 }
 
-// ── sync ───────────────────────────────────────────────────────────
-
-// Flushing goes through the posix libc `sync`/`syncfs` symbols, never a
-// hand-rolled `syscall`.  This code used to issue raw syscall 162 — Linux's
-// `sync` number, which the native Slate OS table leaves unassigned (our sync is
-// `SYS_FS_SYNC = 641`), so on the real OS it would have failed with ENOSYS while
-// happening to work on a Linux development host.  `cfg(unix)` rather than
-// `cfg(target_vendor = "slateos")` because these are C symbols with the same
-// meaning on both, so a development host flushes for real instead of pretending.
-#[cfg(unix)]
-unsafe extern "C" {
-    /// posix libc `sync` — flush every mounted filesystem.
-    fn sync();
-    /// posix libc `syncfs` — flush the filesystem containing `fd`.
-    fn syncfs(fd: i32) -> i32;
-}
-
-/// Flush every mounted filesystem.
-fn sync_all_filesystems() -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        // SAFETY: `sync` takes no arguments, returns nothing, and cannot fail.
-        unsafe { sync() };
-    }
-    Ok(())
-}
-
-/// Flush the filesystem that contains `f`.
-#[cfg(unix)]
-fn sync_containing_filesystem(f: &fs::File) -> Result<(), String> {
-    use std::os::fd::AsRawFd;
-    // SAFETY: `AsRawFd` yields a descriptor that is open for the borrow of `f`.
-    let rc = unsafe { syncfs(f.as_raw_fd()) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error().to_string())
-    }
-}
-
-/// Development-host fallback: without `syncfs`, flushing the file itself is the
-/// closest honest approximation, and is a subset of what `-f` promises.
-#[cfg(not(unix))]
-fn sync_containing_filesystem(f: &fs::File) -> Result<(), String> {
-    f.sync_all().map_err(|e| e.to_string())
-}
-
-fn run_sync() -> Result<(), String> {
-    let argv: Vec<String> = env::args().collect();
-    let mut data_only = false;
-    let mut filesystem_only = false;
-    let mut files: Vec<String> = Vec::new();
-
-    for arg in &argv[1..] {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                eprintln!("Usage: sync [OPTION] [FILE]...");
-                eprintln!("Flush file system buffers.");
-                eprintln!();
-                eprintln!("  -d, --data     sync only file data, no metadata");
-                eprintln!("  -f, --file-system  sync filesystems containing files");
-                process::exit(0);
-            }
-            "-d" | "--data" => data_only = true,
-            "-f" | "--file-system" => filesystem_only = true,
-            _ => files.push(arg.clone()),
-        }
-    }
-
-    // Both narrow the sync; asking for both at once is contradictory.  GNU
-    // coreutils rejects it, and so do we rather than silently picking one.
-    if data_only && filesystem_only {
-        return Err("cannot specify both --data and --file-system".to_string());
-    }
-
-    if files.is_empty() {
-        // `-d`/`-f` name what to sync *about a file*, so without an operand
-        // there is nothing for them to mean.  Rejecting is what keeps the flags
-        // honest: accepting them here would silently widen the request to "sync
-        // everything", which is the opposite of what the user narrowed it to.
-        if data_only || filesystem_only {
-            return Err("--data/--file-system need at least one argument".to_string());
-        }
-        sync_all_filesystems()?;
-    } else {
-        for file in &files {
-            let f = fs::File::open(file).map_err(|e| format!("{file}: {e}"))?;
-            if filesystem_only {
-                sync_containing_filesystem(&f).map_err(|e| format!("{file}: {e}"))?;
-            } else if data_only {
-                f.sync_data().map_err(|e| format!("{file}: {e}"))?;
-            } else {
-                f.sync_all().map_err(|e| format!("{file}: {e}"))?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
 // ── Main ───────────────────────────────────────────────────────────
 
 fn run() -> Result<(), String> {
@@ -622,7 +519,6 @@ fn run() -> Result<(), String> {
     match mode {
         Mode::Getopt => run_getopt(),
         Mode::Cksum => run_cksum(),
-        Mode::Sync => run_sync(),
     }
 }
 
@@ -672,16 +568,13 @@ mod tests {
         assert_eq!(detect_mode("/bin/cksum"), Mode::Cksum);
     }
 
+    /// `printenv` and `sync` are coreutils' bins now; this binary no longer
+    /// answers to either, so each falls to the default like any other name it
+    /// does not know.
     #[test]
-    fn test_detect_sync() {
-        assert_eq!(detect_mode("sync"), Mode::Sync);
-    }
-
-    /// `printenv` is coreutils' bin now; this binary no longer answers to it,
-    /// so the name falls to the default like any other it does not know.
-    #[test]
-    fn printenv_is_not_a_personality_here() {
+    fn printenv_and_sync_are_not_personalities_here() {
         assert_eq!(detect_mode("printenv"), Mode::Getopt);
+        assert_eq!(detect_mode("sync"), Mode::Getopt);
     }
 
     #[test]

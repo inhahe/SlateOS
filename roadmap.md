@@ -1653,7 +1653,11 @@ live.
   called the icon layer's key handler before. "Add to desktop" on a
   start-menu row or a pinned button puts a program shortcut there, saved
   with the layout; a right-click on an icon opens its own menu (Open, Pin
-  to taskbar, Remove from desktop). **Next, and open:** F2 rename, and
+  to taskbar, Remove from desktop). F2 (or "Rename" on that menu) renames
+  an icon in place -- Enter keeps the name, Escape the old one, a click away
+  or the keyboard leaving for another program keeps it -- and a renamed
+  default is saved as `labels` in the layout file, only if renamed, so a
+  later build's own names still reach everyone else. **Next, and open:**
   dragging between the start menu, the taskbar and the desktop
   (`design.txt` line 712) -- which wants lane F's implicit pointer grab
   (`requests/c-f-a-drag-that-leaves-its-window-stops-being-told-where-the-pointer-is.md`)
@@ -7386,7 +7390,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Rubber-band selection, Ctrl+Click toggle, Ctrl+A select all
   - [x] Drag-and-drop repositioning with ghost indicator, multi-select drag
   - [x] Default icons (This PC, Recycle Bin, Documents, Home), icon types (9 variants)
-  - [-] Double-click activate, right-click context menu, F2 rename, Delete -- **corrected 2026-09-25**: ticked from the start, when only the double-click reached anything, and it asked for a folder to be *executed* and did nothing for This PC or the Recycle Bin. Opening, the icon's own right-click menu (Open, Pin to taskbar, Remove from desktop) and Delete are real now; **F2 rename is still to do** -- lane C's next item.
+  - [x] Double-click activate, right-click context menu, F2 rename, Delete -- **really done 2026-09-25**: ticked from the start, when only the double-click reached anything, and it asked for a folder to be *executed* and did nothing for This PC or the Recycle Bin. Opening, the icon's own right-click menu (Open, Rename, Pin to taskbar, Remove from desktop), Delete and F2 rename in place are all real now.
 - [x] Taskbar enhancements:
   - [x] Pinned apps on left, running apps on right, divider between sections
   - [-] Drag to reorder (done), drag to/from desktop and start menu (**not done**, ticked in error: a pinned button only reorders within the pinned run, and nothing can be dragged between the start menu, the taskbar and the desktop. "Add to desktop" on the start menu's and the taskbar's right-click menu is the non-drag way in, done 2026-09-25; the drag is lane C's next item. Corrected 2026-09-25)

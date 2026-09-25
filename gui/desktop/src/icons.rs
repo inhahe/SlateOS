@@ -50,11 +50,15 @@
 use appearance::Palette;
 use core::num::NonZeroU32;
 use guitk::color::Color;
+use guitk::event::{Key, KeyEvent};
 use guitk::idseq::IdSeq;
+use guitk::render::RenderTree;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
-use std::collections::BTreeSet;
+use guitk::textedit::{self, SingleLine};
+use guitk::textinput::TextInput;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use yamldoc::Document;
 
@@ -114,6 +118,14 @@ const DRAG_THRESHOLD_SQ: f32 = 25.0;
 const ICON_TOP_PADDING: f32 = 8.0;
 /// Padding from screen edges.
 const EDGE_PADDING: u32 = 8;
+/// How far in from its cell's sides the rename field sits.
+const RENAME_INSET: f32 = 2.0;
+/// How far in from the field's sides its text starts.
+const RENAME_TEXT_INSET: f32 = 3.0;
+/// The rename field's height: one line of label text and its margins.
+const RENAME_FIELD_HEIGHT: f32 = LABEL_FONT_SIZE + 8.0;
+/// The caret's width until the shell says otherwise -- the toolkit's default.
+const DEFAULT_CARET_WIDTH: f32 = 1.0;
 
 /// The grid cell that holds a `px`-pixel icon and its two-line label.
 ///
@@ -286,6 +298,14 @@ const GRID_KEY: &str = "grid";
 /// How the icons are placed: an [`ArrangementMode`]'s file spelling.
 const ARRANGEMENT_KEY: &str = "arrangement";
 
+/// Names the user gave the default icons: icon key -> name. A shortcut the
+/// user added keeps its name in `shortcuts` instead, beside what it opens.
+///
+/// Only the renamed ones are written. Writing every default's name would
+/// freeze today's names into every user's file, and a later build that named
+/// "This PC" differently -- or in the user's language -- would never be seen.
+const LABELS_KEY: &str = "labels";
+
 /// The shortcuts the user added: icon key -> `{label, type}`.
 ///
 /// Keyed by the same key the positions are, which is the icon's *action* in
@@ -352,6 +372,26 @@ enum InteractionState {
         current_x: f32,
         current_y: f32,
     },
+}
+
+/// An icon's label being edited in place: F2, or "Rename" on the icon's menu.
+#[derive(Clone, Debug)]
+struct Rename {
+    /// The icon whose name it is.
+    id: IconId,
+    /// The field, holding the name as it is typed.
+    input: TextInput,
+}
+
+/// What a key did to a rename under way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenameKey {
+    /// The field took it -- a letter, a caret move -- and the rename goes on.
+    Editing,
+    /// The rename is over: Enter kept the new name, or Escape the old one.
+    /// `renamed` is whether the name changed, which is when there is a layout
+    /// to save.
+    Finished { renamed: bool },
 }
 
 /// What a drop would do: `DesktopIconLayer::drop_plan`'s answer, which the
@@ -674,6 +714,16 @@ pub struct DesktopIconLayer {
     /// Private, with [`set_icon_size`](Self::set_icon_size), because the grid
     /// is derived from it and the two must change together.
     glyph_px: u32,
+    /// The rename under way, if one is. See [`begin_rename`](Self::begin_rename).
+    renaming: Option<Rename>,
+    /// How wide the rename field's caret is drawn: the accessibility setting,
+    /// pushed in by the shell as the icon size is.
+    caret_width: f32,
+    /// The names the user gave the default icons, by icon key -- what
+    /// `LABELS_KEY` in the layout file holds. Kept here rather than read back
+    /// off the icons because a default's own name is not remembered anywhere
+    /// once it is changed, so "was this renamed" cannot be asked of the icon.
+    label_overrides: BTreeMap<String, String>,
 }
 
 impl DesktopIconLayer {
@@ -689,7 +739,153 @@ impl DesktopIconLayer {
             screen_height,
             taskbar_height,
             glyph_px: DEFAULT_GLYPH_PX,
+            renaming: None,
+            caret_width: DEFAULT_CARET_WIDTH,
+            label_overrides: BTreeMap::new(),
         }
+    }
+
+    // ======================================================================
+    // Renaming in place
+    // ======================================================================
+
+    /// How wide the rename field's caret is drawn, in pixels.
+    pub fn set_caret_width(&mut self, width: f32) {
+        self.caret_width = width;
+    }
+
+    /// Start editing `id`'s name in place, all of it selected so that typing
+    /// replaces it -- F2, or "Rename" on the icon's menu. Answers whether it
+    /// started: an icon that is not there has nothing to rename.
+    ///
+    /// A rename already under way is kept first, as clicking another icon's
+    /// name would keep it. A caller that saves on change should keep it
+    /// itself first, with [`commit_rename`](Self::commit_rename), to learn
+    /// whether that changed anything -- the shell does; the keep here is so
+    /// that a caller who forgets loses nothing but the prompt save.
+    ///
+    /// A name, not a file: a desktop icon here is a shortcut to a path, not a
+    /// file in a desktop folder, so renaming "Documents" renames the icon and
+    /// leaves the folder alone.
+    pub fn begin_rename(&mut self, id: IconId) -> bool {
+        // Normally a no-op: see the doc comment for who keeps it first.
+        let _kept = self.commit_rename();
+        let Some(icon) = self.get_icon(id) else {
+            return false;
+        };
+        let mut input = TextInput::new();
+        input.set_text(&icon.label);
+        input.select_all();
+        self.select_single(id);
+        self.renaming = Some(Rename { id, input });
+        true
+    }
+
+    /// The icon being renamed, if one is.
+    #[must_use]
+    pub fn renaming(&self) -> Option<IconId> {
+        self.renaming.as_ref().map(|r| r.id)
+    }
+
+    /// A key while a rename is under way: Enter keeps the new name, Escape
+    /// the old one, and anything else is the field's -- typing, the arrows,
+    /// Backspace, Ctrl+A. With no rename under way it does nothing and says
+    /// so as `Finished` with nothing renamed.
+    pub fn rename_key(&mut self, key: &KeyEvent) -> RenameKey {
+        let Some(rename) = self.renaming.as_mut() else {
+            return RenameKey::Finished { renamed: false };
+        };
+        match key.key {
+            Key::Enter => RenameKey::Finished {
+                renamed: self.commit_rename(),
+            },
+            Key::Escape => {
+                self.renaming = None;
+                RenameKey::Finished { renamed: false }
+            }
+            _ => {
+                // Whether the key edited anything is not asked: while the
+                // field is open every key is its, so that a stray Delete
+                // cannot reach the icons underneath.
+                let _edit = rename
+                    .input
+                    .edit_key(key, LABEL_FONT_SIZE, FontWeightHint::Regular);
+                RenameKey::Editing
+            }
+        }
+    }
+
+    /// Keep what has been typed as the icon's name -- Enter, or a click away.
+    /// Answers whether the name changed, which is when the layout needs
+    /// saving.
+    ///
+    /// Surrounding spaces are dropped, and an empty name is refused -- the
+    /// old one stays -- as every desktop refuses it: an icon with no name is
+    /// one nobody can find by its name.
+    pub fn commit_rename(&mut self) -> bool {
+        let Some(rename) = self.renaming.take() else {
+            return false;
+        };
+        let name = rename.input.text().trim().to_string();
+        if name.is_empty() {
+            return false;
+        }
+        let Some(icon) = self.icons.iter_mut().find(|i| i.id == rename.id) else {
+            return false;
+        };
+        if icon.label == name {
+            return false;
+        }
+        icon.label.clone_from(&name);
+        if !icon.added {
+            self.label_overrides
+                .insert(Self::storage_key(&icon.action), name);
+        }
+        true
+    }
+
+    /// Where the rename field is on the screen, `(x, y, width, height)`, if a
+    /// rename is under way: the label's place in the icon's cell.
+    fn rename_field(&self) -> Option<(f32, f32, f32, f32)> {
+        let rename = self.renaming.as_ref()?;
+        let icon = self.get_icon(rename.id)?;
+        let cw = px_f32(self.grid.cell_width());
+        let x = icon.x as f32 + RENAME_INSET;
+        let y = icon.y as f32 + ICON_TOP_PADDING + px_f32(self.glyph_px) + 4.0;
+        Some((
+            x,
+            y,
+            (cw - RENAME_INSET * 2.0).max(1.0),
+            RENAME_FIELD_HEIGHT,
+        ))
+    }
+
+    /// Whether `(x, y)` is inside the rename field.
+    #[must_use]
+    pub fn rename_field_contains(&self, x: f32, y: f32) -> bool {
+        self.rename_field()
+            .is_some_and(|(fx, fy, fw, fh)| x >= fx && x < fx + fw && y >= fy && y < fy + fh)
+    }
+
+    /// A press inside the rename field: the caret goes where it landed.
+    pub fn rename_click(&mut self, x: f32) {
+        let Some((fx, _, fw, _)) = self.rename_field() else {
+            return;
+        };
+        let Some(rename) = self.renaming.as_mut() else {
+            return;
+        };
+        let text_x = fx + RENAME_TEXT_INSET;
+        let cursor = textedit::cursor_at_click(
+            rename.input.text(),
+            rename.input.cursor(),
+            (fw - RENAME_TEXT_INSET * 2.0).max(1.0),
+            LABEL_FONT_SIZE,
+            FontWeightHint::Regular,
+            x - text_x,
+        );
+        rename.input.set_cursor(cursor);
+        rename.input.set_selection_anchor(None);
     }
 
     /// How tall icons are drawn, in pixels.
@@ -1991,6 +2187,13 @@ impl DesktopIconLayer {
             overflow: TextOverflow::Clip,
         });
 
+        // The field replaces the label while the name is being edited: the
+        // label under it would be the old name showing through the new one.
+        if self.renaming.as_ref().is_some_and(|r| r.id == icon.id) {
+            self.render_rename(p, cmds);
+            return;
+        }
+
         // Label text below icon (centered, 2-line max with ellipsis).
         //
         // Centred for real since 2026-09-24: the comment said so for as long
@@ -2039,6 +2242,58 @@ impl DesktopIconLayer {
                 overflow: TextOverflow::Ellipsis,
             });
         }
+    }
+
+    /// The rename field: a plain box on the wallpaper, and the name being
+    /// typed in it with its selection and caret.
+    ///
+    /// Drawn in the palette's ordinary text roles rather than the label's
+    /// wallpaper ones. A label sits on an arbitrary photograph and so is pale
+    /// with a shadow under it; the field brings its own background, and text
+    /// on a surface is what the text roles are for.
+    fn render_rename(&self, p: &Palette, cmds: &mut Vec<RenderCommand>) {
+        let (Some(rename), Some((x, y, w, h))) = (self.renaming.as_ref(), self.rename_field())
+        else {
+            return;
+        };
+        cmds.push(RenderCommand::FillRect {
+            x,
+            y,
+            width: w,
+            height: h,
+            color: p.base,
+            corner_radii: CornerRadii::all(3.0),
+        });
+        cmds.push(RenderCommand::StrokeRect {
+            x,
+            y,
+            width: w,
+            height: h,
+            color: p.accent,
+            line_width: 1.0,
+            corner_radii: CornerRadii::all(3.0),
+        });
+        let mut tree = RenderTree::new();
+        textedit::draw(
+            &mut tree,
+            &SingleLine {
+                text: rename.input.text(),
+                cursor: rename.input.cursor(),
+                selection_anchor: rename.input.selection_anchor(),
+                focused: true,
+                x: x + RENAME_TEXT_INSET,
+                y: y + (h - (LABEL_FONT_SIZE + 2.0)) / 2.0,
+                width: (w - RENAME_TEXT_INSET * 2.0).max(1.0),
+                line_height: LABEL_FONT_SIZE + 2.0,
+                font_size: LABEL_FONT_SIZE,
+                weight: FontWeightHint::Regular,
+                color: p.text,
+                selection_bg: p.accent,
+                selection_fg: p.on_accent(),
+                caret_width: self.caret_width,
+            },
+        );
+        cmds.extend(tree.commands);
     }
 
     /// Update screen dimensions (e.g., on resolution change), bringing every
@@ -2172,6 +2427,27 @@ impl DesktopIconLayer {
             doc.set_str(&[SHORTCUTS_KEY, &key, "label"], &icon.label);
             doc.set_str(&[SHORTCUTS_KEY, &key, "type"], icon.icon_type.yaml_name());
         }
+
+        // The defaults' new names, for the icons still here.
+        let renamed: Vec<(String, &str)> = self
+            .icons
+            .iter()
+            .filter(|icon| !icon.added)
+            .filter_map(|icon| {
+                let key = Self::storage_key(&icon.action);
+                self.label_overrides
+                    .get(&key)
+                    .map(|name| (key, name.as_str()))
+            })
+            .collect();
+        for key in doc.keys(&[LABELS_KEY]) {
+            if !renamed.iter().any(|(k, _)| *k == key) {
+                doc.remove(&[LABELS_KEY, &key]);
+            }
+        }
+        for (key, name) in renamed {
+            doc.set_str(&[LABELS_KEY, &key], name);
+        }
     }
 
     /// The grid a document's positions were laid out on: what it says, or the
@@ -2249,6 +2525,25 @@ impl DesktopIconLayer {
                 icon.added = true;
             }
         }
+        // The names the user gave the defaults, onto the defaults here.
+        for key in doc.keys(&[LABELS_KEY]) {
+            let Some(name) = doc
+                .get_str(&[LABELS_KEY, &key])
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+            else {
+                continue;
+            };
+            if let Some(icon) = self
+                .icons
+                .iter_mut()
+                .find(|icon| !icon.added && Self::storage_key(&icon.action) == key)
+            {
+                icon.label.clone_from(&name);
+            }
+            self.label_overrides.insert(key, name);
+        }
+
         let saved = Self::saved_grid(doc);
         let mut restored = Vec::new();
         for (index, icon) in self.icons.iter().enumerate() {
@@ -4600,5 +4895,179 @@ mod tests {
         assert_eq!(icon.label, "editor");
         assert_eq!(icon.icon_type, IconType::Shortcut);
         assert!(icon.added);
+    }
+
+    // ------------------------------------------------------------------
+    // Renaming in place
+    // ------------------------------------------------------------------
+
+    fn typed(ch: char) -> KeyEvent {
+        KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: ch.to_string(),
+        }
+    }
+
+    fn key(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    fn type_into(layer: &mut DesktopIconLayer, text: &str) {
+        for ch in text.chars() {
+            assert_eq!(layer.rename_key(&typed(ch)), RenameKey::Editing);
+        }
+    }
+
+    /// **A rename replaces the whole name as typing starts, and Enter keeps
+    /// it.** The field opens with the name selected, as every desktop's does.
+    #[test]
+    fn a_rename_replaces_the_name_and_enter_keeps_it() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let id = layer.add_icon("Old", IconType::Folder, custom("old"), 0, 0);
+        assert!(layer.begin_rename(id));
+        assert_eq!(layer.renaming(), Some(id));
+        type_into(&mut layer, "New name");
+        assert_eq!(
+            layer.rename_key(&key(Key::Enter)),
+            RenameKey::Finished { renamed: true }
+        );
+        assert_eq!(layer.get_icon(id).unwrap().label, "New name");
+        assert_eq!(layer.renaming(), None);
+    }
+
+    /// Escape keeps the old name, and says nothing changed.
+    #[test]
+    fn escape_keeps_the_old_name() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let id = layer.add_icon("Old", IconType::Folder, custom("old"), 0, 0);
+        layer.begin_rename(id);
+        type_into(&mut layer, "Other");
+        assert_eq!(
+            layer.rename_key(&key(Key::Escape)),
+            RenameKey::Finished { renamed: false }
+        );
+        assert_eq!(layer.get_icon(id).unwrap().label, "Old");
+    }
+
+    /// **An empty name is refused**, and a name only of spaces is empty;
+    /// the old name stays. Surrounding spaces are dropped from a real one.
+    #[test]
+    fn an_empty_name_is_refused_and_spaces_are_trimmed() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let id = layer.add_icon("Old", IconType::Folder, custom("old"), 0, 0);
+        layer.begin_rename(id);
+        type_into(&mut layer, "   ");
+        assert!(!layer.commit_rename());
+        assert_eq!(layer.get_icon(id).unwrap().label, "Old");
+
+        layer.begin_rename(id);
+        type_into(&mut layer, "  Tidy  ");
+        assert!(layer.commit_rename());
+        assert_eq!(layer.get_icon(id).unwrap().label, "Tidy");
+
+        layer.begin_rename(id);
+        type_into(&mut layer, "Tidy");
+        assert!(!layer.commit_rename(), "the same name is no change");
+    }
+
+    /// **A renamed default and a renamed shortcut are both still renamed
+    /// after a login** -- the default through `labels`, the shortcut through
+    /// its own entry -- and only the renamed default is written as a label.
+    #[test]
+    fn renamed_icons_survive_a_restart() {
+        let mut layer = populated();
+        let this_pc = layer
+            .icons
+            .iter()
+            .find(|i| i.label == "This PC")
+            .map(|i| i.id)
+            .unwrap();
+        layer.begin_rename(this_pc);
+        type_into(&mut layer, "My Machine");
+        assert!(layer.commit_rename());
+        let editor = IconAction::OpenPath(PathBuf::from("/usr/bin/editor"));
+        let (shortcut, _) = layer.add_shortcut("Editor", IconType::Executable, editor.clone());
+        layer.begin_rename(shortcut);
+        type_into(&mut layer, "Write");
+        assert!(layer.commit_rename());
+
+        let mut doc = Document::new();
+        layer.write_layout(&mut doc);
+        assert_eq!(
+            doc.keys(&[LABELS_KEY]),
+            [DesktopIconLayer::storage_key(&IconAction::LaunchSystem(
+                THIS_PC.to_string()
+            ))],
+            "only the renamed default is a label"
+        );
+
+        let mut restarted = populated();
+        restarted.read_layout(&doc);
+        assert!(restarted.icons.iter().any(|i| i.label == "My Machine"));
+        assert!(!restarted.icons.iter().any(|i| i.label == "This PC"));
+        let back = restarted.icons.iter().find(|i| i.action == editor).unwrap();
+        assert_eq!(back.label, "Write");
+    }
+
+    /// **The field replaces the label while it is open**: the old name is
+    /// not drawn under the new one, and the field is outlined in the accent.
+    #[test]
+    fn the_rename_field_replaces_the_label() {
+        let p = Palette::for_mode(false);
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let id = layer.add_icon("Readme", IconType::File, custom("r"), 0, 0);
+        layer.begin_rename(id);
+        type_into(&mut layer, "Notes");
+        let cmds = layer.render(&p);
+        let plain_texts: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !plain_texts.contains(&"Readme"),
+            "the old name shows through the field: {plain_texts:?}"
+        );
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            RenderCommand::RichText { text, .. } if text == "Notes"
+        )));
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            RenderCommand::StrokeRect { color, .. } if *color == p.accent
+        )));
+        palette_check::assert_drawn_from(
+            &p,
+            &cmds,
+            &[p.on_wallpaper(), p.on_wallpaper_dim()],
+            "rename",
+        );
+    }
+
+    /// A click in the field puts the caret where it landed and ends the
+    /// selection, so the next letter goes there rather than replacing
+    /// everything.
+    #[test]
+    fn a_click_in_the_field_places_the_caret() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let id = layer.add_icon("Readme", IconType::File, custom("r"), 0, 0);
+        layer.begin_rename(id);
+        let (fx, fy, _, _) = layer.rename_field().unwrap();
+        assert!(layer.rename_field_contains(fx + 1.0, fy + 1.0));
+        assert!(!layer.rename_field_contains(fx - 5.0, fy + 1.0));
+        // Just inside the text's left edge: before the first letter.
+        layer.rename_click(fx + RENAME_TEXT_INSET);
+        type_into(&mut layer, "X");
+        assert!(layer.commit_rename());
+        assert_eq!(layer.get_icon(id).unwrap().label, "XReadme");
     }
 }

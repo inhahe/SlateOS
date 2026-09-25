@@ -4598,3 +4598,63 @@ fn a_key_on_the_desktop_reaches_its_icons_and_on_the_taskbar_does_not() {
         );
     });
 }
+
+// ---- renaming an icon ----
+
+/// **A rename takes its keys from whichever of the shell's surfaces has the
+/// keyboard, and the keyboard leaving the shell keeps the name** -- through
+/// the pump that saves it, so it is there after a login.
+///
+/// "Rename" is chosen from the icon's menu, which is on the popup surface, so
+/// that surface -- not the desktop's -- has the keyboard when typing starts. A
+/// session that only handed the desktop's own keys to the icons would type
+/// the new name into nothing.
+#[test]
+fn a_rename_takes_keys_from_any_shell_surface_and_focus_leaving_keeps_it() {
+    settingsfile::testing::with_scratch_config("session-rename", |_root| {
+        let (mut session, desktop, _turn) = session();
+        let id = *session.shell().icons.icon_ids().first().expect("no icons");
+        assert!(session.shell_mut().icons.begin_rename(id));
+
+        let popups = session.popups().window();
+        desktop.borrow_mut().send_input(&[InputEvent::new(
+            popups,
+            guitk::event::Event::Key(KeyEvent {
+                key: Key::Unknown(0),
+                pressed: true,
+                modifiers: Modifiers::default(),
+                text: "Q".to_string(),
+            }),
+        )]);
+        session.pump().expect("pump");
+        assert_eq!(
+            session.shell().icons.renaming(),
+            Some(id),
+            "the key ended the rename"
+        );
+
+        // The keyboard goes to another program.
+        desktop
+            .borrow_mut()
+            .send_input(&[InputEvent::new(popups, guitk::event::Event::FocusOut)]);
+        session.pump().expect("pump");
+        assert_eq!(
+            session.shell().icons.renaming(),
+            None,
+            "the rename was left open"
+        );
+        let named = |s: &Session| {
+            s.shell()
+                .icons
+                .icon_ids()
+                .into_iter()
+                .filter_map(|i| s.shell().icons.get_icon(i))
+                .any(|i| i.label == "Q")
+        };
+        assert!(named(&session), "the typed name was not kept");
+        drop(session);
+
+        let (restarted, _d2, _turn2) = self::session();
+        assert!(named(&restarted), "the name was not saved");
+    });
+}

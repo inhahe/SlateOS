@@ -1848,6 +1848,7 @@ impl DesktopShell {
         // as `sync_animation_speed`, and for the same reason -- a second door
         // the caller has to remember is a door somebody forgets.
         self.run_dialog.set_caret_width(appearance.caret_width());
+        self.icons.set_caret_width(appearance.caret_width());
         // The icon size goes to the layer that draws icons, for the same
         // reason: it was a setting with a working control and no reader --
         // `known-issues.md` TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-
@@ -2798,6 +2799,21 @@ impl DesktopShell {
     }
 
     fn handle_mouse_inner(&mut self, event: &MouseEvent) -> ShellAction {
+        // A rename under way owns the presses on its own field -- they place
+        // the caret -- and any other press keeps the new name before it does
+        // whatever it does, as a click away does on every desktop. First,
+        // before the menus: a right-click that opens a menu is a click away
+        // too, and the name must not be left half-typed under it.
+        if self.icons.renaming().is_some()
+            && let MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) = event.kind
+        {
+            if self.icons.rename_field_contains(event.x, event.y) {
+                self.icons.rename_click(event.x);
+                return ShellAction::Consumed;
+            }
+            self.icons_dirty |= self.icons.commit_rename();
+        }
+
         // The desktop menu first, for the same reason the Run box's chooser is
         // first below: it is drawn over everything, so a press either landed on
         // it or dismissed it, and either way no control underneath should see
@@ -6874,6 +6890,7 @@ impl DesktopShell {
     const MENU_ICON_OPEN: u64 = 300;
     const MENU_ICON_PIN: u64 = 301;
     const MENU_ICON_REMOVE: u64 = 302;
+    const MENU_ICON_RENAME: u64 = 303;
     /// The first icon size's id; the others follow in
     /// [`IconSize::ALL`](appearance::IconSize::ALL)'s order. A block of its
     /// own, far from the rest, so a size added to the setting cannot land on
@@ -6969,8 +6986,9 @@ impl DesktopShell {
 
     /// The items for a right-click on the icon `id`.
     ///
-    /// "Open" always; "Pin to taskbar" (or "Unpin") for a program; "Remove
-    /// from desktop" when the selection holds anything the user added -- the
+    /// "Open" and "Rename" always; "Pin to taskbar" (or "Unpin") for a
+    /// program; "Remove from desktop" when the selection holds anything the
+    /// user added -- the
     /// defaults are not the user's to remove, and offering to would be a door
     /// that does nothing. Each label says the *action*, not the state, the
     /// rule the pin menu set.
@@ -6984,7 +7002,7 @@ impl DesktopShell {
             checked: None,
         };
         let mut items = vec![item(Self::MENU_ICON_OPEN, "Open")];
-        let mut more = Vec::new();
+        let mut more = vec![item(Self::MENU_ICON_RENAME, "Rename")];
         if let Some(exec) = self.icon_program(id) {
             more.push(item(
                 Self::MENU_ICON_PIN,
@@ -7049,6 +7067,13 @@ impl DesktopShell {
     /// Taken rather than read so a caller cannot ask twice and save twice.
     pub fn take_widgets_dirty(&mut self) -> bool {
         core::mem::replace(&mut self.widgets_dirty, false)
+    }
+
+    /// Keep a rename under way, marking the layout for saving if the name
+    /// changed. The session calls this when the keyboard leaves the shell for
+    /// another program, which keeps a half-typed name as a click away would.
+    pub fn commit_icon_rename(&mut self) {
+        self.icons_dirty |= self.icons.commit_rename();
     }
 
     /// Whether the icon layout needs writing, clearing the flag -- taken
@@ -7435,12 +7460,15 @@ impl DesktopShell {
     /// The items of an icon's own menu. `None` for an id that is not one of
     /// them.
     ///
-    /// All three act on `menu_icon`, the icon the menu was opened over, and
-    /// Remove on the whole selection, as Delete does.
+    /// All act on `menu_icon`, the icon the menu was opened over, except
+    /// Remove, which acts on the whole selection, as Delete does.
     fn activate_icon_context_item(&mut self, id: MenuItemId) -> Option<ShellAction> {
         if !matches!(
             id,
-            Self::MENU_ICON_OPEN | Self::MENU_ICON_PIN | Self::MENU_ICON_REMOVE
+            Self::MENU_ICON_OPEN
+                | Self::MENU_ICON_PIN
+                | Self::MENU_ICON_REMOVE
+                | Self::MENU_ICON_RENAME
         ) {
             return None;
         }
@@ -7454,6 +7482,16 @@ impl DesktopShell {
                 Some(action) => self.open_icon(icon, &action),
                 None => ShellAction::Pass,
             },
+            Self::MENU_ICON_RENAME => {
+                // A rename already under way is kept first, and its change
+                // saved -- see `begin_rename`.
+                self.icons_dirty |= self.icons.commit_rename();
+                if self.icons.begin_rename(icon) {
+                    ShellAction::Consumed
+                } else {
+                    ShellAction::Pass
+                }
+            }
             Self::MENU_ICON_PIN => match self.icon_program(icon) {
                 Some(exec) => {
                     if self.is_pinned(&exec) {
@@ -7667,12 +7705,22 @@ impl DesktopShell {
     /// - **Delete** takes the selected shortcuts the user added off the
     ///   desktop; the defaults stay, as they would come back at the next login.
     ///
-    /// F2 reaches the layer and is not acted on yet: there is no rename.
+    /// - **F2** renames the one selected icon, in place: Enter keeps the new
+    ///   name, Escape the old one, and a click away keeps it.
+    ///
     /// `Pass` for any key that changed nothing, so the frame is not repainted
     /// for it.
     pub fn handle_desktop_key(&mut self, key: &KeyEvent) -> ShellAction {
         if !key.pressed {
             return ShellAction::Pass;
+        }
+        // While a name is being edited every key is the field's, so that a
+        // Delete meant for a letter cannot remove the icon being renamed.
+        if self.icons.renaming().is_some() {
+            if let icons::RenameKey::Finished { renamed } = self.icons.rename_key(key) {
+                self.icons_dirty |= renamed;
+            }
+            return ShellAction::Consumed;
         }
         let ctrl = key.modifiers.ctrl;
         let desktop_key = match key.key {
@@ -7692,6 +7740,9 @@ impl DesktopShell {
             icons::IconEvent::Activate(id, action) => self.open_icon(id, &action),
             icons::IconEvent::Delete(ids) if self.icons.remove_added(&ids) > 0 => {
                 self.icons_dirty = true;
+                ShellAction::Consumed
+            }
+            icons::IconEvent::BeginRename(id) if self.icons.begin_rename(id) => {
                 ShellAction::Consumed
             }
             _ if self.icons.selected_ids() != before => ShellAction::Consumed,
@@ -16322,7 +16373,7 @@ mod icon_menu_tests {
 
     /// **A right-click on an icon opens the icon's menu, not the desktop's**,
     /// offering what that icon can do: a program can be pinned, and what the
-    /// user added can be removed; a default folder can only be opened.
+    /// user added can be removed; a default folder can be opened and renamed.
     #[test]
     fn a_right_click_on_an_icon_opens_its_own_menu() {
         with_scratch_config("icon-menu-items", |root| {
@@ -16350,8 +16401,8 @@ mod icon_menu_tests {
             right_click(&mut shell, plain);
             assert_eq!(
                 menu_labels(&shell),
-                ["Open"],
-                "a default folder can only be opened"
+                ["Open", "Rename"],
+                "a default folder can be opened and renamed, not pinned or removed"
             );
             assert_eq!(
                 shell.icons.selected_ids(),
@@ -16502,5 +16553,175 @@ mod icon_menu_tests {
                 .map(|i| (i.label.clone(), i.added));
             assert_eq!(back, Some((name, true)));
         });
+    }
+}
+
+/// Renaming a desktop icon in place, through the shell's own routes.
+#[cfg(test)]
+mod rename_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::{DesktopShell, MouseEvent, MouseEventKind, ShellAction, icons};
+    use guitk::event::{Key, KeyEvent, Modifiers, MouseButton};
+
+    fn press(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    fn typed(ch: char) -> KeyEvent {
+        KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: ch.to_string(),
+        }
+    }
+
+    /// A shell with one icon, "Old", selected.
+    fn shell_with_one() -> (DesktopShell, icons::IconId) {
+        let mut shell = DesktopShell::new(1920, 1080);
+        let id = shell.icons.add_icon(
+            "Old",
+            icons::IconType::Folder,
+            icons::IconAction::Custom("old".to_string()),
+            200,
+            200,
+        );
+        shell.icons.select_single(id);
+        (shell, id)
+    }
+
+    fn label(shell: &DesktopShell, id: icons::IconId) -> String {
+        shell.icons.get_icon(id).unwrap().label.clone()
+    }
+
+    /// **F2 renames the selected icon; Enter keeps the name and marks the
+    /// layout for saving.** Before 2026-09-25 F2 reached the icon layer and
+    /// nothing acted on it.
+    #[test]
+    fn f2_renames_and_enter_keeps_it() {
+        let (mut shell, id) = shell_with_one();
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::F2)),
+            ShellAction::Consumed
+        );
+        assert_eq!(shell.icons.renaming(), Some(id));
+        for ch in "Projects".chars() {
+            assert_eq!(shell.handle_desktop_key(&typed(ch)), ShellAction::Consumed);
+        }
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Enter)),
+            ShellAction::Consumed
+        );
+        assert_eq!(label(&shell, id), "Projects");
+        assert!(shell.take_icons_dirty(), "the new name will not be saved");
+    }
+
+    /// **Delete while a name is being typed deletes a letter, not the icon**
+    /// -- every key belongs to the field while it is open.
+    #[test]
+    fn delete_while_renaming_edits_the_name() {
+        let mut shell = DesktopShell::new(1920, 1080);
+        shell.activate_pin_menu_item(
+            DesktopShell::MENU_ADD_TO_DESKTOP,
+            super::PinTarget::StartMenuRow(0),
+        );
+        let id = shell.icons.selected_ids()[0];
+        assert!(
+            shell.icons.get_icon(id).unwrap().added,
+            "the fixture must be removable"
+        );
+        drop(shell.handle_desktop_key(&press(Key::F2)));
+        drop(shell.handle_desktop_key(&press(Key::Delete)));
+        assert!(
+            shell.icons.get_icon(id).is_some(),
+            "Delete removed the icon being renamed"
+        );
+    }
+
+    /// **A click away keeps the name**, as on every desktop -- and the click
+    /// still does what it does.
+    #[test]
+    fn a_click_away_keeps_the_name() {
+        let (mut shell, id) = shell_with_one();
+        drop(shell.handle_desktop_key(&press(Key::F2)));
+        for ch in "Kept".chars() {
+            drop(shell.handle_desktop_key(&typed(ch)));
+        }
+        let away = MouseEvent {
+            x: 1000.0,
+            y: 600.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        };
+        drop(shell.handle_mouse(&away));
+        assert_eq!(shell.icons.renaming(), None);
+        assert_eq!(label(&shell, id), "Kept");
+        assert!(shell.take_icons_dirty());
+        assert!(
+            shell.icons.selected_ids().is_empty(),
+            "and the press on empty desktop still cleared the selection"
+        );
+    }
+
+    /// A press inside the field is the field's: it places the caret and the
+    /// rename goes on.
+    #[test]
+    fn a_press_in_the_field_keeps_renaming() {
+        let (mut shell, id) = shell_with_one();
+        drop(shell.handle_desktop_key(&press(Key::F2)));
+        let icon = shell.icons.get_icon(id).unwrap();
+        // Well inside the field, which sits under the glyph in the cell.
+        #[allow(clippy::cast_precision_loss)]
+        let (x, y) = (icon.x as f32 + 20.0, icon.y as f32 + 8.0 + 48.0 + 4.0 + 6.0);
+        assert!(
+            shell.icons.rename_field_contains(x, y),
+            "the fixture missed the field"
+        );
+        let inside = MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        };
+        assert_eq!(shell.handle_mouse(&inside), ShellAction::Consumed);
+        assert_eq!(shell.icons.renaming(), Some(id));
+    }
+
+    /// **"Rename" on an icon's own menu starts it too**, on the icon the menu
+    /// was opened over.
+    #[test]
+    fn rename_from_the_icon_menu() {
+        let (mut shell, id) = shell_with_one();
+        let icon = shell.icons.get_icon(id).unwrap();
+        #[allow(clippy::cast_precision_loss)]
+        let (x, y) = (icon.x as f32 + 10.0, icon.y as f32 + 10.0);
+        shell.open_desktop_menu(x, y);
+        assert_eq!(
+            shell.activate_desktop_menu_item(DesktopShell::MENU_ICON_RENAME),
+            ShellAction::Consumed
+        );
+        assert_eq!(shell.icons.renaming(), Some(id));
+    }
+
+    /// Keeping a rename from outside -- the session does this when the
+    /// keyboard leaves for another program -- keeps the name and marks it.
+    #[test]
+    fn a_rename_kept_from_outside_is_saved() {
+        let (mut shell, id) = shell_with_one();
+        drop(shell.handle_desktop_key(&press(Key::F2)));
+        drop(shell.handle_desktop_key(&typed('Z')));
+        shell.commit_icon_rename();
+        assert_eq!(label(&shell, id), "Z");
+        assert!(shell.take_icons_dirty());
     }
 }

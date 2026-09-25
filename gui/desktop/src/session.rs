@@ -342,6 +342,13 @@ pub struct ShellSession<T: Transport> {
     /// was corrupt would be a worse outcome than a plain background. See
     /// [`wallpaper_error`](Self::wallpaper_error).
     wallpaper_error: Option<String>,
+    /// Whether the keyboard has left the shell's surfaces in this pump: a
+    /// `FocusOut` on one of them with no `FocusIn` on another after it. The
+    /// compositor reports a move between two of the shell's own surfaces as
+    /// both, in that order, so only a move away from the shell leaves this
+    /// set at the end of the pump -- which is when a rename under way is kept,
+    /// as clicking into another program keeps it on every desktop.
+    focus_left_shell: bool,
     /// The "could not be saved" report last posted for each thing saved, so
     /// a save that keeps failing the same way says so once rather than once
     /// per change -- and two that are both failing do not take turns
@@ -596,6 +603,7 @@ impl<T: Transport> ShellSession<T> {
             wallpaper_image: None,
             wallpaper_error: None,
             save_errors: BTreeMap::new(),
+            focus_left_shell: false,
             login_image: None,
             login_image_next: 1,
             login_background_error: None,
@@ -1520,6 +1528,14 @@ impl<T: Transport> ShellSession<T> {
             worked = true;
         }
 
+        // The keyboard went to another program with a name half-typed: keep
+        // it, as a click away would. Before the saves just below, which is
+        // what writes it.
+        if core::mem::take(&mut self.focus_left_shell) && self.shell.icons.renaming().is_some() {
+            self.shell.commit_icon_rename();
+            self.dirty = true;
+        }
+
         // After the events, before the paint: a drag that ended in this batch
         // has committed by now, and coalescing here means one write per pump
         // rather than one per event.
@@ -2120,8 +2136,12 @@ impl<T: Transport> ShellSession<T> {
                 // surface claimed: the icons' -- Enter, Ctrl+A, the arrows.
                 // Only from the desktop's own surface, because the compositor
                 // sends keys to the focused surface and a key typed into the
-                // taskbar or a menu is not about the icons.
-                if !claimed && surface.window() == self.background.window() {
+                // taskbar or a menu is not about the icons -- except while an
+                // icon is being renamed, when every key that reaches the shell
+                // is the name's. "Rename" is chosen from a menu on another of
+                // the shell's surfaces, and that surface keeps the keyboard.
+                let renaming = self.shell.icons.renaming().is_some();
+                if !claimed && (renaming || surface.window() == self.background.window()) {
                     let action = self.shell.handle_desktop_key(&key);
                     self.act(action)?;
                 }
@@ -2131,6 +2151,8 @@ impl<T: Transport> ShellSession<T> {
             // a different one has to move the grab -- which the next
             // `reconcile_modifier_chords` does, because the wanted set is
             // derived from the setting rather than remembered separately.
+            Event::FocusOut => self.focus_left_shell = true,
+            Event::FocusIn => self.focus_left_shell = false,
             Event::SettingsChanged {
                 group: SettingsGroup::Input,
             } => {

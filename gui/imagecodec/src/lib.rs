@@ -73,11 +73,11 @@
 //! difference is 0.03 of a level, which is the difference between rounding the
 //! inverse DCT differently and decoding differently.
 //!
-//! **Progressive** JPEG is refused by name rather than half-read: its image
-//! arrives in successive approximations, and decoding only the first would
-//! give a recognisable and wrong picture, which is worse than refusing because
-//! nobody checks a thumbnail. Arithmetic coding and 12-bit samples are named
-//! the same way. See [`jpeg`].
+//! **Progressive** JPEG too, every pass of it: the coefficients are gathered
+//! across the scans and reconstructed once they are all in, so a progressive
+//! file decodes to exactly the pixels a baseline file carrying the same
+//! coefficients does. Arithmetic coding and 12-bit samples are refused by name
+//! rather than half-read. See [`jpeg`].
 //!
 //! # Picture files for *other* crates' tests
 //!

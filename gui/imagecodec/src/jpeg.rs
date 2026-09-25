@@ -1,4 +1,4 @@
-//! JPEG (JFIF), baseline sequential.
+//! JPEG (JFIF): baseline sequential, and progressive.
 //!
 //! The format this crate's own header called "the next thing this crate should
 //! grow", and the one a photograph is almost always in. PNG is what a
@@ -26,15 +26,16 @@
 //! 6. **Reconstruction**: dequantise, inverse-DCT each 8x8 block, upsample the
 //!    chroma back to full resolution, and convert YCbCr to RGB.
 //!
+//! **Progressive** files (`SOF2`) send the whole picture several times, each
+//! pass adding frequencies or precision, so their coefficients are gathered
+//! across every scan and reconstructed at the end; see [`progressive`]. They
+//! share everything after the entropy decoding with baseline -- dequantising,
+//! the inverse DCT, upsampling, colour -- so the two decode the same
+//! coefficients to the same pixels.
+//!
 //! # What this does not do, and says so
 //!
-//! **Progressive JPEG** is refused by name. It is a different scan structure
-//! -- the image arrives in successive approximations rather than block by
-//! block -- and decoding its first scan would produce a recognisable but
-//! wrong picture, which is worse than refusing: a thumbnail that is subtly
-//! incorrect is one nobody checks. `ImageError::Unsupported` says which.
-//!
-//! **Arithmetic coding** and **12-bit samples** are likewise named rather than
+//! **Arithmetic coding** and **12-bit samples** are named rather than
 //! half-read. Both are rare enough that no file on this machine uses them and
 //! common enough in the specification to be worth refusing precisely.
 //!
@@ -51,6 +52,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::{Image, ImageError, ImageResult, Limits};
+
+mod progressive;
 
 /// Zig-zag order: the sequence a block's 64 coefficients are stored in.
 ///
@@ -281,6 +284,15 @@ impl<'a> BitReader<'a> {
             self.buffer |= u64::from(byte) << (56u32.saturating_sub(self.count));
             self.count = self.count.saturating_add(8);
         }
+    }
+
+    /// How far into the data loading has reached: every byte before this has
+    /// been taken into the stream, and the next marker is at or after it.
+    ///
+    /// Bits loaded and not consumed are a scan's padding, never the start of
+    /// the next segment, because loading stops *at* a marker.
+    const fn position(&self) -> usize {
+        self.pos
     }
 
     /// One bit, or `None` at the end of the data or at a marker.
@@ -726,6 +738,8 @@ fn decode_at(bytes: &[u8], limits: Limits, block: usize) -> ImageResult<Image> {
     }
     let mut tables = Tables::default();
     let mut frame: Option<(usize, usize, Vec<Component>)> = None;
+    // A progressive frame's coefficients, gathered across its scans.
+    let mut passes: Option<progressive::Coefficients> = None;
     // Past the SOI.
     let mut at = 2usize;
 
@@ -746,13 +760,27 @@ fn decode_at(bytes: &[u8], limits: Limits, block: usize) -> ImageResult<Image> {
             break;
         }
         let Some(marker) = marker else {
+            // The data ran out before the end-of-image marker. A progressive
+            // picture is reconstructed from the passes that did arrive -- a
+            // softer picture, which is what a browser shows too.
+            if let Some(passes) = passes.take().filter(progressive::Coefficients::has_scans) {
+                return passes.finish();
+            }
             return Err(ImageError::Truncated);
         };
 
         match marker {
             // Standalone markers: no length, no payload.
             0xD8 | 0x01 | 0xD0..=0xD7 => continue,
-            0xD9 => return Err(ImageError::Truncated), // EOI before any scan
+            // End of image: where a progressive picture is finished. For a
+            // baseline one it comes before any scan, which is a file with no
+            // picture in it.
+            0xD9 => {
+                if let Some(passes) = passes.take().filter(progressive::Coefficients::has_scans) {
+                    return passes.finish();
+                }
+                return Err(ImageError::Truncated);
+            }
             _ => {}
         }
 
@@ -771,10 +799,15 @@ fn decode_at(bytes: &[u8], limits: Limits, block: usize) -> ImageResult<Image> {
             // way at 8 bits.
             0xC0 | 0xC1 => frame = Some(read_frame(payload)?),
             0xC2 => {
-                return Err(ImageError::Unsupported(
-                    "progressive JPEG: the image arrives in successive approximations, and \
-                     decoding only its first scan would give a recognisable but wrong picture",
-                ));
+                let (width, height, components) = read_frame(payload)?;
+                passes = Some(progressive::Coefficients::new(
+                    width,
+                    height,
+                    components.clone(),
+                    limits,
+                    block,
+                )?);
+                frame = Some((width, height, components));
             }
             0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => {
                 return Err(ImageError::Unsupported(
@@ -785,6 +818,15 @@ fn decode_at(bytes: &[u8], limits: Limits, block: usize) -> ImageResult<Image> {
             0xDB => read_quant_tables(payload, &mut tables)?,
             0xDD => {
                 tables.restart_interval = usize::from(read_u16(payload, 0)?);
+            }
+            0xDA if passes.is_some() => {
+                let Some(coefficients) = passes.as_mut() else {
+                    continue;
+                };
+                let mut scan = coefficients.read_scan(payload)?;
+                let data = bytes.get(at..).ok_or(ImageError::Truncated)?;
+                let used = coefficients.decode_scan(data, &mut scan, &tables);
+                at = next_marker(bytes, at.saturating_add(used));
             }
             0xDA => {
                 let Some((width, height, components)) = frame else {
@@ -800,6 +842,31 @@ fn decode_at(bytes: &[u8], limits: Limits, block: usize) -> ImageResult<Image> {
             _ => {}
         }
     }
+}
+
+/// Where the next segment starts at or after `from`: the `0xFF` of the first
+/// marker that is neither a stuffed zero nor a restart.
+///
+/// For after a progressive scan. The scan's decoder stops where its data ends,
+/// but an encoder may leave bytes between the last block and the next marker,
+/// and those can include `0xFF 0x00` pairs and restart markers that belong to
+/// the scan. Taking the first `0xFF` as the next segment would read one of
+/// them as a marker with a length, and walk off into the entropy data.
+fn next_marker(bytes: &[u8], from: usize) -> usize {
+    let mut at = from;
+    while let Some(&byte) = bytes.get(at) {
+        if byte == 0xFF {
+            match bytes.get(at.saturating_add(1)) {
+                Some(0x00 | 0xD0..=0xD7) => {
+                    at = at.saturating_add(2);
+                    continue;
+                }
+                _ => return at,
+            }
+        }
+        at = at.saturating_add(1);
+    }
+    at
 }
 
 /// A big-endian `u16` at `at`.
@@ -1787,9 +1854,11 @@ mod tests {
 
     /// A progressive JPEG is refused by name, not half-decoded.
     #[test]
-    fn a_progressive_jpeg_is_refused() {
-        // The fixture with its SOF0 marker changed to SOF2, which is the one
-        // byte that makes it progressive.
+    fn a_baseline_scan_in_a_progressive_frame_is_refused_as_malformed() {
+        // The fixture with its SOF0 marker changed to SOF2: a progressive frame
+        // whose one scan sends DC and all 63 AC coefficients together, which
+        // no progressive scan may. Read as a pass it would decode a picture
+        // subtly wrong, so it is refused, and says why.
         let mut progressive = FIXTURE.to_vec();
         let at = progressive
             .windows(2)
@@ -1799,11 +1868,25 @@ mod tests {
             *slot = 0xC2;
         }
         match decode(&progressive, Limits::default()) {
-            Err(ImageError::Unsupported(why)) => {
-                assert!(why.contains("progressive"), "it should say which: {why}");
+            Err(ImageError::Malformed(why)) => {
+                assert!(why.contains("DC and AC"), "it should say which: {why}");
             }
-            other => panic!("a progressive JPEG should be refused, got {other:?}"),
+            other => panic!("a baseline scan cannot be a progressive pass, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_next_marker_skips_stuffed_bytes_and_restarts() {
+        let bytes = [
+            0x12, 0xFF, 0x00, 0x34, 0xFF, 0xD3, 0x56, 0xFF, 0xFF, 0xC4, 0x00,
+        ];
+        assert_eq!(
+            next_marker(&bytes, 0),
+            7,
+            "a fill byte before the marker is the marker"
+        );
+        assert_eq!(next_marker(&bytes, 8), 8);
+        assert_eq!(next_marker(&[0x01, 0x02], 0), 2, "none: the end");
     }
 
     /// The signature check does not claim every file starting `FF D8`.

@@ -2,18 +2,32 @@
 //!
 //! A powerful batch file renaming tool with:
 //! - Multiple rename operations (find/replace, insert, remove, case change,
-//!   numbering, date stamp, regex)
-//! - Live preview showing old → new names before committing
+//!   numbering, date stamp, regex), each added from the Add Rule menu and set
+//!   up in the rule editor
+//! - Live preview showing old → new names before committing, updated as a
+//!   rule is typed
 //! - Undo/redo for rename operations
 //! - Operation chaining (apply multiple transforms in sequence)
-//! - Name conflict detection and resolution
-//! - File type filtering
-//! - Drag-and-drop file addition
-//! - History of past rename sessions
+//! - Name conflict detection, and an order of renames that never overwrites a
+//!   file a later rename still needs
+//! - Filtering by name, extension and conflict
+//! - Drag-and-drop file addition -- **not yet**: a window is never handed a
+//!   dropped file, because the toolkit has no drop event to hand it
+//! - History of past rename sessions, with when each happened
 //! - Template-based renaming with variables
 //! - Extension handling (rename, add, remove, change)
 //!
 //! Uses the guitk library for UI rendering.
+//!
+//! # The pointer
+//!
+//! Every control is drawn and hit-tested by one walk, [`RenamerApp::frame`],
+//! through [`guitk::frame::Frame`]: the toolbar, the sidebar's tabs, each rule
+//! and its move and remove buttons, every box, choice and switch in the rule
+//! editor, the list's filters, and each file's row and checkbox. The file list
+//! and the operations panel scroll under the wheel, and the layout follows the
+//! window's size. Until 2026-09-25 none of it took a pointer, and every rule
+//! that needed something typed or chosen could not be added at all.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
@@ -38,11 +52,15 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
 use guitk::dialog::{FileDialog, FilePicker, Picked};
-use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::menu::{ContextMenu, MenuAction, MenuItem};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
+use guitk::textinput::TextInput;
+use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -58,8 +76,6 @@ use std::time::Duration;
 // Layout constants
 // ============================================================================
 
-const WINDOW_WIDTH: f32 = 1100.0;
-const WINDOW_HEIGHT: f32 = 750.0;
 const TOOLBAR_HEIGHT: f32 = 40.0;
 
 /// Every key this program answers, and what it does.
@@ -89,6 +105,9 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("W", "Add a rule: trim the spaces off both ends"),
     ("E / X", "Add a rule: lower-case the extension / remove it"),
     ("N", "Add a rule: number the files"),
+    ("R", "Add a rule of any kind, from a menu"),
+    ("F2", "Edit the selected rule; Tab moves between its boxes"),
+    ("Ctrl+Up / Ctrl+Down", "Select the rule above / below"),
     ("Delete", "Remove the selected rule"),
     ("PageUp / PageDown", "Move the selected rule up / down"),
     ("Ctrl+Backspace", "Remove every rule"),
@@ -96,6 +115,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Z / Ctrl+Y", "Undo / redo the rename"),
     ("Ctrl+O", "Open a folder"),
     ("/", "Search the file names"),
+    ("Ctrl+E", "Show only one extension"),
     ("C", "Show only the names that would collide"),
     ("F1 / ?", "This list"),
 ];
@@ -103,21 +123,11 @@ const SIDEBAR_WIDTH: f32 = 280.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 const PADDING: f32 = 8.0;
 const LINE_HEIGHT: f32 = 22.0;
-// A measurement constant nothing measures with: the renderer asks
-// `text::` for widths rather than assuming a monospace cell.
-// See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
-#[allow(dead_code, reason = "superseded by text measurement")]
-const CHAR_WIDTH: f32 = 7.5;
 const SMALL_TEXT: f32 = 11.0;
 const NORMAL_TEXT: f32 = 13.0;
 const HEADER_TEXT: f32 = 15.0;
 const TITLE_TEXT: f32 = 17.0;
 const BUTTON_HEIGHT: f32 = 28.0;
-// A measurement constant nothing measures with: the renderer asks
-// `text::` for widths rather than assuming a monospace cell.
-// See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
-#[allow(dead_code, reason = "superseded by text measurement")]
-const INPUT_HEIGHT: f32 = 26.0;
 
 /// Columns of the rename-preview file list.
 ///
@@ -203,13 +213,12 @@ const MAX_HISTORY: usize = 50;
 // Rename operation types
 // ============================================================================
 
-// Rename rules that need a string typed in — find/replace, insert,
-// remove-at, regex. Each is implemented and tested; none can be added,
-// because the app has no text field. The rules that need nothing typed
-// are on keys.
-// See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
-#[allow(dead_code, reason = "these rules need a text field")]
 /// A single rename operation that transforms a filename.
+///
+/// Every kind is reachable: the Add Rule menu adds any of them and the rule
+/// editor sets its parameters. For most of this app's life only the kinds that
+/// needed nothing typed could be added (known-issues
+/// `TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING`).
 #[derive(Debug, Clone)]
 enum RenameOp {
     /// Find and replace text in the filename.
@@ -242,10 +251,14 @@ enum RenameOp {
         position: InsertPosition,
         separator: String,
     },
-    /// Regex find and replace.
+    /// Regular-expression find and replace: a POSIX extended regular
+    /// expression, the dialect `grep -E`, `sed -E` and the shell's `=~` use in
+    /// this system, with `\1`...`\9` and `&` in the replacement as `sed` has
+    /// them.
     Regex {
         pattern: String,
         replacement: String,
+        case_sensitive: bool,
     },
     /// Trim whitespace or specific characters.
     Trim { chars: String, mode: TrimMode },
@@ -287,10 +300,6 @@ impl RenameOp {
     }
 }
 
-// Insert positions other than the end: reachable only from the rules
-// that need a text field.
-// See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
-#[allow(dead_code, reason = "these rules need a text field")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InsertPosition {
     /// Insert at the beginning of the name (before extension).
@@ -301,10 +310,7 @@ enum InsertPosition {
     At(usize),
 }
 
-// Case modes with no key. Five of the eight are bound; these three are
-// the ones a keyboard runs out of room for, and want a menu.
-// See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
-#[allow(dead_code, reason = "no menu to choose the rest")]
+/// Five of the eight have a key; all eight are in the rule editor's chooser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CaseMode {
     Upper,
@@ -332,10 +338,6 @@ impl CaseMode {
     }
 }
 
-// Date stamp formats: the date-stamp rule needs a format chosen and a
-// separator typed, so none is reachable.
-// See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
-#[allow(dead_code, reason = "date-stamp rule needs a chooser")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DateFormat {
     YmdHyphen,  // 2024-01-15
@@ -346,10 +348,6 @@ enum DateFormat {
 }
 
 impl DateFormat {
-    // Date stamp formats: the date-stamp rule needs a format chosen and a
-    // separator typed, so none is reachable.
-    // See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
-    #[allow(dead_code, reason = "date-stamp rule needs a chooser")]
     fn label(self) -> &'static str {
         match self {
             Self::YmdHyphen => "YYYY-MM-DD",
@@ -371,9 +369,6 @@ impl DateFormat {
     }
 }
 
-// Trim modes other than both ends: the bound key trims both.
-// See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
-#[allow(dead_code, reason = "only both-ends trimming is bound")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrimMode {
     Both,
@@ -381,12 +376,6 @@ enum TrimMode {
     End,
 }
 
-// Extension rules that need a string typed in — replacing an extension or
-// adding one. Lowercasing and removing need nothing typed and are on keys;
-// uppercasing is the third and the keyboard ran out of letters that read
-// naturally, so it wants the same menu the other unbound rules do.
-// See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
-#[allow(dead_code, reason = "these rules need a text field or a menu")]
 #[derive(Debug, Clone)]
 enum ExtensionOp {
     /// Replace extension with a new one.
@@ -436,12 +425,8 @@ struct FileEntry {
     conflict: bool,
     /// File type/extension.
     extension: String,
-    /// Last modified timestamp (mock).
-    // A file's modification time: read from nowhere, because there is no file
-    // chooser to read one from. It exists so a date-stamp rule can use it when
-    // there is.
-    // See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
-    #[allow(dead_code, reason = "no file chooser supplies it")]
+    /// When the file was last modified, in milliseconds since the epoch, as
+    /// the folder listing read it: what a date-stamp rule stamps.
     modified_ms: u64,
 }
 
@@ -513,6 +498,98 @@ impl FileEntry {
 /// so no existing rule changes behaviour.
 fn char_offset(s: &str, chars: usize) -> usize {
     s.char_indices().nth(chars).map_or(s.len(), |(i, _)| i)
+}
+
+/// A file time as a date-stamp format writes it.
+///
+/// In UTC, explicitly: there is no per-process zone to read yet (known-issues
+/// `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`), and `Tz::utc()` is the mark that
+/// convention leaves so every such place can be found when there is one.
+fn stamp_for(format: DateFormat, modified_ms: u64) -> String {
+    let secs = i64::try_from(modified_ms / 1000).unwrap_or(i64::MAX);
+    let at = guitk::datetime::DateTime::at(secs, &guitk::tzrules::Tz::utc());
+    let date = at.date();
+    format.format(
+        u16::try_from(date.year()).unwrap_or(0),
+        u8::try_from(date.month()).unwrap_or(1),
+        u8::try_from(date.day()).unwrap_or(1),
+        u8::try_from(at.hour()).unwrap_or(0),
+        u8::try_from(at.minute()).unwrap_or(0),
+        u8::try_from(at.second()).unwrap_or(0),
+    )
+}
+
+/// Why a regular-expression rule cannot run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RegexProblem {
+    /// The pattern does not compile; the text says why.
+    Pattern(&'static str),
+    /// A backreference search ran past its budget.
+    TooHard,
+    /// The replacement produced bytes that are not text.
+    NotText,
+}
+
+impl RegexProblem {
+    fn message(&self) -> &'static str {
+        match self {
+            Self::Pattern(why) => why,
+            Self::TooHard => "the pattern takes too long to match",
+            Self::NotText => "the replacement would make a name that is not text",
+        }
+    }
+}
+
+/// Replace every match of `pattern` in `name` with `replacement`, as `sed`'s
+/// `s///g` does: `&` is the whole match, `\1` to `\9` are its groups, and a
+/// backslash makes the next character itself (`\&`, `\\`).
+///
+/// Through `ere`, the one POSIX regular-expression engine the shell, `grep`,
+/// `sed` and `awk` share, so a pattern that works at the prompt works here.
+fn regex_replace(
+    pattern: &str,
+    replacement: &str,
+    case_insensitive: bool,
+    name: &str,
+) -> Result<String, RegexProblem> {
+    let re = ere::Regex::new_flags(pattern.as_bytes(), case_insensitive)
+        .map_err(|e| RegexProblem::Pattern(e.message()))?;
+    let subject = name.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(subject.len());
+    let mut copied = 0usize;
+    for groups in re.capture_spans_iter(subject) {
+        let groups = groups.map_err(|_| RegexProblem::TooHard)?;
+        let Some(Some((start, end))) = groups.first().copied() else {
+            continue;
+        };
+        out.extend_from_slice(subject.get(copied..start).unwrap_or(&[]));
+        let mut chars = replacement.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '&' => out.extend_from_slice(subject.get(start..end).unwrap_or(&[])),
+                '\\' => match chars.next() {
+                    Some(d @ '0'..='9') => {
+                        let group = d.to_digit(10).and_then(|g| usize::try_from(g).ok());
+                        if let Some(Some((gs, ge))) = group.and_then(|g| groups.get(g)).copied() {
+                            out.extend_from_slice(subject.get(gs..ge).unwrap_or(&[]));
+                        }
+                    }
+                    Some(other) => {
+                        let mut buf = [0u8; 4];
+                        out.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+                    }
+                    None => out.push(b'\\'),
+                },
+                other => {
+                    let mut buf = [0u8; 4];
+                    out.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+                }
+            }
+        }
+        copied = end;
+    }
+    out.extend_from_slice(subject.get(copied..).unwrap_or(&[]));
+    String::from_utf8(out).map_err(|_| RegexProblem::NotText)
 }
 
 /// One filesystem rename, in the order it must be performed.
@@ -609,12 +686,41 @@ fn unused_temp_name(occupied: &BTreeSet<String>, counter: &mut usize) -> String 
 // Rename engine
 // ============================================================================
 
+/// What a rule may need to know about the file it is renaming, beyond its
+/// name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RuleContext {
+    /// This file's position among the files being renamed, from 0: what a
+    /// numbering rule counts. Files that are not being renamed are not
+    /// counted, so ticking three files of ten numbers them 1, 2, 3.
+    index: usize,
+    /// When the file was last modified, in milliseconds since the epoch: the
+    /// date a date-stamp rule stamps.
+    modified_ms: u64,
+}
+
 /// The core rename engine that applies operations to filenames.
 struct RenameEngine;
 
 impl RenameEngine {
-    /// Apply a single operation to a filename, with an index (for numbering).
+    /// Apply a single operation to a filename, with an index (for numbering)
+    /// and no file behind it. **Tests only**: a date stamp needs the file's
+    /// time, which only [`apply_in`](Self::apply_in) is given.
+    #[cfg(test)]
     fn apply(op: &RenameOp, name: &str, index: usize) -> String {
+        Self::apply_in(
+            op,
+            name,
+            RuleContext {
+                index,
+                modified_ms: 0,
+            },
+        )
+    }
+
+    /// Apply a single operation to a filename.
+    fn apply_in(op: &RenameOp, name: &str, ctx: RuleContext) -> String {
+        let index = ctx.index;
         let (stem, ext) = FileEntry::split_name(name);
 
         match op {
@@ -624,6 +730,12 @@ impl RenameEngine {
                 case_sensitive,
                 replace_all,
             } => {
+                // An empty search matches between every character, and
+                // `str::replace` would put the replacement between each pair:
+                // a rule the user has only half written must change nothing.
+                if find.is_empty() {
+                    return name.to_string();
+                }
                 let new_stem = if *case_sensitive {
                     if *replace_all {
                         stem.replace(find.as_str(), replace.as_str())
@@ -692,8 +804,11 @@ impl RenameEngine {
                 position,
                 separator,
             } => {
-                // Mock date (in real OS, would use system time)
-                let date_str = format.format(2026, 5, 18, 14, 30, 0);
+                // The file's own modification time. This was the constant
+                // 2026-05-18 14:30:00 -- "Mock date (in real OS, would use
+                // system time)" -- so every file in every batch was stamped
+                // with one day in May, whenever it was written.
+                let date_str = stamp_for(*format, ctx.modified_ms);
                 match position {
                     InsertPosition::Start => format!("{date_str}{separator}{stem}{ext}"),
                     InsertPosition::End => format!("{stem}{separator}{date_str}{ext}"),
@@ -712,11 +827,18 @@ impl RenameEngine {
             RenameOp::Regex {
                 pattern,
                 replacement,
+                case_sensitive,
             } => {
-                // Simple regex: only support literal patterns for now
-                // (real implementation would use our NFA regex engine)
-
-                name.replace(pattern.as_str(), replacement.as_str())
+                // A real regular expression. This was `name.replace(pattern,
+                // replacement)` under "Simple regex: only support literal
+                // patterns for now", so `IMG_(\d+)` matched only a name that
+                // literally contained those nine characters.
+                // An empty pattern matches everywhere; see Find & Replace.
+                if pattern.is_empty() {
+                    return name.to_string();
+                }
+                regex_replace(pattern, replacement, !*case_sensitive, name)
+                    .unwrap_or_else(|_| name.to_string())
             }
             RenameOp::Trim { chars, mode } => {
                 let new_stem = if chars.is_empty() {
@@ -888,11 +1010,8 @@ struct RenameRecord {
     renames: Vec<(String, String)>,
     /// The operations that were applied.
     operations: Vec<String>,
-    /// When the rename was performed (mock timestamp).
-    // A rename record's timestamp: written when a rename is recorded and never
-    // shown. The history panel lists what changed, not when.
-    // See known-issues.md -> TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING.
-    #[allow(dead_code, reason = "history does not show times")]
+    /// When the rename was performed, in milliseconds since the epoch, as
+    /// the History panel shows it.
     timestamp_ms: u64,
 }
 
@@ -929,16 +1048,22 @@ struct RenamerApp {
     undo_stack: Vec<RenameRecord>,
     /// Redo stack.
     redo_stack: Vec<RenameRecord>,
-    /// Scroll offset in the file list.
-    scroll_offset: f32,
+    /// The first file row shown.
+    ///
+    /// Was `scroll_offset: f32`, which nothing but the folder loader ever
+    /// wrote: the list showed its first page and no key or wheel reached the
+    /// rest, while Up and Down walked the cursor onto rows never drawn.
+    file_scroll: usize,
+    /// The wheel's remainder over the file list.
+    files_wheel: wheel::Accumulator,
+    /// How far the operations panel is scrolled, in pixels.
+    ops_scroll: f32,
     /// Selected file index.
     selected_file: usize,
     /// Selected operation index in the sidebar.
     selected_op: usize,
     /// Which sidebar panel is active.
     sidebar_panel: SidebarPanel,
-    /// Current time (mock).
-    current_time_ms: u64,
     /// Status message.
     status_message: String,
     /// Filter: file extension (empty = all).
@@ -949,11 +1074,22 @@ struct RenamerApp {
     history: Vec<RenameRecord>,
     /// Search/filter text for the file list.
     search_text: String,
-    /// Whether typing goes to the search box rather than to the shortcuts.
+    /// Where the keyboard is: the list, or one of the boxes.
     ///
-    /// Without it, typing "c" to search would toggle the conflicts filter. The
-    /// app had no input at all, so nothing had needed the distinction.
-    searching: bool,
+    /// Was `searching: bool`, the one box there was; the rule editor and the
+    /// extension filter are boxes too now.
+    focus: Focus,
+    /// The text being typed into the box that has the keyboard.
+    draft: TextInput,
+    /// Whether what is in the box is a value its rule cannot take (a count
+    /// that is not a number), shown as a red rule under the box.
+    draft_invalid: bool,
+    /// The Add Rule menu, while it is up.
+    rule_menu: Option<ContextMenu>,
+    /// What the pointer is over.
+    hover: Option<Target>,
+    /// Every box the last paint recorded, for hover and the wheel.
+    last_hits: Vec<(Target, Rect)>,
     /// Whether the shortcut list is up.
     show_help: bool,
     /// The user's colours, replaced whenever the theme changes.
@@ -983,17 +1119,23 @@ impl RenamerApp {
             operations: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            scroll_offset: 0.0,
+            file_scroll: 0,
+            files_wheel: wheel::Accumulator::default(),
+            ops_scroll: 0.0,
             selected_file: 0,
             selected_op: 0,
             sidebar_panel: SidebarPanel::Operations,
-            current_time_ms: 0,
             status_message: String::new(),
             filter_extension: String::new(),
             filter_conflicts: false,
             history: Vec::new(),
             search_text: String::new(),
-            searching: false,
+            focus: Focus::List,
+            draft: TextInput::new(),
+            draft_invalid: false,
+            rule_menu: None,
+            hover: None,
+            last_hits: Vec::new(),
             show_help: false,
         }
     }
@@ -1019,14 +1161,17 @@ impl RenamerApp {
         };
 
         self.files.clear();
-        self.operations.clear();
+        // The rules are kept: a set of rules built for one folder is exactly
+        // what a person wants to run over the next, and opening a folder used
+        // to throw them away without a word.
+        //
         // The stacks describe renames in the old folder. Undo across a folder
         // change would look up names that are not here and silently do
         // nothing, which reads exactly like an undo that failed.
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.selected_file = 0;
-        self.scroll_offset = 0.0;
+        self.file_scroll = 0;
 
         let mut skipped_dirs = 0usize;
         let mut unreadable = 0usize;
@@ -1133,14 +1278,29 @@ impl RenamerApp {
         }
     }
 
-    /// Apply all operations to all files and update previews.
+    /// Apply all operations to the files being renamed and update previews.
+    ///
+    /// A file that is not ticked keeps its name in the preview, because it
+    /// keeps it on disk; and the numbering counts only the ticked ones. It
+    /// counted every file in the list, so renaming three photos out of ten
+    /// numbered them 1, 4 and 9.
     fn apply_operations(&mut self) {
-        for (i, file) in self.files.iter_mut().enumerate() {
+        let mut index = 0usize;
+        for file in &mut self.files {
+            if !(file.selected && file.renameable) {
+                file.new_name.clone_from(&file.original_name);
+                continue;
+            }
+            let ctx = RuleContext {
+                index,
+                modified_ms: file.modified_ms,
+            };
             let mut name = file.original_name.clone();
             for op in &self.operations {
-                name = RenameEngine::apply(op, &name, i);
+                name = RenameEngine::apply_in(op, &name, ctx);
             }
             file.new_name = name;
+            index = index.saturating_add(1);
         }
         self.detect_conflicts();
     }
@@ -1212,7 +1372,9 @@ impl RenamerApp {
                 .iter()
                 .map(|o| o.label().to_string())
                 .collect(),
-            timestamp_ms: self.current_time_ms,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
         };
 
         if record.renames.is_empty() {
@@ -1429,6 +1591,7 @@ impl RenamerApp {
         for file in &mut self.files {
             file.selected = selected && file.renameable;
         }
+        self.apply_operations();
     }
 
     /// Clear all files from the list.
@@ -1465,10 +1628,28 @@ impl RenamerApp {
         }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
-            Event::Resize { .. } => {
-                // The layout is computed from the size handed to `render`, so
-                // there is nothing to store and nothing to redraw for.
-                EventResult::Ignored
+            Event::Mouse(mouse) => {
+                // The card is modal: a press anywhere puts it away, and nothing
+                // under it hears one.
+                if self.show_help {
+                    if matches!(mouse.kind, MouseEventKind::Press(_)) {
+                        self.show_help = false;
+                        return EventResult::Consumed;
+                    }
+                    return EventResult::Ignored;
+                }
+                self.handle_mouse(mouse)
+            }
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension is far below f32's integer-exact range"
+                )]
+                {
+                    self.last_width = *width as f32;
+                    self.last_height = *height as f32;
+                }
+                EventResult::Consumed
             }
             _ => EventResult::Ignored,
         }
@@ -1485,8 +1666,21 @@ impl RenamerApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
-        if self.searching {
-            return self.handle_key_search(key);
+        // The Add Rule menu takes the keyboard while it is up: arrows, Enter,
+        // Escape.
+        if let Some(menu) = self.rule_menu.as_mut() {
+            match menu.handle_key(key) {
+                Some(MenuAction::Selected(id)) => {
+                    self.rule_menu = None;
+                    self.add_rule_of_kind(id);
+                }
+                Some(MenuAction::Closed) => self.rule_menu = None,
+                Some(MenuAction::None) | None => {}
+            }
+            return EventResult::Consumed;
+        }
+        if self.focus != Focus::List && !matches!(key.key, Key::F1) {
+            return self.handle_key_in_box(key);
         }
         let ctrl = key.modifiers.ctrl;
         match key.key {
@@ -1499,9 +1693,56 @@ impl RenamerApp {
                 };
                 EventResult::Consumed
             }
+            // The rules: which one the editor shows. Without these the
+            // selection moved only when a rule was added, so every rule but
+            // the newest could be neither edited, reordered nor removed.
+            Key::Up if ctrl => {
+                if self.selected_op == 0 {
+                    return EventResult::Ignored;
+                }
+                self.selected_op = self.selected_op.saturating_sub(1);
+                EventResult::Consumed
+            }
+            Key::Down if ctrl => {
+                if self.selected_op.saturating_add(1) >= self.operations.len() {
+                    return EventResult::Ignored;
+                }
+                self.selected_op = self.selected_op.saturating_add(1);
+                EventResult::Consumed
+            }
+            Key::F2 => {
+                let first = self
+                    .operations
+                    .get(self.selected_op)
+                    .and_then(|op| rule_slots(op).first().copied());
+                match first {
+                    Some(slot) => {
+                        self.sidebar_panel = SidebarPanel::Operations;
+                        self.set_focus(Focus::Field(slot));
+                        EventResult::Consumed
+                    }
+                    None => EventResult::Ignored,
+                }
+            }
+            Key::R => {
+                self.open_rule_menu();
+                EventResult::Consumed
+            }
+            Key::E if ctrl => {
+                self.set_focus(Focus::Extension);
+                EventResult::Consumed
+            }
             // The file list.
-            Key::Up => self.step_file(-1),
-            Key::Down => self.step_file(1),
+            Key::Up => {
+                let moved = self.step_file(-1);
+                self.keep_file_visible();
+                moved
+            }
+            Key::Down => {
+                let moved = self.step_file(1);
+                self.keep_file_visible();
+                moved
+            }
             Key::Space => self.toggle_selected_file(),
             Key::A if ctrl => {
                 // Select-all, and its opposite when everything already is.
@@ -1536,14 +1777,7 @@ impl RenamerApp {
             Key::PageUp => self.move_op(-1),
             Key::PageDown => self.move_op(1),
             // Doing it, and undoing it.
-            Key::Enter => {
-                if self.files.iter().all(|f| !f.selected) {
-                    self.status_message = String::from("Nothing selected to rename");
-                    return EventResult::Consumed;
-                }
-                self.execute_rename();
-                EventResult::Consumed
-            }
+            Key::Enter => self.rename_selected(),
             Key::O if ctrl => {
                 self.open_folder();
                 EventResult::Consumed
@@ -1578,11 +1812,12 @@ impl RenamerApp {
                 EventResult::Consumed
             }
             Key::Slash => {
-                self.searching = true;
+                self.set_focus(Focus::Search);
                 EventResult::Consumed
             }
             Key::C => {
                 self.filter_conflicts = !self.filter_conflicts;
+                self.file_scroll = 0;
                 EventResult::Consumed
             }
             // The operations that need nothing typed. `add_operation` and
@@ -1620,32 +1855,6 @@ impl RenamerApp {
                 separator: String::from("_"),
             }),
             _ => EventResult::Ignored,
-        }
-    }
-
-    /// Keys while the search box has focus.
-    ///
-    /// It comes first in `handle_key` because otherwise typing "c" to search
-    /// would toggle the conflicts filter under the box.
-    fn handle_key_search(&mut self, key: &KeyEvent) -> EventResult {
-        match key.key {
-            Key::Escape | Key::Enter => {
-                self.searching = false;
-                EventResult::Consumed
-            }
-            Key::Backspace => {
-                if self.search_text.pop().is_none() {
-                    return EventResult::Ignored;
-                }
-                EventResult::Consumed
-            }
-            _ => {
-                if key.text.is_empty() || key.modifiers.ctrl {
-                    return EventResult::Ignored;
-                }
-                self.search_text.push_str(&key.text);
-                EventResult::Consumed
-            }
         }
     }
 
@@ -1701,6 +1910,10 @@ impl RenamerApp {
             return EventResult::Consumed;
         }
         file.selected = !file.selected;
+        // The preview and the numbering follow the ticks, and so do the
+        // conflicts: a collision with a file that is no longer being renamed
+        // is no collision, and one with a file that now is, is.
+        self.apply_operations();
         EventResult::Consumed
     }
 
@@ -1734,329 +1947,6 @@ impl RenamerApp {
         self.selected_op = moved;
         self.apply_operations();
         EventResult::Consumed
-    }
-
-    /// Named `render_commands` and not `render`: at equal arity an inherent
-    /// method silently wins method lookup over `oswindow::app::App::render`, so
-    /// an app that keeps the name draws nothing and reports no error.
-    fn render_commands(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::with_capacity(256);
-
-        // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: WINDOW_WIDTH,
-            height: WINDOW_HEIGHT,
-            color: self.palette.base,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Toolbar
-        self.render_toolbar(&mut cmds);
-
-        // Sidebar (operations list)
-        self.render_sidebar(&mut cmds);
-
-        // Main area (file list with old → new preview)
-        self.render_file_list(&mut cmds);
-
-        // Status bar
-        self.render_status_bar(&mut cmds);
-
-        // And the shortcut list over everything, because it is the one thing a
-        // reader asked for explicitly.
-        if self.show_help {
-            guitk::shortcut::render_card(
-                &mut cmds,
-                &self.palette,
-                (WINDOW_WIDTH, WINDOW_HEIGHT),
-                TOOLBAR_HEIGHT,
-                SHORTCUTS,
-                "F1 or ? closes this",
-            );
-        }
-
-        cmds
-    }
-
-    fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>) {
-        self.palette.push_surface(
-            cmds,
-            0.0,
-            0.0,
-            WINDOW_WIDTH,
-            TOOLBAR_HEIGHT,
-            0.0,
-            Surface::Strip(Edge::Bottom),
-        );
-
-        // Title
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: 10.0,
-            text: "Batch File Renamer".into(),
-            font_size: TITLE_TEXT,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Toolbar buttons. Pair label with color so we never index out of bounds.
-        // Inked: these are button *labels*, so each takes the 4.5:1 floor.
-        let buttons = [
-            ("Add Files", self.palette.ink(self.palette.blue)),
-            ("Rename", self.palette.ink(self.palette.green)),
-            ("Undo", self.palette.ink(self.palette.peach)),
-            ("Redo", self.palette.ink(self.palette.peach)),
-            ("Clear", self.palette.ink(self.palette.red)),
-        ];
-        let mut bx = 220.0;
-        for (label, color) in buttons {
-            let bw = text::padded_width(label, 10.0, 12.0, FontWeightHint::Regular);
-            self.palette
-                .push_surface(cmds, bx, 6.0, bw, BUTTON_HEIGHT, 4.0, Surface::Card);
-            cmds.push(RenderCommand::Text {
-                x: bx + 10.0,
-                y: 12.0,
-                text: label.into(),
-                font_size: SMALL_TEXT,
-                color,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(bw - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            bx += bw + 6.0;
-        }
-
-        // File count
-        let count_text = format!(
-            "{} files | {} to rename | {} conflicts",
-            self.files.len(),
-            self.rename_count(),
-            self.conflict_count()
-        );
-        cmds.push(RenderCommand::Text {
-            x: WINDOW_WIDTH - 300.0,
-            y: 14.0,
-            text: count_text,
-            font_size: SMALL_TEXT,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(290.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-    }
-
-    fn render_sidebar(&self, cmds: &mut Vec<RenderCommand>) {
-        let x = 0.0;
-        let y = TOOLBAR_HEIGHT;
-        let h = WINDOW_HEIGHT - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT;
-
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: SIDEBAR_WIDTH,
-            height: h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Sidebar tabs
-        let tabs = ["Operations", "Preview", "History"];
-        let tab_w = SIDEBAR_WIDTH / 3.0;
-        for (i, tab) in tabs.iter().enumerate() {
-            let tx = x + i as f32 * tab_w;
-            let is_active = match self.sidebar_panel {
-                SidebarPanel::Operations => i == 0,
-                SidebarPanel::Preview => i == 1,
-                SidebarPanel::History => i == 2,
-            };
-            let bg = if is_active {
-                self.palette.surface0
-            } else {
-                self.palette.mantle
-            };
-            cmds.push(RenderCommand::FillRect {
-                x: tx,
-                y,
-                width: tab_w,
-                height: 28.0,
-                color: bg,
-                corner_radii: CornerRadii::ZERO,
-            });
-            if is_active {
-                cmds.push(RenderCommand::FillRect {
-                    x: tx,
-                    y,
-                    width: tab_w,
-                    height: 2.0,
-                    color: self.palette.blue,
-                    corner_radii: CornerRadii::ZERO,
-                });
-            }
-            cmds.push(RenderCommand::Text {
-                x: tx + 6.0,
-                y: y + 8.0,
-                text: (*tab).into(),
-                font_size: SMALL_TEXT,
-                color: if is_active {
-                    self.palette.text
-                } else {
-                    self.palette.subtext0
-                },
-                font_weight: if is_active {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(tab_w - 12.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
-        let content_y = y + 32.0;
-
-        match self.sidebar_panel {
-            SidebarPanel::Operations => {
-                self.render_operations_panel(cmds, x, content_y);
-            }
-            SidebarPanel::Preview => {
-                self.render_preview_panel(cmds, x, content_y);
-            }
-            SidebarPanel::History => {
-                self.render_history_panel(cmds, x, content_y);
-            }
-        }
-    }
-
-    fn render_operations_panel(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) {
-        if self.operations.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: x + PADDING,
-                y: y + PADDING,
-                text: "No operations added yet.".into(),
-                font_size: SMALL_TEXT,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cmds.push(RenderCommand::Text {
-                x: x + PADDING,
-                y: y + PADDING + 18.0,
-                text: "Add operations to see a".into(),
-                font_size: SMALL_TEXT,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cmds.push(RenderCommand::Text {
-                x: x + PADDING,
-                y: y + PADDING + 34.0,
-                text: "live rename preview.".into(),
-                font_size: SMALL_TEXT,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            return;
-        }
-
-        let mut oy = y + 4.0;
-        for (i, op) in self.operations.iter().enumerate() {
-            let is_selected = i == self.selected_op;
-            let bg = if is_selected {
-                self.palette.surface0
-            } else {
-                self.palette.mantle
-            };
-
-            cmds.push(RenderCommand::FillRect {
-                x: x + 4.0,
-                y: oy,
-                width: SIDEBAR_WIDTH - 8.0,
-                height: 30.0,
-                color: bg,
-                corner_radii: CornerRadii::all(4.0),
-            });
-
-            // Color indicator
-            cmds.push(RenderCommand::FillRect {
-                x: x + 8.0,
-                y: oy + 6.0,
-                width: 4.0,
-                height: 18.0,
-                color: op.color(&self.palette),
-                corner_radii: CornerRadii::all(2.0),
-            });
-
-            // Operation index and label
-            cmds.push(RenderCommand::Text {
-                x: x + 18.0,
-                y: oy + 4.0,
-                text: format!("{}. {}", i.saturating_add(1), op.label()),
-                font_size: SMALL_TEXT,
-                color: if is_selected {
-                    self.palette.text
-                } else {
-                    self.palette.subtext0
-                },
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(SIDEBAR_WIDTH - 40.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Operation details
-            // The user-typed halves of these summaries are elided against the
-            // row's real width; the row is a fixed 34px, so wrapping is not an
-            // option and a silent cut would leave two operations looking alike.
-            let detail = match op {
-                RenameOp::FindReplace { find, replace, .. } => {
-                    find_replace_detail(find, replace, OP_DETAIL_WIDTH)
-                }
-                RenameOp::Insert { text, position } => {
-                    let where_ = match position {
-                        InsertPosition::Start => "start".to_string(),
-                        InsertPosition::End => "end".to_string(),
-                        InsertPosition::At(n) => format!("pos {n}"),
-                    };
-                    framed_detail("\"", text, &format!("\" at {where_}"), OP_DETAIL_WIDTH)
-                }
-                RenameOp::ChangeCase(mode) => mode.label().into(),
-                RenameOp::Number {
-                    start,
-                    step,
-                    padding,
-                    ..
-                } => format!("from {start} step {step} pad {padding}"),
-                RenameOp::Extension(ext_op) => match ext_op {
-                    ExtensionOp::Replace(e) => framed_detail("→ .", e, "", OP_DETAIL_WIDTH),
-                    ExtensionOp::Add(e) => framed_detail("+ .", e, "", OP_DETAIL_WIDTH),
-                    ExtensionOp::Remove => "remove".into(),
-                    ExtensionOp::Lower => "lowercase".into(),
-                    ExtensionOp::Upper => "UPPERCASE".into(),
-                },
-                _ => String::new(),
-            };
-            if !detail.is_empty() {
-                cmds.push(RenderCommand::Text {
-                    x: x + 18.0,
-                    y: oy + 17.0,
-                    text: detail,
-                    font_size: OP_DETAIL_SIZE,
-                    color: self.palette.subtext0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(OP_DETAIL_WIDTH),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-
-            oy += 34.0;
-        }
     }
 
     fn render_preview_panel(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) {
@@ -2230,8 +2120,14 @@ impl RenamerApp {
                 corner_radii: CornerRadii::all(3.0),
             });
 
+            // When, as well as what: the record kept its time from the start
+            // and nothing drew it.
+            let when = guitk::datetime::stamp(
+                i64::try_from(record.timestamp_ms / 1000).unwrap_or(i64::MAX),
+                &guitk::tzrules::Tz::utc(),
+            );
             let label = format!(
-                "{} files — {}",
+                "{when} — {} files — {}",
                 record.renames.len(),
                 record.operations.join(", ")
             );
@@ -2249,45 +2145,1419 @@ impl RenamerApp {
             hy += 30.0;
         }
     }
+}
 
-    fn render_file_list(&self, cmds: &mut Vec<RenderCommand>) {
-        let x = SIDEBAR_WIDTH;
-        let y = TOOLBAR_HEIGHT;
-        let w = WINDOW_WIDTH - SIDEBAR_WIDTH;
-        let h = WINDOW_HEIGHT - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT;
+// ============================================================================
+// The rule editor: what each kind of rule asks for
+// ============================================================================
 
-        // Column headers
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: 24.0,
-            color: self.palette.surface0,
+/// A text box in the rule editor, by its position in the selected rule's form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    A,
+    B,
+    C,
+    D,
+    E,
+}
+
+/// Where a rule puts what it adds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PositionKind {
+    Start,
+    End,
+    At,
+}
+
+/// The five extension rules, as one choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtKind {
+    Lower,
+    Upper,
+    Remove,
+    Replace,
+    Add,
+}
+
+/// One of a choice row's options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pick {
+    Case(CaseMode),
+    Position(PositionKind),
+    Format(DateFormat),
+    Trim(TrimMode),
+    Ext(ExtKind),
+}
+
+/// One of the rule editor's on/off switches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flip {
+    MatchCase,
+    EveryOccurrence,
+}
+
+/// One control in the rule editor, as the selected rule's form lists it.
+///
+/// The form is *derived* from the rule on every frame rather than kept beside
+/// it, so the editor and the rule cannot disagree about what the rule is.
+#[derive(Debug, Clone)]
+enum Control {
+    /// A labelled text box for one of the rule's parameters.
+    Field { slot: Slot, label: &'static str },
+    /// A row of exclusive choices; `chosen` is the one in force.
+    Choice {
+        label: &'static str,
+        options: Vec<(&'static str, Pick)>,
+        chosen: Option<Pick>,
+    },
+    /// An on/off switch.
+    Switch {
+        label: &'static str,
+        on: bool,
+        flip: Flip,
+    },
+    /// A line of guidance, or -- when `error` -- what is wrong.
+    Note { text: String, error: bool },
+}
+
+const POSITIONS: [(&str, Pick); 3] = [
+    ("Start", Pick::Position(PositionKind::Start)),
+    ("End", Pick::Position(PositionKind::End)),
+    ("At a position", Pick::Position(PositionKind::At)),
+];
+
+fn position_kind(position: InsertPosition) -> PositionKind {
+    match position {
+        InsertPosition::Start => PositionKind::Start,
+        InsertPosition::End => PositionKind::End,
+        InsertPosition::At(_) => PositionKind::At,
+    }
+}
+
+/// The controls a rule's form shows, top to bottom.
+fn rule_controls(op: &RenameOp) -> Vec<Control> {
+    let field = |slot, label| Control::Field { slot, label };
+    let place = |position: InsertPosition| Control::Choice {
+        label: "Where",
+        options: POSITIONS.to_vec(),
+        chosen: Some(Pick::Position(position_kind(position))),
+    };
+    match op {
+        RenameOp::FindReplace {
+            case_sensitive,
+            replace_all,
+            ..
+        } => vec![
+            field(Slot::A, "Find"),
+            field(Slot::B, "Replace with"),
+            Control::Switch {
+                label: "Match case",
+                on: *case_sensitive,
+                flip: Flip::MatchCase,
+            },
+            Control::Switch {
+                label: "Every occurrence, not just the first",
+                on: *replace_all,
+                flip: Flip::EveryOccurrence,
+            },
+        ],
+        RenameOp::Insert { position, .. } => {
+            let mut c = vec![field(Slot::A, "Text"), place(*position)];
+            if let InsertPosition::At(_) = position {
+                c.push(field(Slot::B, "Position, in characters from the start"));
+            }
+            c
+        }
+        RenameOp::Remove { .. } => vec![
+            field(Slot::A, "From character (0 is the first)"),
+            field(Slot::B, "How many characters"),
+        ],
+        RenameOp::ChangeCase(mode) => vec![Control::Choice {
+            label: "Case",
+            options: CASE_MODES
+                .iter()
+                .map(|m| (m.label(), Pick::Case(*m)))
+                .collect(),
+            chosen: Some(Pick::Case(*mode)),
+        }],
+        RenameOp::Number { position, .. } => {
+            let mut c = vec![
+                field(Slot::A, "Start at"),
+                field(Slot::B, "Step"),
+                field(Slot::C, "Digits (zero-padded)"),
+                field(Slot::D, "Separator"),
+                place(*position),
+            ];
+            if let InsertPosition::At(_) = position {
+                c.push(field(Slot::E, "Position, in characters from the start"));
+            }
+            c
+        }
+        RenameOp::DateStamp {
+            format, position, ..
+        } => {
+            let mut c = vec![
+                Control::Choice {
+                    label: "Format",
+                    options: DATE_FORMATS
+                        .iter()
+                        .map(|f| (f.label(), Pick::Format(*f)))
+                        .collect(),
+                    chosen: Some(Pick::Format(*format)),
+                },
+                field(Slot::A, "Separator"),
+                place(*position),
+            ];
+            if let InsertPosition::At(_) = position {
+                c.push(field(Slot::B, "Position, in characters from the start"));
+            }
+            c.push(Control::Note {
+                text: "Each file's own date: when it was last modified, in UTC".to_string(),
+                error: false,
+            });
+            c
+        }
+        RenameOp::Regex {
+            pattern,
+            case_sensitive,
+            ..
+        } => {
+            let note = match regex_replace(pattern, "", !*case_sensitive, "") {
+                Err(problem) if !pattern.is_empty() => Control::Note {
+                    text: format!("Not a pattern yet: {}", problem.message()),
+                    error: true,
+                },
+                _ => Control::Note {
+                    text: "& is the whole match, \\1 to \\9 its groups".to_string(),
+                    error: false,
+                },
+            };
+            vec![
+                field(Slot::A, "Pattern (POSIX extended)"),
+                field(Slot::B, "Replace with"),
+                Control::Switch {
+                    label: "Match case",
+                    on: *case_sensitive,
+                    flip: Flip::MatchCase,
+                },
+                note,
+            ]
+        }
+        RenameOp::Trim { mode, .. } => vec![
+            field(Slot::A, "Characters to trim (blank: spaces)"),
+            Control::Choice {
+                label: "From",
+                options: vec![
+                    ("Both ends", Pick::Trim(TrimMode::Both)),
+                    ("The start", Pick::Trim(TrimMode::Start)),
+                    ("The end", Pick::Trim(TrimMode::End)),
+                ],
+                chosen: Some(Pick::Trim(*mode)),
+            },
+        ],
+        RenameOp::Extension(ext) => {
+            let kind = ext_kind(ext);
+            let mut c = vec![Control::Choice {
+                label: "Extension",
+                options: vec![
+                    ("lower case", Pick::Ext(ExtKind::Lower)),
+                    ("UPPER CASE", Pick::Ext(ExtKind::Upper)),
+                    ("Remove it", Pick::Ext(ExtKind::Remove)),
+                    ("Replace it", Pick::Ext(ExtKind::Replace)),
+                    ("Add one", Pick::Ext(ExtKind::Add)),
+                ],
+                chosen: Some(Pick::Ext(kind)),
+            }];
+            if matches!(kind, ExtKind::Replace | ExtKind::Add) {
+                c.push(field(Slot::A, "Extension"));
+            }
+            c
+        }
+        RenameOp::Template { .. } => vec![
+            field(Slot::A, "Template"),
+            Control::Note {
+                text: "{name} {ext} {original}; {n} and {N} count from 0".to_string(),
+                error: false,
+            },
+        ],
+    }
+}
+
+/// Every case mode, in the order the chooser lists them.
+const CASE_MODES: [CaseMode; 8] = [
+    CaseMode::Lower,
+    CaseMode::Upper,
+    CaseMode::Title,
+    CaseMode::Sentence,
+    CaseMode::Toggle,
+    CaseMode::CamelCase,
+    CaseMode::SnakeCase,
+    CaseMode::KebabCase,
+];
+
+/// Every date format, in the order the chooser lists them.
+const DATE_FORMATS: [DateFormat; 5] = [
+    DateFormat::YmdHyphen,
+    DateFormat::YmdSlash,
+    DateFormat::DmyHyphen,
+    DateFormat::YmdCompact,
+    DateFormat::Timestamp,
+];
+
+fn ext_kind(ext: &ExtensionOp) -> ExtKind {
+    match ext {
+        ExtensionOp::Lower => ExtKind::Lower,
+        ExtensionOp::Upper => ExtKind::Upper,
+        ExtensionOp::Remove => ExtKind::Remove,
+        ExtensionOp::Replace(_) => ExtKind::Replace,
+        ExtensionOp::Add(_) => ExtKind::Add,
+    }
+}
+
+/// The text a rule's box `slot` shows.
+fn field_text(op: &RenameOp, slot: Slot) -> String {
+    let at = |position: &InsertPosition| match position {
+        InsertPosition::At(n) => n.to_string(),
+        _ => String::new(),
+    };
+    match (op, slot) {
+        (RenameOp::FindReplace { find, .. }, Slot::A) => find.clone(),
+        (RenameOp::FindReplace { replace, .. }, Slot::B) => replace.clone(),
+        (RenameOp::Insert { text, .. }, Slot::A) => text.clone(),
+        (RenameOp::Insert { position, .. }, Slot::B) => at(position),
+        (RenameOp::Remove { from, .. }, Slot::A) => from.to_string(),
+        (RenameOp::Remove { count, .. }, Slot::B) => count.to_string(),
+        (RenameOp::Number { start, .. }, Slot::A) => start.to_string(),
+        (RenameOp::Number { step, .. }, Slot::B) => step.to_string(),
+        (RenameOp::Number { padding, .. }, Slot::C) => padding.to_string(),
+        (RenameOp::Number { separator, .. }, Slot::D) => separator.clone(),
+        (RenameOp::Number { position, .. }, Slot::E) => at(position),
+        (RenameOp::DateStamp { separator, .. }, Slot::A) => separator.clone(),
+        (RenameOp::DateStamp { position, .. }, Slot::B) => at(position),
+        (RenameOp::Regex { pattern, .. }, Slot::A) => pattern.clone(),
+        (RenameOp::Regex { replacement, .. }, Slot::B) => replacement.clone(),
+        (RenameOp::Trim { chars, .. }, Slot::A) => chars.clone(),
+        (RenameOp::Extension(ExtensionOp::Replace(e) | ExtensionOp::Add(e)), Slot::A) => e.clone(),
+        (RenameOp::Template { template }, Slot::A) => template.clone(),
+        _ => String::new(),
+    }
+}
+
+/// The largest number a counting box takes. A position or a count past any
+/// name's length already means "the end", and a padding of a thousand digits
+/// would make a name no filesystem accepts.
+const MAX_FIELD_NUMBER: usize = 255;
+
+/// Write `text` into a rule's box `slot`. Returns whether it was taken: a
+/// counting box refuses what is not a number from 0 to [`MAX_FIELD_NUMBER`],
+/// and the rule keeps its last good value while the box shows what was typed.
+fn set_field(op: &mut RenameOp, slot: Slot, text: &str) -> bool {
+    let number = || {
+        text.trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n <= MAX_FIELD_NUMBER)
+    };
+    let set_at = |position: &mut InsertPosition| match number() {
+        Some(n) => {
+            *position = InsertPosition::At(n);
+            true
+        }
+        None => false,
+    };
+    match (op, slot) {
+        (RenameOp::FindReplace { find, .. }, Slot::A) => *find = text.to_string(),
+        (RenameOp::FindReplace { replace, .. }, Slot::B) => *replace = text.to_string(),
+        (RenameOp::Insert { text: t, .. }, Slot::A) => *t = text.to_string(),
+        (RenameOp::Insert { position, .. }, Slot::B) => return set_at(position),
+        (RenameOp::Remove { from, .. }, Slot::A) => match number() {
+            Some(n) => *from = n,
+            None => return false,
+        },
+        (RenameOp::Remove { count, .. }, Slot::B) => match number() {
+            Some(n) => *count = n,
+            None => return false,
+        },
+        (RenameOp::Number { start, .. }, Slot::A) => match text.trim().parse::<usize>() {
+            // A start is not bounded like the others: numbering from 1000
+            // is ordinary.
+            Ok(n) => *start = n,
+            Err(_) => return false,
+        },
+        (RenameOp::Number { step, .. }, Slot::B) => match number() {
+            Some(n) => *step = n,
+            None => return false,
+        },
+        (RenameOp::Number { padding, .. }, Slot::C) => match number() {
+            Some(n) => *padding = n,
+            None => return false,
+        },
+        (RenameOp::Number { separator, .. }, Slot::D) => *separator = text.to_string(),
+        (RenameOp::Number { position, .. }, Slot::E) => return set_at(position),
+        (RenameOp::DateStamp { separator, .. }, Slot::A) => *separator = text.to_string(),
+        (RenameOp::DateStamp { position, .. }, Slot::B) => return set_at(position),
+        (RenameOp::Regex { pattern, .. }, Slot::A) => *pattern = text.to_string(),
+        (RenameOp::Regex { replacement, .. }, Slot::B) => *replacement = text.to_string(),
+        (RenameOp::Trim { chars, .. }, Slot::A) => *chars = text.to_string(),
+        (RenameOp::Extension(ExtensionOp::Replace(e) | ExtensionOp::Add(e)), Slot::A) => {
+            *e = text.to_string();
+        }
+        (RenameOp::Template { template }, Slot::A) => *template = text.to_string(),
+        _ => return false,
+    }
+    true
+}
+
+/// Apply a choice to a rule.
+fn apply_pick(op: &mut RenameOp, pick: Pick) {
+    let move_to = |position: &mut InsertPosition, kind: PositionKind| {
+        *position = match kind {
+            PositionKind::Start => InsertPosition::Start,
+            PositionKind::End => InsertPosition::End,
+            // Keep a position already chosen; start a new one at the front.
+            PositionKind::At => match *position {
+                InsertPosition::At(n) => InsertPosition::At(n),
+                _ => InsertPosition::At(0),
+            },
+        };
+    };
+    match (op, pick) {
+        (RenameOp::ChangeCase(mode), Pick::Case(m)) => *mode = m,
+        (
+            RenameOp::Insert { position, .. }
+            | RenameOp::Number { position, .. }
+            | RenameOp::DateStamp { position, .. },
+            Pick::Position(kind),
+        ) => move_to(position, kind),
+        (RenameOp::DateStamp { format, .. }, Pick::Format(f)) => *format = f,
+        (RenameOp::Trim { mode, .. }, Pick::Trim(t)) => *mode = t,
+        (RenameOp::Extension(ext), Pick::Ext(kind)) => {
+            // The text typed for Replace survives a change to Add and back.
+            let typed = match ext {
+                ExtensionOp::Replace(e) | ExtensionOp::Add(e) => e.clone(),
+                _ => String::new(),
+            };
+            *ext = match kind {
+                ExtKind::Lower => ExtensionOp::Lower,
+                ExtKind::Upper => ExtensionOp::Upper,
+                ExtKind::Remove => ExtensionOp::Remove,
+                ExtKind::Replace => ExtensionOp::Replace(typed),
+                ExtKind::Add => ExtensionOp::Add(typed),
+            };
+        }
+        _ => {}
+    }
+}
+
+/// Flip one of a rule's switches.
+fn apply_flip(op: &mut RenameOp, flip: Flip) {
+    match (op, flip) {
+        (RenameOp::FindReplace { case_sensitive, .. }, Flip::MatchCase)
+        | (RenameOp::Regex { case_sensitive, .. }, Flip::MatchCase) => {
+            *case_sensitive = !*case_sensitive;
+        }
+        (RenameOp::FindReplace { replace_all, .. }, Flip::EveryOccurrence) => {
+            *replace_all = !*replace_all;
+        }
+        _ => {}
+    }
+}
+
+/// The text boxes a rule's form has, in order: where Tab goes next.
+fn rule_slots(op: &RenameOp) -> Vec<Slot> {
+    rule_controls(op)
+        .iter()
+        .filter_map(|c| match c {
+            Control::Field { slot, .. } => Some(*slot),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The kinds of rule the Add Rule menu offers, in its order, named as each
+/// rule names itself in the pipeline (`RenameOp::label`) -- which
+/// `the_add_rule_menu_adds_every_kind` holds them to.
+const RULE_KINDS: [&str; 10] = [
+    "Find & Replace",
+    "Insert Text",
+    "Remove Characters",
+    "Change Case",
+    "Add Numbering",
+    "Date Stamp",
+    "Regex Replace",
+    "Trim",
+    "Extension",
+    "Template",
+];
+
+/// A new rule of kind `index` into [`RULE_KINDS`], with values that change
+/// nothing until the user fills them in -- except the kinds that need nothing
+/// filled in, which start doing their one obvious thing.
+fn new_rule(index: usize) -> Option<RenameOp> {
+    Some(match index {
+        0 => RenameOp::FindReplace {
+            find: String::new(),
+            replace: String::new(),
+            case_sensitive: false,
+            replace_all: true,
+        },
+        1 => RenameOp::Insert {
+            text: String::new(),
+            position: InsertPosition::Start,
+        },
+        2 => RenameOp::Remove { from: 0, count: 0 },
+        3 => RenameOp::ChangeCase(CaseMode::Lower),
+        4 => RenameOp::Number {
+            start: 1,
+            step: 1,
+            padding: 3,
+            position: InsertPosition::End,
+            separator: String::from("_"),
+        },
+        5 => RenameOp::DateStamp {
+            format: DateFormat::YmdHyphen,
+            position: InsertPosition::Start,
+            separator: String::from("_"),
+        },
+        6 => RenameOp::Regex {
+            pattern: String::new(),
+            replacement: String::new(),
+            case_sensitive: true,
+        },
+        7 => RenameOp::Trim {
+            chars: String::new(),
+            mode: TrimMode::Both,
+        },
+        8 => RenameOp::Extension(ExtensionOp::Lower),
+        9 => RenameOp::Template {
+            template: String::from("{original}"),
+        },
+        _ => return None,
+    })
+}
+
+// ============================================================================
+// Pointer targets and layout
+// ============================================================================
+
+/// Everything in the window a pointer can press, as the renderer records it.
+///
+/// The renamer drew a toolbar of five buttons, three sidebar tabs, a rule
+/// list, a checkbox on every file and a conflicts filter, and handled no
+/// pointer event (`known-issues.md` →
+/// `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`). Every
+/// variant is recorded by the walk that paints it ([`RenamerApp::frame`]), so
+/// a control and the place a press finds it cannot disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    OpenFolder,
+    AddRule,
+    Rename,
+    Undo,
+    Redo,
+    ClearRules,
+    /// A sidebar tab.
+    Panel(SidebarPanel),
+    /// A rule in the pipeline, which selects it for editing.
+    Rule(usize),
+    RuleUp(usize),
+    RuleDown(usize),
+    RuleRemove(usize),
+    /// A box in the selected rule's editor.
+    Field(Slot),
+    /// An option in one of its choice rows.
+    Choice(Pick),
+    /// One of its switches.
+    Switch(Flip),
+    /// The operations panel itself, which scrolls under the wheel.
+    Ops,
+    SearchBox,
+    ExtensionBox,
+    ConflictsOnly,
+    /// The file list itself, which scrolls under the wheel.
+    Files,
+    /// A file's row, by its index in `files`: moves the cursor there.
+    File(usize),
+    /// A file's checkbox: ticks or unticks it.
+    Check(usize),
+    /// The shortcut card; a press anywhere puts it away.
+    HelpCard,
+}
+
+/// Height of the bar above the file list holding its filters.
+const FILTER_BAR_H: f32 = 32.0;
+/// Height of the sidebar's tabs.
+const TABS_H: f32 = 28.0;
+/// Height of the file list's column headings.
+const FILE_HEADER_H: f32 = 24.0;
+/// Height of one rule in the pipeline list.
+const RULE_ROW_H: f32 = 30.0;
+/// Distance from one rule's top to the next.
+const RULE_PITCH: f32 = 34.0;
+/// Height of a text box in the rule editor.
+const FIELD_H: f32 = 24.0;
+/// Height of a choice chip.
+const CHIP_H: f32 = 22.0;
+
+/// Where the window's regions go at a given size.
+///
+/// The renamer laid itself out from the constants it asks to open at, and
+/// ignored the size it was given: a maximised window drew a 1100-by-750 island
+/// in its corner, and a smaller one cut its own file list off. One function
+/// for the drawing and for everything that needs a region between frames.
+#[derive(Debug, Clone, Copy)]
+struct Layout {
+    toolbar: Rect,
+    tabs: Rect,
+    panel: Rect,
+    filters: Rect,
+    table: Rect,
+    status: Rect,
+}
+
+impl Layout {
+    fn of(width: f32, height: f32) -> Self {
+        let body_y = TOOLBAR_HEIGHT;
+        let body_h = (height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT).max(0.0);
+        let side_w = SIDEBAR_WIDTH.min(width);
+        let list_x = side_w;
+        let list_w = (width - side_w).max(0.0);
+        Self {
+            toolbar: Rect::new(0.0, 0.0, width, TOOLBAR_HEIGHT),
+            tabs: Rect::new(0.0, body_y, side_w, TABS_H),
+            panel: Rect::new(
+                0.0,
+                body_y + TABS_H + 4.0,
+                side_w,
+                (body_h - TABS_H - 4.0).max(0.0),
+            ),
+            filters: Rect::new(list_x, body_y, list_w, FILTER_BAR_H),
+            table: Rect::new(
+                list_x,
+                body_y + FILTER_BAR_H,
+                list_w,
+                (body_h - FILTER_BAR_H).max(0.0),
+            ),
+            status: Rect::new(0.0, height - STATUS_BAR_HEIGHT, width, STATUS_BAR_HEIGHT),
+        }
+    }
+
+    /// How many whole file rows the list shows.
+    fn file_rows(self) -> usize {
+        ((self.table.h - FILE_HEADER_H) / LINE_HEIGHT).max(0.0) as usize
+    }
+}
+
+/// The toolbar's buttons, left to right, with each one's key.
+const TOOLBAR_BUTTONS: [(&str, Target); 6] = [
+    ("Open Folder…", Target::OpenFolder),
+    ("Add Rule ▾", Target::AddRule),
+    ("Rename", Target::Rename),
+    ("Undo", Target::Undo),
+    ("Redo", Target::Redo),
+    ("Clear Rules", Target::ClearRules),
+];
+
+impl Target {
+    /// What pressing this does, with its key, for the status bar while the
+    /// pointer is on it.
+    fn tip(self) -> Option<&'static str> {
+        Some(match self {
+            Self::OpenFolder => "Choose the folder whose files to rename (Ctrl+O)",
+            Self::AddRule => "Add a rule of any kind (R)",
+            Self::Rename => "Rename the ticked files (Enter)",
+            Self::Undo => "Put the last rename back (Ctrl+Z)",
+            Self::Redo => "Do it again (Ctrl+Y)",
+            Self::ClearRules => "Remove every rule (Ctrl+Backspace)",
+            Self::RuleUp(_) => "Move this rule earlier (PageUp)",
+            Self::RuleDown(_) => "Move this rule later (PageDown)",
+            Self::RuleRemove(_) => "Remove this rule (Delete)",
+            Self::SearchBox => "Show only names containing this (/)",
+            Self::ExtensionBox => "Show only this extension (Ctrl+E)",
+            Self::ConflictsOnly => "Show only the names that would collide (C)",
+            Self::Check(_) => "Tick or untick this file (Space)",
+            _ => return None,
+        })
+    }
+}
+
+/// Where the keyboard is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    /// The file list and the shortcuts.
+    List,
+    /// A box in the selected rule's editor.
+    Field(Slot),
+    /// The search box above the file list.
+    Search,
+    /// The extension filter above the file list.
+    Extension,
+}
+
+/// Apply a keystroke to a text box, as every text box in the tree does.
+/// Returns whether the key was an editing key.
+fn edit_text(input: &mut TextInput, key: &KeyEvent) -> bool {
+    let shift = key.modifiers.shift;
+    let ctrl = key.modifiers.ctrl;
+    match key.key {
+        Key::Left => input.move_cursor_left(shift, NORMAL_TEXT, FontWeightHint::Regular),
+        Key::Right => input.move_cursor_right(shift, NORMAL_TEXT, FontWeightHint::Regular),
+        Key::Home => input.move_home(shift),
+        Key::End => input.move_end(shift),
+        Key::Backspace => input.backspace(),
+        Key::Delete => input.delete(),
+        Key::A if ctrl => input.select_all(),
+        Key::C if ctrl => input.copy(),
+        Key::X if ctrl => input.cut(),
+        Key::V if ctrl => input.paste(),
+        _ => {
+            if key.text.is_empty() || ctrl {
+                return false;
+            }
+            for ch in key.text.chars() {
+                input.insert_char(ch);
+            }
+        }
+    }
+    true
+}
+
+impl RenamerApp {
+    /// Draw the window at `width` by `height`, recording every control where
+    /// it is drawn. Both the renderer and the hit test.
+    fn frame(&self, width: f32, height: f32) -> Frame<Target> {
+        let mut f = Frame::new(width, height);
+        let l = Layout::of(width, height);
+        f.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
+            color: self.palette.base,
+            corner_radii: CornerRadii::ZERO,
+        });
+        self.draw_toolbar(&mut f, l.toolbar);
+        self.draw_sidebar(&mut f, &l);
+        self.draw_file_list(&mut f, &l);
+        self.draw_status_bar(&mut f, l.status);
+        if let Some(menu) = &self.rule_menu {
+            f.extend(menu.render(&self.palette));
+        }
+        // And the shortcut list over everything, because it is the one thing a
+        // reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (width, height),
+                TOOLBAR_HEIGHT,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+            f.hit(Target::HelpCard, Rect::new(0.0, 0.0, width, height));
+        }
+        f
+    }
+
+    /// Named `render_commands` and not `render`: at equal arity an inherent
+    /// method silently wins method lookup over `oswindow::app::App::render`, so
+    /// an app that keeps the name draws nothing and reports no error.
+    ///
+    /// **Tests only**: the window's `render` takes the frame itself, because it
+    /// keeps the frame's boxes for the pointer as well as its commands.
+    #[cfg(test)]
+    fn render_commands(&self) -> Vec<RenderCommand> {
+        self.frame(self.last_width, self.last_height)
+            .into_tree()
+            .commands
+    }
+
+    /// A small button, lit while the pointer is on it.
+    fn draw_button(
+        &self,
+        f: &mut Frame<Target>,
+        rect: Rect,
+        label: &str,
+        color: Color,
+        target: Target,
+    ) {
+        let surface = if self.hover == Some(target) {
+            Surface::Panel
+        } else {
+            Surface::Card
+        };
+        self.palette
+            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, surface);
+        f.push(RenderCommand::Text {
+            x: rect.x + 8.0,
+            y: rect.y + (rect.h - SMALL_TEXT) / 2.0 - 1.0,
+            text: label.into(),
+            font_size: SMALL_TEXT,
+            color,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some((rect.w - 12.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        f.hit(target, rect);
+    }
+
+    fn draw_toolbar(&self, f: &mut Frame<Target>, bar: Rect) {
+        self.palette.push_surface(
+            f,
+            bar.x,
+            bar.y,
+            bar.w,
+            bar.h,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
+        f.push(RenderCommand::Text {
+            x: PADDING,
+            y: 10.0,
+            text: "Batch File Renamer".into(),
+            font_size: TITLE_TEXT,
+            color: self.palette.text,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(200.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        // Inked: these are button *labels*, so each takes the 4.5:1 floor.
+        let mut bx = 220.0;
+        for (label, target) in TOOLBAR_BUTTONS {
+            let color = self.palette.ink(match target {
+                Target::Rename => self.palette.green,
+                Target::Undo | Target::Redo => self.palette.peach,
+                Target::ClearRules => self.palette.red,
+                _ => self.palette.blue,
+            });
+            let bw = text::padded_width(label, 10.0, 12.0, FontWeightHint::Bold);
+            self.draw_button(
+                f,
+                Rect::new(bx, 6.0, bw, BUTTON_HEIGHT),
+                label,
+                color,
+                target,
+            );
+            bx += bw + 6.0;
+        }
+
+        let count_text = format!(
+            "{} files | {} to rename | {} conflicts",
+            self.files.len(),
+            self.rename_count(),
+            self.conflict_count()
+        );
+        let count_x = (bar.w - 300.0).max(bx + 8.0);
+        f.push(RenderCommand::Text {
+            x: count_x,
+            y: 14.0,
+            text: count_text,
+            font_size: SMALL_TEXT,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((bar.w - count_x - PADDING).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    fn draw_sidebar(&self, f: &mut Frame<Target>, l: &Layout) {
+        let side = Rect::new(0.0, l.tabs.y, l.tabs.w, l.status.y - l.tabs.y);
+        f.push(RenderCommand::FillRect {
+            x: side.x,
+            y: side.y,
+            width: side.w,
+            height: side.h,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
+        let tabs = [
+            ("Operations", SidebarPanel::Operations),
+            ("Preview", SidebarPanel::Preview),
+            ("History", SidebarPanel::History),
+        ];
+        let tab_w = l.tabs.w / 3.0;
+        for (i, (label, panel)) in tabs.into_iter().enumerate() {
+            let tab = Rect::new(l.tabs.x + i as f32 * tab_w, l.tabs.y, tab_w, TABS_H);
+            let is_active = self.sidebar_panel == panel;
+            f.push(RenderCommand::FillRect {
+                x: tab.x,
+                y: tab.y,
+                width: tab.w,
+                height: tab.h,
+                color: if is_active || self.hover == Some(Target::Panel(panel)) {
+                    self.palette.surface0
+                } else {
+                    self.palette.mantle
+                },
+                corner_radii: CornerRadii::ZERO,
+            });
+            if is_active {
+                f.push(RenderCommand::FillRect {
+                    x: tab.x,
+                    y: tab.y,
+                    width: tab.w,
+                    height: 2.0,
+                    color: self.palette.blue,
+                    corner_radii: CornerRadii::ZERO,
+                });
+            }
+            f.push(RenderCommand::Text {
+                x: tab.x + 6.0,
+                y: tab.y + 8.0,
+                text: label.into(),
+                font_size: SMALL_TEXT,
+                color: if is_active {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(tab.w - 12.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            f.hit(Target::Panel(panel), tab);
+        }
+
+        let (x, y) = (l.panel.x, l.panel.y);
+        match self.sidebar_panel {
+            SidebarPanel::Operations => self.draw_operations_panel(f, l.panel),
+            SidebarPanel::Preview => f.draw_with(|cmds| self.render_preview_panel(cmds, x, y)),
+            SidebarPanel::History => f.draw_with(|cmds| self.render_history_panel(cmds, x, y)),
+        }
+    }
+
+    /// The rule pipeline, the Add Rule button, and -- for the selected rule --
+    /// its editor; scrolled by `ops_scroll` and clipped to the panel.
+    ///
+    /// The editor is the control the renamer never had. Find and replace,
+    /// insert, remove, regex, date stamp, template and four of the five
+    /// extension rules were implemented and tested, and none could be added:
+    /// they need a string typed or a choice made, and the app drew no text box
+    /// and no chooser anywhere (`TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING`).
+    fn draw_operations_panel(&self, f: &mut Frame<Target>, panel: Rect) {
+        f.hit(Target::Ops, panel);
+        f.clip(panel);
+        self.draw_operations_content(f, panel, self.ops_scroll);
+        f.unclip();
+    }
+
+    /// The operations panel's content from `panel`'s top, scrolled by
+    /// `scroll`. Returns the `y` just below the last thing drawn, which is how
+    /// [`ops_content_height`](Self::ops_content_height) measures it.
+    fn draw_operations_content(&self, f: &mut Frame<Target>, panel: Rect, scroll: f32) -> f32 {
+        let x = panel.x;
+        let w = panel.w;
+        let mut y = panel.y - scroll;
+
+        if self.operations.is_empty() {
+            for (i, line) in [
+                "No rules yet.",
+                "Add Rule, or R, adds any kind;",
+                "L U T S K W E X N add the common ones.",
+            ]
+            .iter()
+            .enumerate()
+            {
+                f.push(RenderCommand::Text {
+                    x: x + PADDING,
+                    y: y + PADDING + i as f32 * 16.0,
+                    text: (*line).into(),
+                    font_size: SMALL_TEXT,
+                    color: self.palette.subtext0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(w - PADDING * 2.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+            y += PADDING + 3.0 * 16.0 + 8.0;
+        }
+
+        for (i, op) in self.operations.iter().enumerate() {
+            let row = Rect::new(x + 4.0, y, w - 8.0, RULE_ROW_H);
+            let is_selected = i == self.selected_op;
+            f.push(RenderCommand::FillRect {
+                x: row.x,
+                y: row.y,
+                width: row.w,
+                height: row.h,
+                color: if is_selected || self.hover == Some(Target::Rule(i)) {
+                    self.palette.surface0
+                } else {
+                    self.palette.mantle
+                },
+                corner_radii: CornerRadii::all(4.0),
+            });
+            f.push(RenderCommand::FillRect {
+                x: x + 8.0,
+                y: y + 6.0,
+                width: 4.0,
+                height: 18.0,
+                color: op.color(&self.palette),
+                corner_radii: CornerRadii::all(2.0),
+            });
+            let buttons_w = 3.0 * 22.0;
+            f.push(RenderCommand::Text {
+                x: x + 18.0,
+                y: y + 4.0,
+                text: format!("{}. {}", i.saturating_add(1), op.label()),
+                font_size: SMALL_TEXT,
+                color: if is_selected {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
+                font_weight: FontWeightHint::Bold,
+                max_width: Some((w - 40.0 - buttons_w).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+            let detail = op_detail(op);
+            if !detail.is_empty() {
+                f.push(RenderCommand::Text {
+                    x: x + 18.0,
+                    y: y + 17.0,
+                    text: detail,
+                    font_size: OP_DETAIL_SIZE,
+                    color: self.palette.subtext0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some((OP_DETAIL_WIDTH - buttons_w).max(0.0)),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+            f.hit(Target::Rule(i), row);
+            // The row's three buttons, recorded after the row so they win.
+            let mut bx = row.right() - buttons_w;
+            for (glyph, target) in [
+                ("↑", Target::RuleUp(i)),
+                ("↓", Target::RuleDown(i)),
+                ("×", Target::RuleRemove(i)),
+            ] {
+                let b = Rect::new(bx + 2.0, y + 5.0, 20.0, 20.0);
+                if self.hover == Some(target) {
+                    f.push(RenderCommand::FillRect {
+                        x: b.x,
+                        y: b.y,
+                        width: b.w,
+                        height: b.h,
+                        color: self.palette.surface1,
+                        corner_radii: CornerRadii::all(4.0),
+                    });
+                }
+                f.push(RenderCommand::Text {
+                    x: b.x + 5.0,
+                    y: b.y + 3.0,
+                    text: glyph.into(),
+                    font_size: SMALL_TEXT,
+                    color: self.palette.subtext1,
+                    font_weight: FontWeightHint::Bold,
+                    max_width: None,
+                    overflow: TextOverflow::Clip,
+                });
+                f.hit(target, b);
+                bx += 22.0;
+            }
+            y += RULE_PITCH;
+        }
+
+        self.draw_button(
+            f,
+            Rect::new(x + 4.0, y, w - 8.0, BUTTON_HEIGHT),
+            "Add Rule ▾  (R)",
+            self.palette.ink(self.palette.blue),
+            Target::AddRule,
+        );
+        y += BUTTON_HEIGHT + 10.0;
+
+        if let Some(op) = self.operations.get(self.selected_op) {
+            y = self.draw_rule_editor(f, op, x, y, w);
+        }
+        y
+    }
+
+    /// The selected rule's form. Returns the `y` below it.
+    fn draw_rule_editor(
+        &self,
+        f: &mut Frame<Target>,
+        op: &RenameOp,
+        x: f32,
+        mut y: f32,
+        w: f32,
+    ) -> f32 {
+        f.push(RenderCommand::Text {
+            x: x + PADDING,
+            y,
+            text: format!(
+                "Rule {}: {}",
+                self.selected_op.saturating_add(1),
+                op.label()
+            ),
+            font_size: NORMAL_TEXT,
+            color: self.palette.text,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(w - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        y += 22.0;
+        let inner_x = x + PADDING;
+        let inner_w = w - PADDING * 2.0;
+        for control in rule_controls(op) {
+            match control {
+                Control::Field { slot, label } => {
+                    self.field_label(f, inner_x, y, inner_w, label);
+                    y += 16.0;
+                    let rect = Rect::new(inner_x, y, inner_w, FIELD_H);
+                    let focused = self.focus == Focus::Field(slot);
+                    let text = if focused {
+                        self.draft.text().to_string()
+                    } else {
+                        field_text(op, slot)
+                    };
+                    let invalid = focused && self.draft_invalid;
+                    self.draw_text_box(f, rect, &text, focused, invalid, Target::Field(slot));
+                    y += FIELD_H + 8.0;
+                }
+                Control::Choice {
+                    label,
+                    options,
+                    chosen,
+                } => {
+                    self.field_label(f, inner_x, y, inner_w, label);
+                    y += 16.0;
+                    let mut cx = inner_x;
+                    for (text, pick) in options {
+                        let cw = text::padded_width(text, 8.0, SMALL_TEXT, FontWeightHint::Regular);
+                        if cx + cw > inner_x + inner_w && cx > inner_x {
+                            cx = inner_x;
+                            y += CHIP_H + 4.0;
+                        }
+                        let chip = Rect::new(cx, y, cw, CHIP_H);
+                        let lit = chosen == Some(pick);
+                        let target = Target::Choice(pick);
+                        let surface = if lit || self.hover == Some(target) {
+                            Surface::Panel
+                        } else {
+                            Surface::Card
+                        };
+                        self.palette
+                            .push_surface(f, chip.x, chip.y, chip.w, chip.h, 4.0, surface);
+                        if lit {
+                            f.push(RenderCommand::StrokeRect {
+                                x: chip.x,
+                                y: chip.y,
+                                width: chip.w,
+                                height: chip.h,
+                                color: self.palette.blue,
+                                line_width: 1.0,
+                                corner_radii: CornerRadii::all(4.0),
+                            });
+                        }
+                        f.push(RenderCommand::Text {
+                            x: chip.x + 8.0,
+                            y: chip.y + 4.0,
+                            text: text.into(),
+                            font_size: SMALL_TEXT,
+                            color: if lit {
+                                self.palette.ink(self.palette.blue)
+                            } else {
+                                self.palette.subtext1
+                            },
+                            font_weight: FontWeightHint::Regular,
+                            max_width: Some(chip.w - 12.0),
+                            overflow: TextOverflow::Ellipsis,
+                        });
+                        f.hit(target, chip);
+                        cx += cw + 4.0;
+                    }
+                    y += CHIP_H + 10.0;
+                }
+                Control::Switch { label, on, flip } => {
+                    let row = Rect::new(inner_x, y, inner_w, 22.0);
+                    f.push(RenderCommand::FillRect {
+                        x: row.x,
+                        y: row.y + 4.0,
+                        width: 14.0,
+                        height: 14.0,
+                        color: if on {
+                            self.palette.green
+                        } else {
+                            self.palette.surface2
+                        },
+                        corner_radii: CornerRadii::all(2.0),
+                    });
+                    if on {
+                        f.push(RenderCommand::Text {
+                            x: row.x + 2.0,
+                            y: row.y + 4.0,
+                            text: "✓".into(),
+                            font_size: 10.0,
+                            color: self.palette.crust,
+                            font_weight: FontWeightHint::Bold,
+                            max_width: Some(12.0),
+                            overflow: TextOverflow::Ellipsis,
+                        });
+                    }
+                    f.push(RenderCommand::Text {
+                        x: row.x + 22.0,
+                        y: row.y + 4.0,
+                        text: label.into(),
+                        font_size: SMALL_TEXT,
+                        color: self.palette.subtext1,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(row.w - 22.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                    f.hit(Target::Switch(flip), row);
+                    y += 26.0;
+                }
+                Control::Note { text, error } => {
+                    f.push(RenderCommand::Text {
+                        x: inner_x,
+                        y,
+                        text,
+                        font_size: SMALL_TEXT,
+                        color: if error {
+                            self.palette.ink(self.palette.red)
+                        } else {
+                            self.palette.subtext0
+                        },
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(inner_w),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                    y += 18.0;
+                }
+            }
+        }
+        y
+    }
+
+    fn field_label(&self, f: &mut Frame<Target>, x: f32, y: f32, w: f32, label: &str) {
+        f.push(RenderCommand::Text {
+            x,
+            y,
+            text: label.into(),
+            font_size: SMALL_TEXT,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(w),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    /// A text box: its text, a caret and selection while it has the keyboard
+    /// (the toolkit's `textedit`, so it scrolls the same as every other box),
+    /// and a red rule under it while what is typed is not a value the rule
+    /// can take.
+    fn draw_text_box(
+        &self,
+        f: &mut Frame<Target>,
+        rect: Rect,
+        text: &str,
+        focused: bool,
+        invalid: bool,
+        target: Target,
+    ) {
+        self.palette
+            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
+        if focused || invalid {
+            f.push(RenderCommand::FillRect {
+                x: rect.x,
+                y: rect.bottom() - 2.0,
+                width: rect.w,
+                height: 2.0,
+                color: if invalid {
+                    self.palette.red
+                } else {
+                    self.palette.blue
+                },
+                corner_radii: CornerRadii::ZERO,
+            });
+        }
+        let mut tree = RenderTree::new();
+        let (cursor, anchor) = if focused {
+            (self.draft.cursor(), self.draft.selection_anchor())
+        } else {
+            // Unfocused, the box shows the start of what it holds.
+            (guitk::text::TextCursor::default(), None)
+        };
+        guitk::textedit::draw(
+            &mut tree,
+            &guitk::textedit::SingleLine {
+                text,
+                cursor,
+                selection_anchor: anchor,
+                focused,
+                x: rect.x + 6.0,
+                y: rect.y + 5.0,
+                width: rect.w - 12.0,
+                line_height: 16.0,
+                font_size: NORMAL_TEXT,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.blue,
+                selection_fg: self.palette.crust,
+                caret_width: 1.5,
+            },
+        );
+        f.extend(tree.commands);
+        f.hit(target, rect);
+    }
+
+    /// How tall the operations panel's content is, for the wheel's limit:
+    /// drawn once, unscrolled, into a frame nobody shows.
+    fn ops_content_height(&self, panel: Rect) -> f32 {
+        let mut f = Frame::new(panel.w, panel.h);
+        let bottom = self.draw_operations_content(&mut f, panel, 0.0);
+        bottom - panel.y + 12.0
+    }
+
+    /// The file list: filter bar, headings, and the rows from `file_scroll`.
+    fn draw_file_list(&self, f: &mut Frame<Target>, l: &Layout) {
+        // Filters: search, extension, conflicts only. The extension filter
+        // was a field `filtered_files` read and nothing wrote.
+        let bar = l.filters;
+        f.push(RenderCommand::FillRect {
+            x: bar.x,
+            y: bar.y,
+            width: bar.w,
+            height: bar.h,
+            color: self.palette.mantle,
+            corner_radii: CornerRadii::ZERO,
+        });
+        let search = Rect::new(
+            bar.x + 8.0,
+            bar.y + 4.0,
+            240.0_f32.min(bar.w * 0.4),
+            FIELD_H,
+        );
+        let search_text = if self.focus == Focus::Search {
+            self.draft.text().to_string()
+        } else if self.search_text.is_empty() {
+            String::new()
+        } else {
+            self.search_text.clone()
+        };
+        self.draw_text_box(
+            f,
+            search,
+            &search_text,
+            self.focus == Focus::Search,
+            false,
+            Target::SearchBox,
+        );
+        if search_text.is_empty() && self.focus != Focus::Search {
+            f.push(RenderCommand::Text {
+                x: search.x + 6.0,
+                y: search.y + 5.0,
+                text: "Search names  /".into(),
+                font_size: SMALL_TEXT,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(search.w - 12.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        let ext = Rect::new(search.right() + 8.0, bar.y + 4.0, 110.0, FIELD_H);
+        let ext_text = if self.focus == Focus::Extension {
+            self.draft.text().to_string()
+        } else {
+            self.filter_extension.clone()
+        };
+        self.draw_text_box(
+            f,
+            ext,
+            &ext_text,
+            self.focus == Focus::Extension,
+            false,
+            Target::ExtensionBox,
+        );
+        if ext_text.is_empty() && self.focus != Focus::Extension {
+            f.push(RenderCommand::Text {
+                x: ext.x + 6.0,
+                y: ext.y + 5.0,
+                text: "Extension".into(),
+                font_size: SMALL_TEXT,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(ext.w - 12.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        let chip_label = "Conflicts only  C";
+        let chip_w = text::padded_width(chip_label, 8.0, SMALL_TEXT, FontWeightHint::Regular);
+        let chip = Rect::new(ext.right() + 8.0, bar.y + 5.0, chip_w, CHIP_H);
+        let surface = if self.filter_conflicts || self.hover == Some(Target::ConflictsOnly) {
+            Surface::Panel
+        } else {
+            Surface::Card
+        };
+        self.palette
+            .push_surface(f, chip.x, chip.y, chip.w, chip.h, 4.0, surface);
+        if self.filter_conflicts {
+            f.push(RenderCommand::StrokeRect {
+                x: chip.x,
+                y: chip.y,
+                width: chip.w,
+                height: chip.h,
+                color: self.palette.red,
+                line_width: 1.0,
+                corner_radii: CornerRadii::all(4.0),
+            });
+        }
+        f.push(RenderCommand::Text {
+            x: chip.x + 8.0,
+            y: chip.y + 4.0,
+            text: chip_label.into(),
+            font_size: SMALL_TEXT,
+            color: if self.filter_conflicts {
+                self.palette.ink(self.palette.red)
+            } else {
+                self.palette.subtext1
+            },
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(chip.w - 12.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        f.hit(Target::ConflictsOnly, chip);
+
+        let table_rect = l.table;
+        f.hit(Target::Files, table_rect);
+        let (x, y, w) = (table_rect.x, table_rect.y, table_rect.w);
+        f.push(RenderCommand::FillRect {
+            x,
+            y,
+            width: w,
+            height: FILE_HEADER_H,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
         let table = Table::new(FILE_COLUMNS, x);
-        table.header(cmds, y + 5.0, self.palette.subtext1, SMALL_TEXT);
+        f.draw_with(|cmds| table.header(cmds, y + 5.0, self.palette.subtext1, SMALL_TEXT));
 
-        // File rows
         let filtered = self.filtered_files();
-        let visible_rows = ((h - 24.0) / LINE_HEIGHT) as usize;
-        let start = (self.scroll_offset / LINE_HEIGHT) as usize;
-
-        let mut ry = y + 24.0;
-        for (display_idx, (file_idx, file)) in
-            filtered.iter().enumerate().skip(start).take(visible_rows)
+        let visible_rows = l.file_rows();
+        let mut ry = y + FILE_HEADER_H;
+        for (display_idx, (file_idx, file)) in filtered
+            .iter()
+            .enumerate()
+            .skip(self.file_scroll)
+            .take(visible_rows)
         {
+            let row = Rect::new(x, ry, w, LINE_HEIGHT);
             let is_selected = *file_idx == self.selected_file;
-            let bg = if is_selected {
+            let bg = if is_selected || self.hover == Some(Target::File(*file_idx)) {
                 self.palette.surface0
             } else if display_idx % 2 == 0 {
                 self.palette.base
             } else {
-                Color::from_hex(0x1F1F30) // Slightly lighter than base
+                self.palette.mantle
             };
-
-            cmds.push(RenderCommand::FillRect {
+            f.push(RenderCommand::FillRect {
                 x,
                 y: ry,
                 width: w,
@@ -2295,26 +3565,28 @@ impl RenamerApp {
                 color: bg,
                 corner_radii: CornerRadii::ZERO,
             });
+            f.hit(Target::File(*file_idx), row);
 
             // The checkbox is a graphic, not a text cell, so it is placed
-            // against its column's left edge by hand.
+            // against its column's left edge by hand -- and it is its own
+            // target, recorded after the row so a press on it ticks rather
+            // than only moving the cursor.
             let cx = table.left(COL_CHECK);
-
-            let check_color = if file.selected {
-                self.palette.green
-            } else {
-                self.palette.surface2
-            };
-            cmds.push(RenderCommand::FillRect {
+            let check = Rect::new(cx - 3.0, ry + 1.0, 20.0, LINE_HEIGHT - 2.0);
+            f.push(RenderCommand::FillRect {
                 x: cx,
                 y: ry + 4.0,
                 width: 14.0,
                 height: 14.0,
-                color: check_color,
+                color: if file.selected {
+                    self.palette.green
+                } else {
+                    self.palette.surface2
+                },
                 corner_radii: CornerRadii::all(2.0),
             });
             if file.selected {
-                cmds.push(RenderCommand::Text {
+                f.push(RenderCommand::Text {
                     x: cx + 2.0,
                     y: ry + 4.0,
                     text: "✓".into(),
@@ -2325,41 +3597,9 @@ impl RenamerApp {
                     overflow: TextOverflow::Ellipsis,
                 });
             }
+            f.hit(Target::Check(*file_idx), check);
 
             let changed = file.original_name != file.new_name;
-
-            // Both names are cut at the *end* (`Fit::End`). This list is a
-            // rename preview, and its whole job is to let the user check what
-            // is about to happen to their files before committing. A name cut
-            // the usual way loses the extension and any numeric suffix --
-            // exactly the parts a rename usually changes -- so a batch of long
-            // names would all read identically and the user would be
-            // confirming a rename they cannot actually see.
-            table.cell(
-                cmds,
-                COL_ORIGINAL,
-                ry + 4.0,
-                &file.original_name,
-                self.palette.text,
-                SMALL_TEXT,
-                Fit::End,
-            );
-
-            table.cell_weighted(
-                cmds,
-                COL_ARROW,
-                ry + 4.0,
-                if changed { "→" } else { "=" },
-                if changed {
-                    self.palette.green
-                } else {
-                    self.palette.overlay0
-                },
-                SMALL_TEXT,
-                Fit::Start,
-                FontWeightHint::Bold,
-            );
-
             let new_color = if file.conflict {
                 self.palette.red
             } else if changed {
@@ -2367,31 +3607,6 @@ impl RenamerApp {
             } else {
                 self.palette.subtext0
             };
-            table.cell_weighted(
-                cmds,
-                COL_NEW,
-                ry + 4.0,
-                &file.new_name,
-                new_color,
-                SMALL_TEXT,
-                Fit::End,
-                if changed {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-            );
-
-            table.cell(
-                cmds,
-                COL_SIZE,
-                ry + 4.0,
-                &format_size(file.size),
-                self.palette.subtext0,
-                SMALL_TEXT,
-                Fit::Start,
-            );
-
             let status = if file.conflict {
                 ("Conflict", self.palette.red)
             } else if changed {
@@ -2399,37 +3614,88 @@ impl RenamerApp {
             } else {
                 ("", self.palette.overlay0)
             };
-            if !status.0.is_empty() {
+            f.draw_with(|cmds| {
+                // Both names are cut at the *end* (`Fit::End`). This list is a
+                // rename preview, and its whole job is to let the user check
+                // what is about to happen to their files before committing. A
+                // name cut the usual way loses the extension and any numeric
+                // suffix -- exactly the parts a rename usually changes.
+                table.cell(
+                    cmds,
+                    COL_ORIGINAL,
+                    ry + 4.0,
+                    &file.original_name,
+                    self.palette.text,
+                    SMALL_TEXT,
+                    Fit::End,
+                );
                 table.cell_weighted(
                     cmds,
-                    COL_STATUS,
+                    COL_ARROW,
                     ry + 4.0,
-                    status.0,
-                    status.1,
+                    if changed { "→" } else { "=" },
+                    if changed {
+                        self.palette.green
+                    } else {
+                        self.palette.overlay0
+                    },
                     SMALL_TEXT,
                     Fit::Start,
                     FontWeightHint::Bold,
                 );
-            }
-
+                table.cell_weighted(
+                    cmds,
+                    COL_NEW,
+                    ry + 4.0,
+                    &file.new_name,
+                    new_color,
+                    SMALL_TEXT,
+                    Fit::End,
+                    if changed {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                );
+                table.cell(
+                    cmds,
+                    COL_SIZE,
+                    ry + 4.0,
+                    &format_size(file.size),
+                    self.palette.subtext0,
+                    SMALL_TEXT,
+                    Fit::Start,
+                );
+                if !status.0.is_empty() {
+                    table.cell_weighted(
+                        cmds,
+                        COL_STATUS,
+                        ry + 4.0,
+                        status.0,
+                        status.1,
+                        SMALL_TEXT,
+                        Fit::Start,
+                        FontWeightHint::Bold,
+                    );
+                }
+            });
             ry += LINE_HEIGHT;
         }
     }
 
-    fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>) {
-        let y = WINDOW_HEIGHT - STATUS_BAR_HEIGHT;
-
+    fn draw_status_bar(&self, f: &mut Frame<Target>, bar: Rect) {
         self.palette.push_surface(
-            cmds,
-            0.0,
-            y,
-            WINDOW_WIDTH,
-            STATUS_BAR_HEIGHT,
+            f,
+            bar.x,
+            bar.y,
+            bar.w,
+            bar.h,
             0.0,
             Surface::Strip(Edge::Top),
         );
-
-        let msg = if self.status_message.is_empty() {
+        let msg = if let Some(tip) = self.hover.and_then(Target::tip) {
+            tip.to_string()
+        } else if self.status_message.is_empty() {
             format!(
                 "Ready | {} files | {} selected | {} operations",
                 self.files.len(),
@@ -2439,17 +3705,478 @@ impl RenamerApp {
         } else {
             self.status_message.clone()
         };
-
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: PADDING,
-            y: y + 5.0,
+            y: bar.y + 5.0,
             text: msg,
             font_size: SMALL_TEXT,
             color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(WINDOW_WIDTH - PADDING * 2.0),
+            max_width: Some((bar.w - PADDING * 2.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
+    }
+}
+
+/// A rule's one-line summary under its name in the pipeline list.
+///
+/// The user-typed halves are elided against the row's real width; the row is
+/// a fixed height, so wrapping is not an option and a silent cut would leave
+/// two rules looking alike.
+fn op_detail(op: &RenameOp) -> String {
+    match op {
+        RenameOp::FindReplace { find, replace, .. } => {
+            find_replace_detail(find, replace, OP_DETAIL_WIDTH)
+        }
+        RenameOp::Insert { text, position } => {
+            let where_ = match position {
+                InsertPosition::Start => "start".to_string(),
+                InsertPosition::End => "end".to_string(),
+                InsertPosition::At(n) => format!("pos {n}"),
+            };
+            framed_detail("\"", text, &format!("\" at {where_}"), OP_DETAIL_WIDTH)
+        }
+        RenameOp::Remove { from, count } => format!("{count} from character {from}"),
+        RenameOp::ChangeCase(mode) => mode.label().into(),
+        RenameOp::Number {
+            start,
+            step,
+            padding,
+            ..
+        } => format!("from {start} step {step} pad {padding}"),
+        RenameOp::DateStamp { format, .. } => format.label().into(),
+        RenameOp::Regex {
+            pattern,
+            replacement,
+            ..
+        } => find_replace_detail(pattern, replacement, OP_DETAIL_WIDTH),
+        RenameOp::Trim { chars, mode } => {
+            let from = match mode {
+                TrimMode::Both => "both ends",
+                TrimMode::Start => "the start",
+                TrimMode::End => "the end",
+            };
+            if chars.is_empty() {
+                format!("spaces from {from}")
+            } else {
+                framed_detail("\"", chars, &format!("\" from {from}"), OP_DETAIL_WIDTH)
+            }
+        }
+        RenameOp::Extension(ext_op) => match ext_op {
+            ExtensionOp::Replace(e) => framed_detail("→ .", e, "", OP_DETAIL_WIDTH),
+            ExtensionOp::Add(e) => framed_detail("+ .", e, "", OP_DETAIL_WIDTH),
+            ExtensionOp::Remove => "remove".into(),
+            ExtensionOp::Lower => "lowercase".into(),
+            ExtensionOp::Upper => "UPPERCASE".into(),
+        },
+        RenameOp::Template { template } => framed_detail("", template, "", OP_DETAIL_WIDTH),
+    }
+}
+
+// ============================================================================
+// The pointer, the menu and the rule editor's keyboard
+// ============================================================================
+
+impl RenamerApp {
+    /// What is under `(x, y)` in the frame last shown: for the pointer's
+    /// movement and the wheel, which come in floods. A press draws afresh.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        if self.last_hits.is_empty() {
+            return self.frame(self.last_width, self.last_height).hit_test(x, y);
+        }
+        self.last_hits
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(target, _)| *target)
+    }
+
+    /// Route a pointer event.
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        // An open menu takes every press, and consumes it either way: a press
+        // that dismisses a menu must not also land on what was behind it.
+        if let Some(menu) = self.rule_menu.as_mut() {
+            match event.kind {
+                MouseEventKind::Press(_) => {
+                    let chosen = menu.handle_click(event.x, event.y);
+                    self.rule_menu = None;
+                    if let Some(id) = chosen {
+                        self.add_rule_of_kind(id);
+                    }
+                    return EventResult::Consumed;
+                }
+                MouseEventKind::Move => {
+                    menu.handle_mouse_move(event.x, event.y);
+                    return EventResult::Consumed;
+                }
+                _ => return EventResult::Ignored,
+            }
+        }
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                let Some(target) = self
+                    .frame(self.last_width, self.last_height)
+                    .hit_test(event.x, event.y)
+                else {
+                    return EventResult::Ignored;
+                };
+                self.activate(target)
+            }
+            // A double press on a file ticks or unticks it -- the row's own
+            // press already moved the cursor there. (Nothing produces this
+            // event until `oswindow` synthesises it; see known-issues.md.)
+            MouseEventKind::DoubleClick(MouseButton::Left) => {
+                match self
+                    .frame(self.last_width, self.last_height)
+                    .hit_test(event.x, event.y)
+                {
+                    Some(Target::File(i)) => {
+                        self.selected_file = i;
+                        self.toggle_selected_file()
+                    }
+                    _ => EventResult::Ignored,
+                }
+            }
+            MouseEventKind::Move => {
+                let over = self.target_at(event.x, event.y);
+                if over == self.hover {
+                    return EventResult::Ignored;
+                }
+                self.hover = over;
+                EventResult::Consumed
+            }
+            MouseEventKind::Leave => {
+                if self.hover.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            MouseEventKind::Scroll { dy, .. } => {
+                let over = self.target_at(event.x, event.y);
+                self.scroll(over, event.x, event.y, dy)
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Turn the wheel over `over`, at `(x, y)`, by `dy` notches.
+    fn scroll(&mut self, over: Option<Target>, x: f32, y: f32, dy: f32) -> EventResult {
+        let l = Layout::of(self.last_width, self.last_height);
+        match over {
+            Some(Target::Files | Target::File(_) | Target::Check(_)) => {
+                let rows = self.files_wheel.rows(dy);
+                let last_top = self.filtered_files().len().saturating_sub(l.file_rows());
+                let before = self.file_scroll;
+                self.file_scroll = self.file_scroll.saturating_add_signed(rows).min(last_top);
+                if self.file_scroll == before {
+                    EventResult::Ignored
+                } else {
+                    EventResult::Consumed
+                }
+            }
+            // In the panel, not merely on one of its targets: Add Rule is on
+            // the toolbar too, and the wheel over the toolbar scrolls nothing.
+            Some(target)
+                if self.sidebar_panel == SidebarPanel::Operations
+                    && target.is_in_ops()
+                    && l.panel.contains(x, y) =>
+            {
+                let limit = (self.ops_content_height(l.panel) - l.panel.h).max(0.0);
+                let before = self.ops_scroll;
+                self.ops_scroll = (self.ops_scroll + wheel::pixels(dy, 24.0)).clamp(0.0, limit);
+                if (self.ops_scroll - before).abs() > f32::EPSILON {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Do what pressing `target` means.
+    fn activate(&mut self, target: Target) -> EventResult {
+        // A press anywhere but in the box being typed into takes the
+        // keyboard back from it; a press on another box moves it there.
+        if !matches!(
+            target,
+            Target::Field(_) | Target::SearchBox | Target::ExtensionBox
+        ) {
+            self.set_focus(Focus::List);
+        }
+        match target {
+            Target::OpenFolder => {
+                self.open_folder();
+                EventResult::Consumed
+            }
+            Target::AddRule => {
+                self.open_rule_menu();
+                EventResult::Consumed
+            }
+            Target::Rename => self.rename_selected(),
+            Target::Undo => {
+                if self.undo_stack.is_empty() {
+                    self.status_message = "Nothing to undo".to_string();
+                } else {
+                    self.undo();
+                }
+                EventResult::Consumed
+            }
+            Target::Redo => {
+                if self.redo_stack.is_empty() {
+                    self.status_message = "Nothing to redo".to_string();
+                } else {
+                    self.redo();
+                }
+                EventResult::Consumed
+            }
+            Target::ClearRules => {
+                self.clear_operations();
+                self.selected_op = 0;
+                EventResult::Consumed
+            }
+            Target::Panel(panel) => {
+                self.sidebar_panel = panel;
+                EventResult::Consumed
+            }
+            Target::Rule(i) => {
+                self.selected_op = i;
+                EventResult::Consumed
+            }
+            Target::RuleUp(i) => {
+                self.selected_op = i;
+                self.move_op(-1);
+                EventResult::Consumed
+            }
+            Target::RuleDown(i) => {
+                self.selected_op = i;
+                self.move_op(1);
+                EventResult::Consumed
+            }
+            Target::RuleRemove(i) => {
+                self.remove_operation(i);
+                self.selected_op = self
+                    .selected_op
+                    .min(self.operations.len().saturating_sub(1));
+                EventResult::Consumed
+            }
+            Target::Field(slot) => {
+                self.set_focus(Focus::Field(slot));
+                EventResult::Consumed
+            }
+            Target::Choice(pick) => {
+                if let Some(op) = self.operations.get_mut(self.selected_op) {
+                    apply_pick(op, pick);
+                }
+                self.apply_operations();
+                EventResult::Consumed
+            }
+            Target::Switch(flip) => {
+                if let Some(op) = self.operations.get_mut(self.selected_op) {
+                    apply_flip(op, flip);
+                }
+                self.apply_operations();
+                EventResult::Consumed
+            }
+            Target::SearchBox => {
+                self.set_focus(Focus::Search);
+                EventResult::Consumed
+            }
+            Target::ExtensionBox => {
+                self.set_focus(Focus::Extension);
+                EventResult::Consumed
+            }
+            Target::ConflictsOnly => {
+                self.filter_conflicts = !self.filter_conflicts;
+                self.file_scroll = 0;
+                EventResult::Consumed
+            }
+            Target::File(i) => {
+                self.selected_file = i;
+                EventResult::Consumed
+            }
+            Target::Check(i) => {
+                self.selected_file = i;
+                self.toggle_selected_file()
+            }
+            Target::HelpCard => {
+                self.show_help = false;
+                EventResult::Consumed
+            }
+            Target::Ops | Target::Files => EventResult::Consumed,
+        }
+    }
+
+    /// Rename the ticked files, or say why not.
+    fn rename_selected(&mut self) -> EventResult {
+        if self.files.iter().all(|f| !f.selected) {
+            self.status_message = String::from("Nothing selected to rename");
+            return EventResult::Consumed;
+        }
+        self.execute_rename();
+        EventResult::Consumed
+    }
+
+    /// Put the Add Rule menu up, under its toolbar button.
+    fn open_rule_menu(&mut self) {
+        let items: Vec<MenuItem> = RULE_KINDS
+            .iter()
+            .enumerate()
+            .map(|(i, label)| MenuItem::Action {
+                id: i as u64,
+                label: (*label).to_string(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: None,
+            })
+            .collect();
+        let at = self
+            .frame(self.last_width, self.last_height)
+            .rect_of(|t| *t == Target::AddRule)
+            .unwrap_or(Rect::new(220.0, 6.0, 0.0, BUTTON_HEIGHT));
+        let mut menu = ContextMenu::new(items);
+        menu.show(at.x, at.bottom(), (self.last_width, self.last_height));
+        self.rule_menu = Some(menu);
+    }
+
+    /// Add a rule of kind `id` (an index into [`RULE_KINDS`]), select it, and
+    /// put the keyboard in its first box if it has one.
+    fn add_rule_of_kind(&mut self, id: u64) {
+        let Some(op) = usize::try_from(id).ok().and_then(new_rule) else {
+            return;
+        };
+        let first = rule_slots(&op).first().copied();
+        if self.add_op(op) == EventResult::Ignored {
+            self.status_message = format!("The pipeline is full: {MAX_OPERATIONS} rules");
+            return;
+        }
+        self.sidebar_panel = SidebarPanel::Operations;
+        if let Some(slot) = first {
+            self.set_focus(Focus::Field(slot));
+        }
+    }
+
+    /// Move the keyboard to `focus`, loading the box it lands in.
+    fn set_focus(&mut self, focus: Focus) {
+        self.focus = focus;
+        self.draft_invalid = false;
+        let text = match focus {
+            Focus::List => return,
+            Focus::Field(slot) => self
+                .operations
+                .get(self.selected_op)
+                .map_or_else(String::new, |op| field_text(op, slot)),
+            Focus::Search => self.search_text.clone(),
+            Focus::Extension => self.filter_extension.clone(),
+        };
+        self.draft = TextInput::new();
+        self.draft.set_text(&text);
+        self.draft.select_all();
+    }
+
+    /// A key while a box has the keyboard.
+    ///
+    /// Typing goes into the box and takes effect as it is typed -- the preview
+    /// is live, so a rule is seen doing what it will do while it is being
+    /// written. Tab and Shift+Tab move between the rule's boxes; Enter and Esc
+    /// give the keyboard back to the list.
+    fn handle_key_in_box(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape | Key::Enter => {
+                self.set_focus(Focus::List);
+                return EventResult::Consumed;
+            }
+            Key::Tab => {
+                if let Focus::Field(slot) = self.focus
+                    && let Some(op) = self.operations.get(self.selected_op)
+                {
+                    let slots = rule_slots(op);
+                    let at = slots.iter().position(|s| *s == slot).unwrap_or(0);
+                    let count = slots.len().max(1);
+                    let next = if key.modifiers.shift {
+                        at.checked_sub(1).unwrap_or(count.saturating_sub(1))
+                    } else if at.saturating_add(1) >= count {
+                        0
+                    } else {
+                        at.saturating_add(1)
+                    };
+                    if let Some(next) = slots.get(next).copied() {
+                        self.set_focus(Focus::Field(next));
+                    }
+                }
+                return EventResult::Consumed;
+            }
+            _ => {}
+        }
+        if !edit_text(&mut self.draft, key) {
+            // A key a box has no use for changed nothing. It stops here all
+            // the same -- `handle_key` came into this method before its
+            // shortcuts -- so no key typed into a box can add a rule.
+            return EventResult::Ignored;
+        }
+        let typed = self.draft.text().to_string();
+        match self.focus {
+            Focus::Field(slot) => {
+                let taken = self
+                    .operations
+                    .get_mut(self.selected_op)
+                    .is_some_and(|op| set_field(op, slot, &typed));
+                self.draft_invalid = !taken;
+                if taken {
+                    self.apply_operations();
+                }
+            }
+            Focus::Search => {
+                self.search_text = typed;
+                self.file_scroll = 0;
+            }
+            Focus::Extension => {
+                self.filter_extension = typed.trim().trim_start_matches('.').to_string();
+                self.file_scroll = 0;
+            }
+            Focus::List => {}
+        }
+        EventResult::Consumed
+    }
+
+    /// Scroll the file list so the cursor is on screen.
+    fn keep_file_visible(&mut self) {
+        let rows = Layout::of(self.last_width, self.last_height)
+            .file_rows()
+            .max(1);
+        let Some(pos) = self
+            .filtered_files()
+            .iter()
+            .position(|(i, _)| *i == self.selected_file)
+        else {
+            return;
+        };
+        if pos < self.file_scroll {
+            self.file_scroll = pos;
+        } else if pos >= self.file_scroll.saturating_add(rows) {
+            self.file_scroll = pos.saturating_sub(rows.saturating_sub(1));
+        }
+    }
+}
+
+impl Target {
+    /// Whether this target is part of the operations panel, which the wheel
+    /// scrolls as one.
+    fn is_in_ops(self) -> bool {
+        matches!(
+            self,
+            Self::Ops
+                | Self::AddRule
+                | Self::Rule(_)
+                | Self::RuleUp(_)
+                | Self::RuleDown(_)
+                | Self::RuleRemove(_)
+                | Self::Field(_)
+                | Self::Choice(_)
+                | Self::Switch(_)
+        )
     }
 }
 
@@ -2483,11 +4210,7 @@ impl App for RenamerApp {
         (WINDOW_WIDTH_PX, WINDOW_HEIGHT_PX)
     }
 
-    /// No clock.
-    ///
-    /// `current_time_ms` is a counter this app advances itself when it records
-    /// a rename, not a reading of any clock, and nothing else here ages. A tick
-    /// would redraw an identical frame.
+    /// No clock: nothing here ages. A rename's time is read when it happens.
     fn tick_interval(&self) -> Option<Duration> {
         None
     }
@@ -2505,7 +4228,10 @@ impl App for RenamerApp {
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
         self.last_width = width;
         self.last_height = height;
-        let mut commands = self.render_commands();
+        let frame = self.frame(width, height);
+        // Kept for the pointer's movement and the wheel; see `target_at`.
+        self.last_hits = frame.hits().to_vec();
+        let mut commands = frame.into_tree().commands;
         // The picker last, so it draws over the file list rather than under
         // it. A dialog that takes input and paints nothing is invisible and
         // still swallowing keys.
@@ -2639,7 +4365,15 @@ mod tests {
         }
         undone.handle_event(&press_ctrl(Key::Z));
 
-        vec![plain, loaded, reordered, renamed, undone]
+        // A rule with boxes selected, for F2, which declines on a rule that
+        // has nothing to type into.
+        let mut editable = seeded();
+        editable.add_op(RenameOp::Insert {
+            text: String::new(),
+            position: InsertPosition::Start,
+        });
+
+        vec![plain, loaded, reordered, renamed, undone, editable]
     }
 
     /// **The shortcut list reaches the window.**
@@ -2675,7 +4409,10 @@ mod tests {
     fn the_help_key_did_not_take_the_search_key_with_it() {
         let mut app = seeded();
         app.handle_event(&press(Key::Slash));
-        assert!(app.searching, "`/` no longer opens the search box");
+        assert!(
+            app.focus == Focus::Search,
+            "`/` no longer opens the search box"
+        );
         assert!(
             !drawn_text(&app).contains("? closes this"),
             "`/` opened the shortcut list"
@@ -2832,7 +4569,7 @@ mod tests {
         // outside the search box.
         let mut app = seeded();
         assert_eq!(app.handle_event(&press(Key::Slash)), EventResult::Consumed);
-        assert!(app.searching);
+        assert!(app.focus == Focus::Search);
         for c in "lux".chars() {
             app.handle_event(&typed(c));
         }
@@ -3137,6 +4874,17 @@ mod tests {
 
     // --- Date stamp ---
 
+    /// 2026-05-18 14:30:00 UTC, as a file's modification time.
+    const MAY_18: u64 = 1_779_114_600_000;
+
+    /// A file modified at `modified_ms`, first in the batch.
+    fn at(modified_ms: u64) -> RuleContext {
+        RuleContext {
+            index: 0,
+            modified_ms,
+        }
+    }
+
     #[test]
     fn test_date_stamp_ymd() {
         let op = RenameOp::DateStamp {
@@ -3144,8 +4892,8 @@ mod tests {
             position: InsertPosition::Start,
             separator: "_".into(),
         };
-        let result = RenameEngine::apply(&op, "photo.jpg", 0);
-        assert!(result.starts_with("2026-05-18_"));
+        let result = RenameEngine::apply_in(&op, "photo.jpg", at(MAY_18));
+        assert!(result.starts_with("2026-05-18_"), "{result}");
         assert!(result.ends_with(".jpg"));
     }
 
@@ -3156,8 +4904,24 @@ mod tests {
             position: InsertPosition::End,
             separator: "_".into(),
         };
-        let result = RenameEngine::apply(&op, "photo.jpg", 0);
-        assert!(result.contains("20260518"));
+        let result = RenameEngine::apply_in(&op, "photo.jpg", at(MAY_18));
+        assert!(result.contains("20260518"), "{result}");
+    }
+
+    /// **The stamp is each file's own date.** It was the constant 2026-05-18
+    /// for every file ever renamed.
+    #[test]
+    fn a_date_stamp_is_the_files_own_date() {
+        let op = RenameOp::DateStamp {
+            format: DateFormat::Timestamp,
+            position: InsertPosition::End,
+            separator: "_".into(),
+        };
+        // 1999-12-31 23:59:58 UTC.
+        let old = RenameEngine::apply_in(&op, "a.txt", at(946_684_798_000));
+        assert_eq!(old, "a_19991231_235958.txt");
+        let new = RenameEngine::apply_in(&op, "a.txt", at(MAY_18));
+        assert_eq!(new, "a_20260518_143000.txt");
     }
 
     // --- Extension ---
@@ -3360,9 +5124,16 @@ mod tests {
         app.render_commands()
             .into_iter()
             .filter_map(|c| match c {
+                // At the detail line's own x, as well as its size: the rule
+                // editor below the list draws its switches' ticks in the same
+                // small size.
                 RenderCommand::Text {
-                    text, font_size, ..
-                } if (font_size - OP_DETAIL_SIZE).abs() < f32::EPSILON => Some(text),
+                    x, text, font_size, ..
+                } if (font_size - OP_DETAIL_SIZE).abs() < f32::EPSILON
+                    && (x - 18.0).abs() < 0.01 =>
+                {
+                    Some(text)
+                }
                 _ => None,
             })
             .collect()
@@ -3692,6 +5463,15 @@ mod tests {
     }
 
     /// The texts drawn in one column of the file list, header included.
+    /// The file list alone -- filter bar, headings and rows -- as the window
+    /// draws it at the size it opens at.
+    fn file_list_commands(app: &RenamerApp) -> Vec<RenderCommand> {
+        let l = Layout::of(app.last_width, app.last_height);
+        let mut f = Frame::new(app.last_width, app.last_height);
+        app.draw_file_list(&mut f, &l);
+        f.commands().to_vec()
+    }
+
     fn cells_in_column(cmds: &[RenderCommand], index: usize) -> Vec<String> {
         let left = Table::new(FILE_COLUMNS, SIDEBAR_WIDTH).left(index);
         cmds.iter()
@@ -3711,12 +5491,11 @@ mod tests {
     #[test]
     fn no_file_row_cell_escapes_its_column() {
         let app = app_with_overlong_names();
-        let mut cmds = Vec::new();
         // Render the list directly rather than the whole app: a full render
         // puts sidebar and toolbar text at x values that can coincide with a
         // column's left edge, and the assertion would then fail on chrome that
         // was never part of this table.
-        app.render_file_list(&mut cmds);
+        let cmds = file_list_commands(&app);
         // 6 header labels + 2 rows x 5 cells (name, arrow, new name, size,
         // status).
         assert_file_cells_fit(&cmds, 16);
@@ -3725,8 +5504,7 @@ mod tests {
     #[test]
     fn an_overlong_rename_preview_keeps_the_end_of_both_names() {
         let app = app_with_overlong_names();
-        let mut cmds = Vec::new();
-        app.render_file_list(&mut cmds);
+        let cmds = file_list_commands(&app);
 
         // The whole point of the preview is to show what changes. Both of
         // these names differ only in their tail, so a name cut the usual way
@@ -3764,8 +5542,7 @@ mod tests {
     fn a_short_name_is_drawn_verbatim() {
         let mut app = RenamerApp::new();
         app.add_file("notes.txt", 12, 0);
-        let mut cmds = Vec::new();
-        app.render_file_list(&mut cmds);
+        let cmds = file_list_commands(&app);
         let originals = cells_in_column(&cmds, COL_ORIGINAL);
         assert!(
             originals.iter().any(|t| t == "notes.txt"),
@@ -3776,8 +5553,7 @@ mod tests {
     #[test]
     fn the_header_and_the_rows_agree_on_where_a_column_starts() {
         let app = app_with_overlong_names();
-        let mut cmds = Vec::new();
-        app.render_file_list(&mut cmds);
+        let cmds = file_list_commands(&app);
         // The header label and the body cells of the size column share an x.
         // Three copies of a width is what let these drift apart before the
         // table became a single `&[Column]`.
@@ -3922,7 +5698,7 @@ mod tests {
             separator: "_".into(),
         };
         assert_eq!(
-            RenameEngine::apply(&op, "\u{65e5}\u{672c}\u{8a9e}.txt", 0),
+            RenameEngine::apply_in(&op, "\u{65e5}\u{672c}\u{8a9e}.txt", at(MAY_18)),
             "\u{65e5}\u{672c}_2026-05-18_\u{8a9e}.txt"
         );
     }
@@ -4771,6 +6547,526 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // The pointer, the Add Rule menu and the rule editor
+    //
+    // Driven through `handle_event` at the points the renderer says it drew
+    // each control -- see `guitk::probe`.
+    // ------------------------------------------------------------------
+
+    use guitk::probe::{self, Probe};
+
+    impl Probe for RenamerApp {
+        type Target = Target;
+        type Outcome = EventResult;
+        const SIZE: (f32, f32) = (1100.0, 750.0);
+
+        fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+            self.frame(size.0, size.1)
+        }
+
+        fn click_at(
+            &mut self,
+            x: f32,
+            y: f32,
+            button: MouseButton,
+            size: (f32, f32),
+        ) -> EventResult {
+            (self.last_width, self.last_height) = size;
+            self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }))
+        }
+
+        fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> EventResult {
+            (self.last_width, self.last_height) = size;
+            self.handle_event(&Event::Key(key.clone()))
+        }
+
+        fn scroll_at(&mut self, x: f32, y: f32, dy: f32, size: (f32, f32)) -> Option<EventResult> {
+            (self.last_width, self.last_height) = size;
+            Some(self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })))
+        }
+    }
+
+    fn new_names(app: &RenamerApp) -> Vec<String> {
+        app.files.iter().map(|f| f.new_name.clone()).collect()
+    }
+
+    /// Add a rule of `kind` (its name in the menu) the way a person does:
+    /// the Add Rule button, then the menu's row.
+    fn add_from_menu(app: &mut RenamerApp, kind: &str) {
+        probe::click(app, Target::AddRule);
+        let index = RULE_KINDS
+            .iter()
+            .position(|k| *k == kind)
+            .expect("a kind the menu lists");
+        assert!(app.rule_menu.is_some(), "Add Rule put no menu up");
+        for _ in 0..=index {
+            probe::key(app, &probe::press(Key::Down));
+        }
+        probe::key(app, &probe::press(Key::Enter));
+        assert!(app.rule_menu.is_none(), "choosing did not close the menu");
+    }
+
+    /// **Every kind of rule can be added.** Only the ones that needed nothing
+    /// typed ever could; find and replace, insert, remove, regex, date stamp,
+    /// template and four of the five extension rules were implemented, tested
+    /// and unreachable.
+    #[test]
+    fn the_add_rule_menu_adds_every_kind() {
+        for kind in RULE_KINDS {
+            let mut app = app_listing(&["a.txt"]);
+            add_from_menu(&mut app, kind);
+            assert_eq!(app.operations.len(), 1, "{kind} was not added");
+            assert_eq!(app.operations[0].label(), kind);
+            assert_eq!(app.selected_op, 0);
+            // A kind with boxes opens its first one for typing.
+            let wants_typing = !rule_slots(&app.operations[0]).is_empty();
+            assert_eq!(
+                matches!(app.focus, Focus::Field(_)),
+                wants_typing,
+                "{kind}: the keyboard is {:?}",
+                app.focus
+            );
+        }
+    }
+
+    /// **A rule is typed into, and the preview follows as it is typed.**
+    #[test]
+    fn a_find_and_replace_rule_is_written_in_its_editor() {
+        let mut app = app_listing(&["IMG_0001.JPG", "IMG_0002.JPG", "notes.txt"]);
+        add_from_menu(&mut app, "Find & Replace");
+        probe::type_str(&mut app, "IMG_");
+        probe::key(&mut app, &probe::press(Key::Tab));
+        assert_eq!(
+            app.focus,
+            Focus::Field(Slot::B),
+            "Tab did not reach the second box"
+        );
+        probe::type_str(&mut app, "photo-");
+        assert_eq!(
+            new_names(&app),
+            vec!["photo-0001.JPG", "photo-0002.JPG", "notes.txt"]
+        );
+        // Typing a letter in a box is text, not a shortcut: `L` did not add a
+        // lower-case rule.
+        assert_eq!(app.operations.len(), 1);
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert_eq!(app.focus, Focus::List);
+    }
+
+    /// A counting box refuses what is not a number, keeps the rule's last good
+    /// value, and says so under the box.
+    #[test]
+    fn a_counting_box_refuses_what_is_not_a_number() {
+        let mut app = app_listing(&["abcdef.txt"]);
+        add_from_menu(&mut app, "Remove Characters");
+        probe::type_str(&mut app, "1");
+        probe::key(&mut app, &probe::press(Key::Tab));
+        probe::type_str(&mut app, "x");
+        assert!(app.draft_invalid, "an x in a count was taken");
+        assert!(matches!(
+            app.operations[0],
+            RenameOp::Remove { from: 1, count: 0 }
+        ));
+        probe::key(&mut app, &probe::press(Key::Backspace));
+        probe::type_str(&mut app, "2");
+        assert!(!app.draft_invalid);
+        assert_eq!(new_names(&app), vec!["adef.txt"]);
+    }
+
+    /// Choices and switches change the rule they belong to.
+    #[test]
+    fn choices_and_switches_change_the_rule() {
+        let mut app = app_listing(&["hello world.txt"]);
+        add_from_menu(&mut app, "Change Case");
+        probe::click(&mut app, Target::Choice(Pick::Case(CaseMode::Title)));
+        assert_eq!(new_names(&app), vec!["Hello World.txt"]);
+        probe::click(&mut app, Target::Choice(Pick::Case(CaseMode::CamelCase)));
+        assert_eq!(new_names(&app), vec!["helloWorld.txt"]);
+
+        let mut app = app_listing(&["file.txt"]);
+        add_from_menu(&mut app, "Insert Text");
+        probe::type_str(&mut app, "X");
+        assert!(!probe::is_visible(&app, Target::Field(Slot::B)));
+        probe::click(&mut app, Target::Choice(Pick::Position(PositionKind::At)));
+        assert!(
+            probe::is_visible(&app, Target::Field(Slot::B)),
+            "choosing a position offered no box to type it in"
+        );
+        probe::click(&mut app, Target::Field(Slot::B));
+        probe::type_str(&mut app, "2");
+        assert_eq!(new_names(&app), vec!["fiXle.txt"]);
+
+        let mut app = app_listing(&["Aa aA.txt"]);
+        add_from_menu(&mut app, "Find & Replace");
+        probe::type_str(&mut app, "a");
+        probe::key(&mut app, &probe::press(Key::Tab));
+        probe::type_str(&mut app, "-");
+        assert_eq!(new_names(&app), vec!["-- --.txt"]);
+        probe::click(&mut app, Target::Switch(Flip::MatchCase));
+        assert_eq!(new_names(&app), vec!["A- -A.txt"]);
+        probe::click(&mut app, Target::Switch(Flip::EveryOccurrence));
+        assert_eq!(new_names(&app), vec!["A- aA.txt"]);
+    }
+
+    /// **The regex rule is a regular expression.** It was a literal replace
+    /// under "Simple regex: only support literal patterns for now".
+    #[test]
+    fn the_regex_rule_is_a_regular_expression() {
+        let op = |pattern: &str, replacement: &str, case_sensitive| RenameOp::Regex {
+            pattern: pattern.into(),
+            replacement: replacement.into(),
+            case_sensitive,
+        };
+        let ctx = RuleContext::default();
+        assert_eq!(
+            RenameEngine::apply_in(&op("IMG_([0-9]+)", "photo-\\1", true), "IMG_0042.JPG", ctx),
+            "photo-0042.JPG"
+        );
+        assert_eq!(
+            RenameEngine::apply_in(&op("[aeiou]", "<&>", true), "rename.txt", ctx),
+            "r<e>n<a>m<e>.txt"
+        );
+        assert_eq!(
+            RenameEngine::apply_in(&op("img", "pic", false), "IMG_1.jpg", ctx),
+            "pic_1.jpg",
+            "case-insensitive matching"
+        );
+        assert_eq!(
+            RenameEngine::apply_in(&op("a\\&b", "x", true), "a&b.txt", ctx),
+            "x.txt"
+        );
+        // A pattern that is not one changes nothing, and the editor says why.
+        assert_eq!(
+            RenameEngine::apply_in(&op("(unclosed", "x", true), "(unclosed.txt", ctx),
+            "(unclosed.txt"
+        );
+        let notes: Vec<(String, bool)> = rule_controls(&op("(unclosed", "x", true))
+            .into_iter()
+            .filter_map(|c| match c {
+                Control::Note { text, error } => Some((text, error)),
+                _ => None,
+            })
+            .collect();
+        assert!(notes.iter().any(|(_, error)| *error), "{notes:?}");
+    }
+
+    /// A rule the user has only half written changes nothing: an empty search
+    /// matches between every character.
+    #[test]
+    fn an_empty_search_changes_nothing() {
+        let ctx = RuleContext::default();
+        let find = RenameOp::FindReplace {
+            find: String::new(),
+            replace: "x".into(),
+            case_sensitive: true,
+            replace_all: true,
+        };
+        assert_eq!(RenameEngine::apply_in(&find, "abc.txt", ctx), "abc.txt");
+        let regex = RenameOp::Regex {
+            pattern: String::new(),
+            replacement: "x".into(),
+            case_sensitive: true,
+        };
+        assert_eq!(RenameEngine::apply_in(&regex, "abc.txt", ctx), "abc.txt");
+    }
+
+    /// **Numbering counts the files being renamed**, not every file listed.
+    #[test]
+    fn numbering_counts_only_the_ticked_files() {
+        let mut app = app_listing(&["a.txt", "b.txt", "c.txt"]);
+        app.handle_event(&press(Key::N));
+        assert_eq!(new_names(&app), vec!["a_001.txt", "b_002.txt", "c_003.txt"]);
+        probe::click(&mut app, Target::Check(1));
+        assert!(!app.files[1].selected);
+        assert_eq!(new_names(&app), vec!["a_001.txt", "b.txt", "c_002.txt"]);
+    }
+
+    /// Unticking a file takes it out of a collision; the conflicts were
+    /// computed once and went stale when the ticks moved.
+    #[test]
+    fn unticking_a_file_updates_the_conflicts() {
+        let mut app = app_listing(&["A.txt", "a.txt"]);
+        app.handle_event(&press(Key::L));
+        // Both end as a.txt: the one renamed and the one already there.
+        assert_eq!(app.conflict_count(), 2);
+        // Untick the one being renamed, and nothing collides any more.
+        app.selected_file = 0;
+        app.handle_event(&press(Key::Space));
+        assert_eq!(
+            app.conflict_count(),
+            0,
+            "a collision with an unticked file remained"
+        );
+    }
+
+    /// **Opening another folder keeps the rules.**
+    #[test]
+    fn the_rules_survive_opening_another_folder() {
+        let mut app = app_with(&["One.txt"]);
+        app.handle_event(&press(Key::L));
+        let second = scratch("second");
+        std::fs::write(second.join("Two.TXT"), b"2").unwrap();
+        app.load_folder(&second);
+        assert_eq!(
+            app.operations.len(),
+            1,
+            "opening a folder threw the rules away"
+        );
+        assert_eq!(new_names(&app), vec!["two.TXT"]);
+    }
+
+    /// **The file list scrolls: with the wheel, and to follow the cursor.**
+    #[test]
+    fn the_file_list_scrolls() {
+        let names: Vec<String> = (0..100).map(|i| format!("file{i:03}.txt")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut app = app_listing(&refs);
+        assert!(!probe::is_visible(&app, Target::File(99)));
+        for _ in 0..99 {
+            probe::key(&mut app, &probe::press(Key::Down));
+        }
+        assert_eq!(app.selected_file, 99);
+        assert!(
+            probe::is_visible(&app, Target::File(99)),
+            "the cursor left the screen"
+        );
+        for _ in 0..40 {
+            probe::scroll_at_point(&mut app, Target::Files, 1.0);
+        }
+        assert!(
+            probe::is_visible(&app, Target::File(0)),
+            "the wheel does not reach the top"
+        );
+    }
+
+    /// A press on a row moves the cursor; a press on its box ticks it.
+    #[test]
+    fn a_row_moves_the_cursor_and_its_box_ticks() {
+        let mut app = app_listing(&["a.txt", "b.txt", "c.txt"]);
+        probe::click(&mut app, Target::File(2));
+        assert_eq!(app.selected_file, 2);
+        assert!(
+            app.files[2].selected,
+            "a press on the row ticked nothing, as it should not"
+        );
+        probe::click(&mut app, Target::Check(2));
+        assert!(!app.files[2].selected, "the box did not untick");
+    }
+
+    /// **Every rule can be selected, moved and removed** -- not only the
+    /// newest, which was the only one the selection ever landed on.
+    #[test]
+    fn every_rule_can_be_selected_moved_and_removed() {
+        let mut app = app_listing(&["Ab.txt"]);
+        app.handle_event(&press(Key::L));
+        app.handle_event(&press(Key::U));
+        assert_eq!(app.selected_op, 1);
+        probe::click(&mut app, Target::Rule(0));
+        assert_eq!(app.selected_op, 0);
+        probe::click(&mut app, Target::RuleDown(0));
+        assert_eq!(app.operations[0].label(), "Change Case");
+        assert!(matches!(
+            app.operations[1],
+            RenameOp::ChangeCase(CaseMode::Lower)
+        ));
+        assert_eq!(app.selected_op, 1, "the moved rule is not the selected one");
+        probe::click(&mut app, Target::RuleRemove(0));
+        assert_eq!(app.operations.len(), 1);
+        assert_eq!(new_names(&app), vec!["ab.txt"]);
+
+        // And from the keyboard.
+        app.handle_event(&press(Key::U));
+        app.handle_event(&Event::Key(probe::press_with(
+            Key::Up,
+            guitk::event::Modifiers {
+                ctrl: true,
+                ..guitk::event::Modifiers::NONE
+            },
+        )));
+        assert_eq!(app.selected_op, 0, "Ctrl+Up selected nothing");
+    }
+
+    /// F2 puts the keyboard in the selected rule's first box.
+    #[test]
+    fn f2_edits_the_selected_rule() {
+        let mut app = app_listing(&["a.txt"]);
+        add_from_menu(&mut app, "Insert Text");
+        probe::key(&mut app, &probe::press(Key::Escape));
+        app.handle_event(&press(Key::F2));
+        assert_eq!(app.focus, Focus::Field(Slot::A));
+        probe::type_str(&mut app, "new-");
+        assert_eq!(new_names(&app), vec!["new-a.txt"]);
+    }
+
+    /// The extension box and the conflicts chip filter the list.
+    #[test]
+    fn the_list_filters_answer_the_pointer() {
+        let mut app = app_listing(&["a.jpg", "b.png", "c.JPG"]);
+        probe::click(&mut app, Target::ExtensionBox);
+        assert_eq!(app.focus, Focus::Extension);
+        probe::type_str(&mut app, "jpg");
+        let shown: Vec<usize> = app.filtered_files().iter().map(|(i, _)| *i).collect();
+        assert_eq!(shown, vec![0, 2]);
+        probe::click(&mut app, Target::ConflictsOnly);
+        assert!(app.filter_conflicts);
+        assert_eq!(
+            app.focus,
+            Focus::List,
+            "a press elsewhere left the box typing"
+        );
+    }
+
+    /// The toolbar's buttons do what their keys do.
+    #[test]
+    fn the_toolbar_answers_the_pointer() {
+        let mut app = app_with(&["one.txt", "two.txt"]);
+        probe::click(&mut app, Target::OpenFolder);
+        assert!(app.picker.is_open(), "Open Folder put no picker up");
+        app.picker.close();
+
+        app.handle_event(&press(Key::U));
+        probe::click(&mut app, Target::Rename);
+        assert!(
+            app.files.iter().any(|f| f.original_name == "ONE.txt"),
+            "{}",
+            app.status_message
+        );
+        probe::click(&mut app, Target::Undo);
+        assert!(app.files.iter().any(|f| f.original_name == "one.txt"));
+        probe::click(&mut app, Target::Redo);
+        assert!(app.files.iter().any(|f| f.original_name == "ONE.txt"));
+        probe::click(&mut app, Target::ClearRules);
+        assert!(app.operations.is_empty());
+    }
+
+    /// **The History panel says when.** Each record kept its time, and the
+    /// panel drew only what changed.
+    #[test]
+    fn the_history_says_when() {
+        let mut app = app_with(&["one.txt"]);
+        app.handle_event(&press(Key::U));
+        app.handle_event(&press(Key::Enter));
+        probe::click(&mut app, Target::Panel(SidebarPanel::History));
+        let year = guitk::datetime::stamp(
+            i64::try_from(app.history[0].timestamp_ms / 1000).unwrap(),
+            &guitk::tzrules::Tz::utc(),
+        );
+        let text: String = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(text.contains(&year), "{text}");
+        assert!(
+            app.history[0].timestamp_ms > 1_700_000_000_000,
+            "the time is not the clock's"
+        );
+    }
+
+    /// **The layout follows the window.** It was drawn from the size the
+    /// window opens at, whatever it had been resized to.
+    #[test]
+    fn the_layout_follows_the_window() {
+        let app = app_listing(&["a.txt"]);
+        let small = probe::rect_of_sized(&app, Target::Files, (1100.0, 750.0)).unwrap();
+        let large = probe::rect_of_sized(&app, Target::Files, (1600.0, 1000.0)).unwrap();
+        assert!(
+            large.w > small.w + 400.0,
+            "the list did not widen: {small:?} {large:?}"
+        );
+        assert!(
+            large.h > small.h + 200.0,
+            "the list did not deepen: {small:?} {large:?}"
+        );
+    }
+
+    /// **A resize moves where presses land.** The size the layout is
+    /// measured in was the size the window opened at, whatever it had been
+    /// resized to since.
+    #[test]
+    fn a_resize_moves_where_presses_land() {
+        let mut app = app_listing(&["a.txt"]);
+        let press_at = |app: &mut RenamerApp, x, y| {
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }))
+        };
+        // Beyond the right edge of the window the app opens at.
+        assert_eq!(press_at(&mut app, 1500.0, 600.0), EventResult::Ignored);
+        app.handle_event(&Event::Resize {
+            width: 1600,
+            height: 1000,
+        });
+        assert_eq!(
+            press_at(&mut app, 1500.0, 600.0),
+            EventResult::Consumed,
+            "the widened list does not take a press"
+        );
+    }
+
+    /// Hovering a control names its key in the status bar.
+    #[test]
+    fn hovering_a_control_names_its_key() {
+        let mut app = app_listing(&["a.txt"]);
+        let (x, y) = probe::rect_of(&app, Target::Rename).unwrap().centre();
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        let text: String = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(text.contains("Rename the ticked files (Enter)"), "{text}");
+    }
+
+    /// The operations panel scrolls when a rule's editor is taller than the
+    /// window leaves room for.
+    #[test]
+    fn a_tall_editor_scrolls() {
+        let mut app = app_listing(&["a.txt"]);
+        (app.last_width, app.last_height) = (1100.0, 360.0);
+        for _ in 0..6 {
+            app.handle_event(&press(Key::L));
+        }
+        add_from_menu(&mut app, "Add Numbering");
+        let size = (1100.0, 360.0);
+        probe::key(&mut app, &probe::press(Key::Escape));
+        // Set here rather than pressed: its chip is below the panel's fold,
+        // which is the point of the test.
+        let last = app.operations.len() - 1;
+        apply_pick(&mut app.operations[last], Pick::Position(PositionKind::At));
+        assert!(!probe::is_visible_sized(&app, Target::Field(Slot::E), size));
+        for _ in 0..40 {
+            probe::scroll_at_point_sized(&mut app, Target::Ops, -1.0, size);
+        }
+        assert!(
+            probe::is_visible_sized(&app, Target::Field(Slot::E), size),
+            "the last box of the editor cannot be reached"
         );
     }
 }

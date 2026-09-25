@@ -2422,6 +2422,7 @@ name = "renamer"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "ere",
  "guitk",
  "oswindow",
 ]

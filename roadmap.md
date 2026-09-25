@@ -1833,9 +1833,11 @@ word; text inside them that says "lane C" is history.
   operations no route reached; its close dialog waits on
   `requests/e-f-let-an-application-decline-a-close-so-it-can-ask-about-unsaved-work.md`),
   `filesearch` (2026-09-25 — every control; opening results, scrolling,
-  saved searches, and a Content mode that reads the files).
-  **Next:** renamer, logviewer, regextester — local tools a person opens
-  with a mouse — then the rest.
+  saved searches, and a Content mode that reads the files), `renamer`
+  (2026-09-25 — every control, and a rule editor, so every kind of rule can
+  be added at last).
+  **Next:** logviewer, regextester — local tools a person opens with a
+  mouse — then the rest.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane

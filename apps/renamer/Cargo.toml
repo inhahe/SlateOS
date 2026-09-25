@@ -12,5 +12,9 @@ guitk = { path = "../../gui/toolkit" }
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
 
+# The regular-expression rule: the POSIX engine the shell, grep, sed and awk
+# share, so a pattern that works at the prompt works here.
+ere = { path = "../../userspace/ere" }
+
 [lints]
 workspace = true

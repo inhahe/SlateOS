@@ -61423,7 +61423,33 @@ clone with a `filter-repo` history in it.
 a work tree", while the same commands work fine in `os-lane-a/b/c`. The check is
 `git -C "…/os" config --get core.bare`; the answer should be `false` or absent.
 
-### TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING — 2026-09-04 — OPEN
+### TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING — 2026-09-04 — FIXED 2026-09-25
+
+**FIXED 2026-09-25 (lane E).** The renamer has the control this entry asked
+for: an Add Rule menu (the toolbar's button, the operations panel's, or `R`)
+that adds any of the ten kinds, and a rule editor under the pipeline with a
+text box for every string or number a rule takes, a chooser for every choice
+(all eight case modes, all five date formats, the three trim modes, the five
+extension rules, start / end / at-a-position) and a switch for each flag.
+Typing takes effect as it is typed; a counting box refuses what is not a number
+and says so with a red rule under the box. `FileEntry::modified_ms` is read
+from the folder listing and a date stamp stamps it; `RenameRecord::timestamp_ms`
+is the clock's and the History panel shows it. Every rule can be selected
+(a press, or Ctrl+Up / Ctrl+Down), edited (F2), moved and removed -- the
+selection used to land only on the newest rule, so the others could be neither.
+
+Making the rules reachable showed what three of them would have done, fixed in
+the same change: the Regex rule was a literal replace ("only support literal
+patterns for now") and is a POSIX extended regular expression through `ere`,
+the engine the shell, `grep` and `sed` share, with `&` and `\1`...`\9` in the
+replacement; the date stamp was the constant 2026-05-18 and is the file's own
+modification date (UTC, `Tz::utc()`); and an empty search put the replacement
+between every character. Also: numbering counted every file in the list rather
+than the files being renamed, ticking a file did not re-run the preview or the
+conflicts, and opening a folder threw the rules away.
+
+The rest of this entry is the history.
+
 
 **Corrected 2026-09-15.** The paragraph below said the renamer "can actually
 rename". It could not: `apply_plan` edited a `Vec<FileEntry>` and the crate
@@ -159679,6 +159705,14 @@ preview pane itself. Also fixed: "now" was the constant `1_779_000_000`, so the
 date filters and every "3 hours ago" were measured from one day in May 2026,
 and the Content mode matched names (its own [E] entry, fixed the same day).
 Four examined; sixteen to go.
+
+**`apps/renamer`, 2026-09-25 -- wholesale, and most of its purpose was
+unreachable.** Beyond the missing pointer, every rule that needed a string typed
+or a choice made could not be added (its own entry,
+`TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING`, now fixed), only the
+newest rule could be selected, the file list and the extension filter had no
+way to scroll or be typed into, and the layout ignored the window's size. All
+reachable now, by pointer and by key. Five examined; fifteen to go.
 
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 

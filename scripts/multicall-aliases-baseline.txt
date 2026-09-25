@@ -58,7 +58,6 @@ firejail:firemon
 flock:lockfile
 fwupd:fwupdtool
 getopt:cksum
-getopt:printenv
 getopt:sync
 getty:mingetty
 grub2:grub-editenv

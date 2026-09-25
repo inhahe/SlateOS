@@ -1,10 +1,14 @@
-//! Slate OS getopt/cksum/sync/printenv — shell scripting helpers
+//! Slate OS getopt/cksum/sync — shell scripting helpers
 //!
 //! Multi-personality binary detected via argv[0]:
 //! - `getopt`: Parse command-line options for shell scripts
 //! - `cksum`: Print CRC32 checksum and byte count
 //! - `sync`: Flush filesystem buffers
-//! - `printenv`: Print environment variables
+//!
+//! `printenv` was a fourth personality here, which nothing could reach: no
+//! `/bin/printenv` link was ever staged. It is `userspace/coreutils`'s own bin
+//! since 2026-09-24 -- a port of GNU's, differentially tested -- and the name
+//! belongs to the one program that does the job (design-decisions.md §1019).
 
 use quoting::quoteaf_os;
 use std::env;
@@ -19,7 +23,6 @@ enum Mode {
     Getopt,
     Cksum,
     Sync,
-    Printenv,
 }
 
 fn detect_mode(argv0: &str) -> Mode {
@@ -29,7 +32,6 @@ fn detect_mode(argv0: &str) -> Mode {
     match lower.as_str() {
         "cksum" => Mode::Cksum,
         "sync" => Mode::Sync,
-        "printenv" => Mode::Printenv,
         _ => Mode::Getopt,
     }
 }
@@ -611,52 +613,6 @@ fn run_sync() -> Result<(), String> {
     Ok(())
 }
 
-// ── printenv ───────────────────────────────────────────────────────
-
-fn run_printenv() -> Result<(), String> {
-    let argv: Vec<String> = env::args().collect();
-    let mut null_terminated = false;
-    let mut vars: Vec<String> = Vec::new();
-
-    for arg in &argv[1..] {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                eprintln!("Usage: printenv [OPTION] [VARIABLE]...");
-                eprintln!("Print the values of environment variables.");
-                eprintln!();
-                eprintln!("  -0, --null  end each line with NUL, not newline");
-                process::exit(0);
-            }
-            "-0" | "--null" => null_terminated = true,
-            _ => vars.push(arg.clone()),
-        }
-    }
-
-    let end = if null_terminated { "\0" } else { "\n" };
-
-    if vars.is_empty() {
-        // Print all environment variables
-        let mut env_vars: Vec<(String, String)> = env::vars().collect();
-        env_vars.sort_by(|a, b| a.0.cmp(&b.0));
-        for (key, value) in &env_vars {
-            print!("{key}={value}{end}");
-        }
-    } else {
-        let mut found_all = true;
-        for var in &vars {
-            match env::var(var) {
-                Ok(value) => print!("{value}{end}"),
-                Err(_) => found_all = false,
-            }
-        }
-        if !found_all {
-            process::exit(1);
-        }
-    }
-
-    Ok(())
-}
-
 // ── Main ───────────────────────────────────────────────────────────
 
 fn run() -> Result<(), String> {
@@ -667,7 +623,6 @@ fn run() -> Result<(), String> {
         Mode::Getopt => run_getopt(),
         Mode::Cksum => run_cksum(),
         Mode::Sync => run_sync(),
-        Mode::Printenv => run_printenv(),
     }
 }
 
@@ -722,9 +677,11 @@ mod tests {
         assert_eq!(detect_mode("sync"), Mode::Sync);
     }
 
+    /// `printenv` is coreutils' bin now; this binary no longer answers to it,
+    /// so the name falls to the default like any other it does not know.
     #[test]
-    fn test_detect_printenv() {
-        assert_eq!(detect_mode("printenv"), Mode::Printenv);
+    fn printenv_is_not_a_personality_here() {
+        assert_eq!(detect_mode("printenv"), Mode::Getopt);
     }
 
     #[test]

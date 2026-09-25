@@ -145,8 +145,8 @@ fn parse_window(window: [u8; SHEBANG_BUF]) -> Result<Shebang, i32> {
 
     // Trim trailing blanks. `#!` occupies 0..2 and is not blank, so this stops
     // there at the latest; the bound says so rather than relying on it.
-    while line_end > 2 && is_blank(at(line_end - 1)) {
-        line_end -= 1;
+    while line_end > 2 && is_blank(at(line_end.saturating_sub(1))) {
+        line_end = line_end.saturating_sub(1);
     }
 
     let name_start = next_non_blank(2, line_end).ok_or(errno::ENOEXEC)?;
@@ -198,8 +198,12 @@ pub(crate) fn splice_argv(buf: &mut [u8], len: usize, prefix: &[&[u8]]) -> Optio
     let used = buf.get(..len)?;
     // The first string and its NUL. A list without any NUL cannot come out of
     // the packer; treat it as one unterminated argv[0] and drop all of it.
-    let arg0_len = used.iter().position(|&b| b == 0).map_or(len, |p| p + 1);
-    let tail_len = len - arg0_len;
+    let arg0_len = used
+        .iter()
+        .position(|&b| b == 0)
+        .map_or(len, |p| p.saturating_add(1));
+    // `arg0_len <= len` by construction, so this never saturates.
+    let tail_len = len.saturating_sub(arg0_len);
 
     let mut prefix_len = 0usize;
     for s in prefix {
@@ -213,15 +217,18 @@ pub(crate) fn splice_argv(buf: &mut [u8], len: usize, prefix: &[&[u8]]) -> Optio
     buf.copy_within(arg0_len..len, prefix_len);
     let mut pos = 0usize;
     for s in prefix {
-        let end = pos + s.len();
+        let end = pos.checked_add(s.len())?;
         buf.get_mut(pos..end)?.copy_from_slice(s);
         *buf.get_mut(end)? = 0;
-        pos = end + 1;
+        pos = end.checked_add(1)?;
     }
     Some(new_len)
 }
 
 /// How many arguments a packed list holds — the number of NULs in it.
+// An argument list is at most `ARG_MAX` (128 KiB) and is counted once per exec;
+// the `bytecount` crate's SIMD is not worth a dependency of the C library.
+#[allow(clippy::naive_bytecount)]
 pub(crate) fn packed_count(packed: &[u8]) -> usize {
     packed.iter().filter(|&&b| b == 0).count()
 }

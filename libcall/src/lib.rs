@@ -61,6 +61,12 @@
 
 #![no_std]
 
+// Named at the root because an `extern crate` anywhere else binds the name
+// for that one module and not the modules inside it. Only `pty` uses it: its
+// argument arrays are `Vec`s, built before a fork so the child need not
+// allocate. Every program that depends on this crate links `std` anyway.
+extern crate std;
+
 use core::ffi::CStr;
 
 // ---------------------------------------------------------------------------
@@ -95,6 +101,17 @@ pub const ENOSYS: i32 = 38;
 /// the listing and the keypress, which is the ordinary case rather than an
 /// error in the program: a process list is a photograph of something moving.
 pub const ESRCH: i32 = 3;
+
+/// Interrupted system call. [`pty`] retries or absorbs it; exported so a
+/// caller matching on one of its errors can name it too.
+pub const EINTR: i32 = 4;
+/// Input/output error -- on a terminal's master end, "the far end has closed",
+/// which [`pty::PtyChild::read`] reports as [`pty::Output::Closed`].
+pub const EIO: i32 = 5;
+/// Try again: a non-blocking descriptor had nothing to give or no room.
+pub const EAGAIN: i32 = 11;
+
+pub mod pty;
 
 /// Terminate. Catchable, so a process may clean up or ignore it.
 pub const SIGTERM: i32 = 15;
@@ -575,6 +592,9 @@ mod tests {
         );
         assert_eq!(SYSLOG_ACTION_CLEAR, posix::unistd::SYSLOG_ACTION_CLEAR);
         assert_eq!(ESRCH, posix::errno::ESRCH);
+        assert_eq!(EINTR, posix::errno::EINTR);
+        assert_eq!(EIO, posix::errno::EIO);
+        assert_eq!(EAGAIN, posix::errno::EAGAIN);
         assert_eq!(SIGTERM, posix::signal::SIGTERM);
         assert_eq!(SIGKILL, posix::signal::SIGKILL);
         assert_eq!(SIGSTOP, posix::signal::SIGSTOP);
@@ -615,10 +635,32 @@ mod tests {
     /// signal anything -- the exact state lane C asked to have fixed.
     /// `ENOSYS` is the host arm declining, which is one step further than the
     /// guard and proves the guard let it past.
+    #[cfg(not(unix))]
     #[test]
     fn a_single_pid_reaches_the_libc_arm() {
         assert_eq!(kill(1, SIGTERM), Err(ENOSYS));
         assert_eq!(kill(i32::MAX, SIGCONT), Err(ENOSYS));
+    }
+
+    /// The same control on a `unix` build, where the arm past the guard is the
+    /// real `kill` -- a Linux host, or SlateOS. It asserted `ENOSYS` there too
+    /// until 2026-09-24, when this crate's tests first ran on Linux and it
+    /// failed.
+    ///
+    /// Signal 0, not the `SIGTERM` above: on a real kernel, run as root, a
+    /// `SIGTERM` to pid 1 would be delivered to init. Signal 0 sends nothing
+    /// and still takes the whole path, so what comes back is the kernel's
+    /// verdict -- and any verdict but the guard's `EINVAL` proves the guard
+    /// let it past.
+    #[cfg(unix)]
+    #[test]
+    fn a_single_pid_reaches_the_libc_arm() {
+        assert_ne!(kill(1, 0), Err(EINVAL));
+        assert_eq!(
+            kill(i32::MAX, 0),
+            Err(ESRCH),
+            "no such process, from the kernel"
+        );
     }
 
     /// The priority mask and the prefer bit do not overlap.

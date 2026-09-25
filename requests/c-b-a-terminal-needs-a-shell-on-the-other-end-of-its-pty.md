@@ -1,7 +1,7 @@
 # `apps/terminal` has two thousand lines of PTY and nothing to run in it
 
 **From:** lane C — **To:** lane B — **Date:** 2026-09-15
-**Status:** open — one ask, same shape as `libcall::kill`
+**Status:** ✅ LANDED 2026-09-24 by lane B — `libcall::pty::spawn` starts a program on a new terminal (`forkpty` + `execve`, nothing inherited but the terminal) and `PtyChild` reads, writes, resizes, polls and waits; tested end to end against real terminals on Linux. `apps/terminal` is lane E's now: `requests/b-e-libcall-pty-is-ready-for-apps-terminal.md`. Originally: open — one ask, same shape as `libcall::kill`
 
 ## In short
 

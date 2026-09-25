@@ -75376,6 +75376,49 @@ will notice losing.
 
 ---
 
+## 1028. `libcall::pty` starts a program with `forkpty` + `execve`, and reports a failure to start on the terminal
+
+**Date:** 2026-09-24
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** the terminal emulator needed a way to start a shell on a
+pseudo-terminal. The usual Rust way (std's `Command` with a hook that runs in
+the child) would, on SlateOS today, freeze the emulator until the shell exits,
+because of a defect in how a native `exec` handles close-on-exec descriptors.
+So `libcall::pty::spawn` forks and execs by hand through the C library. The
+price: a program that cannot be started is not reported to the caller as an
+error; the child prints why on the terminal and exits with 127.
+
+**The alternatives:**
+
+| | `Command` + `pre_exec(login_tty)` (what `sshd` does) | `forkpty` + `execve` (chosen) |
+|---|---|---|
+| `exec` failure | returned from `spawn()` as an `Err` | a line on the terminal, exit status 127 |
+| on SlateOS today | `spawn()` returns only when the program exits (`requests/b-ad-close-on-exec-does-not-close-on-a-native-exec.md`) | returns at once |
+| descriptors the child inherits | whatever is not close-on-exec -- and on SlateOS the close-on-exec ones' handles too | none but the terminal (`closefrom(3)`) |
+| identity change (uid/gid/groups) | std does it | not supported |
+| fork-safety | std's | ours: everything built before the fork, bare libc calls after |
+
+**Why the failure goes to the terminal rather than an `Err`.** Knowing that an
+`exec` succeeded needs a close-on-exec pipe whose end-of-file arrives at the
+`exec` -- exactly the mechanism that is broken. The terminal is where the
+emulator's user is already looking, and every terminal emulator reports a shell
+it could not start that way. Every failure *before* the fork (bad arguments,
+no terminal available, fork failure) is still an `Err`.
+
+**Revisit when** the platform fix lands: `pre_exec` then works, and the choice
+becomes "exec failure as an `Err`" against "no descriptor leaks even when a
+caller forgot close-on-exec". The second is worth keeping regardless, so the
+likely revision is to keep `closefrom(3)` and add an exec-status pipe beside it,
+not to switch to `Command`. `sshd` cannot use this path until it grows an
+identity switch, which is why its session deadlock is tracked separately
+(`known-issues.md` -> `TD-B-SSHD-PTY-SESSIONS-DEADLOCK-BECAUSE-CLOSE-ON-EXEC-DOES-NOT-CLOSE`).
+
+**Where:** `libcall/src/pty.rs`.
+
+---
+
 ## 834. Selection is a change of colour, not of weight
 
 **Date:** 2026-09-12

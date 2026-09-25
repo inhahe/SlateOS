@@ -159777,7 +159777,9 @@ the whole input into a new character vector (a thousand matches over the
 16 384-character limit copied sixteen million characters per keystroke). Now
 the test input is a real multi-line field (caret, selection, clipboard, drag),
 the library saves patterns with their flags to the user's settings, and every
-control answers the pointer. Seven examined; thirteen to go.
+control answers the pointer. Seven examined; fourteen to go -- the counts in
+the paragraphs above are each one short, because the list is twenty apps
+*besides* `notes`, which was the first examined.
 
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 

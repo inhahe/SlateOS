@@ -1839,7 +1839,8 @@ word; text inside them that says "lane C" is history.
   it reads files, follows them, and exports the file's own bytes),
   `regextester` (2026-09-25 — every control, a multi-line test input, and a
   library that loads and saves).
-  **Next:** weather, reminders, rssreader — then the rest.
+  **Next:** weather, rssreader, habits — then the rest. (`reminders` was
+  examined 2026-09-18: keyboard-driven by design, its two gaps fixed.)
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane

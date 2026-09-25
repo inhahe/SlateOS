@@ -17561,10 +17561,21 @@ mod tests {
             assert!(!rows.is_empty(), "font_size = {size} drew nothing");
         }
         // An enormous size is clamped rather than honoured — a 1e30-pixel face
-        // would be a memory bomb — so its glyphs are merely too big for this
-        // 200x120 surface. What matters is that asking does not panic.
-        let (rows, _) = ink_of("W", 1e30, FontWeightHint::Regular, None);
-        assert!(rows.is_empty(), "a 512px glyph should not fit in 120 rows");
+        // would be a memory bomb — to the largest size fonts are built at, so
+        // it draws exactly what that size draws.
+        //
+        // Compared against that size rather than asserted to draw nothing:
+        // whether a 512px glyph's ink reaches this 200x120 surface depends on
+        // the face's ascent, and the face is whichever one the machine has
+        // installed. With Windows' UI face the "W" lands below the surface; with
+        // DejaVu Sans, which a Linux host finds first, the top of it is inside,
+        // and the old `rows.is_empty()` failed there.
+        let max = f32::from(osfont::system::MAX_PX);
+        assert_eq!(
+            ink_of("W", 1e30, FontWeightHint::Regular, None),
+            ink_of("W", max, FontWeightHint::Regular, None),
+            "a 1e30px request did not draw what the largest size draws"
+        );
     }
 
     // ---- rich text (per-glyph colour) --------------------------------------

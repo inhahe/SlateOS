@@ -29,6 +29,16 @@ fn main() {
     let t = std::time::Instant::now();
     let img = imagecodec::decode(&bytes, limits).expect("decode");
     println!("decode {}x{} in {:?}", img.width, img.height, t.elapsed());
+    if imagecodec::gif::is_gif(&bytes) {
+        // Every frame of an animation, composited, as a viewer plays it.
+        let t = std::time::Instant::now();
+        let mut animation = imagecodec::gif::Animation::new(&bytes, limits).expect("animation");
+        let mut frames = 0u32;
+        while animation.next_frame().expect("frame").is_some() {
+            frames += 1;
+        }
+        println!("animation: {frames} frames in {:?}", t.elapsed());
+    }
     if let Some(p) = &prefix {
         dump(p, "full", &img);
     }

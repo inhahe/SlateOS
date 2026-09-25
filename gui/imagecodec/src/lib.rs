@@ -82,6 +82,14 @@
 //! coefficients does. Arithmetic coding and 12-bit samples are refused by name
 //! rather than half-read. See [`jpeg`].
 //!
+//! GIF (87a and 89a), animations included: [`decode`] gives the first frame,
+//! which is what a thumbnail or a still viewer shows, and [`gif::Animation`]
+//! composites every frame onto its canvas in turn, with each image's disposal
+//! and delay, for a viewer that plays it. Where decoders disagree -- the
+//! background colour, an image larger than its screen, a frame cut short --
+//! it does what browsers do, since that is how anyone has seen the file. See
+//! [`gif`].
+//!
 //! # Picture files for *other* crates' tests
 //!
 //! [`testing`] emits real, small PNGs. It is public rather than `#[cfg(test)]`
@@ -97,8 +105,10 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
+pub mod gif;
 pub mod jpeg;
 pub mod png;
+mod scale;
 pub mod testing;
 
 /// A decoded picture: densely packed `0xAARRGGBB`, row-major, no padding.
@@ -294,6 +304,9 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
     if jpeg::is_jpeg(bytes) {
         return jpeg::decode(bytes, limits);
     }
+    if gif::is_gif(bytes) {
+        return gif::decode(bytes, limits);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -305,13 +318,15 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
 /// bounds is returned at its own size -- inventing pixels is not what this is
 /// for.
 ///
-/// Both formats scale *during reconstruction*, so the source is never held at
+/// PNG and JPEG scale *during reconstruction*, so the source is never held at
 /// its own size: a PNG's rows go from the decompressor straight into a box
 /// filter, interlaced files included, and a JPEG's blocks are transformed from
 /// only as many coefficients as the output needs. A 2000x1500 PNG thumbnails
 /// in 0.65 MB where its decompressed stream alone is 12 MB
-/// (`tests/decode_memory.rs`). A caller may always use this and never has to
-/// ask which case a file is in.
+/// (`tests/decode_memory.rs`). A GIF's first frame is composited at its own
+/// size -- it is not a picture until it is on its canvas, and a GIF is small --
+/// and then averaged by the same rule as a PNG. A caller may always use this
+/// and never has to ask which case a file is in.
 ///
 /// # Errors
 ///
@@ -322,6 +337,9 @@ pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> Im
     }
     if jpeg::is_jpeg(bytes) {
         return jpeg::decode_scaled(bytes, limits, max_w, max_h);
+    }
+    if gif::is_gif(bytes) {
+        return gif::decode_scaled(bytes, limits, max_w, max_h);
     }
     Err(ImageError::UnknownFormat)
 }
@@ -342,6 +360,9 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     }
     if jpeg::is_jpeg(bytes) {
         return jpeg::dimensions(bytes);
+    }
+    if gif::is_gif(bytes) {
+        return gif::dimensions(bytes);
     }
     Err(ImageError::UnknownFormat)
 }
@@ -382,7 +403,14 @@ mod tests {
             decode(&[], Limits::default()),
             Err(ImageError::UnknownFormat)
         );
-        assert_eq!(dimensions(b"GIF89a"), Err(ImageError::UnknownFormat));
+        // A format this crate does not read yet.
+        assert_eq!(
+            dimensions(b"RIFF\0\0\0\0WEBPVP8 "),
+            Err(ImageError::UnknownFormat)
+        );
+        // And one it does, too short to say anything: that is a truncated
+        // GIF, not an unknown format.
+        assert_eq!(dimensions(b"GIF89a"), Err(ImageError::Truncated));
     }
 
     #[test]

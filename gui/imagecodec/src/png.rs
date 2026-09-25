@@ -47,6 +47,7 @@ use alloc::vec::Vec;
 
 use deflate::{ZlibInflateStream, zlib_inflate_stream};
 
+use crate::scale::{BoxFilter, Sink, fit_within};
 use crate::{Image, ImageError, ImageResult, Limits};
 
 /// The eight bytes every PNG begins with (RFC 2083 §3.1).
@@ -488,12 +489,6 @@ impl<'a> Scanlines<'a> {
     }
 }
 
-/// Where reconstructed pixels go.
-trait Sink {
-    /// The pixel at `(x, y)` of the picture is `argb`.
-    fn put(&mut self, x: u32, y: u32, argb: u32);
-}
-
 /// The whole picture, at its own size.
 struct FullSize {
     width: u32,
@@ -521,117 +516,6 @@ impl Sink for FullSize {
             *slot = argb;
         }
     }
-}
-
-/// A picture no larger than a thumbnail, each cell the average of the source
-/// pixels that fall in it.
-///
-/// Every source pixel is added to exactly one cell and each cell is divided
-/// by its own count at the end. Counting per cell rather than assuming
-/// `(w/dw) * (h/dh)` matters because the division is integer — with a
-/// 100-wide source and a 30-wide destination the columns come out
-/// 4,3,3,4,3..., and a fixed divisor would darken the wide ones.
-///
-/// Order does not matter to a sum, which is why interlaced files need no
-/// special case: Adam7's passes arrive scattered across the picture, and each
-/// pixel still lands in the one cell its position names.
-///
-/// Alpha is averaged with the colour rather than premultiplied first. That is
-/// the same thing `box_filter_downscale` in the thumbnailer does, and matching
-/// it is deliberate: two averaging rules would make a scaled decode and a
-/// decode-then-scale disagree about the same picture.
-struct BoxFilter {
-    dest_w: u32,
-    /// Which destination column each source column falls in.
-    col_cell: Vec<u32>,
-    /// Which destination row each source row falls in.
-    row_cell: Vec<u32>,
-    /// Per cell: the sums of alpha, red, green and blue. `u64` because a cell
-    /// can cover the whole source, and 255 times 24 million overflows a `u32`.
-    acc: Vec<[u64; 4]>,
-    /// Per cell: how many source pixels went into it.
-    counts: Vec<u64>,
-}
-
-impl BoxFilter {
-    fn new(src_w: u32, src_h: u32, dest_w: u32, dest_h: u32) -> ImageResult<Self> {
-        let cells = (dest_w as usize)
-            .checked_mul(dest_h as usize)
-            .ok_or(ImageError::Truncated)?;
-        Ok(Self {
-            dest_w,
-            col_cell: cell_map(src_w, dest_w),
-            row_cell: cell_map(src_h, dest_h),
-            acc: vec![[0u64; 4]; cells],
-            counts: vec![0u64; cells],
-        })
-    }
-
-    /// Each cell's average, as `0xAARRGGBB`.
-    fn finish(self) -> Vec<u32> {
-        self.acc
-            .iter()
-            .zip(self.counts.iter())
-            .map(|(cell, &n)| {
-                // `checked_div` for the empty cell, which cannot happen with a
-                // destination no larger than its source — every cell receives
-                // at least one pixel — and would otherwise be a panic in a
-                // decoder that reads files it did not write. It comes out as a
-                // clear pixel.
-                let mean = |v: u64| {
-                    u32::try_from(v.checked_div(n).unwrap_or(0))
-                        .unwrap_or(255)
-                        .min(255)
-                };
-                (mean(cell[0]) << 24) | (mean(cell[1]) << 16) | (mean(cell[2]) << 8) | mean(cell[3])
-            })
-            .collect()
-    }
-}
-
-impl Sink for BoxFilter {
-    fn put(&mut self, x: u32, y: u32, argb: u32) {
-        let (Some(&dx), Some(&dy)) = (self.col_cell.get(x as usize), self.row_cell.get(y as usize))
-        else {
-            return;
-        };
-        let at = (dy as usize)
-            .checked_mul(self.dest_w as usize)
-            .and_then(|row| row.checked_add(dx as usize));
-        let Some(at) = at else {
-            return;
-        };
-        if let (Some(cell), Some(n)) = (self.acc.get_mut(at), self.counts.get_mut(at)) {
-            // Saturating throughout. The sums are bounded by 255 times the
-            // pixel cap and cannot reach a u64 in practice, but a codec is
-            // exactly the place where "in practice" is decided by whoever
-            // supplies the file.
-            cell[0] = cell[0].saturating_add(u64::from((argb >> 24) & 0xFF));
-            cell[1] = cell[1].saturating_add(u64::from((argb >> 16) & 0xFF));
-            cell[2] = cell[2].saturating_add(u64::from((argb >> 8) & 0xFF));
-            cell[3] = cell[3].saturating_add(u64::from(argb & 0xFF));
-            *n = n.saturating_add(1);
-        }
-    }
-}
-
-/// For each of `src` source positions, the destination cell of `dest` it falls
-/// in: `i * dest / src`, clamped so the last position cannot land one past the
-/// end when the division is exact.
-///
-/// A table rather than a division per pixel, because `put` runs once for every
-/// pixel of a picture that may have tens of millions of them.
-fn cell_map(src: u32, dest: u32) -> Vec<u32> {
-    (0..src)
-        .map(|i| {
-            let cell = u64::from(i)
-                .saturating_mul(u64::from(dest))
-                .checked_div(u64::from(src.max(1)))
-                .unwrap_or(0)
-                .min(u64::from(dest.saturating_sub(1)));
-            u32::try_from(cell).unwrap_or(0)
-        })
-        .collect()
 }
 
 /// Reconstruct the whole picture into `sink`: one pass for a plain file, the
@@ -708,31 +592,6 @@ fn expand_pass(
         core::mem::swap(&mut prev, &mut cur);
     }
     Ok(())
-}
-
-/// The largest `w x h` that fits in `max_w x max_h` with the aspect ratio of
-/// `w x h`, never zero in either dimension.
-///
-/// A picture is never scaled *up*: a 16x16 icon asked to fit 128x128 stays
-/// 16x16, because inventing pixels is not what a thumbnailer is for.
-fn fit_within(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
-    if w <= max_w && h <= max_h {
-        return (w.max(1), h.max(1));
-    }
-    // Saturating rather than plain: the product of two `u32`s fits a `u64`
-    // with a hair to spare, but writing the proof in a comment and the
-    // multiplication as if it needed none is how the next edit loses it.
-    let by_w = u64::from(max_w).saturating_mul(u64::from(h));
-    let by_h = u64::from(max_h).saturating_mul(u64::from(w));
-    // Whichever bound binds first: comparing the cross-products avoids
-    // floating point and its rounding.
-    if by_w <= by_h {
-        let dh = by_w.checked_div(u64::from(w.max(1))).unwrap_or(1).max(1);
-        (max_w.max(1), u32::try_from(dh).unwrap_or(1))
-    } else {
-        let dw = by_h.checked_div(u64::from(h.max(1))).unwrap_or(1).max(1);
-        (u32::try_from(dw).unwrap_or(1), max_h.max(1))
-    }
 }
 
 /// Reverse one of the five scanline filters (RFC 2083 §6), in place.

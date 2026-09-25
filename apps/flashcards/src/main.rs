@@ -24,13 +24,18 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
 use guitk::dialog::{FilePicker, Picked};
-use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
 use guitk::kv;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::textinput::TextInput;
+use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -754,8 +759,235 @@ enum AppView {
     DeckList,
     DeckDetail,
     CardEditor,
+    /// A deck's name and description. `n` made a deck called "New Deck" that
+    /// nothing could rename, and a description nothing could write.
+    DeckEditor,
     StudyMode,
     Statistics,
+}
+
+/// A text field in one of the two editors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Field {
+    Front,
+    Back,
+    Tags,
+    Name,
+    About,
+}
+
+/// What a delete waiting on its answer would remove.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Doomed {
+    Deck(usize),
+    /// A card, by id: its position in the list moves when one before it goes.
+    Card(u32),
+}
+
+/// Everything in the window a pointer can press, as the renderer records it.
+///
+/// The program drew a list of decks, a table of cards, a search box, a tag
+/// pill, three editor fields, a flip button and four rating buttons, and
+/// handled no pointer event (`known-issues.md` ->
+/// `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    /// Back one view, as Escape.
+    Back,
+    /// The list of keys.
+    Help,
+    DeckList,
+    DeckRow(usize),
+    NewDeck,
+    EditDeck,
+    DeleteDeck,
+    Import,
+    Export,
+    CardList,
+    /// A card, by its position in the list shown.
+    CardRow(usize),
+    Search,
+    TagChip,
+    StudyDue,
+    StudyAll,
+    NewCard,
+    EditCard,
+    DeleteCard,
+    Shuffle,
+    Stats,
+    Field(Field),
+    Save,
+    Cancel,
+    /// The card being studied: a press turns it over.
+    StudyCard,
+    Rate(Rating),
+    EndSession,
+    ConfirmDelete,
+    KeepIt,
+    /// Around the question: a press keeps what it asked about.
+    QuestionBackdrop,
+    QuestionCard,
+    HelpCard,
+}
+
+/// Every key this program answers, and what it does.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`. There was no list: each view
+/// printed its own line of hints, and the deck view's advertised `[D]ay+`, a
+/// key removed when the day came from the clock.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Up / Down", "Choose a deck or a card"),
+    ("Enter", "Open the deck; in an editor, save"),
+    ("N", "New deck, or new card inside a deck"),
+    ("E", "Edit the deck, or the card"),
+    ("X / Delete", "Delete the deck, or the card (asks first)"),
+    ("S / Shift+S", "Study the cards due / every card"),
+    ("Space", "Turn the card over"),
+    ("1 / 2 / 3 / 4", "Again / Hard / Good / Easy"),
+    ("R", "Shuffle the deck"),
+    ("T", "Next tag filter"),
+    ("/", "Search the deck"),
+    ("I", "The deck's statistics"),
+    ("Tab / Shift+Tab", "Next / previous field in an editor"),
+    ("Esc", "Back"),
+    ("Ctrl+O / Ctrl+S", "Import a deck file / export this deck"),
+    ("F1", "This list"),
+];
+
+/// The most characters a card's front, back or tags, or a deck's name or
+/// description, will take.
+const FIELD_CAPACITY: usize = 2000;
+
+/// A deck row's height.
+const DECK_ROW_H: f32 = 72.0;
+
+/// The band at the bottom of the deck list that says where the decks came
+/// from and what is kept.
+const NOTICE_H: f32 = 34.0;
+
+/// The character a letter or digit key types, shifted or not; `/` and `?`.
+fn key_char(key: Key, shift: bool) -> Option<char> {
+    const LETTERS: [(Key, char); 26] = [
+        (Key::A, 'a'),
+        (Key::B, 'b'),
+        (Key::C, 'c'),
+        (Key::D, 'd'),
+        (Key::E, 'e'),
+        (Key::F, 'f'),
+        (Key::G, 'g'),
+        (Key::H, 'h'),
+        (Key::I, 'i'),
+        (Key::J, 'j'),
+        (Key::K, 'k'),
+        (Key::L, 'l'),
+        (Key::M, 'm'),
+        (Key::N, 'n'),
+        (Key::O, 'o'),
+        (Key::P, 'p'),
+        (Key::Q, 'q'),
+        (Key::R, 'r'),
+        (Key::S, 's'),
+        (Key::T, 't'),
+        (Key::U, 'u'),
+        (Key::V, 'v'),
+        (Key::W, 'w'),
+        (Key::X, 'x'),
+        (Key::Y, 'y'),
+        (Key::Z, 'z'),
+    ];
+    const DIGITS: [(Key, char); 10] = [
+        (Key::Num0, '0'),
+        (Key::Num1, '1'),
+        (Key::Num2, '2'),
+        (Key::Num3, '3'),
+        (Key::Num4, '4'),
+        (Key::Num5, '5'),
+        (Key::Num6, '6'),
+        (Key::Num7, '7'),
+        (Key::Num8, '8'),
+        (Key::Num9, '9'),
+    ];
+    if let Some(&(_, c)) = LETTERS.iter().find(|(k, _)| *k == key) {
+        return Some(if shift { c.to_ascii_uppercase() } else { c });
+    }
+    if key == Key::Slash {
+        return Some(if shift { '?' } else { '/' });
+    }
+    DIGITS.iter().find(|(k, _)| *k == key).map(|&(_, c)| c)
+}
+
+/// What one keystroke did to a one-line field.
+struct LineEdit {
+    /// Whether the key was an editing key.
+    handled: bool,
+    /// What was copied or cut, for the fields' clipboard.
+    copied: Option<String>,
+}
+
+/// Apply a keystroke to a one-line field, taking no more than leaves it at
+/// `capacity` characters. Paste reads `clipboard`; copy and cut hand theirs
+/// back in the result.
+///
+/// The same as `apps/regextester`'s. Two copies of it is one too many: the
+/// toolkit's `TextInput` holds the state and leaves the keys to each caller,
+/// which is filed as `requests/e-c-a-text-field-that-takes-its-own-keys.md`.
+fn edit_line(input: &mut TextInput, key: &KeyEvent, capacity: usize, clipboard: &str) -> LineEdit {
+    let shift = key.modifiers.shift;
+    let ctrl = key.modifiers.ctrl;
+    let mut copied = None;
+    match key.key {
+        Key::Left => input.move_cursor_left(shift, 13.0, FontWeightHint::Regular),
+        Key::Right => input.move_cursor_right(shift, 13.0, FontWeightHint::Regular),
+        Key::Home => input.move_home(shift),
+        Key::End => input.move_end(shift),
+        Key::Backspace => input.backspace(),
+        Key::Delete => input.delete(),
+        Key::A if ctrl => input.select_all(),
+        Key::C if ctrl => {
+            if input.has_selection() {
+                copied = Some(input.selected_text().to_string());
+            }
+        }
+        Key::X if ctrl => {
+            if input.has_selection() {
+                copied = Some(input.selected_text().to_string());
+                input.delete_selection();
+            }
+        }
+        Key::V if ctrl => insert_limited(input, clipboard, capacity),
+        _ => {
+            if key.text.is_empty() || ctrl {
+                return LineEdit {
+                    handled: false,
+                    copied: None,
+                };
+            }
+            insert_limited(input, &key.text, capacity);
+        }
+    }
+    LineEdit {
+        handled: true,
+        copied,
+    }
+}
+
+/// Type `typed` into `input` over its selection, stopping at `capacity`
+/// characters; a control character -- a newline in a paste -- is left out,
+/// since a field is one line.
+fn insert_limited(input: &mut TextInput, typed: &str, capacity: usize) {
+    if input.has_selection() {
+        input.delete_selection();
+    }
+    for ch in typed.chars() {
+        if ch.is_control() {
+            continue;
+        }
+        if input.text().chars().count() >= capacity {
+            break;
+        }
+        input.insert_char(ch);
+    }
 }
 
 // ── Study session state ─────────────────────────────────────────────
@@ -869,9 +1101,32 @@ struct FlashcardsApp {
     selected_card: usize,
     /// Card editor state: editing which card ID (None = new card).
     editing_card_id: Option<u32>,
-    editor_front: String,
-    editor_back: String,
-    editor_tags: String,
+    /// The editor's fields. They were strings nothing could type into: the
+    /// editor's keys were Enter and Escape, so a card could be neither made
+    /// nor changed -- every "New Card" was refused as empty.
+    editor_front: TextInput,
+    editor_back: TextInput,
+    editor_tags: TextInput,
+    /// The deck editor's fields, and which deck (`None` = a new one).
+    deck_name: TextInput,
+    deck_about: TextInput,
+    editing_deck: Option<usize>,
+    /// The field the keyboard is in, in whichever editor is up.
+    field: Field,
+    /// The fields' clipboard.
+    clipboard: String,
+    /// A delete waiting on its answer.
+    pending_delete: Option<Doomed>,
+    /// Whether the list of keys is up.
+    show_help: bool,
+    /// How far the deck list is scrolled, in rows.
+    deck_scroll: usize,
+    /// What the pointer is over, so it can be drawn lit.
+    hover: Option<Target>,
+    /// Every box the last paint recorded, for hover and the wheel.
+    last_hits: Vec<(Target, Rect)>,
+    /// The wheel's remainder.
+    wheel: wheel::Accumulator,
     /// Scroll offset for card lists.
     scroll_offset: usize,
     /// Status message displayed at the bottom.
@@ -931,6 +1186,9 @@ struct Fingerprint {
     tag_filter: Option<String>,
     /// The first card's id, which moves when the deck is shuffled.
     first_card: usize,
+    /// A delete waiting on its answer: `x` sets it and changes nothing else,
+    /// so without this the question was asked and not drawn.
+    pending_delete: Option<Doomed>,
 }
 
 impl FlashcardsApp {
@@ -957,9 +1215,20 @@ impl FlashcardsApp {
             tag_filter: None,
             selected_card: 0,
             editing_card_id: None,
-            editor_front: String::new(),
-            editor_back: String::new(),
-            editor_tags: String::new(),
+            editor_front: TextInput::new(),
+            editor_back: TextInput::new(),
+            editor_tags: TextInput::new(),
+            deck_name: TextInput::new(),
+            deck_about: TextInput::new(),
+            editing_deck: None,
+            field: Field::Front,
+            clipboard: String::new(),
+            pending_delete: None,
+            show_help: false,
+            deck_scroll: 0,
+            hover: None,
+            last_hits: Vec::new(),
+            wheel: wheel::Accumulator::default(),
             scroll_offset: 0,
             status_msg: String::from("Welcome to Flashcards"),
             // Was `shuffle_seed: 42`, incremented by 7 per press, so every
@@ -1282,7 +1551,176 @@ impl FlashcardsApp {
         self.editor_front.clear();
         self.editor_back.clear();
         self.editor_tags.clear();
+        self.field = Field::Front;
         self.view = AppView::CardEditor;
+    }
+
+    /// Name a new deck: the editor, empty. `n` made one called "New Deck"
+    /// straight away, and nothing could rename it.
+    fn open_new_deck_editor(&mut self) {
+        self.editing_deck = None;
+        self.deck_name.clear();
+        self.deck_about.clear();
+        self.field = Field::Name;
+        self.view = AppView::DeckEditor;
+    }
+
+    /// Rename deck `idx`, or change its description.
+    fn open_edit_deck(&mut self, idx: usize) {
+        let Some(deck) = self.decks.get(idx) else {
+            return;
+        };
+        self.deck_name.set_text(&deck.name);
+        self.deck_about.set_text(&deck.description);
+        self.editing_deck = Some(idx);
+        self.field = Field::Name;
+        self.view = AppView::DeckEditor;
+    }
+
+    /// Keep what the deck editor holds: a new deck, or the one being edited
+    /// renamed. A deck needs a name.
+    fn save_deck_edits(&mut self) -> bool {
+        let name = self.deck_name.text().trim().to_owned();
+        if name.is_empty() {
+            self.status_msg = String::from("A deck needs a name");
+            return false;
+        }
+        let about = self.deck_about.text().trim().to_owned();
+        match self.editing_deck {
+            Some(idx) => {
+                let Some(deck) = self.decks.get_mut(idx) else {
+                    return false;
+                };
+                deck.name.clone_from(&name);
+                deck.description = about;
+                self.selected_deck = idx;
+                self.status_msg = format!("Saved deck: {name}");
+            }
+            None => {
+                self.add_deck(&name, &about);
+                self.selected_deck = self.decks.len().saturating_sub(1);
+            }
+        }
+        self.view = AppView::DeckList;
+        self.ensure_deck_visible();
+        true
+    }
+
+    /// The fields of the editor that is up, in the order Tab walks them.
+    fn fields(&self) -> &'static [Field] {
+        match self.view {
+            AppView::DeckEditor => &[Field::Name, Field::About],
+            _ => &[Field::Front, Field::Back, Field::Tags],
+        }
+    }
+
+    /// The field `which`.
+    fn input(&mut self, which: Field) -> &mut TextInput {
+        match which {
+            Field::Front => &mut self.editor_front,
+            Field::Back => &mut self.editor_back,
+            Field::Tags => &mut self.editor_tags,
+            Field::Name => &mut self.deck_name,
+            Field::About => &mut self.deck_about,
+        }
+    }
+
+    /// The field `which`, to read.
+    fn input_ref(&self, which: Field) -> &TextInput {
+        match which {
+            Field::Front => &self.editor_front,
+            Field::Back => &self.editor_back,
+            Field::Tags => &self.editor_tags,
+            Field::Name => &self.deck_name,
+            Field::About => &self.deck_about,
+        }
+    }
+
+    /// Keys while an editor is up: Tab between the fields, Enter keeps,
+    /// Escape leaves, and the rest edit the field the keyboard is in.
+    fn handle_editor_key(&mut self, key: &KeyEvent) -> EventResult {
+        let fields = self.fields();
+        match key.key {
+            Key::Tab => {
+                let at = fields.iter().position(|f| *f == self.field).unwrap_or(0);
+                let next = if key.modifiers.shift {
+                    at.checked_sub(1).unwrap_or(fields.len().saturating_sub(1))
+                } else {
+                    at.saturating_add(1).checked_rem(fields.len()).unwrap_or(0)
+                };
+                self.field = fields.get(next).copied().unwrap_or(self.field);
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                if self.view == AppView::DeckEditor {
+                    self.save_deck_edits();
+                } else {
+                    self.save_card();
+                }
+                EventResult::Consumed
+            }
+            Key::Escape => {
+                self.leave_editor();
+                EventResult::Consumed
+            }
+            _ => {
+                if !fields.contains(&self.field) {
+                    self.field = fields.first().copied().unwrap_or(Field::Front);
+                }
+                let which = self.field;
+                let clipboard = self.clipboard.clone();
+                let done = edit_line(self.input(which), key, FIELD_CAPACITY, &clipboard);
+                if let Some(copied) = done.copied {
+                    self.clipboard = copied;
+                }
+                if done.handled {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+        }
+    }
+
+    /// Out of an editor, keeping nothing.
+    fn leave_editor(&mut self) {
+        self.view = if self.view == AppView::DeckEditor {
+            AppView::DeckList
+        } else {
+            AppView::DeckDetail
+        };
+        self.status_msg = String::from("Cancelled");
+    }
+
+    /// Ask before deleting: a deck's cards, or a card, go with their whole
+    /// history. Both were deleted on the key, with no undo.
+    fn ask_to_delete(&mut self, doomed: Doomed) {
+        let exists = match doomed {
+            Doomed::Deck(idx) => idx < self.decks.len() && self.decks.len() > 1,
+            Doomed::Card(id) => self.current_deck().and_then(|d| d.find_card(id)).is_some(),
+        };
+        if exists {
+            self.pending_delete = Some(doomed);
+        } else if matches!(doomed, Doomed::Deck(_)) {
+            self.status_msg = String::from("The last deck cannot be deleted");
+        }
+    }
+
+    /// Delete what the question asked about.
+    fn delete_doomed(&mut self, doomed: Doomed) {
+        match doomed {
+            Doomed::Deck(idx) => self.remove_deck(idx),
+            Doomed::Card(id) => {
+                let before = self.selected_card;
+                if let Some(deck) = self.current_deck_mut()
+                    && deck.remove_card(id)
+                {
+                    self.status_msg = String::from("Card deleted");
+                }
+                let count = self.matching_card_indices().len();
+                self.selected_card = before.min(count.saturating_sub(1));
+            }
+        }
     }
 
     fn open_edit_card(&mut self, card_id: u32) {
@@ -1292,22 +1730,24 @@ impl FlashcardsApp {
             .map(|card| (card.front.clone(), card.back.clone(), card.tags.join(", ")));
         if let Some((front, back, tags)) = card_data {
             self.editing_card_id = Some(card_id);
-            self.editor_front = front;
-            self.editor_back = back;
-            self.editor_tags = tags;
+            self.editor_front.set_text(&front);
+            self.editor_back.set_text(&back);
+            self.editor_tags.set_text(&tags);
+            self.field = Field::Front;
             self.view = AppView::CardEditor;
         }
     }
 
     fn save_card(&mut self) -> bool {
-        if self.editor_front.trim().is_empty() || self.editor_back.trim().is_empty() {
+        if self.editor_front.text().trim().is_empty() || self.editor_back.text().trim().is_empty() {
             self.status_msg = String::from("Front and back text are required");
             return false;
         }
-        let front = self.editor_front.trim().to_string();
-        let back = self.editor_back.trim().to_string();
+        let front = self.editor_front.text().trim().to_string();
+        let back = self.editor_back.text().trim().to_string();
         let tags: Vec<String> = self
             .editor_tags
+            .text()
             .split(',')
             .map(|s| String::from(s.trim()))
             .filter(|s| !s.is_empty())
@@ -1341,25 +1781,6 @@ impl FlashcardsApp {
             }
         }
         false
-    }
-
-    fn delete_selected_card(&mut self) {
-        let matching = self.matching_card_indices();
-        if let Some(&card_list_idx) = matching.get(self.selected_card)
-            && let Some(deck) = self.current_deck_mut()
-            && let Some(card_id) = deck.cards.get(card_list_idx).map(|c| c.id)
-            && deck.remove_card(card_id)
-        {
-            // Through `Deck::remove_card` rather than `cards.remove(idx)`
-            // inline. Both are correct -- `card_list_idx` is already an index
-            // into the unfiltered list -- but there was one way to remove a
-            // card that had a name and no callers, and another that had
-            // callers and no name.
-            self.status_msg = String::from("Card deleted");
-            if self.selected_card > 0 && self.selected_card >= matching.len().saturating_sub(1) {
-                self.selected_card = self.selected_card.saturating_sub(1);
-            }
-        }
     }
 
     fn matching_card_indices(&self) -> Vec<usize> {
@@ -1476,6 +1897,7 @@ impl FlashcardsApp {
         }
         match event {
             Event::Key(key_ev) => self.handle_key_event(key_ev),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Tick { .. } => self.refresh_day(),
             Event::Resize { width, height } => {
                 #[allow(
@@ -1497,6 +1919,39 @@ impl FlashcardsApp {
     fn handle_key_event(&mut self, key: &KeyEvent) -> EventResult {
         if !key.pressed {
             return EventResult::Ignored;
+        }
+        // The list of keys, from anywhere; while it is up nothing else hears a
+        // key, which would change a view nobody can see.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
+        // A delete waiting on its answer takes the next key, and only Y
+        // deletes.
+        if let Some(doomed) = self.pending_delete.take() {
+            // The character typed, not the key: on a layout that puts Y
+            // somewhere else, the key that types "y" is the one that means yes.
+            let yes = key
+                .single_char()
+                .map_or(key.key == Key::Y, |c| c.eq_ignore_ascii_case(&'y'));
+            if yes {
+                self.delete_doomed(doomed);
+            } else {
+                self.status_msg = String::from("Kept");
+            }
+            return EventResult::Consumed;
+        }
+        // An editor takes every key, or `s` in a card's answer would start
+        // studying the deck behind it.
+        if matches!(self.view, AppView::CardEditor | AppView::DeckEditor) {
+            return self.handle_editor_key(key);
         }
         // Handled here, ahead of the fingerprint below. Opening a picker
         // changes nothing `state_fingerprint` covers, so routing it through
@@ -1535,6 +1990,13 @@ impl FlashcardsApp {
     /// is the one place a compositor `Key` becomes one of those names, rather
     /// than the key table existing twice in two forms.
     fn key_name(key: &KeyEvent) -> Option<String> {
+        // A letter or digit with no text -- as a keystroke built from its key
+        // alone arrives -- still names its character, shifted or not.
+        if key.text.is_empty()
+            && let Some(ch) = key_char(key.key, key.modifiers.shift)
+        {
+            return Some(ch.to_string());
+        }
         let named = match key.key {
             Key::Up => "Up",
             Key::Down => "Down",
@@ -1584,6 +2046,7 @@ impl FlashcardsApp {
                 .current_deck()
                 .and_then(|d| d.cards.first().map(|c| c.id as usize))
                 .unwrap_or(0),
+            pending_delete: self.pending_delete,
         }
     }
 
@@ -1591,7 +2054,7 @@ impl FlashcardsApp {
         match self.view {
             AppView::DeckList => self.handle_key_deck_list(key, ctrl),
             AppView::DeckDetail => self.handle_key_deck_detail(key, ctrl),
-            AppView::CardEditor => self.handle_key_card_editor(key),
+            AppView::CardEditor | AppView::DeckEditor => self.handle_key_card_editor(key),
             AppView::StudyMode => self.handle_key_study(key),
             AppView::Statistics => self.handle_key_statistics(key),
         }
@@ -1606,13 +2069,12 @@ impl FlashcardsApp {
                 self.selected_deck = self.selected_deck.saturating_add(1);
             }
             "Enter" => self.select_deck(self.selected_deck),
-            "n" => self.add_deck("New Deck", ""),
-            "Delete" | "x" => {
-                let idx = self.selected_deck;
-                self.remove_deck(idx);
-            }
+            "n" => self.open_new_deck_editor(),
+            "e" => self.open_edit_deck(self.selected_deck),
+            "Delete" | "x" => self.ask_to_delete(Doomed::Deck(self.selected_deck)),
             _ => {}
         }
+        self.ensure_deck_visible();
     }
 
     fn handle_key_deck_detail(&mut self, key: &str, _ctrl: bool) {
@@ -1671,7 +2133,16 @@ impl FlashcardsApp {
                     self.open_edit_card(cid);
                 }
             }
-            "Delete" | "x" => self.delete_selected_card(),
+            "Delete" | "x" => {
+                let matching = self.matching_card_indices();
+                if let Some(id) = matching
+                    .get(self.selected_card)
+                    .and_then(|&i| self.current_deck()?.cards.get(i))
+                    .map(|c| c.id)
+                {
+                    self.ask_to_delete(Doomed::Card(id));
+                }
+            }
             "r" => {
                 // The generator has to come out of `self` before
                 // `current_deck_mut` borrows `self` mutably; taking it and
@@ -1717,9 +2188,11 @@ impl FlashcardsApp {
         }
     }
 
+    /// The card editor by key name, for callers that speak names. The window
+    /// sends an editor's keys to `handle_editor_key`, which types.
     fn handle_key_card_editor(&mut self, key: &str) {
         match key {
-            "Escape" => self.view = AppView::DeckDetail,
+            "Escape" => self.leave_editor(),
             "Enter" => {
                 self.save_card();
             }
@@ -1761,8 +2234,41 @@ impl FlashcardsApp {
         }
     }
 
+    /// Where the deck list's rows start, the pitch between them, and how
+    /// many fit above the notice and the status bar.
+    fn deck_list_geometry(&self) -> (f32, f32, usize) {
+        let list_top = Self::HEADER_H + Self::PADDING + 88.0;
+        let pitch = DECK_ROW_H + 8.0;
+        let room = self.height - Self::STATUS_H - NOTICE_H - list_top;
+        (list_top, pitch, ((room / pitch).floor().max(1.0)) as usize)
+    }
+
+    /// Keep the chosen deck on screen. The list had no scrolling, so a deck
+    /// past the bottom edge could be chosen by key and never seen.
+    fn ensure_deck_visible(&mut self) {
+        let (_, _, visible) = self.deck_list_geometry();
+        let last = self.decks.len().saturating_sub(visible);
+        if self.selected_deck < self.deck_scroll {
+            self.deck_scroll = self.selected_deck;
+        } else if self.selected_deck >= self.deck_scroll.saturating_add(visible) {
+            self.deck_scroll = self.selected_deck.saturating_add(1).saturating_sub(visible);
+        }
+        self.deck_scroll = self.deck_scroll.min(last);
+    }
+
+    /// Where the card list's rows start, and how many fit. It showed eight
+    /// whatever the window's height.
+    fn card_list_geometry(&self) -> (f32, usize) {
+        let rows_top = Self::HEADER_H + Self::PADDING + 120.0;
+        let room = self.height - Self::STATUS_H - 20.0 - rows_top;
+        (
+            rows_top,
+            ((room / Self::CARD_ROW_H).floor().max(1.0)) as usize,
+        )
+    }
+
     fn ensure_card_visible(&mut self) {
-        let visible_rows = 8usize;
+        let (_, visible_rows) = self.card_list_geometry();
         if self.selected_card < self.scroll_offset {
             self.scroll_offset = self.selected_card;
         } else if self.selected_card >= self.scroll_offset.saturating_add(visible_rows) {
@@ -1778,6 +2284,8 @@ impl FlashcardsApp {
 
     // ── Layout constants ────────────────────────────────────────────
     const HEADER_H: f32 = 50.0;
+    // (The deck list's row and the notice's band are module constants,
+    // `DECK_ROW_H` and `NOTICE_H`, so the free functions can reach them.)
     const STATUS_H: f32 = 28.0;
     const CARD_ROW_H: f32 = 48.0;
     const PADDING: f32 = 16.0;
@@ -1843,70 +2351,116 @@ impl FlashcardsApp {
     /// Named `render_commands` and not `render`: at equal arity an inherent
     /// method silently wins method lookup over `oswindow::app::App::render`, so
     /// an app that keeps the name draws nothing and reports no error.
+    /// The drawn commands. **Tests only**: the window's `render` keeps the
+    /// frame, for its boxes.
+    #[cfg(test)]
     fn render_commands(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::with_capacity(512);
+        self.frame().into_tree().commands
+    }
 
-        // Background
-        cmds.push(RenderCommand::FillRect {
+    /// Draw the window, recording every control where it is drawn: both the
+    /// picture and the hit test.
+    fn frame(&self) -> Frame<Target> {
+        let (w, h) = (self.width, self.height);
+        let mut f = Frame::new(w, h);
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: self.width,
-            height: self.height,
+            width: w,
+            height: h,
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
-
-        // After the background, or it would be painted over.
-        for (i, line) in SAMPLE_AND_PROGRESS_LINES.iter().enumerate() {
-            #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
-            let ty = 1.0 + i as f32 * 11.0;
-            let avail = (self.width - 16.0).max(0.0);
-            if avail <= 0.0 || ty + 11.0 > self.height {
-                break;
-            }
-            cmds.push(RenderCommand::Text {
-                x: 8.0,
-                y: ty,
-                text: (*line).to_string(),
-                color: if i == 0 {
-                    self.palette.subtext0
-                } else {
-                    self.palette.ink(self.palette.yellow)
-                },
-                font_size: if i == 0 { 9.0 } else { 10.0 },
-                font_weight: if i == 0 {
-                    FontWeightHint::Regular
-                } else {
-                    FontWeightHint::Bold
-                },
-                max_width: Some(avail),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
-        self.render_header(&mut cmds);
-
+        self.render_header(&mut f);
         match self.view {
-            AppView::DeckList => self.render_deck_list(&mut cmds),
-            AppView::DeckDetail => self.render_deck_detail(&mut cmds),
-            AppView::CardEditor => self.render_card_editor(&mut cmds),
-            AppView::StudyMode => self.render_study_mode(&mut cmds),
-            AppView::Statistics => self.render_statistics(&mut cmds),
+            AppView::DeckList => self.render_deck_list(&mut f),
+            AppView::DeckDetail => self.render_deck_detail(&mut f),
+            AppView::CardEditor | AppView::DeckEditor => self.render_editor(&mut f),
+            AppView::StudyMode => self.render_study_mode(&mut f),
+            AppView::Statistics => self.render_statistics(&mut f),
         }
-
-        self.render_status_bar(&mut cmds);
-
+        self.render_status_bar(&mut f);
+        if let Some(doomed) = self.pending_delete {
+            self.render_question(&mut f, doomed);
+        }
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (w, h),
+                Self::HEADER_H,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+            f.hit(Target::HelpCard, Rect::new(0.0, 0.0, w, h));
+        }
         // Last, so it is above everything. Forgetting this is how a picker
         // ends up open and invisible: it takes every keystroke, and nothing
         // on screen says why the window stopped responding.
-        cmds.extend(self.picker.render(&self.palette, self.width, self.height));
-
-        cmds
+        f.extend(self.picker.render(&self.palette, w, h));
+        f
     }
 
-    fn render_header(&self, cmds: &mut Vec<RenderCommand>) {
+    /// A button, lit while the pointer is on it; one with nothing to do is
+    /// drawn dim and records no box.
+    fn button(
+        &self,
+        f: &mut Frame<Target>,
+        rect: Rect,
+        label: &str,
+        target: Target,
+        enabled: bool,
+    ) {
+        let lit = enabled && self.hover == Some(target);
+        f.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: if lit {
+                self.palette.surface2
+            } else {
+                self.palette.surface1
+            },
+            corner_radii: CornerRadii::all(6.0),
+        });
+        f.push(RenderCommand::Text {
+            x: rect.x + 8.0,
+            y: rect.y + (rect.h - 12.0) / 2.0,
+            text: label.to_string(),
+            font_size: 12.0,
+            color: if enabled {
+                self.palette.text
+            } else {
+                self.palette.overlay0
+            },
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((rect.w - 16.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if enabled {
+            f.hit(target, rect);
+        }
+    }
+
+    /// A row of buttons from `x` at `y`, each as wide as it says.
+    fn button_row(
+        &self,
+        f: &mut Frame<Target>,
+        x: f32,
+        y: f32,
+        buttons: &[(&str, f32, Target, bool)],
+    ) {
+        let mut at = x;
+        for (label, width, target, enabled) in buttons {
+            self.button(f, Rect::new(at, y, *width, 26.0), label, *target, *enabled);
+            at += width + 6.0;
+        }
+    }
+
+    fn render_header(&self, f: &mut Frame<Target>) {
         self.palette.push_surface(
-            cmds,
+            f,
             0.0,
             0.0,
             self.width,
@@ -1914,8 +2468,7 @@ impl FlashcardsApp {
             0.0,
             Surface::Strip(Edge::Top),
         );
-
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: Self::PADDING,
             y: 14.0,
             text: String::from("Flashcards"),
@@ -1925,17 +2478,27 @@ impl FlashcardsApp {
             max_width: Some(160.0),
             overflow: TextOverflow::Ellipsis,
         });
-
-        // View indicator
+        // Back, from anywhere but the deck list: Escape was the only way.
+        let mut label_x = 180.0;
+        if self.view != AppView::DeckList {
+            self.button(
+                f,
+                Rect::new(180.0, 12.0, 70.0, 26.0),
+                "< Back",
+                Target::Back,
+                true,
+            );
+            label_x = 262.0;
+        }
         let view_label = match self.view {
             AppView::DeckList => "Decks",
             AppView::DeckDetail => "Cards",
-            AppView::CardEditor => "Editor",
+            AppView::CardEditor | AppView::DeckEditor => "Editor",
             AppView::StudyMode => "Study",
             AppView::Statistics => "Stats",
         };
-        cmds.push(RenderCommand::Text {
-            x: 180.0,
+        f.push(RenderCommand::Text {
+            x: label_x,
             y: 18.0,
             text: String::from(view_label),
             font_size: 14.0,
@@ -1944,9 +2507,14 @@ impl FlashcardsApp {
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,
         });
-
-        // Day counter
-        cmds.push(RenderCommand::Text {
+        self.button(
+            f,
+            Rect::new(self.width - 170.0, 12.0, 36.0, 26.0),
+            "?",
+            Target::Help,
+            true,
+        );
+        f.push(RenderCommand::Text {
             x: self.width - 120.0,
             y: 18.0,
             text: Self::day_label(self.current_day),
@@ -1956,9 +2524,7 @@ impl FlashcardsApp {
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,
         });
-
-        // Header separator
-        cmds.push(RenderCommand::Line {
+        f.push(RenderCommand::Line {
             x1: 0.0,
             y1: Self::HEADER_H,
             x2: self.width,
@@ -1968,10 +2534,10 @@ impl FlashcardsApp {
         });
     }
 
-    fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_status_bar(&self, f: &mut Frame<Target>) {
         let y = self.height - Self::STATUS_H;
         self.palette.push_surface(
-            cmds,
+            f,
             0.0,
             y,
             self.width,
@@ -1979,10 +2545,14 @@ impl FlashcardsApp {
             0.0,
             Surface::Strip(Edge::Top),
         );
-        cmds.push(RenderCommand::Text {
+        let message = self
+            .last_file_action
+            .clone()
+            .unwrap_or_else(|| self.status_msg.clone());
+        f.push(RenderCommand::Text {
             x: Self::PADDING,
             y: y + 7.0,
-            text: self.status_msg.clone(),
+            text: message,
             font_size: 12.0,
             color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
@@ -1991,11 +2561,11 @@ impl FlashcardsApp {
         });
     }
 
-    fn render_deck_list(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_deck_list(&self, f: &mut Frame<Target>) {
         let top = Self::HEADER_H + Self::PADDING;
         let content_w = self.width - Self::PADDING * 2.0;
 
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: Self::PADDING,
             y: top,
             text: String::from("Your Decks"),
@@ -2005,52 +2575,59 @@ impl FlashcardsApp {
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
         });
+        let has_cards = self.current_deck().is_some_and(|d| !d.cards.is_empty());
+        self.button_row(
+            f,
+            Self::PADDING,
+            top + 34.0,
+            &[
+                ("New deck", 90.0, Target::NewDeck, true),
+                ("Edit", 60.0, Target::EditDeck, true),
+                ("Delete", 70.0, Target::DeleteDeck, self.decks.len() > 1),
+                ("Import", 70.0, Target::Import, true),
+                ("Export", 70.0, Target::Export, has_cards),
+            ],
+        );
 
-        cmds.push(RenderCommand::Text {
-            x: Self::PADDING,
-            y: top + 26.0,
-            text: String::from("[N]ew deck  [Enter] open  [X] delete  [Up/Down] navigate"),
-            font_size: 11.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(content_w),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        let list_top = top + 52.0;
-        let row_h = 72.0;
-
-        for (i, deck) in self.decks.iter().enumerate() {
-            let y = list_top + (i as f32) * (row_h + 8.0);
+        let (list_top, pitch, visible) = self.deck_list_geometry();
+        let pane = Rect::new(Self::PADDING, list_top, content_w, visible as f32 * pitch);
+        f.hit(Target::DeckList, pane);
+        for (i, deck) in self
+            .decks
+            .iter()
+            .enumerate()
+            .skip(self.deck_scroll)
+            .take(visible)
+        {
+            let y = list_top + (i.saturating_sub(self.deck_scroll)) as f32 * pitch;
+            let row = Rect::new(Self::PADDING, y, content_w, DECK_ROW_H);
             let is_selected = i == self.selected_deck;
-
-            let bg = if is_selected {
-                self.palette.surface1
-            } else {
-                self.palette.surface0
-            };
-            cmds.push(RenderCommand::FillRect {
-                x: Self::PADDING,
-                y,
-                width: content_w,
-                height: row_h,
-                color: bg,
+            f.push(RenderCommand::FillRect {
+                x: row.x,
+                y: row.y,
+                width: row.w,
+                height: row.h,
+                color: if is_selected {
+                    self.palette.surface1
+                } else if self.hover == Some(Target::DeckRow(i)) {
+                    self.palette.surface2
+                } else {
+                    self.palette.surface0
+                },
                 corner_radii: CornerRadii::all(8.0),
             });
-
             if is_selected {
-                cmds.push(RenderCommand::StrokeRect {
-                    x: Self::PADDING,
-                    y,
-                    width: content_w,
-                    height: row_h,
+                f.push(RenderCommand::StrokeRect {
+                    x: row.x,
+                    y: row.y,
+                    width: row.w,
+                    height: row.h,
                     color: self.palette.blue,
                     line_width: 2.0,
                     corner_radii: CornerRadii::all(8.0),
                 });
             }
-
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: Self::PADDING + 16.0,
                 y: y + 12.0,
                 text: deck.name.clone(),
@@ -2060,8 +2637,7 @@ impl FlashcardsApp {
                 max_width: Some(content_w - 200.0),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: Self::PADDING + 16.0,
                 y: y + 36.0,
                 text: format!(
@@ -2076,12 +2652,10 @@ impl FlashcardsApp {
                 max_width: Some(content_w - 48.0),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            // Due count badge
             let due_count = deck.due_cards(self.current_day).len();
             if due_count > 0 {
                 let badge_x = self.width - Self::PADDING - 90.0;
-                cmds.push(RenderCommand::FillRect {
+                f.push(RenderCommand::FillRect {
                     x: badge_x,
                     y: y + 14.0,
                     width: 72.0,
@@ -2089,7 +2663,7 @@ impl FlashcardsApp {
                     color: self.palette.blue,
                     corner_radii: CornerRadii::all(12.0),
                 });
-                cmds.push(RenderCommand::Text {
+                f.push(RenderCommand::Text {
                     x: badge_x + 8.0,
                     y: y + 18.0,
                     text: format!("{due_count} due"),
@@ -2100,9 +2674,8 @@ impl FlashcardsApp {
                     overflow: TextOverflow::Ellipsis,
                 });
             }
-
             if !deck.description.is_empty() {
-                cmds.push(RenderCommand::Text {
+                f.push(RenderCommand::Text {
                     x: Self::PADDING + 16.0,
                     y: y + 52.0,
                     text: deck.description.clone(),
@@ -2113,20 +2686,62 @@ impl FlashcardsApp {
                     overflow: TextOverflow::Ellipsis,
                 });
             }
+            // A press chooses the deck; a press on the chosen one opens it.
+            f.hit(Target::DeckRow(i), row);
+        }
+        if self.decks.len() > visible {
+            f.push(RenderCommand::Text {
+                x: self.width - 180.0,
+                y: pane.bottom() + 2.0,
+                text: format!(
+                    "Showing {}-{} of {}",
+                    self.deck_scroll.saturating_add(1),
+                    self.deck_scroll
+                        .saturating_add(visible)
+                        .min(self.decks.len()),
+                    self.decks.len()
+                ),
+                font_size: 11.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(170.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
+        // Where the decks came from, and what is kept. It was drawn at the
+        // top of the window before the header, which painted over it.
+        let notice_y = self.height - Self::STATUS_H - NOTICE_H + 2.0;
+        for (i, line) in SAMPLE_AND_PROGRESS_LINES.iter().enumerate() {
+            f.push(RenderCommand::Text {
+                x: Self::PADDING,
+                y: notice_y + i as f32 * 15.0,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.subtext0
+                } else {
+                    self.palette.ink(self.palette.yellow)
+                },
+                font_size: 11.0,
+                font_weight: if i == 0 {
+                    FontWeightHint::Regular
+                } else {
+                    FontWeightHint::Bold
+                },
+                max_width: Some(content_w.max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
         }
     }
 
-    fn render_deck_detail(&self, cmds: &mut Vec<RenderCommand>) {
-        let deck = match self.current_deck() {
-            Some(d) => d,
-            None => return,
+    fn render_deck_detail(&self, f: &mut Frame<Target>) {
+        let Some(deck) = self.current_deck() else {
+            return;
         };
-
         let top = Self::HEADER_H + Self::PADDING;
         let content_w = self.width - Self::PADDING * 2.0;
 
-        // Deck title
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: Self::PADDING,
             y: top,
             text: deck.name.clone(),
@@ -2137,93 +2752,141 @@ impl FlashcardsApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Shortcuts
-        cmds.push(RenderCommand::Text {
-            x: Self::PADDING,
-            y: top + 24.0,
-            text: String::from("[S]tudy due  [Shift+S] all  [N]ew  [E]dit  [X] delete  [R]andom  [T]ag  [I]nfo  [D]ay+  [Esc] back"),
-            font_size: 10.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(content_w),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Search bar
-        let search_y = top + 44.0;
-        self.palette.push_surface(
-            cmds,
+        // The deck's commands. The line of key hints this replaces advertised
+        // `[D]ay+`, a key that was removed when the day came from the clock.
+        let matching = self.matching_card_indices();
+        let due = deck.due_cards(self.current_day).len();
+        let study_due = format!("Study due ({due})");
+        self.button_row(
+            f,
             Self::PADDING,
-            search_y,
-            content_w * 0.6,
-            28.0,
+            top + 30.0,
+            &[
+                (study_due.as_str(), 120.0, Target::StudyDue, due > 0),
+                ("Study all", 86.0, Target::StudyAll, !deck.cards.is_empty()),
+                ("New card", 86.0, Target::NewCard, true),
+                ("Edit", 56.0, Target::EditCard, !matching.is_empty()),
+                ("Delete", 66.0, Target::DeleteCard, !matching.is_empty()),
+                ("Shuffle", 72.0, Target::Shuffle, deck.cards.len() > 1),
+                ("Statistics", 90.0, Target::Stats, true),
+            ],
+        );
+
+        // Search. A press starts typing into it, as `/` does.
+        let search_y = top + 64.0;
+        let search = Rect::new(Self::PADDING, search_y, content_w * 0.6, 28.0);
+        self.palette.push_surface(
+            f,
+            search.x,
+            search.y,
+            search.w,
+            search.h,
             4.0,
             Surface::Card,
         );
+        if self.search_active {
+            f.push(RenderCommand::StrokeRect {
+                x: search.x,
+                y: search.y,
+                width: search.w,
+                height: search.h,
+                color: self.palette.blue,
+                line_width: 2.0,
+                corner_radii: CornerRadii::all(4.0),
+            });
+        }
         let search_display = match (self.search_active, self.search_query.is_empty()) {
             (true, true) => String::from("Type to filter..."),
             (false, true) => String::from("Search [/]"),
             (_, false) => self.search_query.clone(),
         };
-        let search_color = if self.search_query.is_empty() {
-            self.palette.overlay0
-        } else {
-            self.palette.text
-        };
-        cmds.push(RenderCommand::Text {
-            x: Self::PADDING + 8.0,
+        f.push(RenderCommand::Text {
+            x: search.x + 8.0,
             y: search_y + 7.0,
             text: search_display,
             font_size: 12.0,
-            color: search_color,
+            color: if self.search_query.is_empty() {
+                self.palette.subtext0
+            } else {
+                self.palette.text
+            },
             font_weight: FontWeightHint::Regular,
-            max_width: Some(content_w * 0.6 - 16.0),
+            max_width: Some(search.w - 16.0),
             overflow: TextOverflow::Ellipsis,
         });
+        f.hit(Target::Search, search);
 
-        // Tag filter pill. The pill used to be a flat 100px at a proportional
-        // anchor, so it ran off the right edge of the panel whenever the
-        // content was narrower than 270px — a per-element `max_width` on the
-        // label inside it is not a bound on the pill itself. It is now sized
-        // to its own text and clamped to whatever room is left beside the
-        // search box, so it can shrink instead of overflowing.
-        if let Some(tag) = &self.tag_filter {
-            let tag_x = Self::PADDING + content_w * 0.6 + TAG_PILL_GAP;
-            let room = (self.width - Self::PADDING - tag_x).max(0.0);
-            let pill_w = text::padded_width(tag, TAG_PILL_PAD, CARD_TAG_SIZE, FontWeightHint::Bold)
-                .min(room);
-            if pill_w > 0.0 {
-                cmds.push(RenderCommand::FillRect {
-                    x: tag_x,
-                    y: search_y + 2.0,
-                    width: pill_w,
-                    height: 24.0,
-                    color: self.palette.mauve,
-                    corner_radii: CornerRadii::all(12.0),
-                });
+        // The tag filter: a chip that steps through the deck's tags as `T`
+        // does. It was drawn only while a filter was set, so there was
+        // nothing to press to set one.
+        let tags = deck.all_tags();
+        let chip_x = search.right() + TAG_PILL_GAP;
+        let room = (self.width - Self::PADDING - chip_x).max(0.0);
+        let chip_label = self.tag_filter.clone().unwrap_or_else(|| {
+            String::from(if tags.is_empty() {
+                "No tags"
+            } else {
+                "All tags"
+            })
+        });
+        let pill_w = text::padded_width(
+            &chip_label,
+            TAG_PILL_PAD,
+            CARD_TAG_SIZE,
+            FontWeightHint::Bold,
+        )
+        .min(room);
+        if pill_w > 0.0 {
+            let chip = Rect::new(chip_x, search_y + 2.0, pill_w, 24.0);
+            f.push(RenderCommand::FillRect {
+                x: chip.x,
+                y: chip.y,
+                width: chip.w,
+                height: chip.h,
+                color: if self.tag_filter.is_some() {
+                    self.palette.mauve
+                } else if self.hover == Some(Target::TagChip) {
+                    self.palette.surface2
+                } else {
+                    self.palette.surface1
+                },
+                corner_radii: CornerRadii::all(12.0),
+            });
+            let ink = if self.tag_filter.is_some() {
+                self.palette.crust
+            } else if tags.is_empty() {
+                self.palette.overlay0
+            } else {
+                self.palette.text
+            };
+            f.draw_with(|c| {
                 Table::fitted(
-                    cmds,
-                    tag_x + TAG_PILL_PAD,
+                    c,
+                    chip.x + TAG_PILL_PAD,
                     (pill_w - TAG_PILL_PAD * 2.0).max(0.0),
                     search_y + 6.0,
-                    tag,
-                    self.palette.crust,
+                    &chip_label,
+                    ink,
                     CARD_TAG_SIZE,
                     Fit::Start,
                     FontWeightHint::Bold,
                 );
+            });
+            if !tags.is_empty() {
+                f.hit(Target::TagChip, chip);
             }
         }
 
-        // Card list
-        let list_top = search_y + 40.0;
-        let matching = self.matching_card_indices();
-
+        let list_top = top + 100.0;
         if matching.is_empty() {
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: Self::PADDING + 8.0,
                 y: list_top + 20.0,
-                text: String::from("No cards match your search."),
+                text: String::from(if deck.cards.is_empty() {
+                    "This deck has no cards yet -- New card (N) makes one."
+                } else {
+                    "No cards match your search."
+                }),
                 font_size: 14.0,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
@@ -2233,54 +2896,71 @@ impl FlashcardsApp {
             return;
         }
 
-        // Column headers
         let card_cols = self.card_columns();
         let table = Self::card_table(&card_cols);
-        table.header_weighted(
-            cmds,
-            list_top,
-            self.palette.overlay0,
-            CARD_HEADING_SIZE,
-            FontWeightHint::Bold,
+        f.draw_with(|c| {
+            table.header_weighted(
+                c,
+                list_top,
+                self.palette.subtext0,
+                CARD_HEADING_SIZE,
+                FontWeightHint::Bold,
+            );
+        });
+
+        let (rows_top, visible_count) = self.card_list_geometry();
+        let pane = Rect::new(
+            Self::PADDING,
+            rows_top,
+            content_w,
+            visible_count as f32 * Self::CARD_ROW_H,
         );
-
-        let rows_top = list_top + 20.0;
-        let visible_count = 8usize;
-
+        f.hit(Target::CardList, pane);
         let end = self
             .scroll_offset
             .saturating_add(visible_count)
             .min(matching.len());
         for (vis_i, list_i) in (self.scroll_offset..end).enumerate() {
-            if let Some(&card_idx) = matching.get(list_i)
-                && let Some(card) = deck.cards.get(card_idx)
-            {
-                let y = rows_top + (vis_i as f32) * Self::CARD_ROW_H;
-                let is_selected = list_i == self.selected_card;
-                let bg = if is_selected {
+            let Some(card) = matching.get(list_i).and_then(|&i| deck.cards.get(i)) else {
+                continue;
+            };
+            let y = rows_top + (vis_i as f32) * Self::CARD_ROW_H;
+            let row = Rect::new(Self::PADDING, y, content_w, Self::CARD_ROW_H - 4.0);
+            let is_selected = list_i == self.selected_card;
+            f.push(RenderCommand::FillRect {
+                x: row.x,
+                y: row.y,
+                width: row.w,
+                height: row.h,
+                color: if is_selected {
                     self.palette.surface1
+                } else if self.hover == Some(Target::CardRow(list_i)) {
+                    self.palette.surface2
                 } else {
                     self.palette.surface0
-                };
-
-                cmds.push(RenderCommand::FillRect {
-                    x: Self::PADDING,
-                    y,
-                    width: content_w,
-                    height: Self::CARD_ROW_H - 4.0,
-                    color: bg,
-                    corner_radii: CornerRadii::all(4.0),
-                });
-
-                // Front. Elided by measured width rather than by byte
-                // index: `&card.front[..47]` aborts whenever byte 47 lands
-                // inside a multi-byte character, and the `len() > 50` guard
-                // made that *more* likely rather than less — a 16-character
-                // Japanese prompt is 48 bytes and so always took the
-                // truncating branch. Language flashcards are the one thing
-                // guaranteed to carry non-ASCII text.
+                },
+                corner_radii: CornerRadii::all(4.0),
+            });
+            // Front. Elided by measured width rather than by byte index:
+            // language flashcards are the one thing guaranteed to carry
+            // non-ASCII text.
+            let tags_str = card.tags.join(", ");
+            let (status_text, status_color) = if card.review.total_reviews == 0 {
+                (String::from("New"), self.palette.ink(self.palette.yellow))
+            } else if card.review.repetitions >= 3 {
+                (
+                    String::from("Mastered"),
+                    self.palette.ink(self.palette.green),
+                )
+            } else {
+                (
+                    format!("{}d", card.review.interval_days),
+                    self.palette.subtext0,
+                )
+            };
+            f.draw_with(|c| {
                 table.cell(
-                    cmds,
+                    c,
                     Self::CARD_FRONT,
                     y + 8.0,
                     &card.front,
@@ -2288,36 +2968,17 @@ impl FlashcardsApp {
                     CARD_FRONT_SIZE,
                     Fit::Start,
                 );
-
-                // Tags
-                let tags_str = card.tags.join(", ");
                 table.cell(
-                    cmds,
+                    c,
                     Self::CARD_TAGS,
                     y + 8.0,
                     if tags_str.is_empty() { "-" } else { &tags_str },
-                    self.palette.mauve,
+                    self.palette.ink(self.palette.mauve),
                     CARD_TAG_SIZE,
                     Fit::Start,
                 );
-
-                // Review status
-                let status_text = if card.review.total_reviews == 0 {
-                    String::from("New")
-                } else if card.review.repetitions >= 3 {
-                    String::from("Mastered")
-                } else {
-                    format!("{}d", card.review.interval_days)
-                };
-                let status_color = if card.review.total_reviews == 0 {
-                    self.palette.yellow
-                } else if card.review.repetitions >= 3 {
-                    self.palette.green
-                } else {
-                    self.palette.subtext0
-                };
                 table.cell_weighted(
-                    cmds,
+                    c,
                     Self::CARD_STATUS,
                     y + 8.0,
                     &status_text,
@@ -2326,32 +2987,30 @@ impl FlashcardsApp {
                     Fit::Start,
                     FontWeightHint::Bold,
                 );
-
-                // Back preview, on the row's second line. Nothing else is
-                // drawn at this height, so it gets the whole row rather
-                // than just the Front column — and is elided against that
-                // width, not against a byte count that knew nothing about
-                // the room available.
-                let (back_x, back_w) = self.card_row_span();
+            });
+            // The back, on the row's second line, in the readable grey: it
+            // was overlay0, the grey of a switched-off control.
+            let (back_x, back_w) = self.card_row_span();
+            f.draw_with(|c| {
                 Table::fitted(
-                    cmds,
+                    c,
                     back_x,
                     back_w,
                     y + 26.0,
                     &card.back,
-                    self.palette.overlay0,
+                    self.palette.subtext0,
                     CARD_BACK_SIZE,
                     Fit::Start,
                     FontWeightHint::Regular,
                 );
-            }
+            });
+            // A press chooses the card; a press on the chosen one edits it.
+            f.hit(Target::CardRow(list_i), row);
         }
-
-        // Scroll indicator
         if matching.len() > visible_count {
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: self.width - 160.0,
-                y: rows_top + (visible_count as f32) * Self::CARD_ROW_H + 4.0,
+                y: pane.bottom() + 4.0,
                 text: format!(
                     "Showing {}-{} of {}",
                     self.scroll_offset.saturating_add(1),
@@ -2367,17 +3026,38 @@ impl FlashcardsApp {
         }
     }
 
-    fn render_card_editor(&self, cmds: &mut Vec<RenderCommand>) {
+    /// The card editor and the deck editor: a labelled field each, the one
+    /// the keyboard is in marked and holding the caret, and Save and Cancel.
+    fn render_editor(&self, f: &mut Frame<Target>) {
         let top = Self::HEADER_H + Self::PADDING;
         let content_w = self.width - Self::PADDING * 2.0;
-        let field_w = content_w - 32.0;
-
-        let title = if self.editing_card_id.is_some() {
-            "Edit Card"
-        } else {
-            "New Card"
+        let field_w = (content_w - 32.0).max(0.0);
+        let (title, fields): (&str, &[(Field, &str, &str)]) = match self.view {
+            AppView::DeckEditor => (
+                if self.editing_deck.is_some() {
+                    "Edit Deck"
+                } else {
+                    "New Deck"
+                },
+                &[
+                    (Field::Name, "Name:", "The deck's name"),
+                    (Field::About, "Description:", "What it covers (optional)"),
+                ],
+            ),
+            _ => (
+                if self.editing_card_id.is_some() {
+                    "Edit Card"
+                } else {
+                    "New Card"
+                },
+                &[
+                    (Field::Front, "Front (Question):", "Enter question text..."),
+                    (Field::Back, "Back (Answer):", "Enter answer text..."),
+                    (Field::Tags, "Tags (comma-separated):", "e.g. math, algebra"),
+                ],
+            ),
         };
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: Self::PADDING,
             y: top,
             text: String::from(title),
@@ -2387,187 +3067,142 @@ impl FlashcardsApp {
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
         });
-
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: Self::PADDING,
             y: top + 26.0,
-            text: String::from("[Enter] save  [Esc] cancel"),
+            text: String::from("[Tab] next field  [Enter] save  [Esc] cancel"),
             font_size: 11.0,
             color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(300.0),
+            max_width: Some(content_w),
             overflow: TextOverflow::Ellipsis,
         });
-
-        // Front field
-        let field_y = top + 56.0;
-        cmds.push(RenderCommand::Text {
-            x: Self::PADDING + 16.0,
-            y: field_y,
-            text: String::from("Front (Question):"),
-            font_size: 12.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        self.palette.push_surface(
-            cmds,
+        let mut y = top + 56.0;
+        for (field, label, placeholder) in fields {
+            f.push(RenderCommand::Text {
+                x: Self::PADDING + 16.0,
+                y,
+                text: String::from(*label),
+                font_size: 12.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(field_w),
+                overflow: TextOverflow::Ellipsis,
+            });
+            let rect = Rect::new(Self::PADDING + 16.0, y + 20.0, field_w, 36.0);
+            let focused = self.field == *field;
+            self.palette
+                .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
+            f.push(RenderCommand::StrokeRect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.w,
+                height: rect.h,
+                color: if focused {
+                    self.palette.blue
+                } else {
+                    self.palette.surface1
+                },
+                line_width: if focused { 2.0 } else { 1.0 },
+                corner_radii: CornerRadii::all(4.0),
+            });
+            let input = self.input_ref(*field);
+            if input.text().is_empty() && !focused {
+                f.push(RenderCommand::Text {
+                    x: rect.x + 8.0,
+                    y: rect.y + 10.0,
+                    text: String::from(*placeholder),
+                    font_size: 13.0,
+                    color: self.palette.subtext0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some((rect.w - 16.0).max(0.0)),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            } else {
+                let mut tree = RenderTree::new();
+                textedit::draw(
+                    &mut tree,
+                    &textedit::SingleLine {
+                        text: input.text(),
+                        cursor: if focused {
+                            input.cursor()
+                        } else {
+                            TextCursor::default()
+                        },
+                        selection_anchor: if focused {
+                            input.selection_anchor()
+                        } else {
+                            None
+                        },
+                        focused,
+                        x: rect.x + 8.0,
+                        y: rect.y + 9.0,
+                        width: (rect.w - 16.0).max(0.0),
+                        line_height: 18.0,
+                        font_size: 13.0,
+                        weight: FontWeightHint::Regular,
+                        color: self.palette.text,
+                        selection_bg: self.palette.blue,
+                        selection_fg: self.palette.crust,
+                        caret_width: textedit::CARET_WIDTH,
+                    },
+                );
+                f.extend(tree.commands);
+            }
+            // A press puts the keyboard in the field.
+            f.hit(Target::Field(*field), rect);
+            y += 72.0;
+        }
+        self.button_row(
+            f,
             Self::PADDING + 16.0,
-            field_y + 20.0,
-            field_w,
-            36.0,
-            4.0,
-            Surface::Card,
+            y + 6.0,
+            &[
+                ("Save", 80.0, Target::Save, true),
+                ("Cancel", 80.0, Target::Cancel, true),
+            ],
         );
-        cmds.push(RenderCommand::Text {
-            x: Self::PADDING + 24.0,
-            y: field_y + 30.0,
-            text: if self.editor_front.is_empty() {
-                String::from("Enter question text...")
-            } else {
-                self.editor_front.clone()
-            },
-            font_size: 13.0,
-            color: if self.editor_front.is_empty() {
-                self.palette.subtext0
-            } else {
-                self.palette.text
-            },
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(field_w - 16.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Back field
-        let back_y = field_y + 72.0;
-        cmds.push(RenderCommand::Text {
-            x: Self::PADDING + 16.0,
-            y: back_y,
-            text: String::from("Back (Answer):"),
-            font_size: 12.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        self.palette.push_surface(
-            cmds,
-            Self::PADDING + 16.0,
-            back_y + 20.0,
-            field_w,
-            36.0,
-            4.0,
-            Surface::Card,
-        );
-        cmds.push(RenderCommand::Text {
-            x: Self::PADDING + 24.0,
-            y: back_y + 30.0,
-            text: if self.editor_back.is_empty() {
-                String::from("Enter answer text...")
-            } else {
-                self.editor_back.clone()
-            },
-            font_size: 13.0,
-            color: if self.editor_back.is_empty() {
-                self.palette.subtext0
-            } else {
-                self.palette.text
-            },
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(field_w - 16.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Tags field
-        let tags_y = back_y + 72.0;
-        cmds.push(RenderCommand::Text {
-            x: Self::PADDING + 16.0,
-            y: tags_y,
-            text: String::from("Tags (comma-separated):"),
-            font_size: 12.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        self.palette.push_surface(
-            cmds,
-            Self::PADDING + 16.0,
-            tags_y + 20.0,
-            field_w,
-            36.0,
-            4.0,
-            Surface::Card,
-        );
-        cmds.push(RenderCommand::Text {
-            x: Self::PADDING + 24.0,
-            y: tags_y + 30.0,
-            text: if self.editor_tags.is_empty() {
-                String::from("e.g. math, algebra")
-            } else {
-                self.editor_tags.clone()
-            },
-            font_size: 13.0,
-            color: if self.editor_tags.is_empty() {
-                self.palette.subtext0
-            } else {
-                self.palette.text
-            },
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(field_w - 16.0),
-            overflow: TextOverflow::Ellipsis,
-        });
     }
 
-    fn render_study_mode(&self, cmds: &mut Vec<RenderCommand>) {
-        let session = match &self.study_session {
-            Some(s) => s,
-            None => return,
+    fn render_study_mode(&self, f: &mut Frame<Target>) {
+        let Some(session) = &self.study_session else {
+            return;
         };
-
-        let deck = match self.current_deck() {
-            Some(d) => d,
-            None => return,
+        let Some(deck) = self.current_deck() else {
+            return;
         };
-
         let top = Self::HEADER_H + Self::PADDING;
         let content_w = self.width - Self::PADDING * 2.0;
 
-        // Progress bar
         let total = session.queue.len() as f32;
         let done = session.current_pos as f32;
-        let progress_w = content_w;
-        let progress_h = 8.0;
         self.palette.push_surface(
-            cmds,
+            f,
             Self::PADDING,
             top,
-            progress_w,
-            progress_h,
+            content_w,
+            8.0,
             4.0,
             Surface::ControlTrack,
         );
         if total > 0.0 {
-            let filled = (done / total) * progress_w;
+            let filled = (done / total) * content_w;
             if filled > 0.0 {
-                cmds.push(RenderCommand::FillRect {
+                f.push(RenderCommand::FillRect {
                     x: Self::PADDING,
                     y: top,
                     width: filled,
-                    height: progress_h,
+                    height: 8.0,
                     color: self.palette.blue,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
         }
-
-        // Progress text
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: Self::PADDING,
             y: top + 14.0,
             text: format!(
-                "{} / {} cards  |  {} remaining  |  [Esc] quit",
+                "{} / {} cards  |  {} remaining",
                 session.current_pos,
                 session.queue.len(),
                 session.remaining()
@@ -2575,127 +3210,152 @@ impl FlashcardsApp {
             font_size: 12.0,
             color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(content_w),
+            max_width: Some((content_w - 140.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
-
-        if session.is_complete() {
-            // Session complete summary
-            self.render_session_summary(cmds, session, top + 50.0, content_w);
-            return;
+        if !session.is_complete() {
+            self.button(
+                f,
+                Rect::new(self.width - Self::PADDING - 120.0, top + 12.0, 120.0, 24.0),
+                "End session",
+                Target::EndSession,
+                true,
+            );
         }
 
-        let card_idx = match session.current_card_idx() {
-            Some(i) => i,
-            None => return,
-        };
-        let card = match deck.cards.get(card_idx) {
-            Some(c) => c,
-            None => return,
+        if session.is_complete() {
+            self.render_session_summary(f, session, top + 50.0, content_w);
+            return;
+        }
+        let Some(card) = session.current_card_idx().and_then(|i| deck.cards.get(i)) else {
+            return;
         };
 
-        // Card display
-        let card_y = top + 50.0;
-        let card_h = 260.0;
-
-        self.palette.push_surface(
-            cmds,
+        let card_rect = Rect::new(
             Self::PADDING + 40.0,
-            card_y,
-            content_w - 80.0,
-            card_h,
+            top + 50.0,
+            (content_w - 80.0).max(0.0),
+            260.0,
+        );
+        self.palette.push_surface(
+            f,
+            card_rect.x,
+            card_rect.y,
+            card_rect.w,
+            card_rect.h,
             12.0,
             Surface::Card,
         );
-        cmds.push(RenderCommand::StrokeRect {
-            x: Self::PADDING + 40.0,
-            y: card_y,
-            width: content_w - 80.0,
-            height: card_h,
-            color: if session.flipped {
-                self.palette.green
-            } else {
-                self.palette.blue
-            },
-            line_width: 2.0,
-            corner_radii: CornerRadii::all(12.0),
-        });
-
-        // Side label
-        let side_label = if session.flipped {
-            "ANSWER"
-        } else {
-            "QUESTION"
-        };
         let side_color = if session.flipped {
             self.palette.green
         } else {
             self.palette.blue
         };
-        cmds.push(RenderCommand::Text {
-            x: Self::PADDING + 60.0,
-            y: card_y + 16.0,
-            text: String::from(side_label),
-            font_size: 11.0,
+        f.push(RenderCommand::StrokeRect {
+            x: card_rect.x,
+            y: card_rect.y,
+            width: card_rect.w,
+            height: card_rect.h,
             color: side_color,
+            line_width: 2.0,
+            corner_radii: CornerRadii::all(12.0),
+        });
+        f.push(RenderCommand::Text {
+            x: card_rect.x + 20.0,
+            y: card_rect.y + 16.0,
+            text: String::from(if session.flipped {
+                "ANSWER"
+            } else {
+                "QUESTION"
+            }),
+            font_size: 11.0,
+            color: self.palette.ink(side_color),
             font_weight: FontWeightHint::Bold,
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,
         });
-
-        // Card text
-        let display_text = if session.flipped {
-            card.back.clone()
+        // The text wrapped to the card: it was one line cut with an ellipsis,
+        // so a long answer lost its end in the one place it has to be read.
+        let words = if session.flipped {
+            &card.back
         } else {
-            card.front.clone()
+            &card.front
         };
-        cmds.push(RenderCommand::Text {
-            x: Self::PADDING + 60.0,
-            y: card_y + 60.0,
-            text: display_text,
-            font_size: 18.0,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(content_w - 160.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Tags on card
+        let width = (card_rect.w - 40.0).max(1.0);
+        let mut lines = Vec::new();
+        for line in words.split('\n') {
+            if line.is_empty() || text::measure(line, 18.0, FontWeightHint::Regular) <= width {
+                lines.push(line.to_owned());
+            } else {
+                lines.extend(text::wrap(line, width, 18.0, FontWeightHint::Regular));
+            }
+        }
+        let room = 7usize;
+        let more = lines.len() > room;
+        for (i, line) in lines.iter().take(room).enumerate() {
+            let last = i.saturating_add(1) == room;
+            f.push(RenderCommand::Text {
+                x: card_rect.x + 20.0,
+                y: card_rect.y + 50.0 + i as f32 * 24.0,
+                text: if more && last {
+                    format!("{line}\u{2026}")
+                } else {
+                    line.clone()
+                },
+                font_size: 18.0,
+                color: self.palette.text,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
         if !card.tags.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: Self::PADDING + 60.0,
-                y: card_y + card_h - 30.0,
+            f.push(RenderCommand::Text {
+                x: card_rect.x + 20.0,
+                y: card_rect.bottom() - 30.0,
                 text: card.tags.join(" | "),
                 font_size: 10.0,
                 color: self.palette.ink(self.palette.mauve),
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(content_w - 160.0),
+                max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
             });
         }
+        // A press on the card turns it over.
+        if !session.flipped {
+            f.hit(Target::StudyCard, card_rect);
+        }
 
-        // Action buttons
-        let btn_y = card_y + card_h + 20.0;
+        let btn_y = card_rect.bottom() + 20.0;
         if session.flipped {
-            // Rating buttons
             let btn_w = 120.0;
             let gap = 16.0;
-            let total_btn_w = btn_w * 4.0 + gap * 3.0;
-            let start_x = (self.width - total_btn_w) / 2.0;
-
+            let start_x = (self.width - (btn_w * 4.0 + gap * 3.0)) / 2.0;
             for (i, rating) in ALL_RATINGS.iter().enumerate() {
-                let x = start_x + (i as f32) * (btn_w + gap);
-                cmds.push(RenderCommand::FillRect {
-                    x,
-                    y: btn_y,
-                    width: btn_w,
-                    height: 40.0,
+                let rect = Rect::new(start_x + (i as f32) * (btn_w + gap), btn_y, btn_w, 40.0);
+                let lit = self.hover == Some(Target::Rate(*rating));
+                f.push(RenderCommand::FillRect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.w,
+                    height: rect.h,
                     color: rating.color(&self.palette),
                     corner_radii: CornerRadii::all(8.0),
                 });
-                cmds.push(RenderCommand::Text {
-                    x: x + 10.0,
-                    y: btn_y + 10.0,
+                if lit {
+                    f.push(RenderCommand::StrokeRect {
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.w,
+                        height: rect.h,
+                        color: self.palette.text,
+                        line_width: 2.0,
+                        corner_radii: CornerRadii::all(8.0),
+                    });
+                }
+                f.push(RenderCommand::Text {
+                    x: rect.x + 10.0,
+                    y: rect.y + 10.0,
                     text: format!("[{}] {}", i.saturating_add(1), rating.label()),
                     font_size: 14.0,
                     color: self.palette.crust,
@@ -2703,52 +3363,50 @@ impl FlashcardsApp {
                     max_width: Some(btn_w - 20.0),
                     overflow: TextOverflow::Ellipsis,
                 });
+                f.hit(Target::Rate(*rating), rect);
             }
         } else {
-            // Flip prompt
-            let prompt_w = 200.0;
-            let prompt_x = (self.width - prompt_w) / 2.0;
-            cmds.push(RenderCommand::FillRect {
-                x: prompt_x,
-                y: btn_y,
-                width: prompt_w,
-                height: 40.0,
+            let prompt = Rect::new((self.width - 200.0) / 2.0, btn_y, 200.0, 40.0);
+            f.push(RenderCommand::FillRect {
+                x: prompt.x,
+                y: prompt.y,
+                width: prompt.w,
+                height: prompt.h,
                 color: self.palette.blue,
                 corner_radii: CornerRadii::all(8.0),
             });
-            cmds.push(RenderCommand::Text {
-                x: prompt_x + 20.0,
-                y: btn_y + 10.0,
+            f.push(RenderCommand::Text {
+                x: prompt.x + 20.0,
+                y: prompt.y + 10.0,
                 text: String::from("[Space] Flip Card"),
                 font_size: 14.0,
                 color: self.palette.crust,
                 font_weight: FontWeightHint::Bold,
-                max_width: Some(prompt_w - 40.0),
+                max_width: Some(prompt.w - 40.0),
                 overflow: TextOverflow::Ellipsis,
             });
+            f.hit(Target::StudyCard, prompt);
         }
     }
 
     fn render_session_summary(
         &self,
-        cmds: &mut Vec<RenderCommand>,
+        f: &mut Frame<Target>,
         session: &StudySession,
         top: f32,
         content_w: f32,
     ) {
         let cx = self.width / 2.0;
-
         self.palette.push_surface(
-            cmds,
+            f,
             Self::PADDING + 60.0,
             top,
-            content_w - 120.0,
+            (content_w - 120.0).max(0.0),
             280.0,
             12.0,
             Surface::Card,
         );
-
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: cx - 80.0,
             y: top + 20.0,
             text: String::from("Session Complete!"),
@@ -2758,8 +3416,7 @@ impl FlashcardsApp {
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
         });
-
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: cx - 100.0,
             y: top + 60.0,
             text: format!("Cards reviewed: {}", session.reviewed),
@@ -2769,8 +3426,7 @@ impl FlashcardsApp {
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
         });
-
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: cx - 100.0,
             y: top + 84.0,
             text: format!("Accuracy: {}%", session.session_accuracy()),
@@ -2780,54 +3436,38 @@ impl FlashcardsApp {
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
         });
-
-        // Rating breakdown
-        let labels = ["Again", "Hard", "Good", "Easy"];
-        let colors = [
-            self.palette.red,
-            self.palette.peach,
-            self.palette.blue,
-            self.palette.green,
-        ];
-        for (i, (label, color)) in labels.iter().zip(colors.iter()).enumerate() {
-            let y = top + 120.0 + (i as f32) * 24.0;
-            cmds.push(RenderCommand::Text {
+        for (i, rating) in ALL_RATINGS.iter().enumerate() {
+            f.push(RenderCommand::Text {
                 x: cx - 80.0,
-                y,
+                y: top + 120.0 + (i as f32) * 24.0,
                 text: format!(
-                    "{label}: {}",
+                    "{}: {}",
+                    rating.label(),
                     session.session_ratings.get(i).copied().unwrap_or(0)
                 ),
                 font_size: 13.0,
-                color: *color,
+                color: self.palette.ink(rating.color(&self.palette)),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(150.0),
                 overflow: TextOverflow::Ellipsis,
             });
         }
-
-        cmds.push(RenderCommand::Text {
-            x: cx - 60.0,
-            y: top + 240.0,
-            text: String::from("[Esc] Back to deck"),
-            font_size: 12.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        self.button(
+            f,
+            Rect::new(cx - 70.0, top + 234.0, 140.0, 28.0),
+            "Back to deck",
+            Target::EndSession,
+            true,
+        );
     }
 
-    fn render_statistics(&self, cmds: &mut Vec<RenderCommand>) {
-        let deck = match self.current_deck() {
-            Some(d) => d,
-            None => return,
+    fn render_statistics(&self, f: &mut Frame<Target>) {
+        let Some(deck) = self.current_deck() else {
+            return;
         };
-
         let top = Self::HEADER_H + Self::PADDING;
         let content_w = self.width - Self::PADDING * 2.0;
-
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: Self::PADDING,
             y: top,
             text: format!("Statistics: {}", deck.name),
@@ -2837,23 +3477,14 @@ impl FlashcardsApp {
             max_width: Some(400.0),
             overflow: TextOverflow::Ellipsis,
         });
-
-        cmds.push(RenderCommand::Text {
-            x: Self::PADDING,
-            y: top + 26.0,
-            text: String::from("[Esc] back"),
-            font_size: 11.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(100.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        let stats_y = top + 56.0;
+        let stats_y = top + 40.0;
         let col_w = (content_w - 32.0) / 3.0;
-
-        // Stat boxes
-        let stats = [
+        let new_cards = deck
+            .cards
+            .iter()
+            .filter(|c| c.review.total_reviews == 0)
+            .count();
+        let boxes = [
             (
                 "Total Cards",
                 format!("{}", deck.cards.len()),
@@ -2869,37 +3500,6 @@ impl FlashcardsApp {
                 format!("{}%", deck.average_accuracy()),
                 self.palette.green,
             ),
-        ];
-
-        for (i, (label, value, color)) in stats.iter().enumerate() {
-            let x = Self::PADDING + (i as f32) * (col_w + 16.0);
-            self.palette
-                .push_surface(cmds, x, stats_y, col_w, 70.0, 8.0, Surface::Card);
-            cmds.push(RenderCommand::Text {
-                x: x + 12.0,
-                y: stats_y + 10.0,
-                text: String::from(*label),
-                font_size: 11.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(col_w - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cmds.push(RenderCommand::Text {
-                x: x + 12.0,
-                y: stats_y + 32.0,
-                text: value.clone(),
-                font_size: 24.0,
-                color: *color,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(col_w - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
-        // Second row
-        let row2_y = stats_y + 90.0;
-        let stats2 = [
             (
                 "Due Today",
                 format!("{}", deck.due_cards(self.current_day).len()),
@@ -2910,26 +3510,16 @@ impl FlashcardsApp {
                 format!("{}", deck.mastered_count()),
                 self.palette.green,
             ),
-            (
-                "New",
-                format!(
-                    "{}",
-                    deck.cards
-                        .iter()
-                        .filter(|c| c.review.total_reviews == 0)
-                        .count()
-                ),
-                self.palette.peach,
-            ),
+            ("New", format!("{new_cards}"), self.palette.peach),
         ];
-
-        for (i, (label, value, color)) in stats2.iter().enumerate() {
-            let x = Self::PADDING + (i as f32) * (col_w + 16.0);
+        for (i, (label, value, color)) in boxes.iter().enumerate() {
+            let x = Self::PADDING + ((i % 3) as f32) * (col_w + 16.0);
+            let y = stats_y + ((i / 3) as f32) * 90.0;
             self.palette
-                .push_surface(cmds, x, row2_y, col_w, 70.0, 8.0, Surface::Card);
-            cmds.push(RenderCommand::Text {
+                .push_surface(f, x, y, col_w, 70.0, 8.0, Surface::Card);
+            f.push(RenderCommand::Text {
                 x: x + 12.0,
-                y: row2_y + 10.0,
+                y: y + 10.0,
                 text: String::from(*label),
                 font_size: 11.0,
                 color: self.palette.subtext0,
@@ -2937,21 +3527,19 @@ impl FlashcardsApp {
                 max_width: Some(col_w - 24.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: x + 12.0,
-                y: row2_y + 32.0,
+                y: y + 32.0,
                 text: value.clone(),
                 font_size: 24.0,
-                color: *color,
+                color: self.palette.ink(*color),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(col_w - 24.0),
                 overflow: TextOverflow::Ellipsis,
             });
         }
-
-        // Per-card breakdown
-        let breakdown_y = row2_y + 90.0;
-        cmds.push(RenderCommand::Text {
+        let breakdown_y = stats_y + 180.0;
+        f.push(RenderCommand::Text {
             x: Self::PADDING,
             y: breakdown_y,
             text: String::from("Card Breakdown"),
@@ -2961,8 +3549,7 @@ impl FlashcardsApp {
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
         });
-
-        cmds.push(RenderCommand::Line {
+        f.push(RenderCommand::Line {
             x1: Self::PADDING,
             y1: breakdown_y + 20.0,
             x2: self.width - Self::PADDING,
@@ -2970,42 +3557,42 @@ impl FlashcardsApp {
             color: self.palette.surface1,
             width: 1.0,
         });
-
-        // Show ease factor distribution as a bar chart approximation
         let bar_y = breakdown_y + 30.0;
         let bar_h = 20.0;
-        let bar_max_w = content_w - 200.0;
-
-        let ease_ranges = [
-            ("Ease < 1.8 (difficult)", self.palette.red),
-            ("Ease 1.8-2.2 (moderate)", self.palette.yellow),
-            ("Ease 2.2-2.5 (good)", self.palette.blue),
-            ("Ease > 2.5 (easy)", self.palette.green),
+        let bar_max_w = (content_w - 200.0).max(0.0);
+        let ease = |c: &&Card| c.review.ease_factor;
+        let counts: [(&str, Color, usize); 4] = [
+            (
+                "Ease < 1.8 (difficult)",
+                self.palette.red,
+                deck.cards.iter().filter(|c| ease(c) < 1.8).count(),
+            ),
+            (
+                "Ease 1.8-2.2 (moderate)",
+                self.palette.yellow,
+                deck.cards
+                    .iter()
+                    .filter(|c| (1.8..2.2).contains(&ease(c)))
+                    .count(),
+            ),
+            (
+                "Ease 2.2-2.5 (good)",
+                self.palette.blue,
+                deck.cards
+                    .iter()
+                    .filter(|c| (2.2..2.5).contains(&ease(c)))
+                    .count(),
+            ),
+            (
+                "Ease > 2.5 (easy)",
+                self.palette.green,
+                deck.cards.iter().filter(|c| ease(c) >= 2.5).count(),
+            ),
         ];
-
-        let counts: [usize; 4] = [
-            deck.cards
-                .iter()
-                .filter(|c| c.review.ease_factor < 1.8)
-                .count(),
-            deck.cards
-                .iter()
-                .filter(|c| c.review.ease_factor >= 1.8 && c.review.ease_factor < 2.2)
-                .count(),
-            deck.cards
-                .iter()
-                .filter(|c| c.review.ease_factor >= 2.2 && c.review.ease_factor < 2.5)
-                .count(),
-            deck.cards
-                .iter()
-                .filter(|c| c.review.ease_factor >= 2.5)
-                .count(),
-        ];
-        let max_count = counts.iter().copied().max().unwrap_or(1).max(1);
-
-        for (i, ((label, color), count)) in ease_ranges.iter().zip(counts.iter()).enumerate() {
+        let max_count = counts.iter().map(|(_, _, n)| *n).max().unwrap_or(1).max(1);
+        for (i, (label, color, count)) in counts.iter().enumerate() {
             let y = bar_y + (i as f32) * (bar_h + 8.0);
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: Self::PADDING,
                 y: y + 3.0,
                 text: String::from(*label),
@@ -3015,10 +3602,9 @@ impl FlashcardsApp {
                 max_width: Some(180.0),
                 overflow: TextOverflow::Ellipsis,
             });
-
             let w = (*count as f32 / max_count as f32) * bar_max_w;
             if w > 0.0 {
-                cmds.push(RenderCommand::FillRect {
+                f.push(RenderCommand::FillRect {
                     x: Self::PADDING + 190.0,
                     y,
                     width: w,
@@ -3027,8 +3613,7 @@ impl FlashcardsApp {
                     corner_radii: CornerRadii::all(3.0),
                 });
             }
-
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: Self::PADDING + 196.0 + w,
                 y: y + 3.0,
                 text: format!("{count}"),
@@ -3039,6 +3624,254 @@ impl FlashcardsApp {
                 overflow: TextOverflow::Ellipsis,
             });
         }
+    }
+
+    /// The question before a delete, with a button for each answer.
+    fn render_question(&self, f: &mut Frame<Target>, doomed: Doomed) {
+        let (w, h) = (self.width, self.height);
+        f.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: w,
+            height: h,
+            color: Color::rgba(0, 0, 0, 160),
+            corner_radii: CornerRadii::ZERO,
+        });
+        f.hit(Target::QuestionBackdrop, Rect::new(0.0, 0.0, w, h));
+        let card = Rect::new((w - 460.0) / 2.0, (h - 150.0) / 2.0, 460.0, 150.0);
+        self.palette
+            .push_surface(f, card.x, card.y, card.w, card.h, 12.0, Surface::Card);
+        f.hit(Target::QuestionCard, card);
+        let (title, body) = match doomed {
+            Doomed::Deck(idx) => {
+                let deck = self.decks.get(idx);
+                (
+                    format!("Delete the deck {}?", deck.map_or("", |d| d.name.as_str())),
+                    format!(
+                        "Its {} card(s) and every review go with it, and this cannot be undone.",
+                        deck.map_or(0, |d| d.cards.len())
+                    ),
+                )
+            }
+            Doomed::Card(_) => (
+                String::from("Delete this card?"),
+                String::from("Its review history goes with it, and this cannot be undone."),
+            ),
+        };
+        f.push(RenderCommand::Text {
+            x: card.x + 20.0,
+            y: card.y + 20.0,
+            text: title,
+            font_size: 16.0,
+            color: self.palette.text,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(card.w - 40.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        f.push(RenderCommand::Text {
+            x: card.x + 20.0,
+            y: card.y + 50.0,
+            text: body,
+            font_size: 12.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(card.w - 40.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        let delete = Rect::new(
+            card.right() - 20.0 - 210.0,
+            card.bottom() - 50.0,
+            120.0,
+            32.0,
+        );
+        f.push(RenderCommand::FillRect {
+            x: delete.x,
+            y: delete.y,
+            width: delete.w,
+            height: delete.h,
+            color: self.palette.red,
+            corner_radii: CornerRadii::all(6.0),
+        });
+        f.push(RenderCommand::Text {
+            x: delete.x + 14.0,
+            y: delete.y + 9.0,
+            text: String::from("Delete (Y)"),
+            font_size: 12.0,
+            color: self.palette.crust,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(delete.w - 20.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        f.hit(Target::ConfirmDelete, delete);
+        self.button(
+            f,
+            Rect::new(card.right() - 20.0 - 80.0, card.bottom() - 50.0, 80.0, 32.0),
+            "Keep",
+            Target::KeepIt,
+            true,
+        );
+    }
+
+    // ── The pointer ─────────────────────────────────────────────────
+
+    /// What is under `(x, y)` in the frame last shown.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        if self.last_hits.is_empty() {
+            return self.frame().hit_test(x, y);
+        }
+        self.last_hits
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(target, _)| *target)
+    }
+
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                let Some(target) = self.frame().hit_test(event.x, event.y) else {
+                    return EventResult::Ignored;
+                };
+                self.press(target)
+            }
+            MouseEventKind::Move => {
+                let over = self.target_at(event.x, event.y);
+                if over == self.hover {
+                    return EventResult::Ignored;
+                }
+                self.hover = over;
+                EventResult::Consumed
+            }
+            MouseEventKind::Leave => {
+                if self.hover.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            MouseEventKind::Scroll { dy, .. } => self.wheel_at(event.x, event.y, dy),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Back one view, as Escape does from each.
+    fn go_back(&mut self) {
+        match self.view {
+            AppView::CardEditor | AppView::DeckEditor => self.leave_editor(),
+            AppView::DeckList => {}
+            AppView::DeckDetail => {
+                self.search_active = false;
+                self.handle_key("Escape", false, false);
+            }
+            AppView::StudyMode | AppView::Statistics => self.handle_key("Escape", false, false),
+        }
+    }
+
+    /// A left press on `target`.
+    fn press(&mut self, target: Target) -> EventResult {
+        match target {
+            Target::HelpCard => self.show_help = false,
+            Target::Help => self.show_help = true,
+            Target::Back => self.go_back(),
+            Target::DeckRow(i) => {
+                if i == self.selected_deck {
+                    self.select_deck(i);
+                } else {
+                    self.selected_deck = i;
+                }
+            }
+            Target::NewDeck => self.open_new_deck_editor(),
+            Target::EditDeck => self.open_edit_deck(self.selected_deck),
+            Target::DeleteDeck => self.ask_to_delete(Doomed::Deck(self.selected_deck)),
+            Target::Import => self.picker.open_to_read(),
+            Target::Export => self.open_save_dialog(),
+            Target::CardRow(p) => {
+                if p == self.selected_card {
+                    self.handle_key("e", false, false);
+                } else {
+                    self.selected_card = p;
+                }
+            }
+            Target::Search => {
+                self.search_active = true;
+                self.status_msg = String::from("Search: type to filter, Esc to clear");
+            }
+            Target::TagChip => self.handle_key("t", false, false),
+            Target::StudyDue => self.start_study(),
+            Target::StudyAll => self.start_study_all(),
+            Target::NewCard => self.open_new_card_editor(),
+            Target::EditCard => self.handle_key("e", false, false),
+            Target::DeleteCard => self.handle_key("x", false, false),
+            Target::Shuffle => self.handle_key("r", false, false),
+            Target::Stats => self.view = AppView::Statistics,
+            Target::Field(field) => self.field = field,
+            Target::Save => {
+                if self.view == AppView::DeckEditor {
+                    self.save_deck_edits();
+                } else {
+                    self.save_card();
+                }
+            }
+            Target::Cancel => self.leave_editor(),
+            Target::StudyCard => self.flip_card(),
+            Target::Rate(rating) => self.rate_card(rating),
+            Target::EndSession => self.end_study(),
+            Target::ConfirmDelete => {
+                let Some(doomed) = self.pending_delete.take() else {
+                    return EventResult::Ignored;
+                };
+                self.delete_doomed(doomed);
+            }
+            Target::KeepIt | Target::QuestionBackdrop => {
+                if self.pending_delete.take().is_none() {
+                    return EventResult::Ignored;
+                }
+                self.status_msg = String::from("Kept");
+            }
+            Target::QuestionCard | Target::DeckList | Target::CardList => {
+                return EventResult::Ignored;
+            }
+        }
+        self.ensure_deck_visible();
+        EventResult::Consumed
+    }
+
+    /// The wheel over the deck list or the card list.
+    fn wheel_at(&mut self, x: f32, y: f32, dy: f32) -> EventResult {
+        let over = self.target_at(x, y);
+        let decks = match over {
+            Some(Target::DeckList | Target::DeckRow(_)) => true,
+            Some(Target::CardList | Target::CardRow(_)) => false,
+            _ => return EventResult::Ignored,
+        };
+        let rows = self.wheel.rows(dy);
+        let (now, count, visible) = if decks {
+            let (_, _, visible) = self.deck_list_geometry();
+            (self.deck_scroll, self.decks.len(), visible)
+        } else {
+            let (_, visible) = self.card_list_geometry();
+            (
+                self.scroll_offset,
+                self.matching_card_indices().len(),
+                visible,
+            )
+        };
+        let last = count.saturating_sub(visible);
+        let next = if rows < 0 {
+            now.saturating_sub(rows.unsigned_abs())
+        } else {
+            now.saturating_add(rows.unsigned_abs())
+        }
+        .min(last);
+        if next == now {
+            return EventResult::Ignored;
+        }
+        if decks {
+            self.deck_scroll = next;
+        } else {
+            self.scroll_offset = next;
+        }
+        EventResult::Consumed
     }
 }
 
@@ -3114,9 +3947,9 @@ impl App for FlashcardsApp {
         // for, and the first frame is drawn before any `Resize` arrives.
         self.width = width;
         self.height = height;
-        RenderTree {
-            commands: self.render_commands(),
-        }
+        let frame = self.frame();
+        self.last_hits = frame.hits().to_vec();
+        frame.into_tree()
     }
 }
 
@@ -4374,17 +5207,32 @@ mod tests {
 
     #[test]
     fn test_new_deck_key() {
+        // `n` names the deck first: it made one called "New Deck" at once,
+        // and nothing could rename it.
         let mut app = FlashcardsApp::new();
         let n = app.decks.len();
         app.handle_key("n", false, false);
+        assert_eq!(app.view, AppView::DeckEditor);
+        assert_eq!(app.decks.len(), n);
+        app.deck_name.set_text("Verbs");
+        assert!(app.save_deck_edits());
         assert_eq!(app.decks.len(), n + 1);
+        assert_eq!(app.decks.last().unwrap().name, "Verbs");
     }
 
     #[test]
     fn test_delete_deck_key() {
+        // It asks first now, and Y answers.
         let mut app = FlashcardsApp::new();
         let n = app.decks.len();
         app.handle_key("Delete", false, false);
+        assert_eq!(app.decks.len(), n, "deleted without asking");
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Y,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::from("y"),
+        }));
         assert_eq!(app.decks.len(), n - 1);
     }
 
@@ -4529,9 +5377,9 @@ mod tests {
     fn test_card_editor_save_new() {
         let mut app = FlashcardsApp::new();
         app.open_new_card_editor();
-        app.editor_front = String::from("New Q");
-        app.editor_back = String::from("New A");
-        app.editor_tags = String::from("tag1, tag2");
+        app.editor_front.set_text("New Q");
+        app.editor_back.set_text("New A");
+        app.editor_tags.set_text("tag1, tag2");
         assert!(app.save_card());
         let deck = &app.decks[app.selected_deck];
         let last = deck.cards.last().unwrap();
@@ -4553,8 +5401,8 @@ mod tests {
         let card_id = app.decks[0].cards[0].id;
         app.open_edit_card(card_id);
         assert_eq!(app.editing_card_id, Some(card_id));
-        app.editor_front = String::from("Updated question");
-        app.editor_back = String::from("Updated answer");
+        app.editor_front.set_text("Updated question");
+        app.editor_back.set_text("Updated answer");
         assert!(app.save_card());
         assert_eq!(app.decks[0].cards[0].front, "Updated question");
     }
@@ -4564,7 +5412,10 @@ mod tests {
         let mut app = FlashcardsApp::new();
         app.view = AppView::DeckDetail;
         let n = app.decks[0].cards.len();
-        app.delete_selected_card();
+        app.handle_key("x", false, false);
+        assert_eq!(app.decks[0].cards.len(), n, "deleted without asking");
+        let doomed = app.pending_delete.take().expect("x asks");
+        app.delete_doomed(doomed);
         assert_eq!(app.decks[0].cards.len(), n - 1);
     }
 
@@ -4882,9 +5733,9 @@ mod tests {
         app.scroll_offset = 0;
         app.view = AppView::DeckDetail;
         app.tag_filter = tag_filter.map(String::from);
-        let mut cmds = Vec::new();
-        app.render_deck_detail(&mut cmds);
-        cmds
+        let mut f = Frame::new(app.width, app.height);
+        app.render_deck_detail(&mut f);
+        f.into_tree().commands
     }
 
     fn texts_of(cmds: &[RenderCommand]) -> Vec<TextCell> {
@@ -5201,8 +6052,8 @@ mod tests {
         let mut app = FlashcardsApp::new();
         let next = app.decks[app.selected_deck].next_card_id;
         app.open_new_card_editor();
-        app.editor_front = String::from("Q");
-        app.editor_back = String::from("A");
+        app.editor_front.set_text("Q");
+        app.editor_back.set_text("A");
         assert!(app.save_card());
         let deck = &app.decks[app.selected_deck];
         assert_eq!(deck.cards.last().map(|c| c.id), Some(next));
@@ -5240,7 +6091,9 @@ mod tests {
             deck.cards[matching[0]].id
         };
         app.selected_card = 0;
-        app.delete_selected_card();
+        app.handle_key("x", false, false);
+        let asked = app.pending_delete.take().expect("x asks");
+        app.delete_doomed(asked);
         let deck = &app.decks[app.selected_deck];
         assert!(
             !deck.cards.iter().any(|c| c.id == doomed),
@@ -5359,6 +6212,532 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+    // ── Typing, naming, asking, and the pointer ──────────────────────
+
+    use guitk::probe::{self, Probe};
+
+    impl Probe for FlashcardsApp {
+        type Target = Target;
+        type Outcome = EventResult;
+        const SIZE: (f32, f32) = (1000.0, 700.0);
+
+        /// Drawn at the app's own size, which these tests leave at `SIZE`.
+        fn draw(&self, _size: (f32, f32)) -> Frame<Target> {
+            self.frame()
+        }
+
+        fn click_at(
+            &mut self,
+            x: f32,
+            y: f32,
+            button: MouseButton,
+            _size: (f32, f32),
+        ) -> EventResult {
+            self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }))
+        }
+
+        fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> EventResult {
+            self.handle_event(&Event::Key(key.clone()))
+        }
+
+        fn scroll_at(&mut self, x: f32, y: f32, dy: f32, _size: (f32, f32)) -> Option<EventResult> {
+            Some(self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })))
+        }
+    }
+
+    /// Type `text` through the event layer, as a keyboard would.
+    fn type_text(app: &mut FlashcardsApp, text: &str) {
+        for c in text.chars() {
+            app.handle_event(&typed(c));
+        }
+    }
+
+    fn shift_press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        })
+    }
+
+    /// A card can be typed and saved. The editor's keys were Enter and
+    /// Escape, so no card could be made or changed: every new one was refused
+    /// as empty.
+    #[test]
+    fn a_card_can_be_typed_and_saved() {
+        let mut app = app_in_deck();
+        let n = app.decks[app.selected_deck].cards.len();
+        app.handle_event(&typed('n'));
+        assert_eq!(app.view, AppView::CardEditor);
+        type_text(&mut app, "What is 2+2?");
+        app.handle_event(&press(Key::Tab));
+        type_text(&mut app, "Four");
+        app.handle_event(&press(Key::Backspace));
+        type_text(&mut app, "r");
+        app.handle_event(&press(Key::Tab));
+        type_text(&mut app, "maths, easy");
+        app.handle_event(&press(Key::Enter));
+        let deck = &app.decks[app.selected_deck];
+        assert_eq!(deck.cards.len(), n + 1);
+        let card = deck.cards.last().unwrap();
+        assert_eq!(card.front, "What is 2+2?");
+        assert_eq!(card.back, "Four");
+        assert_eq!(card.tags, vec![String::from("maths"), String::from("easy")]);
+        assert_eq!(app.view, AppView::DeckDetail);
+    }
+
+    /// Tab walks the fields and Shift+Tab walks back.
+    #[test]
+    fn tab_walks_the_editors_fields() {
+        let mut app = app_in_deck();
+        app.open_new_card_editor();
+        assert_eq!(app.field, Field::Front);
+        app.handle_event(&press(Key::Tab));
+        assert_eq!(app.field, Field::Back);
+        app.handle_event(&press(Key::Tab));
+        app.handle_event(&press(Key::Tab));
+        assert_eq!(app.field, Field::Front, "Tab does not wrap");
+        app.handle_event(&shift_press(Key::Tab));
+        assert_eq!(app.field, Field::Tags);
+    }
+
+    /// An editor takes every key: `s` in an answer does not start studying,
+    /// and `x` does not delete.
+    #[test]
+    fn an_editor_takes_every_key() {
+        let mut app = app_in_deck();
+        app.open_new_card_editor();
+        type_text(&mut app, "sx/");
+        assert_eq!(app.view, AppView::CardEditor);
+        assert!(app.pending_delete.is_none());
+        assert_eq!(app.editor_front.text(), "sx/");
+    }
+
+    /// A new deck is named when it is made, and can be renamed. `n` made one
+    /// called "New Deck" that nothing could rename.
+    #[test]
+    fn a_deck_is_named_and_can_be_renamed() {
+        let mut app = FlashcardsApp::new();
+        let n = app.decks.len();
+        app.handle_event(&typed('n'));
+        assert_eq!(app.view, AppView::DeckEditor);
+        type_text(&mut app, "Verbs");
+        app.handle_event(&press(Key::Tab));
+        type_text(&mut app, "Spanish, irregular");
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(app.decks.len(), n + 1);
+        let made = app.decks.len() - 1;
+        assert_eq!(app.decks[made].name, "Verbs");
+        assert_eq!(app.decks[made].description, "Spanish, irregular");
+        assert_eq!(app.selected_deck, made);
+        app.handle_event(&typed('e'));
+        app.handle_event(&ctrl_press(Key::A));
+        type_text(&mut app, "Irregular verbs");
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(app.decks[made].name, "Irregular verbs");
+        assert_eq!(app.decks.len(), n + 1, "a rename made a deck");
+    }
+
+    /// A deck needs a name.
+    #[test]
+    fn a_nameless_deck_is_refused() {
+        let mut app = FlashcardsApp::new();
+        let n = app.decks.len();
+        app.open_new_deck_editor();
+        type_text(&mut app, "   ");
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(app.decks.len(), n);
+        assert_eq!(app.view, AppView::DeckEditor);
+        assert_eq!(app.status_msg, "A deck needs a name");
+    }
+
+    /// Deleting a deck or a card asks first, is drawn, and only Y deletes.
+    /// Both went at once, with their whole history.
+    #[test]
+    fn deleting_asks_first_and_only_y_deletes() {
+        let mut app = FlashcardsApp::new();
+        let n = app.decks.len();
+        assert_eq!(
+            app.handle_event(&typed('x')),
+            EventResult::Consumed,
+            "the question is not drawn"
+        );
+        assert!(
+            drawn_texts(&app)
+                .iter()
+                .any(|t| t.starts_with("Delete the deck"))
+        );
+        app.handle_event(&typed('n'));
+        assert_eq!(app.decks.len(), n);
+        assert_eq!(
+            app.view,
+            AppView::DeckList,
+            "the answer was taken as a command too"
+        );
+        app.handle_event(&typed('x'));
+        app.handle_event(&typed('y'));
+        assert_eq!(app.decks.len(), n - 1);
+
+        let mut app = app_in_deck();
+        let cards = app.decks[app.selected_deck].cards.len();
+        app.handle_event(&typed('x'));
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(app.decks[app.selected_deck].cards.len(), cards);
+        app.handle_event(&typed('x'));
+        probe::click(&mut app, Target::ConfirmDelete);
+        assert_eq!(app.decks[app.selected_deck].cards.len(), cards - 1);
+        app.handle_event(&typed('x'));
+        probe::click(&mut app, Target::KeepIt);
+        assert_eq!(app.decks[app.selected_deck].cards.len(), cards - 1);
+    }
+
+    /// Every deck-list button answers the pointer.
+    #[test]
+    fn every_deck_list_button_answers_the_pointer() {
+        let mut app = FlashcardsApp::new();
+        probe::click(&mut app, Target::NewDeck);
+        assert_eq!(app.view, AppView::DeckEditor);
+        probe::click(&mut app, Target::Cancel);
+        assert_eq!(app.view, AppView::DeckList);
+        probe::click(&mut app, Target::EditDeck);
+        assert_eq!(app.deck_name.text(), app.decks[0].name);
+        probe::click(&mut app, Target::Cancel);
+        probe::click(&mut app, Target::DeleteDeck);
+        assert!(app.pending_delete.is_some());
+        // Beside the question's card: the backdrop's middle is the card.
+        assert_eq!(
+            app.frame().hit_test(5.0, 60.0),
+            Some(Target::QuestionBackdrop)
+        );
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: 5.0,
+            y: 60.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert!(app.pending_delete.is_none());
+        probe::click(&mut app, Target::Import);
+        assert!(app.picker.is_open());
+        app.handle_event(&press(Key::Escape));
+        probe::click(&mut app, Target::Export);
+        assert!(app.picker.is_open());
+    }
+
+    /// A press on a deck chooses it, and a press on the chosen one opens it.
+    #[test]
+    fn a_deck_press_chooses_and_a_second_opens() {
+        let mut app = FlashcardsApp::new();
+        probe::click(&mut app, Target::DeckRow(2));
+        assert_eq!(app.selected_deck, 2);
+        assert_eq!(app.view, AppView::DeckList);
+        probe::click(&mut app, Target::DeckRow(2));
+        assert_eq!(app.view, AppView::DeckDetail);
+    }
+
+    /// Every deck-view button answers the pointer.
+    #[test]
+    fn every_deck_view_button_answers_the_pointer() {
+        let mut app = app_in_deck();
+        probe::click(&mut app, Target::StudyDue);
+        assert_eq!(app.view, AppView::StudyMode);
+        probe::click(&mut app, Target::EndSession);
+        probe::click(&mut app, Target::StudyAll);
+        assert_eq!(app.view, AppView::StudyMode);
+        probe::click(&mut app, Target::EndSession);
+        probe::click(&mut app, Target::NewCard);
+        assert_eq!(app.view, AppView::CardEditor);
+        probe::click(&mut app, Target::Cancel);
+        probe::click(&mut app, Target::EditCard);
+        assert!(app.editing_card_id.is_some());
+        probe::click(&mut app, Target::Cancel);
+        probe::click(&mut app, Target::DeleteCard);
+        assert!(matches!(app.pending_delete, Some(Doomed::Card(_))));
+        probe::click(&mut app, Target::KeepIt);
+        probe::click(&mut app, Target::Shuffle);
+        assert_eq!(app.status_msg, "Deck shuffled");
+        probe::click(&mut app, Target::TagChip);
+        assert!(app.tag_filter.is_some(), "the chip set no filter");
+        probe::click(&mut app, Target::Search);
+        assert!(app.search_active);
+        app.handle_event(&press(Key::Escape));
+        probe::click(&mut app, Target::Stats);
+        assert_eq!(app.view, AppView::Statistics);
+    }
+
+    /// The tag chip is there with no filter set, or there would be nothing
+    /// to press to set one.
+    #[test]
+    fn the_tag_chip_is_there_with_no_filter() {
+        let app = app_in_deck();
+        assert!(app.tag_filter.is_none());
+        assert!(probe::rect_of(&app, Target::TagChip).is_some());
+    }
+
+    /// A press on a card chooses it, and a press on the chosen one edits it.
+    #[test]
+    fn a_card_press_chooses_and_a_second_edits() {
+        let mut app = app_in_deck();
+        probe::click(&mut app, Target::CardRow(2));
+        assert_eq!(app.selected_card, 2);
+        assert_eq!(app.view, AppView::DeckDetail);
+        probe::click(&mut app, Target::CardRow(2));
+        assert_eq!(app.view, AppView::CardEditor);
+    }
+
+    /// The editor's fields and buttons answer the pointer.
+    #[test]
+    fn the_editor_answers_the_pointer() {
+        let mut app = app_in_deck();
+        let n = app.decks[app.selected_deck].cards.len();
+        app.open_new_card_editor();
+        probe::click(&mut app, Target::Field(Field::Back));
+        assert_eq!(app.field, Field::Back);
+        type_text(&mut app, "An answer");
+        probe::click(&mut app, Target::Field(Field::Front));
+        type_text(&mut app, "A question");
+        probe::click(&mut app, Target::Save);
+        let card = app.decks[app.selected_deck].cards.last().unwrap();
+        assert_eq!(
+            (card.front.as_str(), card.back.as_str()),
+            ("A question", "An answer")
+        );
+        assert_eq!(app.decks[app.selected_deck].cards.len(), n + 1);
+    }
+
+    /// Study answers the pointer: the card turns over, a rating rates, and
+    /// the session ends.
+    #[test]
+    fn study_answers_the_pointer() {
+        let mut app = app_in_deck();
+        app.start_study_all();
+        probe::click(&mut app, Target::StudyCard);
+        assert!(app.study_session.as_ref().unwrap().flipped);
+        assert!(
+            probe::rect_of(&app, Target::StudyCard).is_none(),
+            "a turned card turns again"
+        );
+        probe::click(&mut app, Target::Rate(Rating::Good));
+        let session = app.study_session.as_ref().unwrap();
+        assert_eq!((session.reviewed, session.flipped), (1, false));
+        probe::click(&mut app, Target::EndSession);
+        assert_eq!(app.view, AppView::DeckDetail);
+    }
+
+    /// The header's Back goes back from every view but the deck list.
+    #[test]
+    fn back_goes_back_from_every_view() {
+        let mut app = app_in_deck();
+        assert!(probe::rect_of(&FlashcardsApp::new(), Target::Back).is_none());
+        app.handle_event(&typed('/'));
+        type_text(&mut app, "cap");
+        probe::click(&mut app, Target::Back);
+        assert_eq!(app.view, AppView::DeckList, "Back only closed the search");
+        app.select_deck(0);
+        for (open, from) in [
+            (Target::NewCard, AppView::CardEditor),
+            (Target::Stats, AppView::Statistics),
+            (Target::StudyAll, AppView::StudyMode),
+        ] {
+            probe::click(&mut app, open);
+            assert_eq!(app.view, from);
+            probe::click(&mut app, Target::Back);
+            assert_eq!(app.view, AppView::DeckDetail, "from {from:?}");
+        }
+    }
+
+    /// The card list fits the window, and the wheel scrolls it. It showed
+    /// eight rows whatever the height.
+    #[test]
+    fn the_card_list_fits_the_window_and_scrolls() {
+        let mut app = app_in_deck();
+        for i in 0..40 {
+            app.decks[0].add_card(&format!("Question {i}"), &format!("Answer {i}"));
+        }
+        app.height = 1100.0;
+        let (_, tall) = app.card_list_geometry();
+        assert!(tall > 8, "{tall} rows in a 1100-pixel window");
+        app.height = 700.0;
+        let (_, visible) = app.card_list_geometry();
+        assert!(probe::rect_of(&app, Target::CardRow(visible)).is_none());
+        for _ in 0..5 {
+            probe::scroll_at_point(&mut app, Target::CardList, -3.0);
+        }
+        assert!(app.scroll_offset > 0);
+        assert!(probe::rect_of(&app, Target::CardRow(app.scroll_offset)).is_some());
+    }
+
+    /// The deck list scrolls, and follows the chosen deck. It had no
+    /// scrolling: a deck past the bottom could be chosen and never seen.
+    #[test]
+    fn the_deck_list_scrolls_and_follows_the_chosen_deck() {
+        let mut app = FlashcardsApp::new();
+        for i in 0..20 {
+            app.add_deck(&format!("Deck {i}"), "");
+        }
+        let last = app.decks.len() - 1;
+        for _ in 0..last {
+            app.handle_event(&press(Key::Down));
+        }
+        assert_eq!(app.selected_deck, last);
+        assert!(
+            probe::rect_of(&app, Target::DeckRow(last)).is_some(),
+            "the chosen deck is off screen"
+        );
+        for _ in 0..40 {
+            probe::scroll_at_point(&mut app, Target::DeckList, 3.0);
+        }
+        assert_eq!(app.deck_scroll, 0);
+        assert!(probe::rect_of(&app, Target::DeckRow(0)).is_some());
+    }
+
+    /// The notice about the included decks is drawn where it can be read: it
+    /// was drawn before the header, which painted over it.
+    #[test]
+    fn the_notice_is_drawn_below_the_header() {
+        let app = FlashcardsApp::new();
+        for line in SAMPLE_AND_PROGRESS_LINES {
+            let y = app
+                .render_commands()
+                .into_iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { text, y, .. } if text == line => Some(y),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{line:?} is not drawn"));
+            assert!(y > FlashcardsApp::HEADER_H, "{line:?} at y={y}");
+        }
+    }
+
+    /// No view advertises the day key that was removed.
+    #[test]
+    fn no_view_advertises_the_removed_day_key() {
+        let app = app_in_deck();
+        assert!(!drawn_texts(&app).iter().any(|t| t.contains("[D]ay")));
+    }
+
+    /// Every drawn string.
+    fn drawn_texts(app: &FlashcardsApp) -> Vec<String> {
+        app.render_commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every key on the list does something somewhere.
+    #[test]
+    fn every_advertised_key_does_something() {
+        let states = || {
+            let list = FlashcardsApp::new();
+            let deck = app_in_deck();
+            let mut editor = app_in_deck();
+            editor.open_new_card_editor();
+            let mut studying = app_in_deck();
+            studying.start_study_all();
+            let mut flipped = app_in_deck();
+            flipped.start_study_all();
+            flipped.flip_card();
+            let mut down = app_in_deck();
+            down.selected_card = 1;
+            vec![list, deck, editor, studying, flipped, down]
+        };
+        for (row, what) in SHORTCUTS {
+            let strokes = guitk::shortcut::keystrokes(row).unwrap_or_else(|e| panic!("{e}"));
+            for stroke in strokes {
+                let taken = states().iter_mut().any(|app| {
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    taken,
+                    "the list offers {row:?} ({what}) and nothing takes {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// F1 raises the list, which is modal, and a press puts it away.
+    #[test]
+    fn the_list_of_keys_is_modal() {
+        let mut app = FlashcardsApp::new();
+        app.handle_event(&press(Key::F1));
+        assert!(app.show_help);
+        let n = app.decks.len();
+        assert_eq!(app.handle_event(&typed('x')), EventResult::Ignored);
+        assert!(app.pending_delete.is_none() && app.decks.len() == n);
+        probe::click(&mut app, Target::HelpCard);
+        assert!(!app.show_help);
+        probe::click(&mut app, Target::Help);
+        assert!(app.show_help);
+    }
+
+    /// A long answer wraps on the card. It was one line cut with an
+    /// ellipsis, in the one place it has to be read in full.
+    #[test]
+    fn a_long_answer_wraps_on_the_study_card() {
+        let mut app = app_in_deck();
+        let long = "The mitochondrion is the organelle in which cellular respiration \
+                    produces most of the adenosine triphosphate that the cell uses";
+        app.decks[app.selected_deck].cards[0].back = String::from(long);
+        app.start_study_all();
+        app.flip_card();
+        let texts = drawn_texts(&app);
+        let joined = texts
+            .iter()
+            .filter(|t| long.contains(t.as_str()) && t.len() > 3)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(joined.len() >= 2, "the answer is on one line: {joined:?}");
+        assert_eq!(joined.join(" "), long);
+    }
+
+    /// A letter key arrives as its letter even with no text on it, shifted
+    /// or not -- as a keystroke built from its key alone does.
+    #[test]
+    fn a_letter_key_names_its_letter_without_text() {
+        let bare = |key, shift| KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers {
+                shift,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        };
+        assert_eq!(
+            FlashcardsApp::key_name(&bare(Key::S, false)).as_deref(),
+            Some("s")
+        );
+        assert_eq!(
+            FlashcardsApp::key_name(&bare(Key::S, true)).as_deref(),
+            Some("S")
+        );
+        assert_eq!(
+            FlashcardsApp::key_name(&bare(Key::Num3, false)).as_deref(),
+            Some("3")
+        );
+        assert_eq!(
+            FlashcardsApp::key_name(&bare(Key::Slash, false)).as_deref(),
+            Some("/")
+        );
+        assert_eq!(
+            FlashcardsApp::key_name(&bare(Key::Up, false)).as_deref(),
+            Some("Up")
         );
     }
 }

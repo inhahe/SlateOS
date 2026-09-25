@@ -1280,7 +1280,7 @@ fn run(o: Options, sink: &mut dyn Write) -> Result<(), Fatal> {
             ptx.word_fastmap.set(c, false);
         }
         if !ptx.o.gnu_extensions {
-            for c in [b' ', b'\t', b'\n'] {
+            for &c in b" \t\n" {
                 ptx.word_fastmap.set(c, false);
             }
         }

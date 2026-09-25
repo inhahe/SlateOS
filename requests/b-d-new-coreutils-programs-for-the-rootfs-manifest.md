@@ -6,13 +6,13 @@
 
 ## In short
 
-The `coreutils` crate now builds eleven programs it did not build when the
+The `coreutils` crate now builds twelve programs it did not build when the
 manifest was written: `sha1sum`, `printenv`, `link`, `unlink`, `sync`,
-`truncate`, `groups`, `arch`, `pathchk`, `users` and `nproc`. Each is a port of
-GNU coreutils 9.4 and has been checked against a build of 9.4 (a script runs
-both on the same inputs and compares their output, errors and exit status). A
-binary the manifest does not name does not go on the image, so today all
-eleven are built and then left out. Please add them.
+`truncate`, `groups`, `arch`, `pathchk`, `users`, `nproc` and `chgrp`. Each is a
+port of GNU coreutils 9.4 and has been checked against a build of 9.4 (a script
+runs both on the same inputs and compares their output, errors and exit
+status). A binary the manifest does not name does not go on the image, so
+today all twelve are built and then left out. Please add them.
 
 ## Why they belong by the manifest's own rule
 
@@ -23,13 +23,13 @@ bin list. The only coreutils names it leaves out on purpose are:
 - `sort`, for the same reason;
 - `sh`, because `/bin/sh` is dash.
 
-These eleven are none of those. They are missing only because they did not
+These twelve are none of those. They are missing only because they did not
 exist when the list was generated. Nothing else stages these names:
 `create-ext4-rootfs.sh`'s `PROMOTED` map has none of them. So listing them
 takes no name away from anything.
 
 **Size.** At the manifest's own average of about 813 KiB per static binary,
-eleven come to roughly 9 MiB. The header records 59 MiB used of a 96 MiB
+twelve come to roughly 10 MiB. The header records 59 MiB used of a 96 MiB
 budget.
 
 ## The programs
@@ -47,6 +47,7 @@ budget.
 | `pathchk` | whether file names are valid, or portable to any POSIX system (POSIX) | `scripts/pathchk-diff.sh` |
 | `users` | the users logged in now, one word per session | `scripts/users-diff.sh` |
 | `nproc` | how many CPUs this process may use; what `make -j"$(nproc)"` asks | `scripts/nproc-diff.sh` |
+| `chgrp` | change a file's group (POSIX); `chown :GROUP` does the same, but scripts say `chgrp` | `scripts/chgrp-diff.sh` |
 
 **One alias as well: `[ = test`.** Our `test` already behaves as `[` when it
 is started under that name: it then insists on the closing `]`. But nothing
@@ -67,7 +68,7 @@ crates was on the image, so no name moves from one program to another there.
 ## This list may grow before you read it
 
 I am porting the rest of the programs GNU 9.4 has and we do not (`cksum`,
-`chgrp`, `base32`, `basenc`, `mknod` and others). Each one that lands before
+`base32`, `basenc`, `mknod` and others). Each one that lands before
 this request reaches `main` will be added to the table above, not filed as a
 separate request. Whatever the table says when you read it is the whole ask.
 

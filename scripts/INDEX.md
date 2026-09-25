@@ -130,6 +130,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-vfs-under-lock.py` | Find module-global lock guards held across a call into the VFS. |
 | `scripts/check-window-wiring.py` | Find GUI programs whose `main` never opens a window. |
 | `scripts/check-workspace-lints.py` | Find crates that are not subject to the project's own lint policy. |
+| `scripts/chgrp-diff.sh` | Differential test: our `chgrp` against GNU `chgrp`. |
 | `scripts/chown-diff.sh` | Differential test: our `chown` against GNU `chown`. |
 | `scripts/clippy-diff.py` | Compare two clippy logs by diagnostic *kind*, so a refactor can be cleared. |
 | `scripts/clippy-sites.py` | Count and list distinct clippy warning sites. |
@@ -403,4 +404,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_393 scripts._
+_394 scripts._

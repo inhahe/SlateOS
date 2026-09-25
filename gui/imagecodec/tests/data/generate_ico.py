@@ -240,7 +240,9 @@ def main() -> None:
             assert by_pillow is not None, name
             img = Image.open(io.BytesIO(data))
             text = answer_text(img.width, img.height, by_pillow)
-        (HERE / f"{name}.txt").write_text(text)
+        with open(HERE / f"{name}.txt", "w", encoding="ascii", newline="
+") as out:
+            out.write(text)
         print(f"  {name}: {text.split()[0] if text.startswith('REFUSED') else ' '.join(text.split()[:2])}")
 
 

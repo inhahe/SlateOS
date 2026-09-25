@@ -482,7 +482,11 @@ fn rand_error(e: &RandError) -> ExitCode {
                 coreutils::errmsg::strerror(err)
             )
         }
-        RandError::System(what) => format!("getrandom: {what}"),
+        // Upstream names the source it failed on, `getrandom` when none was
+        // given; the reason is randrange's, since it keeps no errno.
+        RandError::System => {
+            "getrandom: the system random number generator is unavailable".to_string()
+        }
     };
     coreutils::diag!("shred: {message}");
     ExitCode::from(1)

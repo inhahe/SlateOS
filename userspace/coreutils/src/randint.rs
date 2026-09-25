@@ -41,8 +41,9 @@ pub enum RandError {
     Read(Vec<u8>, io::Error),
     /// The kernel's CSPRNG refused. Upstream cannot reach this after start-up
     /// (ISAAC never fails once seeded); it is kept distinct so that it is
-    /// reported for what it is rather than as a file error.
-    System(String),
+    /// reported for what it is rather than as a file error. It carries
+    /// nothing because `randrange::EntropyError` carries nothing but the fact.
+    System,
 }
 
 /// gnulib's `struct randread_source`: where random bytes come from.
@@ -101,8 +102,10 @@ impl RandRead {
                 }
                 Ok(())
             }
+            // `EntropyError` has one variant, `Unavailable`, which is exactly
+            // what `System` says; nothing is dropped in the mapping.
             Source::System => {
-                randrange::fill_secret(buf).map_err(|e| RandError::System(format!("{e:?}")))
+                randrange::fill_secret(buf).map_err(|_: randrange::EntropyError| RandError::System)
             }
         }
     }

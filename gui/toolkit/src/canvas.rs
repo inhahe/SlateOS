@@ -967,6 +967,41 @@ mod tests {
         assert_eq!(small.get(0, 0), Some(Color::rgba(100, 100, 100, 255)));
     }
 
+    /// An opaque disc on a transparent field, shrunk: every edge pixel of the
+    /// result has the disc's colour at partial opacity -- no dark rim.
+    #[test]
+    fn a_shrunken_disc_keeps_its_colour_at_its_edge() {
+        let disc = Color::rgba(40, 180, 90, 255);
+        let mut c = Canvas::transparent(64, 64);
+        for y in 0..64_u32 {
+            for x in 0..64_u32 {
+                let (dx, dy) = (i64::from(x) - 32, i64::from(y) - 32);
+                if dx * dx + dy * dy < 24 * 24 {
+                    c.set(x, y, disc);
+                }
+            }
+        }
+        let small = c.box_downscale(8, 8);
+        let mut edges = 0;
+        for y in 0..8 {
+            for x in 0..8 {
+                let p = small.get(x, y).unwrap();
+                if p.a == 0 {
+                    continue;
+                }
+                assert_eq!(
+                    (p.r, p.g, p.b),
+                    (disc.r, disc.g, disc.b),
+                    "at ({x}, {y}): {p:?}"
+                );
+                if p.a < 255 {
+                    edges += 1;
+                }
+            }
+        }
+        assert!(edges > 0, "the fixture has no edge to test");
+    }
+
     #[test]
     fn box_downscale_does_not_enlarge() {
         let c = coords(2, 2);

@@ -159628,6 +159628,40 @@ a control drawn at coordinates the click handler had never heard of.
 
     grep -c "Event::Mouse\|MouseEvent" apps/*/src/main.rs
 
+**UPDATE 2026-09-25 (lane E): the list is lane E's now, and a third is
+examined -- `apps/markdowneditor`, a wholesale case like `notes`, and a worse
+one.** Recounted over each app's whole `src/` (every one is a single `main.rs`),
+twenty apps still take no pointer: weather, reminders, rssreader,
+markdowneditor, habits, pinball, slides, flashcards, finance, logviewer,
+qrcode, torrent, mediaconvert, regextester, tmux, soundrecorder, renamer,
+email, filesearch, metronome. `roadmap.md` → Lane E tracks them.
+
+The markdown editor drew a toolbar, a tab bar, a table of contents, a find
+panel and three dialogs, and its module doc called the contents "clickable".
+Asking the reachability question of each thing it offered found that the
+pointer was the smaller half of it:
+
+| | before | now |
+|---|---|---|
+| view mode, contents, templates, Save As | no key, no pointer: **unreachable** | a toolbar button each and a key each |
+| switching or closing a tab | no key, no pointer: a document once open stayed open, behind whichever was newest | tabs and close buttons answer; Ctrl+Tab, Ctrl+W; a `»` menu when the tabs overflow |
+| HTML export | computed the HTML and dropped it (`let _ = html;`) | writes it where the picker says |
+| a file changed on disk | `check_external_change` had no caller -- the prompt, merge and review were never raised | checked on focus and on tab switch; every answer a button and a key; a deleted file no longer offered a "Reload" that did nothing |
+| selection | the anchor had four writers that cleared it and none that set it | drag, Shift+press, Shift+arrows, Ctrl+A; typing replaces it; cut, copy, paste |
+| auto-save | no off switch | the status-bar label is one |
+| a failed Save As | reported only to a field nothing drew | sticky and red, like any failed save |
+
+Found on the way and fixed: undoing a delete that spanned lines put the
+newlines *inside* one line; the delete recorded an unclamped column; a heading
+button stacked `## ## `; a toolbar separator was a `NewFile` button in
+disguise; a narrow window drew its last toolbar buttons off its own edge. The
+close-button dialog is in and tested, and cannot take effect yet -- see the
+[E] entry on closing over unsaved work.
+
+Three examined: `notes` (wholesale), `reminders` (keyboard-driven by
+construction, two specific gaps), `markdowneditor` (wholesale, plus five
+operations nothing reached by any route). Seventeen to go.
+
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 
 **In short:** a `cargo test --workspace` failed with exactly one failing test,
@@ -165117,3 +165151,58 @@ recipe had staged everything else.
    sibling's manifest along with its image would not help: it would record the
    sibling's fixture hashes, and a fresh tree has no fixtures to compare them
    with.
+
+### [E] Every document application closes over unsaved work, and the event loop will not let one ask -- 2026-09-25
+**Status:** OPEN -- blocked on lane F for the loop, `requests/e-f-let-an-application-decline-a-close-so-it-can-ask-about-unsaved-work.md`; the per-application dialogs are lane E's and follow
+
+**In short:** click a window's X and every change since the last save is gone,
+without a question, in the text editor, the markdown editor, the hex editor and
+the JSON viewer. An untitled document -- which auto-save never touches -- is
+lost whole. The markdown editor has had an "Unsaved changes: Save / Don't save /
+Cancel" dialog since today, and it still loses the work in a real window,
+because `oswindow` closes the window on a close request whatever the
+application answers.
+
+**Where.** `gui/window/src/lib.rs`, `EventLoop::run_batched`: `if verdict ==
+EventResponse::Exit || requested_close` -- the loop stops on `CloseRequested`
+regardless of the verdict, by design ("A title-bar X that does nothing is worse
+than an application that quits when it would rather not have"). Behind it, each
+application answers `Exit` without looking: `apps/editor/src/input.rs`
+(`Event::CloseRequested => Response::Exit`), `apps/hexeditor/src/main.rs` and
+`apps/jsonviewer/src/main.rs` (`if matches!(event, Event::CloseRequested) {
+return Response::Exit; }`). `apps/markdowneditor` asks (`App::request_quit`),
+and is overruled.
+
+**How to see it.** Open a file in `apps/editor`, type a character, close the
+window. The file is unchanged and the character is gone.
+
+**The proper fix** is in two halves. Lane F's: an explicit "not yet" answer to
+a close request (the request proposes `Response::KeepOpen`, keeping today's
+close-anyway default for every application that does not use it). Lane E's:
+each document application raises the markdown editor's dialog -- which
+already exists, tested, with pointer and keys -- and answers `KeepOpen` while
+it is up. Until the first half lands, the markdown editor at least saves every
+document that has a file when auto-save is on, since auto-save is the user
+having said "save for me" and the close is the last chance to.
+
+### [E] Nothing produces a double-click, so every double-click handler is dead -- 2026-09-25
+**Status:** OPEN -- lane F's, ask 2 of `requests/e-f-let-an-application-decline-a-close-so-it-can-ask-about-unsaved-work.md`
+
+**In short:** double-clicking a file in the file picker does not open it,
+double-clicking a word in a text view does not select it, and the same goes
+for every other double-click the toolkit handles: `MouseEventKind::DoubleClick`
+is defined, carried on the wire and matched in `guitk`'s file dialog, grid and
+text view -- and in `apps/markdowneditor` since today -- but nothing ever sends
+one.
+
+**Why.** The compositor deliberately does not synthesise it (`gui/compositor`,
+`wire_mouse_kind`: double-click timing "belongs with the widget that has to
+honour it"), and `oswindow` does not either, so the event every consumer waits
+for does not exist on any path from a real mouse.
+
+**The proper fix** is one synthesiser in `oswindow`, using the double-click
+interval it already reads from `input.yaml`, delivering `DoubleClick` alongside
+the second press. Design-decisions §502 settled the edge cases for the title
+bar's own double-click, and they carry over. Until then, double-click in the
+markdown editor's source pane (select a word) is tested by delivering the event
+directly and does nothing in a real window.

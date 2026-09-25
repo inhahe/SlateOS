@@ -23,20 +23,40 @@
 //! - Scroll sync between editor and preview
 //! - Outline/structure view showing document hierarchy
 //! - Keyboard shortcuts: Ctrl+B bold, Ctrl+I italic, Ctrl+K link,
-//!   Ctrl+Shift+K code block
-//! - Dark theme (Catppuccin Mocha) throughout
+//!   Ctrl+Shift+K code block, and the rest on the F1 card
+//! - The desktop's theme throughout
 //!
 //! Uses the guitk library for UI rendering.
+//!
+//! # The pointer
+//!
+//! Every control is drawn and hit-tested by one walk, [`App::frame`], through
+//! [`guitk::frame::Frame`]: the toolbar (with a `»` menu for the buttons a
+//! narrow window has no room for), the tabs and their close buttons (with a
+//! `»` menu listing every document once they overflow), the table of contents,
+//! the find panel, the status bar's view and auto-save switches, and the three
+//! dialogs. In the source pane a press places the caret, a drag or a
+//! Shift+press selects, and the wheel scrolls whichever pane it is over.
+//!
+//! Until 2026-09-25 this app handled no pointer event of any kind, and five of
+//! the things listed above -- the view mode, the contents, the templates, Save
+//! As and the tabs -- had no key either, so nothing could reach them at all.
+//! `known-issues.md` → `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`
+//! has the whole list.
 
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
+use guitk::event::{MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::menu::{ContextMenu, MenuAction, MenuItem};
 use guitk::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::tabs::Tabs;
 use guitk::text;
 use guitk::textfind::{self, Case};
+use guitk::wheel;
 
 use diffcore::{
     ConflictChoice, DiskChange, FileSync, MergeOutcome, MergeReview, ThreeWayMerge,
@@ -882,34 +902,94 @@ impl Document {
         }
     }
 
-    /// Remove `text.len()` bytes from line `line` starting at `col`, and put
-    /// the cursor where they were.
+    /// Remove `text` from the document at `(line, col)`, and put the cursor
+    /// where it was.
     ///
     /// Undoing an insert and redoing a delete are the same operation, so they
     /// share it — as do the two below. An undo stack outlives the text it
     /// describes (a reload, or a merge from disk, replaces every line while
     /// leaving the stack alone), so each of these validates rather than
     /// trusting the recorded position.
-    fn erase_at(&mut self, line: usize, col: usize, len: usize) {
-        let Some(text) = self.lines.get_mut(line) else {
+    ///
+    /// `text` may span lines. A selection deleted across three lines is
+    /// recorded as one `Delete` whose text holds two newlines, and this used to
+    /// erase `text.len()` bytes *of the first line* -- clamped at its end -- so
+    /// redoing that delete removed the tail of one line and left the other two
+    /// in place.
+    fn erase_at(&mut self, line: usize, col: usize, text: &str) {
+        let Some(first) = self.lines.get(line) else {
             return;
         };
-        let start = clamp_col(text, col);
-        let end = clamp_col(text, start.saturating_add(len));
-        text.replace_range(start..end, "");
+        let start = clamp_col(first, col);
+        let end = match text.rsplit_once('\n') {
+            None => (line, start.saturating_add(text.len())),
+            Some((_, last)) => (line.saturating_add(text.matches('\n').count()), last.len()),
+        };
+        self.remove_range((line, start), end);
         self.cursor_line = line;
         self.cursor_col = start;
     }
 
-    /// Put `insert` back into line `line` at `col`, and put the cursor after it.
+    /// Put `insert` back into the document at `(line, col)`, and put the
+    /// cursor after it.
+    ///
+    /// `insert` may span lines, for the reason [`erase_at`](Self::erase_at)
+    /// gives: this used to `insert_str` it into the one line whole, so undoing
+    /// a multi-line delete left a line with newlines *inside* it -- drawn as
+    /// one line, counted as one line, and stepped over by the cursor as one
+    /// line, until the file was saved and reopened.
     fn restore_at(&mut self, line: usize, col: usize, insert: &str) {
         let Some(text) = self.lines.get_mut(line) else {
             return;
         };
         let col = clamp_col(text, col);
-        text.insert_str(col, insert);
-        self.cursor_line = line;
-        self.cursor_col = col.saturating_add(insert.len());
+        let tail = text.split_off(col);
+        let mut pieces = insert.split('\n');
+        text.push_str(pieces.next().unwrap_or(""));
+        let mut at = line;
+        for piece in pieces {
+            at = at.saturating_add(1);
+            self.lines
+                .insert(at.min(self.lines.len()), piece.to_string());
+        }
+        let Some(last) = self.lines.get_mut(at) else {
+            return;
+        };
+        self.cursor_line = at;
+        self.cursor_col = last.len();
+        last.push_str(&tail);
+    }
+
+    /// Delete everything from `start` to `end`, `start` first, each a
+    /// `(line, col)` clamped to the document.
+    ///
+    /// The one place text between two positions is removed: the selection's
+    /// delete and the undo stack's erase both come here, so the two cannot
+    /// disagree about what "the text from here to there" is.
+    fn remove_range(&mut self, start: (usize, usize), end: (usize, usize)) {
+        let last = self.lines.len().saturating_sub(1);
+        let (start, end) = if end < start {
+            (end, start)
+        } else {
+            (start, end)
+        };
+        let (sl, el) = (start.0.min(last), end.0.min(last));
+        let s = clamp_col(self.line_text(sl), start.1);
+        let e = clamp_col(self.line_text(el), end.1);
+        if sl == el {
+            if let Some(text) = self.lines.get_mut(sl) {
+                let e = e.max(s);
+                text.replace_range(s..e, "");
+            }
+            return;
+        }
+        let remaining = self.line_text(el).get(e..).unwrap_or("").to_string();
+        // Lines strictly after the first, through the last, go.
+        self.lines.drain(sl.saturating_add(1)..=el.min(last));
+        if let Some(text) = self.lines.get_mut(sl) {
+            text.truncate(s);
+            text.push_str(&remaining);
+        }
     }
 
     /// Join line `line` back onto the one above it, undoing a line split.
@@ -931,7 +1011,7 @@ impl Document {
     /// Apply an undo action (reverse the edit).
     fn apply_undo(&mut self, action: &EditAction) {
         match action {
-            EditAction::Insert { line, col, text } => self.erase_at(*line, *col, text.len()),
+            EditAction::Insert { line, col, text } => self.erase_at(*line, *col, text),
             EditAction::Delete { line, col, text } => self.restore_at(*line, *col, text),
             EditAction::InsertLine { line, text: _ } => self.join_onto_previous(*line),
             EditAction::DeleteLine { line, text } => {
@@ -954,7 +1034,7 @@ impl Document {
     fn apply_redo(&mut self, action: &EditAction) {
         match action {
             EditAction::Insert { line, col, text } => self.restore_at(*line, *col, text),
-            EditAction::Delete { line, col, text } => self.erase_at(*line, *col, text.len()),
+            EditAction::Delete { line, col, text } => self.erase_at(*line, *col, text),
             EditAction::InsertLine { line, text } => {
                 if *line <= self.lines.len() {
                     self.lines.insert(*line, text.clone());
@@ -1062,59 +1142,24 @@ impl Document {
 
     /// Delete the currently selected text (if any).
     pub fn delete_selection(&mut self) -> Option<String> {
-        let anchor = self.selection_anchor?;
-        let (start, end) = if anchor < (self.cursor_line, self.cursor_col) {
-            (anchor, (self.cursor_line, self.cursor_col))
+        let anchor = self.selection_anchor.take()?;
+        let caret = (self.cursor_line, self.cursor_col);
+        let (start, end) = if anchor < caret {
+            (anchor, caret)
         } else {
-            ((self.cursor_line, self.cursor_col), anchor)
+            (caret, anchor)
         };
-
-        // The deleted text goes on the undo stack, so it is read from the
-        // buffer as it stands — and only in the branch that actually deletes
-        // it, or an undo would restore text that was never removed.
-        let mut deleted = String::new();
-        if start.0 == end.0 {
-            // Selection within a single line.
-            if let Some(text) = self.lines.get_mut(start.0) {
-                let s = clamp_col(text, start.1);
-                let e = clamp_col(text, end.1).max(s);
-                deleted = text.get(s..e).unwrap_or("").to_string();
-                text.replace_range(s..e, "");
-            }
-        } else if end.0 < self.lines.len() {
-            deleted = self.text_between(start, end);
-            // Multi-line selection: keep the tail of the last line, drop the
-            // lines in between, and graft the tail onto the head of the first.
-            let remaining = self
-                .lines
-                .get(end.0)
-                .map(|text| {
-                    let end_col = clamp_col(text, end.1);
-                    text.get(end_col..).unwrap_or("").to_string()
-                })
-                .unwrap_or_default();
-            let start_col = clamp_col(self.line_text(start.0), start.1);
-
-            let after_start = start.0.saturating_add(1);
-            let remove_count = end.0.saturating_sub(start.0);
-            for _ in 0..remove_count {
-                if after_start < self.lines.len() {
-                    self.lines.remove(after_start);
-                }
-            }
-            if let Some(text) = self.lines.get_mut(start.0) {
-                text.truncate(start_col);
-                text.push_str(&remaining);
-            }
-        }
-
+        // Clamped to the document as it stands: a selection can outlive the
+        // text it was made on (a reload, a merge from disk), and the undo entry
+        // has to describe what was actually removed -- including the column,
+        // which used to be recorded unclamped, so undo put the text back one
+        // byte off wherever the clamp had moved it.
+        let start = self.clamp_position(start);
+        let end = self.clamp_position(end);
+        let deleted = self.text_between(start, end);
+        self.remove_range(start, end);
         self.cursor_line = start.0;
-        self.cursor_col = self
-            .lines
-            .get(start.0)
-            .map_or(0, |line| clamp_col(line, start.1));
-        self.selection_anchor = None;
-
+        self.cursor_col = start.1;
         if !deleted.is_empty() {
             self.push_undo(EditAction::Delete {
                 line: start.0,
@@ -1122,8 +1167,44 @@ impl Document {
                 text: deleted.clone(),
             });
         }
-
         Some(deleted)
+    }
+
+    /// `(line, col)` moved onto the document: a line past the end becomes the
+    /// end of the last line, and a column is floored to a character boundary.
+    fn clamp_position(&self, (line, col): (usize, usize)) -> (usize, usize) {
+        let last = self.lines.len().saturating_sub(1);
+        if line > last {
+            return (last, self.line_text(last).len());
+        }
+        (line, clamp_col(self.line_text(line), col))
+    }
+
+    /// Select the whole document, caret at the end.
+    pub fn select_all(&mut self) {
+        let last = self.lines.len().saturating_sub(1);
+        self.selection_anchor = Some((0, 0));
+        self.cursor_line = last;
+        self.cursor_col = self.line_text(last).len();
+    }
+
+    /// Whether some text is selected (an anchor that is not the caret).
+    pub fn has_selection(&self) -> bool {
+        self.selection_anchor
+            .is_some_and(|anchor| anchor != (self.cursor_line, self.cursor_col))
+    }
+
+    /// The selection's two ends, earlier first, if there is a selection.
+    pub fn selection_bounds(&self) -> Option<((usize, usize), (usize, usize))> {
+        let anchor = self.selection_anchor?;
+        let caret = (self.cursor_line, self.cursor_col);
+        (anchor != caret).then(|| {
+            if anchor < caret {
+                (anchor, caret)
+            } else {
+                (caret, anchor)
+            }
+        })
     }
 
     /// The text between two `(line, col)` positions, `start` first.
@@ -2618,24 +2699,96 @@ pub fn insert_strikethrough(doc: &mut Document) {
     }
 }
 
-/// Insert a heading at the current line.
-pub fn insert_heading(doc: &mut Document, level: u8) {
-    let prefix = format!("{} ", "#".repeat(level as usize));
+/// Make the caret's line a heading of `level` (clamped to 1–6), or plain text
+/// again if it already is a heading of that level.
+///
+/// Replaces a heading marker that is already there rather than stacking a
+/// second one in front of it: this used to insert `## ` unconditionally, so
+/// pressing the button twice made `## ## Title`, and changing a heading's level
+/// meant deleting its old `#`s by hand first. The caret stays on the same
+/// character of the heading's text.
+///
+/// One undo step either way: taking the old marker off and putting the new one
+/// on are recorded as a single batch.
+pub fn set_heading(doc: &mut Document, level: u8) {
+    let level = usize::from(level.clamp(1, 6));
     let line = doc.cursor_line;
-    let Some(text) = doc.lines.get_mut(line) else {
+    let Some(text) = doc.lines.get(line) else {
         return;
     };
-    text.insert_str(0, &prefix);
-    doc.cursor_col = doc.line_text(line).len();
-    // What happened here is an *insertion* of the prefix, so its undo is an
-    // erase of the prefix. Recording it as a `Delete` of the old line — which
-    // is what this used to do — made undo re-insert the whole line in front of
-    // itself, so `# Hello` undid to `Hello# Hello` instead of `Hello`.
-    doc.push_undo(EditAction::Insert {
-        line,
-        col: 0,
-        text: prefix,
-    });
+    let hashes = text.bytes().take_while(|&b| b == b'#').count();
+    let is_heading = (1..=6).contains(&hashes) && text.as_bytes().get(hashes) == Some(&b' ');
+    let old_prefix = if is_heading {
+        text.get(..=hashes).unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
+    let new_prefix = if is_heading && hashes == level {
+        String::new()
+    } else {
+        format!("{} ", "#".repeat(level))
+    };
+    let body_col = doc.cursor_col.saturating_sub(old_prefix.len());
+
+    let mut actions = Vec::new();
+    if !old_prefix.is_empty() {
+        doc.erase_at(line, 0, &old_prefix);
+        actions.push(EditAction::Delete {
+            line,
+            col: 0,
+            text: old_prefix,
+        });
+    }
+    if !new_prefix.is_empty() {
+        doc.restore_at(line, 0, &new_prefix);
+        let caret = new_prefix.len().saturating_add(body_col);
+        actions.push(EditAction::Insert {
+            line,
+            col: 0,
+            text: new_prefix,
+        });
+        doc.cursor_col = caret;
+    } else {
+        doc.cursor_col = body_col;
+    }
+    doc.cursor_line = line;
+    doc.cursor_col = clamp_col(doc.line_text(line), doc.cursor_col);
+    match actions.len() {
+        0 => {}
+        1 => {
+            if let Some(action) = actions.pop() {
+                doc.push_undo(action);
+            }
+        }
+        _ => doc.push_undo(EditAction::Batch { actions }),
+    }
+}
+
+/// The name to offer when saving `doc` under a new one: its own file name if
+/// it has one, otherwise its tab name with `.md` on the end.
+///
+/// An `OsString` and never text: a document opened from a file whose name is
+/// not valid UTF-8 must be offered that name, byte for byte, and not a copy
+/// with a replacement character in it.
+fn save_as_name(doc: &Document) -> std::ffi::OsString {
+    if let Some(name) = doc.path.as_ref().and_then(|p| p.file_name()) {
+        return name.to_os_string();
+    }
+    let mut name = std::ffi::OsString::from(&doc.name);
+    name.push(".md");
+    name
+}
+
+/// The name to offer for `doc`'s HTML export: its file stem, or its tab name,
+/// with `.html` on the end.
+fn html_export_name(doc: &Document) -> std::ffi::OsString {
+    let mut name = doc
+        .path
+        .as_ref()
+        .and_then(|p| p.file_stem())
+        .map_or_else(|| std::ffi::OsString::from(&doc.name), |s| s.to_os_string());
+    name.push(".html");
+    name
 }
 
 /// Insert a link template.
@@ -3562,6 +3715,93 @@ pub fn inlines_to_plain_text(inlines: &[MdInline]) -> String {
 }
 
 // ============================================================================
+// Pointer targets
+// ============================================================================
+
+/// Everything in the window a pointer can press, as the renderer records it.
+///
+/// This app drew a toolbar, a tab bar, a table of contents, a find panel and
+/// three dialogs, and handled no pointer event of any kind (`known-issues.md`
+/// → `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`). Every
+/// variant here is recorded by the same walk that paints it ([`App::frame`],
+/// through [`guitk::frame::Frame`]), so a control and the place a click finds
+/// it cannot disagree.
+///
+/// Variants carry a tab index or a heading's source line rather than a stable
+/// id. That is safe here because the frame is rebuilt from the current state
+/// at the moment a press arrives, so an index names exactly what is on screen
+/// then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// A toolbar button.
+    Toolbar(ToolbarAction),
+    /// The toolbar's `»`, standing in for the buttons a narrow window has no
+    /// room for.
+    ToolbarMore,
+    /// A document's tab.
+    Tab(usize),
+    /// A document tab's close button.
+    CloseTab(usize),
+    /// The tab bar's `»`, which lists every open document.
+    TabsMore,
+    /// The table of contents panel itself, which scrolls under the wheel.
+    Toc,
+    /// A heading in the table of contents, by its line in the source.
+    Heading(usize),
+    /// The find panel's background.
+    FindPanel,
+    /// The find box.
+    FindQuery,
+    /// The replace box.
+    FindReplacement,
+    /// Previous match.
+    FindPrev,
+    /// Next match.
+    FindNext,
+    /// The match-case switch.
+    FindMatchCase,
+    /// Replace the current match.
+    FindReplace,
+    /// Replace every match.
+    FindReplaceAll,
+    /// Close the find panel.
+    FindClose,
+    /// The source pane: gutter and text. A press places the caret, a drag
+    /// selects, the wheel scrolls.
+    Editor,
+    /// The rendered preview, which scrolls under the wheel.
+    Preview,
+    /// The status bar's view-mode switch.
+    ViewMode,
+    /// The status bar's auto-save switch.
+    Autosave,
+    /// The dimmed window behind the template chooser; a press there closes it.
+    TemplateBackdrop,
+    /// A modal dialog's own body, between its buttons. Does nothing, and in
+    /// doing nothing keeps the press off whatever the dialog covers.
+    DialogBody,
+    /// The dimmed window behind a dialog that must be answered. Does nothing,
+    /// for the same reason.
+    ModalBackdrop,
+    /// A template in the chooser, by its index in [`Template::all`].
+    Template(usize),
+    /// The template chooser's Cancel.
+    TemplateCancel,
+    /// One of the answers to "the file changed on disk".
+    External(ExternalChoice),
+    /// One of a conflict's three resolutions in the merge review.
+    ReviewPick(usize, ConflictChoice),
+    /// Accept the reviewed merge.
+    ReviewAccept,
+    /// Back out of the review to the four answers.
+    ReviewCancel,
+    /// One of the answers to "this document has unsaved changes".
+    Closing(CloseChoice),
+    /// The shortcut card; a press anywhere while it is up puts it away.
+    HelpCard,
+}
+
+// ============================================================================
 // Rendering — toolbar
 // ============================================================================
 
@@ -3570,14 +3810,32 @@ pub fn inlines_to_plain_text(inlines: &[MdInline]) -> String {
 pub struct ToolbarButton {
     /// Display label for the button.
     pub label: String,
-    /// Tooltip text.
+    /// What the button does, in words, with its key if it has one.
+    ///
+    /// Shown in the status bar while the pointer is over the button, which is
+    /// the only place it has ever been read: for as long as this app took no
+    /// pointer input the field had no reader at all.
     pub tooltip: String,
     /// Button action identifier.
     pub action: ToolbarAction,
 }
 
+/// One slot in the toolbar: a button, or the rule between two groups.
+///
+/// A separator used to be a `ToolbarButton` labelled `"|"` whose action was
+/// `NewFile` "because it is not clickable" -- true only while nothing in the
+/// app could be clicked. The moment a pointer arrived it would have become a
+/// second New button, twelve pixels wide, between Save and Bold.
+#[derive(Clone, Debug)]
+pub enum ToolbarItem {
+    /// A button that does something.
+    Button(ToolbarButton),
+    /// A thin vertical rule, which does nothing and takes no hit box.
+    Separator,
+}
+
 /// Actions that can be triggered from the toolbar.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolbarAction {
     /// Create a new document.
     NewFile,
@@ -3619,139 +3877,193 @@ pub enum ToolbarAction {
     Undo,
     /// Redo.
     Redo,
+    /// Put the template chooser up.
+    Templates,
     /// Apply a template.
     ApplyTemplate(usize),
 }
 
-/// Get the default toolbar buttons.
-pub fn default_toolbar_buttons() -> Vec<ToolbarButton> {
+/// The toolbar, left to right.
+///
+/// Every button names its key in its tooltip where it has one, and every
+/// action here is reachable without the pointer too -- the buttons that could
+/// not be reached any other way (Save As, the view, the contents, the
+/// templates, the HTML export) were given keys in the same change that made
+/// the toolbar clickable, and the rest are text a person can type.
+pub fn default_toolbar() -> Vec<ToolbarItem> {
+    let button = |label: &str, tooltip: &str, action| {
+        ToolbarItem::Button(ToolbarButton {
+            label: label.to_string(),
+            tooltip: tooltip.to_string(),
+            action,
+        })
+    };
     vec![
-        ToolbarButton {
-            label: "New".to_string(),
-            tooltip: "New file (Ctrl+N)".to_string(),
-            action: ToolbarAction::NewFile,
-        },
-        ToolbarButton {
-            label: "Open".to_string(),
-            tooltip: "Open file (Ctrl+O)".to_string(),
-            action: ToolbarAction::OpenFile,
-        },
-        ToolbarButton {
-            label: "Save".to_string(),
-            tooltip: "Save file (Ctrl+S)".to_string(),
-            action: ToolbarAction::Save,
-        },
-        ToolbarButton {
-            label: "|".to_string(),
-            tooltip: String::new(),
-            action: ToolbarAction::NewFile, // separator, not clickable
-        },
-        ToolbarButton {
-            label: "B".to_string(),
-            tooltip: "Bold (Ctrl+B)".to_string(),
-            action: ToolbarAction::Bold,
-        },
-        ToolbarButton {
-            label: "I".to_string(),
-            tooltip: "Italic (Ctrl+I)".to_string(),
-            action: ToolbarAction::Italic,
-        },
-        ToolbarButton {
-            label: "H".to_string(),
-            tooltip: "Heading".to_string(),
-            action: ToolbarAction::Heading,
-        },
-        ToolbarButton {
-            label: "Link".to_string(),
-            tooltip: "Link (Ctrl+K)".to_string(),
-            action: ToolbarAction::Link,
-        },
-        ToolbarButton {
-            label: "Img".to_string(),
-            tooltip: "Image".to_string(),
-            action: ToolbarAction::Image,
-        },
-        ToolbarButton {
-            label: "<>".to_string(),
-            tooltip: "Code block (Ctrl+Shift+K)".to_string(),
-            action: ToolbarAction::CodeBlock,
-        },
-        ToolbarButton {
-            label: "UL".to_string(),
-            tooltip: "Unordered list".to_string(),
-            action: ToolbarAction::UnorderedList,
-        },
-        ToolbarButton {
-            label: "OL".to_string(),
-            tooltip: "Ordered list".to_string(),
-            action: ToolbarAction::OrderedList,
-        },
-        ToolbarButton {
-            label: "Tbl".to_string(),
-            tooltip: "Table".to_string(),
-            action: ToolbarAction::Table,
-        },
-        ToolbarButton {
-            label: "---".to_string(),
-            tooltip: "Horizontal rule".to_string(),
-            action: ToolbarAction::HRule,
-        },
-        ToolbarButton {
-            label: "|".to_string(),
-            tooltip: String::new(),
-            action: ToolbarAction::NewFile,
-        },
-        ToolbarButton {
-            label: "Undo".to_string(),
-            tooltip: "Undo (Ctrl+Z)".to_string(),
-            action: ToolbarAction::Undo,
-        },
-        ToolbarButton {
-            label: "Redo".to_string(),
-            tooltip: "Redo (Ctrl+Y)".to_string(),
-            action: ToolbarAction::Redo,
-        },
-        ToolbarButton {
-            label: "|".to_string(),
-            tooltip: String::new(),
-            action: ToolbarAction::NewFile,
-        },
-        ToolbarButton {
-            label: "Find".to_string(),
-            tooltip: "Find & Replace (Ctrl+H)".to_string(),
-            action: ToolbarAction::FindReplace,
-        },
-        ToolbarButton {
-            label: "View".to_string(),
-            tooltip: "Toggle view mode".to_string(),
-            action: ToolbarAction::ToggleView,
-        },
-        ToolbarButton {
-            label: "ToC".to_string(),
-            tooltip: "Toggle table of contents".to_string(),
-            action: ToolbarAction::ToggleToc,
-        },
-        ToolbarButton {
-            label: "HTML".to_string(),
-            tooltip: "Export to HTML".to_string(),
-            action: ToolbarAction::ExportHtml,
-        },
+        button("New", "New document (Ctrl+N)", ToolbarAction::NewFile),
+        button("Open", "Open a file (Ctrl+O)", ToolbarAction::OpenFile),
+        button("Save", "Save (Ctrl+S)", ToolbarAction::Save),
+        button(
+            "Save As",
+            "Save under a new name (Ctrl+Shift+S)",
+            ToolbarAction::SaveAs,
+        ),
+        ToolbarItem::Separator,
+        button("B", "Bold (Ctrl+B)", ToolbarAction::Bold),
+        button("I", "Italic (Ctrl+I)", ToolbarAction::Italic),
+        button(
+            "H",
+            "Heading, level 2; Ctrl+1 to Ctrl+6 for a level",
+            ToolbarAction::Heading,
+        ),
+        button("Link", "Link (Ctrl+K)", ToolbarAction::Link),
+        button("Img", "Image (Ctrl+Shift+I)", ToolbarAction::Image),
+        button("<>", "Code block (Ctrl+Shift+K)", ToolbarAction::CodeBlock),
+        button("UL", "Bulleted list item", ToolbarAction::UnorderedList),
+        button("OL", "Numbered list item", ToolbarAction::OrderedList),
+        button("Tbl", "Table", ToolbarAction::Table),
+        button("---", "Horizontal rule", ToolbarAction::HRule),
+        ToolbarItem::Separator,
+        button("Undo", "Undo (Ctrl+Z)", ToolbarAction::Undo),
+        button("Redo", "Redo (Ctrl+Y)", ToolbarAction::Redo),
+        ToolbarItem::Separator,
+        button(
+            "Find",
+            "Find and replace (Ctrl+H)",
+            ToolbarAction::FindReplace,
+        ),
+        button(
+            "View",
+            "Editor, split or preview (Ctrl+E)",
+            ToolbarAction::ToggleView,
+        ),
+        button(
+            "ToC",
+            "Table of contents (Ctrl+Shift+O)",
+            ToolbarAction::ToggleToc,
+        ),
+        ToolbarItem::Separator,
+        button(
+            "Templates",
+            "New document from a template (Ctrl+Shift+N)",
+            ToolbarAction::Templates,
+        ),
+        button(
+            "HTML",
+            "Export as HTML (Ctrl+Shift+E)",
+            ToolbarAction::ExportHtml,
+        ),
     ]
 }
 
-/// Render the toolbar.
-pub fn render_toolbar(
-    buttons: &[ToolbarButton],
+/// Width of the `»` button that stands in for the buttons a narrow window has
+/// no room for, including the gap before it.
+const TOOLBAR_CHEVRON_W: f32 = 36.0;
+/// Horizontal room a separator takes.
+const TOOLBAR_SEPARATOR_W: f32 = 12.0;
+/// Gap between two adjacent toolbar buttons.
+const TOOLBAR_GAP: f32 = 4.0;
+
+/// Where the toolbar's buttons go at a given width, and which did not fit.
+///
+/// One function, read by the drawing and by the overflow menu, so "the buttons
+/// the window had no room for" and "the buttons the menu offers" are the same
+/// list by construction. Before this there was no overflow at all: a window
+/// narrower than the toolbar drew its last buttons past its own right edge,
+/// where they could not be seen -- and, now that they can be clicked, could
+/// not be clicked either.
+#[derive(Debug, Default)]
+struct ToolbarLayout {
+    /// `(index into the toolbar, the box it is drawn in)` for every button
+    /// that fits.
+    buttons: Vec<(usize, Rect)>,
+    /// The left edge of every separator that fits.
+    separators: Vec<f32>,
+    /// The chevron's box, and the index of the first item that did not fit.
+    overflow: Option<(Rect, usize)>,
+}
+
+/// How wide a toolbar button is: its label and eight pixels either side.
+fn toolbar_button_width(button: &ToolbarButton) -> f32 {
+    text::width(&button.label, TOOLBAR_FONT_SIZE) + 16.0
+}
+
+fn toolbar_layout(items: &[ToolbarItem], x: f32, y: f32, width: f32) -> ToolbarLayout {
+    let btn_y = y + 4.0;
+    let btn_h = TOOLBAR_HEIGHT - 8.0;
+    let advance = |item: &ToolbarItem| match item {
+        ToolbarItem::Separator => TOOLBAR_SEPARATOR_W,
+        ToolbarItem::Button(b) => toolbar_button_width(b) + TOOLBAR_GAP,
+    };
+    // The chevron's room is reserved only when something is going to need
+    // it; a toolbar that fits whole should not lose its last button to a
+    // chevron that would open an empty menu.
+    let natural: f32 = 8.0 + items.iter().map(advance).sum::<f32>();
+    let right = if natural <= width {
+        x + width
+    } else {
+        x + width - TOOLBAR_CHEVRON_W
+    };
+    let mut layout = ToolbarLayout::default();
+    let mut bx = x + 8.0;
+    for (i, item) in items.iter().enumerate() {
+        let w = match item {
+            ToolbarItem::Separator => TOOLBAR_SEPARATOR_W,
+            ToolbarItem::Button(b) => toolbar_button_width(b),
+        };
+        if bx + w > right {
+            layout.overflow = Some((
+                Rect::new(
+                    x + width - TOOLBAR_CHEVRON_W + TOOLBAR_GAP,
+                    btn_y,
+                    TOOLBAR_CHEVRON_W - 2.0 * TOOLBAR_GAP,
+                    btn_h,
+                ),
+                i,
+            ));
+            break;
+        }
+        match item {
+            ToolbarItem::Separator => layout.separators.push(bx),
+            ToolbarItem::Button(_) => layout.buttons.push((i, Rect::new(bx, btn_y, w, btn_h))),
+        }
+        bx += advance(item);
+    }
+    layout
+}
+
+/// The buttons a toolbar of `width` had no room for, in order.
+fn toolbar_overflow(items: &[ToolbarItem], width: f32) -> Vec<(usize, &ToolbarButton)> {
+    let Some((_, first)) = toolbar_layout(items, 0.0, 0.0, width).overflow else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .enumerate()
+        .skip(first)
+        .filter_map(|(i, item)| match item {
+            ToolbarItem::Button(b) => Some((i, b)),
+            ToolbarItem::Separator => None,
+        })
+        .collect()
+}
+
+/// Draw the toolbar, recording every button where it is drawn.
+///
+/// `hover` is what the pointer is over, so the button under it can be drawn
+/// lifted: a control that does not change when the pointer reaches it gives
+/// no sign that it can be pressed.
+pub fn draw_toolbar(
+    f: &mut Frame<Target>,
+    items: &[ToolbarItem],
     pal: &Palette,
+    hover: Option<Target>,
     x: f32,
     y: f32,
     width: f32,
-) -> Vec<RenderCommand> {
-    let mut cmds = Vec::new();
-
+) {
     // Toolbar background.
     pal.push_surface(
-        &mut cmds,
+        f,
         x,
         y,
         width,
@@ -3761,7 +4073,7 @@ pub fn render_toolbar(
     );
 
     // Bottom border.
-    cmds.push(RenderCommand::Line {
+    f.push(RenderCommand::Line {
         x1: x,
         y1: y + TOOLBAR_HEIGHT,
         x2: x + width,
@@ -3770,76 +4082,196 @@ pub fn render_toolbar(
         width: 1.0,
     });
 
-    let mut btn_x = x + 8.0;
-    let btn_y = y + 4.0;
-    let btn_height = TOOLBAR_HEIGHT - 8.0;
-
-    for button in buttons {
-        if button.label == "|" {
-            // Separator.
-            cmds.push(RenderCommand::Line {
-                x1: btn_x + 4.0,
-                y1: btn_y + 2.0,
-                x2: btn_x + 4.0,
-                y2: btn_y + btn_height - 2.0,
-                color: pal.surface1,
-                width: 1.0,
-            });
-            btn_x += 12.0;
-            continue;
-        }
-
-        let btn_width = text::width(&button.label, TOOLBAR_FONT_SIZE) + 16.0;
-
-        // Button background.
-        pal.push_surface(
-            &mut cmds,
-            btn_x,
-            btn_y,
-            btn_width,
-            btn_height,
-            4.0,
-            Surface::Strip(Edge::Bottom),
-        );
-
-        // Button label.
-        cmds.push(RenderCommand::Text {
-            x: btn_x + 8.0,
-            y: btn_y + 5.0,
-            text: button.label.clone(),
-            font_size: TOOLBAR_FONT_SIZE,
-            color: pal.text,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(btn_width - 16.0),
-            overflow: TextOverflow::Ellipsis,
+    let layout = toolbar_layout(items, x, y, width);
+    for sx in &layout.separators {
+        f.push(RenderCommand::Line {
+            x1: sx + 4.0,
+            y1: y + 6.0,
+            x2: sx + 4.0,
+            y2: y + TOOLBAR_HEIGHT - 6.0,
+            color: pal.surface1,
+            width: 1.0,
         });
-
-        btn_x += btn_width + 4.0;
     }
+    for &(i, rect) in &layout.buttons {
+        let Some(ToolbarItem::Button(button)) = items.get(i) else {
+            continue;
+        };
+        let target = Target::Toolbar(button.action);
+        draw_toolbar_button(f, pal, rect, &button.label, hover == Some(target));
+        f.hit(target, rect);
+    }
+    if let Some((rect, _)) = layout.overflow {
+        draw_toolbar_button(f, pal, rect, "»", hover == Some(Target::ToolbarMore));
+        f.hit(Target::ToolbarMore, rect);
+    }
+}
 
-    cmds
+/// One toolbar button's face: a raised strip and its label.
+fn draw_toolbar_button(f: &mut Frame<Target>, pal: &Palette, rect: Rect, label: &str, hot: bool) {
+    let surface = if hot {
+        Surface::Card
+    } else {
+        Surface::Strip(Edge::Bottom)
+    };
+    pal.push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, surface);
+    f.push(RenderCommand::Text {
+        x: rect.x + 8.0,
+        y: rect.y + 5.0,
+        text: label.to_string(),
+        font_size: TOOLBAR_FONT_SIZE,
+        color: pal.text,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some(rect.w - 16.0),
+        overflow: TextOverflow::Ellipsis,
+    });
 }
 
 // ============================================================================
 // Rendering — tab bar
 // ============================================================================
 
-/// Render the tab bar for multi-document editing.
-pub fn render_tab_bar(
+/// The narrowest a tab is squeezed to before the tab bar gives up on showing
+/// every tab and offers the rest through its `»` menu.
+const TAB_MIN_WIDTH: f32 = 64.0;
+/// The widest a tab grows for a long name.
+const TAB_MAX_WIDTH: f32 = 200.0;
+/// The side of the square a tab's close button answers in.
+const TAB_CLOSE_BOX: f32 = 18.0;
+/// Gap between two adjacent tabs.
+const TAB_GAP: f32 = 2.0;
+
+/// One tab as the bar draws it.
+#[derive(Debug)]
+struct TabSlot {
+    /// Which document.
+    index: usize,
+    /// The whole tab.
+    rect: Rect,
+    /// The close button inside it.
+    close: Rect,
+    /// The name, with ` *` when the document has unsaved changes.
+    label: String,
+}
+
+/// The label a document's tab shows.
+fn tab_label(doc: &Document) -> String {
+    if doc.modified {
+        format!("{} *", doc.name)
+    } else {
+        doc.name.clone()
+    }
+}
+
+/// Where each tab goes, and the `»` button's box if some did not fit.
+///
+/// Tabs shrink before they overflow, down to [`TAB_MIN_WIDTH`], because a tab
+/// bar that runs off the edge of the window hides documents that are open.
+/// Past that floor the bar shows a run of tabs that always includes the one in
+/// front -- a hidden active tab would leave the user unable to see which
+/// document they are typing into -- and a `»` button whose menu lists every
+/// open document, so each can still be brought forward with the pointer.
+fn tab_layout(
     documents: &Tabs<Document>,
-    pal: &Palette,
     x: f32,
     y: f32,
     width: f32,
-) -> Vec<RenderCommand> {
+) -> (Vec<TabSlot>, Option<Rect>) {
+    let active = documents.active_index();
+    let tab_y = y + 4.0;
+    let tab_h = TAB_BAR_HEIGHT - 4.0;
+    let natural: Vec<f32> = documents
+        .iter()
+        .enumerate()
+        .map(|(i, doc)| {
+            // The active tab is drawn bold, so it has to be *measured* bold —
+            // sizing every tab as if it were regular made the active one the
+            // one that overflowed.
+            let weight = if i == active {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            };
+            (text::measure(&tab_label(doc), TOOLBAR_FONT_SIZE, weight) + 24.0 + TAB_CLOSE_BOX)
+                .clamp(80.0, TAB_MAX_WIDTH)
+        })
+        .collect();
+    let room = width - 8.0;
+    let span = |ws: &[f32]| ws.iter().map(|w| w + TAB_GAP).sum::<f32>();
+    let mut widths = natural.clone();
+    if span(&widths) > room {
+        // Squeeze every tab by the same factor, but never below the floor.
+        let scale = room / span(&natural);
+        widths = natural
+            .iter()
+            .map(|w| (w * scale).max(TAB_MIN_WIDTH))
+            .collect();
+    }
+    let overflowing = span(&widths) > room;
+    let right = if overflowing {
+        x + width - TOOLBAR_CHEVRON_W
+    } else {
+        x + width
+    };
+    // The first tab drawn: as far left as possible while the active one still
+    // fits between it and `right`.
+    let mut first = 0;
+    while first < active {
+        let through_active = widths.get(first..=active).map_or(0.0, span);
+        if x + 4.0 + through_active <= right {
+            break;
+        }
+        first = first.saturating_add(1);
+    }
+    let mut slots = Vec::new();
+    let mut tab_x = x + 4.0;
+    for ((index, doc), &w) in documents.iter().enumerate().zip(&widths).skip(first) {
+        if tab_x + w > right {
+            break;
+        }
+        let rect = Rect::new(tab_x, tab_y, w, tab_h);
+        let close = Rect::new(
+            rect.right() - TAB_CLOSE_BOX - 4.0,
+            tab_y + (tab_h - TAB_CLOSE_BOX) / 2.0,
+            TAB_CLOSE_BOX,
+            TAB_CLOSE_BOX,
+        );
+        slots.push(TabSlot {
+            index,
+            rect,
+            close,
+            label: tab_label(doc),
+        });
+        tab_x += w + TAB_GAP;
+    }
+    let chevron = overflowing.then(|| {
+        Rect::new(
+            x + width - TOOLBAR_CHEVRON_W + TOOLBAR_GAP,
+            tab_y,
+            TOOLBAR_CHEVRON_W - 2.0 * TOOLBAR_GAP,
+            tab_h,
+        )
+    });
+    (slots, chevron)
+}
+
+/// Draw the tab bar, recording each tab and each close button.
+pub fn draw_tab_bar(
+    f: &mut Frame<Target>,
+    documents: &Tabs<Document>,
+    pal: &Palette,
+    hover: Option<Target>,
+    x: f32,
+    y: f32,
+    width: f32,
+) {
     // Which tab is in front is the tab set's own business, so it is read
     // from it rather than passed alongside — the two could not disagree.
     let active_idx = documents.active_index();
-    let mut cmds = Vec::new();
 
     // Tab bar background.
     pal.push_surface(
-        &mut cmds,
+        f,
         x,
         y,
         width,
@@ -3848,37 +4280,24 @@ pub fn render_tab_bar(
         Surface::Strip(Edge::Bottom),
     );
 
-    let mut tab_x = x + 4.0;
-    let tab_y = y + 4.0;
-    let tab_height = TAB_BAR_HEIGHT - 4.0;
-
-    for (i, doc) in documents.iter().enumerate() {
-        let is_active = i == active_idx;
-        let label = if doc.modified {
-            format!("{} *", doc.name)
-        } else {
-            doc.name.clone()
-        };
-        // The active tab is drawn bold, so it has to be *measured* bold —
-        // sizing every tab as if it were regular made the active one the one
-        // that overflowed.
+    let (slots, chevron) = tab_layout(documents, x, y, width);
+    for slot in slots {
+        let is_active = slot.index == active_idx;
         let label_weight = if is_active {
             FontWeightHint::Bold
         } else {
             FontWeightHint::Regular
         };
-        let tab_width =
-            (text::measure(&label, TOOLBAR_FONT_SIZE, label_weight) + 24.0).clamp(80.0, 200.0);
-
         let bg_color = if is_active { pal.base } else { pal.mantle };
         let text_color = if is_active { pal.text } else { pal.subtext0 };
+        let rect = slot.rect;
 
         // Tab background.
-        cmds.push(RenderCommand::FillRect {
-            x: tab_x,
-            y: tab_y,
-            width: tab_width,
-            height: tab_height,
+        f.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
             color: bg_color,
             corner_radii: CornerRadii {
                 top_left: 6.0,
@@ -3890,32 +4309,45 @@ pub fn render_tab_bar(
 
         // Active tab indicator.
         if is_active {
-            cmds.push(RenderCommand::FillRect {
-                x: tab_x,
-                y: tab_y,
-                width: tab_width,
+            f.push(RenderCommand::FillRect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.w,
                 height: 2.0,
                 color: pal.blue,
                 corner_radii: CornerRadii::ZERO,
             });
         }
 
-        // Tab label.
-        cmds.push(RenderCommand::Text {
-            x: tab_x + 8.0,
-            y: tab_y + 6.0,
-            text: label,
+        // Tab label, stopping short of the close button.
+        f.push(RenderCommand::Text {
+            x: rect.x + 8.0,
+            y: rect.y + 6.0,
+            text: slot.label,
             font_size: TOOLBAR_FONT_SIZE,
             color: text_color,
             font_weight: label_weight,
-            max_width: Some(tab_width - 16.0),
+            max_width: Some((slot.close.x - rect.x - 12.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
+        f.hit(Target::Tab(slot.index), rect);
 
-        // Close button (X).
-        cmds.push(RenderCommand::Text {
-            x: tab_x + tab_width - 18.0,
-            y: tab_y + 6.0,
+        // Close button, lit while the pointer is on it so it is plain which of
+        // the two targets in the tab a press will reach.
+        let close_target = Target::CloseTab(slot.index);
+        if hover == Some(close_target) {
+            f.push(RenderCommand::FillRect {
+                x: slot.close.x,
+                y: slot.close.y,
+                width: slot.close.w,
+                height: slot.close.h,
+                color: pal.surface1,
+                corner_radii: CornerRadii::all(4.0),
+            });
+        }
+        f.push(RenderCommand::Text {
+            x: slot.close.x + 5.0,
+            y: slot.close.y + 2.0,
             text: "x".to_string(),
             font_size: 11.0,
             color: pal.subtext0,
@@ -3923,19 +4355,79 @@ pub fn render_tab_bar(
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-
-        tab_x += tab_width + 2.0;
+        f.hit(close_target, slot.close);
     }
-
-    cmds
+    if let Some(rect) = chevron {
+        draw_toolbar_button(f, pal, rect, "»", hover == Some(Target::TabsMore));
+        f.hit(Target::TabsMore, rect);
+    }
 }
 
 // ============================================================================
 // Rendering — status bar
 // ============================================================================
 
-/// Render the status bar with document statistics.
-pub fn render_status_bar(
+/// What the middle of the status bar is saying, most urgent first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusNote<'a> {
+    /// What the toolbar button under the pointer does. Transient: it lasts as
+    /// long as the pointer stays, and is the only place a button's tooltip --
+    /// and so its key -- is ever shown.
+    Tip(&'a str),
+    /// A save that failed. Sticky; see [`App::save_error`].
+    Error(&'a str),
+    /// What the last open, save or export did.
+    Info(&'a str),
+    /// Nothing to report: the word count and its companions.
+    Stats,
+}
+
+/// Where the status bar's two switches are drawn, right-aligned, with the
+/// saved/modified word to their right.
+///
+/// Returned as `(view, autosave, state)` text boxes; the drawing and the hit
+/// boxes both come from here.
+fn status_segments(
+    view_mode: ViewMode,
+    autosave_enabled: bool,
+    modified: bool,
+    x: f32,
+    y: f32,
+    width: f32,
+) -> [(Rect, &'static str); 3] {
+    let texts = [
+        view_mode.label(),
+        if autosave_enabled {
+            "Auto-save ON"
+        } else {
+            "Auto-save OFF"
+        },
+        if modified { "Modified" } else { "Saved" },
+    ];
+    let mut right = x + width - 12.0;
+    let mut out = [(Rect::EMPTY, ""); 3];
+    for (slot, text) in out.iter_mut().zip(texts).rev() {
+        let w = text::measure(text, STATUS_FONT_SIZE, FontWeightHint::Regular);
+        // Four pixels of slack either side, so a switch is not a target only
+        // as wide as its letters.
+        *slot = (
+            Rect::new(right - w - 4.0, y, w + 8.0, STATUS_BAR_HEIGHT),
+            text,
+        );
+        right -= w + 16.0;
+    }
+    out
+}
+
+/// Draw the status bar, recording its two switches: the view mode, which
+/// cycles, and auto-save, which turns on and off.
+///
+/// Auto-save had a field, a tick, a status-bar label and tests, and no way to
+/// be turned off: `autosave_enabled` was written only by the constructor. The
+/// label saying "Auto-save ON" is where a person would look to change it, so
+/// it is where the change is made.
+pub fn draw_status_bar(
+    f: &mut Frame<Target>,
     doc: &Document,
     pal: &Palette,
     view_mode: ViewMode,
@@ -3943,13 +4435,11 @@ pub fn render_status_bar(
     y: f32,
     width: f32,
     autosave_enabled: bool,
-    save_error: Option<&str>,
-) -> Vec<RenderCommand> {
-    let mut cmds = Vec::new();
-
+    note: StatusNote<'_>,
+) {
     // Status bar background.
     pal.push_surface(
-        &mut cmds,
+        f,
         x,
         y,
         width,
@@ -3959,7 +4449,7 @@ pub fn render_status_bar(
     );
 
     // Top border.
-    cmds.push(RenderCommand::Line {
+    f.push(RenderCommand::Line {
         x1: x,
         y1: y,
         x2: x + width,
@@ -3981,7 +4471,7 @@ pub fn render_status_bar(
         doc.cursor_line.saturating_add(1),
         cursor_column.saturating_add(1)
     );
-    cmds.push(RenderCommand::Text {
+    f.push(RenderCommand::Text {
         x: x + 12.0,
         y: y + 5.0,
         text: pos_text,
@@ -3992,99 +4482,97 @@ pub fn render_status_bar(
         overflow: TextOverflow::Clip,
     });
 
-    // Center: a save failure if there is one, otherwise the statistics.
-    // The error *displaces* the word count rather than sharing the row with
-    // it: the two would collide on a narrow window, and of the two it is the
-    // word count that can wait.
-    if let Some(err) = save_error {
-        let text = err.to_string();
-        cmds.push(RenderCommand::Text {
-            x: text::center_x(
-                &text,
-                x + width / 2.0,
-                STATUS_FONT_SIZE,
-                FontWeightHint::Bold,
+    // Center: whatever `note` says, otherwise the statistics. A message
+    // *displaces* the word count rather than sharing the row with it: the two
+    // would collide on a narrow window, and of the two it is the word count
+    // that can wait.
+    let (text, color, weight) = match note {
+        StatusNote::Tip(tip) => (tip.to_string(), pal.text, FontWeightHint::Regular),
+        StatusNote::Error(err) => (err.to_string(), pal.ink(pal.red), FontWeightHint::Bold),
+        StatusNote::Info(info) => (info.to_string(), pal.text, FontWeightHint::Regular),
+        StatusNote::Stats => (
+            format!(
+                "{} words | {} chars | {} lines | ~{:.0} min read",
+                doc.word_count(),
+                doc.char_count(),
+                doc.lines.len(),
+                doc.reading_time_minutes()
             ),
+            pal.subtext0,
+            FontWeightHint::Regular,
+        ),
+    };
+    f.push(RenderCommand::Text {
+        x: text::center_x(&text, x + width / 2.0, STATUS_FONT_SIZE, weight),
+        y: y + 5.0,
+        text,
+        font_size: STATUS_FONT_SIZE,
+        color,
+        font_weight: weight,
+        max_width: Some(width * 0.5),
+        overflow: TextOverflow::Ellipsis,
+    });
+
+    // Right side: the two switches and the saved/modified word.
+    let [view, autosave, state] =
+        status_segments(view_mode, autosave_enabled, doc.modified, x, y, width);
+    for (rect, label) in [view, autosave, state] {
+        f.push(RenderCommand::Text {
+            x: rect.x + 4.0,
             y: y + 5.0,
-            text,
-            font_size: STATUS_FONT_SIZE,
-            color: pal.ink(pal.red),
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(width * 0.6),
-            overflow: TextOverflow::Ellipsis,
-        });
-    } else {
-        let words = doc.word_count();
-        let chars = doc.char_count();
-        let lines = doc.lines.len();
-        let reading_mins = doc.reading_time_minutes();
-        let stats_text = format!(
-            "{} words | {} chars | {} lines | ~{:.0} min read",
-            words, chars, lines, reading_mins
-        );
-        cmds.push(RenderCommand::Text {
-            x: text::center_x(
-                &stats_text,
-                x + width / 2.0,
-                STATUS_FONT_SIZE,
-                FontWeightHint::Regular,
-            ),
-            y: y + 5.0,
-            text: stats_text,
+            text: label.to_string(),
             font_size: STATUS_FONT_SIZE,
             color: pal.subtext0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(width * 0.6),
-            overflow: TextOverflow::Ellipsis,
+            max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
-
-    // Right side: view mode and auto-save status.
-    let right_items = format!(
-        "{}  {}  {}",
-        view_mode.label(),
-        if autosave_enabled {
-            "Auto-save ON"
-        } else {
-            "Auto-save OFF"
-        },
-        if doc.modified { "Modified" } else { "Saved" }
-    );
-    cmds.push(RenderCommand::Text {
-        x: text::right_x(
-            &right_items,
-            x + width - 12.0,
-            STATUS_FONT_SIZE,
-            FontWeightHint::Regular,
-        ),
-        y: y + 5.0,
-        text: right_items,
-        font_size: STATUS_FONT_SIZE,
-        color: pal.subtext0,
-        font_weight: FontWeightHint::Regular,
-        max_width: None,
-        overflow: TextOverflow::Clip,
-    });
-
-    cmds
+    f.hit(Target::ViewMode, view.0);
+    f.hit(Target::Autosave, autosave.0);
 }
 
 // ============================================================================
 // Rendering — table of contents sidebar
 // ============================================================================
 
-/// Render the table of contents sidebar.
-pub fn render_toc_sidebar(
+/// Height of one row in the table of contents.
+const TOC_ROW_H: f32 = 20.0;
+/// Space above the first row, where the panel's title is drawn.
+const TOC_HEADER_H: f32 = 32.0;
+
+/// How many contents rows fit in a panel `height` tall.
+fn toc_rows_visible(height: f32) -> usize {
+    ((height - TOC_HEADER_H) / TOC_ROW_H).max(0.0) as usize
+}
+
+/// Draw the table of contents, recording each heading as a target that jumps
+/// to it.
+///
+/// The module doc has promised "generated from headings, clickable" since the
+/// file was written. The panel had no way to be opened -- nothing wrote
+/// `toc_visible` but its own toolbar button, which could not be clicked -- and
+/// had it been opened, nothing on it would have answered a press. `first` is
+/// the first row shown, so a document with more headings than the panel has
+/// room for can be scrolled through; the rows used to stop at the panel's
+/// bottom edge and the rest of the document's headings were simply not there.
+///
+/// `current` is the line of the heading the caret is under, which is drawn
+/// marked, so the panel also says where in the document you are.
+pub fn draw_toc_sidebar(
+    f: &mut Frame<Target>,
     entries: &[TocEntry],
     pal: &Palette,
+    first: usize,
+    current: Option<usize>,
+    hover: Option<Target>,
     x: f32,
     y: f32,
     height: f32,
-) -> Vec<RenderCommand> {
-    let mut cmds = Vec::new();
-
+) {
+    let panel = Rect::new(x, y, TOC_SIDEBAR_WIDTH, height);
     // Sidebar background.
-    cmds.push(RenderCommand::FillRect {
+    f.push(RenderCommand::FillRect {
         x,
         y,
         width: TOC_SIDEBAR_WIDTH,
@@ -4092,9 +4580,12 @@ pub fn render_toc_sidebar(
         color: pal.mantle,
         corner_radii: CornerRadii::ZERO,
     });
+    // The whole panel answers the wheel; the rows below are recorded on top
+    // of it and take presses.
+    f.hit(Target::Toc, panel);
 
     // Right border.
-    cmds.push(RenderCommand::Line {
+    f.push(RenderCommand::Line {
         x1: x + TOC_SIDEBAR_WIDTH,
         y1: y,
         x2: x + TOC_SIDEBAR_WIDTH,
@@ -4104,7 +4595,7 @@ pub fn render_toc_sidebar(
     });
 
     // Title.
-    cmds.push(RenderCommand::Text {
+    f.push(RenderCommand::Text {
         x: x + 12.0,
         y: y + 8.0,
         text: "Table of Contents".to_string(),
@@ -4115,11 +4606,34 @@ pub fn render_toc_sidebar(
         overflow: TextOverflow::Ellipsis,
     });
 
-    // Entries.
-    let mut entry_y = y + 32.0;
-    for entry in entries {
+    // The rows are clipped to the panel below the title, so a row half past
+    // the bottom neither paints over the status bar nor answers a press there.
+    f.clip(Rect::new(
+        x,
+        y + TOC_HEADER_H,
+        TOC_SIDEBAR_WIDTH,
+        (height - TOC_HEADER_H).max(0.0),
+    ));
+    let mut entry_y = y + TOC_HEADER_H;
+    for entry in entries.iter().skip(first) {
         if entry_y > y + height {
             break;
+        }
+        let row = Rect::new(x, entry_y - 2.0, TOC_SIDEBAR_WIDTH, TOC_ROW_H);
+        let target = Target::Heading(entry.line);
+        if current == Some(entry.line) || hover == Some(target) {
+            f.push(RenderCommand::FillRect {
+                x: row.x + 4.0,
+                y: row.y,
+                width: row.w - 8.0,
+                height: row.h,
+                color: if current == Some(entry.line) {
+                    pal.surface0
+                } else {
+                    pal.surface1
+                },
+                corner_radii: CornerRadii::all(4.0),
+            });
         }
         let indent = (entry.level.saturating_sub(1) as f32) * 12.0;
         let entry_color = match entry.level {
@@ -4140,7 +4654,7 @@ pub fn render_toc_sidebar(
             _ => 11.0,
         };
 
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: x + 12.0 + indent,
             y: entry_y,
             text: entry.text.clone(),
@@ -4150,44 +4664,138 @@ pub fn render_toc_sidebar(
             max_width: Some(TOC_SIDEBAR_WIDTH - 24.0 - indent),
             overflow: TextOverflow::Ellipsis,
         });
+        f.hit(target, row);
 
-        entry_y += 20.0;
+        entry_y += TOC_ROW_H;
     }
-
-    cmds
+    f.unclip();
 }
 
 // ============================================================================
 // Rendering — find/replace panel
 // ============================================================================
 
-/// Render the find and replace panel.
-pub fn render_find_replace(
-    state: &FindReplaceState,
+/// Height of the find panel's two text boxes and its buttons.
+const FIND_ROW_H: f32 = 22.0;
+
+/// Draw a compact button at `(x, y)` and return the box it occupies.
+///
+/// `lit` is for a button that is also a switch -- match case -- and is drawn
+/// in the accent while it is on, so the panel says what the search is doing
+/// rather than leaving the user to remember which way they last pressed it.
+fn draw_small_button(
+    f: &mut Frame<Target>,
     pal: &Palette,
     x: f32,
     y: f32,
-    width: f32,
-) -> Vec<RenderCommand> {
-    let mut cmds = Vec::new();
+    label: &str,
+    hot: bool,
+    lit: bool,
+) -> Rect {
+    let w = text::width(label, SMALL_BUTTON_FONT_SIZE) + 16.0;
+    let rect = Rect::new(x, y, w, FIND_ROW_H);
+    let surface = if hot { Surface::Panel } else { Surface::Card };
+    pal.push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, surface);
+    if lit {
+        f.push(RenderCommand::StrokeRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: pal.blue,
+            line_width: 1.0,
+            corner_radii: CornerRadii::all(4.0),
+        });
+    }
+    f.push(RenderCommand::Text {
+        x: rect.x + 8.0,
+        y: rect.y + 4.0,
+        text: label.to_string(),
+        font_size: SMALL_BUTTON_FONT_SIZE,
+        color: if lit { pal.ink(pal.blue) } else { pal.text },
+        font_weight: FontWeightHint::Regular,
+        max_width: Some(rect.w - 16.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    rect
+}
 
+/// Draw one of the panel's two text boxes, with a caret when it has the
+/// keyboard, and record it as a target that takes the keyboard.
+fn draw_find_box(
+    f: &mut Frame<Target>,
+    pal: &Palette,
+    rect: Rect,
+    value: &str,
+    focused: bool,
+    target: Target,
+) {
+    pal.push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
+    if focused {
+        f.push(RenderCommand::StrokeRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: pal.blue,
+            line_width: 1.0,
+            corner_radii: CornerRadii::all(4.0),
+        });
+    }
+    f.push(RenderCommand::Text {
+        x: rect.x + 4.0,
+        y: rect.y + 4.0,
+        text: value.to_string(),
+        font_size: 12.0,
+        color: pal.text,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some(rect.w - 8.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+    if focused {
+        let caret_x = (rect.x + 4.0 + text::measure(value, 12.0, FontWeightHint::Regular))
+            .min(rect.right() - 4.0);
+        f.push(RenderCommand::FillRect {
+            x: caret_x,
+            y: rect.y + 4.0,
+            width: 1.0,
+            height: rect.h - 8.0,
+            color: pal.text,
+            corner_radii: CornerRadii::ZERO,
+        });
+    }
+    f.hit(target, rect);
+}
+
+/// Draw the find and replace panel, recording both boxes and every button.
+///
+/// The boxes used to look identical whichever one the keyboard was typing
+/// into, and the panel never said whether matching was case-sensitive; both
+/// are drawn now. The buttons were drawn with a comment calling them "labels
+/// for keys, not targets for a pointer", which was true only because nothing
+/// in the app took a pointer. They keep their keys in their labels, because a
+/// button that names its key teaches it.
+pub fn draw_find_replace(
+    f: &mut Frame<Target>,
+    state: &FindReplaceState,
+    pal: &Palette,
+    hover: Option<Target>,
+    x: f32,
+    y: f32,
+    width: f32,
+) {
     if !state.visible {
-        return cmds;
+        return;
     }
 
     // Panel background.
-    pal.push_surface(
-        &mut cmds,
-        x,
-        y,
-        width,
-        FIND_PANEL_HEIGHT,
-        0.0,
-        Surface::Card,
-    );
+    pal.push_surface(f, x, y, width, FIND_PANEL_HEIGHT, 0.0, Surface::Card);
+    // Clicks on the panel's bare background are the panel's, not the
+    // document's under it.
+    f.hit(Target::FindPanel, Rect::new(x, y, width, FIND_PANEL_HEIGHT));
 
     // Bottom border.
-    cmds.push(RenderCommand::Line {
+    f.push(RenderCommand::Line {
         x1: x,
         y1: y + FIND_PANEL_HEIGHT,
         x2: x + width,
@@ -4196,41 +4804,71 @@ pub fn render_find_replace(
         width: 1.0,
     });
 
-    // Find row.
-    cmds.push(RenderCommand::Text {
-        x: x + 12.0,
-        y: y + 8.0,
-        text: "Find:".to_string(),
-        font_size: 12.0,
-        color: pal.subtext0,
-        font_weight: FontWeightHint::Regular,
-        max_width: None,
-        overflow: TextOverflow::Clip,
-    });
+    for (label, row_y) in [("Find:", y + 8.0), ("Replace:", y + 36.0)] {
+        f.push(RenderCommand::Text {
+            x: x + 12.0,
+            y: row_y,
+            text: label.to_string(),
+            font_size: 12.0,
+            color: pal.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+    }
 
-    // Find input box.
-    pal.push_surface(
-        &mut cmds,
-        x + 70.0,
-        y + 4.0,
-        width * 0.4,
-        22.0,
-        4.0,
-        Surface::Card,
+    let box_w = width * 0.4;
+    draw_find_box(
+        f,
+        pal,
+        Rect::new(x + 70.0, y + 4.0, box_w, FIND_ROW_H),
+        &state.query,
+        !state.focus_replacement,
+        Target::FindQuery,
+    );
+    draw_find_box(
+        f,
+        pal,
+        Rect::new(x + 70.0, y + 32.0, box_w, FIND_ROW_H),
+        &state.replacement,
+        state.focus_replacement,
+        Target::FindReplacement,
     );
 
-    cmds.push(RenderCommand::Text {
-        x: x + 74.0,
-        y: y + 8.0,
-        text: state.query.clone(),
-        font_size: 12.0,
-        color: pal.text,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some(width * 0.4 - 8.0),
-        overflow: TextOverflow::Ellipsis,
-    });
+    let buttons_x = x + 70.0 + box_w + 12.0;
+    let rows: [(f32, &[(&str, Target)]); 2] = [
+        (
+            y + 4.0,
+            &[
+                ("Prev  Shift+Enter", Target::FindPrev),
+                ("Next  Enter", Target::FindNext),
+                ("Match case  Ctrl+I", Target::FindMatchCase),
+            ],
+        ),
+        (
+            y + 32.0,
+            &[
+                ("Replace  Ctrl+Enter", Target::FindReplace),
+                ("Replace All  Ctrl+Shift+Enter", Target::FindReplaceAll),
+                ("Close  Esc", Target::FindClose),
+            ],
+        ),
+    ];
+    let mut count_x = buttons_x;
+    for (row_y, buttons) in rows {
+        let mut bx = buttons_x;
+        for &(label, target) in buttons {
+            let lit = target == Target::FindMatchCase && state.case_sensitive;
+            let rect = draw_small_button(f, pal, bx, row_y, label, hover == Some(target), lit);
+            f.hit(target, rect);
+            bx = rect.right() + 4.0;
+        }
+        if row_y < y + 20.0 {
+            count_x = bx + 8.0;
+        }
+    }
 
-    // Match count.
+    // Match count, after the first row's buttons.
     let match_text = if state.matches.is_empty() {
         "No matches".to_string()
     } else {
@@ -4240,8 +4878,8 @@ pub fn render_find_replace(
             state.matches.len()
         )
     };
-    cmds.push(RenderCommand::Text {
-        x: x + 70.0 + width * 0.4 + 12.0,
+    f.push(RenderCommand::Text {
+        x: count_x,
         y: y + 8.0,
         text: match_text,
         font_size: 11.0,
@@ -4250,86 +4888,43 @@ pub fn render_find_replace(
         max_width: None,
         overflow: TextOverflow::Clip,
     });
-
-    // Replace row.
-    cmds.push(RenderCommand::Text {
-        x: x + 12.0,
-        y: y + 36.0,
-        text: "Replace:".to_string(),
-        font_size: 12.0,
-        color: pal.subtext0,
-        font_weight: FontWeightHint::Regular,
-        max_width: None,
-        overflow: TextOverflow::Clip,
-    });
-
-    // Replace input box.
-    pal.push_surface(
-        &mut cmds,
-        x + 70.0,
-        y + 32.0,
-        width * 0.4,
-        22.0,
-        4.0,
-        Surface::Card,
-    );
-
-    cmds.push(RenderCommand::Text {
-        x: x + 74.0,
-        y: y + 36.0,
-        text: state.replacement.clone(),
-        font_size: 12.0,
-        color: pal.text,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some(width * 0.4 - 8.0),
-        overflow: TextOverflow::Ellipsis,
-    });
-
-    // Action buttons.
-    let btn_x = x + 70.0 + width * 0.4 + 12.0;
-    // Labels for keys, not targets for a pointer: this app handles no
-    // pointer events, so a button here can only ever tell you what to press.
-    let btn_labels = [
-        "Replace  Ctrl+Enter",
-        "Replace All  Ctrl+Shift+Enter",
-        "Close  Esc",
-    ];
-    let mut bx = btn_x;
-    for label in &btn_labels {
-        let bw = text::width(label, SMALL_BUTTON_FONT_SIZE) + 16.0;
-        pal.push_surface(&mut cmds, bx, y + 32.0, bw, 22.0, 4.0, Surface::Card);
-        cmds.push(RenderCommand::Text {
-            x: bx + 8.0,
-            y: y + 36.0,
-            text: label.to_string(),
-            font_size: SMALL_BUTTON_FONT_SIZE,
-            color: pal.text,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(bw - 16.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        bx += bw + 4.0;
-    }
-
-    cmds
 }
 
 // ============================================================================
 // Rendering — template chooser dialog
 // ============================================================================
 
-/// Render a template chooser dialog overlay.
-pub fn render_template_chooser(
-    x: f32,
+/// The template chooser's box, for a window `width` by `height` at `(x, y)`.
+fn template_dialog_rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
+    let w = 400.0;
+    let h = 350.0;
+    Rect::new(x + (width - w) / 2.0, y + (height - h) / 2.0, w, h)
+}
+
+/// Draw the template chooser over the window, recording each template and
+/// the Cancel button.
+///
+/// Nothing could put this dialog up -- `template_chooser_open` was written
+/// only by the key that closed it and by a test -- so five templates, their
+/// content and a `ToolbarAction::ApplyTemplate` sat behind a door with no
+/// handle. It is opened by the toolbar's Templates button and by
+/// Ctrl+Shift+N now, and answers the pointer, the arrow keys and Enter.
+///
+/// `focus` is the row the keyboard is on.
+pub fn draw_template_chooser(
+    f: &mut Frame<Target>,
     pal: &Palette,
+    focus: usize,
+    hover: Option<Target>,
+    x: f32,
     y: f32,
     width: f32,
     height: f32,
-) -> Vec<RenderCommand> {
-    let mut cmds = Vec::new();
-
-    // Overlay dimmer.
-    cmds.push(RenderCommand::FillRect {
+) {
+    // Overlay dimmer. It is a target too: a press on it closes the dialog,
+    // and -- being recorded over everything drawn before it -- it keeps that
+    // press off the document behind.
+    f.push(RenderCommand::FillRect {
         x,
         y,
         width,
@@ -4337,18 +4932,16 @@ pub fn render_template_chooser(
         color: Color::rgba(0, 0, 0, 150),
         corner_radii: CornerRadii::ZERO,
     });
+    f.hit(Target::TemplateBackdrop, Rect::new(x, y, width, height));
 
-    let dialog_width = 400.0;
-    let dialog_height = 300.0;
-    let dialog_x = x + (width - dialog_width) / 2.0;
-    let dialog_y = y + (height - dialog_height) / 2.0;
+    let dialog = template_dialog_rect(x, y, width, height);
 
     // Dialog shadow.
-    cmds.push(RenderCommand::BoxShadow {
-        x: dialog_x,
-        y: dialog_y,
-        width: dialog_width,
-        height: dialog_height,
+    f.push(RenderCommand::BoxShadow {
+        x: dialog.x,
+        y: dialog.y,
+        width: dialog.w,
+        height: dialog.h,
         offset_x: 0.0,
         offset_y: 4.0,
         blur: 20.0,
@@ -4359,70 +4952,88 @@ pub fn render_template_chooser(
 
     // Dialog background.
     pal.push_surface(
-        &mut cmds,
-        dialog_x,
-        dialog_y,
-        dialog_width,
-        dialog_height,
+        f,
+        dialog.x,
+        dialog.y,
+        dialog.w,
+        dialog.h,
         8.0,
         Surface::Panel,
     );
+    // The dialog's own body is not the backdrop: a press between two buttons
+    // does nothing rather than closing the dialog it landed in.
+    f.hit(Target::DialogBody, dialog);
 
     // Dialog border.
-    cmds.push(RenderCommand::StrokeRect {
-        x: dialog_x,
-        y: dialog_y,
-        width: dialog_width,
-        height: dialog_height,
+    f.push(RenderCommand::StrokeRect {
+        x: dialog.x,
+        y: dialog.y,
+        width: dialog.w,
+        height: dialog.h,
         color: pal.surface0,
         line_width: 1.0,
         corner_radii: CornerRadii::all(8.0),
     });
 
     // Title.
-    cmds.push(RenderCommand::Text {
-        x: dialog_x + 20.0,
-        y: dialog_y + 20.0,
+    f.push(RenderCommand::Text {
+        x: dialog.x + 20.0,
+        y: dialog.y + 20.0,
         text: "Choose a Template".to_string(),
         font_size: 18.0,
         color: pal.ink(pal.blue),
         font_weight: FontWeightHint::Bold,
-        max_width: Some(dialog_width - 40.0),
+        max_width: Some(dialog.w - 40.0),
         overflow: TextOverflow::Ellipsis,
     });
 
     // Template buttons.
-    let templates = Template::all();
-    let mut btn_y = dialog_y + 56.0;
-    for template in templates {
-        let btn_height = 40.0;
-        let btn_width = dialog_width - 40.0;
-
-        pal.push_surface(
-            &mut cmds,
-            dialog_x + 20.0,
-            btn_y,
-            btn_width,
-            btn_height,
-            6.0,
-            Surface::Panel,
-        );
-
-        cmds.push(RenderCommand::Text {
-            x: dialog_x + 32.0,
-            y: btn_y + 12.0,
+    let mut btn_y = dialog.y + 56.0;
+    for (i, template) in Template::all().iter().enumerate() {
+        let rect = Rect::new(dialog.x + 20.0, btn_y, dialog.w - 40.0, 40.0);
+        let target = Target::Template(i);
+        let surface = if hover == Some(target) {
+            Surface::Card
+        } else {
+            Surface::Panel
+        };
+        pal.push_surface(f, rect.x, rect.y, rect.w, rect.h, 6.0, surface);
+        if i == focus {
+            f.push(RenderCommand::StrokeRect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.w,
+                height: rect.h,
+                color: pal.blue,
+                line_width: 1.0,
+                corner_radii: CornerRadii::all(6.0),
+            });
+        }
+        f.push(RenderCommand::Text {
+            x: rect.x + 12.0,
+            y: rect.y + 12.0,
             text: template.label().to_string(),
             font_size: 14.0,
             color: pal.text,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(btn_width - 24.0),
+            max_width: Some(rect.w - 24.0),
             overflow: TextOverflow::Ellipsis,
         });
-
-        btn_y += btn_height + 8.0;
+        f.hit(target, rect);
+        btn_y += 48.0;
     }
 
-    cmds
+    let cancel_w = text::width("Cancel  Esc", SMALL_BUTTON_FONT_SIZE) + 16.0;
+    let cancel = draw_small_button(
+        f,
+        pal,
+        dialog.right() - 20.0 - cancel_w,
+        dialog.bottom() - 20.0 - FIND_ROW_H,
+        "Cancel  Esc",
+        hover == Some(Target::TemplateCancel),
+        false,
+    );
+    f.hit(Target::TemplateCancel, cancel);
 }
 
 // ============================================================================
@@ -4450,8 +5061,20 @@ pub struct App {
     /// pinned against it; this one was not among them because it had no picker
     /// at all.
     pub picker: guitk::dialog::FilePicker,
-    /// What the last open or save did, or why it did not happen.
-    pub file_status: Option<String>,
+    /// What the last open, save or export did, when it worked.
+    ///
+    /// Drawn in the middle of the status bar until the next key or press, so
+    /// "Opened notes.md" is seen and then gets out of the way. For most of this
+    /// app's life it was written and drawn nowhere -- and a Save As that
+    /// *failed* reported itself only here, so it failed silently. Failures go
+    /// to [`save_error`](Self::save_error) now, which is sticky and red.
+    pub file_status: Option<FileNote>,
+    /// What the file picker is up for, when it is up.
+    ///
+    /// The picker answers only "a path was chosen"; whether that path is a
+    /// Save As, an HTML export or a save that should close its tab afterwards
+    /// is the app's to remember.
+    save_purpose: SavePurpose,
     /// Milliseconds seen since the last whole second was handed to autosave.
     ///
     /// `tick_autosave` counts in whole seconds and `Event::Tick` arrives in
@@ -4471,8 +5094,8 @@ pub struct App {
     pub toc_visible: bool,
     /// Find and replace state.
     pub find_state: FindReplaceState,
-    /// Toolbar button definitions.
-    pub toolbar_buttons: Vec<ToolbarButton>,
+    /// The toolbar, left to right.
+    pub toolbar: Vec<ToolbarItem>,
     /// Whether the shortcut card is up.
     pub show_help: bool,
     /// Whether auto-save is enabled.
@@ -4481,6 +5104,46 @@ pub struct App {
     pub autosave_interval: u64,
     /// Whether the template chooser dialog is open.
     pub template_chooser_open: bool,
+    /// The template the chooser's keyboard highlight is on.
+    pub template_focus: usize,
+    /// The first row the table of contents shows.
+    pub toc_scroll: usize,
+    /// A close waiting on an answer, because what it would close has unsaved
+    /// changes.
+    pub close_prompt: Option<CloseScope>,
+    /// The conflict the merge review's keys act on.
+    pub review_focus: usize,
+    /// A drop-down open over the window: the toolbar's or the tab bar's `»`.
+    menu: Option<(MenuKind, ContextMenu)>,
+    /// What the pointer is over, so it can be drawn lit and a toolbar button's
+    /// tooltip can be shown.
+    hover: Option<Target>,
+    /// Whether a press in the source pane is being dragged, extending the
+    /// selection as it goes.
+    dragging: bool,
+    /// Wheel remainders, one per scrolling surface, so a trackpad's fractions
+    /// add up instead of vanishing (see [`guitk::wheel`]).
+    editor_wheel: wheel::Accumulator,
+    toc_wheel: wheel::Accumulator,
+    /// The editor's own clipboard.
+    ///
+    /// Not the system clipboard, for the reason `apps/editor` gives: the
+    /// clipboard service is reachable only over an IPC transport applications
+    /// do not have yet, so cut, copy and paste work within this editor and
+    /// nowhere else until it lands.
+    pub clipboard: String,
+    /// Whether Shift is held, as the keyboard last reported it.
+    ///
+    /// A pointer event carries a position and a kind and nothing else, so a
+    /// Shift-press that extends the selection can only learn about Shift from
+    /// the key events; `apps/editor` does the same.
+    shift_held: bool,
+    /// Every box the last paint recorded, for hover and the wheel; see
+    /// [`App::target_at`].
+    last_hits: Vec<(Target, Rect)>,
+    /// Set when the window should close: every unsaved document has been
+    /// saved or given up.
+    quit: bool,
     /// Cached parsed blocks for the active document.
     pub cached_blocks: Vec<MdBlock>,
     /// Cached table of contents for the active document.
@@ -4521,7 +5184,12 @@ pub struct ExternalChangePrompt {
     pub review: Option<MergeReview>,
 }
 
-/// The four top-level responses to an [`ExternalChangePrompt`].
+/// The top-level responses to an [`ExternalChangePrompt`].
+///
+/// A file that was *modified* is offered the first four; a file that was
+/// *deleted* is offered `KeepCurrent` and `Close`. It used to be offered
+/// "Reload from disk" as well, which with no file to read cleared the prompt
+/// and did nothing else -- an answer that silently was not one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalChoice {
     /// Keep the current buffer, ignoring the disk change.
@@ -4532,6 +5200,103 @@ pub enum ExternalChoice {
     Merge,
     /// Open the side-by-side review to resolve conflicts manually.
     Review,
+    /// The file is gone and the user does not want it back: close the tab.
+    Close,
+}
+
+impl ExternalChoice {
+    /// The answers a prompt about `change` offers, in the order drawn, with
+    /// each one's label, key and consequence.
+    pub fn offered(change: &DiskChange) -> &'static [(ExternalChoice, &'static str, &'static str)] {
+        match change {
+            DiskChange::Deleted => &[
+                (
+                    ExternalChoice::KeepCurrent,
+                    "Keep editing  K",
+                    "keep your buffer; saving writes the file again",
+                ),
+                (
+                    ExternalChoice::Close,
+                    "Close the document  C",
+                    "discard the buffer; the file stays deleted",
+                ),
+            ],
+            _ => &[
+                (
+                    ExternalChoice::KeepCurrent,
+                    "Keep current  K",
+                    "keep your buffer; overwrites disk on save",
+                ),
+                (
+                    ExternalChoice::Reload,
+                    "Reload from disk  R",
+                    "discard local edits, load disk version",
+                ),
+                (
+                    ExternalChoice::Merge,
+                    "Merge  M",
+                    "auto-combine both; mark conflicts inline",
+                ),
+                (
+                    ExternalChoice::Review,
+                    "Review merge…  V",
+                    "resolve conflicts side-by-side",
+                ),
+            ],
+        }
+    }
+}
+
+/// What the last file operation said: done, or why not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileNote {
+    /// It worked, and this is what it did.
+    Done(String),
+    /// It did not, and this is why.
+    Failed(String),
+}
+
+/// What a pending close would close.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseScope {
+    /// One document's tab.
+    Tab(usize),
+    /// The whole window, with every document in it.
+    Window,
+}
+
+/// The answers to "this has unsaved changes".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseChoice {
+    /// Save, then close if the save worked.
+    Save,
+    /// Close without saving.
+    Discard,
+    /// Do not close.
+    Cancel,
+}
+
+/// What a path chosen in the save picker is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SavePurpose {
+    /// Save the active document under the chosen name.
+    Document,
+    /// Save the given tab, then close it -- the "Save" answer to closing an
+    /// untitled document.
+    DocumentThenClose(usize),
+    /// Save the given tab, then carry on closing the window.
+    DocumentThenQuit(usize),
+    /// Write the active document's HTML rendering.
+    Html,
+}
+
+/// Which `»` a drop-down belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuKind {
+    /// The toolbar's, listing the buttons that did not fit.
+    Toolbar,
+    /// The tab bar's, listing every open document.
+    Tabs,
 }
 
 impl App {
@@ -4550,11 +5315,25 @@ impl App {
             view_mode: ViewMode::Split,
             toc_visible: false,
             find_state: FindReplaceState::new(),
-            toolbar_buttons: default_toolbar_buttons(),
+            toolbar: default_toolbar(),
             show_help: false,
             autosave_enabled: true,
             autosave_interval: DEFAULT_AUTOSAVE_INTERVAL,
             template_chooser_open: false,
+            template_focus: 0,
+            toc_scroll: 0,
+            close_prompt: None,
+            review_focus: 0,
+            menu: None,
+            hover: None,
+            dragging: false,
+            editor_wheel: wheel::Accumulator::default(),
+            toc_wheel: wheel::Accumulator::default(),
+            clipboard: String::new(),
+            shift_held: false,
+            last_hits: Vec::new(),
+            quit: false,
+            save_purpose: SavePurpose::Document,
             cached_blocks: blocks,
             cached_toc: toc,
             window_width,
@@ -4584,6 +5363,17 @@ impl App {
         let text = self.documents.active().full_text();
         self.cached_blocks = parse_markdown(&text);
         self.cached_toc = extract_toc(&text);
+        // An edit that removed headings must not leave the contents scrolled
+        // past its own end.
+        self.toc_scroll = self.toc_scroll.min(self.cached_toc.len().saturating_sub(1));
+    }
+
+    /// A different document has come to the front: refresh what is drawn from
+    /// it, and start its contents at the top rather than wherever the last
+    /// document's were.
+    fn document_changed(&mut self) {
+        self.toc_scroll = 0;
+        self.refresh_cache();
     }
 
     /// Create a new blank document and add it as a new tab.
@@ -4602,55 +5392,123 @@ impl App {
             .handle(event, self.window_width, self.window_height)
         {
             guitk::dialog::Picked::Chose(path) => {
-                self.file_status = Some(if saving {
-                    match self.active_document_mut().save_as(&path) {
-                        Ok(()) => format!("Saved as {}", path.display()),
-                        Err(e) => format!("Could not save {}: {e}", path.display()),
-                    }
+                if saving {
+                    self.write_chosen(&path);
                 } else {
-                    match self.open_file(&path) {
-                        Ok(()) => format!("Opened {}", path.display()),
-                        Err(e) => format!("Could not open {}: {e}", path.display()),
-                    }
-                });
+                    self.file_status = Some(match self.open_file(&path) {
+                        Ok(()) => FileNote::Done(format!("Opened {}", path.display())),
+                        Err(e) => {
+                            FileNote::Failed(format!("Could not open {}: {e}", path.display()))
+                        }
+                    });
+                }
                 true
             }
-            guitk::dialog::Picked::Handled | guitk::dialog::Picked::Cancelled => true,
+            guitk::dialog::Picked::Cancelled => {
+                // A close that was waiting on this save does not happen: the
+                // user backed out of the save, so they have not agreed to lose
+                // the document either.
+                self.save_purpose = SavePurpose::Document;
+                true
+            }
+            guitk::dialog::Picked::Handled => true,
             guitk::dialog::Picked::Ignored => false,
+        }
+    }
+
+    /// Put the save picker up for `purpose`, suggesting `name`.
+    fn ask_where_to_save(&mut self, purpose: SavePurpose, name: std::ffi::OsString) {
+        self.save_purpose = purpose;
+        self.picker.open_to_write(name);
+    }
+
+    /// Do whatever the save picker was put up for, at the path it chose.
+    ///
+    /// A failed write of the document goes to `save_error` like any other
+    /// failed save -- sticky and red, because the buffer is unsaved and the
+    /// user has just been told otherwise if they miss it.
+    fn write_chosen(&mut self, path: &std::path::Path) {
+        let purpose = std::mem::replace(&mut self.save_purpose, SavePurpose::Document);
+        let tab = match purpose {
+            SavePurpose::Html => {
+                let html = export_html(&self.cached_blocks);
+                match safeio::write_str_atomically(path, &html) {
+                    Ok(()) => {
+                        self.file_status =
+                            Some(FileNote::Done(format!("Exported {}", path.display())));
+                    }
+                    Err(e) => {
+                        self.file_status = Some(FileNote::Failed(format!(
+                            "Could not export {}: {e}",
+                            path.display()
+                        )));
+                    }
+                }
+                return;
+            }
+            SavePurpose::Document => self.active_doc(),
+            SavePurpose::DocumentThenClose(tab) | SavePurpose::DocumentThenQuit(tab) => tab,
+        };
+        let Some(doc) = self.documents.get_mut(tab) else {
+            return;
+        };
+        match doc.save_as(path) {
+            Ok(()) => {
+                self.save_error = None;
+                self.file_status = Some(FileNote::Done(format!("Saved as {}", path.display())));
+                match purpose {
+                    SavePurpose::DocumentThenClose(tab) => self.close_document(tab),
+                    SavePurpose::DocumentThenQuit(_) => self.continue_quitting(),
+                    SavePurpose::Document | SavePurpose::Html => {}
+                }
+            }
+            Err(e) => {
+                self.save_error = Some(format!("Could not save {}: {e}", path.display()));
+            }
         }
     }
 
     pub fn new_document(&mut self) {
         self.documents.open(Document::new());
-        self.refresh_cache();
+        self.document_changed();
     }
 
     /// Create a new document from a template and add it as a new tab.
     pub fn new_from_template(&mut self, template: Template) {
         self.documents.open(Document::from_template(template));
-        self.refresh_cache();
+        self.document_changed();
     }
 
     /// Open a file and add it as a new tab.
     pub fn open_file(&mut self, path: &std::path::Path) -> std::io::Result<()> {
         let doc = Document::from_file(path)?;
         self.documents.open(doc);
-        self.refresh_cache();
+        self.document_changed();
         Ok(())
     }
 
     /// Close the document at the given index. Closing the last one leaves a
     /// fresh empty document rather than no document at all.
+    ///
+    /// Closes without asking: [`request_close_tab`](Self::request_close_tab)
+    /// is the door a person uses, and asks first when there is anything to
+    /// lose.
     pub fn close_document(&mut self, idx: usize) {
         self.documents.close(idx);
-        self.refresh_cache();
+        self.document_changed();
     }
 
     /// Switch to the document at the given index.
+    ///
+    /// Also asks whether its file changed on disk while it was behind another
+    /// tab: the check reads only the document in front, so a document edited
+    /// elsewhere while it was not would otherwise be shown -- and saved over --
+    /// as it was.
     pub fn switch_tab(&mut self, idx: usize) {
         if idx < self.documents.count() {
             self.documents.set_active(idx);
-            self.refresh_cache();
+            self.document_changed();
+            self.check_external_change();
         }
     }
 
@@ -4744,7 +5602,12 @@ impl App {
                     if let Some(prompt) = self.external_prompt.as_mut() {
                         prompt.review = Some(review);
                     }
+                    self.review_focus = 0;
                 }
+            }
+            ExternalChoice::Close => {
+                self.external_prompt = None;
+                self.close_document(tab);
             }
         }
     }
@@ -4801,8 +5664,8 @@ impl App {
                 self.save_active();
             }
             ToolbarAction::SaveAs => {
-                let name = self.active_document().name.clone();
-                self.picker.open_to_write(name);
+                let name = save_as_name(self.active_document());
+                self.ask_where_to_save(SavePurpose::Document, name);
             }
             ToolbarAction::Bold => {
                 insert_bold(self.active_document_mut());
@@ -4813,7 +5676,7 @@ impl App {
                 self.refresh_cache();
             }
             ToolbarAction::Heading => {
-                insert_heading(self.active_document_mut(), 2);
+                set_heading(self.active_document_mut(), 2);
                 self.refresh_cache();
             }
             ToolbarAction::Link => {
@@ -4850,10 +5713,17 @@ impl App {
             ToolbarAction::ToggleToc => {
                 self.toc_visible = !self.toc_visible;
             }
+            // It rendered the document to HTML and dropped the result -- "In a
+            // real app, write to a file. For now, store in memory.", above a
+            // `let _ = html;`. A button that computes an answer and discards it
+            // is a button that does nothing, and says nothing about it.
             ToolbarAction::ExportHtml => {
-                let html = export_html(&self.cached_blocks);
-                // In a real app, write to a file. For now, store in memory.
-                let _ = html;
+                let name = html_export_name(self.active_document());
+                self.ask_where_to_save(SavePurpose::Html, name);
+            }
+            ToolbarAction::Templates => {
+                self.template_chooser_open = true;
+                self.template_focus = 0;
             }
             ToolbarAction::FindReplace => {
                 self.find_state.visible = !self.find_state.visible;
@@ -4951,210 +5821,348 @@ impl App {
     /// Named `render_commands` and not `render`: at equal arity an inherent
     /// method silently wins method lookup over `oswindow::app::App::render`.
     pub fn render_commands(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+        self.frame(self.window_width, self.window_height)
+            .into_tree()
+            .commands
+    }
+
+    /// Where the source and preview panes go in the content area, for the
+    /// current view mode: `(source, preview)`, either of which may be absent.
+    fn content_panes(
+        &self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) -> (Option<Rect>, Option<Rect>) {
+        match self.view_mode {
+            ViewMode::EditorOnly => (Some(Rect::new(x, y, width, height)), None),
+            ViewMode::Split => {
+                let half = width / 2.0;
+                (
+                    Some(Rect::new(x, y, half, height)),
+                    Some(Rect::new(x + half + 1.0, y, half - 1.0, height)),
+                )
+            }
+            ViewMode::PreviewOnly => (None, Some(Rect::new(x, y, width, height))),
+        }
+    }
+
+    /// The line of the heading the caret is under, if it is under one.
+    fn current_heading(&self) -> Option<usize> {
+        let caret = self.active_document().cursor_line;
+        self.cached_toc
+            .iter()
+            .take_while(|entry| entry.line <= caret)
+            .last()
+            .map(|entry| entry.line)
+    }
+
+    /// What the middle of the status bar should say right now.
+    fn status_note(&self) -> StatusNote<'_> {
+        let tip = match self.hover {
+            Some(Target::Toolbar(action)) => self.toolbar.iter().find_map(|item| match item {
+                ToolbarItem::Button(b) if b.action == action => Some(b.tooltip.as_str()),
+                _ => None,
+            }),
+            Some(Target::ToolbarMore) => Some("More buttons"),
+            Some(Target::TabsMore) => Some("Every open document"),
+            Some(Target::ViewMode) => Some("Editor, split or preview (Ctrl+E)"),
+            Some(Target::Autosave) => Some("Turn auto-save on or off"),
+            _ => None,
+        };
+        if let Some(tip) = tip {
+            return StatusNote::Tip(tip);
+        }
+        if let Some(err) = self.save_error.as_deref() {
+            return StatusNote::Error(err);
+        }
+        match &self.file_status {
+            Some(FileNote::Failed(msg)) => StatusNote::Error(msg),
+            Some(FileNote::Done(msg)) => StatusNote::Info(msg),
+            None => StatusNote::Stats,
+        }
+    }
+
+    /// Draw the window at `width` by `height`, recording every control where
+    /// it is drawn.
+    ///
+    /// This is both the renderer and the hit test: a press is resolved by
+    /// drawing a frame and asking it what is at the point (see [`Target`]).
+    pub fn frame(&self, width: f32, height: f32) -> Frame<Target> {
+        let mut f = Frame::new(width, height);
+        let pal = &self.palette;
 
         // Full window background.
-        cmds.push(RenderCommand::FillRect {
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: self.window_width,
-            height: self.window_height,
-            color: self.palette.base,
+            width,
+            height,
+            color: pal.base,
             corner_radii: CornerRadii::ZERO,
         });
 
         let mut content_y: f32 = 0.0;
-
-        // Toolbar.
-        cmds.extend(render_toolbar(
-            &self.toolbar_buttons,
-            &self.palette,
+        draw_toolbar(
+            &mut f,
+            &self.toolbar,
+            pal,
+            self.hover,
             0.0,
             content_y,
-            self.window_width,
-        ));
+            width,
+        );
         content_y += TOOLBAR_HEIGHT;
-
-        // Tab bar.
-        cmds.extend(render_tab_bar(
+        draw_tab_bar(
+            &mut f,
             &self.documents,
-            &self.palette,
+            pal,
+            self.hover,
             0.0,
             content_y,
-            self.window_width,
-        ));
+            width,
+        );
         content_y += TAB_BAR_HEIGHT;
-
-        // Find/replace panel.
-        let find_panel_offset = if self.find_state.visible {
-            cmds.extend(render_find_replace(
+        if self.find_state.visible {
+            draw_find_replace(
+                &mut f,
                 &self.find_state,
-                &self.palette,
+                pal,
+                self.hover,
                 0.0,
                 content_y,
-                self.window_width,
-            ));
-            FIND_PANEL_HEIGHT
-        } else {
-            0.0
-        };
-        content_y += find_panel_offset;
+                width,
+            );
+            content_y += FIND_PANEL_HEIGHT;
+        }
 
-        // Content area dimensions.
-        let status_y = self.window_height - STATUS_BAR_HEIGHT;
-        let content_height = status_y - content_y;
+        let status_y = height - STATUS_BAR_HEIGHT;
+        let content_height = (status_y - content_y).max(0.0);
         let mut content_x = 0.0;
-        let mut available_width = self.window_width;
-
-        // Table of contents sidebar.
+        let mut available_width = width;
         if self.toc_visible {
-            cmds.extend(render_toc_sidebar(
+            draw_toc_sidebar(
+                &mut f,
                 &self.cached_toc,
-                &self.palette,
+                pal,
+                self.toc_scroll,
+                self.current_heading(),
+                self.hover,
                 0.0,
                 content_y,
                 content_height,
-            ));
+            );
             content_x += TOC_SIDEBAR_WIDTH;
             available_width -= TOC_SIDEBAR_WIDTH;
         }
 
-        // Main content: editor and/or preview.
         let doc = self.active_document();
-        match self.view_mode {
-            ViewMode::EditorOnly => {
-                cmds.extend(render_editor(
-                    doc,
-                    &self.palette,
-                    content_x,
-                    content_y,
-                    available_width,
-                    content_height,
-                    &self.find_state,
-                ));
-            }
-            ViewMode::Split => {
-                let half_width = available_width / 2.0;
-                cmds.extend(render_editor(
-                    doc,
-                    &self.palette,
-                    content_x,
-                    content_y,
-                    half_width,
-                    content_height,
-                    &self.find_state,
-                ));
-                // Split divider.
-                self.palette.push_surface(
-                    &mut cmds,
-                    content_x + half_width - 1.0,
-                    content_y,
-                    2.0,
-                    content_height,
-                    0.0,
-                    Surface::Card,
-                );
-                cmds.extend(render_preview(
-                    &self.cached_blocks,
-                    &self.palette,
-                    content_x + half_width + 1.0,
-                    content_y,
-                    half_width - 1.0,
-                    content_height,
-                    doc.preview_scroll,
-                ));
-            }
-            ViewMode::PreviewOnly => {
-                cmds.extend(render_preview(
-                    &self.cached_blocks,
-                    &self.palette,
-                    content_x,
-                    content_y,
-                    available_width,
-                    content_height,
-                    doc.preview_scroll,
-                ));
-            }
+        let (source, preview) =
+            self.content_panes(content_x, content_y, available_width, content_height);
+        if let Some(pane) = source {
+            f.clip(pane);
+            f.extend(render_editor(
+                doc,
+                pal,
+                pane.x,
+                pane.y,
+                pane.w,
+                pane.h,
+                &self.find_state,
+            ));
+            f.hit(Target::Editor, pane);
+            f.unclip();
+        }
+        if let (Some(pane), Some(_)) = (preview, source) {
+            // Split divider.
+            pal.push_surface(
+                &mut f,
+                pane.x - 2.0,
+                pane.y,
+                2.0,
+                pane.h,
+                0.0,
+                Surface::Card,
+            );
+        }
+        if let Some(pane) = preview {
+            // Clipped, because a block the preview has scrolled half out of
+            // view is drawn whole, and its top half would otherwise be painted
+            // over the tab bar.
+            f.clip(pane);
+            f.extend(render_preview(
+                &self.cached_blocks,
+                pal,
+                pane.x,
+                pane.y,
+                pane.w,
+                pane.h,
+                doc.preview_scroll,
+            ));
+            f.hit(Target::Preview, pane);
+            f.unclip();
         }
 
-        // Status bar.
-        cmds.extend(render_status_bar(
+        draw_status_bar(
+            &mut f,
             doc,
-            &self.palette,
+            pal,
             self.view_mode,
             0.0,
             status_y,
-            self.window_width,
+            width,
             self.autosave_enabled,
-            self.save_error.as_deref(),
-        ));
+            self.status_note(),
+        );
 
-        // Template chooser overlay.
         if self.template_chooser_open {
-            cmds.extend(render_template_chooser(
+            draw_template_chooser(
+                &mut f,
+                pal,
+                self.template_focus,
+                self.hover,
                 0.0,
-                &self.palette,
                 0.0,
-                self.window_width,
-                self.window_height,
-            ));
+                width,
+                height,
+            );
         }
-
-        // External-change prompt / merge review (modal overlay).
         if let Some(prompt) = self.external_prompt.as_ref() {
-            cmds.extend(self.render_external_prompt(prompt));
+            self.draw_external_prompt(&mut f, prompt, width, height);
         }
-
+        if let Some(scope) = self.close_prompt {
+            self.draw_close_prompt(&mut f, scope, width, height);
+        }
+        if let Some((_, menu)) = self.menu.as_ref() {
+            f.extend(menu.render(pal));
+        }
         if self.show_help {
             guitk::shortcut::render_card(
-                &mut cmds,
-                &self.palette,
-                (self.window_width, self.window_height),
+                &mut f,
+                pal,
+                (width, height),
                 0.0,
                 SHORTCUTS,
                 "F1 closes this",
             );
+            f.hit(Target::HelpCard, Rect::new(0.0, 0.0, width, height));
         }
-
-        cmds
+        f
     }
 
-    /// Render the external-change modal — either the four-option prompt or, when
-    /// the user chose "review", the side-by-side merge review.
-    fn render_external_prompt(&self, prompt: &ExternalChangePrompt) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-        let w = self.window_width;
-        let h = self.window_height;
-
-        // Dim the background.
-        cmds.push(RenderCommand::FillRect {
+    /// A dialog's frame: the dimmed window behind it, the box, and a title
+    /// bar. Returns the box.
+    ///
+    /// The dimmed window is recorded as [`Target::ModalBackdrop`], which does
+    /// nothing -- so a press that misses the dialog's buttons is not delivered
+    /// to the document under it. These dialogs must be answered; a press
+    /// outside one is not an answer.
+    fn draw_dialog_frame(
+        &self,
+        f: &mut Frame<Target>,
+        width: f32,
+        height: f32,
+        dialog: Rect,
+        title: &str,
+    ) {
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: w,
-            height: h,
+            width,
+            height,
             color: Color::rgba(0x11, 0x11, 0x1B, 0xB0),
             corner_radii: CornerRadii::ZERO,
         });
-
-        if let Some(review) = prompt.review.as_ref() {
-            self.render_merge_review(&mut cmds, prompt, review);
-            return cmds;
-        }
-
-        let dw = 480.0_f32.min(w - 40.0);
-        let dh = 220.0_f32;
-        let dx = (w - dw) / 2.0;
-        let dy = (h - dh) / 2.0;
-        cmds.push(RenderCommand::FillRect {
-            x: dx,
-            y: dy,
-            width: dw,
-            height: dh,
+        f.hit(Target::ModalBackdrop, Rect::new(0.0, 0.0, width, height));
+        f.push(RenderCommand::FillRect {
+            x: dialog.x,
+            y: dialog.y,
+            width: dialog.w,
+            height: dialog.h,
             color: self.palette.base,
             corner_radii: CornerRadii::all(6.0),
         });
+        f.hit(Target::DialogBody, dialog);
         self.palette
-            .push_surface(&mut cmds, dx, dy, dw, 32.0, 0.0, Surface::Card);
+            .push_surface(f, dialog.x, dialog.y, dialog.w, 32.0, 0.0, Surface::Card);
+        f.push(RenderCommand::Text {
+            x: dialog.x + 12.0,
+            y: dialog.y + 9.0,
+            text: title.to_string(),
+            font_size: 14.0,
+            color: self.palette.ink(self.palette.yellow),
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(dialog.w - 24.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    /// One answer in a dialog: a full-width row with a label and, to its
+    /// right, what choosing it does, recorded as `target`.
+    fn draw_answer_row(
+        &self,
+        f: &mut Frame<Target>,
+        row: Rect,
+        label: &str,
+        hint: &str,
+        target: Target,
+    ) {
+        let surface = if self.hover == Some(target) {
+            Surface::Panel
+        } else {
+            Surface::Card
+        };
+        self.palette
+            .push_surface(f, row.x, row.y, row.w, row.h, 4.0, surface);
+        f.push(RenderCommand::Text {
+            x: row.x + 8.0,
+            y: row.y + 7.0,
+            text: label.to_string(),
+            font_size: 12.0,
+            color: self.palette.text,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(160.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        f.push(RenderCommand::Text {
+            x: row.x + 176.0,
+            y: row.y + 8.0,
+            text: hint.to_string(),
+            font_size: 10.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((row.w - 184.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        f.hit(target, row);
+    }
+
+    /// Draw the external-change modal — either its answers or, when the user
+    /// chose "review", the side-by-side merge review.
+    ///
+    /// Neither half could ever be answered. `check_external_change` had no
+    /// caller, so the prompt was never raised; had it been, nothing would
+    /// have reached `resolve_external`, and the review's footer read
+    /// "[Accept]  [Cancel]" in brackets that were text. The prompt is raised
+    /// when the window regains focus and when a tab comes to the front, and
+    /// every answer is a key and a button now.
+    fn draw_external_prompt(
+        &self,
+        f: &mut Frame<Target>,
+        prompt: &ExternalChangePrompt,
+        width: f32,
+        height: f32,
+    ) {
+        if let Some(review) = prompt.review.as_ref() {
+            self.draw_merge_review(f, prompt, review, width, height);
+            return;
+        }
+        let offered = ExternalChoice::offered(&prompt.change);
+        let dw = 480.0_f32.min(width - 40.0);
+        #[allow(clippy::cast_precision_loss, reason = "at most four answers")]
+        let dh = 86.0 + offered.len() as f32 * 34.0;
+        let dialog = Rect::new((width - dw) / 2.0, (height - dh) / 2.0, dw, dh);
 
         let name = self
             .documents
@@ -5172,19 +6180,10 @@ impl App {
                 format!("\"{name}\" was modified outside the editor and you have unsaved changes."),
             ),
         };
-        cmds.push(RenderCommand::Text {
-            x: dx + 12.0,
-            y: dy + 9.0,
-            text: title.to_string(),
-            font_size: 14.0,
-            color: self.palette.ink(self.palette.yellow),
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(dw - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cmds.push(RenderCommand::Text {
-            x: dx + 12.0,
-            y: dy + 44.0,
+        self.draw_dialog_frame(f, width, height, dialog, title);
+        f.push(RenderCommand::Text {
+            x: dialog.x + 12.0,
+            y: dialog.y + 44.0,
             text: body,
             font_size: 12.0,
             color: self.palette.text,
@@ -5193,132 +6192,92 @@ impl App {
             overflow: TextOverflow::Ellipsis,
         });
 
-        let deleted = matches!(prompt.change, DiskChange::Deleted);
-        let mut options: Vec<(&str, &str)> = vec![
-            ("Keep current", "keep your buffer; overwrites disk on save"),
-            ("Reload from disk", "discard local edits, load disk version"),
-        ];
-        if !deleted {
-            options.push(("Merge", "auto-combine both; mark conflicts inline"));
-            options.push(("Review merge…", "resolve conflicts side-by-side"));
-        }
-
-        let mut by = dy + 74.0;
-        for (label, hint) in options {
-            self.palette.push_surface(
-                &mut cmds,
-                dx + 12.0,
-                by,
-                dw - 24.0,
-                30.0,
-                4.0,
-                Surface::Card,
-            );
-            cmds.push(RenderCommand::Text {
-                x: dx + 20.0,
-                y: by + 7.0,
-                text: label.to_string(),
-                font_size: 12.0,
-                color: self.palette.text,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(140.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cmds.push(RenderCommand::Text {
-                x: dx + 160.0,
-                y: by + 8.0,
-                text: hint.to_string(),
-                font_size: 10.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(dw - 176.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        let mut by = dialog.y + 74.0;
+        for &(choice, label, hint) in offered {
+            let row = Rect::new(dialog.x + 12.0, by, dw - 24.0, 30.0);
+            self.draw_answer_row(f, row, label, hint, Target::External(choice));
             by += 34.0;
         }
-        cmds
     }
 
-    /// Render the side-by-side merge review (ours | disk) with each conflict's
-    /// current resolution highlighted. Mirrors orchestrator2's diff viewer.
-    fn render_merge_review(
+    /// The side-by-side merge review (ours | disk), each conflict's current
+    /// resolution highlighted, with three answers per conflict and Accept and
+    /// Cancel. Mirrors orchestrator2's diff viewer.
+    fn draw_merge_review(
         &self,
-        cmds: &mut Vec<RenderCommand>,
+        f: &mut Frame<Target>,
         prompt: &ExternalChangePrompt,
         review: &MergeReview,
+        width: f32,
+        height: f32,
     ) {
-        let w = self.window_width;
-        let h = self.window_height;
         let margin = 24.0;
-        let dx = margin;
-        let dy = margin;
-        let dw = w - margin * 2.0;
-        let dh = h - margin * 2.0;
-
-        cmds.push(RenderCommand::FillRect {
-            x: dx,
-            y: dy,
-            width: dw,
-            height: dh,
-            color: self.palette.base,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        self.palette
-            .push_surface(cmds, dx, dy, dw, 32.0, 0.0, Surface::Card);
-
+        let dialog = Rect::new(
+            margin,
+            margin,
+            (width - margin * 2.0).max(0.0),
+            (height - margin * 2.0).max(0.0),
+        );
         let name = self
             .documents
             .get(prompt.tab)
             .map_or("file", |d| d.name.as_str());
-        cmds.push(RenderCommand::Text {
-            x: dx + 12.0,
-            y: dy + 9.0,
-            text: format!(
+        self.draw_dialog_frame(
+            f,
+            width,
+            height,
+            dialog,
+            &format!(
                 "Review merge — {name}  ({} conflict(s))",
                 review.conflict_count()
             ),
-            font_size: 14.0,
-            color: self.palette.ink(self.palette.yellow),
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(dw - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        );
+        let (dx, dy, dw, dh) = (dialog.x, dialog.y, dialog.w, dialog.h);
 
-        let col_w = (dw - 24.0) / 2.0;
-        let ours_x = dx + 12.0;
-        let theirs_x = dx + 12.0 + col_w;
-        cmds.push(RenderCommand::Text {
-            x: ours_x,
-            y: dy + 40.0,
-            text: name.to_string(),
-            font_size: 11.0,
-            color: self.palette.ink(self.palette.green),
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(col_w),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cmds.push(RenderCommand::Text {
-            x: theirs_x,
-            y: dy + 40.0,
-            text: "disk".to_string(),
-            font_size: 11.0,
-            color: self.palette.ink(self.palette.red),
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(col_w),
-            overflow: TextOverflow::Ellipsis,
-        });
+        // The conflicts scroll inside the dialog above its footer; the chips
+        // on a conflict scrolled out of view are clipped away with it.
+        let body = Rect::new(dx, dy + 60.0, dw, (dh - 60.0 - 44.0).max(0.0));
+        let col_w = (dw - 24.0 - REVIEW_CHIPS_W) / 2.0;
+        let ours_x = dx + 12.0 + REVIEW_CHIPS_W;
+        let theirs_x = ours_x + col_w;
+        for (x, label, color) in [
+            (ours_x, name, self.palette.green),
+            (theirs_x, "disk", self.palette.red),
+        ] {
+            f.push(RenderCommand::Text {
+                x,
+                y: dy + 40.0,
+                text: label.to_string(),
+                font_size: 11.0,
+                color: self.palette.ink(color),
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(col_w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
-        let mut y = dy + 60.0;
+        f.clip(body);
+        let mut y = body.y - review_scroll_px(review, self.review_focus, body.h);
         for (i, (_base, ours, theirs)) in review.conflicts().iter().enumerate() {
             let choice = review.choice(i).unwrap_or(ConflictChoice::Theirs);
             let chosen_ours = matches!(choice, ConflictChoice::Ours | ConflictChoice::Both);
             let chosen_theirs = matches!(choice, ConflictChoice::Theirs | ConflictChoice::Both);
 
-            let block_lines = ours.len().max(theirs.len()).max(1);
-            let block_h = block_lines as f32 * LINE_HEIGHT + 6.0;
+            let block_h = review_block_h(ours.len(), theirs.len());
 
+            if i == self.review_focus {
+                f.push(RenderCommand::StrokeRect {
+                    x: dx + 6.0,
+                    y: y - 2.0,
+                    width: dw - 12.0,
+                    height: block_h + 4.0,
+                    color: self.palette.blue,
+                    line_width: 1.0,
+                    corner_radii: CornerRadii::all(4.0),
+                });
+            }
             if chosen_ours {
-                cmds.push(RenderCommand::FillRect {
+                f.push(RenderCommand::FillRect {
                     x: ours_x - 4.0,
                     y,
                     width: col_w,
@@ -5328,7 +6287,7 @@ impl App {
                 });
             }
             if chosen_theirs {
-                cmds.push(RenderCommand::FillRect {
+                f.push(RenderCommand::FillRect {
                     x: theirs_x - 4.0,
                     y,
                     width: col_w,
@@ -5337,18 +6296,30 @@ impl App {
                     corner_radii: CornerRadii::ZERO,
                 });
             }
-            cmds.push(RenderCommand::Text {
-                x: dx + 2.0,
-                y,
-                text: format!("#{}", i.saturating_add(1)),
-                font_size: 9.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(10.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            // The three answers for this conflict, stacked at its left. Each
+            // column is also a target for "take this side", since pressing
+            // the text you want is what a person reaches for first.
+            let mut chip_y = y;
+            for (label, pick) in [
+                ("Ours  O", ConflictChoice::Ours),
+                ("Disk  D", ConflictChoice::Theirs),
+                ("Both  B", ConflictChoice::Both),
+            ] {
+                let target = Target::ReviewPick(i, pick);
+                let rect = draw_small_button(
+                    f,
+                    &self.palette,
+                    dx + 10.0,
+                    chip_y,
+                    label,
+                    self.hover == Some(target),
+                    choice == pick,
+                );
+                f.hit(target, rect);
+                chip_y += FIND_ROW_H + 2.0;
+            }
             for (li, line) in ours.iter().enumerate() {
-                cmds.push(RenderCommand::Text {
+                f.push(RenderCommand::Text {
                     x: ours_x,
                     y: y + li as f32 * LINE_HEIGHT,
                     text: line.clone(),
@@ -5360,7 +6331,7 @@ impl App {
                 });
             }
             for (li, line) in theirs.iter().enumerate() {
-                cmds.push(RenderCommand::Text {
+                f.push(RenderCommand::Text {
                     x: theirs_x,
                     y: y + li as f32 * LINE_HEIGHT,
                     text: line.clone(),
@@ -5371,21 +6342,767 @@ impl App {
                     overflow: TextOverflow::Ellipsis,
                 });
             }
-            y += block_h + 6.0;
+            f.hit(
+                Target::ReviewPick(i, ConflictChoice::Ours),
+                Rect::new(ours_x - 4.0, y, col_w, block_h),
+            );
+            f.hit(
+                Target::ReviewPick(i, ConflictChoice::Theirs),
+                Rect::new(theirs_x - 4.0, y, col_w, block_h),
+            );
+            y += block_h + REVIEW_BLOCK_GAP;
         }
+        f.unclip();
 
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: dx + 12.0,
-            y: dy + dh - 24.0,
-            text: "[Accept]  [Cancel]   per-conflict: take ours / take disk / keep both"
-                .to_string(),
+            y: dy + dh - 30.0,
+            text: "Up and Down choose a conflict".to_string(),
             font_size: 11.0,
             color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((dw * 0.5).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        let mut bx = dx + dw - 12.0;
+        for (label, target) in [
+            ("Cancel  Esc", Target::ReviewCancel),
+            ("Accept  Enter", Target::ReviewAccept),
+        ] {
+            bx -= text::width(label, SMALL_BUTTON_FONT_SIZE) + 16.0;
+            let rect = draw_small_button(
+                f,
+                &self.palette,
+                bx,
+                dy + dh - 34.0,
+                label,
+                self.hover == Some(target),
+                false,
+            );
+            f.hit(target, rect);
+            bx -= 8.0;
+        }
+    }
+
+    /// Draw the "unsaved changes" dialog for a pending close.
+    fn draw_close_prompt(&self, f: &mut Frame<Target>, scope: CloseScope, width: f32, height: f32) {
+        let (title, body) = match scope {
+            CloseScope::Tab(idx) => {
+                let name = self
+                    .documents
+                    .get(idx)
+                    .map_or("This document", |d| d.name.as_str());
+                (
+                    "Unsaved changes",
+                    format!("\"{name}\" has changes that have not been saved."),
+                )
+            }
+            CloseScope::Window => {
+                let unsaved = self.documents.iter().filter(|d| d.modified).count();
+                (
+                    "Unsaved changes",
+                    if unsaved == 1 {
+                        "A document has changes that have not been saved.".to_string()
+                    } else {
+                        format!("{unsaved} documents have changes that have not been saved.")
+                    },
+                )
+            }
+        };
+        let offered: [(CloseChoice, &str, &str); 3] = match scope {
+            CloseScope::Tab(_) => [
+                (CloseChoice::Save, "Save  S", "save it, then close it"),
+                (
+                    CloseChoice::Discard,
+                    "Don't save  D",
+                    "close it and lose the changes",
+                ),
+                (CloseChoice::Cancel, "Cancel  Esc", "keep it open"),
+            ],
+            CloseScope::Window => [
+                (
+                    CloseChoice::Save,
+                    "Save all  S",
+                    "save each one, then close",
+                ),
+                (
+                    CloseChoice::Discard,
+                    "Don't save  D",
+                    "close and lose the changes",
+                ),
+                (CloseChoice::Cancel, "Cancel  Esc", "keep the window open"),
+            ],
+        };
+        let dw = 480.0_f32.min(width - 40.0);
+        let dh = 86.0 + 3.0 * 34.0;
+        let dialog = Rect::new((width - dw) / 2.0, (height - dh) / 2.0, dw, dh);
+        self.draw_dialog_frame(f, width, height, dialog, title);
+        f.push(RenderCommand::Text {
+            x: dialog.x + 12.0,
+            y: dialog.y + 44.0,
+            text: body,
+            font_size: 12.0,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dw - 24.0),
             overflow: TextOverflow::Ellipsis,
         });
+        let mut by = dialog.y + 74.0;
+        for (choice, label, hint) in offered {
+            let row = Rect::new(dialog.x + 12.0, by, dw - 24.0, 30.0);
+            self.draw_answer_row(f, row, label, hint, Target::Closing(choice));
+            by += 34.0;
+        }
     }
+}
+
+/// Width of the column of three answer buttons at the left of each conflict
+/// in the merge review.
+const REVIEW_CHIPS_W: f32 = 80.0;
+/// Vertical gap between two conflicts in the merge review.
+const REVIEW_BLOCK_GAP: f32 = 6.0;
+
+/// Height of one conflict in the merge review: its longer side, and never
+/// less than the three answer buttons stacked beside it.
+fn review_block_h(ours: usize, theirs: usize) -> f32 {
+    let lines = ours.max(theirs).max(1) as f32;
+    (lines * LINE_HEIGHT + 6.0).max(3.0 * (FIND_ROW_H + 2.0))
+}
+
+/// How far the merge review's conflicts are scrolled so the focused one is in
+/// view, for a body `body_h` tall.
+///
+/// Derived from the focus rather than kept: the conflicts cannot be scrolled
+/// any other way, and a position computed from the one thing that moves it
+/// cannot drift from it.
+fn review_scroll_px(review: &MergeReview, focus: usize, body_h: f32) -> f32 {
+    let mut top = 0.0;
+    let mut bottom = 0.0;
+    for (i, (_base, ours, theirs)) in review.conflicts().iter().enumerate() {
+        let h = review_block_h(ours.len(), theirs.len());
+        if i == focus {
+            bottom = top + h;
+            break;
+        }
+        top += h + REVIEW_BLOCK_GAP;
+    }
+    (bottom - body_h).max(0.0).min(top)
+}
+
+// ============================================================================
+// Closing, and the pointer
+// ============================================================================
+
+impl App {
+    /// Close tab `idx`, or ask first if it has unsaved changes.
+    ///
+    /// The close button on every tab drew an `x` that nothing answered, and
+    /// `close_document` -- written and tested -- had no caller at all, so a
+    /// document once opened stayed open. Now it can be closed, and closing one
+    /// with unsaved changes asks rather than losing them.
+    pub fn request_close_tab(&mut self, idx: usize) {
+        match self.documents.get(idx) {
+            Some(doc) if doc.modified => self.close_prompt = Some(CloseScope::Tab(idx)),
+            Some(_) => self.close_document(idx),
+            None => {}
+        }
+    }
+
+    /// The window has been asked to close. Returns whether it may go now.
+    ///
+    /// It used to go at once whatever it held: `CloseRequested` answered
+    /// `Exit` unconditionally, so every unsaved change in every tab --
+    /// including any untitled document, which auto-save never touches -- was
+    /// lost without a word. Now unsaved work is asked about first.
+    pub fn request_quit(&mut self) -> bool {
+        // With auto-save on, every document that has a file is saved first,
+        // without asking: auto-save is the user having said "save for me",
+        // and closing the window is the last chance to. It also matters for
+        // as long as `oswindow` closes the window whatever this answers
+        // (`requests/e-f-let-an-application-decline-a-close-so-it-can-ask-about-unsaved-work.md`):
+        // until then, this is the only part of the close that is sure to run.
+        if self.autosave_enabled {
+            self.save_every_titled_document();
+        }
+        if self.documents.iter().any(|d| d.modified) {
+            self.close_prompt = Some(CloseScope::Window);
+            false
+        } else {
+            true
+        }
+    }
+
+    /// Save every modified document that has a file, recording the first
+    /// failure where the user will see it. Returns whether they all saved.
+    fn save_every_titled_document(&mut self) -> bool {
+        let mut failure = None;
+        for doc in self.documents.iter_mut() {
+            if doc.modified
+                && doc.path.is_some()
+                && let Err(e) = doc.save()
+                && failure.is_none()
+            {
+                failure = Some(format!("Could not save {}: {e}", doc.name));
+            }
+        }
+        match failure {
+            Some(err) => {
+                self.save_error = Some(err);
+                false
+            }
+            None => true,
+        }
+    }
+
+    /// Answer the pending close.
+    pub fn answer_close(&mut self, choice: CloseChoice) {
+        let Some(scope) = self.close_prompt.take() else {
+            return;
+        };
+        match (scope, choice) {
+            (_, CloseChoice::Cancel) => {}
+            (CloseScope::Tab(idx), CloseChoice::Discard) => self.close_document(idx),
+            (CloseScope::Tab(idx), CloseChoice::Save) => self.save_then_close(idx),
+            (CloseScope::Window, CloseChoice::Discard) => self.quit = true,
+            (CloseScope::Window, CloseChoice::Save) => self.continue_quitting(),
+        }
+    }
+
+    /// Save tab `idx` and close it -- through the picker first if it has never
+    /// been saved. A save that fails leaves the tab open and says why.
+    fn save_then_close(&mut self, idx: usize) {
+        let Some(doc) = self.documents.get_mut(idx) else {
+            return;
+        };
+        if doc.path.is_none() {
+            let name = save_as_name(doc);
+            self.ask_where_to_save(SavePurpose::DocumentThenClose(idx), name);
+            return;
+        }
+        let name = doc.name.clone();
+        match doc.save() {
+            Ok(()) => {
+                self.save_error = None;
+                self.close_document(idx);
+            }
+            Err(e) => self.save_error = Some(format!("Could not save {name}: {e}")),
+        }
+    }
+
+    /// Carry on closing the window: save everything that has somewhere to go,
+    /// ask where to put the first thing that does not, and quit once nothing
+    /// is left unsaved.
+    ///
+    /// Stops at the first failure. Quitting past a document whose save just
+    /// failed is exactly the loss this exists to prevent.
+    fn continue_quitting(&mut self) {
+        if !self.save_every_titled_document() {
+            return;
+        }
+        let unsaved = self.documents.iter().position(|d| d.modified);
+        if let Some(idx) = unsaved {
+            self.switch_tab(idx);
+            let name = save_as_name(self.active_document());
+            self.ask_where_to_save(SavePurpose::DocumentThenQuit(idx), name);
+            return;
+        }
+        self.quit = true;
+    }
+
+    /// Whether the window should close now.
+    pub fn wants_to_quit(&self) -> bool {
+        self.quit
+    }
+
+    /// What is under `(x, y)` in the frame last shown.
+    ///
+    /// For the events that come in floods -- the pointer moving, the wheel
+    /// turning -- the boxes recorded by the last paint are read rather than a
+    /// frame drawn afresh: drawing one lays out the whole preview, and doing
+    /// that for every pixel the pointer crosses would be most of this app's
+    /// work. What the last paint recorded is also exactly what the person is
+    /// looking at. A press, which is rare and must act on the current state,
+    /// draws a fresh frame instead.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        if self.last_hits.is_empty() {
+            return self
+                .frame(self.window_width, self.window_height)
+                .hit_test(x, y);
+        }
+        self.last_hits
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(target, _)| *target)
+    }
+
+    /// The box the source pane was last drawn in, if it is showing.
+    fn source_pane(&self) -> Option<Rect> {
+        if let Some(&(_, rect)) = self
+            .last_hits
+            .iter()
+            .rev()
+            .find(|(t, _)| *t == Target::Editor)
+        {
+            return Some(rect);
+        }
+        self.frame(self.window_width, self.window_height)
+            .rect_of(|t| *t == Target::Editor)
+    }
+
+    /// Route a pointer event. Returns whether anything changed.
+    pub fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        // An open drop-down takes every press, and consumes it either way: a
+        // press that dismisses a menu must not also land on what was behind
+        // it.
+        if let Some((kind, menu)) = self.menu.as_mut() {
+            match event.kind {
+                MouseEventKind::Press(_) => {
+                    let kind = *kind;
+                    let chosen = menu.handle_click(event.x, event.y);
+                    self.menu = None;
+                    if let Some(id) = chosen {
+                        self.choose_from_menu(kind, id);
+                    }
+                    return true;
+                }
+                MouseEventKind::Move => {
+                    menu.handle_mouse_move(event.x, event.y);
+                    return true;
+                }
+                MouseEventKind::Scroll { dy, .. } => {
+                    return menu.handle_scroll(event.x, event.y, dy);
+                }
+                _ => return false,
+            }
+        }
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                self.file_status = None;
+                let frame = self.frame(self.window_width, self.window_height);
+                let Some(target) = frame.hit_test(event.x, event.y) else {
+                    return false;
+                };
+                if target == Target::Editor {
+                    let pane = frame
+                        .rect_of(|t| *t == Target::Editor)
+                        .unwrap_or(Rect::EMPTY);
+                    self.press_in_source(pane, event.x, event.y);
+                    return true;
+                }
+                self.activate(target);
+                true
+            }
+            MouseEventKind::DoubleClick(MouseButton::Left) => {
+                let frame = self.frame(self.window_width, self.window_height);
+                match frame.hit_test(event.x, event.y) {
+                    Some(Target::Editor) => {
+                        let pane = frame
+                            .rect_of(|t| *t == Target::Editor)
+                            .unwrap_or(Rect::EMPTY);
+                        self.select_word_at(pane, event.x, event.y);
+                        true
+                    }
+                    // Anywhere else a double press means nothing more than
+                    // its first press, which has already been delivered. Not
+                    // repeated: whether a host sends the second press as well
+                    // as this is not settled (`guitk::dialog` notes a host may
+                    // send only this), and a button that fired three times for
+                    // two presses would be worse than one that fired once.
+                    _ => false,
+                }
+            }
+            MouseEventKind::Move => {
+                if self.dragging {
+                    let Some(pane) = self.source_pane() else {
+                        self.dragging = false;
+                        return false;
+                    };
+                    self.drag_in_source(pane, event.x, event.y);
+                    return true;
+                }
+                let over = self.target_at(event.x, event.y);
+                if over == self.hover {
+                    return false;
+                }
+                self.hover = over;
+                true
+            }
+            MouseEventKind::Release(MouseButton::Left) => {
+                if !self.dragging {
+                    return false;
+                }
+                self.dragging = false;
+                // A press that never moved selected nothing; leaving an empty
+                // selection behind would make the next Bold wrap nothing in
+                // `****` rather than inserting its placeholder.
+                let doc = self.active_document_mut();
+                if doc.selection_anchor == Some((doc.cursor_line, doc.cursor_col)) {
+                    doc.selection_anchor = None;
+                }
+                true
+            }
+            MouseEventKind::Leave => {
+                let changed = self.hover.is_some();
+                self.hover = None;
+                changed
+            }
+            MouseEventKind::Scroll { dy, .. } => {
+                let over = self.target_at(event.x, event.y);
+                self.scroll(over, dy)
+            }
+            _ => false,
+        }
+    }
+
+    /// Turn the wheel over `over` by `dy` notches. Returns whether anything
+    /// moved.
+    fn scroll(&mut self, over: Option<Target>, dy: f32) -> bool {
+        match over {
+            Some(Target::Editor) => {
+                let rows = self.editor_wheel.rows(dy);
+                let doc = self.active_document_mut();
+                let last = doc.lines.len().saturating_sub(1);
+                let before = doc.scroll_line;
+                doc.scroll_line = doc.scroll_line.saturating_add_signed(rows).min(last);
+                if doc.scroll_line == before {
+                    return false;
+                }
+                // The preview follows the source, as it does for the keys.
+                self.sync_scroll();
+                true
+            }
+            Some(Target::Preview) => {
+                let Some(pane) = self
+                    .frame(self.window_width, self.window_height)
+                    .rect_of(|t| *t == Target::Preview)
+                else {
+                    return false;
+                };
+                let limit = (preview_content_height(&self.cached_blocks, &self.palette, pane.w)
+                    - pane.h)
+                    .max(0.0);
+                let doc = self.active_document_mut();
+                let before = doc.preview_scroll;
+                doc.preview_scroll =
+                    (doc.preview_scroll + wheel::pixels(dy, LINE_HEIGHT)).clamp(0.0, limit);
+                (doc.preview_scroll - before).abs() > f32::EPSILON
+            }
+            Some(Target::Toc | Target::Heading(_)) => {
+                let rows = self.toc_wheel.rows(dy);
+                let content_h = self.window_height
+                    - TOOLBAR_HEIGHT
+                    - TAB_BAR_HEIGHT
+                    - STATUS_BAR_HEIGHT
+                    - if self.find_state.visible {
+                        FIND_PANEL_HEIGHT
+                    } else {
+                        0.0
+                    };
+                let last_first = self
+                    .cached_toc
+                    .len()
+                    .saturating_sub(toc_rows_visible(content_h));
+                let before = self.toc_scroll;
+                self.toc_scroll = self.toc_scroll.saturating_add_signed(rows).min(last_first);
+                self.toc_scroll != before
+            }
+            _ => false,
+        }
+    }
+
+    /// Do what pressing `target` means.
+    fn activate(&mut self, target: Target) {
+        match target {
+            Target::Toolbar(action) => self.handle_toolbar_action(&action),
+            Target::ToolbarMore => self.open_toolbar_menu(),
+            Target::Tab(idx) => self.switch_tab(idx),
+            Target::CloseTab(idx) => self.request_close_tab(idx),
+            Target::TabsMore => self.open_tabs_menu(),
+            Target::Heading(line) => self.jump_to_heading(line),
+            Target::FindQuery => self.find_state.focus_replacement = false,
+            Target::FindReplacement => self.find_state.focus_replacement = true,
+            Target::FindPrev => {
+                self.find_state.prev_match();
+                show_current_match(self);
+            }
+            Target::FindNext => {
+                self.find_state.next_match();
+                show_current_match(self);
+            }
+            Target::FindMatchCase => {
+                self.find_state.case_sensitive = !self.find_state.case_sensitive;
+                refresh_matches(self);
+            }
+            Target::FindReplace | Target::FindReplaceAll => {
+                replace_in_active(self, target == Target::FindReplaceAll);
+                refresh_matches(self);
+                show_current_match(self);
+            }
+            Target::FindClose => self.find_state.visible = false,
+            Target::ViewMode => self.view_mode = self.view_mode.next(),
+            Target::Autosave => self.autosave_enabled = !self.autosave_enabled,
+            Target::TemplateBackdrop | Target::TemplateCancel => {
+                self.template_chooser_open = false;
+            }
+            Target::Template(idx) => {
+                self.handle_toolbar_action(&ToolbarAction::ApplyTemplate(idx));
+            }
+            Target::External(choice) => self.resolve_external(choice),
+            Target::ReviewPick(idx, choice) => {
+                self.review_focus = idx;
+                self.review_set_choice(idx, choice);
+            }
+            Target::ReviewAccept => self.review_accept(),
+            Target::ReviewCancel => self.review_cancel(),
+            Target::Closing(choice) => self.answer_close(choice),
+            Target::HelpCard => self.show_help = false,
+            // Surfaces that answer the wheel or nothing at all; a press on
+            // them is theirs, and stops there.
+            Target::Toc
+            | Target::FindPanel
+            | Target::Preview
+            | Target::DialogBody
+            | Target::ModalBackdrop
+            | Target::Editor => {}
+        }
+    }
+
+    /// Bring heading `line` to the top of the source pane, caret on it.
+    fn jump_to_heading(&mut self, line: usize) {
+        let doc = self.active_document_mut();
+        doc.selection_anchor = None;
+        doc.go_to_line(line);
+        doc.cursor_col = 0;
+        doc.scroll_line = doc.cursor_line;
+        self.sync_scroll();
+    }
+
+    /// Open the toolbar's drop-down under its `»`, listing the buttons the
+    /// window had no room for.
+    fn open_toolbar_menu(&mut self) {
+        let items: Vec<MenuItem> = toolbar_overflow(&self.toolbar, self.window_width)
+            .into_iter()
+            .map(|(i, button)| MenuItem::Action {
+                id: i as u64,
+                label: button.tooltip.clone(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: None,
+            })
+            .collect();
+        let at = self
+            .frame(self.window_width, self.window_height)
+            .rect_of(|t| *t == Target::ToolbarMore);
+        self.show_menu(MenuKind::Toolbar, items, at);
+    }
+
+    /// Open the tab bar's drop-down under its `»`, listing every document.
+    fn open_tabs_menu(&mut self) {
+        let active = self.active_doc();
+        let items: Vec<MenuItem> = self
+            .documents
+            .iter()
+            .enumerate()
+            .map(|(i, doc)| MenuItem::Action {
+                id: i as u64,
+                label: tab_label(doc),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: Some(i == active),
+            })
+            .collect();
+        let at = self
+            .frame(self.window_width, self.window_height)
+            .rect_of(|t| *t == Target::TabsMore);
+        self.show_menu(MenuKind::Tabs, items, at);
+    }
+
+    /// Put a drop-down up below `under`, right-aligned to it.
+    fn show_menu(&mut self, kind: MenuKind, items: Vec<MenuItem>, under: Option<Rect>) {
+        if items.is_empty() {
+            return;
+        }
+        let anchor = under.unwrap_or(Rect::new(self.window_width, 0.0, 0.0, 0.0));
+        let mut menu = ContextMenu::new(items);
+        // `show` keeps the menu inside the viewport, so asking for the right
+        // edge of the `»` is safe even when the menu is wider than the space
+        // to its right.
+        menu.show(
+            anchor.right(),
+            anchor.bottom(),
+            (self.window_width, self.window_height),
+        );
+        self.menu = Some((kind, menu));
+    }
+
+    /// Act on item `id` of a drop-down of `kind`.
+    fn choose_from_menu(&mut self, kind: MenuKind, id: u64) {
+        let Ok(idx) = usize::try_from(id) else {
+            return;
+        };
+        match kind {
+            MenuKind::Toolbar => {
+                if let Some(ToolbarItem::Button(button)) = self.toolbar.get(idx) {
+                    let action = button.action;
+                    self.handle_toolbar_action(&action);
+                }
+            }
+            MenuKind::Tabs => self.switch_tab(idx),
+        }
+    }
+
+    /// A press in the source pane: put the caret there, or -- with Shift held
+    /// -- extend the selection there, and start a drag either way.
+    fn press_in_source(&mut self, pane: Rect, x: f32, y: f32) {
+        let extend = self.shift_held;
+        let doc = self.active_document_mut();
+        let (line, col) = position_at(doc, pane, x, y);
+        if extend {
+            if doc.selection_anchor.is_none() {
+                doc.selection_anchor = Some((doc.cursor_line, doc.cursor_col));
+            }
+        } else {
+            // Anchored here, so the drag that may follow has somewhere to
+            // extend from. Cleared again on release if nothing was dragged.
+            doc.selection_anchor = Some((line, col));
+        }
+        doc.cursor_line = line;
+        doc.cursor_col = col;
+        self.dragging = true;
+    }
+
+    /// The pointer moved with the button held: extend the selection to it.
+    ///
+    /// Past the top or bottom of the pane the view scrolls one line per
+    /// movement, so a selection can be dragged beyond what is on screen.
+    fn drag_in_source(&mut self, pane: Rect, x: f32, y: f32) {
+        let visible = (pane.h / LINE_HEIGHT) as usize;
+        let doc = self.active_document_mut();
+        if y < pane.y {
+            doc.scroll_line = doc.scroll_line.saturating_sub(1);
+        } else if y >= pane.bottom() {
+            let last = doc.lines.len().saturating_sub(1);
+            doc.scroll_line = doc.scroll_line.saturating_add(1).min(last);
+        }
+        let (line, col) = position_at(doc, pane, x, y);
+        doc.cursor_line = line;
+        doc.cursor_col = col;
+        doc.ensure_cursor_visible(visible.max(1));
+        self.sync_scroll();
+    }
+
+    /// Select the word under `(x, y)`: letters, digits and underscores, or the
+    /// single character there if it is none of those.
+    fn select_word_at(&mut self, pane: Rect, x: f32, y: f32) {
+        self.dragging = false;
+        let doc = self.active_document_mut();
+        let (line, col) = position_at(doc, pane, x, y);
+        let (start, end) = word_bounds(doc.line_text(line), col);
+        doc.cursor_line = line;
+        if start == end {
+            doc.selection_anchor = None;
+            doc.cursor_col = start;
+        } else {
+            doc.selection_anchor = Some((line, start));
+            doc.cursor_col = end;
+        }
+    }
+}
+
+/// The byte range of the word around byte `col` of `line`.
+///
+/// A word is a run of letters, digits and underscores. Off a word, the range
+/// is the single character at `col`, so a double press on punctuation still
+/// selects what it landed on; at the end of a line it is empty.
+fn word_bounds(line: &str, col: usize) -> (usize, usize) {
+    let col = clamp_col(line, col);
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let Some(here) = line.get(col..).and_then(|tail| tail.chars().next()) else {
+        return (col, col);
+    };
+    if !is_word(here) {
+        return (col, col.saturating_add(here.len_utf8()));
+    }
+    let start = line
+        .get(..col)
+        .and_then(|head| {
+            head.char_indices()
+                .rev()
+                .take_while(|&(_, c)| is_word(c))
+                .last()
+        })
+        .map_or(col, |(i, _)| i);
+    let end = line
+        .get(col..)
+        .and_then(|tail| tail.char_indices().find(|&(_, c)| !is_word(c)))
+        .map_or(line.len(), |(i, _)| col.saturating_add(i));
+    (start, end)
+}
+
+/// The column of `line` nearest to `x`, for a line whose text starts at
+/// `text_x`.
+///
+/// The inverse of [`col_x`], and built on it rather than beside it: it asks
+/// `col_x` where each character boundary is drawn and picks the nearest, so a
+/// press lands on the boundary the caret would be *drawn* at, whatever the
+/// characters' widths. A binary search, because `col_x` only grows with the
+/// column.
+fn col_at(line: &str, x: f32, text_x: f32) -> usize {
+    let bounds: Vec<usize> = line
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(line.len()))
+        .collect();
+    let past = bounds.partition_point(|&b| col_x(line, b, text_x) <= x);
+    let before = past.checked_sub(1).and_then(|i| bounds.get(i)).copied();
+    let after = bounds.get(past).copied();
+    match (before, after) {
+        (Some(lo), Some(hi)) => {
+            if x - col_x(line, lo, text_x) <= col_x(line, hi, text_x) - x {
+                lo
+            } else {
+                hi
+            }
+        }
+        (Some(lo), None) => lo,
+        (None, Some(hi)) => hi,
+        (None, None) => 0,
+    }
+}
+
+/// The document position under `(x, y)` in a source pane drawn in `pane`.
+///
+/// Above or below the pane it answers the line just off that edge, clamped
+/// to the document, which is what a drag past the edge needs.
+fn position_at(doc: &Document, pane: Rect, x: f32, y: f32) -> (usize, usize) {
+    let row = ((y - pane.y) / LINE_HEIGHT).floor() as isize;
+    let last = doc.lines.len().saturating_sub(1);
+    let line = doc.scroll_line.saturating_add_signed(row).min(last);
+    let text_x = pane.x + GUTTER_WIDTH + EDITOR_PADDING;
+    (line, col_at(doc.line_text(line), x, text_x))
+}
+
+/// How tall the preview of `blocks` is when laid out `width` wide: what the
+/// wheel may scroll through.
+fn preview_content_height(blocks: &[MdBlock], pal: &Palette, width: f32) -> f32 {
+    // A zero-height viewport: every element is laid out and none is drawn,
+    // so this measures without building a frame's worth of commands.
+    let mut ctx = PreviewContext::new(
+        *pal,
+        PREVIEW_PADDING,
+        0.0,
+        width - PREVIEW_PADDING * 2.0,
+        0.0,
+        0.0,
+    );
+    for block in blocks {
+        render_block_preview(block, &mut ctx);
+        ctx.add_spacing(8.0);
+    }
+    ctx.y + PREVIEW_PADDING * 2.0
 }
 
 // ============================================================================
@@ -5572,12 +7289,15 @@ fn handle_find_key(app: &mut App, key: Key, modifiers: Modifiers) -> bool {
 /// The keys this program answers, as a reader sees them.
 ///
 /// Every one of these was already written down -- in `ToolbarButton::tooltip`,
-/// which nothing in this crate reads and no pointer could ever summon, because
-/// this app handles no mouse event of any kind. A shortcut named only in a
-/// field with no reader is not named.
+/// which for most of this app's life nothing read and no pointer could
+/// summon, because the app handled no mouse event of any kind. A shortcut
+/// named only in a field with no reader is not named.
 ///
 /// `Ctrl+O` was in that list too and was bound to nothing at all. It is bound
 /// here, because the honest repair for an advertised key is to make it work.
+/// The rows from `Ctrl+Shift+N` to `Ctrl+Shift+I`, and the selection and
+/// clipboard rows, arrived with the pointer layer: each names something the
+/// app offered and nothing reached.
 ///
 /// **No `?` row.** `Key::Char(ch)` with no Ctrl inserts the character into the
 /// document, so binding `?` would cost a question mark in a markdown file to
@@ -5585,12 +7305,30 @@ fn handle_find_key(app: &mut App, key: Key, modifiers: Modifiers) -> bool {
 const SHORTCUTS: &[(&str, &str)] = &[
     ("F1", "This list"),
     ("Ctrl+N", "New document"),
+    ("Ctrl+Shift+N", "New document from a template"),
     ("Ctrl+O", "Open a file"),
     ("Ctrl+S", "Save"),
+    ("Ctrl+Shift+S", "Save under a new name"),
+    ("Ctrl+Shift+E", "Export as HTML"),
+    ("Ctrl+W", "Close the document"),
+    ("Ctrl+Tab", "Next document"),
+    ("Ctrl+Shift+Tab", "Previous document"),
+    ("Ctrl+E", "Editor, split or preview"),
+    ("Ctrl+Shift+O", "Table of contents"),
     ("Ctrl+B", "Bold"),
     ("Ctrl+I", "Italic; match case in the find panel"),
     ("Ctrl+K", "Link"),
     ("Ctrl+Shift+K", "Code block"),
+    ("Ctrl+Shift+I", "Image"),
+    ("Ctrl+1", "Heading 1; Ctrl+2 to Ctrl+6 for the rest"),
+    ("Ctrl+A", "Select everything"),
+    (
+        "Shift+Right",
+        "Extend the selection; any arrow, Home or End",
+    ),
+    ("Ctrl+C", "Copy"),
+    ("Ctrl+X", "Cut"),
+    ("Ctrl+V", "Paste"),
     ("Ctrl+Z", "Undo"),
     ("Ctrl+Y", "Redo"),
     ("Ctrl+Shift+Z", "Redo"),
@@ -5598,10 +7336,246 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+H", "Find and replace"),
     ("Tab", "Indent; switch boxes in the find panel"),
     ("Enter", "New line; next match in the find panel"),
+    ("Shift+Enter", "Previous match, in the find panel"),
     ("Ctrl+Enter", "Replace, in the find panel"),
     ("Ctrl+Shift+Enter", "Replace all, in the find panel"),
     ("Esc", "Close the find panel"),
 ];
+
+/// Keys while the "unsaved changes" dialog is up. It is modal: every key stops
+/// here, answered or not, because typing into a document that is being closed
+/// is typing into a document the user has already decided about.
+fn handle_close_prompt_key(app: &mut App, key: Key) -> bool {
+    let choice = match key {
+        Key::Char('s' | 'S') | Key::Enter => CloseChoice::Save,
+        Key::Char('d' | 'D') => CloseChoice::Discard,
+        Key::Char('c' | 'C') | Key::Escape => CloseChoice::Cancel,
+        _ => return true,
+    };
+    app.answer_close(choice);
+    true
+}
+
+/// Keys while the "file changed on disk" dialog is up -- its answers, or the
+/// merge review's. Modal for the same reason as the close dialog.
+///
+/// `Esc` on the answers puts the question off rather than answering it: the
+/// dialog comes back the next time the window regains focus, because the file
+/// on disk still differs from the buffer. On the review it goes back to the
+/// answers, which is what the review's own Cancel does.
+fn handle_external_prompt_key(app: &mut App, key: Key) -> bool {
+    let Some(prompt) = app.external_prompt.as_ref() else {
+        return false;
+    };
+    if let Some(review) = prompt.review.as_ref() {
+        let last = review.conflicts().len().saturating_sub(1);
+        match key {
+            Key::Up => app.review_focus = app.review_focus.saturating_sub(1),
+            Key::Down => app.review_focus = app.review_focus.saturating_add(1).min(last),
+            Key::Char('o' | 'O') => app.review_set_choice(app.review_focus, ConflictChoice::Ours),
+            Key::Char('d' | 'D') => {
+                app.review_set_choice(app.review_focus, ConflictChoice::Theirs);
+            }
+            Key::Char('b' | 'B') => app.review_set_choice(app.review_focus, ConflictChoice::Both),
+            Key::Enter => app.review_accept(),
+            Key::Escape => app.review_cancel(),
+            _ => {}
+        }
+        return true;
+    }
+    let choice = match key {
+        Key::Char('k' | 'K') => ExternalChoice::KeepCurrent,
+        Key::Char('r' | 'R') => ExternalChoice::Reload,
+        Key::Char('m' | 'M') => ExternalChoice::Merge,
+        Key::Char('v' | 'V') => ExternalChoice::Review,
+        Key::Char('c' | 'C') => ExternalChoice::Close,
+        Key::Escape => {
+            app.dismiss_external();
+            return true;
+        }
+        _ => return true,
+    };
+    // Only the answers this prompt offers: `R` on a deleted file has no disk
+    // version to reload, and doing nothing silently is what that answer used
+    // to do.
+    if ExternalChoice::offered(&prompt.change)
+        .iter()
+        .any(|(offered, ..)| *offered == choice)
+    {
+        app.resolve_external(choice);
+    }
+    true
+}
+
+/// Keys while the template chooser is up: arrows and Enter, a digit for a
+/// template by number, `Esc` to close. Modal, like the rest.
+fn handle_template_key(app: &mut App, key: Key) -> bool {
+    let last = Template::all().len().saturating_sub(1);
+    match key {
+        Key::Up => app.template_focus = app.template_focus.saturating_sub(1),
+        Key::Down => app.template_focus = app.template_focus.saturating_add(1).min(last),
+        Key::Enter => {
+            let focus = app.template_focus;
+            app.handle_toolbar_action(&ToolbarAction::ApplyTemplate(focus));
+        }
+        Key::Char(c @ '1'..='9') => {
+            let chosen = c
+                .to_digit(10)
+                .and_then(|d| usize::try_from(d).ok())
+                .and_then(|d| d.checked_sub(1));
+            if let Some(idx) = chosen.filter(|&i| i <= last) {
+                app.handle_toolbar_action(&ToolbarAction::ApplyTemplate(idx));
+            }
+        }
+        Key::Escape => app.template_chooser_open = false,
+        _ => {}
+    }
+    true
+}
+
+/// Bring the next or the previous tab to the front, wrapping at either end.
+fn cycle_tab(app: &mut App, forward: bool) {
+    let count = app.documents.count();
+    if count < 2 {
+        return;
+    }
+    let current = app.active_doc();
+    let last = count.saturating_sub(1);
+    let next = if forward {
+        if current >= last {
+            0
+        } else {
+            current.saturating_add(1)
+        }
+    } else {
+        current.checked_sub(1).unwrap_or(last)
+    };
+    app.switch_tab(next);
+}
+
+/// Copy the selection to the editor's clipboard. Returns whether there was a
+/// selection to copy -- Ctrl+C with nothing selected leaves the clipboard
+/// alone rather than emptying it.
+fn copy_selection(app: &mut App) -> bool {
+    match app.active_document().selected_text() {
+        Some(text) => {
+            app.clipboard = text;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Answer a Ctrl chord. `None` when it is not one of this app's, so the caller
+/// can carry on looking.
+fn handle_ctrl_key(app: &mut App, key: Key, modifiers: Modifiers) -> Option<bool> {
+    let shift = modifiers.shift;
+    match key {
+        Key::Char('n' | 'N') if shift => {
+            app.handle_toolbar_action(&ToolbarAction::Templates);
+        }
+        Key::Char('n' | 'N') => app.new_document(),
+        Key::Char('o' | 'O') if shift => app.toc_visible = !app.toc_visible,
+        // Advertised by the Open button's tooltip since that toolbar was
+        // written, and answered by nothing until this was.
+        Key::Char('o' | 'O') => app.picker.open_to_read(),
+        Key::Char('s' | 'S') if shift => app.handle_toolbar_action(&ToolbarAction::SaveAs),
+        Key::Char('s' | 'S') => {
+            app.save_active();
+        }
+        Key::Char('e' | 'E') if shift => app.handle_toolbar_action(&ToolbarAction::ExportHtml),
+        Key::Char('e' | 'E') => app.view_mode = app.view_mode.next(),
+        Key::Char('w' | 'W') => app.request_close_tab(app.active_doc()),
+        Key::Tab => cycle_tab(app, !shift),
+        Key::PageDown => cycle_tab(app, true),
+        Key::PageUp => cycle_tab(app, false),
+        Key::Char('z' | 'Z') => {
+            if shift {
+                app.active_document_mut().redo();
+            } else {
+                app.active_document_mut().undo();
+            }
+            app.refresh_cache();
+        }
+        Key::Char('y' | 'Y') => {
+            app.active_document_mut().redo();
+            app.refresh_cache();
+        }
+        Key::Char('b' | 'B') => {
+            insert_bold(app.active_document_mut());
+            app.refresh_cache();
+        }
+        Key::Char('i' | 'I') if shift => {
+            insert_image(app.active_document_mut());
+            app.refresh_cache();
+        }
+        Key::Char('i' | 'I') => {
+            insert_italic(app.active_document_mut());
+            app.refresh_cache();
+        }
+        Key::Char('k' | 'K') => {
+            if shift {
+                insert_code_block(app.active_document_mut());
+            } else {
+                insert_link(app.active_document_mut());
+            }
+            app.refresh_cache();
+        }
+        Key::Char(c @ '1'..='6') => {
+            let level = c
+                .to_digit(10)
+                .and_then(|d| u8::try_from(d).ok())
+                .unwrap_or(1);
+            set_heading(app.active_document_mut(), level);
+            app.refresh_cache();
+        }
+        Key::Char('a' | 'A') => app.active_document_mut().select_all(),
+        Key::Char('c' | 'C') => {
+            copy_selection(app);
+        }
+        Key::Char('x' | 'X') => {
+            if copy_selection(app) {
+                app.active_document_mut().delete_selection();
+                app.refresh_cache();
+            }
+        }
+        Key::Char('v' | 'V') => {
+            let text = app.clipboard.clone();
+            let doc = app.active_document_mut();
+            doc.delete_selection();
+            doc.insert_text(&text);
+            app.refresh_cache();
+        }
+        Key::Char('h' | 'H') => app.find_state.visible = !app.find_state.visible,
+        Key::Char('f' | 'F') => app.find_state.visible = true,
+        _ => return None,
+    }
+    Some(true)
+}
+
+/// Move the caret with `step`, extending the selection when Shift is held and
+/// dropping it when not.
+///
+/// Shift+arrow is how a keyboard selects, and nothing here did it:
+/// `selection_anchor` was cleared in four places and set in none, so every
+/// branch of Bold, Italic and Link that wraps a selection was unreachable, and
+/// they could only ever insert their placeholders.
+fn move_caret(app: &mut App, extend: bool, step: impl FnOnce(&mut Document)) {
+    let doc = app.active_document_mut();
+    if extend {
+        if doc.selection_anchor.is_none() {
+            doc.selection_anchor = Some((doc.cursor_line, doc.cursor_col));
+        }
+    } else {
+        doc.selection_anchor = None;
+    }
+    step(doc);
+    if doc.selection_anchor == Some((doc.cursor_line, doc.cursor_col)) {
+        doc.selection_anchor = None;
+    }
+    let visible = compute_visible_lines(app);
+    app.active_document_mut().ensure_cursor_visible(visible);
+}
 
 /// Answer a keystroke. Reports whether this program did anything with it.
 ///
@@ -5610,6 +7584,8 @@ const SHORTCUTS: &[(&str, &str)] = &[
 /// is the mistake this tree has made six times: the observable whose name
 /// matches the verb is usually not the one the action writes.
 pub fn handle_key(app: &mut App, key: Key, modifiers: Modifiers) -> bool {
+    // "Opened notes.md" has been seen once the person does something else.
+    app.file_status = None;
     // Above the find panel's branch, which returns before everything below
     // it. Placed after, the card could be raised from the editor and then not
     // dismissed while the panel was open -- a list with no way out, which is
@@ -5626,6 +7602,16 @@ pub fn handle_key(app: &mut App, key: Key, modifiers: Modifiers) -> bool {
         }
         return true;
     }
+    // The dialogs, each modal, most urgent first.
+    if app.close_prompt.is_some() {
+        return handle_close_prompt_key(app, key);
+    }
+    if app.external_prompt.is_some() {
+        return handle_external_prompt_key(app, key);
+    }
+    if app.template_chooser_open {
+        return handle_template_key(app, key);
+    }
 
     // The find panel takes the keyboard while it is open.
     if app.find_state.visible && handle_find_key(app, key, modifiers) {
@@ -5633,150 +7619,106 @@ pub fn handle_key(app: &mut App, key: Key, modifiers: Modifiers) -> bool {
     }
 
     // Global shortcuts.
-    if modifiers.ctrl {
-        match key {
-            Key::Char('n') | Key::Char('N') => {
-                app.new_document();
-                return true;
-            }
-            // Advertised by the Open button's tooltip since that toolbar was
-            // written, and answered by nothing. The toolbar cannot be clicked
-            // either, so this was the only route left to a file.
-            Key::Char('o') | Key::Char('O') => {
-                app.picker.open_to_read();
-                return true;
-            }
-            Key::Char('s') | Key::Char('S') => {
-                app.save_active();
-                return true;
-            }
-            Key::Char('z') | Key::Char('Z') => {
-                if modifiers.shift {
-                    app.active_document_mut().redo();
-                } else {
-                    app.active_document_mut().undo();
-                }
-                app.refresh_cache();
-                return true;
-            }
-            Key::Char('y') | Key::Char('Y') => {
-                app.active_document_mut().redo();
-                app.refresh_cache();
-                return true;
-            }
-            Key::Char('b') | Key::Char('B') => {
-                insert_bold(app.active_document_mut());
-                app.refresh_cache();
-                return true;
-            }
-            Key::Char('i') | Key::Char('I') => {
-                insert_italic(app.active_document_mut());
-                app.refresh_cache();
-                return true;
-            }
-            Key::Char('k') | Key::Char('K') => {
-                if modifiers.shift {
-                    insert_code_block(app.active_document_mut());
-                } else {
-                    insert_link(app.active_document_mut());
-                }
-                app.refresh_cache();
-                return true;
-            }
-            Key::Char('h') | Key::Char('H') => {
-                app.find_state.visible = !app.find_state.visible;
-                return true;
-            }
-            Key::Char('f') | Key::Char('F') => {
-                app.find_state.visible = true;
-                return true;
-            }
-            _ => {}
-        }
+    if modifiers.ctrl
+        && let Some(answered) = handle_ctrl_key(app, key, modifiers)
+    {
+        app.sync_scroll();
+        return answered;
     }
 
-    // Escape closes dialogs/panels.
-    if key == Key::Escape {
-        if app.template_chooser_open {
-            app.template_chooser_open = false;
-            return true;
-        }
-        if app.find_state.visible {
-            app.find_state.visible = false;
-            return true;
-        }
+    // Escape closes the find panel.
+    if key == Key::Escape && app.find_state.visible {
+        app.find_state.visible = false;
+        return true;
     }
 
-    // Navigation keys.
+    let extend = modifiers.shift;
     let answered = match key {
+        // Left and Right on a selection without Shift land on its near and
+        // far ends rather than moving one character from the caret.
+        Key::Left | Key::Right if !extend && app.active_document().has_selection() => {
+            if let Some((start, end)) = app.active_document().selection_bounds() {
+                let doc = app.active_document_mut();
+                let (line, col) = if key == Key::Left { start } else { end };
+                doc.selection_anchor = None;
+                doc.cursor_line = line;
+                doc.cursor_col = col;
+            }
+            true
+        }
         Key::Up => {
-            app.active_document_mut().move_cursor_up();
-            let visible = compute_visible_lines(app);
-            app.active_document_mut().ensure_cursor_visible(visible);
+            move_caret(app, extend, Document::move_cursor_up);
             true
         }
         Key::Down => {
-            app.active_document_mut().move_cursor_down();
-            let visible = compute_visible_lines(app);
-            app.active_document_mut().ensure_cursor_visible(visible);
+            move_caret(app, extend, Document::move_cursor_down);
             true
         }
         Key::Left => {
-            app.active_document_mut().move_cursor_left();
+            move_caret(app, extend, Document::move_cursor_left);
             true
         }
         Key::Right => {
-            app.active_document_mut().move_cursor_right();
+            move_caret(app, extend, Document::move_cursor_right);
             true
         }
         Key::Home => {
-            app.active_document_mut().move_cursor_home();
+            move_caret(app, extend, Document::move_cursor_home);
             true
         }
         Key::End => {
-            app.active_document_mut().move_cursor_end();
+            move_caret(app, extend, Document::move_cursor_end);
             true
         }
-        Key::PageUp => {
+        Key::PageUp | Key::PageDown => {
             let visible = compute_visible_lines(app);
-            let doc = app.active_document_mut();
-            for _ in 0..visible {
-                doc.move_cursor_up();
-            }
-            doc.ensure_cursor_visible(visible);
+            let down = key == Key::PageDown;
+            move_caret(app, extend, |doc| {
+                for _ in 0..visible {
+                    if down {
+                        doc.move_cursor_down();
+                    } else {
+                        doc.move_cursor_up();
+                    }
+                }
+            });
             true
         }
-        Key::PageDown => {
-            let visible = compute_visible_lines(app);
-            let doc = app.active_document_mut();
-            for _ in 0..visible {
-                doc.move_cursor_down();
-            }
-            doc.ensure_cursor_visible(visible);
-            true
-        }
+        // Everything that types replaces the selection, as it does in every
+        // editor a person has used; an anchor left behind would have made the
+        // next Bold wrap text the person had already typed over.
         Key::Enter => {
-            app.active_document_mut().insert_newline();
+            let doc = app.active_document_mut();
+            doc.delete_selection();
+            doc.insert_newline();
             app.refresh_cache();
             true
         }
-        Key::Backspace => {
-            app.active_document_mut().delete_backward();
-            app.refresh_cache();
-            true
-        }
-        Key::Delete => {
-            app.active_document_mut().delete_forward();
+        Key::Backspace | Key::Delete => {
+            let doc = app.active_document_mut();
+            if doc.has_selection() {
+                doc.delete_selection();
+            } else if key == Key::Backspace {
+                doc.selection_anchor = None;
+                doc.delete_backward();
+            } else {
+                doc.selection_anchor = None;
+                doc.delete_forward();
+            }
             app.refresh_cache();
             true
         }
         Key::Tab => {
-            app.active_document_mut().insert_text("    ");
+            let doc = app.active_document_mut();
+            doc.delete_selection();
+            doc.insert_text("    ");
             app.refresh_cache();
             true
         }
         Key::Char(ch) if !modifiers.ctrl && !modifiers.alt => {
-            app.active_document_mut().insert_char(ch);
+            let doc = app.active_document_mut();
+            doc.delete_selection();
+            doc.insert_char(ch);
             app.refresh_cache();
             true
         }
@@ -5903,6 +7845,19 @@ fn printable(ev: &guitk::event::KeyEvent) -> Option<char> {
         GKey::Y => 'y',
         GKey::Z => 'z',
         GKey::Space => ' ',
+        // Digits too, for Ctrl+1 to Ctrl+6: a chord that suppressed the text
+        // would otherwise arrive with no character and the heading keys would
+        // be dropped here, before anything could answer them.
+        GKey::Num0 => '0',
+        GKey::Num1 => '1',
+        GKey::Num2 => '2',
+        GKey::Num3 => '3',
+        GKey::Num4 => '4',
+        GKey::Num5 => '5',
+        GKey::Num6 => '6',
+        GKey::Num7 => '7',
+        GKey::Num8 => '8',
+        GKey::Num9 => '9',
         _ => return None,
     };
     Some(c)
@@ -5950,17 +7905,49 @@ impl oswindow::app::App for App {
         // size the compositor actually gave us; everything else stops here
         // while a dialog is up.
         if !matches!(event, GEvent::Resize { .. }) && self.picker_took(event) {
+            // The picker's last answer may have been the save that lets a
+            // closing window go.
+            if self.quit {
+                return Response::Exit;
+            }
             return Response::Redraw;
         }
 
-        match event {
-            GEvent::CloseRequested => Response::Exit,
+        let response = match event {
+            // Not `Exit` outright any more: see `App::request_quit`.
+            GEvent::CloseRequested => {
+                if self.request_quit() {
+                    Response::Exit
+                } else {
+                    Response::Redraw
+                }
+            }
             GEvent::Resize { width, height } => {
                 #[allow(clippy::cast_precision_loss)]
                 {
                     self.window_width = *width as f32;
                     self.window_height = *height as f32;
                 }
+                Response::Redraw
+            }
+            // Coming back to the window is when another program is most
+            // likely to have written the file -- a build, a formatter, a
+            // `git checkout` in the terminal the user has just left -- and
+            // was, until this, never checked at all: `check_external_change`
+            // and the whole prompt-and-merge path behind it had no caller.
+            // Redraw whatever it finds, because an unmodified document is
+            // reloaded without a prompt and that changes the text on screen.
+            GEvent::FocusIn => {
+                self.check_external_change();
+                Response::Redraw
+            }
+            // A drag that ends outside the window never delivers its release,
+            // so losing focus ends it; otherwise the next move over the window,
+            // with no button held, would go on extending the selection.
+            GEvent::FocusOut => {
+                self.dragging = false;
+                self.shift_held = false;
+                self.hover = None;
                 Response::Redraw
             }
             GEvent::Tick { elapsed_ms } => {
@@ -5974,11 +7961,39 @@ impl oswindow::app::App for App {
                     self.tick_ms_carry =
                         self.tick_ms_carry.saturating_sub(secs.saturating_mul(1000));
                     self.tick_autosave(secs);
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+            GEvent::Mouse(mouse) => {
+                if self.handle_mouse(mouse) {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+            GEvent::Key(key) => {
+                // Pressed and released both, so Shift is known while it is
+                // held and forgotten when it is not.
+                self.shift_held = key.modifiers.shift;
+                if !key.pressed {
+                    return Response::Idle;
+                }
+                if let Some((kind, menu)) = self.menu.as_mut() {
+                    // An open drop-down takes the keyboard: arrows, Enter,
+                    // Escape. Everything else stops here with it.
+                    let kind = *kind;
+                    match menu.handle_key(key) {
+                        Some(MenuAction::Selected(id)) => {
+                            self.menu = None;
+                            self.choose_from_menu(kind, id);
+                        }
+                        Some(MenuAction::Closed) => self.menu = None,
+                        Some(MenuAction::None) | None => {}
+                    }
                     return Response::Redraw;
                 }
-                Response::Idle
-            }
-            GEvent::Key(key) if key.pressed => {
                 let Some((k, m)) = translate_key(key) else {
                     return Response::Idle;
                 };
@@ -5991,14 +8006,24 @@ impl oswindow::app::App for App {
                 }
             }
             _ => Response::Idle,
+        };
+        // Any event can be the one that finishes closing the window: the
+        // last save of a "Save all" can arrive as a key in the picker, a
+        // press on a dialog button, or a close request itself.
+        if self.quit {
+            return Response::Exit;
         }
+        response
     }
 
     fn render(&mut self, width: f32, height: f32) -> guitk::render::RenderTree {
         self.window_width = width;
         self.window_height = height;
-        let mut tree = guitk::render::RenderTree::new();
-        tree.commands = self.render_commands();
+        let frame = self.frame(width, height);
+        // Kept for the pointer's hover and the wheel, which read what was
+        // last shown rather than drawing a frame of their own per event.
+        self.last_hits = frame.hits().to_vec();
+        let mut tree = frame.into_tree();
         // Over the document, and last, so nothing is drawn on top of the
         // dialog. A picker painted under the text it is asking about is the
         // same defect as one that never receives an event, arriving by a
@@ -7316,7 +9341,7 @@ mod tests {
     fn test_insert_heading_level_1() {
         let mut doc = Document::new();
         doc.lines = vec!["Title".to_string()];
-        insert_heading(&mut doc, 1);
+        set_heading(&mut doc, 1);
         assert!(doc.lines[0].starts_with("# "));
     }
 
@@ -7324,14 +9349,14 @@ mod tests {
     fn test_insert_heading_level_3() {
         let mut doc = Document::new();
         doc.lines = vec!["Section".to_string()];
-        insert_heading(&mut doc, 3);
+        set_heading(&mut doc, 3);
         assert!(doc.lines[0].starts_with("### "));
     }
 
     /// Undoing a heading removes the `#` prefix — it does not paste the old
     /// line in front of itself.
     ///
-    /// `insert_heading` was the one edit that hand-rolled its own undo entry,
+    /// `set_heading` (once `insert_heading`) was the one edit that hand-rolled its own undo entry,
     /// and it recorded the wrong *kind*: an `EditAction::Delete` naming the
     /// whole previous line, whose undo is "put that text back at column 0".
     /// Since nothing had been deleted, undo appended rather than removed, so
@@ -7342,7 +9367,7 @@ mod tests {
         doc.lines = vec!["Title".to_string()];
         doc.cursor_line = 0;
 
-        insert_heading(&mut doc, 2);
+        set_heading(&mut doc, 2);
         assert_eq!(doc.line_text(0), "## Title");
 
         doc.undo();
@@ -7361,7 +9386,7 @@ mod tests {
         let mut doc = Document::new();
         doc.lines = vec!["only".to_string()];
         doc.cursor_line = 40;
-        insert_heading(&mut doc, 1);
+        set_heading(&mut doc, 1);
         assert_eq!(doc.lines, vec!["only".to_string()]);
     }
 
@@ -7402,28 +9427,48 @@ mod tests {
         assert!(!cmds.is_empty());
     }
 
+    /// What a drawing function puts in a fresh frame.
+    fn drawn(draw: impl FnOnce(&mut Frame<Target>)) -> Frame<Target> {
+        let mut frame = Frame::new(1200.0, 800.0);
+        draw(&mut frame);
+        assert!(frame.is_balanced(), "a clip or translation was left pushed");
+        frame
+    }
+
     #[test]
     fn test_render_toolbar_produces_commands() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        let buttons = default_toolbar_buttons();
-        let cmds = render_toolbar(&buttons, &pal, 0.0, 0.0, 1200.0);
-        assert!(!cmds.is_empty());
+        let toolbar = default_toolbar();
+        let frame = drawn(|f| draw_toolbar(f, &toolbar, &pal, None, 0.0, 0.0, 1200.0));
+        assert!(!frame.commands().is_empty());
     }
 
     #[test]
     fn test_render_tab_bar_produces_commands() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let docs = Tabs::with(Document::new());
-        let cmds = render_tab_bar(&docs, &pal, 0.0, 0.0, 1200.0);
-        assert!(!cmds.is_empty());
+        let frame = drawn(|f| draw_tab_bar(f, &docs, &pal, None, 0.0, 0.0, 1200.0));
+        assert!(!frame.commands().is_empty());
     }
 
     #[test]
     fn test_render_status_bar_produces_commands() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let doc = Document::new();
-        let cmds = render_status_bar(&doc, &pal, ViewMode::Split, 0.0, 0.0, 1200.0, true, None);
-        assert!(!cmds.is_empty());
+        let frame = drawn(|f| {
+            draw_status_bar(
+                f,
+                &doc,
+                &pal,
+                ViewMode::Split,
+                0.0,
+                0.0,
+                1200.0,
+                true,
+                StatusNote::Stats,
+            );
+        });
+        assert!(!frame.commands().is_empty());
     }
 
     #[test]
@@ -7434,16 +9479,20 @@ mod tests {
             text: "Title".to_string(),
             line: 0,
         }];
-        let cmds = render_toc_sidebar(&entries, &pal, 0.0, 0.0, 600.0);
-        assert!(!cmds.is_empty());
+        let frame = drawn(|f| draw_toc_sidebar(f, &entries, &pal, 0, None, None, 0.0, 0.0, 600.0));
+        assert!(!frame.commands().is_empty());
     }
 
     #[test]
     fn test_render_find_replace_hidden() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let state = FindReplaceState::new();
-        let cmds = render_find_replace(&state, &pal, 0.0, 0.0, 1200.0);
-        assert!(cmds.is_empty()); // hidden by default
+        let frame = drawn(|f| draw_find_replace(f, &state, &pal, None, 0.0, 0.0, 1200.0));
+        assert!(frame.commands().is_empty()); // hidden by default
+        assert!(
+            frame.hits().is_empty(),
+            "a hidden panel has nothing to press"
+        );
     }
 
     #[test]
@@ -7451,15 +9500,15 @@ mod tests {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut state = FindReplaceState::new();
         state.visible = true;
-        let cmds = render_find_replace(&state, &pal, 0.0, 0.0, 1200.0);
-        assert!(!cmds.is_empty());
+        let frame = drawn(|f| draw_find_replace(f, &state, &pal, None, 0.0, 0.0, 1200.0));
+        assert!(!frame.commands().is_empty());
     }
 
     #[test]
     fn test_render_template_chooser() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        let cmds = render_template_chooser(0.0, &pal, 0.0, 1200.0, 800.0);
-        assert!(!cmds.is_empty());
+        let frame = drawn(|f| draw_template_chooser(f, &pal, 0, None, 0.0, 0.0, 1200.0, 800.0));
+        assert!(!frame.commands().is_empty());
     }
 
     // --- App tests ---
@@ -8219,8 +10268,11 @@ mod tests {
 
     #[test]
     fn test_default_toolbar_buttons_count() {
-        let buttons = default_toolbar_buttons();
-        assert!(buttons.len() > 10);
+        let buttons = default_toolbar()
+            .into_iter()
+            .filter(|item| matches!(item, ToolbarItem::Button(_)))
+            .count();
+        assert!(buttons > 10);
     }
 
     // --- ToolbarAction tests ---
@@ -8392,18 +10444,22 @@ mod tests {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let doc = Document::new();
         let msg = "Could not save notes.md: disk full";
-        let cmds = render_status_bar(
-            &doc,
-            &pal,
-            ViewMode::Split,
-            0.0,
-            0.0,
-            1200.0,
-            true,
-            Some(msg),
-        );
+        let frame = drawn(|f| {
+            draw_status_bar(
+                f,
+                &doc,
+                &pal,
+                ViewMode::Split,
+                0.0,
+                0.0,
+                1200.0,
+                true,
+                StatusNote::Error(msg),
+            );
+        });
 
-        let texts: Vec<&str> = cmds
+        let texts: Vec<&str> = frame
+            .commands()
             .iter()
             .filter_map(|c| match c {
                 RenderCommand::Text { text, .. } => Some(text.as_str()),
@@ -9125,5 +11181,1129 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // --- The pointer ---------------------------------------------------------
+    //
+    // Everything below drives the window the way a person does: through
+    // `on_event`, at the point the renderer says it drew the control. A test
+    // that called `activate` or `handle_toolbar_action` directly would have
+    // supplied the answer to the question the pointer layer exists to answer.
+
+    use guitk::probe::{self, Probe};
+    use oswindow::app::Response;
+
+    impl Probe for App {
+        type Target = Target;
+        type Outcome = Response;
+        const SIZE: (f32, f32) = (1280.0, 800.0);
+
+        fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+            self.frame(size.0, size.1)
+        }
+
+        /// A click is a press and a release; the release is what ends a drag
+        /// the press began in the source pane.
+        fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Response {
+            self.window_width = size.0;
+            self.window_height = size.1;
+            let press = self.on_event(&mouse(x, y, MouseEventKind::Press(button)));
+            let release = self.on_event(&mouse(x, y, MouseEventKind::Release(button)));
+            if release == Response::Exit {
+                release
+            } else {
+                press
+            }
+        }
+
+        fn key_at(&mut self, key: &guitk::event::KeyEvent, size: (f32, f32)) -> Response {
+            self.window_width = size.0;
+            self.window_height = size.1;
+            self.on_event(&guitk::event::Event::Key(key.clone()))
+        }
+
+        fn scroll_at(&mut self, x: f32, y: f32, dy: f32, size: (f32, f32)) -> Option<Response> {
+            self.window_width = size.0;
+            self.window_height = size.1;
+            Some(self.on_event(&mouse(x, y, MouseEventKind::Scroll { dx: 0.0, dy })))
+        }
+    }
+
+    fn mouse(x: f32, y: f32, kind: MouseEventKind) -> guitk::event::Event {
+        guitk::event::Event::Mouse(MouseEvent { x, y, kind })
+    }
+
+    fn ctrl_shift(key: guitk::event::Key) -> guitk::event::KeyEvent {
+        probe::press_with(
+            key,
+            guitk::event::Modifiers {
+                ctrl: true,
+                shift: true,
+                ..guitk::event::Modifiers::NONE
+            },
+        )
+    }
+
+    /// Every text the frame draws, joined, for "is this on screen" checks.
+    fn screen_text(app: &App) -> String {
+        app.frame(1280.0, 800.0)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// Where the renderer draws `(line, col)` of the active document, as a
+    /// point a press can aim at: the character boundary's own x, and the
+    /// middle of the line's row.
+    fn point_of(app: &App, line: usize, col: usize) -> (f32, f32) {
+        let pane = probe::rect_of(app, Target::Editor).expect("the source pane is drawn");
+        let doc = app.active_document();
+        let row = line - doc.scroll_line;
+        let text_x = pane.x + GUTTER_WIDTH + EDITOR_PADDING;
+        (
+            col_x(doc.line_text(line), col, text_x) + 0.5,
+            pane.y + row as f32 * LINE_HEIGHT + LINE_HEIGHT / 2.0,
+        )
+    }
+
+    /// **Every toolbar button the window draws answers a press, and does what
+    /// its action does.** The control is the same action through
+    /// `handle_toolbar_action` on a twin app: a button wired to the wrong
+    /// action, or to none, leaves the two apps different.
+    #[test]
+    fn every_toolbar_button_does_what_its_action_says() {
+        let app = app_with_text();
+        let drawn: Vec<ToolbarAction> = app
+            .frame(1280.0, 800.0)
+            .hits()
+            .iter()
+            .filter_map(|(t, _)| match t {
+                Target::Toolbar(action) => Some(*action),
+                _ => None,
+            })
+            .collect();
+        let offered: Vec<ToolbarAction> = default_toolbar()
+            .iter()
+            .filter_map(|item| match item {
+                ToolbarItem::Button(b) => Some(b.action),
+                ToolbarItem::Separator => None,
+            })
+            .collect();
+        assert_eq!(
+            drawn, offered,
+            "at 1280 wide every button is drawn, in order"
+        );
+
+        for action in drawn {
+            let mut clicked = app_with_text();
+            probe::click(&mut clicked, Target::Toolbar(action));
+            let mut direct = app_with_text();
+            direct.handle_toolbar_action(&action);
+            assert_eq!(
+                (
+                    clicked.active_document().full_text(),
+                    clicked.documents.count(),
+                    clicked.view_mode,
+                    clicked.toc_visible,
+                    clicked.find_state.visible,
+                    clicked.template_chooser_open,
+                    clicked.picker.is_open(),
+                    clicked.picker.is_saving(),
+                ),
+                (
+                    direct.active_document().full_text(),
+                    direct.documents.count(),
+                    direct.view_mode,
+                    direct.toc_visible,
+                    direct.find_state.visible,
+                    direct.template_chooser_open,
+                    direct.picker.is_open(),
+                    direct.picker.is_saving(),
+                ),
+                "pressing {action:?} did not do what {action:?} does"
+            );
+        }
+    }
+
+    /// A separator is a rule, not a button. It used to be a `ToolbarButton`
+    /// whose action was `NewFile`, so the first press anyone made on the gap
+    /// between Save and Bold would have opened a document.
+    #[test]
+    fn the_gap_between_toolbar_groups_is_not_a_button() {
+        let app = App::new(1280.0, 800.0);
+        let layout = toolbar_layout(&app.toolbar, 0.0, 0.0, 1280.0);
+        assert!(!layout.separators.is_empty(), "the toolbar has separators");
+        let frame = app.frame(1280.0, 800.0);
+        for sx in layout.separators {
+            let at = frame.hit_test(sx + 4.0, TOOLBAR_HEIGHT / 2.0);
+            assert_eq!(at, None, "the separator at {sx} answers as {at:?}");
+        }
+    }
+
+    /// **A window too narrow for the toolbar offers the rest through `»`.**
+    /// Before this, the last buttons were drawn past the window's right edge:
+    /// invisible, and so unpressable. The menu offers exactly the buttons that
+    /// did not fit, and choosing one does what the button would have.
+    #[test]
+    fn a_narrow_window_offers_its_missing_buttons_through_the_chevron() {
+        let size = (640.0, 600.0);
+        let mut app = app_with_text();
+        app.window_width = size.0;
+        app.window_height = size.1;
+        let frame = app.frame(size.0, size.1);
+        let chevron = frame
+            .rect_of(|t| *t == Target::ToolbarMore)
+            .expect("a narrow toolbar draws a chevron");
+        assert!(
+            chevron.right() <= size.0,
+            "the chevron is inside the window"
+        );
+        for (target, rect) in frame.hits() {
+            if matches!(target, Target::Toolbar(_)) {
+                assert!(rect.right() <= chevron.x, "{target:?} overlaps the chevron");
+            }
+        }
+        let hidden: Vec<(usize, ToolbarAction)> = toolbar_overflow(&app.toolbar, size.0)
+            .into_iter()
+            .map(|(i, b)| (i, b.action))
+            .collect();
+        assert!(!hidden.is_empty());
+        assert!(
+            hidden
+                .iter()
+                .all(|(_, action)| frame.rect_of(|t| *t == Target::Toolbar(*action)).is_none()),
+            "the menu offers a button that is already on the toolbar"
+        );
+
+        probe::click_sized(&mut app, Target::ToolbarMore, MouseButton::Left, size);
+        assert!(app.menu.is_some(), "the chevron opened nothing");
+        // The last hidden button is "HTML", which puts the save picker up.
+        let (last_index, last) = *hidden.last().expect("something is hidden");
+        assert_eq!(last, ToolbarAction::ExportHtml);
+        app.menu = None;
+        app.choose_from_menu(MenuKind::Toolbar, last_index as u64);
+        assert!(
+            app.picker.is_saving(),
+            "choosing HTML from the menu did not export"
+        );
+
+        // And the keyboard can drive the menu: Down onto the first row, Enter.
+        let mut app = app_with_text();
+        app.window_width = size.0;
+        probe::click_sized(&mut app, Target::ToolbarMore, MouseButton::Left, size);
+        let (_, expected) = hidden[0];
+        probe::key(&mut app, &probe::press(guitk::event::Key::Down));
+        probe::key(&mut app, &probe::press(guitk::event::Key::Enter));
+        assert!(app.menu.is_none(), "Enter did not close the menu");
+        let mut direct = app_with_text();
+        direct.handle_toolbar_action(&expected);
+        assert_eq!(app.picker.is_saving(), direct.picker.is_saving());
+        assert_eq!(app.view_mode, direct.view_mode);
+        assert_eq!(app.toc_visible, direct.toc_visible);
+        assert_eq!(
+            app.active_document().full_text(),
+            direct.active_document().full_text(),
+            "the menu's first row did not do what {expected:?} does"
+        );
+    }
+
+    /// **Hovering a button says what it does, key included.** The tooltips
+    /// were written for every button and read by nothing.
+    #[test]
+    fn hovering_a_button_names_it_in_the_status_bar() {
+        let mut app = App::new(1280.0, 800.0);
+        let bold = probe::rect_of(&app, Target::Toolbar(ToolbarAction::Bold)).unwrap();
+        let (x, y) = bold.centre();
+        let redraw = app.on_event(&mouse(x, y, MouseEventKind::Move));
+        assert_eq!(redraw, Response::Redraw);
+        assert!(screen_text(&app).contains("Bold (Ctrl+B)"));
+        // Moving within the same button changes nothing and asks for nothing.
+        assert_eq!(
+            app.on_event(&mouse(x + 1.0, y, MouseEventKind::Move)),
+            Response::Idle
+        );
+        app.on_event(&mouse(x, 400.0, MouseEventKind::Move));
+        assert!(
+            !screen_text(&app).contains("Bold (Ctrl+B)"),
+            "the tip outlived the hover"
+        );
+    }
+
+    /// **The tabs switch and close.** `switch_tab` and `close_document` were
+    /// written and tested and had no caller: a second document, once open,
+    /// could never be brought back to the front or put away.
+    #[test]
+    fn a_tab_comes_forward_and_its_close_button_closes_it() {
+        let mut app = App::new(1280.0, 800.0);
+        app.new_document();
+        app.active_document_mut().lines = vec!["second".to_string()];
+        assert_eq!(app.active_doc(), 1);
+
+        probe::click(&mut app, Target::Tab(0));
+        assert_eq!(
+            app.active_doc(),
+            0,
+            "pressing the first tab did not bring it forward"
+        );
+
+        probe::click(&mut app, Target::CloseTab(0));
+        assert_eq!(app.documents.count(), 1, "the close button closed nothing");
+        assert_eq!(
+            app.active_document().full_text(),
+            "second",
+            "the wrong tab closed"
+        );
+    }
+
+    /// **Closing a document with unsaved changes asks first**, and each answer
+    /// does what it says. The control for "Cancel" is that the same press does
+    /// close a document with nothing to lose (the test above).
+    #[test]
+    fn closing_an_unsaved_document_asks_and_each_answer_is_kept() {
+        let (_scratch, path) = temp_path("md_close_ask");
+        std::fs::write(&path, "on disk").unwrap();
+
+        // Cancel keeps it.
+        let mut app = App::new(1280.0, 800.0);
+        app.open_file(&path).unwrap();
+        app.active_document_mut().insert_char('!');
+        probe::click(&mut app, Target::CloseTab(1));
+        assert_eq!(app.close_prompt, Some(CloseScope::Tab(1)));
+        assert_eq!(app.documents.count(), 2, "it closed without asking");
+        probe::click(&mut app, Target::Closing(CloseChoice::Cancel));
+        assert_eq!(app.documents.count(), 2);
+        assert_eq!(app.close_prompt, None);
+
+        // Don't save closes it and leaves the file alone.
+        probe::click(&mut app, Target::CloseTab(1));
+        probe::click(&mut app, Target::Closing(CloseChoice::Discard));
+        assert_eq!(app.documents.count(), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "on disk");
+
+        // Save writes it, then closes it.
+        app.open_file(&path).unwrap();
+        app.active_document_mut().insert_char('!');
+        probe::click(&mut app, Target::CloseTab(1));
+        probe::key(&mut app, &probe::press(guitk::event::Key::S));
+        assert_eq!(app.documents.count(), 1, "Save did not close the tab");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "!on disk");
+    }
+
+    /// An untitled document has nowhere to be saved, so "Save" asks where --
+    /// and the tab closes only once it has been written there.
+    #[test]
+    fn saving_an_untitled_document_on_close_asks_where_then_closes_it() {
+        let (_scratch, path) = temp_path("md_close_untitled");
+        let mut app = App::new(1280.0, 800.0);
+        app.new_document();
+        app.active_document_mut().insert_char('x');
+        probe::key(&mut app, &probe::ctrl(guitk::event::Key::W));
+        assert_eq!(app.close_prompt, Some(CloseScope::Tab(1)));
+        probe::click(&mut app, Target::Closing(CloseChoice::Save));
+        assert!(app.picker.is_saving(), "no picker to say where");
+        assert_eq!(app.documents.count(), 2, "closed before it was saved");
+
+        app.write_chosen(&path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x");
+        assert_eq!(app.documents.count(), 1, "saved but not closed");
+    }
+
+    /// **Closing the window with unsaved work asks, instead of losing it.**
+    /// `CloseRequested` answered `Exit` whatever the window held.
+    #[test]
+    fn closing_the_window_with_unsaved_work_asks_first() {
+        let (_scratch, path) = temp_path("md_quit");
+        std::fs::write(&path, "kept").unwrap();
+        let close = guitk::event::Event::CloseRequested;
+
+        // Nothing to lose: it goes.
+        let mut app = App::new(1280.0, 800.0);
+        assert_eq!(app.on_event(&close), Response::Exit);
+
+        // Something to lose: it asks, and Cancel keeps the window. Auto-save
+        // is off here, so the document with a file is not saved on the way
+        // out and the dialog has something to ask about.
+        let mut app = App::new(1280.0, 800.0);
+        app.autosave_enabled = false;
+        app.open_file(&path).unwrap();
+        app.active_document_mut().insert_char('!');
+        assert_ne!(
+            app.on_event(&close),
+            Response::Exit,
+            "unsaved work was thrown away"
+        );
+        assert_eq!(app.close_prompt, Some(CloseScope::Window));
+        assert_ne!(
+            probe::click(&mut app, Target::Closing(CloseChoice::Cancel)),
+            Response::Exit
+        );
+
+        // Save all writes it and then goes.
+        app.on_event(&close);
+        assert_eq!(
+            probe::click(&mut app, Target::Closing(CloseChoice::Save)),
+            Response::Exit,
+            "saved everything and stayed open"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "!kept");
+
+        // Don't save goes at once and writes nothing.
+        let mut app = App::new(1280.0, 800.0);
+        app.autosave_enabled = false;
+        app.open_file(&path).unwrap();
+        app.active_document_mut().insert_char('?');
+        app.on_event(&close);
+        assert_eq!(
+            probe::click(&mut app, Target::Closing(CloseChoice::Discard)),
+            Response::Exit
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "!kept");
+    }
+
+    /// **With auto-save on, closing the window saves what has a file** -- and
+    /// asks only about what does not. Auto-save is the user having said "save
+    /// for me", and the close is the last chance to; it is also the one part
+    /// of a close that runs while `oswindow` closes the window whatever the
+    /// application answers.
+    #[test]
+    fn closing_with_auto_save_on_saves_titled_documents_and_asks_about_the_rest() {
+        let (_scratch, path) = temp_path("md_quit_autosave");
+        std::fs::write(&path, "kept").unwrap();
+        let close = guitk::event::Event::CloseRequested;
+
+        let mut app = App::new(1280.0, 800.0);
+        assert!(app.autosave_enabled, "auto-save is on by default");
+        app.open_file(&path).unwrap();
+        app.active_document_mut().insert_char('!');
+        assert_eq!(
+            app.on_event(&close),
+            Response::Exit,
+            "it asked about a saved document"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "!kept");
+
+        // An untitled document has nowhere to go, so it is still asked about,
+        // and the titled one is saved all the same.
+        let mut app = App::new(1280.0, 800.0);
+        app.open_file(&path).unwrap();
+        app.active_document_mut().insert_char('?');
+        app.new_document();
+        app.active_document_mut().insert_char('u');
+        assert_ne!(
+            app.on_event(&close),
+            Response::Exit,
+            "the untitled work was dropped"
+        );
+        assert_eq!(app.close_prompt, Some(CloseScope::Window));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "?!kept");
+    }
+
+    /// A dialog that must be answered keeps the press off the document behind
+    /// it: the dimmed window is a target that does nothing.
+    #[test]
+    fn a_press_outside_a_dialog_does_not_reach_the_document() {
+        let mut app = App::new(1280.0, 800.0);
+        app.new_document();
+        app.active_document_mut().insert_char('x');
+        probe::key(&mut app, &probe::ctrl(guitk::event::Key::W));
+        assert!(app.close_prompt.is_some());
+        // Where the first tab is drawn, under the dimmed window.
+        let first_tab = {
+            let mut plain = App::new(1280.0, 800.0);
+            plain.new_document();
+            probe::rect_of(&plain, Target::Tab(0)).unwrap()
+        };
+        let (x, y) = first_tab.centre();
+        app.click_at(x, y, MouseButton::Left, App::SIZE);
+        assert_eq!(
+            app.active_doc(),
+            1,
+            "the press went through the dialog to a tab"
+        );
+        assert!(
+            app.close_prompt.is_some(),
+            "a press beside the dialog answered it"
+        );
+    }
+
+    /// **Many tabs shrink, then overflow into a menu, and the tab in front is
+    /// always one of those drawn.**
+    #[test]
+    fn many_tabs_keep_the_front_one_visible_and_list_the_rest() {
+        let mut app = App::new(640.0, 600.0);
+        for i in 0..20 {
+            app.new_document();
+            app.active_document_mut().name = format!("a-long-document-name-{i}.md");
+        }
+        let size = (640.0, 600.0);
+        let front = app.active_doc();
+        assert!(
+            probe::is_visible_sized(&app, Target::Tab(front), size),
+            "the document in front has no tab on screen"
+        );
+        assert!(probe::is_visible_sized(&app, Target::TabsMore, size));
+        let frame = app.frame(size.0, size.1);
+        for (target, rect) in frame.hits() {
+            if matches!(target, Target::Tab(_)) {
+                assert!(rect.right() <= size.0, "{target:?} runs off the window");
+                assert!(
+                    rect.w >= TAB_MIN_WIDTH - 0.01,
+                    "{target:?} squeezed past the floor"
+                );
+            }
+        }
+        probe::click_sized(&mut app, Target::TabsMore, MouseButton::Left, size);
+        app.menu = None;
+        app.choose_from_menu(MenuKind::Tabs, 0);
+        assert_eq!(app.active_doc(), 0);
+        assert!(
+            probe::is_visible_sized(&app, Target::Tab(0), size),
+            "brought the first document forward and did not show its tab"
+        );
+    }
+
+    /// **The contents panel opens, and a heading in it jumps to that heading.**
+    /// The module doc promised "clickable" for the whole life of the file.
+    #[test]
+    fn a_heading_in_the_contents_jumps_to_it() {
+        let mut app = App::new(1280.0, 800.0);
+        let mut lines = vec!["# Top".to_string()];
+        lines.extend((0..100).map(|i| format!("line {i}")));
+        lines.push("## Far down".to_string());
+        app.active_document_mut().lines = lines;
+        app.refresh_cache();
+
+        assert!(!probe::is_visible(&app, Target::Toc));
+        probe::key(&mut app, &ctrl_shift(guitk::event::Key::O));
+        assert!(app.toc_visible, "Ctrl+Shift+O did not open the contents");
+
+        probe::click(&mut app, Target::Heading(101));
+        let doc = app.active_document();
+        assert_eq!((doc.cursor_line, doc.cursor_col), (101, 0));
+        assert_eq!(
+            doc.scroll_line, 101,
+            "the heading was not brought into view"
+        );
+        assert!(
+            screen_text(&app).contains("Far down"),
+            "the source pane does not show the heading jumped to"
+        );
+    }
+
+    /// The contents scroll under the wheel when they are longer than the
+    /// panel, and a heading scrolled out of the panel cannot be pressed.
+    #[test]
+    fn a_long_contents_scrolls_and_hides_what_scrolled_away() {
+        let mut app = App::new(1280.0, 800.0);
+        app.active_document_mut().lines = (0..80).map(|i| format!("# Heading {i}")).collect();
+        app.refresh_cache();
+        app.toc_visible = true;
+        assert!(probe::is_visible(&app, Target::Heading(0)));
+        assert!(
+            !probe::is_visible(&app, Target::Heading(79)),
+            "80 rows fit a 800px panel?"
+        );
+
+        probe::scroll_at_point(&mut app, Target::Toc, -10.0);
+        assert!(app.toc_scroll > 0, "the wheel did not scroll the contents");
+        assert!(
+            !probe::is_visible(&app, Target::Heading(0)),
+            "row 0 is still pressable"
+        );
+
+        for _ in 0..20 {
+            probe::scroll_at_point(&mut app, Target::Toc, -10.0);
+        }
+        assert!(
+            probe::is_visible(&app, Target::Heading(79)),
+            "the last heading is unreachable"
+        );
+    }
+
+    /// **The find panel's boxes, arrows, switch and buttons all answer.**
+    #[test]
+    fn the_find_panel_answers_the_pointer() {
+        let mut app = app_with_text();
+        probe::key(&mut app, &probe::ctrl(guitk::event::Key::H));
+        probe::type_str(&mut app, "beta");
+        assert_eq!(app.find_state.match_count(), 2);
+
+        probe::click(&mut app, Target::FindReplacement);
+        assert!(
+            app.find_state.focus_replacement,
+            "the replace box did not take the keyboard"
+        );
+        probe::type_str(&mut app, "B");
+        assert_eq!(app.find_state.replacement, "B");
+        probe::click(&mut app, Target::FindQuery);
+        assert!(!app.find_state.focus_replacement);
+
+        let first = app.find_state.current_match;
+        probe::click(&mut app, Target::FindNext);
+        assert_ne!(app.find_state.current_match, first, "Next did not move");
+        probe::click(&mut app, Target::FindPrev);
+        assert_eq!(
+            app.find_state.current_match, first,
+            "Prev did not come back"
+        );
+
+        probe::click(&mut app, Target::FindMatchCase);
+        assert!(app.find_state.case_sensitive);
+        probe::click(&mut app, Target::FindReplace);
+        assert_eq!(app.find_state.match_count(), 1, "Replace replaced nothing");
+        probe::click(&mut app, Target::FindReplaceAll);
+        assert_eq!(app.find_state.match_count(), 0);
+        assert_eq!(app.active_document().full_text(), "alpha B\nB gamma\ndelta");
+
+        probe::click(&mut app, Target::FindClose);
+        assert!(!app.find_state.visible);
+    }
+
+    /// The find panel says which box is typing and whether case matters.
+    #[test]
+    fn the_find_panel_draws_its_focus_and_its_case_switch() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let outlines = |state: &FindReplaceState| {
+            drawn(|f| draw_find_replace(f, state, &pal, None, 0.0, 0.0, 1200.0))
+                .commands()
+                .iter()
+                .filter(|c| matches!(c, RenderCommand::StrokeRect { .. }))
+                .count()
+        };
+        let mut state = FindReplaceState::new();
+        state.visible = true;
+        let plain = outlines(&state);
+        state.case_sensitive = true;
+        assert_eq!(
+            outlines(&state),
+            plain + 1,
+            "match case is on and nothing shows it"
+        );
+    }
+
+    /// **A press puts the caret on the character under the pointer.** Aimed
+    /// with `col_x`, the function that draws the caret, on a line with wide
+    /// characters, so a press model that counted bytes or cells would land
+    /// somewhere else.
+    #[test]
+    fn a_press_in_the_source_puts_the_caret_under_it() {
+        let mut app = App::new(1280.0, 800.0);
+        app.active_document_mut().lines = vec![
+            "plain".to_string(),
+            "日本語 text".to_string(),
+            "x".to_string(),
+        ];
+        app.refresh_cache();
+        let col = "日本".len();
+        let (x, y) = point_of(&app, 1, col);
+        app.click_at(x, y, MouseButton::Left, App::SIZE);
+        let doc = app.active_document();
+        assert_eq!((doc.cursor_line, doc.cursor_col), (1, col));
+        assert!(
+            !doc.has_selection(),
+            "a click without a drag selected something"
+        );
+
+        // Past the end of a line lands at its end; below the last line, on
+        // the last line.
+        // (In the split view the source pane is the left half, so "past the
+        // end" is aimed inside it.)
+        let (_, y) = point_of(&app, 0, 0);
+        app.click_at(600.0, y, MouseButton::Left, App::SIZE);
+        assert_eq!(app.active_document().cursor_col, "plain".len());
+        app.click_at(300.0, 700.0, MouseButton::Left, App::SIZE);
+        assert_eq!(app.active_document().cursor_line, 2);
+    }
+
+    /// **A drag selects, and Shift+press extends.** The selection anchor had
+    /// four writers that cleared it and none that set it.
+    #[test]
+    fn a_drag_selects_and_shift_press_extends() {
+        let mut app = app_with_text();
+        let (x0, y0) = point_of(&app, 0, 0);
+        let (x1, y1) = point_of(&app, 1, 4);
+        app.on_event(&mouse(x0, y0, MouseEventKind::Press(MouseButton::Left)));
+        app.on_event(&mouse(x1, y1, MouseEventKind::Move));
+        app.on_event(&mouse(x1, y1, MouseEventKind::Release(MouseButton::Left)));
+        assert_eq!(
+            app.active_document().selected_text().as_deref(),
+            Some("alpha beta\nbeta")
+        );
+        // Bold wraps it, which it could never do before.
+        probe::key(&mut app, &probe::ctrl(guitk::event::Key::B));
+        assert_eq!(
+            app.active_document().full_text(),
+            "**alpha beta\nbeta** gamma\ndelta"
+        );
+
+        let mut app = app_with_text();
+        let (x, y) = point_of(&app, 0, 6);
+        app.click_at(x, y, MouseButton::Left, App::SIZE);
+        app.on_event(&guitk::event::Event::Key(probe::press_with(
+            guitk::event::Key::LeftShift,
+            guitk::event::Modifiers {
+                shift: true,
+                ..guitk::event::Modifiers::NONE
+            },
+        )));
+        let (x, y) = point_of(&app, 2, 5);
+        app.click_at(x, y, MouseButton::Left, App::SIZE);
+        assert_eq!(
+            app.active_document().selected_text().as_deref(),
+            Some("beta\nbeta gamma\ndelta")
+        );
+    }
+
+    /// A double press selects the word under it.
+    #[test]
+    fn a_double_press_selects_a_word() {
+        let mut app = app_with_text();
+        let (x, y) = point_of(&app, 1, 7);
+        app.on_event(&mouse(x, y, MouseEventKind::DoubleClick(MouseButton::Left)));
+        assert_eq!(
+            app.active_document().selected_text().as_deref(),
+            Some("gamma")
+        );
+    }
+
+    /// The wheel scrolls whichever pane it is over, and the preview follows
+    /// the source as it does for the keys.
+    #[test]
+    fn the_wheel_scrolls_the_pane_under_it() {
+        let mut app = App::new(1280.0, 800.0);
+        app.active_document_mut().lines = (0..300)
+            .flat_map(|i| [format!("para {i}"), String::new()])
+            .collect();
+        app.refresh_cache();
+
+        probe::scroll_at_point(&mut app, Target::Editor, -2.0);
+        let doc = app.active_document();
+        assert!(
+            doc.scroll_line > 0,
+            "the wheel over the source scrolled nothing"
+        );
+        assert!(
+            doc.preview_scroll > 0.0,
+            "the preview did not follow the source"
+        );
+
+        let before = app.active_document().preview_scroll;
+        probe::scroll_at_point(&mut app, Target::Preview, -2.0);
+        assert!(
+            app.active_document().preview_scroll > before,
+            "the preview did not scroll"
+        );
+        // Up far past the top stops at the top.
+        for _ in 0..50 {
+            probe::scroll_at_point(&mut app, Target::Preview, 5.0);
+        }
+        assert_eq!(app.active_document().preview_scroll, 0.0);
+    }
+
+    /// **The status bar's two labels are switches.** Auto-save had no off
+    /// switch at all: `autosave_enabled` was written only by the constructor.
+    #[test]
+    fn the_status_bar_switches_the_view_and_auto_save() {
+        let mut app = App::new(1280.0, 800.0);
+        let before = app.view_mode;
+        probe::click(&mut app, Target::ViewMode);
+        assert_eq!(app.view_mode, before.next());
+        assert!(app.autosave_enabled);
+        probe::click(&mut app, Target::Autosave);
+        assert!(!app.autosave_enabled, "auto-save cannot be turned off");
+        assert!(screen_text(&app).contains("Auto-save OFF"));
+        assert!(
+            app.tick_interval().is_none(),
+            "the clock kept running for nothing"
+        );
+    }
+
+    /// **The template chooser can be opened, and answers the pointer and the
+    /// keys.** Nothing could open it: `template_chooser_open` was written only
+    /// by the key that closed it.
+    #[test]
+    fn a_template_is_chosen_with_the_pointer_or_the_keys() {
+        let mut app = App::new(1280.0, 800.0);
+        probe::click(&mut app, Target::Toolbar(ToolbarAction::Templates));
+        assert!(app.template_chooser_open);
+        probe::click(&mut app, Target::Template(1));
+        assert_eq!(app.documents.count(), 2);
+        assert_eq!(
+            app.active_document().full_text(),
+            Template::MeetingNotes.content().trim_end_matches('\n')
+        );
+        assert!(!app.template_chooser_open);
+
+        probe::key(&mut app, &ctrl_shift(guitk::event::Key::N));
+        assert!(
+            app.template_chooser_open,
+            "Ctrl+Shift+N did not open the chooser"
+        );
+        // Typing while it is up does not reach the document behind it.
+        let text = app.active_document().full_text();
+        probe::type_str(&mut app, "q");
+        assert_eq!(app.active_document().full_text(), text);
+        probe::key(&mut app, &probe::press(guitk::event::Key::Down));
+        probe::key(&mut app, &probe::press(guitk::event::Key::Down));
+        probe::key(&mut app, &probe::press(guitk::event::Key::Enter));
+        assert_eq!(
+            app.active_document().full_text(),
+            Template::ProjectReadme.content().trim_end_matches('\n')
+        );
+
+        // A press on the dimmed window closes it; one on its body does not.
+        // Aimed at points, not at the targets' centres: the centre of the
+        // dialog's body and of the dimmed window are both on a template row,
+        // and a press there would choose that template -- which would also
+        // close the chooser, and pass this for the wrong reason.
+        probe::click(&mut app, Target::Toolbar(ToolbarAction::Templates));
+        let dialog = probe::rect_of(&app, Target::DialogBody).unwrap();
+        let docs = app.documents.count();
+        app.click_at(dialog.x + 8.0, dialog.y + 8.0, MouseButton::Left, App::SIZE);
+        assert!(
+            app.template_chooser_open,
+            "a press on the dialog's title closed it"
+        );
+        app.click_at(5.0, 5.0, MouseButton::Left, App::SIZE);
+        assert!(
+            !app.template_chooser_open,
+            "a press outside the dialog left it up"
+        );
+        assert_eq!(
+            app.documents.count(),
+            docs,
+            "closing the chooser made a document"
+        );
+    }
+
+    /// **The export writes the HTML it computes.** It used to compute it and
+    /// drop it on the floor.
+    #[test]
+    fn the_html_export_writes_a_file() {
+        let (_scratch, path) = temp_path("md_export");
+        let mut app = App::new(1280.0, 800.0);
+        app.active_document_mut().lines = vec!["# Title".to_string(), "body".to_string()];
+        app.refresh_cache();
+        probe::key(&mut app, &ctrl_shift(guitk::event::Key::E));
+        assert!(
+            app.picker.is_saving(),
+            "Ctrl+Shift+E asked for no file name"
+        );
+        app.write_chosen(&path);
+        let html = std::fs::read_to_string(&path).unwrap();
+        assert!(html.contains("<h1>Title</h1>"), "{html}");
+        assert!(
+            screen_text(&app).contains("Exported"),
+            "the export said nothing about having worked"
+        );
+        // And the document itself was not renamed or saved by it.
+        assert!(app.active_document().path.is_none());
+    }
+
+    /// **A Save As that fails says so, in red, and stays said.** It reported
+    /// only to `file_status`, which nothing drew.
+    #[test]
+    fn a_failed_save_as_is_shown() {
+        let (_scratch, path) = unwritable_path("md_saveas_fail");
+        let mut app = App::new(1280.0, 800.0);
+        app.active_document_mut().insert_char('x');
+        probe::key(&mut app, &ctrl_shift(guitk::event::Key::S));
+        assert!(
+            app.picker.is_saving(),
+            "Ctrl+Shift+S asked for no file name"
+        );
+        app.write_chosen(&path);
+        let err = app
+            .save_error
+            .clone()
+            .expect("the failure was not recorded");
+        assert!(
+            screen_text(&app).contains(&err),
+            "the failure is not on screen"
+        );
+        probe::type_str(&mut app, "y");
+        assert!(
+            screen_text(&app).contains(&err),
+            "a keystroke hid an unsaved-work error"
+        );
+    }
+
+    /// **A file changed on disk is noticed when the window comes back**, and
+    /// the prompt's answers are buttons and keys. The check had no caller.
+    #[test]
+    fn a_file_changed_elsewhere_is_noticed_on_focus_and_answered() {
+        let (_scratch, path) = temp_path("md_focus_changed");
+        std::fs::write(&path, "one\ntwo\n").unwrap();
+        let mut app = App::new(1280.0, 800.0);
+        app.open_file(&path).unwrap();
+        app.active_document_mut().insert_char('!');
+        // Rewritten elsewhere, with a different mtime.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+
+        app.on_event(&guitk::event::Event::FocusIn);
+        assert!(
+            app.external_prompt.is_some(),
+            "coming back to the window noticed nothing"
+        );
+        // Typing does not reach the document behind the prompt.
+        probe::type_str(&mut app, "z");
+        assert_eq!(app.active_document().full_text(), "!one\ntwo");
+
+        probe::click(&mut app, Target::External(ExternalChoice::Reload));
+        assert!(app.external_prompt.is_none());
+        // The disk version as `normalize_content` gives it: LF, and no
+        // trailing newline to become an empty last line.
+        assert_eq!(app.active_document().full_text(), "one\ntwo\nthree");
+    }
+
+    /// A deleted file is offered what makes sense for one: keep editing, or
+    /// close. "Reload from disk" had nothing to reload and did nothing.
+    #[test]
+    fn a_deleted_file_offers_keep_or_close() {
+        let (_scratch, path) = temp_path("md_focus_deleted");
+        std::fs::write(&path, "gone soon").unwrap();
+        let mut app = App::new(1280.0, 800.0);
+        app.open_file(&path).unwrap();
+        app.active_document_mut().insert_char('!');
+        std::fs::remove_file(&path).unwrap();
+        app.on_event(&guitk::event::Event::FocusIn);
+        assert!(app.external_prompt.is_some());
+        assert!(!probe::is_visible(
+            &app,
+            Target::External(ExternalChoice::Reload)
+        ));
+        // R is not an answer here, and does nothing.
+        probe::key(&mut app, &probe::press(guitk::event::Key::R));
+        assert!(app.external_prompt.is_some());
+        probe::click(&mut app, Target::External(ExternalChoice::Close));
+        assert!(app.external_prompt.is_none());
+        assert_eq!(app.documents.count(), 1);
+        assert!(
+            app.active_document().path.is_none(),
+            "the deleted file's tab is still open"
+        );
+    }
+
+    /// **The merge review's answers are buttons and keys.** Its footer read
+    /// "[Accept]  [Cancel]" in brackets that were text.
+    #[test]
+    fn the_merge_review_is_answered_by_pointer_and_keys() {
+        let (_scratch, path) = temp_path("md_review_ptr");
+        std::fs::write(&path, "a\nb\nc\n").unwrap();
+        let mut app = App::new(1280.0, 800.0);
+        app.open_file(&path).unwrap();
+        app.active_document_mut().lines = vec!["a".into(), "OURS".into(), "c".into()];
+        app.active_document_mut().modified = true;
+        std::fs::write(&path, "a\nDISK\nc\n").unwrap();
+        app.on_event(&guitk::event::Event::FocusIn);
+
+        probe::key(&mut app, &probe::press(guitk::event::Key::V));
+        assert!(
+            app.external_prompt
+                .as_ref()
+                .is_some_and(|p| p.review.is_some()),
+            "V did not open the review"
+        );
+        probe::click(&mut app, Target::ReviewPick(0, ConflictChoice::Ours));
+        probe::click(&mut app, Target::ReviewAccept);
+        assert!(app.external_prompt.is_none(), "Accept left the review up");
+        assert!(app.active_document().full_text().contains("OURS"));
+        assert!(!app.active_document().full_text().contains("DISK"));
+    }
+
+    /// The help card goes away on a press, as well as on F1 and Esc.
+    #[test]
+    fn a_press_puts_the_shortcut_card_away() {
+        let mut app = App::new(1280.0, 800.0);
+        probe::key(&mut app, &probe::press(guitk::event::Key::F1));
+        assert!(app.show_help);
+        probe::click(&mut app, Target::HelpCard);
+        assert!(!app.show_help);
+    }
+
+    // --- Keys that reach what the pointer reaches ---------------------------
+
+    #[test]
+    fn ctrl_tab_and_ctrl_w_reach_the_tabs() {
+        let mut app = App::new(1280.0, 800.0);
+        app.new_document();
+        app.new_document();
+        assert_eq!(app.active_doc(), 2);
+        probe::key(&mut app, &probe::ctrl(guitk::event::Key::Tab));
+        assert_eq!(
+            app.active_doc(),
+            0,
+            "Ctrl+Tab does not wrap to the first document"
+        );
+        probe::key(&mut app, &ctrl_shift(guitk::event::Key::Tab));
+        assert_eq!(app.active_doc(), 2, "Ctrl+Shift+Tab does not go back");
+        probe::key(&mut app, &probe::ctrl(guitk::event::Key::W));
+        assert_eq!(app.documents.count(), 2);
+    }
+
+    #[test]
+    fn ctrl_e_cycles_the_view() {
+        let mut app = App::new(1280.0, 800.0);
+        let before = app.view_mode;
+        probe::key(&mut app, &probe::ctrl(guitk::event::Key::E));
+        assert_eq!(app.view_mode, before.next());
+        // Preview only: the source pane is not drawn, so it cannot be pressed.
+        while app.view_mode != ViewMode::PreviewOnly {
+            probe::key(&mut app, &probe::ctrl(guitk::event::Key::E));
+        }
+        assert!(!probe::is_visible(&app, Target::Editor));
+        assert!(probe::is_visible(&app, Target::Preview));
+    }
+
+    #[test]
+    fn ctrl_digits_set_a_heading_level() {
+        let mut app = App::new(1280.0, 800.0);
+        app.active_document_mut().lines = vec!["Title".to_string()];
+        probe::key(&mut app, &probe::ctrl(guitk::event::Key::Num3));
+        assert_eq!(app.active_document().line_text(0), "### Title");
+        probe::key(&mut app, &probe::ctrl(guitk::event::Key::Num1));
+        assert_eq!(
+            app.active_document().line_text(0),
+            "# Title",
+            "re-levelled by stacking"
+        );
+        probe::key(&mut app, &probe::ctrl(guitk::event::Key::Num1));
+        assert_eq!(
+            app.active_document().line_text(0),
+            "Title",
+            "the same level again is off"
+        );
+    }
+
+    #[test]
+    fn shift_arrows_select_and_typing_replaces_the_selection() {
+        let mut app = app_with_text();
+        for _ in 0..5 {
+            probe::key(&mut app, &probe::shift(guitk::event::Key::Right));
+        }
+        assert_eq!(
+            app.active_document().selected_text().as_deref(),
+            Some("alpha")
+        );
+        probe::type_str(&mut app, "A");
+        assert_eq!(app.active_document().line_text(0), "A beta");
+        assert!(!app.active_document().has_selection());
+
+        // Left without Shift on a selection lands on its start.
+        probe::key(&mut app, &probe::press(guitk::event::Key::End));
+        probe::key(&mut app, &probe::shift(guitk::event::Key::Left));
+        probe::key(&mut app, &probe::shift(guitk::event::Key::Left));
+        probe::key(&mut app, &probe::press(guitk::event::Key::Left));
+        assert_eq!(app.active_document().cursor_col, "A be".len());
+        assert!(!app.active_document().has_selection());
+    }
+
+    #[test]
+    fn cut_copy_and_paste_move_text() {
+        let mut app = app_with_text();
+        probe::key(&mut app, &probe::ctrl(guitk::event::Key::A));
+        probe::key(&mut app, &probe::ctrl(guitk::event::Key::C));
+        assert_eq!(app.clipboard, "alpha beta\nbeta gamma\ndelta");
+        probe::key(&mut app, &probe::ctrl(guitk::event::Key::X));
+        assert_eq!(app.active_document().full_text(), "");
+        probe::key(&mut app, &probe::ctrl(guitk::event::Key::V));
+        probe::key(&mut app, &probe::ctrl(guitk::event::Key::V));
+        assert_eq!(
+            app.active_document().full_text(),
+            "alpha beta\nbeta gamma\ndeltaalpha beta\nbeta gamma\ndelta"
+        );
+        // Copying nothing keeps what was copied.
+        probe::key(&mut app, &probe::ctrl(guitk::event::Key::C));
+        assert_eq!(app.clipboard, "alpha beta\nbeta gamma\ndelta");
+    }
+
+    // --- The document model under a real selection -------------------------
+
+    /// **Undoing a multi-line delete restores the lines as lines.** The undo
+    /// inserted the deleted text, newlines and all, into one line -- which
+    /// then drew, counted and moved as one line.
+    #[test]
+    fn a_multi_line_delete_undoes_and_redoes_as_lines() {
+        let mut doc = Document::new();
+        doc.lines = vec!["one".into(), "two".into(), "three".into(), "four".into()];
+        doc.selection_anchor = Some((0, 1));
+        doc.cursor_line = 2;
+        doc.cursor_col = 2;
+        assert_eq!(doc.delete_selection().as_deref(), Some("ne\ntwo\nth"));
+        assert_eq!(doc.lines, vec!["oree".to_string(), "four".to_string()]);
+
+        doc.undo();
+        assert_eq!(doc.lines, vec!["one", "two", "three", "four"]);
+        assert!(doc.lines.iter().all(|l| !l.contains('\n')));
+        assert_eq!((doc.cursor_line, doc.cursor_col), (2, 2));
+
+        doc.redo();
+        assert_eq!(doc.lines, vec!["oree".to_string(), "four".to_string()]);
+        doc.undo();
+        assert_eq!(doc.lines, vec!["one", "two", "three", "four"]);
+    }
+
+    /// The selection's delete records the column it actually deleted at: a
+    /// column inside a character is floored, and undo puts the text back
+    /// where it came from.
+    #[test]
+    fn a_selection_off_a_boundary_undoes_in_place() {
+        let mut doc = Document::new();
+        doc.lines = vec!["é-x".into()];
+        doc.selection_anchor = Some((0, 1)); // inside the é
+        doc.cursor_line = 0;
+        doc.cursor_col = 2;
+        assert_eq!(doc.delete_selection().as_deref(), Some("é"));
+        assert_eq!(doc.lines, vec!["-x".to_string()]);
+        doc.undo();
+        assert_eq!(doc.lines, vec!["é-x".to_string()]);
+    }
+
+    #[test]
+    fn a_heading_level_changes_in_one_undo_step() {
+        let mut doc = Document::new();
+        doc.lines = vec!["## Title".into()];
+        doc.cursor_col = 5;
+        set_heading(&mut doc, 4);
+        assert_eq!(doc.line_text(0), "#### Title");
+        assert_eq!(doc.cursor_col, 7, "the caret left the character it was on");
+        doc.undo();
+        assert_eq!(doc.line_text(0), "## Title");
+    }
+
+    #[test]
+    fn word_bounds_find_words_and_single_characters() {
+        assert_eq!(word_bounds("alpha beta", 2), (0, 5));
+        assert_eq!(word_bounds("alpha beta", 5), (5, 6), "the space alone");
+        assert_eq!(
+            word_bounds("alpha beta", 10),
+            (10, 10),
+            "nothing past the end"
+        );
+        assert_eq!(word_bounds("日本語 x", 3), (0, "日本語".len()));
+        assert_eq!(word_bounds("snake_case!", 0), (0, 10));
+    }
+
+    /// `col_at` is `col_x` inverted: every boundary of a mixed-width line
+    /// comes back from its own drawn position.
+    #[test]
+    fn the_column_under_a_point_is_the_one_drawn_there() {
+        let line = "a日b本c";
+        let text_x = 100.0;
+        for (col, _) in line
+            .char_indices()
+            .chain(std::iter::once((line.len(), ' ')))
+        {
+            let x = col_x(line, col, text_x);
+            assert_eq!(col_at(line, x + 0.25, text_x), col, "boundary {col}");
+        }
+        assert_eq!(col_at(line, 0.0, text_x), 0, "left of the text is column 0");
+        assert_eq!(col_at(line, 1.0e6, text_x), line.len());
     }
 }

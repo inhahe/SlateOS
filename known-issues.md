@@ -159839,6 +159839,30 @@ its selection, Page Down pages, and the number keys start a screen at its top
 as a tab does. And a space could not be typed into a habit's name. 167 tests;
 `apps/habits/mutate.py` has 55 rows. Ten examined; eleven to go.
 
+**`apps/slides`, 2026-09-25 -- a pointer layer, and an editor that could not
+change most of a slide, keep a deck, or show one.** Nothing selected an
+element but adding one, so nothing a layout put on a slide -- the first
+slide's title included -- could be selected, typed into, moved or deleted, and
+only text boxes could be typed into at all (every Title + Content slide said
+"First point" for good). Undo and redo had no key, and the toolbar's Undo and
+Redo lit up and could not be pressed. The notes were shown and exported and
+could not be written. Ctrl+N made one layout and nothing made the other five.
+Nothing could move or resize an element. The thumbnail column and the sorter
+clipped and never scrolled. `set_theme` said it restyled every slide and
+restyled none, so the Light theme put pale text on a pale ground. There was
+no save and no open -- a deck lived as long as the window -- and no show: the
+transition every slide chose was stored, printed and exported as nothing. And
+the export's result message was drawn nowhere, so a failed export failed in
+silence. Now: Tab selects, a press selects and a second press types, a drag
+moves and corner handles resize, the arrows nudge; every toolbar and panel
+button works and the panel's values change; Ctrl+M and + Slide reach every
+layout; the thumbnails scroll, follow and reorder by drag; a theme change
+restyles what came from the theme; decks save and open as YAML (`.slides`,
+versioned), with a question before Open loses unsaved work and a `*` in the
+window bar; F5 presents, with each transition played -- in the export too, and
+lines there run in their own direction instead of flat. 146 tests;
+`apps/slides/mutate.py` has 61 rows. Eleven examined; ten to go.
+
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 
 **In short:** a `cargo test --workspace` failed with exactly one failing test,
@@ -165352,6 +165376,12 @@ and is overruled.
 
 **How to see it.** Open a file in `apps/editor`, type a character, close the
 window. The file is unchanged and the character is gone.
+
+**`apps/slides` joins the list (2026-09-25).** It can save a deck now and
+knows when one has unsaved changes (the window bar's `*`, and the question
+before Open), so its close is the same loss; it answers
+`Event::CloseRequested` with `Response::Exit`, and asks nothing, until the
+loop lets it.
 
 **The proper fix** is in two halves. Lane F's: an explicit "not yet" answer to
 a close request (the request proposes `Response::KeepOpen`, keeping today's

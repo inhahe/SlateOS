@@ -1843,8 +1843,11 @@ word; text inside them that says "lane C" is history.
   kept), `rssreader` (2026-09-25 — every control, three panes that scroll, a
   notice that can be seen, and feed discovery from a saved page), `habits`
   (2026-09-25 — every control; the clock's day, a record that is kept,
-  deletion that asks, and an archive and a table that scroll).
-  **Next:** slides, flashcards — then the rest. (`reminders` was
+  deletion that asks, and an archive and a table that scroll), `slides`
+  (2026-09-25 — every control; every element selectable, editable, movable
+  and resizable, undo, notes, all six layouts, decks saved and opened, and a
+  slide show with its transitions).
+  **Next:** flashcards — then the rest. (`reminders` was
   examined 2026-09-18: keyboard-driven by design, its two gaps fixed.)
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;

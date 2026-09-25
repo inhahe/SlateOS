@@ -829,6 +829,11 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Shift+T", "Name the deck"),
     ("N / B", "Type / show or hide the speaker notes"),
     ("1 / 2", "Edit view / sorter view"),
+    ("F5 / Shift+F5", "Present from the start / from this slide"),
+    (
+        "Space / Backspace",
+        "Next / previous slide while presenting; Esc stops",
+    ),
     ("Ctrl+O / Ctrl+S", "Open a deck / save this one"),
     ("Ctrl+Shift+S", "Save this deck under another name"),
     ("Ctrl+E", "Export a web page"),
@@ -838,6 +843,23 @@ const SHORTCUTS: &[(&str, &str)] = &[
 /// A deck file's format, written under `slateos-slides` so that a file from
 /// a later format is recognised and refused rather than half-read.
 const DECK_FORMAT: i64 = 1;
+
+/// How long a transition between two slides takes.
+const TRANSITION_MS: u64 = 500;
+
+/// The grid a Dissolve reveals the arriving slide through, cell by cell.
+const DISSOLVE_COLS: usize = 16;
+const DISSOLVE_ROWS: usize = 9;
+
+/// A slide show in progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Show {
+    /// The slide on screen, or arriving.
+    index: usize,
+    /// The slide leaving while a transition plays, and how far the
+    /// transition has got, in milliseconds.
+    leaving: Option<(usize, u64)>,
+}
 
 /// What the file picker was opened for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -912,6 +934,8 @@ pub enum Target {
     /// The question's card, where a press does nothing.
     QuestionCard,
     HelpCard,
+    /// The slide show: a press goes on to the next slide.
+    Show,
 }
 
 /// A toolbar button.
@@ -928,6 +952,7 @@ pub enum Tool {
     Undo,
     Redo,
     Export,
+    Present,
     Theme,
 }
 
@@ -1081,6 +1106,13 @@ pub struct SlidesApp {
     picker_for: PickerFor,
     /// Asking before Open throws away unsaved changes.
     confirm_open: bool,
+    /// The slide show, while one is running.
+    ///
+    /// There was none: `ViewMode` had Edit and Sorter, so this program edited
+    /// decks and could not show one, and the transitions it let every slide
+    /// choose were stored, printed and exported as a class name nothing
+    /// animated. They play here, and in the export.
+    show: Option<Show>,
     /// The new-slide menu, with the layout its keys have reached.
     layout_menu: Option<usize>,
     /// What a press held down is doing.
@@ -1128,6 +1160,7 @@ impl SlidesApp {
             dirty: false,
             picker_for: PickerFor::Export,
             confirm_open: false,
+            show: None,
             layout_menu: None,
             drag: None,
             sidebar_scroll: 0.0,
@@ -1975,6 +2008,20 @@ impl SlidesApp {
             ".controls button { padding: 8px 16px; background: #313244; color: #CDD6F4; ",
             "border: 1px solid #45475A; border-radius: 4px; cursor: pointer; font-size: 14px; }\n",
             ".controls button:hover { background: #45475A; }\n",
+            // Each slide's transition, played as it becomes the one shown.
+            // They were exported as nothing at all: every slide switched with
+            // `display`, whatever it said it did.
+            ".slide.active.t-fade { animation: t-fade .5s; }\n",
+            "@keyframes t-fade { from { opacity: 0; } to { opacity: 1; } }\n",
+            ".slide.active.t-slide-left { animation: t-slide-left .5s; }\n",
+            "@keyframes t-slide-left { from { transform: translateX(100%); } to { transform: none; } }\n",
+            ".slide.active.t-slide-right { animation: t-slide-right .5s; }\n",
+            "@keyframes t-slide-right { from { transform: translateX(-100%); } to { transform: none; } }\n",
+            ".slide.active.t-wipe { animation: t-wipe .5s; }\n",
+            "@keyframes t-wipe { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }\n",
+            ".slide.active.t-dissolve { animation: t-dissolve .5s steps(8); }\n",
+            "@keyframes t-dissolve { from { opacity: 0; } to { opacity: 1; } }\n",
+            ".line { position: absolute; overflow: visible; }\n",
         ));
         html.push_str("</style>\n</head>\n<body>\n");
 
@@ -1982,9 +2029,14 @@ impl SlidesApp {
         for (i, slide) in self.slides.iter().enumerate() {
             let bg = slide.effective_bg(&self.theme);
             let active = if i == 0 { " active" } else { "" };
+            let transition = match slide.transition {
+                Transition::None => String::new(),
+                other => format!(" t-{}", transition_name(other)),
+            };
             html.push_str(&format!(
-                "<div class=\"slide{}\" id=\"slide-{}\" style=\"background:{}\">\n",
+                "<div class=\"slide{}{}\" id=\"slide-{}\" style=\"background:{}\">\n",
                 active,
+                transition,
                 i,
                 color_to_css(bg),
             ));
@@ -2051,13 +2103,35 @@ impl SlidesApp {
                                     color_to_css(*stroke_color),
                                 ));
                             }
+                            // Along the line, from its box's top-left to its
+                            // bottom-right, as the editor draws it. It was a
+                            // flat two-pixel bar the width of the box, so
+                            // every diagonal came out horizontal and an arrow
+                            // lost its head.
                             ShapeKind::Line | ShapeKind::Arrow => {
-                                // Render as a thin div (line) — simplified.
+                                let stroke = color_to_css(*stroke_color);
+                                let sw = stroke_width.max(1.0);
                                 html.push_str(&format!(
-                                    "  <div class=\"shape\" style=\"left:{x}px;top:{y}px;width:{width}px;\
-                                     height:2px;background:{};\"></div>\n",
-                                    color_to_css(*stroke_color),
+                                    "  <svg class=\"line\" style=\"left:{x}px;top:{y}px;\" \
+                                     width=\"{}\" height=\"{}\">\
+                                     <line x1=\"0\" y1=\"0\" x2=\"{width}\" y2=\"{height}\" \
+                                     stroke=\"{stroke}\" stroke-width=\"{sw}\"/>",
+                                    width.max(1.0),
+                                    height.max(1.0),
                                 ));
+                                if *kind == ShapeKind::Arrow {
+                                    let len = width.hypot(*height).max(f32::EPSILON);
+                                    let (ux, uy) = (width / len, height / len);
+                                    for side in [-1.0_f32, 1.0] {
+                                        let bx = width - 10.0 * (ux + side * 0.5 * uy);
+                                        let by = height - 10.0 * (uy - side * 0.5 * ux);
+                                        html.push_str(&format!(
+                                            "<line x1=\"{width}\" y1=\"{height}\" x2=\"{bx}\" y2=\"{by}\" \
+                                             stroke=\"{stroke}\" stroke-width=\"{sw}\"/>",
+                                        ));
+                                    }
+                                }
+                                html.push_str("</svg>\n");
                             }
                         }
                     }
@@ -2401,6 +2475,7 @@ impl SlidesApp {
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Tick { elapsed_ms } => self.tick(*elapsed_ms),
             Event::Resize { width, height } => {
                 #[allow(
                     clippy::cast_precision_loss,
@@ -2426,6 +2501,9 @@ impl SlidesApp {
     pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
         if !key.pressed {
             return EventResult::Ignored;
+        }
+        if self.show.is_some() {
+            return self.handle_show_key(key);
         }
         // Typing into a box takes every key while it is up, or a title
         // containing `s` would drop a rectangle on the slide behind it.
@@ -2495,6 +2573,10 @@ impl SlidesApp {
                 self.export_as();
                 EventResult::Consumed
             }
+            // The show. F5 and Shift+F5 are what every presentation program
+            // uses for these two.
+            Key::F5 if shift => self.present(self.current_index),
+            Key::F5 => self.present(0),
             // Before the plain `S` and `O`, which add shapes.
             Key::S if ctrl && shift => self.save_deck_as(),
             Key::S if ctrl => self.save_deck(),
@@ -2676,6 +2758,109 @@ impl SlidesApp {
         EventResult::Consumed
     }
 
+    /// Start the show at slide `from`. What was being typed is kept, and
+    /// anything open over the editor is put away.
+    fn present(&mut self, from: usize) -> EventResult {
+        if let Some((edit, buf)) = self.editing.take() {
+            self.commit_editing(edit, &buf);
+        }
+        self.layout_menu = None;
+        self.show_help = false;
+        self.drag = None;
+        self.show = Some(Show {
+            index: from.min(self.slides.len().saturating_sub(1)),
+            leaving: None,
+        });
+        EventResult::Consumed
+    }
+
+    /// Go on to the next slide of the show, playing the transition into it.
+    /// At the last slide there is nowhere to go.
+    fn show_next(&mut self) -> EventResult {
+        let Some(show) = self.show else {
+            return EventResult::Ignored;
+        };
+        let next = show.index.saturating_add(1);
+        let Some(slide) = self.slides.get(next) else {
+            return EventResult::Ignored;
+        };
+        let leaving = (slide.transition != Transition::None).then_some((show.index, 0));
+        self.show = Some(Show {
+            index: next,
+            leaving,
+        });
+        EventResult::Consumed
+    }
+
+    /// Go back a slide. Going back is a cut: a transition is how a slide
+    /// arrives, and replaying it backwards shows the audience the seam.
+    fn show_previous(&mut self) -> EventResult {
+        let Some(show) = self.show else {
+            return EventResult::Ignored;
+        };
+        if show.index == 0 && show.leaving.is_none() {
+            return EventResult::Ignored;
+        }
+        self.show = Some(Show {
+            index: show.index.saturating_sub(1),
+            leaving: None,
+        });
+        EventResult::Consumed
+    }
+
+    /// End the show, back in the editor on the slide that was showing.
+    fn end_show(&mut self) -> EventResult {
+        let Some(show) = self.show.take() else {
+            return EventResult::Ignored;
+        };
+        self.go_to_slide(show.index);
+        self.keep_current_visible();
+        EventResult::Consumed
+    }
+
+    /// Keys during the show.
+    fn handle_show_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Right | Key::Down | Key::PageDown | Key::Space | Key::Enter | Key::N => {
+                self.show_next()
+            }
+            Key::Left | Key::Up | Key::PageUp | Key::Backspace | Key::P => self.show_previous(),
+            Key::Home => {
+                self.show = Some(Show {
+                    index: 0,
+                    leaving: None,
+                });
+                EventResult::Consumed
+            }
+            Key::End => {
+                self.show = Some(Show {
+                    index: self.slides.len().saturating_sub(1),
+                    leaving: None,
+                });
+                EventResult::Consumed
+            }
+            Key::Escape => self.end_show(),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Time passing: the transition on screen moves on, and finishes.
+    fn tick(&mut self, elapsed_ms: u64) -> EventResult {
+        let Some(Show {
+            index,
+            leaving: Some((from, done)),
+        }) = self.show
+        else {
+            return EventResult::Ignored;
+        };
+        let done = done.saturating_add(elapsed_ms);
+        self.show = Some(Show {
+            index,
+            leaving: (done < TRANSITION_MS).then_some((from, done)),
+        });
+        EventResult::Consumed
+    }
+
     /// Delete the current slide, unless it is the last one.
     fn delete_current_slide(&mut self) -> EventResult {
         if self.slides.len() < 2 {
@@ -2754,6 +2939,11 @@ impl SlidesApp {
     pub fn frame(&self) -> Frame<Target> {
         let (w, h) = (self.window_width, self.window_height);
         let mut f = Frame::new(w, h);
+        // The show is the whole window, and nothing else is drawn under it.
+        if let Some(show) = self.show {
+            self.render_show(&mut f, show);
+            return f;
+        }
 
         // Background fill the entire window.
         self.palette
@@ -2916,6 +3106,7 @@ impl SlidesApp {
                 self.undo_mgr.can_redo(),
             ),
             (Tool::Export, String::from("Export"), 62.0, true),
+            (Tool::Present, String::from("Present"), 70.0, true),
             (
                 Tool::Theme,
                 format!("Theme: {}", self.theme.name),
@@ -4007,6 +4198,126 @@ impl SlidesApp {
         f.hit(Target::Notes, panel);
     }
 
+    /// Where the show draws a slide: letterboxed in the window, its top-left
+    /// corner and its scale.
+    fn show_geometry(&self) -> (f32, f32, f32) {
+        let (w, h) = (self.window_width, self.window_height);
+        let scale = (w / SLIDE_W).min(h / SLIDE_H).max(0.01);
+        (
+            (w - SLIDE_W * scale) / 2.0,
+            (h - SLIDE_H * scale) / 2.0,
+            scale,
+        )
+    }
+
+    /// Draw slide `index` at `(x, y)` and `scale`: its background and its
+    /// elements, clipped to itself.
+    fn draw_slide(&self, f: &mut Frame<Target>, index: usize, x: f32, y: f32, scale: f32) {
+        let Some(slide) = self.slides.get(index) else {
+            return;
+        };
+        let rect = Rect::new(x, y, SLIDE_W * scale, SLIDE_H * scale);
+        f.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: slide.effective_bg(&self.theme),
+            corner_radii: CornerRadii::ZERO,
+        });
+        f.clip(rect);
+        for element in &slide.elements {
+            self.render_element(f, element, x, y, scale);
+        }
+        f.unclip();
+    }
+
+    /// The show: the slide on screen, or two with a transition between them.
+    fn render_show(&self, f: &mut Frame<Target>, show: Show) {
+        let (w, h) = (self.window_width, self.window_height);
+        f.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: w,
+            height: h,
+            color: Color::BLACK,
+            corner_radii: CornerRadii::ZERO,
+        });
+        f.hit(Target::Show, Rect::new(0.0, 0.0, w, h));
+        let (x, y, scale) = self.show_geometry();
+        let (sw, sh) = (SLIDE_W * scale, SLIDE_H * scale);
+        let Some((from, done)) = show.leaving else {
+            self.draw_slide(f, show.index, x, y, scale);
+            return;
+        };
+        let p = (done as f32 / TRANSITION_MS as f32).clamp(0.0, 1.0);
+        let transition = self
+            .slides
+            .get(show.index)
+            .map_or(Transition::None, |s| s.transition);
+        match transition {
+            Transition::None => self.draw_slide(f, show.index, x, y, scale),
+            // Through black: out for the first half, in for the second.
+            Transition::Fade => {
+                let (index, dark) = if p < 0.5 {
+                    (from, p * 2.0)
+                } else {
+                    (show.index, (1.0 - p) * 2.0)
+                };
+                self.draw_slide(f, index, x, y, scale);
+                let alpha = (dark * 255.0).round().clamp(0.0, 255.0) as u8;
+                f.push(RenderCommand::FillRect {
+                    x,
+                    y,
+                    width: sw,
+                    height: sh,
+                    color: Color::rgba(0, 0, 0, alpha),
+                    corner_radii: CornerRadii::ZERO,
+                });
+            }
+            // The arriving slide pushes the leaving one out of the frame.
+            Transition::SlideLeft | Transition::SlideRight => {
+                let dir = if transition == Transition::SlideLeft {
+                    -1.0
+                } else {
+                    1.0
+                };
+                f.clip(Rect::new(x, y, sw, sh));
+                f.translate(dir * p * sw, 0.0);
+                self.draw_slide(f, from, x, y, scale);
+                f.untranslate();
+                f.translate(-dir * (1.0 - p) * sw, 0.0);
+                self.draw_slide(f, show.index, x, y, scale);
+                f.untranslate();
+                f.unclip();
+            }
+            // Revealed from the left edge.
+            Transition::Wipe => {
+                self.draw_slide(f, from, x, y, scale);
+                f.clip(Rect::new(x, y, sw * p, sh));
+                self.draw_slide(f, show.index, x, y, scale);
+                f.unclip();
+            }
+            // Revealed a cell at a time, in an order that looks scattered and
+            // is the same every time.
+            Transition::Dissolve => {
+                self.draw_slide(f, from, x, y, scale);
+                let cells = DISSOLVE_COLS.saturating_mul(DISSOLVE_ROWS);
+                let shown = ((p * cells as f32).round() as usize).min(cells);
+                let (cw, ch) = (sw / DISSOLVE_COLS as f32, sh / DISSOLVE_ROWS as f32);
+                for order in 0..shown {
+                    // 97 is prime and does not divide 144, so stepping by it
+                    // visits every cell exactly once.
+                    let cell = order.saturating_mul(97).checked_rem(cells).unwrap_or(0);
+                    let (col, row) = (cell % DISSOLVE_COLS, cell / DISSOLVE_COLS);
+                    f.clip(Rect::new(x + col as f32 * cw, y + row as f32 * ch, cw, ch));
+                    self.draw_slide(f, show.index, x, y, scale);
+                    f.unclip();
+                }
+            }
+        }
+    }
+
     /// The question before Open loses unsaved changes.
     fn render_open_question(&self, f: &mut Frame<Target>) {
         let (w, h) = (self.window_width, self.window_height);
@@ -4284,6 +4595,14 @@ impl SlidesApp {
     }
 
     fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        // During the show a press goes on, and a right press goes back.
+        if self.show.is_some() {
+            return match event.kind {
+                MouseEventKind::Press(MouseButton::Left) => self.show_next(),
+                MouseEventKind::Press(MouseButton::Right) => self.show_previous(),
+                _ => EventResult::Ignored,
+            };
+        }
         match event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
                 let target = self.frame().hit_test(event.x, event.y);
@@ -4369,6 +4688,7 @@ impl SlidesApp {
                 EventResult::Consumed
             }
             Target::Menu | Target::Sidebar | Target::SorterGrid => EventResult::Ignored,
+            Target::Show => self.show_next(),
             Target::LayoutChoice(i) => self.choose_layout(i),
             Target::Tool(tool) => self.use_tool(tool),
             Target::Thumb(i) | Target::SorterThumb(i) => {
@@ -4461,6 +4781,7 @@ impl SlidesApp {
                 self.export_as();
                 EventResult::Consumed
             }
+            Tool::Present => self.present(self.current_index),
             Tool::Theme => {
                 self.cycle_theme();
                 EventResult::Consumed
@@ -5051,14 +5372,17 @@ impl App for SlidesApp {
         }
     }
 
-    /// No clock.
+    /// A clock only while a transition plays.
     ///
-    /// Slides advance when the speaker advances them. There are no transitions
-    /// and no timed rehearsal mode, so a tick would redraw an identical frame —
-    /// and this is a program that runs full-screen in front of an audience,
-    /// where a needless wake-up is a dropped frame someone can see.
+    /// Slides advance when the speaker advances them; the one thing that moves
+    /// by itself is the half-second between two of them. Any other tick would
+    /// redraw an identical frame -- and this is a program that runs in front
+    /// of an audience, where a needless wake-up is a dropped frame someone can
+    /// see.
     fn tick_interval(&self) -> Option<Duration> {
-        None
+        self.show
+            .and_then(|s| s.leaving)
+            .map(|_| Duration::from_millis(16))
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -5359,7 +5683,12 @@ mod tests {
         undone.handle_event(&press(Key::T));
         undone.handle_event(&press_ctrl(Key::Z));
 
-        vec![plain, sorter, working, undone]
+        // Presenting, a slide in from either end.
+        let mut presenting = seeded();
+        presenting.handle_event(&press(Key::F5));
+        presenting.handle_event(&press(Key::Right));
+
+        vec![plain, sorter, working, undone, presenting]
     }
 
     /// **The shortcut list reaches the window.**
@@ -7780,5 +8109,300 @@ mod tests {
         assert_eq!(app.file_name("slides"), "Q3-plans-draft.slides");
         app.title = String::from("  ");
         assert_eq!(app.file_name("html"), "presentation.html");
+    }
+    // ── The show ────────────────────────────────────────────────────
+
+    fn tick(ms: u64) -> Event {
+        Event::Tick { elapsed_ms: ms }
+    }
+
+    /// F5 presents from the first slide and Shift+F5 from this one. There
+    /// was no presenting view: the program edited decks and could not show
+    /// one.
+    #[test]
+    fn f5_presents_from_the_start_and_shift_f5_from_this_slide() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::End));
+        app.handle_event(&press(Key::F5));
+        assert_eq!(app.show.map(|s| s.index), Some(0));
+        app.handle_event(&press(Key::Escape));
+        assert!(app.show.is_none());
+        app.handle_event(&press(Key::End));
+        let last = app.current_index;
+        app.handle_event(&press_shift(Key::F5));
+        assert_eq!(app.show.map(|s| s.index), Some(last));
+        app.handle_event(&press(Key::Escape));
+        probe::click(&mut app, Target::Tool(Tool::Present));
+        assert_eq!(app.show.map(|s| s.index), Some(last));
+    }
+
+    /// The show is the slide and nothing else: no toolbar, no panels.
+    #[test]
+    fn the_show_draws_the_slide_and_nothing_else() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::F5));
+        let text = drawn_text(&app);
+        assert!(text.contains("Presentation Title"), "{text}");
+        assert!(
+            !text.contains("Duplicate") && !text.contains("Properties"),
+            "{text}"
+        );
+        assert_eq!(app.frame().hit_test(5.0, 5.0), Some(Target::Show));
+    }
+
+    /// The keys and the pointer move through the show and stop at its ends,
+    /// and Escape comes back to the editor on the slide that was showing.
+    #[test]
+    fn the_show_moves_by_key_and_press_and_ends_on_the_slide_shown() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::F5));
+        let count = app.slide_count();
+        for key in [Key::Space, Key::Right, Key::PageDown, Key::Enter] {
+            app.handle_event(&press(key));
+            app.handle_event(&tick(TRANSITION_MS));
+        }
+        assert_eq!(app.show.map(|s| s.index), Some(4));
+        probe::click(&mut app, Target::Show);
+        assert_eq!(app.show.map(|s| s.index), Some(5.min(count - 1)));
+        app.handle_event(&press(Key::End));
+        assert_eq!(
+            app.handle_event(&press(Key::Space)),
+            EventResult::Ignored,
+            "past the last slide"
+        );
+        app.handle_event(&press(Key::Backspace));
+        app.handle_event(&mouse(5.0, 5.0, MouseEventKind::Press(MouseButton::Right)));
+        assert_eq!(app.show.map(|s| s.index), Some(count - 3));
+        app.handle_event(&press(Key::Home));
+        assert_eq!(
+            app.handle_event(&press(Key::Left)),
+            EventResult::Ignored,
+            "before the first"
+        );
+        app.handle_event(&press(Key::Right));
+        app.handle_event(&tick(TRANSITION_MS));
+        app.handle_event(&press(Key::Escape));
+        assert!(app.show.is_none());
+        assert_eq!(app.current_index, 1);
+        // A key the show has no use for does nothing to the deck behind it.
+        app.handle_event(&press(Key::F5));
+        let before = element_count(&app);
+        assert_eq!(app.handle_event(&press(Key::T)), EventResult::Ignored);
+        assert_eq!(element_count(&app), before);
+    }
+
+    /// A transition plays over the clock's ticks, and the clock stops when
+    /// it is over.
+    #[test]
+    fn a_transition_plays_over_the_ticks_and_the_clock_stops() {
+        let mut app = seeded();
+        app.slides[1].transition = Transition::Fade;
+        app.handle_event(&press(Key::F5));
+        assert_eq!(app.tick_interval(), None, "a still slide wakes the window");
+        app.handle_event(&press(Key::Space));
+        assert!(app.tick_interval().is_some(), "a transition has no clock");
+        assert_eq!(app.show.and_then(|s| s.leaving), Some((0, 0)));
+        app.handle_event(&tick(200));
+        assert_eq!(app.show.and_then(|s| s.leaving), Some((0, 200)));
+        app.handle_event(&tick(400));
+        assert_eq!(app.show.and_then(|s| s.leaving), None);
+        assert_eq!(app.tick_interval(), None);
+        assert_eq!(app.handle_event(&tick(16)), EventResult::Ignored);
+        // Going back is a cut.
+        app.handle_event(&press(Key::Backspace));
+        assert_eq!(app.show.and_then(|s| s.leaving), None);
+    }
+
+    /// Every transition draws both slides part of the way through, each in
+    /// its own manner.
+    #[test]
+    fn each_transition_draws_both_slides_on_the_way() {
+        let fills = |app: &SlidesApp| -> Vec<Color> {
+            app.render_commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(color),
+                    _ => None,
+                })
+                .collect()
+        };
+        for transition in [
+            Transition::Fade,
+            Transition::SlideLeft,
+            Transition::SlideRight,
+            Transition::Wipe,
+            Transition::Dissolve,
+        ] {
+            let mut app = fresh();
+            app.handle_event(&press_ctrl(Key::N));
+            app.slides[0].background = Some(Color::rgb(10, 20, 30));
+            app.slides[1].background = Some(Color::rgb(200, 100, 50));
+            app.slides[1].transition = transition;
+            app.handle_event(&press(Key::F5));
+            app.handle_event(&press(Key::Space));
+            // A quarter of the way, and three quarters.
+            app.handle_event(&tick(TRANSITION_MS / 4));
+            let early = fills(&app);
+            app.handle_event(&tick(TRANSITION_MS / 2));
+            let late = fills(&app);
+            let (old, new) = (Color::rgb(10, 20, 30), Color::rgb(200, 100, 50));
+            match transition {
+                // Through black: the old slide, darkening; then the new one.
+                Transition::Fade => {
+                    assert!(
+                        early.contains(&old) && !early.contains(&new),
+                        "{transition:?}"
+                    );
+                    assert!(
+                        late.contains(&new) && !late.contains(&old),
+                        "{transition:?}"
+                    );
+                    assert!(
+                        early.iter().any(|c| c.r == 0
+                            && c.g == 0
+                            && c.b == 0
+                            && c.a > 0
+                            && c.a < 255),
+                        "no darkening"
+                    );
+                }
+                _ => {
+                    assert!(
+                        early.contains(&old) && early.contains(&new),
+                        "{transition:?}: {early:?}"
+                    );
+                    assert!(late.contains(&old) && late.contains(&new), "{transition:?}");
+                }
+            }
+            app.handle_event(&tick(TRANSITION_MS));
+            let done = fills(&app);
+            assert!(
+                done.contains(&new) && !done.contains(&old),
+                "{transition:?} did not finish"
+            );
+        }
+    }
+
+    /// Each transition, a quarter of the way through, is where it should
+    /// be: how dark the fade is, how far each slide has slid, how much the
+    /// wipe shows and how many cells the dissolve has revealed. Both slides
+    /// being drawn says nothing about any of that.
+    #[test]
+    fn each_transition_is_a_quarter_done_a_quarter_of_the_way() {
+        for transition in [
+            Transition::Fade,
+            Transition::SlideLeft,
+            Transition::SlideRight,
+            Transition::Wipe,
+            Transition::Dissolve,
+        ] {
+            let mut app = fresh();
+            app.handle_event(&press_ctrl(Key::N));
+            app.slides[1].transition = transition;
+            app.handle_event(&press(Key::F5));
+            app.handle_event(&press(Key::Space));
+            app.handle_event(&tick(TRANSITION_MS / 4));
+            let (_, _, scale) = app.show_geometry();
+            let sw = SLIDE_W * scale;
+            let cmds = app.render_commands();
+            match transition {
+                // Half dark on the way out: a quarter of the whole.
+                Transition::Fade => {
+                    let dark = cmds.iter().find_map(|c| match c {
+                        RenderCommand::FillRect { color, .. }
+                            if color.r == 0 && color.g == 0 && color.b == 0 && color.a < 255 =>
+                        {
+                            Some(color.a)
+                        }
+                        _ => None,
+                    });
+                    assert!(dark.is_some_and(|a| a.abs_diff(128) <= 1), "{dark:?}");
+                }
+                Transition::SlideLeft | Transition::SlideRight => {
+                    let way = if transition == Transition::SlideLeft {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    let shifts: Vec<f32> = cmds
+                        .iter()
+                        .filter_map(|c| match c {
+                            RenderCommand::PushTranslate { dx, .. } => Some(*dx),
+                            _ => None,
+                        })
+                        .collect();
+                    let near = |want: f32| shifts.iter().any(|d| (d - want).abs() < 1.0);
+                    assert!(
+                        near(way * 0.25 * sw) && near(-way * 0.75 * sw),
+                        "{transition:?}: {shifts:?}"
+                    );
+                }
+                Transition::Wipe => {
+                    let widths: Vec<f32> = cmds
+                        .iter()
+                        .filter_map(|c| match c {
+                            RenderCommand::PushClip { width, .. } => Some(*width),
+                            _ => None,
+                        })
+                        .collect();
+                    assert!(
+                        widths.iter().any(|w| (w - 0.25 * sw).abs() < 1.0),
+                        "{widths:?}"
+                    );
+                    assert!(
+                        !widths
+                            .iter()
+                            .any(|w| (w - sw).abs() < 0.5 && widths.len() == 1)
+                    );
+                }
+                Transition::Dissolve => {
+                    let cell = sw / DISSOLVE_COLS as f32;
+                    let cells = cmds
+                        .iter()
+                        .filter(|c| matches!(c, RenderCommand::PushClip { width, .. } if (width - cell).abs() < 0.01))
+                        .count();
+                    assert_eq!(cells, DISSOLVE_COLS * DISSOLVE_ROWS / 4, "cells revealed");
+                }
+                Transition::None => {}
+            }
+        }
+    }
+
+    /// The export plays each slide's transition. Every slide switched with
+    /// `display`, whatever transition it had chosen.
+    #[test]
+    fn the_export_plays_each_slides_transition() {
+        let mut app = seeded();
+        app.slides[1].transition = Transition::Wipe;
+        app.slides[2].transition = Transition::SlideLeft;
+        let html = app.export_html();
+        assert!(
+            html.contains("class=\"slide t-wipe\" id=\"slide-1\""),
+            "{html}"
+        );
+        assert!(html.contains("class=\"slide t-slide-left\" id=\"slide-2\""));
+        assert!(html.contains("@keyframes t-wipe") && html.contains(".slide.active.t-wipe"));
+        assert!(
+            html.contains("class=\"slide active\" id=\"slide-0\""),
+            "a slide with no transition gained a class"
+        );
+    }
+
+    /// The export draws a line along its direction, and an arrow with its
+    /// head. Both were a flat two-pixel bar the width of their box.
+    #[test]
+    fn the_export_draws_lines_along_their_direction() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::A));
+        let html = app.export_html();
+        assert!(
+            html.contains("<line x1=\"0\" y1=\"0\" x2=\"200\" y2=\"120\""),
+            "{html}"
+        );
+        assert_eq!(
+            tag_count(&html, "line"),
+            1 + 2 + 1,
+            "the rule, the arrow and its head: {html}"
+        );
     }
 }

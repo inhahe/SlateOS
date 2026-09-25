@@ -58757,6 +58757,27 @@ test of the fixture, not of the bound.
   of those three files; `CONFIG_NAME`'s load and store are the only call
   sites here.
 
+- **A slide deck is a YAML file named `.slides`.** (2026-09-25,
+  `apps/slides/src/main.rs` -> `deck_document`, `deck_from_document`,
+  `DECK_FORMAT`.) YAML because it is the tree's format for anything a person
+  might open in an editor and `yamldoc` already reads and writes it
+  faithfully; versioned under `slateos-slides: 1` so a later format is refused
+  rather than half-read. The alternative -- reading back our own HTML export --
+  would tie the editor to a presentation format. The extension is new and no
+  file association names it yet (`apps/fileassoc`).
+
+- **Tab walks a slide's elements; it no longer switches views.** (2026-09-25,
+  `apps/slides/src/main.rs` -> `handle_command_key`.) Nothing else reached an
+  element a layout had made, and Tab is how every slide editor selects the
+  next object. Views keep `1` and `2` (and the toolbar). Reversing it is one
+  arm, but then something else must select elements by key.
+
+- **Slides opens on one title slide, not the six-slide sample.** (2026-09-25,
+  `apps/slides/src/main.rs` -> `main`.) The sample existed because it was the
+  only way five of the six layouts could appear; Ctrl+M reaches them all now,
+  and an editor that opens on someone else's deck makes every new deck start
+  with five deletions.
+
 ### Deferred, each with the condition that un-defers it
 
 - **The terminal polls for its shell's output** -- 16 ms while the shell is

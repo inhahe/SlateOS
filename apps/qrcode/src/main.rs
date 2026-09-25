@@ -5235,11 +5235,13 @@ mod tests {
         assert_eq!(app.wifi_config.password, "secret");
         assert!(app.wifi_config.hidden);
         assert!(app.current_qr.is_some());
+        let kinds: Vec<InputMode> = app.history.iter().map(|e| e.mode).collect();
         assert_eq!(
-            app.history.last().map(|e| e.mode),
-            Some(InputMode::Wifi),
-            "the brought-back code is not the newest"
+            kinds,
+            [InputMode::Text, InputMode::Wifi],
+            "the brought-back code is not the newest, or the text code was lost"
         );
+        assert_eq!(app.history[0].data, "something else");
         // And the box has it, caret at the end, so typing adds to it.
         probe::type_str(&mut app, "2");
         assert_eq!(app.wifi_config.ssid, "Home2");

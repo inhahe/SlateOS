@@ -164968,3 +164968,44 @@ name, they read identically at the call site, and only one of them answers
 "is this row on the card". This is the same distinction `names_the_key` makes
 in `scripts/key-survey.py`, written to fix this exact defect in the survey --
 by the same hand that then wrote it into thirty-eight tests.
+
+### [D] TD-D-CWD-AND-UMASK-DO-NOT-SURVIVE-EXEC-OR-SPAWN — 2026-09-24 — OPEN
+
+**Status:** OPEN — the libc half is lane D's and is written up; it waits on a
+kernel half filed as `requests/d-a-cwd-and-umask-do-not-survive-exec.md`.
+
+**In short:** every program a SlateOS-native program starts begins in `/`,
+with the default file-creation mask (`umask`, the permission bits a new file
+must not get) of `022`, whatever its parent had. So a shell's `cd` is forgotten
+by every command it runs, and a `umask 077` is forgotten too. Found by reading
+the code; no boot has exercised it, because every ring-3 rung runs from `/`
+with absolute paths, which is the one case where right and wrong agree.
+
+**Where:** the working directory is a libc `process_global!` buffer in
+`posix/src/unistd.rs` (initialised to `/`); the umask is `UMASK_VALUE` in
+`posix/src/file.rs` (initialised to `022`). Both are copied by `fork` (address
+space) and both reset in a new image, because `crt.rs` start-up has nobody to
+ask: no native syscall reads or writes `pcb.cwd` / `pcb.linux_umask`.
+
+**Who it reaches:**
+- C programs that `fork` + `exec*`.
+- Everything that uses `posix_spawn`, which includes **all of Rust's
+  `std::process::Command`** on this target (`os: linux, env: musl`, so `std`
+  runs on this libc). `Command::current_dir` on musl always becomes
+  `posix_spawn_file_actions_addchdir_np`, which `posix_spawn` records as tag 4
+  and then ignores (`build_fd_map`'s `_ => {}` arm) — so Oils, which sets
+  `current_dir` on every external command (`userspace/oils/src/interp.rs`),
+  `login` and `sshd` all start their children in `/`.
+- Linux-ABI children of native parents too: native spawn leaves the child's
+  `pcb` record at its defaults.
+
+**Proper fix:** `pcb.cwd` and `pcb.linux_umask` become the record for every
+ABI (native `SET_CWD`/`GET_CWD`/`UMASK`, spawn inherits both, `SpawnEx2Args`
+carries an optional `cwd` for `addchdir_np`), with libc keeping them current
+and reading them at start-up. Why that does not reopen `design-decisions.md`
+§648 is argued in the request: no native call resolves against the record.
+
+**Not done in the meantime, deliberately:** making `addchdir_np` fail loudly
+instead of being ignored. Oils uses it for every command, so refusing it would
+turn "runs in the wrong directory" into "runs nothing", and the fix for both is
+the same kernel half.

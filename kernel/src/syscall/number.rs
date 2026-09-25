@@ -2380,9 +2380,12 @@ pub const SYS_TTY_GET_TERMIOS: u64 = 541;
 ///
 /// `arg0`: pointer to a 36-byte wire-format `struct termios` to install.
 ///
-/// `TCSETSW`/`TCSETSF` collapse onto this: we have no output queue to drain
-/// and no kernel-side input queue to flush, exactly as the Linux shim's
-/// three commands already collapse.
+/// `TCSETSW` collapses onto this: there is no output queue to drain.
+/// `TCSETSF` does not quite: since 2026-09-24 a terminal has a kernel-side
+/// input queue (the line discipline runs as input arrives), and the Linux
+/// shim's `TCSETSF` empties it. This native call has no flush variant yet, so
+/// a native `tcsetattr(TCSAFLUSH)` sets the termios without discarding
+/// type-ahead — see todo.txt, "native tcflush".
 ///
 /// This is what makes raw mode work for a native-ABI program.  libc's
 /// `tcsetattr` previously accepted the call and threw it away ("our console
@@ -4764,13 +4767,11 @@ pub const SYS_NET_RAW_CLOSE: u64 = 868;
 ///
 /// # What the number means
 ///
-/// Exact on a master and on a slave in raw mode; an **upper bound** on a slave
-/// in canonical mode, where the counted bytes have not been through the line
-/// editor yet and an erase will consume rather than deliver one.  **Zero is
-/// exact in every case**, so a caller testing for emptiness — which is what
-/// most `FIONREAD` callers are doing — is never misled. See
-/// [`crate::tty::pty::readable_bytes`] for why counting canonical input
-/// exactly would require running the editor twice against different input.
+/// Exact at both ends and in both modes. On a slave in canonical mode it
+/// counts the bytes of complete lines only: input is edited as it arrives, so
+/// the line still being typed is known not to be readable yet. (Until
+/// 2026-09-24 the editor ran inside the reader and this was an upper bound;
+/// see [`crate::tty::pty::readable_bytes`].)
 ///
 /// A hung-up end with nothing buffered answers 0, not an error: `FIONREAD`
 /// asks how many bytes there are, and the answer is none. That differs from

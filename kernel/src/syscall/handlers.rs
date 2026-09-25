@@ -5665,12 +5665,13 @@ pub fn tty_read_into_user(buf: u64, cap: u64) -> TtyReadOutcome {
 
 /// Send `sig` to every member of `tty`'s foreground process group.
 ///
-/// Split out from [`deliver_console_signal`] because not every terminal-
-/// generated signal interrupts a syscall: `SIGWINCH` from `TIOCSWINSZ` is
-/// delivered by a *writer* that has nothing to restart, while `^C` is
-/// delivered by the reader it aborts.  Sharing the loop keeps the
-/// "no foreground group ⇒ no signal" rule and the `SI_KERNEL` origin in one
-/// place instead of two.
+/// Split out from [`deliver_console_signal`] because most terminal-generated
+/// signals interrupt no syscall: `SIGWINCH` from `TIOCSWINSZ`, and every
+/// `^C`/`^\`/`^Z` typed into a pty, are delivered by a *writer* — the master's
+/// write is where a pty's input is received — which has nothing to restart.
+/// Only the console's are delivered by the reader they abort. Sharing the loop
+/// keeps the "no foreground group ⇒ no signal" rule and the `SI_KERNEL` origin
+/// in one place.
 ///
 /// A `pgid` of 0 means no foreground group is installed, which is not an
 /// error: Linux likewise generates no signal for a tty with no `tty->pgrp`.
@@ -5680,71 +5681,31 @@ pub fn signal_foreground_group(tty: crate::tty::TtyId, sig: u8) {
 
     let pgid = crate::tty::foreground_pgid(tty);
     if pgid == 0 {
-        // A terminal signal was DUE and nobody is registered to receive
-        // it, so it is dropped. Announced rather than returned silently,
-        // because the caller's very next move is
-        // `restart_result(ERESTARTSYS)`: the reader restarts, the byte
-        // that caused this is already consumed, and nothing will ever
-        // arrive. That is an unbounded restart loop with no signal, no
-        // data and no EOF -- and until this line existed it left no
-        // trace anywhere.
-        //
-        // Suspected cause of `ctest-pty` exit 45 on 2026-09-16, the
-        // rung's first real run, where the child never returned from its
-        // read on the pty slave. `foreground_pgid` is
-        // `pcb::ctty_fg_pgrp(id).unwrap_or(0)`, so 0 means no session
-        // holds this terminal -- which for a `forkpty` child means
-        // `login_tty`'s TIOCSCTTY/tcsetpgrp did not take effect.
-        //
-        // This print is the discriminator, and that is the whole point of
-        // adding it before changing any behaviour: if it appears naming
-        // the pty's id, the fault is in acquiring the terminal and NOT in
-        // the line discipline, which had already decided correctly that a
-        // signal was due. If it does not appear, the hypothesis is wrong
-        // and the child is blocked somewhere else entirely.
+        // Dropped, as Linux drops it: there is nobody to interrupt. Said out
+        // loud because it is rare and because the silent version of this
+        // branch once sent an investigation down a wrong path for a day
+        // (known-issues.md A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED).
         crate::serial_println!(
-            concat!(
-                "[tty] signal {} due on tty {:?} but NO foreground group ",
-                "is registered: DROPPED, and the reader will now restart. ",
-                "See known-issues ",
-                "A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED"
-            ),
+            "[tty] signal {} due on tty {:?}, which has no foreground process group: dropped",
             sig,
             tty
         );
         return;
     }
-    // ROUND-4 DISCRIMINATOR for ctest-pty exit 45. Rounds 1 and 3 settled
-    // that the byte reaches the discipline, that ISIG is on, that a signal is
-    // decided (at `canonical_try_read`/`step()`), and that `pgid != 0` so
-    // delivery is attempted. The child still never returns from its read.
-    //
-    // These counters exist because the per-member `let _ =` below cannot tell
-    // the benign case its own comment describes -- one member exited -- from
-    // the case that would explain the hang, which is NOT ONE send succeeding.
-    // A tolerated per-item failure hides a total failure, and a discarded
-    // Result reports both as silence.
-    // ROUND-8. Rounds 3 and 4 established that a signal is decided and that
-    // delivery SUCCEEDS -- and the ctest-pty trace shows the child never got
-    // it. Both are consistent: `delivered > 0` only says somebody received
-    // it, not that the right group did. The pty child is its own group leader
-    // (login_tty/setsid), and the serial shows its group is 205 while the
-    // parent gave up and exited BEFORE any SIGINT arrived.
-    //
-    // So the target is the thing to print, not the count. Terminal signals are
-    // rare, so this is quiet.
+    // One line per terminal signal, naming the terminal, the group and its
+    // members. Terminal signals are rare, and a line that says *whose* signal
+    // it was is what the ctest-pty investigation lacked for eleven rounds.
     let members = pcb::pids_in_group(pgid);
     crate::serial_println!(
-        "[tty] signal {} -> fg pgid {} on tty {:?}: {} member(s) {:?}",
+        "[tty] signal {} -> foreground group {} on tty {:?}: {:?}",
         sig,
         pgid,
         tty,
-        members.len(),
         members
     );
     let mut delivered = 0usize;
     let mut failed = 0usize;
-    for target in pcb::pids_in_group(pgid) {
+    for target in members {
         let send_args = SyscallArgs {
             arg0: target,
             arg1: u64::from(sig),
@@ -5757,26 +5718,21 @@ pub fn signal_foreground_group(tty: crate::tty::TtyId, sig: u8) {
         // snapshot and delivery just fails its own send and the rest still
         // receive it. Counted rather than discarded so the aggregate can be
         // judged even though no individual failure is worth reporting.
-        // `SyscallResult` is not a `Result`: it carries an i64 `value` whose
-        // negative range is the error code. Assuming the API from the name
-        // cost a compile here, which is the cheapest place to be wrong.
+        // (`SyscallResult` carries an i64 `value` whose negative range is the
+        // error code; it is not a `Result`.)
         if sys_signal_send_with_info(&send_args, SI_KERNEL, 0).value < 0 {
             failed = failed.saturating_add(1);
         } else {
             delivered = delivered.saturating_add(1);
         }
     }
-    // Deliberately silent unless NOTHING was delivered to a non-empty group.
-    // Printing each failure would bury this case in noise on a busy system and
-    // tell a reader nothing the discarded Result did not already tell them.
+    // Silent unless NOTHING was delivered to a non-empty group: one member
+    // exiting mid-delivery is benign, not one send succeeding is a fault, and
+    // printing every failure would bury the second in the first.
     if delivered == 0 && failed > 0 {
         crate::serial_println!(
-            concat!(
-                "[tty] signal {} decided for pgid {} on tty {:?}: {} member(s) ",
-                "and NOT ONE delivery succeeded. The line discipline was ",
-                "right and the delivery is the fault -- known-issues ",
-                "A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED"
-            ),
+            "[tty] signal {} for foreground group {} on tty {:?}: {} member(s) and NOT ONE \
+             delivery succeeded",
             sig,
             pgid,
             tty,
@@ -6025,8 +5981,20 @@ fn pty_master_write_common(args: &SyscallArgs, non_blocking: bool) -> SyscallRes
         crate::tty::pty::master_write(handle, &data)
     };
     match result {
-        #[allow(clippy::cast_possible_wrap)]
-        Ok(n) => SyscallResult::ok(n as i64),
+        Ok(w) => {
+            // A signal character in the input was acted on *by this write*:
+            // the line discipline runs when keystrokes arrive, so this is the
+            // moment `^C` becomes `SIGINT` — whether or not anything is reading
+            // the slave. The pty layer decided it; delivering to a process
+            // group is this layer's job, as for `close`'s hangups. See
+            // known-issues.md A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER for what
+            // happened while it waited for a reader instead.
+            for &sig in &w.signals {
+                signal_foreground_group(handle.id(), sig);
+            }
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(w.written as i64)
+        }
         Err(e) => SyscallResult::err(e),
     }
 }

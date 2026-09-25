@@ -153030,6 +153030,7 @@ boot. What it needs is I/O pressure, which is a load question, not a fixture
 one.
 
 ## A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED (lane A, 2026-09-16) — **Status: OPEN**, instrumented, hypothesis not yet confirmed
+**Status:** SUPERSEDED 2026-09-24 (lane A). The section below headed "RESOLVED: the child is never scheduled; nothing is wrong with the pty" is **wrong**: a `^C` written to a pty master was only ever classified by a *reader*, and `ctest-pty`'s child never reads after announcing readiness, so no signal could be raised. Root cause and fix: `A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER` at the end of this file. The drop-with-no-foreground-group branch this entry is named for is real, still prints, and is not a bug (Linux drops the signal too).
 
 **In short:** a `^C` typed at a terminal that has no registered foreground process group is thrown away, and the reader that consumed it is then told to *restart*. The byte is gone, no signal was sent, and nothing will ever arrive -- so the read spins forever. Until 2026-09-16 that left no trace anywhere: the drop was a bare `return`.
 
@@ -166654,7 +166655,7 @@ diagnostic naming the failing step would finish this. Filed at lane B as
 `requests/a-b-execv-should-say-which-step-failed.md`.
 
 ### [A] ctest-pty exit 45 is a scheduling question, not necessarily a budget one -- 2026-09-21
-**Status:** OPEN, narrowed. Recorded because the obvious fix (raise `SPIN`) may be the wrong one.
+**Status:** RESOLVED 2026-09-24 — neither scheduling nor budget. The `^C` was never turned into a `SIGINT` at all, because the kernel only looked for it when the child read the terminal, and the child never reads. See `A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER` at the end of this file.
 
 **In short:** a test waits for its child to finish by asking repeatedly, up
 to a fixed number of tries, yielding the processor between asks. It runs out
@@ -167371,7 +167372,7 @@ a gate that already existed. None was a gap in coverage -- they were gaps in
 one, and it has the cheapest possible fix.
 
 ### [A] `ctest-pty` HANGS where it used to fail with exit 45, and my record-locking change is not the cause -- 2026-09-22
-**Status:** OPEN (pre-existing rung, new symptom; my changes exonerated by inspection, not yet by a boot)
+**Status:** ROOT-CAUSED 2026-09-24 — the record-locking change was indeed not the cause. The hang is the same two 2,000,000-iteration spins as exit 45, run on a debug kernel, where they outlast the 2400 s boot budget; both spins exist only because no `SIGINT` was ever raised. Fix: `A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER` at the end of this file.
 
 **In short:** a userspace test that used to fail now hangs instead, which turns
 a red boot into an incomplete one. That is worse, because a red-but-complete run
@@ -167412,7 +167413,7 @@ a timing interaction, and the discriminating experiment -- boot with
 currently blocked by WSL being down on this host.
 
 ### [A] BLOCKED: WSL is down on this host, so every lane-A boot fails at gate 50 -- 2026-09-22
-**Status:** BLOCKED on the environment. Not a code defect; nothing in the tree fixes it.
+**Status:** RESOLVED 2026-09-24 — WSL answers again (`wsl -d Ubuntu -- bash -s` returned `5.2.21(1)-release`); nothing in the tree changed. The request about telling a quiet WSL from a broken checker still stands on its own merits.
 
 **In short:** the boot test asks a real bash, running inside WSL, whether the
 kernel's shell-quoting rules match bash's. WSL on this machine now answers
@@ -167573,3 +167574,107 @@ name, they read identically at the call site, and only one of them answers
 "is this row on the card". This is the same distinction `names_the_key` makes
 in `scripts/key-survey.py`, written to fix this exact defect in the survey --
 by the same hand that then wrote it into thirty-eight tests.
+
+### [A] `A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER` — `^C` typed into a pty could not interrupt a program that was not reading -- 2026-09-24
+**Status:** FIXED 2026-09-24 in the kernel (lane A); awaiting the boot that shows `ctest-pty` pass.
+
+**In short:** pressing Ctrl-C in a terminal window is how you stop the program
+running in it. On SlateOS that only worked if the program happened to be
+*reading from the terminal* at the time — and a program you want to stop is
+almost never doing that; it is busy. The kernel only looked for the Ctrl-C when
+the program next read its input. It now acts on it the moment it is typed, as
+every Unix does.
+
+**The mechanism.** The line discipline — the code that turns `0x03` into
+`SIGINT`, echoes what you type and assembles lines — ran inside `tty::read`,
+i.e. inside the *slave's reader*. `pty::master_write` only put the byte in a
+ring. So a `^C` sat in that ring until somebody read the slave, and nothing
+else ever looked at it.
+
+`ctest-pty`'s child installs its handler, writes its readiness byte, and then
+spins on `got_sigint` with `sched_yield()` — it never reads again, which is
+precisely the situation `^C` exists for. The byte was never classified, no
+signal was raised, and both processes spun their 2,000,000 iterations: the
+parent's `waitpid` budget ran out first (exit **45**), and under a debug kernel
+the same two spins outlast the 2400 s boot budget (the **hang** of 2026-09-22).
+
+The module's own documentation already stated the requirement —
+*"`^C` must be acted on when it is typed, not when somebody next calls `read`.
+A line discipline running inside a reader only runs while a reader is in it, so
+a program in a compute loop would be uninterruptible"* — and the code did not
+implement it.
+
+**Why eleven rounds of probes did not find it.** Every probe sat on a path the
+`^C` takes *through a reader*, so the question they could answer was "which read
+path consumes it". When none fired, the 2026-09-16 resolution read the absence
+of a read as a scheduling fault ("the child is never scheduled; nothing is wrong
+with the pty") and sent the fix to lane B's fixture. The "positive control" it
+cited — the kernel's pty self-test driving `master_write` → `slave_read` →
+`decided signal 2` — was no control for this: it performs the read the fixture
+never performs. **A control that shares the subject's hidden assumption cannot
+test it.** The question that finds the bug is not "which reader consumes the
+byte" but "why does a reader have to exist at all".
+
+**The fix — the discipline runs on arrival** (`kernel/src/tty/mod.rs`,
+`kernel/src/tty/pty.rs`, `kernel/src/syscall/handlers.rs`):
+
+- `tty::receive` processes one byte as it arrives: input translation, then
+  `ISIG`, then canonical editing (`feed`) or the raw queue, plus echo. There is
+  now **one** `ISIG` classifier; there were three (one in the canonical editor,
+  two in the raw read paths), which is why the investigation had to instrument
+  "all three sites".
+- Finished bytes go into a per-device `InputQueue` (Linux's `read_buf` +
+  `read_flags`): complete lines marked with their ends, `^D` as an end-of-file
+  mark that is never delivered. Reads take from it through one waiting
+  primitive (`wait_for`) and one policy per mode.
+- `pty::master_write` runs `receive` for every byte it is given and returns
+  `MasterWrite { written, signals }`; `SYS_PTY_MASTER_WRITE`/`_TRY_WRITE`
+  deliver the signals to the foreground group before returning.
+
+**Behaviour that changes with it — all of it Linux's behaviour:**
+
+| | before | now |
+|---|---|---|
+| `^C` to a busy program | nothing, ever | `SIGINT` at once |
+| echo of typed-ahead text | when the program next reads | as it is typed |
+| `^C` flush | the line being edited | that line **and** complete lines not yet read |
+| `FIONREAD` / poll on a canonical slave | an upper bound (a half-typed line counted) | exact (complete lines only) |
+| a line typed to `MAX_CANON` | its `\n` could be lost | the last slot is kept for the terminator |
+| `VEOL` / `VEOL2` | not recognised | end a line |
+| a control character set to 0 | matched the NUL byte (`stty intr undef` made NUL a `^C`) | disabled |
+| `ICRNL`/`INLCR`/`IGNCR` in raw mode | not applied | applied (they are input flags) |
+| `TCSETSF` (Linux ABI) | same as `TCSETS` | also flushes unread input |
+| `ICANON` switched with input unread | undefined | carried across, as `n_tty_set_termios` does |
+
+**Not changed:** the console. See the next entry.
+
+**Still owed:** the native ABI has no `tcflush`/`TCSAFLUSH` (todo.txt, "native
+tcflush"); `VWERASE`, `VREPRINT` and `VLNEXT` are still unimplemented, as
+before.
+
+### [A] `A-CONSOLE-CTRL-C-IS-ONLY-SEEN-BY-A-READER` — `^C` on the physical console still only reaches a program that is reading -- 2026-09-24
+**Status:** OPEN (lane A). Designed below; not implemented.
+
+**In short:** the entry above fixed Ctrl-C for terminal windows (ptys). The
+physical keyboard-and-screen console has the same defect and was deliberately
+left alone: a program running on the text console cannot be interrupted with
+Ctrl-C unless it is reading its input at the time.
+
+**Why it was not fixed with the pty.** A pty's input arrives through one door,
+the master's write. The console's arrives in the keyboard IRQ, into a ring
+that **three** consumers read directly: the terminal line discipline, the
+kernel shell (`kshell.rs` — Ctrl-C exits its find mode, which needs byte 0x03
+as *data*), and `SYS_CONSOLE_READ_CHAR`. Classifying `^C` at IRQ time would
+take the byte away from the other two. So the console receives a keystroke
+when a terminal reader pulls it off the ring (every key already typed is
+received, oldest first, before the reader decides anything), which keeps the
+order of type-ahead right but cannot help a program that is not reading.
+
+**The proper fix, as designed.** Receive at arrival *while a user session owns
+the console*: the IRQ path already defers work to the workqueue (echo does, in
+`keyboard::queue_echo`); a second deferred item would drain the ring into the
+console device through `tty::receive` whenever the console has a foreground
+process group — the state in which a `^C` has somebody to signal — and leave
+the ring raw otherwise, which is the kernel shell's state. What has to be
+settled first is who owns keystrokes when both a session and the kernel shell
+are live, since today they simply race for each key.

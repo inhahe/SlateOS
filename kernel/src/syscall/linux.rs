@@ -9174,8 +9174,9 @@ pub mod ioctl_cmd {
     /// `TCSETSW` — like `TCSETS` but wait for queued output to drain
     /// first.  We have no output queue, so it behaves as `TCSETS`.
     pub const TCSETSW: u32 = 0x5403;
-    /// `TCSETSF` — like `TCSETSW` but also flush pending input.  We have
-    /// no kernel-side input queue yet, so it behaves as `TCSETS`.
+    /// `TCSETSF` — like `TCSETSW` but also flush pending input: the
+    /// terminal's input queue and the line being edited
+    /// (`crate::tty::flush_input`).
     pub const TCSETSF: u32 = 0x5404;
     /// `TIOCGWINSZ` — read the terminal window size into `*arg`
     /// (`struct winsize`).
@@ -9208,8 +9209,8 @@ pub mod ioctl_cmd {
 /// The caller (`sys_ioctl`) has already verified the fd is a `Console`-kind
 /// handle.  `arg` is the userspace pointer to the `struct termios`
 /// (`TCGETS`/`TCSETS*`) or `struct winsize` (`TIOCGWINSZ`/`TIOCSWINSZ`).
-/// `TCSETSW`/`TCSETSF` behave as `TCSETS` because we have no kernel-side
-/// output/input queue to drain or flush yet.
+/// `TCSETSW` behaves as `TCSETS` because there is no kernel-side output queue
+/// to drain; `TCSETSF` additionally discards unread input.
 ///
 /// `pid` is the calling process, and it decides *both* halves of the answer:
 ///
@@ -9254,7 +9255,18 @@ fn console_terminal_ioctl(
             // Shared with the native `SYS_TTY_SET_TERMIOS`, so the SIGTTOU
             // job-control rule is written once rather than once per ABI.
             match super::handlers::tty_set_termios_from_user(tty_id, arg) {
-                super::handlers::TtyCtlOutcome::Done => SyscallResult::ok(0),
+                super::handlers::TtyCtlOutcome::Done => {
+                    // `tcsetattr(TCSAFLUSH)`: discard what was typed ahead,
+                    // which is what a password prompt uses it for. After the
+                    // set rather than before, so a request refused for a bad
+                    // pointer or by job control flushes nothing; the end state
+                    // is the same, since a change of mode only moves unread
+                    // input around inside the queue that is being emptied.
+                    if request == ioctl_cmd::TCSETSF {
+                        tty::flush_input(tty_id);
+                    }
+                    SyscallResult::ok(0)
+                }
                 super::handlers::TtyCtlOutcome::Restart(r) => r,
                 super::handlers::TtyCtlOutcome::Fail(e) => linux_err(linux_errno_for(e)),
             }

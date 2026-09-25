@@ -4,10 +4,19 @@
 //! between them:
 //!
 //! ```text
-//!   master end                                              slave end
-//!     write ──────► input ring ──► [ line discipline ] ─────► read
-//!     read  ◄────── output ring ◄── [ echo / OPOST   ] ◄───── write
+//!   master end                                                  slave end
+//!     write ──► [ line discipline ] ──► input queue ──────────────► read
+//!                      │ echo
+//!                      ▼
+//!     read  ◄────────────────────── output ring ◄── [ OPOST ] ◄──── write
 //! ```
+//!
+//! The line discipline runs **in the master's write**, when the "keystrokes"
+//! arrive — not in the slave's read. That is where `^C` becomes `SIGINT`, where
+//! a typed character is echoed, and where a line is edited and completed; the
+//! slave's read only takes finished bytes out of the device's input queue.
+//! See "When input is processed" in [`crate::tty`] for why, and for the
+//! failure the other arrangement produced.
 //!
 //! The *master* is held by whatever is pretending to be a terminal — a terminal
 //! emulator, `script(1)`, `ssh`. What it writes is what the program on the far
@@ -38,16 +47,18 @@
 //!   never opened" state. Linux has one, which is why it needs `TIOCSPTLCK` and
 //!   an "opened at least once" flag to decide whether an empty master read is
 //!   EOF or a wait; we simply do not have the state that poses the question.
-//! * **Echo is best-effort.** [`master_push_output`] drops what does not fit
-//!   rather than blocking, because it is called from inside the line discipline
-//!   on the input path: blocking there would stall a reader on a *reader*.
-//!   Linux drops echo on a full output buffer for the same reason. Real slave
-//!   output ([`slave_write`]) blocks for space and is never dropped.
+//! * **Echo is best-effort.** The master write drops echo that does not fit in
+//!   the output ring rather than blocking, because the echo is a side effect of
+//!   *input*: blocking the typist until the program's output is read would
+//!   stall a writer on a reader of the other direction. Linux drops echo on a
+//!   full output buffer for the same reason. Real slave output
+//!   ([`slave_write`]) blocks for space and is never dropped.
 //!
 //! # Lock ordering
 //!
-//! `tty::DEVICES` → `PTYS` → `SCHED`. In practice no path here holds both of
-//! the first two at once, and — as everywhere in this tree — the table lock is
+//! `tty::DEVICES` → `PTYS` → `SCHED`. The master write and a slave read hold
+//! the first two together — the line discipline's state is in the device, the
+//! rings and waiter sets are here — and, as everywhere in this tree, both are
 //! dropped before any park or wake.
 
 use crate::error::{KernelError, KernelResult};
@@ -57,7 +68,7 @@ use crate::ipc::waiters::{
 use crate::proc::pcb::ProcessId;
 use crate::sched::{self, task::TaskId};
 use crate::sync::PreemptSpinMutex as Mutex;
-use crate::tty::{self, Input, TtyId};
+use crate::tty::{self, Received, TtyId};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec;
@@ -68,17 +79,16 @@ use core::sync::atomic::{AtomicU32, Ordering};
 // Capacities
 // ---------------------------------------------------------------------------
 
-/// Bytes of un-consumed "typing" the master may have outstanding.
-///
-/// 4 KiB is Linux's `N_TTY_BUF_SIZE`. It is deliberately small: it bounds how
-/// far ahead of the reading program a paste can get, which is what makes flow
-/// control mean anything.
-const INPUT_CAPACITY: usize = 4096;
-
 /// Bytes of program output the master may have yet to read.
 ///
-/// Larger than the input ring because a program printing a screenful at once is
-/// the normal case, and every byte that does not fit blocks the program.
+/// (Input has no capacity here: it is queued in the terminal device, after the
+/// line discipline, and bounded there by [`tty::INPUT_QUEUE_CAPACITY`] — Linux's
+/// `N_TTY_BUF_SIZE`, deliberately small so it bounds how far ahead of the
+/// reading program a paste can get, which is what makes flow control mean
+/// anything.)
+///
+/// Larger than the input queue because a program printing a screenful at once
+/// is the normal case, and every byte that does not fit blocks the program.
 const OUTPUT_CAPACITY: usize = 64 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -262,34 +272,23 @@ impl Ring {
         self.len -= n;
         n
     }
-
-    /// Remove exactly one byte.
-    #[allow(clippy::arithmetic_side_effects)]
-    fn read_byte(&mut self) -> Option<u8> {
-        if self.len == 0 {
-            return None;
-        }
-        let b = self.buf.get(self.head).copied();
-        self.head = (self.head + 1) % self.buf.len();
-        self.len -= 1;
-        b
-    }
 }
 
 /// One pseudo-terminal.
 ///
 /// # The waiter rule
 ///
-/// There are four things a task can block on here — each ring being non-empty
-/// and each ring being non-full — and only two waiter sets. The mapping is not
-/// free-form; it follows one rule, and the rule is what makes it checkable:
+/// There are four things a task can block on here — the input queue and the
+/// output ring each being non-empty and each being non-full — and only two
+/// waiter sets. The mapping is not free-form; it follows one rule, and the rule
+/// is what makes it checkable:
 ///
-/// > **A task parks in the set of the ring it is blocked on, and every
-/// > mutation of a ring wakes that ring's entire set.**
+/// > **A task parks in the set of the buffer it is blocked on, and every
+/// > mutation of a buffer wakes that buffer's entire set.**
 ///
-/// So `master_write` — which is blocked on the *input* ring having space —
+/// So `master_write` — which is blocked on the *input* queue having space —
 /// parks in `input_waiters`, alongside the slave reader blocked on that same
-/// ring having data. Waking both when either changes is over-broad by one
+/// queue having data. Waking both when either changes is over-broad by one
 /// waiter, which costs a re-check under the lock and nothing else, because
 /// every park loop re-evaluates its own condition after waking.
 ///
@@ -299,18 +298,21 @@ impl Ring {
 /// is hardest to see: `slave_write` deregistered from one set and registered in
 /// the other, so every signal-interrupted slave write left a stale entry behind
 /// naming a task that was no longer parked — the `BUG-PIPE-SINGLE-WAITER-SLOT`
-/// failure mode, which wakes an unrelated task once ids recycle. Keyed by ring,
-/// each function names one set throughout and a mismatch is visible on one
-/// screen.
+/// failure mode, which wakes an unrelated task once ids recycle. Keyed by
+/// buffer, each function names one set throughout and a mismatch is visible on
+/// one screen.
+///
+/// The input queue itself lives in the terminal device (`tty::TtyDevice`), with
+/// the line discipline that fills it; its waiter set lives here with the other
+/// one. Both sides touch the set only while holding the device lock too, which
+/// is what keeps a wake from falling between a reader's test and its park.
 struct Pty {
-    /// What the master wrote: keystrokes awaiting the line discipline.
-    input: Ring,
     /// What the slave wrote (plus echo): output awaiting the master's read.
     output: Ring,
-    /// Everyone parked on the **input ring**: the slave's line discipline
-    /// waiting for a byte, and a master waiting for room to write one.
+    /// Everyone parked on the terminal's **input queue**: a slave reader
+    /// waiting for input, and a master waiting for room to write more.
     ///
-    /// See the type-level note below on why the sets are keyed by *ring* and
+    /// See the type-level note above on why the sets are keyed by *buffer* and
     /// not by *role*.
     input_waiters: WaiterSet,
     /// Everyone parked on the **output ring**: a master waiting for program
@@ -325,7 +327,6 @@ struct Pty {
 impl Pty {
     fn new() -> Self {
         Self {
-            input: Ring::new(INPUT_CAPACITY),
             output: Ring::new(OUTPUT_CAPACITY),
             input_waiters: WaiterSet::new(),
             output_waiters: WaiterSet::new(),
@@ -462,33 +463,133 @@ pub fn close(handle: PtyHandle) -> Hangup {
 // Master side
 // ---------------------------------------------------------------------------
 
-/// Write "keystrokes" into the pty: bytes the slave's line discipline will see
-/// as input.
+/// Signals a master write decided are due, in the order their characters
+/// arrived.
 ///
-/// Blocks while the input ring is full, which is what gives a paste into a slow
-/// program back-pressure rather than a silent truncation.
+/// Almost always empty; one `^C` is one entry. Runs of the same signal are
+/// collapsed — a standard signal is either pending or not, so `^C^C^C` in one
+/// write means one `SIGINT`, and delivering it three times would only cost
+/// three walks of the group.
+pub type SignalsDue = Vec<u8>;
+
+/// What a master write did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use = "a master write can decide terminal signals, and only the caller can deliver them"]
+pub struct MasterWrite {
+    /// How many of the caller's bytes the terminal took — including signal
+    /// characters and the typing a full canonical line had to drop, both of
+    /// which were consumed exactly as a real terminal consumes them. A short
+    /// count is a success; the caller resubmits the rest, as on a pipe.
+    pub written: usize,
+    /// Signals now due for the terminal's foreground process group.
+    ///
+    /// The pty layer decides them and the syscall layer delivers them
+    /// (`handlers::signal_foreground_group`), the same split [`close`]'s
+    /// hangups use: this layer knows which terminal and which signal, and
+    /// nothing about process groups.
+    pub signals: SignalsDue,
+}
+
+/// Run `data` through the terminal's line discipline as input: the shared
+/// body of [`master_write`] and [`master_try_write`].
+///
+/// Everything happens under `DEVICES` then `PTYS`, held together: the
+/// discipline's state (termios, the line being edited, the input queue) is in
+/// the device, the output ring and waiter sets are here, and the echo of a
+/// byte, the queueing of the line it completes and the wake of the reader
+/// waiting for that line must not be separable.
+///
+/// Returns `Ok(Some(_))` once at least one byte was consumed. Returns
+/// `Ok(None)` when the input queue is full and nothing could be — and if
+/// `park_as` is given, that task has been registered in the input waiter set
+/// *before* the locks were released, so a reader draining the queue in the
+/// meantime cannot wake nobody.
+///
+/// # Errors
+///
+/// * `InvalidHandle` — the pty is gone.
+/// * `ChannelClosed` — the slave end is closed: nothing will ever read this.
+/// * `Interrupted` — only with `park_as`: a deliverable signal is pending for
+///   the writer and nothing was consumed, so it must unwind rather than park.
+fn receive_input(
+    id: TtyId,
+    data: &[u8],
+    park_as: Option<(u64, TaskId)>,
+) -> KernelResult<Option<MasterWrite>> {
+    let mut devices = tty::DEVICES.lock();
+    let dev = devices.get_mut(&id).ok_or(KernelError::InvalidHandle)?;
+    let mut table = PTYS.lock();
+    let pty = table.get_mut(&id).ok_or(KernelError::InvalidHandle)?;
+    if let Some((_, task)) = park_as {
+        // Deregister at the top of every attempt: a wake does not clear the
+        // entry, and a stale one names a task that is no longer parked.
+        pty.input_waiters.remove(task);
+    }
+    if pty.slave_gone() {
+        return Err(KernelError::ChannelClosed);
+    }
+
+    let mut echo = Vec::new();
+    let mut signals = SignalsDue::new();
+    let mut written = 0usize;
+    for &b in data {
+        match tty::receive(dev, b, Some(&mut echo)) {
+            Received::Consumed => {}
+            Received::Signal(sig) => {
+                if signals.last() != Some(&sig) {
+                    signals.push(sig);
+                }
+            }
+            Received::NoRoom => break,
+        }
+        written = written.saturating_add(1);
+    }
+
+    if written == 0 {
+        if let Some((pid, task)) = park_as {
+            if deliverable_signal_pending(pid) {
+                return Err(KernelError::Interrupted);
+            }
+            // Room is made by a slave *reading*, which wakes this same set.
+            pty.input_waiters.insert(task);
+        }
+        return Ok(None);
+    }
+
+    // The echo goes out now, with the input it shows: what a terminal emulator
+    // draws when you type. Lossy by design — see the module notes.
+    let echoed = pty.output.write(&echo);
+    let output_woken = if echoed > 0 {
+        pty.output_waiters.take_all()
+    } else {
+        Vec::new()
+    };
+    // Input was queued (or flushed, which also changes what a reader sees):
+    // every task parked on the input queue re-checks.
+    let input_woken = pty.input_waiters.take_all();
+    drop(table);
+    drop(devices);
+    wake_all(input_woken);
+    wake_all(output_woken);
+    Ok(Some(MasterWrite { written, signals }))
+}
+
+/// Write "keystrokes" into the pty: bytes the slave's line discipline receives
+/// as input, *now* — this is where they are echoed, edited into a line, and,
+/// if one is a signal character, turned into a signal for the foreground
+/// group (returned in [`MasterWrite::signals`] for the caller to deliver).
+///
+/// Blocks while the terminal's input queue is full, which is what gives a paste
+/// into a slow program back-pressure rather than a silent truncation. Returns
+/// as soon as at least one byte has been taken.
 ///
 /// # Errors
 ///
 /// * `InvalidHandle` — not a master handle, or the pty is gone.
 /// * `ChannelClosed` — the slave end is closed: nothing will ever read this.
-/// * `Interrupted` — a deliverable signal arrived before any byte was written.
+/// * `Interrupted` — a deliverable signal arrived before any byte was taken.
 /// * `InvalidArgument` — `data` is empty.
-pub fn master_write(handle: PtyHandle, data: &[u8]) -> KernelResult<usize> {
-    // ROUND-9 probe: a VINTR byte entering a pty's input ring, named by
-    // handle. Gated on the byte so ordinary traffic stays silent.
-    //
-    // A `//` comment inside the body, not `///` above the fn: it documents
-    // the probe rather than the API, and appending it to a doc comment that
-    // ends in an `# Errors` bullet list made it a lazy continuation of the
-    // last bullet, which clippy denies. Appending without reading what
-    // precedes is the same error as every other one today, in a doc block.
-    if data.contains(&3u8) {
-        crate::serial_println!(
-            "[pty] master_write handle={:?}: VINTR (0x03) entering the input ring",
-            handle
-        );
-    }
+pub fn master_write(handle: PtyHandle, data: &[u8]) -> KernelResult<MasterWrite> {
     if handle.end() != PtyEnd::Master {
         return Err(KernelError::InvalidHandle);
     }
@@ -497,38 +598,50 @@ pub fn master_write(handle: PtyHandle, data: &[u8]) -> KernelResult<usize> {
     }
     let pid = current_user_pid();
     let task = sched::current_task_id();
-
     loop {
-        {
-            let mut table = PTYS.lock();
-            let pty = table
-                .get_mut(&handle.id())
-                .ok_or(KernelError::InvalidHandle)?;
-            // Blocked on the input ring, so `input_waiters` throughout — see
-            // the waiter rule on `Pty`. Deregister at the top of every
-            // iteration: a wake does not clear our entry, and a stale entry
-            // names a task that is no longer parked (see `waiters`' docs).
-            pty.input_waiters.remove(task);
-
-            if pty.slave_gone() {
-                return Err(KernelError::ChannelClosed);
-            }
-            let n = pty.input.write(data);
-            if n > 0 {
-                let woken = pty.input_waiters.take_all();
-                drop(table);
-                wake_all(woken);
-                return Ok(n);
-            }
-            if deliverable_signal_pending(pid) {
-                return Err(KernelError::Interrupted);
-            }
-            // Space is freed by the slave's discipline *reading*, which wakes
-            // this same set.
-            pty.input_waiters.insert(task);
+        if let Some(done) = receive_input(handle.id(), data, Some((pid, task)))? {
+            return Ok(done);
         }
         park_interruptible(pid, task);
     }
+}
+
+/// Write "keystrokes" into the pty without blocking.
+///
+/// As [`master_write`], but a full input queue is reported rather than waited
+/// out. This exists so a caller driving several objects in one loop — sshd
+/// forwarding a socket into a terminal is the case that asked for it — cannot
+/// be parked on the pty while the socket has work: with only the blocking form
+/// available, the choice was between stalling the whole loop and never filling
+/// the queue at all.
+///
+/// Two asymmetries against [`master_try_read`] are deliberate, and each follows
+/// this function's *blocking twin* rather than its non-blocking sibling:
+///
+/// 1. The hangup is checked **before** the transfer, where `master_try_read`
+///    checks it after. Bytes handed to a dead slave will never be read by
+///    anyone, whereas bytes a dying program already printed are still its
+///    output and must be drained first (see the module note and
+///    design-decisions.md §259).
+/// 2. Empty `data` is `InvalidArgument`, where an empty `out` is `Ok(0)`.
+///    Asking to write nothing is a caller bug; asking to read nothing is not.
+///
+/// # Errors
+///
+/// * `InvalidHandle` — not a master handle, or the pty is gone.
+/// * `ChannelClosed` — the slave end is closed: nothing will ever read this.
+/// * `InvalidArgument` — `data` is empty.
+/// * `WouldBlock` — the input queue is full and the slave is still open. This
+///   is the one state the blocking form waits out, and the whole point of this
+///   call is to surface it instead.
+pub fn master_try_write(handle: PtyHandle, data: &[u8]) -> KernelResult<MasterWrite> {
+    if handle.end() != PtyEnd::Master {
+        return Err(KernelError::InvalidHandle);
+    }
+    if data.is_empty() {
+        return Err(KernelError::InvalidArgument);
+    }
+    receive_input(handle.id(), data, None)?.ok_or(KernelError::WouldBlock)
 }
 
 /// Read program output from the pty.
@@ -609,80 +722,6 @@ pub fn master_try_read(handle: PtyHandle, out: &mut [u8]) -> KernelResult<usize>
     if pty.slave_gone() {
         return Err(KernelError::IoError);
     }
-    Err(KernelError::WouldBlock)
-}
-
-/// Write "keystrokes" into the pty without blocking.
-///
-/// As [`master_write`], but a full input ring is reported rather than waited
-/// out. This exists so a caller driving several objects in one loop — sshd
-/// forwarding a socket into a terminal is the case that asked for it — cannot
-/// be parked on the pty while the socket has work: with only the blocking form
-/// available, the choice was between stalling the whole loop and never filling
-/// the ring at all.
-///
-/// Two asymmetries against [`master_try_read`] are deliberate, and each follows
-/// this function's *blocking twin* rather than its non-blocking sibling:
-///
-/// 1. The hangup is checked **before** the transfer, where `master_try_read`
-///    checks it after. Bytes handed to a dead slave will never be read by
-///    anyone, whereas bytes a dying program already printed are still its
-///    output and must be drained first (see the module note and
-///    design-decisions.md §259).
-/// 2. Empty `data` is `InvalidArgument`, where an empty `out` is `Ok(0)`.
-///    Asking to write nothing is a caller bug; asking to read nothing is not.
-///
-/// # Errors
-///
-/// * `InvalidHandle` — not a master handle, or the pty is gone.
-/// * `ChannelClosed` — the slave end is closed: nothing will ever read this.
-/// * `InvalidArgument` — `data` is empty.
-/// * `WouldBlock` — the input ring is full and the slave is still open. This is
-///   the one state the blocking form waits out, and the whole point of this
-///   call is to surface it instead.
-pub fn master_try_write(handle: PtyHandle, data: &[u8]) -> KernelResult<usize> {
-    // ROUND-10 probe, and the reason it exists is a mistake worth naming.
-    // Round 9 instrumented `master_write` only, saw nothing in ctest-pty's
-    // window, and I was about to conclude the byte never reaches a pty. There
-    // are TWO master-write paths: posix/src/file.rs routes an O_NONBLOCK
-    // master to SYS_PTY_MASTER_TRY_WRITE (1065), which lands here, not in
-    // master_write. A comment in main.rs had already recorded that routing.
-    //
-    // Third time in this investigation that instrumenting a subset of the
-    // paths produced a silence I read as absence -- after sig_for covering
-    // two of four classification sites, and linux_exec_common being wrapped
-    // while the failure was upstream of it.
-    if data.contains(&3u8) {
-        crate::serial_println!(
-            "[pty] master_TRY_write handle={:?}: VINTR (0x03) entering the input ring",
-            handle
-        );
-    }
-    if handle.end() != PtyEnd::Master {
-        return Err(KernelError::InvalidHandle);
-    }
-    if data.is_empty() {
-        return Err(KernelError::InvalidArgument);
-    }
-    let mut table = PTYS.lock();
-    let pty = table
-        .get_mut(&handle.id())
-        .ok_or(KernelError::InvalidHandle)?;
-    if pty.slave_gone() {
-        return Err(KernelError::ChannelClosed);
-    }
-    let n = pty.input.write(data);
-    if n > 0 {
-        // Waking is not optional on the short-write path either: the slave may
-        // be parked on an empty ring, and these bytes are exactly what it is
-        // waiting for.
-        let woken = pty.input_waiters.take_all();
-        drop(table);
-        wake_all(woken);
-        return Ok(n);
-    }
-    // No `input_waiters.remove(task)` counterpart to `master_write`'s: that
-    // call is paired with the `insert` its park needs, and this never parks.
     Err(KernelError::WouldBlock)
 }
 
@@ -771,176 +810,48 @@ pub fn slave_write(handle: PtyHandle, data: &[u8]) -> KernelResult<usize> {
 }
 
 // ---------------------------------------------------------------------------
-// Line-discipline hooks (called by `tty`, never by userspace)
+// The input queue's waiters (called by `tty`, never by userspace)
 // ---------------------------------------------------------------------------
+//
+// The input queue lives in the terminal device, and a slave read waits on it
+// from `tty` (`pty_wait_for`) with `DEVICES` held; its waiter set lives here.
+// These are the four things that read needs from this side, each taking `PTYS`
+// only — the documented order, `DEVICES` then `PTYS`, is the caller's to keep.
 
-/// Take one input byte for the slave's line discipline, blocking.
-///
-/// Called by [`crate::tty::read`] with no device lock held, which is what
-/// allows it to park.
-pub(crate) fn slave_read_input_blocking(id: TtyId) -> Input {
-    let pid = current_user_pid();
-    let task = sched::current_task_id();
-    loop {
-        {
-            let mut table = PTYS.lock();
-            let Some(pty) = table.get_mut(&id) else {
-                return Input::Hangup;
-            };
-            pty.input_waiters.remove(task);
+/// Whether terminal `id` has lost its last master — nothing more will ever be
+/// typed into it. A pty that no longer exists counts as hung up.
+pub(crate) fn master_gone(id: TtyId) -> bool {
+    PTYS.lock().get(&id).is_none_or(|p| p.master_gone())
+}
 
-            if let Some(b) = pty.input.read_byte() {
-                // ROUND-9 probe: the slave actually consuming the VINTR, named
-                // by tty. If master_write speaks and this does not, the child
-                // never reads and the discipline never gets the chance to
-                // classify anything -- which is where the trail currently
-                // ends.
-                if b == 3u8 {
-                    crate::serial_println!("[pty] slave_read tty={:?}: consumed VINTR (0x03)", id);
-                }
-                // Draining the input ring frees space, so wake that ring's set
-                // (which holds masters blocked on a full input ring).
-                let woken = pty.input_waiters.take_all();
-                drop(table);
-                wake_all(woken);
-                return Input::Byte(b);
-            }
-            if pty.master_gone() {
-                return Input::Hangup;
-            }
-            if deliverable_signal_pending(pid) {
-                return Input::Interrupted;
-            }
-            pty.input_waiters.insert(task);
-        }
-        park_interruptible(pid, task);
+/// Register `task` as parked on terminal `id`'s input queue.
+pub(crate) fn insert_input_waiter(id: TtyId, task: TaskId) {
+    if let Some(p) = PTYS.lock().get_mut(&id) {
+        p.input_waiters.insert(task);
     }
 }
 
-/// Take one input byte if one is ready, without blocking.
-pub(crate) fn slave_try_read_input(id: TtyId) -> Input {
-    // No task id is taken here on purpose: this is the non-blocking path, so it
-    // never parks and therefore never joins a waiter set.  It still *wakes* the
-    // input set below, because draining the ring frees space for a blocked
-    // master whether the drain blocked or not.
-    let mut table = PTYS.lock();
-    let Some(pty) = table.get_mut(&id) else {
-        return Input::Hangup;
-    };
-    if let Some(b) = pty.input.read_byte() {
-        // ROUND-11 probe. `input.read_byte()` has THREE callers and
-        // round 9 instrumented only the blocking one; the fixture
-        // reads non-blocking, so it uses a different path. Found by
-        // enumerating every caller rather than reasoning about which
-        // one 'should' be used -- which is how three earlier subsets
-        // were missed. The unlabelled `slave_read tty=` message is
-        // the blocking path.
-        if b == 3u8 {
-            crate::serial_println!("[pty] slave_read(try) tty={:?}: consumed VINTR", id);
-        }
-        let woken = pty.input_waiters.take_all();
-        drop(table);
-        wake_all(woken);
-        return Input::Byte(b);
-    }
-    if pty.master_gone() {
-        Input::Hangup
-    } else {
-        Input::Empty
+/// Undo [`insert_input_waiter`]. Idempotent, and silent for a pty that is gone.
+pub(crate) fn remove_input_waiter(id: TtyId, task: TaskId) {
+    if let Some(p) = PTYS.lock().get_mut(&id) {
+        p.input_waiters.remove(task);
     }
 }
 
-/// Take one input byte, blocking no later than `deadline_ns`.
-pub(crate) fn slave_read_input_timeout(id: TtyId, deadline_ns: u64) -> Input {
-    let pid = current_user_pid();
-    let task = sched::current_task_id();
-
-    /// Wake the parked task when the deadline fires.
-    fn timeout_wake(tid: u64) {
-        if !sched::try_wake(tid) {
-            sched::defer_wake(tid);
-        }
-    }
-
-    let now = crate::hrtimer::now_ns();
-    if now >= deadline_ns {
-        return slave_try_read_input(id);
-    }
-    let timer = crate::hrtimer::schedule_ns(deadline_ns.saturating_sub(now), timeout_wake, task);
-
-    loop {
-        {
-            let mut table = PTYS.lock();
-            let Some(pty) = table.get_mut(&id) else {
-                crate::hrtimer::cancel(timer);
-                return Input::Hangup;
-            };
-            pty.input_waiters.remove(task);
-
-            if let Some(b) = pty.input.read_byte() {
-                // ROUND-11 probe. `input.read_byte()` has THREE callers and
-                // round 9 instrumented only the blocking one; the fixture
-                // reads non-blocking, so it uses a different path. Found by
-                // enumerating every caller rather than reasoning about which
-                // one 'should' be used -- which is how three earlier subsets
-                // were missed. The unlabelled `slave_read tty=` message is
-                // the blocking path.
-                if b == 3u8 {
-                    crate::serial_println!(
-                        "[pty] slave_read(timeout) tty={:?}: consumed VINTR",
-                        id
-                    );
-                }
-                let woken = pty.input_waiters.take_all();
-                crate::hrtimer::cancel(timer);
-                drop(table);
-                wake_all(woken);
-                return Input::Byte(b);
-            }
-            if pty.master_gone() {
-                crate::hrtimer::cancel(timer);
-                return Input::Hangup;
-            }
-            if crate::hrtimer::now_ns() >= deadline_ns {
-                crate::hrtimer::cancel(timer);
-                return Input::Empty;
-            }
-            if deliverable_signal_pending(pid) {
-                crate::hrtimer::cancel(timer);
-                return Input::Interrupted;
-            }
-            pty.input_waiters.insert(task);
-        }
-        park_interruptible(pid, task);
-    }
+/// Take every task parked on terminal `id`'s input queue, for the caller to
+/// wake once it has dropped its locks.
+pub(crate) fn take_input_waiters(id: TtyId) -> Vec<TaskId> {
+    PTYS.lock()
+        .get_mut(&id)
+        .map(|p| p.input_waiters.take_all())
+        .unwrap_or_default()
 }
 
-/// Push echo bytes towards the master.
-///
-/// **Lossy by design**: called from the line discipline's *input* path, so
-/// blocking here would park a reader waiting on a reader. What does not fit is
-/// dropped, exactly as Linux drops echo on a full output buffer — losing the
-/// visual copy of a keystroke is a cosmetic failure, and the alternative is a
-/// deadlock.
-pub(crate) fn master_push_output(id: TtyId, bytes: &[u8]) {
-    if bytes.is_empty() {
-        return;
-    }
-    let readers = {
-        let mut table = PTYS.lock();
-        let Some(pty) = table.get_mut(&id) else {
-            return;
-        };
-        if pty.master_gone() {
-            return;
-        }
-        let n = pty.output.write(bytes);
-        if n == 0 {
-            return;
-        }
-        pty.output_waiters.take_all()
-    };
-    wake_all(readers);
+/// Wake every task parked on terminal `id`'s input queue: the queue changed in
+/// a way none of them caused — a flush, or a new termios that changes what a
+/// waiting read is waiting for.
+pub(crate) fn wake_input_waiters(id: TtyId) {
+    wake_all(take_input_waiters(id));
 }
 
 // ---------------------------------------------------------------------------
@@ -953,72 +864,54 @@ pub(crate) fn master_push_output(id: TtyId, bytes: &[u8]) {
 /// short count rather than data, and a poll loop that called this "not ready"
 /// would spin forever on a dead terminal.
 ///
-/// # Why the slave arm consults the device and not just the ring
-///
-/// A canonical line is delivered as a unit, and a reader whose buffer is
-/// smaller than the line leaves the remainder in the device's pending buffer
-/// (see [`crate::tty::pending_bytes`]). Those bytes are not in the input ring —
-/// they have already been pulled out of it and processed — so a slave-side
-/// readability answer taken from the ring alone reports "not readable" while a
-/// `read` is standing by to return them immediately. If the master then sends
-/// nothing further, the poll loop parks forever on data it already has.
+/// The slave arm asks the terminal device ([`tty::input_ready`]), which holds
+/// the input queue, and the answer is exact in both modes: input is edited as
+/// it arrives, so "a complete line is queued" is a lookup. (It used to be an
+/// upper bound — "bytes are present" — because the editor ran in the reader;
+/// a canonical slave holding half a line then reported readable, and a poller
+/// that believed it issued a read that parked.)
 #[must_use]
 pub fn readable(handle: PtyHandle) -> bool {
     // Sampled *before* PTYS is taken: the documented lock order is `DEVICES`
     // before `PTYS`, so reaching into the device with the pty table held would
-    // be the inversion. Sampling first is not a race that matters — bytes can
-    // only be added between the two reads, and a readability answer is a
-    // hint that is re-checked by the read itself either way.
-    let pending = if handle.end() == PtyEnd::Slave {
-        crate::tty::pending_bytes(handle.id())
-    } else {
-        0
-    };
+    // be the inversion. Sampling first is not a race that matters — input can
+    // only be added between the two reads, and a readability answer is a hint
+    // that the read itself re-checks either way.
+    let input = handle.end() == PtyEnd::Slave && tty::input_ready(handle.id());
     let table = PTYS.lock();
     let Some(pty) = table.get(&handle.id()) else {
         return true;
     };
     match handle.end() {
         PtyEnd::Master => !pty.output.is_empty() || pty.slave_gone(),
-        PtyEnd::Slave => pending > 0 || !pty.input.is_empty() || pty.master_gone(),
+        PtyEnd::Slave => input || pty.master_gone(),
     }
 }
 
 /// How many bytes a read on `handle` would find waiting — `FIONREAD`.
 ///
-/// # Exactness, which differs by end
+/// Exact at both ends and in both modes:
 ///
-/// * **Master** — exact. The output ring holds post-discipline bytes with
-///   nothing further to do to them, so its length is precisely what the next
-///   read delivers.
-/// * **Slave, raw mode** — exact. Every byte in the input ring reaches the
-///   reader unchanged.
-/// * **Slave, canonical mode** — an **upper bound**, and deliberately so. The
-///   input ring holds *pre*-discipline bytes; the line editor has not run on
-///   them yet, so an erase character will consume a byte rather than deliver
-///   one, and an unterminated line delivers nothing at all until its newline
-///   arrives. Counting them accurately would mean running the editor twice —
-///   once to answer the question and again to answer the read — and the
-///   second run would see different input.
-///
-/// **Zero is exact at both ends and in both modes**, which is what makes the
-/// bound usable rather than merely optimistic: a caller using `FIONREAD` only
-/// to test emptiness — the common case, and what a `select`-less polling loop
-/// does — is never told there is something to read when there is not. A caller
-/// that sizes a buffer by the count over-allocates in canonical mode and loses
-/// nothing, because `read` returns what is actually there regardless.
+/// * **Master** — the output ring holds post-discipline bytes with nothing
+///   further to do to them, so its length is precisely what the next read
+///   delivers.
+/// * **Slave** — [`tty::input_bytes`]: in canonical mode the bytes of complete
+///   lines only, since the line being edited is not readable until its
+///   terminator arrives; in raw mode every queued byte. (Canonical mode used to
+///   report an upper bound here, counting pre-discipline bytes the editor had
+///   not yet run over; the editor now runs as they arrive.)
 ///
 /// # Hangup is not readable *bytes*
 ///
-/// Unlike [`readable`], a hung-up end with an empty ring answers 0. The two
+/// Unlike [`readable`], a hung-up end with nothing queued answers 0. The two
 /// questions differ: "would a read return immediately" is yes (it returns EOF
 /// or `EIO`), but "how many bytes are there" is none, and `FIONREAD` is asked
 /// by callers who will believe the number. Linux answers 0 here too.
 #[must_use]
 pub fn readable_bytes(handle: PtyHandle) -> usize {
     // Sampled before PTYS for the lock-order reason given on `readable`.
-    let pending = if handle.end() == PtyEnd::Slave {
-        crate::tty::pending_bytes(handle.id())
+    let input = if handle.end() == PtyEnd::Slave {
+        tty::input_bytes(handle.id())
     } else {
         0
     };
@@ -1028,19 +921,25 @@ pub fn readable_bytes(handle: PtyHandle) -> usize {
     };
     match handle.end() {
         PtyEnd::Master => pty.output.len(),
-        PtyEnd::Slave => pending.saturating_add(pty.input.len()),
+        PtyEnd::Slave => input,
     }
 }
 
 /// Whether a write on `handle` would make progress without blocking.
+///
+/// For the master this is [`tty::input_room`], which under-reports in the safe
+/// direction (a canonical terminal can also take ordinary typing into its line
+/// while the queue is full).
 #[must_use]
 pub fn writable(handle: PtyHandle) -> bool {
+    // Sampled before PTYS for the lock-order reason given on `readable`.
+    let room = handle.end() == PtyEnd::Master && tty::input_room(handle.id());
     let table = PTYS.lock();
     let Some(pty) = table.get(&handle.id()) else {
         return true;
     };
     match handle.end() {
-        PtyEnd::Master => pty.input.writable() > 0 || pty.slave_gone(),
+        PtyEnd::Master => room || pty.slave_gone(),
         PtyEnd::Slave => pty.output.writable() > 0 || pty.master_gone(),
     }
 }
@@ -1151,19 +1050,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     assert!(tty::echo_enabled(id), "pty defaults to echo");
 
     // --- master -> discipline -> slave ------------------------------------
-    let n = master_write(m, b"hi\n").expect("master write");
-    assert_eq!(n, 3, "all three bytes accepted");
+    let w = master_write(m, b"hi\n").expect("master write");
+    assert_eq!(w.written, 3, "all three bytes accepted");
+    assert!(w.signals.is_empty(), "no signal character, no signal");
 
-    let mut buf = [0u8; 32];
-    let got = match tty::read(id, &mut buf) {
-        tty::ConsoleRead::Data(n) => n,
-        other => panic!("canonical read returned {other:?}"),
-    };
-    assert_eq!(got, 3, "canonical line is 'hi\\n'");
-    assert_eq!(buf.get(..3), Some(&b"hi\n"[..]), "line contents");
-
-    // Typing it echoed it back to the master, with the newline expanded by
-    // ONLCR (the default `OPOST|ONLCR` terminal).
+    // The echo is there BEFORE anybody reads, because the discipline ran in
+    // the write. This is what lets a terminal emulator show what you type
+    // while the program on the other end is busy.
     let mut echo = [0u8; 32];
     let n = master_read(m, &mut echo).expect("master read echo");
     assert_eq!(
@@ -1172,6 +1065,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         "echo is 'hi' plus a CRLF, got {:?}",
         echo.get(..n)
     );
+
+    let mut buf = [0u8; 32];
+    let got = match tty::read(id, &mut buf) {
+        tty::ConsoleRead::Data(n) => n,
+        other => panic!("canonical read returned {other:?}"),
+    };
+    assert_eq!(got, 3, "canonical line is 'hi\\n'");
+    assert_eq!(buf.get(..3), Some(&b"hi\n"[..]), "line contents");
 
     // --- slave -> master ---------------------------------------------------
     let n = slave_write(s, b"out\n").expect("slave write");
@@ -1199,32 +1100,96 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         "tty::write applied the pty backend's ONLCR"
     );
 
-    // --- an interrupt character generates a signal, not data ---------------
-    let _ = master_write(m, b"\x03").expect("master write ^C");
-    match tty::read(id, &mut buf) {
-        tty::ConsoleRead::Signal(sig) => assert_eq!(sig, 2, "^C is SIGINT"),
-        other => panic!("^C should signal, got {other:?}"),
-    }
-    // ...and Linux echoes it, so the emulator shows `^C`.
+    // --- ^C is acted on when it is WRITTEN, with nobody reading -------------
+    // The regression this arrangement exists for (known-issues.md
+    // A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER): the write itself decides the
+    // signal. No read happens between the write and the assertion, which is
+    // exactly the position of a program that is busy rather than reading —
+    // the only kind of program anyone wants to interrupt. Before 2026-09-24
+    // this write returned 1 and decided nothing; the SIGINT waited for a read
+    // that `ctest-pty`'s child never made.
+    let _ = master_write(m, b"ab").expect("half a line typed ahead");
+    let w = master_write(m, b"\x03").expect("master write ^C");
+    assert_eq!(w.written, 1, "the ^C is consumed");
+    assert_eq!(w.signals, vec![2u8], "^C is SIGINT, decided by the write");
+    // ...it is not data, and it flushed what was typed ahead of it:
+    assert_eq!(
+        tty::try_read(id, &mut buf),
+        tty::ConsoleRead::WouldBlock,
+        "neither the ^C nor the flushed 'ab' is input"
+    );
+    let _ = master_write(m, b"\n").expect("end the (now empty) line");
+    assert_eq!(
+        tty::read(id, &mut buf),
+        tty::ConsoleRead::Data(1),
+        "only the newline survives the flush"
+    );
+    // ...and it is echoed as caret-C, after the typed-ahead text that was
+    // already on screen when it arrived.
     let n = master_read(m, &mut got).expect("master read ^C echo");
-    assert_eq!(got.get(..n), Some(&b"^C"[..]), "^C is echoed as caret-C");
+    assert_eq!(
+        got.get(..n),
+        Some(&b"ab^C\r\n"[..]),
+        "typed text, then ^C, then the newline; got {:?}",
+        got.get(..n)
+    );
 
-    // --- readable byte counts (FIONREAD) -----------------------------------
-    // Both ends are empty here: the ^C above consumed the last input and its
-    // echo was drained. Zero must be exact — a caller that uses FIONREAD only
-    // to test emptiness, which is what a select-less poll loop does, is the
-    // majority caller and the one that must never be misled.
+    // Several signal characters in one write: each is decided, in order, and
+    // a run of the same signal collapses (a standard signal is pending or not).
+    let w = master_write(m, b"\x03\x03\x1c").expect("^C ^C ^\\");
+    assert_eq!(w.written, 3, "all three consumed");
+    assert_eq!(w.signals, vec![2u8, 3u8], "SIGINT once, then SIGQUIT");
+    while master_try_read(m, &mut got).is_ok() {}
+
+    // NOFLSH: the signal still happens, and the typed-ahead line survives it.
+    let mut t = tty::get_termios(id);
+    t.c_lflag |= tty::lflag::NOFLSH;
+    tty::set_termios(id, t);
+    let w = master_write(m, b"keep\x03\n").expect("a NOFLSH line with a ^C in it");
+    assert_eq!(w.signals, vec![2u8], "NOFLSH does not suppress the signal");
+    assert_eq!(
+        tty::read(id, &mut buf),
+        tty::ConsoleRead::Data(5),
+        "NOFLSH kept the line"
+    );
+    assert_eq!(buf.get(..5), Some(&b"keep\n"[..]), "and all of it");
+    t.c_lflag &= !tty::lflag::NOFLSH;
+    tty::set_termios(id, t);
+    while master_try_read(m, &mut got).is_ok() {}
+
+    // A disabled interrupt character (c_cc 0, what `stty intr undef` writes)
+    // is not "the NUL character": a NUL byte must not raise SIGINT.
+    let mut t = tty::get_termios(id);
+    let saved = t;
+    if let Some(c) = t.c_cc.get_mut(tty::cc::VINTR) {
+        *c = 0;
+    }
+    tty::set_termios(id, t);
+    let w = master_write(m, b"\0\n").expect("a NUL with VINTR disabled");
+    assert!(w.signals.is_empty(), "a disabled VINTR matches nothing");
+    assert_eq!(
+        tty::read(id, &mut buf),
+        tty::ConsoleRead::Data(2),
+        "the NUL is data"
+    );
+    tty::set_termios(id, saved);
+    while master_try_read(m, &mut got).is_ok() {}
+
+    // --- readable byte counts (FIONREAD): exact, in both modes -------------
+    // Both ends are empty here. Zero must be exact — a caller that uses
+    // FIONREAD only to test emptiness, which is what a select-less poll loop
+    // does, is the majority caller and the one that must never be misled.
     assert_eq!(readable_bytes(m), 0, "drained master counts zero");
     assert_eq!(readable_bytes(s), 0, "drained slave counts zero");
     assert!(!readable(m), "drained master is not readable");
     assert!(!readable(s), "drained slave is not readable");
 
-    // Master side is exact: `slave_write` puts post-discipline bytes in the
-    // output ring, so the count is precisely what the next read delivers —
-    // including the ONLCR expansion, because the expansion has already
-    // happened by the time the bytes are counted. Counting the *caller's* four
-    // bytes here would be an undercount, and a reader sized by it would leave
-    // the stray CR behind to be mistaken for the start of the next line.
+    // Master side: `slave_write` puts post-discipline bytes in the output
+    // ring, so the count is precisely what the next read delivers — including
+    // the ONLCR expansion, because the expansion has already happened by the
+    // time the bytes are counted. Counting the *caller's* four bytes here
+    // would be an undercount, and a reader sized by it would leave the stray
+    // CR behind to be mistaken for the start of the next line.
     let n = slave_write(s, b"abc\n").expect("slave write for count");
     assert_eq!(n, 4, "four caller bytes consumed");
     assert_eq!(
@@ -1237,19 +1202,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     assert_eq!(n, 5, "the count was exact, not an estimate");
     assert_eq!(readable_bytes(m), 0, "and the ring is empty again");
 
-    // Slave side, canonical mode: an *upper bound*, stated as such. An
-    // unterminated line delivers nothing yet, so this deliberately reports
-    // more than a read would return. It is still useful because it is an
-    // upper bound rather than an under-report: a caller sizing a buffer by it
-    // over-allocates and loses nothing.
+    // Slave side, canonical mode: half a line is NOT readable. This used to
+    // count 2 here, as a deliberate upper bound, because the editor had not
+    // run yet; now it has, and a poller that trusted "2" would have issued a
+    // read that parked.
     let _ = master_write(m, b"xy").expect("partial line");
-    assert_eq!(
-        readable_bytes(s),
-        2,
-        "canonical slave counts unedited input bytes"
-    );
-    // Drain the partial line and its echo so the next case starts clean.
+    assert_eq!(readable_bytes(s), 0, "half a line is not readable input");
+    assert!(!readable(s), "and poll agrees");
     let _ = master_write(m, b"\n").expect("terminate the line");
+    assert_eq!(readable_bytes(s), 3, "a complete line counts exactly");
+    assert!(readable(s), "and is readable");
     let got_n = match tty::read(id, &mut buf) {
         tty::ConsoleRead::Data(n) => n,
         other => panic!("read returned {other:?}"),
@@ -1258,13 +1220,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     let _ = master_read(m, &mut got).expect("drain echo");
     assert_eq!(readable_bytes(s), 0, "slave drained");
 
-    // The case that motivated consulting the device at all: a canonical line
-    // is delivered as a unit, and a reader whose buffer is smaller than the
-    // line leaves the rest in the device's pending buffer. Those bytes are in
-    // no ring. A slave-side answer taken from the input ring alone reports
-    // "nothing to read" while a read is standing by to return four bytes — and
-    // if the master sends nothing more, reports it forever, which is a hang
-    // rather than a wrong number.
+    // A canonical line is delivered as a unit, and a reader whose buffer is
+    // smaller than the line leaves the rest queued, still marked as the same
+    // line. A readiness answer that forgot it would report "nothing to read"
+    // while a read stood by to return four bytes — forever, if the master
+    // sends nothing more.
     let _ = master_write(m, b"hello\n").expect("full line");
     let mut small = [0u8; 2];
     let got_n = match tty::read(id, &mut small) {
@@ -1277,10 +1237,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         4,
         "the undelivered remainder of the line is still readable"
     );
-    assert!(
-        readable(s),
-        "a slave holding a partial line is readable even with an empty ring"
-    );
+    assert!(readable(s), "a slave holding a partial line is readable");
     let got_n = match tty::read(id, &mut buf) {
         tty::ConsoleRead::Data(n) => n,
         other => panic!("remainder read returned {other:?}"),
@@ -1293,6 +1250,78 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     );
     assert_eq!(readable_bytes(s), 0, "nothing left");
     let _ = master_read(m, &mut got).expect("drain the echo of 'hello'");
+
+    // --- end of file --------------------------------------------------------
+    // ^D after text delivers the text without the ^D; ^D on an empty line is a
+    // zero-length read. The mark is not a byte, so FIONREAD does not count it.
+    let _ = master_write(m, b"ab\x04").expect("ab^D");
+    assert_eq!(readable_bytes(s), 2, "the ^D is not a byte");
+    assert_eq!(
+        tty::read(id, &mut buf),
+        tty::ConsoleRead::Data(2),
+        "'ab' alone"
+    );
+    assert_eq!(buf.get(..2), Some(&b"ab"[..]), "without the ^D");
+    let _ = master_write(m, b"\x04").expect("^D on an empty line");
+    assert!(readable(s), "an end of file is readable");
+    assert_eq!(
+        tty::read(id, &mut buf),
+        tty::ConsoleRead::Data(0),
+        "^D on an empty line reads as end of file"
+    );
+    assert_eq!(
+        tty::try_read(id, &mut buf),
+        tty::ConsoleRead::WouldBlock,
+        "and reading it consumed it"
+    );
+    while master_try_read(m, &mut got).is_ok() {}
+
+    // --- a full line can still be ended -------------------------------------
+    // Typing past MAX_CANON is consumed and dropped, never refused — refusing
+    // would block the typist behind a line only a terminator can finish — and
+    // the terminator always fits, because the last slot is kept for it.
+    let long = vec![b'q'; tty::MAX_CANON + 100];
+    let w = master_write(m, &long).expect("type past MAX_CANON");
+    assert_eq!(w.written, long.len(), "typing past a full line is consumed");
+    let w = master_write(m, b"\n").expect("end the full line");
+    assert_eq!(w.written, 1, "the reserved slot takes the terminator");
+    let mut big = vec![0u8; tty::MAX_CANON + 16];
+    assert_eq!(
+        tty::read(id, &mut big),
+        tty::ConsoleRead::Data(tty::MAX_CANON),
+        "a full line is MAX_CANON bytes, newline included"
+    );
+    assert_eq!(
+        big.get(tty::MAX_CANON - 1).copied(),
+        Some(b'\n'),
+        "and it still ends in its newline"
+    );
+    while master_try_read(m, &mut got).is_ok() {}
+
+    // --- a change of mode carries unread input across -----------------------
+    let canonical = tty::get_termios(id);
+    let mut raw = canonical;
+    raw.c_lflag &= !(tty::lflag::ICANON | tty::lflag::ECHO);
+    let _ = master_write(m, b"ab").expect("half a line");
+    tty::set_termios(id, raw);
+    assert_eq!(
+        tty::try_read(id, &mut buf),
+        tty::ConsoleRead::Data(2),
+        "canonical -> raw: the half-typed line becomes raw input"
+    );
+    let _ = master_write(m, b"xyz").expect("raw input");
+    tty::set_termios(id, canonical);
+    assert_eq!(
+        tty::try_read(id, &mut buf),
+        tty::ConsoleRead::Data(3),
+        "raw -> canonical: unread raw input is one complete line"
+    );
+    assert_eq!(
+        buf.get(..3),
+        Some(&b"xyz"[..]),
+        "the raw bytes, as that line"
+    );
+    while master_try_read(m, &mut got).is_ok() {}
 
     // A vanished pty counts zero rather than panicking or reporting a stale
     // number: `readable` calls that end "ready" so a poll loop can observe the
@@ -1346,14 +1375,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     let _ = close(m2);
     assert!(!tty::exists(id2), "both ends closed removes the device");
 
-    // --- hangup: master closes -> slave reads EOF, writes EIO --------------
+    // --- hangup: master closes -> slave reads what was typed, then EOF -----
     let (m3, s3) = create().expect("pty create 3");
     let id3 = m3.id();
+    let _ = master_write(m3, b"par").expect("half a line, never finished");
     let _ = close(m3);
     assert_eq!(
         tty::read(id3, &mut buf),
+        tty::ConsoleRead::Data(3),
+        "a hangup delivers the half-typed line as it stands"
+    );
+    assert_eq!(buf.get(..3), Some(&b"par"[..]), "that line");
+    assert_eq!(
+        tty::read(id3, &mut buf),
         tty::ConsoleRead::Data(0),
-        "a slave whose master went away reads EOF"
+        "then the slave reads EOF"
     );
     assert_eq!(
         slave_write(s3, b"x"),
@@ -1363,11 +1399,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     let _ = close(s3);
     assert!(!tty::exists(id3), "device removed after both ends closed");
 
-    // --- non-blocking master write -----------------------------------------
+    // --- non-blocking master write: flow control ----------------------------
     // `master_write` cannot be exercised at its interesting point here — a full
-    // input ring is exactly where it parks, and there is no second task to
+    // input queue is exactly where it parks, and there is no second task to
     // unpark it. The non-blocking form reaches that state and returns, so this
-    // is the one place the full-ring behaviour is checkable in a boot self-test.
+    // is the one place the full-queue behaviour is checkable in a boot
+    // self-test.
     let (m5, s5) = create().expect("pty create 5");
     let id5 = m5.id();
 
@@ -1388,38 +1425,60 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         "an empty write follows master_write's rejection, not master_try_read's Ok(0)"
     );
 
-    let block = vec![b'a'; INPUT_CAPACITY];
+    // Raw mode, so bytes go straight to the queue — a canonical terminal would
+    // take this much typing into its line editor instead.
+    let mut raw5 = tty::get_termios(id5);
+    raw5.c_lflag &= !(tty::lflag::ICANON | tty::lflag::ECHO);
+    tty::set_termios(id5, raw5);
+    let block = vec![b'a'; tty::INPUT_QUEUE_CAPACITY];
     assert_eq!(
-        master_try_write(m5, &block),
-        Ok(INPUT_CAPACITY),
-        "an empty ring takes the whole buffer"
+        master_try_write(m5, &block).map(|w| w.written),
+        Ok(tty::INPUT_QUEUE_CAPACITY),
+        "an empty queue takes the whole buffer"
     );
     assert_eq!(
         master_try_write(m5, b"z"),
         Err(KernelError::WouldBlock),
-        "a full ring with a live slave is WouldBlock — not Ok(0), and not a park"
+        "a full queue with a live slave is WouldBlock — not Ok(0), and not a park"
     );
 
     // One byte out makes room for exactly one byte in, and a short count is a
     // *success*: the caller resubmits the tail, as it would on a pipe. Reported
     // as an error instead, a caller retrying "the failed write" would resend the
     // byte that was in fact accepted.
-    match slave_try_read_input(id5) {
-        Input::Byte(b) => assert_eq!(b, b'a', "the byte drained is the first written"),
-        other => panic!("draining a full input ring returned {other:?}"),
-    }
+    let mut one = [0u8; 1];
     assert_eq!(
-        master_try_write(m5, b"xy"),
+        tty::try_read(id5, &mut one),
+        tty::ConsoleRead::Data(1),
+        "a raw read drains one byte"
+    );
+    assert_eq!(one[0], b'a', "the byte drained is the first written");
+    assert_eq!(
+        master_try_write(m5, b"xy").map(|w| w.written),
         Ok(1),
         "a short count is a success, not an error"
     );
     assert_eq!(
         master_try_write(m5, b"z"),
         Err(KernelError::WouldBlock),
-        "and one byte refilled the ring"
+        "and one byte refilled the queue"
+    );
+    // A signal character is consumed even with the queue full — it needs no
+    // room, and a program that has stopped reading its input is precisely the
+    // one a ^C must reach. Raw mode keeps ISIG unless it is cleared.
+    let w = master_try_write(m5, b"\x03").expect("^C into a full queue");
+    assert_eq!(
+        w.signals,
+        vec![2u8],
+        "the signal is decided with the queue full"
+    );
+    assert_eq!(
+        master_try_write(m5, b"z").map(|w| w.written),
+        Ok(1),
+        "and the flush it performed made room"
     );
 
-    // The hangup outranks the full ring, which is the asymmetry against
+    // The hangup outranks the full queue, which is the asymmetry against
     // `master_try_read` (that one drains before reporting EIO). Bytes handed to
     // a dead slave will never be read by anybody, so there is nothing to
     // preserve by reporting the space first — whereas a dying program's last
@@ -1428,7 +1487,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     assert_eq!(
         master_try_write(m5, b"z"),
         Err(KernelError::ChannelClosed),
-        "a closed slave is EPIPE, checked before the ring's state"
+        "a closed slave is EPIPE, checked before the queue's state"
     );
     let _ = close(m5);
     assert!(!tty::exists(id5), "device removed after both ends closed");
@@ -1437,7 +1496,6 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     let _ = close(m);
     let _ = close(s);
     assert!(!tty::exists(id), "device removed after both ends closed");
-
     crate::serial_println!("[pty] Self-test PASSED");
     Ok(())
 }

@@ -2771,6 +2771,14 @@ extern "C" fn kernel_main() -> ! {
     // stale binary came to look staged in the first place. A condition phrased
     // over provenance can pass for the wrong reason; phrase it over content.
     // See design-decisions.md 944.
+    //
+    // ROOT CAUSE, 2026-09-24, of every failure since (45, and the debug-kernel
+    // hang): the kernel only turned a `^C` into SIGINT when something READ the
+    // slave, and this fixture's child -- correctly -- never reads after its
+    // readiness byte; it waits for the signal, as a busy program would. The
+    // theories recorded above (starvation, the fixture racing itself) were
+    // about symptoms of that. The line discipline now runs in the master's
+    // write: known-issues.md A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER.
     {
         #[inline(never)]
         fn case() {

@@ -8,7 +8,9 @@
 //! had a real per-minute loop but read only `/var/spool/cron/root`, gave
 //! `/etc/cron.d` a parser built for the five-field user-crontab grammar (so the
 //! user name in column six was executed as the program), and could not change
-//! user. This crate was the third, named `crond2` because the name was taken.
+//! user. This crate was the third, named `crond2` because the name was taken;
+//! with the other two gone, its binary, messages, log identity and PID file
+//! are `crond`.
 //!
 //! Which one a user got would have been decided by whichever binary landed at
 //! `/sbin/crond`, with the do-nothing implementation in the draw. That is the
@@ -54,6 +56,7 @@
 //!   7        10    weekly-clean  /bin/cleanup --weekly
 //! ```
 
+use libcsyslog::{LOG_DEBUG, LOG_ERR, LOG_INFO, LOG_WARNING};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -89,7 +92,7 @@ const ANACRONTAB_PATH: &str = cronspool::ANACRONTAB;
 const ANACRON_SPOOL: &str = cronspool::ANACRON_SPOOL;
 
 /// PID file for daemon mode.
-const PID_PATH: &str = "/var/run/crond2.pid";
+const PID_PATH: &str = "/var/run/crond.pid";
 
 /// Default log level.
 const DEFAULT_LOG_LEVEL: u32 = 1;
@@ -784,7 +787,7 @@ impl CronTab {
         let content = match fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => {
-                log_msg(2, &format!("cannot read {}: {e}", path.display()));
+                log_msg(2, LOG_ERR, &format!("cannot read {}: {e}", path.display()));
                 return;
             }
         };
@@ -816,6 +819,7 @@ impl CronTab {
                 Err(e) => {
                     log_msg(
                         2,
+                        LOG_ERR,
                         &format!("bad line in {}: {e}: {trimmed}", path.display()),
                     );
                 }
@@ -828,7 +832,7 @@ impl CronTab {
         let content = match fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => {
-                log_msg(2, &format!("cannot read {}: {e}", path.display()));
+                log_msg(2, LOG_ERR, &format!("cannot read {}: {e}", path.display()));
                 return;
             }
         };
@@ -862,6 +866,7 @@ impl CronTab {
                 Err(e) => {
                     log_msg(
                         2,
+                        LOG_ERR,
                         &format!("bad line in {}: {e}: {trimmed}", path.display()),
                     );
                 }
@@ -1128,7 +1133,7 @@ fn read_anacron_timestamp(job_id: &str) -> u64 {
 fn write_anacron_timestamp(job_id: &str, secs: u64) {
     let dir = Path::new(ANACRON_SPOOL);
     if let Err(e) = fs::create_dir_all(dir) {
-        log_msg(1, &format!("cannot create {}: {e}", dir.display()));
+        log_msg(1, LOG_ERR, &format!("cannot create {}: {e}", dir.display()));
         return;
     }
 
@@ -1139,6 +1144,7 @@ fn write_anacron_timestamp(job_id: &str, secs: u64) {
     if let Err(e) = fs::write(&path, date_str.as_bytes()) {
         log_msg(
             1,
+            LOG_ERR,
             &format!("cannot write timestamp {}: {e}", path.display()),
         );
     }
@@ -1153,8 +1159,15 @@ static mut LOG_LEVEL: u32 = DEFAULT_LOG_LEVEL;
 /// If true, log to stdout instead of syslog.
 static mut LOG_TO_STDOUT: bool = false;
 
-/// Log a message if the current log level is >= `level`.
-fn log_msg(level: u32, msg: &str) {
+/// Log `msg` at syslog `severity`, if the current log level is >= `level`.
+///
+/// The two are different axes. `level` is verbosity -- `-L`, 0 always shown,
+/// higher chattier -- and decides WHETHER a message is written. `severity` is
+/// what the message is -- `LOG_ERR` for a failure of crond's own,
+/// `LOG_WARNING` for something skipped or a job that failed, `LOG_INFO` for
+/// the rest, `LOG_DEBUG` for the per-minute tick -- and is what syslog files
+/// it under.
+fn log_msg(level: u32, severity: i32, msg: &str) {
     // SAFETY: These statics are only written during argument parsing (single-
     // threaded startup), then read-only during the main loop. No data race.
     let (log_level, to_stdout) = unsafe { (LOG_LEVEL, LOG_TO_STDOUT) };
@@ -1170,20 +1183,16 @@ fn log_msg(level: u32, msg: &str) {
             bt.year, bt.month, bt.day, bt.hour, bt.minute, msg
         );
     } else {
-        // Syslog: on Slate OS, write to /dev/log or use the syslog utility.
-        // For now, write to stderr as a fallback.
-        let bt = unix_to_broken(now_secs());
-        eprintln!(
-            "crond2[{}]: [{:04}-{:02}-{:02} {:02}:{:02}] {}",
-            std::process::id(),
-            bt.year,
-            bt.month,
-            bt.day,
-            bt.hour,
-            bt.minute,
-            msg
-        );
+        // syslog(3), as cron and anacron log: the C library adds the time, the
+        // name `open_syslog` gave, and the PID, and decides where it goes.
+        libcsyslog::syslog(severity, msg.as_bytes());
     }
+}
+
+/// `openlog(name, LOG_PID, LOG_CRON)`: how cronie's crond and anacron open
+/// the log, `name` being the personality -- `crond` or `anacron`.
+fn open_syslog(name: &str) {
+    libcsyslog::openlog(name.as_bytes(), libcsyslog::LOG_PID, libcsyslog::LOG_CRON);
 }
 
 // ============================================================================
@@ -1238,7 +1247,7 @@ fn may_run_as(want: &str, running_as: Option<&str>) -> Result<(), String> {
     match running_as {
         Some(me) if me == want => Ok(()),
         Some(me) => Err(format!(
-            "declared user {want:?}, running as {me:?}, and crond2 cannot \
+            "declared user {want:?}, running as {me:?}, and crond cannot \
              change user -- running it would give the job authority its \
              crontab withheld, and log it as {want:?}"
         )),
@@ -1255,10 +1264,14 @@ fn execute_command(command: &str, user: &str, env_vars: &HashMap<String, String>
         // Logged at level 0 so it is visible at any verbosity: a job that did
         // not run is not a detail. Deliberately NOT in the `(user) CMD (...)`
         // format, which asserts that a job ran as that user.
-        log_msg(0, &format!("REFUSED ({user}) CMD ({command}): {why}"));
+        log_msg(
+            0,
+            LOG_ERR,
+            &format!("REFUSED ({user}) CMD ({command}): {why}"),
+        );
         return;
     }
-    log_msg(1, &format!("({user}) CMD ({command})"));
+    log_msg(1, LOG_INFO, &format!("({user}) CMD ({command})"));
 
     let shell = env_vars
         .get("SHELL")
@@ -1294,18 +1307,23 @@ fn execute_command(command: &str, user: &str, env_vars: &HashMap<String, String>
             if !output.stderr.is_empty()
                 && let Ok(text) = String::from_utf8(output.stderr)
             {
-                log_msg(1, &format!("({user}) STDERR: {text}"));
+                log_msg(1, LOG_INFO, &format!("({user}) STDERR: {text}"));
             }
             if !output.status.success() {
                 let code = output.status.code().unwrap_or(-1);
                 log_msg(
                     1,
+                    LOG_WARNING,
                     &format!("({user}) CMD ({command}) exited with status {code}"),
                 );
             }
         }
         Err(e) => {
-            log_msg(1, &format!("({user}) EXEC FAILED ({command}): {e}"));
+            log_msg(
+                1,
+                LOG_ERR,
+                &format!("({user}) EXEC FAILED ({command}): {e}"),
+            );
         }
     }
 }
@@ -1337,7 +1355,7 @@ fn send_mail(user: &str, command: &str, body: &str) {
             let _ = f.write_all(b"\n");
         }
         Err(e) => {
-            log_msg(2, &format!("cannot write mail for {user}: {e}"));
+            log_msg(2, LOG_ERR, &format!("cannot write mail for {user}: {e}"));
         }
     }
 }
@@ -1365,7 +1383,7 @@ fn load_all_crontabs() -> CronTab {
     // Load system crontab.
     let sys_path = Path::new(SYSTEM_CRONTAB);
     if sys_path.exists() {
-        log_msg(2, "loading /etc/crontab");
+        log_msg(2, LOG_INFO, "loading /etc/crontab");
         tab.load_system_crontab(sys_path);
     }
 
@@ -1382,15 +1400,20 @@ fn load_all_crontabs() -> CronTab {
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 log_msg(
                     0,
+                    LOG_WARNING,
                     &format!("skipping {}: its name is not valid UTF-8", path.display()),
                 );
                 continue;
             };
             if !cron_d_name_is_usable(&name) {
-                log_msg(2, &format!("skipping {name}: run-parts naming rule"));
+                log_msg(
+                    2,
+                    LOG_INFO,
+                    &format!("skipping {name}: run-parts naming rule"),
+                );
                 continue;
             }
-            log_msg(2, &format!("loading /etc/cron.d/{name}"));
+            log_msg(2, LOG_INFO, &format!("loading /etc/cron.d/{name}"));
             tab.load_system_crontab(&path);
         }
     }
@@ -1412,6 +1435,7 @@ fn load_all_crontabs() -> CronTab {
                 let Some(user) = entry.file_name().to_str().map(str::to_owned) else {
                     log_msg(
                         0,
+                        LOG_WARNING,
                         &format!(
                             "skipping {}: the file name is the user name and this \
                          one is not valid UTF-8, so its jobs cannot be \
@@ -1421,13 +1445,17 @@ fn load_all_crontabs() -> CronTab {
                     );
                     continue;
                 };
-                log_msg(2, &format!("loading crontab for user {user}"));
+                log_msg(2, LOG_INFO, &format!("loading crontab for user {user}"));
                 tab.load_user_crontab(&path, &user);
             }
         }
     }
 
-    log_msg(1, &format!("loaded {} cron entries", tab.entries.len()));
+    log_msg(
+        1,
+        LOG_INFO,
+        &format!("loaded {} cron entries", tab.entries.len()),
+    );
     tab
 }
 
@@ -1442,7 +1470,7 @@ fn run_crond(foreground: bool) {
         let _ = fs::write(PID_PATH, format!("{}", process::id()));
     }
 
-    log_msg(0, "crond2 starting");
+    log_msg(0, LOG_INFO, "crond starting");
 
     let mut tab = load_all_crontabs();
 
@@ -1467,6 +1495,7 @@ fn run_crond(foreground: bool) {
         let bt = unix_to_broken(now_secs());
         log_msg(
             2,
+            LOG_DEBUG,
             &format!(
                 "tick: {:04}-{:02}-{:02} {:02}:{:02}",
                 bt.year, bt.month, bt.day, bt.hour, bt.minute
@@ -1527,9 +1556,9 @@ fn run_anacron(
     };
 
     if foreground {
-        log_msg(0, "anacron starting in foreground");
+        log_msg(0, LOG_INFO, "anacron starting in foreground");
     } else {
-        log_msg(0, "anacron starting");
+        log_msg(0, LOG_INFO, "anacron starting");
     }
 
     let now = now_secs();
@@ -1551,6 +1580,7 @@ fn run_anacron(
         if !should_run {
             log_msg(
                 1,
+                LOG_INFO,
                 &format!(
                     "job `{}` not due (last run {} days ago, period {} days)",
                     entry.job_id, elapsed_days, entry.period_days
@@ -1560,7 +1590,11 @@ fn run_anacron(
         }
 
         if update_only {
-            log_msg(1, &format!("updating timestamp for `{}`", entry.job_id));
+            log_msg(
+                1,
+                LOG_INFO,
+                &format!("updating timestamp for `{}`", entry.job_id),
+            );
             write_anacron_timestamp(&entry.job_id, now);
             continue;
         }
@@ -1578,14 +1612,18 @@ fn run_anacron(
 
         let handle = std::thread::spawn(move || {
             if delay_secs > 0 {
-                log_msg(1, &format!("job `{job_id}`: delaying {delay_secs}s"));
+                log_msg(
+                    1,
+                    LOG_INFO,
+                    &format!("job `{job_id}`: delaying {delay_secs}s"),
+                );
                 std::thread::sleep(std::time::Duration::from_secs(delay_secs));
             }
 
-            log_msg(1, &format!("job `{job_id}`: running `{cmd}`"));
+            log_msg(1, LOG_INFO, &format!("job `{job_id}`: running `{cmd}`"));
             execute_command(&cmd, "root", &env_vars);
             write_anacron_timestamp(&job_id, run_now);
-            log_msg(1, &format!("job `{job_id}`: done"));
+            log_msg(1, LOG_INFO, &format!("job `{job_id}`: done"));
         });
 
         if serialize {
@@ -1601,7 +1639,7 @@ fn run_anacron(
         let _ = h.join();
     }
 
-    log_msg(0, "anacron: all jobs processed");
+    log_msg(0, LOG_INFO, "anacron: all jobs processed");
 }
 
 // ============================================================================
@@ -1624,7 +1662,7 @@ struct AnacronArgs {
 }
 
 fn print_crond_usage() {
-    eprintln!("Usage: crond2 [-f] [-L loglevel] [-l]");
+    eprintln!("Usage: crond [-f] [-L loglevel] [-l]");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  -f          Run in foreground (don't daemonize)");
@@ -1746,6 +1784,8 @@ fn main() {
             unsafe {
                 LOG_TO_STDOUT = true;
             }
+        } else {
+            open_syslog("anacron");
         }
 
         run_anacron(
@@ -1760,7 +1800,7 @@ fn main() {
         let crond_args = match parse_crond_args(&args[1..]) {
             Ok(a) => a,
             Err(e) => {
-                eprintln!("crond2: {e}");
+                eprintln!("crond: {e}");
                 print_crond_usage();
                 process::exit(1);
             }
@@ -1770,6 +1810,9 @@ fn main() {
         unsafe {
             LOG_LEVEL = crond_args.log_level;
             LOG_TO_STDOUT = crond_args.log_stdout;
+        }
+        if !crond_args.log_stdout {
+            open_syslog("crond");
         }
 
         run_crond(crond_args.foreground);
@@ -2551,7 +2594,7 @@ mod tests {
     #[test]
     fn anacron_parse_valid() {
         let content = "1 5 daily-job /bin/daily-task\n7 10 weekly-job /bin/weekly-task\n";
-        let scratch = ScratchDir::new("crond2_test_anacron");
+        let scratch = ScratchDir::new("crond_test_anacron");
         let path = scratch.path("anacrontab_test");
         fs::write(&path, content).unwrap();
 
@@ -2567,7 +2610,7 @@ mod tests {
     #[test]
     fn anacron_parse_with_comments_and_env() {
         let content = "# Comment line\nSHELL=/bin/bash\n\n1 5 test-job /bin/test\n";
-        let scratch = ScratchDir::new("crond2_test_anacron2");
+        let scratch = ScratchDir::new("crond_test_anacron2");
         let path = scratch.path("anacrontab_test2");
         fs::write(&path, content).unwrap();
 
@@ -2579,7 +2622,7 @@ mod tests {
     #[test]
     fn anacron_parse_bad_period() {
         let content = "abc 5 test-job /bin/test\n";
-        let scratch = ScratchDir::new("crond2_test_anacron3");
+        let scratch = ScratchDir::new("crond_test_anacron3");
         let path = scratch.path("anacrontab_test3");
         fs::write(&path, content).unwrap();
 
@@ -2590,7 +2633,7 @@ mod tests {
 
     #[test]
     fn anacron_timestamp_roundtrip() {
-        let scratch = ScratchDir::new("crond2_test_ts");
+        let scratch = ScratchDir::new("crond_test_ts");
         let ts_path = scratch.path("test-job-ts");
 
         // Write a YYYYMMDD timestamp file manually.

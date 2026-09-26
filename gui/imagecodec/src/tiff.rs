@@ -17,9 +17,15 @@
 //!   `StripByteCounts`, colour channels that should have been extra
 //!   samples, a palette image with no palette).
 //! - **Strips and tiles** ([`read`]): where the bytes are, `FillOrder`, and
-//!   the codecs -- none, PackBits, LZW (both styles), Deflate, and CCITT fax
-//!   ([`fax`]: Group 3 1-D and 2-D, Group 4, Modified Huffman) -- with the
-//!   horizontal predictor and big-endian 16-bit samples.
+//!   the codecs -- none, PackBits, LZW (both styles), Deflate, CCITT fax
+//!   ([`fax`]: Group 3 1-D and 2-D, Group 4, Modified Huffman), JPEG through
+//!   this crate's libjpeg-turbo port (lossless too), old-style JPEG
+//!   ([`ojpeg`], which rebuilds one JPEG from the file's tags and strips as
+//!   `tif_ojpeg.c` does), NeXT ([`next`]), ThunderScan ([`thunder`]), SGI
+//!   LogLuv ([`luv`], high dynamic range, which the codec itself turns to
+//!   8-bit grey or RGB, as libtiff's reader asks) and PixarLog
+//!   ([`pixarlog`], Pixar's log-coded film frames) -- with the horizontal
+//!   predictor and big-endian 16-bit samples.
 //! - **Samples to pixels** ([`rgba`]): grey of 1 to 16 bits, palettes, RGB
 //!   of 8 and 16 bits with or without alpha, CMYK, `YCbCr` at every
 //!   subsampling libtiff converts, and CIE L*a*b*, in contiguous or separate
@@ -48,15 +54,18 @@
 //!
 //! # What is not here yet
 //!
-//! Old-style JPEG, SGI LogLuv and PixarLog are refused by name. The first
+//! Every compression libtiff's reader decodes is decoded here. The first
 //! page only is read, as libtiff's viewers read it; the others are not
 //! reached.
 
 mod color;
 mod dir;
 mod fax;
+mod luv;
 mod lzw;
 mod next;
+mod ojpeg;
+mod pixarlog;
 mod read;
 mod rgba;
 mod thunder;

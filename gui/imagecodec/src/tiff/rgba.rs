@@ -139,6 +139,23 @@ struct Image {
 /// convert, or a strip that will not read.
 pub(crate) fn read(file: File<'_>, dir: &Directory, limits: &Limits) -> ImageResult<Raster> {
     check(dir)?;
+    // `TIFFRGBAImageBegin` asks the SGI LogLuv codec for 8-bit samples
+    // (`SGILOGDATAFMT_8BIT`), and the codec rewrites the directory to match:
+    // from there on, every size is one of 8-bit unsigned samples.
+    let eight_bit;
+    let dir = if matches!(
+        dir.photometric,
+        Some(photometric::LOGL | photometric::LOGLUV)
+    ) {
+        eight_bit = Directory {
+            bits_per_sample: 8,
+            sample_format: 1,
+            ..dir.clone()
+        };
+        &eight_bit
+    } else {
+        dir
+    };
     let img = begin(dir)?;
     let mut raster = vec![0u32; (img.width as usize).saturating_mul(img.height as usize)];
     let mut reader = Reader::new(file, dir, *limits);
@@ -308,11 +325,17 @@ fn begin(dir: &Directory) -> ImageResult<Image> {
                 return Err(refuse("TIFF CMYK of this shape"));
             }
         }
-        photometric::LOGL | photometric::LOGLUV => {
-            return Err(refuse("TIFF LogLuv, not yet decoded here"));
-        }
+        // The codec hands out 8-bit grey or RGB (`read`).
+        photometric::LOGL | photometric::LOGLUV => {}
         _ => return Err(refuse("TIFF photometric interpretation")),
     }
+    // "A little white lie": the reader treats what the codec hands out as
+    // the grey or RGB it is.
+    let p = match p {
+        photometric::LOGL => photometric::MIN_IS_BLACK,
+        photometric::LOGLUV => photometric::RGB,
+        p => p,
+    };
     // Contiguous `YCbCr` JPEG comes out of libjpeg as RGB.
     let p = if p == photometric::YCBCR
         && dir.planar_config == 1
@@ -923,6 +946,13 @@ fn cursor(v: usize) -> ImageResult<isize> {
 fn strip_of(dir: &Directory, row: u32, plane: u32) -> u32 {
     let strip = row.checked_div(dir.rows_per_strip).unwrap_or(0);
     if dir.planar_config == 2 {
+        // A plane past the samples -- the alpha plane `Matteing` or
+        // `ExtraSamples` promises a picture that has no room for one -- is
+        // reported and then read from strip 0, whose samples the colour
+        // conversions that take no alpha never look at.
+        if plane >= u32::from(dir.samples_per_pixel) {
+            return 0;
+        }
         strip.wrapping_add(plane.wrapping_mul(dir.strips_per_image))
     } else {
         strip

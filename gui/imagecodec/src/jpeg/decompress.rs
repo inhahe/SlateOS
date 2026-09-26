@@ -13,8 +13,10 @@
 //!
 //! The input side follows libjpeg's state machine. A single-scan image is
 //! decoded one iMCU row -- one row of MCUs -- at a time as output rows are asked
-//! for, and a row's worth of context ahead for the upsampler, just as
-//! libjpeg's context controller reads ahead; a multi-scan image (progressive,
+//! for, reading ahead exactly when libjpeg's main controller does: the next
+//! iMCU row is read for the last row group of this one if an upsampler needs
+//! the rows below (its context controller), and otherwise not until its own
+//! first row is wanted; a multi-scan image (progressive,
 //! or sequential with the components in separate scans) is read whole into
 //! [`Store`]s when the decode starts, as `jpeg_start_decompress` does, and
 //! reconstructed a row at a time from there, with block smoothing where
@@ -49,6 +51,43 @@ pub(crate) enum Headed {
     TablesOnly,
     /// An image, ready to start (`JPEG_HEADER_OK`).
     Image,
+}
+
+/// The tables a decompressor reads into: the caller's, which outlive it (as
+/// libjpeg's permanent pool outlives a datastream), or its own.
+enum TablesRef<'t> {
+    Borrowed(&'t mut Tables),
+    Owned(Box<Tables>),
+}
+
+impl core::ops::Deref for TablesRef<'_> {
+    type Target = Tables;
+
+    fn deref(&self) -> &Tables {
+        match self {
+            Self::Borrowed(tables) => tables,
+            Self::Owned(tables) => tables,
+        }
+    }
+}
+
+impl core::ops::DerefMut for TablesRef<'_> {
+    fn deref_mut(&mut self) -> &mut Tables {
+        match self {
+            Self::Borrowed(tables) => tables,
+            Self::Owned(tables) => tables,
+        }
+    }
+}
+
+/// One component's rows as raw output hands them over (`jpeg_read_raw_data`):
+/// the caller's buffer, which an iMCU row is written into and which keeps
+/// whatever the inverse transform does not write -- as libtiff's old-JPEG
+/// reader relies on, reusing one buffer for every iMCU row.
+pub(crate) struct RawPlane {
+    pub(crate) data: Vec<u8>,
+    /// Bytes from one row to the next.
+    pub(crate) stride: usize,
 }
 
 /// A scan's entropy decoder.
@@ -116,7 +155,7 @@ fn div_up(a: usize, b: usize) -> usize {
 /// One JPEG datastream being decoded (`jpeg_decompress_struct`).
 pub(crate) struct Decompress<'d, 't> {
     input: Input<'d>,
-    tables: &'t mut Tables,
+    tables: TablesRef<'t>,
     header: Header,
     // The input controller.
     inheaders: bool,
@@ -164,6 +203,8 @@ pub(crate) struct Decompress<'d, 't> {
     defined_rows: Vec<usize>,
     ycc: Option<Ycc>,
     out_row: Vec<u8>,
+    /// `raw_data_out`: no upsampling and no colour conversion.
+    raw: bool,
 }
 
 impl<'d, 't> Decompress<'d, 't> {
@@ -171,7 +212,7 @@ impl<'d, 't> Decompress<'d, 't> {
     pub(crate) fn new(data: &'d [u8], tables: &'t mut Tables) -> Self {
         Self {
             input: Input::new(data),
-            tables,
+            tables: TablesRef::Borrowed(tables),
             header: Header::default(),
             inheaders: true,
             has_multiple_scans: false,
@@ -205,13 +246,88 @@ impl<'d, 't> Decompress<'d, 't> {
             defined_rows: Vec::new(),
             ycc: None,
             out_row: Vec::new(),
+            raw: false,
+        }
+    }
+
+    /// A decompressor over bytes of its own, with tables of its own: one
+    /// that can be kept, as libtiff's old-JPEG reader keeps its session.
+    pub(crate) fn owned(data: Vec<u8>) -> Decompress<'static, 'static> {
+        Decompress {
+            input: Input::owned(data),
+            tables: TablesRef::Owned(Box::new(Tables::new())),
+            header: Header::default(),
+            inheaders: true,
+            has_multiple_scans: false,
+            eoi_reached: false,
+            reading_markers: true,
+            max_h: 1,
+            max_v: 1,
+            total_imcu_rows: 0,
+            mcus_per_row: 0,
+            membership: Vec::new(),
+            input_imcu_row: 0,
+            mcu_rows_per_imcu_row: 1,
+            last_good_imcu_row: 0,
+            jpeg_color_space: ColorSpace::Unknown,
+            out_color_space: ColorSpace::Unknown,
+            block_size: 8,
+            max_scans: None,
+            entropy: None,
+            progression: None,
+            stores: Vec::new(),
+            min_dct: 8,
+            output_width: 0,
+            output_height: 0,
+            out_components: 0,
+            planes: Vec::new(),
+            rows: Vec::new(),
+            output_imcu_row: 0,
+            output_scanline: 0,
+            smoothing: None,
+            lossless: None,
+            defined_rows: Vec::new(),
+            ycc: None,
+            out_row: Vec::new(),
+            raw: false,
+        }
+    }
+
+    /// Fail where libtiff's old-JPEG source fails (see [`Input::strict`]),
+    /// and, if `hard_end`, when the data runs out.
+    pub(crate) fn set_strict_source(&mut self, hard_end: bool) {
+        self.input.strict = true;
+        if hard_end {
+            self.input.src.set_hard_end();
+        }
+    }
+
+    /// `raw_data_out`: hand out each component's samples, an iMCU row at a
+    /// time ([`Self::read_raw`]), rather than rows of pixels.
+    pub(crate) const fn set_raw_output(&mut self) {
+        self.raw = true;
+    }
+
+    /// The largest sampling factors, across and down.
+    pub(crate) const fn max_sampling(&self) -> (usize, usize) {
+        (self.max_h, self.max_v)
+    }
+
+    /// An error if a strict source failed during the call now returning.
+    fn source_check(&self) -> Result<(), Error> {
+        if self.input.failed || self.input.src.overrun {
+            Err(jerr::SOURCE_FAILED)
+        } else {
+            Ok(())
         }
     }
 
     /// `jpeg_read_header`: read to the first scan, or to the end of a
     /// tables-only datastream (an error if `require_image`).
     pub(crate) fn read_header(&mut self, require_image: bool) -> Result<Headed, Error> {
-        match self.consume_markers()? {
+        let reached = self.consume_markers();
+        self.source_check()?;
+        match reached? {
             Reached::Sos => {
                 self.default_parameters();
                 Ok(Headed::Image)
@@ -285,7 +401,7 @@ impl<'d, 't> Decompress<'d, 't> {
         if self.eoi_reached {
             return Ok(Reached::Eoi);
         }
-        let reached = marker::read_markers(&mut self.input, &mut self.header, self.tables)?;
+        let reached = marker::read_markers(&mut self.input, &mut self.header, &mut self.tables)?;
         match reached {
             Reached::Sos => {
                 if self.inheaders {
@@ -425,10 +541,26 @@ impl<'d, 't> Decompress<'d, 't> {
         limits: &Limits,
         rows_wanted: Option<usize>,
     ) -> Result<(), Error> {
+        let started = self.start_inner(limits, rows_wanted);
+        self.source_check()?;
+        started
+    }
+
+    fn start_inner(&mut self, limits: &Limits, rows_wanted: Option<usize>) -> Result<(), Error> {
+        // `master_selection` turns raw output off for a lossless image.
+        if self.header.lossless {
+            self.raw = false;
+        }
         self.calc_output_dimensions();
-        self.select_color()?;
-        let fancy = self.min_dct > 1;
-        self.select_upsampling(fancy)?;
+        if self.raw {
+            // No colour deconverter and no upsampler: nothing to check, and
+            // the planes alone to make.
+            self.raw_planes();
+        } else {
+            self.select_color()?;
+            let fancy = self.min_dct > 1;
+            self.select_upsampling(fancy)?;
+        }
         if self.header.lossless && self.header.arith {
             return Err(jerr::ARITH_NOTIMPL);
         }
@@ -577,6 +709,29 @@ impl<'d, 't> Decompress<'d, 't> {
         Ok(())
     }
 
+    /// Each component's plane for raw output: the inverse transform's output,
+    /// whole blocks, and nothing to bring it to the picture's size.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "frame geometry: dimensions are at most 65500, sampling factors at most 4 and block sizes at most 8, so every product here is far below usize::MAX"
+    )]
+    fn raw_planes(&mut self) {
+        let (max_h, max_v, min) = (self.max_h, self.max_v, self.min_dct);
+        self.planes.clear();
+        self.rows.clear();
+        for component in &self.header.components {
+            let size = component.dct_scaled_size;
+            self.planes.push(Samples::new(Shape {
+                stride: component.width_in_blocks * size,
+                rows: self.total_imcu_rows * component.v * size,
+                width: component.downsampled_width,
+                height: component.downsampled_height,
+                across: (component.h * size, max_h * min),
+                down: (component.v * size, max_v * min),
+            }));
+        }
+    }
+
     /// The coefficient stores of a multi-scan image, after checking them and
     /// the planes against `limits`.
     #[allow(
@@ -637,7 +792,7 @@ impl<'d, 't> Decompress<'d, 't> {
         if self.header.lossless {
             // The lossless decoder's `start_pass`, then the difference
             // controller's; no quantisation tables are latched.
-            let entropy = lossless::Entropy::start(&self.header, self.tables, &self.membership)?;
+            let entropy = lossless::Entropy::start(&self.header, &self.tables, &self.membership)?;
             if let Some(controller) = self.lossless.as_mut() {
                 controller.start_input_pass(&self.header, self.mcus_per_row)?;
             }
@@ -672,14 +827,14 @@ impl<'d, 't> Decompress<'d, 't> {
             Entropy::Progressive(Box::new(Progressive::start(
                 pass,
                 &self.header,
-                self.tables,
+                &self.tables,
                 &self.membership,
             )?))
         } else {
             Entropy::Sequential(Box::new(Sequential::start(
                 &mut self.input,
                 &self.header,
-                self.tables,
+                &self.tables,
                 &self.membership,
             )?))
         };
@@ -1186,8 +1341,18 @@ impl<'d, 't> Decompress<'d, 't> {
             self.input.warn();
             return Ok(&[]);
         }
+        // The iMCU rows libjpeg's main controller has read by the time it
+        // hands out row `y`: the one the row is in, and -- when a plane is
+        // filtered down, so needs the rows either side -- the next one too
+        // once the row is in the iMCU row's last row group (`max_v` rows).
+        // A source that fails when its data runs out (old-style JPEG in TIFF)
+        // fails on the same row as libjpeg's only if the reading is no
+        // earlier than libjpeg's.
         let per_imcu = (self.max_v * self.min_dct).max(1);
-        let needed = (y / per_imcu + 1).min(self.total_imcu_rows.saturating_sub(1));
+        let imcu = y / per_imcu;
+        let last_group = y % per_imcu >= self.min_dct.saturating_sub(1) * self.max_v;
+        let context = last_group && self.rows.iter().any(Rows::needs_context);
+        let needed = (imcu + usize::from(context)).min(self.total_imcu_rows.saturating_sub(1));
         while self.output_imcu_row <= needed && self.output_imcu_row < self.total_imcu_rows {
             if self.has_multiple_scans {
                 self.decompress_data()?;
@@ -1219,7 +1384,79 @@ impl<'d, 't> Decompress<'d, 't> {
             (_, _, lines) => color::interleave(lines, out),
         }
         self.output_scanline += 1;
+        self.source_check()?;
         Ok(&self.out_row)
+    }
+
+    /// `jpeg_read_raw_data`: the next iMCU row, each component's samples
+    /// into its [`RawPlane`] -- as many rows as the component has in an iMCU
+    /// row, as many samples a row as it has blocks, and only what the inverse
+    /// transform writes: the rest of each buffer is left as it was. Nothing
+    /// once every row has been handed out (`JWRN_TOO_MUCH_DATA`).
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "frame geometry: dimensions are at most 65500, sampling factors at most 4 and block sizes at most 8, so every product here is far below usize::MAX"
+    )]
+    pub(crate) fn read_raw(&mut self, out: &mut [RawPlane]) -> Result<(), Error> {
+        if self.header.precision != 8 {
+            return Err(jerr::BAD_PRECISION);
+        }
+        if self.header.lossless {
+            return Err(jerr::NOTIMPL);
+        }
+        if !self.raw {
+            return Err(Error::Malformed(
+                "JPEG: raw rows asked of a decode that is not raw",
+            ));
+        }
+        if self.output_scanline >= self.output_height {
+            self.input.warn();
+            return Ok(());
+        }
+        let row = self.output_imcu_row;
+        let decoded = if self.has_multiple_scans {
+            self.decompress_data()
+        } else {
+            self.decompress_onepass()
+        };
+        self.source_check()?;
+        decoded?;
+        let last = row + 1 >= self.total_imcu_rows;
+        for ((component, plane), raw) in self
+            .header
+            .components
+            .iter()
+            .zip(&self.planes)
+            .zip(out.iter_mut())
+        {
+            let size = component.dct_scaled_size;
+            let v = component.v.max(1);
+            // The block rows the inverse transform wrote in this iMCU row.
+            let block_rows = if last {
+                component.height_in_blocks.saturating_sub(row * v).min(v)
+            } else {
+                v
+            };
+            let width = component.width_in_blocks * size;
+            let stride = plane.shape.stride;
+            for r in 0..block_rows * size {
+                let from = (row * v * size + r) * stride;
+                let (Some(src), Some(dst)) = (
+                    plane.data.get(from..from + width),
+                    raw.data.get_mut(
+                        r * raw.stride..(r * raw.stride + width).min((r + 1) * raw.stride),
+                    ),
+                ) else {
+                    continue;
+                };
+                let n = dst.len().min(src.len());
+                if let (Some(dst), Some(src)) = (dst.get_mut(..n), src.get(..n)) {
+                    dst.copy_from_slice(src);
+                }
+            }
+        }
+        self.output_scanline += self.max_v * self.min_dct;
+        Ok(())
     }
 
     /// Rows read so far.

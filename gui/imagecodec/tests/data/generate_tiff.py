@@ -260,16 +260,20 @@ def count_of(kind: int, values) -> int:
 
 
 def write_tiff(entries: list[tuple[int, int, object]], chunks: list[bytes], *, big_endian: bool = False,
-               bigtiff: bool = False, offsets_tag: int = STRIP_OFFSETS, counts_tag: int | None = STRIP_BYTE_COUNTS,
+               bigtiff: bool = False, offsets_tag: int | None = STRIP_OFFSETS,
+               counts_tag: int | None = STRIP_BYTE_COUNTS,
                counts: list[int] | None = None, offsets_kind: int = LONG, counts_kind: int = LONG,
-               truncate: int | None = None, magic: bytes | None = None, align: bool = True) -> bytes:
+               truncate: int | None = None, magic: bytes | None = None, align: bool = True,
+               prefix: bytes = b"") -> bytes:
     """A TIFF of one directory: `entries` as (tag, type, values), and the
     strips or tiles in `chunks`, whose offsets and byte counts are added as
     `offsets_tag` and `counts_tag` (`counts` overriding the true sizes, and
-    `counts_tag` None leaving the counts out)."""
+    `counts_tag` None leaving the counts out, and `offsets_tag` None the
+    offsets). `prefix` goes straight after the header, before the strips, for
+    data the entries point into."""
     e = ">" if big_endian else "<"
     head_size = 16 if bigtiff else 8
-    out = bytearray(head_size)
+    out = bytearray(head_size) + prefix
     offsets = []
     if not align:
         # One byte, so the strips start at an odd offset.
@@ -282,7 +286,9 @@ def write_tiff(entries: list[tuple[int, int, object]], chunks: list[bytes], *, b
     if len(out) % 2:
         out += b"\0"
     sizes = counts if counts is not None else [len(c) for c in chunks]
-    all_entries = list(entries) + [(offsets_tag, offsets_kind, offsets)]
+    all_entries = list(entries)
+    if offsets_tag is not None:
+        all_entries.append((offsets_tag, offsets_kind, offsets))
     if counts_tag is not None:
         all_entries.append((counts_tag, counts_kind, sizes))
     all_entries.sort(key=lambda t: t[0])
@@ -1275,6 +1281,551 @@ def next_thunder_fixtures() -> dict[str, bytes]:
     return out
 
 
+JPEG_PROC, JPEG_IF, JPEG_IF_LENGTH, JPEG_RESTART = 512, 513, 514, 515
+JPEG_Q_TABLES, JPEG_DC_TABLES, JPEG_AC_TABLES = 519, 520, 521
+
+
+def jpeg_parts(data: bytes) -> tuple[list[tuple[int, bytes]], bytes]:
+    """A JPEG's marker segments up to its first scan, as (marker, payload),
+    and its entropy-coded data -- from the end of the SOS header to its EOI."""
+    segments, at = [], 2
+    while True:
+        marker = data[at + 1]
+        length = struct.unpack(">H", data[at + 2:at + 4])[0]
+        segments.append((marker, data[at + 4:at + 2 + length]))
+        at += 2 + length
+        if marker == 0xDA:
+            break
+    end = data.rfind(b"\xff\xd9")
+    return segments, data[at:end]
+
+
+def split_restarts(scan: bytes) -> list[bytes]:
+    """Entropy-coded data cut at its restart markers, which are dropped: old
+    JPEG in TIFF keeps one restart interval a strip, and libtiff puts the
+    markers back between them."""
+    pieces, start, at = [], 0, 0
+    while at < len(scan) - 1:
+        if scan[at] == 0xFF and 0xD0 <= scan[at + 1] <= 0xD7:
+            pieces.append(scan[start:at])
+            start = at + 2
+            at += 2
+        else:
+            at += 1
+    pieces.append(scan[start:])
+    return pieces
+
+
+def ojpeg_tables(segments: list[tuple[int, bytes]]) -> tuple[list[bytes], list[bytes], list[bytes]]:
+    """The quantisation tables (64 bytes each, zig-zag, as JPEGQTables points
+    to them) and the DC and AC Huffman tables (16 counts then the values, as
+    JPEGDCTables and JPEGACTables point to them), by table number."""
+    q, dc, ac = {}, {}, {}
+    for marker, payload in segments:
+        at = 0
+        while marker == 0xDB and at < len(payload):
+            q[payload[at] & 15] = payload[at + 1:at + 65]
+            at += 65
+        while marker == 0xC4 and at < len(payload):
+            kind, number = payload[at] >> 4, payload[at] & 15
+            count = sum(payload[at + 1:at + 17])
+            table = payload[at + 1:at + 17 + count]
+            (ac if kind else dc)[number] = table
+            at += 17 + count
+    return ([q[n] for n in sorted(q)], [dc[n] for n in sorted(dc)], [ac[n] for n in sorted(ac)])
+
+
+def segment(marker: int, payload: bytes) -> bytes:
+    """A JPEG marker segment."""
+    return bytes([0xFF, marker]) + struct.pack(">H", len(payload) + 2) + payload
+
+
+def ojpeg_tiff(img: Image.Image, *, rows: int, subsampling: int, layout: str = "tables",
+               photometric: int | None = 6, sampling_tag: list[int] | None = None,
+               extra: list[tuple[int, int, object]] | None = None, damage=None,
+               big_endian: bool = False, tiles: tuple[int, int] | None = None,
+               keep_restarts: bool = False, offsets: bool = True) -> bytes:
+    """An old-style JPEG TIFF of `img`, written by Pillow's encoder (libjpeg)
+    with a restart interval a strip, laid out one of the ways such files are:
+
+    - `tables`: the tables in JPEGQTables, JPEGDCTables and JPEGACTables, each
+      strip one restart interval of bare entropy-coded data;
+    - `jif`: the whole JPEG in JPEGInterchangeFormat, the strips pointing
+      into its scan;
+    - `jif_header`: JPEGInterchangeFormat holding the headers alone, through
+      its SOS, the strips the entropy-coded data after it.
+
+    `tiles` (width, length) makes it tiled instead, the tiles in order
+    stacked into one JPEG a tile wide, a restart interval a tile.
+    `keep_restarts` leaves one strip of the whole scan, restart markers and
+    all; `offsets` false leaves StripOffsets and StripByteCounts out.
+    """
+    grey = img.mode == "L"
+    mcu_rows = 8 if grey or subsampling != 2 else 16
+    if tiles is not None:
+        tw, tl = tiles
+        across, down = -(-img.width // tw), -(-img.height // tl)
+        tall = Image.new(img.mode, (tw, tl * across * down))
+        for r in range(down):
+            for c in range(across):
+                tall.paste(img.crop((c * tw, r * tl, c * tw + tw, r * tl + tl)), (0, (r * across + c) * tl))
+        source, rows = tall, tl
+    else:
+        source = img
+    buf = io.BytesIO()
+    options = {"quality": 85}
+    if rows < source.height:
+        # A restart interval a strip, as the strips of these files are.
+        options["restart_marker_rows"] = rows // mcu_rows
+    if not grey:
+        options["subsampling"] = subsampling
+    source.save(buf, "JPEG", **options)
+    data = buf.getvalue()
+    segments, scan = jpeg_parts(data)
+    strips = [scan] if keep_restarts else split_restarts(scan)
+    if damage:
+        strips = damage(strips)
+    spp = 1 if grey else 3
+    prefix = bytearray()
+
+    def place(blob: bytes) -> int:
+        if len(prefix) % 2:
+            prefix.append(0)
+        at = 8 + len(prefix)
+        prefix.extend(blob)
+        return at
+
+    entries = [(WIDTH, LONG, [img.width]), (LENGTH, LONG, [img.height]), (BITS, SHORT, [8] * spp),
+               (COMPRESSION, SHORT, [6]), (SAMPLES, SHORT, [spp]), (JPEG_PROC, SHORT, [1])]
+    if tiles is not None:
+        entries += [(TILE_WIDTH, LONG, [tiles[0]]), (TILE_LENGTH, LONG, [tiles[1]])]
+    else:
+        entries.append((ROWS_PER_STRIP, LONG, [rows]))
+    if photometric is not None:
+        entries.append((PHOTOMETRIC, SHORT, [photometric]))
+    if sampling_tag is not None:
+        entries.append((YCBCR_SUBSAMPLING, SHORT, sampling_tag))
+    if layout == "tables":
+        q, dc, ac = ojpeg_tables(segments)
+        pick = (lambda tables: [tables[0]] * spp if len(tables) == 1 else
+                ([tables[0], tables[1], tables[1]] if spp == 3 else [tables[0]]))
+        q_at = [place(t) for t in q]
+        dc_at = [place(t) for t in dc]
+        ac_at = [place(t) for t in ac]
+        entries += [(JPEG_Q_TABLES, LONG, pick(q_at)), (JPEG_DC_TABLES, LONG, pick(dc_at)),
+                    (JPEG_AC_TABLES, LONG, pick(ac_at))]
+    elif layout == "jif":
+        at = place(data)
+        entries += [(JPEG_IF, LONG, [at]), (JPEG_IF_LENGTH, LONG, [len(data)])]
+    elif layout == "jif_header":
+        header = data[:len(data) - len(scan) - 2]
+        at = place(header)
+        entries += [(JPEG_IF, LONG, [at]), (JPEG_IF_LENGTH, LONG, [len(header)])]
+    else:
+        raise ValueError(layout)
+    ours = {tag for tag, _, _ in (extra or [])}
+    entries = [e for e in entries if e[0] not in ours] + list(extra or [])
+    if not offsets:
+        return write_tiff(entries, [], offsets_tag=None, counts_tag=None, prefix=bytes(prefix),
+                          big_endian=big_endian)
+    if tiles is not None:
+        return write_tiff(entries, strips, offsets_tag=TILE_OFFSETS, counts_tag=TILE_BYTE_COUNTS,
+                          prefix=bytes(prefix), big_endian=big_endian)
+    return write_tiff(entries, strips, prefix=bytes(prefix), big_endian=big_endian)
+
+
+def ojpeg_planar(img: Image.Image) -> bytes:
+    """Planes held apart (PlanarConfiguration 2): one JPEG of three scans, a
+    component each, its headers through the first scan in
+    JPEGInterchangeFormat and each plane's strip its scan's data -- the second
+    and third opening with their own scan header, which libtiff finds by
+    reading on from the scan before (`OJPEGReadSecondarySos`)."""
+    scans = []
+    for plane in img.convert("YCbCr").split():
+        buf = io.BytesIO()
+        plane.save(buf, "JPEG", quality=85)
+        scans.append(jpeg_parts(buf.getvalue()))
+    tables = [(m, p) for m, p in scans[0][0] if m in (0xDB, 0xC4)]
+    frame = bytes([8]) + struct.pack(">HH", img.height, img.width) + bytes(
+        [3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0])
+
+    def sos(component: int) -> bytes:
+        return segment(0xDA, bytes([1, component, 0x00, 0, 63, 0]))
+
+    header = b"\xff\xd8" + b"".join(segment(m, p) for m, p in tables) + segment(0xC0, frame) + sos(1)
+    strips = [scans[0][1], sos(2) + scans[1][1], sos(3) + scans[2][1]]
+    jif = 8
+    entries = [(WIDTH, LONG, [img.width]), (LENGTH, LONG, [img.height]), (BITS, SHORT, [8, 8, 8]),
+               (COMPRESSION, SHORT, [6]), (PHOTOMETRIC, SHORT, [6]), (SAMPLES, SHORT, [3]),
+               (ROWS_PER_STRIP, LONG, [img.height]), (PLANAR, SHORT, [2]),
+               (YCBCR_SUBSAMPLING, SHORT, [1, 1]), (JPEG_PROC, SHORT, [1]),
+               (JPEG_IF, LONG, [jif]), (JPEG_IF_LENGTH, LONG, [len(header)])]
+    return write_tiff(entries, strips, prefix=header)
+
+
+def ojpeg_fixtures() -> dict[str, bytes]:
+    """Old-style JPEG (compression 6), which nothing writes any more and libtiff
+    still reads -- scanners and cameras of the 1990s -- in the layouts such
+    files come in, and the repairs libtiff makes to them."""
+    rng = random.Random(606)
+    base = Image.new("RGB", (37, 35))
+    base.putdata([((x * 7 + rng.randrange(30)) % 256, (y * 11) % 256, (x * y + rng.randrange(25)) % 256)
+                  for y in range(35) for x in range(37)])
+    grey = base.convert("L")
+    out: dict[str, bytes] = {}
+    for name, sub, rows, tag in (("420", 2, 16, [2, 2]), ("422", 1, 8, [2, 1]), ("444", 0, 8, [1, 1])):
+        out[f"ojpeg_ycbcr{name}_tables"] = ojpeg_tiff(base, rows=rows, subsampling=sub, sampling_tag=tag)
+        out[f"ojpeg_ycbcr{name}_jif"] = ojpeg_tiff(base, rows=rows, subsampling=sub, sampling_tag=tag,
+                                                   layout="jif")
+        out[f"ojpeg_ycbcr{name}_jif_header"] = ojpeg_tiff(base, rows=rows, subsampling=sub,
+                                                          sampling_tag=tag, layout="jif_header")
+    # No YCbCrSubsampling: libtiff's 2x2 default, corrected from the JPEG's
+    # own frame where there is one.
+    out["ojpeg_ycbcr420_no_subsampling_tag"] = ojpeg_tiff(base, rows=16, subsampling=2, layout="jif")
+    out["ojpeg_ycbcr422_no_subsampling_tag"] = ojpeg_tiff(base, rows=8, subsampling=1, layout="jif")
+    # One strip for the whole picture: no restart interval at all -- or one
+    # from the JPEGRestartInterval tag, the strip keeping its markers.
+    out["ojpeg_ycbcr420_one_strip"] = ojpeg_tiff(base, rows=35, subsampling=2)
+    out["ojpeg_ycbcr420_restart_tag"] = ojpeg_tiff(
+        base, rows=16, subsampling=2, keep_restarts=True, extra=[(ROWS_PER_STRIP, LONG, [35]),
+                                                                 (JPEG_RESTART, SHORT, [3])])
+    # Photometric missing, or RGB: libtiff takes both for YCbCr.
+    out["ojpeg_no_photometric"] = ojpeg_tiff(base, rows=16, subsampling=2, photometric=None)
+    out["ojpeg_rgb_photometric"] = ojpeg_tiff(base, rows=16, subsampling=2, photometric=2)
+    out["ojpeg_grey"] = ojpeg_tiff(grey, rows=8, subsampling=0, photometric=1)
+    out["ojpeg_grey_jif"] = ojpeg_tiff(grey, rows=8, subsampling=0, photometric=1, layout="jif")
+    # Big-endian: libtiff's byte swap takes the codec's post-decode step's
+    # place, so each strip after the first skips a strip's worth of the
+    # JPEG, and past its end the buffer's last contents come back.
+    out["ojpeg_ycbcr420_big_endian"] = ojpeg_tiff(base, rows=16, subsampling=2, big_endian=True)
+    out["ojpeg_grey_big_endian"] = ojpeg_tiff(grey, rows=8, subsampling=0, photometric=1, big_endian=True)
+    # Tiles: in one column, a tile wider than the picture; and two across,
+    # where libtiff's frame is one column tall and the tiles beyond it keep
+    # what the last decoded one left.
+    out["ojpeg_ycbcr420_tiled"] = ojpeg_tiff(base, rows=16, subsampling=2, tiles=(48, 16))
+    out["ojpeg_ycbcr420_tiles_across"] = ojpeg_tiff(base, rows=16, subsampling=2, tiles=(16, 16))
+    # No StripOffsets at all: one strip, its data all in JPEGInterchangeFormat.
+    out["ojpeg_no_strip_offsets"] = ojpeg_tiff(base, rows=35, subsampling=2, layout="jif", offsets=False)
+    # Planes apart, each a scan of its own; and planes "apart" with one strip,
+    # which libtiff reads as planes together.
+    out["ojpeg_planar"] = ojpeg_planar(base)
+    out["ojpeg_planar_one_strip"] = ojpeg_tiff(base, rows=35, subsampling=2, extra=[(PLANAR, SHORT, [2])])
+    # A strip cut short: grey where it ran out. A strip missing its tables.
+    out["ojpeg_ycbcr420_cut_strip"] = ojpeg_tiff(
+        base, rows=16, subsampling=2, damage=lambda strips: [strips[0][: len(strips[0]) // 2]] + strips[1:])
+    out["ojpeg_no_tables_refused"] = ojpeg_tiff(
+        base, rows=16, subsampling=2, extra=[(JPEG_Q_TABLES, LONG, [0, 0, 0])])
+    return out
+
+
+SGILOG, SGILOG24 = 34676, 34677
+LOGL, LOGLUV = 32844, 32845
+# glibc 2.39's `exp` is not correctly rounded for these LogL codes: the
+# fixtures carry every one of them.
+GLIBC_EXP_EXCEPTIONS = [1446, 1731, 3281, 4127, 7617, 10550, 11288, 14113, 15572, 17888, 18453,
+                        19618, 22517, 27488, 29305, 29382, 30029, 30706, 31690, 31814, 32285]
+
+
+def luv_rle(plane: bytes) -> bytes:
+    """One byte plane run-length coded as libtiff's LogLuv encoder codes it:
+    runs of 4 or more as `count + 126` and the byte (at most 129), the rest
+    as literals of at most 127 bytes after their count."""
+    out, i, n = bytearray(), 0, len(plane)
+    while i < n:
+        j = i
+        while j < n and plane[j] == plane[i] and j - i < 129:
+            j += 1
+        if j - i >= 4:
+            out += bytes([j - i + 126, plane[i]])
+            i = j
+            continue
+        k = i
+        while k < n and k - i < 127:
+            m = k
+            while m < n and plane[m] == plane[k] and m - k < 4:
+                m += 1
+            if m - k >= 4:
+                break
+            k += 1
+        out += bytes([k - i]) + plane[i:k]
+        i = k
+    return bytes(out)
+
+
+def luv_rows(values: list[list[int]], kind: str) -> list[bytes]:
+    """Each row of stored codes as a LogLuv strip holds it: LogL's two
+    planes and LogLuv32's four, each run-length coded, or LogLuv24's three
+    bytes a pixel."""
+    rows = []
+    for row in values:
+        if kind == "24":
+            rows.append(b"".join(v.to_bytes(3, "big") for v in row))
+            continue
+        shifts = (8, 0) if kind == "L" else (24, 16, 8, 0)
+        rows.append(b"".join(luv_rle(bytes((v >> sh) & 255 for v in row)) for sh in shifts))
+    return rows
+
+
+def luv_codes(w: int, h: int, kind: str, seed: int) -> list[list[int]]:
+    """Codes a picture's worth: luminance mostly where the 8-bit reading
+    shows it (2^-16 to 2^0), the glibc exceptions, the extremes and signs;
+    chroma across the table, and past it for LogLuv24."""
+    rng = random.Random(seed)
+    specials = GLIBC_EXP_EXCEPTIONS + [0, 1, 0x3dff, 0x3e00, 0x3fff, 0x4000, 0x7fff]
+    rows = []
+    for y in range(h):
+        row = []
+        for x in range(w):
+            k = y * w + x
+            if kind == "24":
+                le = specials[k] % 1024 if k < len(specials) else rng.randrange(600, 780)
+                ce = rng.randrange(16384) if rng.random() < 0.1 else rng.randrange(16289)
+                row.append(le << 14 | ce)
+                continue
+            if k < len(specials):
+                le = specials[k]
+            elif rng.random() < 0.05:
+                le = rng.randrange(32768)
+            else:
+                le = rng.randrange(12288, 16500)
+            sign = 0x8000 if rng.random() < 0.03 else 0
+            if kind == "L":
+                row.append(sign | le)
+            else:
+                ue = rng.randrange(40, 200) if rng.random() < 0.95 else rng.randrange(256)
+                ve = rng.randrange(120, 220) if rng.random() < 0.95 else rng.randrange(256)
+                row.append((sign | le) << 16 | ue << 8 | ve)
+        rows.append(row)
+    return rows
+
+
+def luv_tiff(kind: str, w: int = 29, h: int = 23, *, rows_per_strip: int = 8, seed: int = 1,
+             big_endian: bool = False, tiles: tuple[int, int] | None = None,
+             extra: list[tuple[int, int, object]] | None = None, damage=None) -> bytes:
+    """A LogL (`kind` "L"), LogLuv32 ("32") or LogLuv24 ("24") TIFF of
+    synthetic codes, 16-bit signed samples as libtiff writes them."""
+    spp = 1 if kind == "L" else 3
+    if tiles is None:
+        codes = luv_codes(w, h, kind, seed)
+        rows = luv_rows(codes, kind)
+        chunks = [b"".join(rows[i:i + rows_per_strip]) for i in range(0, h, rows_per_strip)]
+    else:
+        tw, tl = tiles
+        codes = luv_codes(w, h, kind, seed)
+        chunks = []
+        for ty in range(0, h, tl):
+            for tx in range(0, w, tw):
+                tile = [[codes[y][x] if y < h and x < w else 0 for x in range(tx, tx + tw)]
+                        for y in range(ty, ty + tl)]
+                chunks.append(b"".join(luv_rows(tile, kind)))
+    if damage:
+        chunks = damage(chunks)
+    entries = [(WIDTH, LONG, [w]), (LENGTH, LONG, [h]), (BITS, SHORT, [16] * spp),
+               (COMPRESSION, SHORT, [SGILOG24 if kind == "24" else SGILOG]),
+               (PHOTOMETRIC, SHORT, [LOGL if kind == "L" else LOGLUV]), (SAMPLES, SHORT, [spp]),
+               (SAMPLE_FORMAT, SHORT, [2] * spp)]
+    if tiles is None:
+        entries.append((ROWS_PER_STRIP, LONG, [rows_per_strip]))
+    else:
+        entries += [(TILE_WIDTH, LONG, [tiles[0]]), (TILE_LENGTH, LONG, [tiles[1]])]
+    ours = {tag for tag, _, _ in (extra or [])}
+    entries = [e for e in entries if e[0] not in ours] + list(extra or [])
+    if tiles is None:
+        return write_tiff(entries, chunks, big_endian=big_endian)
+    return write_tiff(entries, chunks, big_endian=big_endian, offsets_tag=TILE_OFFSETS,
+                      counts_tag=TILE_BYTE_COUNTS)
+
+
+def luv_overrun() -> bytes:
+    """A LogL row whose high plane has a literal three bytes longer than the
+    row: libtiff reads what is left over as the low plane's first codes --
+    here a run of five, then an empty literal -- before the low plane's own."""
+    w, h = 6, 1
+    high = bytes([9]) + bytes([0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f]) + bytes([131, 0x40, 0x00])
+    low = bytes([2, 0x11, 0x22])
+    entries = [(WIDTH, LONG, [w]), (LENGTH, LONG, [h]), (BITS, SHORT, [16]), (COMPRESSION, SHORT, [SGILOG]),
+               (PHOTOMETRIC, SHORT, [LOGL]), (SAMPLES, SHORT, [1]), (ROWS_PER_STRIP, LONG, [h])]
+    return write_tiff(entries, [high + low])
+
+
+def luv_fixtures() -> dict[str, bytes]:
+    """SGI LogLuv (34676, 34677): Greg Ward Larson's high-dynamic-range
+    encodings, which libtiff's RGBA reader turns to 8-bit grey or RGB --
+    luminance through glibc's `exp`, colour through CCIR 709 primaries."""
+    out: dict[str, bytes] = {}
+    out["luv_logl"] = luv_tiff("L")
+    out["luv_logl_one_strip"] = luv_tiff("L", rows_per_strip=23, seed=2)
+    out["luv_32"] = luv_tiff("32")
+    out["luv_32_big_endian"] = luv_tiff("32", seed=3, big_endian=True)
+    out["luv_32_tiled"] = luv_tiff("32", 37, 29, tiles=(16, 16), seed=4)
+    out["luv_24"] = luv_tiff("24")
+    out["luv_24_tiled"] = luv_tiff("24", 37, 29, tiles=(16, 16), seed=5)
+    # The RGBA reader asks for 8-bit samples whatever the file says -- but
+    # only after checking what it says.
+    out["luv_24_bits8"] = luv_tiff("24", seed=6, extra=[(BITS, SHORT, [8, 8, 8])])
+    out["luv_32_uint"] = luv_tiff("32", seed=7, extra=[(SAMPLE_FORMAT, SHORT, [1, 1, 1])])
+    out["luv_logl_bits32_refused"] = luv_tiff("L", seed=8, extra=[(BITS, SHORT, [32])])
+    out["luv_32_float_refused"] = luv_tiff("32", seed=9, extra=[(SAMPLE_FORMAT, SHORT, [3, 3, 3])])
+    out["luv_overrun"] = luv_overrun()
+    # A strip cut short, LogL of three samples, planes apart, and LogLuv
+    # data called RGB: each refused, at a different step.
+    out["luv_32_cut_refused"] = luv_tiff("32", seed=10, damage=lambda c: [c[0][: len(c[0]) // 2]] + c[1:])
+    out["luv_logl_three_samples_refused"] = luv_tiff(
+        "L", seed=11, extra=[(SAMPLES, SHORT, [3]), (BITS, SHORT, [16, 16, 16])])
+    out["luv_32_planar_refused"] = luv_tiff("32", seed=12, extra=[(PLANAR, SHORT, [2])])
+    out["luv_32_rgb_refused"] = luv_tiff("32", seed=13, extra=[(PHOTOMETRIC, SHORT, [2])])
+    return out
+
+
+PIXARLOG = 32909
+# libtiff's `From8` (`PixarLogMakeTables`, built with glibc): each 8-bit
+# level's 11-bit code, as its encoder takes 8-bit samples.
+PIXARLOG_FROM8 = [
+    0, 54, 107, 161, 214, 267, 313, 351, 385, 414, 440, 464, 486, 506, 524, 542,
+    558, 573, 587, 601, 614, 626, 637, 649, 659, 669, 679, 689, 698, 707, 715, 723,
+    731, 739, 746, 754, 761, 767, 774, 781, 787, 793, 799, 805, 811, 816, 822, 827,
+    832, 838, 843, 848, 852, 857, 862, 867, 871, 875, 880, 884, 888, 892, 896, 900,
+    904, 908, 912, 916, 920, 923, 927, 930, 934, 937, 941, 944, 947, 951, 954, 957,
+    960, 963, 966, 969, 972, 975, 978, 981, 984, 987, 990, 992, 995, 998, 1001, 1003,
+    1006, 1008, 1011, 1013, 1016, 1018, 1021, 1023, 1026, 1028, 1031, 1033, 1035, 1038, 1040, 1042,
+    1044, 1047, 1049, 1051, 1053, 1055, 1057, 1059, 1062, 1064, 1066, 1068, 1070, 1072, 1074, 1076,
+    1078, 1080, 1082, 1083, 1085, 1087, 1089, 1091, 1093, 1095, 1096, 1098, 1100, 1102, 1104, 1105,
+    1107, 1109, 1111, 1112, 1114, 1116, 1117, 1119, 1121, 1122, 1124, 1126, 1127, 1129, 1130, 1132,
+    1133, 1135, 1137, 1138, 1140, 1141, 1143, 1144, 1146, 1147, 1149, 1150, 1152, 1153, 1154, 1156,
+    1157, 1159, 1160, 1162, 1163, 1164, 1166, 1167, 1168, 1170, 1171, 1172, 1174, 1175, 1176, 1178,
+    1179, 1180, 1182, 1183, 1184, 1185, 1187, 1188, 1189, 1191, 1192, 1193, 1194, 1195, 1197, 1198,
+    1199, 1200, 1201, 1203, 1204, 1205, 1206, 1207, 1209, 1210, 1211, 1212, 1213, 1214, 1215, 1216,
+    1218, 1219, 1220, 1221, 1222, 1223, 1224, 1225, 1226, 1227, 1229, 1230, 1231, 1232, 1233, 1234,
+    1235, 1236, 1237, 1238, 1239, 1240, 1241, 1242, 1243, 1244, 1245, 1246, 1247, 1248, 1249, 1250,
+]
+
+
+def pixarlog_codes(samples: list[int], stride: int, llen: int) -> list[int]:
+    """The codes libtiff's encoder stores for rows of `llen` 8-bit samples
+    (`horizontalDifference8`): for 3 or 4 samples a pixel each channel
+    differenced from the pixel before, masked to 11 bits; for any other
+    number the first two pixels as they are and the rest differenced, in 16
+    bits."""
+    out = []
+    for at in range(0, len(samples), llen):
+        c = [PIXARLOG_FROM8[v] for v in samples[at:at + llen]]
+        if stride in (3, 4):
+            out += c[:stride] + [(c[i] - c[i - stride]) & 0x7FF for i in range(stride, len(c))]
+        else:
+            out += [c[i] if i < 2 * stride else (c[i] - c[i - stride]) & 0xFFFF for i in range(len(c))]
+    return out
+
+
+def pixarlog_stream(codes: list[int], big_endian: bool, blocks: int = 1) -> bytes:
+    """The codes as 16-bit values in the file's byte order, deflated as one
+    zlib stream -- in `blocks` pieces, each ended with a full flush."""
+    raw = b"".join(struct.pack(">H" if big_endian else "<H", c) for c in codes)
+    if blocks == 1:
+        return zlib.compress(raw, 6)
+    z = zlib.compressobj(6)
+    out, step = bytearray(), -(-len(raw) // blocks)
+    for at in range(0, len(raw), step):
+        out += z.compress(raw[at:at + step]) + z.flush(zlib.Z_FULL_FLUSH)
+    return bytes(out + z.flush())
+
+
+def pixarlog_tiff(img: Image.Image, *, rows: int = 8, bits: int = 8, big_endian: bool = False,
+                  planar: bool = False, predictor: bool = False, tiles: tuple[int, int] | None = None,
+                  extra: list[tuple[int, int, object]] | None = None, blocks: int = 1, damage=None) -> bytes:
+    """A PixarLog TIFF of `img`, as libtiff's encoder would store its 8-bit
+    samples; `bits` 16 declares 16-bit samples of the same codes."""
+    spp = len(img.getbands())
+    w, h = img.size
+    px = [img.getpixel((x, y)) for y in range(h) for x in range(w)]
+    if spp == 1:
+        px = [(p,) for p in px]
+    if predictor:
+        # The horizontal predictor differences the 8-bit samples first.
+        diffed = []
+        for y in range(h):
+            row = px[y * w:(y + 1) * w]
+            diffed += [row[0]] + [tuple((a - b) & 255 for a, b in zip(row[x], row[x - 1])) for x in range(1, w)]
+        px = diffed
+    photometric = {1: 1, 2: 1, 3: 2, 4: 2}[spp]
+    chunks = []
+    if tiles is not None:
+        tw, tl = tiles
+        stride = spp
+        for ty in range(0, h, tl):
+            for tx in range(0, w, tw):
+                samples = [c for y in range(ty, ty + tl) for x in range(tx, tx + tw)
+                           for c in (px[y * w + x] if y < h and x < w else (0,) * spp)]
+                chunks.append(pixarlog_stream(pixarlog_codes(samples, stride, stride * w), big_endian, blocks))
+    elif planar:
+        for plane in range(spp):
+            for top in range(0, h, rows):
+                samples = [px[y * w + x][plane] for y in range(top, min(top + rows, h)) for x in range(w)]
+                chunks.append(pixarlog_stream(pixarlog_codes(samples, 1, w), big_endian, blocks))
+    else:
+        for top in range(0, h, rows):
+            samples = [c for y in range(top, min(top + rows, h)) for x in range(w) for c in px[y * w + x]]
+            chunks.append(pixarlog_stream(pixarlog_codes(samples, spp, spp * w), big_endian, blocks))
+    if damage:
+        chunks = damage(chunks)
+    entries = [(WIDTH, LONG, [w]), (LENGTH, LONG, [h]), (BITS, SHORT, [bits] * spp),
+               (COMPRESSION, SHORT, [PIXARLOG]), (PHOTOMETRIC, SHORT, [photometric]),
+               (SAMPLES, SHORT, [spp])]
+    if spp in (2, 4):
+        entries.append((EXTRA_SAMPLES, SHORT, [2]))
+    if planar:
+        entries.append((PLANAR, SHORT, [2]))
+    if predictor:
+        entries.append((PREDICTOR, SHORT, [2]))
+    if tiles is None:
+        entries.append((ROWS_PER_STRIP, LONG, [rows]))
+    else:
+        entries += [(TILE_WIDTH, LONG, [tiles[0]]), (TILE_LENGTH, LONG, [tiles[1]])]
+    ours = {tag for tag, _, _ in (extra or [])}
+    entries = [e for e in entries if e[0] not in ours] + list(extra or [])
+    if tiles is None:
+        return write_tiff(entries, chunks, big_endian=big_endian)
+    return write_tiff(entries, chunks, big_endian=big_endian, offsets_tag=TILE_OFFSETS,
+                      counts_tag=TILE_BYTE_COUNTS)
+
+
+def pixarlog_fixtures() -> dict[str, bytes]:
+    """PixarLog (32909): Pixar's film format -- 11-bit log codes,
+    differenced, deflated -- which libtiff's RGBA reader asks for as 8- or
+    16-bit samples through tables it builds with glibc."""
+    rng = random.Random(3290)
+    base = Image.new("RGB", (37, 21))
+    base.putdata([((x * 7 + rng.randrange(30)) % 256, (y * 12) % 256, (x * y + rng.randrange(25)) % 256)
+                  for y in range(21) for x in range(37)])
+    grey = base.convert("L")
+    out: dict[str, bytes] = {}
+    out["pixarlog_rgb"] = pixarlog_tiff(base)
+    out["pixarlog_rgb_one_strip"] = pixarlog_tiff(base, rows=21)
+    out["pixarlog_rgba"] = pixarlog_tiff(base.convert("RGBA"))
+    # One or two samples a pixel: libtiff's accumulation spills each row's
+    # last sum into the next row's first pixel.
+    out["pixarlog_grey"] = pixarlog_tiff(grey)
+    out["pixarlog_grey_alpha"] = pixarlog_tiff(base.convert("LA"))
+    out["pixarlog_rgb16"] = pixarlog_tiff(base, bits=16)
+    out["pixarlog_rgb_big_endian"] = pixarlog_tiff(base, big_endian=True)
+    out["pixarlog_rgb16_big_endian"] = pixarlog_tiff(base, bits=16, big_endian=True)
+    out["pixarlog_rgb_predictor"] = pixarlog_tiff(base, predictor=True)
+    out["pixarlog_rgb_planar"] = pixarlog_tiff(base, planar=True)
+    # Tiles: libtiff's rows are the image's width, not the tile's.
+    out["pixarlog_rgb_tiled"] = pixarlog_tiff(base, tiles=(16, 16))
+    out["pixarlog_rgb_blocks"] = pixarlog_tiff(base, blocks=5)
+    # What follows the Deflate data: junk is ignored, a missing checksum is
+    # not missed, a wrong one refuses the strip.
+    out["pixarlog_rgb_junk_after"] = pixarlog_tiff(base, damage=lambda c: [s + b"\x01\x02\x03\x04\x05" for s in c])
+    out["pixarlog_rgb_no_checksum"] = pixarlog_tiff(base, damage=lambda c: [s[:-4] for s in c])
+    out["pixarlog_rgb_bad_checksum_refused"] = pixarlog_tiff(
+        base, damage=lambda c: [c[0][:-1] + bytes([c[0][-1] ^ 1])] + c[1:])
+    out["pixarlog_rgb_cut_refused"] = pixarlog_tiff(base, damage=lambda c: [c[0][: len(c[0]) // 2]] + c[1:])
+    # Depths and kinds the codec will not guess a format for.
+    out["pixarlog_int8_refused"] = pixarlog_tiff(base, extra=[(SAMPLE_FORMAT, SHORT, [2, 2, 2])])
+    out["pixarlog_bits12_refused"] = pixarlog_tiff(base, bits=12)
+    return out
+
+
 def pillow_fixtures() -> dict[str, bytes]:
     """Pictures written by Pillow's writer, which is libtiff's encoder."""
     rng = random.Random(99)
@@ -1297,7 +1848,8 @@ def main() -> None:
     oracle = build_oracle()
     made = {f"tiff_{name}": data for name, data in
             (fixtures() | pillow_fixtures() | fax_fixtures() | jpeg_fixtures()
-             | next_thunder_fixtures()).items()}
+             | next_thunder_fixtures() | ojpeg_fixtures() | luv_fixtures()
+             | pixarlog_fixtures()).items()}
     for old in HERE.glob("tiff_*.tif"):
         old.unlink()
     for old in HERE.glob("tiff_*.txt"):

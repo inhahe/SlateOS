@@ -606,14 +606,37 @@ fn large_value(r: &mut Reader<'_>, p: &[u8; 11]) -> i32 {
     }
 }
 
-/// The probabilities for coefficient position `n` in `context`; past the last
-/// position, a harmless stand-in that is never read.
-fn band_probs(bands: &[[[u8; 11]; 3]; 8], n: usize, context: usize) -> &[u8; 11] {
-    BANDS
-        .get(n)
-        .and_then(|&band| bands.get(band))
-        .and_then(|contexts| contexts.get(context))
-        .unwrap_or(&[128; 11])
+/// One block type's probabilities by coefficient position rather than by
+/// band, three contexts a position, flattened to `[position * 3 + context]`
+/// -- libwebp's `bands_ptr`, so that a coefficient costs one lookup -- with a
+/// seventeenth position, past the last, that is never read.
+type Banded = [[u8; 11]; 17 * 3];
+
+/// Every block type's [`Banded`] probabilities.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "the index is below 51, its quotient and remainder by 3 smaller"
+)]
+fn banded(probs: &Probs) -> [Banded; 4] {
+    probs.map(|bands| {
+        core::array::from_fn(|i| {
+            BANDS
+                .get(i / 3)
+                .and_then(|&band| bands.get(band))
+                .and_then(|contexts| contexts.get(i % 3))
+                .copied()
+                .unwrap_or([128; 11])
+        })
+    })
+}
+
+/// The probabilities for coefficient position `n` in `context`.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "n is at most 16 and context at most 2"
+)]
+fn band_probs(bands: &Banded, n: usize, context: usize) -> &[u8; 11] {
+    bands.get(n * 3 + context).unwrap_or(&[128; 11])
 }
 
 /// Read one block's coefficients from position `first` on, dequantised by
@@ -629,7 +652,7 @@ fn band_probs(bands: &[[[u8; 11]; 3]; 8], n: usize, context: usize) -> &[u8; 11]
 )]
 fn read_block(
     r: &mut Reader<'_>,
-    bands: &[[[u8; 11]; 3]; 8],
+    bands: &Banded,
     context: usize,
     dq: [i32; 2],
     first: usize,
@@ -730,7 +753,7 @@ impl Residual {
 )]
 fn read_residual(
     r: &mut Reader<'_>,
-    probs: &Probs,
+    probs: &[Banded; 4],
     quant: &Quant,
     whole: bool,
     above: &mut Nonzero,
@@ -880,7 +903,7 @@ struct MacroblockHeader<'h> {
     segmentation: &'h Segmentation,
     skip_prob: Option<u8>,
     quantizers: &'h [Quant; 4],
-    probs: &'h Probs,
+    probs: &'h [Banded; 4],
 }
 
 // ---------------------------------------------------------------------------
@@ -1155,7 +1178,7 @@ pub(super) fn decode(data: &[u8], declared: usize, limits: Limits) -> ImageResul
         segmentation: &segmentation,
         skip_prob,
         quantizers: &quantizers,
-        probs: &probs,
+        probs: &banded(&probs),
     };
 
     for my in 0..mb_height {
@@ -1494,7 +1517,7 @@ mod tests {
             segmentation: &segmentation,
             skip_prob,
             quantizers: &quantizers,
-            probs: &probs,
+            probs: &banded(&probs),
         };
         let mut above_modes = vec![[0u8; 4]; mb_width];
         let mut above_nonzero = vec![Nonzero::default(); mb_width];

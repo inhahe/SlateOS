@@ -1,0 +1,1 @@
+REFUSED read: Sorry, can not handle LogL image with Samples/pixel=3

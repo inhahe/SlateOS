@@ -23,10 +23,10 @@ use crate::serial_println;
 
 use super::handlers;
 use super::number::{
-    MAX_SYSCALL_NR, SYS_ARP_TABLE, SYS_CAP_QUERY, SYS_CAP_REQUEST, SYS_CAP_REQUEST_CANCEL,
-    SYS_CAP_REQUEST_STATUS, SYS_CHANNEL_CLOSE, SYS_CHANNEL_CREATE, SYS_CHANNEL_PEER_CRED,
-    SYS_CHANNEL_RECV, SYS_CHANNEL_RECV_CAPS, SYS_CHANNEL_RECV_TIMEOUT, SYS_CHANNEL_SEND,
-    SYS_CHANNEL_SEND_BLOCKING, SYS_CHANNEL_SEND_CAPS, SYS_CHANNEL_SEND_TIMEOUT,
+    MAX_SYSCALL_NR, SYS_ARP_TABLE, SYS_BRIGHTNESS_SET, SYS_CAP_QUERY, SYS_CAP_REQUEST,
+    SYS_CAP_REQUEST_CANCEL, SYS_CAP_REQUEST_STATUS, SYS_CHANNEL_CLOSE, SYS_CHANNEL_CREATE,
+    SYS_CHANNEL_PEER_CRED, SYS_CHANNEL_RECV, SYS_CHANNEL_RECV_CAPS, SYS_CHANNEL_RECV_TIMEOUT,
+    SYS_CHANNEL_SEND, SYS_CHANNEL_SEND_BLOCKING, SYS_CHANNEL_SEND_CAPS, SYS_CHANNEL_SEND_TIMEOUT,
     SYS_CHANNEL_TRY_RECV, SYS_CLOCK_ADJTIME, SYS_CLOCK_MONOTONIC, SYS_CLOCK_REALTIME,
     SYS_CLOCK_SETTIME, SYS_CONSOLE_READ_CHAR, SYS_CONSOLE_TRY_READ_CHAR, SYS_CONSOLE_WRITE,
     SYS_CP_CLOSE, SYS_CP_CREATE, SYS_CP_NOTIFY, SYS_CP_REGISTER, SYS_CP_TRY_WAIT,
@@ -68,12 +68,13 @@ use super::number::{
     SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE,
     SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE,
     SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS,
-    SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE,
-    SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID,
-    SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS,
-    SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_SID,
-    SYS_PROCESS_SETGROUPS, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2,
-    SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE,
+    SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_INITIAL_FDS,
+    SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID,
+    SYS_PROCESS_ID, SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID,
+    SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_CWD, SYS_PROCESS_SET_EXEC_FDS,
+    SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_SID, SYS_PROCESS_SETGROUPS,
+    SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2, SYS_PROCESS_TRY_WAIT,
+    SYS_PROCESS_UMASK, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE,
     SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ,
     SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL,
     SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE,
@@ -96,7 +97,7 @@ use super::number::{
     SYS_TCP_SET_KEEPALIVE, SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN,
     SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_RESUME,
     SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
-    SYS_TTY_ACQUIRE_CTTY, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS, SYS_TTY_READ,
+    SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS, SYS_TTY_READ,
     SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND, SYS_UDP_CLOSE,
     SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE, SYS_UDP_RECV,
     SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_WAIT_MULTIPLE, SYS_YIELD,
@@ -389,6 +390,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_HOSTNAME_SET as usize] = Some(handlers::sys_hostname_set);
     handlers[SYS_DOMAINNAME_SET as usize] = Some(handlers::sys_domainname_set);
     handlers[SYS_KEYLAYOUT_SET as usize] = Some(handlers::sys_keylayout_set);
+    handlers[SYS_BRIGHTNESS_SET as usize] = Some(handlers::sys_brightness_set);
 
     // io_ring (260–269).
     handlers[SYS_IO_RING_SETUP as usize] = Some(handlers::sys_io_ring_setup);
@@ -461,6 +463,11 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_COUNT as usize] = Some(handlers::sys_process_count);
     handlers[SYS_PROCESS_GET_CREDENTIALS as usize] = Some(handlers::sys_process_get_credentials);
     handlers[SYS_PROCESS_SET_CREDENTIALS as usize] = Some(handlers::sys_process_set_credentials);
+    // Working directory and file-creation mask as the process's own record
+    // (1077-1079), so both survive exec and reach spawned children.
+    handlers[SYS_PROCESS_SET_CWD as usize] = Some(handlers::sys_process_set_cwd);
+    handlers[SYS_PROCESS_GET_CWD as usize] = Some(handlers::sys_process_get_cwd);
+    handlers[SYS_PROCESS_UMASK as usize] = Some(handlers::sys_process_umask);
     handlers[SYS_PROCESS_GET_NICE as usize] = Some(handlers::sys_process_get_nice);
     handlers[SYS_PROCESS_SET_NICE as usize] = Some(handlers::sys_process_set_nice);
 
@@ -488,6 +495,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_TTY_GET_TERMIOS as usize] = Some(handlers::sys_tty_get_termios);
     handlers[SYS_TTY_SET_TERMIOS as usize] = Some(handlers::sys_tty_set_termios);
     handlers[SYS_TTY_READ as usize] = Some(handlers::sys_tty_read);
+    handlers[SYS_TTY_FLUSH as usize] = Some(handlers::sys_tty_flush);
 
     // Pseudo-terminals (544–554). The same line discipline as above, driven by
     // a program instead of the keyboard driver — what a terminal emulator, an
@@ -989,6 +997,8 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_process_group_syscalls()?;
     test_dispatch_ctty_syscalls()?;
     test_dispatch_termios_syscalls()?;
+    test_tty_flush()?;
+    test_process_cwd_umask_registered()?;
     test_dispatch_pty_syscalls()?;
     test_dispatch_rlimit_syscalls()?;
     test_dispatch_spawn_ex2_registered()?;
@@ -1027,6 +1037,151 @@ pub fn self_test() -> KernelResult<()> {
 /// mount, "root is not writable yet" is a fact about the boot stage; after it,
 /// it is a defect, and answering a defect with a SKIP is how these two came to
 /// spend their whole lives unrun.
+/// `SYS_DNS_RESOLVE` must consult the hosts table before the network.
+///
+/// `fs::nameservice::init_defaults` installs `127.0.0.1 localhost loopback`
+/// and `::1 localhost ip6-localhost`, and declares a resolve order of Cache,
+/// Files, Dns. Until 2026-09-21 this syscall called `net::dns::resolve`
+/// directly, so `localhost` went out on the wire and failed.
+///
+/// Nothing else in the boot covers this. `[2/10] ping localhost: OK` is
+/// `ping("127.0.0.1", 4)` -- the name appears in the message and never in
+/// the call.
+fn test_dispatch_dns_hosts() -> KernelResult<()> {
+    // (name, expected) -- None means the lookup MUST NOT answer in IPv4.
+    let cases: [(&[u8], Option<[u8; 4]>); 3] = [
+        (b"localhost", Some([127, 0, 0, 1])),
+        (b"loopback", Some([127, 0, 0, 1])),
+        // Alias of the `::1` entry. This syscall writes four bytes, so a
+        // truncated answer would name a different host than the one found.
+        (b"ip6-localhost", None),
+    ];
+
+    for (name, expect) in cases {
+        let mut out = [0u8; 4];
+        let args = SyscallArgs {
+            arg0: name.as_ptr() as u64,
+            arg1: name.len() as u64,
+            arg2: out.as_mut_ptr() as u64,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let r = dispatch(SYS_DNS_RESOLVE, &args);
+        match expect {
+            Some(want) => {
+                if r.value != 0 {
+                    serial_println!(
+                        "[dispatch]   FAIL: SYS_DNS_RESOLVE({:?}) returned {}; the hosts table was not consulted",
+                        core::str::from_utf8(name).unwrap_or("?"),
+                        r.value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                if out != want {
+                    serial_println!(
+                        "[dispatch]   FAIL: {:?} resolved to {:?}, expected {:?}",
+                        core::str::from_utf8(name).unwrap_or("?"),
+                        out,
+                        want
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            None => {
+                if r.value == 0 {
+                    serial_println!(
+                        "[dispatch]   FAIL: {:?} is an IPv6 hosts entry but answered {:?} in four bytes",
+                        core::str::from_utf8(name).unwrap_or("?"),
+                        out
+                    );
+                    serial_println!(
+                        "[dispatch]          a truncated address resolves a DIFFERENT host than the one found"
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+        }
+    }
+
+    serial_println!(
+        "[dispatch]   SYS_DNS_RESOLVE honours the hosts table (localhost, alias, IPv6 refused): OK"
+    );
+    Ok(())
+}
+
+/// `SYS_BRIGHTNESS_SET` is registered and refuses a caller without the right.
+///
+/// **This test cannot show that the gate ever grants, and that is not an
+/// oversight.** `pcb::has_capability_type` has no kernel bypass, so a
+/// kernel-context caller is always refused; a gate that refused *everyone*
+/// would pass this unchanged. `SYS_KEYLAYOUT_SET` has the same shape and
+/// carries its granted arm as a ring-3 fixture for exactly this reason --
+/// see the comment beside `self_test_ctest_keylayout` in `main.rs`.
+///
+/// What it does rule out:
+///
+/// * **never registered** -- an empty dispatch slot returns
+///   `NoSuchSyscall` (-10), which this asserts against explicitly;
+/// * **ungated** -- with no capability check the call would reach
+///   `set_brightness` and return 0.
+fn test_dispatch_brightness_gated() -> KernelResult<()> {
+    let args = SyscallArgs {
+        arg0: 0,
+        arg1: 50,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let r = dispatch(SYS_BRIGHTNESS_SET, &args);
+
+    if r.value == i64::from(KernelError::NoSuchSyscall as i32) {
+        serial_println!("[dispatch]   FAIL: SYS_BRIGHTNESS_SET is not registered (NoSuchSyscall)");
+        return Err(KernelError::InternalError);
+    }
+    if r.value == 0 {
+        serial_println!("[dispatch]   FAIL: SYS_BRIGHTNESS_SET succeeded for a caller holding no");
+        serial_println!(
+            "[dispatch]          SET_BRIGHTNESS right -- the capability gate is missing"
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Two refusals are correct here and a third class is the bug.
+    //
+    // This runs in KERNEL context, where there is no caller process, so the
+    // capability lookup cannot reach a permission decision and answers
+    // NoSuchProcess. A ring-3 caller lacking the right would get
+    // PermissionDenied. Both mean refused-without-granting, and the neighbouring
+    // rungs say the same of themselves -- `chroot (1068): OK -- a caller with no
+    // process is refused before the path is read`.
+    //
+    // What must NOT appear is an ARGUMENT error. `arg1: 50` is a valid
+    // brightness, chosen so that a missing gate shows up as success (caught
+    // above) and a mis-ORDERED gate shows up here: if argument validation ran
+    // first, a syscall that later grew stricter argument checks could start
+    // refusing for the wrong reason and this rung would still pass on a bare
+    // "it refused" test.
+    let expected_refusal = r.value == i64::from(KernelError::NoSuchProcess as i32)
+        || r.value == i64::from(KernelError::PermissionDenied as i32);
+    if !expected_refusal {
+        serial_println!(
+            "[dispatch]   FAIL: SYS_BRIGHTNESS_SET refused with {}, expected NoSuchProcess",
+            r.value
+        );
+        serial_println!(
+            "[dispatch]          (kernel context) or PermissionDenied (ring 3). Any other"
+        );
+        serial_println!("[dispatch]          error means it validated arguments before the gate");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[dispatch]   SYS_BRIGHTNESS_SET registered and capability-gated (grant arm needs ring 3): OK"
+    );
+    Ok(())
+}
+
 pub fn self_test_fs() -> KernelResult<()> {
     serial_println!("[syscall] Running post-mount dispatch self-test...");
 
@@ -1035,6 +1190,8 @@ pub fn self_test_fs() -> KernelResult<()> {
     test_dispatch_chroot()?;
     test_dispatch_itimer()?;
     test_dispatch_uts_name()?;
+    test_dispatch_dns_hosts()?;
+    test_dispatch_brightness_gated()?;
 
     serial_println!("[syscall] Post-mount dispatch self-test PASSED");
     Ok(())
@@ -1962,6 +2119,123 @@ fn test_dispatch_termios_syscalls() -> KernelResult<()> {
     }
 
     serial_println!("[syscall]   Native termios (541/542) reaches the line discipline: OK");
+    Ok(())
+}
+
+/// `SYS_PROCESS_SET_CWD`, `SYS_PROCESS_GET_CWD` and `SYS_PROCESS_UMASK`
+/// (1077-1079) are registered.
+///
+/// This runs on a kernel task with no owning process, so each must answer
+/// `NoSuchProcess` -- the handler ran and found no record to read or write --
+/// rather than `NoSuchSyscall`, which is what an unwired number returns. The
+/// handlers' logic is a canonical-form check (`pcb::is_canonical_path`, tested
+/// in `pcb::self_test`) around `pcb::get_cwd`/`set_cwd`/`get_umask`/
+/// `set_umask`, and inheritance is tested in `spawn::self_test`; a user
+/// pointer can only be exercised from ring 3.
+fn test_process_cwd_umask_registered() -> KernelResult<()> {
+    let args = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let want = i64::from(KernelError::NoSuchProcess.code());
+    for (name, number, a) in [
+        ("SYS_PROCESS_SET_CWD", SYS_PROCESS_SET_CWD, args(0x1000, 1)),
+        ("SYS_PROCESS_GET_CWD", SYS_PROCESS_GET_CWD, args(0x1000, 64)),
+        (
+            "SYS_PROCESS_UMASK",
+            SYS_PROCESS_UMASK,
+            args(handlers::UMASK_QUERY, 0),
+        ),
+    ] {
+        let got = dispatch(number, &a).value;
+        if got != want {
+            serial_println!(
+                "[syscall]   FAIL: {} ({}) from a kernel task returned {}, expected NoSuchProcess ({}) -- is it registered?",
+                name,
+                number,
+                got,
+                want
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!("[syscall]   Native cwd/umask record (1077-1079) is wired: OK");
+    Ok(())
+}
+
+/// `SYS_TTY_FLUSH` is registered, refuses a queue selector it does not know,
+/// and — through [`handlers::tty_flush`], which both ABIs share — discards
+/// exactly the queue it is asked to on a real pty.
+///
+/// The pty half calls the shared function rather than the syscall because a
+/// pty handle is owned by a *process* and this runs on a kernel task; the
+/// dispatch half proves the number is wired, using the caller's own terminal
+/// with a selector that is refused before anything is flushed.
+fn test_tty_flush() -> KernelResult<()> {
+    use crate::tty::{self, pty};
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: tty flush: {}", msg);
+        Err(KernelError::InternalError)
+    }
+
+    let bad = SyscallArgs {
+        arg0: 0,
+        arg1: 7,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    if dispatch(SYS_TTY_FLUSH, &bad).value != i64::from(KernelError::InvalidArgument.code()) {
+        return fail("selector 7 should be InvalidArgument (is SYS_TTY_FLUSH registered?)");
+    }
+
+    let (m, s) = pty::create()?;
+    let id = m.id();
+    let result = (|| -> KernelResult<()> {
+        // Input: a complete line queued and half of another in the editor.
+        let _ = pty::master_write(m, b"queued\nhalf")?;
+        // Output: something the program printed that the master has not read.
+        let _ = pty::slave_write(s, b"printed")?;
+
+        match handlers::tty_flush(id, handlers::tcflush_queue::TCOFLUSH) {
+            handlers::TtyCtlOutcome::Done => {}
+            _ => return fail("TCOFLUSH on a pty should succeed"),
+        }
+        if pty::readable_bytes(m) != 0 {
+            return fail("TCOFLUSH left output for the master to read");
+        }
+        if tty::input_bytes(id) == 0 {
+            return fail("TCOFLUSH discarded input too");
+        }
+
+        match handlers::tty_flush(id, handlers::tcflush_queue::TCIFLUSH) {
+            handlers::TtyCtlOutcome::Done => {}
+            _ => return fail("TCIFLUSH on a pty should succeed"),
+        }
+        let mut buf = [0u8; 16];
+        if tty::try_read(id, &mut buf) != tty::ConsoleRead::WouldBlock {
+            return fail("TCIFLUSH left a queued line behind");
+        }
+        // The half-typed line went too: finishing it now yields only what is
+        // typed after the flush.
+        let _ = pty::master_write(m, b"x\n")?;
+        if tty::try_read(id, &mut buf) != tty::ConsoleRead::Data(2) {
+            return fail("TCIFLUSH left the half-typed line in the editor");
+        }
+        Ok(())
+    })();
+    let _ = pty::close(m);
+    let _ = pty::close(s);
+    result?;
+
+    serial_println!(
+        "[syscall]   SYS_TTY_FLUSH registered; TCOFLUSH/TCIFLUSH discard exactly their queue on a pty: OK"
+    );
     Ok(())
 }
 

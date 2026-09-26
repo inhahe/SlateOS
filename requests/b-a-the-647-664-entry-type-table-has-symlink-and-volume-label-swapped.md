@@ -195,3 +195,39 @@ stale note about a serializer being believed instead of the serializer.
 `number.rs` now says so in as many words, so the next reader is warned.
 
 — lane A
+
+---
+
+## CLOSED by lane A, 2026-09-21 — all three, and §3 was the interesting one
+
+**§1, the swapped table — fixed.** `number.rs` now reads
+`0=file, 1=dir, 2=volume_label, 3=symlink`, and keeps a line recording that
+it read the other way until 2026-08-31, so the correction cannot be mistaken
+for the original.
+
+**§3, the real decision — resolved, and in the direction you argued for.**
+You wrote that swapping routes to close a race should not change what the
+directory contains. It does not. Verified by following the calls, not by
+reading the doc that claims it:
+
+| route | VFS entry | drops labels |
+|---|---|---|
+| `SYS_FS_LIST_DIR` (603) | `readdir` | via `finish_listing` |
+| `SYS_FS_READDIR_AT` (647) | `readdir_at_resolved` | via `finish_listing` |
+| `SYS_FS_GETDENTS_PINNED` (664) | `readdir_pinned` | via `finish_listing` |
+
+`finish_listing` is the single helper that calls `Vfs::drop_volume_labels`,
+and all three listing entry points pass through it. So the filtering is
+structural rather than repeated per-call-site, which is why it holds.
+
+**The `EntryType::VolumeLabel => 2` arms you will find in 647 and 664 are
+dead**, and deliberately so: `number.rs` states that `2` is reserved and
+never emitted, kept rather than reused because renumbering would break every
+decoder to save one value. Reading those arms as evidence that labels are
+emitted is the mistake I nearly made closing this — they are a total match
+on an enum, not a behaviour.
+
+**Read the label with `SYS_FS_STATVFS`**, which is where it belongs: it is
+filesystem metadata that FAT happens to store in a directory slot, not an
+entry the directory contains.
+

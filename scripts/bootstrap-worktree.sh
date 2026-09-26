@@ -14,7 +14,8 @@
 # including every REAL-glibc Path-Z test (dynamic execution, stdio, pthread,
 # signal, fault). A lane that only ever ran in a fresh worktree would
 # therefore never exercise the highest-value tests in the tree and would not
-# be told so by the exit code. Provision it before trusting a green boot.
+# be told so by the exit code. Build it before trusting a green boot -- this
+# script says how, but no longer copies one (see provision_rootfs).
 #
 # WHY THIS EXISTS
 #
@@ -60,6 +61,8 @@
 #
 #     ./scripts/bootstrap-worktree.sh              # everything
 #     ./scripts/bootstrap-worktree.sh netstack     # build just one service
+#     ./scripts/bootstrap-worktree.sh --services   # build every embedded service,
+#                                                  # and provision nothing else
 #     ./scripts/bootstrap-worktree.sh --check      # report what is missing
 #     ./scripts/bootstrap-worktree.sh --check --need=limine,rootfs
 #                                                  # ...only these classes
@@ -196,9 +199,8 @@ provision_limine() {
 ROOTFS_IMG="$ROOT/rootfs.ext4"
 
 # True if the file carries an ext4 superblock magic (0xEF53, little-endian at
-# byte offset 0x438). Guards against copying a partially-written image out of
-# a sibling worktree while another lane is regenerating it — a truncated
-# 256 MiB image would otherwise fail as a mysterious mount error at boot.
+# byte offset 0x438). A truncated image -- a pack that failed partway -- would
+# otherwise fail as a mysterious mount error at boot.
 looks_like_ext4() {
     local f="$1" magic
     [ -f "$f" ] || return 1
@@ -216,33 +218,24 @@ provision_rootfs() {
         rm -f "$ROOTFS_IMG"
     fi
 
-    local parent sibling
-    parent="$(dirname "$ROOT")"
-    for sibling in "$parent"/*/; do
-        sibling="${sibling%/}"
-        [ "$sibling" = "$ROOT" ] && continue
-        if looks_like_ext4 "$sibling/rootfs.ext4"; then
-            # Size is whatever the sibling's image is, not a constant: it was
-            # 48M, then 256M, then 384M as ports landed. Report the real one.
-            echo "==> copying rootfs.ext4 from sibling worktree $(basename "$sibling")" \
-                 "($(( $(stat -c%s "$sibling/rootfs.ext4" 2>/dev/null || echo 0) / 1048576 )) MiB)"
-            cp "$sibling/rootfs.ext4" "$ROOTFS_IMG"
-            if looks_like_ext4 "$ROOTFS_IMG"; then
-                return 0
-            fi
-            echo "    error: copied image has no ext4 superblock; removing" >&2
-            rm -f "$ROOTFS_IMG"
-            return 1
-        fi
-    done
-
-    # Building it needs a Linux userland (mke2fs/debugfs) plus a glibc
-    # cross-build, so we cannot do it from this shell. Say exactly what to
-    # run rather than failing with a bare "missing".
-    echo "    rootfs.ext4 not found, and no sibling worktree has one." >&2
-    echo "    Build it with:  wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh" >&2
-    echo "    Without it the boot test still reports PASSED but silently skips" >&2
-    echo "    ~58 rungs, including every REAL-glibc Path-Z test." >&2
+    # NOT COPIED FROM A SIBLING, WHICH THIS USED TO DO. The image is packed
+    # from this tree's own test fixtures -- the ctest and fastpy ELFs, the
+    # cmake spike -- and its rootfs.ext4.manifest records their hashes. A
+    # copy arrives without those fixtures, so the boot test's freshness check
+    # (`ctest-fixtures.py image-check`) refuses it; copying the fixtures too
+    # would make that check pass on another tree's binaries, which is the one
+    # thing it exists to prevent. Lane F's provisioned worktree was refused
+    # that way 2 h 50 min into a run, 2026-09-25
+    # (requests/f-ad-bootstrap-copies-a-rootfs-its-boot-test-then-refuses.md).
+    # Building it needs a Linux userland (mke2fs/debugfs) and the fixtures
+    # first, so say what to run rather than failing with a bare "missing".
+    echo "    rootfs.ext4 is not in this worktree, and is not copied from another:" >&2
+    echo "    it is packed from this tree's own test fixtures, and a copy would be" >&2
+    echo "    refused by the boot test's freshness check. Build it here:" >&2
+    echo "        python scripts/ctest-fixtures.py build" >&2
+    echo "        wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh" >&2
+    echo "    (the second names anything else it needs). Until then the boot test" >&2
+    echo "    runs, and says it skipped ~58 rungs, every REAL-glibc Path-Z test." >&2
     return 1
 }
 
@@ -296,6 +289,21 @@ provision_sysroot() {
 
 check_only=0
 
+# `--services`: rebuild every service the kernel embeds, and nothing else --
+# no limine, no rootfs, no sysroot. What `scripts/boot-test.sh` runs before
+# every kernel build.
+#
+# WHY BOOT-TEST NEEDS IT. The services live outside the kernel workspace (see
+# the header), so the kernel build never rebuilds them: `include_bytes!` embeds
+# whatever binary the worktree last built, however old. On 2026-09-26 lane A's
+# netstack binary dated from 7 September, a netproto change behind its source,
+# and each of the six lanes boots its own copy -- so a service fix published to
+# main reached no lane's boot until that lane happened to rebuild by hand, and a
+# self-test written against the fix would red every lane that had not. Cargo
+# no-ops a current service in seconds, so asking every boot costs little and
+# makes "the embedded daemon is the daemon in the tree" true by construction.
+services_only=0
+
 # Which classes of prerequisite `--check` reports on.  All three by default.
 #
 # This exists because "missing" and "missing *and needed*" are different
@@ -316,6 +324,7 @@ _need_given=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --check) check_only=1; shift ;;
+        --services) services_only=1; shift ;;
         --need=*)
             # The first --need clears the defaults; further ones add to it.
             if [ "$_need_given" -eq 0 ]; then
@@ -340,7 +349,7 @@ while [ $# -gt 0 ]; do
         --) shift; break ;;
         -*)
             echo "error: unknown option '$1'" >&2
-            echo "usage: bootstrap-worktree.sh [--check [--need=<classes>]] [service...]" >&2
+            echo "usage: bootstrap-worktree.sh [--check [--need=<classes>]] [--services] [service...]" >&2
             exit 2
             ;;
         *) break ;;
@@ -350,6 +359,14 @@ done
 if [ "$_need_given" -eq 1 ] && [ "$check_only" -eq 0 ]; then
     echo "error: --need only applies to --check; provisioning always does" >&2
     echo "       everything, or the services you name." >&2
+    exit 2
+fi
+
+# `--services` means all of them and only them: with --check it would be a
+# second spelling of `--check --need=services`, and with names a contradiction.
+if [ "$services_only" -eq 1 ] && { [ "$check_only" -eq 1 ] || [ $# -gt 0 ]; }; then
+    echo "error: --services builds every embedded service and nothing else;" >&2
+    echo "       it takes no --check and no service names." >&2
     exit 2
 fi
 
@@ -436,8 +453,9 @@ fi
 failed=()
 
 # The bootloader is only needed when provisioning the whole worktree; a
-# targeted rebuild of one service should not reach for the network.
-if [ $# -eq 0 ]; then
+# targeted rebuild of one service -- or of all of them, `--services` -- should
+# not reach for the network.
+if [ $# -eq 0 ] && [ "$services_only" -eq 0 ]; then
     provision_limine || failed+=("limine")
     provision_rootfs || failed+=("rootfs.ext4")
     provision_sysroot || failed+=("sysroot")
@@ -478,7 +496,7 @@ if [ ${#failed[@]} -gt 0 ]; then
 fi
 
 echo ""
-if [ $# -eq 0 ]; then
+if [ $# -eq 0 ] && [ "$services_only" -eq 0 ]; then
     echo "Worktree provisioned. 'cargo build -p kernel' and"
     echo "'./scripts/boot-test.sh' should now both succeed."
 else

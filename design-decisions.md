@@ -74,6 +74,20 @@ another lane's files. Renumbering would therefore have traded a cosmetic
 inconsistency for either four dangling citations or a lane violation. Lane A
 continues from §221; §217–§220 are never reissued.
 
+### How the bands got this way — dated history, not instructions
+
+**The table above is the rule. Every paragraph from here down to "The gate
+landed" records one moment, in the tense of that moment,** and several of them
+give instructions that were right then and are wrong now — "Lane C claims
+§500–§599", "take §600–§699 and §700–§799 if you overflow", "Lane B takes
+§700–§799 from here on". All of those bands are closed. Where a paragraph here
+disagrees with the table, the table wins; read on for *why* the bands are
+shaped as they are, not for what number to use. (Marked 2026-09-25 by lane A,
+as proposed in
+`requests/c-ab-the-band-authority-contradicts-itself-and-that-is-what-actually-bit-me.md`:
+a new entry had been numbered into a closed band by a reader who did the right
+thing and consulted this file.)
+
 **Lane C's band is full, and lane C has continued into §500+ (noted
 2026-08-21).** §400–§499 is exhausted; entries 500, 501, 502 and 503 already
 exist. Nothing above §499 is allotted to anyone, so the numbers are unambiguous
@@ -226,6 +240,8 @@ the property every band anchor has to have. The gate reads the anchor from the
 row (the words "after §N" in its region column) and prints the exact line to
 insert after, as it does for every other band; a row naming a section that does
 not exist is an error. No band closed, so nothing was grandfathered.
+
+### The gate, and the rules that still hold
 
 **Two cautions for whoever writes the next band row**, both learned while
 adding these: the gate reads the status words anywhere in the row, so a region
@@ -80706,6 +80722,76 @@ buys safety in Python that it does not buy in `sh`, and for shell the rule
 has to be the stronger one: **never edit a script that is executing; put the
 change in a new file.**
 
+**A proxy should report when it has stopped being one.** Lane C's cure, and
+the most useful thing in dd-953 that is not a diagnosis. Their
+`frozen-flag-survey.py` is a proxy engine by construction -- *no assignment
+to this field by name* standing in for *the user cannot change this* -- and
+it was wrong three ways in one week, each silently:
+
+| failure | why nothing said so |
+|---|---|
+| scope regex wanted `impl App for X`; every app writes `impl oswindow::app::App for X` | it matched none and **fell back to scanning whole crates** without announcing the fallback |
+| `*self = Self::new(..)` writes every field | no by-name search can see it |
+| `.field = Type { .. }` from outside | same |
+
+Two-thirds of one headline number was furniture. **The fix was not a better
+regex.** It was making the tool print the count of what it could not scope,
+so the proxy announces the moment it stops being one.
+
+**Applied to my own instrument within the hour, and it corrected a claim I
+had made.** `build/scan-guest-output.py` had always *stated* that it cannot
+see kernel-prefixed lines. Made to count them:
+
+```
+population: 47626 lines, of which 44022 are kernel-prefixed and INVISIBLE
+to this scanner by design; 109 unprefixed lines were eligible.
+```
+
+**It examines 109 lines out of 47,626 -- 0.23%.** In prose that limitation
+read as a caveat; as a number it is the whole story. And it revises what its
+verdicts were worth: when I wrote that a boot log was "otherwise clean", the
+population that covered was 109 lines, not a boot. The intermittent `listen`
+failure found the same day is a `[netsock]`-prefixed line -- **invisible to
+this scanner** -- and was found by grepping the log directly, which at the
+time I did not register as evidence about the tool.
+
+**And counting one limit is worse than counting none, because it looks
+finished.** Lane C's, one message later, and it caught me mid-mistake. They
+had been printing an unscoped-crate count -- 6 crates -- and read that as
+having discharged the obligation. It was the smallest of four blind spots;
+the largest set aside 387 types. *"A tool that counts one of its limits looks
+like a tool that counts its limits."*
+
+I had just done exactly that. My scanner counted the kernel-prefix rule
+(46,370 lines) and printed the post-filter total as what it examines. Its
+`DROP` has seven clauses and a separate error-shape test after them. Counting
+all of them:
+
+| stage | lines |
+|---|---|
+| in the log | 47,626 |
+| survived every `DROP` rule | 109 |
+| of those, not error-shaped, never considered | 103 |
+| **actually judged** | **6** |
+
+**0.013%, not the 0.23% I reported an hour earlier** -- and my own figure was
+the overstatement, by eighteen times. "109 eligible" is not "109 examined",
+and I published the first as the second.
+
+The scanner now prints the whole ladder, iterating the *same* rule list it
+filters with rather than a second hand-written copy, which would be the
+third-copy problem above. It also states that the rules **overlap** -- a
+blank line is also indented -- so the column is not read as a partition when
+only `survived` and `judged` are.
+
+Two orders of correction in two messages, on the same instrument, from the
+same rule: state the limit, then count it, then count *all* of them. Each
+step revealed the previous one had been satisfied too cheaply.
+
+So the general form is stronger than "document your limits": a stated limit
+cannot be weighed, and a reader has no way to tell 30 excluded lines from
+30,000. **A limit that is not counted is a limit nobody can price.**
+
 **The checker is a third copy** -- lane C's, and the strongest of the
 operational ones. Five of their apps print a list of their keyboard
 shortcuts on screen. That printed list and the key handler are **two copies
@@ -80773,3 +80859,1010 @@ suite is wired up at all. That is dd-942's rule turned into a construction
 rule rather than a warning -- a corpus you cannot see is checked by
 including one member whose verdict you already know, and checking it is the
 one you expected.
+
+
+## 954. A passing control licenses only the failure it simulates, and the confidence it produces is general
+
+**Date:** 2026-09-21 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; **Where:** the method, not a file
+
+**In short:** dd-953 ends by turning dd-942 into a construction rule -- a
+corpus you cannot see is checked by including one member whose verdict you
+already know. I did exactly that, it passed, and the number it was guarding
+was still wrong by a factor of fifteen. The rule is right. What it lacks is
+the warning that **a control covers one axis, while the reassurance it gives
+covers the whole instrument.**
+
+**The case.** A scan for `unsafe` blocks missing a `// SAFETY:` comment said
+2214 blocks, 318 missing, 14.4%.
+
+Before publishing I ran a control, because the scan only looked *backwards*
+and a note written as the first line *inside* a block is an ordinary
+placement it would miss. The control found 4. The total barely moved, so I
+concluded the instrument was sound and wrote that down: *the 318 are
+absences, not variations.*
+
+Then I opened a file to start fixing, and the first site had its comment
+sitting two lines up, separated from the `unsafe` block by one **safe**
+statement -- which a backward walk that stops at the first non-comment line
+cannot see. I had been measuring "has a comment immediately above" and
+reporting it as "has a SAFETY comment".
+
+| widened to | count |
+|---|---|
+| comment immediately above | 318 |
+| anywhere in the enclosing function | 24 |
+| ...excluding `unsafe` inside doc-comment examples | 21 |
+| ...without a 40-line cap on "enclosing function" | **8** |
+
+The last cut is the one that stings: the scan *claimed* to search the
+enclosing function and capped at 40 lines, while one file carries a comment
+governing reads 48 lines below it. 0.36%, not 14.4%. The tree was fine and
+the instrument was not.
+
+**Why a passing control made it worse.** Running one is strictly better
+than not. But a control that passes is far more persuasive than no control,
+and it persuades about the *whole* measurement while being evidence about
+*one axis*. Mine varied placement AFTER the block. Every real failure was
+placement BEFORE but separated. Planting a comment two lines up with a
+statement between would have exposed it in thirty seconds.
+
+**So the construction rule needs a second half:** plant one defect *per
+axis the instrument could be blind along*, and enumerate those axes before
+planting anything. For a text scan over source they are roughly distance,
+direction, intervening content, comment syntax, and whether the match is
+code at all.
+
+**Lane C reached the same place from the other side within the hour,** which
+is why this is a rule and not an anecdote. Their survey's zero rested on one
+planted defect varying one axis. On reading the above they ran three more,
+and the informative pair was a frozen field in a type held in a `Vec`
+(correctly silent) versus the same field in the same type held singly
+(reported). *Correctly excluded* and *blind* are indistinguishable until you
+vary the axis that separates them.
+
+**Four more the same day, each a scan answering the question next to mine:**
+
+| the instrument | what it actually matched |
+|---|---|
+| is this size clamped? | `clip` matched **clippy** in an `allow` attribute, so a syscall looked bounded |
+| what size is this allocation? | a `[^)]+` capture stopped at the first `)`, truncating `argv_ptrs.len()` and filing four safe sites as suspicious |
+| is this doc link's target unique? | it matched the LAST path segment, so two variants of one enum resolved to two different modules |
+| does this applier's anchor resolve? | the text matched 3-4 times, and the duplicates were the sites correctly clamped to 4096 -- a text replace would have converted a safe site and left an unsafe one |
+
+**Every count produced that day shrank when examined:** 47 qualifiable doc
+links became 11, 64 demotable became 2, 9 unbounded allocations became 3,
+318 missing SAFETY comments became 8. Not one shrank because the tree
+improved.
+
+**The operational rule, cheaper than it sounds.** Before a scan's total is
+written anywhere, read its *output* -- not its count -- for long enough to
+find one entry checkable by hand. Every one of the four above was exposed by
+the first or second sample, never by re-reading the regex. A total is a
+claim about a population; a sample is the only thing that tests whether the
+population is the one you meant.
+
+**Corollary, from breaking a file the same day:** the check that catches an
+error must not share machinery with the thing that made it. A script whose
+anchors all asserted correctly still wrote a *variable name* into a document
+as literal text, because the name sat inside a quoted string. The assertions
+were checking anchors; nothing checked that the result was still valid. An
+`ast.parse` of the output costs one command and cannot be fooled by the
+mistake that produced the file.
+
+## 955. A disconfirming fact absorbed as a refinement leaves the conclusion looking better supported
+
+**Date:** 2026-09-21 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; **Named by:** lane C, from lane A's instance
+
+**In short:** twice this week another lane told me something that meant my
+conclusion could not be true. Both times I treated it as a detail about
+*how* the conclusion was true, attached it, and carried on. The conclusion
+came out of each exchange with more facts stapled to it and less support
+than before -- which is worse than ignoring the correction, because it now
+looks better evidenced to everyone including me.
+
+**The instance.** I filed `a-b-libc-execl-passes-a-null-path-to-execve.md`
+at severity HIGH, saying libc's `execl` handed the kernel a NULL path. Lane
+C told me two things:
+
+| what I was told | what it meant | what I did with it |
+|---|---|---|
+| `execl` **is** `execv` plus a `va_list` walk | the two cannot differ in what they pass | filed as *narrowing the suspect region to the walk* |
+| there is no C `execv` anywhere in `services/` | my `execl`-vs-`execv` split had **no C-side control** | filed as *an observation about fixture coverage* |
+
+Each was a reason the conclusion could not stand. Neither was wrong, neither
+was ignored, and after both my file had *more* supporting material in it.
+The claim survived six rounds of investigation and two published retractions
+before an unrelated read -- that posix execs through the **native**
+`SYS_PROCESS_EXEC`, so a C fixture cannot reach `linux_execve` at all --
+made the whole thing impossible rather than merely unsupported.
+
+**Why this is not already covered.** §942, §953 and §954 are all about a
+measurement being *about the wrong thing*. This is about a fact that is
+about exactly the right thing, arrives correct, and is metabolised into
+detail. The error is not in the observation or the instrument; it is in the
+update.
+
+**The tell, which is the only operational part of this entry.** When a new
+fact arrives and your next move is to make the conclusion **more specific**
+rather than to ask **what would have to be true for it to be false** -- that
+is the moment. Lane C put it that way and it is better than anything I had.
+A conclusion that keeps acquiring detail and never acquires a test is not
+being investigated; it is being decorated.
+
+**It is symmetrical, which is why it is worth a number.** Lane C hit it the
+same morning in miniature: they found a survey over-reporting, fixed it,
+re-measured, and published a two-thirds reduction -- having never tested
+whether it also *under*-reported, which it did, by three times as much.
+Every fact they gathered was about the direction they had already decided
+was the problem. Two lanes, same day, same shape, neither noticing in
+themselves what was obvious in the other.
+
+**What to do about it.** Not "be more sceptical" -- that is the advice that
+never changes behaviour. Concretely: when a peer's correction arrives,
+write down the sentence *"this would make my conclusion false if ..."*
+before writing anything else. If that sentence cannot be completed, the
+correction was genuinely a refinement. If it can, stop and test it. Both of
+mine could have been completed in one line.
+
+## 956. A rule earns a gate when its population separates cleanly, and that is measurable before writing it
+
+**Date:** 2026-09-21 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A
+
+**In short:** four times in one day I found a defect and asked whether the
+rule behind it should become an automatic check. Once the answer was yes and
+twice it was no, and in every case the deciding evidence was a count taken
+before any code was written. The rule that came out of it: measure the
+population the gate would judge, and build the gate only if the good and bad
+cases fall into two piles with nothing in the middle.
+
+| candidate rule | population | verdict |
+|---|---|---|
+| every ring-3 entry must define the six syscall-argument registers | six correct sites defined **6 of 6**; the defect defined **0 of 6**; nothing in between | **built** — `scripts/check-ring3-entry-regs.py`, and it found the bug it was written for and nothing else |
+| a table answering "may this be modified?" must key on the file, not the name | **80** path-comparison sites across **25** files, and most are correct: `devfs`, `cgroupfs`, `index`, `fontmgr` are namespaces where the name *is* the thing | **not built** — a gate here is ~70 false positives, and the distinguishing feature is *what question the table answers*, which no regex sees |
+| a self-test must be able to fail | **823** self-tests; a no-`Err` scan flags 53, tightened to 31 — and the survivors are `assert!`-based (panic is a failure path) or thin wrappers delegating to a shared runner (`run_hosted_cc_case`) | **not built** — ~90% false positives, and separating them means following calls, not matching text |
+| a `/proc` generator must serve the rows its module holds | **126** generators call `stats()` while their module also offers a `list_*()` they never call | **not built**, and not even swept: `gen_locale`'s module offers `list_timezones`, and publishing every timezone into `/proc` would be absurd. Whether rows belong is a judgement about what a reader needs |
+
+**Why this is worth a number rather than three notes.** The tempting move
+in rows two and three is to build the gate anyway and add a baseline for the
+70 exceptions. That produces a check whose output is mostly noise, which
+trains every reader to skim it — the exact failure lane C described about
+stale notices, and the reason `check-gates-can-refuse` exists at all. A gate
+with a large baseline is not a strict rule with exceptions; it is a list of
+known cases wearing a rule's clothes.
+
+**The operational form:** before writing a checker, count the population it
+would judge and look at the distribution. Two piles with a gap means the
+rule is real and the threshold is *discovered*. One smear means the rule is
+a judgement, and judgements belong in review and documentation, not in a
+gate. A threshold chosen after seeing a smear is fitted to the data and
+means nothing — lane C put that better than I did, and it is their sentence.
+
+**The fourth row is the most instructive, because the class is REAL.**
+Lane C filed two instances (`/proc/memlayout`, `/proc/servicemgr`); both
+were genuine and are fixed, and I found a third in `/proc/secureboot`,
+where the enrolled keys are exactly what a reader wants and only
+`key_count` was published. So the rule catches real defects and still
+must not be mechanised: 126 candidates with no gap means each one needs a
+human to ask *would anybody want this list?*. A gate here would carry a
+123-entry baseline, and a 123-entry baseline is a list of known cases
+wearing a rule's clothes.
+
+**The cheapest version of this discipline** is that all three measurements
+above took under a minute each, and two of them saved a day of building
+something that would then have had to be maintained or deleted.
+
+## 957. "Metadata belongs to the file" is too coarse to key a table by; ask whether the data should survive the file being replaced
+
+**Date:** 2026-09-21 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A
+
+**In short:** several kernel tables attach information to a file -- who may
+read it, a comment, a tag, a hash of its contents. Each has to be stored under
+some key, and the two candidates are the file's *name* and the file's *identity*
+(its inode). I had been choosing with the rule "data about a file should follow
+the file, so use the inode", and that rule is wrong often enough to be
+dangerous: applied to integrity monitoring it would have silently destroyed the
+thing being monitored. The better question is not what the data is *about* but
+what should happen to it when the file at that name is **replaced**.
+
+**The case that broke the old rule.** `fs::integrity` stores a content hash per
+file and `verify_file` reports whether the file still matches. By the old rule
+that is per-file data and should be inode-keyed. But the threat integrity
+monitoring exists to catch is a file being swapped out -- and a swapped file is
+a *different inode*. Key the baseline by inode and the lookup for a replaced
+`/etc/passwd` misses entirely, so the verdict is "no baseline recorded" instead
+of `Modified`. `VerifyStatus::Missing` becomes unreachable too, because a file
+that has been deleted has no inode left to look anything up by. The path is not
+the lazy key here; it is the only correct one, which is why Tripwire and AIDE
+monitor paths.
+
+**The rule that replaces it.** Ask: *should this data survive the file at this
+path being replaced by a different file?*
+
+| answer | key | examples |
+|---|---|---|
+| yes -- the *location* is the subject | path | integrity baselines; `cap::file_tags`, whose `effective_tags` walks ancestors so a file's tags depend on where it lives; overlay whiteouts; records of deleted names |
+| no -- the *file* is the subject | identity (`FileId { fs_id, ino }`) | ACLs (POSIX keeps them in the inode's xattrs), advisory locks, seals, record locks, immutable flags, comments, tags |
+
+The reframing also explains the inode cases better than the old rule did. An
+ACL must not transfer to a stranger's file that happens to land at the same
+name -- that would be a grant nobody issued. Stated as "metadata follows the
+file" that is a coincidence; stated as "this must not survive replacement" it is
+the reason.
+
+**Alternatives considered.**
+
+| option | why not |
+|---|---|
+| Keep the coarse rule, fix mistakes as found | it had already produced a written plan to convert `integrity`, and the conversion would have compiled, passed its existing self-tests, and quietly disabled replacement detection. The failure is invisible at the point it is made |
+| Key everything by both, and check both | doubles every lookup and makes "which one wins" a new question at each site. The disagreement between the two keys is exactly the semantic content -- collapsing it loses the answer |
+| Ask the operator per table | the verdict is derivable from what each table is for, and 16 tables is too many to escalate. Only `history` is a genuine tradeoff (below) |
+
+**What is left open.** `fs::history` (file version history) is undecided and
+deliberately not converted. Inode-keyed, a rename keeps its history, which is
+what Dropbox and macOS versions do. Path-keyed, you get the history of a
+location, which is what a user watching one config file may expect. That is
+user-visible behaviour with defensible answers on both sides, so it is not a
+call to make silently.
+
+**Where this bites:** `kernel/src/fs/{acl,vfs,sealing,reclock,immutable}.rs` are
+converted; `fcomment`, `queryable`, `tags` are not yet; `integrity` and
+`cap/file_tags.rs` are correct as they stand and should be left alone. Two
+mechanical requirements travel with any conversion: derive the key *above* the
+module lock, because `Vfs::file_identity` calls into the VFS and a module global
+held across that inverts filesystem-lock -> module-state (nine such sites were
+introduced and caught by `scripts/check-vfs-under-lock.py` the same day), and
+add a rung that hard-links a *real* file, because the pre-existing rungs used
+synthetic paths that resolve to nothing and therefore passed identically before
+and after conversion.
+
+## 958. A terminal's line discipline runs when input arrives, not when it is read — for ptys now, for the console once its keyboard ring has one owner
+
+**Date:** 2026-09-24 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A
+
+**In short:** the code that interprets what is typed into a terminal — Ctrl-C
+becoming an interrupt, characters being echoed, lines being edited — used to run
+only when a program *read* from the terminal. So Ctrl-C could not interrupt a
+program that was busy, which is the only kind anyone tries to interrupt. For
+terminal windows (ptys) that code now runs the moment input arrives, as it does
+on every Unix. The physical console keeps the old arrangement for now, because
+the kernel's own debug shell reads the same keyboard input directly and needs
+Ctrl-C delivered to it as an ordinary byte.
+
+**What was decided.** `tty::receive` is the line discipline, applied per byte on
+arrival: input translation, `ISIG`, canonical editing, echo. Its output goes to
+a per-device input queue (lines marked, `^D` as a mark that is never
+delivered), and `read` only takes finished bytes out of that queue. A pty
+receives in `pty::master_write`, which returns the signals it decided and lets
+the syscall layer deliver them. Found through `ctest-pty`; see known-issues
+`A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER`.
+
+**Alternatives considered.**
+
+| option | why not |
+|---|---|
+| Keep the discipline in the reader and only classify signal characters in the master write | fixes `^C` alone and leaves every other receive-side behaviour wrong — type-ahead not echoed, poll readiness only an upper bound for a canonical slave, a `^C` unable to flush lines already typed ahead. It would also have needed a *fourth* `ISIG` classifier beside the three the read paths already had, when the root problem was that there were several |
+| Full Linux structure: one ring holding the partial line after the committed ones (`canon_head`) | fewer bytes per device and no line-to-queue copy, but it moves the editor's erase/kill/column logic onto a ring and discards `feed` — the pure, already-tested editor. The two-buffer form keeps `feed` intact and makes the mode switch an explicit, readable rule rather than a pointer reassignment |
+| Receive console keystrokes in the keyboard IRQ too | the kernel shell (`kshell.rs`) and `SYS_CONSOLE_READ_CHAR` read that ring directly and use byte 0x03 as data; classifying it in the IRQ would take it from them. Deferred with a design in known-issues `A-CONSOLE-CTRL-C-IS-ONLY-SEEN-BY-A-READER` |
+
+**Behaviour that changes, deliberately, because it is Linux's:** echo appears as
+you type; a `^C` flushes complete lines not yet read as well as the line being
+edited, and clears echo still pending from the same write (Linux's `isig`
+does both); `FIONREAD` and poll on a canonical slave are exact; a line typed to
+`MAX_CANON` keeps its terminator; `VEOL`/`VEOL2` end lines; a control character
+set to 0 is disabled; `ICRNL`/`INLCR`/`IGNCR` apply in raw mode; a switch of
+`ICANON` carries unread input across (canonical → raw: the half-typed line
+becomes raw input; raw → canonical: unread raw input becomes one complete line);
+`TCSETSF` flushes. One Linux quirk is deliberately *not* reproduced: an
+end-of-file mark left over from canonical mode is dropped on the switch to raw,
+where Linux delivers it as a NUL byte.
+
+**Where this bites:** `kernel/src/tty/mod.rs` (`receive`, `InputQueue`,
+`wait_for`, the read policies), `kernel/src/tty/pty.rs` (`master_write` and
+`master_try_write` return `MasterWrite`), `kernel/src/syscall/handlers.rs`
+(`pty_master_write_common` delivers the signals), `kernel/src/syscall/linux.rs`
+(`TCSETSF`).
+
+## 959. Kernel heap allocations too big for any buddy block are mapped from vmalloc, and the kernel half's top-level page-table entries are fixed at boot
+
+**Date:** 2026-09-25 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; **Resolves:** A-Q19 (removed from `open-questions.md`; the operator may overrule)
+
+**In short:** the kernel could not start any program bigger than 16 megabytes,
+because it reads the whole program file into one block of memory and the
+largest block its page allocator can hand out is 16 MB. Now, when the kernel
+needs more than that in one piece, it builds the piece out of many small blocks
+arranged to *look* contiguous (virtual memory — the same trick every program
+already gets). Any program that fits in free memory can start. Making that safe
+meant fixing four older bugs in the code that does the arranging. The most
+important: memory arranged that way after the first program started was
+invisible to every other program.
+
+**What was decided.**
+
+1. `mm::heap` sends a large allocation to `mm::vmalloc` when its buddy order
+   would exceed `frame::BUDDY_MAX_ORDER` (10, i.e. over 16 MiB) —
+   `HeapInner::exceeds_buddy`. **Only** those: everything the buddy allocator
+   can serve is still served by it, physically contiguous and reached through
+   the direct map's large pages. The requests that move are ones that used to
+   fail whatever memory was free, so no existing caller changes behaviour. The
+   vmalloc path runs outside the heap lock (mapping 1,400 frames must not stall
+   every other slow-path allocation), refuses alignment above 16 KiB, and is
+   freed by address: a pointer in the vmalloc region goes back to `vfree`.
+2. The vmalloc region grows from 128 MiB to 1 GiB (`kvspace::VMALLOC`): room
+   for a large program plus the second copy a growing `Vec` briefly holds.
+   Virtual space is free until mapped; the bitmap is 8 KiB, and the free-run
+   search now skips whole full or empty words.
+3. `page_table::init` creates every kernel top-level (PML4) entry any mapper can
+   reach — the direct map up to the CPU's physical address width, plus each
+   region in the new `kvspace::PAGE_TABLE_MAPPED` — and then **freezes** the
+   kernel half: a mapping that would need a new kernel top-level entry is
+   refused, with a serial line naming it. `alloc_pml4` copies the kernel half
+   from the kernel's own PML4 (`page_table::kernel_pml4_phys`) rather than from
+   whatever is loaded. A build-time check refuses a kernel region that is in
+   neither `PAGE_TABLE_MAPPED` nor the KASAN shadow (which `kasan::early_init`
+   already handles the same way, for the same reason).
+4. vmalloc and kstack map through the kernel PML4, never the loaded one.
+5. Page-table entries are read and written atomically (Acquire/Release), and a
+   new intermediate table is published with a compare-and-swap; the loser of a
+   race frees its page and walks into the winner's.
+6. `vfree` shoots down the freed range on every CPU before any frame is freed,
+   and keeps the range reserved until then.
+7. The direct map's top-level entries are marked no-execute in
+   `page_table::init`, not at boot step 22e2 by `protect::harden_hhdm_nx` —
+   which changed only the loaded PML4, long after the ring-3 self-tests had
+   copied the executable originals. `harden_hhdm_nx` stays as the check and
+   now reports 0. Two regions that were mapped without being registered —
+   `bench_page_fault`'s window and `protect`'s mprotect test page — became
+   `kvspace::BENCH` and `kvspace::PROTECT_TEST`; the freeze would otherwise
+   have refused them.
+
+**The four bugs 3–6 fix,** all in code that had exactly one caller before
+today (vmalloc's own self-test), which is why none had surfaced:
+
+| bug | consequence once the heap depends on it |
+|---|---|
+| a kernel top-level entry created after the first process existed went only into the loaded PML4 | a vmalloc buffer allocated during one process's syscall is unmapped in every other address space — a kernel page fault in whoever touches it next |
+| mappings made through the loaded PML4 were charged to that process's RSS | a 22 MB program buffer counted against whichever process was running, and was subtracted from whichever was running when it was freed. The OOM killer ranks by RSS |
+| `vfree` flushed no TLB entries, and released the range *before* unmapping it | a reused range could be read and written through the previous frame's stale translation; and a concurrent `vmalloc` could map the released range just in time for `vfree` to unmap its pages |
+| `walk_or_create` stored a new table with a plain write | two CPUs creating the same table: the second store discards the first table and the mapping already in it |
+
+kstack had the first two as well, invisibly: every kernel stack allocated after
+boot was charged to the running process, and it passed the raw CR3 value — PCID
+bits included — where a table address belongs, harmless only while every CR3
+carries PCID 0.
+
+**Alternatives considered** (A-Q19's three, and one more):
+
+| option | why not |
+|---|---|
+| **Raise `MAX_ORDER`** to 11 or 12 | touches the allocator every frame goes through and buys one or two doublings; the next large port meets the same wall. It would also make the largest contiguous block a standing demand on physical memory |
+| **Stream the ELF from the file** instead of holding it (A-Q19's recommendation) | the better memory profile — the file is held once, in the page cache, rather than once in the kernel and again as segments — but a rewrite of a loader with 69 uses of the slice. It is still worth doing, as an optimisation; it is no longer needed for correctness, and this does not make it harder |
+| **Accept the limit** | writes off every port over 16 MB, `gcc` included, for a limit that was never a design choice |
+| **Also fall back to vmalloc when the buddy allocator fails for an order ≤ 10** (fragmentation), as Linux's `kvmalloc` does | tempting, since the alternative is an allocation failure. Not done because it moves *currently working* allocations — which might be freed with interrupts disabled — onto a path whose free does a cross-CPU TLB shootdown, and that deadlocks if a CPU waits for it with interrupts off. Worth revisiting together with the shootdown's interrupts-off hazard |
+| **Grow the direct map's top level lazily and copy each new entry into every PML4** (Linux's `sync_global_pgds`) | needs a registry of every address space and a lock ordering with process creation. Creating the direct map's entries up front costs one 4 KiB page per 512 GiB of physical address space — 8 KiB on this QEMU (40-bit), at most about 0.5 MiB on a 48-bit machine |
+
+**What it does not change.** Buddy-served allocations behave exactly as before,
+including the power-of-two rounding that makes an 8 MiB + 1 byte request take a
+16 MiB block. Syscalls whose kernel buffers are sized by the caller can now
+reach the 1 GiB vmalloc region instead of failing at 16 MiB; the sites found
+by the 2026-09-21 audit already allocate fallibly, and bounding them properly is
+tracked in known-issues (`A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC`).
+
+**Where this bites:** `kernel/src/mm/heap.rs` (`exceeds_buddy`,
+`alloc_virtual`, `dealloc_virtual`, `virtual_alloc_self_test`),
+`kernel/src/mm/vmalloc.rs`, `kernel/src/mm/page_table.rs` (`init`,
+`kernel_pml4_phys`, `walk_or_create`, `install_table`, `walk_or_create_pml4`,
+`mark_direct_map_no_execute`, `alloc_pml4`), `kernel/src/mm/kvspace.rs`
+(`PAGE_TABLE_MAPPED`, `VMALLOC`, `PROTECT_TEST`, `BENCH`),
+`kernel/src/mm/kstack.rs`, `kernel/src/mm/hugepage.rs`, `kernel/src/mm/cow.rs`,
+`kernel/src/mm/protect.rs` (`harden_hhdm_nx`), `kernel/src/bench.rs`,
+`kernel/src/cpu.rs` (`physical_address_bits`), `kernel/src/syscall/linux.rs`
+(`epoll_wait_core`), `kernel/src/proc/spawn.rs` (the cmake rung, which now
+runs).
+
+## 960. The kernel's working directory and umask are the process's record for every ABI — kept current by native libc, inherited by spawn, never a native lookup base
+
+**Date:** 2026-09-25 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; **Answers:** `requests/d-a-cwd-and-umask-do-not-survive-exec.md` (lane D, option A)
+
+**In short:** a SlateOS-native program keeps its current folder and its
+file-permission mask in its own memory, and a newly started program never got
+either — every command a shell ran started in `/` with the default mask,
+whatever `cd` or `umask` had said. Now the kernel keeps both as the process's
+record: the C library tells it when they change, reads them back when a program
+starts, and every spawned child starts from its parent's. The folder is only
+remembered, never used by the kernel to find files, so the rule that a native
+program must always name the folder it means (§648) is unchanged.
+
+**What was decided.**
+
+- Three native syscalls, 1077–1079: `SYS_PROCESS_SET_CWD` records a path that
+  must already be canonical (`pcb::is_canonical_path`: absolute, no `.`, `..` or
+  empty component, no trailing `/` but the root's, no NUL, at most
+  `CWD_MAX_LEN`) — refused, never rewritten, because libc has already resolved
+  and `stat`ed the directory and a rewritten path would be one it never
+  checked; `SYS_PROCESS_GET_CWD` copies it out (`BufferTooSmall` rather than a
+  truncated, different, directory); `SYS_PROCESS_UMASK` sets (`0..=0o777`,
+  refused above) or queries (`u64::MAX`) the same `linux_umask` the Linux
+  shim's `umask` uses.
+- `spawn_process` gives every child with a parent the parent's working
+  directory and mask, as POSIX requires of `posix_spawn` and as `fork` already
+  did; `SpawnOptions::cwd` still overrides the directory, and a kernel-spawned
+  process keeps `/` and `022`.
+- `SpawnEx2Args` gains `cwd_ptr`/`cwd_len` for
+  `posix_spawn_file_actions_addchdir_np`; zero length (including every older
+  caller, whose shorter `struct_size` leaves them zero) means inherit.
+
+**Why this does not reopen §648.** §648 refused a native `SYS_FS_SET_CWD`
+because `dirfd == 0` would then have meant "resolve against wherever I happen
+to be" — ambient authority, a base the caller never named and could not have
+been denied. Nothing here reads the record as a base: no native call resolves a
+path against it, and libc still turns every relative path into an absolute one
+that is checked against the caller's capabilities as before. The record is
+used only for inheritance, for `/proc/<pid>/cwd`, and as the starting directory
+of a Linux image a native process `exec`s — which is the Linux ABI's own
+semantics. A string naming a directory confers nothing a capability check at
+use does not already decide, so recording one takes no permission and checks
+none. Lane D made this argument in the request; I checked it against §648's
+text and agree with it.
+
+**Alternatives considered.**
+
+| option | why not |
+|---|---|
+| Hand the values over only at the image boundary (a staging call before `exec`, plus the spawn field) | fixes the children but leaves `/proc/<pid>/cwd` wrong and needs a separate fix for native→Linux `exec`; a second channel for state the kernel already stores |
+| Pass them in the environment | visible to every program, lost to `env -i`, and a workaround rather than a record |
+| Validate existence or capability in `SET_CWD` | the check that matters happens when a path is *used*, and it already happens there; a check at record time would test a directory that can change before any use, and libc's `chdir` has just `stat`ed it through the caller's own capabilities anyway |
+
+**Where this bites:** `kernel/src/proc/pcb.rs` (`is_canonical_path`),
+`kernel/src/syscall/number.rs` (1077–1079), `kernel/src/syscall/handlers.rs`
+(`sys_process_set_cwd`, `sys_process_get_cwd`, `sys_process_umask`,
+`spawn_ex_common`, `sys_process_spawn_ex2`), `kernel/src/syscall/dispatch.rs`,
+`kernel/src/proc/spawn.rs` (inheritance in `spawn_process_inner`,
+`SpawnEx2Args::cwd_ptr`/`cwd_len`). The libc half — `chdir`/`fchdir`/`umask`
+keeping the record current, `crt.rs` reading it at start-up, `addchdir_np`
+filling the new field — is lane D's.
+
+## 961. A task earns the interactive boost by sleeping, not only by blocking briefly — sleep credit alongside the burst average
+
+**Date:** 2026-09-25 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A
+
+**In short:** the scheduler moves "interactive" tasks — ones that wake up, do
+a little work and go back to waiting, like anything responding to a user —
+two places up the queue, so they respond quickly. It recognised them by one
+sign only: their work comes in short bursts. A program reading a large file
+in small pieces shows the same sign while using almost all of the processor,
+because each wait is over almost as soon as it starts. It was being moved up
+the queue and starving the program waiting for it. Now a task must also have
+actually spent time asleep, recently, to be moved up.
+
+**What was decided.** Each task keeps a `sleep_credit`: raised at every wake
+from a real park by the ticks it spent parked, lowered by one for each tick it
+is charged while running, held within `0..=MAX_SLEEP_CREDIT` (100 ticks). The
+boost now requires both the old test — the burst average under
+`INTERACTIVE_THRESHOLD_TICKS` — and a credit of at least `MIN_SLEEP_CREDIT`
+(one threshold). It is re-evaluated at each block, at each wake, and at each
+tick, so a task that stops sleeping loses the boost the tick its credit runs
+out rather than at its next block. This is the quantity Linux's O(1)
+scheduler kept as `sleep_avg`.
+
+Tick sampling makes it an unbiased measure even for work and sleep shorter
+than a tick: a task on the CPU 90% of the time is charged about 90% of the
+ticks, and sleeps too short to straddle a tick boundary bank nothing, so it
+drains; a task that sleeps most of the time banks far more than it spends.
+
+**Found by** `ctest-python-repl` on 2026-09-25: the interpreter child, inside
+a large read, kept the boost while its parent at the same base priority was
+rescued by the anti-starvation check a dozen times.
+
+**Alternatives considered.**
+
+| option | why not |
+|---|---|
+| Measure burst and sleep in nanoseconds (hrtimer) | exact rather than sampled, but needs a timestamp at every switch-out as well as every block, on the hottest path in the kernel, to accumulate a burst across preemptions; the sampled credit reaches the same verdict statistically for the cost of one decrement per tick |
+| Replace the burst rule with the credit alone (as O(1) did) | the burst rule is what drops a task the moment one burst runs long, and the self-test pins that; keeping both costs one comparison |
+| Fair-share scheduling by virtual runtime (CFS) | the right long-term shape for fairness, and a rewrite of the run queues; this fixes the observed starvation within the current design |
+
+**Where this bites:** `kernel/src/sched/task.rs` (`sleep_credit`,
+`MAX_SLEEP_CREDIT`, `MIN_SLEEP_CREDIT`, `interactive_verdict`, `record_block`,
+`tick_burst`, `mark_ready`), `kernel/src/sched/mod.rs` (`spawn_inner` stamps
+`block_tick` on a suspended spawn so admission is not credited with every tick
+since boot; `test_interactive_detection`).
+
+## 962. State the kernel keeps about a file outside its filesystem ends when the file's last name is removed — not when its last handle closes
+
+**Date:** 2026-09-25 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A
+
+**In short:** the kernel keeps four kinds of note about files in memory — who
+may open a file beyond its owner and group (an ACL), `chattr`-style flags,
+seals, and searchable attributes. Each is filed under the file's inode number,
+and when a file is deleted its inode number goes to the next file created, so
+the notes have to be thrown away when their file goes or a stranger inherits
+them. The question is what "goes" means. A file can be deleted while a program
+still has it open, and the operating system keeps it alive until that program
+closes it. The notes are now thrown away when the last *name* is removed,
+without waiting for the last close.
+
+**What was decided.** `fs::perfile` drops a table's entry when the VFS removes
+an object's last name: a regular file with `nlinks <= 1`, a directory, or the
+object a replacing rename displaces. It does not track open handles.
+
+**Why the last name is enough.** Every consumer of these tables reaches them
+through a name. ACLs are consulted when a path is resolved, the flags and seals
+on path operations (by `kshell` today), and the attributes are found by path
+queries. With the last name gone, none of them can consult an entry for this
+file again. Keeping the entry until the last close would keep it only for
+readers that do not exist.
+
+**Alternatives considered.**
+
+| option | why not |
+|---|---|
+| End it at the last close, as POSIX frees the inode | needs an open count per identity that the VFS does not keep, maintained on every open and close, the hottest path in the VFS, to preserve state nothing can read |
+| Add a generation number to `FileId`, as NFS file handles do | makes a reused number miss rather than match, which fixes the inheritance, but entries would then never be removed: the tables would grow without bound (the seal table refuses new seals after 512) |
+| Store the state in the inode: ACLs as `system.posix_acl_access` xattrs, flags as inode flags | the right long-term home, which ends with the inode by construction and survives a reboot; also a change to what persists on disk, and to the ACL hot path, larger than the bug. Recorded in `known-issues.md` `A-PER-FILE-STATE-OUTLIVED-ITS-FILE` |
+
+**Revisit if** a consumer appears that reaches this state through a handle
+rather than a name. Seal enforcement on an unlinked, still-open file is the
+likely one, since that is how Linux uses `memfd` seals. At that point the end
+of an identity has to wait for its last handle.
+
+**Where this bites:** `kernel/src/fs/perfile.rs` (`Unlinked::from_meta`,
+`object_unlinked`); the capture sites in `kernel/src/fs/vfs.rs`
+(`unlinked_object`, `displaced_object`).
+
+## 963. The boot test runs QEMU above normal priority, so a boot is not starved by the gates and builds of the lanes sharing its machine
+
+**Date:** 2026-09-25 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A
+
+**In short:** six lanes share one computer, and much of the time they are
+all running their long pre-boot checks and builds at once. The virtual
+machine a boot test starts ran at the same priority as all of that, so it
+got a sliver of a processor, the operating system inside it fell behind its
+own clock, and the boot test reported the guest as hung -- a failure that
+was the machine's, not the code's, found only after an hour of checks. The
+boot test now asks Windows to run its virtual machine at "above normal"
+priority, so it runs ahead of that background work. Only one boot's virtual
+machine runs at a time, and it keeps one or two of the computer's six
+physical cores busy (twelve counting hyperthreads).
+
+**What was decided.** After launching QEMU, `boot-test.sh` reads QEMU's
+Windows PID from the pidfile it already writes and calls
+`SetPriorityClass(ABOVE_NORMAL_PRIORITY_CLASS)` on it, in the background so
+the wait for the pidfile delays nothing. Every outcome is printed: raised,
+left at normal (no pidfile, no Python), or refused. `BOOT_QEMU_PRIORITY=normal`
+skips it.
+
+**Measured, not guessed.** On 2026-09-25 the host ran at 100% CPU for hours
+-- 78 bash and 26 Python processes from other lanes' gates, four cargo
+builds -- and plain spinners measured 0.012 to 0.117 of a core. Earlier the
+same day a quick boot's heartbeats collapsed under the same kind of load.
+QEMU runs are already serialized across lanes by the boot lock, so at most
+one QEMU holds the boost at a time. And the starting point was lower than
+"normal": a process launched from the agents' environment inherits
+BELOW_NORMAL (0x4000, measured on a stand-in for QEMU), so every boot's QEMU
+has been competing at the same class as all the gate work around it. The
+boost takes it two classes up, to 0x8000.
+
+**Alternatives considered.**
+
+| option | why not |
+|---|---|
+| Lower everything else (gates, builds) to below normal | the same effect from the other side, but it has to be done by every lane's every heavy command, and one that is missed puts a boot back among a hundred equals |
+| A cross-lane lock on the gate phase, as for QEMU | serializes an hour of checks per lane across six lanes -- a boot would wait hours for its turn -- to protect the ten minutes that are timing-sensitive |
+| HIGH or REALTIME priority | no measured need, and HIGH can starve the desktop; above normal is enough to win against normal-priority throughput work |
+| Leave it, and let the harness decline starved runs | the harness's suites now do decline them honestly (`scripts/hostload.py`), but a declined boot is still a boot that verified nothing |
+
+**Corroborated on a live boot (lane D, 2026-09-25).** Lane D's boot of
+`506a50749` -- a debug build, before this change reached lane D -- had its
+QEMU (pid 74596) at BelowNormal on a host pinned at 100% of its twelve logical
+CPUs. Between the liveness breadcrumbs at 2310 s and 2340 s the guest's
+heartbeat advanced by 434; lane D then set that one process to AboveNormal by
+hand at about 2350 s, and the next two 30-second windows advanced it by 2,973
+and 3,016 -- about seven times as much. The boot's self-test rungs went from
+359 to 390 in some 90 seconds, and to 443 by 2550 s, after minutes between
+rungs before. Lane D also observed that every debug boot recorded since
+2026-09-22 printed about 3,000 serial lines against about 47,000 for the last
+passing one (2026-09-16): starvation, not a kernel regression, and the right
+reading of lane A's 2026-09-22 TIMEOUT (2419 s wall) too. Quoted with lane
+D's agreement.
+
+**Process Lasso was undoing it (found 2026-09-25; fixed by operator decision).**
+Lane B's watcher raised its QEMU to AboveNormal and minutes later found it at
+BelowNormal. The cause is on the host, not in the harness: Process Lasso runs
+here (its `ProcessGovernor` service), and its ProBalance restrains -- lowers
+to BelowNormal -- any process above 7% of total CPU once the system is over
+10% busy, after 0.9 s over quota (`C:\ProgramData\ProcessLasso\config\
+prolasso.ini`, `[OutOfControlProcessRestraint]`), with no exclusions. A TCG
+QEMU uses about one of the twelve logical CPUs, 8%, so on a loaded host every
+boot's QEMU qualified within a second. Its log showed one QEMU (pid 46812)
+restrained almost continuously: each restraint lasted about 70 s and the next
+began one second after it ended (18:28:42, 18:29:57, 18:30:04). The raise
+above could not survive that, and the load it exists for is exactly when
+ProBalance acts.
+
+**Decided by:** Operator (Claude proposed the exclusion; the operator chose it
+over changing the setting by hand or leaving ProBalance as it was). At 18:30
+`qemu-system-x86_64.exe` was added to `OocExclusions` -- the file backed up
+beside itself as `prolasso.ini.bak-2026-09-25-before-qemu-exclusion`, its
+UTF-16 encoding and line endings kept, that one line changed -- and the
+service restarted. ProBalance has restrained the lanes' `bash.exe`,
+`python.exe` and `rustc.exe` since, and no QEMU. The exclusion is host
+configuration, not in this repository: a rebuilt machine needs it again, and
+`raise_qemu_priority` now reads the class back after raising it and every
+30 s after that for as long as QEMU runs, so that a return of the problem is a
+line in the boot log rather than a mysteriously starved boot.
+
+**What it changes for measurement.** The kernel benchmarks inside a boot now
+run with less host interference, so their noise should drop from this date;
+a step in `bench/history.jsonl` around 2026-09-25 may be this, not the code.
+The load-canary experiments measure exactly that interference, so
+`canary-load-test.sh` sets `BOOT_QEMU_PRIORITY=normal`.
+
+**Revisit if** the guest ever runs more than one vCPU (the boost would then
+take several cores), or a lane needs its QEMU to compete with host load for a
+reason other than the canary.
+
+**Where this bites:** `scripts/boot-test.sh` (`raise_qemu_priority`, called
+after the QEMU traps are installed), `scripts/canary-load-test.sh`.
+
+## 964. The scheduler takes no run-queue entry on trust: removal is by id, a pick checks that the task can run, and an exiting task that is resumed re-parks instead of halting
+
+**Date:** 2026-09-25 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A
+
+**In short:** the lists of tasks waiting for a processor could keep an entry
+for a task that had died or gone to sleep, because the code that takes a task
+off a list looked in only one place on it. When such a leftover entry reached
+the front, the scheduler ran whatever it named -- a dead task came back to
+life -- and when the leftover belonged to a task in the middle of exiting,
+the kernel stopped the whole machine without printing anything. That was the
+intermittent silent boot hang of known-issues.md `B-FORKEXEC-BOOT-HANG`. Now
+removal searches the whole list, the scheduler checks every task before
+running it, and the exit path reports and carries on instead of stopping the
+machine.
+
+**What was decided.**
+
+1. **Removal is by id.** `PriorityRoundRobin::dequeue` removes every entry
+   for the task at every priority level, ignoring the level the caller
+   computed, and `PerCpuScheduler::dequeue` sweeps every online CPU's queue,
+   not only the one `last_cpu` names. (`dequeue_any`, which the
+   anti-starvation booster had for exactly this, is folded in.)
+2. **A pick checks what it picked.** `pick_runnable_locked` -- the only path
+   from a queue entry to a CPU, used by both the main switch and the idle
+   fallback -- drops and reports (`*** BUG: stale run-queue entry`) an entry
+   for a task that is `Dead`, `Blocked`, `Suspended`, `Running` elsewhere or
+   gone from the table, and resumes the current task in place only if it is
+   `Ready` or `Running`. On SMP it also hands a task still executing on
+   another CPU back to that CPU instead of running it twice, and re-homes a
+   stolen task that its affinity forbids here.
+3. **Death purges.** `kill_task` and `task_exit` remove every entry of the
+   task under the guard that publishes it `Dead`.
+4. **An exiting task that is resumed re-parks.** `task_exit` is `-> !` and
+   loops: resumed after publishing `Dead`, it prints
+   `*** BUG: task N was resumed after it exited`, marks the task `Dead`
+   again and switches away. It used to fall into `cpu::halt_loop()`, which
+   halts with interrupts disabled.
+
+**Alternatives considered.**
+
+| option | why not |
+|---|---|
+| Record each task's queue position in `Task` (Linux's `on_rq`), making removal O(1) and a double enqueue detectable at the enqueue | every path that moves entries between CPU queues without the task table -- push balance, the CPU-offline drain, work stealing -- would have to keep it current, and those are the paths that already let `last_cpu` go stale. By-id removal needs no bookkeeping to be right. Revisit if a removal ever shows up on a hot path |
+| Fix only the removals that missed, and keep trusting the pick | the pick is the one place every stale entry passes through, whatever left it there: checking there closes the whole class, including sources nobody has found yet, for one table lookup per switch |
+| On a resumed dead task, panic -- fail-stop, but loud | the resumed task is harmless to re-park, and a panic turns a recoverable scheduler inconsistency into a lost boot -- the outcome being fixed. The report keeps it from being silent, and `DEAD_TASKS_RESUMED` counts it |
+| Keep `cpu::halt_loop()` but print first | still stops a uniprocessor machine: every later diagnostic, watchdog and test is lost to a condition the scheduler can recover from |
+
+**Cost.** One task-table lookup per pick (the `BTreeMap` the switch already
+reads twice) and, on SMP, one atomic load per online CPU. Removal now visits
+every queued entry on every online CPU instead of one level; no removal is on
+a per-switch path.
+
+**Revisit if** removal ever lands on a hot path (then track the queue
+position in `Task`), or a stale-entry report appears in a healthy boot: the
+report's `found by` site and state name the removal that missed.
+
+**Where this bites:** `kernel/src/sched/mod.rs` (`pick_runnable_locked`,
+`classify_pick`, `running_elsewhere`, `report_stale_rq_entry`, `task_exit`,
+`kill_task`, `starvation_boost_locked`, `test_stale_run_queue_entries`),
+`kernel/src/sched/priority_rr.rs` (`PriorityRoundRobin::dequeue`,
+`PerCpuScheduler::dequeue`).
+
+## 965. The push hook answers "does this push touch these paths?" from one list of changed paths when the push publishes no merge, and asks git per call only when it does
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A
+
+**In short:** before each push, the checking script (`scripts/hooks/pre-push`)
+asks about forty times "does this push change anything under these folders?",
+once per check, to decide whether that check needs to run. Each question
+started a new git program, and on this machine with six lanes busy each start
+costs a second or more, so most of a push's time went on asking. The script
+now lists the files a push changes once and answers every question from that
+list, which gives the same answers far faster. The one kind of push where a
+list could give a different answer from git -- one that includes a merge --
+still asks git every time.
+
+**Why now.** The integration boot of `0bede19e6` was stopped after more than
+five hours, still inside the tooling suites, because
+`test-checkers-honour-head.py` alone had run for 2 h 40 m. Profiling it
+(2026-09-25, six lanes building):
+
+* its direct cases take 5-10 s each; its end-to-end cases 65-140 s, of which
+  95% is two pushes through the real hook;
+* one fixture push spent 130 s of its 172 s inside `touches`: 49 calls, each a
+  command-substitution fork, a pipeline fork, a `git` process and a `head`
+  process, with MSYS emulating every fork by copying the shell;
+* the suite makes 84 such pushes -- 49 of them only to seed a fixture's
+  remote, whose verdict nothing read.
+
+Every lane's boot runs this suite, and every lane's push runs the hook.
+
+**What was decided.**
+
+1. **A push that publishes no merge is answered from a list.** On its first
+   call, `touches_prepare` asks git two questions: is any published commit a
+   merge (`rev-list --min-parents=2 --max-count=1`), and if not, what paths do
+   the published commits change (`git -c core.quotePath=false log
+   --no-renames --root --name-only --format=`). Every `touches` call is then
+   answered by `case` matching in the shell, with no process started.
+2. **The answer is git's, not an approximation of it.** `rev-list -- <paths>`
+   differs from "some published commit changes a matching path" only through
+   history simplification, which acts at merges. With no merge among the
+   published commits there is nothing for it to act on -- a commit reachable
+   from the pushed shas only through an already-published merge is itself
+   already published. The matching rules are git's own, checked against git
+   before being written down: `dir/` matches below dir; a literal `name`
+   matches name and below it; `*suffix` matches any path ending in suffix,
+   since `*` crosses `/`, and a wildcard never matches a leading directory
+   (`*.md` does not match `a.md/b.txt`); everything is case-sensitive.
+3. **Everything else still goes to git, per call:** a push that publishes a
+   merge, a path git had to quote (a double quote, backslash or control
+   character in its name), a scope spelled with any other wildcard or with
+   pathspec magic, or a list that could not be built. The per-call question is
+   the old one with `--max-count=1` in place of `| head -n 1`: one fork fewer,
+   and git stops at the first commit it finds.
+4. **Fixture seed pushes skip the hook.** The four suites that seed a fixture's
+   remote by pushing now pass `--no-verify` and fail loudly if the seed is
+   refused. The seed is the remote's starting state, not a push under test;
+   its verdict was never read, and a refused seed does not fail, it silently
+   widens the next push's range (`test-pre-push-unixhalf-gate.py` had already
+   found that the hard way).
+
+**Alternatives considered.**
+
+| Option | For | Against |
+|---|---|---|
+| Keep asking git per call | Nothing to prove | ~1-3 s per call under load, forty-odd calls per push, well over a hundred hooked pushes per boot |
+| Test the checker's presence before `touches` in every gate | Exact without any argument; cheap in fixtures | Forty-odd call sites to reorder in a file six lanes edit; no help to a real push, where every checker is present |
+| Split a scope into its paths and cache each path's answer | Real pushes share paths (`userspace/`, `gui/`) | Not exact: with a merge, `rev-list -- a b` can differ from `rev-list -- a` or `rev-list -- b` |
+| Answer from the list even when a merge is published | The ordinary lane push merges `main`, so it would be fast too | Would need history simplification reimplemented in shell; the published merge is already excluded, so only a push carrying a new merge pays |
+| **The list for merge-free pushes, git otherwise** (chosen) | Exact; the fixture pushes and every merge-free push stop paying | A second code path in a security-relevant predicate, which is why it has its own suite |
+
+**What holds it to this.** `scripts/test-pre-push-touches.py` lifts the helper
+out of the hook verbatim and, for fifteen kinds of push -- a root commit;
+modify, delete, rename, mode change and empty commit together and alone; two
+refs in one push; a change and its revert; a published and an unpublished
+merge; a wildcard against a path whose directory ends in its suffix; four
+names git quotes; nothing published; a sha the remote already has --
+requires the hook's answer to equal git's for every spelling asked.
+The fixture repository's config is set to defeat each defensive flag
+(`log.showRoot=false` against `--root`, `diff.renames=copies` against
+`--no-renames`, `core.quotePath=true` against `-c core.quotePath=false`), so
+dropping a flag fails the suite rather than a push on somebody's machine.
+Sixteen mutations of the helper were run against the suite; three got past
+it at first, and each was answered. Dropping `--no-color` changed nothing --
+git does not colour `--name-only` names even under `color.ui=always` -- so
+the flag was removed rather than kept as a precaution nothing can test, and
+the fixture keeps `color.ui=always` so that a git which starts colouring
+them fails here. Matching `*suffix` anywhere in a path rather than at its end
+got past because every changed path holding `.md` also ended in it; the
+scenario of a wildcard against a leading directory was added for it. And
+matching a name's "below it" anywhere in a path rather than from the top got
+past because no scope had been asked about a path it occurs inside; `src`
+against `posix/src/lib.rs` was added. The other thirteen were caught as
+first written, and every one of them against the helper as it stands now. It also fails if any gate's scope is ever spelled
+in a way the list cannot answer, since such a gate would be judged correctly
+and paid for on every push, silently.
+
+**Where this bites:** `scripts/hooks/pre-push` (`touches_prepare`,
+`touches_from_list`, `touches`), `scripts/test-pre-push-touches.py`, and the
+seed pushes in `scripts/test-checkers-honour-head.py` (`_push_fixture`),
+`scripts/test-pre-push-doclinks-gate.py`, `scripts/test-pre-push-fmt-gate.py`
+and `scripts/test-pre-push-unixhalf-gate.py`.
+
+## 966. The boot lock admits two QEMUs at once, each with its own monitor-port range; benchmark and load-experiment boots still take the machine alone
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (operator-approved scope) -- the operator asked for the limit to be measured and adjusted "as appropriate", argued that even a large mutual slowdown is worth taking while two boots still finish sooner together than one after the other, and then left both the number and whether to run a dedicated slowdown experiment to Claude &middot; **Lane:** A
+
+**In short:** only one lane at a time could run its test virtual machine, so a
+lane that finished building while another lane's machine was running had to
+wait for it -- up to 40 minutes when that machine was stuck. Now two can run
+at once. Each one uses about one of the computer's twelve processor threads,
+so two of them barely slow each other, and a boot that runs alongside another
+still finishes far sooner than one that waits its turn. Boots that measure
+performance still get the computer to themselves, because a second virtual
+machine running beside them would distort what they measure.
+
+**What was decided.**
+
+* `BOOT_LOCK_SLOTS` (default 2) slots, each a `mkdir` lock directory: slot 1 is
+  the old `slateos-boot-lock` itself, slot *k* is `slateos-boot-lock.slot`*k*.
+  A lane still running a pre-slot `boot-test.sh` sees only slot 1, so the host
+  never has more QEMUs than slots however the lanes' copies differ; slots are
+  taken highest first so that such a lane is not left waiting behind a slot it
+  cannot see.
+* The ticket queue stays FIFO: a waiter may try only while fewer tickets are
+  ahead of it than slots are free, and never past an exclusive ticket.
+* Exclusive runs take every slot: `--bench` (which `canary-load-test.sh` uses)
+  and `BOOT_LOCK_EXCLUSIVE=1`. An exclusive
+  waiter collects slots as they free and holds everyone behind it meanwhile, so
+  ordinary boots cannot starve it by slipping into each slot in turn.
+* The QEMU monitor port is chosen after the lock, from the slot's own range of
+  50 (slot *k*: 57000 + 50(*k*-1); no slot: 56950-56999). It used to be chosen
+  at setup, hours before QEMU bound it -- harmless with one QEMU; with two,
+  both runs would find 57000 free and the second QEMU would die binding it.
+  Nothing else a boot writes is shared between worktrees (images, serial log,
+  pidfile, ESP are all under the worktree; the firmware is read-only; the
+  networks are user-mode with no host ports).
+
+**Measured, not guessed -- and one measurement deliberately not taken.**
+2026-09-26, the host at 100% CPU (six lanes; Process Lasso then still lowering
+their tools' priority, see §963):
+
+1. *What the one-slot lock was costing.* `bench/boot-history.jsonl`, the 12
+   runs since the six-lane split (2026-09-22): the time between the build
+   finishing and QEMU starting -- which contains the lock wait -- was a median
+   0.8 min and at most 2.0 min. A passing run's QEMU phase was 3.6-5.3 min of
+   a 141-165 min run; the gate phase (median 139 min) takes no lock. But 6 of
+   the 12 runs hung and held the lock for their full 40-minute QEMU timeout
+   (one for 68 min), and a lane arriving then waits that long.
+2. *What a second QEMU costs a boot* was not measured by a dedicated
+   experiment, on purpose. Each QEMU runs one TCG vCPU -- about one of the
+   host's twelve threads -- above normal priority (§963), so two cannot come
+   near doubling each other, which is the only slowdown that would make
+   running them together slower than one after the other. An experiment of
+   single, paired and tripled boots would have held the lock for one to two
+   hours of a host already at 100%, to settle a question whose answer could
+   save about a minute a boot. The boot histories record when every QEMU
+   ran; boots that did overlap, from now on, are the measurement -- and a
+   run of false TIMEOUTs among them is the sign to go back to one slot.
+
+**Alternatives considered.**
+
+| option | why not |
+|---|---|
+| Keep one slot | the wait it causes is rare but long (a hung boot holds it 40 min), and the reason given for it -- two TCG QEMUs "roughly double each other's boot time" -- predates QEMU running above normal priority and was never measured |
+| Three or more slots | nothing measured asks for it -- two already cover the rare overlap -- and each slot is another core held above normal priority on a host at 100% |
+| No lock at all | the benchmark and load experiments need the machine to themselves, and a lock is also what keeps a hung boot's QEMU count bounded |
+| Choose the monitor port by retrying on bind failure | handles any clash, but QEMU fails at startup with an error that has to be recognized and the boot restarted; disjoint ranges make the clash impossible instead |
+
+**How to reverse.** `BOOT_LOCK_SLOTS=1` in the environment restores the
+one-QEMU lock for a run; changing the default in the region does it for every
+lane that has merged it.
+
+**Where this bites:** `scripts/boot-test.sh` (BOOT-LOCK-REGION,
+MONITOR-PORT-REGION, `pick_monitor_port`, `--bench`),
+`scripts/test-boot-lock.sh` (cases 16-30), `scripts/test-boot-test.py` (runs it).
+
+## 967. `deflate` inflates into a fixed buffer twice: once stopping exactly where zlib stops, once exactly where libdeflate stops -- overrun bytes included
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous; the two function shapes are lane F's proposals, requests/f-a-zlib-inflate-into-a-fixed-buffer-as-zlib-does.md and f-a-deflate-decode-into-a-fixed-buffer-as-libdeflate-does.md) &middot; **Lane:** A
+
+**In short:** a TIFF picture is stored in compressed strips, and libtiff
+decompresses each strip into a buffer of a known size with one of two
+libraries -- zlib for one compression type, libdeflate for another. On an
+undamaged file both simply fill the buffer. On a damaged one they stop in
+different places and leave different bytes behind, and what a user sees --
+the picture libtiff shows, or its refusal -- depends on exactly where. The
+`deflate` crate now has one function that behaves exactly as each library
+does, down to the bytes left in the buffer when decoding stops early, so the
+image decoder can show what libtiff shows.
+
+**What was decided.**
+
+1. **Two functions, not one with a mode.** `zlib_inflate_into` is zlib 1.3's
+   `inflate()` as libtiff 4.7.1's `PixarLogDecode` drives it;
+   `zlib_decompress_into` is libdeflate 1.24's `libdeflate_zlib_decompress`
+   with no size out-parameter, as `tif_zip.c` calls it. The libraries
+   disagree on seven points of validity alone (litlen 286/287, distance
+   30/31, oversize headers, empty and single-codeword codes, a missing
+   end-of-block, when a repeat overrun is caught -- the table in
+   `src/fixed_buffer.rs`), so a single decoder could match at most one.
+2. **Ports of decisions, not of code.** Each decodes canonically, bit by
+   bit, but follows its library's order of checks, its acceptance rules for
+   codes, and its rules for running out of input or room. For libdeflate
+   that includes reading past the end of its input as zero bits and refusing
+   at its refill points: its 64-bit buffer holds `56 + (-p mod 8)` bits after
+   any refill at bit position `p`, whatever came before, so the emulation
+   keeps only the refill *points*, copied from `decompress_template.h`.
+3. **libdeflate's match-copy overrun is reproduced.** Its fastloop copies a
+   match whole words at a time and runs up to 39 bytes past it. When decoding
+   then stops for lack of room, those bytes stay in the buffer, and libtiff
+   shows the buffer. So the fastloop's entry and exit conditions, its refill
+   schedule and its three copy variants are emulated exactly.
+4. **Held to the libraries, not to the specification.** `tests/fixed_buffer.rs`
+   replays 1,519 streams against answers recorded from zlib 1.3 and
+   libdeflate 1.24 built from pinned sources (`tests/data/fixed_buffer/
+   generate.py`). Before the corpus was cut, 105,000 generated streams --
+   valid, mutated, truncated, and built with long codewords to reach
+   libdeflate's subtables -- were run against both libraries, whole output
+   buffers compared, with no disagreement; path counters confirmed the
+   fastloop, all three overrun copies and every stopping rule were reached.
+
+**Two points where the requests' descriptions and the libraries differ.**
+The implementation follows the libraries:
+
+* zlib does **not** check a match's "distance too far back" once the buffer
+  is full: the check sits in its MATCH state after the room check, and
+  `inflate_fast` never runs with fewer than 258 bytes of room.
+* libdeflate's "insufficient space" does **not** leave the rest of the
+  buffer untouched: the fastloop's overrun can have written up to 39 bytes
+  past the stopping point.
+
+**Alternatives considered.**
+
+| Option | For | Against |
+|---|---|---|
+| Extend `inflate_stream` with a fixed-buffer mode | One decoder to maintain | It decodes a block at a time; neither library does, and the seven validity differences cannot all be one decoder's |
+| Implement the behaviour the requests describe | Short, readable | Both descriptions were wrong in one detail each, and a TIFF strip that hits either detail would decode differently from libtiff |
+| Link zlib and libdeflate | Exact by construction | C in the crate the kernel links, a build that needs a C toolchain for every target, and no answer at all for `no_std` |
+| **Exact ports, differentially tested** (chosen) | Exact on everything tested, and the tests say where | ~1,200 lines that must track two libraries' versions; the pinned sources in `generate.py` say which |
+
+**Where this bites:** `deflate/src/fixed_buffer.rs`, `deflate/src/lib.rs`
+(`Error::ShortOutput`), `deflate/tests/fixed_buffer.rs`,
+`deflate/tests/data/fixed_buffer/`.
+
+## 968. A lane may publish a boot whose only red rungs are another lane's tracked faults that `main` already has
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (operator-approved scope) -- A-Q20 put the question to the operator; on 2026-09-26 the operator left it to Claude ("I'll let you do what you think is best"), for lane A's case in hand &middot; **Lane:** A
+
+**In short:** a lane may only copy its work into the shared main line after
+its full test run passes. Lane A's runs have been failing for days on tests
+that fail because of bugs in another lane's code -- bugs the shared main line
+already has -- so nothing lane A did in a week, including fixes the other
+lanes are waiting for, reached anyone. A lane now publishes in that one
+situation, under three conditions it must check and write down, and in no
+other.
+
+**What was decided.** A lane may publish a tested commit whose boot is red only
+when all three hold, checked and stated in the publishing note:
+
+1. **Every red rung is another lane's fault, and tracked.** Its cause is in
+   code the publishing lane does not own, with an open request to the owner.
+2. **`main` already has it.** The rung fails on `main` too for the same image
+   contents, so publishing introduces no failure `main` does not already have.
+3. **The lane's own failures are zero.** Anything of its own that was red is
+   fixed, and the boot being published shows it fixed.
+
+Everything else about publishing stays as it was: merge `origin/main`, boot the
+merge, fast-forward push of the sha that was booted (§538).
+
+**The case that decided it.** Lane A's integration boot of `3fd70ae1d` was red
+on four counts. Two were lane A's own -- a VFS lock-order inversion that a
+brittle kshell rung turned into a kernel panic, and a ring-3 ABI probe left
+behind by a struct that grew -- and are fixed. Two are lane D's libc, and fail
+on `main` for any image that carries Python and CMake:
+
+| rung | cause (lane D's code) | on `main` |
+|---|---|---|
+| `ctest-python-repl` | `execl` starts programs with an empty environment; fixed on `lane-d`, not published | red: exit 8, since lane A's grant fix for the rung is only on `lane-a` |
+| Path-Z real CMake | `__cxa_atexit` drops the object pointer, so static destructors run on `NULL` | red: the stub is on `main` |
+
+The first is also a circular wait: lane D's `execv` fix cannot pass lane D's
+boot until lane A's grant fix is on `main`, and lane A's boot cannot pass until
+lane D's fix is.
+
+**Alternatives considered.**
+
+| option | why not |
+|---|---|
+| Keep the strict rule | lane A's week of work -- including hang fixes other lanes' boots need -- waits on lane D's libc, while lane D's fix waits on lane A |
+| Quarantine the rungs: skip them, or boot an image without Python and CMake | hides the failures; the report would say less than the truth, and `main` would look greener than it is |
+| Cherry-pick lane D's unpublished fix | takes another lane's untested work in through a side door, outside the publish protocol |
+
+**How to reverse.** Return to the strict rule; nothing structural depends on
+this. Revisit if a publish under it ever turns out to have introduced a
+failure -- condition 2 exists to make that impossible, so one would mean the
+check was done wrong.
+
+**Where this bites:** `CLAUDE.md` "Branch Strategy" and `roadmap.md` rule 6
+still state the strict rule; this entry is the exception, cited from each
+publish that uses it.

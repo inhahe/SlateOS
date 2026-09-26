@@ -80,7 +80,7 @@ pub use sha2::{Sha256, sha256};
 /// SHA-256 output size in bytes.
 pub const SHA256_DIGEST_SIZE: usize = 32;
 
-/// Convenience function: compute SHA-256 and return as a Vec<u8>.
+/// Convenience function: compute SHA-256 and return as a `Vec<u8>`.
 ///
 /// Kept here rather than pushed into `sha2`: the crate is deliberately
 /// `alloc`-free so the kernel can link it, and several callers here want the

@@ -717,6 +717,20 @@ pub struct SpawnEx2Args {
     pub cap_ptr: u64,
     /// Number of entries at `cap_ptr`. Capped at [`SPAWN_CAP_MAX`].
     pub cap_count: u64,
+    /// The child's working directory (`posix_spawn_file_actions_addchdir_np`):
+    /// pointer to the path bytes, no NUL. Read only when `cwd_len != 0`.
+    ///
+    /// Zero length — including a caller whose `struct_size` stops before
+    /// these two fields — means **inherit the parent's**, as POSIX requires
+    /// of `posix_spawn` (design-decisions.md §960). Otherwise the path must
+    /// be canonical (`pcb::is_canonical_path`); libc resolves the `chdir`
+    /// actions in order against the parent's directory and `stat`s the
+    /// result before it gets here. A non-canonical path is `InvalidArgument`,
+    /// never ignored: a child started somewhere other than where its caller
+    /// asked is running in the wrong directory without knowing it.
+    pub cwd_ptr: u64,
+    /// Length of the path at `cwd_ptr`, at most `pcb::CWD_MAX_LEN`.
+    pub cwd_len: u64,
 }
 
 /// `cap_mode`: the child inherits the parent's entire capability table.
@@ -1082,6 +1096,25 @@ pub(crate) struct UserEntryInfo {
 ///
 /// - [`KernelError::InvalidExecutable`] if the ELF binary is invalid.
 /// - [`KernelError::OutOfMemory`] if any allocation fails.
+/// # Size
+///
+/// `elf_data` is one contiguous slice, normally the `Vec` that
+/// [`crate::fs::Vfs::read_file`] filled from the kernel heap. That used to
+/// cap executables at 16 MiB: the heap served large requests from the
+/// buddy allocator, whose biggest block is 2^[`BUDDY_MAX_ORDER`] frames x
+/// 16 KiB = 16 MiB, and refused anything larger whatever memory was free
+/// (`cmake-slateos.elf`, 22,526,200 bytes, was the first port to meet it).
+///
+/// The heap now maps any request above that block from vmalloc
+/// (`mm::heap::KernelHeap::alloc_virtual`) — contiguous in virtual memory
+/// only, which is all a slice needs — so the limit is free memory and the
+/// 1 GiB vmalloc region (`mm::kvspace::VMALLOC`), with room for the two
+/// copies a growing `Vec` briefly holds. The whole file is still held in
+/// the kernel while its segments are copied out, so starting a program
+/// costs its size in kernel memory for the duration; reading segments
+/// straight from the file would avoid that (design-decisions.md §959).
+///
+/// [`BUDDY_MAX_ORDER`]: crate::mm::frame::BUDDY_MAX_ORDER
 pub fn spawn_process(elf_data: &[u8], options: &SpawnOptions<'_>) -> KernelResult<SpawnResult> {
     spawn_process_inner(elf_data, options, None, &[], CapInherit::All)
 }
@@ -1877,11 +1910,39 @@ fn spawn_process_inner(
         }
     }
 
-    // Apply the initial working directory (container `WorkingDir`/`--workdir`)
-    // when the caller supplied one.  Best-effort: a malformed value (not an
-    // absolute path, too long, or containing NUL) is rejected by `set_cwd` and
-    // logged — the child simply stays at the PCB default cwd `/`, never failing
-    // the spawn.
+    // Inherit the parent's working directory and file-creation mask, as POSIX
+    // requires of `posix_spawn` and as `fork` already does: both are the
+    // process's own record (design-decisions.md §960), and a child that
+    // started at `/` with umask 022 is what made a shell's `cd` and `umask`
+    // stop at the first command it ran. A kernel-spawned process
+    // (`parent == 0`) has no parent record and keeps the defaults.
+    // `options.cwd`, applied just below, still overrides the directory.
+    if options.parent != 0 {
+        if let Some(dir) = pcb::get_cwd(options.parent) {
+            // The parent's record already meets `set_cwd`'s invariants, so a
+            // refusal would mean it did not; the child keeping `/` is the safe
+            // outcome, and the spawn goes on.
+            if let Err(e) = pcb::set_cwd(pid, dir) {
+                serial_println!(
+                    "[spawn] Could not inherit parent {}'s cwd into process {}: {:?}",
+                    options.parent,
+                    pid,
+                    e,
+                );
+            }
+        }
+        if let Some(mask) = pcb::get_umask(options.parent) {
+            // Ignoring the result: `None` means the child's record is already
+            // gone, which the steps below discover for themselves.
+            let _ = pcb::set_umask(pid, mask);
+        }
+    }
+
+    // Apply the initial working directory (container `WorkingDir`/`--workdir`,
+    // or `SpawnEx2Args::cwd_ptr`) when the caller supplied one.  Best-effort: a
+    // malformed value (not an absolute path, too long, or containing NUL) is
+    // rejected by `set_cwd` and logged — the child simply keeps the inherited
+    // (or default) cwd, never failing the spawn.
     if let Some(dir) = options.cwd {
         if let Err(e) = pcb::set_cwd(pid, dir.to_vec()) {
             serial_println!(
@@ -2931,6 +2992,59 @@ pub(crate) extern "C" fn userspace_entry_trampoline(info_raw: u64) {
             "push {rflags}",   // RFLAGS
             "push {cs}",       // CS
             "push {rip}",      // RIP
+            // Every IRETQ operand is now on the stack, so all GP registers
+            // are dead and may be cleared. Two reasons this is required and
+            // not hygiene:
+            //
+            //   1. Without it, ring 3 reads kernel register residue at its
+            //      first instruction. Disassembled from the 2026-09-21
+            //      release kernel: rbp still holds a KERNEL STACK ADDRESS
+            //      (push rbp; mov rbp, rsp with no leave before the iretq),
+            //      and rbx/r8..r15 are untouched by this function entirely.
+            //      That is a kernel-address leak handed to ring 3.
+            //   2. A user stub that sets only the registers it needs still
+            //      has the rest forwarded as syscall arguments. That is how
+            //      SYS_PROCESS_EXEC came to read argv from rdx = 0x1B --
+            //      the USER_DS selector this very function loads into edx
+            //      to push as SS -- so it read user address 27
+            //   3. And rdx=0x1B is an ABI VIOLATION in its own right.
+            //      System V x86-64 says rdx at process entry holds a
+            //      function pointer to register with atexit, or zero.
+            //      0x1B is neither. It is harmless here only because
+            //      our __libc_start_main names that parameter
+            //      `_rtld_fini` and never calls it -- a conforming
+            //      runtime would call (*rtld_fini)() at exit and jump
+            //      to address 27. So zero is not merely A defined
+            //      value for rdx; it is THE value the ABI specifies.
+            //      and return InvalidAddress (-101) for a perfectly valid
+            //      ELF -- see known-issues.md 2026-09-21.
+            //
+            // Why ZERO, and why that is not a matter of taste: all four
+            // ring-3 entries define this boundary in the way their own
+            // semantics demand. `fork.rs` and `thread_clone.rs` RESTORE the
+            // saved set, because a child inherits. And
+            // `sys_process_exec_with_frame_inner` ZEROES arg0..arg5, rbx,
+            // rbp and r12..r15 before returning to a new image, because a
+            // new image inherits nothing. Fresh spawn is that same
+            // new-image case, and was the only one defining nothing.
+            // rsp is deliberately untouched -- IRETQ
+            // pops its frame from it. 32-bit `xor` zero-extends, clearing
+            // the full 64-bit register in a shorter encoding.
+            "xor eax, eax",
+            "xor ebx, ebx",
+            "xor ecx, ecx",
+            "xor edx, edx",
+            "xor esi, esi",
+            "xor edi, edi",
+            "xor ebp, ebp",
+            "xor r8d, r8d",
+            "xor r9d, r9d",
+            "xor r10d, r10d",
+            "xor r11d, r11d",
+            "xor r12d, r12d",
+            "xor r13d, r13d",
+            "xor r14d, r14d",
+            "xor r15d, r15d",
             "iretq",
             ss = in(reg) user_ds,
             rsp_val = in(reg) user_rsp,
@@ -2962,6 +3076,7 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_faulting_process()?;
     test_spawn_stack_growth()?;
     test_exec_process()?;
+    test_exec_process_failure_is_reported()?;
     test_seh_handler_exit()?;
     test_seh_handler_resume()?;
     test_process_kill()?;
@@ -2975,6 +3090,7 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_with_argv()?;
     test_spawn_with_argv_envp()?;
     test_spawn_with_cwd()?;
+    test_spawn_inherits_cwd_and_umask()?;
     test_spawn_with_uid_gid()?;
     test_spawn_args_one_shot()?;
     test_spawn_ex_args_layout()?;
@@ -4869,20 +4985,37 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
     // There is no external server to accept from under slirp, so this drives the
     // daemon's in-process software loopback — a connection to our own me.ip is
     // diverted to a listener in the same session. A single non-blocking connect
-    // completes the handshake for both ends; accept then dequeues the passive
-    // connection and a bidirectional data exchange proves it is a real socket.
+    // completes the handshake for both ends; the listener must then poll
+    // readable (and quiet before and after), accept dequeues the passive
+    // connection, and a bidirectional data exchange proves it is a real socket.
     match crate::net::netstack_client::self_test_listen_accept() {
         Ok(Some(())) => serial_println!(
-            "[spawn]   persistent netstack listen/accept: server socket accepted a loopback \
-             connection and echoed data both ways — server-socket parity proven over the daemon"
+            "[spawn]   persistent netstack listen/accept: the listener polled readable for a \
+             waiting loopback connection and quiet either side of it, accept took it, and \
+             data echoed both ways — server-socket parity proven over the daemon"
         ),
         Ok(None) => serial_println!(
             "[spawn]   persistent netstack listen/accept: no IPv4 lease — check skipped"
         ),
-        Err(e) => serial_println!(
-            "[spawn]   WARNING: persistent netstack listen/accept error ({:?})",
-            e
-        ),
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: persistent netstack listen/accept ({:?}) — the reason is on \
+                 the line above",
+                e
+            );
+            // Fails the run, which the line above cannot: boot-test.sh reds a
+            // run on `self-test failed`, never on a bare `FAIL:` or `WARNING:`
+            // (see the head-of-line witness below). This check used to end in a
+            // WARNING alone, so a regression here was a line nothing read. It is
+            // loopback inside one daemon session -- no upstream, no variance --
+            // so an error is a real break. Diagnostic, not Integrity: the checks
+            // after it still run.
+            crate::selftest::dispatch_debug(
+                "persistent netstack listen/accept",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
     }
 
     // Object-layer server-socket parity (Q23 Option A): drive the
@@ -8684,10 +8817,10 @@ pub fn self_test_ctest_keylayout() -> KernelResult<()> {
 /// reading back your own writes, in the fixture written to avoid exactly that.
 /// `6*7` does not contain `42`. Any replacement must keep that property.
 ///
-/// **Expect this to fail while `ctest-pty` does.** It `forkpty`s, so if the
-/// pty path is broken this exits 3 (no output at all) for the same reason
-/// ctest-pty exits 45, and the two are one finding rather than two. Do not
-/// bisect it twice.
+/// **Read `ctest-pty` first if both are red.** This `forkpty`s and types
+/// into the master, so a pty fault shows up here too — as 3 (no output at
+/// all) or 2 (the master write failed) — and the two are then one finding
+/// rather than two. Do not bisect it twice.
 pub fn self_test_ctest_python_repl() -> KernelResult<()> {
     let Some(ctest_elf) = pathz_test_elf("ctest-python-repl", "ctest-python-repl")? else {
         return Ok(());
@@ -8703,12 +8836,29 @@ pub fn self_test_ctest_python_repl() -> KernelResult<()> {
     const EXPECTED: i32 = 42;
 
     let argv: &[&[u8]] = &[b"ctest-python-repl"];
-    let envp: &[&[u8]] = &[];
+    // The fixture's child execs python3 with `execl`, which passes on the
+    // environment this process was given — so what the interpreter needs has
+    // to be here. PYTHONHOME is MANDATORY for the reason
+    // `self_test_cpython_on_slateos_libc` gives: without it the interpreter
+    // looks in a compiled-in prefix that does not exist here and dies in
+    // `init_fs_encoding`. The stdlib archive is read in place under /mnt.
+    let envp: &[&[u8]] = &[b"PYTHONHOME=/mnt/usr/local", b"PATH=/mnt/bin", b"LANG=C"];
+    // This rung held NOTHING until 2026-09-24, and exit 8 ("python3 could not
+    // be EXEC'd") was exactly that: libc's exec begins with SYS_FS_STAT, gated
+    // on (File, METADATA), so the exec failed before it reached the kernel's
+    // exec at all — the same fault as `ctest-coreutils-runs`' 11. An
+    // interactive interpreter then reads its archive (READ, METADATA); EXECUTE
+    // is what exec is, and WRITE is what a session normally holds.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA | Rights::EXECUTE,
+    )];
     let options = SpawnOptions {
         name: "ctest-python-repl",
         parent: 0,
         priority: DEFAULT_PRIORITY,
-        capabilities: &[],
+        capabilities: &caps,
         fd_map: &[],
         argv,
         envp,
@@ -8782,18 +8932,36 @@ pub fn self_test_ctest_python_repl() -> KernelResult<()> {
                 //
                 // Its wording says "missing from the image or not
                 // executable" and BOTH halves are false here: debugfs
-                // reports inode 80, mode 0755, 10,468,016 bytes. So this is
-                // the same defect as ctest-coreutils-runs' exit 11 --
-                // libc's execl passes a NULL path to execve and the kernel
-                // correctly returns EFAULT. Two independent fixtures, both
-                // files present, both execs failing.
+                // reports inode 80, mode 0755, 10,468,016 bytes.
+                //
+                // THE CAUSE IS NOT KNOWN, and an earlier version of this
+                // message asserted one. It said libc's execl passes a NULL
+                // path to execve. It does not: posix/src/spawn.rs's
+                // execl_body ends ExecLMode::Direct => execv(path, argv),
+                // forwarding path unchanged. The single linux_execve
+                // filename_ptr=0x0 line in the serial log sits among the
+                // in-kernel [syscall/linux] self-test batches, so it was
+                // never shown to come from this fixture at all.
+                //
+                // What is measured stays: the file is present and
+                // executable, and the exec fails anyway. What was removed
+                // is a cause nobody checked -- and the sentence telling
+                // the reader not to look at the image, which is how a
+                // wrong diagnosis costs someone else an afternoon.
+                //
+                // EXPLAINED 2026-09-24: this rung spawned the fixture holding
+                // no capability at all, and libc's exec starts with
+                // SYS_FS_STAT, which needs (File, METADATA). The grant above
+                // is the fix. If 8 comes back, the grant is the first thing to
+                // check -- the rung, not the image and not the interpreter.
                 concat!(
-                    "8: /bin/python3 could not be EXEC'd -- but it IS on the ",
-                    "image (inode 80, mode 0755). Do not go looking at the ",
-                    "image: this is libc's execl passing a NULL path to ",
-                    "execve, the same defect as ctest-coreutils-runs' exit ",
-                    "11. See requests/a-b-libc-execl-passes-a-null-path-to-",
-                    "execve.md"
+                    "8: /mnt/bin/python3 could not be EXEC'd, and it IS on the ",
+                    "image (inode 80, mode 0755, 10,468,016 bytes, verified ",
+                    "with debugfs). The one cause seen so far is this rung's ",
+                    "own grant: libc's exec begins with SYS_FS_STAT, which ",
+                    "needs (File, METADATA), and until 2026-09-24 the rung ",
+                    "granted nothing. Check the capabilities passed above ",
+                    "before the image or the interpreter."
                 )
             }
             _ => "an unexpected code; see services/ctest-python-repl/main.c",
@@ -8884,10 +9052,20 @@ pub fn self_test_coreutils_runs() -> KernelResult<()> {
     // EXECUTE is granted alongside READ because executing is what this does,
     // even though nothing checks it today -- so a future gate that does check
     // it finds the grant already correct rather than this rung breaking.
+    //
+    // METADATA is the THIRD fault, found 2026-09-24, and the one that kept
+    // this rung at 11 after the path and the register fixes. libc's exec does
+    // not open the file first: `posix/src/spawn.rs::load_elf` begins with
+    // SYS_FS_STAT, to size the buffer, and native `sys_fs_stat` is gated on
+    // (File, METADATA). The stat was refused, `execl` returned -1 with
+    // EACCES, and the child took `_exit(127)` -- which is why "the exec
+    // syscall is never reached" was true. The CPython rung had already
+    // recorded this exact trap ("native sys_fs_stat is gated on METADATA");
+    // this rung was written from a sketch that did not know it.
     let caps = [(
         ResourceType::File,
         0u64,
-        Rights::READ.union(Rights::EXECUTE),
+        Rights::READ.union(Rights::EXECUTE).union(Rights::METADATA),
     )];
 
     let argv: &[&[u8]] = &[b"ctest-coreutils-runs"];
@@ -8958,13 +9136,21 @@ pub fn self_test_coreutils_runs() -> KernelResult<()> {
                 // ordinary status and fall through step 1's `rc != 0`. Now
                 // separated, and reported as a fact about the IMAGE rather
                 // than a verdict about the program.
+                //
+                // Three different faults have produced 11, and the legend now
+                // names all three: the image (lane B's case), this rung's path
+                // (/bin vs /mnt/bin), and this rung's grant -- libc's exec
+                // stats the file first, which needs METADATA (2026-09-24).
                 concat!(
-                    "11: a program could not be EXEC'd at all -- missing from ",
-                    "the image or not executable. NOT a finding about the Rust ",
-                    "userland: check that create-ext4-rootfs.sh staged the ",
-                    "manifest binaries, and that all five producing crates ",
-                    "(coreutils, ar, kill, logger, logrotate) were built for ",
-                    "the slateos target. The serial names the path."
+                    "11: a program could not be EXEC'd at all. NOT a finding ",
+                    "about the Rust userland. Three causes have produced it: ",
+                    "the binary is missing from the image (check that ",
+                    "create-ext4-rootfs.sh staged the manifest binaries and that ",
+                    "coreutils, ar, kill, logger and logrotate were built for the ",
+                    "slateos target); the path is wrong (the image mounts at ",
+                    "/mnt); or this rung's grant lacks what libc's exec uses -- ",
+                    "it stats the file first, and SYS_FS_STAT needs (File, ",
+                    "METADATA). The serial names the path."
                 )
             }
             Some(3) => {
@@ -10871,7 +11057,7 @@ pub fn self_test_fastpy_slateos_fileio2() -> KernelResult<()> {
 /// **Promotion (2026-07-23):** `cat` is no longer loaded from a `/tests`
 /// fixture. It is *installed* at `/bin/cat` (mounted at `/mnt/bin`) like any
 /// other shipping command, and this harness resolves it **by command name**
-/// through the PATH ([`resolve_command`]/[`COMMAND_PATH`]) — the exact
+/// through the PATH ([`pathz_command`]/[`COMMAND_PATH`]) — the exact
 /// resolve+load step init or a shell performs before `exec` — then spawns it
 /// with `argv[0] = "cat"`. This makes `cat` the first fastpy binary promoted
 /// from a boot self-test fixture to a real `/bin` component invoked as a
@@ -20058,8 +20244,8 @@ pub fn self_test_fastpy_slateos_store() -> KernelResult<()> {
 ///   * `deps <name>` — print the record's dependency field (exit 0) or
 ///     "not found" (exit 1).
 ///   * `check <name>` — verify every declared dependency of `<name>` is itself
-///     installed; "ok <name>" + exit 0, else "missing <dep>" + exit 1 (or
-///     "not found <name>" + exit 1 if `<name>` is absent).
+///     installed; "ok `<name>`" + exit 0, else "missing `<dep>`" + exit 1 (or
+///     "not found `<name>`" + exit 1 if `<name>` is absent).
 ///   * `remove <name>` — drop the record (exit 0) or "not found" (exit 1).
 ///   * `list` — print every record; exit 0.
 ///
@@ -23718,10 +23904,10 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
 /// kernel-side test can execute.  This runs it.
 ///
 /// The probe program is [`elf::build_spawn_ex2_abi_test_elf`]; its doc
-/// comment lists all sixteen probes and what each one proves.  Every probe
+/// comment lists all twenty-one probes and what each one proves.  Every probe
 /// compares the syscall's return against an expected error and exits on the
 /// first disagreement with its own code, so a non-zero exit names the exact
-/// rule that broke.  `exit(0)` means all sixteen agreed.
+/// rule that broke.  `exit(0)` means all twenty-one agreed.
 ///
 /// The child is given **no capabilities**, because it never gets far enough
 /// to need one: `SYS_PROCESS_SPAWN_EX2` is not capability-gated (neither is
@@ -23755,7 +23941,7 @@ pub fn self_test_spawn_ex2_abi() -> KernelResult<()> {
         }
     };
 
-    // Sixteen syscalls, none of which block, so the probe runs to exit within
+    // Twenty-one syscalls, none of which block, so the probe runs to exit within
     // its first slice; the yields are the same belt-and-braces the other ring-3
     // tests use for the scheduler to actually reap it.
     crate::sched::yield_now();
@@ -23787,8 +23973,8 @@ pub fn self_test_spawn_ex2_abi() -> KernelResult<()> {
     }
 
     serial_println!(
-        "[spawn]   SYS_PROCESS_SPAWN_EX2 argument ABI (ring 3: 16 probes — size gate, \
-         unknown tail, cap_mode, CapEntryInfo): OK"
+        "[spawn]   SYS_PROCESS_SPAWN_EX2 argument ABI (ring 3: 21 probes — size gate, \
+         unknown tail, cap_mode, CapEntryInfo, cwd): OK"
     );
     Ok(())
 }
@@ -23797,7 +23983,7 @@ pub fn self_test_spawn_ex2_abi() -> KernelResult<()> {
 /// Linux binary to completion.
 ///
 /// Every prior Linux-ABI self-test runs a *synthetic* ELF this kernel emits
-/// itself ([`elf::build_linux_*`]).  Those validate one mechanism at a time
+/// itself (`elf::build_linux_*`).  Those validate one mechanism at a time
 /// (PT_INTERP parse, `AT_BASE`/`AT_ENTRY` auxv, PIE bias, SysV stack layout,
 /// `fork`/`execve`/`wait4`) against code we control.  This test instead drives
 /// the *real* glibc dynamic path: it spawns `/bin/hello` — an ordinary
@@ -33220,13 +33406,14 @@ fn test_ex2_copy_plan() -> KernelResult<()> {
 
     // The constants must describe the struct they gate, or every case below is
     // testing the wrong boundary.  `SPAWN_EX2_MIN_SIZE` is "version 1 plus the
-    // size field"; the struct adds exactly `cap_mode`, `cap_ptr`, `cap_count`.
-    if known != SPAWN_EX2_MIN_SIZE + 3 * 8 {
+    // size field"; the struct adds exactly `cap_mode`, `cap_ptr`, `cap_count`,
+    // `cwd_ptr` and `cwd_len`.
+    if known != SPAWN_EX2_MIN_SIZE + 5 * 8 {
         serial_println!(
             "[spawn]   FAIL: SpawnEx2Args is {} bytes but SPAWN_EX2_MIN_SIZE implies {} \
              — a field was added without revisiting the minimum",
             known,
-            SPAWN_EX2_MIN_SIZE + 3 * 8
+            SPAWN_EX2_MIN_SIZE + 5 * 8
         );
         return Err(KernelError::InternalError);
     }
@@ -33347,6 +33534,25 @@ fn test_spawn_faulting_process() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // Zombie cannot separate this from the failure it must exclude:
+    // the null write did not fault; the process ran to SYS_EXIT instead, which is a zombie too.
+    // NOT an exact code: the exception path sets no constant this
+    // file can name -- every KILLED_EXIT_CODE use is on the
+    // exec-failure path. A clean exit is the one outcome that
+    // disproves the claim, so that is what is asserted.
+    let code_fault = pcb::exit_code(result.pid);
+    if code_fault == Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fault test reached Zombie but exit code was {:?}, expected anything but Some(0)",
+            code_fault
+        );
+        serial_println!(
+            "[spawn]          the null write did not fault; the process ran to SYS_EXIT instead"
+        );
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
     pcb::destroy(result.pid);
 
     serial_println!("[spawn]   Faulting process killed (kernel survived): OK");
@@ -33385,9 +33591,83 @@ fn test_spawn_stack_growth() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // Zombie cannot separate this from the failure it must exclude:
+    // stack growth failed and an unresolvable #PF killed it, which is a zombie too.
+    // Exact: the ELF ends SYS_EXIT(0), so the value is known.
+    let code_growth = pcb::exit_code(result.pid);
+    if code_growth != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: growth test reached Zombie but exit code was {:?}, expected Some(0)",
+            code_growth
+        );
+        serial_println!("[spawn]          stack growth failed and an unresolvable #PF killed it");
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
     pcb::destroy(result.pid);
 
     serial_println!("[spawn]   Stack growth (128 KiB past initial): OK");
+    Ok(())
+}
+
+/// Test 6b (negative control): a native exec that FAILS must say so.
+///
+/// Exists to license reading silence. `sys_process_exec_with_frame` gained
+/// failure logging in `391232edb`, and Test 6 exercises only the success
+/// path -- on which the wrapper is deliberately silent. So no log anywhere
+/// demonstrated the probe fires, and a boot with no `[exec] NATIVE` line
+/// could equally mean "the syscall was never reached" or "the probe does
+/// not work". Those are different conclusions and one of them sent two
+/// investigations, five days apart, at the wrong door.
+///
+/// `elf_len = 0` is rejected by the handler's first check, so this is the
+/// cheapest deterministic failure available and needs no bad pointer.
+///
+/// Termination is asserted, not a particular exit code:
+/// `build_exec_test_elf` emits `int3` after the syscall because a
+/// successful exec never returns, so a failed one traps. How it dies is
+/// not the point; the line in the log is.
+fn test_exec_process_failure_is_reported() -> KernelResult<()> {
+    // Snapshot the probe's counter. Zombie alone cannot distinguish a
+    // correctly-refused exec from a wrongly-successful one, so termination
+    // is not evidence the probe fired -- the counter is.
+    let logs_before = crate::syscall::handlers::native_exec_fail_logs();
+
+    // A caller whose exec cannot succeed: zero-length image.
+    let caller_elf = elf::build_exec_test_elf(0x0000_0050_0000_0000, 0);
+    let options = SpawnOptions::new("spawn-test-exec-fail");
+    let result = spawn_process(&caller_elf, &options)?;
+
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let state = pcb::state(result.pid);
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: exec-failure control expected Zombie, got {:?}",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    // The point of this control: the probe must have LOGGED. Exactly one
+    // more line, not `at least one` -- a >= test would also pass if some
+    // unrelated exec failed in the same window, and loose assertions are why
+    // the positive test stayed green while every exec was failing.
+    let logs_after = crate::syscall::handlers::native_exec_fail_logs();
+    if logs_after != logs_before.wrapping_add(1) {
+        serial_println!(
+            "[spawn]   FAIL: exec-failure control saw {} probe log(s), expected exactly 1",
+            logs_after.wrapping_sub(logs_before)
+        );
+        serial_println!("[spawn]          the process died, but the probe did not report it,");
+        serial_println!("[spawn]          so an absent [exec] NATIVE line proves nothing");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   native exec failure is reported (control for the \
+         [exec] NATIVE probe): OK"
+    );
     Ok(())
 }
 
@@ -33501,14 +33781,43 @@ fn test_exec_process() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::yield_now();
 
-    // Verify the process is now a zombie (exec succeeded, new code ran,
-    // SYS_EXIT was called).
+    // Verify the process is now a zombie.
+    //
+    // This comment used to read "(exec succeeded, new code ran, SYS_EXIT
+    // was called)", which Zombie does NOT establish. On 2026-09-21 the rung
+    // reported OK through six consecutive lines in which the exec failed:
+    //
+    //   [exec] NATIVE exec FAILED -> -101 (elf_len=136)
+    //   [exception] Killing task 96 - General Protection Fault (#GP)
+    //   [thread] Process 131 has no threads left - now zombie
+    //   [spawn]   Exec (replace process image): OK
+    //
+    // A successful exec ends with the target calling exit(0) -> zombie. A
+    // FAILED exec ends with the caller running off its own code into
+    // unmapped memory -> #GP -> also zombie. One assertion, two opposite
+    // outcomes, reported as success for as long as it has existed.
     let state = pcb::state(result.pid);
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
             "[spawn]   FAIL: after exec, expected Zombie, got {:?}",
             state
         );
+        // Clean up.
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // The target ELF is `build_test_elf_public()`, whose whole body is
+    // SYS_EXIT(0), so the exit code separates the two outcomes exactly:
+    // Some(0) only if the new image actually ran.
+    let exec_code = pcb::exit_code(result.pid);
+    if exec_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: exec reached Zombie but exit code was {:?}, expected Some(0)",
+            exec_code
+        );
+        serial_println!("[spawn]          the process DIED instead of exec-ing");
         // Clean up.
         thread::on_thread_exit(result.task_id);
         pcb::destroy(result.pid);
@@ -33559,6 +33868,22 @@ fn test_seh_handler_exit() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // Zombie alone cannot tell this apart from the failure it is
+    // supposed to exclude: the handler never ran and the #PF killed it,
+    // and that is a zombie too. Both ELFs end `xor edi, edi` before
+    // SYS_EXIT, so success is exit code 0; a kill sets
+    // KILLED_EXIT_CODE = -126. Read before destroy(), which drops the PCB.
+    let seh_code = pcb::exit_code(result.pid);
+    if seh_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: SEH exit reached Zombie but exit code was {:?}, expected Some(0)",
+            seh_code
+        );
+        serial_println!("[spawn]          the handler never ran and the #PF killed it");
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
     thread::on_thread_exit(result.task_id);
     pcb::destroy(result.pid);
 
@@ -33604,6 +33929,22 @@ fn test_seh_handler_resume() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // Zombie alone cannot tell this apart from the failure it is
+    // supposed to exclude: the ud2 killed it instead of resuming past it,
+    // and that is a zombie too. Both ELFs end `xor edi, edi` before
+    // SYS_EXIT, so success is exit code 0; a kill sets
+    // KILLED_EXIT_CODE = -126. Read before destroy(), which drops the PCB.
+    let seh_code = pcb::exit_code(result.pid);
+    if seh_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: SEH resume reached Zombie but exit code was {:?}, expected Some(0)",
+            seh_code
+        );
+        serial_println!("[spawn]          the ud2 killed it instead of resuming past it");
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
     thread::on_thread_exit(result.task_id);
     pcb::destroy(result.pid);
 
@@ -34342,6 +34683,87 @@ fn test_spawn_with_cwd() -> KernelResult<()> {
     Ok(())
 }
 
+/// Test: a spawned child starts in its parent's working directory with its
+/// parent's file-creation mask, an explicit `cwd` still wins, and a process
+/// with no parent keeps the defaults (design-decisions.md §960).
+///
+/// The parent is given a directory and a mask that are not the defaults, so
+/// the failure this exists for — every child starting at `/` with umask 022,
+/// which is what made a shell's `cd` and `umask` stop at the first command it
+/// ran — cannot pass by coincidence.
+fn test_spawn_inherits_cwd_and_umask() -> KernelResult<()> {
+    let elf_data = elf::build_test_elf_public();
+    let parent = spawn_process(&elf_data, &SpawnOptions::new("spawn-cwd-parent"))?;
+    let mut spawned = alloc::vec![(parent.pid, parent.task_id)];
+
+    let check = |what: &str, pid: ProcessId, cwd: &[u8], mask: u16| -> KernelResult<()> {
+        let got_cwd = pcb::get_cwd(pid);
+        let got_mask = pcb::get_umask(pid);
+        if got_cwd.as_deref() == Some(cwd) && got_mask == Some(mask) {
+            Ok(())
+        } else {
+            serial_println!(
+                "[spawn]   FAIL: {}: cwd {:?} umask {:?}, expected {:?} and {:#o}",
+                what,
+                got_cwd,
+                got_mask,
+                cwd,
+                mask
+            );
+            Err(KernelError::InternalError)
+        }
+    };
+
+    let result = (|| -> KernelResult<()> {
+        pcb::set_cwd(parent.pid, b"/srv/build".to_vec())?;
+        pcb::set_umask(parent.pid, 0o077).ok_or(KernelError::NoSuchProcess)?;
+
+        let child = spawn_process(
+            &elf_data,
+            &SpawnOptions::new("spawn-cwd-child").parent(parent.pid),
+        )?;
+        spawned.push((child.pid, child.task_id));
+        check("a child inherits", child.pid, b"/srv/build", 0o077)?;
+
+        let placed = spawn_process(
+            &elf_data,
+            &SpawnOptions::new("spawn-cwd-placed")
+                .parent(parent.pid)
+                .cwd(b"/elsewhere"),
+        )?;
+        spawned.push((placed.pid, placed.task_id));
+        check(
+            "an explicit cwd wins, the mask is still inherited",
+            placed.pid,
+            b"/elsewhere",
+            0o077,
+        )?;
+
+        let orphan = spawn_process(&elf_data, &SpawnOptions::new("spawn-cwd-orphan"))?;
+        spawned.push((orphan.pid, orphan.task_id));
+        check(
+            "a process with no parent keeps the defaults",
+            orphan.pid,
+            b"/",
+            0o022,
+        )
+    })();
+
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    for &(pid, task) in spawned.iter().rev() {
+        thread::on_thread_exit(task);
+        pcb::destroy(pid);
+    }
+    if result.is_ok() {
+        serial_println!(
+            "[spawn]   Spawned child inherits cwd and umask; an explicit cwd wins; no parent keeps defaults: OK"
+        );
+    }
+    result
+}
+
 /// Test: an initial `(uid, gid)` is applied to the child's credentials, and a
 /// child with no `uid_gid` keeps the default root credentials.
 fn test_spawn_with_uid_gid() -> KernelResult<()> {
@@ -34813,14 +35235,19 @@ pub fn self_test_linux_slateos_cmake() -> KernelResult<()> {
         }
         // An OutOfMemory here is an ENVIRONMENT fact, not a cmake defect,
         // and the split matches `pathz_fixtures_missing`'s: absent source
-        // skips, present-but-broken fails. This binary is 22.5 MB, and the
-        // buddy allocator rounds a request to a power-of-two frame count,
-        // so loading it needs a 32 MiB CONTIGUOUS block. A 20.5 MB file is
-        // the same order and loads fine -- whether the block exists depends
-        // on fragmentation at this point in the boot, not on the file.
+        // skips, present-but-broken fails.
         //
-        // So this skips rather than reds the boot, and it skips through
-        // `pathz_skip` so the lost coverage is COUNTED. A rung that
+        // Until 2026-09-25 it was also a PERMANENT fact and fired on every
+        // boot: this binary is 22.5 MB, which rounds to buddy order 11, and
+        // the heap served large requests only from the buddy allocator,
+        // whose largest block is order 10 = 16 MiB. The heap now maps such
+        // requests from vmalloc (design-decisions.md §959), so what is left
+        // is genuine exhaustion -- no 22.5 MB of free frames, or no room in
+        // the 1 GiB vmalloc region -- and the skip says so rather than
+        // naming a ceiling that no longer exists.
+        //
+        // It skips rather than reds the boot, and it skips through
+        // `pathz_skip_unusable` so the lost coverage is COUNTED. A rung that
         // silently returned Ok here would be the Path-Z verdict problem
         // recorded on 2026-09-18: "complete -- 0 rungs skipped" over a rung
         // that quietly did nothing.
@@ -34828,9 +35255,9 @@ pub fn self_test_linux_slateos_cmake() -> KernelResult<()> {
             pathz_skip_unusable(
                 format_args!("{RUNG}"),
                 CMAKE,
-                "no 32 MiB contiguous block (the buddy allocator rounds a \
-                 22.5 MB request up to 2048 frames); fragmentation at this \
-                 point in the boot, not a missing file",
+                "reading the 22.5 MB binary ran out of kernel memory -- \
+                 not enough free frames, or no room left in the vmalloc \
+                 region that serves heap allocations over 16 MiB",
             );
             return Ok(());
         }

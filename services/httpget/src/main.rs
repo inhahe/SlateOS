@@ -43,6 +43,25 @@
 #![no_std]
 #![no_main]
 
+/// Declares this binary SlateOS-native: the ELF note the kernel trusts over
+/// every Linux signal when it decides which system-call table a program gets
+/// (design-decisions.md §33). posix's crt0 carries the same note for every
+/// program linked against the libc; this service links no libc, so it carries
+/// its own, and `linker.ld` keeps the section and gives it a `PT_NOTE`.
+///
+/// Layout: `n_namesz` 8, `n_descsz` 4, `n_type` 1 (`NT_SLATEOS_ABI`), the name
+/// "SlateOS" with its NUL, then the ABI revision, 1.
+#[used]
+#[unsafe(link_section = ".note.slateos")]
+static SLATEOS_ABI_NOTE: [u32; 6] = [
+    8,
+    4,
+    1,
+    u32::from_le_bytes(*b"Slat"),
+    u32::from_le_bytes(*b"eOS\0"),
+    1,
+];
+
 // ---- Linux x86_64 syscall numbers ----
 const SYS_READ: usize = 0;
 const SYS_WRITE: usize = 1;

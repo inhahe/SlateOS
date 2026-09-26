@@ -9,9 +9,16 @@
 //! restriction, because the word invites reliance -- which is why this
 //! paragraph is first rather than a footnote.
 //!
-//! Note also that `stats()`'s `denied` count can only ever be 0, since
-//! nothing checks a seal in order to deny anything. In `/proc` that reads
-//! as *nobody has tried*, not as *nothing is enforced*.
+//! Note also what `stats()`'s `denied` count is worth. It IS incremented
+//! -- `DENIED_OPS.fetch_add` in `check_seals` -- but `check_seals` has one
+//! caller outside this module, `kshell`, which is a command a human types.
+//! No write or truncate path calls it. So the count reads 0 on any boot
+//! where nobody ran that command, and in `/proc` that reads as *nobody has
+//! tried* rather than *nothing in the write path asks*.
+//!
+//! (An earlier version of this note said the count "can only ever be 0".
+//! That was false: one kshell command moves it. The counter is reachable,
+//! just not from anything that writes a file.)
 //!
 //! Enforcement belongs in the VFS write and truncate paths and needs a
 //! capability story; tracked in `known-issues.md`.
@@ -169,6 +176,18 @@ pub enum SealOp {
 // Internal state
 // ---------------------------------------------------------------------------
 
+/// Does this entry describe the same file as `(path, id)`?
+///
+/// Identity wins when both sides have one; otherwise the path is the key.
+/// One function rather than a comparison at each site, because two sites
+/// comparing by hand is how one of them ends up different.
+fn seal_entry_matches(e: &SealEntry, path: &Path, id: Option<crate::fs::vfs::FileId>) -> bool {
+    match (e.id, id) {
+        (Some(a), Some(b)) => a == b,
+        _ => e.path.as_path() == path,
+    }
+}
+
 /// A sealed file entry.
 #[derive(Debug, Clone)]
 struct SealEntry {
@@ -177,6 +196,15 @@ struct SealEntry {
     /// is a file that can never be sealed at all. See
     /// `design-decisions.md` §261.
     path: PathBuf,
+    /// Filesystem identity, when the filesystem provides one.
+    ///
+    /// The real key. A seal placed under one name and checked under another
+    /// used to read as *not sealed*, and seals are permanent -- the only
+    /// removal is deleting the file -- so that misread lasted the life of
+    /// the file. `None` means the filesystem reports `ino == 0` (devfs,
+    /// procfs, sysfs), and those cannot have two names for one object, so
+    /// the path fallback is exact there rather than approximate.
+    id: Option<crate::fs::vfs::FileId>,
     flags: SealFlags,
     sealed_at_ns: u64,
 }
@@ -207,10 +235,14 @@ pub fn add_seals(path: impl AsRef<Path>, new_seals: SealFlags) -> KernelResult<S
     SEAL_OPS.fetch_add(1, Ordering::Relaxed);
     let now = crate::timekeeping::clock_monotonic();
 
+    // Derived before the lock: `Vfs::file_identity` calls into the VFS,
+    // and holding SEAL_TABLE across that inverts the kernel's
+    // filesystem-lock -> module-state order.
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
     let mut table = SEAL_TABLE.lock();
 
     // Check existing entry.
-    if let Some(entry) = table.iter_mut().find(|e| e.path.as_path() == path) {
+    if let Some(entry) = table.iter_mut().find(|e| seal_entry_matches(e, path, id)) {
         // Cannot add seals if SEAL is already set.
         if entry.flags.contains(SealFlags::SEAL) {
             DENIED_OPS.fetch_add(1, Ordering::Relaxed);
@@ -227,6 +259,7 @@ pub fn add_seals(path: impl AsRef<Path>, new_seals: SealFlags) -> KernelResult<S
 
     let flags = new_seals;
     table.push(SealEntry {
+        id,
         path: path.to_path_buf(),
         flags,
         sealed_at_ns: now,
@@ -238,10 +271,16 @@ pub fn add_seals(path: impl AsRef<Path>, new_seals: SealFlags) -> KernelResult<S
 /// Get current seals for a file.
 pub fn get_seals(path: impl AsRef<Path>) -> SealFlags {
     let path = path.as_ref();
+    // Its own resolution: this is a separate entry point from `add_seals`,
+    // and the identity must be looked up here too. The first version of this
+    // change computed it in `add_seals` only and did not compile -- which is
+    // the failure mode worth having: a second call site silently comparing by
+    // name would have keyed half the table differently.
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
     let table = SEAL_TABLE.lock();
     table
         .iter()
-        .find(|e| e.path.as_path() == path)
+        .find(|e| seal_entry_matches(e, path, id))
         .map_or(SealFlags::NONE, |e| e.flags)
 }
 
@@ -273,14 +312,89 @@ pub fn check_seals(path: impl AsRef<Path>, op: SealOp) -> KernelResult<()> {
     }
 }
 
-/// Remove all seals for a file (used when the file is deleted).
+/// Remove all seals for a file, as its deletion does.
 ///
-/// This is the only way to remove seals — by deleting the file itself.
-/// Regular unseal operations are not supported by design.
+/// Deleting the file is the only way to remove a seal; there is no unseal, by
+/// design. The VFS now performs this itself when a file's last name is
+/// removed, through [`PER_FILE_STATE`] (see [`super::perfile`]) -- until
+/// 2026-09-25 nothing called this function, so a deleted file's seals stayed
+/// in the table for good. What remains is the direct form, which this
+/// module's self-test uses; it looks the file up while the name still
+/// resolves, as the VFS does before a removal.
+///
+/// It also used to compare names only, so after the identity conversion it
+/// could not find a seal that had been placed under a second name.
 pub fn remove_on_delete(path: impl AsRef<Path>) {
     let path = path.as_ref();
-    let mut table = SEAL_TABLE.lock();
-    table.retain(|e| e.path.as_path() != path);
+    // Derived before the lock; see `add_seals`.
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
+    forget_file(id, path);
+}
+
+// ---------------------------------------------------------------------------
+// File lifecycle (see `super::perfile`)
+// ---------------------------------------------------------------------------
+
+/// This table's part in the file lifecycle: seals end with their file -- the
+/// one removal the design allows -- and move with it when it is renamed. See
+/// [`super::perfile`] for why a `FileId`-keyed seal that outlived its file
+/// would seal a stranger.
+pub(crate) const PER_FILE_STATE: super::perfile::Table = super::perfile::Table {
+    name: "sealing",
+    forget: forget_file,
+    rename: rename_names,
+    unmounted: forget_filesystem,
+    plant: plant_for_test,
+    finds: finds_for_test,
+    reports: reports_for_test,
+};
+
+/// The file is gone: drop every seal that applied to it.
+///
+/// Uses [`seal_entry_matches`], the same test `get_seals` answers with, so
+/// what is dropped is exactly what a lookup of this file would have found --
+/// including a path-keyed seal placed on the name before the file existed.
+fn forget_file(id: Option<crate::fs::vfs::FileId>, path: &Path) {
+    SEAL_TABLE
+        .lock()
+        .retain(|e| !seal_entry_matches(e, path, id));
+}
+
+/// Names moved: rewrite every stored name `rename` maps to a new one. For an
+/// identity-keyed seal that is only the name it is reported under; for a
+/// path-keyed one the name is the key.
+fn rename_names(rename: &super::perfile::NameMap<'_>) {
+    for e in SEAL_TABLE.lock().iter_mut() {
+        if let Some(new) = rename(&e.path) {
+            e.path = new;
+        }
+    }
+}
+
+/// Self-test support: a `GROW` seal. Seals are not enforced yet (see the
+/// module docs), so none restricts what the lifecycle rungs do; `GROW` is the
+/// one that would stay harmless once they are, since the rungs never extend a
+/// file after planting.
+fn plant_for_test(path: &Path) -> KernelResult<()> {
+    add_seals(path, SealFlags::GROW).map(|_| ())
+}
+
+/// Self-test support: whether a lookup through `path` finds the `GROW` seal.
+fn finds_for_test(path: &Path) -> bool {
+    get_seals(path).contains(SealFlags::GROW)
+}
+
+/// Self-test support: whether a seal is reported under `name`.
+fn reports_for_test(name: &Path) -> bool {
+    SEAL_TABLE.lock().iter().any(|e| e.path.as_path() == name)
+}
+
+/// A filesystem was unmounted: its mount id is never reused, so no identity
+/// on it can match again, and its seals are only garbage.
+fn forget_filesystem(fs_id: u64) {
+    SEAL_TABLE
+        .lock()
+        .retain(|e| e.id.is_none_or(|id| id.fs_id != fs_id));
 }
 
 /// List all sealed files.
@@ -316,7 +430,103 @@ pub fn clear_all() {
 // Self-tests
 // ---------------------------------------------------------------------------
 
+/// A seal placed under one name must be seen under every other name.
+///
+/// **The only rung here that exercises identity keying.** The rest of this
+/// module's self-test uses paths like `/test/important.txt`, which do not
+/// exist -- `Vfs::file_identity` returns `NotFound`, `flag_key` falls back to
+/// the name, and the rung passes exactly as it did before the 2026-09-21
+/// conversion. Those rungs are no evidence for it.
+///
+/// This matters more here than for locks: seals are permanent by design, the
+/// only removal being deletion of the file. A seal that reads as absent under
+/// a second name is wrong for the life of the file, not for the life of a
+/// process.
+fn test_seal_follows_the_file_not_the_name() -> KernelResult<()> {
+    use crate::fs::Vfs;
+    const A: &[u8] = b"/tmp/seal-id-a";
+    const B: &[u8] = b"/tmp/seal-id-b";
+
+    let _ = Vfs::remove(Path::new(A));
+    let _ = Vfs::remove(Path::new(B));
+    Vfs::write_file(Path::new(A), b"x")?;
+    match crate::fs::selftest::classify(Vfs::link(Path::new(A), Path::new(B))) {
+        crate::fs::selftest::Setup::Ready => {}
+        // Only NotSupported/ReadOnlyFilesystem/NoSuchDevice reach here.
+        crate::fs::selftest::Setup::Unsupported(e) => {
+            serial_println!(
+                "sealing::self_test: identity rung SKIPPED -- link() unsupported here: {:?}",
+                e
+            );
+            let _ = Vfs::remove(Path::new(A));
+            return Ok(());
+        }
+        // The system was ASKED and REFUSED. Reporting that as 'no hard
+        // links here' would announce a cause never established.
+        crate::fs::selftest::Setup::Failed(e) => {
+            serial_println!(
+                "sealing::self_test: FAIL: link() refused with {:?}, which is not",
+                e
+            );
+            serial_println!("sealing::self_test:       'this system cannot'");
+            let _ = Vfs::remove(Path::new(A));
+            return Err(e);
+        }
+    }
+
+    // Verify the premise before asserting on it: if the two names do not
+    // resolve to one identity, a later assertion proves nothing about keying.
+    let (ida, idb) = (
+        Vfs::file_identity(Path::new(A))?,
+        Vfs::file_identity(Path::new(B))?,
+    );
+    if ida.is_none() || ida != idb {
+        serial_println!(
+            "sealing::self_test: identity rung SKIPPED -- {:?} vs {:?}",
+            ida,
+            idb
+        );
+        let _ = Vfs::remove(Path::new(B));
+        let _ = Vfs::remove(Path::new(A));
+        return Ok(());
+    }
+
+    // A third file, NOT a link to A, for the negative control.
+    const C: &[u8] = b"/tmp/seal-id-c";
+    let _ = Vfs::remove(Path::new(C));
+    Vfs::write_file(Path::new(C), b"x")?;
+
+    add_seals(Path::new(A), SealFlags::WRITE)?;
+    let seen = get_seals(Path::new(B));
+    let unrelated = get_seals(Path::new(C));
+    let _ = Vfs::remove(Path::new(C));
+
+    // NEGATIVE CONTROL, checked first: a matcher that matches anything
+    // would report A's seal on every file, and the assertion below would
+    // pass without identity keying existing at all (dd-954).
+    if unrelated.contains(SealFlags::WRITE) {
+        serial_println!(
+            "sealing::self_test: ERROR: control failed -- an UNRELATED file reports A's seal"
+        );
+        return Err(KernelError::InternalError);
+    }
+    let _ = Vfs::remove(Path::new(B));
+    let _ = Vfs::remove(Path::new(A));
+
+    if !seen.contains(SealFlags::WRITE) {
+        serial_println!(
+            "sealing::self_test: FAIL -- seal set on one name reads as {:?} on another",
+            seen
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "sealing::self_test: identity rung OK -- a seal follows the file, not the name"
+    );
+    Ok(())
+}
 pub fn self_test() -> KernelResult<()> {
+    test_seal_follows_the_file_not_the_name()?;
     serial_println!("[sealing] Running self-test...");
 
     test_add_get_seals();

@@ -2483,6 +2483,30 @@ pub fn get_cwd(pid: ProcessId) -> Option<Vec<u8>> {
     table.get(&pid).map(|p| p.cwd.clone())
 }
 
+/// Whether `path` is already in the canonical form [`Process::cwd`]
+/// requires: absolute, no empty (`//`), `.` or `..` component, no trailing
+/// `/` except the root itself, no NUL, at most [`CWD_MAX_LEN`] bytes.
+///
+/// A check, not a normaliser: the native `SYS_PROCESS_SET_CWD` refuses a
+/// path that fails it rather than rewriting it, because the caller (libc's
+/// `chdir`) has already resolved and `stat`ed the directory, and a kernel
+/// that silently rewrote the path would record a directory the caller never
+/// checked. Bytes, not UTF-8: a component may hold any byte but `/` and NUL.
+#[must_use]
+pub fn is_canonical_path(path: &[u8]) -> bool {
+    let Some(rest) = path.strip_prefix(b"/") else {
+        return false;
+    };
+    if path.len() > CWD_MAX_LEN || path.contains(&0) {
+        return false;
+    }
+    // The root is the only canonical path that ends in a slash.
+    rest.is_empty()
+        || rest
+            .split(|&b| b == b'/')
+            .all(|c| !c.is_empty() && c != b"." && c != b"..")
+}
+
 /// Replace the current working directory of a process.
 ///
 /// The caller is responsible for ensuring `new_cwd` already satisfies
@@ -4214,7 +4238,7 @@ pub const RLIMIT_DATA_INDEX: usize = 2;
 
 /// Index of `RLIMIT_STACK` (maximum stack size) in [`Process::rlimits`].
 ///
-/// Consulted from the page-fault handler ([`crate::idt::try_grow_user_stack`])
+/// Consulted from the page-fault handler (`crate::idt::try_grow_user_stack`)
 /// via [`try_get_rlimit`] to bound on-demand stack growth.  The page
 /// fault handler runs in interrupt context where the regular process
 /// table lock cannot be acquired safely; the `try_lock`-based accessor
@@ -4252,7 +4276,7 @@ pub const RLIMIT_RTPRIO_INDEX: usize = 14;
 /// This is the **only** safe accessor for callers that run with
 /// interrupts disabled or are themselves servicing an interrupt — most
 /// notably the page fault handler's stack-growth path
-/// ([`crate::idt::try_grow_user_stack`]).  A regular [`get_rlimit`] call
+/// (`crate::idt::try_grow_user_stack`).  A regular [`get_rlimit`] call
 /// from those contexts would deadlock if the interrupted code happened
 /// to hold the process table.
 ///
@@ -6403,7 +6427,11 @@ fn destroy_process_resources(
     // table from flock because POSIX makes them separate lock spaces. Same
     // reason, same moment: a dead owner's write lock on a range would refuse
     // every live process that overlaps it, and nothing else clears one.
-    crate::fs::reclock::release_all(pid);
+    // Through `posix_owner`, not the bare pid: `reclock` owns the owner
+    // encoding, and a second place building the same value by hand is how
+    // the two silently stop matching. They agree today only because the
+    // mask clears a bit no real pid sets.
+    crate::fs::reclock::release_all(crate::fs::reclock::posix_owner(pid));
 
     // Close all IPC handles owned by this process.  In the normal exit
     // path these were already drained and closed at the zombie
@@ -6638,6 +6666,37 @@ pub fn take_exec_inherited_fds(pid: ProcessId) -> Vec<(i32, u8, u64)> {
 ///
 /// Prevents a parent from allocating unbounded kernel heap for a child
 /// that may never read the data.
+///
+/// # Deliberately larger than `ARG_MAX`, and why
+///
+/// `sysconf(_SC_ARG_MAX)` reports **128 KiB** and libc's `execve` refuses
+/// above it (`EXEC_PACKED_MAX`, `posix/src/spawn.rs`). This constant is
+/// twice that, so a caller that bypasses libc -- a static binary issuing
+/// `SYS_PROCESS_EXEC`, or a runtime with its own syscall layer -- is
+/// allowed more than `sysconf` advertises. Lane B asked whether that gap
+/// was intended; it is, and the reason is that **the two numbers answer
+/// different questions**:
+///
+/// - `ARG_MAX` is a *portability promise*: the largest list a program can
+///   rely on working. Lowering it breaks programs; raising it is safe.
+/// - this constant is a *resource bound*: the most kernel heap one
+///   process may make another allocate. It exists to be refused at, and
+///   it is the only one of the two an attacker cannot route around.
+///
+/// Making them equal would tie a security bound to a compatibility
+/// number, so raising `ARG_MAX` later -- a compatibility decision -- would
+/// silently raise how much kernel heap an unprivileged process can pin.
+/// That is the wrong coupling to create for the sake of one number.
+///
+/// What was genuinely wrong was that nothing said so. The gap held only
+/// because libc refused first, which is the shape lane B named in the
+/// request: *"happens not to collide" is a property that stops holding
+/// quietly*. It is now a stated invariant rather than a coincidence:
+/// **this constant must be >= `EXEC_PACKED_MAX`**, and if `ARG_MAX` is
+/// ever raised, raise this first.
+///
+/// See `requests/b-a-libc-now-refuses-at-half-the-limit-your-kernel-
+/// enforces.md`.
 const MAX_ARGS_BYTES: usize = 256 * 1024;
 
 /// Store initial arguments and environment in a child process's PCB.
@@ -7425,7 +7484,67 @@ pub fn self_test() -> KernelResult<()> {
     test_reset_linux_state_for_exec()?;
     test_prot_none()?;
     test_rlimits()?;
+    test_canonical_path()?;
 
+    Ok(())
+}
+
+/// Test: [`is_canonical_path`] accepts exactly the form `Process::cwd`
+/// stores, and refuses every near miss.
+///
+/// The near misses are the point. `SYS_PROCESS_SET_CWD` records the path
+/// it is given without rewriting it, so each accepted spelling is a second
+/// name for one directory (`/a/` and `/a`, `/a/./b` and `/a/b`), and
+/// `/proc/<pid>/cwd` and every child that inherits the record would carry
+/// whichever one libc happened to send.
+fn test_canonical_path() -> KernelResult<()> {
+    let accept: &[&[u8]] = &[
+        b"/",
+        b"/a",
+        b"/a/b",
+        b"/.hidden",
+        b"/a..b",
+        b"/...",
+        b"/\xff\x01name",
+    ];
+    let refuse: &[&[u8]] = &[
+        b"", b"a", b"a/b", b"//", b"/a/", b"/a//b", b"/.", b"/..", b"/a/.", b"/a/./b", b"/a/../b",
+        b"/a\0b",
+    ];
+    for &p in accept {
+        if !is_canonical_path(p) {
+            serial_println!("[pcb]   FAIL: canonical path {:?} refused", p);
+            return Err(KernelError::InternalError);
+        }
+    }
+    for &p in refuse {
+        if is_canonical_path(p) {
+            serial_println!("[pcb]   FAIL: non-canonical path {:?} accepted", p);
+            return Err(KernelError::InternalError);
+        }
+    }
+    // The length bound is inclusive: CWD_MAX_LEN bytes fit, one more does not.
+    let mut long = alloc::vec![b'a'; CWD_MAX_LEN];
+    if let Some(first) = long.first_mut() {
+        *first = b'/';
+    }
+    if !is_canonical_path(&long) {
+        serial_println!(
+            "[pcb]   FAIL: a {}-byte path (the maximum) refused",
+            CWD_MAX_LEN
+        );
+        return Err(KernelError::InternalError);
+    }
+    long.push(b'a');
+    if is_canonical_path(&long) {
+        serial_println!("[pcb]   FAIL: a path one byte over CWD_MAX_LEN accepted");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[pcb]   canonical cwd form: OK ({} accepted, {} refused, length bound exact)",
+        accept.len().saturating_add(1),
+        refuse.len().saturating_add(1)
+    );
     Ok(())
 }
 

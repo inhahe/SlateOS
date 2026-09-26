@@ -327,7 +327,12 @@ pub fn open(path: &Path) -> Result<ArchiveModel, ArchiveError> {
         return Err(ArchiveError::UnknownFormat {
             name: path.file_name().map_or_else(
                 || path.display().to_string(),
-                |n| n.to_string_lossy().into_owned(),
+                |n| {
+                    n.to_str().map_or_else(
+                        || quoting::escape_unprintable(n.as_encoded_bytes()),
+                        str::to_owned,
+                    )
+                },
             ),
         });
     };
@@ -718,19 +723,19 @@ fn method_name(method: u16) -> String {
 
 /// The path to *show* for a member, from the bytes the archive stored.
 ///
-/// Lossy, deliberately and only here: a listing is the one place a name with no
-/// UTF-8 reading still has to appear on screen, and a row that cannot be drawn
-/// is worse than one drawn with a replacement character in it. Nothing is ever
-/// *written* to this name — [`safe_destination`] works from the raw bytes and
-/// refuses what it cannot render faithfully — so a substituted character can
-/// mislabel a row but can never misplace a file.
+/// A name that is text is itself; one that is not is shown by its bytes, as
+/// escapes (`quoting::escape_unprintable`). It was a lossy decode, which drew
+/// two members differing only in such a byte as the same row -- and the
+/// model addresses members by this string, so the two became one entry.
+/// Nothing is ever *written* to this name -- [`safe_destination`] works from
+/// the raw bytes and refuses what it cannot render faithfully.
 ///
 /// The trailing `/` a directory member carries is dropped, because every other
 /// part of the model addresses `src` rather than `src/`.
 fn display_path(raw: &[u8]) -> String {
-    String::from_utf8_lossy(raw)
-        .trim_end_matches('/')
-        .to_string()
+    let shown =
+        std::str::from_utf8(raw).map_or_else(|_| quoting::escape_unprintable(raw), str::to_owned);
+    shown.trim_end_matches('/').to_string()
 }
 
 /// Why a member was not extracted.
@@ -3373,5 +3378,20 @@ mod tests {
         }
         assert_eq!(fs::read(&path).unwrap(), before, "the archive changed");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A member's name that is not text is shown by its bytes: two members
+    /// that differ only there stay two, and a directory's `/` still goes.
+    #[test]
+    fn a_member_name_that_is_not_text_is_shown_by_its_bytes() {
+        assert_eq!(display_path(b"docs/notes.txt"), "docs/notes.txt");
+        assert_eq!(display_path(b"docs/"), "docs");
+        assert_eq!(display_path(b"caf\xe9.txt"), r"caf\351.txt");
+        assert_ne!(
+            display_path(b"a\xfe"),
+            display_path(b"a\xff"),
+            "two members became one"
+        );
+        assert!(!display_path(b"a\xff").contains('\u{FFFD}'));
     }
 }

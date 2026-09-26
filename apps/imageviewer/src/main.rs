@@ -26,6 +26,17 @@ use guitk::wheel;
 mod video;
 
 use std::path::{Path, PathBuf};
+
+/// `path`'s file name as the window shows it: the name itself when it is
+/// text, its bytes as escapes (`quoting::escape_unprintable`) when it is not
+/// -- never a lossy decode, which shows two such names alike.
+fn shown_file_name(path: &std::path::Path) -> Option<String> {
+    let name = path.file_name()?;
+    Some(name.to_str().map_or_else(
+        || quoting::escape_unprintable(name.as_encoded_bytes()),
+        str::to_owned,
+    ))
+}
 use std::process::ExitCode;
 
 // ============================================================================
@@ -621,10 +632,7 @@ impl ViewerState {
     const MAX_PICTURE_BYTES: usize = 256 * 1024 * 1024;
 
     fn display_image(&mut self, path: &Path) -> bool {
-        let filename = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| String::from("(unknown)"));
+        let filename = shown_file_name(path).unwrap_or_else(|| String::from("(unknown)"));
 
         // Built fresh so nothing can survive from the last image.
         let mut info = ImageInfo {
@@ -779,10 +787,7 @@ impl ViewerState {
                 if !IMAGE_EXTENSIONS.contains(&ext.as_str()) {
                     continue;
                 }
-                let filename = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                let filename = shown_file_name(&path).unwrap_or_default();
                 let file_size = entry.metadata().map(|m| m.len()).unwrap_or(0);
                 self.entries.push(DirectoryEntry {
                     path,
@@ -2133,6 +2138,38 @@ mod tests {
     /// is taken right now": `Escape` means nothing until there is a full
     /// screen or a slideshow to leave, and declining from its own arm is
     /// answering.
+    /// A file name that is text is shown as it is; one that is not, by its
+    /// bytes -- two such names never look the same.
+    #[test]
+    fn a_file_name_that_is_not_text_is_shown_by_its_bytes() {
+        use std::path::Path;
+        assert_eq!(
+            shown_file_name(Path::new("dir/notes.txt")).as_deref(),
+            Some("notes.txt")
+        );
+        assert_eq!(shown_file_name(Path::new("/")), None);
+        #[cfg(windows)]
+        let (a, b) = {
+            use std::os::windows::ffi::OsStringExt;
+            (
+                std::ffi::OsString::from_wide(&[0x0066, 0xD800]),
+                std::ffi::OsString::from_wide(&[0x0066, 0xD801]),
+            )
+        };
+        #[cfg(not(windows))]
+        let (a, b) = {
+            use std::os::unix::ffi::OsStringExt;
+            (
+                std::ffi::OsString::from_vec(vec![b'f', 0xFE]),
+                std::ffi::OsString::from_vec(vec![b'f', 0xFF]),
+            )
+        };
+        let shown_a = shown_file_name(Path::new(&a)).unwrap();
+        let shown_b = shown_file_name(Path::new(&b)).unwrap();
+        assert!(!shown_a.contains('\u{FFFD}'), "{shown_a:?}");
+        assert_ne!(shown_a, shown_b, "two names became one");
+    }
+
     #[test]
     fn every_advertised_key_does_something() {
         for (label, what) in SHORTCUTS {

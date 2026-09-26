@@ -10763,6 +10763,20 @@ mod tests {
             app.remove_feed(id);
             app.keep();
             assert!(!kept().contains("https://a/f"), "a removed feed");
+            // A feed subscribed by its address alone takes the feed's own
+            // title when it is read -- a change of its own, with no feed
+            // added beside it to carry it along.
+            let bare = app.add_feed("https://b/f", "https://b/f", None);
+            app.keep();
+            let parsed = parse_feed(RssReaderApp::SAMPLE_RSS).unwrap();
+            app.ingest_parsed_feed(bare, &parsed, 1);
+            app.keep();
+            assert!(
+                kept().contains(&format!("text=\"{}\"", parsed.title)),
+                "a feed's own title was not kept"
+            );
+            app.remove_feed(bare);
+            app.keep();
             // A feed read from a file takes the feed's own title: kept too.
             let file = subscriptions_path().unwrap().with_file_name("feed.xml");
             std::fs::write(&file, RssReaderApp::SAMPLE_RSS).unwrap();

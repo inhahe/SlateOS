@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Markdown Editor — split-view editor with live preview"
 [dependencies]
+# A file name that is not text is shown by its bytes, as escapes -- the
+# tree's one renderer for an untrusted name -- never as a lossy decode.
+quoting = { path = "../../userspace/quoting" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }

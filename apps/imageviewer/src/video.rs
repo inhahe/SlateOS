@@ -871,7 +871,9 @@ impl VideoPlayer {
         let info = match container {
             ContainerFormat::Avi => {
                 let hdr = parse_avi_header(&data)?;
-                let fourcc_str = String::from_utf8_lossy(&hdr.codec_fourcc).to_string();
+                // Four bytes from the file: shown as they are, any that are
+                // not printable text as escapes.
+                let fourcc_str = quoting::escape_unprintable(&hdr.codec_fourcc);
                 VideoInfo {
                     duration_ms: hdr.duration_ms(),
                     width: hdr.width,
@@ -887,7 +889,7 @@ impl VideoPlayer {
                 let mp4 = parse_mp4_info(&data)?;
                 let codec_str = mp4
                     .video_codec
-                    .map(|c| String::from_utf8_lossy(&c).to_string())
+                    .map(|c| quoting::escape_unprintable(&c))
                     .unwrap_or_else(|| String::from("unknown"));
                 VideoInfo {
                     duration_ms: mp4.duration_ms,

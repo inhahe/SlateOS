@@ -3158,19 +3158,25 @@ impl PhotoApp {
     /// window over a library that was never read from anywhere, and "nothing
     /// visibly happened" is exactly how that survived.
     fn import_from_disk(&mut self, path: &std::path::Path) -> String {
-        let name = path.file_name().map_or_else(
-            || path.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
+        let name = shown_file_name(path).unwrap_or_else(|| path.display().to_string());
+        // Under the same cap as opening a picture: it read the whole file
+        // first, however large, before anything could refuse it.
+        let bytes = match safeio::read_capped(path, Self::MAX_PICTURE_BYTES) {
+            Ok(read) if read.truncated => {
+                return format!(
+                    "{name} is over {} MB, more than this imports",
+                    Self::MAX_PICTURE_BYTES / (1024 * 1024)
+                );
+            }
+            Ok(read) => read.bytes,
             Err(err) => return format!("Could not read {name}: {err}"),
         };
+        // An extension that is not text is no format this reads.
         let ext = path
             .extension()
-            .map(|e| e.to_string_lossy().into_owned())
+            .and_then(std::ffi::OsStr::to_str)
             .unwrap_or_default();
-        let Some(format) = ImageFormat::from_extension(&ext) else {
+        let Some(format) = ImageFormat::from_extension(ext) else {
             return format!("{name} is not an image format this reads");
         };
         // The EXIF parser was written, tested and never given a real file.
@@ -5174,6 +5180,17 @@ impl App for PhotoApp {
     }
 }
 
+/// `path`'s file name as the window shows it: the name itself when it is
+/// text, its bytes as escapes (`quoting::escape_unprintable`) when it is not
+/// -- never a lossy decode, which shows two such names alike.
+fn shown_file_name(path: &std::path::Path) -> Option<String> {
+    let name = path.file_name()?;
+    Some(name.to_str().map_or_else(
+        || quoting::escape_unprintable(name.as_encoded_bytes()),
+        str::to_owned,
+    ))
+}
+
 fn main() -> ExitCode {
     // Starts empty. It used to call `seeded_library`, which built two albums
     // ("Vacation 2025", "Family") and three photos at paths like
@@ -5211,6 +5228,38 @@ mod tests {
     use super::*;
 
     // --- ImageFormat tests ---
+
+    /// A file name that is text is shown as it is; one that is not, by its
+    /// bytes -- two such names never look the same.
+    #[test]
+    fn a_file_name_that_is_not_text_is_shown_by_its_bytes() {
+        use std::path::Path;
+        assert_eq!(
+            shown_file_name(Path::new("dir/notes.txt")).as_deref(),
+            Some("notes.txt")
+        );
+        assert_eq!(shown_file_name(Path::new("/")), None);
+        #[cfg(windows)]
+        let (a, b) = {
+            use std::os::windows::ffi::OsStringExt;
+            (
+                std::ffi::OsString::from_wide(&[0x0066, 0xD800]),
+                std::ffi::OsString::from_wide(&[0x0066, 0xD801]),
+            )
+        };
+        #[cfg(not(windows))]
+        let (a, b) = {
+            use std::os::unix::ffi::OsStringExt;
+            (
+                std::ffi::OsString::from_vec(vec![b'f', 0xFE]),
+                std::ffi::OsString::from_vec(vec![b'f', 0xFF]),
+            )
+        };
+        let shown_a = shown_file_name(Path::new(&a)).unwrap();
+        let shown_b = shown_file_name(Path::new(&b)).unwrap();
+        assert!(!shown_a.contains('\u{FFFD}'), "{shown_a:?}");
+        assert_ne!(shown_a, shown_b, "two names became one");
+    }
 
     #[test]
     fn test_format_from_extension() {

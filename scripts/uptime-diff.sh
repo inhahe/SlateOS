@@ -108,26 +108,44 @@ run_side() {
     "$bindir/$side" "$@"
 }
 
-# Seconds since midnight of a leading " HH:MM:SS", or empty if absent.
+# Seconds since midnight of the clock in a line, or empty if it has none: the
+# leading " HH:MM:SS" of the status line, or the "YYYY-MM-DD HH:MM:SS" that is
+# the whole of `-s`'s output. The second is a clock too -- the boot time is
+# "now" less the fixture's uptime, so it moves with "now" exactly as the status
+# line's does, and two runs a second apart print two boot times a second apart.
 clock_secs() {
   printf '%s' "$1" | sed -n \
-    's/^ \([0-9][0-9]\):\([0-9][0-9]\):\([0-9][0-9]\) .*/\1 \2 \3/p' \
+    -e 's/^ \([0-9][0-9]\):\([0-9][0-9]\):\([0-9][0-9]\) .*/\1 \2 \3/p' \
+    -e 's/^[0-9]\{4\}-[0-9][0-9]-[0-9][0-9] \([0-9][0-9]\):\([0-9][0-9]\):\([0-9][0-9]\)$/\1 \2 \3/p' \
   | { read -r h m s || exit 0
       printf '%s' "$(( 10#$h * 3600 + 10#$m * 60 + 10#$s ))"; }
 }
 
-# The line with its clock replaced, so the rest compares byte for byte.
+# The line with its clock replaced, so the rest compares byte for byte. `-s`'s
+# date stays in: only the time of day is a reading of the clock.
 without_clock() {
-  printf '%s' "$1" | sed 's/^ [0-9][0-9]:[0-9][0-9]:[0-9][0-9] / <CLOCK> /'
+  printf '%s' "$1" | sed \
+    -e 's/^ [0-9][0-9]:[0-9][0-9]:[0-9][0-9] / <CLOCK> /' \
+    -e 's/^\([0-9]\{4\}-[0-9][0-9]-[0-9][0-9]\) [0-9][0-9]:[0-9][0-9]:[0-9][0-9]$/\1 <CLOCK>/'
 }
 
 compare() {
   local utmp=$1; shift
-  local o_out g_out o_err g_err o_rc g_rc
+  local o_out g_out o_err g_err o_rc g_rc t0 t1 allowed
+  t0=$(date +%s)
   o_out=$(run_side ours "$utmp" "$@" 2>/dev/null); o_rc=$?
   o_err=$(run_side ours "$utmp" "$@" 2>&1 >/dev/null)
   g_out=$(run_side gnu  "$utmp" "$@" 2>/dev/null); g_rc=$?
   g_err=$(run_side gnu  "$utmp" "$@" 2>&1 >/dev/null)
+  t1=$(date +%s)
+  # The two clocks are read up to t1-t0 seconds apart -- four processes, each
+  # set up in a namespace -- so that, and the second boundary, is the most they
+  # can honestly differ by. Never less than the 2 s this always allowed: on an
+  # idle host that is the whole allowance, and it only widens when the host
+  # really did take longer, which a fixed figure cannot know (a loaded run put
+  # 4 s between the two sides of `-sV`).
+  allowed=$(( t1 - t0 + 1 ))
+  [ "$allowed" -lt 2 ] && allowed=2
 
   # NEITHER SIDE RUNNING IS NOT AGREEMENT.  free-diff.sh learned this the
   # expensive way: a PATH bug killed both invocations with rc=127 and 47 cases
@@ -155,15 +173,15 @@ compare() {
   fi
 
   if [ "$o_body" = "$g_body" ] && [ "$o_rc" = "$g_rc" ] && [ "$o_err" = "$g_err" ] \
-     && [ "$skew" -le 2 ]; then
+     && [ "$skew" -le "$allowed" ]; then
     AGREED=yes
   else
     AGREED=no
   fi
-  REPORT=$(printf '  ours (rc=%s): %s  {%s}\n  gnu  (rc=%s): %s  {%s}\n  clock skew: %ss' \
+  REPORT=$(printf '  ours (rc=%s): %s  {%s}\n  gnu  (rc=%s): %s  {%s}\n  clock skew: %ss (allowed %ss)' \
     "$o_rc" "$(printf '%s' "$o_out" | tr '\n' '|')" "$(printf '%s' "$o_err" | tr '\n' '|')" \
     "$g_rc" "$(printf '%s' "$g_out" | tr '\n' '|')" "$(printf '%s' "$g_err" | tr '\n' '|')" \
-    "$skew")
+    "$skew" "$allowed")
 }
 
 report() {

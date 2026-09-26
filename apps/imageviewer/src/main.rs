@@ -23,7 +23,6 @@ use guitk::style::CornerRadii;
 use guitk::theme::with_alpha;
 use guitk::wheel;
 
-mod video;
 
 use std::path::{Path, PathBuf};
 

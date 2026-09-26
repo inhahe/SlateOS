@@ -221,7 +221,6 @@
 # reader, including the lane that wrote it, that a decided question was still
 # open.  A stale blocker is indistinguishable from a real one from the
 # outside, and this one had sat for a week.
-apps/imageviewer/src/video.rs
 apps/installer/src/grub.rs
 apps/procexplorer/src/features.rs
 apps/settings/src/remote.rs

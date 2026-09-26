@@ -1639,10 +1639,16 @@ PIDFILE_WIN="$(to_win_path "$PIDFILE")"
 # experiments measure what host load does to the guest, which a boosted QEMU
 # would hide.
 #
+# BOOT_QEMU_PRIORITY_POLL_SECS (default 30) is how often the class is read back
+# after the raise. A change is a host tool's doing and matters over minutes, so
+# 30 s is plenty; the knob exists so test-boot-test.py can watch a change being
+# reported in seconds rather than half a minute.
+#
 # Windows only (SetPriorityClass through ctypes; the harness already has
 # Python). Run in the background by the caller, so waiting for QEMU to write
 # its pidfile delays nothing. Every outcome is said aloud: a boot that ran at
 # normal priority on a loaded host is evidence someone reading the log needs.
+# The watcher ends when QEMU does; nothing waits for it.
 raise_qemu_priority() {
     if [ "${BOOT_QEMU_PRIORITY:-abovenormal}" = "normal" ]; then
         echo "=== QEMU priority: left as launched (BOOT_QEMU_PRIORITY=normal) ==="
@@ -1675,18 +1681,63 @@ raise_qemu_priority() {
         echo "=== QEMU priority: left as launched (no pidfile after 30 s) ==="
         return 0
     fi
-    # PROCESS_SET_INFORMATION = 0x0200, ABOVE_NORMAL_PRIORITY_CLASS = 0x8000.
-    if "$py" -c 'import ctypes, sys
+    # Raise it, read the class back, then keep reading it every 30 s for as
+    # long as QEMU lives and say when it changes.  "SetPriorityClass
+    # succeeded" is not the same as "QEMU ran above normal": on 2026-09-25
+    # lane B raised its QEMU, logged success, and found it at BelowNormal
+    # minutes later.  Process Lasso's ProBalance, running on this host,
+    # restrains any process above 7% of the CPU -- one TCG QEMU is 8% -- and
+    # held one QEMU at BelowNormal almost continuously until the operator had
+    # QEMU excluded from it (design-decisions.md §963).  Nothing here fights
+    # such a tool; it reports it, so a return of the problem is a line in the
+    # log instead of a mysteriously starved boot.
+    #
+    # PROCESS_SET_INFORMATION 0x0200 | PROCESS_QUERY_LIMITED_INFORMATION 0x1000
+    # | SYNCHRONIZE 0x00100000; ABOVE_NORMAL_PRIORITY_CLASS = 0x8000;
+    # WAIT_TIMEOUT = 0x102.  At most ten changes are reported.
+    #
+    # newline="\n": a Windows Python ends its lines with CRLF, and `read`
+    # would keep the CR in the last field -- the first live run of this printed
+    # "reads back: AboveNormal<CR>) ===" and a seconds count with a CR in it.
+    local what a b c
+    "$py" -u -c 'import ctypes, sys, time
+sys.stdout.reconfigure(newline="\n")
 k = ctypes.windll.kernel32
-h = k.OpenProcess(0x0200, False, int(sys.argv[1]))
-ok = bool(h) and bool(k.SetPriorityClass(h, 0x8000))
-if h:
+names = {0x40: "Idle", 0x4000: "BelowNormal", 0x20: "Normal",
+         0x8000: "AboveNormal", 0x80: "High", 0x100: "Realtime"}
+h = k.OpenProcess(0x0200 | 0x1000 | 0x00100000, False, int(sys.argv[1]))
+if not h:
+    print("open-failed", flush=True)
+    sys.exit(1)
+if not k.SetPriorityClass(h, 0x8000):
+    print("set-failed", flush=True)
     k.CloseHandle(h)
-sys.exit(0 if ok else 1)' "$win_pid" 2>/dev/null; then
-        echo "=== QEMU (pid $win_pid) raised to above-normal priority ==="
-    else
-        echo "=== QEMU priority: could not be raised (pid $win_pid); left as launched ==="
-    fi
+    sys.exit(1)
+last = k.GetPriorityClass(h)
+print("raised", names.get(last, hex(last)), flush=True)
+try:
+    poll_ms = max(100, int(float(sys.argv[2]) * 1000))
+except (IndexError, ValueError):
+    poll_ms = 30000
+t0, reports = time.monotonic(), 0
+while k.WaitForSingleObject(h, poll_ms) == 0x102:
+    now = k.GetPriorityClass(h)
+    if now != last and reports < 10:
+        print("changed", names.get(last, hex(last)), names.get(now, hex(now)),
+              int(time.monotonic() - t0), flush=True)
+        reports += 1
+    last = now
+k.CloseHandle(h)' "$win_pid" "${BOOT_QEMU_PRIORITY_POLL_SECS:-30}" 2>/dev/null \
+        | while read -r what a b c; do
+        case "$what" in
+            raised)
+                echo "=== QEMU (pid $win_pid) raised to above-normal priority (reads back: $a) ===" ;;
+            changed)
+                echo "=== QEMU (pid $win_pid) priority changed from $a to $b, ${c}s after it was raised -- something on the host re-set it (Process Lasso's ProBalance did, before QEMU was excluded from it: design-decisions.md §963) ===" ;;
+            *)
+                echo "=== QEMU priority: could not be raised (pid $win_pid: $what); left as launched ===" ;;
+        esac
+    done
 }
 
 # Reliably terminate the QEMU launched by this script.

@@ -1454,6 +1454,115 @@ def test_the_own_output_scan_is_throttled_but_no_verdict_is_stale():
     check("stall verdict: --stall-secs unset never stalls", off.split(), ["LIVE"])
 
 
+def test_the_qemu_priority_watcher_reads_back_and_reports_a_change():
+    """`raise_qemu_priority` raises QEMU, reads the class back, and says when
+    something on the host changes it -- which is how Process Lasso's
+    ProBalance was found undoing the raise (design-decisions.md §963).
+
+    Run against a stand-in process with the poll at one second. It pins two
+    things a reading of the code missed. Every field is free of the CR that a
+    Windows Python ends its lines with: the first live run logged "reads
+    back: AboveNormal<CR>) ===" and a seconds count with a CR in it, which
+    this harness's universal-newline decoding turns into a split line, so the
+    whole-line matches below fail on it. And the function returns once the
+    process it watches has gone, since the boot's exit path does not wait for
+    it and a watcher that outlived QEMU would hold the log's pipe open.
+    """
+    func = extract_shell_function("raise_qemu_priority")
+    if os.name != "nt":
+        # `uname -s` is not MSYS, so the function must return at once, quietly.
+        tmp = new_fixture()
+        try:
+            with open(os.path.join(tmp, "harness.sh"), "w", encoding="utf-8",
+                      newline="\n") as fh:
+                fh.write(f"{func}\nraise_qemu_priority\necho WATCHER-RETURNED\n")
+            proc = run_harness(tmp, HARNESS_HANG_GUARD_S,
+                               "the QEMU priority watcher")
+        finally:
+            drop_fixture(tmp)
+        check("priority watcher: off Windows it only returns",
+              proc.stdout if proc else None, "WATCHER-RETURNED\n")
+        return
+
+    import ctypes
+    import threading
+
+    kernel32 = ctypes.windll.kernel32
+    stand_in = subprocess.Popen([sys.executable, "-c",
+                                 "import time; time.sleep(3600)"])
+    tmp = new_fixture()
+    outcome: list = []
+    raised = False
+    try:
+        pidfile = os.path.join(tmp, "qemu.pid")
+        with open(pidfile, "w", encoding="ascii", newline="\n") as fh:
+            fh.write(f"{stand_in.pid}\n")
+        with open(os.path.join(tmp, "harness.sh"), "w", encoding="utf-8",
+                  newline="\n") as fh:
+            fh.write(f"PIDFILE={_sq(_shpath(pidfile))}\n"
+                     "BOOT_QEMU_PRIORITY_POLL_SECS=1\n"
+                     f"{func}\n"
+                     "raise_qemu_priority\n"
+                     "echo WATCHER-RETURNED\n")
+
+        def watch():
+            # Carried back rather than raised here: an exception in a thread
+            # is lost, and `HostStarved` has to reach `main` to be declined.
+            try:
+                outcome.append(run_harness(tmp, HARNESS_HANG_GUARD_S,
+                                           "the QEMU priority watcher"))
+            except BaseException as exc:  # noqa: BLE001 -- re-raised below
+                outcome.append(exc)
+
+        runner = threading.Thread(target=watch, daemon=True)
+        runner.start()
+        # PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION.
+        handle = kernel32.OpenProcess(0x0200 | 0x1000, False, stand_in.pid)
+        try:
+            deadline = time.monotonic() + HARNESS_HANG_GUARD_S
+            while runner.is_alive() and time.monotonic() < deadline:
+                if kernel32.GetPriorityClass(handle) == 0x8000:
+                    raised = True
+                    break
+                time.sleep(0.2)
+            # What ProBalance did: put it back to BelowNormal from outside.
+            kernel32.SetPriorityClass(handle, 0x4000)
+        finally:
+            kernel32.CloseHandle(handle)
+        time.sleep(5)          # five one-second polls
+        stand_in.kill()
+        stand_in.wait()
+        runner.join(HARNESS_HANG_GUARD_S)
+    finally:
+        if stand_in.poll() is None:
+            stand_in.kill()
+            stand_in.wait()
+        drop_fixture(tmp)
+
+    if outcome and isinstance(outcome[0], BaseException):
+        raise outcome[0]
+    proc = outcome[0] if outcome else None
+    check("priority watcher: finished (did not hang)", proc is not None, True)
+    if proc is None:
+        return
+    lines = proc.stdout.splitlines()
+    pid = stand_in.pid
+    check("priority watcher: the stand-in was raised to AboveNormal",
+          raised, True)
+    check("priority watcher: says the class it read back, whole",
+          f"=== QEMU (pid {pid}) raised to above-normal priority "
+          "(reads back: AboveNormal) ===" in lines, True)
+    changed = re.compile(
+        rf"^=== QEMU \(pid {pid}\) priority changed from AboveNormal to "
+        r"BelowNormal, \d+s after it was raised -- something on the host "
+        r"re-set it \(.*\) ===$")
+    if not check("priority watcher: reports the outside change, whole",
+                 any(changed.match(line) for line in lines), True):
+        print("      output was:\n" + proc.stdout)
+    check("priority watcher: returns once the process is gone",
+          lines[-1:] == ["WATCHER-RETURNED"], True)
+
+
 def _sq(text):
     """Single-quote for POSIX sh."""
     return "'" + text.replace("'", "'\\''") + "'"

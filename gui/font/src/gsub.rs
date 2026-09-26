@@ -138,7 +138,10 @@ use crate::would::would_apply;
 ///
 /// The unconditional ones come first so that "every feature a glyph always
 /// gets" is one contiguous run of bits ([`ALWAYS`]); the four positional ones
-/// follow, one bit each.
+/// follow, one bit each. `rvrn` opens the list: it is on for every glyph, and
+/// [`Substitutions::apply_stages`] runs it in a stage of its own before any
+/// other, as HarfBuzz does -- a variable font's substitutions for its
+/// instance are made before anything reads the glyphs.
 ///
 /// The positioning-sounding tags at the end of the unconditional run are here
 /// for the same reason the substitution-sounding ones are in
@@ -151,8 +154,8 @@ use crate::would::would_apply;
 /// against it.
 pub(crate) const FEATURES: &[&[u8; 4]] = &[
     // Unconditional: every glyph is eligible for all of these.
-    b"ccmp", b"locl", b"liga", b"rlig", b"clig", b"calt", b"rclt", b"abvm", b"blwm", b"curs",
-    b"dist", b"kern", b"mark", b"mkmk",
+    b"rvrn", b"ccmp", b"locl", b"liga", b"rlig", b"clig", b"calt", b"rclt", b"abvm", b"blwm",
+    b"curs", b"dist", b"kern", b"mark", b"mkmk",
     // Positional: a glyph is eligible for at most one, and only when the
     // cursive joining pass says so.
     b"isol", b"init", b"medi", b"fina",
@@ -196,37 +199,41 @@ pub(crate) const FEATURES: &[&[u8; 4]] = &[
 /// one is on by default for the glyphs its shaper says, and none from here on
 /// is on unless asked for. `the_optional_features_close_the_list` keeps it in
 /// step.
-pub(crate) const OPTIONAL_FROM: usize = 38;
+pub(crate) const OPTIONAL_FROM: usize = 39;
 
-/// The feature mask every glyph carries: bits for the fourteen unconditional
+/// The feature mask every glyph carries: bits for the fifteen unconditional
 /// entries of [`FEATURES`], and none of the four positional ones.
 ///
 /// Written out rather than computed from `FEATURES`, so that no shift or
 /// subtraction appears in a path the arithmetic lints police. The two are
 /// kept in step by `the_masks_match_the_feature_list`, which fails if an
 /// entry is ever inserted or reordered.
-const ALWAYS: u64 = 0b0011_1111_1111_1111;
-/// The bit for `isol`, the fifteenth entry of [`FEATURES`].
-const ISOL: u64 = 0b0100_0000_0000_0000;
-/// The bit for `init`, the sixteenth.
-const INIT: u64 = 0b1000_0000_0000_0000;
-/// The bit for `medi`, the seventeenth.
-const MEDI: u64 = 0b1_0000_0000_0000_0000;
-/// The bit for `fina`, the eighteenth.
-const FINA: u64 = 0b10_0000_0000_0000_0000;
+const ALWAYS: u64 = 0b0111_1111_1111_1111;
+/// The bit for `isol`, the sixteenth entry of [`FEATURES`].
+const ISOL: u64 = 0b1000_0000_0000_0000;
+/// The bit for `init`, the seventeenth.
+const INIT: u64 = 0b1_0000_0000_0000_0000;
+/// The bit for `medi`, the eighteenth.
+const MEDI: u64 = 0b10_0000_0000_0000_0000;
+/// The bit for `fina`, the nineteenth.
+const FINA: u64 = 0b100_0000_0000_0000_0000;
 
-/// The bit for `calt`, the sixth entry of [`FEATURES`].
+/// The bit for `calt`, the seventh entry of [`FEATURES`].
 ///
 /// Named because the Hangul pass has to *clear* it, which is the one place a
 /// constructor takes a bit away rather than adding one.
-const CALT: u64 = 0b10_0000;
+const CALT: u64 = 0b100_0000;
 
-/// The bit for `ljmo`, the thirty-fifth entry of [`FEATURES`].
-const LJMO: u64 = 1 << 34;
-/// The bit for `vjmo`, the thirty-sixth.
-const VJMO: u64 = 1 << 35;
-/// The bit for `tjmo`, the thirty-seventh.
-const TJMO: u64 = 1 << 36;
+/// The bit for `ljmo`, the thirty-sixth entry of [`FEATURES`].
+const LJMO: u64 = 1 << 35;
+/// The bit for `vjmo`, the thirty-seventh.
+const VJMO: u64 = 1 << 36;
+/// The bit for `tjmo`, the thirty-eighth.
+const TJMO: u64 = 1 << 37;
+
+/// The bit for `rvrn`, the first entry of [`FEATURES`]: on for every glyph,
+/// and applied in a stage of its own before every other.
+const RVRN: u64 = 1;
 
 /// Every feature at once: the one stage a caller with no staging plan runs.
 ///
@@ -931,8 +938,28 @@ impl Substitutions {
     /// an error. Monospace faces in particular have no ligatures by design: a
     /// ligature would break the grid.
     pub(crate) fn parse(data: &[u8], gsub: Option<Span>, gdef: Option<Span>) -> Option<Self> {
+        Self::parse_varied(data, gsub, gdef, &[])
+    }
+
+    /// [`parse`](Self::parse) where a feature variation swaps in the feature
+    /// tables `alternates` names -- one [`Variation`](crate::otl::Variation)'s
+    /// -- which is what a variable face substitutes at the instances it holds
+    /// at.
+    pub(crate) fn parse_varied(
+        data: &[u8],
+        gsub: Option<Span>,
+        gdef: Option<Span>,
+        alternates: &[(u16, usize)],
+    ) -> Option<Self> {
         let base = gsub?.off;
-        let lookups = ByScript::parse(data, base, FEATURES, TOP_LEVEL, LOOKUP_EXTENSION)?;
+        let lookups = ByScript::parse_varied(
+            data,
+            base,
+            FEATURES,
+            TOP_LEVEL,
+            LOOKUP_EXTENSION,
+            alternates,
+        )?;
         Some(Self {
             lookups,
             lookup_list: lookup_list(data, base)?,
@@ -1010,7 +1037,33 @@ impl Substitutions {
         // per-syllable stage would otherwise allocate once per syllable per
         // lookup, and Devanagari text is nothing but syllables.
         let mut piece: Vec<SubGlyph> = Vec::new();
+        // `rvrn` first, in a stage of its own, whatever the shaper's stages
+        // are: HarfBuzz enables it and pauses before collecting anything
+        // else, so a variable font's substitutions for its instance are made
+        // before any other feature reads the glyphs. Every glyph carries the
+        // bit (it is in `ALWAYS`), no shaper stages it, and it is neither
+        // per-syllable nor manual about joiners.
+        {
+            let reach = glyphs.iter().fold(0u64, |m, g| m | g.mask);
+            ctx.dirty = true;
+            for (lookup, mask) in self.lookups.for_script(script, lang) {
+                if mask & RVRN == 0 || reach & RVRN == 0 {
+                    continue;
+                }
+                if ctx.dirty {
+                    ctx.run = Digest::EMPTY;
+                    for glyph in glyphs.iter() {
+                        ctx.run.add(glyph.gid);
+                    }
+                    ctx.dirty = false;
+                }
+                ctx.mask = RVRN;
+                apply_lookup(data, lookup, glyphs, &mut ctx);
+            }
+        }
         for (i, &stage) in staging.stages.iter().enumerate() {
+            // `rvrn` has had its stage.
+            let stage = stage & !RVRN;
             // `between` is free to rewrite the run between stages, so the
             // digest carried over from the last one may no longer describe it.
             ctx.dirty = true;
@@ -3517,6 +3570,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("{tag:?} is not in FEATURES"));
             1u64 << i
         };
+        assert_eq!(bit(b"rvrn"), RVRN);
+        // `rvrn` is on for every glyph.
+        assert_eq!(ALWAYS & RVRN, RVRN);
         assert_eq!(bit(b"isol"), ISOL);
         assert_eq!(bit(b"init"), INIT);
         assert_eq!(bit(b"medi"), MEDI);
@@ -3545,7 +3601,7 @@ mod tests {
         // positional one would make it discontiguous and this fail.
         let positional = ISOL | INIT | MEDI | FINA;
         assert_eq!(ALWAYS.trailing_ones(), ALWAYS.count_ones());
-        assert_eq!(ALWAYS | positional, (1u64 << 18) - 1);
+        assert_eq!(ALWAYS | positional, (1u64 << 19) - 1);
         assert_eq!(ALWAYS & positional, 0);
     }
 
@@ -3603,6 +3659,211 @@ mod tests {
         }
         subs.apply(&data, None, None, &mut glyphs);
         assert_eq!(glyphs.iter().map(|g| g.gid).collect::<Vec<_>>(), [10, 16]);
+    }
+
+    // --- feature variations -----------------------------------------------
+
+    /// A condition: axis, then the range as F2DOT14; `None` stands for a
+    /// condition of format 2, which HarfBuzz does not evaluate.
+    type Cond = Option<(u16, i16, i16)>;
+
+    /// A `FeatureVariations` record for [`gsub_varied`]: its conditions
+    /// (`None` for no ConditionSet) and its `(feature index, lookups)`
+    /// substitutions.
+    type Record<'a> = (Option<&'a [Cond]>, &'a [(u16, &'a [u16])]);
+
+    /// A `GSUB` 1.1: one `DFLT` language system listing every feature of
+    /// `features` (`(tag, lookups)`), a single-substitution lookup per entry
+    /// of `subs`, and a `FeatureVariations` record per entry of `records` --
+    /// its conditions (`None` for no ConditionSet at all) and its
+    /// `(feature index, lookups)` substitutions.
+    fn gsub_varied(
+        features: &[(&[u8; 4], &[u16])],
+        subs: &[Vec<u8>],
+        records: &[Record<'_>],
+    ) -> Vec<u8> {
+        let b16 = |v: u16| v.to_be_bytes();
+        let b32 = |v: usize| u32::try_from(v).unwrap().to_be_bytes();
+        let feature = |lookups: &[u16]| {
+            let mut t = Vec::new();
+            t.extend_from_slice(&b16(0));
+            t.extend_from_slice(&b16(u16::try_from(lookups.len()).unwrap()));
+            for &l in lookups {
+                t.extend_from_slice(&b16(l));
+            }
+            t
+        };
+        // ScriptList: DFLT, whose default system lists features 0..n.
+        let n = features.len();
+        let mut scripts = Vec::new();
+        scripts.extend_from_slice(&b16(1));
+        scripts.extend_from_slice(b"DFLT");
+        scripts.extend_from_slice(&b16(8));
+        scripts.extend_from_slice(&b16(4)); // defaultLangSys
+        scripts.extend_from_slice(&b16(0));
+        scripts.extend_from_slice(&b16(0)); // lookupOrder
+        scripts.extend_from_slice(&b16(0xFFFF));
+        scripts.extend_from_slice(&b16(u16::try_from(n).unwrap()));
+        for i in 0..n {
+            scripts.extend_from_slice(&b16(u16::try_from(i).unwrap()));
+        }
+        // FeatureList.
+        let mut list = Vec::new();
+        list.extend_from_slice(&b16(u16::try_from(n).unwrap()));
+        let mut tables = Vec::new();
+        for (tag, lookups) in features {
+            list.extend_from_slice(*tag);
+            list.extend_from_slice(&b16(u16::try_from(2 + n * 6 + tables.len()).unwrap()));
+            tables.extend(feature(lookups));
+        }
+        list.extend(tables);
+        // LookupList: one single-substitution lookup per subtable.
+        let mut lookups = Vec::new();
+        lookups.extend_from_slice(&b16(u16::try_from(subs.len()).unwrap()));
+        let mut bodies = Vec::new();
+        for sub in subs {
+            lookups.extend_from_slice(&b16(
+                u16::try_from(2 + subs.len() * 2 + bodies.len()).unwrap()
+            ));
+            bodies.extend_from_slice(&b16(LOOKUP_SINGLE));
+            bodies.extend_from_slice(&b16(0));
+            bodies.extend_from_slice(&b16(1));
+            bodies.extend_from_slice(&b16(8));
+            bodies.extend_from_slice(sub);
+        }
+        lookups.extend(bodies);
+        // FeatureVariations.
+        let mut fv = Vec::new();
+        fv.extend_from_slice(&b16(1));
+        fv.extend_from_slice(&b16(0));
+        fv.extend_from_slice(&b32(records.len()));
+        let mut tail = Vec::new();
+        let head = 8 + records.len() * 8;
+        for (conditions, swaps) in records {
+            match conditions {
+                None => fv.extend_from_slice(&b32(0)),
+                Some(conds) => {
+                    fv.extend_from_slice(&b32(head + tail.len()));
+                    let mut set = Vec::new();
+                    set.extend_from_slice(&b16(u16::try_from(conds.len()).unwrap()));
+                    let mut body = Vec::new();
+                    for cond in *conds {
+                        set.extend_from_slice(&b32(2 + conds.len() * 4 + body.len()));
+                        match cond {
+                            Some((axis, min, max)) => {
+                                body.extend_from_slice(&b16(1));
+                                body.extend_from_slice(&b16(*axis));
+                                body.extend_from_slice(&min.to_be_bytes());
+                                body.extend_from_slice(&max.to_be_bytes());
+                            }
+                            None => {
+                                body.extend_from_slice(&b16(2));
+                                body.extend_from_slice(&[0; 6]);
+                            }
+                        }
+                    }
+                    set.extend(body);
+                    tail.extend(set);
+                }
+            }
+            fv.extend_from_slice(&b32(head + tail.len()));
+            let mut sub = Vec::new();
+            sub.extend_from_slice(&b16(1));
+            sub.extend_from_slice(&b16(0));
+            sub.extend_from_slice(&b16(u16::try_from(swaps.len()).unwrap()));
+            let mut alts = Vec::new();
+            for (index, lookups) in *swaps {
+                sub.extend_from_slice(&b16(*index));
+                sub.extend_from_slice(&b32(6 + swaps.len() * 6 + alts.len()));
+                alts.extend(feature(lookups));
+            }
+            sub.extend(alts);
+            tail.extend(sub);
+        }
+        fv.extend(tail);
+
+        let scripts_at = 14;
+        let features_at = scripts_at + scripts.len();
+        let lookups_at = features_at + list.len();
+        let fv_at = lookups_at + lookups.len();
+        let mut out = Vec::new();
+        out.extend_from_slice(&b16(1));
+        out.extend_from_slice(&b16(1));
+        out.extend_from_slice(&b16(u16::try_from(scripts_at).unwrap()));
+        out.extend_from_slice(&b16(u16::try_from(features_at).unwrap()));
+        out.extend_from_slice(&b16(u16::try_from(lookups_at).unwrap()));
+        out.extend_from_slice(&b32(fv_at));
+        out.extend(scripts);
+        out.extend(list);
+        out.extend(lookups);
+        out.extend(fv);
+        out
+    }
+
+    /// `glyphs` substituted with the tables in force where `variation`
+    /// (an index into the table's records) holds, or the table's own.
+    fn subst_at(data: &[u8], variation: Option<usize>, glyphs: &[u16]) -> Vec<u16> {
+        let alternates = variation
+            .map(|i| crate::otl::variations(data, 0)[i].alternates.clone())
+            .unwrap_or_default();
+        let subs = Substitutions::parse_varied(data, Some(span(0, data.len())), None, &alternates)
+            .unwrap();
+        subst(data, &subs, glyphs)
+    }
+
+    #[test]
+    fn a_feature_variation_swaps_its_features_lookups_where_it_holds() {
+        // `liga` turns 10 into 11 -- or, where weight (axis 0) is at least
+        // half way to its maximum, into 12.
+        let data = gsub_varied(
+            &[(b"liga", &[0])],
+            &[single_delta(&[10], 1), single_delta(&[10], 2)],
+            &[(Some(&[Some((0, 0x2000, 0x4000))]), &[(0, &[1])])],
+        );
+        let records = crate::otl::variations(&data, 0);
+        assert_eq!(records.len(), 1);
+        assert!(records[0].holds(&[0x2000]));
+        assert!(records[0].holds(&[0x4000]));
+        assert!(!records[0].holds(&[0x1FFF]));
+        // An axis past the end of the coordinates is at its default, 0.
+        assert!(!records[0].holds(&[]));
+        assert_eq!(subst_at(&data, None, &[10]), [11]);
+        assert_eq!(subst_at(&data, Some(0), &[10]), [12]);
+    }
+
+    #[test]
+    fn conditions_hold_as_harfbuzz_evaluates_them() {
+        let data = gsub_varied(
+            &[(b"liga", &[0])],
+            &[single_delta(&[10], 1)],
+            &[
+                // No ConditionSet: always.
+                (None, &[]),
+                // Two conditions: both.
+                (Some(&[Some((0, 0, 0x4000)), Some((1, -0x4000, 0))]), &[]),
+                // A format HarfBuzz does not evaluate: never.
+                (Some(&[None]), &[]),
+            ],
+        );
+        let records = crate::otl::variations(&data, 0);
+        assert!(records[0].holds(&[]) && records[0].holds(&[0x4000, 0x4000]));
+        assert!(records[1].holds(&[0x1000, -0x1000]));
+        assert!(!records[1].holds(&[0x1000, 0x1000]));
+        assert!(!records[2].holds(&[]));
+    }
+
+    #[test]
+    fn rvrn_is_applied_before_every_other_feature() {
+        // `liga` (lookup 0) turns 11 into 20; `rvrn` (lookup 1) turns 10 into
+        // 11. In LookupList order `liga` would run first and see only 10;
+        // `rvrn` has a stage of its own before it, as in HarfBuzz, so the 11
+        // it makes is `liga`'s to rewrite.
+        let data = gsub_varied(
+            &[(b"liga", &[0]), (b"rvrn", &[1])],
+            &[single_delta(&[11], 9), single_delta(&[10], 1)],
+            &[],
+        );
+        assert_eq!(subst_at(&data, None, &[10]), [20]);
     }
 
     // --- reverse chaining -------------------------------------------------

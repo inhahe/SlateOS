@@ -63,7 +63,7 @@ except ImportError:  # pragma: no cover - a missing dependency is a setup error
 # `the_survey_matches_the_shapers_feature_list` in `otl.rs` pins them equal.
 WANTED = frozenset(
     """
-    ccmp locl liga rlig clig calt rclt abvm blwm curs dist kern mark mkmk
+    rvrn ccmp locl liga rlig clig calt rclt abvm blwm curs dist kern mark mkmk
     isol init medi fina
     nukt akhn rphf rkrf pref blwf abvf half pstf vatu cjct pres abvs blws
     psts haln

@@ -880,7 +880,19 @@ pub struct Face {
     /// Glyph substitution from `GSUB`. `None` for a face with no `GSUB`, or
     /// one whose `GSUB` carries no default-on feature reaching a lookup type
     /// this can apply.
+    ///
+    /// The face's own feature tables. Where a variable face's
+    /// `FeatureVariations` record holds, its tables are in
+    /// [`gsub_variations`](Self::gsub_variations) instead; see
+    /// [`substitutions_at`](Face::substitutions_at).
     substitutions: Option<Substitutions>,
+    /// A variable face's `GSUB` feature variations, in record order, each
+    /// with the substitutions in force at the instances it holds at: its
+    /// alternate feature tables swapped in (HarfBuzz compiles its plan with
+    /// the first record that holds). Built with the face, because a variable
+    /// face with them is rare -- three of this host's 556 -- and each has a
+    /// record or two. Empty for every other face.
+    gsub_variations: Vec<(otl::Variation, Option<Substitutions>)>,
     /// Which glyphs this face calls combining marks, from `GPOS` mark coverage
     /// and `GDEF` glyph classes. `None` for the many faces that only ever
     /// expect precomposed characters.
@@ -892,8 +904,11 @@ pub struct Face {
     marks: Option<MarkPositioning>,
     /// Every `GPOS` lookup the positioning pass can apply, resolved once per
     /// script the face registers. `None` for a face with no `GPOS`, or one
-    /// whose `GPOS` reaches nothing of a type the pass knows.
+    /// whose `GPOS` reaches nothing of a type the pass knows. The face's own
+    /// feature tables, as [`substitutions`](Self::substitutions) are.
     positioning: Option<Positioning>,
+    /// `GPOS`'s feature variations, as [`gsub_variations`](Self::gsub_variations).
+    gpos_variations: Vec<(otl::Variation, Option<Positioning>)>,
     /// Whether the file carries a `GPOS` table at all — which is a different
     /// question from whether any of the three things this crate reads out of
     /// it (kerning, `mark`, `mkmk`) is present. See
@@ -1268,9 +1283,31 @@ impl Face {
         // the glyph classes it defines: "ignore marks" means nothing until
         // something has said which glyphs are marks.
         let substitutions = Substitutions::parse(&data, gsub, gdef);
+        let gsub_variations = gsub
+            .map(|span| {
+                otl::variations(&data, span.off)
+                    .into_iter()
+                    .map(|v| {
+                        let subs = Substitutions::parse_varied(&data, gsub, gdef, &v.alternates);
+                        (v, subs)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let marks = MarkPositioning::parse(&data, gpos, gdef);
         // And again: the feature walk is per face, the selection per run.
         let positioning = gpos.and_then(|span| Positioning::parse(&data, span, gdef));
+        let gpos_variations = gpos
+            .map(|span| {
+                otl::variations(&data, span.off)
+                    .into_iter()
+                    .map(|v| {
+                        let pos = Positioning::parse_varied(&data, span, gdef, &v.alternates);
+                        (v, pos)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         // Four bytes per script and a handful of scripts per face, so this is
         // cheaper than the offset walk that finds it and is wanted on a path
         // that runs once per shaped run.
@@ -1335,8 +1372,10 @@ impl Face {
             monospaced,
             kerning,
             substitutions,
+            gsub_variations,
             marks,
             positioning,
+            gpos_variations,
             has_positioning: gpos.is_some(),
             gpos_scripts,
             gsub_scripts,
@@ -2340,7 +2379,21 @@ impl Face {
         lang: Option<Lang>,
         glyphs: &mut Vec<SubGlyph>,
     ) {
-        let subs = self.substitutions.as_ref();
+        self.substitute_at(script, lang, glyphs, &[]);
+    }
+
+    /// [`substitute`](Self::substitute) at the variation instance `coords`
+    /// (normalized, as [`var::Coords::as_slice`] gives them; empty for the
+    /// default instance), with the feature tables a variable face's
+    /// `FeatureVariations` put in force there.
+    pub(crate) fn substitute_at(
+        &self,
+        script: Option<ScriptTags>,
+        lang: Option<Lang>,
+        glyphs: &mut Vec<SubGlyph>,
+        coords: &[i16],
+    ) {
+        let subs = self.substitutions_at(coords);
         let chosen = self.gsub_chosen_script(script);
         // Khmer is asked about first and without the `shaped_as_default`
         // filter, because `khmr` is in
@@ -2445,7 +2498,26 @@ impl Face {
     /// all", and to let a caller skip the pass entirely.
     #[must_use]
     pub fn has_substitutions(&self) -> bool {
-        self.substitutions.is_some()
+        self.substitutions.is_some() || self.gsub_variations.iter().any(|(_, s)| s.is_some())
+    }
+
+    /// The substitutions in force at the variation instance `coords`: those
+    /// of the first `FeatureVariations` record that holds there, as HarfBuzz
+    /// compiles its plan, or the face's own where none does.
+    pub(crate) fn substitutions_at(&self, coords: &[i16]) -> Option<&Substitutions> {
+        match self.gsub_variations.iter().find(|(v, _)| v.holds(coords)) {
+            Some((_, subs)) => subs.as_ref(),
+            None => self.substitutions.as_ref(),
+        }
+    }
+
+    /// The positioning in force at `coords`, as
+    /// [`substitutions_at`](Self::substitutions_at) chooses.
+    pub(crate) fn positioning_at(&self, coords: &[i16]) -> Option<&Positioning> {
+        match self.gpos_variations.iter().find(|(v, _)| v.holds(coords)) {
+            Some((_, pos)) => pos.as_ref(),
+            None => self.positioning.as_ref(),
+        }
     }
 
     /// Whether `glyph` is a combining mark — drawn onto what precedes it
@@ -2484,9 +2556,13 @@ impl Face {
     ///
     /// `None` when the face has no `GPOS` the pass can use, which leaves the
     /// caller with the nominal advances it already had.
-    #[must_use]
-    pub(crate) fn position(&self, run: &Run<'_>) -> Option<Vec<Adjust>> {
-        Some(self.positioning.as_ref()?.apply(&self.data, run))
+    ///
+    /// `coords` is the variation instance (normalized, as
+    /// [`var::Coords::as_slice`] gives them; empty for the default), which
+    /// chooses the feature tables a variable face's `FeatureVariations` put in
+    /// force -- see [`positioning_at`](Self::positioning_at).
+    pub(crate) fn position_at(&self, run: &Run<'_>, coords: &[i16]) -> Option<Vec<Adjust>> {
+        Some(self.positioning_at(coords)?.apply(&self.data, run))
     }
 
     /// Whether this face has any `GPOS` lookup the positioning pass can apply.
@@ -2495,7 +2571,7 @@ impl Face {
     /// mark flag per glyph — for the faces that would do nothing with them.
     #[must_use]
     pub(crate) fn has_gpos_lookups(&self) -> bool {
-        self.positioning.is_some()
+        self.positioning.is_some() || self.gpos_variations.iter().any(|(_, p)| p.is_some())
     }
 
     /// Whether the face ships a legacy `kern` table this can read, whatever
@@ -2523,9 +2599,13 @@ impl Face {
     /// switched on by `!has_gpos_kern`, and `has_gpos_kern` is looked up in the
     /// shaping plan's *selected* script.
     #[must_use]
-    pub(crate) fn gpos_kerns(&self, script: Option<ScriptTags>, lang: Option<Lang>) -> bool {
-        self.positioning
-            .as_ref()
+    pub(crate) fn gpos_kerns(
+        &self,
+        script: Option<ScriptTags>,
+        lang: Option<Lang>,
+        coords: &[i16],
+    ) -> bool {
+        self.positioning_at(coords)
             .is_some_and(|gpos| gpos.kerns(script, lang))
     }
 

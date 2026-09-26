@@ -83,7 +83,7 @@ use alloc::vec::Vec;
 use crate::digest::Digest;
 use crate::lang::Lang;
 use crate::script::ScriptTags;
-use crate::sfnt::{u16_at, u32_at};
+use crate::sfnt::{i16_at, u16_at, u32_at};
 
 /// The key under which a script's *default* language system is filed in
 /// [`ByScript::scripts`].
@@ -512,6 +512,20 @@ impl ByScript {
         want: &[u16],
         extension: u16,
     ) -> Option<Self> {
+        Self::parse_varied(data, base, tags, want, extension, &[])
+    }
+
+    /// [`parse`](Self::parse) at an instance where a feature variation swaps
+    /// the feature tables `alternates` names (feature index to the table in
+    /// force, sorted) for the table's own -- one [`Variation`]'s.
+    pub(crate) fn parse_varied(
+        data: &[u8],
+        base: usize,
+        tags: &[&[u8; 4]],
+        want: &[u16],
+        extension: u16,
+        alternates: &[(u16, usize)],
+    ) -> Option<Self> {
         let lookup_list = lookup_list(data, base)?;
         let lookup_count = u16_at(data, lookup_list)?;
 
@@ -526,7 +540,8 @@ impl ByScript {
             // chain belongs to the *run*, in `for_script`, and applying it
             // here would file `DFLT`'s lookups under every script's name.
             let exactly = Some(ScriptTags::exactly(tag));
-            let Some((_, default)) = lookup_indices(data, base, tags, exactly, None) else {
+            let Some((_, default)) = lookup_indices(data, base, tags, exactly, None, alternates)
+            else {
                 continue;
             };
             union.extend(
@@ -550,9 +565,14 @@ impl ByScript {
                 // is the list `selection` consults to decide which of a
                 // language's candidate tags the face answers to.
                 langs.push((tag, lang));
-                let Some((_, indices)) =
-                    lookup_indices(data, base, tags, exactly, Some(Lang::from_tag(lang)))
-                else {
+                let Some((_, indices)) = lookup_indices(
+                    data,
+                    base,
+                    tags,
+                    exactly,
+                    Some(Lang::from_tag(lang)),
+                    alternates,
+                ) else {
                     continue;
                 };
                 if indices == default {
@@ -829,9 +849,7 @@ pub(crate) fn collect_lookups(
             push_feature_lookups(data, table, &mut lookups);
         }
     }
-    if let Some(variations) = feature_variations(data, base) {
-        variation_lookups(data, variations, &features, &mut lookups);
-    }
+    variation_lookups(data, base, &features, &mut lookups);
     lookups.sort_unstable();
     lookups.dedup();
     lookups
@@ -883,6 +901,134 @@ fn feature_variations(data: &[u8], base: usize) -> Option<usize> {
     base.checked_add(usize::try_from(off).ok()?)
 }
 
+/// One `FeatureVariationRecord`: the instances it applies at, and the
+/// feature tables it swaps in there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Variation {
+    /// Its conditions -- an axis and a range of normalized coordinates each,
+    /// all of which must hold -- or `None` when one is of a format HarfBuzz
+    /// does not evaluate, which then never holds.
+    conditions: Option<Vec<(u16, i16, i16)>>,
+    /// Feature index to the alternate Feature table in force where the record
+    /// holds, sorted by index, the first record of a duplicated index kept.
+    pub(crate) alternates: Vec<(u16, usize)>,
+}
+
+impl Variation {
+    /// Whether the record holds at `coords`, normalized (F2DOT14) and after
+    /// `avar`: HarfBuzz's `ConditionSet::evaluate`, where an axis past the end
+    /// of `coords` is at its default, 0.
+    pub(crate) fn holds(&self, coords: &[i16]) -> bool {
+        self.conditions.as_ref().is_some_and(|all| {
+            all.iter().all(|&(axis, min, max)| {
+                let at = coords.get(usize::from(axis)).copied().unwrap_or(0);
+                min <= at && at <= max
+            })
+        })
+    }
+}
+
+/// A `GSUB`/`GPOS` table's `FeatureVariations` records, in order: the first
+/// that holds at an instance is the one in force there
+/// (`hb_ot_layout_table_find_feature_variations`). Empty for a table without
+/// them.
+pub(crate) fn variations(data: &[u8], base: usize) -> Vec<Variation> {
+    let Some(table) = feature_variations(data, base) else {
+        return Vec::new();
+    };
+    let Some(count) = table
+        .checked_add(4)
+        .and_then(|o| u32_at(data, o))
+        .and_then(|c| usize::try_from(c).ok())
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for i in 0..count.min(MAX_VARIATION_RECORDS) {
+        let Some(record) = i
+            .checked_mul(8)
+            .and_then(|d| table.checked_add(8)?.checked_add(d))
+        else {
+            break;
+        };
+        let (Some(conditions_at), Some(substitution_at)) = (
+            u32_at(data, record),
+            record.checked_add(4).and_then(|o| u32_at(data, o)),
+        ) else {
+            break;
+        };
+        let conditions = if conditions_at == 0 {
+            // No ConditionSet is a set of no conditions, which always holds.
+            Some(Vec::new())
+        } else {
+            usize::try_from(conditions_at)
+                .ok()
+                .and_then(|off| table.checked_add(off))
+                .and_then(|set| condition_set(data, set))
+        };
+        let mut alternates = Vec::new();
+        if let Some(substitution) = usize::try_from(substitution_at)
+            .ok()
+            .filter(|&off| off != 0)
+            .and_then(|off| table.checked_add(off))
+        {
+            let records = substitution
+                .checked_add(4)
+                .and_then(|o| u16_at(data, o))
+                .unwrap_or(0);
+            for j in 0..usize::from(records).min(MAX_VARIATION_RECORDS) {
+                let Some(at) = j
+                    .checked_mul(6)
+                    .and_then(|d| substitution.checked_add(6)?.checked_add(d))
+                else {
+                    break;
+                };
+                let (Some(index), Some(feature)) = (
+                    u16_at(data, at),
+                    at.checked_add(2)
+                        .and_then(|o| u32_at(data, o))
+                        .and_then(|off| substitution.checked_add(usize::try_from(off).ok()?)),
+                ) else {
+                    continue;
+                };
+                alternates.push((index, feature));
+            }
+        }
+        // HarfBuzz finds a feature's substitute by a linear search, first
+        // match winning; a stable sort keeps that one first.
+        alternates.sort_by_key(|&(index, _)| index);
+        alternates.dedup_by_key(|&mut (index, _)| index);
+        out.push(Variation {
+            conditions,
+            alternates,
+        });
+    }
+    out
+}
+
+/// A ConditionSet's axis-range conditions, or `None` when one is of another
+/// format -- which HarfBuzz evaluates as never holding, and so the set too.
+fn condition_set(data: &[u8], set: usize) -> Option<Vec<(u16, i16, i16)>> {
+    let count = usize::from(u16_at(data, set)?);
+    let mut out = Vec::with_capacity(count.min(64));
+    for k in 0..count.min(MAX_VARIATION_RECORDS) {
+        let condition = k
+            .checked_mul(4)
+            .and_then(|d| set.checked_add(2)?.checked_add(d))
+            .and_then(|o| u32_at(data, o))
+            .and_then(|off| set.checked_add(usize::try_from(off).ok()?))?;
+        // ConditionFormat1: format, axisIndex, then the range as F2DOT14.
+        if u16_at(data, condition)? != 1 {
+            return None;
+        }
+        let axis = u16_at(data, condition.checked_add(2)?)?;
+        let min = i16_at(data, condition.checked_add(4)?)?;
+        let max = i16_at(data, condition.checked_add(6)?)?;
+        out.push((axis, min, max));
+    }
+    Some(out)
+}
+
 /// The most `FeatureVariations` records, and substitutions per record, read:
 /// a real font has a handful; this bounds what a hostile one can make the
 /// walk cost.
@@ -892,49 +1038,11 @@ const MAX_VARIATION_RECORDS: usize = 1 << 12;
 /// table substitutes for one of `features` (sorted), whatever the record's
 /// conditions -- HarfBuzz's `feature_variation_collect_lookups` with no
 /// substitutes map.
-fn variation_lookups(data: &[u8], table: usize, features: &[u16], out: &mut Vec<u16>) {
-    let Some(count) = table
-        .checked_add(4)
-        .and_then(|o| u32_at(data, o))
-        .and_then(|c| usize::try_from(c).ok())
-    else {
-        return;
-    };
-    for i in 0..count.min(MAX_VARIATION_RECORDS) {
-        let Some(substitution) = i
-            .checked_mul(8)
-            .and_then(|d| table.checked_add(8)?.checked_add(d)?.checked_add(4))
-            .and_then(|o| u32_at(data, o))
-            .filter(|&off| off != 0)
-            .and_then(|off| table.checked_add(usize::try_from(off).ok()?))
-        else {
-            continue;
-        };
-        // FeatureTableSubstitution: version (two u16s), a count, then records
-        // of a feature index and a 32-bit offset from this table.
-        let records = substitution
-            .checked_add(4)
-            .and_then(|o| u16_at(data, o))
-            .unwrap_or(0);
-        for j in 0..usize::from(records).min(MAX_VARIATION_RECORDS) {
-            let Some(at) = j
-                .checked_mul(6)
-                .and_then(|d| substitution.checked_add(6)?.checked_add(d))
-            else {
-                continue;
-            };
-            let Some(index) = u16_at(data, at) else {
-                continue;
-            };
-            if features.binary_search(&index).is_err() {
-                continue;
-            }
-            if let Some(alternate) = at
-                .checked_add(2)
-                .and_then(|o| u32_at(data, o))
-                .and_then(|off| substitution.checked_add(usize::try_from(off).ok()?))
-            {
-                push_feature_lookups(data, alternate, out);
+fn variation_lookups(data: &[u8], base: usize, features: &[u16], out: &mut Vec<u16>) {
+    for variation in variations(data, base) {
+        for &(index, feature) in &variation.alternates {
+            if features.binary_search(&index).is_ok() {
+                push_feature_lookups(data, feature, out);
             }
         }
     }
@@ -1055,6 +1163,7 @@ fn lookup_indices(
     tags: &[&[u8; 4]],
     script: Option<ScriptTags>,
     lang: Option<Lang>,
+    alternates: &[(u16, usize)],
 ) -> Option<(usize, Vec<Masked>)> {
     let lookup_list = lookup_list(data, base)?;
     let LangSys {
@@ -1089,9 +1198,14 @@ fn lookup_indices(
         // is checked against the width by `the_masks_match_the_feature_list`.
         let mask = u32::try_from(which).ok().and_then(|b| 1u64.checked_shl(b));
         let Some(mask) = mask else { continue };
-        let Some(feature) = u16_at(data, rec.checked_add(4)?)
-            .and_then(|o| feature_list.checked_add(usize::from(o)))
-        else {
+        // The feature's own table, or the one a feature variation swaps in
+        // at this instance.
+        let feature = match alternates.binary_search_by_key(&feature_index, |&(i, _)| i) {
+            Ok(k) => alternates.get(k).map(|&(_, table)| table),
+            Err(_) => u16_at(data, rec.checked_add(4)?)
+                .and_then(|o| feature_list.checked_add(usize::from(o))),
+        };
+        let Some(feature) = feature else {
             continue;
         };
         let count = u16_at(data, feature.checked_add(2)?)?;

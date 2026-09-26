@@ -125,7 +125,7 @@ const KINDS: [u16; 8] = [
 /// lookup: asking `GPOS` for only the positioning-sounding tags left every
 /// letter after an `i` 64 units out of place.
 ///
-/// The first fourteen are on for every run: unlike `GSUB`, where the Arabic
+/// The first fifteen are on for every run: unlike `GSUB`, where the Arabic
 /// positional features must reach only the glyphs the shaper marked eligible,
 /// a positioning feature is gated by its own glyph coverage — a face's `abvm`
 /// simply does not cover glyphs that have nothing above them. The rest, from
@@ -136,14 +136,17 @@ const KINDS: [u16; 8] = [
 ///
 /// Visible to the crate so that `the_two_tables_ask_for_the_same_features` in
 /// [`otl`](crate::otl) can pin the "one feature map" claim above.
-pub(crate) const FEATURES: [&[u8; 4]; 23] = [
+pub(crate) const FEATURES: [&[u8; 4]; 24] = [
     b"abvm", b"blwm", b"calt", b"ccmp", b"clig", b"curs", b"dist", b"kern", b"liga", b"locl",
-    b"mark", b"mkmk", b"rclt", b"rlig", // Optional, as in `gsub::FEATURES`.
+    b"mark", b"mkmk", b"rclt", b"rlig",
+    // HarfBuzz enables `rvrn` for both tables. `GSUB` gives it a stage of its
+    // own; `GPOS` has no pause, so here it simply runs with the rest.
+    b"rvrn", // Optional, as in `gsub::FEATURES`.
     b"c2cp", b"c2sc", b"ordn", b"pcap", b"sinf", b"smcp", b"subs", b"sups", b"titl",
 ];
 
 /// Where the optional features begin in [`FEATURES`].
-pub(crate) const OPTIONAL_FROM: usize = 14;
+pub(crate) const OPTIONAL_FROM: usize = 15;
 
 /// The features every run gets: the bits of [`FEATURES`] before
 /// [`OPTIONAL_FROM`].
@@ -353,7 +356,19 @@ impl Positioning {
     /// which is a normal answer: a face whose `GPOS` holds only vertical
     /// features has nothing here to run.
     pub(crate) fn parse(data: &[u8], gpos: Span, gdef: Option<Span>) -> Option<Self> {
-        let lookups = ByScript::parse(data, gpos.off, &FEATURES, &KINDS, EXTENSION_POS)?;
+        Self::parse_varied(data, gpos, gdef, &[])
+    }
+
+    /// [`parse`](Self::parse) where a feature variation swaps in the feature
+    /// tables `alternates` names -- one [`Variation`](crate::otl::Variation)'s.
+    pub(crate) fn parse_varied(
+        data: &[u8],
+        gpos: Span,
+        gdef: Option<Span>,
+        alternates: &[(u16, usize)],
+    ) -> Option<Self> {
+        let lookups =
+            ByScript::parse_varied(data, gpos.off, &FEATURES, &KINDS, EXTENSION_POS, alternates)?;
         Some(Self {
             lookups,
             lookup_list: lookup_list(data, gpos.off)?,

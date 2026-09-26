@@ -117,6 +117,12 @@ CORPUS = [
     # Contextual alternates and fractions.
     "1/2 3/4",
     "0O1lI",
+    # `rvrn` and feature variations: Bahnschrift swaps these four for other
+    # designs at its default instance and most others (Cascadia Code swaps
+    # its `$` from a weight of about 520 -- sweep with `--axes wght=700`).
+    # A shaper without `rvrn`, or blind to `FeatureVariations`, draws the
+    # glyphs the character map names.
+    "$ \\u00a2 \\u00d8 \\u00f8",
     # Mixed scripts in one string, which is the case script runs exist for.
     # Listed in `MIXED` below: the two halves are not answering the same
     # question here, so their disagreements are reported apart from the rest.

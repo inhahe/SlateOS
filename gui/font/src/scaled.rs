@@ -1383,7 +1383,11 @@ impl ScaledFont {
         for segment in &segments {
             let applies = self.applies_gpos(segment.script);
             let answer = !applies;
-            let kern = legacy && (!applies || !self.face.gpos_kerns(segment.script, lang));
+            let kern = legacy
+                && (!applies
+                    || !self
+                        .face
+                        .gpos_kerns(segment.script, lang, self.coords.as_slice()));
             let zero = self.zeroes_marks(segment.script);
             for slot in synth_at
                 .get_mut(segment.start..segment.end)
@@ -1775,7 +1779,8 @@ impl ScaledFont {
             if run.is_empty() {
                 return;
             }
-            font.face.substitute(script, lang, run);
+            font.face
+                .substitute_at(script, lang, run, font.coords.as_slice());
             let start = out.len();
             segments.push(Segment {
                 start,
@@ -1963,17 +1968,20 @@ impl ScaledFont {
                     .is_some_and(|level| !level.is_multiple_of(2))
             });
             let first = self.zeroes_marks_first(segment.script);
-            let Some(done) = self.face.position(&Run {
-                glyphs: run,
-                advances: widths,
-                marks: is_mark,
-                zero_marks_first: first,
-                rtl,
-                script: segment.script,
-                lang,
-                features: crate::gpos::DEFAULT_FEATURES | extra.gpos,
-                corrections: self.corrections(),
-            }) else {
+            let Some(done) = self.face.position_at(
+                &Run {
+                    glyphs: run,
+                    advances: widths,
+                    marks: is_mark,
+                    zero_marks_first: first,
+                    rtl,
+                    script: segment.script,
+                    lang,
+                    features: crate::gpos::DEFAULT_FEATURES | extra.gpos,
+                    corrections: self.corrections(),
+                },
+                self.coords.as_slice(),
+            ) else {
                 continue;
             };
             for (offset, adjust) in done.into_iter().enumerate() {

@@ -168094,7 +168094,11 @@ memfs-style and ext4-style numbering, and fails without the events.
 
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 
-**Status:** OPEN — worked around in lane F; the fix is lane A's (`requests/f-a-poll-never-reports-a-connection-waiting-on-a-listening-socket.md`).
+**Status: FIXED 2026-09-26** — lane A's `851d9165b` makes the network daemon
+answer `OP_POLL` for a listener (readable when a connection is waiting), and
+lane F then removed the workaround: `LISTENER_READINESS` is gone, and with it
+`listener_worth_asking` and `accept_deadline`, so on SlateOS too the compositor
+sleeps until a connection or a request wakes it. The original report follows.
 
 **In short:** the compositor now sleeps until there is something to do instead
 of waking sixty times a second to look (design-decisions §1302). On SlateOS it

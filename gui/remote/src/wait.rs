@@ -36,10 +36,10 @@
 //!   *declare* a wait rather than poll: the kernel can improve a wait, and
 //!   cannot improve a loop that never tells it what it is waiting for.
 //!
-//!   One gap is a bug rather than a limitation: a *listening* socket is never
-//!   reported ready on SlateOS, however many connections are waiting. See
-//!   [`LISTENER_READINESS`] for what a server must do about it until it is
-//!   fixed.
+//!   A *listening* socket is reported ready when a connection is waiting to
+//!   be accepted, as everywhere else -- since lane A's `851d9165b`; before
+//!   it, SlateOS's network daemon answered a readiness probe only for
+//!   connections, and a server had to ask its listener every tick.
 //!
 //! - **Windows**, the development host, is harder, because a GUI thread there
 //!   must also wake for its *window messages* ([`WaitSet::wait_or_message`]),
@@ -90,19 +90,6 @@ pub type WaitHandle = u64;
 /// off than the timer loop the wait replaced, and one that asked for less gets
 /// less.
 pub const FALLBACK_SLICE: Duration = Duration::from_millis(16);
-
-/// Whether a listening socket in a [`WaitSet`] is reported ready when a
-/// connection is waiting to be accepted.
-///
-/// `false` on SlateOS today, and there it is a bug rather than a design: the
-/// network daemon answers a readiness probe only for connections, and the
-/// kernel reads its "no such connection" about a listener as "nothing waiting"
-/// (`requests/f-a-poll-never-reports-a-connection-waiting-on-a-listening-socket.md`).
-/// A server that waited on its listener there would never learn that anyone had
-/// connected. So where this is `false` a server must ask its listener on every
-/// tick and bound its wait, which is what the compositor does; the day lane A's
-/// fix lands, this becomes `true` everywhere and can go.
-pub const LISTENER_READINESS: bool = !cfg!(target_vendor = "slateos");
 
 /// A socket, or anything else [`WaitSet`] can wait on.
 pub trait AsWaitHandle {

@@ -10073,9 +10073,11 @@ puts in it the listener, every client, and whatever the display adds through
 
 ### What SlateOS does not give it yet
 
-- **A listening socket is never reported ready.** The kernel asks the network
-  daemon (`OP_POLL` on the listener id), the daemon answers only for
-  connections, and `-1` becomes "nothing waiting". A server that trusted the
+- **A listening socket is never reported ready** -- *fixed 2026-09-26 by lane
+  A's `851d9165b`; the workaround below is gone, and the compositor waits on
+  its listener on SlateOS as everywhere.* The kernel asked the network
+  daemon (`OP_POLL` on the listener id), the daemon answered only for
+  connections, and `-1` became "nothing waiting". A server that trusted the
   wait would never accept anyone. So `guiremote::LISTENER_READINESS` is `false`
   on SlateOS, and there the loop asks its listener every tick and never waits
   longer than a frame — which keeps an idle SlateOS desktop waking at the frame

@@ -37,11 +37,24 @@ type AtexitFn = exit_list::AtexitFn;
 /// Register `func` to be called at normal process termination.
 ///
 /// 0, or -1 with `errno` `ENOMEM` when the list cannot grow; there is no
-/// fixed limit.  A NULL `func` registers nothing and succeeds: C leaves it
-/// undefined, and glibc's registers it and crashes at exit.
+/// fixed limit.  A NULL `func` is refused -- see [`null_handler`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn atexit(func: Option<AtexitFn>) -> i32 {
-    func.map_or(0, |f| exit_list::register(Which::Exit, Handler::At(f)))
+    func.map_or_else(null_handler, |f| {
+        exit_list::register(Which::Exit, Handler::At(f))
+    })
+}
+
+/// A NULL handler handed to `atexit`, `at_quick_exit`, `on_exit` or
+/// `__cxa_atexit`.  glibc asserts that it is not NULL (`__internal_atexit`,
+/// `__on_exit`: "detect NULL early with an assertion instead of a SIGSEGV at
+/// program exit when the handler is run", bug 20544), so its process ends
+/// there; C leaves the call undefined.  The call can fail, so here it does,
+/// with nothing registered: -1 and `EINVAL` (design-decisions.md §1115).
+/// Until 2026-09-26 it succeeded, registering nothing.
+fn null_handler() -> i32 {
+    crate::errno::set_errno(crate::errno::EINVAL);
+    -1
 }
 
 /// Terminate the process: run the calling thread's `thread_local`
@@ -63,10 +76,13 @@ pub extern "C" fn exit(status: i32) -> ! {
 
 /// C11: register `func` to be called by `quick_exit`, and not by `exit`.
 ///
-/// 0, or -1 with `errno` `ENOMEM`; a NULL `func` registers nothing.
+/// 0, or -1 with `errno` `ENOMEM`; a NULL `func` is refused, as
+/// [`null_handler`] says.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn at_quick_exit(func: Option<AtexitFn>) -> i32 {
-    func.map_or(0, |f| exit_list::register(Which::QuickExit, Handler::At(f)))
+    func.map_or_else(null_handler, |f| {
+        exit_list::register(Which::QuickExit, Handler::At(f))
+    })
 }
 
 /// C11: terminate the process, running only the `at_quick_exit` handlers,
@@ -1004,14 +1020,14 @@ global_asm!(
 /// `dso_handle` is finalised -- a static object's destructor and the object.
 ///
 /// 0, or -1 with `errno` `ENOMEM`.  Compilers do not check the result.  A
-/// NULL `func` registers nothing.
+/// NULL `func` is refused, as [`null_handler`] says.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cxa_atexit(
     func: Option<extern "C" fn(*mut u8)>,
     arg: *mut u8,
     dso_handle: *mut u8,
 ) -> i32 {
-    func.map_or(0, |f| {
+    func.map_or_else(null_handler, |f| {
         exit_list::register(Which::Exit, Handler::Cxa(f, arg, dso_handle))
     })
 }
@@ -1197,7 +1213,9 @@ pub extern "C" fn __libc_csu_fini() {
 /// Returns 0.  When the entry cannot be allocated the process is aborted with
 /// a message, as glibc does: the caller has no way to act on a failure, so a
 /// destructor that silently never ran would be the only alternative.  A NULL
-/// `dtor` registers nothing.
+/// `dtor` ends the process the same way -- glibc registers it, and its
+/// process ends when the thread does, calling it (design-decisions.md
+/// §1115).  Until 2026-09-26 it registered nothing.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cxa_thread_atexit_impl(
     dtor: Option<extern "C" fn(*mut u8)>,
@@ -1205,13 +1223,14 @@ pub extern "C" fn __cxa_thread_atexit_impl(
     _dso_handle: *mut u8,
 ) -> i32 {
     let Some(dtor) = dtor else {
-        return 0;
+        crate::unistd::libc_fatal(
+            b"Fatal libc error: __cxa_thread_atexit_impl: the destructor is NULL\n",
+        );
     };
     if exit_list::register_thread_dtor(dtor, obj).is_err() {
-        let msg = b"Fatal libc error: failed to register TLS destructor: out of memory\n";
-        // The process is about to abort; a failed write changes nothing.
-        let _ = crate::file::write(2, msg.as_ptr(), msg.len());
-        crate::unistd::abort();
+        crate::unistd::libc_fatal(
+            b"Fatal libc error: failed to register TLS destructor: out of memory\n",
+        );
     }
     0
 }
@@ -1692,11 +1711,13 @@ pub type OnExitFn = extern "C" fn(i32, *mut u8);
 /// exit, in the same reverse order as `atexit`'s handlers.
 ///
 /// SunOS/glibc extension.  0, or -1 with `errno` `ENOMEM`; a NULL `func`
-/// registers nothing.  Until 2026-09-26 the handler was stored in a table
-/// `exit` never read.
+/// is refused, as [`null_handler`] says.  Until 2026-09-26 the handler was
+/// stored in a table `exit` never read.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn on_exit(func: Option<OnExitFn>, arg: *mut u8) -> i32 {
-    func.map_or(0, |f| exit_list::register(Which::Exit, Handler::On(f, arg)))
+    func.map_or_else(null_handler, |f| {
+        exit_list::register(Which::Exit, Handler::On(f, arg))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2212,22 +2233,29 @@ mod tests {
         assert_eq!(take_seen(), vec![('a', 2, 0)]);
     }
 
+    /// glibc asserts a handler is not NULL; here the call fails instead,
+    /// registering nothing (design-decisions.md §1115).  It succeeded until
+    /// 2026-09-26.  (`__cxa_thread_atexit_impl`'s NULL ends the process, as
+    /// glibc's ends when the thread exits; that is not a test's to take.)
     #[test]
-    fn a_null_handler_registers_nothing() {
-        assert_eq!(atexit(None), 0);
-        assert_eq!(at_quick_exit(None), 0);
-        assert_eq!(on_exit(None, core::ptr::null_mut()), 0);
-        assert_eq!(
-            __cxa_atexit(None, core::ptr::null_mut(), core::ptr::null_mut()),
-            0
-        );
-        assert_eq!(
-            __cxa_thread_atexit_impl(None, core::ptr::null_mut(), core::ptr::null_mut()),
-            0
-        );
+    fn a_null_handler_is_refused_and_registers_nothing() {
+        let calls: [(&str, i32); 4] = [
+            ("atexit", atexit(None)),
+            ("at_quick_exit", at_quick_exit(None)),
+            ("on_exit", on_exit(None, core::ptr::null_mut())),
+            (
+                "__cxa_atexit",
+                __cxa_atexit(None, core::ptr::null_mut(), core::ptr::null_mut()),
+            ),
+        ];
+        for (call, ret) in calls {
+            assert_eq!(ret, -1, "{call}");
+        }
+        crate::errno::set_errno(0);
+        assert_eq!(atexit(None), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         crate::exit_list::run(Which::Exit, 0);
         crate::exit_list::run(Which::QuickExit, 0);
-        crate::exit_list::run_thread_dtors();
         assert!(take_seen().is_empty());
     }
 

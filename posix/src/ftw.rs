@@ -657,6 +657,27 @@ const fn ftw_flag(flag: i32) -> i32 {
     }
 }
 
+/// What `ftw` hands the walker to deliver an entry: the caller's callback,
+/// with `ftw`'s type flags.
+fn ftw_emit(callback: Option<FtwFn>) -> impl FnMut(*const u8, *const Stat, i32, i32) -> i32 {
+    move |p, sb, flag, _level| match callback {
+        Some(f) => f(p, sb, ftw_flag(flag)),
+        None => no_callback(),
+    }
+}
+
+/// A NULL callback, at the first entry the walk has to report. glibc calls
+/// through it there, and faults -- not before, so a root that cannot be
+/// `stat`ed is still that error. `ftw` can fail, so here it does: `EFAULT`,
+/// this libc's substitute for the fault, and -1, which ends the walk and is
+/// no action [`FTW_ACTIONRETVAL`] knows (design-decisions.md §1115). Until
+/// 2026-09-26 the parameter was a Rust `fn` pointer, which cannot be NULL, so
+/// a C caller that passed NULL was undefined behaviour before the walk began.
+fn no_callback() -> i32 {
+    errno::set_errno(errno::EFAULT);
+    -1
+}
+
 /// Walk a file tree, calling `callback` for each entry.
 ///
 /// `nopenfd` is the most directory streams the walk may hold open at once.
@@ -664,10 +685,14 @@ const fn ftw_flag(flag: i32) -> i32 {
 /// honoured — `nopenfd < 1` means 1, as in glibc; it was `EINVAL` until
 /// 2026-09-26 — and it limits nothing else: the whole tree is walked.
 ///
+/// A NULL `callback` ends the walk with -1 and `EFAULT` at the first entry
+/// there is to report, where glibc faults calling it; until then the walk's
+/// own errors come first, as in glibc.
+///
 /// Returns 0 on success, -1 with `errno` set on error, or the non-zero
 /// value returned by `callback`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ftw(dirpath: *const u8, callback: FtwFn, nopenfd: i32) -> i32 {
+pub extern "C" fn ftw(dirpath: *const u8, callback: Option<FtwFn>, nopenfd: i32) -> i32 {
     // glibc reads `dirpath[0]` first, where a NULL faults; EFAULT is this
     // libc's substitute for the fault (design-decisions.md §303).
     if dirpath.is_null() {
@@ -684,7 +709,7 @@ pub extern "C" fn ftw(dirpath: *const u8, callback: FtwFn, nopenfd: i32) -> i32 
             physical: false,
             action_retval: false,
         },
-        |p, sb, flag, _level| callback(p, sb, ftw_flag(flag)),
+        ftw_emit(callback),
         Kernel,
     )
 }
@@ -715,9 +740,15 @@ const UNSUPPORTED_NFTW_FLAGS: i32 = FTW_MOUNT | FTW_CHDIR;
 /// Supports [`FTW_PHYS`], [`FTW_DEPTH`] and [`FTW_ACTIONRETVAL`].  A bit
 /// outside [`KNOWN_NFTW_FLAGS`] is `EINVAL`, as in glibc, before the path is
 /// looked at; so are [`FTW_MOUNT`] and [`FTW_CHDIR`] — see
-/// [`UNSUPPORTED_NFTW_FLAGS`].  `nopenfd` is as for [`ftw`].
+/// [`UNSUPPORTED_NFTW_FLAGS`].  `nopenfd` and a NULL `callback` are as for
+/// [`ftw`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn nftw(dirpath: *const u8, callback: NftwFn, nopenfd: i32, flags: i32) -> i32 {
+pub extern "C" fn nftw(
+    dirpath: *const u8,
+    callback: Option<NftwFn>,
+    nopenfd: i32,
+    flags: i32,
+) -> i32 {
     if flags & !KNOWN_NFTW_FLAGS != 0 || flags & UNSUPPORTED_NFTW_FLAGS != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -736,15 +767,24 @@ pub extern "C" fn nftw(dirpath: *const u8, callback: NftwFn, nopenfd: i32, flags
             physical: flags & FTW_PHYS != 0,
             action_retval: flags & FTW_ACTIONRETVAL != 0,
         },
-        |p, sb, flag, level| {
-            let mut info = FTW {
-                base: find_basename_offset(p),
-                level,
-            };
-            callback(p, sb, flag, &raw mut info)
-        },
+        nftw_emit(callback),
         Kernel,
     )
+}
+
+/// What `nftw` hands the walker: the caller's callback, with the [`FTW`]
+/// built from the path and the level; a NULL one is as for [`ftw`].
+fn nftw_emit(callback: Option<NftwFn>) -> impl FnMut(*const u8, *const Stat, i32, i32) -> i32 {
+    move |p, sb, flag, level| {
+        let Some(f) = callback else {
+            return no_callback();
+        };
+        let mut info = FTW {
+            base: find_basename_offset(p),
+            level,
+        };
+        f(p, sb, flag, &raw mut info)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -862,13 +902,18 @@ fn find_basename_offset(path: *const u8) -> i32 {
 /// On our OS, `off_t` is always 64-bit (LP64 data model), so
 /// `struct stat` and `ftw` already handle large files.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ftw64(path: *const u8, callback: FtwFn, maxfds: i32) -> i32 {
+pub extern "C" fn ftw64(path: *const u8, callback: Option<FtwFn>, maxfds: i32) -> i32 {
     ftw(path, callback, maxfds)
 }
 
 /// `nftw64` — Large File Support alias for `nftw`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn nftw64(path: *const u8, callback: NftwFn, maxfds: i32, flags: i32) -> i32 {
+pub extern "C" fn nftw64(
+    path: *const u8,
+    callback: Option<NftwFn>,
+    maxfds: i32,
+    flags: i32,
+) -> i32 {
     nftw(path, callback, maxfds, flags)
 }
 
@@ -1477,10 +1522,10 @@ mod tests {
         // so the empty root's ENOENT is what comes back.
         for n in [0, -5, 1] {
             errno::set_errno(0);
-            assert_eq!(ftw(b"\0".as_ptr(), never, n), -1);
+            assert_eq!(ftw(b"\0".as_ptr(), Some(never), n), -1);
             assert_eq!(errno::get_errno(), errno::ENOENT, "ftw, nopenfd {n}");
             errno::set_errno(0);
-            assert_eq!(nftw(b"\0".as_ptr(), never_n, n, FTW_ACTIONRETVAL), -1);
+            assert_eq!(nftw(b"\0".as_ptr(), Some(never_n), n, FTW_ACTIONRETVAL), -1);
             assert_eq!(errno::get_errno(), errno::ENOENT, "nftw, nopenfd {n}");
         }
     }
@@ -1723,13 +1768,13 @@ mod tests {
 
     #[test]
     fn test_ftw_null_path_efault() {
-        assert_eq!(ftw(core::ptr::null(), never_called_ftw, 4), -1);
+        assert_eq!(ftw(core::ptr::null(), Some(never_called_ftw), 4), -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
     fn test_nftw_null_path_efault() {
-        assert_eq!(nftw(core::ptr::null(), never_called_nftw, 4, 0), -1);
+        assert_eq!(nftw(core::ptr::null(), Some(never_called_nftw), 4, 0), -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
@@ -1739,7 +1784,10 @@ mod tests {
         // even looked at.
         for flags in [32, 64 | FTW_PHYS, i32::MIN] {
             errno::set_errno(0);
-            assert_eq!(nftw(core::ptr::null(), never_called_nftw, 4, flags), -1);
+            assert_eq!(
+                nftw(core::ptr::null(), Some(never_called_nftw), 4, flags),
+                -1
+            );
             assert_eq!(errno::get_errno(), errno::EINVAL, "flags {flags:#x}");
         }
     }
@@ -1749,7 +1797,7 @@ mod tests {
         // Accepted-and-ignored is how a --one-file-system delete walks
         // into a network mount.  See UNSUPPORTED_NFTW_FLAGS.
         assert_eq!(
-            nftw(b"/tmp\0".as_ptr(), never_called_nftw, 4, FTW_MOUNT),
+            nftw(b"/tmp\0".as_ptr(), Some(never_called_nftw), 4, FTW_MOUNT),
             -1
         );
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1758,7 +1806,7 @@ mod tests {
     #[test]
     fn test_nftw_rejects_ftw_chdir() {
         assert_eq!(
-            nftw(b"/tmp\0".as_ptr(), never_called_nftw, 4, FTW_CHDIR),
+            nftw(b"/tmp\0".as_ptr(), Some(never_called_nftw), 4, FTW_CHDIR),
             -1
         );
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1772,7 +1820,7 @@ mod tests {
         // everything.
         let rc = nftw(
             b"\0".as_ptr(),
-            passthrough_nftw,
+            Some(passthrough_nftw),
             4,
             FTW_PHYS | FTW_DEPTH | FTW_ACTIONRETVAL,
         );
@@ -1798,7 +1846,47 @@ mod tests {
         // into the walker's buffer.
         let mut root = [b'a'; PATH_MAX + 9];
         root[PATH_MAX + 8] = 0;
-        assert_eq!(ftw(root.as_ptr(), never_called_ftw, 4), -1);
+        assert_eq!(ftw(root.as_ptr(), Some(never_called_ftw), 4), -1);
         assert_eq!(errno::get_errno(), errno::ENAMETOOLONG);
+    }
+
+    /// A NULL callback: glibc calls through it, and faults, at the first
+    /// entry it reports -- so a root with no entry to report is still its
+    /// own error, and a real one is EFAULT, which ends the walk.  The
+    /// parameter could not be NULL until 2026-09-26: it was a Rust `fn`
+    /// pointer, and a C NULL was undefined behaviour.
+    #[test]
+    fn test_a_null_callback_is_efault_at_the_first_entry() {
+        errno::set_errno(0);
+        assert_eq!(ftw(b"\0".as_ptr(), None, 4), -1);
+        assert_eq!(errno::get_errno(), errno::ENOENT, "ftw: the root first");
+        errno::set_errno(0);
+        assert_eq!(nftw(b"\0".as_ptr(), None, 4, 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOENT, "nftw: the root first");
+        let modes = [
+            PLAIN,
+            Walk {
+                depth_first: true,
+                ..PLAIN
+            },
+            Walk {
+                action_retval: true,
+                ..PLAIN
+            },
+            Walk {
+                physical: true,
+                ..PLAIN
+            },
+        ];
+        for opts in modes {
+            let mut fs = small_tree();
+            errno::set_errno(0);
+            assert_eq!(run(b"r\0".as_ptr(), opts, ftw_emit(None), &mut fs), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT, "ftw");
+            let mut fs = small_tree();
+            errno::set_errno(0);
+            assert_eq!(run(b"r\0".as_ptr(), opts, nftw_emit(None), &mut fs), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT, "nftw");
+        }
     }
 }

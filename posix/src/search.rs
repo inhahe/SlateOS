@@ -203,8 +203,17 @@ unsafe fn maybe_split_for_insert(
 /// glibc 2.39's top-down red-black insertion (misc/tsearch.c), so a tree
 /// built from keys in order stays O(log n) high; until 2026-09-26 this was an
 /// unbalanced tree, which sorted input made a linked list.
+///
+/// `compar` is called only when there is a node to compare with, so an empty
+/// tree takes a NULL one, as glibc's does; with nodes, a NULL `compar` is
+/// null with `EFAULT`, where glibc faults calling it (design-decisions.md
+/// §1115).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tsearch(key: *const u8, rootp: *mut *mut u8, compar: ComparFn) -> *mut u8 {
+pub extern "C" fn tsearch(
+    key: *const u8,
+    rootp: *mut *mut u8,
+    compar: Option<ComparFn>,
+) -> *mut u8 {
     if rootp.is_null() {
         return core::ptr::null_mut();
     }
@@ -225,6 +234,10 @@ pub extern "C" fn tsearch(key: *const u8, rootp: *mut *mut u8, compar: ComparFn)
         let mut nextp = rootp;
         while !(*nextp).is_null() {
             let root = *rootp;
+            let Some(compar) = compar else {
+                errno::set_errno(errno::EFAULT);
+                return core::ptr::null_mut();
+            };
             r = compar(key, (*root).key);
             if r == 0 {
                 return root.cast();
@@ -270,8 +283,14 @@ pub extern "C" fn tsearch(key: *const u8, rootp: *mut *mut u8, compar: ComparFn)
 /// `tfind` — find `key` in the tree at `*rootp`, without inserting.
 ///
 /// Returns the node holding it, or null if it is absent or `rootp` is null.
+/// An empty tree needs no `compar`; otherwise a NULL one ends the process --
+/// see [`no_comparator`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tfind(key: *const u8, rootp: *const *mut u8, compar: ComparFn) -> *const u8 {
+pub extern "C" fn tfind(
+    key: *const u8,
+    rootp: *const *mut u8,
+    compar: Option<ComparFn>,
+) -> *const u8 {
     if rootp.is_null() {
         return core::ptr::null();
     }
@@ -279,6 +298,9 @@ pub extern "C" fn tfind(key: *const u8, rootp: *const *mut u8, compar: ComparFn)
     unsafe {
         let mut node = (*rootp).cast::<Node>();
         while !node.is_null() {
+            let Some(compar) = compar else {
+                no_comparator(b"Fatal libc error: tfind: the comparison function is NULL\n");
+            };
             let r = compar(key, (*node).key);
             if r == 0 {
                 return node.cast_const().cast();
@@ -305,9 +327,14 @@ pub extern "C" fn tfind(key: *const u8, rootp: *const *mut u8, compar: ComparFn)
 ///
 /// glibc 2.39's deletion: the node's key is overwritten with its in-order
 /// successor's, the successor is unchained, and a black node lost is repaired
-/// on the way back up.
+/// on the way back up.  An empty tree needs no `compar`; otherwise a NULL one
+/// ends the process -- see [`no_comparator`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tdelete(key: *const u8, rootp: *mut *mut u8, compar: ComparFn) -> *mut u8 {
+pub extern "C" fn tdelete(
+    key: *const u8,
+    rootp: *mut *mut u8,
+    compar: Option<ComparFn>,
+) -> *mut u8 {
     if rootp.is_null() {
         return core::ptr::null_mut();
     }
@@ -325,6 +352,9 @@ pub extern "C" fn tdelete(key: *const u8, rootp: *mut *mut u8, compar: ComparFn)
         if root.is_null() {
             return core::ptr::null_mut();
         }
+        let Some(compar) = compar else {
+            no_comparator(b"Fatal libc error: tdelete: the comparison function is NULL\n");
+        };
         let mut p = root;
         loop {
             let cmp = compar(key, (*root).key);
@@ -858,30 +888,48 @@ pub extern "C" fn hsearch(item: Entry, action: i32) -> *mut Entry {
 /// Linear search comparison function type.
 pub type LsearchComparFn = extern "C" fn(*const u8, *const u8) -> i32;
 
+/// A NULL comparison function where glibc would call it, in a call with no
+/// way to fail: `tfind` and `tdelete` answer only "here" or "absent", and
+/// `lfind` and `lsearch` only "here".  glibc faults calling it, and its
+/// process ends; so does this one, with `message` on standard error, rather
+/// than answer "absent" as if nothing were wrong (design-decisions.md §1115).
+fn no_comparator(message: &[u8]) -> ! {
+    crate::unistd::libc_fatal(message)
+}
+
 /// `lfind` — linear search without insertion.
 ///
 /// Searches the array `base` of `*nelp` elements, each of `width`
 /// bytes, for a member matching `key` using `compar`.
 ///
 /// Returns a pointer to the matching element, or null if not found.
+///
+/// glibc's, which checks nothing: `key` and every element go to `compar`
+/// whatever they are, and a `width` of 0 makes every element `base`.  Until
+/// 2026-09-26 a NULL `key` or `base`, or a `width` of 0, was "not found"
+/// without a comparison.  An empty array needs no `compar`; a NULL `nelp`,
+/// which glibc reads, or a NULL `compar` it would call, ends the process --
+/// see [`no_comparator`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lfind(
     key: *const u8,
     base: *const u8,
     nelp: *const usize,
     width: usize,
-    compar: LsearchComparFn,
+    compar: Option<LsearchComparFn>,
 ) -> *const u8 {
-    if key.is_null() || base.is_null() || nelp.is_null() || width == 0 {
-        return core::ptr::null();
+    if nelp.is_null() {
+        no_comparator(b"Fatal libc error: lfind: the element count is NULL\n");
     }
-
-    // SAFETY: nelp is valid per caller's contract.
+    // SAFETY: non-null, and by the caller's contract the array's length.
     let n = unsafe { *nelp };
     let mut i: usize = 0;
     while i < n {
-        // SAFETY: base + i*width is within the array.
-        let elem = unsafe { base.add(i.wrapping_mul(width)) };
+        let Some(compar) = compar else {
+            no_comparator(b"Fatal libc error: lfind: the comparison function is NULL\n");
+        };
+        // Computed, not dereferenced: the element is `compar`'s to read.
+        let elem = base.wrapping_add(i.wrapping_mul(width));
         if compar(key, elem) == 0 {
             return elem;
         }
@@ -896,30 +944,38 @@ pub extern "C" fn lfind(
 /// (copies `width` bytes from `key` to the end) and increments `*nelp`.
 ///
 /// Returns a pointer to the matching or newly-inserted element.
+///
+/// glibc's, as [`lfind`] is: an empty array is appended to without a
+/// comparison, so it needs no `compar`.  The copy reads `key` and writes the
+/// array, so when there is something to copy a NULL one of either ends the
+/// process, as glibc's `memcpy` ends it.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lsearch(
     key: *const u8,
     base: *mut u8,
     nelp: *mut usize,
     width: usize,
-    compar: LsearchComparFn,
+    compar: Option<LsearchComparFn>,
 ) -> *mut u8 {
-    if key.is_null() || base.is_null() || nelp.is_null() || width == 0 {
-        return core::ptr::null_mut();
-    }
-
     // Search first.
     let found = lfind(key, base, nelp, width, compar);
     if !found.is_null() {
         return found.cast_mut();
     }
 
-    // Not found — append.
-    // SAFETY: nelp is valid, and caller guarantees the array has room.
+    // Not found — append.  `lfind` returned, so `nelp` is not NULL.
+    // SAFETY: `nelp` is valid, and the caller guarantees the array has room
+    // for one more element; the copy is made only with a non-NULL `key` and
+    // `base` and a non-zero `width`.
     unsafe {
         let n = *nelp;
-        let dest = base.add(n.wrapping_mul(width));
-        core::ptr::copy_nonoverlapping(key, dest, width);
+        let dest = base.wrapping_add(n.wrapping_mul(width));
+        if width != 0 {
+            if key.is_null() || base.is_null() {
+                no_comparator(b"Fatal libc error: lsearch: the key or the array is NULL\n");
+            }
+            core::ptr::copy_nonoverlapping(key, dest, width);
+        }
         *nelp = n.wrapping_add(1);
         dest
     }
@@ -1067,20 +1123,20 @@ mod tests {
 
     #[test]
     fn test_tsearch_null_rootp() {
-        let ret = tsearch(1 as *const u8, core::ptr::null_mut(), int_compar);
+        let ret = tsearch(1 as *const u8, core::ptr::null_mut(), Some(int_compar));
         assert!(ret.is_null());
     }
 
     #[test]
     fn test_tfind_null_rootp() {
-        let ret = tfind(1 as *const u8, core::ptr::null(), int_compar);
+        let ret = tfind(1 as *const u8, core::ptr::null(), Some(int_compar));
         assert!(ret.is_null());
     }
 
     #[test]
     fn test_tsearch_insert_one() {
         let mut root: *mut u8 = core::ptr::null_mut();
-        let ret = tsearch(42 as *const u8, &raw mut root, int_compar);
+        let ret = tsearch(42 as *const u8, &raw mut root, Some(int_compar));
         // malloc may fail on test host — skip if so.
         if ret.is_null() {
             return;
@@ -1088,11 +1144,11 @@ mod tests {
         assert!(!root.is_null(), "root should be set after insert");
 
         // Find it.
-        let found = tfind(42 as *const u8, &raw const root, int_compar);
+        let found = tfind(42 as *const u8, &raw const root, Some(int_compar));
         assert!(!found.is_null(), "should find inserted key");
 
         // Don't find a different key.
-        let not_found = tfind(99 as *const u8, &raw const root, int_compar);
+        let not_found = tfind(99 as *const u8, &raw const root, Some(int_compar));
         assert!(not_found.is_null(), "should not find non-existent key");
 
         tdestroy(root, Some(dummy_free));
@@ -1101,11 +1157,11 @@ mod tests {
     #[test]
     fn test_tsearch_insert_duplicate() {
         let mut root: *mut u8 = core::ptr::null_mut();
-        let ret1 = tsearch(10 as *const u8, &raw mut root, int_compar);
+        let ret1 = tsearch(10 as *const u8, &raw mut root, Some(int_compar));
         if ret1.is_null() {
             return;
         }
-        let ret2 = tsearch(10 as *const u8, &raw mut root, int_compar);
+        let ret2 = tsearch(10 as *const u8, &raw mut root, Some(int_compar));
         assert_eq!(ret1, ret2, "duplicate insert should return same node");
 
         tdestroy(root, Some(dummy_free));
@@ -1115,7 +1171,7 @@ mod tests {
     fn test_tsearch_insert_multiple() {
         let mut root: *mut u8 = core::ptr::null_mut();
         for v in [50, 25, 75, 10, 30, 60, 90] {
-            let ret = tsearch(v as *const u8, &raw mut root, int_compar);
+            let ret = tsearch(v as *const u8, &raw mut root, Some(int_compar));
             if ret.is_null() {
                 // malloc failed — clean up and skip.
                 tdestroy(root, Some(dummy_free));
@@ -1125,11 +1181,11 @@ mod tests {
 
         // All should be findable.
         for v in [50, 25, 75, 10, 30, 60, 90] {
-            let found = tfind(v as *const u8, &raw const root, int_compar);
+            let found = tfind(v as *const u8, &raw const root, Some(int_compar));
             assert!(!found.is_null(), "should find key {v}");
         }
 
-        let nf = tfind(42 as *const u8, &raw const root, int_compar);
+        let nf = tfind(42 as *const u8, &raw const root, Some(int_compar));
         assert!(nf.is_null());
 
         tdestroy(root, Some(dummy_free));
@@ -1139,18 +1195,18 @@ mod tests {
 
     #[test]
     fn test_tdelete_null_rootp() {
-        let ret = tdelete(1 as *const u8, core::ptr::null_mut(), int_compar);
+        let ret = tdelete(1 as *const u8, core::ptr::null_mut(), Some(int_compar));
         assert!(ret.is_null());
     }
 
     #[test]
     fn test_tdelete_not_found() {
         let mut root: *mut u8 = core::ptr::null_mut();
-        let ret = tsearch(10 as *const u8, &raw mut root, int_compar);
+        let ret = tsearch(10 as *const u8, &raw mut root, Some(int_compar));
         if ret.is_null() {
             return;
         }
-        let ret = tdelete(99 as *const u8, &raw mut root, int_compar);
+        let ret = tdelete(99 as *const u8, &raw mut root, Some(int_compar));
         assert!(
             ret.is_null(),
             "deleting non-existent key should return null"
@@ -1163,17 +1219,17 @@ mod tests {
     fn test_tdelete_leaf() {
         let mut root: *mut u8 = core::ptr::null_mut();
         for v in [50, 25, 75] {
-            if tsearch(v as *const u8, &raw mut root, int_compar).is_null() {
+            if tsearch(v as *const u8, &raw mut root, Some(int_compar)).is_null() {
                 tdestroy(root, Some(dummy_free));
                 return;
             }
         }
 
-        let ret = tdelete(25 as *const u8, &raw mut root, int_compar);
+        let ret = tdelete(25 as *const u8, &raw mut root, Some(int_compar));
         assert!(!ret.is_null());
-        assert!(tfind(25 as *const u8, &raw const root, int_compar).is_null());
-        assert!(!tfind(50 as *const u8, &raw const root, int_compar).is_null());
-        assert!(!tfind(75 as *const u8, &raw const root, int_compar).is_null());
+        assert!(tfind(25 as *const u8, &raw const root, Some(int_compar)).is_null());
+        assert!(!tfind(50 as *const u8, &raw const root, Some(int_compar)).is_null());
+        assert!(!tfind(75 as *const u8, &raw const root, Some(int_compar)).is_null());
 
         tdestroy(root, Some(dummy_free));
     }
@@ -1181,11 +1237,11 @@ mod tests {
     #[test]
     fn test_tdelete_root() {
         let mut root: *mut u8 = core::ptr::null_mut();
-        if tsearch(50 as *const u8, &raw mut root, int_compar).is_null() {
+        if tsearch(50 as *const u8, &raw mut root, Some(int_compar)).is_null() {
             return;
         }
 
-        let ret = tdelete(50 as *const u8, &raw mut root, int_compar);
+        let ret = tdelete(50 as *const u8, &raw mut root, Some(int_compar));
         assert!(
             root.is_null(),
             "root should be null after deleting only node"
@@ -1240,7 +1296,7 @@ mod tests {
         let mut root: *mut u8 = core::ptr::null_mut();
         let n = 20_000usize;
         for v in 1..=n {
-            assert!(!tsearch(v as *const u8, &raw mut root, int_compar).is_null());
+            assert!(!tsearch(v as *const u8, &raw mut root, Some(int_compar)).is_null());
         }
         check_tree(root);
         let h = height(root.cast());
@@ -1250,7 +1306,7 @@ mod tests {
         );
         for v in (1..=n).rev().step_by(7) {
             assert!(
-                !tfind(v as *const u8, &raw const root, int_compar).is_null(),
+                !tfind(v as *const u8, &raw const root, Some(int_compar)).is_null(),
                 "{v}"
             );
         }
@@ -1272,25 +1328,25 @@ mod tests {
         };
         for _ in 0..3000 {
             let k = next();
-            assert!(!tsearch(k as *const u8, &raw mut root, int_compar).is_null());
+            assert!(!tsearch(k as *const u8, &raw mut root, Some(int_compar)).is_null());
             present.insert(k);
         }
         check_tree(root);
         for _ in 0..3000 {
             let k = next();
-            let ret = tdelete(k as *const u8, &raw mut root, int_compar);
+            let ret = tdelete(k as *const u8, &raw mut root, Some(int_compar));
             assert_eq!(!ret.is_null(), present.remove(&k), "delete {k}");
             if !root.is_null() {
                 check_tree(root);
             }
         }
         for k in 1..=1000i64 {
-            let found = !tfind(k as *const u8, &raw const root, int_compar).is_null();
+            let found = !tfind(k as *const u8, &raw const root, Some(int_compar)).is_null();
             assert_eq!(found, present.contains(&k), "find {k}");
         }
         // Down to nothing, in order, and each root deletion still non-null.
         for k in present.clone() {
-            assert!(!tdelete(k as *const u8, &raw mut root, int_compar).is_null());
+            assert!(!tdelete(k as *const u8, &raw mut root, Some(int_compar)).is_null());
             if !root.is_null() {
                 check_tree(root);
             }
@@ -1303,10 +1359,10 @@ mod tests {
     fn test_tdelete_returns_the_parent() {
         let mut root: *mut u8 = core::ptr::null_mut();
         for v in [2, 1, 3] {
-            assert!(!tsearch(v as *const u8, &raw mut root, int_compar).is_null());
+            assert!(!tsearch(v as *const u8, &raw mut root, Some(int_compar)).is_null());
         }
         // 2 is the root, 1 and 3 its children.
-        let parent = tdelete(3 as *const u8, &raw mut root, int_compar);
+        let parent = tdelete(3 as *const u8, &raw mut root, Some(int_compar));
         assert_eq!(parent, root, "3's parent is the root");
         assert_eq!(unsafe { (*parent.cast::<Node>()).key } as i64, 2);
         tdestroy(root, None);
@@ -1333,7 +1389,7 @@ mod tests {
     fn test_twalk_visits_in_posix_order() {
         let mut root: *mut u8 = core::ptr::null_mut();
         for v in [1, 2, 3] {
-            assert!(!tsearch(v as *const u8, &raw mut root, int_compar).is_null());
+            assert!(!tsearch(v as *const u8, &raw mut root, Some(int_compar)).is_null());
         }
         VISITS.with(|v| v.borrow_mut().clear());
         twalk(root, Some(record_visit));
@@ -1361,7 +1417,7 @@ mod tests {
     fn test_tdestroy_with_no_free_function() {
         let mut root: *mut u8 = core::ptr::null_mut();
         for v in 1..=100usize {
-            assert!(!tsearch(v as *const u8, &raw mut root, int_compar).is_null());
+            assert!(!tsearch(v as *const u8, &raw mut root, Some(int_compar)).is_null());
         }
         reset_destroy_count();
         tdestroy(root, None);
@@ -1415,7 +1471,7 @@ mod tests {
     #[test]
     fn test_twalk_single() {
         let mut root: *mut u8 = core::ptr::null_mut();
-        if tsearch(42 as *const u8, &raw mut root, int_compar).is_null() {
+        if tsearch(42 as *const u8, &raw mut root, Some(int_compar)).is_null() {
             return;
         }
 
@@ -1430,7 +1486,7 @@ mod tests {
     fn test_twalk_multiple() {
         let mut root: *mut u8 = core::ptr::null_mut();
         for v in [50, 25, 75] {
-            if tsearch(v as *const u8, &raw mut root, int_compar).is_null() {
+            if tsearch(v as *const u8, &raw mut root, Some(int_compar)).is_null() {
                 tdestroy(root, Some(dummy_free));
                 return;
             }
@@ -1478,7 +1534,7 @@ mod tests {
     fn test_tdestroy_calls_free_fn() {
         let mut root: *mut u8 = core::ptr::null_mut();
         for v in [50, 25, 75, 10, 90] {
-            if tsearch(v as *const u8, &raw mut root, int_compar).is_null() {
+            if tsearch(v as *const u8, &raw mut root, Some(int_compar)).is_null() {
                 tdestroy(root, Some(dummy_free));
                 return;
             }
@@ -1761,7 +1817,7 @@ mod tests {
             arr.as_ptr().cast::<u8>(),
             &raw const nel,
             width,
-            i32_compar,
+            Some(i32_compar),
         );
         assert!(!result.is_null());
         assert_eq!(unsafe { *(result.cast::<i32>()) }, 30);
@@ -1779,7 +1835,7 @@ mod tests {
             arr.as_ptr().cast::<u8>(),
             &raw const nel,
             width,
-            i32_compar,
+            Some(i32_compar),
         );
         assert!(result.is_null());
     }
@@ -1795,13 +1851,23 @@ mod tests {
             core::ptr::null(),
             &raw const nel,
             width,
-            i32_compar,
+            Some(i32_compar),
         );
         assert!(result.is_null());
     }
 
+    /// glibc hands the key to `compar` whatever it is -- a NULL one too.  It
+    /// was "not found" without a comparison until 2026-09-26.
     #[test]
     fn test_lfind_null_key() {
+        extern "C" fn null_matches_two(a: *const u8, b: *const u8) -> i32 {
+            // SAFETY: `b` is an element of the array below.
+            if a.is_null() && unsafe { *b.cast::<i32>() } == 2 {
+                0
+            } else {
+                1
+            }
+        }
         let arr: [i32; 3] = [1, 2, 3];
         let nel: usize = 3;
         let result = lfind(
@@ -1809,9 +1875,9 @@ mod tests {
             arr.as_ptr().cast::<u8>(),
             &raw const nel,
             4,
-            i32_compar,
+            Some(null_matches_two),
         );
-        assert!(result.is_null());
+        assert_eq!(result, (&raw const arr[1]).cast::<u8>());
     }
 
     #[test]
@@ -1826,7 +1892,7 @@ mod tests {
             arr.as_ptr().cast::<u8>(),
             &raw const nel,
             width,
-            i32_compar,
+            Some(i32_compar),
         );
         assert!(!result.is_null());
         // Should point to the first element.
@@ -1845,7 +1911,7 @@ mod tests {
             arr.as_ptr().cast::<u8>(),
             &raw const nel,
             width,
-            i32_compar,
+            Some(i32_compar),
         );
         assert!(!result.is_null());
         assert_eq!(unsafe { *(result.cast::<i32>()) }, 300);
@@ -1863,7 +1929,7 @@ mod tests {
             arr.as_mut_ptr().cast::<u8>(),
             &raw mut nel,
             width,
-            i32_compar,
+            Some(i32_compar),
         );
         assert!(!result.is_null());
         assert_eq!(nel, 3, "nel should not change when found");
@@ -1882,25 +1948,17 @@ mod tests {
             arr.as_mut_ptr().cast::<u8>(),
             &raw mut nel,
             width,
-            i32_compar,
+            Some(i32_compar),
         );
         assert!(!result.is_null());
         assert_eq!(nel, 4, "nel should increment on insert");
         assert_eq!(arr[3], 99, "inserted value should be at end");
     }
 
-    #[test]
-    fn test_lsearch_null_params() {
-        let result = lsearch(
-            core::ptr::null(),
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            4,
-            i32_compar,
-        );
-        assert!(result.is_null());
-    }
-
+    /// A width of 0 makes every element `base`, as glibc computes them: a key
+    /// equal to the first element is found there.  It was refused without a
+    /// comparison until 2026-09-26.  (A NULL `nelp`, which glibc reads, ends
+    /// the process now; it was "not found".)
     #[test]
     fn test_lsearch_zero_width() {
         let mut arr: [i32; 4] = [1, 2, 3, 0];
@@ -1911,9 +1969,10 @@ mod tests {
             arr.as_mut_ptr().cast::<u8>(),
             &raw mut nel,
             0,
-            i32_compar,
+            Some(i32_compar),
         );
-        assert!(result.is_null());
+        assert_eq!(result, arr.as_mut_ptr().cast::<u8>());
+        assert_eq!(nel, 3, "found, so nothing appended");
     }
 
     // ===================================================================
@@ -2041,5 +2100,63 @@ mod tests {
     fn test_queue_entry_layout() {
         // QueueEntry: next + prev = 2 pointers = 16 bytes.
         assert_eq!(core::mem::size_of::<QueueEntry>(), 16);
+    }
+
+    // -- A NULL comparison function (design-decisions.md §1115) --
+
+    /// glibc calls `compar` only when there is something to compare with: an
+    /// empty tree takes a NULL one, and `tsearch` inserts into it.  With a
+    /// node to compare, `tsearch` fails with EFAULT.  (`tfind`'s and
+    /// `tdelete`'s NULL with a node to compare ends the process, which is not
+    /// a test's to take.)
+    #[test]
+    fn a_null_compar_is_harmless_while_the_tree_is_empty() {
+        let mut root: *mut u8 = core::ptr::null_mut();
+        assert!(tfind(7 as *const u8, &raw const root, None).is_null());
+        assert!(tdelete(7 as *const u8, &raw mut root, None).is_null());
+        let node = tsearch(7 as *const u8, &raw mut root, None);
+        assert!(!node.is_null(), "an empty tree is inserted into");
+        assert_eq!(
+            tfind(7 as *const u8, &raw const root, Some(int_compar)),
+            node
+        );
+        errno::set_errno(0);
+        assert!(tsearch(8 as *const u8, &raw mut root, None).is_null());
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert!(tfind(8 as *const u8, &raw const root, Some(int_compar)).is_null());
+        assert!(!tdelete(7 as *const u8, &raw mut root, Some(int_compar)).is_null());
+        assert!(root.is_null());
+    }
+
+    /// glibc's `lfind` checks nothing: a NULL key and a NULL array go to
+    /// `compar`, a zero width compares `base` every time, and an empty array
+    /// needs no `compar`.  Each was "not found" without a comparison until
+    /// 2026-09-26.
+    #[test]
+    fn lfind_hands_compar_whatever_it_is_given() {
+        extern "C" fn null_is_seven(a: *const u8, b: *const u8) -> i32 {
+            // The key is NULL; the element is the address it was given.
+            if a.is_null() && b as usize == 7 { 0 } else { 1 }
+        }
+        let one = 1usize;
+        let base = 7 as *const u8;
+        assert_eq!(
+            lfind(core::ptr::null(), base, &one, 0, Some(null_is_seven)),
+            base
+        );
+        let zero = 0usize;
+        assert!(lfind(core::ptr::null(), core::ptr::null(), &zero, 4, None).is_null());
+        // lsearch appends to an empty array without a comparison.
+        let mut arr = [0i32; 2];
+        let mut n = 0usize;
+        let key = 5i32;
+        let got = lsearch(
+            (&raw const key).cast(),
+            arr.as_mut_ptr().cast(),
+            &raw mut n,
+            4,
+            None,
+        );
+        assert_eq!((got, n, arr[0]), (arr.as_mut_ptr().cast(), 1, 5));
     }
 }

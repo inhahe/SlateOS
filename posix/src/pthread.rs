@@ -748,12 +748,14 @@ pub extern "C" fn __pthread_thread_start(
 /// address is left in the thread's per-thread block, so the thread can find
 /// its slot even if it exits before this function has published its id.
 ///
-/// Returns 0 on success, or a POSIX error number on failure.
+/// Returns 0 on success, or a POSIX error number on failure.  A NULL `start`
+/// is `EFAULT`, after the thread's memory could be had: glibc creates the
+/// thread, which faults calling it (design-decisions.md §1115).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_create(
     thread: *mut PthreadT,
     attr: *const PthreadAttrT,
-    start: extern "C" fn(*mut u8) -> *mut u8,
+    start: Option<extern "C" fn(*mut u8) -> *mut u8>,
     arg: *mut u8,
 ) -> i32 {
     let want = CreateAttr::read(attr);
@@ -917,7 +919,7 @@ impl ThreadPlan {
 fn launch(
     slot: &'static ThreadSlot,
     want: &CreateAttr,
-    start: extern "C" fn(*mut u8) -> *mut u8,
+    start: Option<extern "C" fn(*mut u8) -> *mut u8>,
     arg: *mut u8,
 ) -> Result<u64, i32> {
     let tls_img = crate::tls::image();
@@ -939,6 +941,13 @@ fn launch(
         let _ = crate::mman::munmap(mem, plan.map_size);
         return Err(errno::EAGAIN);
     }
+    // A NULL start routine: glibc creates the thread, which faults calling it.
+    // `pthread_create` can fail, so it does here, as late as it can without a
+    // thread -- after the memory the thread needed was had.
+    let Some(start) = start else {
+        let _ = crate::mman::munmap(mem, plan.map_size);
+        return Err(errno::EFAULT);
+    };
     let map_base = mem as usize;
     let layout = plan.place(map_base, &tls_img);
 
@@ -1667,8 +1676,17 @@ pub unsafe extern "C" fn pthread_mutex_destroy(mutex: *mut PthreadMutexT) -> i32
 /// - 1: initialization complete
 ///
 /// Threads that arrive while init is running spin-wait until complete.
+///
+/// A NULL `init` is called by glibc only when it is the one to run it, and
+/// faults there; while another thread runs its own it waits, and once that is
+/// done there is nothing to call.  So a NULL `init` returns 0 in those two
+/// cases and is `EFAULT` in the first, leaving the once as it was
+/// (design-decisions.md §1115).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn pthread_once(once: *mut PthreadOnceT, init: extern "C" fn()) -> i32 {
+pub unsafe extern "C" fn pthread_once(
+    once: *mut PthreadOnceT,
+    init: Option<extern "C" fn()>,
+) -> i32 {
     if once.is_null() {
         return errno::EFAULT;
     }
@@ -1680,6 +1698,16 @@ pub unsafe extern "C" fn pthread_once(once: *mut PthreadOnceT, init: extern "C" 
     if done.load(Ordering::Acquire) == 1 {
         return 0;
     }
+
+    let Some(init) = init else {
+        loop {
+            match done.load(Ordering::Acquire) {
+                1 => return 0,
+                0 => return errno::EFAULT,
+                d => crate::lowlevellock::futex_wait(done, d),
+            }
+        }
+    };
 
     // Try to claim the initialization.
     if done
@@ -6166,17 +6194,17 @@ mod tests {
         unsafe {
             *core::ptr::addr_of_mut!(ONCE_COUNTER) = 0;
         }
-        assert_eq!(unsafe { pthread_once(&mut once, once_increment) }, 0);
+        assert_eq!(unsafe { pthread_once(&mut once, Some(once_increment)) }, 0);
         assert_eq!(unsafe { *core::ptr::addr_of!(ONCE_COUNTER) }, 1);
         // Second call should not invoke init again.
-        assert_eq!(unsafe { pthread_once(&mut once, once_increment) }, 0);
+        assert_eq!(unsafe { pthread_once(&mut once, Some(once_increment)) }, 0);
         assert_eq!(unsafe { *core::ptr::addr_of!(ONCE_COUNTER) }, 1);
     }
 
     #[test]
     fn once_null_returns_efault() {
         assert_eq!(
-            unsafe { pthread_once(core::ptr::null_mut(), once_increment) },
+            unsafe { pthread_once(core::ptr::null_mut(), Some(once_increment)) },
             errno::EFAULT
         );
     }
@@ -6886,7 +6914,7 @@ mod tests {
         let _ret = pthread_create(
             &raw mut tid,
             core::ptr::null(),
-            dummy,
+            Some(dummy),
             core::ptr::null_mut(),
         );
     }
@@ -7271,7 +7299,12 @@ mod tests {
             .filter(|s| s.task_id.load(Ordering::Relaxed) == SLOT_RESERVED)
             .count();
         assert_eq!(
-            pthread_create(&mut t, core::ptr::null(), never, core::ptr::null_mut()),
+            pthread_create(
+                &mut t,
+                core::ptr::null(),
+                Some(never),
+                core::ptr::null_mut()
+            ),
             crate::errno::EAGAIN
         );
         assert_eq!(t, 0);
@@ -8216,7 +8249,7 @@ mod tests {
             .map(|_| {
                 std::thread::spawn(move || {
                     let op = op.get();
-                    assert_eq!(unsafe { pthread_once(op, slow_once_init) }, 0);
+                    assert_eq!(unsafe { pthread_once(op, Some(slow_once_init)) }, 0);
                     assert!(
                         ONCE_RUNS.load(Ordering::SeqCst) >= 1,
                         "returned before init finished"
@@ -8269,5 +8302,42 @@ mod tests {
         let n = AtomicUsize::new(0);
         assert!(live_threads_remove(&n));
         assert_eq!(n.load(Ordering::Acquire), 0, "saturates at zero");
+    }
+
+    // -- A NULL start routine or once routine (design-decisions.md §1115) --
+
+    /// A done once needs no routine: 0, as in glibc.  One not yet run would
+    /// have glibc call the NULL; here it is EFAULT, and the once can still be
+    /// run by a real routine afterwards.
+    #[test]
+    fn a_null_once_routine_is_efault_only_when_it_would_run() {
+        static RAN: AtomicI32 = AtomicI32::new(0);
+        extern "C" fn mark() {
+            RAN.fetch_add(1, Ordering::Relaxed);
+        }
+        let mut once = PTHREAD_ONCE_INIT;
+        // SAFETY: a live once control.
+        unsafe {
+            assert_eq!(pthread_once(&mut once, None), errno::EFAULT);
+            assert_eq!(RAN.load(Ordering::Relaxed), 0);
+            assert_eq!(pthread_once(&mut once, Some(mark)), 0, "still runnable");
+            assert_eq!(RAN.load(Ordering::Relaxed), 1);
+            assert_eq!(pthread_once(&mut once, None), 0, "done: nothing to call");
+        }
+    }
+
+    /// A NULL start routine is judged only after the thread's memory has been
+    /// had: glibc creates the thread, which faults calling it.  The host has
+    /// no memory to give a thread, so there its EAGAIN is the answer -- the
+    /// NULL is not judged first.  (With the memory, it is EFAULT and no
+    /// thread.)
+    #[test]
+    fn a_null_start_routine_is_judged_after_the_threads_memory() {
+        let mut t: PthreadT = 0;
+        assert_eq!(
+            pthread_create(&mut t, core::ptr::null(), None, core::ptr::null_mut()),
+            errno::EAGAIN
+        );
+        assert_eq!(t, 0);
     }
 }

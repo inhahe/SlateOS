@@ -121,7 +121,7 @@ pub(crate) fn notify(sev: &SigeventView) -> Result<(), ()> {
                 sev.sigev_notify_attributes
             };
             let mut tid: crate::pthread::PthreadT = 0;
-            let rc = crate::pthread::pthread_create(&raw mut tid, attr, notify_thread, call);
+            let rc = crate::pthread::pthread_create(&raw mut tid, attr, Some(notify_thread), call);
             if rc != 0 {
                 // glibc tests this with `< 0`, which a positive error number
                 // never is, and so never notices; the caller is told.

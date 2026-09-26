@@ -1011,6 +1011,28 @@ unsafe fn qsort_partition<C: Fn(*const u8, *const u8) -> i32>(
     j
 }
 
+/// What `qsort` and `qsort_r` check before they sort, as glibc 2.39's
+/// `__qsort_r` meets them: fewer than two elements return at once, calling
+/// nothing, so they need no `compar`.  Otherwise glibc calls `compar` and moves
+/// elements through `base`, so a NULL either (with elements of some size to
+/// move) is where its process faults -- and `qsort` has no way to fail, so here
+/// it ends too, with a message (design-decisions.md §1115).  Until 2026-09-26
+/// the parameter could not be NULL, and a NULL `base` sorted nothing.
+///
+/// `None` means there is nothing to do.
+fn qsort_comparator<F>(base: *mut u8, nmemb: usize, size: usize, compar: Option<F>) -> Option<F> {
+    if nmemb <= 1 {
+        return None;
+    }
+    let Some(f) = compar else {
+        crate::unistd::libc_fatal(b"Fatal libc error: qsort: the comparison function is NULL\n");
+    };
+    if size != 0 && base.is_null() {
+        crate::unistd::libc_fatal(b"Fatal libc error: qsort: the array is NULL\n");
+    }
+    Some(f)
+}
+
 /// The shared introsort engine behind `qsort` and `qsort_r`.
 ///
 /// Recursion is replaced by an explicit stack that always defers the *smaller*
@@ -1129,14 +1151,18 @@ unsafe fn qsort_core<C: Fn(*const u8, *const u8) -> i32>(
 /// # Safety
 ///
 /// `base` must point to an array of at least `nmemb` elements, each
-/// of `size` bytes.  `compar` must be a valid comparison function.
+/// of `size` bytes.  `compar` must be a valid comparison function, or NULL
+/// for fewer than two elements (see [`qsort_comparator`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn qsort(
     base: *mut u8,
     nmemb: usize,
     size: usize,
-    compar: unsafe extern "C" fn(*const u8, *const u8) -> i32,
+    compar: Option<unsafe extern "C" fn(*const u8, *const u8) -> i32>,
 ) {
+    let Some(compar) = qsort_comparator(base, nmemb, size, compar) else {
+        return;
+    };
     // SAFETY: forwarded from this function's contract; the closure only calls
     // the caller's comparator on the pointers the engine hands it.
     unsafe { qsort_core(base, nmemb, size, &|a, b| compar(a, b)) };
@@ -1169,9 +1195,12 @@ mod gnu_qsort_r {
         base: *mut u8,
         nmemb: usize,
         size: usize,
-        compar: unsafe extern "C" fn(*const u8, *const u8, *mut core::ffi::c_void) -> i32,
+        compar: Option<unsafe extern "C" fn(*const u8, *const u8, *mut core::ffi::c_void) -> i32>,
         arg: *mut core::ffi::c_void,
     ) {
+        let Some(compar) = super::qsort_comparator(base, nmemb, size, compar) else {
+            return;
+        };
         // SAFETY: forwarded from this function's contract.
         unsafe { qsort_core(base, nmemb, size, &|a, b| compar(a, b, arg)) };
     }
@@ -1195,9 +1224,12 @@ pub unsafe extern "C" fn qsort_r(
     base: *mut u8,
     nmemb: usize,
     size: usize,
-    compar: unsafe extern "C" fn(*const u8, *const u8, *mut core::ffi::c_void) -> i32,
+    compar: Option<unsafe extern "C" fn(*const u8, *const u8, *mut core::ffi::c_void) -> i32>,
     arg: *mut core::ffi::c_void,
 ) {
+    let Some(compar) = qsort_comparator(base, nmemb, size, compar) else {
+        return;
+    };
     // SAFETY: forwarded from this function's contract.
     unsafe { qsort_core(base, nmemb, size, &|a, b| compar(a, b, arg)) };
 }
@@ -1205,6 +1237,14 @@ pub unsafe extern "C" fn qsort_r(
 /// Binary search a sorted array.
 ///
 /// Returns a pointer to the matching element, or NULL if not found.
+///
+/// glibc's (bits/stdlib-bsearch.h), which checks nothing: the elements are
+/// computed from `base` and handed to `compar`, and a `size` of 0 makes every
+/// element `base` -- which was "not found" without a comparison until
+/// 2026-09-26.  An empty array needs no `compar`.  A NULL one with elements
+/// to compare ends the process: glibc faults calling it, and "not found" is
+/// the only failure `bsearch` could report, which would be a wrong answer
+/// rather than a failure (design-decisions.md §1115).
 ///
 /// # Safety
 ///
@@ -1216,19 +1256,23 @@ pub unsafe extern "C" fn bsearch(
     base: *const u8,
     nmemb: usize,
     size: usize,
-    compar: unsafe extern "C" fn(*const u8, *const u8) -> i32,
+    compar: Option<unsafe extern "C" fn(*const u8, *const u8) -> i32>,
 ) -> *mut u8 {
-    if nmemb == 0 || size == 0 {
+    if nmemb == 0 {
         return core::ptr::null_mut();
     }
+    let Some(compar) = compar else {
+        crate::unistd::libc_fatal(b"Fatal libc error: bsearch: the comparison function is NULL\n");
+    };
 
     let mut lo: usize = 0;
     let mut hi: usize = nmemb;
 
     while lo < hi {
         let mid = lo.wrapping_add(hi.wrapping_sub(lo) / 2);
-        // SAFETY: mid < nmemb, so base + mid*size is within the array.
-        let elem = unsafe { base.add(mid.wrapping_mul(size)) };
+        // Computed, not dereferenced: the element is `compar`'s to read.
+        let elem = base.wrapping_add(mid.wrapping_mul(size));
+        // SAFETY: the caller's comparator on the caller's key and element.
         let cmp = unsafe { compar(key, elem) };
         match cmp.cmp(&0) {
             core::cmp::Ordering::Less => hi = mid,
@@ -2611,7 +2655,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 5,
                 core::mem::size_of::<i32>(),
-                cmp_i32,
+                Some(cmp_i32),
             );
         }
         assert_eq!(arr, [1, 2, 3, 4, 5]);
@@ -2625,7 +2669,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 4,
                 core::mem::size_of::<i32>(),
-                cmp_i32,
+                Some(cmp_i32),
             );
         }
         assert_eq!(arr, [1, 2, 3, 4]);
@@ -2639,7 +2683,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 4,
                 core::mem::size_of::<i32>(),
-                cmp_i32,
+                Some(cmp_i32),
             );
         }
         assert_eq!(arr, [1, 2, 3, 4]);
@@ -2653,7 +2697,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 1,
                 core::mem::size_of::<i32>(),
-                cmp_i32,
+                Some(cmp_i32),
             );
         }
         assert_eq!(arr, [42]);
@@ -2667,7 +2711,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 0,
                 core::mem::size_of::<i32>(),
-                cmp_i32,
+                Some(cmp_i32),
             );
         }
         // Should not crash.
@@ -2685,7 +2729,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 5,
                 core::mem::size_of::<i32>(),
-                cmp_i32,
+                Some(cmp_i32),
             )
         };
         assert!(!p.is_null());
@@ -2702,7 +2746,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 5,
                 core::mem::size_of::<i32>(),
-                cmp_i32,
+                Some(cmp_i32),
             )
         };
         assert!(p.is_null());
@@ -2862,7 +2906,7 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        unsafe { qsort(arr.as_mut_ptr().cast(), 0, 4, cmp) };
+        unsafe { qsort(arr.as_mut_ptr().cast(), 0, 4, Some(cmp)) };
     }
 
     #[test]
@@ -2871,7 +2915,7 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        unsafe { qsort(arr.as_mut_ptr().cast(), 1, 4, cmp) };
+        unsafe { qsort(arr.as_mut_ptr().cast(), 1, 4, Some(cmp)) };
         assert_eq!(arr[0], 42);
     }
 
@@ -2881,7 +2925,7 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        unsafe { qsort(arr.as_mut_ptr().cast(), 5, 4, cmp) };
+        unsafe { qsort(arr.as_mut_ptr().cast(), 5, 4, Some(cmp)) };
         assert_eq!(arr, [1, 2, 3, 4, 5]);
     }
 
@@ -2891,7 +2935,7 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        unsafe { qsort(arr.as_mut_ptr().cast(), 5, 4, cmp) };
+        unsafe { qsort(arr.as_mut_ptr().cast(), 5, 4, Some(cmp)) };
         assert_eq!(arr, [1, 2, 3, 4, 5]);
     }
 
@@ -2901,7 +2945,7 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        unsafe { qsort(arr.as_mut_ptr().cast(), 11, 4, cmp) };
+        unsafe { qsort(arr.as_mut_ptr().cast(), 11, 4, Some(cmp)) };
         assert_eq!(arr, [1, 1, 2, 3, 3, 4, 5, 5, 5, 6, 9]);
     }
 
@@ -2953,7 +2997,7 @@ mod tests {
         let mut expected = arr.clone();
         expected.sort_unstable();
         let n = arr.len();
-        unsafe { qsort(arr.as_mut_ptr().cast(), n, 4, qcmp_i32) };
+        unsafe { qsort(arr.as_mut_ptr().cast(), n, 4, Some(qcmp_i32)) };
         assert_eq!(arr, expected, "n = {n}");
     }
 
@@ -3022,7 +3066,7 @@ mod tests {
                 *b = (key as u8).wrapping_add(j as u8);
             }
         }
-        unsafe { qsort(buf.as_mut_ptr(), n, W, qcmp_i32) };
+        unsafe { qsort(buf.as_mut_ptr(), n, W, Some(qcmp_i32)) };
 
         keys.sort_unstable();
         for (i, want) in keys.iter().enumerate() {
@@ -3071,7 +3115,7 @@ mod tests {
             }
             0
         }
-        unsafe { qsort(buf.as_mut_ptr(), n, W, cmp_be3) };
+        unsafe { qsort(buf.as_mut_ptr(), n, W, Some(cmp_be3)) };
 
         for (i, want) in expected.iter().enumerate() {
             assert_eq!(&buf[i * W..i * W + 3], &want[..], "element {i}");
@@ -3138,7 +3182,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 n,
                 4,
-                cmp_dir,
+                Some(cmp_dir),
                 (&raw mut dir).cast::<core::ffi::c_void>(),
             );
         }
@@ -3150,7 +3194,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 n,
                 4,
-                cmp_dir,
+                Some(cmp_dir),
                 (&raw mut dir).cast::<core::ffi::c_void>(),
             );
         }
@@ -3164,10 +3208,11 @@ mod tests {
         }
         let mut arr = [3i32, 1, 2];
         // size == 0: nothing can be swapped meaningfully.
-        unsafe { qsort(arr.as_mut_ptr().cast(), 3, 0, cmp_never) };
+        unsafe { qsort(arr.as_mut_ptr().cast(), 3, 0, Some(cmp_never)) };
         assert_eq!(arr, [3, 1, 2]);
-        // A NULL base with a non-zero count must not be dereferenced.
-        unsafe { qsort(core::ptr::null_mut(), 5, 4, cmp_never) };
+        // A NULL base with elements to move is where glibc's process faults,
+        // and it ends this one too (`qsort_comparator`) -- not a test's to
+        // take.  It returned without sorting until 2026-09-26.
     }
 
     // -----------------------------------------------------------------------
@@ -3224,8 +3269,15 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        let result =
-            unsafe { bsearch((&key as *const i32).cast(), arr.as_ptr().cast(), 6, 4, cmp) };
+        let result = unsafe {
+            bsearch(
+                (&key as *const i32).cast(),
+                arr.as_ptr().cast(),
+                6,
+                4,
+                Some(cmp),
+            )
+        };
         assert!(!result.is_null());
         assert_eq!(unsafe { *(result as *const i32) }, 7);
     }
@@ -3237,8 +3289,15 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        let result =
-            unsafe { bsearch((&key as *const i32).cast(), arr.as_ptr().cast(), 6, 4, cmp) };
+        let result = unsafe {
+            bsearch(
+                (&key as *const i32).cast(),
+                arr.as_ptr().cast(),
+                6,
+                4,
+                Some(cmp),
+            )
+        };
         assert!(result.is_null());
     }
 
@@ -3248,7 +3307,15 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        let result = unsafe { bsearch((&key as *const i32).cast(), core::ptr::null(), 0, 4, cmp) };
+        let result = unsafe {
+            bsearch(
+                (&key as *const i32).cast(),
+                core::ptr::null(),
+                0,
+                4,
+                Some(cmp),
+            )
+        };
         assert!(result.is_null());
     }
 
@@ -4084,7 +4151,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 100,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             );
         }
         for &v in &arr {
@@ -4100,7 +4167,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 64,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             );
         }
         for i in 0..64 {
@@ -4116,7 +4183,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 128,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             );
         }
         for i in 0..128 {
@@ -4133,7 +4200,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 80,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             );
         }
         // First 40 should be 0, last 40 should be 1.
@@ -4153,7 +4220,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 10,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             );
         }
         assert_eq!(arr, [-999, -100, -50, -5, -3, -1, 0, 7, 10, 42]);
@@ -4167,7 +4234,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 2,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             );
         }
         assert_eq!(arr, [1, 2]);
@@ -4183,7 +4250,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 50,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             );
         }
         // Verify sorted.
@@ -4219,7 +4286,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 10,
                 core::mem::size_of::<Big>(),
-                cmp_big,
+                Some(cmp_big),
             );
         }
 
@@ -4237,7 +4304,7 @@ mod tests {
                 arr.as_mut_ptr().cast(),
                 60,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             );
         }
         for i in 1..60 {
@@ -4264,7 +4331,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 10,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(!ret.is_null());
@@ -4281,7 +4348,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 10,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(!ret.is_null());
@@ -4298,7 +4365,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 10,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(!ret.is_null());
@@ -4315,7 +4382,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 5,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(ret.is_null());
@@ -4331,7 +4398,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 5,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(ret.is_null());
@@ -4347,7 +4414,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 5,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(ret.is_null());
@@ -4363,7 +4430,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 1,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(!ret.is_null());
@@ -4380,7 +4447,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 1,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(ret.is_null());
@@ -4398,7 +4465,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 256,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(!ret.is_null());
@@ -4416,7 +4483,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 256,
                 core::mem::size_of::<i32>(),
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         assert!(ret.is_null());
@@ -4435,7 +4502,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 2,
                 4,
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         let r2 = unsafe {
@@ -4444,7 +4511,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 2,
                 4,
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
         let r3 = unsafe {
@@ -4453,7 +4520,7 @@ mod tests {
                 arr.as_ptr().cast(),
                 2,
                 4,
-                cmp_i32_stress,
+                Some(cmp_i32_stress),
             )
         };
 
@@ -5741,5 +5808,36 @@ mod tests {
                 assert_eq!(got, text.parse::<f32>().unwrap(), "strtof({text})");
             }
         }
+    }
+
+    // -- A NULL comparison function (design-decisions.md §1115) --
+
+    /// Fewer than two elements are sorted without a comparison, so they take
+    /// a NULL `compar`, as in glibc; so does an empty `bsearch`.  (A NULL one
+    /// with work to do ends the process, which is not a test's to take.)
+    #[test]
+    fn a_null_compar_is_harmless_with_nothing_to_compare() {
+        let mut one = [9i32];
+        // SAFETY: a one-element array; nothing is compared.
+        unsafe {
+            qsort(one.as_mut_ptr().cast(), 1, 4, None);
+            qsort(core::ptr::null_mut(), 0, 4, None);
+            qsort_r(one.as_mut_ptr().cast(), 1, 4, None, core::ptr::null_mut());
+            assert!(bsearch(one.as_ptr().cast(), one.as_ptr().cast(), 0, 4, None).is_null());
+        }
+        assert_eq!(one, [9]);
+    }
+
+    /// glibc's bsearch computes every element from `base`, so a size of 0
+    /// compares `base` itself -- it was "not found" without a comparison.
+    #[test]
+    fn bsearch_of_size_zero_compares_the_base() {
+        extern "C" fn always_equal(_: *const u8, _: *const u8) -> i32 {
+            0
+        }
+        let base = 64 as *const u8;
+        // SAFETY: `always_equal` reads neither pointer.
+        let got = unsafe { bsearch(core::ptr::null(), base, 3, 0, Some(always_equal)) };
+        assert_eq!(got.cast_const(), base);
     }
 }

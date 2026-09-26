@@ -3330,6 +3330,18 @@ pub extern "C" fn abort() -> ! {
     crate::process::_exit(134); // 128 + SIGABRT(6)
 }
 
+/// glibc's `__libc_fatal`: write `message` to standard error and abort.
+///
+/// For what a call cannot report -- it has no failure return, or its caller
+/// could not go on after one -- in the cases where glibc's process would end
+/// as well (design-decisions.md §1115). `message` is the whole line, newline
+/// included.
+pub(crate) fn libc_fatal(message: &[u8]) -> ! {
+    // The process is about to abort; a failed write changes nothing.
+    let _ = crate::file::write(2, message.as_ptr(), message.len());
+    abort()
+}
+
 // ---------------------------------------------------------------------------
 // prctl — process control (Linux)
 // ---------------------------------------------------------------------------

@@ -879,7 +879,7 @@ fn sort(sp: &mut Stream, head: *mut FtsEnt, nitems: usize, compar: FtsCompar) ->
             array.cast::<u8>(),
             nitems,
             core::mem::size_of::<*mut FtsEnt>(),
-            qcompar,
+            Some(qcompar),
         );
         for j in 0..nitems - 1 {
             (**array.add(j)).fts_link = *array.add(j + 1);

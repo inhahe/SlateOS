@@ -52,9 +52,7 @@ const OPEN_MESSAGE: &[u8] =
 /// glibc's `__fortify_fail`: write `message` -- already in glibc's
 /// `*** ... ***: terminated` form -- to standard error, and abort.
 fn fortify_fail(message: &[u8]) -> ! {
-    // There is no one to report a failed write to: the process is ending.
-    let _ = crate::file::write(2, message.as_ptr(), message.len());
-    crate::unistd::abort()
+    crate::unistd::libc_fatal(message)
 }
 
 /// glibc's `__chk_fail`: a fortified call's operation did not fit its object.

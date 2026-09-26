@@ -520,35 +520,36 @@ struct BrokenDown {
     wday: i32,
 }
 
-/// `mktime` for a [`Zone`](localtime::Zone): civil local time to epoch seconds.
+/// glibc's `mktime` ([`localtime::Zone::mktime`]) on `cal`'s own
+/// [`BrokenDown`], with `tm_isdst` -1 as util-linux's `parse_timestamp` sets
+/// it -- so a skipped or repeated hour resolves as it does upstream, from the
+/// same process-wide offset guess. `None` where `mktime` fails, and where a
+/// field does not fit the `int` it is in C.
 ///
-/// The arithmetic moved to [`localtime::Zone::epoch`] on 2026-09-14 — this is
-/// now the adapter between it and `cal`'s own [`BrokenDown`], which carries a
-/// `wday` that `localtime::Civil` has no use for. The comment that stood here
-/// said "there is no inverse of `Zone::local` in the `localtime` crate, so this
-/// is it"; there is one now, and it is shared rather than being the fourth
-/// private copy of `days_from_civil` in this tree.
-fn mktime(zone: &localtime::Zone, tm: &mut BrokenDown) -> i64 {
-    let (t, resolved) = zone.epoch(&localtime::Civil {
-        year: tm.year,
-        month: tm.month,
-        day: tm.day,
-        hour: tm.hour,
-        minute: tm.minute,
-        second: tm.second,
-    });
-
-    // Write the normalised civil fields back, the way `mktime` does, so that the
-    // weekday check in `parse_timestamp` sees the resolved date rather than the
-    // one that was typed.
-    tm.year = resolved.year;
-    tm.month = i64::from(resolved.month);
-    tm.day = i64::from(resolved.day);
-    tm.hour = i64::from(resolved.hour);
-    tm.minute = i64::from(resolved.minute);
-    tm.second = i64::from(resolved.second);
-    tm.wday = i32::try_from(resolved.wday).unwrap_or(0);
-    t
+/// The normalised fields are written back, as `mktime` writes them, so the
+/// weekday check in `parse_timestamp` sees the resolved date rather than the
+/// one that was typed.
+fn mktime(zone: &localtime::Zone, tm: &mut BrokenDown) -> Option<i64> {
+    let mut stm = localtime::StructTm {
+        tm_sec: i32::try_from(tm.second).ok()?,
+        tm_min: i32::try_from(tm.minute).ok()?,
+        tm_hour: i32::try_from(tm.hour).ok()?,
+        tm_mday: i32::try_from(tm.day).ok()?,
+        tm_mon: i32::try_from(tm.month.checked_sub(1)?).ok()?,
+        tm_year: i32::try_from(tm.year.checked_sub(1900)?).ok()?,
+        tm_wday: -1,
+        tm_isdst: -1,
+        ..localtime::StructTm::default()
+    };
+    let t = zone.mktime(&mut stm)?;
+    tm.year = i64::from(stm.tm_year).saturating_add(1900);
+    tm.month = i64::from(stm.tm_mon).saturating_add(1);
+    tm.day = i64::from(stm.tm_mday);
+    tm.hour = i64::from(stm.tm_hour);
+    tm.minute = i64::from(stm.tm_min);
+    tm.second = i64::from(stm.tm_sec);
+    tm.wday = stm.tm_wday;
+    Some(t)
 }
 
 // ------------------------------------------------------- numbers, as C's ---
@@ -1384,7 +1385,9 @@ fn parse_timestamp(zone: &localtime::Zone, reference: i64, t: &[u8]) -> Option<u
         }
     }
 
-    let x = mktime(zone, &mut tm);
+    // `if (x == (time_t) -1) return -EINVAL;` -- which refuses the second
+    // before the epoch along with a failure, as upstream's does.
+    let x = mktime(zone, &mut tm).filter(|&x| x != -1)?;
     if weekday >= 0 && tm.wday != weekday {
         return None;
     }

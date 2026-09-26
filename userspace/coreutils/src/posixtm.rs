@@ -14,14 +14,20 @@
 //! current year in the local zone.
 //!
 //! The string is read as a *local* time and turned into an instant through
-//! [`Zone::epoch`], this tree's `mktime`, and then the answer is checked
-//! against what was asked for: `mktime` carries "September 31" into October
-//! and a spring-forward gap into the next hour, and upstream refuses both by
-//! comparing the normalised fields with the parsed ones. The one mismatch it
-//! forgives is a seconds field of 60, which POSIX requires be accepted and
-//! which, with no leap second to land on, means the second after 59.
+//! [`Zone::mktime`] -- glibc's, with `tm_isdst` -1 as upstream sets it -- and
+//! then the answer is checked against what was asked for: `mktime` carries
+//! "September 31" into October and a spring-forward gap into the next hour,
+//! and upstream refuses both by comparing the normalised fields with the
+//! parsed ones. The one mismatch it forgives is a seconds field of 60, which
+//! POSIX requires be accepted and which, with no leap second to land on, means
+//! the second after 59.
+//!
+//! glibc's `mktime` rather than [`Zone::epoch`] because the repeated hour at a
+//! fall-back has two answers, and which one `touch -t` stamps is the one
+//! glibc's search finds -- from the offset the previous `mktime` in the
+//! process left behind, which only the port reproduces.
 
-use localtime::{Civil, Zone};
+use localtime::{StructTm, Zone};
 
 /// Upstream's `PDS_*` bits. `LEADING_YEAR` is the absence of `TRAILING_YEAR`,
 /// kept as a name because upstream's header keeps it.
@@ -52,8 +58,7 @@ impl Syntax {
 }
 
 /// The fields a string names, before `mktime`: upstream's `struct tm` as
-/// `posix_time_parse` fills it, but with the full year and a 1-based month,
-/// which is what [`Civil`] wants.
+/// `posix_time_parse` fills it, but with the full year and a 1-based month.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Fields {
     year: i64,
@@ -66,9 +71,13 @@ struct Fields {
 
 /// Upstream's `year`: the year from `pairs` -- none, one pair or two -- under
 /// `syntax`, `current` supplying the year when there are none.
-fn year(pairs: &[i64], syntax: Syntax, current: i64) -> Option<i64> {
+///
+/// `current` is called only then, because upstream's `localtime (&now)` is
+/// made only then -- and that call is a `tzset`, which under a `TZ` built
+/// from `posixrules` changes how the `mktime` after it anchors the zone.
+fn year(pairs: &[i64], syntax: Syntax, current: &dyn Fn() -> i64) -> Option<i64> {
     match *pairs {
-        [] => Some(current),
+        [] => Some(current()),
         [yy] => {
             // POSIX: 00-68 are 2000-2068, 69-99 are 1969-1999.
             if yy <= 68 {
@@ -86,9 +95,9 @@ fn year(pairs: &[i64], syntax: Syntax, current: i64) -> Option<i64> {
 }
 
 /// Upstream's `posix_time_parse`: the digits of `s` as fields, or `None` if
-/// `s` is not in `syntax`. `current_year` is the local year now, for a string
-/// that names none.
-fn parse(s: &[u8], syntax: Syntax, current_year: i64) -> Option<Fields> {
+/// `s` is not in `syntax`. `current_year` gives the local year now, for a
+/// string that names none, and is asked only for one of those.
+fn parse(s: &[u8], syntax: Syntax, current_year: &dyn Fn() -> i64) -> Option<Fields> {
     // A `.` is only the seconds separator when seconds are allowed; otherwise
     // it is just a byte that is not a digit.
     let (digits, seconds) = match s.iter().position(|&b| b == b'.') {
@@ -164,24 +173,32 @@ fn parse(s: &[u8], syntax: Syntax, current_year: i64) -> Option<Fields> {
 /// none, so a test can pin it.
 #[must_use]
 pub fn posixtime(s: &[u8], syntax: Syntax, zone: &Zone, now: i64) -> Option<i64> {
-    let current_year = zone.local(now, 0).year;
-    let mut want = parse(s, syntax, current_year)?;
+    // Upstream's `year` reads it with `localtime`, which runs `tzset` -- and
+    // only for a string with no year in it (see [`year`]).
+    let current_year = || zone.localtime(now, 0).year;
+    let mut want = parse(s, syntax, &current_year)?;
     let mut leapsec = false;
     loop {
-        let (t, got) = zone.epoch(&Civil {
-            year: want.year,
-            month: want.month,
-            day: want.day,
-            hour: want.hour,
-            minute: want.minute,
-            second: want.second,
-        });
-        let same = got.year == want.year
-            && i64::from(got.month) == want.month
-            && i64::from(got.day) == want.day
-            && i64::from(got.hour) == want.hour
-            && i64::from(got.minute) == want.minute
-            && i64::from(got.second) == want.second;
+        let mut tm1 = StructTm {
+            tm_sec: i32::try_from(want.second).ok()?,
+            tm_min: i32::try_from(want.minute).ok()?,
+            tm_hour: i32::try_from(want.hour).ok()?,
+            tm_mday: i32::try_from(want.day).ok()?,
+            tm_mon: i32::try_from(want.month.checked_sub(1)?).ok()?,
+            tm_year: i32::try_from(want.year.checked_sub(1900)?).ok()?,
+            tm_wday: -1,
+            tm_isdst: -1,
+            ..StructTm::default()
+        };
+        // `if (tm1.tm_wday < 0) return false;`: `mktime` failed, and left
+        // the fields as they were.
+        let t = zone.mktime(&mut tm1)?;
+        let same = i64::from(tm1.tm_year).checked_add(1900) == Some(want.year)
+            && i64::from(tm1.tm_mon).checked_add(1) == Some(want.month)
+            && i64::from(tm1.tm_mday) == want.day
+            && i64::from(tm1.tm_hour) == want.hour
+            && i64::from(tm1.tm_min) == want.minute
+            && i64::from(tm1.tm_sec) == want.second;
         if same {
             return t.checked_add(i64::from(leapsec));
         }
@@ -273,6 +290,24 @@ mod tests {
             "a leap day"
         );
         assert_eq!(at("202102290000", TOUCH_T), None, "not a leap year");
+    }
+
+    #[test]
+    fn a_time_in_a_spring_forward_gap_is_refused_and_a_repeated_one_is_either() {
+        // New York's rules, so no zoneinfo tree is needed.
+        let ny = Zone::resolve(
+            Some(b"EST5EDT,M3.2.0,M11.1.0"),
+            std::path::Path::new("/nonexistent"),
+            std::path::Path::new("/nonexistent"),
+        );
+        let in_ny = |s: &str| posixtime(s.as_bytes(), TOUCH_T, &ny, NOW);
+        // 02:30 on 2020-03-08 did not happen: `mktime` moves it and the
+        // fields no longer match.
+        assert_eq!(in_ny("202003080230"), None);
+        // 01:30 on 2020-11-01 happened twice. Which one is glibc's search's
+        // choice, from the process-wide offset -- either is a valid answer.
+        let t = in_ny("202011010130").unwrap();
+        assert!(t == 1_604_208_600 || t == 1_604_212_200, "{t}");
     }
 
     #[test]

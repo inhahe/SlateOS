@@ -583,6 +583,18 @@ run_case -t 2020 --bogus file
 # Two sources of a time, in either order.
 run_case -t 202001010000 -r file newfile
 run_case -r file -t 202001010000 newfile
+# Where daylight saving makes local time ambiguous, `-t` is glibc's `mktime`
+# with `tm_isdst` -1: a time a spring-forward skipped does not come back as
+# asked for, and is refused; one a fall-back repeated is whichever instant the
+# search finds first in a fresh process. `AAA3BBB` borrows `posixrules`'
+# history, which `mktime`'s own `tzset` anchors -- the case the order of
+# glibc's zone reads decides.
+ENVV=(TZ=America/New_York); run_case -t 202003080230 file
+ENVV=(TZ=America/New_York); run_case -t 202011010130 file
+ENVV=(TZ=America/New_York); run_case -t 202011010159.60 file
+ENVV=(TZ=AAA3BBB); run_case -t 202011010130 file
+ENVV=(TZ=AAA3BBB); run_case -t 202003080330 file
+ENVV=(TZ=AAA3BBB); run_case -t 11010130 file
 
 # The obsolete `MMDDhhmm[YY] FILE…`: a date only before the 2001 edition, only
 # with a second operand, only when no other source of a time was given, and

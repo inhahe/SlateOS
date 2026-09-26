@@ -756,7 +756,8 @@ fn obsolete_stamp(
     if posixly_correct {
         return None;
     }
-    let tm = clock.zone.local(secs, 0);
+    // Upstream's `localtime`, not `localtime_r`: it runs `tzset` first.
+    let tm = clock.zone.localtime(secs, 0);
     // The operand is printed as it was typed, upstream's `%s`. It is all ASCII
     // digits, or `posixtime` would not have accepted it, so each byte is its
     // own character and nothing is lost in the conversion.

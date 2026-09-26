@@ -80311,7 +80311,10 @@ entry yet, so the menu still shows the shell's own ten, now in folders.
 - **Icons come from the icon theme only**: an entry naming an icon file by path,
   or an icon installed in `hicolor`, draws the generic program picture
   (`known-issues.md` `TD-C-A-PROGRAMS-OWN-ICON-FILE-IS-NOT-READ`).
-- **Jump lists** (an entry's `Actions`) are read and not yet offered.
+- ~~Jump lists (an entry's `Actions`) are read and not yet offered.~~ Offered
+  the same day: a program's right-click menu -- its start menu row, its pinned
+  taskbar button -- starts with its actions, above a separator; an action with
+  no command line (D-Bus only) is left out.
 - **Which folders are closed** is not saved across logins.
 
 ## 952. A measurement the host can distort needs a repeat, not a wider bound

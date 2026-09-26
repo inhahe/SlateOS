@@ -5470,8 +5470,10 @@ impl DesktopShell {
                 Some(Some(MenuAction::Selected(id))) => {
                     let target = self.pin_menu.as_ref().map(|(_, target)| *target);
                     self.pin_menu = None;
-                    if let Some(target) = target {
-                        self.activate_pin_menu_item(id, target);
+                    if let Some(launch) =
+                        target.and_then(|target| self.activate_pin_menu_item(id, target))
+                    {
+                        return HotkeyOutcome::start(vec![launch]);
                     }
                 }
                 Some(Some(MenuAction::Closed)) => self.pin_menu = None,
@@ -7519,6 +7521,32 @@ impl DesktopShell {
         let Some(exec) = self.exec_of(target) else {
             return;
         };
+        // The program's jump list first, as a taskbar's is: what it can be
+        // started to do, above what can be done with it. An action with no
+        // command line is started by D-Bus, which this system does not have,
+        // so it is not offered.
+        let mut items: Vec<guitk::menu::MenuItem> = self
+            .program_of(target)
+            .map(|app| {
+                app.actions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, action)| action.exec.is_some())
+                    .map(|(index, action)| guitk::menu::MenuItem::Action {
+                        id: Self::MENU_JUMP_LIST_BASE
+                            .saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
+                        label: action.name.clone(),
+                        shortcut: None,
+                        icon: None,
+                        enabled: true,
+                        checked: None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !items.is_empty() {
+            items.push(guitk::menu::MenuItem::Separator);
+        }
         let label = if self.is_pinned(&exec) {
             "Unpin from taskbar"
         } else {
@@ -7529,7 +7557,7 @@ impl DesktopShell {
         } else {
             "Pin to Start menu"
         };
-        let items = vec![
+        items.extend([
             guitk::menu::MenuItem::Action {
                 id: Self::MENU_PIN_TOGGLE,
                 label: label.to_string(),
@@ -7554,7 +7582,7 @@ impl DesktopShell {
                 enabled: true,
                 checked: None,
             },
-        ];
+        ]);
         let mut menu = guitk::menu::ContextMenu::new(items);
         // The real screen, not the toolkit's assumed one -- the same reason
         // the overflow list passes it: this opens from wherever the start menu
@@ -7576,12 +7604,17 @@ impl DesktopShell {
             return ShellAction::Consumed;
         };
         self.pin_menu = None;
-        self.activate_pin_menu_item(id, target);
-        ShellAction::Consumed
+        self.activate_pin_menu_item(id, target)
+            .map_or(ShellAction::Consumed, ShellAction::Launch)
     }
 
-    /// One row of the pin menu, chosen by click or by key.
-    fn activate_pin_menu_item(&mut self, id: MenuItemId, target: PinTarget) {
+    /// One row of the pin menu, chosen by click or by key: the program to
+    /// start, for a row of its jump list.
+    fn activate_pin_menu_item(
+        &mut self,
+        id: MenuItemId,
+        target: PinTarget,
+    ) -> Option<hotkeys::Launch> {
         match id {
             Self::MENU_PIN_TOGGLE => self.toggle_pin(target),
             Self::MENU_START_PIN_TOGGLE => {
@@ -7590,8 +7623,30 @@ impl DesktopShell {
                 }
             }
             Self::MENU_ADD_TO_DESKTOP => self.add_to_desktop(target),
-            _ => {}
+            _ => {
+                let index = usize::try_from(id.checked_sub(Self::MENU_JUMP_LIST_BASE)?).ok()?;
+                let launch = {
+                    let app = self.program_of(target)?;
+                    let action = app.actions.get(index)?;
+                    app.launch_action(&action.id)?
+                };
+                // Chosen from the start menu, it gets out of the way of the
+                // window it is about to open, as starting the program does.
+                if matches!(target, PinTarget::StartMenuRow(_)) {
+                    self.close_start_menu();
+                }
+                return Some(launch);
+            }
         }
+        None
+    }
+
+    /// The program a pin menu target names, as the launcher knows it -- for
+    /// its jump list. A program the launcher does not know has none: a pin
+    /// is a copy of a listed program's entry, or one made from its path.
+    fn program_of(&self, target: PinTarget) -> Option<&AppEntry> {
+        let exec = self.exec_of(target)?;
+        self.apps.iter().find(|app| app.executable_path == exec)
     }
 
     /// Pin `exec` to the start menu, or unpin it if it is pinned there
@@ -8798,6 +8853,9 @@ impl DesktopShell {
     const MENU_ADD_TO_DESKTOP: u64 = 901;
     /// The pin menu's "Pin to Start menu" / "Unpin from Start menu".
     const MENU_START_PIN_TOGGLE: u64 = 902;
+    /// The first of the jump list's rows: the program's `n`-th desktop action
+    /// is this plus `n`.
+    const MENU_JUMP_LIST_BASE: u64 = 1000;
 
     // The desktop menu's item ids. Stable numbers rather than positions, so
     // inserting an item cannot silently reassign what the ones below it do;
@@ -20413,6 +20471,145 @@ mod start_search_tests {
             shell.render_pin_menu().is_none(),
             "a folder opened a pin menu"
         );
+    }
+
+    const SKETCHPAD_WITH_ACTIONS: &str = "[Desktop Entry]\nType=Application\nName=Sketchpad\nExec=sketch %U\nCategories=Graphics;\nActions=new;dbus;empty;\n[Desktop Action new]\nName=New Drawing\nExec=sketch --new\n[Desktop Action dbus]\nName=Only by D-Bus\n[Desktop Action empty]\nName=Blank Canvas\nExec=sketch --blank\n";
+
+    /// The labels of the pin menu, top to bottom.
+    fn pin_menu_labels(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .render_pin_menu()
+            .expect("the pin menu is open")
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The row the program named `name` is on.
+    fn row_named(shell: &DesktopShell, name: &str) -> usize {
+        shell
+            .start_menu_rows()
+            .iter()
+            .position(|r| matches!(r, crate::StartRow::Program { entry, .. } if entry.name == name))
+            .expect("the program is listed")
+    }
+
+    /// **A program's right-click menu starts with its jump list** -- the
+    /// actions its desktop entry offers, above what can be done with it --
+    /// leaving out an action only D-Bus could start.
+    #[test]
+    fn a_programs_menu_starts_with_its_jump_list() {
+        let mut shell = shell();
+        shell.set_installed_apps(vec![installed(SKETCHPAD_WITH_ACTIONS)]);
+        let row = row_named(&shell, "Sketchpad");
+        shell.open_pin_menu(super::PinTarget::StartMenuRow(row), 100.0, 100.0);
+        let labels = pin_menu_labels(&shell);
+        assert_eq!(labels[..2], ["New Drawing", "Blank Canvas"], "{labels:?}");
+        assert!(!labels.contains(&"Only by D-Bus".to_owned()), "{labels:?}");
+        assert!(labels.contains(&"Pin to taskbar".to_owned()), "{labels:?}");
+        // A program with no actions has the menu it had.
+        let terminal = row_named(&shell, "Terminal");
+        shell.pin_menu = None;
+        shell.open_pin_menu(super::PinTarget::StartMenuRow(terminal), 100.0, 100.0);
+        assert_eq!(pin_menu_labels(&shell)[0], "Pin to taskbar");
+    }
+
+    /// **A row of the jump list starts the program as that action says**, and
+    /// the start menu gets out of the way -- by click and by key.
+    #[test]
+    fn a_jump_list_row_starts_its_action() {
+        let mut shell = shell();
+        shell.set_installed_apps(vec![installed(SKETCHPAD_WITH_ACTIONS)]);
+        let row = row_named(&shell, "Sketchpad");
+        let blank = super::DesktopShell::MENU_JUMP_LIST_BASE + 2;
+        assert_eq!(
+            shell.activate_pin_menu_item(blank, super::PinTarget::StartMenuRow(row)),
+            Some(launch("sketch", &["--blank"]))
+        );
+        assert!(
+            !shell.start_menu_open,
+            "the menu stayed over the new window"
+        );
+
+        // By key: the first row, chosen with Down and Enter.
+        let mut shell = super::DesktopShell::new(1920, 1080);
+        shell.toggle_start_menu();
+        shell.set_installed_apps(vec![installed(SKETCHPAD_WITH_ACTIONS)]);
+        let row = row_named(&shell, "Sketchpad");
+        shell.open_pin_menu(super::PinTarget::StartMenuRow(row), 100.0, 100.0);
+        drop(shell.handle_hotkey(&press(Key::Down)));
+        let outcome = shell.handle_hotkey(&press(Key::Enter));
+        assert_eq!(outcome.launches, [launch("sketch", &["--new"])]);
+    }
+
+    /// Where the pin menu draws `label`: its text's top-left corner.
+    fn pin_menu_text_at(shell: &DesktopShell, label: &str) -> (f32, f32) {
+        shell
+            .render_pin_menu()
+            .expect("the pin menu is open")
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                guitk::render::RenderCommand::Text { text, x, y, .. } if text == label => {
+                    Some((*x, *y))
+                }
+                _ => None,
+            })
+            .expect("the label is drawn")
+    }
+
+    /// **A click on a row of the jump list starts it**, the pointer's way to
+    /// the same thing the keyboard reaches -- and the jump list is set apart
+    /// from the rows below it by more than its own rows are from each other.
+    #[test]
+    fn a_click_on_the_jump_list_starts_its_action() {
+        use guitk::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut shell = shell();
+        shell.set_installed_apps(vec![installed(SKETCHPAD_WITH_ACTIONS)]);
+        let row = row_named(&shell, "Sketchpad");
+        shell.open_pin_menu(super::PinTarget::StartMenuRow(row), 100.0, 100.0);
+
+        let first = pin_menu_text_at(&shell, "New Drawing");
+        let second = pin_menu_text_at(&shell, "Blank Canvas");
+        let pin = pin_menu_text_at(&shell, "Pin to taskbar");
+        assert!(
+            pin.1 - second.1 > (second.1 - first.1) + 1.0,
+            "no separator between the jump list and the rest: {first:?} {second:?} {pin:?}"
+        );
+
+        let at = (second.0 + 2.0, second.1 + 4.0);
+        let pressed = shell.handle_mouse(&MouseEvent {
+            x: at.0,
+            y: at.1,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        assert_eq!(
+            pressed,
+            super::ShellAction::Launch(launch("sketch", &["--blank"]))
+        );
+        assert!(!shell.start_menu_open);
+    }
+
+    /// A pinned taskbar button's menu has the jump list too.
+    #[test]
+    fn a_pinned_buttons_menu_has_the_jump_list() {
+        // Pinning saves the taskbar's pins: a directory of the test's own.
+        settingsfile::testing::with_scratch_config("shell-jump-list", |_root| {
+            let mut shell = shell();
+            shell.set_installed_apps(vec![installed(SKETCHPAD_WITH_ACTIONS)]);
+            shell.pin_app("sketch", "Sketchpad");
+            let index = shell
+                .pinned_apps()
+                .iter()
+                .position(|app| app.exec_path == "sketch")
+                .expect("pinned");
+            shell.open_pin_menu(super::PinTarget::Pinned(index), 100.0, 100.0);
+            assert_eq!(pin_menu_labels(&shell)[0], "New Drawing");
+        });
     }
 
     /// **A program in a folder is set in under the folder's row**, so the

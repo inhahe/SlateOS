@@ -1845,7 +1845,8 @@ live.
   and the XDG directories in precedence order), read at login and again when
   the menu opens if an entry changed; in folders by kind, open until clicked,
   each program with its picture from the icon theme; started with the
-  arguments its entry gives. The shell's own ten remain for programs no entry
+  arguments its entry gives; its right-click menu starts with its jump list
+  (the entry's actions). The shell's own ten remain for programs no entry
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 

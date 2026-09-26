@@ -430,68 +430,93 @@ fn parse_json_object(json: &str) -> Option<BTreeMap<String, String>> {
 /// Parse a JSON string starting at `pos` (which should point to the opening `"`).
 fn parse_json_string_value(s: &str, pos: &mut usize) -> Option<String> {
     let bytes = s.as_bytes();
-    if *pos >= bytes.len() || bytes[*pos] != b'"' {
+    if bytes.get(*pos) != Some(&b'"') {
         return None;
     }
     *pos += 1; // skip opening "
 
     let mut result = String::new();
-    while *pos < bytes.len() {
-        if bytes[*pos] == b'\\' && *pos + 1 < bytes.len() {
-            match bytes[*pos + 1] {
-                b'"' => {
-                    result.push('"');
-                    *pos += 2;
-                }
-                b'\\' => {
-                    result.push('\\');
-                    *pos += 2;
-                }
-                b'n' => {
-                    result.push('\n');
-                    *pos += 2;
-                }
-                b'r' => {
-                    result.push('\r');
-                    *pos += 2;
-                }
-                b't' => {
-                    result.push('\t');
-                    *pos += 2;
-                }
-                b'/' => {
-                    result.push('/');
-                    *pos += 2;
-                }
-                b'u' => {
-                    // \uXXXX — parse 4 hex digits.
-                    if *pos + 5 < bytes.len() {
-                        let hex = &s[*pos + 2..*pos + 6];
-                        if let Ok(code) = u32::from_str_radix(hex, 16)
-                            && let Some(ch) = char::from_u32(code)
-                        {
-                            result.push(ch);
-                        }
-                        *pos += 6;
-                    } else {
-                        *pos += 2;
-                    }
-                }
-                _ => {
-                    result.push(bytes[*pos + 1] as char);
-                    *pos += 2;
-                }
+    // Where the current run of bytes needing no decoding began. A run always
+    // ends at an ASCII byte -- a quote, a backslash -- or at the end, so it is
+    // copied as the UTF-8 it already is. Pushing it byte by byte `as char`, as
+    // this did until 2026-09-26, turned every non-ASCII character into
+    // mojibake: a record saying `café` was shown as `cafÃ©`.
+    let mut run = *pos;
+    while let Some(&b) = bytes.get(*pos) {
+        match b {
+            b'"' => {
+                result.push_str(s.get(run..*pos).unwrap_or_default());
+                *pos += 1; // skip closing "
+                return Some(result);
             }
-        } else if bytes[*pos] == b'"' {
-            *pos += 1; // skip closing "
-            return Some(result);
-        } else {
-            result.push(bytes[*pos] as char);
-            *pos += 1;
+            b'\\' => {
+                result.push_str(s.get(run..*pos).unwrap_or_default());
+                *pos += decode_escape(bytes, *pos, &mut result);
+                run = *pos;
+            }
+            _ => *pos += 1,
         }
     }
     // Unterminated string -- return what we have.
+    result.push_str(s.get(run..*pos).unwrap_or_default());
     Some(result)
+}
+
+/// Decode the escape whose backslash is at `bytes[at]` into `out`, returning
+/// how many bytes it spans.
+///
+/// Every escape JSON defines is decoded, `\uXXXX` included and a surrogate
+/// pair as the one character it encodes. What cannot be decoded -- a lone
+/// surrogate, a malformed `\u`, an escape JSON does not define -- is kept as
+/// it was written, backslash and all: a log viewer that drops text it cannot
+/// interpret shows a record that was never written. (The old decoder dropped a
+/// lone surrogate, and a pair lost both halves.)
+fn decode_escape(bytes: &[u8], at: usize, out: &mut String) -> usize {
+    let simple = match bytes.get(at + 1) {
+        Some(b'"') => Some('"'),
+        Some(b'\\') => Some('\\'),
+        Some(b'/') => Some('/'),
+        Some(b'b') => Some('\u{8}'),
+        Some(b'f') => Some('\u{c}'),
+        Some(b'n') => Some('\n'),
+        Some(b'r') => Some('\r'),
+        Some(b't') => Some('\t'),
+        _ => None,
+    };
+    if let Some(c) = simple {
+        out.push(c);
+        return 2;
+    }
+    if bytes.get(at + 1) == Some(&b'u')
+        && let Some(unit) = hex4(bytes, at + 2)
+    {
+        if (0xD800..0xDC00).contains(&unit) {
+            if bytes.get(at + 6) == Some(&b'\\')
+                && bytes.get(at + 7) == Some(&b'u')
+                && let Some(low) = hex4(bytes, at + 8)
+                && (0xDC00..0xE000).contains(&low)
+                && let Some(ch) = char::from_u32(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00))
+            {
+                out.push(ch);
+                return 12;
+            }
+        } else if let Some(ch) = char::from_u32(unit) {
+            out.push(ch);
+            return 6;
+        }
+    }
+    // Kept as written: the backslash here, and whatever follows it copied by
+    // the caller as ordinary text.
+    out.push('\\');
+    1
+}
+
+/// Four hex digits at `bytes[at..at + 4]` as a number.
+fn hex4(bytes: &[u8], at: usize) -> Option<u32> {
+    let digits = bytes.get(at..at + 4)?;
+    digits.iter().try_fold(0u32, |acc, &d| {
+        char::from(d).to_digit(16).map(|v| acc * 16 + v)
+    })
 }
 
 fn json_escape(s: &str) -> String {
@@ -2757,5 +2782,56 @@ mod tests {
         assert_eq!(cfg.priority_filter, Some(Priority::Error));
         assert_eq!(cfg.num_entries, Some(50));
         assert!(cfg.reverse);
+    }
+
+    // --- JSON string decoding ---
+
+    fn decoded(json: &str) -> Option<String> {
+        let mut pos = 0;
+        parse_json_string_value(json, &mut pos)
+    }
+
+    /// Non-ASCII text used to come back as mojibake, one Latin-1 character
+    /// per UTF-8 byte: `café` as `cafÃ©`.
+    #[test]
+    fn json_strings_decode_as_utf8() {
+        assert_eq!(decoded("\"caf\u{e9}\"").as_deref(), Some("caf\u{e9}"));
+        assert_eq!(decoded("\"\u{65e5}\u{672c}\"").as_deref(), Some("\u{65e5}\u{672c}"));
+    }
+
+    #[test]
+    fn every_escape_json_defines_is_decoded() {
+        let cases = [
+            (r#""\u00e9""#, "\u{e9}"),
+            (r#""\ud83d\ude00""#, "\u{1f600}"),
+            (r#""\b\f\n\r\t\/\\\"""#, "\u{8}\u{c}\n\r\t/\\\""),
+        ];
+        for (json, want) in cases {
+            assert_eq!(decoded(json).as_deref(), Some(want), "{json}");
+        }
+    }
+
+    /// What cannot be decoded is kept as written, not dropped.
+    #[test]
+    fn undecodable_escapes_are_kept_as_written() {
+        let cases = [
+            (r#""a\ud83dz""#, "a\\ud83dz"),
+            (r#""\x41""#, "\\x41"),
+            (r#""\u12G4""#, "\\u12G4"),
+            (r#""\u00e""#, "\\u00e"),
+        ];
+        for (json, want) in cases {
+            assert_eq!(decoded(json).as_deref(), Some(want), "{json}");
+        }
+    }
+
+    /// `\u` followed by multi-byte characters used to slice the `&str`
+    /// inside one of them, which panics.
+    #[test]
+    fn a_multibyte_character_after_a_short_u_escape_does_not_panic() {
+        assert_eq!(
+            decoded("\"\\u\u{e9}\u{e9}\u{e9}\"").as_deref(),
+            Some("\\u\u{e9}\u{e9}\u{e9}")
+        );
     }
 }

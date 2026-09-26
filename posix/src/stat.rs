@@ -368,179 +368,107 @@ pub fn may_mknod(mode: u32) -> Result<(), i32> {
     }
 }
 
-/// Create a special or ordinary file.
-///
-/// Returns -1 with `ENOSYS` after argument-domain validation.  Our
-/// filesystem doesn't support device nodes or special files yet, but
-/// invalid callers must still see Linux-matching errno values so
-/// portable code (udev, mdev, tmpfiles.d processors) reports failures
-/// correctly.
-///
-/// Validation order matches `fs/namei.c::do_mknodat` and
-/// `fs/namei.c::vfs_mknod` in Linux:
-/// 1. `pathname == NULL` → `EFAULT`.
-/// 2. `pathname` is the empty string → `ENOENT`.
-/// 3. `mode & S_IFMT` is not a valid file type → `EINVAL`.
-///    Plain `0` (no type bits) is rejected — Linux treats that as
-///    "create a regular file" in the BSD legacy interface but
-///    `do_mknodat` is strict.  Our stub follows the strict path.
-/// 4. (Phase 188) `mode & S_IFMT` is `S_IFCHR` or `S_IFBLK` and the
-///    caller lacks `CAP_MKNOD` → `EPERM`.  Matches Linux's
-///    `vfs_mknod`: `if (S_ISCHR(mode) || S_ISBLK(mode)) { if
-///    (!capable(CAP_MKNOD)) return -EPERM; }`.  FIFO, socket, and
-///    regular-file types do not require the cap.
-/// 5. All validated → `ENOSYS`.
-///
-/// Things we cannot validate yet:
-/// - `EEXIST`: pathname already exists.
-/// - `ENOTDIR`/`ENOENT`: a path component is wrong.
+/// Create a special or ordinary file: glibc's `mknod`, which is
+/// `mknodat(AT_FDCWD, ...)`.  See [`mknodat`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mknod(pathname: *const u8, mode: u32, _dev: u64) -> i32 {
-    // `do_mknodat` (fs/namei.c:4023) runs `may_mknod` first; `getname`'s
-    // EFAULT/ENOENT only surface after, from `filename_create`.
-    if let Err(e) = may_mknod(mode) {
-        crate::errno::set_errno(e);
-        return -1;
-    }
-    if pathname.is_null() {
-        crate::errno::set_errno(crate::errno::EFAULT);
-        return -1;
-    }
-    // SAFETY: pathname non-NULL; read one byte to detect empty string.
-    if unsafe { *pathname } == 0 {
-        crate::errno::set_errno(crate::errno::ENOENT);
-        return -1;
-    }
-    // Phase 188: CAP_MKNOD gate fires only for character and block
-    // device types — matches Linux's `vfs_mknod` placement.  FIFO,
-    // socket, and regular-file creations bypass this check.
-    let t = mode & crate::fcntl::S_IFMT;
-    if (t == crate::fcntl::S_IFCHR || t == crate::fcntl::S_IFBLK)
-        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_MKNOD)
-    {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    crate::errno::set_errno(crate::errno::ENOSYS);
-    -1
+pub extern "C" fn mknod(pathname: *const u8, mode: u32, dev: u64) -> i32 {
+    mknodat(crate::file::AT_FDCWD, pathname, mode, dev)
 }
 
-/// Create a special file relative to a directory fd.
+/// Create a special or ordinary file relative to a directory fd.
 ///
-/// Returns -1 with `ENOSYS` after argument-domain validation, matching
-/// `mknod` for path/mode and adding directory-fd checks.
-///
-/// Validation order is `do_mknodat`'s (fs/namei.c:4023):
-/// 1. [`may_mknod`]: a directory → `EPERM`, another invalid type → `EINVAL`
+/// The checks come in glibc's order and then Linux's (`do_mknodat`,
+/// fs/namei.c):
+/// 1. `dev` wider than the kernel's 32-bit device number → `EINVAL`
+///    (glibc's `__mknodat`, before the system call).
+/// 2. [`may_mknod`]: a directory → `EPERM`, another unknown type → `EINVAL`
 ///    -- before the path is looked at.
-/// 2. `pathname == NULL` → `EFAULT`.
-/// 3. `pathname` empty → `ENOENT`.
-/// 4. `dirfd != AT_FDCWD` and `dirfd < 0` → `EBADF`.
-/// 5. `dirfd != AT_FDCWD` and not an open fd → `EBADF`.
-/// 6. (Phase 188) `mode & S_IFMT` is `S_IFCHR` or `S_IFBLK` and the
-///    caller lacks `CAP_MKNOD` → `EPERM`.  Linux's `vfs_mknod` runs
-///    after path resolution, so the dirfd checks beat the cap check.
-/// 7. All validated → `ENOSYS`.
+/// 3. `pathname == NULL` → `EFAULT`; empty → `ENOENT` (`getname`'s errors,
+///    which surface in `filename_create`).
+/// 4. For a relative `pathname` only, `dirfd` other than `AT_FDCWD`: not
+///    open → `EBADF`, not a directory → `ENOTDIR` (`path_init`; an absolute
+///    path never looks at `dirfd`).
+/// 5. A regular file -- type 0 or `S_IFREG` -- is created, as `vfs_create`
+///    does, through `openat(O_CREAT | O_EXCL)`, and takes its errors
+///    (`EEXIST` among them).
+/// 6. A character or block device without `CAP_MKNOD` → `EPERM`
+///    (`vfs_mknod`).
+/// 7. A FIFO, socket or device → `ENOSYS`: the filesystem cannot hold
+///    special files yet.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mknodat(dirfd: i32, pathname: *const u8, mode: u32, _dev: u64) -> i32 {
-    if let Err(e) = may_mknod(mode) {
-        crate::errno::set_errno(e);
-        return -1;
+pub extern "C" fn mknodat(dirfd: i32, pathname: *const u8, mode: u32, dev: u64) -> i32 {
+    match mknod_at(dirfd, pathname, mode, dev) {
+        Ok(()) => 0,
+        Err(e) => {
+            crate::errno::set_errno(e);
+            -1
+        }
     }
+}
+
+fn mknod_at(dirfd: i32, pathname: *const u8, mode: u32, dev: u64) -> Result<(), i32> {
+    // glibc: "The user-exported dev_t is 64-bit while the kernel interface
+    // is 32-bit."
+    if u32::try_from(dev).is_err() {
+        return Err(crate::errno::EINVAL);
+    }
+    may_mknod(mode)?;
     if pathname.is_null() {
-        crate::errno::set_errno(crate::errno::EFAULT);
-        return -1;
+        return Err(crate::errno::EFAULT);
     }
-    // SAFETY: pathname non-NULL.
-    if unsafe { *pathname } == 0 {
-        crate::errno::set_errno(crate::errno::ENOENT);
-        return -1;
+    // SAFETY: `pathname` is non-NULL, and the caller's contract makes it a
+    // NUL-terminated string, so its first byte is readable.
+    let first = unsafe { *pathname };
+    if first == 0 {
+        return Err(crate::errno::ENOENT);
     }
-    if dirfd != crate::file::AT_FDCWD {
-        if dirfd < 0 {
-            crate::errno::set_errno(crate::errno::EBADF);
-            return -1;
-        }
-        if crate::fdtable::get_fd(dirfd).is_none() {
-            crate::errno::set_errno(crate::errno::EBADF);
-            return -1;
+    if dirfd != crate::file::AT_FDCWD && first != b'/' {
+        let mut joined = [0u8; crate::unistd::PATH_MAX];
+        if crate::file::resolve_dirfd_path(dirfd, pathname, &mut joined) == 0 {
+            // It set EBADF, ENOTDIR or ENAMETOOLONG.
+            return Err(crate::errno::get_errno());
         }
     }
-    // Phase 188: CAP_MKNOD gate fires only for CHR/BLK device types,
-    // and only after path resolution / dirfd validation — matching
-    // Linux's `vfs_mknod` placement deep inside `do_mknodat`.
     let t = mode & crate::fcntl::S_IFMT;
+    if t == 0 || t == crate::fcntl::S_IFREG {
+        let flags = crate::fcntl::O_CREAT
+            | crate::fcntl::O_EXCL
+            | crate::fcntl::O_WRONLY
+            | crate::fcntl::O_CLOEXEC;
+        let fd = crate::file::openat(dirfd, pathname, flags, mode & 0o7777);
+        if fd < 0 {
+            return Err(crate::errno::get_errno());
+        }
+        // Nothing was written through it, so nothing can be lost closing it.
+        let _ = crate::file::close(fd);
+        return Ok(());
+    }
     if (t == crate::fcntl::S_IFCHR || t == crate::fcntl::S_IFBLK)
         && !crate::sys_capability::has_capability(crate::sys_capability::CAP_MKNOD)
     {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
+        return Err(crate::errno::EPERM);
     }
-    crate::errno::set_errno(crate::errno::ENOSYS);
-    -1
+    Err(crate::errno::ENOSYS)
 }
 
-/// Create a FIFO (named pipe).
-///
-/// Returns -1 with `ENOSYS` after argument-domain validation.  Named
-/// pipes require kernel support for special file types in the
-/// filesystem, which we don't have yet.
-///
-/// Validation order (matches `fs/namei.c::do_mkfifoat` in Linux):
-/// 1. `pathname == NULL` → `EFAULT`.
-/// 2. `pathname` empty → `ENOENT`.
-/// 3. All validated → `ENOSYS`.  Linux does not validate `mode` bits
-///    here — the type field is implicit (S_IFIFO) and the permission
-///    bits are silently masked against the umask.
+/// Create a FIFO: glibc's `mkfifo`, which is `mknod(path, mode | S_IFIFO,
+/// 0)` -- so type bits in `mode` beside the FIFO's make a type `may_mknod`
+/// refuses (`EINVAL`), ahead of the path. See [`mknodat`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mkfifo(pathname: *const u8, _mode: u32) -> i32 {
-    if pathname.is_null() {
-        crate::errno::set_errno(crate::errno::EFAULT);
-        return -1;
-    }
-    // SAFETY: pathname non-NULL.
-    if unsafe { *pathname } == 0 {
-        crate::errno::set_errno(crate::errno::ENOENT);
-        return -1;
-    }
-    crate::errno::set_errno(crate::errno::ENOSYS);
-    -1
+pub extern "C" fn mkfifo(pathname: *const u8, mode: u32) -> i32 {
+    mknodat(
+        crate::file::AT_FDCWD,
+        pathname,
+        mode | crate::fcntl::S_IFIFO,
+        0,
+    )
 }
 
-/// Create a FIFO relative to a directory fd.
-///
-/// Returns -1 with `ENOSYS` after argument-domain validation, matching
-/// `mkfifo` plus directory-fd checks.
-///
-/// Validation order:
-/// 1. `pathname == NULL` → `EFAULT`.
-/// 2. `pathname` empty → `ENOENT`.
-/// 3. `dirfd != AT_FDCWD` and `dirfd < 0` → `EBADF`.
-/// 4. `dirfd != AT_FDCWD` and not an open fd → `EBADF`.
-/// 5. All validated → `ENOSYS`.
+/// Create a FIFO relative to a directory fd: glibc's `mkfifoat`, which is
+/// `mknodat(fd, path, mode | S_IFIFO, 0)`. See [`mknodat`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mkfifoat(dirfd: i32, pathname: *const u8, _mode: u32) -> i32 {
-    if pathname.is_null() {
-        crate::errno::set_errno(crate::errno::EFAULT);
-        return -1;
-    }
-    // SAFETY: pathname non-NULL.
-    if unsafe { *pathname } == 0 {
-        crate::errno::set_errno(crate::errno::ENOENT);
-        return -1;
-    }
-    if dirfd != crate::file::AT_FDCWD {
-        if dirfd < 0 {
-            crate::errno::set_errno(crate::errno::EBADF);
-            return -1;
-        }
-        if crate::fdtable::get_fd(dirfd).is_none() {
-            crate::errno::set_errno(crate::errno::EBADF);
-            return -1;
-        }
-    }
-    crate::errno::set_errno(crate::errno::ENOSYS);
-    -1
+pub extern "C" fn mkfifoat(dirfd: i32, pathname: *const u8, mode: u32) -> i32 {
+    mknodat(dirfd, pathname, mode | crate::fcntl::S_IFIFO, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1041,6 +969,21 @@ mod tests {
 
     // -- mknod/mkfifo stubs return ENOSYS --
 
+    /// What `openat(O_CREAT | O_EXCL)` answers for `path` on the host --
+    /// which has no kernel behind it -- and so what a regular-file `mknod`,
+    /// which is made through it, answers there too.
+    fn create_errno(path: &[u8]) -> i32 {
+        crate::errno::set_errno(0);
+        let fd = crate::file::openat(
+            crate::file::AT_FDCWD,
+            path.as_ptr(),
+            O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC,
+            0o644,
+        );
+        assert_eq!(fd, -1, "the host's openat has no kernel");
+        crate::errno::get_errno()
+    }
+
     #[test]
     fn test_mknod_returns_enosys() {
         assert_eq!(mknod(b"/dev/null\0".as_ptr(), S_IFCHR | 0o666, 0), -1);
@@ -1256,12 +1199,10 @@ mod tests {
     // -- mknod/mkfifo set errno --
 
     #[test]
-    fn test_mknod_sets_enosys() {
-        // Phase 66: mode=0 (no type bits) is now rejected with EINVAL
-        // before reaching ENOSYS.  Use a valid type to reach the sentinel.
+    fn test_mknod_regular_file_takes_openats_answer() {
         crate::errno::set_errno(0);
         mknod(b"/tmp/n\0".as_ptr(), S_IFREG | 0o644, 0);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), create_errno(b"/tmp/n\0"));
     }
 
     #[test]
@@ -1272,12 +1213,10 @@ mod tests {
     }
 
     #[test]
-    fn test_mknodat_sets_enosys() {
-        // Phase 66: mode=0 → EINVAL, dirfd=0 (not AT_FDCWD, not open) → EBADF.
-        // Use S_IFREG type and AT_FDCWD to reach ENOSYS.
+    fn test_mknodat_regular_file_takes_openats_answer() {
         crate::errno::set_errno(0);
         mknodat(crate::file::AT_FDCWD, b"n\0".as_ptr(), S_IFREG | 0o644, 0);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), create_errno(b"n\0"));
     }
 
     #[test]
@@ -1383,10 +1322,10 @@ mod tests {
 
     #[test]
     fn test_mknod_no_type_bits_is_a_regular_file() {
-        // Past `may_mknod`, so the stub's ENOSYS -- not EINVAL.
+        // Past `may_mknod`, so openat's answer -- not EINVAL.
         crate::errno::set_errno(0);
         assert_eq!(mknod(b"/tmp/x\0".as_ptr(), 0o644, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), create_errno(b"/tmp/x\0"));
     }
 
     #[test]
@@ -1546,13 +1485,93 @@ mod tests {
     }
 
     #[test]
-    fn test_mkfifo_any_mode_ok() {
-        // Linux does not validate mode bits — only the type field matters
-        // (implicit S_IFIFO) and even garbage mode bits are accepted at
-        // this layer (perms are masked by umask later).
+    fn test_mkfifo_takes_its_mode_through_mknod() {
+        // glibc's mkfifo is mknod(path, mode | S_IFIFO, 0): any permission
+        // bits go through, but type bits beside the FIFO's make a type
+        // `may_mknod` refuses. This asserted that garbage passed.
+        crate::errno::set_errno(0);
+        assert_eq!(mkfifo(b"/tmp/fifo\0".as_ptr(), 0o7777), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
         crate::errno::set_errno(0);
         assert_eq!(mkfifo(b"/tmp/fifo\0".as_ptr(), 0xFFFF_FFFF), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        crate::errno::set_errno(0);
+        assert_eq!(mkfifo(b"/tmp/fifo\0".as_ptr(), S_IFREG | 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mkfifo_type_bits_beat_a_null_path() {
+        // The mode is judged before the path, as for mknod.
+        crate::errno::set_errno(0);
+        assert_eq!(mkfifo(core::ptr::null(), S_IFCHR | 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        crate::errno::set_errno(0);
+        assert_eq!(mkfifoat(-1, core::ptr::null(), S_IFSOCK), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mknod_dev_past_32_bits_is_einval_first() {
+        // glibc refuses it before the system call, so before the type and
+        // the path.
+        crate::errno::set_errno(0);
+        assert_eq!(mknod(core::ptr::null(), S_IFDIR, 1 << 32), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        crate::errno::set_errno(0);
+        assert_eq!(mknodat(-1, b"n\0".as_ptr(), S_IFCHR | 0o600, u64::MAX), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        // 32 bits is the kernel's whole device number, and goes through.
+        crate::errno::set_errno(0);
+        assert_eq!(
+            mknod(b"/tmp/c\0".as_ptr(), S_IFCHR | 0o600, u64::from(u32::MAX)),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_an_absolute_path_never_looks_at_dirfd() {
+        // `path_init` uses dirfd only for a relative name.
+        for fd in [-1, 9999] {
+            crate::errno::set_errno(0);
+            assert_eq!(mknodat(fd, b"/tmp/n\0".as_ptr(), S_IFIFO | 0o644, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS, "fd {fd}");
+            crate::errno::set_errno(0);
+            assert_eq!(mkfifoat(fd, b"/tmp/f\0".as_ptr(), 0o644), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS, "fd {fd}");
+        }
+    }
+
+    #[test]
+    fn test_mknodat_a_dirfd_that_is_no_directory_is_enotdir() {
+        // An open descriptor with no directory behind it (a pipe here).
+        let fd = crate::fdtable::alloc_fd(crate::fdtable::HandleKind::Pipe, 0).unwrap();
+        crate::errno::set_errno(0);
+        assert_eq!(mknodat(fd, b"n\0".as_ptr(), S_IFIFO | 0o644, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTDIR);
+        let _ = crate::fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_a_regular_file_is_made_by_openat() {
+        // Type 0 and S_IFREG create the file through
+        // openat(O_CREAT | O_EXCL) and take its answer -- which on the host,
+        // with no kernel behind openat, is ENOSYS; on SlateOS, the file.
+        for mode in [0o644, S_IFREG | 0o600] {
+            crate::errno::set_errno(0);
+            let expected = crate::file::openat(
+                crate::file::AT_FDCWD,
+                b"/tmp/reg\0".as_ptr(),
+                O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC,
+                mode & 0o7777,
+            );
+            let expected_errno = crate::errno::get_errno();
+            assert_eq!(expected, -1, "the host's openat has no kernel");
+            crate::errno::set_errno(0);
+            assert_eq!(mknod(b"/tmp/reg\0".as_ptr(), mode, 0), -1);
+            assert_eq!(crate::errno::get_errno(), expected_errno, "mode {mode:o}");
+        }
     }
 
     // --- mkfifo: ordering ---
@@ -1674,10 +1693,11 @@ mod tests {
         // Passing 0o644 to mknod to create a regular file is *correct* on
         // Linux: type 0 "translates to S_IFREG" (fs/namei.c:4014).  This
         // test used to call it a bug that "Linux's do_mknodat is strict"
-        // about; it is not.  Past `may_mknod`, it reaches the stub.
+        // about; it is not.  Past `may_mknod`, the file is made through
+        // openat, whose answer it takes.
         crate::errno::set_errno(0);
         assert_eq!(mknod(b"/tmp/x\0".as_ptr(), 0o644, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), create_errno(b"/tmp/x\0"));
     }
 
     #[test]
@@ -1871,16 +1891,16 @@ mod tests {
             );
         }
 
-        /// Regular file without CAP_MKNOD → still reaches ENOSYS.
+        /// Regular file without CAP_MKNOD → made through openat all the same.
         #[test]
-        fn test_mknod_phase188_reg_no_cap_reaches_enosys() {
+        fn test_mknod_phase188_reg_no_cap_goes_to_openat() {
             let _g = CapGuard::snapshot();
             drop_cap_mknod();
             crate::errno::set_errno(0);
             assert_eq!(mknod(b"/tmp/r\0".as_ptr(), S_IFREG | 0o644, 0), -1,);
             assert_eq!(
                 crate::errno::get_errno(),
-                crate::errno::ENOSYS,
+                create_errno(b"/tmp/r\0"),
                 "Regular file must not require CAP_MKNOD"
             );
         }

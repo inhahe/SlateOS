@@ -24051,6 +24051,23 @@ glibc 2.39's `sysdeps/unix/sysv/linux/sysctl.c` and Linux 6.6, which has no
   read as that structure. It has glibc's signature now, and `SysctlArgs` the
   kernel's 80 bytes (`__unused[4]` was missing).
 
+**Twenty-fourth pass, 2026-09-26 — `stat.rs` (4 sites), lane D.** Against
+glibc 2.39's `__mknodat`, `mknod`, `mkfifo` and `mkfifoat` (io/,
+sysdeps/posix/) and Linux 6.6's `do_mknodat` (fs/namei.c).
+
+- **`mknod` and `mknodat`** put their NULL (`EFAULT`) after `may_mknod`, as
+  `do_mknodat` does -- right -- but glibc makes one check first: a device
+  number wider than the kernel's 32 bits is `EINVAL` before the system call.
+  It was ignored.
+- **`mkfifo` and `mkfifoat`** judged their NULL first. glibc's are
+  `mknodat(fd, path, mode | S_IFIFO, 0)`, so type bits in `mode` beside the
+  FIFO's make a type `may_mknod` refuses: `EINVAL`, ahead of the path. They
+  are that call now, as `mknod` is `mknodat(AT_FDCWD, ...)`.
+- Beside them: the directory descriptor was judged for an absolute path too
+  (`EBADF`), which `path_init` never looks at; and a regular file -- type 0
+  or `S_IFREG` -- answered `ENOSYS` where Linux's `vfs_create` makes it. It
+  is made now, through `openat(O_CREAT | O_EXCL)`.
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24064,10 +24081,10 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-twenty-three swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
+twenty-four swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
 `sched.rs`, `mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`,
-`linux_module.rs`, `sysv_msg.rs` and `sys_sysctl.rs`; next are the other
-files at four.
+`linux_module.rs`, `sysv_msg.rs`, `sys_sysctl.rs` and `stat.rs`; next are
+the other files at four.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL

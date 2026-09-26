@@ -1863,6 +1863,10 @@ D's to act on once answered).
     * `sysctl` is glibc 2.39's compat stub (the twenty-third pass): its six
       arguments and `ENOSYS` for all of them, where it took the removed
       system call's structure and refused shapes with errnos of its own.
+    * `mknod` makes a regular file (the twenty-fourth pass), and `mknod`,
+      `mkfifo` and `mkfifoat` are glibc's calls through `mknodat`, checked
+      in glibc's then Linux's order; FIFOs and devices still wait on the
+      filesystem.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

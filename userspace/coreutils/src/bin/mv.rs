@@ -213,8 +213,6 @@ use coreutils::fileid::{
     self, Copied, FileId, file_id, nlink, same_entry, same_inode, split_entry,
 };
 use coreutils::fsattr::{self, Link, On};
-#[cfg(unix)]
-use coreutils::getopt::Report;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::hardlink;
 use coreutils::overwrite::{self, Interactive};

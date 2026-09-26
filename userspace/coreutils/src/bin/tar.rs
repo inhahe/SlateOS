@@ -62,8 +62,6 @@ use coreutils::diag;
 #[cfg(unix)]
 use coreutils::dirfd;
 use coreutils::errmsg::strerror;
-#[cfg(unix)]
-use coreutils::getopt::Report;
 use coreutils::getopt::{self, Opt, Program, Takes};
 // `escape`, not `quotef`, and that is a deliberate departure from the house
 // style of the other 85 bins. GNU tar calls `set_quoting_style (NULL,

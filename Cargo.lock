@@ -778,6 +778,7 @@ dependencies = [
  "safeio",
  "settingsfile",
  "textarea",
+ "textline",
 ]
 
 [[package]]
@@ -877,6 +878,7 @@ dependencies = [
  "safeio",
  "settingsfile",
  "textfmt",
+ "textline",
  "tzrules",
 ]
 
@@ -922,6 +924,7 @@ dependencies = [
  "oswindow",
  "safeio",
  "settingsfile",
+ "textline",
  "tzrules",
 ]
 
@@ -2385,6 +2388,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "safeio",
+ "textline",
 ]
 
 [[package]]
@@ -2440,6 +2444,7 @@ dependencies = [
  "oswindow",
  "settingsfile",
  "textarea",
+ "textline",
  "yamldoc",
 ]
 
@@ -2762,6 +2767,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "safeio",
+ "textline",
  "wavpcm",
 ]
 
@@ -3106,6 +3112,13 @@ name = "textfmt"
 version = "0.1.0"
 
 [[package]]
+name = "textline"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
 name = "thermald"
 version = "0.1.0"
 dependencies = [
@@ -3166,6 +3179,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "safeio",
+ "textline",
 ]
 
 [[package]]

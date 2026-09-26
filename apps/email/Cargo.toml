@@ -7,6 +7,9 @@ edition = "2024"
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
+
+# The keys a one-line field answers, shared rather than copied.
+textline = { path = "../textline" }
 oswindow = { path = "../../gui/window" }
 
 # Mail kept in files, read with a cap and written -- drafts, flags, a saved

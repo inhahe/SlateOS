@@ -169,9 +169,9 @@ MUTATIONS = [
     ),
     # -- the boxes -------------------------------------------------------------------------------------------------------
     (
-        "the caret does not move",
-        "        Key::Left => input.move_cursor_left(shift, 12.0, FontWeightHint::Regular),",
-        "        Key::Left => {}",
+        "the field is given no keys",
+        "        let done = textline::apply_key(&mut self.editor, key, MAX_FIELD_CHARS, &clipboard, 12.0);",
+        "        let done = textline::LineEdit::default();\n        let _ = &clipboard;",
         ["the_caret_moves_and_typing_goes_where_it_is", "every_advertised_key_does_something"],
     ),
     (

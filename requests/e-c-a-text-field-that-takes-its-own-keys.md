@@ -1,9 +1,9 @@
 # E → C: a `TextInput` that takes its own keys
 
 **From:** lane E · **To:** lane C · **Filed:** 2026-09-25
-**Status:** open — nothing in lane E is blocked; six applications carry a copy
-of the same fifty lines until this lands (two when filed; `finance`,
-`qrcode`, `torrent` and `soundrecorder` added 2026-09-25)
+**Status:** open — nothing in lane E is blocked. The copies are gone: since
+2026-09-26 the seven applications share one, the lane E crate `apps/textline`
+(below), which goes when this lands.
 
 ## In short
 
@@ -56,6 +56,26 @@ both copies do today.
 The two copies differ only in the font size they pass to the caret movement
 (which the visual arrows need), so that is a parameter rather than a constant.
 
+## Meanwhile: one copy, not seven (2026-09-26)
+
+A seventh copy had appeared (`apps/email`, for the To, Cc and Subject
+fields), and the copies had drifted into four versions: two reported whether
+a key was the field's and five did not, and five deleted the selection when a
+key typed nothing -- Tab or Enter reaching the field would destroy text it did
+not replace. So the table is now one lane E crate, `apps/textline`, the way
+the multi-line half became `apps/textarea`:
+
+```rust
+pub fn apply_key(input: &mut TextInput, key: &KeyEvent, capacity: usize,
+                 clipboard: &str, font_size: f32) -> LineEdit
+pub struct LineEdit { pub handled: bool, pub copied: Option<String> }
+```
+
+-- the signature asked for above, less the clipboard the field would hold
+itself. All seven applications call it; their tests pass unchanged, and the
+mutation rows that swept their copies moved to `apps/textline/mutate.py`.
+
 ## When it lands
 
-Lane E replaces every copy with the call and deletes them.
+Lane E moves the seven applications onto `TextInput`'s own method and deletes
+`apps/textline`.

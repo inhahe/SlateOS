@@ -3969,7 +3969,7 @@ impl App {
                     input.cursor(),
                     input.selection_anchor(),
                 );
-                let edited = edit_line(input, key, capacity, &clipboard);
+                let edited = textline::apply_key(input, key, capacity, &clipboard, NORMAL_TEXT);
                 let typed = input.text() != before.0;
                 let moved = (input.cursor(), input.selection_anchor()) != (before.1, before.2);
                 let copied = edited.copied.is_some();
@@ -4070,7 +4070,7 @@ impl App {
                     name.cursor(),
                     name.selection_anchor(),
                 );
-                let edited = edit_line(name, key, MAX_NAME_LEN, &clipboard);
+                let edited = textline::apply_key(name, key, MAX_NAME_LEN, &clipboard, NORMAL_TEXT);
                 let changed = (
                     name.text().to_string(),
                     name.cursor(),
@@ -4342,81 +4342,6 @@ impl App {
             | Target::LibraryBody
             | Target::ReferenceBody => false,
         }
-    }
-}
-
-/// What one keystroke did to a one-line field.
-struct LineEdit {
-    /// Whether the key was an editing key.
-    handled: bool,
-    /// What was copied or cut, for the window's clipboard.
-    copied: Option<String>,
-}
-
-/// Apply a keystroke to a one-line field, as every text box in the tree
-/// does, taking no more than leaves it at `capacity` characters. Paste reads
-/// the window's `clipboard`; copy and cut hand theirs back in the result.
-fn edit_line(input: &mut TextInput, key: &KeyEvent, capacity: usize, clipboard: &str) -> LineEdit {
-    let shift = key.modifiers.shift;
-    let ctrl = key.modifiers.ctrl;
-    let mut copied = None;
-    match key.key {
-        Key::Left => input.move_cursor_left(shift, NORMAL_TEXT, FontWeightHint::Regular),
-        Key::Right => input.move_cursor_right(shift, NORMAL_TEXT, FontWeightHint::Regular),
-        Key::Home => input.move_home(shift),
-        Key::End => input.move_end(shift),
-        Key::Backspace => input.backspace(),
-        Key::Delete => input.delete(),
-        Key::A if ctrl => input.select_all(),
-        Key::C if ctrl => {
-            if input.has_selection() {
-                copied = Some(input.selected_text().to_string());
-            }
-        }
-        Key::X if ctrl => {
-            if input.has_selection() {
-                copied = Some(input.selected_text().to_string());
-                input.delete_selection();
-            }
-        }
-        Key::V if ctrl => insert_limited(input, clipboard, capacity),
-        _ => {
-            if key.text.is_empty() || ctrl {
-                return LineEdit {
-                    handled: false,
-                    copied: None,
-                };
-            }
-            insert_limited(input, &key.text, capacity);
-        }
-    }
-    LineEdit {
-        handled: true,
-        copied,
-    }
-}
-
-/// Type `typed` into `input` over its selection, stopping at `capacity`
-/// characters. A limit counted in characters, not bytes: a limit in bytes
-/// would cut a multi-byte character in half.
-///
-/// `MAX_PATTERN_LEN` and its siblings were declared and consulted by nothing,
-/// and it matters here more than in most text boxes: the pattern is compiled
-/// and run across the whole input on *every keystroke*.
-fn insert_limited(input: &mut TextInput, typed: &str, capacity: usize) {
-    if input.has_selection() {
-        input.delete_selection();
-    }
-    for ch in typed.chars() {
-        // A field is one line: a control character -- a newline in a paste
-        // included -- has no place in it.
-        if ch.is_control() {
-            continue;
-        }
-        if input.text().chars().count() >= capacity {
-            break;
-        }
-        input.insert_char(ch);
     }
 }
 

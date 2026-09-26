@@ -2706,7 +2706,9 @@ impl SoundRecorderApp {
             Key::Escape => self.rename = None,
             _ => {
                 if let Some(input) = self.rename.as_mut()
-                    && let Some(copied) = edit_line(input, key, LABEL_CAPACITY, &self.clipboard)
+                    && let Some(copied) =
+                        textline::apply_key(input, key, LABEL_CAPACITY, &self.clipboard, 13.0)
+                            .copied
                 {
                     self.clipboard = copied;
                 }
@@ -2824,67 +2826,6 @@ fn scrolled_to(scroll: usize, at: usize, rows: usize) -> usize {
         at.saturating_add(1).saturating_sub(rows)
     } else {
         scroll
-    }
-}
-
-/// Apply a keystroke to a one-line field, as `apps/finance`, `apps/qrcode`
-/// and three more do (see `requests/e-c-a-text-field-that-takes-its-own-keys.md`);
-/// answers what a copy or a cut took.
-fn edit_line(
-    input: &mut TextInput,
-    key: &KeyEvent,
-    capacity: usize,
-    clipboard: &str,
-) -> Option<String> {
-    let shift = key.modifiers.shift;
-    let ctrl = key.modifiers.ctrl;
-    let mut copied = None;
-    match key.key {
-        Key::Left => input.move_cursor_left(shift, 13.0, FontWeightHint::Regular),
-        Key::Right => input.move_cursor_right(shift, 13.0, FontWeightHint::Regular),
-        Key::Home => input.move_home(shift),
-        Key::End => input.move_end(shift),
-        Key::Backspace => input.backspace(),
-        Key::Delete => input.delete(),
-        Key::A if ctrl => input.select_all(),
-        Key::C if ctrl => {
-            if input.has_selection() {
-                copied = Some(input.selected_text().to_string());
-            }
-        }
-        Key::X if ctrl => {
-            if input.has_selection() {
-                copied = Some(input.selected_text().to_string());
-                input.delete_selection();
-            }
-        }
-        Key::V if ctrl => insert_limited(input, clipboard, capacity),
-        _ => {
-            if !ctrl {
-                insert_limited(input, &key.text, capacity);
-            }
-        }
-    }
-    copied
-}
-
-/// Type `typed` into `input` over its selection, up to `capacity`
-/// characters, leaving control characters out.
-fn insert_limited(input: &mut TextInput, typed: &str, capacity: usize) {
-    if typed.chars().all(char::is_control) {
-        return;
-    }
-    if input.has_selection() {
-        input.delete_selection();
-    }
-    for ch in typed.chars() {
-        if ch.is_control() {
-            continue;
-        }
-        if input.text().chars().count() >= capacity {
-            break;
-        }
-        input.insert_char(ch);
     }
 }
 

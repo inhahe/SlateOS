@@ -2113,7 +2113,7 @@ impl QrApp {
             self.editor.selection_anchor(),
         );
         let clipboard = self.clipboard.clone();
-        let done = edit_line(&mut self.editor, key, MAX_FIELD_CHARS, &clipboard);
+        let done = textline::apply_key(&mut self.editor, key, MAX_FIELD_CHARS, &clipboard, 12.0);
         let copied = done.copied.is_some();
         if let Some(text) = done.copied {
             self.clipboard = text;
@@ -3700,66 +3700,6 @@ fn luminance(c: Color) -> f32 {
         }
     };
     0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
-}
-
-/// What one keystroke did to a one-line box.
-struct LineEdit {
-    copied: Option<String>,
-}
-
-/// Apply a keystroke to a one-line box, as `apps/flashcards` and
-/// `apps/finance` do (see `requests/e-c-a-text-field-that-takes-its-own-keys.md`).
-fn edit_line(input: &mut TextInput, key: &KeyEvent, capacity: usize, clipboard: &str) -> LineEdit {
-    let shift = key.modifiers.shift;
-    let ctrl = key.modifiers.ctrl;
-    let mut copied = None;
-    match key.key {
-        Key::Left => input.move_cursor_left(shift, 12.0, FontWeightHint::Regular),
-        Key::Right => input.move_cursor_right(shift, 12.0, FontWeightHint::Regular),
-        Key::Home => input.move_home(shift),
-        Key::End => input.move_end(shift),
-        Key::Backspace => input.backspace(),
-        Key::Delete => input.delete(),
-        Key::A if ctrl => input.select_all(),
-        Key::C if ctrl => {
-            if input.has_selection() {
-                copied = Some(input.selected_text().to_string());
-            }
-        }
-        Key::X if ctrl => {
-            if input.has_selection() {
-                copied = Some(input.selected_text().to_string());
-                input.delete_selection();
-            }
-        }
-        Key::V if ctrl => insert_limited(input, clipboard, capacity),
-        _ => {
-            if !ctrl {
-                insert_limited(input, &key.text, capacity);
-            }
-        }
-    }
-    LineEdit { copied }
-}
-
-/// Type `typed` into `input` over its selection, up to `capacity`
-/// characters, leaving control characters out.
-fn insert_limited(input: &mut TextInput, typed: &str, capacity: usize) {
-    if typed.chars().all(char::is_control) {
-        return;
-    }
-    if input.has_selection() {
-        input.delete_selection();
-    }
-    for ch in typed.chars() {
-        if ch.is_control() {
-            continue;
-        }
-        if input.text().chars().count() >= capacity {
-            break;
-        }
-        input.insert_char(ch);
-    }
 }
 
 fn main() -> ExitCode {

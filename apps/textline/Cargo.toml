@@ -1,0 +1,11 @@
+[package]
+name = "textline"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS one-line text field keys for applications: what a key does to a guitk TextInput."
+
+[dependencies]
+guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

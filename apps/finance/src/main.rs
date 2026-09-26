@@ -1635,7 +1635,7 @@ impl FinanceApp {
                 let Some(input) = self.form.as_mut().and_then(|f| f.input(which)) else {
                     return EventResult::Ignored;
                 };
-                let done = edit_line(input, key, 200, &clipboard);
+                let done = textline::apply_key(input, key, 200, &clipboard, 13.0);
                 if let Some(copied) = done.copied {
                     self.clipboard = copied;
                 }
@@ -4516,71 +4516,6 @@ fn key_char(key: Key, shift: bool) -> Option<char> {
     ];
     let &(_, c) = KEYS.iter().find(|(k, _)| *k == key)?;
     Some(if shift { c.to_ascii_uppercase() } else { c })
-}
-
-/// What one keystroke did to a one-line field.
-struct LineEdit {
-    handled: bool,
-    copied: Option<String>,
-}
-
-/// Apply a keystroke to a one-line field, as `apps/flashcards` does (see
-/// `requests/e-c-a-text-field-that-takes-its-own-keys.md`).
-fn edit_line(input: &mut TextInput, key: &KeyEvent, capacity: usize, clipboard: &str) -> LineEdit {
-    let shift = key.modifiers.shift;
-    let ctrl = key.modifiers.ctrl;
-    let mut copied = None;
-    match key.key {
-        Key::Left => input.move_cursor_left(shift, 13.0, FontWeightHint::Regular),
-        Key::Right => input.move_cursor_right(shift, 13.0, FontWeightHint::Regular),
-        Key::Home => input.move_home(shift),
-        Key::End => input.move_end(shift),
-        Key::Backspace => input.backspace(),
-        Key::Delete => input.delete(),
-        Key::A if ctrl => input.select_all(),
-        Key::C if ctrl => {
-            if input.has_selection() {
-                copied = Some(input.selected_text().to_string());
-            }
-        }
-        Key::X if ctrl => {
-            if input.has_selection() {
-                copied = Some(input.selected_text().to_string());
-                input.delete_selection();
-            }
-        }
-        Key::V if ctrl => insert_limited(input, clipboard, capacity),
-        _ => {
-            if key.text.is_empty() || ctrl {
-                return LineEdit {
-                    handled: false,
-                    copied: None,
-                };
-            }
-            insert_limited(input, &key.text, capacity);
-        }
-    }
-    LineEdit {
-        handled: true,
-        copied,
-    }
-}
-
-/// Type `typed` into `input` over its selection, up to `capacity`
-/// characters, leaving control characters out.
-fn insert_limited(input: &mut TextInput, typed: &str, capacity: usize) {
-    if input.has_selection() {
-        input.delete_selection();
-    }
-    for ch in typed.chars() {
-        if ch.is_control() {
-            continue;
-        }
-        if input.text().chars().count() >= capacity {
-            break;
-        }
-        input.insert_char(ch);
-    }
 }
 
 fn main() -> ExitCode {

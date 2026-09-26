@@ -7,6 +7,9 @@ edition = "2024"
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
+
+# The keys a one-line field answers, shared rather than copied.
+textline = { path = "../textline" }
 oswindow = { path = "../../gui/window" }
 
 # Ctrl+O reads through `safeio::read_capped`, the byte-oriented one: a

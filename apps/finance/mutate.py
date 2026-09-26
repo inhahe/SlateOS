@@ -87,8 +87,8 @@ MUTATIONS = [
     ),
     (
         "a field takes no typing",
-        "                let done = edit_line(input, key, 200, &clipboard);",
-        "                let done = edit_line(&mut TextInput::new(), key, 200, &clipboard);\n"
+        "                let done = textline::apply_key(input, key, 200, &clipboard, 13.0);",
+        "                let done = textline::apply_key(&mut TextInput::new(), key, 200, &clipboard, 13.0);\n"
         "                let _ = input;",
         [
             "a_transaction_is_entered_from_the_keyboard",
@@ -358,9 +358,9 @@ MUTATIONS = [
         ["a_save_that_fails_says_so_and_the_next_one_clears_it"],
     ),
     (
-        "a tab in a name splits its line",
-        "            '\\t' => out.push_str(\"\\\\t\"),",
-        "            '\\t' => out.push('\\t'),",
+        "a tab in a description splits its line",
+        "            tsv::escape(&t.description),",
+        "            t.description.clone(),",
         ["the_ledger_reads_back_what_it_wrote_whatever_the_text"],
     ),
     (

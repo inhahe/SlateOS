@@ -74,18 +74,17 @@ MUTATIONS = [
     ),
     (
         "copy does not reach the other fields",
-        "        Key::C if ctrl => {\n            if input.has_selection() {\n"
-        "                copied = Some(input.selected_text().to_string());",
-        "        Key::C if ctrl => {\n            if input.has_selection() {\n"
-        "                copied = None;",
+        "                let copied = edited.copied.is_some();\n"
+        "                if let Some(copied) = edited.copied {\n"
+        "                    self.clipboard = copied;\n"
+        "                }\n"
+        "                if typed {",
+        "                let copied = edited.copied.is_some();\n"
+        "                if typed {",
         ["copy_and_paste_carry_text_between_the_fields"],
     ),
-    (
-        "a chord nobody bound types its letter",
-        "        _ => {\n            if key.text.is_empty() || ctrl {\n                return LineEdit {",
-        "        _ => {\n            if key.text.is_empty() {\n                return LineEdit {",
-        ["a_chord_nobody_bound_types_nothing"],
-    ),
+    # "a chord nobody bound types its letter" is apps/textline's now, with the
+    # rest of the key table.
     (
         "a keystroke into a full field still redraws",
         "                edited.handled && (typed || moved || copied)",

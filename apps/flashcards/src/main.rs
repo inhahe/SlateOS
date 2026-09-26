@@ -947,79 +947,6 @@ fn key_char(key: Key, shift: bool) -> Option<char> {
     DIGITS.iter().find(|(k, _)| *k == key).map(|&(_, c)| c)
 }
 
-/// What one keystroke did to a one-line field.
-struct LineEdit {
-    /// Whether the key was an editing key.
-    handled: bool,
-    /// What was copied or cut, for the fields' clipboard.
-    copied: Option<String>,
-}
-
-/// Apply a keystroke to a one-line field, taking no more than leaves it at
-/// `capacity` characters. Paste reads `clipboard`; copy and cut hand theirs
-/// back in the result.
-///
-/// The same as `apps/regextester`'s. Two copies of it is one too many: the
-/// toolkit's `TextInput` holds the state and leaves the keys to each caller,
-/// which is filed as `requests/e-c-a-text-field-that-takes-its-own-keys.md`.
-fn edit_line(input: &mut TextInput, key: &KeyEvent, capacity: usize, clipboard: &str) -> LineEdit {
-    let shift = key.modifiers.shift;
-    let ctrl = key.modifiers.ctrl;
-    let mut copied = None;
-    match key.key {
-        Key::Left => input.move_cursor_left(shift, 13.0, FontWeightHint::Regular),
-        Key::Right => input.move_cursor_right(shift, 13.0, FontWeightHint::Regular),
-        Key::Home => input.move_home(shift),
-        Key::End => input.move_end(shift),
-        Key::Backspace => input.backspace(),
-        Key::Delete => input.delete(),
-        Key::A if ctrl => input.select_all(),
-        Key::C if ctrl => {
-            if input.has_selection() {
-                copied = Some(input.selected_text().to_string());
-            }
-        }
-        Key::X if ctrl => {
-            if input.has_selection() {
-                copied = Some(input.selected_text().to_string());
-                input.delete_selection();
-            }
-        }
-        Key::V if ctrl => insert_limited(input, clipboard, capacity),
-        _ => {
-            if key.text.is_empty() || ctrl {
-                return LineEdit {
-                    handled: false,
-                    copied: None,
-                };
-            }
-            insert_limited(input, &key.text, capacity);
-        }
-    }
-    LineEdit {
-        handled: true,
-        copied,
-    }
-}
-
-/// Type `typed` into `input` over its selection, stopping at `capacity`
-/// characters; a control character -- a newline in a paste -- is left out,
-/// since a field is one line.
-fn insert_limited(input: &mut TextInput, typed: &str, capacity: usize) {
-    if input.has_selection() {
-        input.delete_selection();
-    }
-    for ch in typed.chars() {
-        if ch.is_control() {
-            continue;
-        }
-        if input.text().chars().count() >= capacity {
-            break;
-        }
-        input.insert_char(ch);
-    }
-}
-
 // ── Study session state ─────────────────────────────────────────────
 #[derive(Clone, Debug)]
 struct StudySession {
@@ -1844,7 +1771,8 @@ impl FlashcardsApp {
                 }
                 let which = self.field;
                 let clipboard = self.clipboard.clone();
-                let done = edit_line(self.input(which), key, FIELD_CAPACITY, &clipboard);
+                let done =
+                    textline::apply_key(self.input(which), key, FIELD_CAPACITY, &clipboard, 13.0);
                 if let Some(copied) = done.copied {
                     self.clipboard = copied;
                 }

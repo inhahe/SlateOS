@@ -66,6 +66,12 @@
  *     8  /bin/python3 could not be EXEC'd -- missing from the image or not
  *        executable. A fact about the image, not about the pty or the REPL.
  *
+ * On 3 and 4 the fixture also prints what it DID read from the master --
+ * escaped, the first KiB -- and how the interpreter ended, so the serial log
+ * carries the evidence: a traceback, a "Fatal Python error", a prompt with
+ * nothing after it. Until 2026-09-26 it printed neither, and exit 4 sat red
+ * on every boot with nothing to say which of those it was.
+ *
  * 8 exists because 2 was standing for it. The child execs `/bin/python3` and
  * `_exit(127)`s if that fails; the parent then writes to the master WITHOUT
  * having reaped it, the slave is already closed, the write gets EIO, and the
@@ -124,6 +130,79 @@ static void emit(const char *s)
         ssize_t written = write(1, s, n);
         (void)written;
     }
+}
+
+/* Write `v` in decimal. */
+static void emit_long(long v)
+{
+    char d[24];
+    size_t i = sizeof d - 1;
+    unsigned long u = (v < 0) ? (unsigned long)(-(v + 1)) + 1UL : (unsigned long)v;
+    d[i] = '\0';
+    do {
+        d[--i] = (char)('0' + (int)(u % 10UL));
+        u /= 10UL;
+    } while (u != 0UL && i > 1);
+    if (v < 0) {
+        d[--i] = '-';
+    }
+    emit(d + i);
+}
+
+/* Write the first KiB of what the interpreter sent, every byte that is not
+ * printable ASCII shown as \xHH, so an echo, a prompt and an error message can
+ * be told apart in the serial log. A failure's evidence, not a transcript. */
+static void emit_received(const char *buf, long n)
+{
+    static const char hex[] = "0123456789abcdef";
+    char out[4 * 1024 + 1];
+    size_t o = 0;
+    if (n > 1024) {
+        n = 1024;
+    }
+    for (long i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)buf[i];
+        if (c >= 0x20 && c < 0x7f && c != '\\') {
+            out[o++] = (char)c;
+        } else {
+            out[o++] = '\\';
+            out[o++] = 'x';
+            out[o++] = hex[c >> 4];
+            out[o++] = hex[c & 0xf];
+        }
+    }
+    out[o] = '\0';
+    emit(out);
+}
+
+/* How did the interpreter end -- or has it not? Bounded like every other wait
+ * here: a counted spin on `WNOHANG` with `sched_yield`. */
+static void report_child(pid_t child)
+{
+    for (long i = 0; i < SPIN; i++) {
+        int status = 0;
+        pid_t got = waitpid(child, &status, WNOHANG);
+        if (got == child) {
+            if (WIFEXITED(status)) {
+                emit("[py] the interpreter exited with status ");
+                emit_long((long)WEXITSTATUS(status));
+            } else if (WIFSIGNALED(status)) {
+                emit("[py] the interpreter was ended by signal ");
+                emit_long((long)WTERMSIG(status));
+            } else {
+                emit("[py] the interpreter stopped, status word ");
+                emit_long((long)status);
+            }
+            emit("\n");
+            return;
+        }
+        if (got < 0) {
+            emit("[py] waitpid could not say how the interpreter ended\n");
+            return;
+        }
+        sched_yield();
+    }
+    emit("[py] the interpreter is still running\n");
 }
 
 /* Is `fd` readable right now? Zero timeout, so this never waits.
@@ -288,7 +367,15 @@ int main(void)
     if (!scan_for(master, "42", buf, STARTUP_SPIN, &total)) {
         /* Nothing at all means the interpreter never started -- a loader or
          * staging fault. Output without the answer means it started and the
-         * REPL did not evaluate, which is this fixture's subject. */
+         * REPL did not evaluate, which is this fixture's subject. Either way,
+         * say what came back and how the interpreter ended: that is the
+         * finding, and the exit code alone is not. */
+        emit("[py] received ");
+        emit_long(total);
+        emit(" byte(s): ");
+        emit_received(buf, total);
+        emit("\n");
+        report_child(child);
         return (total == 0) ? 3 : 4;
     }
 

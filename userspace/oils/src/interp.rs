@@ -99,7 +99,6 @@
 use bstr::ByteSlice;
 // The same TZ engine the libc's `strftime`/`localtime` use, so `printf '%(%Z)T'`
 // in osh and a C program's `date` can never disagree about local time.
-use tzrules::{Tz, TzFile, TzInfo};
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -107,9 +106,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, BufRead, IsTerminal, Read, Seek, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, ChildStdout, Command as PCommand, Stdio};
-use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock, mpsc};
 
 use crate::arith::{self, VarLookup};
@@ -5463,6 +5461,18 @@ pub struct Shell {
     /// an `SECONDS=0` in between must not move that figure. Inherited by a
     /// subshell, which bash also times from the parent's birth.
     birth: std::time::Instant,
+    /// When this shell started, in whole seconds since the epoch: bash's
+    /// `shell_start_time`, which `printf '%(…)T' -2` renders. A wall-clock
+    /// reading, where `birth` is monotonic, because this one is printed as a
+    /// date. Inherited by a subshell, as bash's is.
+    start_time: i64,
+    /// The zone glibc's `localtime` would use in this process: its one zone
+    /// state, `None` until something first reads it. Kept, not re-resolved per
+    /// use, because glibc keeps it -- `tzset ()` re-reads only when `TZ`'s value
+    /// has changed, so a later `export TZDIR=...` alone changes nothing, exactly
+    /// as in bash. See [`Shell::tzset`]. Inherited by a subshell, which is a
+    /// fork of this process in bash.
+    tz_zone: Option<localtime::Zone>,
     /// Base value added to elapsed seconds for `$SECONDS` (set by assignment).
     /// Signed, because bash counts on from whatever number it was given:
     /// `SECONDS=-3` reads `-3`, then `-2` a second later.
@@ -6945,6 +6955,8 @@ impl Shell {
             seconds_anchor: SecondsClock::Monotonic.now(),
             seconds_clock: SecondsClock::Monotonic,
             birth: std::time::Instant::now(),
+            start_time: i64::try_from(unix_time().0).unwrap_or(i64::MAX),
+            tz_zone: None,
             seconds_base: 0,
             // Seed `$RANDOM` from the wall clock so successive runs differ.
             rng: std::cell::Cell::new(initial_rng_seed()),
@@ -13722,6 +13734,8 @@ impl Shell {
             seconds_anchor: self.seconds_anchor,
             seconds_clock: self.seconds_clock,
             birth: self.birth,
+            start_time: self.start_time,
+            tz_zone: self.tz_zone.clone(),
             seconds_base: self.seconds_base,
             rng: std::cell::Cell::new(self.rng.get()),
             // `$SRANDOM`'s fallback state is perturbed rather than copied, and
@@ -19933,17 +19947,17 @@ impl Shell {
     /// Decode the bash prompt escape sequences (`\u`, `\h`, `\w`, `\t`, `\d`,
     /// `\D{fmt}`, …) in `s`. Backslash escapes not recognised keep the
     /// backslash and following character. Time-based escapes render in the
-    /// shell's zone — see [`Self::shell_tz`] — consistently with the `%(…)T`
+    /// shell's zone — see [`Self::tzset`] — consistently with the `%(…)T`
     /// printf conversion, which shares the same engine.
     fn prompt_decode(&mut self, s: &str) -> Str {
         let (epoch, _) = unix_time();
         let epoch = epoch as i64;
         // One reading for the whole prompt: `\t` and `\D{%Z}` in the same `PS1`
         // must not straddle a `TZ` change, just as they share one `epoch`. The
-        // snapshot owns its zoneinfo bytes, so the borrowed view below stays
-        // valid for the whole prompt even though the escapes take `&mut self`.
-        let zone = self.shell_tz();
-        let tz = zone.view();
+        // zone is an owned value, so it lasts the whole prompt even though the
+        // escapes take `&mut self`. bash runs `sv_tz` and then `localtime` for
+        // the time escapes: a `tzset ()`.
+        let zone = self.tzset();
         // The escapes insert *values* — the working directory, `$0`, the host
         // name — so what comes out is bytes even though the prompt source is
         // text: `PS1='\w$ '` in a directory whose name is not UTF-8 must still
@@ -19981,13 +19995,15 @@ impl Shell {
                     chars.next();
                 }
                 'd' => {
-                    push_prompt_strftime(&mut out, b"%a %b %e", epoch, &tz);
+                    // bash's is `%a %b %d`: the day zero-padded, where `date`'s
+                    // default is space-padded. Read out of bash 5.2's binary.
+                    push_prompt_strftime(&mut out, b"%a %b %d", epoch, &zone);
                     chars.next();
                 }
                 'D' => {
                     chars.next(); // consume 'D'
-                    // `\D{format}` — strftime; `\D{}` uses bash's default `%X`
-                    // (we render 24h HH:MM:SS). A missing `{` leaves `\D` alone.
+                    // `\D{format}` — strftime; `\D{}` is bash's `%X`, the
+                    // locale's time of day. A missing `{` leaves `\D` alone.
                     if chars.peek() == Some(&'{') {
                         chars.next(); // consume '{'
                         let mut fmt = String::new();
@@ -19997,26 +20013,26 @@ impl Shell {
                             }
                             fmt.push(fc);
                         }
-                        let fmt = if fmt.is_empty() { "%H:%M:%S" } else { &fmt };
-                        push_prompt_strftime(&mut out, fmt.as_bytes(), epoch, &tz);
+                        let fmt = if fmt.is_empty() { "%X" } else { &fmt };
+                        push_prompt_strftime(&mut out, fmt.as_bytes(), epoch, &zone);
                     } else {
                         out.extend_from_slice(b"\\D");
                     }
                 }
                 't' => {
-                    push_prompt_strftime(&mut out, b"%H:%M:%S", epoch, &tz);
+                    push_prompt_strftime(&mut out, b"%H:%M:%S", epoch, &zone);
                     chars.next();
                 }
                 'T' => {
-                    push_prompt_strftime(&mut out, b"%I:%M:%S", epoch, &tz);
+                    push_prompt_strftime(&mut out, b"%I:%M:%S", epoch, &zone);
                     chars.next();
                 }
                 '@' => {
-                    push_prompt_strftime(&mut out, b"%I:%M %p", epoch, &tz);
+                    push_prompt_strftime(&mut out, b"%I:%M %p", epoch, &zone);
                     chars.next();
                 }
                 'A' => {
-                    push_prompt_strftime(&mut out, b"%H:%M", epoch, &tz);
+                    push_prompt_strftime(&mut out, b"%H:%M", epoch, &zone);
                     chars.next();
                 }
                 'h' => {
@@ -39894,8 +39910,9 @@ impl Shell {
         }
     }
 
-    /// The timezone this shell renders broken-down time in — `printf
-    /// '%(FORMAT)T'` and the `\d \D{…} \t \T \@ \A` prompt escapes.
+    /// The zone `TZ` names now, not yet read — what [`Self::tzset`] reads when
+    /// it must, for `printf '%(FORMAT)T'` and the `\d \D{…} \t \T \@ \A` prompt
+    /// escapes.
     ///
     /// The zone comes from **`TZ`, and only when `TZ` is exported.** That is
     /// bash's rule, not an approximation of it: bash renders time by calling
@@ -39917,38 +39934,76 @@ impl Shell {
     /// arrives already exported (see [`Self::import_environment`]), and
     /// assigning to an exported name keeps the attribute.
     ///
-    /// `TZ` may be a POSIX rule string or the name of a binary zoneinfo file,
-    /// and both are resolved here exactly as the libc's `tzset` resolves them
-    /// (`posix::tz::resolve_tz_value`) — same search order (rule first, file
-    /// second, `:` forcing the file), same [`TZDIR`](Self::zoneinfo_dir)
-    /// override, same `/etc/localtime` default, same refusal of a `..` in the
-    /// name. That duplication is the point: osh cannot call the SlateOS libc's
-    /// `tzset` (it is a Rust program with its own runtime), so the only way
-    /// `date` and `printf '%(%T)T'` can agree is for both to walk the same
-    /// rules over the same [`tzrules`] engine.
+    /// What `TZ` then means is glibc's answer, because bash asks glibc: the
+    /// value is read by [`localtime::Zone`], the same port of glibc's `tzset`
+    /// that `date` and every other program here reads it with -- a zoneinfo
+    /// file before a POSIX rule, an empty value as `Universal`, a rule that
+    /// parses in part kept in part, the same [`TZDIR`](Self::zoneinfo_dir)
+    /// override and `/etc/localtime` default. osh cannot call the libc's
+    /// `tzset` (it has its own runtime), so sharing that crate is the only way
+    /// `date` and `printf '%(%T)T'` can agree.
     ///
-    /// An unset, empty or unresolvable `TZ` is UTC, matching both POSIX and
-    /// [`tzrules::Tz::parse`]'s contract. A shell that has not imported the
-    /// environment (every unit test) has nothing in `exported`, so tests render
-    /// in UTC no matter what the host's `TZ` says — the determinism is a
-    /// consequence of bash's rule, not a carve-out from it, and it is why the
-    /// `/etc/localtime` default is taken only by a shell that really did
-    /// inherit a process environment.
-    fn shell_tz(&mut self) -> ShellZone {
-        if !self.exported.contains("TZ") {
-            // No exported `TZ` at all: a real shell follows the machine's own
-            // zone, as glibc does when `TZ` is unset. A test shell has no
-            // machine to follow — it never imported an environment — so it
-            // stays on UTC and renders the same time on every host.
-            if self.env_imported {
-                return ShellZone::from_file(Path::new(LOCALTIME_PATH));
-            }
-            return ShellZone::Posix(Tz::UTC);
+    /// A shell that has not imported the environment (every unit test) has
+    /// nothing in `exported`, so with no exported `TZ` it renders UTC no matter
+    /// what the host's `TZ` says -- the determinism is a consequence of bash's
+    /// rule, not a carve-out from it, and it is why the `/etc/localtime`
+    /// default is taken only by a shell that really did inherit a process
+    /// environment.
+    fn zone_named_by_tz(&mut self) -> localtime::Zone {
+        let localtime_path = Path::new(localtime::LOCALTIME_PATH);
+        let value = if self.exported.contains("TZ") {
+            // Exported but unset is no `TZ` in the environment at all.
+            self.param_value("TZ")
+        } else {
+            None
+        };
+        if value.is_none() && !self.env_imported {
+            // No `TZ` to read and no machine to follow: a test shell never
+            // imported an environment, so it renders the same time on every
+            // host.
+            return localtime::Zone::utc();
         }
         let dir = self.zoneinfo_dir();
-        match self.param_value("TZ") {
-            Some(raw) if !raw.is_empty() => ShellZone::resolve(&raw, &dir),
-            _ => ShellZone::Posix(Tz::UTC),
+        localtime::Zone::resolve(value.as_deref(), &dir, localtime_path)
+    }
+
+    /// glibc's `tzset ()` -- `tzset_internal (1)` -- in the shell's own process,
+    /// returning the zone it leaves in force.
+    ///
+    /// It reads the zone again only if `TZ`'s value has changed since the last
+    /// read -- compared as glibc compares it, so `:X` after `X` is no change --
+    /// or if the zone came from `posixrules`, which glibc re-reads every time;
+    /// otherwise it keeps what it has, whatever `TZDIR` now says. The read
+    /// happens here and not at first use, because what a read does to the next
+    /// one (`localtime`'s `tzset` module) depends on the order.
+    ///
+    /// bash calls it where [`Shell::sv_tz`] does, and glibc's `localtime` calls
+    /// it for every `printf '%(…)T'` conversion and prompt escape.
+    fn tzset(&mut self) -> localtime::Zone {
+        let named = self.zone_named_by_tz();
+        let unchanged = self
+            .tz_zone
+            .as_ref()
+            .is_some_and(|cached| cached.tzset_would_keep(&named));
+        if unchanged {
+            if let Some(cached) = &self.tz_zone {
+                cached.tzset();
+            }
+        } else {
+            named.tzset();
+            self.tz_zone = Some(named);
+        }
+        self.tz_zone.clone().unwrap_or_else(localtime::Zone::utc)
+    }
+
+    /// bash's `sv_tz`, run by [`Shell::after_var_write`] for `TZ`: rebuild the
+    /// exported environment and `tzset ()` -- but only when `TZ` is exported or
+    /// has just been unset. A plain assignment to an unexported `TZ` changes
+    /// nothing a child or `localtime` would see, so bash does not call it.
+    fn sv_tz(&mut self) {
+        let exported = self.exported.contains("TZ");
+        if exported || self.param_value("TZ").is_none() {
+            self.tzset();
         }
     }
 
@@ -39956,20 +40011,20 @@ impl Shell {
     /// `TZDIR` (glibc's override) or the compiled-in default.
     ///
     /// Read from the shell's own variables rather than `std::env`, for the same
-    /// reason [`Self::shell_tz`] reads `TZ` there: an exported assignment is
+    /// reason [`Self::tzset`] reads `TZ` there: an exported assignment is
     /// what a child `date` would see, so the shell's own rendering must agree
     /// with it. It also keeps the lookup independent of the host the tests run
     /// on. A non-UTF-8 or empty value falls back to the default — such a
     /// directory names nothing in any real tzdata tree.
     fn zoneinfo_dir(&mut self) -> String {
         if !self.exported.contains("TZDIR") {
-            return TZDIR_DEFAULT.to_string();
+            return localtime::TZDIR_DEFAULT.to_string();
         }
         match self.param_value("TZDIR") {
             Some(raw) if !raw.is_empty() => {
-                String::from_utf8(raw).unwrap_or_else(|_| TZDIR_DEFAULT.to_string())
+                String::from_utf8(raw).unwrap_or_else(|_| localtime::TZDIR_DEFAULT.to_string())
             }
-            _ => TZDIR_DEFAULT.to_string(),
+            _ => localtime::TZDIR_DEFAULT.to_string(),
         }
     }
 
@@ -40532,7 +40587,8 @@ impl Shell {
     /// exactly that: it rewrites `OPTIND` after every call, and if its own
     /// write reset the scanner the shell could never get past the first option.
     ///
-    /// Three names need it. `DIRSTACK` writes back into the directory stack;
+    /// Four names need it. `TZ` runs bash's [`Shell::sv_tz`]. `DIRSTACK` writes
+    /// back into the directory stack;
     /// the other dynamic names bash exposes (`FUNCNAME`, `BASH_SOURCE`,
     /// `GROUPS`, …) carry `att_noassign`, so a write to one is turned away
     /// before it can land — see [`Shell::noassign`]. `OPTIND` moves the
@@ -40546,6 +40602,7 @@ impl Shell {
             "DIRSTACK" => self.sync_dirstack_writeback(),
             "OPTIND" => self.getopts_reset(),
             "OPTERR" => self.getopts_opterr_reset(),
+            "TZ" => self.sv_tz(),
             _ => {}
         }
     }
@@ -46068,8 +46125,13 @@ impl Shell {
         // Resolved once for the whole format, not per `%(…)T`: bash calls
         // `tzset()` at assignment time, so every conversion in one `printf`
         // sees the same zone even if the format somehow changed it.
-        let zone = self.shell_tz();
-        let text = format_printf(fmt, fargs, &mut diags, &zone.view());
+        // Every `%(…)T` is a `localtime`, which runs `tzset ()` first.
+        let zone = self.tzset();
+        let time = PrintfTime {
+            zone: &zone,
+            start: self.start_time,
+        };
+        let text = format_printf(fmt, fargs, &mut diags, &time);
         let PrintfDiags {
             errors,
             warnings,
@@ -50245,20 +50307,18 @@ impl Shell {
             if readonly && !unset_readonly {
                 self.readonly.insert(name.to_string());
             }
-        }
-        // A declaration runs the dynamic-name hook for every name it was given
-        // — `stupidly_hack_special_variables (name)` at the foot of
-        // `declare_internal`'s own operand loop (builtins/declare.def:1048) —
-        // and that is what makes the `local OPTIND` idiom work: the name is
-        // declared afresh with no value, the hook reads nothing there, and
-        // `getopts` starts over for the call. See [`Shell::getopts_reset`].
-        //
-        // bash runs it per operand, at the end of that operand's turn, and the
-        // paths that leave the turn early skip it. Here it is run for the whole
-        // list once the loop is over. The two hooked names cannot tell the
-        // difference: neither the order among operands nor a refused operand
-        // changes what the hook then reads back out of the variable.
-        for op in &ops {
+            // A declaration runs the dynamic-name hook for every name it was
+            // given — `stupidly_hack_special_variables (name)` at the foot of
+            // `declare_internal`'s own operand loop (builtins/declare.def:1048)
+            // — and that is what makes the `local OPTIND` idiom work: the name
+            // is declared afresh with no value, the hook reads nothing there,
+            // and `getopts` starts over for the call. See
+            // [`Shell::getopts_reset`].
+            //
+            // Per operand, at the end of that operand's turn, as bash runs it:
+            // the paths that leave a turn early skip it, and the order is
+            // visible. `declare -x TZ=… TZDIR=…` reads the zone at `TZ`'s turn,
+            // before `TZDIR` has its new value — see [`Shell::sv_tz`].
             let written: BStr<'_> = match op {
                 DeclOperand::Word(w) => w,
                 DeclOperand::Bound(c) => c.name.as_bytes(),
@@ -67971,7 +68031,7 @@ struct PrintfDiags {
     base: usize,
 }
 
-fn format_printf(fmt: &[u8], args: &[Str], diags: &mut PrintfDiags, tz: &Zone<'_>) -> Str {
+fn format_printf(fmt: &[u8], args: &[Str], diags: &mut PrintfDiags, time: &PrintfTime<'_>) -> Str {
     // Bash reuses the format string until all arguments are consumed. Repeat the
     // format while arguments remain, stopping if a pass consumes none (the
     // format has no argument-consuming conversions) to avoid an infinite loop.
@@ -67984,7 +68044,7 @@ fn format_printf(fmt: &[u8], args: &[Str], diags: &mut PrintfDiags, tz: &Zone<'_
         // which it occurred (used to interleave stderr with stdout — see
         // `builtin_printf`).
         diags.base = out.len();
-        let (chunk, stop) = format_printf_once(fmt, args, &mut arg_i, diags, tz);
+        let (chunk, stop) = format_printf_once(fmt, args, &mut arg_i, diags, time);
         out.extend_from_slice(&chunk);
         // A `%b` argument containing `\c` halts all further output, format
         // recycling included. A malformed conversion (`fatal`) aborts printf
@@ -68041,7 +68101,7 @@ fn format_printf_once(
     args: &[Str],
     arg_i: &mut usize,
     diags: &mut PrintfDiags,
-    tz: &Zone<'_>,
+    time: &PrintfTime<'_>,
 ) -> (Str, bool) {
     let mut out = Str::new();
     // A format string is a shell word: its *syntax* is ASCII, but its literal
@@ -68065,7 +68125,7 @@ fn format_printf_once(
                 }
             }
             b'%' => {
-                if format_conversion(&mut chars, args, arg_i, &mut out, diags, tz) {
+                if format_conversion(&mut chars, args, arg_i, &mut out, diags, time) {
                     return (out, true);
                 }
                 // A malformed conversion aborts the rest of this pass too.
@@ -68089,7 +68149,7 @@ fn format_conversion(
     arg_i: &mut usize,
     out: &mut Str,
     diags: &mut PrintfDiags,
-    tz: &Zone<'_>,
+    time: &PrintfTime<'_>,
 ) -> bool {
     // Literal `%%` short-circuit (no flags/width may precede it).
     if chars.peek() == Some(&b'%') {
@@ -68205,11 +68265,11 @@ fn format_conversion(
     // `%(FORMAT)T` — strftime-style time conversion. The parenthesised format
     // occupies the position of the conversion character and is followed by `T`.
     // It consumes one argument: seconds since the Unix epoch. Two values are
-    // sentinels rather than times — `-1` is now and `-2` is the shell's start
-    // (approximated as now here) — and so is a missing or empty argument. Every
+    // sentinels rather than times — `-1` is now and `-2` is the shell's start,
+    // bash's `shell_start_time` — and so is a missing or empty argument. Every
     // *other* negative is an ordinary time before the epoch: `-86400` is
-    // 1969-12-31, not today. Time is rendered in `tz` — the shell's exported
-    // `TZ`, resolved once per `printf` by [`Shell::shell_tz`].
+    // 1969-12-31, not today. Time is rendered in `time.zone` — the shell's
+    // exported `TZ`, resolved once per `printf` by [`Shell::tzset`].
     if chars.peek() == Some(&b'(') {
         chars.next();
         let mut tfmt = Str::new();
@@ -68242,10 +68302,10 @@ fn format_conversion(
                 // `printf '%(%Y)T' abc` complains and still prints `1970`.
                 let n = star_arg(args, arg_i, diags);
                 #[allow(clippy::cast_possible_wrap)]
-                if n == -1 || n == -2 {
-                    unix_time().0 as i64
-                } else {
-                    n
+                match n {
+                    -1 => unix_time().0 as i64,
+                    -2 => time.start,
+                    n => n,
                 }
             } else {
                 #[allow(clippy::cast_possible_wrap)]
@@ -68257,7 +68317,7 @@ fn format_conversion(
         // An empty format is not an empty result: bash passes `%X` to strftime,
         // which in the C locale is the 24-hour clock time.
         let tfmt: &[u8] = if tfmt.is_empty() { b"%X" } else { &tfmt };
-        let mut rendered = format_strftime(tfmt, secs, tz);
+        let mut rendered = bash_strftime(tfmt, &bash_localtime(time.zone, secs));
         // bash renders the time and then lays it out as a string, so precision
         // truncates it the way it truncates `%s` — by bytes, as C counts them —
         // making `%.2(%Y)T` `19` and `%.0` nothing at all. A precision longer
@@ -68622,481 +68682,58 @@ fn split_sign(s: &str, plus: bool, space: bool) -> (Str, Str) {
     }
 }
 
-/// Parse an integer argument for printf, tolerating leading/trailing whitespace,
-/// a leading `0x`/`0` base prefix, and a leading `'c` character-code form.
-/// Convert a day count relative to 1970-01-01 into a civil `(year, month,
-/// day)`. Uses Howard Hinnant's `civil_from_days` algorithm (valid for the
-/// full proleptic Gregorian range).
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    (if m <= 2 { y + 1 } else { y }, m as u32, d)
-}
+// ---------------------------------------------------------------------------
+// The shell's clock, rendered
+// ---------------------------------------------------------------------------
 
-/// Inverse of [`civil_from_days`]: day count relative to 1970-01-01 for a
-/// civil date. Used to derive the day-of-year.
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mi = i64::from(m);
-    let doy = (153 * (if m > 2 { mi - 3 } else { mi + 9 }) + 2) / 5 + i64::from(d) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
+/// bash's buffer for one rendered time: `char timebuf[128]`, in both
+/// `decode_prompt_string` (the `\t` family and `\D{…}`) and the printf
+/// builtin's `%(…)T`.
+const BASH_TIMEBUF: usize = 128;
 
-/// ISO 8601 week date for a given calendar year, 1-based day-of-year, and
-/// weekday index (`wday`, Sunday = 0 … Saturday = 6). Returns
-/// `(iso_week_year, iso_week_number)`. Week 1 is the week containing the year's
-/// first Thursday; days early in January can belong to the previous year's last
-/// week and days late in December to the next year's week 1.
-fn iso_week(year: i64, yday: i64, wday: usize) -> (i64, i64) {
-    // ISO weekday: Monday = 1 … Sunday = 7.
-    let iso_wday = if wday == 0 { 7 } else { wday as i64 };
-    // A calendar year has 53 ISO weeks iff Jan 1 (or Dec 31) is a Thursday,
-    // i.e. its "p" value is 4, or the previous year's is 3 (leap-year case).
-    let p = |y: i64| (y + y.div_euclid(4) - y.div_euclid(100) + y.div_euclid(400)).rem_euclid(7);
-    let weeks_in = |y: i64| if p(y) == 4 || p(y - 1) == 3 { 53 } else { 52 };
-    let week = (yday - iso_wday + 10).div_euclid(7);
-    if week < 1 {
-        (year - 1, weeks_in(year - 1))
-    } else if week > weeks_in(year) {
-        (year + 1, 1)
+/// bash's `strftime (timebuf, sizeof timebuf, fmt, tm)`, and what it does with
+/// the answer: glibc's `strftime` -- [`localtime::strftime`] is the port -- and
+/// nothing at all when the result does not fit with its NUL, because glibc then
+/// returns 0 and bash prints the buffer it emptied.
+fn bash_strftime(fmt: &[u8], tm: &localtime::Tm) -> Str {
+    let out = localtime::strftime(fmt, tm);
+    if out.len() < BASH_TIMEBUF {
+        out
     } else {
-        (year, week)
+        Str::new()
     }
 }
 
-// ---------------------------------------------------------------------------
-// The shell's timezone
-// ---------------------------------------------------------------------------
-
-/// Where zoneinfo files live when `TZ` names one without a leading `/`.
-const TZDIR_DEFAULT: &str = "/usr/share/zoneinfo";
-
-/// The system-wide zone, followed when no `TZ` is exported.
-const LOCALTIME_PATH: &str = "/etc/localtime";
-
-/// Largest zoneinfo file the shell will load. The biggest in tzdata is under
-/// 4 KiB, so this is generous; the cap exists so a `TZ` pointing at a huge file
-/// cannot make the shell read it into memory on every prompt.
-const MAX_ZONEINFO_BYTES: usize = 64 * 1024;
-
-/// An owned snapshot of the shell's timezone.
-///
-/// Owned rather than borrowed because a zoneinfo zone *is* the file's bytes: a
-/// [`TzFile`] reads the transition table out of them on every lookup instead of
-/// copying it, so something has to hold them. Taking a snapshot — rather than
-/// borrowing the shell — is what lets `prompt_decode` keep one zone for a whole
-/// prompt while still calling `&mut self` methods for `\w` and `\u`.
-///
-/// See [`Shell::shell_tz`] for how `TZ` selects between the two arms.
-#[derive(Clone, Debug)]
-enum ShellZone {
-    /// A POSIX `TZ` rule string, or the UTC default.
-    Posix(Tz),
-    /// The bytes of a zoneinfo file, already known to parse as TZif.
-    ///
-    /// `Rc`, so that handing a caller a snapshot per prompt is a refcount bump
-    /// rather than a few kilobytes of memcpy.
-    File(Rc<[u8]>),
+/// What `printf '%(…)T'` needs from the shell: the zone to render in, and when
+/// the shell started, which is what `-2` means.
+struct PrintfTime<'a> {
+    zone: &'a localtime::Zone,
+    start: i64,
 }
 
-impl ShellZone {
-    /// Resolve a non-empty `TZ` value, falling back to UTC.
-    ///
-    /// A leading `:` forces the file interpretation, which is how POSIX spells
-    /// "the rest is implementation-defined" and how every libc reads it.
-    /// Otherwise a POSIX rule string is tried first and a file only if that
-    /// fails — the order glibc uses, and it matters because `EST5EDT` is both a
-    /// valid rule *and* a file name in the zoneinfo tree.
-    fn resolve(value: &[u8], dir: &str) -> Self {
-        if let Some(name) = value.strip_prefix(b":") {
-            return Self::from_name(name, dir);
-        }
-        match Tz::parse(value) {
-            Some(tz) => Self::Posix(tz),
-            None => Self::from_name(value, dir),
-        }
-    }
-
-    /// Load the zoneinfo file `name` refers to under `dir`, falling back to UTC.
-    fn from_name(name: &[u8], dir: &str) -> Self {
-        let Some(path) = zoneinfo_path(name, dir) else {
-            return Self::Posix(Tz::UTC);
-        };
-        Self::from_file(&path)
-    }
-
-    /// Read and validate a zoneinfo file, falling back to UTC.
-    ///
-    /// The bytes are parsed *here* so that a file which is not TZif never
-    /// becomes a zone: every later lookup then has a file it already knows
-    /// parses, and cannot silently answer UTC halfway through a prompt.
-    fn from_file(path: &Path) -> Self {
-        let Ok(file) = std::fs::File::open(path) else {
-            return Self::Posix(Tz::UTC);
-        };
-        // One byte past the cap, so an oversized file is *refused* rather than
-        // silently truncated to a prefix that might still parse as TZif — and so
-        // that `TZ=/dev/zero` cannot be read until the shell runs out of memory.
-        let mut bytes = Vec::new();
-        if std::io::Read::take(file, MAX_ZONEINFO_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)
-            .is_err()
-            || bytes.len() > MAX_ZONEINFO_BYTES
-        {
-            return Self::Posix(Tz::UTC);
-        }
-        if TzFile::parse(&bytes).is_none() {
-            return Self::Posix(Tz::UTC);
-        }
-        Self::File(bytes.into())
-    }
-
-    /// Borrow this zone as something that can answer lookups.
-    fn view(&self) -> Zone<'_> {
-        match self {
-            Self::Posix(tz) => Zone::Posix(*tz),
-            // `from_file`/`resolve` only build this arm from bytes that parsed,
-            // so the fallback is unreachable; it exists so a shell rendering a
-            // prompt cannot panic.
-            Self::File(bytes) => TzFile::parse(bytes).map_or(Zone::Posix(Tz::UTC), Zone::File),
-        }
-    }
+/// bash's `localtime (&secs)` for `%(…)T`, retried at 0 when the instant has
+/// no `struct tm`, as bash retries it: `printf '%(%Y)T' 99999999999999999`
+/// prints 1970. The `tzset ()` that `localtime` begins with is the caller's
+/// ([`Shell::tzset`]).
+fn bash_localtime(zone: &localtime::Zone, secs: i64) -> localtime::Tm {
+    let secs = if zone.localtime_r(secs).is_some() {
+        secs
+    } else {
+        0
+    };
+    zone.local(secs, 0)
 }
 
-/// A borrowed view of a [`ShellZone`], which is what the rendering code needs.
-#[derive(Clone, Copy, Debug)]
-enum Zone<'a> {
-    /// A POSIX rule.
-    Posix(Tz),
-    /// A zoneinfo file's transition table.
-    File(TzFile<'a>),
-}
-
-impl Zone<'_> {
-    /// The zone state at UTC instant `t`.
-    fn lookup(&self, t: i64) -> TzInfo {
-        match self {
-            Self::Posix(tz) => tz.lookup(t),
-            Self::File(f) => f.lookup(t),
-        }
-    }
-}
-
-/// Build the path of the zoneinfo file `name` names, or `None` for a name that
-/// must not be resolved.
-///
-/// `TZ` is inherited from whoever started the shell, so a name containing a
-/// `..` component is refused: without that check `TZ=../../../etc/shadow` would
-/// make the shell open an arbitrary file and reveal, through whether the time
-/// changed, that it parsed as TZif. `dir` is the tree to look in — see
-/// [`Shell::zoneinfo_dir`].
-fn zoneinfo_path(name: &[u8], dir: &str) -> Option<PathBuf> {
-    if name.is_empty() || name.contains(&0) {
-        return None;
-    }
-    // A `..` *inside* a component is not a traversal; only a whole component is.
-    if name.split(|&b| b == b'/').any(|part| part == b"..") {
-        return None;
-    }
-    // A zone name is a file name, and file names are bytes — but `Path` on the
-    // host build is UTF-8-ish, and a non-UTF-8 zone name names nothing in any
-    // real tzdata tree, so refusing it loses nothing.
-    let name = std::str::from_utf8(name).ok()?;
-    if name.starts_with('/') {
-        return Some(PathBuf::from(name));
-    }
-    Some(Path::new(dir).join(name))
-}
-
-/// Append a strftime rendering to a prompt buffer.
+/// Append a prompt escape's rendering of `epoch` to a prompt buffer: bash's
+/// `localtime` and `strftime`, into its 128-byte buffer.
 ///
 /// **TD-OILS-BYTE-STRINGS scaffold.** Prompt expansion is still `String`-based,
-/// so a `\D{…}` format carrying a non-UTF-8 byte is mangled here. The five
-/// fixed formats the other prompt escapes use (`%a %b %e`, `%H:%M:%S`, …) render
-/// pure ASCII and so pass through unharmed; this whole helper disappears when
-/// prompt expansion becomes byte-native.
-#[allow(deprecated)]
-fn push_prompt_strftime(out: &mut Str, fmt: &[u8], epoch: i64, tz: &Zone<'_>) {
-    out.extend_from_slice(&format_strftime(fmt, epoch, tz));
-}
-
-/// Render a `strftime`-style format for `printf '%(FORMAT)T'`. `epoch` is
-/// seconds since the Unix epoch and `tz` is the zone to render it in — see
-/// [`Shell::shell_tz`], which resolves it from the shell's *exported* `TZ`
-/// exactly as bash's `sv_tz` does. Supports the common specifiers
-/// `%Y %C %y %m %d %e %H %I %k %l %M %S %p %P %A %a %B %b %h %j %u %w %s %z %Z
-/// %V %G %g %n %t %F %T %R %D %r %c %x %X %%`; an unknown specifier is emitted
-/// verbatim. `%z` and `%Z` report the offset and abbreviation `tz` was in at
-/// `epoch`, so they follow a DST rule across its transitions — whether that
-/// rule came from a `TZ` string or from a zoneinfo file's transition table.
-fn format_strftime(fmt: &[u8], epoch: i64, tz: &Zone<'_>) -> Str {
-    const WDAY_FULL: [&[u8]; 7] = [
-        b"Sunday",
-        b"Monday",
-        b"Tuesday",
-        b"Wednesday",
-        b"Thursday",
-        b"Friday",
-        b"Saturday",
-    ];
-    const WDAY_ABBR: [&[u8]; 7] = [b"Sun", b"Mon", b"Tue", b"Wed", b"Thu", b"Fri", b"Sat"];
-    const MON_FULL: [&[u8]; 12] = [
-        b"January",
-        b"February",
-        b"March",
-        b"April",
-        b"May",
-        b"June",
-        b"July",
-        b"August",
-        b"September",
-        b"October",
-        b"November",
-        b"December",
-    ];
-    const MON_ABBR: [&[u8]; 12] = [
-        b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov",
-        b"Dec",
-    ];
-
-    // The zone state at this instant, and the local seconds it names. Every
-    // broken-down field below reads the *local* clock; only `%s` keeps the
-    // unshifted `epoch`, because that specifier names the instant itself
-    // rather than a reading of any clock.
-    let info = tz.lookup(epoch);
-    let local = epoch.saturating_add(i64::from(info.gmtoff));
-    let days = local.div_euclid(86_400);
-    let rem = local.rem_euclid(86_400);
-    let hour = (rem / 3600) as u32;
-    let minute = ((rem % 3600) / 60) as u32;
-    let second = (rem % 60) as u32;
-    let (year, month, day) = civil_from_days(days);
-    // 1970-01-01 was a Thursday (index 4 with Sunday = 0).
-    let wday = (((days + 4) % 7 + 7) % 7) as usize;
-    let yday = days - days_from_civil(year, 1, 1) + 1;
-    let mon_i = (month.max(1) - 1) as usize;
-
-    /// Append a numeric field. Every strftime field is ASCII by construction,
-    /// so building it with `format!` and taking its bytes is lossless.
-    fn num(out: &mut Str, s: &str) {
-        out.extend_from_slice(s.as_bytes());
-    }
-
-    // Render one specifier letter to `out`. `%F`/`%T`/`%R`/`%D` recurse.
-    fn emit(out: &mut Str, c: u8, ctx: &StrftimeCtx<'_>) {
-        match c {
-            b'Y' => num(out, &ctx.year.to_string()),
-            b'C' => num(out, &format!("{:02}", ctx.year.div_euclid(100))),
-            b'y' => num(out, &format!("{:02}", ctx.year.rem_euclid(100))),
-            b'm' => num(out, &format!("{:02}", ctx.month)),
-            b'd' => num(out, &format!("{:02}", ctx.day)),
-            b'e' => num(out, &format!("{:2}", ctx.day)),
-            b'H' => num(out, &format!("{:02}", ctx.hour)),
-            b'I' => {
-                let h12 = match ctx.hour % 12 {
-                    0 => 12,
-                    h => h,
-                };
-                num(out, &format!("{h12:02}"));
-            }
-            b'k' => num(out, &format!("{:2}", ctx.hour)),
-            b'l' => {
-                let h12 = match ctx.hour % 12 {
-                    0 => 12,
-                    h => h,
-                };
-                num(out, &format!("{h12:2}"));
-            }
-            b'M' => num(out, &format!("{:02}", ctx.minute)),
-            b'S' => num(out, &format!("{:02}", ctx.second)),
-            b'p' => out.extend_from_slice(if ctx.hour < 12 { b"AM" } else { b"PM" }),
-            b'P' => out.extend_from_slice(if ctx.hour < 12 { b"am" } else { b"pm" }),
-            b'A' => out.extend_from_slice(ctx.wday_full),
-            b'a' => out.extend_from_slice(ctx.wday_abbr),
-            b'B' => out.extend_from_slice(ctx.mon_full),
-            b'b' | b'h' => out.extend_from_slice(ctx.mon_abbr),
-            b'j' => num(out, &format!("{:03}", ctx.yday)),
-            b'u' => num(out, &(if ctx.wday == 0 { 7 } else { ctx.wday }).to_string()),
-            b'w' => num(out, &ctx.wday.to_string()),
-            b's' => num(out, &ctx.epoch.to_string()),
-            // `%z` — the offset as `±hhmm`. Sub-minute seconds are dropped
-            // rather than rendered as `±hhmmss`, matching glibc's plain `%z`
-            // (which divides the offset by 60 before formatting); no real zone
-            // has had a non-whole-minute offset since 1972 anyway.
-            b'z' => {
-                let (sign, mag) = if ctx.gmtoff < 0 {
-                    (b'-', ctx.gmtoff.unsigned_abs())
-                } else {
-                    (b'+', ctx.gmtoff.unsigned_abs())
-                };
-                out.push(sign);
-                let mins = mag / 60;
-                num(out, &format!("{:02}{:02}", mins / 60, mins % 60));
-            }
-            // `%Z` — the abbreviation in effect at this instant, so a zone with
-            // a DST rule reports `EST` or `EDT` depending on `epoch`.
-            b'Z' => out.extend_from_slice(ctx.zone_name),
-            // `%U`/`%W` — the plain week counts, which are not the ISO one and
-            // do not share its year: week 1 starts at the year's first Sunday
-            // (`%U`) or first Monday (`%W`), and every day before that is week
-            // `00`. So 2006-01-01, a Sunday, is `%U` 01 but `%W` 00.
-            b'U' | b'W' => {
-                let first = if c == b'U' {
-                    ctx.wday
-                } else {
-                    (ctx.wday + 6) % 7
-                };
-                // `yday` counts from 1; the arithmetic wants it from 0.
-                let doy = ctx.yday.saturating_sub(1);
-                let week = (doy + 7 - i64::try_from(first).unwrap_or(0)).div_euclid(7);
-                num(out, &format!("{week:02}"));
-            }
-            // ISO 8601 week date: %V = week number (01-53), %G = week-based year,
-            // %g = week-based year mod 100.
-            b'V' => {
-                let (_, week) = iso_week(ctx.year, ctx.yday, ctx.wday);
-                num(out, &format!("{week:02}"));
-            }
-            b'G' => {
-                let (iso_year, _) = iso_week(ctx.year, ctx.yday, ctx.wday);
-                num(out, &iso_year.to_string());
-            }
-            b'g' => {
-                let (iso_year, _) = iso_week(ctx.year, ctx.yday, ctx.wday);
-                num(out, &format!("{:02}", iso_year.rem_euclid(100)));
-            }
-            b'n' => out.push(b'\n'),
-            b't' => out.push(b'\t'),
-            b'%' => out.push(b'%'),
-            b'F' => {
-                emit(out, b'Y', ctx);
-                out.push(b'-');
-                emit(out, b'm', ctx);
-                out.push(b'-');
-                emit(out, b'd', ctx);
-            }
-            b'T' => {
-                emit(out, b'H', ctx);
-                out.push(b':');
-                emit(out, b'M', ctx);
-                out.push(b':');
-                emit(out, b'S', ctx);
-            }
-            b'R' => {
-                emit(out, b'H', ctx);
-                out.push(b':');
-                emit(out, b'M', ctx);
-            }
-            b'D' => {
-                emit(out, b'm', ctx);
-                out.push(b'/');
-                emit(out, b'd', ctx);
-                out.push(b'/');
-                emit(out, b'y', ctx);
-            }
-            // `%r` — 12-hour clock time: `%I:%M:%S %p` (C locale).
-            b'r' => {
-                emit(out, b'I', ctx);
-                out.push(b':');
-                emit(out, b'M', ctx);
-                out.push(b':');
-                emit(out, b'S', ctx);
-                out.push(b' ');
-                emit(out, b'p', ctx);
-            }
-            // `%c` — C-locale date and time: `%a %b %e %H:%M:%S %Y`.
-            b'c' => {
-                emit(out, b'a', ctx);
-                out.push(b' ');
-                emit(out, b'b', ctx);
-                out.push(b' ');
-                emit(out, b'e', ctx);
-                out.push(b' ');
-                emit(out, b'T', ctx);
-                out.push(b' ');
-                emit(out, b'Y', ctx);
-            }
-            // `%x` — C-locale date: `%m/%d/%y` (same as `%D`).
-            b'x' => emit(out, b'D', ctx),
-            // `%X` — C-locale time: `%H:%M:%S` (same as `%T`).
-            b'X' => emit(out, b'T', ctx),
-            other => {
-                out.push(b'%');
-                out.push(other);
-            }
-        }
-    }
-
-    let ctx = StrftimeCtx {
-        year,
-        month,
-        day,
-        hour,
-        minute,
-        second,
-        wday,
-        yday,
-        epoch,
-        wday_full: WDAY_FULL[wday],
-        wday_abbr: WDAY_ABBR[wday],
-        mon_full: MON_FULL[mon_i],
-        mon_abbr: MON_ABBR[mon_i],
-        gmtoff: info.gmtoff,
-        zone_name: info.name.as_bytes(),
-    };
-    let mut out = Str::new();
-    // Bytes, not chars: the format's *syntax* is ASCII, but its literal text
-    // comes from a shell word and may hold any byte, which passes through
-    // untouched.
-    let mut chars = crate::escape::cursor(fmt);
-    while let Some(c) = chars.next() {
-        if c == b'%' {
-            match chars.next() {
-                Some(sp) => emit(&mut out, sp, &ctx),
-                None => out.push(b'%'),
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Broken-down **local** time plus preformatted name strings, passed to the
-/// `strftime` specifier renderer.
-///
-/// The lifetime is the zone's: `zone_name` borrows the abbreviation out of the
-/// [`tzrules::TzInfo`] the caller looked up, while the weekday/month names are
-/// `&'static` and coerce into it.
-struct StrftimeCtx<'a> {
-    year: i64,
-    month: u32,
-    day: u32,
-    hour: u32,
-    minute: u32,
-    second: u32,
-    wday: usize,
-    yday: i64,
-    /// The unshifted instant, for `%s` — *not* `zone_name`'s local clock.
-    epoch: i64,
-    wday_full: &'a [u8],
-    wday_abbr: &'a [u8],
-    mon_full: &'a [u8],
-    mon_abbr: &'a [u8],
-    /// Seconds east of Greenwich at `epoch` (`%z`).
-    gmtoff: i32,
-    /// The zone abbreviation at `epoch` (`%Z`).
-    zone_name: &'a [u8],
+/// so a `\D{…}` format carrying a non-UTF-8 byte is mangled before it gets
+/// here. The five fixed formats the other prompt escapes use (`%a %b %d`,
+/// `%H:%M:%S`, …) render pure ASCII and so pass through unharmed.
+fn push_prompt_strftime(out: &mut Str, fmt: &[u8], epoch: i64, zone: &localtime::Zone) {
+    // The `tzset ()` of bash's `localtime` is the caller's (`Shell::tzset`).
+    out.extend_from_slice(&bash_strftime(fmt, &zone.local(epoch, 0)));
 }
 
 /// Parse an integer `printf` argument with C/bash `strtoimax` semantics and
@@ -79008,7 +78645,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     /// bash's `sv_tz` calls `tzset()` only for an *exported* `TZ`, so a plain
-    /// assignment leaves the rendered time alone. See [`Shell::shell_tz`].
+    /// assignment leaves the rendered time alone. See [`Shell::tzset`].
     #[test]
     fn printf_time_ignores_an_unexported_tz() {
         // Assigned but never exported: still UTC.
@@ -79029,23 +78666,25 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
     }
 
-    /// An unset, empty or unresolvable `TZ` is UTC — POSIX's rule and
-    /// [`tzrules::Tz::parse`]'s contract.
-    ///
-    /// A bare zoneinfo name is now *looked up* rather than rejected outright
-    /// (see [`Shell::shell_tz`]), so the names here are pointed at a tree that
-    /// does not exist: what is being pinned is the fallback when the lookup
-    /// finds nothing, not the old "a name is never a zone" behaviour.
+    /// A `TZ` that names no zoneinfo file is a POSIX rule, and glibc keeps
+    /// whatever of the rule parses -- measured against glibc by
+    /// `scripts/tz-diff.sh`, through the same `localtime` crate. The names
+    /// point at a tree that does not exist, so none of them is found as a file.
     #[test]
-    fn printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve() {
-        for tz in [
-            "",
-            "America/New_York",
-            "EST5EDT,garbage",
-            "%%%",
-            // Refused before it is opened: a `..` component would let an
-            // inherited `TZ` walk out of the zoneinfo tree.
-            "../../../etc/passwd",
+    fn printf_time_reads_a_zone_it_cannot_find_as_glibc_does() {
+        for (tz, want) in [
+            // Empty is the name `Universal`, then as any other value.
+            ("", "01 Universal\n"),
+            // A standard name and no offset: UTC under that name.
+            ("America/New_York", "01 America\n"),
+            // Two names and a rule that does not parse: glibc keeps the zeroed
+            // rules, which read as a southern zone in DST for most of the year.
+            ("EST5EDT,garbage", "21 EDT\n"),
+            // No name at all.
+            ("%%%", "01 \n"),
+            // Refused before it is opened -- a `..` component would let an
+            // inherited `TZ` walk out of the zoneinfo tree -- and so a rule.
+            ("../../../etc/passwd", "01 \n"),
         ] {
             assert_eq!(
                 run(&format!(
@@ -79053,8 +78692,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                      printf '%(%H %Z)T\\n' 1000000000"
                 ))
                 .0,
-                "01 UTC\n",
-                "TZ={tz:?} should render as UTC"
+                want,
+                "TZ={tz:?}"
             );
         }
     }
@@ -79154,34 +78793,38 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
     }
 
-    /// A name that is *both* a valid POSIX rule and a file resolves as the rule,
-    /// matching glibc — the file is reached only through a leading `:`. The two
-    /// disagree here on purpose: the fixture file is US-eastern, the rule is
-    /// a fixed +0 zone, so which one answered is unambiguous.
+    /// A name that is *both* a valid POSIX rule and a file resolves as the
+    /// file, with or without a leading `:` -- glibc tries a file first. The two
+    /// disagree here on purpose: the fixture file is US-eastern, the rule is a
+    /// fixed +0 zone, so which one answered is unambiguous.
     #[test]
-    fn printf_time_prefers_a_tz_rule_over_a_file_of_the_same_name() {
+    fn printf_time_prefers_a_file_over_a_tz_rule_of_the_same_name() {
         let dir = eastern_zoneinfo_dir();
         std::fs::write(dir.join("XXX0"), eastern_tzif()).expect("write rule-named zone");
         let tzdir = dir.slashed();
+        for tz in ["XXX0", ":XXX0"] {
+            assert_eq!(
+                run(&format!(
+                    "export TZDIR='{tzdir}'; export TZ={tz}; printf '%(%Z %z)T\\n' 1593561600"
+                ))
+                .0,
+                "EDT -0400\n",
+                "TZ={tz}"
+            );
+        }
+        // With no file of that name, the rule.
         assert_eq!(
-            run(&format!(
-                "export TZDIR='{tzdir}'; export TZ=XXX0; printf '%(%Z %z)T\\n' 1593561600"
-            ))
+            run("export TZDIR=/nonexistent-zoneinfo; export TZ=XXX0; \
+                 printf '%(%Z %z)T\\n' 1593561600")
             .0,
             "XXX +0000\n"
         );
-        assert_eq!(
-            run(&format!(
-                "export TZDIR='{tzdir}'; export TZ=:XXX0; printf '%(%Z %z)T\\n' 1593561600"
-            ))
-            .0,
-            "EDT -0400\n"
-        );
     }
 
-    /// A file that is not TZif is not a zone: the shell keeps UTC rather than
-    /// rendering from whatever the bytes happened to decode to. Checked at load
-    /// time, so a prompt cannot start in one zone and finish in another.
+    /// A file that is not TZif is not a zone: the name is read as a POSIX rule
+    /// instead, as glibc reads it when the file will not load -- `Fixture/Junk`
+    /// is UTC under the name `Fixture`. Checked at load time, so a prompt cannot
+    /// start in one zone and finish in another.
     #[test]
     fn printf_time_refuses_a_zoneinfo_file_that_is_not_tzif() {
         let dir = eastern_zoneinfo_dir();
@@ -79198,8 +78841,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                     "export TZDIR='{tzdir}'; export TZ={name}; printf '%(%H %Z)T\\n' 1000000000"
                 ))
                 .0,
-                "01 UTC\n",
-                "TZ={name} should render as UTC"
+                "01 Fixture\n",
+                "TZ={name} should be read as a rule"
             );
         }
     }
@@ -79220,6 +78863,104 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             out == b"EST -0500".to_vec() || out == b"EDT -0400".to_vec(),
             "prompt rendered {:?}, expected an eastern zone from the fixture file",
             String::from_utf8_lossy(&out)
+        );
+    }
+
+    /// `tzset ()` reads the zone again only when `TZ` changes, so a `TZDIR`
+    /// exported after `TZ` changes nothing until `TZ` does -- measured in bash
+    /// 5.2, where `export TZDIR=/nonexistent; export TZ=America/New_York` then
+    /// `export TZDIR=/usr/share/zoneinfo` prints `01 America` both times.
+    #[test]
+    fn printf_time_reads_tzdir_only_when_tz_changes() {
+        let dir = eastern_zoneinfo_dir();
+        let tzdir = dir.slashed();
+        assert_eq!(
+            run(&format!(
+                "export TZDIR=/nonexistent-zoneinfo; export TZ=Fixture/Eastern; \
+                 printf '%(%H %Z)T\\n' 1000000000; \
+                 export TZDIR='{tzdir}'; printf '%(%H %Z)T\\n' 1000000000; \
+                 export TZ=Fixture/Eastern; printf '%(%H %Z)T\\n' 1000000000; \
+                 export TZ=:Fixture/Eastern; printf '%(%H %Z)T\\n' 1000000000; \
+                 export TZ=UTC0; export TZ=Fixture/Eastern; printf '%(%H %Z)T\\n' 1000000000"
+            ))
+            .0,
+            // Assigning the same value is no change, and neither is adding a `:`
+            // (glibc compares without it); changing it and back re-reads -- and
+            // 2001 is before the fixture's first transition, so the file's first
+            // standard type answers.
+            "01 Fixture\n01 Fixture\n01 Fixture\n01 Fixture\n20 EST\n"
+        );
+        // When `sv_tz` reads, in one command naming both. Measured in bash 5.2
+        // with `America/New_York` and a missing `TZDIR`, in a fresh shell:
+        //
+        // * `export TZ=… TZDIR=…` assigns `TZ` before it marks it exported, so
+        //   `sv_tz` does not read it; the first conversion does, with `TZDIR`
+        //   already set -- the file is found;
+        // * with `TZ` already exported, the same line reads at `TZ`'s
+        //   assignment, before `TZDIR` has its new value -- the rule;
+        // * `declare -x` exports before it assigns, so it reads at once too.
+        for (setup, want) in [
+            ("export TZ=Fixture/Eastern TZDIR='{tzdir}'", "20 EST\n"),
+            (
+                "export TZ=UTC0; export TZ=Fixture/Eastern TZDIR='{tzdir}'",
+                "01 Fixture\n",
+            ),
+            (
+                "declare -x TZ=Fixture/Eastern TZDIR='{tzdir}'",
+                "01 Fixture\n",
+            ),
+        ] {
+            let setup = setup.replace("{tzdir}", &tzdir);
+            assert_eq!(
+                run(&format!("{setup}; printf '%(%H %Z)T\\n' 1000000000")).0,
+                want,
+                "{setup}"
+            );
+        }
+    }
+
+    /// bash's `\d` is `%a %b %d`: the day of the month is zero-padded, not
+    /// space-padded as `date`'s default is. A prompt renders *now*, so only the
+    /// shape can be asserted -- and on the 1st to the 9th of a month the shape
+    /// is what tells the two formats apart.
+    #[test]
+    fn prompt_date_escape_zero_pads_the_day() {
+        let mut sh = new_shell();
+        let out = String::from_utf8(sh.prompt_decode("\\d")).expect("ASCII");
+        let fields: Vec<&str> = out.split(' ').collect();
+        assert_eq!(fields.len(), 3, "{out:?}");
+        assert_eq!(fields[2].len(), 2, "{out:?}");
+        assert!(fields[2].bytes().all(|b| b.is_ascii_digit()), "{out:?}");
+    }
+
+    /// `%(…)T` renders into bash's 128-byte buffer, and a time that does not fit
+    /// with its NUL prints nothing: glibc's `strftime` returns 0 and bash
+    /// prints the buffer it emptied.
+    #[test]
+    fn printf_time_prints_nothing_past_bashs_buffer() {
+        let fits = "%Y".repeat(31); // 124 bytes
+        let too_long = "%Y".repeat(32); // 128 bytes, and no room for the NUL
+        assert_eq!(
+            run(&format!("TZ=UTC printf '[%({fits})T]' 0")).0,
+            format!("[{}]", "1970".repeat(31))
+        );
+        assert_eq!(run(&format!("TZ=UTC printf '[%({too_long})T]' 0")).0, "[]");
+    }
+
+    /// `-2` is when the shell started -- bash's `shell_start_time` -- not now.
+    #[test]
+    fn printf_time_minus_two_is_the_shells_start() {
+        let (out, _) = run_with(|sh| sh.start_time = 1_000_000_000, "printf '%(%s)T' -2");
+        assert_eq!(out, "1000000000");
+    }
+
+    /// An instant `localtime` cannot represent is rendered as 0, as bash
+    /// retries it: the year does not fit `tm_year`.
+    #[test]
+    fn printf_time_renders_an_unrepresentable_instant_as_the_epoch() {
+        assert_eq!(
+            run("TZ=UTC printf '%(%Y-%m-%d)T' 9223372036854775807").0,
+            "1970-01-01"
         );
     }
 

@@ -15,7 +15,9 @@
 //! That is the shape of every duplication this tree has found so far: not one
 //! program doing it wrong, but several doing it *differently*, so that `date`,
 //! `ls -l` and the shell's `\t` prompt can disagree about what time it is on
-//! the same machine at the same instant. This crate is the one copy.
+//! the same machine at the same instant. This crate is the one copy. `oils`
+//! moved onto it on 2026-09-26, its `ShellZone` and `strftime` gone; the libc's
+//! stays its own, being `no_std` and lane D's.
 //!
 //! # What "resolve `TZ`" actually means
 //!

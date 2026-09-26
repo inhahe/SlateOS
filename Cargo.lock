@@ -2053,7 +2053,7 @@ dependencies = [
  "bstr",
  "charwidth",
  "ere",
- "tzrules",
+ "localtime",
 ]
 
 [[package]]

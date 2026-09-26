@@ -3376,10 +3376,32 @@ fn the_shell_answers_for_the_desktops_icons_and_forgets_them_on_a_change() {
         .expect("the shell does not know the desktop's icon");
     assert_eq!(request.name, icons::IconType::File.icon_name());
 
+    // And an overlay's, which the overlay manager keeps.
+    shell.show_osd(crate::osd::OsdKind::BatteryLow { percent: 7 });
+    let overlay: Vec<u64> = shell
+        .render_osd()
+        .expect("the overlay is up")
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::Image { image_id, .. } => Some(*image_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(overlay.len(), 1, "the overlay's icon: {overlay:?}");
+    assert!(
+        shell.icon_request(overlay[0]).is_some(),
+        "the shell does not know the overlay's icon"
+    );
+
     shell.set_appearance(AppearanceSettings::default());
     assert!(
         shell.icon_request(ids[0]).is_none(),
         "a desktop icon's request outlived the appearance it was drawn in"
+    );
+    assert!(
+        shell.icon_request(overlay[0]).is_none(),
+        "an overlay's icon request outlived the appearance it was drawn in"
     );
 }
 

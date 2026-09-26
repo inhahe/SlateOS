@@ -5723,6 +5723,44 @@ fn the_taskbars_icons_go_up_before_the_frame_that_names_them() {
     );
 }
 
+/// **An overlay's icon reaches the overlay surface before the frame that
+/// names it** -- the volume's speaker, drawn by the overlay manager and
+/// answered for by the shell.
+#[test]
+fn an_overlays_icon_goes_up_before_the_frame_that_names_it() {
+    let (mut session, desktop, _turn) = session();
+    let osd = session.osd.window;
+    session.shell_mut().show_osd(crate::osd::OsdKind::Volume {
+        level: 40,
+        muted: false,
+    });
+    // Visible, so the overlay is drawn at full strength.
+    session.shell_mut().advance_osd(150);
+    let frames = desktop.borrow_mut().drawn().len();
+
+    session.paint_chrome().expect("paint");
+
+    let tree = session.shell().render_osd().expect("the overlay is up");
+    let wanted = icon_ids(&tree);
+    assert_eq!(wanted.len(), 1, "the speaker: {wanted:?}");
+    let (id, px) = wanted[0];
+    assert_eq!(
+        session.shell().icon_request(id).map(|r| r.name),
+        Some("audio-volume-medium")
+    );
+    let bytes = usize::try_from(px * px * 4).unwrap();
+    assert!(
+        icon_uploads(&desktop).contains(&(osd, id, px, px, px * 4, bytes)),
+        "the speaker did not go up to the overlay surface"
+    );
+    assert!(
+        !desktop.borrow().submitted[frames..]
+            .iter()
+            .any(|(window, _)| *window == osd),
+        "the overlay's frame overtook its icon"
+    );
+}
+
 /// **A change of appearance puts the icons back to the compositor** -- the
 /// old ones dropped, the new ones (in the new colours, under new ids) sent
 /// when a frame next names them.

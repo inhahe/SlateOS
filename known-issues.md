@@ -24341,8 +24341,10 @@ fill by its bounding box and which nothing called.
 ## TD-C-THE-SHELL-DREW-ITS-PICTURES-AS-EMOJI-NO-FONT-IT-HAS-CAN-DRAW (lane C, 2026-09-26) -- PARTLY FIXED the same day
 
 **Status:** PARTLY FIXED 2026-09-26 -- the taskbar's start button, bell and
-tray chevron are icons (design-decisions §881); the volume and brightness
-overlays, the login screen and the widgets are next, in that order.
+tray chevron are icons (design-decisions §881), and so is every overlay's
+picture (volume, brightness, media, lock keys, devices, screenshots,
+microphone, network, battery, and the ten generic ones); the login screen and
+the widgets are next.
 
 **In short:** the shell drew its small pictures as characters -- a bell, a
 speaker, a sun, a padlock, a person, a power symbol, the start button's `≡` --

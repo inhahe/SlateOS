@@ -362,6 +362,8 @@ pub struct OsdManager {
     ids: IdSeq,
     /// Maximum number of simultaneous overlays.
     pub max_overlays: usize,
+    /// The icons the overlays drew, by image id, for the session to upload.
+    icon_registry: crate::IconRegistry,
 }
 
 impl OsdManager {
@@ -373,7 +375,53 @@ impl OsdManager {
             screen_height,
             ids: IdSeq::new(),
             max_overlays: 3,
+            icon_registry: crate::IconRegistry::default(),
         }
+    }
+
+    /// What the icon an overlay drew under `id` is, if one did.
+    #[must_use]
+    pub fn icon_request(&self, id: u64) -> Option<crate::IconRequest> {
+        self.icon_registry.request(id)
+    }
+
+    /// Forget the icons drawn: the appearance changed, and they are drawn
+    /// again in new colours under new ids.
+    pub fn clear_icon_requests(&self) {
+        self.icon_registry.clear();
+    }
+
+    /// An icon `side` pixels square at `(x, y)`: `name` in `color`, faded with
+    /// the overlay by `alpha`.
+    ///
+    /// The overlays drew these as emoji until 2026-09-26 -- a speaker, a sun, a
+    /// padlock -- which no font the desktop has can draw, so each was a box
+    /// (design-decisions.md §881).
+    #[allow(clippy::too_many_arguments)]
+    fn icon(
+        &self,
+        commands: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        side: f32,
+        name: &'static str,
+        color: Color,
+        alpha: u8,
+    ) {
+        // A few dozen pixels; `as` saturates rather than wrapping.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let px = side.round().max(1.0) as u32;
+        commands.push(RenderCommand::Image {
+            x,
+            y,
+            width: side,
+            height: side,
+            image_id: self.icon_registry.icon(
+                name,
+                px,
+                Color::rgba(color.r, color.g, color.b, alpha),
+            ),
+        });
     }
 
     /// Show an OSD. If the same kind of OSD is already showing, update it
@@ -596,7 +644,11 @@ impl OsdManager {
             }
             OsdKind::MediaPlayPause { playing } => {
                 let label = if *playing { "Playing" } else { "Paused" };
-                let icon = if *playing { "\u{25B6}" } else { "\u{23F8}" };
+                let icon = if *playing {
+                    "media-playback-start"
+                } else {
+                    "media-playback-pause"
+                };
                 self.render_icon_text_osd(
                     p, ox, oy, osd_w, text_alpha, icon, label, p.lavender, commands,
                 );
@@ -616,7 +668,7 @@ impl OsdManager {
                     oy,
                     osd_w,
                     text_alpha,
-                    "\u{1F512}",
+                    "input-keyboard",
                     &label,
                     color,
                     commands,
@@ -632,8 +684,13 @@ impl OsdManager {
                     format!("{device_name} connected")
                 };
                 let color = if *ejected { p.subtext0 } else { p.green };
+                let icon = if *ejected {
+                    "media-eject"
+                } else {
+                    "drive-removable-media"
+                };
                 self.render_icon_text_osd(
-                    p, ox, oy, osd_w, text_alpha, "\u{23CF}", &label, color, commands,
+                    p, ox, oy, osd_w, text_alpha, icon, &label, color, commands,
                 );
             }
             OsdKind::ScreenshotTaken { path } => {
@@ -660,7 +717,7 @@ impl OsdManager {
                     oy,
                     osd_w,
                     text_alpha,
-                    "\u{1F4F7}",
+                    "camera-photo",
                     &label,
                     p.green,
                     commands,
@@ -669,16 +726,13 @@ impl OsdManager {
             OsdKind::Microphone { muted } => {
                 let label = if *muted { "Mic: Muted" } else { "Mic: Active" };
                 let color = if *muted { p.red } else { p.green };
+                let icon = if *muted {
+                    "audio-input-microphone-muted"
+                } else {
+                    "audio-input-microphone"
+                };
                 self.render_icon_text_osd(
-                    p,
-                    ox,
-                    oy,
-                    osd_w,
-                    text_alpha,
-                    "\u{1F3A4}",
-                    label,
-                    color,
-                    commands,
+                    p, ox, oy, osd_w, text_alpha, icon, label, color, commands,
                 );
             }
             OsdKind::NetworkStatus { connected, name } => {
@@ -688,16 +742,13 @@ impl OsdManager {
                     format!("Disconnected: {name}")
                 };
                 let color = if *connected { p.green } else { p.red };
+                let icon = if *connected {
+                    "network-idle"
+                } else {
+                    "network-offline"
+                };
                 self.render_icon_text_osd(
-                    p,
-                    ox,
-                    oy,
-                    osd_w,
-                    text_alpha,
-                    "\u{1F310}",
-                    &label,
-                    color,
-                    commands,
+                    p, ox, oy, osd_w, text_alpha, icon, &label, color, commands,
                 );
             }
             OsdKind::BatteryLow { percent } => {
@@ -708,16 +759,16 @@ impl OsdManager {
                     oy,
                     osd_w,
                     text_alpha,
-                    "\u{1F50B}",
+                    "battery-caution",
                     &label,
                     p.red,
                     commands,
                 );
             }
             OsdKind::Custom { icon, message } => {
-                let (icon_str, color) = icon_info(p, *icon);
+                let (name, color) = icon_info(p, *icon);
                 self.render_icon_text_osd(
-                    p, ox, oy, osd_w, text_alpha, icon_str, message, color, commands,
+                    p, ox, oy, osd_w, text_alpha, name, message, color, commands,
                 );
             }
         }
@@ -732,7 +783,7 @@ impl OsdManager {
         osd_w: f32,
         text_alpha: u8,
         label: &str,
-        icon: &str,
+        icon: &'static str,
         level: u8,
         accent: Color,
         commands: &mut Vec<RenderCommand>,
@@ -740,17 +791,16 @@ impl OsdManager {
         let padding = 16.0;
         let icon_size = 24.0;
 
-        // Icon.
-        commands.push(RenderCommand::Text {
-            x: ox + padding,
-            y: oy + 14.0,
-            text: icon.to_string(),
-            font_size: icon_size,
-            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        // Icon, in the accent the slider fills with.
+        self.icon(
+            commands,
+            ox + padding,
+            oy + 12.0,
+            icon_size,
+            icon,
+            p.ink(accent),
+            text_alpha,
+        );
 
         // Label and percentage.
         let pct_str = format!("{label}  {level}%");
@@ -803,22 +853,16 @@ impl OsdManager {
     ) {
         let padding = 16.0;
 
-        // Music note icon.
-        commands.push(RenderCommand::Text {
-            x: ox + padding,
-            y: oy + 14.0,
-            text: "\u{266B}".to_string(),
-            font_size: 28.0,
-            color: Color::rgba(
-                p.ink(p.lavender).r,
-                p.ink(p.lavender).g,
-                p.ink(p.lavender).b,
-                text_alpha,
-            ),
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        // A note of music.
+        self.icon(
+            commands,
+            ox + padding,
+            oy + 14.0,
+            28.0,
+            "audio-x-generic",
+            p.ink(p.lavender),
+            text_alpha,
+        );
 
         let text_x = ox + padding + 40.0;
         let max_text_w = osd_w - padding * 2.0 - 44.0;
@@ -880,18 +924,14 @@ impl OsdManager {
         oy: f32,
         osd_w: f32,
         text_alpha: u8,
-        icon: &str,
+        icon: &'static str,
         label: &str,
         accent: Color,
         commands: &mut Vec<RenderCommand>,
     ) {
-        // Inked here, once, rather than at each of the three call sites -- and
-        // this is the right place because the parameter is *provably* a text
-        // colour: its only use below is the `color:` of a `RenderCommand::Text`.
-        // A colour arriving as an argument is the third way one can reach a
-        // draw site without naming a role there, so `ink-text.py` cannot see
-        // it; the other two are a helper's return value and a method call in
-        // the `color:` field itself.
+        // Inked here, once, rather than at each of the call sites: the icon is
+        // drawn on the overlay's panel as its text is, and has to be as
+        // legible against it.
         let accent = p.ink(accent);
         let padding = OSD_PADDING;
         let osd_h = self.height_for_kind(&OsdKind::Custom {
@@ -901,16 +941,15 @@ impl OsdManager {
         let center_y = oy + (osd_h - 20.0) / 2.0;
 
         // Icon.
-        commands.push(RenderCommand::Text {
-            x: ox + padding,
-            y: center_y,
-            text: icon.to_string(),
-            font_size: 20.0,
-            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        self.icon(
+            commands,
+            ox + padding,
+            center_y,
+            20.0,
+            icon,
+            accent,
+            text_alpha,
+        );
 
         // Label.
         commands.push(RenderCommand::Text {
@@ -946,54 +985,54 @@ fn same_category(a: &OsdKind, b: &OsdKind) -> bool {
     )
 }
 
-/// Volume icon based on level.
+/// The volume icon for `level`, by its name in the icon theme.
 fn volume_icon(level: u8) -> &'static str {
     if level == 0 {
-        "\u{1F507}" // muted
+        "audio-volume-muted"
     } else if level < 33 {
-        "\u{1F508}" // low
+        "audio-volume-low"
     } else if level < 66 {
-        "\u{1F509}" // medium
+        "audio-volume-medium"
     } else {
-        "\u{1F50A}" // high
+        "audio-volume-high"
     }
 }
 
-/// Muted volume icon.
+/// The volume icon when the sound is off, whatever its level.
 fn volume_muted_icon() -> &'static str {
-    "\u{1F507}"
+    "audio-volume-muted"
 }
 
-/// Brightness icon based on level.
+/// The brightness icon for `level`, by its name in the icon theme. A theme
+/// that draws one brightness picture draws it for all three: the lookup falls
+/// back from `display-brightness-high` to `display-brightness`.
 fn brightness_icon(level: u8) -> &'static str {
     if level < 25 {
-        "\u{1F315}" // dark
+        "display-brightness-low"
     } else if level < 75 {
-        "\u{2600}" // medium
+        "display-brightness"
     } else {
-        "\u{2B50}" // bright
+        "display-brightness-high"
     }
 }
 
-/// Get icon string and color for a generic OsdIcon.
+/// The icon, by its name in the icon theme, and the colour for a generic
+/// OsdIcon.
 fn icon_info(p: &Palette, icon: OsdIcon) -> (&'static str, Color) {
-    // Every colour here is drawn as a glyph, so every one goes through
-    // `ink`. A colour reaching a `RenderCommand::Text` through a helper is
-    // invisible to `ink-text.py`, which classifies by the role named at the
-    // draw site -- so these had to be found by a failing test. Unlike
-    // `PermissionState::color` there is no exempt arm to be careful about:
-    // all ten are categorical hues and all ten are text.
+    // Every colour here is drawn on the overlay's panel beside its text, so
+    // every one goes through `ink`, as the text's does. All ten are
+    // categorical hues.
     match icon {
-        OsdIcon::Info => ("\u{2139}", p.ink(p.blue)),
-        OsdIcon::Success => ("\u{2705}", p.ink(p.green)),
-        OsdIcon::Warning => ("\u{26A0}", p.ink(p.yellow)),
-        OsdIcon::Error => ("\u{274C}", p.ink(p.red)),
-        OsdIcon::Speaker => ("\u{1F50A}", p.ink(p.blue)),
-        OsdIcon::Brightness => ("\u{2600}", p.ink(p.yellow)),
-        OsdIcon::Network => ("\u{1F310}", p.ink(p.green)),
-        OsdIcon::Battery => ("\u{1F50B}", p.ink(p.peach)),
-        OsdIcon::Lock => ("\u{1F512}", p.ink(p.lavender)),
-        OsdIcon::Camera => ("\u{1F4F7}", p.ink(p.green)),
+        OsdIcon::Info => ("dialog-information", p.ink(p.blue)),
+        OsdIcon::Success => ("emblem-ok", p.ink(p.green)),
+        OsdIcon::Warning => ("dialog-warning", p.ink(p.yellow)),
+        OsdIcon::Error => ("dialog-error", p.ink(p.red)),
+        OsdIcon::Speaker => ("audio-volume-high", p.ink(p.blue)),
+        OsdIcon::Brightness => ("display-brightness", p.ink(p.yellow)),
+        OsdIcon::Network => ("network-idle", p.ink(p.green)),
+        OsdIcon::Battery => ("battery", p.ink(p.peach)),
+        OsdIcon::Lock => ("system-lock-screen", p.ink(p.lavender)),
+        OsdIcon::Camera => ("camera-photo", p.ink(p.green)),
     }
 }
 
@@ -1921,17 +1960,138 @@ mod tests {
 
     #[test]
     fn volume_icon_levels() {
-        assert_eq!(volume_icon(0), "\u{1F507}");
-        assert_eq!(volume_icon(10), "\u{1F508}");
-        assert_eq!(volume_icon(50), "\u{1F509}");
-        assert_eq!(volume_icon(100), "\u{1F50A}");
+        assert_eq!(volume_icon(0), "audio-volume-muted");
+        assert_eq!(volume_icon(10), "audio-volume-low");
+        assert_eq!(volume_icon(50), "audio-volume-medium");
+        assert_eq!(volume_icon(100), "audio-volume-high");
     }
 
     #[test]
     fn brightness_icon_levels() {
-        assert_eq!(brightness_icon(10), "\u{1F315}");
-        assert_eq!(brightness_icon(50), "\u{2600}");
-        assert_eq!(brightness_icon(90), "\u{2B50}");
+        assert_eq!(brightness_icon(10), "display-brightness-low");
+        assert_eq!(brightness_icon(50), "display-brightness");
+        assert_eq!(brightness_icon(90), "display-brightness-high");
+    }
+
+    /// **Each state draws its own picture** -- the pairs a user tells apart
+    /// at a glance: playing or paused, a live or muted microphone, a network
+    /// up or down, a device in or out, the sound on or off.
+    #[test]
+    fn each_state_draws_its_own_icon() {
+        let p = mocha();
+        let name = |kind: OsdKind| {
+            let (_, icons) = overlay_with_icons(kind, &p);
+            assert_eq!(icons.len(), 1, "one icon: {icons:?}");
+            icons[0].name
+        };
+        for (kind, want) in [
+            (
+                OsdKind::MediaPlayPause { playing: true },
+                "media-playback-start",
+            ),
+            (
+                OsdKind::MediaPlayPause { playing: false },
+                "media-playback-pause",
+            ),
+            (
+                OsdKind::Microphone { muted: false },
+                "audio-input-microphone",
+            ),
+            (
+                OsdKind::Microphone { muted: true },
+                "audio-input-microphone-muted",
+            ),
+            (
+                OsdKind::NetworkStatus {
+                    connected: true,
+                    name: "n".into(),
+                },
+                "network-idle",
+            ),
+            (
+                OsdKind::NetworkStatus {
+                    connected: false,
+                    name: "n".into(),
+                },
+                "network-offline",
+            ),
+            (
+                OsdKind::DeviceEvent {
+                    device_name: "d".into(),
+                    ejected: false,
+                },
+                "drive-removable-media",
+            ),
+            (
+                OsdKind::DeviceEvent {
+                    device_name: "d".into(),
+                    ejected: true,
+                },
+                "media-eject",
+            ),
+            (
+                OsdKind::Volume {
+                    level: 60,
+                    muted: true,
+                },
+                "audio-volume-muted",
+            ),
+            (OsdKind::BatteryLow { percent: 7 }, "battery-caution"),
+        ] {
+            assert_eq!(name(kind.clone()), want, "{kind:?}");
+        }
+    }
+
+    /// **An overlay's icon fades with its text**: in and out, it is one
+    /// thing, and a picture that stayed solid while its words faded would
+    /// linger after them.
+    #[test]
+    fn an_overlays_icon_fades_with_its_text() {
+        let p = mocha();
+        let mut mgr = make_manager();
+        mgr.show(OsdKind::BatteryLow { percent: 7 }, 0);
+        // Half way through the fade in.
+        mgr.tick(75);
+        let commands = mgr.render(&p);
+        let icon = commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Image { image_id, .. } => mgr.icon_request(*image_id),
+                _ => None,
+            })
+            .expect("the overlay drew no icon");
+        let label = texts_of(&commands)
+            .into_iter()
+            .find(|(t, _, _)| t.starts_with("Battery Low"))
+            .expect("the overlay drew no label");
+        assert!(icon.color.a < 255, "the icon did not fade in");
+        assert_eq!(icon.color.a, label.2.a, "the icon and its label fade apart");
+    }
+
+    /// **Every picture an overlay draws is an icon the built-in set draws**,
+    /// named by the overlay and uploaded by the session. They were emoji,
+    /// which no font the desktop has can draw.
+    #[test]
+    fn every_overlay_draws_its_picture_from_the_built_in_icons() {
+        let drawn = appearance::icons::built_in_names();
+        let p = mocha();
+        for (what, kind) in every_kind() {
+            let (commands, icons) = overlay_with_icons(kind, &p);
+            assert_eq!(icons.len(), 1, "{what}: one picture, {icons:?}");
+            assert!(
+                drawn.contains(&icons[0].name),
+                "{what}: {} is not in the built-in set",
+                icons[0].name
+            );
+            for (text, _, _) in texts_of(&commands) {
+                assert!(
+                    !text
+                        .chars()
+                        .any(|c| u32::from(c) >= 0x2100 && c != '\u{2026}'),
+                    "{what}: {text:?} is still drawn as a character"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1948,10 +2108,13 @@ mod tests {
             OsdIcon::Lock,
             OsdIcon::Camera,
         ];
-        for v in variants {
-            let (s, _c) = icon_info(&mocha(), v);
-            assert!(!s.is_empty());
-        }
+        let mut names: Vec<&str> = variants.iter().map(|v| icon_info(&mocha(), *v).0).collect();
+        assert!(names.iter().all(|name| !name.is_empty()));
+        // Ten kinds of message, ten pictures: two that looked alike would be
+        // a message the user cannot tell from another at a glance.
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), variants.len(), "two messages share a picture");
     }
 
     // ---- text is bounded by width, not by a character budget ----
@@ -2417,10 +2580,36 @@ mod tests {
     /// `Visible` at opacity 1.0 — so `text_alpha` is 255 and the assertions
     /// below can compare whole colours where they want to.
     fn overlay(kind: OsdKind, p: &Palette) -> Vec<RenderCommand> {
+        overlay_with_icons(kind, p).0
+    }
+
+    /// [`overlay`], and what each icon it drew was asked to be.
+    fn overlay_with_icons(
+        kind: OsdKind,
+        p: &Palette,
+    ) -> (Vec<RenderCommand>, Vec<crate::IconRequest>) {
         let mut mgr = make_manager();
         mgr.show(kind, 0);
         mgr.tick(150);
-        mgr.render(p)
+        let commands = mgr.render(p);
+        let icons = commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Image { image_id, .. } => Some(
+                    mgr.icon_request(*image_id)
+                        .expect("an icon nobody asked for"),
+                ),
+                _ => None,
+            })
+            .collect();
+        (commands, icons)
+    }
+
+    /// The colour of the one icon `kind`'s overlay draws.
+    fn icon_colour(kind: OsdKind, p: &Palette) -> Color {
+        let (_, icons) = overlay_with_icons(kind, p);
+        assert_eq!(icons.len(), 1, "one icon: {icons:?}");
+        icons[0].color
     }
 
     /// The settings panel at its defaults, 400px wide at the origin.
@@ -2653,31 +2842,34 @@ mod tests {
         );
 
         // volume_icon: all four arms, and brightness_icon: all three.
+        let icon_of = |kind: OsdKind| {
+            let (_, icons) = overlay_with_icons(kind, &p);
+            assert_eq!(icons.len(), 1, "one icon: {icons:?}");
+            icons[0].name
+        };
         for (level, icon) in [
-            (0_u8, "\u{1F507}"),
-            (20, "\u{1F508}"),
-            (50, "\u{1F509}"),
-            (80, "\u{1F50A}"),
+            (0_u8, "audio-volume-muted"),
+            (20, "audio-volume-low"),
+            (50, "audio-volume-medium"),
+            (80, "audio-volume-high"),
         ] {
             assert_eq!(
-                says(
-                    &overlay(
-                        OsdKind::Volume {
-                            level,
-                            muted: false
-                        },
-                        &p
-                    ),
-                    icon
-                ),
-                1,
+                icon_of(OsdKind::Volume {
+                    level,
+                    muted: false
+                }),
+                icon,
                 "volume level {level} does not draw its own icon"
             );
         }
-        for (level, icon) in [(10_u8, "\u{1F315}"), (50, "\u{2600}"), (90, "\u{2B50}")] {
+        for (level, icon) in [
+            (10_u8, "display-brightness-low"),
+            (50, "display-brightness"),
+            (90, "display-brightness-high"),
+        ] {
             assert_eq!(
-                says(&overlay(OsdKind::Brightness { level }, &p), icon),
-                1,
+                icon_of(OsdKind::Brightness { level }),
+                icon,
                 "brightness level {level} does not draw its own icon"
             );
         }
@@ -2799,20 +2991,18 @@ mod tests {
             "the screenshot branch is not drawn"
         );
 
-        // icon_info: all ten arms, each identified by its own icon string.
+        // icon_info: all ten arms, each identified by its own icon.
         for icon in every_icon() {
             let (want, _) = icon_info(&p, icon);
+            let (_, icons) = overlay_with_icons(
+                OsdKind::Custom {
+                    icon,
+                    message: "hello".into(),
+                },
+                &p,
+            );
             assert_eq!(
-                says(
-                    &overlay(
-                        OsdKind::Custom {
-                            icon,
-                            message: "hello".into()
-                        },
-                        &p
-                    ),
-                    want
-                ),
+                icons.iter().filter(|drawn| drawn.name == want).count(),
                 1,
                 "the {icon:?} arm of icon_info is not drawn"
             );
@@ -2889,7 +3079,17 @@ mod tests {
                 &p,
             );
             // S4: the slider's icon takes the kind's own colour.
-            assert_eq!(rgb(text_at(&vol, 24.0)), rgb(p.ink(p.blue)), "slider icon");
+            assert_eq!(
+                rgb(icon_colour(
+                    OsdKind::Volume {
+                        level: 60,
+                        muted: false,
+                    },
+                    &p
+                )),
+                rgb(p.ink(p.blue)),
+                "slider icon"
+            );
             // S5: the label and percentage are plain text.
             assert_eq!(rgb(text_at(&vol, 14.0)), rgb(p.text), "slider label");
 
@@ -2904,7 +3104,14 @@ mod tests {
             );
             // S9: the music note.
             assert_eq!(
-                rgb(text_at(&media, 28.0)),
+                rgb(icon_colour(
+                    OsdKind::MediaTrack {
+                        title: "T".into(),
+                        artist: "A".into(),
+                        album: "B".into(),
+                    },
+                    &p
+                )),
                 rgb(p.ink(p.lavender)),
                 "media note"
             );
@@ -2919,7 +3126,7 @@ mod tests {
             let batt = overlay(OsdKind::BatteryLow { percent: 7 }, &p);
             // S14: the icon takes the kind's own colour.
             assert_eq!(
-                rgb(text_at(&batt, 20.0)),
+                rgb(icon_colour(OsdKind::BatteryLow { percent: 7 }, &p)),
                 rgb(p.ink(p.red)),
                 "icon-text icon"
             );
@@ -3186,9 +3393,10 @@ mod tests {
                 ),
                 ("brightness", OsdKind::Brightness { level: 60 }, p.yellow),
             ] {
+                // Inked for the overlay's panel, as its text is.
                 assert_eq!(
-                    rgb(text_at(&overlay(kind, &p), 24.0)),
-                    rgb(want),
+                    rgb(icon_colour(kind, &p)),
+                    rgb(p.ink(want)),
                     "{mode}: {what} does not draw its icon in its own colour"
                 );
             }
@@ -3294,7 +3502,7 @@ mod tests {
             }
             for (what, kind, want) in cases {
                 assert_eq!(
-                    rgb(text_at(&overlay(kind, &p), 20.0)),
+                    rgb(icon_colour(kind, &p)),
                     rgb(p.ink(want)),
                     "{mode}: {what} does not draw its icon in its own colour"
                 );
@@ -3316,7 +3524,9 @@ mod tests {
                 let mut p = Palette::for_mode(light);
                 p.accent = accent;
                 for (what, kind) in every_kind() {
-                    for c in every_color(&overlay(kind, &p)) {
+                    let (drawn, icons) = overlay_with_icons(kind, &p);
+                    let icon_colours = icons.iter().map(|icon| icon.color);
+                    for c in every_color(&drawn).into_iter().chain(icon_colours) {
                         assert_ne!(
                             rgb(c),
                             rgb(accent),

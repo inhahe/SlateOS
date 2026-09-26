@@ -165388,7 +165388,8 @@ FreeType 2.13.2's auto-hinter in its light mode (`gui/font/src/hint/`,
 design-decisions §1325), which the compositor turns on from the settings. It
 agrees with FreeType point for point on every Latin, Greek, Cyrillic, Arabic,
 Hebrew, Armenian and Devanagari glyph of six fonts checked at eleven sizes
-(`gui/font/tools/hint_oracle.py`), bar the gaps filed below: ideographs and
+(`gui/font/tools/hint_oracle.py`), and on every glyph of two CFF fonts with
+fractional coordinates, both coordinates exact, bar the gaps filed below: ideographs and
 the fallback style are left unhinted, and feature-reached glyphs use their
 script's default zones. (Composites with borrowed metrics, which sat a hair
 off horizontally, were a placement bug rather than a hinting one, and are

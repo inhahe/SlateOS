@@ -27,12 +27,18 @@ flat or round as the rule under test needs:
   0 and round to -12; descenders flat at -200 (p q), round to -212 (g j y);
 * horizontal stems of several heights (the bars of H, E, e, the hyphen) and
   slab serifs (I), a composite (e acute) and a combining mark, which is never
-  snapped to a zone.
+  snapped to a zone;
+* and `w`, drawn in 16.16 fractions of a unit, for what FreeType's CFF loader
+  does with them (`CffPoints` in `src/sfnt.rs`): every coordinate floored --
+  so -0.387 is -1 -- a line of no length dropped, whether it has none at all
+  or none in 1024ths of a unit, and a contour ending a 65536th short of its
+  start folded, where one ending a 1024th short is not. As TrueType it is
+  rounded, which leaves it with coincident points instead.
 
 It is written twice: as TrueType (quadratic, clockwise) and as CFF (cubic,
 counter-clockwise), since the two reach the hinter through different loaders
 and point conventions. For each, at every size in `SIZES`, every glyph's
-hinted points' heights are recorded in 1/64 pixel.
+hinted points are recorded in 1/64 pixel, both coordinates.
 """
 
 import io
@@ -40,6 +46,7 @@ import os
 
 import freetype
 from fontTools.fontBuilder import FontBuilder
+from fontTools.pens.cu2quPen import Cu2QuPen
 from fontTools.pens.recordingPen import RecordingPen
 from fontTools.pens.reverseContourPen import ReverseContourPen
 from fontTools.pens.t2CharStringPen import T2CharStringPen
@@ -94,6 +101,41 @@ def ring(pen, cx, cy, rx, ry, stem_x, stem_y):
 
 def dot(pen, cx, top, r):
     ellipse(pen, cx, top - r, r, r)
+
+
+# A 65536th of a unit, the finest step a charstring's 16.16 operands take.
+F = 1 / 65536
+# 0.387 to the nearest 65536th: as a height below the baseline, FreeType's CFF
+# loader floors it to -1 where rounding would give 0.
+A = 25363 * F
+
+
+def fractional(pen):
+    """`w`: drawn for CFF, counter-clockwise, in exact 16.16 fractions."""
+    pen.moveTo((-10.25, -A))
+    pen.lineTo((140.5, -A))
+    pen.lineTo((140.5 + 3 * F, 250))
+    # No length in 1024ths of a unit, which is where FreeType measures it.
+    pen.lineTo((140.5, 250 + F))
+    pen.lineTo((140.5, 499.75))
+    # No length at all.
+    pen.lineTo((140.5, 499.75))
+    pen.lineTo((60.25, 499.75))
+    # A 65536th short of the start: folded into it.
+    pen.lineTo((-10.25 - F, -A - F))
+    pen.closePath()
+    pen.moveTo((300.5, 100.125))
+    pen.lineTo((420.75, 100.125))
+    pen.lineTo((420.75, 380.5))
+    pen.curveTo((400.25, 420.375), (320.125, 420.375), (300.5, 380.5))
+    # A 1024th short of the start: kept.
+    pen.lineTo((300.5 + 1 / 1024, 100.125 + 1 / 1024))
+    pen.closePath()
+
+
+# Glyphs drawn the CFF way round -- counter-clockwise, and in fractions no
+# rounding may touch -- rather than the TrueType way.
+CFF_NATIVE = {"w"}
 
 
 # Every glyph: name, code point (None for a component only), drawing.
@@ -172,6 +214,7 @@ def glyphs():
                                              (320, 50), (320, 0)]))
     g["acute"] = (0xB4, lambda p: poly(p, [(120, 560), (230, 720), (320, 720), (170, 560)]))
     g["acutecomb"] = (0x301, lambda p: poly(p, [(-200, 560), (-90, 720), (0, 720), (-150, 560)]))
+    g["w"] = (ord("w"), fractional)
     return g
 
 
@@ -194,7 +237,11 @@ def build_ttf(g):
     glyf[".notdef"] = empty.glyph()
     for name, (_, draw) in g.items():
         pen = TTGlyphPen(None)
-        draw(pen)
+        if name in CFF_NATIVE:
+            # Turned round and made quadratic; `glyph()` rounds it.
+            draw(Cu2QuPen(pen, 1.0, reverse_direction=True))
+        else:
+            draw(pen)
         glyf[name] = pen.glyph()
     # A composite: e with the acute lifted over it.
     pen = TTGlyphPen(glyf)
@@ -219,12 +266,19 @@ def build_otf(g):
     pen = T2CharStringPen(600, None)
     charstrings[".notdef"] = pen.getCharString()
     for name, (_, draw) in g.items():
-        rec = RecordingPen()
-        draw(rec)
-        pen = T2CharStringPen(600, None)
-        # PostScript winds its outer contours the other way.
-        rec.replay(ReverseContourPen(pen))
-        charstrings[name] = pen.getCharString()
+        if name in CFF_NATIVE:
+            pen = T2CharStringPen(600, None, roundTolerance=0)
+            draw(pen)
+            # Unoptimized: fontTools' specializer drops a line of no length,
+            # and that line is what the glyph is drawn to test.
+            charstrings[name] = pen.getCharString(optimize=False)
+        else:
+            rec = RecordingPen()
+            draw(rec)
+            pen = T2CharStringPen(600, None)
+            # PostScript winds its outer contours the other way.
+            rec.replay(ReverseContourPen(pen))
+            charstrings[name] = pen.getCharString()
     fb.setupCFF("HintFixtureCFF", {"FullName": "HintFixtureCFF"}, charstrings, {})
     fb.setupHorizontalMetrics(fb_metrics(g, order))
     finish(fb, "HintFixtureCFF")
@@ -274,9 +328,9 @@ def expectations(data, order):
         face.set_char_size(0, int(round(px * 64)), 72, 72)
         for gid, name in enumerate(order):
             face.load_glyph(gid, flags)
-            ys = [y for (_, y) in face.glyph.outline.points]
-            if ys:
-                rows.append((px, gid, name, ys))
+            points = list(face.glyph.outline.points)
+            if points:
+                rows.append((px, gid, name, points))
     return rows
 
 
@@ -302,11 +356,15 @@ def main():
             w(f"/// The face as {'TrueType' if label == 'TTF' else 'CFF'}.\n")
             w(f"pub(super) static {label}: [u8; {len(data)}] = [{rust_bytes(data)}];\n\n")
             rows = expectations(data, order)
-            w(f"/// FreeType's hinted heights for the {label} face: `(px, glyph, name, y in\n")
-            w("/// 1/64 pixel of each stored point)`.\n")
+            # x and y in turn in one flat array, not as pairs: rustfmt packs a
+            # list of numbers into lines but gives every tuple a line of its
+            # own, which would triple the file.
+            w(f"/// FreeType's hinted points for the {label} face: `(px, glyph, name, x and y\n")
+            w("/// in turn, in 1/64 pixel, of each stored point)`.\n")
             w(f"pub(super) static {label}_EXPECTED: [(f32, u16, &str, &[i32]); {len(rows)}] = [\n")
-            for px, gid, name, ys in rows:
-                w(f"    ({float(px)}, {gid}, \"{name}\", &[{', '.join(str(y) for y in ys)}]),\n")
+            for px, gid, name, points in rows:
+                flat = ", ".join(f"{x}, {y}" for (x, y) in points)
+                w(f"    ({float(px)}, {gid}, \"{name}\", &[{flat}]),\n")
             w("];\n\n")
     rustfmt(out)
     print(f"{len(ttf)} + {len(otf)} bytes of font -> {out}")

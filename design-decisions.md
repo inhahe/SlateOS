@@ -11946,11 +11946,19 @@ choices FreeType does, and a tool compares the two glyph by glyph.
   this crate's shaper, as FreeType has HarfBuzz shape them.
 * **Checked against FreeType.** `tools/hint_oracle.py` runs FreeType (from
   `freetype-py`) and this crate over every glyph of a face at eleven sizes
-  and compares every hinted point. On Noto Sans, Open Sans, JetBrains Mono,
-  Segoe UI, Arial and Times New Roman every glyph of the ported styles agrees
-  exactly, bar the gaps below. A generated fixture
-  (`tools/gen_hint_fixture.py`: a synthetic face as TrueType and CFF, with
-  FreeType's answers at eighteen sizes) keeps that in `cargo test`.
+  and compares every hinted point, both coordinates, to the 64th of a pixel.
+  On Noto Sans, Open Sans, JetBrains Mono, Segoe UI, Arial and Times New
+  Roman every glyph of the ported styles agrees exactly, bar the gaps below --
+  and so does every glyph of the CFF fonts David CLM and Frank Ruehl CLM,
+  whose coordinates are fractions of a unit. That last took reading a glyph's
+  points as FreeType's loaders read them, not as its outline draws: a CFF
+  coordinate kept exact (16.16 needs more than `f32` has) and floored to a
+  whole unit, a line of no length in 1024ths of a unit dropped, a contour
+  that ends a hair short of its start folded (`sfnt::CffPoints`), and a
+  composite placed by the component whose metrics it borrows. A generated
+  fixture (`tools/gen_hint_fixture.py`: a synthetic face as TrueType and CFF,
+  one glyph drawn in 16.16 fractions, with FreeType's answers at eighteen
+  sizes) keeps that in `cargo test`.
 * **Robust before faithful.** Every index goes through `get` and a failure
   abandons the glyph to be drawn unhinted, coordinates beyond `i16` and
   absurd sizes are refused at the door (which is what makes the unchecked

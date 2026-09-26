@@ -166,14 +166,42 @@ pub(super) struct Hints {
     pub(super) edges: Vec<Edge>,
 }
 
+/// How a coordinate becomes whole font units: however FreeType's loader for
+/// the face's outline format leaves it, since the hinter sees nothing else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Units {
+    /// Rounded half up. A `glyf` coordinate is an integer already, and a
+    /// variable font's varied one is rounded (`FT_fixedToInt`).
+    Rounded,
+    /// Snapped to a 1024th of a unit, then floored. FreeType's CFF engine
+    /// keeps a charstring's coordinates in 16.16 fixed point and, loading
+    /// unscaled, still passes each through its scaling -- a `FT_MulFix` by
+    /// 1/64 (rounding half away from zero) and back up by 64 -- before handing
+    /// out the integer part with an arithmetic shift (`cf2_glyphpath_hintPoint`,
+    /// `ps_builder_add_point`). So -0.387 becomes -1, not 0, and a point a
+    /// 65536th short of 225 becomes 225. Measured against FreeType on every
+    /// point of three fonts with fractional coordinates: all 17,788 agree,
+    /// where flooring alone missed 68.
+    Floored,
+}
+
 /// A coordinate in whole font units, as FreeType holds it (`FT_Short`), or
 /// `None` beyond that range -- which the hinter then does not touch.
-///
-/// Rounded half up, as FreeType's `FT_fixedToInt` rounds a varied coordinate:
-/// outlines from `glyf` are integers already, and only an instance of a
-/// variable font or a CFF charstring's fractions have anything to round.
-pub(super) fn font_unit(v: f32) -> Option<i64> {
-    let r = (v + 0.5).floor();
+pub(super) fn font_unit(v: f64, units: Units) -> Option<i64> {
+    let r = match units {
+        Units::Rounded => (v + 0.5).floor(),
+        Units::Floored => {
+            // `v` in 1024ths of a unit, rounded half away from zero -- the
+            // `FT_MulFix` -- then the integer part of the unit.
+            let t = v * 1024.0;
+            let t = if t < 0.0 {
+                -((-t + 0.5).floor())
+            } else {
+                (t + 0.5).floor()
+            };
+            (t / 1024.0).floor()
+        }
+    };
     (r.is_finite() && (-32768.0..=32767.0).contains(&r)).then_some(r as i64)
 }
 
@@ -241,7 +269,12 @@ impl Hints {
     /// [`MAX_POINTS`], a coordinate beyond `i16` or an empty contour (which
     /// FreeType rejects as a malformed outline), or a scale outside the range
     /// the arithmetic is proved for.
-    pub(super) fn load(outline: &TaggedOutline, y_scale: i64, units_per_em: i64) -> Option<Self> {
+    pub(super) fn load(
+        outline: &TaggedOutline,
+        units: Units,
+        y_scale: i64,
+        units_per_em: i64,
+    ) -> Option<Self> {
         let n = outline.points.len();
         if n == 0 || n > MAX_POINTS || outline.tags.len() != n {
             return None;
@@ -251,7 +284,7 @@ impl Hints {
         }
         let mut points = Vec::with_capacity(n);
         for (p, tag) in outline.points.iter().zip(&outline.tags) {
-            let (fx, fy) = (font_unit(p.x)?, font_unit(p.y)?);
+            let (fx, fy) = (font_unit(p.x, units)?, font_unit(p.y, units)?);
             let oy = mul_fix(fy, y_scale);
             points.push(Point {
                 flags: match tag {
@@ -648,10 +681,10 @@ impl Hints {
 )]
 mod tests {
     use super::*;
-    use crate::sfnt::Point as P;
+    use crate::sfnt::Exact as P;
 
     /// A clockwise (TrueType) rectangle.
-    fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> TaggedOutline {
+    fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> TaggedOutline {
         TaggedOutline {
             points: alloc::vec![
                 P::new(x0, y0),
@@ -676,19 +709,21 @@ mod tests {
 
     #[test]
     fn a_clockwise_outline_is_truetype_and_a_counter_clockwise_one_is_not() {
-        let cw = Hints::load(&rect(0.0, 0.0, 100.0, 50.0), 0x10000, 1000).unwrap();
+        let cw = Hints::load(&rect(0.0, 0.0, 100.0, 50.0), Units::Rounded, 0x10000, 1000).unwrap();
         assert_eq!(cw.major_dir, DIR_LEFT);
         let mut ccw = rect(0.0, 0.0, 100.0, 50.0);
         ccw.points.reverse();
         assert_eq!(
-            Hints::load(&ccw, 0x10000, 1000).unwrap().major_dir,
+            Hints::load(&ccw, Units::Rounded, 0x10000, 1000)
+                .unwrap()
+                .major_dir,
             DIR_RIGHT
         );
     }
 
     #[test]
     fn a_rectangles_corners_are_strong_and_its_sides_have_directions() {
-        let h = Hints::load(&rect(0.0, 0.0, 100.0, 50.0), 0x10000, 1000).unwrap();
+        let h = Hints::load(&rect(0.0, 0.0, 100.0, 50.0), Units::Rounded, 0x10000, 1000).unwrap();
         // Up the left side, right along the top, down, left along the bottom.
         let dirs: Vec<(i8, i8)> = h.points.iter().map(|p| (p.in_dir, p.out_dir)).collect();
         assert_eq!(
@@ -717,18 +752,26 @@ mod tests {
             tags: alloc::vec![Tag::On, Tag::On, Tag::On, Tag::Conic, Tag::On, Tag::On],
             ends: alloc::vec![6],
         };
-        let h = Hints::load(&o, 0x10000, 1000).unwrap();
+        let h = Hints::load(&o, Units::Rounded, 0x10000, 1000).unwrap();
         let weak: Vec<bool> = h.points.iter().map(|p| p.flags & FLAG_WEAK != 0).collect();
         assert_eq!(weak, [false, true, false, true, false, false]);
     }
 
     #[test]
     fn a_glyph_beyond_sixteen_bits_or_with_an_empty_contour_is_refused() {
-        assert!(Hints::load(&rect(0.0, 0.0, 40000.0, 10.0), 0x10000, 1000).is_none());
+        assert!(
+            Hints::load(
+                &rect(0.0, 0.0, 40000.0, 10.0),
+                Units::Rounded,
+                0x10000,
+                1000
+            )
+            .is_none()
+        );
         let mut bad = rect(0.0, 0.0, 10.0, 10.0);
         bad.ends = alloc::vec![0, 4];
-        assert!(Hints::load(&bad, 0x10000, 1000).is_none());
-        assert!(Hints::load(&TaggedOutline::default(), 0x10000, 1000).is_none());
+        assert!(Hints::load(&bad, Units::Rounded, 0x10000, 1000).is_none());
+        assert!(Hints::load(&TaggedOutline::default(), Units::Rounded, 0x10000, 1000).is_none());
     }
 
     #[test]
@@ -745,7 +788,7 @@ mod tests {
             tags: alloc::vec![Tag::On; 4],
             ends: alloc::vec![4],
         };
-        let mut h = Hints::load(&o, 0x10000, 1000).unwrap();
+        let mut h = Hints::load(&o, Units::Rounded, 0x10000, 1000).unwrap();
         for p in &mut h.points {
             p.flags = 0;
         }

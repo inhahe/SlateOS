@@ -424,7 +424,7 @@ impl ScaledFont {
     /// **For diagnostics only.** Drawing never needs it; it is the half of the
     /// check against FreeType's auto-hinter (`tools/hint_oracle.py`) that this
     /// crate answers, and FreeType answers in stored points, not paths.
-    pub fn hinted_points(&mut self, gid: u16) -> Option<Vec<(f32, f32, bool)>> {
+    pub fn hinted_points(&mut self, gid: u16) -> Option<Vec<(f64, f64, bool)>> {
         self.hinter()?;
         let Hinting::Ready(Some(hinter)) = &self.hinting else {
             return None;

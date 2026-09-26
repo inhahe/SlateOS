@@ -454,6 +454,55 @@ pub(crate) enum Tag {
     Cubic,
 }
 
+/// A stored point, exactly.
+///
+/// `f64` rather than the outline's `f32` because a CFF charstring's
+/// coordinates are 16.16 fixed point -- 32 bits, where `f32` keeps 24 -- and
+/// the auto-hinter has to see them exactly as FreeType does: FreeType's CFF
+/// loader decides where a coordinate lands, and whether a contour closes, in
+/// 1024ths of a unit (see [`CffPoints`]), and a value `f32` rounded can sit
+/// in the next 1024th.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Exact {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+}
+
+impl Exact {
+    /// A point at `(x, y)`.
+    pub(crate) const fn new(x: f64, y: f64) -> Self {
+        Self { x, y }
+    }
+
+    /// An outline's point, widened.
+    fn from_point(p: Point) -> Self {
+        Self::new(f64::from(p.x), f64::from(p.y))
+    }
+
+    /// `self` transformed by `t`, exactly.
+    fn transformed(self, t: &Transform) -> Self {
+        let (a, b, c, d) = (
+            f64::from(t.a),
+            f64::from(t.b),
+            f64::from(t.c),
+            f64::from(t.d),
+        );
+        Self::new(
+            a * self.x + c * self.y + f64::from(t.e),
+            b * self.x + d * self.y + f64::from(t.f),
+        )
+    }
+
+    /// Narrowed to an outline's point.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "a glyph's coordinates are well inside f32's range; only precision is given up"
+    )]
+    pub(crate) fn to_point(self) -> Point {
+        Point::new(self.x as f32, self.y as f32)
+    }
+}
+
 /// A glyph as the font stores it: its points in order, each tagged, split
 /// into contours.
 ///
@@ -466,7 +515,7 @@ pub(crate) enum Tag {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TaggedOutline {
     /// The points, in font units -- or in pixels, once hinted.
-    pub(crate) points: Vec<Point>,
+    pub(crate) points: Vec<Exact>,
     /// What each point is; as long as `points`.
     pub(crate) tags: Vec<Tag>,
     /// One past each contour's last point, ascending.
@@ -477,7 +526,8 @@ impl TaggedOutline {
     /// Append one simple glyph's points as contours.
     fn push_glyph(&mut self, glyph: &SimpleGlyph) {
         let base = self.points.len();
-        self.points.extend(glyph.points.iter().map(|p| p.p));
+        self.points
+            .extend(glyph.points.iter().map(|p| Exact::from_point(p.p)));
         self.tags.extend(
             glyph
                 .points
@@ -491,68 +541,32 @@ impl TaggedOutline {
     /// Append `other`, transformed by `t` -- a composite's component.
     fn extend_transformed(&mut self, other: &Self, t: &Transform) {
         let base = self.points.len();
-        self.points.extend(other.points.iter().map(|&p| t.apply(p)));
+        self.points
+            .extend(other.points.iter().map(|&p| p.transformed(t)));
         self.tags.extend_from_slice(&other.tags);
         self.ends
             .extend(other.ends.iter().map(|&end| base.saturating_add(end)));
     }
 
+    /// Transform every point by `t` -- a CFF face's `FontMatrix`.
+    pub(crate) fn transform(&mut self, t: &Transform) {
+        for p in &mut self.points {
+            *p = p.transformed(t);
+        }
+    }
+
     /// Move every point right by `dx`: [`Outline::translate_x`]'s twin.
     fn translate_x(&mut self, dx: f32) {
+        let dx = f64::from(dx);
         for p in &mut self.points {
             p.x += dx;
         }
     }
 
-    /// The points of a path of lines and cubics, as CFF outlines come.
-    ///
-    /// A contour's closing point is dropped when it lands back on the first,
-    /// which is what FreeType's CFF loader does (`ps_builder_close_contour`):
-    /// the hinter then sees one corner there rather than two coincident ones.
-    pub(crate) fn from_path(path: &Outline) -> Self {
-        let mut out = Self::default();
-        let mut start = 0usize;
-        let close = |out: &mut Self, start: usize| {
-            let n = out.points.len();
-            if n > start.saturating_add(1)
-                && out.tags.last() == Some(&Tag::On)
-                && out.points.last() == out.points.get(start)
-            {
-                out.points.pop();
-                out.tags.pop();
-            }
-            if out.points.len() > start {
-                out.ends.push(out.points.len());
-            }
-        };
-        for cmd in &path.commands {
-            match *cmd {
-                PathCmd::MoveTo(p) => {
-                    close(&mut out, start);
-                    start = out.points.len();
-                    out.points.push(p);
-                    out.tags.push(Tag::On);
-                }
-                PathCmd::LineTo(p) => {
-                    out.points.push(p);
-                    out.tags.push(Tag::On);
-                }
-                PathCmd::QuadTo(c, p) => {
-                    out.points.extend([c, p]);
-                    out.tags.extend([Tag::Conic, Tag::On]);
-                }
-                PathCmd::CurveTo(c1, c2, p) => {
-                    out.points.extend([c1, c2, p]);
-                    out.tags.extend([Tag::Cubic, Tag::Cubic, Tag::On]);
-                }
-                PathCmd::Close => {
-                    close(&mut out, start);
-                    start = out.points.len();
-                }
-            }
-        }
-        close(&mut out, start);
-        out
+    /// Add one point to the contour being built.
+    fn push(&mut self, p: Exact, tag: Tag) {
+        self.points.push(p);
+        self.tags.push(tag);
     }
 
     /// The path these points draw.
@@ -579,7 +593,7 @@ impl TaggedOutline {
                     .iter()
                     .zip(tags)
                     .map(|(&p, &t)| GlyphPoint {
-                        p,
+                        p: p.to_point(),
                         on_curve: t == Tag::On,
                     })
                     .collect();
@@ -590,16 +604,178 @@ impl TaggedOutline {
     }
 }
 
+/// What a CFF charstring draws on, in its own exact coordinates: a path to
+/// rasterize ([`Outline`], narrowed to `f32`), or the points FreeType's CFF
+/// loader would store ([`CffPoints`]), for the auto-hinter.
+pub(crate) trait CffPen {
+    /// Where the pen is before the charstring's first `moveto`.
+    fn start(&mut self, at: Exact);
+    /// Begin a contour at `p`, the open one having been ended.
+    fn move_to(&mut self, p: Exact);
+    /// A line from the pen to `p`.
+    fn line_to(&mut self, p: Exact);
+    /// A cubic from the pen through `c1` and `c2` to `p`.
+    fn curve_to(&mut self, c1: Exact, c2: Exact, p: Exact);
+    /// End the open contour, which closes back to its first point.
+    fn close(&mut self);
+}
+
+impl CffPen for Outline {
+    fn start(&mut self, _: Exact) {}
+
+    fn move_to(&mut self, p: Exact) {
+        self.commands.push(PathCmd::MoveTo(p.to_point()));
+    }
+
+    fn line_to(&mut self, p: Exact) {
+        self.commands.push(PathCmd::LineTo(p.to_point()));
+    }
+
+    fn curve_to(&mut self, c1: Exact, c2: Exact, p: Exact) {
+        self.commands
+            .push(PathCmd::CurveTo(c1.to_point(), c2.to_point(), p.to_point()));
+    }
+
+    fn close(&mut self) {
+        self.commands.push(PathCmd::Close);
+    }
+}
+
+/// A CFF glyph's points as FreeType's CFF loader stores them -- which is not
+/// quite as its charstring draws them.
+///
+/// FreeType's CFF engine (`cf2`) works out where each point lands in *device
+/// space* before storing it, and for the unscaled glyph the auto-hinter reads
+/// that is the coordinate in 1024ths of a unit, rounded half away from zero
+/// (see `hint::glyph::Units::Floored`). Three rules follow, and each changes
+/// which points the hinter sees:
+///
+/// * A line that ends where the last stored point is -- in device space, so
+///   a line a 65536th of a unit long counts -- is not stored
+///   (`cf2_glyphpath_pushPrevElem`: "output only non-zero length lines").
+///   A curve always is.
+/// * A contour's first point is stored only once something is drawn from it
+///   (`cf2_builder_lineTo`'s `path_begun`), so a `moveto` that draws nothing
+///   leaves no contour.
+/// * A contour closes with a line back to its first point that is never
+///   kept: where the last stored point is there already, it is dropped
+///   instead (`ps_builder_close_contour`), so the hinter sees one corner
+///   where the contour meets itself rather than two coincident ones. A
+///   contour that ends a 65536th of a unit short of its start, as David
+///   CLM's do, folds; one whose last point is a 1024th away keeps it.
+///
+/// FreeType also drops a contour left with a single point. None can be left
+/// here: a contour's second point is never where its first is, or the line
+/// to it would have had no length.
+#[derive(Debug, Default)]
+pub(crate) struct CffPoints {
+    out: TaggedOutline,
+    /// The contour's `moveto`, not yet stored because nothing has been drawn
+    /// from it.
+    pending: Option<Exact>,
+    /// Where the open contour's points start, while one is open.
+    open: Option<usize>,
+    /// The last stored point, or the pending move, in device space.
+    current: (f64, f64),
+}
+
+impl CffPoints {
+    /// Where FreeType's CFF engine puts `p`: in 1024ths of a unit, rounded
+    /// half away from zero as `FT_MulFix` rounds.
+    fn device(p: Exact) -> (f64, f64) {
+        let snap = |v: f64| {
+            let t = v * 1024.0;
+            if t < 0.0 {
+                -((-t + 0.5).floor())
+            } else {
+                (t + 0.5).floor()
+            }
+        };
+        (snap(p.x), snap(p.y))
+    }
+
+    /// Store the pending move, now that something is drawn from it.
+    ///
+    /// Something drawn with no move pending and no contour open -- which a
+    /// charstring cannot do, every contour after the first starting with a
+    /// `moveto` -- begins a contour of its own points, so that every point
+    /// stays inside one.
+    fn begin(&mut self) {
+        if let Some(p) = self.pending.take() {
+            self.open = Some(self.out.points.len());
+            self.out.push(p, Tag::On);
+        } else if self.open.is_none() {
+            self.open = Some(self.out.points.len());
+        }
+    }
+
+    /// The points, the last contour ended.
+    pub(crate) fn finish(mut self) -> TaggedOutline {
+        CffPen::close(&mut self);
+        self.out
+    }
+}
+
+impl CffPen for CffPoints {
+    fn start(&mut self, at: Exact) {
+        CffPen::move_to(self, at);
+    }
+
+    fn move_to(&mut self, p: Exact) {
+        CffPen::close(self);
+        self.pending = Some(p);
+        self.current = Self::device(p);
+    }
+
+    fn line_to(&mut self, p: Exact) {
+        let at = Self::device(p);
+        if at == self.current {
+            return;
+        }
+        self.begin();
+        self.out.push(p, Tag::On);
+        self.current = at;
+    }
+
+    fn curve_to(&mut self, c1: Exact, c2: Exact, p: Exact) {
+        self.begin();
+        self.out.push(c1, Tag::Cubic);
+        self.out.push(c2, Tag::Cubic);
+        self.out.push(p, Tag::On);
+        self.current = Self::device(p);
+    }
+
+    fn close(&mut self) {
+        self.pending = None;
+        let Some(start) = self.open.take() else {
+            return;
+        };
+        let out = &mut self.out;
+        let first = out.points.get(start).copied().map(Self::device);
+        if out.points.len() > start.saturating_add(1)
+            && out.tags.last() == Some(&Tag::On)
+            && out.points.last().copied().map(Self::device) == first
+        {
+            out.points.pop();
+            out.tags.pop();
+        }
+        if out.points.len() > start {
+            out.ends.push(out.points.len());
+        }
+    }
+}
+
 /// One CFF contour's points back into path commands: lines between on-curve
 /// points, a cubic for every two control points, and the closing segment
-/// back to the first point that [`TaggedOutline::from_path`] folded away.
-fn emit_cubic_contour(points: &[Point], tags: &[Tag], out: &mut Outline) {
-    let Some(&first) = points.first() else {
+/// back to the first point that the contour's closing point was folded into.
+fn emit_cubic_contour(points: &[Exact], tags: &[Tag], out: &mut Outline) {
+    let Some(first) = points.first().map(|p| p.to_point()) else {
         return;
     };
     out.commands.push(PathCmd::MoveTo(first));
     let mut pending: Vec<Point> = Vec::with_capacity(2);
     for (&p, &tag) in points.iter().zip(tags).skip(1) {
+        let p = p.to_point();
         match tag {
             Tag::Cubic | Tag::Conic => pending.push(p),
             Tag::On => {
@@ -2510,6 +2686,13 @@ impl Face {
             .map(|c| c.gid)
     }
 
+    /// Whether this face's outlines are CFF charstrings rather than `glyf`
+    /// quadratics -- which the auto-hinter needs to know, because FreeType's
+    /// two loaders turn a fractional coordinate into font units differently.
+    pub(crate) fn has_cff_outlines(&self) -> bool {
+        matches!(self.outlines, Outlines::Cff(_))
+    }
+
     /// Left side bearing for a glyph, in font units.
     ///
     /// # Errors
@@ -2685,8 +2868,8 @@ impl Face {
     /// Placed exactly where [`outline_at`](Self::outline_at) places the path --
     /// the same side-bearing shift, the same `gvar` deltas, the same composite
     /// transforms -- so that [`TaggedOutline::to_path`] on the result draws
-    /// the same glyph. A CFF glyph's points are its path's, with each
-    /// contour's closing point folded into its first.
+    /// the same glyph. A CFF glyph's are the points FreeType's CFF loader
+    /// stores, exactly: see [`CffPoints`].
     ///
     /// # Errors
     ///
@@ -2704,9 +2887,15 @@ impl Face {
                 out.translate_x(shift);
                 Ok(out)
             }
-            Outlines::Cff(_) | Outlines::Pictures => self
-                .outline_at(gid, coords)
-                .map(|path| TaggedOutline::from_path(&path)),
+            Outlines::Cff(cff) => {
+                // As `outline`: `maxp`'s count is the one trusted.
+                if gid >= self.num_glyphs {
+                    return Err(SfntError::GlyphOutOfRange);
+                }
+                cff.tagged_outline(&self.data, gid)
+            }
+            // A face of pictures has no points to hint.
+            Outlines::Pictures => self.outline(gid).map(|_| TaggedOutline::default()),
         }
     }
 
@@ -4714,9 +4903,9 @@ pub(crate) mod tests {
         assert_eq!(
             t.points,
             [
-                Point::new(0.0, 0.0),
-                Point::new(50.0, 200.0),
-                Point::new(100.0, 0.0)
+                Exact::new(0.0, 0.0),
+                Exact::new(50.0, 200.0),
+                Exact::new(100.0, 0.0)
             ]
         );
         assert_eq!(t.tags, [Tag::On, Tag::Conic, Tag::On]);
@@ -4724,23 +4913,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_cff_paths_closing_point_folds_into_its_first() {
-        let p = Point::new;
-        let path = Outline {
-            commands: vec![
-                PathCmd::MoveTo(p(0.0, 0.0)),
-                PathCmd::LineTo(p(0.0, 100.0)),
-                PathCmd::CurveTo(p(20.0, 120.0), p(80.0, 120.0), p(100.0, 100.0)),
-                PathCmd::LineTo(p(100.0, 0.0)),
-                PathCmd::LineTo(p(0.0, 0.0)),
-                PathCmd::Close,
-                PathCmd::MoveTo(p(10.0, 10.0)),
-                PathCmd::LineTo(p(20.0, 10.0)),
-                PathCmd::LineTo(p(20.0, 20.0)),
-                PathCmd::Close,
-            ],
-        };
-        let t = TaggedOutline::from_path(&path);
+    fn a_cff_contours_closing_point_folds_into_its_first() {
+        let e = Exact::new;
+        let mut pen = CffPoints::default();
+        pen.start(e(0.0, 0.0));
+        pen.move_to(e(0.0, 0.0));
+        pen.line_to(e(0.0, 100.0));
+        pen.curve_to(e(20.0, 120.0), e(80.0, 120.0), e(100.0, 100.0));
+        pen.line_to(e(100.0, 0.0));
+        pen.line_to(e(0.0, 0.0));
+        pen.move_to(e(10.0, 10.0));
+        pen.line_to(e(20.0, 10.0));
+        pen.line_to(e(20.0, 20.0));
+        let t = pen.finish();
         assert_eq!(t.ends, [6, 9]);
         assert_eq!(
             t.tags,
@@ -4757,9 +4942,9 @@ pub(crate) mod tests {
             ]
         );
         // Back to a path, each contour closing to its first point again.
-        let back = t.to_path();
+        let p = Point::new;
         assert_eq!(
-            back.commands,
+            t.to_path().commands,
             vec![
                 PathCmd::MoveTo(p(0.0, 0.0)),
                 PathCmd::LineTo(p(0.0, 100.0)),
@@ -4772,6 +4957,121 @@ pub(crate) mod tests {
                 PathCmd::LineTo(p(20.0, 20.0)),
                 PathCmd::LineTo(p(10.0, 10.0)),
                 PathCmd::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_closing_point_folds_where_freetypes_device_space_does() {
+        let e = Exact::new;
+        let closing = |last: Exact| {
+            let mut pen = CffPoints::default();
+            pen.move_to(e(10.0, 10.0));
+            pen.line_to(e(90.0, 10.0));
+            pen.line_to(e(90.0, 90.0));
+            pen.line_to(last);
+            pen.finish()
+        };
+        let t = closing(e(10.0, 10.0));
+        assert_eq!(t.points.len(), 3);
+        assert_eq!(t.ends, [3]);
+        // A 65536th short, as David CLM's contours end: the same point once
+        // snapped to 1024ths, so folded as FreeType folds it.
+        let ulp = 1.0 / 65536.0;
+        assert_eq!(closing(e(10.0 - ulp, 10.0 - ulp)).points.len(), 3);
+        // A 1024th off snaps elsewhere: FreeType closes it with a line of its
+        // own, drops only that, and keeps this point.
+        assert_eq!(closing(e(10.0 + 1.0 / 1024.0, 10.0)).points.len(), 4);
+        // Half a 1024th rounds away from zero, as `FT_MulFix` rounds: above
+        // the start it rounds onto the next 1024th, and a 65536th less
+        // rounds back; below the start it rounds up onto the start itself.
+        assert_eq!(closing(e(10.0 + 1.0 / 2048.0, 10.0)).points.len(), 4);
+        assert_eq!(closing(e(10.0 + 1.0 / 2048.0 - ulp, 10.0)).points.len(), 3);
+        assert_eq!(closing(e(10.0 - 1.0 / 2048.0, 10.0)).points.len(), 3);
+        // Below zero, away from zero is down, and the two cases trade places.
+        let mirrored = |last: Exact| {
+            let mut pen = CffPoints::default();
+            pen.move_to(e(-10.0, -10.0));
+            pen.line_to(e(-90.0, -10.0));
+            pen.line_to(e(-90.0, -90.0));
+            pen.line_to(last);
+            pen.finish()
+        };
+        assert_eq!(mirrored(e(-10.0 - 1.0 / 2048.0, -10.0)).points.len(), 4);
+        assert_eq!(mirrored(e(-10.0 + 1.0 / 2048.0, -10.0)).points.len(), 3);
+    }
+
+    #[test]
+    fn a_line_with_no_length_in_device_space_is_not_stored() {
+        let e = Exact::new;
+        let ulp = 1.0 / 65536.0;
+        let mut pen = CffPoints::default();
+        pen.move_to(e(0.0, 0.0));
+        pen.line_to(e(100.0, 0.0));
+        // No length at all, then a 65536th: none in device space either.
+        pen.line_to(e(100.0, 0.0));
+        pen.line_to(e(100.0 + ulp, 0.0));
+        pen.line_to(e(100.0, 100.0));
+        // Short lines are measured from the last point stored, not the last
+        // drawn: a 4096th is nothing, and so is a second, but together they
+        // reach half a 1024th, which rounds to the next one.
+        pen.line_to(e(100.0 + 1.0 / 4096.0, 100.0));
+        pen.line_to(e(100.0 + 2.0 / 4096.0, 100.0));
+        // A curve is stored whatever its length.
+        let end = e(100.0 + 2.0 / 4096.0, 100.0);
+        pen.curve_to(end, end, end);
+        let t = pen.finish();
+        assert_eq!(
+            t.points,
+            [
+                e(0.0, 0.0),
+                e(100.0, 0.0),
+                e(100.0, 100.0),
+                end,
+                end,
+                end,
+                end
+            ]
+        );
+        assert_eq!(t.ends, [7]);
+    }
+
+    #[test]
+    fn a_move_that_draws_nothing_leaves_no_contour() {
+        let e = Exact::new;
+        let mut pen = CffPoints::default();
+        pen.start(e(0.0, 0.0));
+        pen.move_to(e(5.0, 5.0));
+        pen.move_to(e(10.0, 10.0));
+        pen.line_to(e(20.0, 10.0));
+        pen.line_to(e(20.0, 20.0));
+        // A contour whose only line has no length has drawn nothing either.
+        pen.move_to(e(50.0, 50.0));
+        pen.line_to(e(50.0, 50.0));
+        let t = pen.finish();
+        assert_eq!(t.points, [e(10.0, 10.0), e(20.0, 10.0), e(20.0, 20.0)]);
+        assert_eq!(t.ends, [3]);
+    }
+
+    #[test]
+    fn a_path_pen_draws_what_the_charstring_says() {
+        // The rasterizer's pen keeps every command, lines of no length
+        // included: it is drawing, not reproducing FreeType's stored points.
+        let e = Exact::new;
+        let mut out = Outline::default();
+        out.start(e(0.0, 0.0));
+        CffPen::move_to(&mut out, e(1.0, 2.0));
+        CffPen::line_to(&mut out, e(1.0, 2.0));
+        CffPen::curve_to(&mut out, e(3.0, 4.0), e(5.0, 6.0), e(7.0, 8.0));
+        CffPen::close(&mut out);
+        let p = Point::new;
+        assert_eq!(
+            out.commands,
+            [
+                PathCmd::MoveTo(p(1.0, 2.0)),
+                PathCmd::LineTo(p(1.0, 2.0)),
+                PathCmd::CurveTo(p(3.0, 4.0), p(5.0, 6.0), p(7.0, 8.0)),
+                PathCmd::Close
             ]
         );
     }

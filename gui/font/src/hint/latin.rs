@@ -44,7 +44,7 @@ use alloc::vec::Vec;
 use super::fixed::{div_fix, mul_div, mul_fix, pix_floor, pix_round};
 use super::glyph::{
     DIR_NONE, EDGE_DONE, EDGE_NEUTRAL, EDGE_ROUND, EDGE_SERIF, Edge, FLAG_CONTROL, Hints, Segment,
-    font_unit,
+    Units, font_unit,
 };
 use super::{Blue as BlueString, Glyphs};
 use crate::sfnt::{Tag, TaggedOutline};
@@ -123,6 +123,8 @@ pub(super) struct Source<'a> {
     pub(super) shape: &'a dyn Fn(&str) -> Glyphs,
     /// A glyph's stored points, at the instance being hinted.
     pub(super) outline: &'a dyn Fn(u16) -> Option<TaggedOutline>,
+    /// How the face's coordinates become whole font units.
+    pub(super) units: Units,
 }
 
 impl Metrics {
@@ -255,7 +257,7 @@ fn standard_widths(units_per_em: i64, standard: &str, source: &Source<'_>) -> Ve
         return Vec::new();
     };
     // Unscaled: a 16.16 scale of one.
-    let Some(mut hints) = Hints::load(&outline, 0x10000, units_per_em) else {
+    let Some(mut hints) = Hints::load(&outline, source.units, 0x10000, units_per_em) else {
         return Vec::new();
     };
     let mut widths = Vec::new();
@@ -332,6 +334,7 @@ fn sort_and_quantize(widths: &mut Vec<i64>, threshold: i64) {
 /// shaper's offset) and whether it is round.
 fn extreme(
     outline: &TaggedOutline,
+    units: Units,
     y_offset: i64,
     props: u8,
     units_per_em: i64,
@@ -342,12 +345,12 @@ fn extreme(
     let xs: Vec<i64> = outline
         .points
         .iter()
-        .map(|p| font_unit(p.x))
+        .map(|p| font_unit(p.x, units))
         .collect::<Option<_>>()?;
     let ys: Vec<i64> = outline
         .points
         .iter()
-        .map(|p| font_unit(p.y))
+        .map(|p| font_unit(p.y, units))
         .collect::<Option<_>>()?;
     let on = |i: usize| outline.tags.get(i) == Some(&Tag::On);
     let x = |i: usize| xs.get(i).copied().unwrap_or(0);
@@ -609,6 +612,7 @@ fn measure_blues(
                 }
                 let Some((y, round)) = extreme(
                     &outline,
+                    source.units,
                     i64::from(y_offset),
                     props,
                     units_per_em,

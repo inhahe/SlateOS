@@ -65,10 +65,10 @@ mod fixture;
 
 use alloc::vec::Vec;
 
-use crate::sfnt::{Face, Outline, TaggedOutline};
+use crate::sfnt::{Exact, Face, Outline, TaggedOutline};
 use crate::var::Coords;
 
-use fixed::{MAX_SCALE, div_fix};
+use fixed::{MAX_SCALE, div_fix, mul_fix};
 use glyph::Hints;
 use tables::{RANGES, SCRIPTS, STYLES};
 
@@ -155,6 +155,8 @@ pub(crate) struct FaceHints {
     /// glyph uses and at least one of its zones could be measured.
     metrics: Vec<Option<latin::Metrics>>,
     units_per_em: i64,
+    /// How the face's coordinates become whole font units.
+    units: glyph::Units,
 }
 
 impl FaceHints {
@@ -236,9 +238,15 @@ impl FaceHints {
 
         // Measure every Latin-system style some glyph uses.
         let outline = |gid: u16| face.tagged_outline_at(gid, coords).ok();
+        let units = if face.has_cff_outlines() {
+            glyph::Units::Floored
+        } else {
+            glyph::Units::Rounded
+        };
         let source = latin::Source {
             shape,
             outline: &outline,
+            units,
         };
         let mut used = alloc::vec![false; STYLES.len()];
         for &s in &styles {
@@ -268,6 +276,7 @@ impl FaceHints {
             nonbase,
             metrics,
             units_per_em,
+            units,
         }
     }
 }
@@ -278,9 +287,10 @@ pub(crate) struct Hinter {
     face: FaceHints,
     /// Per style, as [`FaceHints::metrics`]: the zones fitted to this size.
     scaled: Vec<Option<latin::Scaled>>,
-    /// Pixels per font unit, for the horizontal coordinates light hinting
-    /// leaves alone.
-    px_scale: f32,
+    /// The size's own scale, 16.16 (FreeType's `x_scale`), for the
+    /// horizontal coordinates light hinting leaves alone: only the vertical
+    /// one is fitted to a style's x-height.
+    x_scale: i64,
 }
 
 impl Hinter {
@@ -303,7 +313,7 @@ impl Hinter {
             .map(|m| m.as_ref().map(|m| m.scale(y_scale)))
             .collect();
         Some(Self {
-            px_scale: px_per_em / face.units_per_em as f32,
+            x_scale: y_scale,
             face,
             scaled,
         })
@@ -335,7 +345,12 @@ impl Hinter {
             .copied()
             .unwrap_or(false);
         let outline = face.tagged_outline_at(gid, coords).ok()?;
-        let mut hints = Hints::load(&outline, scaled.y_scale, self.face.units_per_em)?;
+        let mut hints = Hints::load(
+            &outline,
+            self.face.units,
+            scaled.y_scale,
+            self.face.units_per_em,
+        )?;
         latin::hint(&mut hints, metrics, scaled, nonbase)?;
         Some(self.to_pixels(&outline, &hints))
     }
@@ -355,16 +370,20 @@ impl Hinter {
 
     /// The hinted points in pixels: horizontal positions as the size scales
     /// them, vertical ones as hinting placed them.
+    ///
+    /// Horizontal positions are scaled as FreeType scales them, from the
+    /// whole font units the hinter read (`af_glyph_hints_reload`), not from
+    /// the exact coordinates: a CFF glyph's fractional ones are floored
+    /// first, which moves a point by up to a unit.
     #[allow(
         clippy::cast_precision_loss,
-        reason = "26.6 positions are far inside f32's exact range"
+        reason = "26.6 positions are far inside f64's exact range"
     )]
     fn to_pixels(&self, outline: &TaggedOutline, hints: &Hints) -> TaggedOutline {
-        let points = outline
+        let points = hints
             .points
             .iter()
-            .zip(&hints.points)
-            .map(|(p, h)| crate::sfnt::Point::new(p.x * self.px_scale, h.y as f32 / 64.0))
+            .map(|h| Exact::new(mul_fix(h.fx, self.x_scale) as f64 / 64.0, h.y as f64 / 64.0))
             .collect();
         TaggedOutline {
             points,
@@ -450,11 +469,14 @@ mod tests {
                 current = Some((px, font));
             }
             let (_, font) = current.as_mut().unwrap();
+            // x and y in turn, as the fixture has them. Both are whole 64ths
+            // exactly -- x a `FT_MulFix` of a whole font unit, y a hinted
+            // 26.6 position -- so the rounding here only converts.
             let got: Vec<i32> = font
                 .hinted_points(gid)
                 .unwrap_or_default()
                 .iter()
-                .map(|&(_, y, _)| (y * 64.0).round() as i32)
+                .flat_map(|&(x, y, _)| [(x * 64.0).round() as i32, (y * 64.0).round() as i32])
                 .collect();
             if got != want {
                 failures.push(alloc::format!("{px}px {name}: {got:?}, FreeType {want:?}"));

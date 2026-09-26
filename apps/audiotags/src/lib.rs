@@ -511,16 +511,24 @@ fn parse_id3v2(tag: &[u8]) -> Tags {
         let Some(mut frame) = body.get(start..end).map(<[u8]>::to_vec) else {
             break;
         };
-        // A compressed or encrypted frame is not text this can read; a v2.4
-        // frame may be unsynchronised, or carry its length first.
+        // A compressed or encrypted frame is not text this can read. A frame
+        // in a group starts with the group's byte; a v2.4 frame may be
+        // unsynchronised, and may carry its length (after the group's byte).
         if major >= 3 {
             let fflags = header.get(9).copied().unwrap_or(0);
-            let (compressed, encrypted, unsync, length_first) = if major == 3 {
-                (fflags & 0x80 != 0, fflags & 0x40 != 0, false, false)
+            let (compressed, encrypted, grouped, unsync, length_first) = if major == 3 {
+                (
+                    fflags & 0x80 != 0,
+                    fflags & 0x40 != 0,
+                    fflags & 0x20 != 0,
+                    false,
+                    false,
+                )
             } else {
                 (
                     fflags & 0x08 != 0,
                     fflags & 0x04 != 0,
+                    fflags & 0x40 != 0,
                     fflags & 0x02 != 0,
                     fflags & 0x01 != 0,
                 )
@@ -532,8 +540,9 @@ fn parse_id3v2(tag: &[u8]) -> Tags {
             if unsync {
                 frame = unsynchronise(&frame);
             }
-            if length_first {
-                frame = frame.get(4..).unwrap_or(&[]).to_vec();
+            let before_text = usize::from(grouped).saturating_add(if length_first { 4 } else { 0 });
+            if before_text > 0 {
+                frame = frame.get(before_text..).unwrap_or(&[]).to_vec();
             }
         }
         let text = || id3_text(&frame);
@@ -767,15 +776,22 @@ fn read_mp3<R: Read + Seek>(r: &mut R, len: u64) -> io::Result<(AudioInfo, Tags)
     info.channels = Some(if frame.mono { 1 } else { 2 });
     let first = window.get(at..).unwrap_or(&[]);
     let xing = first.get(frame.xing_offset()..).unwrap_or(&[]);
+    // A count of no frames is a header its encoder never went back to fill
+    // in: the file is timed as if it had none.
     let vbr = if matches!(xing.get(..4), Some(b"Xing" | b"Info")) {
         let flags = be32(xing, 4).unwrap_or(0);
-        let frames = (flags & 1 != 0).then(|| be32(xing, 8)).flatten();
-        let bytes = (flags & 2 != 0)
-            .then(|| be32(xing, if flags & 1 != 0 { 12 } else { 8 }))
-            .flatten();
+        let frames = (flags & 1 != 0)
+            .then(|| be32(xing, 8))
+            .flatten()
+            .filter(|&f| f > 0);
+        // The byte count follows the frame count, and is of use only beside
+        // it: without one there is no length to give a rate by.
+        let bytes = (flags & 2 != 0).then(|| be32(xing, 12)).flatten();
         frames.map(|f| (f, bytes))
     } else if first.get(36..40) == Some(b"VBRI") {
-        be32(first, 50).map(|f| (f, be32(first, 46)))
+        be32(first, 50)
+            .filter(|&f| f > 0)
+            .map(|f| (f, be32(first, 46)))
     } else {
         None
     };
@@ -1018,16 +1034,24 @@ fn read_ogg<R: Read + Seek>(r: &mut R, len: u64) -> io::Result<(AudioInfo, Tags)
         return Ok((info, tags));
     };
     info.sample_rate = rate.filter(|&r| r > 0);
-    // The last page: the last "OggS" in the file's end.
+    // The last page of this stream: the last "OggS" in the file's end that
+    // starts a page -- version 0 -- with the first page's serial number.
+    // Compressed audio can spell "OggS", and a file may carry a second
+    // stream whose pages end it.
+    let serial = head.get(14..18);
     let tail_at = len.saturating_sub(u64::try_from(OGG_WINDOW).unwrap_or(u64::MAX));
     let tail = read_at(r, tail_at, OGG_WINDOW, len)?;
-    let last = tail
-        .windows(4)
-        .rposition(|w| w == b"OggS")
-        .and_then(|at| tail.get(at..));
-    if let (Some(page), Some(rate)) = (last, granule_rate)
-        && let Some(granule) = le64(page, 6).filter(|&g| g != u64::MAX)
-    {
+    // A page on which no packet ends has no position (-1): the one before it
+    // has the stream's.
+    let last = (0..tail.len()).rev().find_map(|at| {
+        let page = tail.get(at..)?;
+        let ours =
+            page.get(..4) == Some(b"OggS") && page.get(4) == Some(&0) && page.get(14..18) == serial;
+        ours.then(|| le64(page, 6))
+            .flatten()
+            .filter(|&g| g != u64::MAX)
+    });
+    if let (Some(granule), Some(rate)) = (last, granule_rate) {
         info.duration_secs = seconds(granule.saturating_sub(pre_skip), rate);
         if info.bitrate_kbps.is_none()
             && let Some(secs) = info.duration_secs
@@ -1049,7 +1073,8 @@ fn read_wav<R: Read + Seek>(r: &mut R, len: u64) -> io::Result<(AudioInfo, Tags)
     let mut tags = Tags::default();
     let mut pos = 12_u64;
     let mut byte_rate = 0_u32;
-    let mut data_size: Option<u64> = None;
+    // Where the `data` chunk's bytes start, and the size its header gives.
+    let mut data: Option<(u64, u32)> = None;
     for _ in 0..1024 {
         let header = read_at(r, pos, 8, len)?;
         let (Some(id), Some(size)) = (header.get(..4), le32(&header, 4)) else {
@@ -1065,7 +1090,7 @@ fn read_wav<R: Read + Seek>(r: &mut R, len: u64) -> io::Result<(AudioInfo, Tags)
                 byte_rate = le32(&fmt, 8).unwrap_or(0);
                 info.bits_per_sample = le16(&fmt, 14).filter(|&b| b > 0);
             }
-            b"data" => data_size = Some(u64::from(size)),
+            b"data" => data = Some((body_at, size)),
             b"LIST" => {
                 let list = read_at(r, body_at, size_usize.min(MAX_TAG_BYTES), len)?;
                 if list.get(..4) == Some(b"INFO") {
@@ -1106,8 +1131,17 @@ fn read_wav<R: Read + Seek>(r: &mut R, len: u64) -> io::Result<(AudioInfo, Tags)
             break;
         }
     }
-    if let Some(bytes) = data_size {
-        let bytes = bytes.min(len);
+    if let Some((at, size)) = data {
+        // The bytes the file holds past the chunk's header: a size larger
+        // than that is a file cut short -- a recording stopped by a crash --
+        // and `FFFFFFFF` is a writer that did not know the length when it
+        // began, streaming. Either way the sound is what is there.
+        let there = len.saturating_sub(at);
+        let bytes = if size == u32::MAX {
+            there
+        } else {
+            u64::from(size).min(there)
+        };
         if byte_rate > 0 {
             info.duration_secs = seconds(bytes, byte_rate);
             info.bitrate_kbps = Some(kbps_of_bits(byte_rate.saturating_mul(8)));
@@ -1241,6 +1275,35 @@ mod tests {
         assert_eq!(tags.title.as_deref(), Some("Na\u{ef}ve"));
     }
 
+    /// A frame in a group starts with the group's byte -- and in v2.4, the
+    /// length after it when the frame carries one. Both are before the text.
+    #[test]
+    fn a_grouped_frame_is_read_past_its_group_byte() {
+        let frame = |id: &[u8; 4], flags: u8, body: &[u8], major: u8| {
+            let mut f = id.to_vec();
+            let n = body.len() as u32;
+            if major == 4 {
+                f.extend_from_slice(&[0, 0, 0, n as u8]);
+            } else {
+                f.extend_from_slice(&n.to_be_bytes());
+            }
+            f.extend_from_slice(&[0, flags]);
+            f.extend_from_slice(body);
+            f
+        };
+        let v3 = frame(b"TIT2", 0x20, b"\x05\x00Grouped", 3);
+        let mut file = id3_tag(3, &[v3], 0);
+        file.extend(mp3_frames(2));
+        let (_, tags) = read_bytes(&file);
+        assert_eq!(tags.title.as_deref(), Some("Grouped"));
+
+        let v4 = frame(b"TPE1", 0x41, b"\x05\x00\x00\x00\x09\x03In a group", 4);
+        let mut file = id3_tag(4, &[v4], 0);
+        file.extend(mp3_frames(2));
+        let (_, tags) = read_bytes(&file);
+        assert_eq!(tags.artist.as_deref(), Some("In a group"));
+    }
+
     #[test]
     fn an_id3v1_tag_fills_what_the_id3v2_one_does_not_say() {
         let mut file = id3_tag(3, &[id3_frame(3, b"TIT2", 0, b"From v2")], 0);
@@ -1293,7 +1356,8 @@ mod tests {
         let n = vc.len() as u32;
         f.extend_from_slice(&[0x84, (n >> 16) as u8, (n >> 8) as u8, n as u8]);
         f.extend(&vc);
-        f.extend(std::iter::repeat_n(0, 1000));
+        // 12 500 bytes of "audio": 10 kbps over ten seconds.
+        f.extend(std::iter::repeat_n(0, 12_500));
         f
     }
 
@@ -1309,6 +1373,9 @@ mod tests {
                 "artist=Someone",
                 "TRACKNUMBER=4/9",
                 "ARTIST=Second",
+                "DATE=2011",
+                "GENRE=Folk",
+                &format!("COMMENT={}", "x".repeat(1000)),
             ],
         );
         let (info, tags) = read_bytes(&file);
@@ -1317,6 +1384,11 @@ mod tests {
         assert_eq!(info.channels, Some(2));
         assert_eq!(info.bits_per_sample, Some(24));
         assert_eq!(info.duration_secs, Some(10.0));
+        assert_eq!(
+            info.bitrate_kbps,
+            Some(10),
+            "the bitrate is the audio's, after the last metadata block"
+        );
         assert_eq!(tags.title.as_deref(), Some("Song"));
         assert_eq!(
             tags.artist.as_deref(),
@@ -1324,6 +1396,8 @@ mod tests {
             "keys are matched without case, the first kept"
         );
         assert_eq!(tags.track, Some(4));
+        assert_eq!(tags.year.as_deref(), Some("2011"));
+        assert_eq!(tags.genre.as_deref(), Some("Folk"));
     }
 
     #[test]
@@ -1377,10 +1451,16 @@ mod tests {
 
     /// An Ogg page holding `packets` (each under 255 bytes), with `granule`.
     fn ogg_page(packets: &[Vec<u8>], granule: u64) -> Vec<u8> {
+        ogg_page_of(0, packets, granule)
+    }
+
+    /// A page of the stream numbered `serial`.
+    fn ogg_page_of(serial: u32, packets: &[Vec<u8>], granule: u64) -> Vec<u8> {
         let mut p = b"OggS".to_vec();
         p.extend_from_slice(&[0, 0]);
         p.extend_from_slice(&granule.to_le_bytes());
-        p.extend_from_slice(&[0; 12]);
+        p.extend_from_slice(&serial.to_le_bytes());
+        p.extend_from_slice(&[0; 8]);
         p.push(packets.len() as u8);
         for packet in packets {
             p.push(packet.len() as u8);
@@ -1419,6 +1499,35 @@ mod tests {
         assert_eq!(tags.album.as_deref(), Some("\u{c9}t\u{e9}"));
     }
 
+    /// The length is the last page's *of this stream*, and a page's: not
+    /// four bytes of audio that spell "OggS", nor a second stream's page.
+    #[test]
+    fn an_ogg_file_is_timed_by_its_own_streams_last_page() {
+        let mut ident = b"\x01vorbis".to_vec();
+        ident.extend_from_slice(&0u32.to_le_bytes());
+        ident.push(2);
+        ident.extend_from_slice(&44_100u32.to_le_bytes());
+        ident.extend_from_slice(&[0; 12]);
+        ident.push(0);
+        let mut file = ogg_page_of(7, &[ident], 0);
+        file.extend(ogg_page_of(7, &[b"\x03vorbis".to_vec()], 0));
+        // Audio whose bytes spell a page of this stream, but for its
+        // version byte; then another stream's page, last in the file.
+        let mut audio = b"OggS\x01\x00".to_vec();
+        audio.extend_from_slice(&u64::MAX.wrapping_sub(1).to_le_bytes());
+        audio.extend_from_slice(&7u32.to_le_bytes());
+        audio.resize(100, 0);
+        file.extend(ogg_page_of(7, &[audio], 441_000));
+        file.extend(ogg_page_of(9, &[vec![0; 20]], 9_999_999));
+        let (info, _) = read_bytes(&file);
+        assert_eq!(info.duration_secs, Some(10.0));
+        // A last page on which no packet ends has no position: the page
+        // before it gives the length.
+        file.extend(ogg_page_of(7, &[vec![0; 255]], u64::MAX));
+        let (info, _) = read_bytes(&file);
+        assert_eq!(info.duration_secs, Some(10.0), "a granule of -1 was taken");
+    }
+
     #[test]
     fn an_opus_file_counts_its_granule_at_48_khz_less_its_pre_skip() {
         let mut head = b"OpusHead".to_vec();
@@ -1438,6 +1547,13 @@ mod tests {
         let (info, tags) = read_bytes(&file);
         assert_eq!(info.duration_secs, Some(2.0));
         assert_eq!(info.sample_rate, Some(48_000));
+        assert_eq!(info.channels, Some(2));
+        let want = (file.len() as f64 * 8.0 / 2.0 / 1000.0).round() as u32;
+        assert_eq!(
+            info.bitrate_kbps,
+            Some(want),
+            "no nominal rate: the file's size over its length"
+        );
         assert_eq!(tags.title.as_deref(), Some("O"));
     }
 
@@ -1490,6 +1606,11 @@ mod tests {
         let (info, tags) = read_bytes(b"not audio at all, just words");
         assert_eq!(info, AudioInfo::default());
         assert_eq!(tags, Tags::default());
+        // A RIFF file is not a WAV unless it says WAVE: an AVI is RIFF too.
+        assert_eq!(
+            AudioFormat::detect(b"RIFF\x00\x00\x00\x00AVI LIST"),
+            AudioFormat::Unknown
+        );
         // Every prefix of every fixture: a file cut anywhere.
         let mut id3 = id3_tag(3, &[id3_frame(3, b"TIT2", 0, b"x")], 10);
         id3.extend(mp3_frames(2));
@@ -1507,6 +1628,32 @@ mod tests {
     /// A chunk claiming the whole address space ends the read: the advance
     /// is saturating, and a read past the end is empty -- this test would
     /// never finish on a parser whose cursor wrapped back to the start.
+    /// A WAV cut short, or written by a stream that did not know its length
+    /// (`FFFFFFFF`), plays for the sound it holds, not the size it claims.
+    #[test]
+    fn a_cut_or_streamed_wav_is_timed_by_what_it_holds() {
+        // 8000 bytes a second, two seconds: 16000 bytes of sound.
+        let whole = crate::testing::wav(8000, 1, 8, 2, &[]);
+        let (info, _) = read_bytes(&whole);
+        assert_eq!(info.duration_secs, Some(2.0));
+        let cut = &whole[..whole.len() - 8000];
+        let (info, _) = read_bytes(cut);
+        assert_eq!(
+            info.duration_secs,
+            Some(1.0),
+            "a cut file was timed by its header"
+        );
+        let mut streamed = whole.clone();
+        let data = streamed.windows(4).position(|w| w == b"data").unwrap();
+        streamed[data + 4..data + 8].copy_from_slice(&u32::MAX.to_le_bytes());
+        let (info, _) = read_bytes(&streamed);
+        assert_eq!(
+            info.duration_secs,
+            Some(2.0),
+            "an unknown length was taken as 4 GiB"
+        );
+    }
+
     #[test]
     fn a_wav_with_an_absurd_chunk_size_does_not_loop() {
         let mut data = Vec::new();
@@ -1621,6 +1768,506 @@ mod tests {
         assert_eq!(synchsafe(&[0x00, 0x00, 0x01, 0x00]), Some(128));
         assert_eq!(synchsafe(&[0x80, 0x00, 0x00, 0x00]), None);
         assert_eq!(synchsafe(&[0x00, 0x00]), None);
+    }
+
+    /// An ID3 tag of `body` with the header's `flags`.
+    fn id3_with(major: u8, flags: u8, body: &[u8]) -> Vec<u8> {
+        let n = body.len() as u32;
+        let mut t = b"ID3".to_vec();
+        t.extend_from_slice(&[major, 0, flags]);
+        t.extend_from_slice(&[
+            ((n >> 21) & 0x7F) as u8,
+            ((n >> 14) & 0x7F) as u8,
+            ((n >> 7) & 0x7F) as u8,
+            (n & 0x7F) as u8,
+        ]);
+        t.extend_from_slice(body);
+        t
+    }
+
+    /// ID3v2.2 names a frame in three letters and sizes it in three bytes.
+    #[test]
+    fn id3v2_2_frames_have_three_letter_names_and_three_byte_sizes() {
+        let frame = |id: &[u8; 3], text: &[u8]| {
+            let n = text.len() + 1;
+            let mut f = id.to_vec();
+            f.extend_from_slice(&[(n >> 16) as u8, (n >> 8) as u8, n as u8]);
+            f.push(0);
+            f.extend_from_slice(text);
+            f
+        };
+        let long = "L".repeat(300);
+        let body = [
+            frame(b"TT2", b"Two Two"),
+            frame(b"TAL", long.as_bytes()),
+            frame(b"TP1", b"Old Tagger"),
+            frame(b"TRK", b"5"),
+        ]
+        .concat();
+        let mut file = id3_with(2, 0, &body);
+        file.extend(mp3_frames(2));
+        let (_, tags) = read_bytes(&file);
+        assert_eq!(tags.title.as_deref(), Some("Two Two"));
+        assert_eq!(
+            tags.album.as_deref(),
+            Some(long.as_str()),
+            "a size over 255 was misread"
+        );
+        assert_eq!(
+            tags.artist.as_deref(),
+            Some("Old Tagger"),
+            "the frame after it was lost"
+        );
+        assert_eq!(tags.track, Some(5));
+    }
+
+    /// Unsynchronisation put a zero after every 0xFF: the whole tag in v2.3,
+    /// a frame at a time in v2.4. The zero is not text.
+    #[test]
+    fn an_unsynchronised_tag_is_read_as_it_was_written() {
+        // v2.3: the frame's size is of the text before the zeros went in.
+        let mut v3 = b"TIT2".to_vec();
+        v3.extend_from_slice(&3u32.to_be_bytes());
+        v3.extend_from_slice(&[0, 0]);
+        v3.extend_from_slice(b"\x00\xFF\x00x");
+        v3.extend(id3_frame(3, b"TPE1", 0, b"Next"));
+        let mut file = id3_with(3, 0x80, &v3);
+        file.extend(mp3_frames(2));
+        let (_, tags) = read_bytes(&file);
+        assert_eq!(tags.title.as_deref(), Some("\u{ff}x"));
+        assert_eq!(tags.artist.as_deref(), Some("Next"));
+
+        // v2.4: the frame's size is as stored, and its flag says so.
+        let mut v4 = b"TIT2".to_vec();
+        v4.extend_from_slice(&[0, 0, 0, 4]);
+        v4.extend_from_slice(&[0, 0x02]);
+        v4.extend_from_slice(b"\x00\xFF\x00y");
+        let mut file = id3_with(4, 0, &v4);
+        file.extend(mp3_frames(2));
+        let (_, tags) = read_bytes(&file);
+        assert_eq!(tags.title.as_deref(), Some("\u{ff}y"));
+    }
+
+    /// An extended header is stepped over: v2.3 gives its size less the
+    /// size's own four bytes, v2.4 including them, synchsafe.
+    #[test]
+    fn an_extended_header_is_stepped_over() {
+        let mut v3 = 6u32.to_be_bytes().to_vec();
+        v3.extend_from_slice(&[0; 6]);
+        v3.extend(id3_frame(3, b"TIT2", 0, b"After three"));
+        let mut file = id3_with(3, 0x40, &v3);
+        file.extend(mp3_frames(2));
+        assert_eq!(read_bytes(&file).1.title.as_deref(), Some("After three"));
+
+        let mut v4 = vec![0, 0, 0, 6, 1, 0];
+        v4.extend(id3_frame(4, b"TIT2", 3, b"After four"));
+        let mut file = id3_with(4, 0x40, &v4);
+        file.extend(mp3_frames(2));
+        assert_eq!(read_bytes(&file).1.title.as_deref(), Some("After four"));
+    }
+
+    /// A v2.4 tag with a footer is ten bytes longer than its size says: what
+    /// follows it is after the footer.
+    #[test]
+    fn a_tag_with_a_footer_ends_after_it() {
+        let mut file = id3_with(4, 0x10, &id3_frame(4, b"TALB", 3, b"Footed"));
+        file.extend_from_slice(b"3DI\x04\x00\x10\x00\x00\x00\x00");
+        file.extend(flac(44_100, 2, 16, 441_000, &["TITLE=Behind"]));
+        let (info, tags) = read_bytes(&file);
+        assert_eq!(
+            info.format,
+            AudioFormat::Flac,
+            "the footer was taken for what follows"
+        );
+        assert_eq!(tags.title.as_deref(), Some("Behind"));
+        assert_eq!(tags.album.as_deref(), Some("Footed"));
+    }
+
+    /// A compressed or encrypted frame is not text: it is passed over, and
+    /// the frame after it read.
+    #[test]
+    fn a_compressed_or_encrypted_frame_is_passed_over() {
+        for (major, flag) in [(3, 0x80), (3, 0x40), (4, 0x08), (4, 0x04)] {
+            let mut body = id3_frame(major, b"TIT2", 0, b"\x78\x9csecret");
+            body[9] = flag;
+            body.extend(id3_frame(major, b"TPE1", 0, b"Plain"));
+            let mut file = id3_with(major, 0, &body);
+            file.extend(mp3_frames(2));
+            let (_, tags) = read_bytes(&file);
+            assert_eq!(tags.title, None, "v2.{major} flag {flag:#x} read as text");
+            assert_eq!(tags.artist.as_deref(), Some("Plain"));
+        }
+    }
+
+    /// A VBRI header -- Fraunhofer's -- sits 32 bytes after the frame header
+    /// in every mode, and gives the bytes before the frames.
+    #[test]
+    fn a_variable_bitrate_mp3_is_timed_by_its_vbri_header() {
+        let mut file = mp3_frames(10);
+        file[36..40].copy_from_slice(b"VBRI");
+        file[46..50].copy_from_slice(&500_000u32.to_be_bytes());
+        file[50..54].copy_from_slice(&1000u32.to_be_bytes());
+        let (info, _) = read_bytes(&file);
+        let secs = info.duration_secs.unwrap();
+        assert!((secs - 1000.0 * 1152.0 / 44_100.0).abs() < 1e-6, "{secs}");
+        assert_eq!(info.bitrate_kbps, Some(153), "500,000 bytes over 26.1 s");
+    }
+
+    /// LAME writes "Info" rather than "Xing" in a constant-bitrate file.
+    /// Without the byte count, the bitrate is the bytes that are there.
+    #[test]
+    fn an_info_header_times_the_file_and_the_bytes_there_give_the_rate() {
+        let mut file = mp3_frames(10);
+        file[36..40].copy_from_slice(b"Info");
+        file[40..44].copy_from_slice(&1u32.to_be_bytes());
+        file[44..48].copy_from_slice(&50u32.to_be_bytes());
+        let (info, _) = read_bytes(&file);
+        let secs = info.duration_secs.unwrap();
+        let want = 50.0 * 1152.0 / 44_100.0;
+        assert!((secs - want).abs() < 1e-6, "{secs}");
+        let rate = (4170.0 * 8.0 / want / 1000.0_f64).round() as u32;
+        assert_eq!(info.bitrate_kbps, Some(rate));
+
+        // Bytes alone, without frames: no length to go by, so the constant
+        // rate's reading stands.
+        let mut file = mp3_frames(10);
+        file[36..40].copy_from_slice(b"Xing");
+        file[40..44].copy_from_slice(&2u32.to_be_bytes());
+        file[44..48].copy_from_slice(&999u32.to_be_bytes());
+        let (info, _) = read_bytes(&file);
+        assert_eq!(info.bitrate_kbps, Some(128));
+    }
+
+    /// MPEG-2 layer III: 576 samples a frame, 72 bytes per bit a second, and
+    /// a mono frame's side information of 9 bytes before its Xing header.
+    #[test]
+    fn an_mpeg2_mono_file_is_timed_and_its_xing_header_found() {
+        // MPEG-2, layer III, no CRC; 64 kbps, 22.05 kHz; mono.
+        // 72 * 64000 / 22050 = 208 bytes a frame.
+        let mut frame = vec![0xFF, 0xF3, 0x80, 0xC0];
+        frame.resize(208, 0);
+        let mut file = frame.repeat(20);
+        file[13..17].copy_from_slice(b"Xing");
+        file[17..21].copy_from_slice(&1u32.to_be_bytes());
+        file[21..25].copy_from_slice(&1000u32.to_be_bytes());
+        let (info, _) = read_bytes(&file);
+        assert_eq!(info.sample_rate, Some(22_050));
+        assert_eq!(info.channels, Some(1));
+        let secs = info.duration_secs.unwrap();
+        assert!((secs - 1000.0 * 576.0 / 22_050.0).abs() < 1e-6, "{secs}");
+    }
+
+    /// MPEG-1 stereo keeps 32 bytes of side information before a Xing
+    /// header, mono 17.
+    #[test]
+    fn an_mpeg1_mono_files_xing_header_is_after_17_bytes() {
+        let mut frame = vec![0xFF, 0xFB, 0x90, 0xC0];
+        frame.resize(417, 0);
+        let mut file = frame.repeat(10);
+        file[21..25].copy_from_slice(b"Xing");
+        file[25..29].copy_from_slice(&1u32.to_be_bytes());
+        file[29..33].copy_from_slice(&2000u32.to_be_bytes());
+        let (info, _) = read_bytes(&file);
+        assert_eq!(info.channels, Some(1));
+        let secs = info.duration_secs.unwrap();
+        assert!((secs - 2000.0 * 1152.0 / 44_100.0).abs() < 1e-6, "{secs}");
+    }
+
+    /// Layer I: 384 samples a frame, and a frame's length counted in
+    /// four-byte slots.
+    #[test]
+    fn a_layer_one_file_is_timed_by_its_frames() {
+        // MPEG-1 layer I, 128 kbps, 44.1 kHz: (12 * 128000 / 44100) * 4 =
+        // 136 bytes a frame.
+        let mut frame = vec![0xFF, 0xFF, 0x40, 0x00];
+        frame.resize(136, 0);
+        let file = frame.repeat(50);
+        let (info, _) = read_bytes(&file);
+        assert_eq!(info.bitrate_kbps, Some(128));
+        let secs = info.duration_secs.unwrap();
+        let want = 50.0 * 136.0 * 8.0 / 128_000.0;
+        assert!(
+            (secs - want).abs() < 1e-6,
+            "the first frame was not found: {secs}"
+        );
+        // With a Xing header, 384 samples a frame.
+        let mut file = file;
+        file[36..40].copy_from_slice(b"Xing");
+        file[40..44].copy_from_slice(&1u32.to_be_bytes());
+        file[44..48].copy_from_slice(&441u32.to_be_bytes());
+        let secs = read_bytes(&file).0.duration_secs.unwrap();
+        assert!((secs - 441.0 * 384.0 / 44_100.0).abs() < 1e-6, "{secs}");
+    }
+
+    /// Layer II has its own bitrates: index 10 is 192 kbps, where layer III's
+    /// is 160.
+    #[test]
+    fn a_layer_two_frame_reads_its_own_bitrate_table() {
+        // MPEG-1 layer II, index 10, 48 kHz: 144 * 192000 / 48000 = 576.
+        let mut frame = vec![0xFF, 0xFD, 0xA4, 0x00];
+        frame.resize(576, 0);
+        let (info, _) = read_bytes(&frame.repeat(5));
+        assert_eq!(info.bitrate_kbps, Some(192));
+        assert_eq!(info.sample_rate, Some(48_000));
+    }
+
+    /// A packet of 255 bytes or more runs across segments: it ends at the
+    /// first segment shorter than 255.
+    #[test]
+    fn an_ogg_packet_runs_across_its_segments() {
+        let mut ident = b"\x01vorbis".to_vec();
+        ident.extend_from_slice(&0u32.to_le_bytes());
+        ident.push(1);
+        ident.extend_from_slice(&8000u32.to_le_bytes());
+        ident.extend_from_slice(&[0; 12]);
+        ident.push(0);
+        // A comment packet of 300 bytes: its vendor fills the first segment.
+        let vendor = "v".repeat(250);
+        let mut comment = b"\x03vorbis".to_vec();
+        comment.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
+        comment.extend_from_slice(vendor.as_bytes());
+        comment.extend_from_slice(&1u32.to_le_bytes());
+        let c = "TITLE=Past the first segment";
+        comment.extend_from_slice(&(c.len() as u32).to_le_bytes());
+        comment.extend_from_slice(c.as_bytes());
+        assert!(comment.len() > 255 && comment.len() < 510);
+        let mut page = b"OggS".to_vec();
+        page.extend_from_slice(&[0, 0]);
+        page.extend_from_slice(&0u64.to_le_bytes());
+        page.extend_from_slice(&[0; 12]);
+        page.push(3);
+        page.push(ident.len() as u8);
+        page.push(255);
+        page.push((comment.len() - 255) as u8);
+        page.extend(&ident);
+        page.extend(&comment);
+        let mut file = page;
+        file.extend(ogg_page(&[vec![0; 10]], 16_000));
+        let (info, tags) = read_bytes(&file);
+        assert_eq!(tags.title.as_deref(), Some("Past the first segment"));
+        assert_eq!(info.duration_secs, Some(2.0));
+        assert_eq!(info.channels, Some(1));
+    }
+
+    /// A chunk of odd size is followed by a pad byte, and the chunk after it
+    /// is found; every INFO field a WAV's tags have is read.
+    #[test]
+    fn a_wav_steps_over_the_pad_after_an_odd_chunk_and_reads_every_field() {
+        let mut body = b"WAVE".to_vec();
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&1u16.to_le_bytes());
+        fmt.extend_from_slice(&1u16.to_le_bytes());
+        fmt.extend_from_slice(&8000u32.to_le_bytes());
+        fmt.extend_from_slice(&8000u32.to_le_bytes());
+        fmt.extend_from_slice(&1u16.to_le_bytes());
+        fmt.extend_from_slice(&8u16.to_le_bytes());
+        body.extend_from_slice(b"fmt ");
+        body.extend_from_slice(&16u32.to_le_bytes());
+        body.extend(&fmt);
+        body.extend_from_slice(b"junk");
+        body.extend_from_slice(&3u32.to_le_bytes());
+        body.extend_from_slice(b"abc\0");
+        let mut list = b"INFO".to_vec();
+        for (id, text) in [
+            (b"ICRD", &b"2001"[..]),
+            (b"IGNR", b"Ambient"),
+            (b"ITRK", b"9/10"),
+            // Not UTF-8: a Latin-1 e acute, as older writers leave it.
+            (b"INAM", b"Caf\xe9"),
+        ] {
+            list.extend_from_slice(id);
+            let mut t = text.to_vec();
+            t.push(0);
+            list.extend_from_slice(&(t.len() as u32).to_le_bytes());
+            list.extend_from_slice(&t);
+            if t.len() % 2 == 1 {
+                list.push(0);
+            }
+        }
+        body.extend_from_slice(b"LIST");
+        body.extend_from_slice(&(list.len() as u32).to_le_bytes());
+        body.extend(&list);
+        body.extend_from_slice(b"data");
+        body.extend_from_slice(&8000u32.to_le_bytes());
+        body.extend(std::iter::repeat_n(0x80, 8000));
+        let mut file = b"RIFF".to_vec();
+        file.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        file.extend(body);
+        let (info, tags) = read_bytes(&file);
+        assert_eq!(
+            info.duration_secs,
+            Some(1.0),
+            "the chunks after the odd one were lost"
+        );
+        assert_eq!(tags.year.as_deref(), Some("2001"));
+        assert_eq!(tags.genre.as_deref(), Some("Ambient"));
+        assert_eq!(tags.track, Some(9));
+        assert_eq!(
+            tags.title.as_deref(),
+            Some("Caf\u{e9}"),
+            "Latin-1 INFO text was lost"
+        );
+    }
+
+    /// A FLAC's STREAMINFO with no rate or no count of samples says nothing
+    /// of its length, rather than an infinite or empty one.
+    #[test]
+    fn a_flac_that_does_not_know_its_length_says_so() {
+        let (info, _) = read_bytes(&flac(44_100, 2, 16, 0, &[]));
+        assert_eq!(info.duration_secs, None);
+        assert_eq!(info.bitrate_kbps, None);
+        let mut no_rate = flac(44_100, 2, 16, 44_100, &[]);
+        no_rate[18] = 0;
+        no_rate[19] = 0;
+        no_rate[20] &= 0x0F;
+        let (info, _) = read_bytes(&no_rate);
+        assert_eq!(info.sample_rate, None);
+        assert_eq!(info.duration_secs, None);
+    }
+
+    /// A Xing or VBRI header counting no frames was never filled in: the
+    /// file is timed by its bitrate, not as 0:00.
+    #[test]
+    fn a_vbr_header_counting_no_frames_is_passed_over() {
+        let cbr = 10.0 * 417.0 * 8.0 / 128_000.0;
+        let mut xing = mp3_frames(10);
+        xing[36..40].copy_from_slice(b"Xing");
+        xing[40..44].copy_from_slice(&1u32.to_be_bytes());
+        let mut vbri = mp3_frames(10);
+        vbri[36..40].copy_from_slice(b"VBRI");
+        vbri[46..50].copy_from_slice(&4170u32.to_be_bytes());
+        for file in [xing, vbri] {
+            let (info, _) = read_bytes(&file);
+            let secs = info.duration_secs.unwrap();
+            assert!((secs - cbr).abs() < 1e-6, "{secs}");
+            assert_eq!(info.bitrate_kbps, Some(128));
+        }
+    }
+
+    /// An Ogg stream that ends where it begins has no length to give a rate
+    /// by: none, not an infinite one.
+    #[test]
+    fn an_ogg_stream_of_no_length_has_no_bitrate() {
+        let mut head = b"OpusHead".to_vec();
+        head.extend_from_slice(&[1, 2]);
+        head.extend_from_slice(&312u16.to_le_bytes());
+        head.extend_from_slice(&48_000u32.to_le_bytes());
+        head.extend_from_slice(&[0, 0, 0]);
+        let mut file = ogg_page(&[head], 0);
+        file.extend(ogg_page(&[b"OpusTags".to_vec()], 0));
+        file.extend(ogg_page(&[vec![0; 10]], 312));
+        let (info, _) = read_bytes(&file);
+        assert_eq!(info.duration_secs, Some(0.0));
+        assert_eq!(info.bitrate_kbps, None);
+    }
+
+    /// A tag longer than the first read -- a cover picture of 100 KiB -- is
+    /// still looked past for the FLAC behind it.
+    #[test]
+    fn a_flac_behind_a_tag_longer_than_the_first_read_is_a_flac() {
+        let mut file = id3_tag(3, &[id3_frame(3, b"TIT2", 0, b"Big")], 100 * 1024);
+        file.extend(flac(44_100, 2, 16, 441_000, &[]));
+        let (info, tags) = read_bytes(&file);
+        assert_eq!(info.format, AudioFormat::Flac);
+        assert_eq!(info.duration_secs, Some(10.0));
+        assert_eq!(tags.title.as_deref(), Some("Big"));
+    }
+
+    /// A frame of 128 bytes or more: v2.3 sizes it as a plain integer, v2.4
+    /// in seven bits a byte. Read the other way, the size is wrong.
+    #[test]
+    fn frame_sizes_over_127_are_read_as_each_version_writes_them() {
+        let long = "T".repeat(200);
+        for major in [3, 4] {
+            let frames = vec![
+                id3_frame(major, b"TIT2", 0, long.as_bytes()),
+                id3_frame(major, b"TPE1", 0, b"After"),
+            ];
+            let mut file = id3_tag(major, &frames, 0);
+            file.extend(mp3_frames(2));
+            let (_, tags) = read_bytes(&file);
+            assert_eq!(tags.title.as_deref(), Some(long.as_str()), "v2.{major}");
+            assert_eq!(tags.artist.as_deref(), Some("After"), "v2.{major}");
+        }
+    }
+
+    /// ID3v1.0 has a 30-byte comment where v1.1 has 28 and a track: without
+    /// the zero at 125, byte 126 is a letter of the comment.
+    #[test]
+    fn an_id3v1_0_comment_is_not_a_track_number() {
+        let mut v1 = vec![0u8; 128];
+        v1[..3].copy_from_slice(b"TAG");
+        v1[97..127].copy_from_slice(&[b'c'; 30]);
+        v1[127] = 255;
+        let tags = parse_id3v1(&v1).unwrap();
+        assert_eq!(tags.track, None);
+        assert_eq!(tags.genre, None, "genre 255 is none");
+        assert_eq!(parse_id3v1(&v1[1..]), None, "127 bytes is not a tag");
+    }
+
+    /// A padded frame is a byte longer, and the next frame is after it.
+    #[test]
+    fn a_padded_frame_is_a_byte_longer() {
+        let mut padded = vec![0xFF, 0xFB, 0x92, 0x00];
+        padded.resize(418, 0);
+        let mut file = padded;
+        file.extend(mp3_frames(5));
+        let (info, _) = read_bytes(&file);
+        let secs = info.duration_secs.unwrap();
+        let want = file.len() as f64 * 8.0 / 128_000.0;
+        assert!(
+            (secs - want).abs() < 1e-6,
+            "the padded first frame was not found: {secs}"
+        );
+    }
+
+    /// Each field of a frame header, and the values that make it no header:
+    /// a reserved version, layer or rate, free format, and index 15.
+    #[test]
+    fn frame_headers_are_read_bit_by_bit() {
+        let frame = |b: [u8; 4]| mp3_frame(&b);
+        let stereo = frame([0xFF, 0xFB, 0x90, 0x00]).unwrap();
+        assert_eq!((stereo.version, stereo.layer), (1, 3));
+        assert_eq!((stereo.bitrate_kbps, stereo.sample_rate), (128, 44_100));
+        assert!(!stereo.mono && !stereo.padding);
+        let joint = frame([0xFF, 0xFB, 0x90, 0x40]).unwrap();
+        assert!(!joint.mono, "joint stereo is two channels");
+        let dual = frame([0xFF, 0xFB, 0x90, 0x80]).unwrap();
+        assert!(!dual.mono, "dual channel is two channels");
+        let v25 = frame([0xFF, 0xE3, 0x80, 0x00]).unwrap();
+        assert_eq!((v25.version, v25.sample_rate), (25, 11_025));
+        assert_eq!(frame([0xFF, 0xEB, 0x90, 0x00]), None, "reserved version");
+        assert_eq!(frame([0xFF, 0xF9, 0x90, 0x00]), None, "reserved layer");
+        assert_eq!(frame([0xFF, 0xFB, 0x9C, 0x00]), None, "reserved rate");
+        assert_eq!(frame([0xFF, 0xFB, 0x00, 0x00]), None, "free format");
+        assert_eq!(frame([0xFF, 0xFB, 0xF0, 0x00]), None, "bitrate index 15");
+        assert_eq!(frame([0xFF, 0x7B, 0x90, 0x00]), None, "no sync");
+    }
+
+    /// A comment that is not UTF-8 is passed over, and the ones after it
+    /// read.
+    #[test]
+    fn a_comment_that_is_not_text_is_passed_over() {
+        let mut block = 0u32.to_le_bytes().to_vec();
+        block.extend_from_slice(&2u32.to_le_bytes());
+        let bad = b"TITLE=\xff\xfe";
+        block.extend_from_slice(&(bad.len() as u32).to_le_bytes());
+        block.extend_from_slice(bad);
+        let good = b"ARTIST=Fine";
+        block.extend_from_slice(&(good.len() as u32).to_le_bytes());
+        block.extend_from_slice(good);
+        let tags = parse_vorbis_comments(&block);
+        assert_eq!(tags.title, None);
+        assert_eq!(tags.artist.as_deref(), Some("Fine"));
+    }
+
+    /// STREAMINFO counts samples in 36 bits: a recording of more than 2^32
+    /// samples -- six hours at 192 kHz -- is timed by all of them.
+    #[test]
+    fn a_flac_of_more_samples_than_32_bits_is_timed() {
+        let samples = (1_u64 << 32) + 192_000;
+        let (info, _) = read_bytes(&flac(192_000, 2, 24, samples, &[]));
+        assert_eq!(info.duration_secs, Some(samples as f64 / 192_000.0));
     }
 
     #[test]

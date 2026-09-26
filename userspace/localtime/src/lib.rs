@@ -19,23 +19,29 @@
 //!
 //! # What "resolve `TZ`" actually means
 //!
-//! Four rules, all of which glibc applies and none of which is guessable:
+//! What glibc 2.39's `tzset` does, which is not guessable and not POSIX's —
+//! the `tzset` module is the port, function by function, and says why each
+//! detail is visible:
 //!
-//! 1. **Unset or empty `TZ` is not UTC** — it is `/etc/localtime`, a TZif file.
-//!    A program that answers UTC for an unset `TZ` prints the wrong hour on
-//!    every desktop in the world, and prints it *silently*.
-//! 2. **A leading `:` forces the file interpretation.** POSIX reserves that
-//!    prefix for implementation-defined forms; every libc reads it as "the rest
-//!    is a file name", and glibc still accepts `:EST5EDT`.
-//! 3. **Otherwise a POSIX rule string is tried first, and a file only if that
-//!    fails.** The order is observable, because `EST5EDT` is *both* a valid
-//!    POSIX rule and a file in every zoneinfo tree — and the two do not agree,
-//!    since the rule cannot know that the United States moved the start of
-//!    daylight saving in 2007.
-//! 4. **A zone name with a `..` component is refused.** `TZ` is inherited from
-//!    whoever started the process, so without this check `TZ=../../etc/shadow`
-//!    makes any program that prints a time open an arbitrary file and reveal,
-//!    through whether the time changed, whether it parsed as TZif.
+//! 1. **Unset `TZ` is not UTC** — it is `/etc/localtime`, a TZif file, and UTC
+//!    (named `UTC`) only if that cannot be read. A program that answers UTC for
+//!    an unset `TZ` prints the wrong hour on every desktop in the world, and
+//!    prints it *silently*.
+//! 2. **Empty `TZ` is the name `Universal`**, which is then resolved like any
+//!    other value: the zoneinfo file of that name if there is one, else UTC
+//!    under that name.
+//! 3. **A leading `:` is dropped**, and means nothing more: `:EST5EDT` and
+//!    `EST5EDT` are the same value.
+//! 4. **A file is tried before a rule.** The order is observable, because
+//!    `EST5EDT` is *both* a POSIX rule and a file in every zoneinfo tree — and
+//!    the two do not agree, since the rule cannot know that the United States
+//!    moved the start of daylight saving in 2007.
+//! 5. **A rule is glibc's even where it is odd**: what parses of it is kept
+//!    (`Foo/Bar` is UTC named `Foo`), a DST name with no dates borrows
+//!    `posixrules`' history, and every year up to 1970 changes on 1970's dates.
+//! 6. **A zone name with a `..` component is never read as a file** — here
+//!    always, where glibc does so only in a setuid program. It falls through to
+//!    the POSIX rule instead, as a missing file does.
 //!
 //! # Why the calendar arithmetic lives here too
 //!
@@ -55,8 +61,9 @@
 //! the `mktime` module for why each of those is observable.
 
 use std::path::{Path, PathBuf};
+use std::sync::{PoisonError, RwLock};
 
-use tzrules::{Tz, TzFile, TzInfo, TzName};
+use tzrules::{TzInfo, TzName};
 
 mod mktime;
 pub use mktime::{StructTm, with_mktime_offset};
@@ -64,39 +71,72 @@ pub use mktime::{StructTm, with_mktime_offset};
 mod strftime;
 pub use strftime::{nstrftime, nstrftime_z, strftime};
 
+mod tzset;
+use tzset::Engine;
+
 /// Where a bare zone name is looked up when `TZDIR` says nothing.
 pub const TZDIR_DEFAULT: &str = "/usr/share/zoneinfo";
 
 /// The file an unset `TZ` means.
 pub const LOCALTIME_PATH: &str = "/etc/localtime";
 
-/// Largest zoneinfo file that will be read.
+/// An owned timezone, as glibc holds one: POSIX rules, or a zoneinfo file's
+/// tables, copied out of the file when it is read.
 ///
-/// The biggest in tzdata is under 4 KiB, so this is generous. The cap is not an
-/// optimisation: `TZ=/dev/zero` is a legal thing for a parent process to set,
-/// and without a bound the first program to print a timestamp reads until it
-/// runs out of memory.
-const MAX_ZONEINFO_BYTES: usize = 64 * 1024;
-
-/// The read limit: one byte past the cap, so an oversized file is refused
-/// rather than truncated to a prefix that might still parse as TZif.
-const ZONEINFO_READ_LIMIT: u64 = MAX_ZONEINFO_BYTES as u64 + 1;
-
-/// An owned timezone: either a POSIX rule or the bytes of a zoneinfo file.
+/// Owned because the something a utility wants is a value it can keep for the
+/// length of a listing — and copied rather than re-read from the file's bytes
+/// per lookup, because `ls -l` asks once per line.
 ///
-/// Owned rather than borrowed because a zoneinfo zone *is* the file's bytes —
-/// [`TzFile`] reads the transition table out of them on every lookup rather
-/// than copying it — so something has to hold them, and the something a
-/// utility wants is a value it can keep for the length of a listing.
-#[derive(Clone, Debug)]
-pub struct Zone(Inner);
+/// # When it is read, and read again
+///
+/// A zone made from a `TZ` value is read at its first use, not when it is
+/// made, and can be read again in place — because glibc's reads are
+/// observable, in their order and their number. Its one zone state is filled
+/// in at the first conversion, re-read whenever `TZ` changes (every `TZ="…"`
+/// in a date string changes it twice), and re-read by every `mktime` if the
+/// zone came from `posixrules`. Each read can move the process-wide value the
+/// next `posixrules` zone is anchored by; see the `tzset` module. So:
+///
+/// * [`Zone::lookup`] and everything built on it read the zone if nothing has
+///   yet, as `localtime_r` does;
+/// * [`Zone::tzset`] is glibc's `tzset ()`, which [`Zone::mktime`] calls as
+///   glibc's `mktime` does;
+/// * [`Zone::reread`] is a switch of `TZ` to this zone, and [`Zone::switched`]
+///   is gnulib's pair of them around one conversion in another zone.
+#[derive(Debug)]
+pub struct Zone {
+    /// `None` until the zone is first read.
+    engine: RwLock<Option<Engine>>,
+    source: Source,
+}
 
-#[derive(Clone, Debug)]
-enum Inner {
-    /// A POSIX `TZ` rule string, or the UTC fallback.
-    Posix(Tz),
-    /// The bytes of a zoneinfo file, already known to parse as TZif.
-    File(Vec<u8>),
+/// What a [`Zone`] is read from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Source {
+    /// A `TZ` value (`None`: unset), and the zoneinfo tree and default file it
+    /// is read against.
+    Tz {
+        tz: Option<Vec<u8>>,
+        dir: String,
+        localtime: PathBuf,
+    },
+    /// Not a `TZ` value — [`Zone::utc`], [`Zone::from_file`] — and so never
+    /// read again.
+    Fixed,
+}
+
+impl Clone for Zone {
+    fn clone(&self) -> Self {
+        let engine = self
+            .engine
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        Self {
+            engine: RwLock::new(engine),
+            source: self.source.clone(),
+        }
+    }
 }
 
 impl Default for Zone {
@@ -106,18 +146,137 @@ impl Default for Zone {
 }
 
 impl Zone {
-    /// The UTC zone, which is what every failure here falls back to.
+    /// A zone that is exactly `engine`, and is never read again.
+    fn fixed(engine: Engine) -> Self {
+        Self {
+            engine: RwLock::new(Some(engine)),
+            source: Source::Fixed,
+        }
+    }
+
+    /// UTC, named `UTC`: what glibc falls back to when neither `TZ` nor
+    /// `/etc/localtime` gives it anything to read.
     #[must_use]
     pub fn utc() -> Self {
-        Self(Inner::Posix(Tz::UTC))
+        Self::fixed(Engine::Rules(tzset::Rules::utc()))
+    }
+
+    /// Read the zone from its source: glibc's `tzset_internal`.
+    fn read(&self) -> Engine {
+        match &self.source {
+            Source::Tz { tz, dir, localtime } => tzset::resolve(tz.as_deref(), dir, localtime),
+            // Unreachable: a fixed zone is built with its engine, and
+            // `reread` leaves it alone.
+            Source::Fixed => Engine::Rules(tzset::Rules::utc()),
+        }
+    }
+
+    /// Run `f` on the zone state, reading the zone first if nothing has —
+    /// `tzset_internal (0)`, which is what `localtime_r` does.
+    fn with_engine<R>(&self, f: impl FnOnce(&Engine) -> R) -> R {
+        {
+            let guard = self.engine.read().unwrap_or_else(PoisonError::into_inner);
+            if let Some(engine) = guard.as_ref() {
+                return f(engine);
+            }
+        }
+        let mut guard = self.engine.write().unwrap_or_else(PoisonError::into_inner);
+        if guard.is_none() {
+            *guard = Some(self.read());
+        }
+        match guard.as_ref() {
+            Some(engine) => f(engine),
+            // Just filled in, under the same lock.
+            None => f(&Engine::Rules(tzset::Rules::utc())),
+        }
+    }
+
+    /// Read this zone again, as glibc does whenever `TZ` is changed to name
+    /// it. A zone that is not a `TZ` value is left alone.
+    pub fn reread(&self) {
+        if self.source == Source::Fixed {
+            return;
+        }
+        let fresh = self.read();
+        *self.engine.write().unwrap_or_else(PoisonError::into_inner) = Some(fresh);
+    }
+
+    /// glibc's `tzset ()` while `TZ` names this zone: read it if nothing has,
+    /// and read it again if it came from `posixrules` — glibc leaves nothing
+    /// to compare the next `TZ` with after one, so it re-reads every time.
+    /// Otherwise nothing: the value has not changed.
+    pub fn tzset(&self) {
+        let stale = self
+            .engine
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_none_or(Engine::stale);
+        if stale {
+            self.reread();
+        }
+    }
+
+    /// Whether `self` and `other` are the same `TZ` value — gnulib's test in
+    /// `set_tz` for whether a conversion in `self`, in a process whose `TZ`
+    /// names `other`, needs `TZ` changed at all. Only as bytes, as `strcmp`
+    /// compares them: `EST5EDT` and `:EST5EDT` differ.
+    #[must_use]
+    pub fn same_tz(&self, other: &Zone) -> bool {
+        match (&self.source, &other.source) {
+            (Source::Tz { tz: a, .. }, Source::Tz { tz: b, .. }) => a == b,
+            _ => false,
+        }
+    }
+
+    /// Whether glibc's `tzset ()`, finding `other`'s `TZ` where `self`'s was,
+    /// would see no change and keep the zone it has — the two values compared
+    /// as `tzset_internal` compares them, after an empty value has become
+    /// `Universal` and one leading `:` has been dropped. So `:EST5EDT` after
+    /// `EST5EDT` is no change here, where to [`Zone::same_tz`] (gnulib's
+    /// comparison) it is one.
+    ///
+    /// Two unset values are the same: glibc re-reads `/etc/localtime` every
+    /// time, but its stat cache finds the file it read before and changes
+    /// nothing. A zone built from `posixrules` is re-read whatever this says;
+    /// that is [`Zone::tzset`]'s business.
+    #[must_use]
+    pub fn tzset_would_keep(&self, other: &Zone) -> bool {
+        fn value(tz: Option<&[u8]>) -> Option<&[u8]> {
+            tz.map(|v| {
+                let v: &[u8] = if v.is_empty() { b"Universal" } else { v };
+                v.strip_prefix(b":").unwrap_or(v)
+            })
+        }
+        match (&self.source, &other.source) {
+            (Source::Tz { tz: a, .. }, Source::Tz { tz: b, .. }) => {
+                value(a.as_deref()) == value(b.as_deref())
+            }
+            _ => false,
+        }
+    }
+
+    /// gnulib's `set_tz` and `revert_tz` around `f`, a conversion in `self` by
+    /// a process whose own zone is `process`: unless the two are the same
+    /// value, `TZ` is switched to `self` (which reads it) and back (which
+    /// reads `process` again).
+    pub fn switched<R>(&self, process: &Zone, f: impl FnOnce() -> R) -> R {
+        if self.same_tz(process) {
+            return f();
+        }
+        self.reread();
+        let out = f();
+        process.reread();
+        out
     }
 
     /// The zone this process is running in, from `TZ`, `TZDIR` and
     /// `/etc/localtime`.
     ///
     /// This is the call a utility wants. It reads the environment exactly once,
-    /// which matters for more than speed: `ls -l` renders a timestamp per file,
-    /// and re-resolving per file would open `/etc/localtime` once per line.
+    /// and the zone file once, at the first conversion — which matters for
+    /// more than speed: `ls -l` renders a timestamp per file, and re-resolving
+    /// per file would open `/etc/localtime` once per line.
     #[must_use]
     pub fn from_env() -> Self {
         let tz = std::env::var_os("TZ");
@@ -146,29 +305,30 @@ impl Zone {
         Self::resolve(tz, &dir, Path::new(LOCALTIME_PATH))
     }
 
-    /// Resolve an explicit `TZ` value against an explicit zoneinfo tree.
+    /// Resolve an explicit `TZ` value against an explicit zoneinfo tree and
+    /// default file — glibc's `tzset` with `TZDIR` and `TZDEFAULT` given.
     ///
     /// Split out from [`Zone::from_env`] so it can be tested without a process
     /// environment, and so a caller that keeps its own variables — a shell —
     /// can pass its own rather than the ones it happened to inherit.
     ///
-    /// `None`, or an empty value, means "the machine's zone": `localtime` is
-    /// read. See the module docs for why that is not UTC.
+    /// `None` means "the machine's zone": `localtime` is read. An empty value
+    /// is the name `Universal`. See the module docs for the rest.
     #[must_use]
     pub fn resolve(tz: Option<&[u8]>, dir: &str, localtime: &Path) -> Self {
-        let Some(value) = tz.filter(|v| !v.is_empty()) else {
-            return Self::from_file(localtime);
-        };
-        if let Some(name) = value.strip_prefix(b":") {
-            return Self::from_name(name, dir);
-        }
-        match Tz::parse(value) {
-            Some(tz) => Self(Inner::Posix(tz)),
-            None => Self::from_name(value, dir),
+        Self {
+            engine: RwLock::new(None),
+            source: Source::Tz {
+                tz: tz.map(<[u8]>::to_vec),
+                dir: dir.to_string(),
+                localtime: localtime.to_path_buf(),
+            },
         }
     }
 
-    /// Load the zoneinfo file `name` names under `dir`, falling back to UTC.
+    /// The zoneinfo file `name` names under `dir` (or at `name`, if it is
+    /// absolute), falling back to UTC. No POSIX rule is tried; for what `TZ`
+    /// means, use [`Zone::resolve`].
     #[must_use]
     pub fn from_name(name: &[u8], dir: &str) -> Self {
         match zoneinfo_path(name, dir) {
@@ -177,42 +337,41 @@ impl Zone {
         }
     }
 
-    /// Read and validate a zoneinfo file, falling back to UTC.
+    /// Read a zoneinfo file, falling back to UTC.
     ///
-    /// The bytes are parsed *here* so that a file which is not TZif never
-    /// becomes a zone. Every later lookup then has a file it already knows
-    /// parses, and cannot silently answer UTC halfway down a listing.
+    /// The file is parsed *here*, so one that is not TZif never becomes a zone
+    /// and a listing cannot silently switch to UTC halfway down.
     #[must_use]
     pub fn from_file(path: &Path) -> Self {
-        let Ok(file) = std::fs::File::open(path) else {
-            return Self::utc();
-        };
-        let mut bytes = Vec::new();
-        if std::io::Read::read_to_end(
-            &mut std::io::Read::take(file, ZONEINFO_READ_LIMIT),
-            &mut bytes,
-        )
-        .is_err()
-            || bytes.len() > MAX_ZONEINFO_BYTES
-            || TzFile::parse(&bytes).is_none()
-        {
-            return Self::utc();
-        }
-        Self(Inner::File(bytes))
+        tzset::read_capped(path)
+            .and_then(|bytes| tzset::Table::from_tzif(&bytes))
+            .map_or_else(Self::utc, |table| Self::fixed(Engine::Table(table)))
     }
 
     /// The zone state in force at UTC instant `t`.
+    ///
+    /// Total, where glibc is not: for a POSIX-rule zone and an instant whose
+    /// UTC year does not fit in `tm_year`, glibc's `localtime` fails, and this
+    /// answers with the rule's standard half. [`Zone::localtime_r`] is the
+    /// glibc-faithful form.
     #[must_use]
     pub fn lookup(&self, t: i64) -> TzInfo {
-        match &self.0 {
-            Inner::Posix(tz) => tz.lookup(t),
-            // `from_file` only builds this arm from bytes that parsed, so the
-            // fallback is unreachable; it exists so that rendering a timestamp
-            // cannot panic.
-            Inner::File(bytes) => {
-                TzFile::parse(bytes).map_or_else(|| Tz::UTC.lookup(t), |f| f.lookup(t))
-            }
-        }
+        self.with_engine(|engine| engine.state_or_standard(t).info())
+    }
+
+    /// `lookup`, `None` where glibc's `localtime_r` fails: for a POSIX-rule
+    /// zone and an instant whose UTC year does not fit in `tm_year`.
+    fn lookup_r(&self, t: i64) -> Option<TzInfo> {
+        self.with_engine(|engine| engine.state(t).map(|state| state.info()))
+    }
+
+    /// glibc's `localtime` — not `localtime_r` — for the programs that call
+    /// it (`find -printf`, `ps`, `tar`, `who`): the same answer, after a
+    /// `tzset ()`, which re-reads a zone made from `posixrules` on every call.
+    #[must_use]
+    pub fn localtime(&self, t: i64, nanos: u32) -> Tm {
+        self.tzset();
+        self.local(t, nanos)
     }
 
     /// Break UTC instant `t` (plus `nanos`) down into this zone's calendar.
@@ -331,9 +490,14 @@ pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 }
 
 /// Build the path of the zoneinfo file `name` names, or `None` for a name that
-/// must not be resolved.
+/// must not be read as a file.
 ///
-/// See rule 4 in the module docs for why `..` is refused rather than resolved.
+/// Absolute names are used as given; others are under `dir`, as glibc's
+/// `TZDIR/NAME`. A name with a `..` component is refused (rule 6 in the module
+/// docs), where glibc refuses one only in a setuid program: `TZ` is inherited
+/// from whoever started the process, and the libc (`posix/src/tz.rs`) refuses
+/// the same names — two readers of one `TZ` must not disagree about what it
+/// means.
 #[must_use]
 pub fn zoneinfo_path(name: &[u8], dir: &str) -> Option<PathBuf> {
     if name.is_empty() || name.contains(&0) {
@@ -343,11 +507,25 @@ pub fn zoneinfo_path(name: &[u8], dir: &str) -> Option<PathBuf> {
     if name.split(|&b| b == b'/').any(|part| part == b"..") {
         return None;
     }
-    let text = std::str::from_utf8(name).ok()?;
-    if text.starts_with('/') {
-        return Some(PathBuf::from(text));
+    let path = bytes_path(name)?;
+    if name.starts_with(b"/") {
+        return Some(path);
     }
-    Some(Path::new(dir).join(text))
+    Some(Path::new(dir).join(path))
+}
+
+/// A path from bytes: exact on Unix, where a path is bytes.
+#[cfg(unix)]
+fn bytes_path(name: &[u8]) -> Option<PathBuf> {
+    Some(PathBuf::from(
+        <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(name),
+    ))
+}
+
+/// A path from bytes on the Windows host build, where only UTF-8 round-trips.
+#[cfg(not(unix))]
+fn bytes_path(name: &[u8]) -> Option<PathBuf> {
+    std::str::from_utf8(name).ok().map(PathBuf::from)
 }
 
 /// Broken-down local time: what `struct tm` carries, plus what it does not.
@@ -883,28 +1061,29 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_or_absent_tz_is_the_machines_zone_not_utc() {
+    fn an_absent_tz_is_the_machines_zone_and_an_empty_one_is_universal() {
         // The rule that is wrong in the obvious implementation, and wrong
         // silently: an unset `TZ` means `/etc/localtime`, not Greenwich. Here
-        // the file does not exist, so the fallback is UTC — what is being
-        // asserted is that it was *looked for*.
+        // the file does not exist, so the fallback is UTC named `UTC` — what
+        // is being asserted is that it was *looked for*, since a rule would
+        // have been named after the value.
         let missing = Path::new("/nonexistent-localtime-for-this-test");
-        assert!(matches!(
-            Zone::resolve(None, TZDIR_DEFAULT, missing).0,
-            Inner::Posix(_)
-        ));
-        assert!(matches!(
-            Zone::resolve(Some(b""), TZDIR_DEFAULT, missing).0,
-            Inner::Posix(_)
-        ));
+        let dir = "/nonexistent-zoneinfo-dir";
+        let name = |tz: Option<&[u8]>| Zone::resolve(tz, dir, missing).lookup(0).name;
+        assert_eq!(name(None).as_bytes(), b"UTC");
+        // Empty is glibc's `Universal`: no such file here, so the rule.
+        assert_eq!(name(Some(b"")).as_bytes(), b"Universal");
     }
 
     #[test]
-    fn a_posix_rule_beats_a_file_of_the_same_name() {
-        // `EST5EDT` is both. glibc tries the rule first, and so do we — which
-        // is observable, because the rule does not know about 2007.
-        let zone = Zone::resolve(Some(b"EST5EDT"), TZDIR_DEFAULT, Path::new(LOCALTIME_PATH));
-        assert!(matches!(zone.0, Inner::Posix(_)));
+    fn with_no_file_of_that_name_a_posix_rule_is_read() {
+        // `EST5EDT` is both a rule and a file. glibc tries the file first
+        // (see the `tzset` tests); with no zoneinfo tree, the rule answers.
+        let zone = Zone::resolve(
+            Some(b"EST5EDT"),
+            "/nonexistent-zoneinfo-dir",
+            Path::new("/nonexistent-localtime-for-this-test"),
+        );
         // Midsummer: EDT, four hours west.
         let summer = zone.lookup(tzrules::days_from_civil(2020, 7, 1) * 86_400);
         assert_eq!(summer.gmtoff, -4 * 3600);
@@ -912,16 +1091,15 @@ mod tests {
     }
 
     #[test]
-    fn a_leading_colon_forces_the_file_reading() {
-        // `:EST5EDT` is a *file* name even though the rest parses as a rule.
-        // The file will not be there under this test's directory, so the
-        // observable is that we did not end up with the rule's offsets.
+    fn a_leading_colon_is_only_dropped() {
+        // glibc reads `:EST5EDT` exactly as `EST5EDT`: a file if there is one,
+        // else the rule.
         let zone = Zone::resolve(
             Some(b":EST5EDT"),
             "/nonexistent-zoneinfo-dir",
-            Path::new(LOCALTIME_PATH),
+            Path::new("/nonexistent-localtime-for-this-test"),
         );
-        assert_eq!(zone.lookup(0).gmtoff, 0);
+        assert_eq!(zone.lookup(0).gmtoff, -5 * 3600);
     }
 
     #[test]
@@ -949,7 +1127,40 @@ mod tests {
     fn a_file_that_is_not_tzif_is_not_a_zone() {
         // Rejected at load, so a listing cannot switch to UTC halfway down.
         let zone = Zone::from_file(Path::new("Cargo.toml"));
-        assert!(matches!(zone.0, Inner::Posix(_)));
+        assert!(zone.with_engine(|e| matches!(e, Engine::Rules(_))));
         assert_eq!(zone.lookup(0).gmtoff, 0);
+    }
+
+    #[test]
+    fn a_zone_is_read_at_first_use_not_when_made() {
+        let zone = Zone::resolve(Some(b"EST5"), "/nonexistent-zoneinfo-dir", Path::new("/x"));
+        assert!(zone.engine.read().unwrap().is_none());
+        assert_eq!(zone.lookup(0).gmtoff, -5 * 3600);
+        assert!(zone.engine.read().unwrap().is_some());
+    }
+
+    #[test]
+    fn tzset_would_keep_compares_as_glibc_does() {
+        let at = |tz: Option<&[u8]>| Zone::resolve(tz, "/d", Path::new("/x"));
+        // glibc drops one `:` and reads empty as `Universal` before comparing.
+        assert!(at(Some(b"EST5")).tzset_would_keep(&at(Some(b":EST5"))));
+        assert!(!at(Some(b"EST5")).tzset_would_keep(&at(Some(b"::EST5"))));
+        assert!(at(Some(b"Universal")).tzset_would_keep(&at(Some(b""))));
+        assert!(at(None).tzset_would_keep(&at(None)));
+        assert!(!at(None).tzset_would_keep(&at(Some(b"UTC"))));
+        assert!(!at(Some(b"EST5")).tzset_would_keep(&at(Some(b"EST6"))));
+        assert!(!Zone::utc().tzset_would_keep(&Zone::utc()));
+        // gnulib's `set_tz` compares the values as written.
+        assert!(!at(Some(b"EST5")).same_tz(&at(Some(b":EST5"))));
+    }
+
+    #[test]
+    fn same_tz_is_a_comparison_of_the_values_as_written() {
+        let at = |tz: Option<&[u8]>| Zone::resolve(tz, "/d", Path::new("/x"));
+        assert!(at(Some(b"EST5")).same_tz(&at(Some(b"EST5"))));
+        assert!(!at(Some(b"EST5")).same_tz(&at(Some(b":EST5"))));
+        assert!(at(None).same_tz(&at(None)));
+        assert!(!at(None).same_tz(&at(Some(b""))));
+        assert!(!Zone::utc().same_tz(&Zone::utc()));
     }
 }

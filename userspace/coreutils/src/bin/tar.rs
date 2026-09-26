@@ -5531,7 +5531,7 @@ fn long_line(
     line.extend_from_slice(&size);
     line.push(b' ');
 
-    let tm = zone.local(member.mtime, 0);
+    let tm = zone.localtime(member.mtime, 0);
     line.extend_from_slice(&localtime::strftime(b"%Y-%m-%d %H:%M", &tm));
     line.push(b' ');
     // The name and the link target are escaped; the user and group names above

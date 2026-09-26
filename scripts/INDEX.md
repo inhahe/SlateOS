@@ -398,6 +398,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/tsort-diff.sh` | Differential test: our tsort against GNU tsort. |
 | `scripts/tsort-probe.py` | Ad-hoc measurement of GNU `tsort`. Not part of the build; kept only so the |
 | `scripts/tty-diff.sh` | tty-diff.sh — compare our `tty` against the real GNU one, inside WSL. |
+| `scripts/tz-diff.sh` | tz-diff.sh — how `TZ` is read, ours against glibc's, through `date`. |
 | `scripts/uname-diff.sh` | Differential test: our `uname` against GNU uname. |
 | `scripts/unexpand-diff.sh` | Differential test: our unexpand against GNU unexpand. |
 | `scripts/uniq-diff.sh` | Differential test: our uniq against GNU uniq. |
@@ -418,4 +419,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_408 scripts._
+_409 scripts._

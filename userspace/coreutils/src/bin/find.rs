@@ -2057,7 +2057,7 @@ impl Parser<'_> {
     fn apply_daystart(&mut self) {
         let zone = localtime::Zone::from_env();
         let base = self.cur_day_start.sec.saturating_add(86400);
-        let tm = zone.local(base, 0);
+        let tm = zone.localtime(base, 0);
         let since_midnight = i64::from(tm.second)
             .saturating_add(i64::from(tm.minute).saturating_mul(60))
             .saturating_add(i64::from(tm.hour).saturating_mul(3600));
@@ -3089,7 +3089,7 @@ fn qmark(bytes: &[u8]) -> Vec<u8> {
 
 /// `ctime_format`: `%a`, `%c` and `%t`'s fixed 26-plus-nanoseconds layout.
 fn ctime_format(ts: Ts, zone: &localtime::Zone) -> Vec<u8> {
-    let tm = zone.local(ts.sec, ts.nsec);
+    let tm = zone.localtime(ts.sec, ts.nsec);
     let wd = WEEKDAYS.get(tm.wday as usize).copied().unwrap_or("???");
     let mon = MONTHS
         .get(tm.month.saturating_sub(1) as usize)
@@ -3186,7 +3186,7 @@ fn format_date(ts: Ts, kind: u8, zone: &localtime::Zone) -> Vec<u8> {
     };
 
     if kind != b'@' {
-        let tm = zone.local(ts.sec, ts.nsec);
+        let tm = zone.localtime(ts.sec, ts.nsec);
         let out = do_time_format(&fmt, &tm, &ns);
         if !out.is_empty() {
             return out;
@@ -3576,7 +3576,7 @@ fn ls_time(mtime: Ts, start: Ts, zone: &localtime::Zone) -> Vec<u8> {
     let recent = start.sec.saturating_sub(SIX_MONTHS) <= mtime.sec
         && mtime.sec <= start.sec.saturating_add(3600);
     let fmt: &[u8] = if recent { b"%b %e %H:%M" } else { b"%b %e  %Y" };
-    let tm = zone.local(mtime.sec, mtime.nsec);
+    let tm = zone.localtime(mtime.sec, mtime.nsec);
     let out = localtime::strftime(fmt, &tm);
     if out.is_empty() {
         // The instant has no local representation. Upstream falls back to a

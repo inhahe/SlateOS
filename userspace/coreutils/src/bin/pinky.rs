@@ -439,7 +439,7 @@ mod imp {
         out.push(b' ');
         // `utmpfile` gives a negative `ut_tv.tv_sec` as 0; see its docs.
         let login = i64::try_from(r.login_time).unwrap_or(i64::MAX);
-        out.extend_from_slice(&localtime::strftime(time_format, &zone.local(login, 0)));
+        out.extend_from_slice(&localtime::strftime(time_format, &zone.localtime(login, 0)));
 
         if show.where_ && !r.host.is_empty() {
             let (host, display) = split_display(&r.host);

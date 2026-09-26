@@ -39,14 +39,42 @@
 //!   would make `localtime` disagree with `time` by the accumulated 27 s.  The
 //!   records are skipped over (their size is still validated, since the block
 //!   layout depends on it).
-//! * **The standard/wall and UT/local indicator arrays.** They exist to let
-//!   `zic` re-derive a POSIX `TZ` string's `/time` fields when recompiling a
-//!   binary file back to source; a reader that already has the footer string
-//!   has no use for them.
+//! * **The standard/wall and UT/local indicator arrays**, by [`TzFile::lookup`].
+//!   They exist to let `zic` re-derive a POSIX `TZ` string's `/time` fields
+//!   when recompiling a binary file back to source; a reader that already has
+//!   the footer string has no use for them. They are still kept and offered
+//!   through [`TzFile::local_type`], because one reader does use them: glibc's
+//!   `__tzfile_default`, which re-anchors a `posixrules` file's transitions to
+//!   a user's offsets according to them, and which `userspace/localtime`
+//!   reproduces.
 //! * **The v1 data block in a v2+ file**, which by design duplicates the v2
 //!   block truncated to 32-bit times.  We read the v2 block, so we skip it.
 
 use crate::{TZ_NAME_CAP, Tz, TzInfo, TzName};
+
+/// One local time type as the file records it: RFC 8536 §3.2's `ttinfo`, plus
+/// that type's entries in the two indicator arrays.
+///
+/// [`TzFile::lookup`] is the way to ask what is in force at an instant. This
+/// is for a reader that has to reproduce *another implementation's* use of the
+/// raw table, which is what `userspace/localtime` does with glibc's
+/// `tzfile.c` -- in particular `__tzfile_default`, which reads the indicators.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalTimeType {
+    /// Seconds east of UT.
+    pub utoff: i32,
+    /// Whether this type is daylight saving time.
+    pub is_dst: bool,
+    /// The designation, e.g. `EST`.
+    pub name: TzName,
+    /// The standard/wall indicator: transitions to this type were specified in
+    /// standard time rather than wall-clock time. `false` when the file has no
+    /// indicator array, as RFC 8536 §3.2 says to assume.
+    pub is_std: bool,
+    /// The UT/local indicator: transitions to this type were specified in UT.
+    /// `false` when the file has no indicator array.
+    pub is_ut: bool,
+}
 
 /// Bytes in a TZif header.  v1 and v2+ headers have identical shape.
 const HEADER_LEN: usize = 44;
@@ -90,6 +118,12 @@ pub struct TzFile<'a> {
     /// transition.  Absent for a v1 file, and for a v2+ file whose footer is
     /// empty or unparseable.
     tail: Option<Tz>,
+    /// The footer's text, verbatim, for a v2+ file; `None` for a v1 file.
+    footer: Option<&'a [u8]>,
+    /// The standard/wall indicators, one byte per type, or empty.
+    isstd: &'a [u8],
+    /// The UT/local indicators, one byte per type, or empty.
+    isut: &'a [u8],
 }
 
 impl<'a> TzFile<'a> {
@@ -120,7 +154,9 @@ impl<'a> TzFile<'a> {
         }
         let body = skip.checked_add(HEADER_LEN)?;
         let (mut view, rest) = Self::data_block(file.get(body..)?, &head2, 8)?;
-        view.tail = Tz::parse(footer_body(rest)?);
+        let footer = footer_body(rest)?;
+        view.tail = Tz::parse(footer);
+        view.footer = Some(footer);
         Some(view)
     }
 
@@ -146,8 +182,8 @@ impl<'a> TzFile<'a> {
             &mut off,
             leapcnt.checked_mul(time_size.checked_add(4)?)?,
         )?;
-        let _isstd = take(body, &mut off, usize::try_from(head.isstdcnt).ok()?)?;
-        let _isut = take(body, &mut off, usize::try_from(head.isutcnt).ok()?)?;
+        let isstd = take(body, &mut off, usize::try_from(head.isstdcnt).ok()?)?;
+        let isut = take(body, &mut off, usize::try_from(head.isutcnt).ok()?)?;
 
         let view = Self {
             times,
@@ -157,6 +193,9 @@ impl<'a> TzFile<'a> {
             time_size,
             default_type: 0,
             tail: None,
+            footer: None,
+            isstd,
+            isut,
         };
         let view = Self {
             default_type: view.validate(typecnt)?,
@@ -232,6 +271,52 @@ impl<'a> TzFile<'a> {
     #[must_use]
     pub fn transition_count(&self) -> usize {
         self.type_idx.len()
+    }
+
+    /// Transition `i`, oldest first: the instant it takes effect, and the index
+    /// of the local time type in force from then on (see [`Self::local_type`]).
+    ///
+    /// `None` past [`Self::transition_count`]. Instants strictly increase with
+    /// `i` and every type index is below [`Self::type_count`]; both were
+    /// checked when the file was parsed.
+    #[must_use]
+    pub fn transition(&self, i: usize) -> Option<(i64, usize)> {
+        Some((
+            self.transition_time(i)?,
+            usize::from(*self.type_idx.get(i)?),
+        ))
+    }
+
+    /// How many local time types the file defines -- at least one, since a
+    /// file with none is refused.
+    #[must_use]
+    pub fn type_count(&self) -> usize {
+        self.types.len().checked_div(TTINFO_LEN).unwrap_or(0)
+    }
+
+    /// Local time type `ty`, or `None` past [`Self::type_count`].
+    #[must_use]
+    pub fn local_type(&self, ty: usize) -> Option<LocalTimeType> {
+        let (utoff, isdst, idx) = self.type_record(ty)?;
+        Some(LocalTimeType {
+            utoff,
+            is_dst: isdst != 0,
+            name: self.name_at(usize::from(idx))?,
+            is_std: self.isstd.get(ty).is_some_and(|&b| b != 0),
+            is_ut: self.isut.get(ty).is_some_and(|&b| b != 0),
+        })
+    }
+
+    /// The footer's text -- the POSIX `TZ` string between a v2+ file's two
+    /// final newlines -- whether or not [`Tz::parse`] accepts it, and
+    /// possibly empty. `None` for a v1 file, which has no footer.
+    ///
+    /// Offered raw because a reader reproducing another libc must parse it that
+    /// libc's way: glibc, for one, keeps what it could read of a rule this
+    /// crate would refuse outright, so [`Self::tail`] is not the same answer.
+    #[must_use]
+    pub fn footer(&self) -> Option<&'a [u8]> {
+        self.footer
     }
 
     /// Whether this zone observes daylight saving under its *current* rules
@@ -1000,6 +1085,84 @@ mod tests {
         b.put(b"\nUTC0\n");
         let tz = TzFile::parse(b.as_slice()).expect("valid TZif with indicators");
         assert_eq!(tz.lookup(0).name, name(b"UTC"));
+    }
+
+    #[test]
+    fn the_raw_table_is_offered_as_recorded() {
+        let f = eastern();
+        let tz = TzFile::parse(f.as_slice()).expect("valid TZif");
+        assert_eq!(tz.transition(0), Some((1_583_650_800, 1)));
+        assert_eq!(tz.transition(1), Some((1_604_210_400, 0)));
+        assert_eq!(tz.transition(2), None);
+        assert_eq!(tz.type_count(), 2);
+        assert_eq!(
+            tz.local_type(0),
+            Some(LocalTimeType {
+                utoff: -5 * 3600,
+                is_dst: false,
+                name: name(b"EST"),
+                is_std: false,
+                is_ut: false,
+            })
+        );
+        let edt = tz.local_type(1).expect("type 1 exists");
+        assert_eq!(
+            (edt.utoff, edt.is_dst, edt.name),
+            (-4 * 3600, true, name(b"EDT"))
+        );
+        assert_eq!(tz.local_type(2), None);
+        assert_eq!(tz.footer(), Some(&b"EST5EDT,M3.2.0,M11.1.0"[..]));
+    }
+
+    #[test]
+    fn the_indicators_are_read_per_type() {
+        // Two types, the second with both indicators set: what `zic` writes
+        // for a zone whose rules give transition times in UT.
+        let mut b = Buf::new();
+        for _ in 0..2 {
+            b.put(b"TZif");
+            b.put(&[b'2']);
+            b.put(&[0; 15]);
+            b.u32(2); // isutcnt
+            b.u32(2); // isstdcnt
+            b.u32(0);
+            b.u32(0); // timecnt
+            b.u32(2); // typecnt
+            b.u32(8); // charcnt
+            b.ttinfo(0, 0, 0);
+            b.ttinfo(3600, 1, 4);
+            b.put(b"AAA\0BBB\0");
+            b.put(&[0, 1]); // isstd
+            b.put(&[0, 1]); // isut
+        }
+        b.put(b"\nAAA0\n");
+        let tz = TzFile::parse(b.as_slice()).expect("valid TZif with indicators");
+        let first = tz.local_type(0).expect("type 0");
+        let second = tz.local_type(1).expect("type 1");
+        assert!(!first.is_std && !first.is_ut);
+        assert!(second.is_std && second.is_ut);
+    }
+
+    #[test]
+    fn the_footer_is_offered_even_when_it_does_not_parse() {
+        // What glibc reads and this crate refuses: a footer that is not a rule.
+        let mut b = eastern();
+        b.len -= b"EST5EDT,M3.2.0,M11.1.0\n".len();
+        b.put(b"EST5EDT,M3.2.0,Q\n");
+        let tz = TzFile::parse(b.as_slice()).expect("the file itself is valid");
+        assert_eq!(tz.tail(), None);
+        assert_eq!(tz.footer(), Some(&b"EST5EDT,M3.2.0,Q"[..]));
+    }
+
+    #[test]
+    fn a_v1_file_has_no_footer_at_all() {
+        let mut b = Buf::new();
+        header(&mut b, 0, 0, 1, 4);
+        b.ttinfo(0, 0, 0);
+        b.put(b"UTC\0");
+        let tz = TzFile::parse(b.as_slice()).expect("valid v1 TZif");
+        assert_eq!(tz.footer(), None);
+        assert_eq!(tz.type_count(), 1);
     }
 
     #[test]

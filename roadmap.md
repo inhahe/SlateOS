@@ -4118,12 +4118,17 @@ _Port ext4 first. Don't write a custom filesystem._
   clock, so a writer who does not own a file can stamp it (`B-TOUCH-WROTE-NOW-AS-A-CHOSEN-TIME`); `diff`, `patch` and
   `hostname` are on the shared `getopt` (`TD-B-DIFF-PATCH-HOSTNAME-PARSE-ARGV-BY-EXACT-MATCH`), which also fixed
   `patch ORIGFILE PATCHFILE` doing nothing (`B-PATCH-ORIGFILE-PATCHFILE-EXITS-0-HAVING-DONE-NOTHING`).
-- [ ] `[B]` What the date parser's harness found in `localtime`, beneath it: `strftime` prints a year outside
+- [x] `[B]` What the date parser's harness found in `localtime`, beneath it: `strftime` prints a year outside
   1000-9999 bare where gnulib's `nstrftime` pads and signs it (`TD-B-LOCALTIME-STRFTIME-DOES-NOT-PAD-YEARS`), and `TZ`
   is resolved unlike glibc -- empty is not UTC, a POSIX rule is tried before a zoneinfo file, a rule that half-parses
   is refused rather than kept, `posixrules` is not consulted, and a rule's transitions before 1970 are the year's own
   rather than 1970's (`TD-B-LOCALTIME-RESOLVES-TZ-DIFFERENTLY-FROM-GLIBC`). Every program that prints a time reads
-  both.
+  both. **Done 2026-09-26**, both as ports rather than patches. `localtime::strftime` is two formatters now, glibc
+  2.39's `strftime` and coreutils 9.4's `nstrftime`, each caller on its upstream's (`scripts/strftime-diff.sh`: every
+  conversion x flag x width x modifier, 0 differences). `localtime`'s `tzset` module ports glibc's `tzset.c` and
+  `tzfile.c`, process-wide state included -- `posixrules` re-anchoring by the `rule_dstoff` static, `mktime`'s
+  re-read, gnulib's `TZ` switch around a date string's `TZ="..."`, which `parse_datetime` now does
+  (`design-decisions.md` §1032; `scripts/tz-diff.sh`: 234 cases, 0 differences, one deliberate xfail for `..`).
 - [x] Port rsync (replaces robocopy need) — Rust implementation: recursive, archive mode, checksums, delete, exclude/include, dry-run, progress, stats
 - [x] Port curl — Rust HTTP/1.1 client: GET/POST/PUT/DELETE/HEAD/PATCH, auth, cookies, redirects, chunked, progress, -o/-O, verbose
 - [x] Port ssh/sshd — Rust SSH-2 client: version exchange, key exchange, password auth, interactive session, host key verification; exits with the *remote* command's status and writes remote stderr to local stderr, per `ssh(1)` (2026-08-21 — both were silently discarded before; `known-issues.md` → `B-SSH-CLIENT-DISCARDED-THE-REMOTE-EXIT-STATUS-AND-ALL-OF-STDERR`). "Host key verification" became true on 2026-08-21: the client now verifies the server's `ssh-ed25519` signature over the exchange hash (`posix::ed25519`) *before* consulting `known_hosts`, refuses any host-key algorithm it cannot verify, range-checks the server's DH value per RFC 4253 §8, and draws both the DH private exponent and the KEXINIT cookie from `posix::random`. Previously it read the signature blob and threw it away unread, prompted about the fingerprint before the exchange hash even existed, and derived its DH exponent from two compile-time constants — identical in every copy of the binary — so the whole `known_hosts` mechanism was decorative and the session key was public. `known-issues.md` → `B-THE-SSH-STACK-AUTHENTICATED-NOBODY`. Interactive shell sessions depend on the *server* having a pty — see the sshd line further down.

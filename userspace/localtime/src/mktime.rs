@@ -261,14 +261,17 @@ fn convertible_bounds() -> (i64, i64) {
 impl Zone {
     /// `localtime_r`: the `struct tm` for UTC instant `t` in this zone, or
     /// `None` where glibc fails with `EOVERFLOW` — when the local year does
-    /// not fit in `tm_year`.
+    /// not fit in `tm_year`, or, in a POSIX-rule zone, when the UTC year does
+    /// not (glibc breaks the instant down in UTC first, to pick the year whose
+    /// rules apply).
     #[must_use]
     pub fn localtime_r(&self, t: i64) -> Option<StructTm> {
         let (lo, hi) = convertible_bounds();
         if !(lo..=hi).contains(&t) {
             return None;
         }
-        StructTm::from_tm(&self.local(t, 0))
+        let info = self.lookup_r(t)?;
+        StructTm::from_tm(&Tm::from_utc(t, 0, info))
     }
 
     /// `ranged_convert`: convert `*t`, or if that overflows, the nearest
@@ -308,6 +311,8 @@ impl Zone {
     /// The search starts from the offset the previous call found, process-wide,
     /// as glibc's does; see the module docs for when that is visible.
     pub fn mktime(&self, tm: &mut StructTm) -> Option<i64> {
+        // glibc's `mktime` begins with `__tzset ()`; see `Zone::tzset`.
+        self.tzset();
         with_mktime_offset(|offset| self.mktime_internal(tm, offset))
     }
 

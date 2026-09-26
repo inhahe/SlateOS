@@ -716,15 +716,23 @@ fn debug_mktime_not_ok(
 /// `mktime_z`: `mktime` in `zone`, writing the result through `tm` only on
 /// success — which is how upstream detects failure (`tm_wday` or `tm_yday`
 /// left at -1).
-fn mktime_z(zone: &Zone, tm: &mut StructTm, offset: &mut i64) -> i64 {
-    let mut tm1 = StructTm { tm_yday: -1, ..*tm };
-    match zone.mktime_internal(&mut tm1, offset) {
-        Some(t) => {
-            *tm = tm1;
-            t
+///
+/// As upstream's, it switches `TZ` to `zone` for the call unless that is the
+/// process's own, `process` ([`Zone::switched`]) — and glibc's `mktime` starts
+/// with a `tzset ()`. Both read zones, and a read can change how the next
+/// `posixrules` zone is anchored, so both are reproduced.
+fn mktime_z(zone: &Zone, process: &Zone, tm: &mut StructTm, offset: &mut i64) -> i64 {
+    zone.switched(process, || {
+        zone.tzset();
+        let mut tm1 = StructTm { tm_yday: -1, ..*tm };
+        match zone.mktime_internal(&mut tm1, offset) {
+            Some(t) => {
+                *tm = tm1;
+                t
+            }
+            None => -1,
         }
-        None => -1,
-    }
+    })
 }
 
 /// The zone upstream falls back to when `mktime` fails for a string that
@@ -787,9 +795,10 @@ fn tz_prefix(p: &[u8]) -> Option<(Zone, Vec<u8>, &[u8])> {
     Some((zone, value, rest))
 }
 
-/// `localtime_rz`, with the abbreviation as bytes.
-fn localtime_rz(zone: &Zone, t: i64) -> Option<StructTm> {
-    zone.localtime_r(t)
+/// `localtime_rz`: `localtime_r` in `zone`, with `TZ` switched to it and back
+/// unless it is the process's own, `process` (see [`mktime_z`]).
+fn localtime_rz(zone: &Zone, process: &Zone, t: i64) -> Option<StructTm> {
+    zone.switched(process, || zone.localtime_r(t))
 }
 
 /// `parse_datetime_body`: the whole of upstream's parse, with `mktime`'s
@@ -832,7 +841,7 @@ fn parse_datetime_body(
         None => (tzdefault, tzstring, false),
     };
 
-    let tmp = localtime_rz(tz, now.tv_sec)?;
+    let tmp = localtime_rz(tz, tzdefault, now.tv_sec)?;
 
     // The empty string is "0" — without this it would be refused when parsed
     // during a DST transition.
@@ -896,7 +905,7 @@ fn parse_datetime_body(
         let Some(probe) = start.checked_add(quarter.saturating_mul(90 * 24 * 60 * 60)) else {
             break;
         };
-        if let Some(probe_tm) = localtime_rz(tz, probe)
+        if let Some(probe_tm) = localtime_rz(tz, tzdefault, probe)
             && probe_tm.tm_isdst != tmp.tm_isdst
         {
             pc.local_time_zone_table.push(LocalZone {
@@ -1054,7 +1063,7 @@ fn parse_datetime_body(
         let tm0 = tm;
         tm.tm_wday = -1;
 
-        start = mktime_z(tz, &mut tm, offset);
+        start = mktime_z(tz, tzdefault, &mut tm, offset);
 
         if !mktime_ok(&tm0, &tm) {
             let time_zone_seen = pc.zones_seen != 0;
@@ -1065,7 +1074,7 @@ fn parse_datetime_body(
                 // string's own offset. (See `repair_zone`.)
                 let tz2 = repair_zone(pc.time_zone);
                 tm = StructTm { tm_wday: -1, ..tm0 };
-                start = mktime_z(&tz2, &mut tm, offset);
+                start = mktime_z(&tz2, tzdefault, &mut tm, offset);
                 repaired = mktime_ok(&tm0, &tm);
             }
             if !repaired {
@@ -1093,7 +1102,7 @@ fn parse_datetime_body(
             if let Some(mday) = moved {
                 tm.tm_mday = mday;
                 tm.tm_isdst = -1;
-                start = mktime_z(tz, &mut tm, offset);
+                start = mktime_z(tz, tzdefault, &mut tm, offset);
             }
             if tm.tm_yday < 0 {
                 if pc.debugging() {
@@ -1176,7 +1185,7 @@ fn parse_datetime_body(
             tm.tm_sec = tm0.tm_sec;
             tm.tm_isdst = tm0.tm_isdst;
             tm.tm_wday = -1;
-            start = mktime_z(tz, &mut tm, offset);
+            start = mktime_z(tz, tzdefault, &mut tm, offset);
             if tm.tm_wday < 0 {
                 if pc.debugging() {
                     let msg = format!(
@@ -1303,7 +1312,7 @@ fn parse_datetime_body(
 
             // Crossing a DST change by a time adjustment (bug#8357).
             if tm.tm_isdst != -1
-                && let Some(lmt) = localtime_rz(tz, t4)
+                && let Some(lmt) = localtime_rz(tz, tzdefault, t4)
                 && tm.tm_isdst != lmt.tm_isdst
             {
                 pc.dbg_printf(b"warning: daylight saving time changed after time adjustment\n");
@@ -1333,7 +1342,7 @@ fn parse_datetime_body(
             let msg = format!("final: {} (UTC)\n", debug_strfdatetime(&gmt, None));
             pc.dbg_printf(msg.as_bytes());
         }
-        if let Some(lmt) = localtime_rz(tz, result.tv_sec) {
+        if let Some(lmt) = localtime_rz(tz, tzdefault, result.tv_sec) {
             // `time_zone_str` takes an int; tm_gmtoff always fits one.
             let utcoff = i32::try_from(lmt.tm_gmtoff).unwrap_or(0);
             let msg = format!(

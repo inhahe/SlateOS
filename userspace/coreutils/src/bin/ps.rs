@@ -1316,8 +1316,8 @@ impl ListCtx {
     /// with no space between them, five characters either way, which is why
     /// the column is exactly five wide.
     fn format_stime(&self, start_epoch: i64) -> String {
-        let started = self.zone.local(start_epoch, 0);
-        let now = self.zone.local(self.now_epoch, 0);
+        let started = self.zone.localtime(start_epoch, 0);
+        let now = self.zone.localtime(self.now_epoch, 0);
         let same_day =
             started.year == now.year && started.month == now.month && started.day == now.day;
         let fmt: &[u8] = if same_day { b"%H:%M" } else { b"%b%d" };

@@ -83,7 +83,7 @@
 
 mod tzif;
 
-pub use tzif::TzFile;
+pub use tzif::{LocalTimeType, TzFile};
 
 /// Longest zone abbreviation stored, in bytes.
 ///
@@ -128,8 +128,10 @@ impl TzName {
         Self { bytes, len: 3 }
     };
 
-    /// Build a name from bytes, rejecting anything that will not fit.
-    fn new(src: &[u8]) -> Option<Self> {
+    /// Build a name from bytes, rejecting anything longer than
+    /// [`TZ_NAME_CAP`].
+    #[must_use]
+    pub fn new(src: &[u8]) -> Option<Self> {
         if src.len() > TZ_NAME_CAP {
             return None;
         }

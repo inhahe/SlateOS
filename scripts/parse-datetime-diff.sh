@@ -36,11 +36,9 @@
 #
 # UTC, three zoneinfo zones chosen for their transitions (New York's hour,
 # Lord Howe's half-hour DST, Kolkata's half-hour offset with none), and a
-# POSIX rule. Not `TZ=`, `TZ=EST5EDT` or a zone name that does not exist:
-# glibc resolves those differently from `localtime::Zone` today (empty is
-# "Universal"; a file is tried before a POSIX rule), which is a defect in how
-# `TZ` is read rather than in this parser -- `known-issues.md` →
-# `TD-B-LOCALTIME-RESOLVES-TZ-DIFFERENTLY-FROM-GLIBC`.
+# POSIX rule -- whose transitions, before 1970, are 1970's, as glibc computes
+# them. How each kind of `TZ` value is *read* is `tz-diff.sh`'s question, not
+# this parser's.
 #
 # ## Cases that differ on purpose
 #
@@ -196,16 +194,6 @@ date_once() {
 # marker that outlives its bug is a false statement about the tree.
 declare -A KNOWN=()
 known_bug() { KNOWN[$2]=$1; }
-
-# glibc computes a POSIX rule's transitions from 1970-01-01 for every year up
-# to 1970, so under a northern rule nothing before 1970 is ever daylight time.
-# `localtime` computes each year's own transitions, so a June in year 21, or in
-# year -2147481623, is CEST to us and CET to glibc -- and the instant moves
-# with it.
-known_bug TD-B-LOCALTIME-RESOLVES-TZ-DIFFERENTLY-FROM-GLIBC \
-  "TZ=CET-1CEST,M3.5.0,M10.5.0/3 date -d 0021-06-15 +%s|%m-%d %T %Z %z"
-known_bug TD-B-LOCALTIME-RESOLVES-TZ-DIFFERENTLY-FROM-GLIBC \
-  "TZ=CET-1CEST,M3.5.0,M10.5.0/3 date -d -2147483649 years +%s|%m-%d %T %Z %z"
 
 verdict() {
   local label=$1 o=$2 g=$3 key=${KNOWN[$1]:-}

@@ -166056,6 +166056,14 @@ and neither can make an item yet (the calendar only imports `.ics`, the
 reminders list only opens JSON), so each wants a way to add one before a store
 is worth much. Lane E's.
 
+**The calendar, 2026-09-26.** Events are added (N, or New event in the top
+bar), changed (Enter, or a second press on an event) and deleted (Delete, which
+asks) in a form, and kept in `calendar/events.txt` in the settings directory,
+written after every change and read whole or not at all (design-decisions
+§1209). Its empty line now says how to add one; what the last import or export
+did has a line of its own under the top bar, where it had been drawn across the
+top bar's buttons. The reminders list remains.
+
 ### [E] The explorer's file-type columns showed the same invented values for every file -- 2026-09-25
 **Status:** FIXED for pictures, source files and zip archives (lane E, 2026-09-25); OPEN for audio files, a picture's colour depth, and tar, gzip, 7z and rar archives -- lane E's.
 

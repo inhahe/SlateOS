@@ -15,5 +15,19 @@ oswindow = { path = "../../gui/window" }
 # truncates the target before writing it.
 safeio = { path = "../safeio" }
 
+# Where the events are kept (the settings folder), and the escapes their text
+# is written with -- as the notes library and the address book keep theirs.
+settingsfile = { path = "../../gui/settingsfile" }
+textfmt = { path = "../../textfmt" }
+
+# The keys a one-line field answers, for the event form.
+textline = { path = "../textline" }
+
+# "Your latest changes are not saved", asked the way every editor here asks.
+unsaved = { path = "../unsaved" }
+
+[dev-dependencies]
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
+
 [lints]
 workspace = true

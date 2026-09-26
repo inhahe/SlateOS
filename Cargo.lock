@@ -246,6 +246,10 @@ dependencies = [
  "guitk",
  "oswindow",
  "safeio",
+ "settingsfile",
+ "textfmt",
+ "textline",
+ "unsaved",
 ]
 
 [[package]]

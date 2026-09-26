@@ -374,6 +374,7 @@ mod imp {
     use coreutils::chowncore::{Ids, Options, chown_files};
     use coreutils::diag;
     use coreutils::errmsg::strerror;
+    use coreutils::getopt::Report;
     use coreutils::quote::{os_bytes, quote, quoteaf_os};
     use coreutils::stdfd::{self, Stream};
     use coreutils::userspec::{Spec, gid_to_name, uid_to_name};

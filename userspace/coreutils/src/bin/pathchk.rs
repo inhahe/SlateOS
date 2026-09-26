@@ -346,6 +346,7 @@ fn validate(file: &[u8], checks: Checks, sys: &impl System, diags: &mut Vec<Stri
 mod imp {
     use super::{PATHCHK, Request, System, help_text, parse_args, validate};
     use coreutils::diag;
+    use coreutils::getopt::Report;
     use coreutils::pathname::{NameLimit, pathconf};
     use coreutils::quote::{os_bytes, os_from_bytes};
     use coreutils::stdfd::{self, Stream};

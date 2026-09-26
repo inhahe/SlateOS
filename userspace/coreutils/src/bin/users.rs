@@ -163,6 +163,7 @@ mod imp {
     use super::{Request, USERS, UTMP_FILE, help_text, parse_args, user_line};
     use coreutils::diag;
     use coreutils::errmsg::strerror;
+    use coreutils::getopt::Report;
     use coreutils::quote::quotef_os;
     use coreutils::stdfd::{self, Stream};
     use std::ffi::OsString;

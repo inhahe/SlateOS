@@ -44,7 +44,7 @@
 
 use coreutils::diag;
 use coreutils::errmsg::strerror;
-use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::locale::{Category, hard_locale};
 use coreutils::mbswidth::mbswidth;
 use coreutils::quote::{os_bytes, quote, quotef};

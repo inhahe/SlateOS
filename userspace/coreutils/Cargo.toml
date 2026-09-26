@@ -29,6 +29,10 @@ ere = { path = "../ere" }
 # 777 utility crates that do not depend on this bundle had 1798 diagnostics
 # doing exactly that, with no way to call the fix. See design-decisions.md §370.
 quoting = { path = "../quoting" }
+# glibc's getopt_long, which lived here as `src/getopt.rs` until 2026-09-26 and
+# is now shared with the programs outside coreutils. `coreutils::getopt`
+# re-exports it, so the binaries' imports did not change.
+getoptlong = { path = "../getoptlong" }
 # One definition of an exact integer, shared with `bc`, `dc` and `genius-cli`.
 # GNU `expr` is arbitrary-precision — `expr 9223372036854775807 + 1` answers
 # 9223372036854775808 — and a shell script reaches those sizes by accident.

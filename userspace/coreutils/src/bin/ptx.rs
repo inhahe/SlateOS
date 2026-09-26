@@ -41,7 +41,7 @@
 
 use coreutils::diag;
 use coreutils::errmsg::strerror;
-use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::quote::{os_bytes, quote, quotef};
 use coreutils::stdfd::{self, Stream};
 use coreutils::xnum::{self, Status};

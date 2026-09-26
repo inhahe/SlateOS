@@ -83,6 +83,7 @@ fn line(id: i64) -> String {
 #[cfg(unix)]
 mod imp {
     use super::{HOSTID, Request, help_text, line, parse_args};
+    use coreutils::getopt::Report;
     use coreutils::stdfd::{self, Stream};
     use std::ffi::OsString;
     use std::io::Write;

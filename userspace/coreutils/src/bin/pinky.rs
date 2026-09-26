@@ -301,6 +301,7 @@ mod imp {
     };
     use coreutils::diag;
     use coreutils::errmsg::strerror;
+    use coreutils::getopt::Report;
     use coreutils::locale::{Category, hard_locale};
     use coreutils::quote::{os_bytes, os_from_bytes, quotef};
     use coreutils::stdfd::{self, Stream};

@@ -53,7 +53,7 @@
 //!   one -- `setenv`, `env` and `posix_spawn`'s callers all write `NAME=VALUE`
 //!   -- so the difference is unreachable rather than accepted.
 
-use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::quote::os_bytes;
 use std::ffi::OsString;
 

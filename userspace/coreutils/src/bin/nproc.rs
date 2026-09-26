@@ -271,6 +271,7 @@ mod imp {
         Cpus, NPROC, Refusal, Request, after_ignoring, help_text, num_processors, parse_args,
     };
     use coreutils::diag;
+    use coreutils::getopt::Report;
     use coreutils::quote::os_bytes;
     use coreutils::stdfd::{self, Stream};
     use std::ffi::OsString;

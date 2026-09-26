@@ -430,6 +430,7 @@ dependencies = [
  "blake2",
  "charwidth",
  "ere",
+ "getoptlong",
  "localtime",
  "md5",
  "modechange",
@@ -1036,6 +1037,13 @@ version = "0.1.0"
 dependencies = [
  "quoting",
  "usageerror",
+]
+
+[[package]]
+name = "getoptlong"
+version = "0.1.0"
+dependencies = [
+ "quoting",
 ]
 
 [[package]]

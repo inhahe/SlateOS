@@ -58,7 +58,7 @@
 
 #![cfg_attr(not(unix), allow(dead_code))]
 
-use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::quote::{os_bytes, quote};
 use coreutils::randint::{RandError, RandInt};
 use coreutils::stdfd;

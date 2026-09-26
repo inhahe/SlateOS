@@ -28,7 +28,7 @@
 //! `scripts/unlink-diff.sh`, which covers both programs.
 
 use coreutils::errmsg::strerror;
-use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::quote::{os_bytes, quote, quoteaf_os};
 use std::ffi::OsString;
 

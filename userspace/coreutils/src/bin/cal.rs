@@ -119,7 +119,7 @@ use std::io::Write as _;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use coreutils::getopt::{Error, Opt, Program, Takes};
+use coreutils::getopt::{Error, Opt, Program, Report, Takes};
 use coreutils::quote::{escape_unprintable, os_bytes, quoteaf_os};
 use coreutils::stdfd::{self, Stream};
 

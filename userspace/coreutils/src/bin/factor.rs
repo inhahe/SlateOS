@@ -49,7 +49,7 @@
 //! `scripts/factor-diff.sh`.
 
 use coreutils::bignat::Nat;
-use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::quote::{os_bytes, quote};
 use coreutils::stdfd::{self, Stream};
 use std::cmp::Ordering;

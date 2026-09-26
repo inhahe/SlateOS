@@ -122,7 +122,7 @@
 use crate::basenc::{base64_encode, is_base64};
 use crate::diag;
 use crate::errmsg::strerror;
-use crate::getopt::{self, Opt, Program, Takes};
+use crate::getopt::{self, Opt, Program, Report, Takes};
 use crate::quote::{os_bytes, os_from_bytes, quote, quotef};
 // Imported as a module rather than by item: this file already has a `Stream`,
 // the hash trait, so `stdfd::Stream` has to stay spelled out.

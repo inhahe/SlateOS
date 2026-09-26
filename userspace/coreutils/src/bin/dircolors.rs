@@ -43,7 +43,7 @@
 //! `scripts/dircolors-diff.sh`.
 
 use coreutils::fnmatch::{Flags, fnmatch};
-use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::pathname::last_component;
 use coreutils::quote::{os_bytes, quote};
 use std::ffi::OsString;

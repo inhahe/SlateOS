@@ -48,7 +48,7 @@
 
 use crate::diag;
 use crate::errmsg::strerror;
-use crate::getopt::{self, Opt, Program as Prog, Takes};
+use crate::getopt::{self, Opt, Program as Prog, Report, Takes};
 use crate::quote::{os_bytes, os_from_bytes, quote, quotef};
 use crate::stdfd::{self, Stream};
 use crate::xnum::{Status, xstrtoimax};

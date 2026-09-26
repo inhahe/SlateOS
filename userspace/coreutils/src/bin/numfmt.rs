@@ -39,7 +39,7 @@
 //! `scripts/numfmt-diff.sh`.
 
 use coreutils::extfloat::{ExtF80, Spec, render};
-use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::quote::{os_bytes, quote, quoteaf};
 use coreutils::setfields::{self, Range};
 use coreutils::xnum::{Status, xstrtoimax, xstrtoumax};

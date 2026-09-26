@@ -301,6 +301,7 @@ mod imp {
     use super::{MKNOD, Node, Refusal, Request, help_text, mode_for, parse_args, read_operands};
     use coreutils::diag;
     use coreutils::errmsg::strerror;
+    use coreutils::getopt::Report;
     use coreutils::pathname::c_path;
     use coreutils::quote::{quoteaf_os, quotef_os};
     use coreutils::stdfd::{self, Stream};

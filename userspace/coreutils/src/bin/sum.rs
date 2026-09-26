@@ -35,7 +35,7 @@
 //! `scripts/sum-diff.sh`.
 
 use coreutils::digest::{Fed, feed_file};
-use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::quote::os_bytes;
 use coreutils::stdfd::{self, Stream};
 use coreutils::sum::{Bsd, Sysv, output_bsd, output_sysv};

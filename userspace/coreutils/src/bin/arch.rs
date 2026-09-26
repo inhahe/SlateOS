@@ -30,7 +30,7 @@
 //!
 //! `scripts/arch-diff.sh`, which also compares the answer with `uname -m`.
 
-use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::quote::{os_bytes, quote};
 use coreutils::utsname::MACHINE;
 use std::ffi::OsString;

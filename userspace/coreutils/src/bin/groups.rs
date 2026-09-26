@@ -117,6 +117,7 @@ fn report_process(ids: Ids, db: &Db, process_groups: &[u32]) -> Output {
 mod imp {
     use super::{Request, help_text, parse_args, report_process, report_user};
     use coreutils::diag;
+    use coreutils::getopt::Report;
     use coreutils::grouplist::{Output, current_ids, process_groups};
     use coreutils::quote::{os_bytes, quote};
     use coreutils::stdfd::{self, Stream};

@@ -297,6 +297,7 @@ mod imp {
     use super::{NewSize, Plan, Rel, Request, help_text, new_size, parse_args};
     use coreutils::diag;
     use coreutils::errmsg::strerror;
+    use coreutils::getopt::Report;
     use coreutils::quote::quoteaf_os;
     use coreutils::stdfd::{self, Stream};
     use std::ffi::{OsStr, OsString};

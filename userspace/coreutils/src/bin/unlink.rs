@@ -29,7 +29,7 @@
 //! `scripts/unlink-diff.sh`, which also covers `link`.
 
 use coreutils::errmsg::strerror;
-use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::quote::{os_bytes, quote, quoteaf_os};
 use std::ffi::OsString;
 

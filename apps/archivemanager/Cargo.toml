@@ -15,6 +15,9 @@ oswindow = { path = "../../gui/window" }
 # `create_sample_archive`; the Test and Extract buttons had nothing behind
 # them because nothing in the program had ever read a file.
 ziparchive = { path = "../../ziparchive" }
+# The TAR reader and writer, and the gzip a .tar.gz is wrapped in.
+tararchive = { path = "../tararchive" }
+deflate = { path = "../../deflate" }
 
 [lints]
 workspace = true

@@ -553,7 +553,7 @@ pub struct NewMember<'a> {
 /// # Errors
 ///
 /// When `w` does.
-pub fn write_header<W: Write>(w: &mut W, member: &NewMember) -> io::Result<()> {
+pub fn write_header<W: Write + ?Sized>(w: &mut W, member: &NewMember) -> io::Result<()> {
     let mut pax = Vec::new();
     let (prefix, name) = match split_name(member.name) {
         Some(split) => split,
@@ -605,7 +605,7 @@ pub fn write_header<W: Write>(w: &mut W, member: &NewMember) -> io::Result<()> {
 /// # Errors
 ///
 /// When `w` does.
-pub fn write_padding<W: Write>(w: &mut W, size: u64) -> io::Result<()> {
+pub fn write_padding<W: Write + ?Sized>(w: &mut W, size: u64) -> io::Result<()> {
     let rest = size % BLOCK;
     if rest == 0 {
         return Ok(());
@@ -619,7 +619,7 @@ pub fn write_padding<W: Write>(w: &mut W, size: u64) -> io::Result<()> {
 /// # Errors
 ///
 /// When `w` does.
-pub fn write_end<W: Write>(w: &mut W) -> io::Result<()> {
+pub fn write_end<W: Write + ?Sized>(w: &mut W) -> io::Result<()> {
     w.write_all(&[0; 1024])
 }
 

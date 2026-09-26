@@ -1,7 +1,8 @@
 //! Slate OS Archive Manager
 //!
 //! Graphical archive/compressed file manager supporting multiple formats:
-//! - ZIP, TAR, TAR.GZ, TAR.BZ2, 7Z
+//! - ZIP, TAR and TAR.GZ, read and written; TAR.BZ2 and 7z recognised and
+//!   refused by name
 //! - Browse archive contents in a tree view
 //! - Extract all, extract selected, extract to folder
 //! - Create a new, empty archive, then add files to it
@@ -33,9 +34,9 @@
 //!
 //! Uses the guitk library for UI rendering.
 //!
-//! Reading is real for ZIP only, and lives in [`backend`]; the other formats
-//! listed above are modelled but not yet parsed, and say so rather than
-//! pretending.
+//! Reading and writing are real for ZIP, TAR and TAR.GZ, and live in
+//! [`backend`]; TAR.BZ2 and 7z are modelled but not parsed -- each needs a
+//! decompressor this tree does not have -- and say so rather than pretending.
 
 mod backend;
 
@@ -199,8 +200,9 @@ pub struct ArchiveEntry {
     pub compressed_size: u64,
     /// Last modification timestamp (seconds since epoch).
     pub modified: u64,
-    /// CRC-32 checksum.
-    pub crc32: u32,
+    /// CRC-32 checksum, where the format keeps one: ZIP does, TAR does not --
+    /// and a column of zeros would read as a checksum of zero.
+    pub crc32: Option<u32>,
     /// Whether this entry is encrypted.
     pub encrypted: bool,
     /// Compression method used for this entry.
@@ -730,6 +732,9 @@ pub struct ArchiveTestResults {
     pub tested: usize,
     pub passed: usize,
     pub failed: usize,
+    /// Where the archive stopped being readable, if it did: the members
+    /// before it can pass and the archive still not be whole.
+    pub damage: Option<String>,
 }
 
 impl ArchiveTestResults {
@@ -740,6 +745,7 @@ impl ArchiveTestResults {
             tested: 0,
             passed: 0,
             failed: 0,
+            damage: None,
         }
     }
 
@@ -764,7 +770,7 @@ impl ArchiveTestResults {
 
     /// Whether all tested entries passed.
     pub fn all_passed(&self) -> bool {
-        self.failed == 0 && self.tested > 0
+        self.failed == 0 && self.tested > 0 && self.damage.is_none()
     }
 
     /// One line for the status bar, naming a failure rather than only
@@ -779,6 +785,16 @@ impl ArchiveTestResults {
     /// like the archive was changing.
     #[must_use]
     pub fn summary(&self) -> String {
+        // The members before a damaged place can all pass; the archive is
+        // still not whole, and that is the more important half of the line.
+        match &self.damage {
+            Some(damage) => format!("{}; but {damage}", self.members_summary()),
+            None => self.members_summary(),
+        }
+    }
+
+    /// [`Self::summary`] for the members alone.
+    fn members_summary(&self) -> String {
         if self.tested == 0 {
             return String::from("Nothing to test — the archive holds no files");
         }
@@ -845,6 +861,10 @@ pub struct ArchiveModel {
     pub is_split: bool,
     /// Comment embedded in the archive (ZIP/7z support this).
     pub comment: String,
+    /// Where a damaged archive stopped being readable, and why: its members
+    /// before that are listed, and nothing after it is. `None` for an archive
+    /// that read to its end.
+    pub damage: Option<String>,
     /// The archive's bytes and the parser's own view of them, where this
     /// model came from a real file. `None` for a model built by hand (the
     /// tests do that, and so does an empty model), and that is the whole
@@ -874,6 +894,7 @@ impl ArchiveModel {
             encrypted: false,
             is_split: false,
             comment: String::new(),
+            damage: None,
             source: None,
             next_id: 1,
         }
@@ -1357,10 +1378,14 @@ impl AppState {
                     )
                 } else {
                     format!(
-                        "{total_files} files, {} dirs | {} -> {} | Ratio: {ratio:.1}% | View: {view} (Ctrl+L)",
+                        "{total_files} files, {} dirs | {} -> {} | Ratio: {ratio:.1}% | View: {view} (Ctrl+L){}",
                         archive.dir_count,
                         ArchiveEntry::format_size(archive.total_size),
                         ArchiveEntry::format_size(archive.total_compressed),
+                        archive
+                            .damage
+                            .as_ref()
+                            .map_or_else(String::new, |d| format!(" | Damaged: {d}")),
                     )
                 }
             }
@@ -2038,7 +2063,9 @@ pub fn render_file_row(
         frame.push(RenderCommand::Text {
             x: x + 4.0,
             y: y + 4.0,
-            text: ArchiveEntry::format_crc(entry.crc32),
+            text: entry
+                .crc32
+                .map_or_else(|| String::from("-"), ArchiveEntry::format_crc),
             color: pal.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
@@ -3793,7 +3820,7 @@ mod tests {
             size: 1000,
             compressed_size: 600,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: "Deflate".into(),
             depth: 0,
@@ -3814,7 +3841,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: "Store".into(),
             depth: 0,
@@ -3835,7 +3862,7 @@ mod tests {
             size: 100,
             compressed_size: 200,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: "Store".into(),
             depth: 0,
@@ -3902,7 +3929,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -3922,7 +3949,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 2,
@@ -4081,7 +4108,7 @@ mod tests {
             size: 100,
             compressed_size: 80,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4104,7 +4131,7 @@ mod tests {
                 size: 0,
                 compressed_size: 0,
                 modified: 0,
-                crc32: 0,
+                crc32: Some(0),
                 encrypted: false,
                 method: String::new(),
                 depth: 0,
@@ -4119,7 +4146,7 @@ mod tests {
                 size: 500,
                 compressed_size: 300,
                 modified: 0,
-                crc32: 0,
+                crc32: Some(0),
                 encrypted: false,
                 method: String::new(),
                 depth: 1,
@@ -4304,7 +4331,7 @@ mod tests {
             size: 100,
             compressed_size: 50,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: "Deflate".into(),
             depth: 0,
@@ -4329,7 +4356,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: "Stored".into(),
             depth: 0,
@@ -4351,7 +4378,7 @@ mod tests {
             size: 1000,
             compressed_size: 400,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4378,7 +4405,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4393,7 +4420,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4418,7 +4445,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4443,7 +4470,7 @@ mod tests {
             size: 100,
             compressed_size: 50,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4458,7 +4485,7 @@ mod tests {
             size: 200,
             compressed_size: 100,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4483,7 +4510,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4498,7 +4525,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4525,7 +4552,7 @@ mod tests {
             size: 10,
             compressed_size: 5,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4540,7 +4567,7 @@ mod tests {
             size: 9999,
             compressed_size: 5000,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4566,7 +4593,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4581,7 +4608,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4604,7 +4631,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4619,7 +4646,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 1,
@@ -4838,7 +4865,10 @@ mod tests {
             .find(|e| e.path == "README.md")
             .expect("no README.md in the sample");
         assert_eq!(readme.method, "Deflate");
-        assert_ne!(readme.crc32, 0, "the checksum was invented, not computed");
+        assert!(
+            readme.crc32.is_some_and(|c| c != 0),
+            "the checksum was invented, not computed"
+        );
     }
 
     // --- calendar boundaries, asserted through the surface that renders them ---
@@ -5984,7 +6014,7 @@ fewer than all {all} entries, and this one shows {in_folder}"
                 compressed_size: 5,
                 is_dir: false,
                 modified: 0,
-                crc32: 0,
+                crc32: Some(0),
                 encrypted: false,
                 method: String::from("Deflate"),
                 depth: 0,
@@ -6048,7 +6078,7 @@ fewer than all {all} entries, and this one shows {in_folder}"
                 compressed_size: 5,
                 is_dir: false,
                 modified: 0,
-                crc32: 0,
+                crc32: Some(0),
                 encrypted: false,
                 method: String::from("Deflate"),
                 depth: 0,
@@ -6166,7 +6196,7 @@ fewer than all {all} entries, and this one shows {in_folder}"
                 compressed_size: 5,
                 is_dir: false,
                 modified: 0,
-                crc32: 0,
+                crc32: Some(0),
                 encrypted: false,
                 method: String::from("Deflate"),
                 depth: 0,

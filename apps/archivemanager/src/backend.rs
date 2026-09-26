@@ -11,10 +11,18 @@
 //!
 //! ZIP, via the workspace's [`ziparchive`] crate — the same parser the kernel
 //! links, promoted out of `kernel/src/fs/zip.rs` at lane C's request precisely
-//! so that this program would not have to grow a second one. TAR, TAR.GZ,
-//! TAR.BZ2 and 7z are named by [`ArchiveFormat`] and are refused here in words
+//! so that this program would not have to grow a second one.
+//!
+//! TAR and TAR.GZ, via [`tararchive`] and the workspace's `deflate`: listed,
+//! extracted, tested, and written back -- a member added or deleted, a new
+//! archive created. A TAR is read in place like a ZIP; a TAR.GZ is one gzip
+//! stream over the whole archive, so it is inflated into memory (under the
+//! same [`MAX_ARCHIVE_BYTES`] as everything else) and rewritten whole. What
+//! the bytes are decides, not the name: a gzipped `.tar` opens as a TAR.GZ.
+//!
+//! TAR.BZ2 and 7z are named by [`ArchiveFormat`] and refused here in words
 //! rather than silently mis-parsed: `ArchiveError::NotYetReadable` says which
-//! format it was and that this build has a ZIP back end only.
+//! format it was. Each needs a decompressor this tree does not have.
 //!
 //! # An entry name is not a path
 //!
@@ -75,6 +83,10 @@ pub enum ArchiveError {
     NotYetReadable { format: ArchiveFormat },
     /// The ZIP parser refused the bytes.
     Zip(ziparchive::Error),
+    /// A `.tar` whose first block is not a TAR header.
+    NotTar { why: tararchive::Damage },
+    /// A `.tar.gz` whose gzip stream will not inflate.
+    Gzip(deflate::Error),
 }
 
 impl fmt::Display for ArchiveError {
@@ -90,10 +102,19 @@ impl fmt::Display for ArchiveError {
             Self::UnknownFormat { name } => {
                 write!(f, "{name} does not end in an archive extension I know")
             }
-            Self::NotYetReadable { format } => {
-                write!(f, "{} — this build reads ZIP only", format.display_name())
-            }
+            Self::NotYetReadable { format } => write!(
+                f,
+                "{} — this build reads ZIP, TAR and TAR.GZ",
+                format.display_name()
+            ),
             Self::Zip(e) => write!(f, "{e}"),
+            Self::NotTar { why } => write!(f, "it is not a TAR archive: {why}"),
+            Self::Gzip(deflate::Error::OutputTooLarge) => write!(
+                f,
+                "it inflates to more than {}, the most this program reads",
+                guitk::bytes::iec(MAX_ARCHIVE_BYTES)
+            ),
+            Self::Gzip(e) => write!(f, "its gzip stream will not inflate: {e}"),
         }
     }
 }
@@ -117,8 +138,24 @@ impl fmt::Display for ArchiveError {
 pub struct ArchiveSource {
     /// Where the archive's bytes are, and how to reach them.
     bytes: ArchiveBytes,
-    /// The parsed central directory, by the id the model gave each entry.
-    members: HashMap<u64, ziparchive::ZipEntry>,
+    /// Each member's record, by the id the model gave its entry.
+    members: Members,
+}
+
+/// The parser's own record of each member: a ZIP's central directory, or a
+/// TAR's headers.
+enum Members {
+    Zip(HashMap<u64, ziparchive::ZipEntry>),
+    Tar(HashMap<u64, tararchive::Entry>),
+}
+
+impl Members {
+    fn len(&self) -> usize {
+        match self {
+            Self::Zip(m) => m.len(),
+            Self::Tar(m) => m.len(),
+        }
+    }
 }
 
 /// Where an archive's bytes live.
@@ -252,10 +289,23 @@ impl ArchiveSource {
         self.bytes.len()
     }
 
-    /// The central-directory record the entry with this id came from.
+    /// The central-directory record the entry with this id came from, for a
+    /// ZIP.
     #[must_use]
     pub fn member(&self, id: u64) -> Option<&ziparchive::ZipEntry> {
-        self.members.get(&id)
+        match &self.members {
+            Members::Zip(m) => m.get(&id),
+            Members::Tar(_) => None,
+        }
+    }
+
+    /// The header the entry with this id came from, for a TAR.
+    #[must_use]
+    pub fn tar_member(&self, id: u64) -> Option<&tararchive::Entry> {
+        match &self.members {
+            Members::Tar(m) => m.get(&id),
+            Members::Zip(_) => None,
+        }
     }
 
     /// How many members the archive declared.
@@ -281,7 +331,7 @@ pub fn open(path: &Path) -> Result<ArchiveModel, ArchiveError> {
             ),
         });
     };
-    if format != ArchiveFormat::Zip {
+    if matches!(format, ArchiveFormat::TarBz2 | ArchiveFormat::SevenZip) {
         return Err(ArchiveError::NotYetReadable { format });
     }
     // Ask the size before reading, so an archive too big to hold is refused by
@@ -303,13 +353,229 @@ pub fn open(path: &Path) -> Result<ArchiveModel, ArchiveError> {
         path: path.to_path_buf(),
         source,
     })?;
-    parse_zip(
-        path,
-        ArchiveBytes::File {
-            file: std::cell::RefCell::new(file),
-            len: size,
-        },
-    )
+    let bytes = ArchiveBytes::File {
+        file: std::cell::RefCell::new(file),
+        len: size,
+    };
+    if format == ArchiveFormat::Zip {
+        return parse_zip(path, bytes);
+    }
+    // A TAR or a TAR.GZ, by what its bytes are rather than its name: gzip's
+    // magic, or not.
+    let mut magic = [0_u8; 2];
+    let read = bytes
+        .read_at(0, &mut magic)
+        .map_err(|source| ArchiveError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if read == 2 && magic == [0x1F, 0x8B] {
+        let compressed = read_all(&bytes).map_err(|source| ArchiveError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let limit = usize::try_from(MAX_ARCHIVE_BYTES).unwrap_or(usize::MAX);
+        let tar = deflate::gunzip_limited(&compressed, limit).map_err(ArchiveError::Gzip)?;
+        drop(compressed);
+        parse_tar(path, ArchiveBytes::Memory(tar), ArchiveFormat::TarGz, size)
+    } else {
+        parse_tar(path, bytes, ArchiveFormat::Tar, size)
+    }
+}
+
+/// All of `bytes`, read into memory -- a gzipped archive, to inflate.
+fn read_all(bytes: &ArchiveBytes) -> io::Result<Vec<u8>> {
+    let len = usize::try_from(bytes.len()).unwrap_or(usize::MAX);
+    let mut buf = vec![0; len];
+    let got = bytes.read_at(0, &mut buf)?;
+    buf.truncate(got);
+    Ok(buf)
+}
+
+/// [`ArchiveBytes`] as a `Read + Seek`, for [`tararchive::list`].
+struct SeekReader<'a> {
+    bytes: &'a ArchiveBytes,
+    pos: u64,
+}
+
+impl io::Read for SeekReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.bytes.read_at(self.pos, buf)?;
+        self.pos = self.pos.saturating_add(n as u64);
+        Ok(n)
+    }
+}
+
+impl io::Seek for SeekReader<'_> {
+    fn seek(&mut self, to: io::SeekFrom) -> io::Result<u64> {
+        let (base, offset) = match to {
+            io::SeekFrom::Start(at) => {
+                self.pos = at;
+                return Ok(at);
+            }
+            io::SeekFrom::End(off) => (self.bytes.len(), off),
+            io::SeekFrom::Current(off) => (self.pos, off),
+        };
+        self.pos = base.checked_add_signed(offset).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "a seek before the start")
+        })?;
+        Ok(self.pos)
+    }
+}
+
+/// Parse `bytes` as a TAR -- inflated already, for a `.tar.gz` -- under the
+/// name `path`. `on_disk` is the file's own size: a TAR.GZ's compressed size
+/// is the whole stream's, since gzip compresses the archive at once and not
+/// each member.
+///
+/// # Errors
+///
+/// [`ArchiveError::NotTar`] if the first block is not a TAR header, and
+/// [`ArchiveError::Io`] if the bytes will not read. An archive damaged further
+/// in is listed as far as it reads, and [`ArchiveModel::damage`] says where.
+pub fn parse_tar(
+    path: &Path,
+    bytes: ArchiveBytes,
+    format: ArchiveFormat,
+    on_disk: u64,
+) -> Result<ArchiveModel, ArchiveError> {
+    let listing = tararchive::list(&mut SeekReader {
+        bytes: &bytes,
+        pos: 0,
+    })
+    .map_err(|source| ArchiveError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if let tararchive::End::Damaged { at: 0, why } = listing.end {
+        return Err(ArchiveError::NotTar { why });
+    }
+    let mut model = ArchiveModel::new(path, format);
+    let mut by_id = HashMap::with_capacity(listing.entries.len());
+    for member in listing.entries {
+        let display = tar_display_path(&member.name);
+        // `./` is the archive's own root, which `tar -C dir .` writes first.
+        if display.is_empty() || display == "." {
+            continue;
+        }
+        let name = display
+            .rsplit_once('/')
+            .map_or(display.as_str(), |(_, last)| last)
+            .to_string();
+        let carries = carries_bytes(member.kind);
+        let size = if carries { member.size } else { 0 };
+        let id = model.add_entry(ArchiveEntry {
+            depth: u32::try_from(display.matches('/').count()).unwrap_or(u32::MAX),
+            name,
+            is_dir: member.kind == tararchive::Kind::Directory,
+            size,
+            compressed_size: size,
+            modified: u64::try_from(member.mtime).unwrap_or(0),
+            crc32: None,
+            encrypted: false,
+            method: tar_method(member.kind, format),
+            path: display,
+            expanded: false,
+            selected: false,
+            id: 0, // assigned by add_entry
+        });
+        by_id.insert(id, member);
+    }
+    if format == ArchiveFormat::TarGz {
+        model.total_compressed = on_disk;
+    }
+    model.damage = match listing.end {
+        tararchive::End::Damaged { at, why } => Some(format!(
+            "the archive is damaged {} in -- {why}; nothing after that is listed",
+            guitk::bytes::iec(at)
+        )),
+        tararchive::End::TooManyMembers => Some(format!(
+            "only the first {} members are listed",
+            tararchive::MAX_MEMBERS
+        )),
+        tararchive::End::Marker | tararchive::End::EndOfFile => None,
+    };
+    model.source = Some(ArchiveSource {
+        bytes,
+        members: Members::Tar(by_id),
+    });
+    model.rebuild_tree();
+    Ok(model)
+}
+
+/// Whether a member of `kind` has bytes of its own in the archive. A kind
+/// this does not know keeps whatever bytes its header says it has, so a
+/// rewrite does not drop them.
+fn carries_bytes(kind: tararchive::Kind) -> bool {
+    matches!(kind, tararchive::Kind::File | tararchive::Kind::Other(_))
+}
+
+/// What the Method column says for a TAR member: how its bytes are stored,
+/// or what it is when it has none.
+fn tar_method(kind: tararchive::Kind, format: ArchiveFormat) -> String {
+    match kind {
+        tararchive::Kind::File if format == ArchiveFormat::TarGz => String::from("Gzip"),
+        tararchive::Kind::File => String::from("Stored"),
+        tararchive::Kind::Directory => String::new(),
+        tararchive::Kind::Symlink => String::from("Symbolic link"),
+        tararchive::Kind::HardLink => String::from("Hard link"),
+        tararchive::Kind::CharDevice | tararchive::Kind::BlockDevice => String::from("Device"),
+        tararchive::Kind::Fifo => String::from("Pipe"),
+        tararchive::Kind::Other(flag) => format!("Type {}", char::from(flag)),
+    }
+}
+
+/// A TAR member's name to show: [`display_path`], less the `./` that `tar -C
+/// dir .` puts in front of every name.
+fn tar_display_path(raw: &[u8]) -> String {
+    display_path(without_dot_slash(raw))
+}
+
+/// Whether two member names are the same file: equal once each has lost the
+/// `./` a TAR may put in front.
+fn same_name(a: &[u8], b: &[u8]) -> bool {
+    without_dot_slash(a) == without_dot_slash(b)
+}
+
+/// `name` less any `./` in front of it.
+fn without_dot_slash(mut name: &[u8]) -> &[u8] {
+    while let Some(rest) = name.strip_prefix(b"./") {
+        name = rest;
+    }
+    name
+}
+
+/// How much of a member is copied at once: a member of a gigabyte is not
+/// held whole to be written out.
+const COPY_CHUNK: usize = 1024 * 1024;
+
+/// Copy `size` bytes at `offset` in the archive to `out`, a chunk at a time.
+fn copy_bytes(
+    bytes: &ArchiveBytes,
+    offset: u64,
+    size: u64,
+    out: &mut (impl io::Write + ?Sized),
+) -> Result<(), SkipReason> {
+    let mut buf = vec![0; COPY_CHUNK];
+    let mut done = 0_u64;
+    while done < size {
+        let want = usize::try_from(size.saturating_sub(done))
+            .unwrap_or(usize::MAX)
+            .min(COPY_CHUNK);
+        let chunk = buf.get_mut(..want).unwrap_or(&mut []);
+        let got = bytes
+            .read_at(offset.saturating_add(done), chunk)
+            .map_err(SkipReason::Unreadable)?;
+        if got < want {
+            return Err(SkipReason::Unreadable(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the archive ends inside this member",
+            )));
+        }
+        out.write_all(chunk).map_err(SkipReason::Io)?;
+        done = done.saturating_add(want as u64);
+    }
+    Ok(())
 }
 
 /// Parse bytes already in hand as a ZIP, under the name `path`.
@@ -348,7 +614,7 @@ pub fn parse_zip(path: &Path, bytes: ArchiveBytes) -> Result<ArchiveModel, Archi
             size: member.uncompressed_size,
             compressed_size: member.compressed_size,
             modified: dos_datetime_to_unix(member.dos_datetime),
-            crc32: member.crc32,
+            crc32: Some(member.crc32),
             // General-purpose bit 0, read rather than assumed. This column used
             // to be a hardcoded `false`, which was the right answer for every
             // archive SlateOS writes and the wrong one for every archive that
@@ -365,7 +631,7 @@ pub fn parse_zip(path: &Path, bytes: ArchiveBytes) -> Result<ArchiveModel, Archi
     }
     model.source = Some(ArchiveSource {
         bytes,
-        members: by_id,
+        members: Members::Zip(by_id),
     });
     model.rebuild_tree();
     Ok(model)
@@ -490,6 +756,13 @@ pub enum SkipReason {
     Zip(ziparchive::Error),
     /// The file or its directory could not be written.
     Io(io::Error),
+    /// A symbolic link. Not made: a link can point outside the destination,
+    /// and a member extracted after it could then be written through it.
+    SymbolicLink,
+    /// A device or a pipe, which is not a file to write.
+    NotAFile,
+    /// A hard link to a member the archive does not hold.
+    LinkTargetMissing,
     /// The archive itself could not be read at that member's offset.
     ///
     /// Separate from [`Self::Io`], which is the *output* failing, and from
@@ -525,6 +798,13 @@ impl fmt::Display for SkipReason {
             Self::Zip(e) => write!(f, "{e}"),
             Self::Io(e) => write!(f, "{e}"),
             Self::Unreadable(e) => write!(f, "the archive could not be read: {e}"),
+            Self::SymbolicLink => f.write_str(
+                "it is a symbolic link, which this build does not make: a link can point outside the destination",
+            ),
+            Self::NotAFile => f.write_str("it is a device or a pipe, not a file"),
+            Self::LinkTargetMissing => {
+                f.write_str("it is a hard link to a member this archive does not hold")
+            }
         }
     }
 }
@@ -629,6 +909,105 @@ fn safe_destination(dest: &Path, raw: &[u8]) -> Result<PathBuf, SkipReason> {
 /// report and the rest are still extracted, because a user who asked for 900
 /// files and can have 897 of them wants the 897.
 pub fn extract(source: &ArchiveSource, members: &[&ArchiveEntry], dest: &Path) -> ExtractReport {
+    match &source.members {
+        Members::Zip(_) => extract_zip(source, members, dest),
+        Members::Tar(map) => extract_tar(&source.bytes, map, members, dest),
+    }
+}
+
+/// [`extract`] for a TAR: a file's bytes copied out a chunk at a time, a
+/// directory made, a hard link written as a copy of its target. A symbolic
+/// link is not made -- see [`SkipReason::SymbolicLink`] -- and neither is a
+/// device or a pipe.
+fn extract_tar(
+    bytes: &ArchiveBytes,
+    map: &HashMap<u64, tararchive::Entry>,
+    members: &[&ArchiveEntry],
+    dest: &Path,
+) -> ExtractReport {
+    let mut report = ExtractReport::default();
+    for entry in members {
+        let Some(member) = map.get(&entry.id) else {
+            report
+                .skipped
+                .push((entry.path.clone(), SkipReason::Escapes));
+            continue;
+        };
+        let target = match safe_destination(dest, &member.name) {
+            Ok(p) => p,
+            Err(why) => {
+                report.skipped.push((entry.path.clone(), why));
+                continue;
+            }
+        };
+        // What to copy: the member's own bytes, or for a hard link its
+        // target's -- the first file of that name, which a TAR writes before
+        // any link to it.
+        let from = match member.kind {
+            tararchive::Kind::Directory => {
+                match fs::create_dir_all(&target) {
+                    Ok(()) => report.directories = report.directories.saturating_add(1),
+                    Err(e) => report.skipped.push((entry.path.clone(), SkipReason::Io(e))),
+                }
+                continue;
+            }
+            tararchive::Kind::File | tararchive::Kind::Other(_) => member,
+            tararchive::Kind::HardLink => {
+                let original = member.link.as_ref().and_then(|link| {
+                    map.values()
+                        .find(|m| m.kind == tararchive::Kind::File && same_name(&m.name, link))
+                });
+                match original {
+                    Some(original) => original,
+                    None => {
+                        report
+                            .skipped
+                            .push((entry.path.clone(), SkipReason::LinkTargetMissing));
+                        continue;
+                    }
+                }
+            }
+            tararchive::Kind::Symlink => {
+                report
+                    .skipped
+                    .push((entry.path.clone(), SkipReason::SymbolicLink));
+                continue;
+            }
+            tararchive::Kind::CharDevice
+            | tararchive::Kind::BlockDevice
+            | tararchive::Kind::Fifo => {
+                report
+                    .skipped
+                    .push((entry.path.clone(), SkipReason::NotAFile));
+                continue;
+            }
+        };
+        if let Some(parent) = target.parent()
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            report.skipped.push((entry.path.clone(), SkipReason::Io(e)));
+            continue;
+        }
+        let written = fs::File::create(&target)
+            .map_err(SkipReason::Io)
+            .and_then(|mut file| copy_bytes(bytes, from.offset, from.size, &mut file));
+        match written {
+            Ok(()) => {
+                report.written = report.written.saturating_add(1);
+                report.bytes = report.bytes.saturating_add(from.size);
+            }
+            Err(why) => {
+                // A file cut off part-way is not left looking like the member.
+                let _ = fs::remove_file(&target);
+                report.skipped.push((entry.path.clone(), why));
+            }
+        }
+    }
+    report
+}
+
+/// [`extract`] for a ZIP.
+fn extract_zip(source: &ArchiveSource, members: &[&ArchiveEntry], dest: &Path) -> ExtractReport {
     let mut report = ExtractReport::default();
     for entry in members {
         let Some(member) = source.member(entry.id) else {
@@ -708,9 +1087,14 @@ pub fn extract(source: &ArchiveSource, members: &[&ArchiveEntry], dest: &Path) -
 pub fn verify(model: &ArchiveModel) -> ArchiveTestResults {
     let files: Vec<&ArchiveEntry> = model.entries.iter().filter(|e| !e.is_dir).collect();
     let mut results = ArchiveTestResults::new(files.len());
+    results.damage.clone_from(&model.damage);
     let Some(source) = model.source.as_ref() else {
         return results;
     };
+    if let Members::Tar(map) = &source.members {
+        verify_tar(&source.bytes, map, &files, &mut results);
+        return results;
+    }
     for entry in files {
         let result = match source.member(entry.id) {
             None => TestResult::Corrupted(String::from("no record of this entry in the archive")),
@@ -743,6 +1127,48 @@ pub fn verify(model: &ArchiveModel) -> ArchiveTestResults {
         results.record(&entry.path, result);
     }
     results
+}
+
+/// [`verify`] for a TAR: every member's bytes read back from the archive.
+/// A TAR keeps no checksum of a member's contents -- only of its header,
+/// which the listing already checked -- so what can fail is the archive
+/// ending inside a member, or the disk not answering.
+fn verify_tar(
+    bytes: &ArchiveBytes,
+    map: &HashMap<u64, tararchive::Entry>,
+    files: &[&ArchiveEntry],
+    results: &mut ArchiveTestResults,
+) {
+    for entry in files {
+        let result = match map.get(&entry.id) {
+            None => TestResult::Corrupted(String::from("no record of this entry in the archive")),
+            Some(member) if carries_bytes(member.kind) => {
+                match copy_bytes(bytes, member.offset, member.size, &mut io::sink()) {
+                    Ok(()) => TestResult::Ok,
+                    Err(SkipReason::Unreadable(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                        TestResult::Corrupted(String::from("the archive ends inside it"))
+                    }
+                    Err(why) => TestResult::Unreadable(why.to_string()),
+                }
+            }
+            Some(member) if member.kind == tararchive::Kind::HardLink => {
+                let target = member.link.as_ref().and_then(|link| {
+                    map.values()
+                        .find(|m| m.kind == tararchive::Kind::File && same_name(&m.name, link))
+                });
+                match target {
+                    Some(_) => TestResult::Ok,
+                    None => TestResult::Corrupted(String::from(
+                        "it links to a member the archive does not hold",
+                    )),
+                }
+            }
+            // A link or a device: its header is all there is, and the listing
+            // checked it.
+            Some(_) => TestResult::Ok,
+        };
+        results.record(&entry.path, result);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -784,6 +1210,9 @@ pub struct PendingAdd {
     /// The file's mtime as the DOS pair, or `0` if it had none this build
     /// could express.
     pub dos_datetime: u32,
+    /// The file's mtime in seconds since 1970 -- what a TAR records -- or `0`
+    /// if it had none.
+    pub mtime: i64,
 }
 
 /// Why an archive could not be rewritten.
@@ -822,6 +1251,8 @@ pub enum SaveError {
     UnknownMember { name: String },
     /// The new archive could not be written, or could not replace the old one.
     Io { path: PathBuf, source: io::Error },
+    /// A format this build cannot write.
+    Unwritable { format: ArchiveFormat },
 }
 
 impl fmt::Display for SaveError {
@@ -846,6 +1277,11 @@ impl fmt::Display for SaveError {
                  Re-open the archive"
             ),
             Self::Io { path, source } => write!(f, "cannot write {}: {source}", path.display()),
+            Self::Unwritable { format } => write!(
+                f,
+                "this build writes ZIP, TAR and TAR.GZ, and not {}",
+                format.display_name()
+            ),
         }
     }
 }
@@ -924,7 +1360,18 @@ pub fn read_for_add(path: &Path) -> Result<PendingAdd, ArchiveError> {
         name,
         data,
         dos_datetime: dos_datetime_of(&meta),
+        mtime: unix_mtime_of(&meta),
     })
+}
+
+/// A file's mtime in seconds since 1970, or `0` when it has none this build
+/// can read.
+fn unix_mtime_of(meta: &fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+        .unwrap_or(0)
 }
 
 /// A file's mtime as the DOS pair, or `0` when there is not one this build can
@@ -1043,6 +1490,9 @@ fn save_within(
     limit: u64,
 ) -> Result<SaveReport, SaveError> {
     let source = model.source.as_ref().ok_or(SaveError::NoSource)?;
+    if let Members::Tar(map) = &source.members {
+        return save_tar(model, source, map, adding, limit);
+    }
 
     // Before anything is allocated, and before the old archive is touched.
     let projected = projected_save_bytes(source, model, &adding);
@@ -1141,13 +1591,153 @@ fn save_within(
     })
 }
 
-/// Write an empty ZIP at `path`.
+/// [`save`] for a TAR or a TAR.GZ: the model's members, in its order, less
+/// those an added file of the same name displaces, then the added files.
+///
+/// A TAR is written to the file as it is produced, a member at a time, its
+/// bytes copied across a chunk at a time. A TAR.GZ is one gzip stream over
+/// the whole archive, so the archive is built in memory and compressed --
+/// which is what its projection counts, and refuses past `limit`.
+fn save_tar(
+    model: &ArchiveModel,
+    source: &ArchiveSource,
+    map: &HashMap<u64, tararchive::Entry>,
+    adding: Vec<PendingAdd>,
+    limit: u64,
+) -> Result<SaveReport, SaveError> {
+    let gzipped = model.format == ArchiveFormat::TarGz;
+    let added_bytes: u64 = adding.iter().map(|a| a.data.len() as u64).sum();
+    let projected = if gzipped {
+        // The archive being built -- every member padded, two headers each
+        // at most -- and its compressed copy beside it.
+        let members: u64 = model
+            .entries
+            .iter()
+            .filter_map(|e| map.get(&e.id))
+            .map(|m| {
+                m.size
+                    .div_ceil(512)
+                    .saturating_mul(512)
+                    .saturating_add(1024)
+            })
+            .sum();
+        let tar = members
+            .saturating_add(
+                added_bytes.saturating_add(1024_u64.saturating_mul(adding.len() as u64)),
+            )
+            .saturating_add(1024);
+        tar.saturating_mul(2).saturating_add(added_bytes)
+    } else {
+        added_bytes.saturating_add(COPY_CHUNK as u64)
+    };
+    if projected > limit {
+        return Err(SaveError::WouldExhaustMemory { projected, limit });
+    }
+    let added = adding.len();
+    let write = |out: &mut dyn io::Write| -> Result<(usize, usize), SaveError> {
+        let failed = |source: io::Error| SaveError::Io {
+            path: model.path.clone(),
+            source,
+        };
+        let (mut written, mut replaced) = (0_usize, 0_usize);
+        for entry in &model.entries {
+            let Some(member) = map.get(&entry.id) else {
+                return Err(SaveError::UnknownMember {
+                    name: entry.path.clone(),
+                });
+            };
+            if adding.iter().any(|add| same_name(&add.name, &member.name)) {
+                replaced = replaced.saturating_add(1);
+                continue;
+            }
+            let size = if carries_bytes(member.kind) {
+                member.size
+            } else {
+                0
+            };
+            tararchive::write_header(
+                &mut *out,
+                &tararchive::NewMember {
+                    name: &member.name,
+                    kind: member.kind,
+                    mode: member.mode,
+                    mtime: member.mtime,
+                    size,
+                    link: member.link.as_deref(),
+                },
+            )
+            .map_err(failed)?;
+            copy_bytes(&source.bytes, member.offset, size, &mut *out).map_err(|why| match why {
+                SkipReason::Io(e) => failed(e),
+                why => SaveError::CannotReproduce {
+                    name: entry.path.clone(),
+                    why,
+                },
+            })?;
+            tararchive::write_padding(&mut *out, size).map_err(failed)?;
+            written = written.saturating_add(1);
+        }
+        for add in &adding {
+            let size = add.data.len() as u64;
+            tararchive::write_header(
+                &mut *out,
+                &tararchive::NewMember {
+                    name: &add.name,
+                    kind: tararchive::Kind::File,
+                    mode: 0o644,
+                    mtime: add.mtime,
+                    size,
+                    link: None,
+                },
+            )
+            .map_err(failed)?;
+            out.write_all(&add.data).map_err(failed)?;
+            tararchive::write_padding(&mut *out, size).map_err(failed)?;
+            written = written.saturating_add(1);
+        }
+        tararchive::write_end(&mut *out).map_err(failed)?;
+        Ok((written, replaced))
+    };
+    let ((written, replaced), bytes) = if gzipped {
+        let mut tar = Vec::new();
+        let counts = write(&mut tar)?;
+        let gz = deflate::gzip(&tar);
+        drop(tar);
+        replace_file(&model.path, &gz)?;
+        (counts, gz.len() as u64)
+    } else {
+        replace_file_with(&model.path, |file| write(file))?
+    };
+    Ok(SaveReport {
+        members: written,
+        added,
+        replaced,
+        bytes,
+    })
+}
+
+/// Write an empty archive at `path`, in the format its name says -- a ZIP
+/// when it names none. An empty TAR is its two closing blocks; an empty
+/// TAR.GZ, those gzipped.
+///
+/// It wrote an empty ZIP whatever the name, so a new `backup.tar` was a ZIP
+/// under a TAR's name, which nothing then opened as either.
 ///
 /// # Errors
 ///
-/// [`SaveError::Io`] if the file cannot be written.
+/// [`SaveError::Io`] if the file cannot be written, and
+/// [`SaveError::Unwritable`] for a format this build does not write.
 pub fn create_empty(path: &Path) -> Result<(), SaveError> {
-    replace_file(path, &ziparchive::create(&[]))
+    let empty_tar = [0_u8; 1024];
+    let bytes = match ArchiveFormat::from_path(path) {
+        None | Some(ArchiveFormat::Zip) => ziparchive::create(&[]),
+        Some(ArchiveFormat::Tar) => empty_tar.to_vec(),
+        Some(ArchiveFormat::TarGz) => deflate::gzip(&empty_tar),
+        Some(format @ (ArchiveFormat::TarBz2 | ArchiveFormat::SevenZip)) => {
+            return Err(SaveError::Unwritable { format });
+        }
+    };
+    replace_file(path, &bytes)
 }
 
 /// Put `bytes` at `path` without ever leaving `path` half-written.
@@ -1858,8 +2448,16 @@ mod tests {
         let tar = dir.join("bundle.tar.gz");
         fs::write(&tar, b"not really").expect("write it");
         match open(&tar) {
+            Err(e @ ArchiveError::NotTar { .. }) => {
+                assert!(e.to_string().contains("not a TAR archive"), "{e}");
+            }
+            other => panic!("expected it to be said not to be a TAR, got {other:?}"),
+        }
+        let seven = dir.join("bundle.7z");
+        fs::write(&seven, b"7z\xBC\xAF\x27\x1C").expect("write it");
+        match open(&seven) {
             Err(e @ ArchiveError::NotYetReadable { .. }) => {
-                assert!(e.to_string().contains("reads ZIP only"), "{e}");
+                assert!(e.to_string().contains("reads ZIP, TAR and TAR.GZ"), "{e}");
             }
             other => panic!("expected a refusal naming the format, got {other:?}"),
         }
@@ -2183,6 +2781,7 @@ mod tests {
                 name: b"new.txt".to_vec(),
                 data: b"brand new".to_vec(),
                 dos_datetime: dos(2026, 8, 26, 14, 30, 52),
+                mtime: 0,
             }],
         )
         .expect("the rewrite succeeds");
@@ -2231,6 +2830,7 @@ mod tests {
                 name: b"dup.txt".to_vec(),
                 data: b"the new one".to_vec(),
                 dos_datetime: 0,
+                mtime: 0,
             }],
         )
         .expect("the rewrite succeeds");
@@ -2467,6 +3067,311 @@ mod tests {
             "the temporary must be renamed away, not left beside the archive: {left:?}"
         );
 
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ------------------------------------------------------------------
+    // TAR and TAR.GZ
+    // ------------------------------------------------------------------
+
+    /// A TAR archive of a folder, a file in it, a file at the root, a hard
+    /// link to the first file and a symbolic link -- written by the same
+    /// writer `save` uses.
+    fn tar_fixture() -> Vec<u8> {
+        use tararchive::{Kind, NewMember};
+        let mut out = Vec::new();
+        let mut put = |name: &str, kind: Kind, data: &[u8], link: Option<&str>| {
+            tararchive::write_header(
+                &mut out,
+                &NewMember {
+                    name: name.as_bytes(),
+                    kind,
+                    mode: 0o644,
+                    mtime: 1_700_000_000,
+                    size: data.len() as u64,
+                    link: link.map(str::as_bytes),
+                },
+            )
+            .unwrap();
+            out.extend_from_slice(data);
+            tararchive::write_padding(&mut out, data.len() as u64).unwrap();
+        };
+        put("./", Kind::Directory, b"", None);
+        put("./docs/", Kind::Directory, b"", None);
+        put("./docs/readme.txt", Kind::File, b"read me first", None);
+        put("./top.bin", Kind::File, &[7; 1300], None);
+        put(
+            "./again.txt",
+            Kind::HardLink,
+            b"",
+            Some("./docs/readme.txt"),
+        );
+        put("./shortcut", Kind::Symlink, b"", Some("/etc/passwd"));
+        tararchive::write_end(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn a_tar_is_listed_as_it_holds() {
+        let dir = scratch("tar-list");
+        let path = dir.join("bundle.tar");
+        fs::write(&path, tar_fixture()).unwrap();
+        let model = open(&path).expect("a TAR opens");
+        assert_eq!(model.format, ArchiveFormat::Tar);
+        let paths: Vec<&str> = model.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "docs",
+                "docs/readme.txt",
+                "top.bin",
+                "again.txt",
+                "shortcut"
+            ],
+            "`./` is the root, not a member, and no name keeps its `./`"
+        );
+        let readme = &model.entries[1];
+        assert_eq!(
+            (readme.size, readme.crc32),
+            (13, None),
+            "no checksum is invented"
+        );
+        assert_eq!(readme.method, "Stored");
+        assert_eq!(readme.modified, 1_700_000_000);
+        assert!(model.entries[0].is_dir);
+        assert_eq!(model.entries[3].method, "Hard link");
+        assert_eq!(model.entries[4].method, "Symbolic link");
+        assert_eq!(model.damage, None);
+        assert_eq!(model.total_size, 13 + 1300);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A TAR.GZ is the same archive, gzipped: inflated, listed, its
+    /// compressed size the file's. A gzipped `.tar` is one too, whatever its
+    /// name says.
+    #[test]
+    fn a_gzipped_tar_is_inflated_and_listed_whatever_it_is_called() {
+        let dir = scratch("tgz-list");
+        let gz = deflate::gzip(&tar_fixture());
+        for name in ["bundle.tar.gz", "bundle.tgz", "misnamed.tar"] {
+            let path = dir.join(name);
+            fs::write(&path, &gz).unwrap();
+            let model = open(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(model.format, ArchiveFormat::TarGz, "{name}");
+            assert_eq!(model.entries.len(), 5, "{name}");
+            assert_eq!(model.total_compressed, gz.len() as u64, "{name}");
+            assert_eq!(model.entries[1].method, "Gzip");
+        }
+        // A `.tgz` that is not gzipped is a plain TAR.
+        let plain = dir.join("plain.tgz");
+        fs::write(&plain, tar_fixture()).unwrap();
+        assert_eq!(open(&plain).unwrap().format, ArchiveFormat::Tar);
+        // A gzip stream that is damaged says so.
+        let mut broken = gz.clone();
+        let middle = broken.len() / 2;
+        broken.truncate(middle);
+        let cut = dir.join("cut.tar.gz");
+        fs::write(&cut, &broken).unwrap();
+        match open(&cut) {
+            Err(e @ ArchiveError::Gzip(_)) => assert!(e.to_string().contains("gzip"), "{e}"),
+            other => panic!("expected the gzip to be refused, got {other:?}"),
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_tar_extracts_its_files_folders_and_hard_links_and_not_its_symbolic_links() {
+        let dir = scratch("tar-extract");
+        let path = dir.join("bundle.tar");
+        fs::write(&path, tar_fixture()).unwrap();
+        let model = open(&path).unwrap();
+        let source = model.source.as_ref().unwrap();
+        let dest = dir.join("out");
+        let all: Vec<&ArchiveEntry> = model.entries.iter().collect();
+        let report = extract(source, &all, &dest);
+        assert_eq!(
+            fs::read(dest.join("docs/readme.txt")).unwrap(),
+            b"read me first"
+        );
+        assert_eq!(fs::read(dest.join("top.bin")).unwrap(), vec![7; 1300]);
+        assert_eq!(
+            fs::read(dest.join("again.txt")).unwrap(),
+            b"read me first",
+            "a hard link is written as a copy of its target"
+        );
+        assert!(!dest.join("shortcut").exists(), "a symbolic link was made");
+        assert_eq!(report.written, 3);
+        assert_eq!(report.directories, 1);
+        assert_eq!(report.skipped.len(), 1);
+        assert!(matches!(report.skipped[0].1, SkipReason::SymbolicLink));
+        assert!(
+            report.summary(&dest).contains("symbolic link"),
+            "{}",
+            report.summary(&dest)
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_tar_member_named_outside_the_destination_is_refused() {
+        let dir = scratch("tar-slip");
+        let path = dir.join("evil.tar");
+        fs::write(
+            &path,
+            tararchive::testing::tar(&[("../escape.txt", b"out".as_slice())]),
+        )
+        .unwrap();
+        let model = open(&path).unwrap();
+        let all: Vec<&ArchiveEntry> = model.entries.iter().collect();
+        let dest = dir.join("out");
+        let report = extract(model.source.as_ref().unwrap(), &all, &dest);
+        assert_eq!(report.written, 0);
+        assert!(matches!(report.skipped[0].1, SkipReason::Escapes));
+        assert!(!dir.join("escape.txt").exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_tar_test_reads_every_member_and_says_where_an_archive_is_damaged() {
+        let dir = scratch("tar-test");
+        let path = dir.join("bundle.tar");
+        fs::write(&path, tar_fixture()).unwrap();
+        let results = verify(&open(&path).unwrap());
+        assert!(results.all_passed(), "{}", results.summary());
+        assert_eq!(results.tested, 4, "every member that is not a folder");
+        // A header past the first two that does not add up: the members
+        // before it list and pass, and the archive is still said to be damaged.
+        let mut bytes = tar_fixture();
+        let second_file = 512 * 3; // "./", "./docs/", "./docs/readme.txt" + its block
+        bytes[second_file + 512] = b'X';
+        let damaged = dir.join("damaged.tar");
+        fs::write(&damaged, &bytes).unwrap();
+        let model = open(&damaged).unwrap();
+        assert!(model.damage.is_some(), "the damage was not noticed");
+        assert!(model.entries.len() < 5);
+        let results = verify(&model);
+        assert!(!results.all_passed());
+        assert!(
+            results.summary().contains("damaged"),
+            "{}",
+            results.summary()
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Adding to a TAR, deleting from it, and the same for a TAR.GZ: the file
+    /// is rewritten in its own format, and reads back as the list said.
+    #[test]
+    fn a_tar_and_a_tar_gz_are_rewritten_in_their_own_format() {
+        let dir = scratch("tar-save");
+        for (name, gzipped) in [("bundle.tar", false), ("bundle.tar.gz", true)] {
+            let path = dir.join(name);
+            let bytes = tar_fixture();
+            fs::write(
+                &path,
+                if gzipped {
+                    deflate::gzip(&bytes)
+                } else {
+                    bytes
+                },
+            )
+            .unwrap();
+            let mut model = open(&path).unwrap();
+            // Delete top.bin, add new.txt, replace docs/readme.txt's name? No:
+            // add a file of a name already there, which displaces it.
+            model.entries.retain(|e| e.path != "top.bin");
+            let report = save(
+                &model,
+                vec![
+                    PendingAdd {
+                        name: b"new.txt".to_vec(),
+                        data: b"fresh".to_vec(),
+                        dos_datetime: 0,
+                        mtime: 1_600_000_000,
+                    },
+                    PendingAdd {
+                        name: b"docs/readme.txt".to_vec(),
+                        data: b"read me second".to_vec(),
+                        dos_datetime: 0,
+                        mtime: 0,
+                    },
+                ],
+            )
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!((report.added, report.replaced), (2, 1), "{name}");
+            let after = open(&path).unwrap();
+            assert_eq!(
+                after.format,
+                if gzipped {
+                    ArchiveFormat::TarGz
+                } else {
+                    ArchiveFormat::Tar
+                }
+            );
+            let paths: Vec<&str> = after.entries.iter().map(|e| e.path.as_str()).collect();
+            assert_eq!(
+                paths,
+                [
+                    "docs",
+                    "again.txt",
+                    "shortcut",
+                    "new.txt",
+                    "docs/readme.txt"
+                ],
+                "{name}"
+            );
+            let new = after.entries.iter().find(|e| e.path == "new.txt").unwrap();
+            assert_eq!(new.modified, 1_600_000_000, "{name}");
+            let dest = dir.join(format!("{name}-out"));
+            let all: Vec<&ArchiveEntry> = after.entries.iter().collect();
+            extract(after.source.as_ref().unwrap(), &all, &dest);
+            assert_eq!(fs::read(dest.join("new.txt")).unwrap(), b"fresh");
+            assert_eq!(
+                fs::read(dest.join("docs/readme.txt")).unwrap(),
+                b"read me second"
+            );
+            let link = after.entries.iter().find(|e| e.path == "shortcut").unwrap();
+            assert_eq!(link.method, "Symbolic link", "a link is kept as a link");
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_new_archive_is_written_in_the_format_its_name_says() {
+        let dir = scratch("tar-create");
+        for (name, format) in [
+            ("new.tar", ArchiveFormat::Tar),
+            ("new.tar.gz", ArchiveFormat::TarGz),
+            ("new.zip", ArchiveFormat::Zip),
+        ] {
+            let path = dir.join(name);
+            create_empty(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let model = open(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(model.format, format, "{name}");
+            assert!(model.entries.is_empty(), "{name}");
+        }
+        match create_empty(&dir.join("new.7z")) {
+            Err(e @ SaveError::Unwritable { .. }) => {
+                assert!(e.to_string().contains("7-Zip"), "{e}");
+            }
+            other => panic!("expected 7z to be refused, got {other:?}"),
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_tar_gz_too_large_to_rebuild_in_memory_is_refused_before_anything_is_touched() {
+        let dir = scratch("tgz-limit");
+        let path = dir.join("big.tar.gz");
+        let tar = tararchive::testing::tar(&[("a.bin", [1; 4000].as_slice())]);
+        fs::write(&path, deflate::gzip(&tar)).unwrap();
+        let before = fs::read(&path).unwrap();
+        let model = open(&path).unwrap();
+        match save_within(&model, Vec::new(), 1000) {
+            Err(SaveError::WouldExhaustMemory { .. }) => {}
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(fs::read(&path).unwrap(), before, "the archive changed");
         fs::remove_dir_all(&dir).ok();
     }
 }

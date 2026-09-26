@@ -59,8 +59,10 @@ name = "archivemanager"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "deflate",
  "guitk",
  "oswindow",
+ "tararchive",
  "ziparchive",
 ]
 
@@ -819,6 +821,7 @@ dependencies = [
  "associations",
  "audiotags",
  "byteread",
+ "deflate",
  "guitk",
  "imagecodec",
  "mediaprobe",
@@ -826,6 +829,7 @@ dependencies = [
  "pathcodec",
  "scratchdir",
  "settingsfile",
+ "tararchive",
  "textfind",
  "thumbs",
  "yamldoc",

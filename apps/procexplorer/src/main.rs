@@ -23,6 +23,8 @@ use guitk::table::{Column, Fit, Table};
 use guitk::text;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -578,7 +580,123 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("F5", "Refresh now"),
     ("Ctrl+F", "Jump to the filter box"),
     ("Delete", "Kill the selected process"),
+    ("Ctrl+N", "Run a new task"),
 ];
+
+/// The longest command line the New Task box takes, in characters.
+const RUN_BOX_CAPACITY: usize = 4096;
+
+/// The size the New Task box's command line is drawn at.
+const RUN_BOX_TEXT_SIZE: f32 = 12.0;
+
+/// The file manager, which opens a file's folder with the file chosen when
+/// it is given the file's path -- where `apps/fileassoc`'s registry says it
+/// is installed.
+const FILE_MANAGER: &str = "/usr/bin/explorer";
+
+/// Start `program` with `args`, and say its process id. A field of the
+/// explorer's, so a test can see what would have been started without
+/// starting it.
+///
+/// `OsStr`, not `str`: what is handed over can be a path, and a path may hold
+/// any byte but `/` and NUL.
+type Spawner = fn(&OsStr, &[OsString]) -> std::io::Result<u32>;
+
+/// Start a program, not waiting for it: it is the user's, not the
+/// explorer's, and outlives it.
+fn spawn_program(program: &OsStr, args: &[OsString]) -> std::io::Result<u32> {
+    std::process::Command::new(program)
+        .args(args)
+        .spawn()
+        .map(|child| child.id())
+}
+
+/// A command line as its words, as a shell splits them: white space between
+/// words; `'...'` taken as it is; `"..."` with `\"` and `\\` escaped; a
+/// backslash elsewhere taking the next character as it is.
+///
+/// No expansion of any kind -- no variables, globs or `~` -- because nothing
+/// here is a shell, and a run box that half-expanded would be worse than one
+/// that plainly does not.
+fn split_command_line(line: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            '\'' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        Some(c) => word.push(c),
+                        None => return Err(String::from("a ' is not closed")),
+                    }
+                }
+            }
+            '"' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('\\') => match chars.next() {
+                            Some(c @ ('"' | '\\')) => word.push(c),
+                            Some(c) => {
+                                word.push('\\');
+                                word.push(c);
+                            }
+                            None => return Err(String::from("a \" is not closed")),
+                        },
+                        Some(c) => word.push(c),
+                        None => return Err(String::from("a \" is not closed")),
+                    }
+                }
+            }
+            '\\' => {
+                in_word = true;
+                match chars.next() {
+                    Some(c) => word.push(c),
+                    None => return Err(String::from("the line ends in a \\")),
+                }
+            }
+            c => {
+                in_word = true;
+                word.push(c);
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    Ok(words)
+}
+
+/// The New Task box, while it is up.
+///
+/// The complaint is the box's own: it goes when the box does, so no way of
+/// closing the box can leave one behind for the next time it opens.
+#[derive(Default)]
+struct RunBox {
+    /// The command line being typed.
+    input: guitk::textinput::TextInput,
+    /// Why the last command line did not start, until the line is edited.
+    error: Option<String>,
+}
+
+/// Where the New Task box and its parts are: left, top, width, height each.
+struct RunBoxLayout {
+    frame: (f32, f32, f32, f32),
+    field: (f32, f32, f32, f32),
+    run: (f32, f32, f32, f32),
+    cancel: (f32, f32, f32, f32),
+}
 
 /// Top-level state for the process explorer application.
 pub struct ProcessExplorerState {
@@ -640,6 +758,16 @@ pub struct ProcessExplorerState {
     /// Whether the search box is focused.
     /// Whether the shortcut card is up.
     pub show_help: bool,
+    /// The New Task box while it is up.
+    ///
+    /// The toolbar's New Task button said "New Task dialog not yet
+    /// implemented" -- the one control a task manager has for starting
+    /// something rather than stopping it.
+    run_box: Option<RunBox>,
+    /// What Ctrl+C or Ctrl+X last took from the New Task box, for Ctrl+V.
+    clipboard: String,
+    /// How programs are started; see [`Spawner`].
+    spawner: Spawner,
     pub filter_focused: bool,
 
     // -- Context menu --------------------------------------------------------
@@ -719,6 +847,9 @@ impl ProcessExplorerState {
             views_pid: None,
             filter_text: String::new(),
             show_help: false,
+            run_box: None,
+            clipboard: String::new(),
+            spawner: spawn_program,
             filter_focused: false,
             context_menu: None,
             system_info,
@@ -1237,6 +1368,15 @@ impl ProcessExplorerState {
             }
             return EventResult::Consumed;
         }
+        // The New Task box is modal too: a letter typed into a command line
+        // is not a shortcut -- and Delete is still the reason.
+        if self.run_box.is_some() {
+            return self.run_box_key(key);
+        }
+        if key.key == Key::N && key.modifiers.ctrl {
+            self.open_run_box();
+            return EventResult::Consumed;
+        }
 
         // If filter box is focused, route text input there.
         if self.filter_focused {
@@ -1376,6 +1516,13 @@ impl ProcessExplorerState {
     fn handle_mouse(&mut self, mouse: &guitk::event::MouseEvent) -> EventResult {
         let mx = mouse.x;
         let my = mouse.y;
+
+        if self.run_box.is_some() {
+            return match mouse.kind {
+                MouseEventKind::Press(MouseButton::Left) => self.run_box_press(mx, my),
+                _ => EventResult::Consumed,
+            };
+        }
 
         // If context menu is open, handle it first.
         if let Some(ref menu) = self.context_menu.clone()
@@ -1531,14 +1678,191 @@ impl ProcessExplorerState {
         if mx < 90.0 {
             self.kill_selected();
         } else if mx < 170.0 {
-            // New Task: in production, open a run dialog.
-            self.status_message = "New Task dialog not yet implemented".to_string();
+            self.open_run_box();
         } else if mx < 240.0 {
             self.refresh();
         } else if mx < 300.0 {
             self.toggle_view_mode();
         } else if mx >= self.window_width as f32 - 210.0 {
             self.filter_focused = true;
+        }
+        EventResult::Consumed
+    }
+
+    /// Put the New Task box up, empty.
+    fn open_run_box(&mut self) {
+        self.run_box = Some(RunBox::default());
+    }
+
+    /// A key while the New Task box is up: Enter runs, Escape closes, the
+    /// rest edit the command line.
+    fn run_box_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape => self.run_box = None,
+            Key::Enter => self.run_task(),
+            _ => {
+                if let Some(run_box) = self.run_box.as_mut() {
+                    let edit = textline::apply_key(
+                        &mut run_box.input,
+                        key,
+                        RUN_BOX_CAPACITY,
+                        &self.clipboard,
+                        RUN_BOX_TEXT_SIZE,
+                    );
+                    if let Some(copied) = edit.copied {
+                        self.clipboard = copied;
+                    }
+                    // An edit is a new attempt; the old complaint no longer
+                    // describes what is typed.
+                    if edit.handled {
+                        run_box.error = None;
+                    }
+                }
+            }
+        }
+        EventResult::Consumed
+    }
+
+    /// Start the command line in the New Task box. On success the box goes
+    /// and the status bar names the new process; on failure the box stays,
+    /// saying why, so the line can be corrected rather than typed again.
+    fn run_task(&mut self) {
+        let Some(run_box) = self.run_box.as_mut() else {
+            return;
+        };
+        let words = match split_command_line(run_box.input.text()) {
+            Ok(words) => words,
+            Err(why) => {
+                run_box.error = Some(why);
+                return;
+            }
+        };
+        let Some((program, args)) = words.split_first() else {
+            run_box.error = Some(String::from("Type the program to run"));
+            return;
+        };
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        match (self.spawner)(OsStr::new(program), &args) {
+            Ok(pid) => {
+                self.run_box = None;
+                // After the refresh, which writes a summary of its own over
+                // the status line.
+                self.refresh();
+                self.status_message = format!("Started {program} (PID {pid})");
+            }
+            Err(e) => run_box.error = Some(format!("Cannot run {program}: {e}")),
+        }
+    }
+
+    /// Open the folder of process `pid`'s program in the file manager, with
+    /// the program chosen. It said "(NYI)".
+    ///
+    /// The program is what `/proc/<pid>/exe` links to -- the file that was
+    /// run, which the command line's first word need not name (a relative
+    /// path, a name looked up in `PATH`, or anything the process wrote over
+    /// its own `argv[0]`).
+    fn open_file_location(&mut self, fs: &procinfo::ProcFs, pid: u32) {
+        let link = fs.root().join(pid.to_string()).join("exe");
+        match std::fs::read_link(&link) {
+            Ok(exe) => self.show_in_folder(exe),
+            Err(e) => self.status_message = format!("Cannot find PID {pid}'s program: {e}"),
+        }
+    }
+
+    /// Hand `file` to the file manager, which opens the folder it is in with
+    /// it chosen, and say so.
+    fn show_in_folder(&mut self, file: PathBuf) {
+        let shown = quoting::escape_unprintable(file.as_os_str().as_encoded_bytes());
+        self.status_message = match (self.spawner)(OsStr::new(FILE_MANAGER), &[file.into()]) {
+            Ok(_) => format!("Opened the folder of {shown}"),
+            Err(e) => format!("Cannot open the file manager: {e}"),
+        };
+    }
+
+    /// The New Task box's rectangle, its field's, and its two buttons', for
+    /// the drawing and the pointer alike.
+    fn run_box_layout(&self) -> RunBoxLayout {
+        #[allow(clippy::cast_precision_loss)]
+        let (w, h) = (self.window_width as f32, self.window_height as f32);
+        let (bw, bh) = (420.0_f32.min(w - 20.0), 150.0);
+        let (x, y) = ((w - bw) / 2.0, (h - bh) / 2.0);
+        RunBoxLayout {
+            frame: (x, y, bw, bh),
+            field: (x + 16.0, y + 44.0, bw - 32.0, 28.0),
+            run: (x + bw - 16.0 - 170.0, y + bh - 40.0, 80.0, 26.0),
+            cancel: (x + bw - 16.0 - 80.0, y + bh - 40.0, 80.0, 26.0),
+        }
+    }
+
+    /// Draw the New Task box.
+    fn render_run_box(&self, tree: &mut RenderTree) {
+        let Some(RunBox { input, error }) = self.run_box.as_ref() else {
+            return;
+        };
+        let l = self.run_box_layout();
+        let (x, y, bw, bh) = l.frame;
+        tree.fill_rect(x, y, bw, bh, self.palette.mantle);
+        tree.stroke_rect(x, y, bw, bh, self.palette.border, 1.0);
+        self.render_bold_text(
+            tree,
+            x + 16.0,
+            y + 14.0,
+            "Run a new task",
+            self.palette.text,
+            13.0,
+        );
+        let (fx, fy, fw, fh) = l.field;
+        tree.fill_rect(fx, fy, fw, fh, self.palette.base);
+        tree.stroke_rect(fx, fy, fw, fh, self.palette.accent, 1.0);
+        tree.text(
+            fx + 6.0,
+            fy + 8.0,
+            input.text(),
+            self.palette.text,
+            RUN_BOX_TEXT_SIZE,
+        );
+        let caret = fx
+            + 6.0
+            + text::caret_x(
+                input.text(),
+                input.cursor(),
+                RUN_BOX_TEXT_SIZE,
+                FontWeightHint::Regular,
+            );
+        tree.fill_rect(caret, fy + 5.0, 1.0, fh - 10.0, self.palette.text);
+        let (detail, colour) = match error {
+            Some(why) => (why.as_str(), self.palette.red),
+            None => (
+                "A program and its arguments, as in a terminal",
+                self.palette.subtext0,
+            ),
+        };
+        tree.text(fx, fy + fh + 8.0, detail, colour, 11.0);
+        for ((bx, by, bw, bh), label, fill) in [
+            (l.run, "Run", self.palette.accent),
+            (l.cancel, "Cancel", self.palette.surface1),
+        ] {
+            tree.fill_rect(bx, by, bw, bh, fill);
+            let ink = if label == "Run" {
+                self.palette.on_accent()
+            } else {
+                self.palette.text
+            };
+            tree.text(bx + 14.0, by + 6.0, label, ink, 11.0);
+        }
+    }
+
+    /// A press while the New Task box is up: its buttons answer; anywhere
+    /// else it is modal and nothing happens.
+    fn run_box_press(&mut self, x: f32, y: f32) -> EventResult {
+        let l = self.run_box_layout();
+        let inside = |(rx, ry, rw, rh): (f32, f32, f32, f32)| {
+            x >= rx && x < rx + rw && y >= ry && y < ry + rh
+        };
+        if inside(l.run) {
+            self.run_task();
+        } else if inside(l.cancel) {
+            self.run_box = None;
         }
         EventResult::Consumed
     }
@@ -1561,7 +1885,7 @@ impl ProcessExplorerState {
                 self.status_message = format!("Change priority for PID {target_pid} (dialog NYI)");
             }
             ContextAction::OpenFileLocation => {
-                self.status_message = format!("Open file location for PID {target_pid} (NYI)");
+                self.open_file_location(&procinfo::ProcFs::new(), target_pid);
             }
         }
     }
@@ -1806,6 +2130,7 @@ impl ProcessExplorerState {
 
         // Context menu overlay (drawn on top of everything)
         self.render_context_menu(&mut tree);
+        self.render_run_box(&mut tree);
 
         if self.show_help {
             #[allow(clippy::cast_precision_loss)]
@@ -3496,6 +3821,402 @@ mod tests {
     use guitk::event::MouseEvent;
 
     // --- The wheel ---
+
+    thread_local! {
+        /// What the recording spawner was asked to start, on this test's
+        /// thread.
+        static SPAWNED: std::cell::RefCell<Vec<(OsString, Vec<OsString>)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// A spawner that starts nothing and says it started PID 4242. A
+    /// `Result` because it stands in for one that can fail.
+    #[allow(clippy::unnecessary_wraps)]
+    fn recording_spawner(program: &OsStr, args: &[OsString]) -> std::io::Result<u32> {
+        SPAWNED.with(|s| s.borrow_mut().push((program.to_owned(), args.to_vec())));
+        Ok(4242)
+    }
+
+    /// What the recording spawner has been asked to start, as text.
+    fn spawned() -> Vec<(String, Vec<String>)> {
+        let text = |s: &OsString| s.to_str().expect("text").to_owned();
+        SPAWNED.with(|s| {
+            s.borrow()
+                .iter()
+                .map(|(program, args)| (text(program), args.iter().map(text).collect()))
+                .collect()
+        })
+    }
+
+    /// A spawner that cannot start anything.
+    fn failing_spawner(_: &OsStr, _: &[OsString]) -> std::io::Result<u32> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no such program",
+        ))
+    }
+
+    /// Why the New Task box says its last line did not start, if it says.
+    fn run_error(app: &ProcessExplorerState) -> Option<String> {
+        app.run_box.as_ref().and_then(|b| b.error.clone())
+    }
+
+    /// The line in the New Task box, if it is up.
+    fn run_line(app: &ProcessExplorerState) -> Option<String> {
+        app.run_box.as_ref().map(|b| b.input.text().to_owned())
+    }
+
+    fn typed(text: &str) -> KeyEvent {
+        KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: text.to_owned(),
+        }
+    }
+
+    fn pressed(key: Key, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }
+    }
+
+    /// A command line splits as a shell splits it: quotes, escapes, runs of
+    /// white space -- and an open quote is an error, not a guess.
+    #[test]
+    fn a_command_line_splits_as_a_shell_splits_it() {
+        let words = |line: &str| split_command_line(line).unwrap();
+        assert_eq!(words("  ls   -l  /tmp "), ["ls", "-l", "/tmp"]);
+        assert_eq!(words(r#"edit "my notes.txt""#), ["edit", "my notes.txt"]);
+        assert_eq!(words(r"echo 'a \ b'"), ["echo", r"a \ b"]);
+        assert_eq!(
+            words(r#"say "a \"quoted\" \\ word""#),
+            ["say", r#"a "quoted" \ word"#]
+        );
+        assert_eq!(words(r"one\ word"), ["one word"]);
+        assert_eq!(words(r#"x"y"'z'"#), ["xyz"]);
+        assert_eq!(words(r#""""#), [""], "an empty quoted word is a word");
+        assert!(words("   ").is_empty());
+        assert!(split_command_line(r#"open "never closed"#).is_err());
+        assert!(split_command_line("open 'never closed").is_err());
+        assert!(split_command_line(r"trailing \").is_err());
+    }
+
+    /// **New Task runs a program.** The button said "New Task dialog not yet
+    /// implemented". Ctrl+N puts the box up; Enter starts what is typed, and
+    /// the status bar names the new process.
+    #[test]
+    fn ctrl_n_runs_a_task_and_names_it() {
+        SPAWNED.with(|s| s.borrow_mut().clear());
+        let mut app = app_with_processes(2);
+        app.spawner = recording_spawner;
+        app.handle_key(&pressed(Key::N, Modifiers::ctrl()));
+        assert!(app.run_box.is_some(), "Ctrl+N put nothing up");
+        app.handle_key(&typed(r#"notepad "my file.txt""#));
+        app.handle_key(&pressed(Key::Enter, Modifiers::NONE));
+        assert!(app.run_box.is_none(), "the box stayed up after a start");
+        assert_eq!(
+            spawned(),
+            [(String::from("notepad"), vec![String::from("my file.txt")])]
+        );
+        assert_eq!(app.status_message, "Started notepad (PID 4242)");
+    }
+
+    /// The toolbar's New Task button puts the box up, and its Run and Cancel
+    /// buttons answer the pointer.
+    #[test]
+    fn the_new_task_button_and_the_box_answer_the_pointer() {
+        SPAWNED.with(|s| s.borrow_mut().clear());
+        let mut app = app_with_processes(1);
+        app.spawner = recording_spawner;
+        app.handle_toolbar_click(120.0);
+        assert!(app.run_box.is_some(), "the New Task button did nothing");
+        let l = app.run_box_layout();
+        let middle = |(x, y, w, h): (f32, f32, f32, f32)| (x + w / 2.0, y + h / 2.0);
+        let (cx, cy) = middle(l.cancel);
+        app.run_box_press(cx, cy);
+        assert!(app.run_box.is_none(), "Cancel did not close it");
+        app.open_run_box();
+        app.handle_key(&typed("calc"));
+        let (rx, ry) = middle(l.run);
+        app.run_box_press(rx, ry);
+        assert_eq!(SPAWNED.with(|s| s.borrow().len()), 1, "Run started nothing");
+    }
+
+    /// A program that will not start leaves the box up, saying why, with the
+    /// line still there to correct; an empty line asks for a program.
+    #[test]
+    fn a_task_that_will_not_start_says_why() {
+        let mut app = app_with_processes(1);
+        app.spawner = failing_spawner;
+        app.open_run_box();
+        app.handle_key(&pressed(Key::Enter, Modifiers::NONE));
+        assert_eq!(run_error(&app).as_deref(), Some("Type the program to run"));
+        app.handle_key(&typed("nosuchprogram"));
+        assert!(
+            run_error(&app).is_none(),
+            "an edit left the old complaint up"
+        );
+        app.handle_key(&pressed(Key::Enter, Modifiers::NONE));
+        assert!(app.run_box.is_some());
+        let why = run_error(&app).expect("a reason");
+        assert!(why.starts_with("Cannot run nosuchprogram"), "{why}");
+        let texts: Vec<String> = app
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == &why),
+            "the reason is not on screen"
+        );
+        assert!(
+            texts.iter().any(|t| t == "nosuchprogram"),
+            "the line is gone"
+        );
+    }
+
+    /// While the box is up, keys are its: Delete edits the line rather than
+    /// killing the selected process, and Escape closes it.
+    #[test]
+    fn the_run_box_takes_the_keys_while_it_is_up() {
+        let mut app = app_with_processes(2);
+        app.selected_index = Some(0);
+        app.status_message = String::from("untouched");
+        app.open_run_box();
+        app.handle_key(&typed("ab"));
+        app.handle_key(&pressed(Key::Left, Modifiers::NONE));
+        app.handle_key(&pressed(Key::Delete, Modifiers::NONE));
+        assert_eq!(run_line(&app).as_deref(), Some("a"));
+        assert_eq!(
+            app.status_message, "untouched",
+            "Delete reached the process list"
+        );
+        app.handle_key(&pressed(Key::Escape, Modifiers::NONE));
+        assert!(app.run_box.is_none());
+    }
+
+    fn left_press(app: &mut ProcessExplorerState, x: f32, y: f32) {
+        app.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+    }
+
+    /// The box is modal to the pointer as it is to the keys: a press on the
+    /// list behind it selects nothing -- the toolbar's Kill is behind it too
+    /// -- and a press on its own Cancel, through the window's own handler,
+    /// closes it.
+    #[test]
+    fn the_run_box_is_modal_to_the_pointer() {
+        let mut app = app_with_processes(3);
+        app.selected_index = Some(2);
+        let row_zero = ProcessExplorerState::rows_top() + ROW_HEIGHT / 2.0;
+        left_press(&mut app, 100.0, row_zero);
+        assert_eq!(app.selected_index, Some(0), "the row press missed row 0");
+        app.selected_index = Some(2);
+        app.open_run_box();
+        left_press(&mut app, 100.0, row_zero);
+        assert_eq!(app.selected_index, Some(2), "a press went through the box");
+        assert!(app.run_box.is_some(), "a press outside closed the box");
+        let (x, y, w, h) = app.run_box_layout().cancel;
+        left_press(&mut app, x + w / 2.0, y + h / 2.0);
+        assert!(
+            app.run_box.is_none(),
+            "Cancel through the handler did nothing"
+        );
+    }
+
+    /// What is copied in the box pastes back in it, across a close and a
+    /// reopen: the box keeps a clipboard as every field of the explorer's
+    /// does.
+    #[test]
+    fn a_line_copied_in_the_run_box_pastes_back() {
+        let mut app = app_with_processes(1);
+        app.open_run_box();
+        app.handle_key(&typed("calc --fast"));
+        app.handle_key(&pressed(Key::A, Modifiers::ctrl()));
+        app.handle_key(&pressed(Key::C, Modifiers::ctrl()));
+        app.handle_key(&pressed(Key::Escape, Modifiers::NONE));
+        app.handle_key(&pressed(Key::N, Modifiers::ctrl()));
+        app.handle_key(&pressed(Key::V, Modifiers::ctrl()));
+        assert_eq!(run_line(&app).as_deref(), Some("calc --fast"));
+    }
+
+    /// A key the line does not answer -- Tab -- is not an edit, so the
+    /// reason the last line did not start stays up.
+    #[test]
+    fn a_key_the_box_does_not_answer_keeps_the_complaint() {
+        let mut app = app_with_processes(1);
+        app.open_run_box();
+        app.handle_key(&pressed(Key::Enter, Modifiers::NONE));
+        assert_eq!(run_error(&app).as_deref(), Some("Type the program to run"));
+        app.handle_key(&pressed(Key::Tab, Modifiers::NONE));
+        assert_eq!(run_error(&app).as_deref(), Some("Type the program to run"));
+    }
+
+    /// N without Ctrl is not New Task: it is a letter, and the box stays down.
+    #[test]
+    fn a_plain_n_does_not_put_the_run_box_up() {
+        let mut app = app_with_processes(1);
+        app.handle_key(&KeyEvent {
+            text: String::from("n"),
+            ..pressed(Key::N, Modifiers::NONE)
+        });
+        assert!(app.run_box.is_none());
+    }
+
+    /// A line that does not split -- an open quote -- is not started, and
+    /// the box says what is wrong with it.
+    #[test]
+    fn a_line_with_an_open_quote_is_not_run() {
+        SPAWNED.with(|s| s.borrow_mut().clear());
+        let mut app = app_with_processes(1);
+        app.spawner = recording_spawner;
+        app.open_run_box();
+        app.handle_key(&typed("edit \"notes"));
+        app.handle_key(&pressed(Key::Enter, Modifiers::NONE));
+        assert!(spawned().is_empty(), "a line with an open quote was run");
+        assert_eq!(run_error(&app).as_deref(), Some("a \" is not closed"));
+        assert!(app.run_box.is_some());
+    }
+
+    /// Make `link` a link to the folder `target`: a symbolic link on Unix; on
+    /// Windows a junction, the one kind of link Windows lets anyone make (a
+    /// symbolic link needs an administrator or developer mode). Either way
+    /// `read_link` reads it -- which is all `/proc/<pid>/exe` is here.
+    fn make_link(target: &std::path::Path, link: &std::path::Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/J")
+                .arg(link)
+                .arg(target)
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "mklink /J failed: {made:?}");
+        }
+    }
+
+    /// Open file location reads the process's program from `/proc/<pid>/exe`
+    /// and hands the path it links to to the file manager; a process whose
+    /// program cannot be read says so and starts nothing.
+    #[test]
+    fn open_file_location_opens_the_programs_folder() {
+        SPAWNED.with(|s| s.borrow_mut().clear());
+        let dir = std::env::temp_dir().join(format!("procexplorer-exe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let tool = dir.join("tool");
+        std::fs::create_dir_all(dir.join("42")).unwrap();
+        std::fs::create_dir_all(&tool).unwrap();
+        let fs = procinfo::ProcFs::at(&dir);
+        let mut app = app_with_processes(1);
+        app.spawner = recording_spawner;
+        app.open_file_location(&fs, 7);
+        assert!(
+            app.status_message
+                .starts_with("Cannot find PID 7's program"),
+            "{}",
+            app.status_message
+        );
+        assert!(spawned().is_empty(), "a program was started on nothing");
+
+        make_link(&tool, &dir.join("42").join("exe"));
+        app.open_file_location(&fs, 42);
+        let given = SPAWNED.with(|s| s.borrow().clone());
+        assert_eq!(given.len(), 1, "{given:?}");
+        let (program, args) = &given[0];
+        assert_eq!(program, FILE_MANAGER);
+        assert_eq!(args.len(), 1, "{args:?}");
+        assert_eq!(
+            std::fs::canonicalize(&args[0]).unwrap(),
+            std::fs::canonicalize(&tool).unwrap(),
+            "the file manager was not given the program the link names"
+        );
+        assert!(
+            app.status_message.starts_with("Opened the folder of ")
+                && app.status_message.ends_with("tool"),
+            "{}",
+            app.status_message
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The context menu's Open file location looks in the real `/proc`: for
+    /// a process that cannot exist, it says it cannot find the program.
+    #[test]
+    fn the_context_menus_open_file_location_looks_for_the_program() {
+        SPAWNED.with(|s| s.borrow_mut().clear());
+        let mut app = app_with_processes(1);
+        app.spawner = recording_spawner;
+        app.execute_context_action(ContextAction::OpenFileLocation, u32::MAX);
+        let expected = format!("Cannot find PID {}'s program", u32::MAX);
+        assert!(
+            app.status_message.starts_with(&expected),
+            "{}",
+            app.status_message
+        );
+        assert!(spawned().is_empty());
+    }
+
+    /// The file manager is given the program's path as it is, and the status
+    /// bar says so -- or says the file manager would not start.
+    #[test]
+    fn show_in_folder_hands_the_path_to_the_file_manager() {
+        SPAWNED.with(|s| s.borrow_mut().clear());
+        let mut app = app_with_processes(1);
+        app.spawner = recording_spawner;
+        app.show_in_folder(PathBuf::from("/usr/bin/tool"));
+        assert_eq!(
+            spawned(),
+            [(
+                String::from(FILE_MANAGER),
+                vec![String::from("/usr/bin/tool")]
+            )]
+        );
+        assert_eq!(app.status_message, "Opened the folder of /usr/bin/tool");
+        app.spawner = failing_spawner;
+        app.show_in_folder(PathBuf::from("/usr/bin/tool"));
+        assert!(
+            app.status_message
+                .starts_with("Cannot open the file manager: "),
+            "{}",
+            app.status_message
+        );
+    }
+
+    /// A program whose path is not text is still handed over byte for byte,
+    /// and shown with its odd bytes escaped rather than replaced.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_text_reaches_the_file_manager_intact() {
+        use std::os::unix::ffi::OsStrExt;
+        SPAWNED.with(|s| s.borrow_mut().clear());
+        let mut app = app_with_processes(1);
+        app.spawner = recording_spawner;
+        let odd = OsStr::from_bytes(b"/opt/caf\xe9/tool");
+        app.show_in_folder(PathBuf::from(odd));
+        let given = SPAWNED.with(|s| s.borrow().clone());
+        assert_eq!(given.len(), 1);
+        assert_eq!(given[0].1, [odd.to_owned()]);
+        assert!(
+            !app.status_message.contains('\u{fffd}'),
+            "{}",
+            app.status_message
+        );
+    }
 
     /// A list of `n` processes, already filtered so `visible_indices` is
     /// populated, with the window at its default height.

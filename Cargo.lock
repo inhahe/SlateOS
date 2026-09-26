@@ -2408,6 +2408,7 @@ dependencies = [
  "oswindow",
  "procinfo",
  "quoting",
+ "textline",
 ]
 
 [[package]]

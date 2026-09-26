@@ -14,10 +14,12 @@
 //!
 //! `path.c` opens the directory once and reads everything under it with
 //! `openat` and `faccessat`. `std` has neither, so this names each file by
-//! its whole path. What upstream's descriptor needs -- permission to read
-//! the directory -- is still asked for, once, by listing it
-//! ([`SysPath::access`]), so a directory that can be searched but not read
-//! is refused the same way. Two differences remain, and neither can arise on
+//! its whole path. The directory is still opened once and held for the run,
+//! as upstream holds its descriptor: opening it asks for the permission to
+//! read it that upstream's `open` asks for, so a directory that can be
+//! searched but not read is refused the same way; and the descriptor it
+//! holds is the one a closed stdout's number goes to, as upstream's is.
+//! Two differences remain, and neither can arise on
 //! a real `/sys`: a tree replaced while `lsmem` reads it is read anew here
 //! where upstream keeps reading the old one, and a `--sysroot` so long that
 //! the memory directory's path is within a few dozen bytes of `PATH_MAX`
@@ -40,8 +42,13 @@ pub struct SysPath {
     dir: Vec<u8>,
     /// `prefix`: `--sysroot`.
     prefix: Option<Vec<u8>>,
-    /// `dir_fd >= 0`: the directory has been opened.
-    opened: bool,
+    /// `dir_fd`: the directory, once opened, held open for the rest of the
+    /// run as upstream holds it. Nothing is read through it; what matters
+    /// is the descriptor it occupies. With stdout closed, upstream's lands on
+    /// descriptor 1, and glibc then sizes stdout's buffer by the directory's
+    /// `st_blksize` and fails its first write with `EBADF` -- observable, as
+    /// `lsmem -a -o STATE,SIZE,BLOCK >&-` is a write error upstream.
+    dir_fd: Option<ReadDir>,
 }
 
 impl SysPath {
@@ -50,7 +57,7 @@ impl SysPath {
         SysPath {
             dir: dir.to_vec(),
             prefix: None,
-            opened: false,
+            dir_fd: None,
         }
     }
 
@@ -95,20 +102,20 @@ impl SysPath {
     ///
     /// `access`'s, or `ENAMETOOLONG` from [`SysPath::absdir`].
     pub fn is_accessible(&self) -> io::Result<()> {
-        if self.opened {
+        if self.dir_fd.is_some() {
             return Ok(());
         }
         let path = self.absdir()?;
         fs::metadata(quoting::os_from_bytes(&path)).map(drop)
     }
 
-    /// `ul_path_get_dirfd`: open the directory, once. Upstream's `open` needs
-    /// read permission on it; listing it asks for the same.
+    /// `ul_path_get_dirfd`: open the directory, once, and keep it open.
+    /// Upstream's `open` needs read permission on it; opening it for listing
+    /// asks for the same.
     fn open_dir(&mut self) -> io::Result<()> {
-        if !self.opened {
+        if self.dir_fd.is_none() {
             let path = self.absdir()?;
-            fs::read_dir(quoting::os_from_bytes(&path))?;
-            self.opened = true;
+            self.dir_fd = Some(fs::read_dir(quoting::os_from_bytes(&path))?);
         }
         Ok(())
     }

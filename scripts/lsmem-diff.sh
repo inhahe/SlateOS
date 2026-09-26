@@ -436,6 +436,11 @@ sh_case 'lsmem --summary=only >/dev/full'
 sh_case 'lsmem -h >/dev/full'
 sh_case 'lsmem -V >/dev/full'
 sh_case 'lsmem >&-'
+# About 5 KB: past the 4096 bytes glibc buffers for /dev/full, so that write
+# fails before the end, but inside the 8192 it buffers on a closed stdout,
+# whose final EBADF is forgiven.
+sh_case 'lsmem -a -o STATE,SIZE,BLOCK >/dev/full'
+sh_case 'lsmem -a -o STATE,SIZE,BLOCK >&-'
 sh_case 'lsmem -a >&-'
 sh_case 'lsmem -a -J >&-'
 sh_case 'lsmem -h >&-'

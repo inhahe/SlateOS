@@ -9,6 +9,13 @@
 //! built-in word list, in a real window: every tab, result row, list row and
 //! button is clickable, and the keyboard reaches all of it.
 //!
+//! A word the thirty built-in entries lack is looked up in WordNet at
+//! dict.org -- when the reader asks, never as they type, since the word is
+//! sent to a server this project does not run ([`online`], design-decisions
+//! §1214). The answer becomes an entry like the others, saying where it came
+//! from, and a remembered word the list lacks stays in the history and the
+//! favourites as a row that looks it up again.
+//!
 //! # What wiring this up found
 //!
 //! The program drew five screens and could not be used, because `main` built a
@@ -90,6 +97,8 @@
 //! now draws one row into that strip so a list continuing below the fold looks
 //! like it does, and the clip cuts that row's hit box off at the pane's edge,
 //! so the half that was never drawn cannot be clicked.
+
+mod online;
 
 use appearance::Palette;
 use guitk::color::Color;
@@ -183,11 +192,18 @@ impl PartOfSpeech {
 pub struct Definition {
     pub part_of_speech: PartOfSpeech,
     pub text: String,
-    pub example: Option<String>,
+    /// Sentences using the word in this sense. A list, not one: WordNet
+    /// gives a sense as many as four, and keeping only the first would drop
+    /// what it chose to say.
+    pub examples: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct DictEntry {
+    /// Where an entry looked up online came from -- WordNet's own name for
+    /// itself, as dict.org gives it -- drawn under the word. `None` for the
+    /// built-in thirty.
+    pub source: Option<String>,
     pub word: String,
     pub pronunciation: String,
     pub definitions: Vec<Definition>,
@@ -203,13 +219,14 @@ pub struct DictEntry {
 pub fn build_dictionary() -> Vec<DictEntry> {
     vec![
         DictEntry {
+            source: None,
             word: "algorithm".into(),
             pronunciation: "/ˈælɡəˌrɪðəm/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Noun,
                     text: "A process or set of rules to be followed in calculations or problem-solving operations.".into(),
-                    example: Some("The search algorithm finds the shortest path.".into()),
+                    examples: vec!["The search algorithm finds the shortest path.".into()],
                 },
             ],
             synonyms: vec!["procedure".into(), "method".into(), "process".into(), "routine".into()],
@@ -218,23 +235,24 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["computation".into(), "heuristic".into(), "program".into(), "iterate".into(), "cache".into(), "compile".into()],
         },
         DictEntry {
+            source: None,
             word: "kernel".into(),
             pronunciation: "/ˈkɜːrnəl/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Noun,
                     text: "The central or most important part of something.".into(),
-                    example: Some("The kernel of the argument was simple.".into()),
+                    examples: vec!["The kernel of the argument was simple.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Noun,
                     text: "The core component of an operating system that manages hardware and system resources.".into(),
-                    example: Some("The kernel handles memory allocation and process scheduling.".into()),
+                    examples: vec!["The kernel handles memory allocation and process scheduling.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Noun,
                     text: "The softer, usually edible part inside the shell of a nut or seed.".into(),
-                    example: Some("Crack the walnut to get at the kernel.".into()),
+                    examples: vec!["Crack the walnut to get at the kernel.".into()],
                 },
             ],
             synonyms: vec!["core".into(), "nucleus".into(), "heart".into(), "center".into(), "essence".into()],
@@ -243,18 +261,19 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["microkernel".into(), "monolithic".into(), "operating system".into(), "concurrency".into(), "cache".into()],
         },
         DictEntry {
+            source: None,
             word: "compile".into(),
             pronunciation: "/kəmˈpaɪl/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Verb,
                     text: "To produce a set of machine-code instructions from source code.".into(),
-                    example: Some("It takes 30 seconds to compile the project.".into()),
+                    examples: vec!["It takes 30 seconds to compile the project.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Verb,
                     text: "To collect and assemble information from various sources.".into(),
-                    example: Some("She compiled a list of references.".into()),
+                    examples: vec!["She compiled a list of references.".into()],
                 },
             ],
             synonyms: vec!["build".into(), "assemble".into(), "collect".into(), "translate".into()],
@@ -263,13 +282,14 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["compiler".into(), "linker".into(), "source code".into(), "algorithm".into(), "verbose".into(), "API".into()],
         },
         DictEntry {
+            source: None,
             word: "ephemeral".into(),
             pronunciation: "/ɪˈfɛmərəl/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Adjective,
                     text: "Lasting for a very short time.".into(),
-                    example: Some("The ephemeral beauty of cherry blossoms.".into()),
+                    examples: vec!["The ephemeral beauty of cherry blossoms.".into()],
                 },
             ],
             synonyms: vec!["fleeting".into(), "transient".into(), "momentary".into(), "brief".into(), "short-lived".into()],
@@ -278,13 +298,14 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["temporary".into(), "impermanent".into(), "obsolete".into(), "immutable".into()],
         },
         DictEntry {
+            source: None,
             word: "ubiquitous".into(),
             pronunciation: "/juːˈbɪkwɪtəs/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Adjective,
                     text: "Present, appearing, or found everywhere.".into(),
-                    example: Some("Smartphones have become ubiquitous in modern life.".into()),
+                    examples: vec!["Smartphones have become ubiquitous in modern life.".into()],
                 },
             ],
             synonyms: vec!["omnipresent".into(), "universal".into(), "pervasive".into(), "widespread".into()],
@@ -293,18 +314,19 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["prevalent".into(), "commonplace".into(), "obsolete".into(), "every".into()],
         },
         DictEntry {
+            source: None,
             word: "concurrency".into(),
             pronunciation: "/kənˈkʌrənsi/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Noun,
                     text: "The ability of different parts of a program to be executed out-of-order or simultaneously.".into(),
-                    example: Some("Rust's ownership system prevents data races in concurrency.".into()),
+                    examples: vec!["Rust's ownership system prevents data races in concurrency.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Noun,
                     text: "The fact of two or more events happening at the same time.".into(),
-                    example: Some("The concurrency of the two festivals created traffic problems.".into()),
+                    examples: vec!["The concurrency of the two festivals created traffic problems.".into()],
                 },
             ],
             synonyms: vec!["parallelism".into(), "simultaneity".into(), "coexistence".into()],
@@ -313,18 +335,19 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["thread".into(), "async".into(), "mutex".into(), "parallelism".into(), "kernel".into(), "iterate".into()],
         },
         DictEntry {
+            source: None,
             word: "resilient".into(),
             pronunciation: "/rɪˈzɪliənt/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Adjective,
                     text: "Able to withstand or recover quickly from difficult conditions.".into(),
-                    example: Some("The resilient community rebuilt after the storm.".into()),
+                    examples: vec!["The resilient community rebuilt after the storm.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Adjective,
                     text: "Able to spring back into shape after bending or stretching.".into(),
-                    example: Some("A resilient material that returns to its original form.".into()),
+                    examples: vec!["A resilient material that returns to its original form.".into()],
                 },
             ],
             synonyms: vec!["tough".into(), "hardy".into(), "adaptable".into(), "flexible".into()],
@@ -333,13 +356,14 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["resilience".into(), "robust".into(), "durable".into(), "tenacious".into(), "ephemeral".into()],
         },
         DictEntry {
+            source: None,
             word: "pragmatic".into(),
             pronunciation: "/præɡˈmætɪk/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Adjective,
                     text: "Dealing with things sensibly and realistically, based on practical considerations.".into(),
-                    example: Some("A pragmatic approach to solving the problem.".into()),
+                    examples: vec!["A pragmatic approach to solving the problem.".into()],
                 },
             ],
             synonyms: vec!["practical".into(), "realistic".into(), "sensible".into(), "down-to-earth".into()],
@@ -348,13 +372,14 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["pragmatism".into(), "utilitarian".into(), "meticulous".into(), "lucid".into()],
         },
         DictEntry {
+            source: None,
             word: "serendipity".into(),
             pronunciation: "/ˌsɛrənˈdɪpɪti/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Noun,
                     text: "The occurrence of events by chance in a happy or beneficial way.".into(),
-                    example: Some("Finding that book was pure serendipity.".into()),
+                    examples: vec!["Finding that book was pure serendipity.".into()],
                 },
             ],
             synonyms: vec!["luck".into(), "fortune".into(), "chance".into(), "happenstance".into()],
@@ -363,18 +388,19 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["coincidence".into(), "providence".into(), "eureka".into()],
         },
         DictEntry {
+            source: None,
             word: "paradigm".into(),
             pronunciation: "/ˈpærəˌdaɪm/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Noun,
                     text: "A typical example or pattern of something; a model.".into(),
-                    example: Some("The shift to object-oriented programming was a paradigm change.".into()),
+                    examples: vec!["The shift to object-oriented programming was a paradigm change.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Noun,
                     text: "A worldview underlying theories and methodology of a scientific subject.".into(),
-                    example: Some("The Copernican paradigm replaced the geocentric model.".into()),
+                    examples: vec!["The Copernican paradigm replaced the geocentric model.".into()],
                 },
             ],
             synonyms: vec!["model".into(), "pattern".into(), "framework".into(), "archetype".into()],
@@ -383,13 +409,14 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["paradigm shift".into(), "framework".into(), "methodology".into(), "obsolete".into(), "ubiquitous".into()],
         },
         DictEntry {
+            source: None,
             word: "iterate".into(),
             pronunciation: "/ˈɪtəˌreɪt/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Verb,
                     text: "To perform or utter repeatedly.".into(),
-                    example: Some("We iterate over the collection to process each item.".into()),
+                    examples: vec!["We iterate over the collection to process each item.".into()],
                 },
             ],
             synonyms: vec!["repeat".into(), "loop".into(), "cycle".into(), "reiterate".into()],
@@ -398,13 +425,14 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["iteration".into(), "iterator".into(), "recursive".into(), "algorithm".into(), "concurrency".into()],
         },
         DictEntry {
+            source: None,
             word: "verbose".into(),
             pronunciation: "/vɜːrˈboʊs/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Adjective,
                     text: "Using or expressed in more words than are needed.".into(),
-                    example: Some("The verbose error messages made debugging easier.".into()),
+                    examples: vec!["The verbose error messages made debugging easier.".into()],
                 },
             ],
             synonyms: vec!["wordy".into(), "long-winded".into(), "prolix".into(), "loquacious".into()],
@@ -413,13 +441,14 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["verbosity".into(), "loquacity".into(), "lucid".into(), "ambiguous".into()],
         },
         DictEntry {
+            source: None,
             word: "immutable".into(),
             pronunciation: "/ɪˈmjuːtəbəl/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Adjective,
                     text: "Unchanging over time or unable to be changed.".into(),
-                    example: Some("In Rust, variables are immutable by default.".into()),
+                    examples: vec!["In Rust, variables are immutable by default.".into()],
                 },
             ],
             synonyms: vec!["unchangeable".into(), "fixed".into(), "permanent".into(), "constant".into()],
@@ -428,23 +457,24 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["mutable".into(), "const".into(), "readonly".into(), "ephemeral".into(), "cache".into()],
         },
         DictEntry {
+            source: None,
             word: "cache".into(),
             pronunciation: "/kæʃ/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Noun,
                     text: "A hardware or software component that stores data for faster future access.".into(),
-                    example: Some("The L1 cache provides the fastest memory access.".into()),
+                    examples: vec!["The L1 cache provides the fastest memory access.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Noun,
                     text: "A collection of items stored in a hidden or secure place.".into(),
-                    example: Some("A cache of weapons was found in the basement.".into()),
+                    examples: vec!["A cache of weapons was found in the basement.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Verb,
                     text: "To store data in a cache for quick retrieval.".into(),
-                    example: Some("The browser caches web pages for faster loading.".into()),
+                    examples: vec!["The browser caches web pages for faster loading.".into()],
                 },
             ],
             synonyms: vec!["store".into(), "buffer".into(), "repository".into(), "stash".into()],
@@ -453,13 +483,14 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["buffer".into(), "memory".into(), "L1".into(), "L2".into(), "kernel".into(), "algorithm".into()],
         },
         DictEntry {
+            source: None,
             word: "encrypt".into(),
             pronunciation: "/ɪnˈkrɪpt/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Verb,
                     text: "To convert data into a coded form to prevent unauthorized access.".into(),
-                    example: Some("Always encrypt sensitive data before transmission.".into()),
+                    examples: vec!["Always encrypt sensitive data before transmission.".into()],
                 },
             ],
             synonyms: vec!["encode".into(), "cipher".into(), "scramble".into(), "encipher".into()],
@@ -468,18 +499,19 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["encryption".into(), "AES".into(), "RSA".into(), "cryptography".into(), "API".into(), "kernel".into()],
         },
         DictEntry {
+            source: None,
             word: "lucid".into(),
             pronunciation: "/ˈluːsɪd/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Adjective,
                     text: "Expressed clearly; easy to understand.".into(),
-                    example: Some("A lucid account of how the scheduler picks a thread.".into()),
+                    examples: vec!["A lucid account of how the scheduler picks a thread.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Adjective,
                     text: "Able to think clearly, especially between periods of confusion.".into(),
-                    example: Some("He had a lucid hour in the afternoon.".into()),
+                    examples: vec!["He had a lucid hour in the afternoon.".into()],
                 },
             ],
             synonyms: vec!["clear".into(), "plain".into(), "intelligible".into(), "coherent".into()],
@@ -488,18 +520,19 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["clarity".into(), "translucent".into(), "elucidate".into(), "ambiguous".into(), "candid".into(), "verbose".into()],
         },
         DictEntry {
+            source: None,
             word: "candid".into(),
             pronunciation: "/ˈkændɪd/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Adjective,
                     text: "Truthful and straightforward, especially about something awkward.".into(),
-                    example: Some("A candid note in the commit message about what still fails.".into()),
+                    examples: vec!["A candid note in the commit message about what still fails.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Adjective,
                     text: "Of a photograph: taken informally, without the subject posing.".into(),
-                    example: Some("A candid shot of the team mid-argument.".into()),
+                    examples: vec!["A candid shot of the team mid-argument.".into()],
                 },
             ],
             synonyms: vec!["frank".into(), "honest".into(), "forthright".into(), "blunt".into()],
@@ -508,13 +541,14 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["candour".into(), "candidate".into(), "incandescent".into(), "lucid".into(), "verbatim".into()],
         },
         DictEntry {
+            source: None,
             word: "ambiguous".into(),
             pronunciation: "/æmˈbɪɡjuəs/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Adjective,
                     text: "Open to more than one interpretation; not having one obvious meaning.".into(),
-                    example: Some("The specification was ambiguous about which end owns the buffer.".into()),
+                    examples: vec!["The specification was ambiguous about which end owns the buffer.".into()],
                 },
             ],
             synonyms: vec!["equivocal".into(), "unclear".into(), "vague".into(), "obscure".into()],
@@ -523,13 +557,14 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["ambiguity".into(), "equivocation".into(), "parse".into(), "nuance".into(), "verbose".into()],
         },
         DictEntry {
+            source: None,
             word: "meticulous".into(),
             pronunciation: "/məˈtɪkjələs/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Adjective,
                     text: "Showing great attention to detail; very careful and precise.".into(),
-                    example: Some("Meticulous accounting of every allocation and its matching free.".into()),
+                    examples: vec!["Meticulous accounting of every allocation and its matching free.".into()],
                 },
             ],
             synonyms: vec!["thorough".into(), "painstaking".into(), "scrupulous".into(), "exacting".into()],
@@ -538,18 +573,19 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["diligence".into(), "rigour".into(), "precision".into(), "pragmatic".into(), "verbatim".into()],
         },
         DictEntry {
+            source: None,
             word: "nuance".into(),
             pronunciation: "/ˈnjuːɑːns/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Noun,
                     text: "A subtle difference in meaning, expression or sound.".into(),
-                    example: Some("The nuance between committed and reserved memory matters here.".into()),
+                    examples: vec!["The nuance between committed and reserved memory matters here.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Verb,
                     text: "To give something subtle shades of difference.".into(),
-                    example: Some("The argument is nuanced rather than hedged.".into()),
+                    examples: vec!["The argument is nuanced rather than hedged.".into()],
                 },
             ],
             synonyms: vec!["shade".into(), "subtlety".into(), "gradation".into(), "distinction".into()],
@@ -558,18 +594,19 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["connotation".into(), "gradation".into(), "register".into(), "ambiguous".into(), "meticulous".into()],
         },
         DictEntry {
+            source: None,
             word: "obsolete".into(),
             pronunciation: "/ˈɒbsəliːt/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Adjective,
                     text: "No longer produced or used; out of date.".into(),
-                    example: Some("The syscall is obsolete but the table keeps its number.".into()),
+                    examples: vec!["The syscall is obsolete but the table keeps its number.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Verb,
                     text: "To make something out of date by replacing it.".into(),
-                    example: Some("Versioned tables let a new call obsolete an old one without breaking it.".into()),
+                    examples: vec!["Versioned tables let a new call obsolete an old one without breaking it.".into()],
                 },
             ],
             synonyms: vec!["outdated".into(), "superseded".into(), "antiquated".into(), "defunct".into()],
@@ -578,18 +615,19 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["deprecated".into(), "legacy".into(), "compatibility".into(), "ephemeral".into(), "ubiquitous".into()],
         },
         DictEntry {
+            source: None,
             word: "tenacious".into(),
             pronunciation: "/təˈneɪʃəs/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Adjective,
                     text: "Holding firmly to something; not readily letting go.".into(),
-                    example: Some("A tenacious bug that survived three rewrites of the allocator.".into()),
+                    examples: vec!["A tenacious bug that survived three rewrites of the allocator.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Adjective,
                     text: "Persistent in seeking something despite difficulty.".into(),
-                    example: Some("She was tenacious about reproducing the fault.".into()),
+                    examples: vec!["She was tenacious about reproducing the fault.".into()],
                 },
             ],
             synonyms: vec!["persistent".into(), "dogged".into(), "determined".into(), "stubborn".into()],
@@ -598,18 +636,19 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["tenacity".into(), "tenure".into(), "retain".into(), "resilient".into()],
         },
         DictEntry {
+            source: None,
             word: "zenith".into(),
             pronunciation: "/ˈzenɪθ/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Noun,
                     text: "The point of the sky directly overhead an observer.".into(),
-                    example: Some("The sun reaches its zenith at solar noon.".into()),
+                    examples: vec!["The sun reaches its zenith at solar noon.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Noun,
                     text: "The highest point reached by something; the time of greatest success.".into(),
-                    example: Some("Throughput was at its zenith before the lock was added.".into()),
+                    examples: vec!["Throughput was at its zenith before the lock was added.".into()],
                 },
             ],
             synonyms: vec!["peak".into(), "apex".into(), "summit".into(), "pinnacle".into()],
@@ -623,18 +662,19 @@ pub fn build_dictionary() -> Vec<DictEntry> {
         // colour is untested, its abbreviation unreachable, and a reader
         // looking for a preposition finds an empty category. One word each.
         DictEntry {
+            source: None,
             word: "verbatim".into(),
             pronunciation: "/vɜːˈbeɪtɪm/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Adverb,
                     text: "In exactly the same words as were used originally.".into(),
-                    example: Some("The error is quoted verbatim, punctuation and all.".into()),
+                    examples: vec!["The error is quoted verbatim, punctuation and all.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Adjective,
                     text: "Corresponding word for word to the original.".into(),
-                    example: Some("A verbatim transcript of the session.".into()),
+                    examples: vec!["A verbatim transcript of the session.".into()],
                 },
             ],
             synonyms: vec!["exactly".into(), "literally".into(), "word for word".into()],
@@ -643,18 +683,19 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["quotation".into(), "transcript".into(), "literal".into(), "candid".into(), "meticulous".into()],
         },
         DictEntry {
+            source: None,
             word: "they".into(),
             pronunciation: "/ðeɪ/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Pronoun,
                     text: "The people or things previously mentioned or easily identified.".into(),
-                    example: Some("The tests ran, and they all passed.".into()),
+                    examples: vec!["The tests ran, and they all passed.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Pronoun,
                     text: "One person of unspecified or non-binary gender.".into(),
-                    example: Some("Whoever filed the bug left no note about what they expected.".into()),
+                    examples: vec!["Whoever filed the bug left no note about what they expected.".into()],
                 },
             ],
             synonyms: vec!["them".into(), "those".into()],
@@ -663,18 +704,19 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["pronoun".into(), "antecedent".into(), "agreement".into(), "every".into()],
         },
         DictEntry {
+            source: None,
             word: "via".into(),
             pronunciation: "/ˈvaɪə/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Preposition,
                     text: "Travelling through a place on the way to a destination.".into(),
-                    example: Some("The packet reached the host via three routers.".into()),
+                    examples: vec!["The packet reached the host via three routers.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Preposition,
                     text: "By way of; by means of.".into(),
-                    example: Some("The driver talks to the kernel via a channel, not a syscall.".into()),
+                    examples: vec!["The driver talks to the kernel via a channel, not a syscall.".into()],
                 },
             ],
             synonyms: vec!["through".into(), "by way of".into(), "using".into()],
@@ -683,13 +725,14 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["route".into(), "indirection".into(), "proxy".into(), "albeit".into()],
         },
         DictEntry {
+            source: None,
             word: "albeit".into(),
             pronunciation: "/ɔːlˈbiːɪt/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Conjunction,
                     text: "Although; even though.".into(),
-                    example: Some("It works, albeit slowly, on a single core.".into()),
+                    examples: vec!["It works, albeit slowly, on a single core.".into()],
                 },
             ],
             synonyms: vec!["although".into(), "though".into(), "even if".into()],
@@ -698,18 +741,19 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["concession".into(), "clause".into(), "conjunction".into(), "via".into()],
         },
         DictEntry {
+            source: None,
             word: "eureka".into(),
             pronunciation: "/jʊəˈriːkə/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Interjection,
                     text: "A cry of joy on finding or working something out.".into(),
-                    example: Some("Eureka — the fault was the wheel delta being read as pixels.".into()),
+                    examples: vec!["Eureka — the fault was the wheel delta being read as pixels.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Noun,
                     text: "The moment at which something is suddenly understood.".into(),
-                    example: Some("The profiler gave us our eureka.".into()),
+                    examples: vec!["The profiler gave us our eureka.".into()],
                 },
             ],
             synonyms: vec!["aha".into(), "breakthrough".into(), "revelation".into()],
@@ -718,18 +762,19 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["heuristic".into(), "insight".into(), "discovery".into(), "serendipity".into()],
         },
         DictEntry {
+            source: None,
             word: "every".into(),
             pronunciation: "/ˈevri/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Determiner,
                     text: "All the members of a group, considered one at a time.".into(),
-                    example: Some("Every unsafe block must carry a safety comment.".into()),
+                    examples: vec!["Every unsafe block must carry a safety comment.".into()],
                 },
                 Definition {
                     part_of_speech: PartOfSpeech::Determiner,
                     text: "Once in each stated interval.".into(),
-                    example: Some("The frame clock fires every sixteen milliseconds.".into()),
+                    examples: vec!["The frame clock fires every sixteen milliseconds.".into()],
                 },
             ],
             synonyms: vec!["each".into(), "all".into()],
@@ -738,13 +783,14 @@ pub fn build_dictionary() -> Vec<DictEntry> {
             related: vec!["quantifier".into(), "determiner".into(), "universal".into(), "ubiquitous".into(), "they".into()],
         },
         DictEntry {
+            source: None,
             word: "API".into(),
             pronunciation: "/ˌeɪ piː ˈaɪ/".into(),
             definitions: vec![
                 Definition {
                     part_of_speech: PartOfSpeech::Abbreviation,
                     text: "Application programming interface: the set of calls one program offers another.".into(),
-                    example: Some("The syscall table is the kernel's API, and it is versioned.".into()),
+                    examples: vec!["The syscall table is the kernel's API, and it is versioned.".into()],
                 },
             ],
             synonyms: vec!["interface".into(), "contract".into()],
@@ -829,10 +875,12 @@ pub enum Target {
     /// three list screens share one variant: only one of them is ever drawn.
     Row(usize),
     /// A cross-reference — a synonym, an antonym or a related word — naming
-    /// the dictionary entry at this index. Recorded only for words the
-    /// dictionary actually has, so a chip that is clickable is a chip that
-    /// leads somewhere.
+    /// the dictionary entry at this index.
     Link(usize),
+    /// A cross-reference naming a word the dictionary has no entry for, by
+    /// its place among the open entry's cross-references (synonyms, then
+    /// antonyms, then related): a click looks it up online.
+    Fetch(usize),
     /// The search field: clicking it puts you on the search screen.
     SearchBox,
     /// Empty the query.
@@ -886,6 +934,35 @@ pub enum Action {
     ScrollRows(isize),
     /// Step the featured word by `n`, wrapping.
     StepFeatured(isize),
+    /// Look up the open entry's `n`th cross-reference online; see
+    /// [`Dictionary::cross_ref`].
+    LookUp(usize),
+}
+
+/// One row of a list screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Row {
+    /// A dictionary entry, by its index.
+    Entry(usize),
+    /// A word the dictionary has no entry for, which opening looks up
+    /// online: the query itself on the search screen, or a remembered word
+    /// in the history or the favourites -- kept from an earlier session, or
+    /// read from a list file.
+    LookUp(String),
+    /// A word one edit away from a word WordNet does not have, offered
+    /// instead of it.
+    Suggestion(String),
+}
+
+impl Row {
+    /// The entry this row names, if it is one.
+    #[must_use]
+    pub fn entry(&self) -> Option<usize> {
+        match self {
+            Self::Entry(i) => Some(*i),
+            Self::LookUp(_) | Self::Suggestion(_) => None,
+        }
+    }
 }
 
 /// How far a selection or a scroll moves.
@@ -1154,9 +1231,7 @@ pub fn rank(entry: &DictEntry, query: &str) -> Option<u8> {
     }
     let in_definitions = entry.definitions.iter().any(|d| {
         d.text.to_lowercase().contains(query)
-            || d.example
-                .as_deref()
-                .is_some_and(|e| e.to_lowercase().contains(query))
+            || d.examples.iter().any(|e| e.to_lowercase().contains(query))
     });
     if in_definitions {
         return Some(3);
@@ -1232,14 +1307,24 @@ pub enum Block {
         /// Blank space above this line.
         space: f32,
     },
-    /// One row of word chips. Each carries the dictionary index it names, when
-    /// the dictionary has it — that index is what makes the chip clickable.
+    /// One row of word chips.
     Chips {
-        words: Vec<(String, Option<usize>)>,
+        words: Vec<Chip>,
         size: f32,
         color: Color,
         space: f32,
     },
+}
+
+/// A cross-reference as drawn, and where a click on it leads.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chip {
+    pub word: String,
+    /// The entry it opens, when the dictionary has one.
+    pub entry: Option<usize>,
+    /// Its place among the open entry's cross-references, for looking it up
+    /// online when there is no entry; see [`Dictionary::cross_ref`].
+    pub ordinal: usize,
 }
 
 impl Block {
@@ -1282,7 +1367,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Up / Down", "Move through the list"),
     ("PageUp / PageDown", "A screen at a time"),
     ("Home / End", "First / last"),
-    ("Enter", "Open what is selected"),
+    ("Enter", "Open what is selected, or look it up online"),
     ("Backspace", "Rub out a letter, or go back"),
     ("Esc", "Clear the query, or go back"),
     ("Ctrl+D", "Favourite this word"),
@@ -1340,6 +1425,40 @@ pub struct Dictionary {
     palette: Palette,
     /// Whether the shortcut card is up.
     show_help: bool,
+    /// The online lookup: [`online::look_up`], or a test's stand-in.
+    pub lookup: online::Lookup,
+    /// The DICT server asked, as `host:port`.
+    pub server: String,
+    /// The lookup under way, if one is.
+    pending: Option<Pending>,
+    /// The last word WordNet did not have, and what it offered instead.
+    miss: Option<Miss>,
+    /// Wakes the window when a lookup's answer arrives.
+    waker: Option<std::task::Waker>,
+}
+
+/// The DICT server a lookup asks: dict.org -- or, under test, a port on
+/// loopback where nothing listens, so no test reaches the network.
+#[cfg(not(test))]
+const DEFAULT_SERVER: &str = online::DICT_ORG;
+#[cfg(test)]
+const DEFAULT_SERVER: &str = "127.0.0.1:9";
+
+/// A lookup under way.
+struct Pending {
+    word: String,
+    answer: std::sync::mpsc::Receiver<Result<online::Answer, online::LookupError>>,
+    /// Where the reader asked from. The entry is opened when it arrives only
+    /// if they are still there: a window that jumps to a page while the
+    /// reader has moved on to something else has taken the screen from them.
+    screen: Screen,
+    query: String,
+}
+
+/// A word WordNet does not have.
+struct Miss {
+    word: String,
+    suggestions: Vec<String>,
 }
 
 /// The longest history the program keeps.
@@ -1369,6 +1488,11 @@ impl Dictionary {
             wheel: guitk::wheel::Accumulator::default(),
             status: "Type a word, or part of one".to_string(),
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            lookup: online::look_up,
+            server: String::from(DEFAULT_SERVER),
+            pending: None,
+            miss: None,
+            waker: None,
         }
     }
 
@@ -1478,26 +1602,203 @@ impl Dictionary {
             .is_some_and(|e| self.favorites.contains(&e.word))
     }
 
-    /// The dictionary indices the given list screen shows, in order.
+    /// The rows the given list screen shows, in order.
     ///
     /// One function for all three, so a row's meaning cannot depend on which
-    /// screen forgot to handle a key.
+    /// screen forgot to handle a key. A remembered word the dictionary has
+    /// no entry for is a row that looks it up -- it used to be dropped, so a
+    /// word looked up online vanished from the history at the next start.
     #[must_use]
-    pub fn rows(&self, screen: Screen) -> Vec<usize> {
+    pub fn rows(&self, screen: Screen) -> Vec<Row> {
+        let remembered = |words: &[String]| -> Vec<Row> {
+            words
+                .iter()
+                .map(|w| {
+                    self.find_word(w)
+                        .map_or_else(|| Row::LookUp(w.clone()), Row::Entry)
+                })
+                .collect()
+        };
         match screen {
-            Screen::Search => self.results.clone(),
-            Screen::History => self
-                .history
-                .iter()
-                .filter_map(|w| self.find_word(w))
-                .collect(),
-            Screen::Favorites => self
-                .favorites
-                .iter()
-                .filter_map(|w| self.find_word(w))
-                .collect(),
+            Screen::Search => {
+                let mut rows: Vec<Row> = self.results.iter().map(|&i| Row::Entry(i)).collect();
+                let query = self.query.trim();
+                // Offered only when the dictionary lacks the very word: a
+                // query that is a prefix of an entry may still be a word of
+                // its own ("bank" of "bankrupt").
+                if !query.is_empty() && self.find_word(query).is_none() {
+                    match &self.miss {
+                        Some(miss) if miss.word.eq_ignore_ascii_case(query) => {
+                            rows.extend(miss.suggestions.iter().cloned().map(Row::Suggestion));
+                        }
+                        _ => rows.push(Row::LookUp(query.to_owned())),
+                    }
+                }
+                rows
+            }
+            Screen::History => remembered(&self.history),
+            Screen::Favorites => remembered(&self.favorites),
             Screen::Entry | Screen::Featured => Vec::new(),
         }
+    }
+
+    /// The word a row stands for.
+    #[must_use]
+    pub fn row_word<'a>(&'a self, row: &'a Row) -> &'a str {
+        match row {
+            Row::Entry(i) => self.word(*i),
+            Row::LookUp(w) | Row::Suggestion(w) => w,
+        }
+    }
+
+    /// Open a row: its entry, or look its word up.
+    fn activate(&mut self, row: &Row) {
+        match row {
+            Row::Entry(i) => self.open(*i),
+            Row::LookUp(w) | Row::Suggestion(w) => {
+                let word = w.clone();
+                self.look_up(&word);
+            }
+        }
+    }
+
+    /// The host a lookup asks, for saying so: `dict.org`.
+    #[must_use]
+    pub fn server_name(&self) -> &str {
+        self.server
+            .rsplit_once(':')
+            .map_or(self.server.as_str(), |(host, _)| host)
+    }
+
+    /// Whether a lookup of `word` is under way.
+    #[must_use]
+    pub fn looking_up(&self, word: &str) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|p| p.word.eq_ignore_ascii_case(word.trim()))
+    }
+
+    /// Look `word` up online -- or open it, if the dictionary already has
+    /// it. The answer arrives on another thread, and wakes the window.
+    pub fn look_up(&mut self, word: &str) {
+        let word = word.trim();
+        if let Some(index) = self.find_word(word) {
+            self.open(index);
+            return;
+        }
+        if word.is_empty() || self.looking_up(word) {
+            return;
+        }
+        let (tx, answer) = std::sync::mpsc::channel();
+        let (lookup, server, asked) = (self.lookup, self.server.clone(), word.to_owned());
+        let waker = self.waker.clone();
+        let spawned = std::thread::Builder::new()
+            .name(String::from("dictionary-lookup"))
+            .spawn(move || {
+                // The window may have closed and dropped the receiver; then
+                // there is nobody to tell, and nothing else to do.
+                let _ = tx.send(lookup(&server, &asked));
+                if let Some(waker) = waker {
+                    waker.wake();
+                }
+            });
+        match spawned {
+            Ok(_) => {
+                self.status = format!(
+                    "Asking {} for \u{201c}{word}\u{201d}\u{2026}",
+                    self.server_name()
+                );
+                // A new question replaces the one before; its answer, when it
+                // comes, has nobody to go to.
+                self.pending = Some(Pending {
+                    word: word.to_owned(),
+                    answer,
+                    screen: self.screen,
+                    query: self.query.clone(),
+                });
+            }
+            Err(e) => self.status = format!("Cannot start the lookup: {e}"),
+        }
+    }
+
+    /// Take in the lookup's answer, if it has come. Whether anything changed.
+    pub fn pump_lookup(&mut self) -> bool {
+        let Some(pending) = &self.pending else {
+            return false;
+        };
+        let answer = match pending.answer.try_recv() {
+            Ok(answer) => answer,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(online::LookupError::Server(
+                String::from("the lookup ended without an answer"),
+            )),
+        };
+        let Some(Pending {
+            word,
+            screen,
+            query,
+            ..
+        }) = self.pending.take()
+        else {
+            return false;
+        };
+        let host = self.server_name().to_owned();
+        match answer {
+            Ok(online::Answer::Found(entry)) => {
+                let index = if let Some(i) = self.find_word(&entry.word) {
+                    i
+                } else {
+                    self.entries.push(entry);
+                    self.entries.len().saturating_sub(1)
+                };
+                let still_there = self.screen == screen && self.query == query;
+                // The results are recomputed over the entry just added, so the
+                // search screen lists it where the offer to look it up was.
+                self.search();
+                if still_there {
+                    self.open(index);
+                } else {
+                    self.status = format!(
+                        "\u{201c}{}\u{201d} is here now \u{2014} search for it to read it",
+                        self.word(index)
+                    );
+                }
+            }
+            Ok(online::Answer::NotFound { suggestions }) => {
+                self.status = match suggestions.len() {
+                    0 => format!("Neither this dictionary nor WordNet has \u{201c}{word}\u{201d}"),
+                    n => {
+                        format!("WordNet has no \u{201c}{word}\u{201d} \u{2014} {n} near it, below")
+                    }
+                };
+                let offered = !suggestions.is_empty();
+                self.miss = Some(Miss { word, suggestions });
+                // The suggestions replace the row that offered the lookup;
+                // the selection goes to the first of them.
+                if offered && self.screen == Screen::Search {
+                    let first = self.results.len();
+                    self.set_sel(Screen::Search, first);
+                }
+            }
+            Err(e) => {
+                self.status = format!("Could not look up \u{201c}{word}\u{201d} at {host}: {e}");
+            }
+        }
+        true
+    }
+
+    /// The open entry's `n`th cross-reference: synonyms, then antonyms, then
+    /// related words.
+    #[must_use]
+    pub fn cross_ref(&self, n: usize) -> Option<&str> {
+        let entry = self.current.and_then(|i| self.entries.get(i))?;
+        entry
+            .synonyms
+            .iter()
+            .chain(&entry.antonyms)
+            .chain(&entry.related)
+            .nth(n)
+            .map(String::as_str)
     }
 
     #[must_use]
@@ -1544,7 +1845,10 @@ impl Dictionary {
         scored.sort_by_key(|&(r, _)| r);
         self.results = scored.into_iter().map(|(_, i)| i).collect();
         self.status = match self.results.len() {
-            0 => format!("Nothing matches \"{}\"", self.query.trim()),
+            0 => format!(
+                "Nothing here matches \"{}\" \u{2014} Enter looks it up online",
+                self.query.trim()
+            ),
             1 => format!("One entry matches \"{}\"", self.query.trim()),
             n => format!("{n} entries match \"{}\"", self.query.trim()),
         };
@@ -1573,8 +1877,8 @@ impl Dictionary {
             Action::Open(index) => self.open(index),
             Action::OpenSelected => {
                 let rows = self.rows(self.screen);
-                if let Some(&index) = rows.get(self.selected(self.screen)) {
-                    self.open(index);
+                if let Some(row) = rows.get(self.selected(self.screen)) {
+                    self.activate(row);
                 }
             }
             Action::Move(step) => self.move_selection(step),
@@ -1582,6 +1886,11 @@ impl Dictionary {
                 self.query.push(ch);
                 self.search();
                 self.screen = Screen::Search;
+            }
+            Action::LookUp(n) => {
+                if let Some(word) = self.cross_ref(n).map(str::to_owned) {
+                    self.look_up(&word);
+                }
             }
             Action::Backspace => {
                 if self.query.pop().is_some() {
@@ -1815,7 +2124,10 @@ impl Dictionary {
                     "Type a word, or part of one".to_string()
                 } else {
                     match self.results.len() {
-                        0 => format!("Nothing matches \"{}\"", self.query.trim()),
+                        0 => format!(
+                            "Nothing here matches \"{}\" \u{2014} Enter looks it up online",
+                            self.query.trim()
+                        ),
                         1 => format!("One entry matches \"{}\"", self.query.trim()),
                         n => format!("{n} entries match \"{}\"", self.query.trim()),
                     }
@@ -1885,6 +2197,18 @@ impl Dictionary {
                 space: l.small * 0.2,
             });
         }
+        // Where an entry looked up online came from, so it is never taken
+        // for one of the built-in thirty -- or they for it.
+        if let Some(source) = &entry.source {
+            out.push(Block::Line {
+                text: format!("From {source}, at {}", self.server_name()),
+                size: l.small,
+                color: self.palette.overlay0,
+                weight: FontWeightHint::Regular,
+                indent: 0.0,
+                space: l.small * 0.2,
+            });
+        }
 
         for (i, def) in entry.definitions.iter().enumerate() {
             out.push(Block::Line {
@@ -1914,7 +2238,7 @@ impl Dictionary {
                     space: if n == 0 { l.small * 0.25 } else { 0.0 },
                 });
             }
-            if let Some(example) = &def.example {
+            for example in &def.examples {
                 let quoted = format!("\u{201c}{example}\u{201d}");
                 let indent = l.font * 1.8;
                 for (n, line) in text::wrap(
@@ -1942,11 +2266,16 @@ impl Dictionary {
         // never been drawn anywhere: it was built by `build_dictionary`, stored
         // on every entry, and reached by nothing at all — which is precisely
         // what the blanket `#![allow(dead_code)]` on line 1 was hiding.
+        // Numbered across all three lists, in this order, as
+        // [`cross_ref`](Self::cross_ref) counts them.
+        let mut ordinal = 0_usize;
         for (title, words, color) in [
             ("Synonyms", &entry.synonyms, self.palette.green),
             ("Antonyms", &entry.antonyms, self.palette.red),
             ("See also", &entry.related, self.palette.blue),
         ] {
+            let first = ordinal;
+            ordinal = ordinal.saturating_add(words.len());
             if words.is_empty() {
                 continue;
             }
@@ -1958,7 +2287,7 @@ impl Dictionary {
                 indent: 0.0,
                 space: l.font * 0.9,
             });
-            self.pack_chips(&mut out, words, body, l, color);
+            self.pack_chips(&mut out, words, first, body, l, color);
         }
 
         if !entry.etymology.is_empty() {
@@ -1997,14 +2326,15 @@ impl Dictionary {
         &self,
         out: &mut Vec<Block>,
         words: &[String],
+        first: usize,
         body: f32,
         l: &Layout,
         color: Color,
     ) {
         let gap = l.pad * 0.5;
-        let mut row: Vec<(String, Option<usize>)> = Vec::new();
+        let mut row: Vec<Chip> = Vec::new();
         let mut used = 0.0f32;
-        for word in words {
+        for (n, word) in words.iter().enumerate() {
             let w = chip_w(word, l.small, l.pad * 0.6);
             let needed = if row.is_empty() { w } else { w + gap };
             if !row.is_empty() && used + needed > body {
@@ -2021,7 +2351,11 @@ impl Dictionary {
                 used = 0.0;
             }
             used += if row.is_empty() { w } else { w + gap };
-            row.push((word.clone(), self.find_word(word)));
+            row.push(Chip {
+                word: word.clone(),
+                entry: self.find_word(word),
+                ordinal: first.saturating_add(n),
+            });
         }
         if !row.is_empty() {
             let space = if out.last().is_some_and(|b| matches!(b, Block::Chips { .. })) {
@@ -2350,7 +2684,7 @@ impl Dictionary {
                 Screen::Search if self.query.trim().is_empty() => {
                     "Start typing to search the dictionary"
                 }
-                Screen::Search => "No entry matches that",
+                Screen::Search => "Nothing here or in WordNet matches that",
                 Screen::History => "Nothing looked up yet",
                 _ => "No favourites yet \u{2014} open a word and press Ctrl+D",
             };
@@ -2385,7 +2719,7 @@ impl Dictionary {
         // drawn cannot be clicked either.
         f.clip(pane);
         for slot in 0..visible.saturating_add(peek) {
-            let Some(&index) = rows.get(top.saturating_add(slot)) else {
+            let Some(row) = rows.get(top.saturating_add(slot)) else {
                 break;
             };
             let r = l.row(pane, slot);
@@ -2393,7 +2727,10 @@ impl Dictionary {
             if chosen {
                 fill(f, r, self.palette.surface0, (r.h * 0.2).min(7.0));
             }
-            self.draw_row(f, l, r, index, chosen);
+            match row {
+                Row::Entry(index) => self.draw_row(f, l, r, *index, chosen),
+                Row::LookUp(_) | Row::Suggestion(_) => self.draw_lookup_row(f, l, r, row, chosen),
+            }
             f.hit(Target::Row(top.saturating_add(slot)), r);
         }
         f.unclip();
@@ -2472,6 +2809,64 @@ impl Dictionary {
                 Some((r.w - inner * 2.0).max(0.0)),
             );
         }
+    }
+
+    /// A row that looks a word up: what it offers, and -- in smaller type --
+    /// what that does, since pressing it sends the word to another machine.
+    fn draw_lookup_row(&self, f: &mut Frame, l: &Layout, r: Rect, row: &Row, chosen: bool) {
+        let word = self.row_word(row);
+        let host = self.server_name();
+        let (head, sub) = if self.looking_up(word) {
+            (
+                format!("Looking up \u{201c}{word}\u{201d}\u{2026}"),
+                format!("Asking {host}"),
+            )
+        } else if matches!(row, Row::Suggestion(_)) {
+            (
+                format!("Did you mean \u{201c}{word}\u{201d}?"),
+                format!("Look it up in WordNet, at {host}"),
+            )
+        } else if self.screen == Screen::Search {
+            (
+                format!("Look up \u{201c}{word}\u{201d} online"),
+                format!("In WordNet, at {host} \u{2014} the word is sent there"),
+            )
+        } else {
+            let star = if self.favorites.iter().any(|w| w == word) {
+                "\u{2605} "
+            } else {
+                ""
+            };
+            (
+                format!("{star}{word}"),
+                format!("Not in the built-in list \u{2014} Enter looks it up at {host}"),
+            )
+        };
+        let inner = l.pad;
+        label(
+            f,
+            r.x + inner,
+            r.y + r.h * 0.5 - text::line_height(l.font, FontWeightHint::Bold),
+            &head,
+            l.font,
+            if chosen {
+                self.palette.lavender
+            } else {
+                self.palette.text
+            },
+            FontWeightHint::Bold,
+            Some((r.w - inner * 2.0).max(0.0)),
+        );
+        label(
+            f,
+            r.x + inner,
+            r.y + r.h * 0.5 + text::line_height(l.small, FontWeightHint::Regular) * 0.1,
+            &sub,
+            l.small,
+            self.palette.subtext0,
+            FontWeightHint::Regular,
+            Some((r.w - inner * 2.0).max(0.0)),
+        );
     }
 
     fn draw_entry(&self, f: &mut Frame, l: &Layout) {
@@ -2742,7 +3137,8 @@ fn draw_block(f: &mut Frame, pal: &Palette, l: &Layout, block: &Block, pane: Rec
             let gap = l.pad * 0.5;
             let inner = l.pad * 0.6;
             let mut x = pane.x + l.pad;
-            for (word, link) in words {
+            for chip_word in words {
+                let word = &chip_word.word;
                 let w = chip_w(word, *size, inner);
                 let chip = Rect::new(x, y, w, h);
                 fill(f, chip, pal.surface0, (h * 0.35).min(9.0));
@@ -2753,14 +3149,21 @@ fn draw_block(f: &mut Frame, pal: &Palette, l: &Layout, block: &Block, pane: Rec
                     chip.y + chip.h / 2.0,
                     word,
                     *size,
-                    if link.is_some() { *color } else { pal.subtext0 },
+                    if chip_word.entry.is_some() {
+                        *color
+                    } else {
+                        pal.subtext0
+                    },
                     FontWeightHint::Regular,
                 );
-                // Only a chip the dictionary can actually open is clickable, so
-                // a chip that looks live leads somewhere.
-                if let Some(index) = link {
-                    f.hit(Target::Link(*index), chip);
-                }
+                // Every chip leads somewhere: to its entry, or -- dimmer, since
+                // it costs a trip to another machine -- to a lookup online.
+                f.hit(
+                    chip_word
+                        .entry
+                        .map_or(Target::Fetch(chip_word.ordinal), Target::Link),
+                    chip,
+                );
                 x += w + gap;
             }
         }
@@ -2907,14 +3310,15 @@ impl Dictionary {
             }
             Target::Row(i) => {
                 let rows = self.rows(self.screen);
-                if let Some(&index) = rows.get(i) {
+                if let Some(row) = rows.get(i) {
                     // One click selects and opens: a two-step select-then-open
                     // is a keyboard idiom, and the row is big enough to hit.
                     self.set_sel(self.screen, i);
-                    self.apply(Action::Open(index));
+                    self.activate(row);
                 }
             }
             Target::Link(index) => self.apply(Action::Open(index)),
+            Target::Fetch(n) => self.apply(Action::LookUp(n)),
             // The field is only ever drawn on the search screen, and typing
             // already reaches the query from every screen, so `Go(Search)`
             // was a hit box that could not do anything on any click that
@@ -3091,6 +3495,31 @@ impl App for Dictionary {
         self.palette = *palette;
     }
 
+    /// A lookup's thread wakes the window when its answer is in.
+    fn wants_waker(&self) -> bool {
+        true
+    }
+
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        self.waker = Some(waker);
+    }
+
+    fn on_wake(&mut self) -> Response {
+        if self.pump_lookup() {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
+    /// While a lookup is under way, a clock as well as the waker: a wake that
+    /// went missing would otherwise leave "Looking up..." on screen for good.
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        self.pending
+            .is_some()
+            .then_some(std::time::Duration::from_millis(500))
+    }
+
     fn title(&self) -> String {
         "Dictionary".to_string()
     }
@@ -3106,6 +3535,13 @@ impl App for Dictionary {
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
             return Response::Exit;
+        }
+        if matches!(event, Event::Tick { .. }) {
+            return if self.pump_lookup() {
+                Response::Redraw
+            } else {
+                Response::Idle
+            };
         }
         match handle_event(self, event) {
             EventResult::Consumed => Response::Redraw,
@@ -3438,6 +3874,273 @@ mod tests {
         Dictionary::new()
     }
 
+    /// A lookup that answers at once, from memory: "nowhere" has no entry
+    /// and two words near it, "offline" cannot be reached, and anything else
+    /// is a one-sense noun.
+    fn answers(_server: &str, word: &str) -> Result<online::Answer, online::LookupError> {
+        match word {
+            "nowhere" => Ok(online::Answer::NotFound {
+                suggestions: vec![String::from("nowise"), String::from("kernel")],
+            }),
+            "offline" => Err(online::LookupError::Network(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "refused",
+            ))),
+            w => Ok(online::Answer::Found(DictEntry {
+                source: Some(String::from("WordNet (r) 3.0 (2006)")),
+                word: w.to_owned(),
+                pronunciation: String::new(),
+                definitions: vec![Definition {
+                    part_of_speech: PartOfSpeech::Noun,
+                    text: format!("the meaning of {w}"),
+                    examples: Vec::new(),
+                }],
+                synonyms: Vec::new(),
+                antonyms: Vec::new(),
+                etymology: String::new(),
+                related: Vec::new(),
+            })),
+        }
+    }
+
+    /// Wait for the lookup under way to answer, and take the answer in.
+    fn settle(d: &mut Dictionary) {
+        for _ in 0..500 {
+            if d.pump_lookup() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the lookup never answered");
+    }
+
+    /// Everything drawn, as text.
+    fn drawn_text(d: &Dictionary) -> Vec<String> {
+        d.frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .into_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// No test reaches the network: the server a test's window asks is a
+    /// loopback port where nothing listens.
+    #[test]
+    fn no_test_reaches_the_network() {
+        assert_eq!(app().server, "127.0.0.1:9");
+        assert_ne!(app().server, online::DICT_ORG);
+    }
+
+    /// **A word the built-in list lacks is offered for lookup, looked up,
+    /// and opened** -- with where it came from said under it, and a place
+    /// in the history like any other.
+    #[test]
+    fn a_word_the_list_lacks_is_looked_up_and_opened() {
+        let mut d = app();
+        d.lookup = answers;
+        search_for(&mut d, "serenity");
+        assert!(
+            d.find_word("serenity").is_none(),
+            "control: a built-in word"
+        );
+        assert_eq!(
+            d.rows(Screen::Search).last(),
+            Some(&Row::LookUp(String::from("serenity"))),
+            "no offer to look it up"
+        );
+        assert!(
+            drawn_text(&d)
+                .iter()
+                .any(|t| t.contains("Look up \u{201c}serenity\u{201d} online")),
+            "the offer is not drawn"
+        );
+        probe::key(&mut d, &probe::press(Key::End));
+        probe::key(&mut d, &probe::press(Key::Enter));
+        assert!(d.looking_up("serenity"), "Enter did not look it up");
+        assert!(d.status().starts_with("Asking 127.0.0.1"), "{}", d.status());
+        assert!(
+            d.tick_interval().is_some(),
+            "no clock while a lookup is out"
+        );
+        settle(&mut d);
+
+        assert_eq!(d.screen(), Screen::Entry);
+        assert_eq!(d.word(d.current().expect("nothing opened")), "serenity");
+        assert_eq!(d.history().first().map(String::as_str), Some("serenity"));
+        assert!(
+            drawn_text(&d)
+                .iter()
+                .any(|t| t == "From WordNet (r) 3.0 (2006), at 127.0.0.1"),
+            "the entry does not say where it came from"
+        );
+        assert!(d.tick_interval().is_none(), "the clock outlived the lookup");
+        // Back on the search screen, it is a result now, not an offer.
+        d.apply(Action::Go(Screen::Search));
+        let rows = d.rows(Screen::Search);
+        assert!(
+            rows.iter().all(|r| !matches!(r, Row::LookUp(_))),
+            "{rows:?}"
+        );
+        assert!(rows.contains(&Row::Entry(d.find_word("serenity").expect("kept"))));
+    }
+
+    /// A word WordNet does not have is said to be missing, and the words
+    /// near it are offered in its place; one of them in the built-in list
+    /// opens without asking anyone.
+    #[test]
+    fn a_word_nobody_has_is_answered_with_what_is_near_it() {
+        let mut d = app();
+        d.lookup = answers;
+        search_for(&mut d, "nowhere");
+        probe::key(&mut d, &probe::press(Key::End));
+        probe::key(&mut d, &probe::press(Key::Enter));
+        settle(&mut d);
+        assert!(d.status().contains("WordNet has no"), "{}", d.status());
+        let rows = d.rows(Screen::Search);
+        let offered: Vec<&Row> = rows.iter().filter(|r| r.entry().is_none()).collect();
+        assert_eq!(
+            offered,
+            [
+                &Row::Suggestion(String::from("nowise")),
+                &Row::Suggestion(String::from("kernel"))
+            ]
+        );
+        assert_eq!(
+            rows.get(d.selected(Screen::Search)),
+            Some(&Row::Suggestion(String::from("nowise"))),
+            "the selection is not on the first suggestion"
+        );
+        probe::key(&mut d, &probe::press(Key::Down));
+        probe::key(&mut d, &probe::press(Key::Enter));
+        assert!(
+            !d.looking_up("kernel"),
+            "a built-in word was sent to be looked up"
+        );
+        assert_eq!(d.word(d.current().expect("kernel opened")), "kernel");
+    }
+
+    /// A lookup that fails says why, and adds nothing.
+    #[test]
+    fn a_lookup_that_fails_says_why_and_changes_nothing() {
+        let mut d = app();
+        d.lookup = answers;
+        let before = d.entries().len();
+        d.look_up("offline");
+        settle(&mut d);
+        assert!(
+            d.status()
+                .starts_with("Could not look up \u{201c}offline\u{201d} at 127.0.0.1"),
+            "{}",
+            d.status()
+        );
+        assert!(d.status().contains("refused"), "{}", d.status());
+        assert_eq!(d.entries().len(), before);
+        assert_eq!(d.current(), None);
+    }
+
+    /// A remembered word the list lacks stays in the history -- it was
+    /// dropped, so a word looked up online was gone at the next start -- and
+    /// opening it looks it up.
+    #[test]
+    fn a_remembered_word_the_list_lacks_is_kept_and_looked_up() {
+        let mut d = app();
+        d.lookup = answers;
+        d.replace_lists(
+            vec![String::from("serenity")],
+            vec![String::from("serenity")],
+        );
+        d.apply(Action::Go(Screen::History));
+        assert_eq!(
+            d.rows(Screen::History),
+            [Row::LookUp(String::from("serenity"))]
+        );
+        assert!(
+            drawn_text(&d)
+                .iter()
+                .any(|t| t.contains("Not in the built-in list")),
+            "the row does not say what opening it will do"
+        );
+        probe::key(&mut d, &probe::press(Key::Enter));
+        settle(&mut d);
+        assert_eq!(d.word(d.current().expect("nothing opened")), "serenity");
+        assert!(d.is_favorite(), "the favourite did not follow the word");
+    }
+
+    /// An answer for a reader who has moved on does not take the screen
+    /// from them; it says it is ready.
+    #[test]
+    fn an_answer_for_a_reader_who_moved_on_does_not_take_the_screen() {
+        let mut d = app();
+        d.lookup = answers;
+        search_for(&mut d, "serenity");
+        probe::key(&mut d, &probe::press(Key::End));
+        probe::key(&mut d, &probe::press(Key::Enter));
+        d.apply(Action::Go(Screen::Favorites));
+        settle(&mut d);
+        assert_eq!(d.screen(), Screen::Favorites, "the answer took the screen");
+        assert_eq!(d.current(), None);
+        assert!(d.status().contains("is here now"), "{}", d.status());
+        assert!(
+            d.find_word("serenity").is_some(),
+            "the entry was thrown away"
+        );
+    }
+
+    /// Asking again while the answer is on its way asks once.
+    #[test]
+    fn asking_again_while_a_lookup_is_out_asks_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static ASKED: AtomicUsize = AtomicUsize::new(0);
+        fn slow(server: &str, word: &str) -> Result<online::Answer, online::LookupError> {
+            ASKED.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            answers(server, word)
+        }
+        let mut d = app();
+        d.lookup = slow;
+        d.look_up("serenity");
+        d.look_up("Serenity");
+        settle(&mut d);
+        assert_eq!(
+            ASKED.load(Ordering::SeqCst),
+            1,
+            "the same word was asked twice"
+        );
+    }
+
+    /// The lookup's thread wakes the window when its answer is in, and the
+    /// wake is what takes the answer.
+    #[test]
+    fn the_answer_wakes_the_window() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Flag(AtomicBool);
+        impl std::task::Wake for Flag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let flag = Arc::new(Flag(AtomicBool::new(false)));
+        let mut d = app();
+        d.lookup = answers;
+        assert!(d.wants_waker());
+        d.attach_waker(std::task::Waker::from(Arc::clone(&flag)));
+        d.look_up("serenity");
+        for _ in 0..500 {
+            if flag.0.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(flag.0.load(Ordering::SeqCst), "the window was never woken");
+        assert_eq!(d.on_wake(), Response::Redraw);
+        assert!(d.find_word("serenity").is_some());
+    }
+
     fn sized(size: (f32, f32)) -> Dictionary {
         let mut d = app();
         d.resize(size.0, size.1);
@@ -3742,7 +4445,7 @@ mod tests {
         let mut d = sized(size);
         search_for(&mut d, "kernel");
         assert_eq!(
-            d.rows(Screen::Search).first().copied(),
+            d.rows(Screen::Search).first().and_then(Row::entry),
             d.find_word("kernel")
         );
         d.key_at(&probe::press(Key::Enter), size);
@@ -3804,7 +4507,7 @@ mod tests {
         search_for(&mut d, "e");
         let rows = d.rows(Screen::Search);
         assert!(rows.len() > 1, "not enough results to tell the rows apart");
-        let wanted = d.word(rows[1]).to_string();
+        let wanted = d.row_word(&rows[1]).to_string();
         probe::click(&mut d, Target::Row(1));
         assert_eq!(d.screen(), Screen::Entry);
         assert_eq!(d.word(d.current().unwrap()), wanted);
@@ -3817,7 +4520,7 @@ mod tests {
         let mut d = app();
         search_for(&mut d, "e");
         let row = probe::rect_of(&d, Target::Row(2)).expect("row 2 has no hit box");
-        let wanted = d.word(d.rows(Screen::Search)[2]).to_string();
+        let wanted = d.row_word(&d.rows(Screen::Search)[2]).to_string();
         d.click_at(
             row.x + row.w * 0.5,
             row.y + row.h * 0.5,
@@ -3890,9 +4593,9 @@ mod tests {
         let (word, index) = blocks
             .iter()
             .find_map(|b| match b {
-                Block::Chips { words, .. } => {
-                    words.iter().find_map(|(w, i)| i.map(|i| (w.clone(), i)))
-                }
+                Block::Chips { words, .. } => words
+                    .iter()
+                    .find_map(|c| c.entry.map(|i| (c.word.clone(), i))),
                 Block::Line { .. } => None,
             })
             .expect("algorithm has no chip that names another entry");
@@ -3903,26 +4606,36 @@ mod tests {
         );
     }
 
+    /// **A chip naming a word the dictionary lacks looks it up online** --
+    /// it was a dead label, drawn and unclickable, which on the built-in
+    /// entries was most of the synonyms.
     #[test]
-    fn a_chip_naming_a_word_the_dictionary_lacks_is_not_clickable() {
-        let d = app();
-        let l = d.layout();
-        let mut dead = 0;
-        for i in 0..d.entries().len() {
-            for block in d.entry_blocks(i, &l, l.entry_pane().w) {
-                if let Block::Chips { words, .. } = block {
-                    dead += words.iter().filter(|(_, link)| link.is_none()).count();
-                }
-            }
-        }
-        assert!(
-            dead > 0,
-            "every cross-reference in the dictionary has an entry — \
-             this test needs one that does not"
+    fn a_chip_naming_a_word_the_dictionary_lacks_looks_it_up() {
+        let mut d = app();
+        d.lookup = answers;
+        open(&mut d, "algorithm");
+        let n = d
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .hits()
+            .iter()
+            .find_map(|(t, _)| match t {
+                Target::Fetch(n) => Some(*n),
+                _ => None,
+            })
+            .expect("algorithm has no chip for a word the dictionary lacks");
+        let word = d
+            .cross_ref(n)
+            .expect("the chip names a cross-reference")
+            .to_owned();
+        assert!(d.find_word(&word).is_none(), "{word} is in the dictionary");
+        probe::click(&mut d, Target::Fetch(n));
+        settle(&mut d);
+        assert_eq!(
+            d.word(d.current().expect("nothing opened")),
+            word,
+            "the chip did not bring its word"
         );
         // And every recorded link points at a real entry.
-        let mut d = app();
-        open(&mut d, "algorithm");
         for (target, _) in d.frame(WINDOW_WIDTH, WINDOW_HEIGHT).hits() {
             if let Target::Link(i) = *target {
                 assert!(
@@ -4038,7 +4751,7 @@ mod tests {
             );
             assert_eq!(d.query(), "kernel");
             assert_eq!(
-                d.rows(Screen::Search).first().copied(),
+                d.rows(Screen::Search).first().and_then(Row::entry),
                 d.find_word("kernel")
             );
         }
@@ -4215,7 +4928,7 @@ mod tests {
         }
         let sel = d.selected(Screen::Search);
         assert!(sel > 0, "the list did not move");
-        let wanted = d.word(d.rows(Screen::Search)[sel]).to_string();
+        let wanted = d.row_word(&d.rows(Screen::Search)[sel]).to_string();
         d.key_at(&probe::press(Key::Enter), SHORT);
         assert_eq!(d.word(d.current().unwrap()), wanted);
     }
@@ -4239,7 +4952,7 @@ mod tests {
             2,
             "Down did nothing on the favourites"
         );
-        let wanted = d.word(d.rows(Screen::Favorites)[2]).to_string();
+        let wanted = d.row_word(&d.rows(Screen::Favorites)[2]).to_string();
         probe::key(&mut d, &probe::press(Key::Enter));
         assert_eq!(d.word(d.current().unwrap()), wanted);
     }
@@ -4510,7 +5223,7 @@ mod tests {
                     Block::Line { text, .. } => text.clone(),
                     Block::Chips { words, .. } => words
                         .iter()
-                        .map(|(w, _)| w.as_str())
+                        .map(|c| c.word.as_str())
                         .collect::<Vec<_>>()
                         .join(" "),
                 })
@@ -4558,7 +5271,7 @@ mod tests {
     fn an_exact_match_comes_first() {
         let mut d = app();
         search_for(&mut d, "cache");
-        assert_eq!(d.word(d.rows(Screen::Search)[0]), "cache");
+        assert_eq!(d.row_word(&d.rows(Screen::Search)[0]), "cache");
     }
 
     #[test]
@@ -4613,7 +5326,8 @@ mod tests {
             .map(|(e, w)| (e.word.clone(), w.to_lowercase()))
             .expect("no entry is reachable only through its related list");
         search_for(&mut d, &probe_word.1);
-        let words: Vec<&str> = d.rows(Screen::Search).iter().map(|&i| d.word(i)).collect();
+        let rows = d.rows(Screen::Search);
+        let words: Vec<&str> = rows.iter().map(|r| d.row_word(r)).collect();
         assert!(
             words.contains(&probe_word.0.as_str()),
             "{} is not among the results for {}",
@@ -4626,7 +5340,18 @@ mod tests {
     fn the_results_are_ordered_by_rank_and_then_by_the_word_list() {
         let mut d = app();
         search_for(&mut d, "e");
-        let rows = d.rows(Screen::Search);
+        // The entries; the offer to look "e" itself up online comes after
+        // them, and has no rank.
+        let rows: Vec<usize> = d
+            .rows(Screen::Search)
+            .iter()
+            .filter_map(Row::entry)
+            .collect();
+        assert_eq!(
+            d.rows(Screen::Search).last(),
+            Some(&Row::LookUp(String::from("e"))),
+            "the online lookup is not offered after the entries"
+        );
         let ranks: Vec<u8> = rows
             .iter()
             .map(|&i| rank(d.entry(i).unwrap(), "e").unwrap())
@@ -4651,7 +5376,7 @@ mod tests {
         let mut b = app();
         search_for(&mut b, "  kernel  ");
         assert_eq!(a.rows(Screen::Search), b.rows(Screen::Search));
-        assert_eq!(a.word(a.rows(Screen::Search)[0]), "kernel");
+        assert_eq!(a.row_word(&a.rows(Screen::Search)[0]), "kernel");
     }
 
     #[test]
@@ -4662,7 +5387,7 @@ mod tests {
             let mut d = app();
             search_for(&mut d, &word);
             assert_eq!(
-                d.rows(Screen::Search).first().copied(),
+                d.rows(Screen::Search).first().and_then(Row::entry),
                 Some(i),
                 "{word} is not the first result for itself"
             );
@@ -4820,7 +5545,7 @@ mod tests {
             for d in &e.definitions {
                 assert!(!d.text.is_empty(), "{}: an empty definition", e.word);
                 assert!(
-                    d.example.as_ref().is_none_or(|x| !x.is_empty()),
+                    d.examples.iter().all(|x| !x.is_empty()),
                     "{}: an empty example",
                     e.word
                 );
@@ -4871,6 +5596,47 @@ mod tests {
         }
     }
 
+    /// Every chip's number finds its own word through `cross_ref` -- in all
+    /// three lists, on every entry -- which is how a click on a chip for a
+    /// word the dictionary lacks knows what to look up.
+    #[test]
+    fn every_chip_numbers_its_own_word() {
+        let mut d = app();
+        let l = d.layout();
+        let mut checked = [0_usize; 3];
+        for i in 0..d.entries().len() {
+            d.apply(Action::Open(i));
+            let entry = d.entry(i).expect("an entry").clone();
+            for block in d.entry_blocks(i, &l, l.entry_pane().w) {
+                if let Block::Chips { words, .. } = block {
+                    for chip in words {
+                        assert_eq!(
+                            d.cross_ref(chip.ordinal),
+                            Some(chip.word.as_str()),
+                            "{}: chip {} is numbered as another word",
+                            entry.word,
+                            chip.ordinal
+                        );
+                        let list = if entry.synonyms.contains(&chip.word) {
+                            0
+                        } else if entry.antonyms.contains(&chip.word) {
+                            1
+                        } else {
+                            2
+                        };
+                        if let Some(n) = checked.get_mut(list) {
+                            *n += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            checked.iter().all(|&n| n > 0),
+            "a list had no chips to check: {checked:?}"
+        );
+    }
+
     #[test]
     fn a_cross_reference_that_names_an_entry_arrives_as_a_link() {
         let d = app();
@@ -4879,7 +5645,10 @@ mod tests {
         for i in 0..d.entries().len() {
             for block in d.entry_blocks(i, &l, l.entry_pane().w) {
                 if let Block::Chips { words, .. } = block {
-                    for (word, link) in words {
+                    for Chip {
+                        word, entry: link, ..
+                    } in words
+                    {
                         assert_eq!(
                             link,
                             d.find_word(&word),
@@ -4911,7 +5680,7 @@ mod tests {
                 .into_iter()
                 .flat_map(|b| match b {
                     Block::Chips { words, .. } => {
-                        words.into_iter().filter_map(|(_, link)| link).collect()
+                        words.into_iter().filter_map(|c| c.entry).collect()
                     }
                     Block::Line { .. } => Vec::new(),
                 })

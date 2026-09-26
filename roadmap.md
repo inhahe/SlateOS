@@ -1936,6 +1936,16 @@ word; text inside them that says "lane C" is history.
   then those read "Not reported". `known-issues.md` → `[E] The Device Manager
   cannot say which driver runs a PCI device, nor its interrupt or memory`.
 
+- `[x]` `[E]` **The dictionary knows more than thirty words** — 2026-09-26.
+  A word the built-in list lacks is looked up in WordNet at dict.org over
+  DICT (RFC 2229), when the reader asks and never as they type
+  (design-decisions §1214): senses, parts of speech, examples, synonyms and
+  antonyms read into the entry screen's own shape, a miss answered with the
+  words one edit away, every cross-reference chip now leading somewhere, and
+  a remembered word the list lacks kept in the history as a row that looks
+  it up. Tested against dict.org's own replies, recorded; no test reaches
+  the network.
+
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane
 C's standing note before the split). **Baseline, 2026-09-24:** every `apps/*`

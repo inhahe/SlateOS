@@ -1837,6 +1837,15 @@ live.
   for in a row only the newest is decoded; and a login screen showing the
   desktop's picture shares its decode.
 
+- `[C]` **Text falls back to other fonts, and the UI font is Open Sans** --
+  done 2026-09-26 (`design-decisions.md` §883). A character the UI font
+  lacked was a box. The toolkit now draws it from the first of a chosen list
+  of installed fonts -- broad coverage (Noto Sans), emoji, symbols and
+  mathematics, then one font per writing system -- through lane F's face
+  fallback, and the default UI family is the Aero theme's Open Sans. Waiting
+  on others: the fonts in the image (lane D) and the compositor installing
+  the same list (lane F); `requests/f-cd-the-os-image-ships-no-fonts-...`.
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's

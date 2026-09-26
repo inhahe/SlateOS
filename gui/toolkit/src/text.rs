@@ -43,14 +43,19 @@ use crate::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
 
 /// The families tried, in order, when nothing has chosen one.
 ///
-/// The first is the design's intended UI font; the rest are the default sans
-/// of each platform this is developed or run on, ending with the two that are
-/// installed almost everywhere. The list exists because the alternative to
+/// The first is the default theme's typeface: Open Sans, the `font-family` of
+/// the Aero reference the operator made the default look (design-decisions
+/// §815), and the face the OS image carries for UI text (`requests/`
+/// `f-cd-the-os-image-ships-no-fonts-so-slateos-draws-every-word-in-the-8x16-bitmap-face.md`).
+/// Inter, which §400 chose before there was a default theme, is second. The
+/// rest are the default sans of each platform this is developed or run on,
+/// ending with the two that are installed almost everywhere. The list exists because the alternative to
 /// finding *a* face is the built-in 8x16 bitmap font, which is legible but
 /// looks nothing like the system it is standing in for — so a host missing
-/// Inter should fall to Segoe UI or DejaVu Sans, not all the way back to
+/// Open Sans should fall to Segoe UI or DejaVu Sans, not all the way back to
 /// bitmaps.
 pub const DEFAULT_UI_FAMILIES: &[&str] = &[
+    "Open Sans",
     "Inter",
     "Segoe UI",
     "Cantarell",
@@ -81,6 +86,130 @@ pub const DEFAULT_MONO_FAMILIES: &[&str] = &[
     "Courier New",
 ];
 
+/// Where a character is drawn from when the UI or fixed-pitch face has no
+/// glyph for it: groups of families, tried in order, each group the first of
+/// its members that is installed.
+///
+/// Face fallback itself is `osfont`'s, cluster by cluster (design-decisions
+/// §1320): a character the chosen face lacks is drawn from the first fallback
+/// face that has it, rather than as a box. Which faces those are is decided
+/// here, once, for every process -- see [`install_fallback_faces`].
+///
+/// A *group* is one job with interchangeable answers: the emoji face is Noto
+/// Color Emoji on SlateOS and Segoe UI Emoji on a Windows host, and loading
+/// both would spend a second face on characters the first already draws. The
+/// groups, in the order they are reached:
+///
+/// - **Broad text coverage.** Noto Sans has three times Open Sans's
+///   repertoire -- the rest of extended Latin (Vietnamese, African and
+///   phonetic letters), more Greek and Cyrillic, and most of the punctuation
+///   and symbols a UI meets.
+/// - **Emoji.** `osfont` tries a colour face *first* for a cluster that asks
+///   for emoji presentation and last otherwise, so this group's place matters
+///   only for the few characters with both a text and an emoji form.
+/// - **Symbols and mathematics** Noto Sans leaves out.
+/// - **Scripts** Noto Sans leaves out -- right-to-left, Indic, South-East
+///   Asian, Caucasian, Ethiopic, CJK -- when installed. One CJK face serves
+///   all four regional forms: they share most of their characters, and each
+///   is tens of megabytes.
+///
+/// Only what is installed is used, and every face used is parsed in every
+/// process that draws text, which is why this is a list someone chose and not
+/// every face on the machine.
+pub const DEFAULT_FALLBACK_FAMILIES: &[&[&str]] = &[
+    &["Noto Sans", "DejaVu Sans", "Segoe UI"],
+    &[
+        "Noto Color Emoji",
+        "Segoe UI Emoji",
+        "Apple Color Emoji",
+        "Twemoji",
+    ],
+    &["Noto Sans Symbols 2", "Segoe UI Symbol", "Symbola"],
+    &["Noto Sans Symbols"],
+    &["Noto Sans Math", "Cambria Math", "STIX Two Math"],
+    &["Noto Sans Arabic", "Noto Naskh Arabic"],
+    &["Noto Sans Hebrew"],
+    &["Noto Sans Devanagari"],
+    &["Noto Sans Bengali"],
+    &["Noto Sans Tamil"],
+    &["Noto Sans Thai"],
+    &["Noto Sans Georgian"],
+    &["Noto Sans Armenian"],
+    &["Noto Sans Ethiopic"],
+    &[
+        "Noto Sans CJK SC",
+        "Noto Sans CJK JP",
+        "Noto Sans CJK TC",
+        "Noto Sans CJK KR",
+        "Noto Sans SC",
+        "Noto Sans JP",
+        "Microsoft YaHei",
+    ],
+];
+
+/// The fallback families installed in `db`, in the order they are tried: the
+/// first installed member of each of [`DEFAULT_FALLBACK_FAMILIES`]'s groups.
+///
+/// A function of the font directories alone -- not of the UI font a process
+/// has chosen, nor of anything else about the process -- because the
+/// toolkit's cache, which measures, and the compositor's, which draws, must
+/// arrive at the same list in the same order. Two lists that differed would
+/// measure a line in one face and draw it in another.
+#[must_use]
+pub fn resolve_fallback_families(db: &FontDb) -> Vec<&'static str> {
+    DEFAULT_FALLBACK_FAMILIES
+        .iter()
+        .filter_map(|group| {
+            group
+                .iter()
+                .copied()
+                .find(|family| db.find(family, Query::regular()).is_some())
+        })
+        .collect()
+}
+
+/// Draw whatever the installed faces have no glyph for from the fallback
+/// families ([`resolve_fallback_families`]), returning the families that loaded.
+///
+/// Public for the same reason [`install_ui_faces`] is: the compositor keeps a
+/// [`FontCache`] of its own, and it must fall back to the same faces in the
+/// same order as the toolkit measured with. Calling this is how the second
+/// cache agrees with the first by construction.
+///
+/// A family whose file cannot be read or parsed is left out and the rest are
+/// still installed -- one broken emoji font must not cost the Greek. Its
+/// place goes to nothing rather than to the next member of its group, so
+/// that a file that fails to load in one process and not in another (a
+/// descriptor limit, a file replaced between the two scans) changes one face
+/// and not the order of the rest. Regular weight only: `osfont` takes a
+/// variable fallback face to weight 700 for bold text itself.
+pub fn install_fallback_faces(cache: &mut FontCache) -> Vec<&'static str> {
+    let db = font_db();
+    let mut installed = Vec::new();
+    let mut faces = Vec::new();
+    for family in resolve_fallback_families(db) {
+        // A face that will not load is one fewer fallback, not a failure of
+        // the rest: see the doc above.
+        if let Ok(face) = db.load(family, Query::regular()) {
+            faces.push(Arc::new(face));
+            installed.push(family);
+        }
+    }
+    cache.set_fallbacks(faces);
+    installed
+}
+
+/// The families characters are drawn from when the UI or fixed-pitch face
+/// lacks them, in the order they are tried.
+#[must_use]
+pub fn fallback_families() -> Vec<&'static str> {
+    cache()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .fallbacks
+        .clone()
+}
+
 /// The index of installed fonts, built once per process.
 ///
 /// Separate from the cache so that changing the UI font later does not
@@ -101,6 +230,9 @@ struct Fonts {
     family: Option<String>,
     /// The fixed-pitch family currently installed, likewise.
     mono_family: Option<String>,
+    /// The fallback families installed, in order -- see
+    /// [`install_fallback_faces`].
+    fallbacks: Vec<&'static str>,
 }
 
 /// The process-wide font cache.
@@ -133,10 +265,12 @@ fn cache() -> &'static Mutex<Fonts> {
         let mut cache = FontCache::new();
         let family = install_ui_faces(&mut cache).map(str::to_string);
         let mono_family = install_mono_faces(&mut cache).map(str::to_string);
+        let fallbacks = install_fallback_faces(&mut cache);
         Mutex::new(Fonts {
             cache,
             family,
             mono_family,
+            fallbacks,
         })
     })
 }
@@ -2015,6 +2149,25 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **The process's fallbacks are what its font directories resolve to**,
+    /// in that order -- the property that makes the compositor's cache,
+    /// which calls the same resolution, agree with this one. Whatever the
+    /// host has installed; on a host with none of them the list is empty.
+    #[test]
+    fn this_processs_fallbacks_are_the_ones_its_fonts_resolve_to() {
+        let resolved = resolve_fallback_families(font_db());
+        let installed = fallback_families();
+        // Installed is resolved with any face that failed to load left out,
+        // so it is an ordered subsequence -- on a healthy host, all of it.
+        let mut rest = resolved.iter();
+        for family in &installed {
+            assert!(
+                rest.any(|r| r == family),
+                "{family} is a fallback here but not where the directories put                  it: {installed:?} against {resolved:?}"
+            );
+        }
+    }
 
     /// The three `TextCursor` motions are the answer every text field in the
     /// system now defers to, so their edges are worth stating outright: a

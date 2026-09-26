@@ -1085,7 +1085,11 @@ pub struct FontSettings {
 impl Default for FontSettings {
     fn default() -> Self {
         Self {
-            ui_font: "Inter".to_string(),
+            // The default theme's typeface -- the Aero reference's
+            // `font-family` (design-decisions §815) -- and the first of
+            // `guitk::text::DEFAULT_UI_FAMILIES`, so a machine that has it
+            // draws in it whether or not anything has been saved.
+            ui_font: "Open Sans".to_string(),
             mono_font: "JetBrains Mono".to_string(),
             ui_size: 13.0,
             mono_size: 12.0,
@@ -2842,7 +2846,7 @@ mod tests {
     #[test]
     fn test_font_settings_default() {
         let f = FontSettings::default();
-        assert_eq!(f.ui_font, "Inter");
+        assert_eq!(f.ui_font, "Open Sans");
         assert_eq!(f.mono_font, "JetBrains Mono");
         assert!(f.hinting);
         assert!(f.smoothing);

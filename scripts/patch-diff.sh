@@ -62,6 +62,11 @@ DIFF_NEED=timeout
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
+# Variables `patch` runs with, on both sides, and nothing else does:
+# `POSIXLY_CORRECT` changes where option parsing stops, and exported it would
+# reach this harness's own tools too. Empty unless a case block sets it.
+ENVV=()
+
 pass=0; fail=0; xfail=0; xpass=0
 
 work=$DIFF_TMP/work
@@ -251,7 +256,7 @@ snap() {
 run_side() {
   local dir=$1 side=$2; shift 2
   ( cd "$dir" && diff_run timeout -k 2 30 \
-      env LC_ALL=C.UTF-8 PATH="$bindir/$side" patch "$@" )
+      env ${ENVV[@]+"${ENVV[@]}"} LC_ALL=C.UTF-8 PATH="$bindir/$side" patch "$@" )
 }
 
 # `$1` is the patch file (absolute), the rest are `patch`'s arguments. stdin is
@@ -316,7 +321,14 @@ report() {
 run_case() {
   local p=$1; shift
   compare "$patches/$p" no -i "$patches/$p" "$@"
-  report "patch -i $p $*"
+  report "${ENVV[*]:+${ENVV[*]} }patch -i $p $*"
+}
+# argv exactly as given, standard input closed: for the operands themselves,
+# `patch ORIGFILE PATCHFILE`. `$patches/` is spelled `@/` in the label.
+argv_case() {
+  compare /dev/null no "$@"
+  local shown=("${@//$patches\//@/}")
+  report "${ENVV[*]:+${ENVV[*]} }patch ${shown[*]}"
 }
 # The other way in: the patch on stdin. Reserved for cases that apply cleanly,
 # since those are the ones that cannot reach the prompt.
@@ -535,6 +547,35 @@ run_case u.patch -p1 -Q
 # --- the two whose text is ours ------------------------------------------------------
 xfail_case "our help text, not the GNU project's" empty.patch --help
 xfail_case "our version string, not the GNU project's" empty.patch --version
+
+# --- the command line, on the shared parser ---------------------------------------
+# Since 2026-09-25. The ladder of exact spellings it replaced kept only the LAST
+# operand, so `patch ORIGFILE PATCHFILE` read its patch from standard input --
+# closed here, a terminal or a pipe in real use -- and exited 0 having patched
+# nothing. It knew no abbreviation, no bundle and no `--` either.
+argv_case a/base.txt "$patches/u.patch"
+argv_case --dry-run a/base.txt "$patches/u.patch"
+argv_case -i "$patches/c.patch" a/base.txt "$patches/u.patch"
+argv_case a/base.txt "$patches/u.patch" extra
+run_case u.patch --dry -p1
+run_case u.patch -sp1
+run_case u.patch --st=1 --dry
+run_case u.patch --s
+run_case u.patch -p1 -- a/base.txt
+run_case u.patch -p -1
+run_case u.patch -F x
+# GNU accepts this, and patches with a wrapped fuzz factor: `numeric_string`
+# tests for overflow with `v10 / 10 != value` after the multiply has already
+# overflowed an `int`, which is undefined behaviour, and the compiler removes
+# the test. Ours keeps it and says `fuzz factor 99999999999 is too large`.
+xfail_case 'GNU loses its overflow check to undefined behaviour; ours refuses the number' \
+  u.patch -F 99999999999
+argv_case --bogus --help
+# POSIXLY_CORRECT: the first operand ends option parsing.
+ENVV=(POSIXLY_CORRECT=1)
+argv_case a/base.txt "$patches/u.patch" --dry-run
+argv_case --dry-run a/base.txt "$patches/u.patch"
+ENVV=()
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

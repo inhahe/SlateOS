@@ -25,6 +25,7 @@
 
 use coreutils::diag;
 use coreutils::errmsg::strerror;
+use coreutils::getopt::{Opt, Program, Takes};
 use coreutils::quote;
 use coreutils::quote::quotef_os;
 use coreutils::stdfd::Stream;
@@ -272,188 +273,224 @@ struct Options {
     target_file: Option<OsString>,
 }
 
-/// Parse patch's argv into an `Options`.  Recognised flags:
-///   -i FILE / -p NUM / -pNUM / -R / --reverse / --dry-run / -s /
-///   --silent / --quiet / -b / --backup.
-/// Anything else not starting with `-` (and not the bare string "-")
-/// is the target file.  Unknown flags return an error.
-fn parse_args(args: &[OsString]) -> Result<Options, String> {
-    let mut opts = Options::default();
-    let mut i: usize = 0;
+/// `patch`'s name, and the status of a command line it will not run: 2, which
+/// is what upstream's `usage (stderr, 2)` and `fatal` both exit with.
+const PATCH: Program = Program::new("patch", 2);
 
-    while let Some(arg) = args.get(i) {
-        // Decoded for MATCHING ONLY, and `""` when the argument is not
-        // Unicode. Every option `patch` accepts is ASCII, so a non-Unicode
-        // argument cannot be one; `""` matches nothing here and falls through
-        // to the operand arm, which keeps the original `OsString`. Option
-        // VALUES are never decoded -- they are the paths, and the whole point
-        // of taking `OsString` is that they reach the syscall unaltered.
-        let a = arg.to_str().unwrap_or("");
-        let raw = quote::os_bytes(arg);
-        if a == "-i" || a == "--input" {
-            i = i.saturating_add(1);
-            let v = args
-                .get(i)
-                .ok_or_else(|| "option -i requires an argument".to_string())?;
-            opts.patch_file = Some(v.clone());
-        } else if let Some(v) = raw.strip_prefix(b"--input=") {
-            // `--input` is the one thing the retired `userspace/patch` crate
-            // accepted that this did not. It is carried over rather than lost:
-            // deleting the worse half of a duplicate pair means the better half
-            // has to end up with everything, and a survey column reading
-            // "1 only in the standalone" is a list of one to go and check, not
-            // a rounding error.
-            opts.patch_file = Some(quote::os_from_bytes(v));
-        } else if a == "-p" {
-            i = i.saturating_add(1);
-            let v = args
-                .get(i)
-                .ok_or_else(|| "option -p requires an argument".to_string())?;
-            let n: usize = v.to_str().and_then(|s| s.parse().ok()).ok_or_else(|| {
-                // `quotef`, NOT `quote_glibc`. Measured: GNU prints
-                // `**** strip count abc is not a number` with no quotes at
-                // all, where it DOES quote an option name
-                // (`invalid option -- 'Q'`). `quotef` leaves plain text alone
-                // and escapes only a value that could forge a line, so it
-                // matches GNU on every input GNU is defined on. The harness
-                // caught this: `quote_glibc` here printed `'abc'`.
-                format!(
-                    "**** strip count {} is not a number",
-                    quote::quotef(&quote::os_bytes(v))
-                )
-            })?;
-            opts.strip = Some(n);
-        } else if let Some(rest) = a.strip_prefix("-p") {
-            if !rest.is_empty() {
-                let n: usize = rest
-                    .parse()
-                    .map_err(|_| format!("**** strip count {rest} is not a number"))?;
-                opts.strip = Some(n);
+/// GNU patch 2.7.6's `shortopts`, verbatim. Upstream spells an `m` in the
+/// middle behind `#if 0 && defined ENABLE_MERGE`, which is never true, so
+/// `--merge` has no short form.
+const SHORT_OPTIONS: &str = "bB:cd:D:eEfF:g:i:lnNo:p:r:RstTuvV:x:Y:z:Z";
+
+/// GNU patch 2.7.6's `longopts`, **in declaration order**, which is observable:
+/// an ambiguous abbreviation lists its candidates in table order. `merge` is
+/// there because the build the harness measures has `ENABLE_MERGE`, which
+/// `configure` turns on unless told `--disable-merge`.
+const LONG_OPTIONS: &[(&str, Takes)] = &[
+    ("backup", Takes::Nothing),
+    ("prefix", Takes::Required),
+    ("context", Takes::Nothing),
+    ("directory", Takes::Required),
+    ("ifdef", Takes::Required),
+    ("ed", Takes::Nothing),
+    ("remove-empty-files", Takes::Nothing),
+    ("force", Takes::Nothing),
+    ("fuzz", Takes::Required),
+    ("get", Takes::Required),
+    ("input", Takes::Required),
+    ("ignore-whitespace", Takes::Nothing),
+    ("merge", Takes::Optional),
+    ("normal", Takes::Nothing),
+    ("forward", Takes::Nothing),
+    ("output", Takes::Required),
+    ("strip", Takes::Required),
+    ("reject-file", Takes::Required),
+    ("reverse", Takes::Nothing),
+    ("quiet", Takes::Nothing),
+    ("silent", Takes::Nothing),
+    ("batch", Takes::Nothing),
+    ("set-time", Takes::Nothing),
+    ("unified", Takes::Nothing),
+    ("version", Takes::Nothing),
+    ("version-control", Takes::Required),
+    ("debug", Takes::Required),
+    ("basename-prefix", Takes::Required),
+    ("suffix", Takes::Required),
+    ("set-utc", Takes::Nothing),
+    ("dry-run", Takes::Nothing),
+    ("verbose", Takes::Nothing),
+    ("binary", Takes::Nothing),
+    ("help", Takes::Nothing),
+    ("backup-if-mismatch", Takes::Nothing),
+    ("no-backup-if-mismatch", Takes::Nothing),
+    ("posix", Takes::Nothing),
+    ("quoting-style", Takes::Required),
+    ("reject-format", Takes::Required),
+    ("read-only", Takes::Required),
+    ("follow-symlinks", Takes::Nothing),
+];
+
+/// `quiet` and `silent` are one option, upstream's `'s'`, so a prefix that
+/// reaches both is not ambiguous. None does today; the table says so anyway,
+/// for the day one does.
+const LONG_ALIASES: &[(&str, &str)] = &[("silent", "quiet")];
+
+/// What the command line asked for.
+#[cfg_attr(test, derive(Debug))]
+enum Request {
+    Help,
+    Version,
+    Run(Options),
+}
+
+/// The two lines upstream's `usage (stderr, 2)` prints after a diagnostic:
+/// the diagnostic, then a referral that -- unlike coreutils' -- carries the
+/// program name too. `main` adds the first `patch: `.
+fn referred(sentence: &str) -> String {
+    format!("{sentence}\npatch: Try 'patch --help' for more information.")
+}
+
+/// Upstream's `numeric_string`: a decimal integer with an optional sign,
+/// refused as `not a number`, `too large` or `negative` in upstream's words,
+/// behind `fatal`'s `**** `. The value is quoted as upstream's `quotearg`
+/// quotes it in its default shell style: only when it has to be.
+///
+/// One deliberate difference: upstream tests for overflow with `v10 / 10 !=
+/// value` *after* the multiply has overflowed an `int`, which is undefined
+/// behaviour, and the compiler deletes the test -- so GNU `patch -F
+/// 99999999999` in practice runs with a wrapped fuzz factor. This refuses the
+/// number as `too large`, which is what upstream's source says it does.
+fn numeric_string(value: &[u8], negative_allowed: bool, what: &str) -> Result<i32, String> {
+    let fatal = |why: &str| format!("**** {what} {} {why}", quote::quotef(value));
+    let (sign, digits): (i32, &[u8]) = match value.split_first() {
+        Some((b'-', rest)) => (-1, rest),
+        Some((b'+', rest)) => (1, rest),
+        _ => (1, value),
+    };
+    // Upstream's loop is a `do … while`, so an empty string of digits -- `""`,
+    // `"-"` -- is one non-digit, not zero.
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return Err(fatal("is not a number"));
+    }
+    let mut total: i32 = 0;
+    for &d in digits {
+        let digit = i32::from(d.wrapping_sub(b'0')).saturating_mul(sign);
+        total = total
+            .checked_mul(10)
+            .and_then(|t| t.checked_add(digit))
+            .ok_or_else(|| fatal("is too large"))?;
+    }
+    if total < 0 && !negative_allowed {
+        return Err(fatal("is negative"));
+    }
+    Ok(total)
+}
+
+/// An option GNU `patch` has and this one does not.
+///
+/// Refused by name rather than ignored: every one of them changes what is
+/// written or where -- `-D` wraps changes in `#ifdef`, `-z`/`-B`/`-Y`/`-V`
+/// name the backups, `--merge` writes conflict markers instead of rejects --
+/// and ignoring any of them would write something other than what was asked
+/// for, with a success status.
+fn unimplemented_short(flag: u8) -> String {
+    referred(&format!(
+        "option -{} is not implemented by this patch",
+        char::from(flag)
+    ))
+}
+
+fn unimplemented_long(name: &str) -> String {
+    referred(&format!(
+        "option '--{name}' is not implemented by this patch"
+    ))
+}
+
+/// Parse patch's argv: upstream's `get_some_switches`, on the shared parser.
+///
+/// So long options abbreviate to any unique prefix (`--dry`, `--rev`), short
+/// ones bundle (`-Rsp1`), `--` ends the options, and `POSIXLY_CORRECT` stops
+/// them at the first operand -- none of which the hand-written ladder this
+/// replaces did. The operands are upstream's `[ORIGFILE [PATCHFILE]]`: the
+/// file to patch, then the patch, which overrides `-i`; a third is `extra
+/// operand`.
+///
+/// `--help` and `--version`/`-v` answer where they appear, as getopt meets
+/// them, so an error before one of them wins and one after it is never read.
+fn parse_args(args: &[OsString]) -> Result<Request, String> {
+    let mut opts = Options::default();
+    let mut operands: Vec<OsString> = Vec::new();
+    for item in PATCH.parse_aliased(args, SHORT_OPTIONS, LONG_OPTIONS, LONG_ALIASES) {
+        let item = item.map_err(|e| referred(&e.sentence))?;
+        let number = |v: &Option<OsString>, what: &str, negative: bool| {
+            numeric_string(
+                &quote::os_bytes(v.as_deref().unwrap_or_default()),
+                negative,
+                what,
+            )
+        };
+        match item {
+            Opt::Operand(word) => operands.push(word.clone()),
+
+            // Upstream also reads `-b SUFFIX ORIGFILE PATCHFILE` as `-b -z SUFFIX`,
+            // for CVS 1.9. That is a spelling of `-z`, which is not implemented
+            // either, so it is not reproduced: the three words are operands
+            // here, and the third is refused as one too many.
+            Opt::Short(b'b', _) | Opt::Long("backup", _) => opts.backup = true,
+            Opt::Short(b'c', _) | Opt::Long("context", _) => {
+                opts.forced_dialect = Some(Dialect::Context);
             }
-        } else if a == "-u" || a == "--unified" {
-            opts.forced_dialect = Some(Dialect::Unified);
-        } else if a == "-c" || a == "--context" {
-            opts.forced_dialect = Some(Dialect::Context);
-        } else if a == "-n" || a == "--normal" {
-            opts.forced_dialect = Some(Dialect::Normal);
-        } else if a == "-R" || a == "--reverse" {
-            opts.reverse = true;
-        } else if a == "--verbose" {
-            // NOT `-v`. GNU's `-v` is `--version`; the two are
-            // measured in main() and the sibling utilities spell it
-            // the other way round.
-            opts.verbose = true;
-        } else if a == "--dry-run" {
-            opts.dry_run = true;
-        } else if a == "-s" || a == "--silent" || a == "--quiet" {
-            opts.silent = true;
-        } else if a == "-b" || a == "--backup" {
-            opts.backup = true;
-        } else if a == "-l" || a == "--ignore-whitespace" {
-            opts.ignore_whitespace = true;
-        } else if a == "-E" || a == "--remove-empty-files" {
-            opts.remove_empty = true;
-        } else if a == "-o" || a == "--output" {
-            i = i.saturating_add(1);
-            match args.get(i) {
-                Some(v) => opts.output_file = Some(v.clone()),
-                None => return Err("option requires an argument -- 'o'".to_string()),
+            Opt::Short(b'd', v) | Opt::Long("directory", v) => opts.directory = v,
+            Opt::Short(b'E', _) | Opt::Long("remove-empty-files", _) => opts.remove_empty = true,
+            Opt::Short(b'f', _) | Opt::Long("force", _) => opts.force = true,
+            Opt::Short(b'F', v) | Opt::Long("fuzz", v) => {
+                let n = number(&v, "fuzz factor", false)?;
+                opts.fuzz = Some(usize::try_from(n).unwrap_or(0));
             }
-        } else if let Some(v) = raw.strip_prefix(b"--output=") {
-            opts.output_file = Some(quote::os_from_bytes(v));
-        } else if a == "-N" || a == "--forward" {
-            opts.forward = true;
-        } else if a == "-f" || a == "--force" {
-            opts.force = true;
-        } else if a == "-Z" || a == "--set-utc" {
-            opts.set_utc = true;
-        } else if a == "--no-backup-if-mismatch" {
-            opts.no_backup_if_mismatch = true;
-        } else if a == "-F" || a == "--fuzz" {
-            i = i.saturating_add(1);
-            match args
-                .get(i)
-                .and_then(|v| v.to_str())
-                .and_then(|v| v.parse::<usize>().ok())
-            {
-                Some(v) => opts.fuzz = Some(v),
-                None => return Err("invalid fuzz factor".to_string()),
+            Opt::Short(b'i', v) | Opt::Long("input", v) => opts.patch_file = v,
+            Opt::Short(b'l', _) | Opt::Long("ignore-whitespace", _) => {
+                opts.ignore_whitespace = true;
             }
-        } else if let Some(v) = a.strip_prefix("--fuzz=") {
-            match v.parse::<usize>() {
-                Ok(n) => opts.fuzz = Some(n),
-                Err(_) => return Err("invalid fuzz factor".to_string()),
+            Opt::Short(b'n', _) | Opt::Long("normal", _) => {
+                opts.forced_dialect = Some(Dialect::Normal);
             }
-        } else if let Some(v) = a.strip_prefix("-F")
-            && !v.is_empty()
-        {
-            // `-F1` with the number GLUED ON. Measured: GNU takes all four of
-            // `-F1`, `-F 1`, `--fuzz=1` and `--fuzz 1`; this build took the
-            // last three, so `patch -F1` answered `invalid option -- 'F'`.
-            // Must sit after the bare `-F` arm above, which claims the
-            // separate-word spelling.
-            match v.parse::<usize>() {
-                Ok(n) => opts.fuzz = Some(n),
-                Err(_) => return Err("invalid fuzz factor".to_string()),
+            Opt::Short(b'N', _) | Opt::Long("forward", _) => opts.forward = true,
+            Opt::Short(b'o', v) | Opt::Long("output", v) => opts.output_file = v,
+            Opt::Short(b'p', v) | Opt::Long("strip", v) => {
+                let n = number(&v, "strip count", false)?;
+                opts.strip = Some(usize::try_from(n).unwrap_or(0));
             }
-        } else if a == "-r" || a == "--reject-file" {
-            i = i.saturating_add(1);
-            match args.get(i) {
-                Some(v) => opts.reject_file = Some(v.clone()),
-                None => return Err("option requires an argument -- 'r'".to_string()),
+            Opt::Short(b'r', v) | Opt::Long("reject-file", v) => opts.reject_file = v,
+            Opt::Short(b'R', _) | Opt::Long("reverse", _) => opts.reverse = true,
+            Opt::Short(b's', _) | Opt::Long("quiet" | "silent", _) => opts.silent = true,
+            Opt::Short(b'u', _) | Opt::Long("unified", _) => {
+                opts.forced_dialect = Some(Dialect::Unified);
             }
-        } else if let Some(v) = raw.strip_prefix(b"--reject-file=") {
-            opts.reject_file = Some(quote::os_from_bytes(v));
-        } else if a == "-d" || a == "--directory" {
-            i = i.saturating_add(1);
-            match args.get(i) {
-                Some(v) => opts.directory = Some(v.clone()),
-                None => return Err("option requires an argument -- 'd'".to_string()),
-            }
-        } else if let Some(v) = raw.strip_prefix(b"--directory=") {
-            opts.directory = Some(quote::os_from_bytes(v));
-        } else if let Some(v) = raw.strip_prefix(b"-d") {
-            opts.directory = Some(quote::os_from_bytes(v));
-        } else if raw.starts_with(b"-") && raw.len() > 1 && &*raw != b"-".as_slice() {
-            // GNU's two spellings, measured rather than guessed. A long option
-            // is quoted and named in full; a short one is reported as the
-            // single character, the way getopt does it:
-            //
-            //     patch: unrecognized option '--nosuchoption'
-            //     patch: invalid option -- 'Q'
-            //
-            // and both are followed by the `Try '... --help'` referral, which
-            // `patch` DOES print -- unlike `strings`, which shows its usage
-            // instead. The two were fixed the same night in opposite
-            // directions, which is the argument for measuring each program
-            // rather than carrying a house style between them.
-            // The RAW bytes, and `quote_glibc` rather than a bare `'{a}'`, for
-            // two reasons the decoded form gets wrong. An argument that is not
-            // Unicode decodes to the empty string, so `-<0x80>` would be
-            // reported as an empty option -- or, before this line existed,
-            // would not be reported at all, because it never reached this arm
-            // and was silently taken as the target file. And a name holding a
-            // newline, printed raw, lets whoever chose it forge a second line
-            // of our error stream. Both are what `coreutils::getopt` already
-            // does, down to the octal spelling of a non-ASCII byte: glibc
-            // answers `invalid option -- '\\303'`, never the character
-            // that byte might begin.
-            let sentence = if raw.starts_with(b"--") {
-                format!("unrecognized option {}", quote::quote_glibc(&raw))
-            } else {
-                let flag = raw.get(1).copied().unwrap_or(b'?');
-                format!("invalid option -- {}", quote::quote_glibc(&[flag]))
-            };
-            return Err(format!(
-                "{sentence}\npatch: Try \'patch --help\' for more information."
-            ));
-        } else {
-            opts.target_file = Some(arg.clone());
+            Opt::Short(b'v', _) | Opt::Long("version", _) => return Ok(Request::Version),
+            Opt::Short(b'Z', _) | Opt::Long("set-utc", _) => opts.set_utc = true,
+            Opt::Long("dry-run", _) => opts.dry_run = true,
+            Opt::Long("verbose", _) => opts.verbose = true,
+            Opt::Long("help", _) => return Ok(Request::Help),
+            Opt::Long("no-backup-if-mismatch", _) => opts.no_backup_if_mismatch = true,
+
+            Opt::Short(flag, _) => return Err(unimplemented_short(flag)),
+            Opt::Long(name, _) => return Err(unimplemented_long(name)),
         }
-        i = i.saturating_add(1);
     }
 
-    Ok(opts)
+    let mut rest = operands.into_iter();
+    opts.target_file = rest.next();
+    if let Some(patchname) = rest.next() {
+        opts.patch_file = Some(patchname);
+    }
+    if let Some(extra) = rest.next() {
+        // Upstream: `"%s: %s: extra operand\n", program_name, quotearg (…)`.
+        return Err(referred(&format!(
+            "{}: extra operand",
+            quote::quotef(&quote::os_bytes(&extra))
+        )));
+    }
+    Ok(Request::Run(opts))
 }
 
 /// Strip NUM leading path components from a file path.
@@ -1453,6 +1490,17 @@ fn help_text() -> String {
     text
 }
 
+/// `--help` or `--version`: print `text` and exit 0.
+fn print_and_exit(text: &str) -> ! {
+    let mut out = Stream::stdout();
+    let _ = out.write_all(text.as_bytes());
+    // `process::exit` runs no destructors, so `Stream`'s Drop never flushes
+    // and the text is lost. Exit 0 with an empty stdout is what this looked
+    // like the first time.
+    let _ = out.flush();
+    process::exit(0);
+}
+
 fn main() {
     // `args_os`, not `args`: the latter's iterator unwraps, so a filename
     // holding a byte that is not valid Unicode aborts the process before
@@ -1460,7 +1508,7 @@ fn main() {
     // and NUL (design.txt), so that is a legal name, not a malformed one.
     let args: Vec<OsString> = env::args_os().skip(1).collect();
 
-    // HANDLED BEFORE `parse_args`, AND WITH THE SPELLINGS GNU ACTUALLY HAS.
+    // THE SPELLINGS GNU ACTUALLY HAS, answered where getopt meets them.
     // Measured rather than copied from the sibling utilities, because `patch`
     // is not shaped like them and the house convention would have been wrong
     // three ways:
@@ -1474,32 +1522,13 @@ fn main() {
     //
     // `strings` in this same tree takes `-h`/`-H` and `-v`/`-V`, so adopting
     // that set here would have invented two options and mistyped a third.
-    // Before this, `patch --help` and `patch --version` were both rejected as
-    // unrecognized -- while `scripts/patch-diff.sh` excused them as "our help
-    // text" and "our version string", which described a behaviour this program
-    // did not have. A declared divergence has to be true before it can be
-    // declared.
-    if args.iter().any(|a| a == "--help") {
-        let mut out = Stream::stdout();
-        let _ = out.write_all(help_text().as_bytes());
-        // `process::exit` runs no destructors, so `Stream`'s Drop
-        // never flushes and the text is lost. Exit 0 with an empty
-        // stdout is what this looked like the first time.
-        let _ = out.flush();
-        process::exit(0);
-    }
-    if args.iter().any(|a| a == "--version" || a == "-v") {
-        let mut out = Stream::stdout();
-        let _ = out.write_all(version_text().as_bytes());
-        // `process::exit` runs no destructors, so `Stream`'s Drop
-        // never flushes and the text is lost. Exit 0 with an empty
-        // stdout is what this looked like the first time.
-        let _ = out.flush();
-        process::exit(0);
-    }
-
+    // These used to be found by scanning all of argv before parsing, which
+    // answered `patch --bogus --help` with the help where GNU reports the bad
+    // option first; now `parse_args` returns them in getopt's order.
     let opts = match parse_args(&args) {
-        Ok(o) => o,
+        Ok(Request::Run(o)) => o,
+        Ok(Request::Help) => print_and_exit(&help_text()),
+        Ok(Request::Version) => print_and_exit(&version_text()),
         Err(e) => {
             diag!("patch: {e}");
             process::exit(2);
@@ -2358,6 +2387,102 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// The parsed options of a command line that runs; anything else -- help,
+    /// version, a refusal -- comes back as the error text, so the existing
+    /// assertions on `Options` fields read as they did.
+    fn parse_args(args: &[OsString]) -> Result<Options, String> {
+        match super::parse_args(args)? {
+            Request::Run(o) => Ok(o),
+            other => Err(format!("{other:?}")),
+        }
+    }
+
+    /// The operands are upstream's `[ORIGFILE [PATCHFILE]]`. The second one
+    /// was dropped on the floor until the port onto the shared parser, so
+    /// `patch o p.diff` read the patch from standard input and exited 0 having
+    /// done nothing (`known-issues.md` →
+    /// `B-PATCH-ORIGFILE-PATCHFILE-EXITS-0-HAVING-DONE-NOTHING`).
+    #[test]
+    fn the_second_operand_is_the_patch_file_and_a_third_is_refused() {
+        let o = parse_args(&s(&["o", "p.diff"])).unwrap();
+        assert_eq!(o.target_file.as_deref(), Some(OsStr::new("o")));
+        assert_eq!(o.patch_file.as_deref(), Some(OsStr::new("p.diff")));
+        // It overrides `-i`, as upstream's `patchname` assignment does.
+        let o = parse_args(&s(&["-i", "x.diff", "o", "p.diff"])).unwrap();
+        assert_eq!(o.patch_file.as_deref(), Some(OsStr::new("p.diff")));
+        let e = parse_args(&s(&["o", "p.diff", "extra"])).unwrap_err();
+        assert_eq!(
+            e,
+            "extra: extra operand\npatch: Try 'patch --help' for more information."
+        );
+    }
+
+    /// What the ladder of exact spellings could not do.
+    #[test]
+    fn long_options_abbreviate_and_short_ones_bundle() {
+        assert!(parse_args(&s(&["--dry"])).unwrap().dry_run);
+        assert!(parse_args(&s(&["--rev"])).unwrap().reverse);
+        assert_eq!(parse_args(&s(&["--strip=2"])).unwrap().strip, Some(2));
+        assert_eq!(parse_args(&s(&["--st", "2"])).unwrap().strip, Some(2));
+        let o = parse_args(&s(&["-Rsp1", "f"])).unwrap();
+        assert!(o.reverse && o.silent);
+        assert_eq!(o.strip, Some(1));
+        assert_eq!(o.target_file.as_deref(), Some(OsStr::new("f")));
+        // `--s` reaches five options; glibc lists them in table order.
+        let e = parse_args(&s(&["--s"])).unwrap_err();
+        assert!(
+            e.starts_with("option '--s' is ambiguous; possibilities:"),
+            "{e}"
+        );
+        // `--` ends the options: `-R` after it is a file.
+        let o = parse_args(&s(&["--", "-R"])).unwrap();
+        assert!(!o.reverse);
+        assert_eq!(o.target_file.as_deref(), Some(OsStr::new("-R")));
+    }
+
+    /// `--help` and `--version` answer where getopt meets them.
+    #[test]
+    fn help_and_version_are_answered_in_order() {
+        assert!(matches!(
+            super::parse_args(&s(&["--he"])),
+            Ok(Request::Help)
+        ));
+        assert!(matches!(
+            super::parse_args(&s(&["-v"])),
+            Ok(Request::Version)
+        ));
+        assert!(matches!(
+            super::parse_args(&s(&["--help", "--bogus"])),
+            Ok(Request::Help)
+        ));
+        assert!(super::parse_args(&s(&["--bogus", "--help"])).is_err());
+    }
+
+    /// Upstream's `numeric_string`, all three of its sentences.
+    #[test]
+    fn numbers_are_refused_in_upstreams_words() {
+        let e = parse_args(&s(&["-p", "-1"])).unwrap_err();
+        assert_eq!(e, "**** strip count -1 is negative");
+        let e = parse_args(&s(&["-F", "99999999999"])).unwrap_err();
+        assert_eq!(e, "**** fuzz factor 99999999999 is too large");
+        let e = parse_args(&s(&["-F", "x"])).unwrap_err();
+        assert_eq!(e, "**** fuzz factor x is not a number");
+        assert_eq!(parse_args(&s(&["-p", "+3"])).unwrap().strip, Some(3));
+    }
+
+    /// An option GNU has and this build does not is refused by name, never
+    /// taken for an operand or ignored.
+    #[test]
+    fn an_unimplemented_option_is_refused_by_name() {
+        let e = parse_args(&s(&["-D", "X", "f"])).unwrap_err();
+        assert!(
+            e.starts_with("option -D is not implemented by this patch"),
+            "{e}"
+        );
+        let e = parse_args(&s(&["--merge"])).unwrap_err();
+        assert!(e.starts_with("option '--merge' is not implemented"), "{e}");
+    }
+
     // ---------------- bytes, not UTF-8 ----------------
     //
     // Measured against GNU patch 2.7.6 before any of this was written:
@@ -2559,7 +2684,10 @@ mod tests {
     #[test]
     fn parse_missing_p_value_errors() {
         let err = parse_args(&s(&["-p"])).unwrap_err();
-        assert!(err.contains("-p requires"));
+        assert!(
+            err.starts_with("option requires an argument -- 'p'"),
+            "{err}"
+        );
     }
 
     #[test]

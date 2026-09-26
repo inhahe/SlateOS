@@ -57,3 +57,33 @@ busy for a moment and the harness was blamed for it.
 Every lane keeps losing a boot test at random whenever another lane's build
 overlaps the few seconds of the live case, with a message that accuses the
 harness -- and the reflex it trains is to re-run until green.
+
+## A second check fails the same way (2026-09-25, later the same day)
+
+A boot test on `lane-e @ 6cebeaf47` failed the tooling gate on a different
+case of the same suite -- the replayed window, not the live spinners:
+
+```
+  FAIL the window's completions lie inside the load's interval: fired 0.9149,
+       released 1.2573, poll 0.1, times [0.7221, 0.7221, 0.7221, 1.2571, ...]
+  FAIL and none of them precedes the trigger by more than one poll:
+       fired 0.9149, times [0.7221, 0.7221, 0.7221, 1.2571, ...]
+```
+
+`test-canary-load.py` ~L960-979. The tolerance is one poll (0.1 s), and its
+comment argues that is the controller's whole uncertainty: a completion is
+stamped when a poll sees it, and the trigger line shares a batch with what
+follows it. On a busy host there is a second one it does not count. In
+`canary-load.py` the poll loop takes `now = time.monotonic()`, reads the tail,
+and stamps every line in the batch with `now`; `consume()` then reaches
+`fire()`, which stamps `on_at` -- the `fired_at` of the record -- only after
+`go.set()`. The three window completions carry the batch's stamp, 0.7221; the
+controller got to `fire()` at 0.9149, 0.19 s later, having been off the CPU in
+between. The gap is the controller's own latency on a loaded machine, not a
+completion outside the window.
+
+What would fix it, lane A's call: record the stamp of the batch in which the
+`--at` line was seen, check the window's completions against that, and state
+the latency from it to `fired_at` as a figure of its own (it is also a direct
+measure of how late the load went on). Widening the tolerance would only move
+the line.

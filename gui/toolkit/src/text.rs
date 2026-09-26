@@ -849,6 +849,140 @@ pub fn wrap_hard(text: &str, max_width: f32, size: f32, weight: FontWeightHint) 
     })
 }
 
+/// [`wrap_hard`]'s lines as byte ranges into `text`, for a caller that has to
+/// go between the text and its lines -- an editor placing its caret on the
+/// third line of a paragraph, or turning a click there back into an offset.
+///
+/// The breaks are [`wrap_hard`]'s: greedily at spaces, a word wider than
+/// `max_width` cut where it stops fitting, and every newline a break. Two
+/// things differ, because a range has to account for every byte:
+///
+/// - **The spaces at a break stay on the line before it**, hanging past its
+///   end instead of being dropped. A caret after a space needs a line to be
+///   drawn on, and the spaces are not measured against `max_width`: they are
+///   invisible, and a line is judged by what can be seen of it.
+/// - **A newline belongs to no line.** A range stops before the `\n` that ends
+///   its paragraph and the next begins after it, so the ranges and the
+///   newlines between them tile `text` exactly, in order.
+///
+/// An empty paragraph -- empty `text`, or two newlines in a row -- is an empty
+/// range at its offset. An empty line is still a line, and a caret has to be
+/// able to stand on it.
+///
+/// With a `max_width` of zero or less nothing fits, and the paragraphs come
+/// back unwrapped, as [`wrap`] returns them.
+#[must_use]
+pub fn wrap_ranges(
+    text: &str,
+    max_width: f32,
+    size: f32,
+    weight: FontWeightHint,
+) -> Vec<core::ops::Range<usize>> {
+    let mut lines = Vec::new();
+    let mut start = 0_usize;
+    for para in text.split('\n') {
+        let end = start.saturating_add(para.len());
+        if max_width > 0.0 && !para.is_empty() {
+            wrap_paragraph(text, start..end, max_width, size, weight, &mut lines);
+        } else {
+            lines.push(start..end);
+        }
+        // Past the newline that ended it. One byte past the end of the text
+        // after the last paragraph, which nothing reads.
+        start = end.saturating_add(1);
+    }
+    lines
+}
+
+/// Break the paragraph `para` of `text` into lines, appending their ranges.
+fn wrap_paragraph(
+    text: &str,
+    para: core::ops::Range<usize>,
+    max_width: f32,
+    size: f32,
+    weight: FontWeightHint,
+    out: &mut Vec<core::ops::Range<usize>>,
+) {
+    let mut pos = para.start;
+    while pos < para.end {
+        let Some(rest) = text.get(pos..para.end) else {
+            // Only a caller's range off a character boundary could get here,
+            // and this function's only caller splits at newlines, which are
+            // one byte wide. Stopping keeps every range pushed a valid one.
+            return;
+        };
+        let fits = fit_prefix(rest, max_width, size, weight);
+        if fits >= rest.len() {
+            out.push(pos..para.end);
+            return;
+        }
+        let end = pos.saturating_add(line_break(rest, fits));
+        out.push(pos..end);
+        pos = end;
+    }
+}
+
+/// How many bytes of `rest` fit in `max_width`, as [`fit`] answers it --
+/// without shaping all of `rest` to find out.
+///
+/// A paragraph is broken one line at a time, and shaping the whole remainder
+/// for each line is quadratic in the paragraph's length: ten thousand bytes
+/// broken into a hundred lines would shape half a megabyte. So this shapes a
+/// window at the front, and a larger one only when everything in the window
+/// fitted, which is the one case where the window could have cut the answer
+/// short. A line is rarely longer than the first window, so the doubling
+/// almost never runs.
+fn fit_prefix(rest: &str, max_width: f32, size: f32, weight: FontWeightHint) -> usize {
+    let mut window = 256_usize;
+    loop {
+        let mut end = window.min(rest.len());
+        while !rest.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        let slice = rest.get(..end).unwrap_or(rest);
+        let fits = fit(slice, max_width, size, weight);
+        if fits < slice.len() || end >= rest.len() {
+            return fits;
+        }
+        window = window.saturating_mul(2);
+    }
+}
+
+/// Where a line ends that cannot hold all of `rest`, of which the first `fits`
+/// bytes fit: after the last run of spaces that is not the line's own
+/// indentation, with the spaces from there on hanging; or, when the first word
+/// alone is wider than the line, where it stops fitting -- but always after at
+/// least one character, so that a box narrower than a single glyph still
+/// advances.
+fn line_break(rest: &str, fits: usize) -> usize {
+    // Leading spaces are the line's indentation. Breaking after them would put
+    // a line of nothing but spaces above the word they indent.
+    let indent = rest
+        .len()
+        .saturating_sub(rest.trim_start_matches(' ').len());
+    if fits > indent && rest.as_bytes().get(fits) == Some(&b' ') {
+        // The first byte that did not fit is a space: the break is right there.
+        return hang(rest, fits);
+    }
+    let head = rest.get(indent..fits).unwrap_or("");
+    if let Some(space) = head.rfind(' ') {
+        return hang(rest, indent.saturating_add(space));
+    }
+    if fits > 0 {
+        return fits;
+    }
+    rest.chars().next().map_or(rest.len(), char::len_utf8)
+}
+
+/// `from`, moved past the run of spaces that starts there.
+fn hang(rest: &str, from: usize) -> usize {
+    let tail = rest.get(from..).unwrap_or("");
+    from.saturating_add(
+        tail.len()
+            .saturating_sub(tail.trim_start_matches(' ').len()),
+    )
+}
+
 /// A block of prose, drawn as one [`RenderCommand::Text`] per wrapped line.
 ///
 /// # Why this exists
@@ -2733,6 +2867,186 @@ mod tests {
         let lines = wrap_hard("mmmm", 1.0, 11.0, FontWeightHint::Regular);
         assert_eq!(lines.len(), 4, "{lines:?}");
         assert_eq!(lines.concat(), "mmmm");
+    }
+
+    // ---- wrap_ranges ------------------------------------------------------
+
+    const RANGE_SIZE: f32 = 11.0;
+
+    fn ranges(text: &str, width: f32) -> Vec<core::ops::Range<usize>> {
+        wrap_ranges(text, width, RANGE_SIZE, FontWeightHint::Regular)
+    }
+
+    /// The ranges and the newlines between them are the text, in order: each
+    /// line starts where the last one ended (a wrap), or one byte later with a
+    /// newline in that byte (a paragraph's end). This is what lets an editor
+    /// move between an offset and a line without losing a byte either way.
+    fn assert_tiles(text: &str, lines: &[core::ops::Range<usize>]) {
+        assert_eq!(lines.first().map(|l| l.start), Some(0), "{lines:?}");
+        assert_eq!(lines.last().map(|l| l.end), Some(text.len()), "{lines:?}");
+        for pair in lines.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            assert!(a.start <= a.end && a.end <= b.start, "{lines:?}");
+            if b.start != a.end {
+                assert_eq!(b.start, a.end + 1, "a gap other than a newline: {lines:?}");
+                assert_eq!(&text[a.end..b.start], "\n", "{lines:?}");
+            }
+        }
+        assert_eq!(
+            lines.len(),
+            text.matches('\n').count()
+                + lines.windows(2).filter(|p| p[0].end == p[1].start).count()
+                + 1,
+            "every newline is a boundary, and nothing else is but a wrap"
+        );
+    }
+
+    /// Every line's visible part -- the spaces hanging off its end are not
+    /// drawn -- fits the box.
+    fn assert_fits(text: &str, lines: &[core::ops::Range<usize>], width: f32) {
+        for line in lines {
+            let seen = text[line.clone()].trim_end_matches(' ');
+            let w = measure(seen, RANGE_SIZE, FontWeightHint::Regular);
+            assert!(w <= width, "{seen:?} measures {w} in a {width} px box");
+        }
+    }
+
+    /// Single-spaced prose breaks where `wrap_hard` breaks it: the same lines,
+    /// with the breaking space kept at the end of the line above.
+    ///
+    /// Only at widths every word fits in. Where a word must be cut the two
+    /// part company on purpose: `wrap_hard` gives the cut word's last piece a
+    /// line to itself, and this lets the words after it share that line, as an
+    /// editor does -- the piece is not a word the reader would keep apart.
+    #[test]
+    fn ranges_break_prose_where_wrap_hard_does() {
+        let text = "the quick brown fox jumps over the lazy dog and keeps on running";
+        let widest = text
+            .split(' ')
+            .map(|word| measure(word, RANGE_SIZE, FontWeightHint::Regular))
+            .fold(0.0_f32, f32::max);
+        for width in [
+            widest + 1.0,
+            widest * 1.5,
+            90.0_f32.max(widest + 1.0),
+            150.0,
+            400.0,
+        ] {
+            let lines = ranges(text, width);
+            assert_tiles(text, &lines);
+            assert_fits(text, &lines, width);
+            let seen: Vec<&str> = lines
+                .iter()
+                .map(|l| text[l.clone()].trim_end_matches(' '))
+                .collect();
+            assert_eq!(
+                seen,
+                wrap_hard(text, width, RANGE_SIZE, FontWeightHint::Regular),
+                "at {width} px"
+            );
+        }
+    }
+
+    /// The space a line breaks at hangs off the end of that line, and the next
+    /// line starts at the next word.
+    #[test]
+    fn the_spaces_at_a_break_hang_off_the_line_before_it() {
+        let text = "alpha   beta";
+        let width = measure("alpha", RANGE_SIZE, FontWeightHint::Regular) + 1.0;
+        let lines = ranges(text, width);
+        assert_eq!(lines, vec![0..8, 8..12], "{lines:?}");
+        assert_tiles(text, &lines);
+    }
+
+    /// Newlines always break, belong to no line, and two in a row make an
+    /// empty line a caret can stand on.
+    #[test]
+    fn newlines_break_and_an_empty_paragraph_is_an_empty_line() {
+        assert_eq!(ranges("", 100.0), vec![0..0]);
+        assert_eq!(ranges("a\n\nb", 100.0), vec![0..1, 2..2, 3..4]);
+        assert_eq!(ranges("a\n", 100.0), vec![0..1, 2..2]);
+        assert_eq!(ranges("\n", 100.0), vec![0..0, 1..1]);
+        for text in [
+            "",
+            "a\n\nb",
+            "a\n",
+            "\n",
+            "one\ntwo three four five six\n\nseven",
+        ] {
+            assert_tiles(text, &ranges(text, 50.0));
+        }
+    }
+
+    /// A line's indentation stays with the word it indents: breaking after the
+    /// leading spaces would leave a line of nothing but spaces above it.
+    #[test]
+    fn indentation_is_not_a_place_to_break() {
+        let text = "    indented";
+        let width = measure("indented", RANGE_SIZE, FontWeightHint::Regular) + 1.0;
+        let lines = ranges(text, width);
+        assert_tiles(text, &lines);
+        assert!(
+            !text[lines[0].clone()].trim().is_empty(),
+            "the first line is only indentation: {lines:?}"
+        );
+    }
+
+    /// A word wider than the box is cut where it stops fitting, every piece
+    /// fits, and the pieces are the word.
+    #[test]
+    fn a_word_wider_than_the_box_is_cut_into_pieces_that_fit() {
+        let text = "antidisestablishmentarianism";
+        let lines = ranges(text, 40.0);
+        assert!(lines.len() > 2, "{lines:?}");
+        assert_tiles(text, &lines);
+        assert_fits(text, &lines, 40.0);
+
+        let cjk = "日本語のファイル名がとても長い場合の折り返しです";
+        let lines = ranges(cjk, 72.0);
+        assert!(lines.len() > 1, "{lines:?}");
+        assert_tiles(cjk, &lines);
+        assert_fits(cjk, &lines, 72.0);
+    }
+
+    /// A box narrower than one glyph still advances a character at a time,
+    /// rather than looping on a line that holds nothing.
+    #[test]
+    fn a_box_narrower_than_a_glyph_advances_a_character_at_a_time() {
+        assert_eq!(ranges("mmm", 1.0), vec![0..1, 1..2, 2..3]);
+        assert_eq!(ranges("ééé", 1.0), vec![0..2, 2..4, 4..6]);
+    }
+
+    /// No room at all is no wrapping, as `wrap` answers it -- not one word per
+    /// line.
+    #[test]
+    fn no_width_means_the_paragraphs_unwrapped() {
+        assert_eq!(ranges("a b c\nd e", 0.0), vec![0..5, 6..9]);
+    }
+
+    /// A line longer than the first window the fit is measured in -- a wide
+    /// box, a long line -- is found whole: the window grows until something
+    /// does not fit or the paragraph ends.
+    #[test]
+    fn a_line_longer_than_the_first_measuring_window_is_found_whole() {
+        let text = "word ".repeat(200);
+        let text = text.trim_end();
+        let wide = measure(text, RANGE_SIZE, FontWeightHint::Regular) + 10.0;
+        assert_eq!(ranges(text, wide), vec![0..text.len()]);
+        let half = wide / 2.0;
+        let lines = ranges(text, half);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_tiles(text, &lines);
+        assert_fits(text, &lines, half);
+    }
+
+    /// The pathological input `wrap_hard` is held to, broken in time linear
+    /// in its length rather than shaping the remainder once per line.
+    #[test]
+    fn ranges_over_a_pathological_word_are_linear() {
+        let word = "λ".repeat(50_000);
+        let lines = ranges(&word, 200.0);
+        assert!(lines.len() > 100, "{} lines", lines.len());
+        assert_tiles(&word, &lines);
     }
 
     /// Counts pixels the canvas actually changed.

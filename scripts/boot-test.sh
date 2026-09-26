@@ -3676,6 +3676,17 @@ check_prerequisites() {
 
 check_prerequisites
 
+# rootfs.ext4 is checked here as well as before staging, where it is attached.
+# `ctest-fixtures.py image-check` compares the image with fixtures that other
+# pipelines built -- nothing this run compiles -- so its verdict is already
+# final now, and a mismatched image used to be refused at staging, after the
+# gate phase and the build: lane F's run of 2026-09-25 learned it 2 h 50 min
+# in (requests/f-ad-bootstrap-copies-a-rootfs-its-boot-test-then-refuses.md).
+# The call before staging stays: it is the check of the file actually attached.
+if [ "$NO_ROOTFS" -eq 0 ] && [ -f "$PROJECT_ROOT/rootfs.ext4" ]; then
+    check_rootfs_freshness
+fi
+
 # --- The gate phase starts here ----------------------------------------------
 
 # Before anything expensive: has another lane asked everyone to stop?

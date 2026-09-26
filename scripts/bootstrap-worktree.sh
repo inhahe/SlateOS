@@ -14,7 +14,8 @@
 # including every REAL-glibc Path-Z test (dynamic execution, stdio, pthread,
 # signal, fault). A lane that only ever ran in a fresh worktree would
 # therefore never exercise the highest-value tests in the tree and would not
-# be told so by the exit code. Provision it before trusting a green boot.
+# be told so by the exit code. Build it before trusting a green boot -- this
+# script says how, but no longer copies one (see provision_rootfs).
 #
 # WHY THIS EXISTS
 #
@@ -198,9 +199,8 @@ provision_limine() {
 ROOTFS_IMG="$ROOT/rootfs.ext4"
 
 # True if the file carries an ext4 superblock magic (0xEF53, little-endian at
-# byte offset 0x438). Guards against copying a partially-written image out of
-# a sibling worktree while another lane is regenerating it — a truncated
-# 256 MiB image would otherwise fail as a mysterious mount error at boot.
+# byte offset 0x438). A truncated image -- a pack that failed partway -- would
+# otherwise fail as a mysterious mount error at boot.
 looks_like_ext4() {
     local f="$1" magic
     [ -f "$f" ] || return 1
@@ -218,33 +218,24 @@ provision_rootfs() {
         rm -f "$ROOTFS_IMG"
     fi
 
-    local parent sibling
-    parent="$(dirname "$ROOT")"
-    for sibling in "$parent"/*/; do
-        sibling="${sibling%/}"
-        [ "$sibling" = "$ROOT" ] && continue
-        if looks_like_ext4 "$sibling/rootfs.ext4"; then
-            # Size is whatever the sibling's image is, not a constant: it was
-            # 48M, then 256M, then 384M as ports landed. Report the real one.
-            echo "==> copying rootfs.ext4 from sibling worktree $(basename "$sibling")" \
-                 "($(( $(stat -c%s "$sibling/rootfs.ext4" 2>/dev/null || echo 0) / 1048576 )) MiB)"
-            cp "$sibling/rootfs.ext4" "$ROOTFS_IMG"
-            if looks_like_ext4 "$ROOTFS_IMG"; then
-                return 0
-            fi
-            echo "    error: copied image has no ext4 superblock; removing" >&2
-            rm -f "$ROOTFS_IMG"
-            return 1
-        fi
-    done
-
-    # Building it needs a Linux userland (mke2fs/debugfs) plus a glibc
-    # cross-build, so we cannot do it from this shell. Say exactly what to
-    # run rather than failing with a bare "missing".
-    echo "    rootfs.ext4 not found, and no sibling worktree has one." >&2
-    echo "    Build it with:  wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh" >&2
-    echo "    Without it the boot test still reports PASSED but silently skips" >&2
-    echo "    ~58 rungs, including every REAL-glibc Path-Z test." >&2
+    # NOT COPIED FROM A SIBLING, WHICH THIS USED TO DO. The image is packed
+    # from this tree's own test fixtures -- the ctest and fastpy ELFs, the
+    # cmake spike -- and its rootfs.ext4.manifest records their hashes. A
+    # copy arrives without those fixtures, so the boot test's freshness check
+    # (`ctest-fixtures.py image-check`) refuses it; copying the fixtures too
+    # would make that check pass on another tree's binaries, which is the one
+    # thing it exists to prevent. Lane F's provisioned worktree was refused
+    # that way 2 h 50 min into a run, 2026-09-25
+    # (requests/f-ad-bootstrap-copies-a-rootfs-its-boot-test-then-refuses.md).
+    # Building it needs a Linux userland (mke2fs/debugfs) and the fixtures
+    # first, so say what to run rather than failing with a bare "missing".
+    echo "    rootfs.ext4 is not in this worktree, and is not copied from another:" >&2
+    echo "    it is packed from this tree's own test fixtures, and a copy would be" >&2
+    echo "    refused by the boot test's freshness check. Build it here:" >&2
+    echo "        python scripts/ctest-fixtures.py build" >&2
+    echo "        wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh" >&2
+    echo "    (the second names anything else it needs). Until then the boot test" >&2
+    echo "    runs, and says it skipped ~58 rungs, every REAL-glibc Path-Z test." >&2
     return 1
 }
 

@@ -267,6 +267,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/printf-cases.py` | Generate the case file for ``scripts/printf-diff.sh``. |
 | `scripts/printf-diff.sh` | Differential test: our `printf` against GNU's. |
 | `scripts/printf-probe.sh` | One side of the `printf` differential test. |
+| `scripts/prlimit-diff.sh` | Differential test: our `prlimit` against util-linux 2.39.3's. |
 | `scripts/probe-cp-diff-nul.sh` | Can cp-diff.sh's `contents()` tell two files apart when they differ ONLY in |
 | `scripts/probe-date-d-grammar.sh` | Measure GNU date's -d language, as epoch seconds. |
 | `scripts/probe-date-f.sh` | How does `date -f FILE` behave at its edges? |
@@ -431,4 +432,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_421 scripts._
+_422 scripts._

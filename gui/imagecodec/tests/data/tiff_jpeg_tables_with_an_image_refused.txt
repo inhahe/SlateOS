@@ -1,0 +1,1 @@
+REFUSED read: Bogus JPEGTables field

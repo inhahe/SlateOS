@@ -12,9 +12,25 @@
 
 use alloc::vec::Vec;
 
-use super::dir::{self, Directory, File, compression};
+use super::dir::{self, Directory, File, compression, photometric};
+use super::fax::{self, Fax};
 use super::lzw::Lzw;
-use crate::{ImageError, ImageResult};
+use crate::jpeg::{ColorSpace, Decompress, Headed, Tables};
+use crate::{ImageError, ImageResult, Limits};
+
+/// The JPEG codec's state for one image (libtiff's `JPEGState`).
+struct Jpeg {
+    /// libjpeg's permanent tables: `JPEGTables`', then whatever each strip
+    /// redefines, for the strips after it.
+    tables: Tables,
+    /// `sp->h_sampling`, `sp->v_sampling`: the `YCbCr` subsampling for
+    /// `YCbCr`, else 1.
+    h_sampling: u16,
+    v_sampling: u16,
+}
+
+/// libtiff's JPEG progress monitor abandons a datastream at this many scans.
+const JPEG_MAX_SCANS: u32 = 100;
 
 /// State kept across the strips of one image, as libtiff keeps it on the
 /// `TIFF` handle.
@@ -31,12 +47,16 @@ pub(super) struct Reader<'a> {
     /// A bit-reversed copy of the current strip, for `FillOrder` 2.
     reversed: Vec<u8>,
     lzw: Option<Lzw>,
+    fax: Option<Fax>,
+    jpeg: Option<Jpeg>,
     /// The codec's one-time setup (`tif_setupdecode`), once it has run.
     setup: Option<bool>,
+    /// What a JPEG strip's decode may allocate.
+    limits: Limits,
 }
 
 impl<'a> Reader<'a> {
-    pub(super) fn new(file: File<'a>, dir: &'a Directory) -> Self {
+    pub(super) fn new(file: File<'a>, dir: &'a Directory, limits: Limits) -> Self {
         Self {
             file,
             dir,
@@ -44,7 +64,10 @@ impl<'a> Reader<'a> {
             raw_in_file: false,
             reversed: Vec::new(),
             lzw: None,
+            fax: None,
+            jpeg: None,
             setup: None,
+            limits,
         }
     }
 
@@ -91,7 +114,7 @@ impl<'a> Reader<'a> {
         let dest = out
             .get_mut(..size)
             .ok_or(ImageError::Malformed("TIFF strip larger than its buffer"))?;
-        self.run_codec(raw, dest)?;
+        self.run_codec(raw, dest, index)?;
         self.after(dest)
     }
 
@@ -145,19 +168,203 @@ impl<'a> Reader<'a> {
         Ok(Raw::Reversed)
     }
 
-    /// The codec's one-time setup: for the codecs with a predictor, whether
-    /// the predictor can apply to these samples (`PredictorSetup`). A setup
+    /// The codec's one-time setup (`tif_setupdecode`): for the codecs
+    /// with a predictor, whether it can apply to these samples
+    /// (`PredictorSetup`); for fax, its state (`Fax3SetupState`). A setup
     /// that fails fails every strip.
     fn setup(&mut self) -> ImageResult<()> {
-        let ok = *self.setup.get_or_insert_with(|| predictor_valid(self.dir));
-        if ok {
+        if self.setup.is_none() {
+            let ok = predictor_valid(self.dir) && self.setup_fax() && self.setup_jpeg();
+            self.setup = Some(ok);
+        }
+        if self.setup == Some(true) {
             Ok(())
         } else {
-            Err(ImageError::Unsupported("TIFF predictor for these samples"))
+            Err(ImageError::Unsupported(
+                "TIFF compression for these samples",
+            ))
         }
     }
 
-    fn run_codec(&mut self, raw: Raw, out: &mut [u8]) -> ImageResult<()> {
+    /// `Fax3SetupState`, for the fax schemes: true for any other.
+    fn setup_fax(&mut self) -> bool {
+        let dir = self.dir;
+        let kind = match dir.compression {
+            compression::CCITT_RLE => fax::Kind::Rle {
+                word_aligned: false,
+            },
+            compression::CCITT_RLEW => fax::Kind::Rle { word_aligned: true },
+            compression::CCITT_FAX3 => fax::Kind::Group3 {
+                two_d: dir.group3_options & 1 != 0,
+            },
+            compression::CCITT_FAX4 => fax::Kind::Group4,
+            _ => return true,
+        };
+        let (row_bytes, row_pixels) = if dir.tiled {
+            (dir.tile_row_size(), dir.tile_width)
+        } else {
+            (dir.scanline_size(), dir.width)
+        };
+        let Some(row_bytes) = row_bytes else {
+            return false;
+        };
+        self.fax = Fax::new(
+            kind,
+            dir.bits_per_sample,
+            dir.samples_per_pixel,
+            dir.planar_config == 2,
+            row_bytes,
+            row_pixels,
+            dir.fill_order,
+        );
+        self.fax.is_some()
+    }
+
+    /// `JPEGSetupDecode`, for JPEG: true for any other scheme. `JPEGTables`,
+    /// if the directory has it, must be a datastream of tables alone -- it is
+    /// read here, once, into the tables every strip is decoded with.
+    fn setup_jpeg(&mut self) -> bool {
+        let dir = self.dir;
+        if dir.compression != compression::JPEG {
+            return true;
+        }
+        let mut tables = Tables::new();
+        if let Some(bytes) = &dir.jpeg_tables {
+            let mut stream = Decompress::new(bytes, &mut tables);
+            if stream.read_header(false) != Ok(Headed::TablesOnly) {
+                return false;
+            }
+        }
+        let (h_sampling, v_sampling) = if dir.photometric == Some(photometric::YCBCR) {
+            (dir.ycbcr_subsampling[0], dir.ycbcr_subsampling[1])
+        } else {
+            (1, 1)
+        };
+        self.jpeg = Some(Jpeg {
+            tables,
+            h_sampling,
+            v_sampling,
+        });
+        true
+    }
+
+    /// `JPEGPreDecode` then `JPEGDecode`: strip (or tile) `index`'s JPEG
+    /// datastream into `out`, checked against the strip it stands for.
+    fn decode_jpeg(&mut self, bytes: &[u8], out: &mut [u8], index: u32) -> ImageResult<()> {
+        let dir = self.dir;
+        let fail = ImageError::Malformed("TIFF JPEG strip");
+        let jpeg = self.jpeg.as_mut().ok_or(fail.clone())?;
+        let (h_sampling, v_sampling) = (jpeg.h_sampling, jpeg.v_sampling);
+        let mut stream = Decompress::new(bytes, &mut jpeg.tables);
+        if stream.read_header(true) != Ok(Headed::Image) {
+            return Err(fail);
+        }
+        // The strip or tile this datastream stands for.
+        let per_plane = dir.strips_per_image.max(1);
+        // `per_plane` is at least 1.
+        let plane = index.checked_div(per_plane).unwrap_or(0);
+        let row = index
+            .checked_rem(per_plane)
+            .unwrap_or(0)
+            .wrapping_mul(dir.rows_per_strip);
+        let (mut segment_width, mut segment_height, bytes_per_line) = if dir.tiled {
+            (dir.tile_width, dir.tile_length, dir.tile_row_size())
+        } else {
+            (
+                dir.width,
+                dir.length.wrapping_sub(row).min(dir.rows_per_strip),
+                dir.scanline_size(),
+            )
+        };
+        if dir.planar_config == 2 && plane > 0 {
+            if h_sampling == 0 || v_sampling == 0 {
+                return Err(fail);
+            }
+            segment_width = dir::howmany32(segment_width, u32::from(h_sampling));
+            segment_height = dir::howmany32(segment_height, u32::from(v_sampling));
+        }
+        let width = u32::try_from(stream.image_width()).unwrap_or(u32::MAX);
+        let height = u32::try_from(stream.image_height()).unwrap_or(u32::MAX);
+        // A last strip whose datastream kept the full strip's height is
+        // tolerated; anything else larger than its strip is not.
+        let tall_last_strip = width == segment_width
+            && height > segment_height
+            && row.wrapping_add(segment_height) == dir.length
+            && !dir.tiled;
+        if !tall_last_strip && (width > segment_width || height > segment_height) {
+            return Err(fail);
+        }
+        let components = if dir.planar_config == 1 {
+            usize::from(dir.samples_per_pixel)
+        } else {
+            1
+        };
+        if stream.num_components() != components
+            || u16::from(stream.data_precision()) != dir.bits_per_sample
+        {
+            return Err(fail);
+        }
+        // The luma's sampling must be the TIFF's, every other component's 1x1.
+        let sampling_ok = if dir.planar_config == 1 {
+            stream.sampling(0) == Some((usize::from(h_sampling), usize::from(v_sampling)))
+                && (1..components).all(|ci| stream.sampling(ci) == Some((1, 1)))
+        } else {
+            stream.sampling(0) == Some((1, 1))
+        };
+        if !sampling_ok {
+            return Err(fail);
+        }
+        if dir.planar_config == 1 && dir.photometric == Some(photometric::YCBCR) {
+            // `JPEGCOLORMODE_RGB`, which `TIFFRGBAImageBegin` always asks for.
+            stream.set_color_spaces(ColorSpace::YCbCr, ColorSpace::Rgb);
+        } else {
+            stream.set_color_spaces(ColorSpace::Unknown, ColorSpace::Unknown);
+        }
+        stream.set_max_scans(JPEG_MAX_SCANS);
+        let line = usize::try_from(bytes_per_line.unwrap_or(0)).unwrap_or(usize::MAX);
+        let rows = if line == 0 {
+            0
+        } else {
+            out.len()
+                .checked_div(line)
+                .unwrap_or(0)
+                .min(stream.image_height())
+        };
+        stream
+            .start(&self.limits, Some(rows))
+            .map_err(|_| fail.clone())?;
+        if line == 0 {
+            out.fill(0);
+            return Err(fail);
+        }
+        for r in 0..rows {
+            let Ok(samples) = stream.read_row() else {
+                out.fill(0);
+                return Err(fail);
+            };
+            let at = r.saturating_mul(line);
+            let end = at.saturating_add(samples.len()).min(out.len());
+            if let (Some(dest), Some(src)) =
+                (out.get_mut(at..end), samples.get(..end.saturating_sub(at)))
+            {
+                dest.copy_from_slice(src);
+            }
+        }
+        // Once every row is read the datastream is finished: its markers are
+        // read to the end, and tables defined after the scan stay for the
+        // strips after it. Whether that succeeds changes nothing else --
+        // libtiff returns `output_scanline < output_height ||
+        // TIFFjpeg_finish_decompress(sp)`, and a C `||` is 1 whenever either
+        // side is nonzero, the failure's -1 included.
+        if stream.output_scanline() >= stream.output_height() {
+            // Deliberately discarded, as libtiff discards it; see above.
+            let _ = stream.finish();
+        }
+        Ok(())
+    }
+
+    fn run_codec(&mut self, raw: Raw, out: &mut [u8], index: u32) -> ImageResult<()> {
+        let offset = dir::strip_offset(self.dir, index);
         let bytes: &[u8] = match raw {
             Raw::File { start, len } => self
                 .file
@@ -175,6 +382,35 @@ impl<'a> Reader<'a> {
             }
             compression::PACKBITS => packbits(bytes, out),
             compression::LZW => self.lzw.get_or_insert_with(Lzw::new).decode(bytes, out),
+            compression::CCITT_RLE
+            | compression::CCITT_RLEW
+            | compression::CCITT_FAX3
+            | compression::CCITT_FAX4 => {
+                let fax = self
+                    .fax
+                    .as_mut()
+                    .ok_or(ImageError::Unsupported("TIFF fax"))?;
+                let decoded = fax.decode(bytes, out, offset);
+                // libtiff's fax decoders fail with -1, and it tests a
+                // strip's decode with `<= 0` but a tile's for truth: a
+                // fax tile that fails is shown as far as it decoded.
+                if self.dir.tiled { Ok(()) } else { decoded }
+            }
+            compression::JPEG => {
+                let owned;
+                let bytes: &[u8] = match raw {
+                    Raw::File { start, len } => self
+                        .file
+                        .data
+                        .get(start..start.saturating_add(len))
+                        .ok_or(ImageError::Truncated)?,
+                    Raw::Reversed => {
+                        owned = core::mem::take(&mut self.reversed);
+                        &owned
+                    }
+                };
+                self.decode_jpeg(bytes, out, index)
+            }
             compression::DEFLATE | compression::ADOBE_DEFLATE => {
                 let full = if self.dir.tiled {
                     self.dir.tile_size()
@@ -199,6 +435,10 @@ impl<'a> Reader<'a> {
     /// predictor does itself when it runs.
     fn after(&self, out: &mut [u8]) -> ImageResult<()> {
         let dir = self.dir;
+        // `JPEGSetupDecode` takes the byte swap away (`_TIFFNoPostDecode`).
+        if dir.compression == compression::JPEG {
+            return Ok(());
+        }
         let swab16 = self.file.big_endian && dir.bits_per_sample == 16;
         let uses_predictor = matches!(
             dir.compression,

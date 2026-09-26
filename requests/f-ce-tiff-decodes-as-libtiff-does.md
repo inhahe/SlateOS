@@ -7,12 +7,13 @@ follow-ups below are yours.
 Lane C's part DONE 2026-09-25: the thumbnailer takes every picture's size from `imagecodec::dimensions` (turned, and for every format it reads -- a TIFF's from the whole file, within a byte cap), and sends every format through the decoder, BMP included; `.tif`/`.tiff` are pictures.
 
 **In short:** `imagecodec::decode`, `decode_scaled` and `dimensions` now read
-TIFF (design-decisions.md §1317): grey, palette, RGB and CMYK pictures of
-every depth libtiff's viewer path takes, in strips or tiles, uncompressed,
-PackBits, LZW or Deflate, turned by the `Orientation` tag. The picture is
-exactly what a libtiff-based viewer shows. Some TIFFs are refused for now by
-name -- `ImageError::Unsupported` -- until the rest lands: `YCbCr`, CIELab,
-fax (CCITT) and JPEG-compressed TIFFs, which are next. Anything that decodes
+TIFF (design-decisions.md §1317): grey, palette, RGB, CMYK, `YCbCr` and
+CIE L*a*b* pictures of every depth libtiff's viewer path takes, in strips or tiles, uncompressed,
+PackBits, LZW, Deflate, CCITT fax (scanned documents) or JPEG (photographs
+and colour scans), turned by the `Orientation` tag. The picture is
+exactly what a libtiff-based viewer shows. A few rare TIFFs are refused by
+name -- `ImageError::Unsupported` -- old-style JPEG and four vendor
+codecs. Anything that decodes
 through `imagecodec` needs no change; the few places that sniff formats
 themselves do.
 

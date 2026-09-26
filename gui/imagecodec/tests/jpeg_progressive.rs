@@ -10,8 +10,9 @@
 //! this crate already checks against a reference.
 //!
 //! That comparison cannot catch a mistake the two decoders share, so each
-//! progressive file is also checked against Pillow's own decode of it, to within
-//! the rounding two decoders may differ by.
+//! progressive file is also checked against Pillow's own decode of it --
+//! exactly, since this decoder is a port of the libjpeg-turbo Pillow decodes
+//! with.
 //!
 //! The scan script in every colour fixture is libjpeg's standard progression:
 //! an interleaved DC pass with one bit held back, spectral-selection AC passes
@@ -33,7 +34,7 @@
 
 mod common;
 
-use common::{answer, assert_agrees, read};
+use common::{answer, assert_exact, read};
 use imagecodec::{Image, Limits, decode, decode_scaled, dimensions};
 
 /// Every fixture pair, and what makes it worth having.
@@ -87,12 +88,11 @@ fn a_progressive_file_decodes_to_exactly_what_its_baseline_twin_does() {
 
 #[test]
 fn a_progressive_file_agrees_with_a_reference_decoder() {
-    // Subsampled ones included: the colour is brought back up with libjpeg's
-    // own filter (`tests/jpeg_sampling.rs` holds every layout to it), so
-    // nothing stands between this decoder and the reference but rounding.
+    // Subsampled ones included: every stage is libjpeg-turbo's own
+    // arithmetic, so the answer is the reference's to the bit.
     for (name, why) in CASES {
         let file = format!("{name}_progressive");
-        assert_agrees(&format!("{file} ({why})"), &decoded(&file), &answer(&file));
+        assert_exact(&format!("{file} ({why})"), &decoded(&file), &answer(&file));
     }
 }
 

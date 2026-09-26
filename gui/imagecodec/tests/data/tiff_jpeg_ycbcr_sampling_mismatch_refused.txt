@@ -1,0 +1,2 @@
+REFUSED read: Improper JPEG sampling factors 1,1
+Apparently should be 2,2.

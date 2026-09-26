@@ -10258,6 +10258,10 @@ drawn in software (§1301).
 **Decided by:** Claude (autonomous). Mechanism inside `gui/imagecodec`; the one
 call with a user-visible side is how a truncated file is treated, recorded
 below.
+**Superseded by §1318** the same day: the decoder this describes was replaced
+by a port of libjpeg-turbo. Its compact coefficient store for thumbnails lives
+on there, and a cut-off file is still shown as far as it got -- now exactly as
+libjpeg shows it.
 
 **In short:** photographs saved "progressive" — a large share of those on the
 web and many a camera's export — used to be refused outright, so the file
@@ -10333,6 +10337,9 @@ while its eighth-scale thumbnail fits in the same budget.
 **Decided by:** Claude (autonomous). It reverses a judgment recorded in the
 decoder's own comments ("interpolating would be a better picture than the file
 contains"), which was also Claude's; the operator has ruled on neither.
+**Superseded by §1318** the same day: the filter lives on, chosen as libjpeg
+chooses it, and the 3-level tolerance is gone -- the whole decoder is now
+libjpeg-turbo's.
 
 **In short:** most photographs store their colour at half resolution, so a
 decoder has to stretch it back to full size. This one used to repeat each
@@ -10425,6 +10432,9 @@ as three shifted slices zipped together, brought that back to noise.
 **Lane:** F
 **Decided by:** Claude (autonomous). Mechanism inside `gui/imagecodec`; the
 trade it makes is memory in a progressive thumbnail, recorded below.
+**Superseded by §1318** the same day: scaled decoding is now libjpeg-turbo's
+own reduced transforms (`jidctred.c`), bit for bit, and the progressive
+thumbnail's store keeps what they read.
 
 **In short:** a JPEG thumbnail is made by decoding the photograph directly at
 a half, a quarter or an eighth of its size, which is far cheaper than decoding
@@ -11264,12 +11274,19 @@ of TIFF are not read yet (listed below) and are refused by name.
   palette made grey or RGB).
 - `read.rs`: `TIFFFillStrip`/`TIFFFillTile` and the codecs -- none,
   PackBits, Deflate, LZW in `lzw.rs` (both the TIFF 6.0 codes and the
-  old-style ones libtiff still reads) -- with the horizontal predictor,
-  `FillOrder`, and big-endian 16-bit samples.
+  old-style ones libtiff still reads), and CCITT fax in `fax.rs` (Group 3 1-D
+  and 2-D, Group 4, Modified Huffman byte- and word-aligned: `tif_fax3.c`'s
+  macros written out, its code tables built as `mkg3states` builds them), and
+  JPEG through this crate's port of libjpeg-turbo (§1318) driven as
+  `tif_jpeg.c` drives libjpeg -- with the horizontal predictor, `FillOrder`,
+  and big-endian 16-bit samples.
 - `rgba.rs`: `tif_getimage.c` -- `TIFFRGBAImageOK`, `TIFFRGBAImageBegin`, the
   strip and tile readers and their pixel routines: grey of 1 to 16 bits,
-  palettes, RGB of 8 and 16 with each kind of alpha, CMYK, planes together or
-  apart.
+  palettes, RGB of 8 and 16 with each kind of alpha, CMYK, `YCbCr` (all seven
+  subsamplings libtiff converts), CIE L*a*b*, planes together or apart.
+- `color.rs`: `tif_color.c`'s `YCbCr` and L*a*b* conversions, in libtiff's
+  own single-precision order so they agree to the bit; its one call to
+  `pow` is a table generated with the C library libtiff runs on.
 
 ### The choices with two sides
 
@@ -11310,24 +11327,145 @@ of TIFF are not read yet (listed below) and are refused by name.
 
 ### Not yet read
 
-`YCbCr` and CIELab samples, CCITT (fax) compression, JPEG and old-style JPEG
-compression, and NeXT, ThunderScan, SGI LogLuv and PixarLog: libtiff reads
-them, and this refuses them by name, for now. Only the first page of a
-multi-page TIFF is read -- as gdk-pixbuf reads it.
+Old-style JPEG compression, NeXT, ThunderScan, SGI LogLuv and PixarLog:
+libtiff reads them, and this refuses them by name, for now.
+(`YCbCr` and CIE L*a*b* samples followed on the same day, held the same way:
+23 more fixtures, and 12,000 mutants of them without a disagreement. So did
+fax, whose leniency is kept whole -- a bad code word ends only its row, a
+Group 4 strip cut short keeps the rows it has, and a Group 3 strip whose data
+runs out is decoded again from its start without end-of-line codes, into the
+rows still to fill, which can show a cut file whole and wrong; and a fax
+tile that fails is shown as far as it decoded, because libtiff tests a
+tile's decode for truth where it tests a strip's for success, and fax fails
+with -1: 25 fixtures, from libtiff's own encoder, and 12,000 mutants. And so
+did JPEG, once JPEG itself was libjpeg-turbo's (§1318): each strip's
+datastream checked against its strip as `JPEGPreDecode` checks it, a last
+strip's full-height datastream tolerated, the subsampling read from the first
+strip's frame when the tag is missing, `JPEGTables` parsed once, and the
+tables kept from strip to strip as libjpeg keeps them, so a strip that
+redefines them -- even after its scan, which `jpeg_finish_decompress` reads --
+redefines them for the abbreviated strips after it. libtiff ignores what that
+finish says: it returns `rows_left || finish()`, and a C `||` is 1 for the
+failure's -1. 38 fixtures, 30 of them decoded, and 12,000 mutants.) Only
+the first page of a multi-page TIFF is read -- as gdk-pixbuf reads it.
 
 ### How it is held
 
-`tests/tiff.rs` against 137 fixtures (`tests/data/generate_tiff.py`: a
+`tests/tiff.rs` against 224 fixtures (`tests/data/generate_tiff.py`: a
 small TIFF writer for every layout, plus Pillow's libtiff-backed writer for
 real encoder output), each answered by libtiff 4.7.1 built from pinned
-sources: 115 decoded to exactly libtiff's raster, 22 refused where libtiff
+sources: 187 decoded to exactly libtiff's raster, 37 refused where libtiff
 refuses. Separate tests hold the straight-alpha conversion to libtiff's
 premultiplied raster, the eight orientations to the stored picture turned,
 limits, and every bit flip of eight fixtures to not panicking. A mutation
 fuzzer against the same libtiff -- bit flips, entry types, counts and values
 changed, entries dropped and duplicated, files cut short -- found no
 disagreement in 30,000 files without Deflate data, and in 8,000 with it only
-the nine Deflate cases above.
+the nine Deflate cases above; the rounds for `YCbCr` with CIELab, for fax and for
+JPEG (12,000 each) found none once the two port errors the fax round turned up were
+fixed -- `RowsPerStrip` also sets the tile size while no tile tags have
+been read, and the tile truth test above.
+
+## 1318. JPEG is libjpeg-turbo's decompressor, ported: every pixel its pixel
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous). It replaces the decoder §1305, §1306 and
+§1307 describe, which were Claude's too; the operator has ruled on none of
+them.
+
+**In short:** JPEG photographs now decode to exactly the pixels every other
+program shows. Browsers, GNOME's image viewer and Pillow all decode JPEG with
+the same library, libjpeg-turbo, and this is now a port of it, agreeing with
+it to the bit on every test file and on 32,000 damaged ones. Before, pixels
+were within a few levels of it -- invisible -- but some kinds of JPEG came out
+wrong or not at all: CMYK files from print work showed false colours,
+RGB-coded JPEGs came out in the wrong colours, and arithmetic-coded files
+and files sending each colour in a scan of its own were refused. Those now show as they
+do elsewhere. It is also faster: a 21-megapixel photograph in 0.76 s rather
+than 1.42 s, its thumbnail in 0.18 s rather than 0.45 s.
+
+### Why a port rather than a better decoder of our own
+
+The old decoder implemented the standard, with libjpeg's upsampling filter
+added (§1306), a floating-point inverse DCT, and tests that allowed 3 levels
+a channel. The standard allows that latitude, but what anyone compares a
+picture against is what their other programs show, and they all show
+libjpeg-turbo. TIFF needed more: everything else in the TIFF port (§1317) is
+held to libtiff's exact output, and a JPEG-compressed TIFF is decoded by
+libjpeg underneath. And the latitude is only about rounding. What a decoder
+does with a *damaged* file -- where it stops, what fills the rest, which
+markers it forgives, when it gives up -- is where decoders differ visibly,
+and there the only reference is libjpeg's own behaviour.
+
+*Alternatives:* (a) keep the old decoder and its tolerance -- cheapest, and
+the rounding differences are invisible, but damaged files would go on
+decoding differently, JPEG-in-TIFF could not be held exactly, and the CMYK,
+RGB and arithmetic gaps would each need a fix of their own; (b) reproduce
+libjpeg-turbo's SIMD arithmetic, which computes the inverse DCT in 16-bit
+lanes and is what x86 distributions run -- but it is not one reference
+(SSE2, AVX2 and NEON can differ where a value overflows), it would be obscure
+to maintain, and it agrees with the C code on every file whose coefficients
+fit 16 bits, which is every valid one. Chosen: (c) the C code, operation for
+operation -- its 64-bit arithmetic, its truncations to `int`, its 10-bit
+range-limit wrap -- so that even garbage decodes to libjpeg's garbage.
+
+### What it is
+
+`gui/imagecodec/src/jpeg/`, each part citing the libjpeg-turbo 3.1.1 file it
+transcribes: `source` (the fake end-of-image markers every libjpeg data
+source supplies past the end of the data, from which the handling of a
+cut-off file follows), `marker` (`jdmarker.c`), `huffman` (`jdhuff.c`,
+`jdphuff.c`), `arith` (`jdarith.c`), `coef` (`jdcoefct.c`: the coefficient
+store of a multi-scan image, and block smoothing), `idct` (`jidctint.c`'s
+accurate integer transform, `jidctred.c`'s reduced ones), `upsample`
+(`jdsample.c`), `color` (`jdcolor.c`), and `decompress` (`jdapimin.c`,
+`jdapistd.c`, `jdinput.c`, `jdmaster.c`). The interface is libjpeg's --
+read the header, choose colour spaces and scale, start, read rows, finish --
+and the quantisation and Huffman tables outlive a datastream, as libjpeg's
+permanent pool does: TIFF needs both.
+
+The choices libjpeg leaves to its caller are taken, for the crate's own entry
+points, as Chrome takes them: RGB out for greyscale, RGB and YCbCr files;
+CMYK and YCCK converted by Chrome's formula for the inverted CMYK Adobe
+writes (`c * k / 255`); two components, or five and more, refused, as Chrome
+refuses them; at most 100 scans, Chrome's (and libtiff's) progress-monitor
+limit; and nothing after the last row read -- a picture whose rows all
+decoded is shown whatever follows, where `jpeg_finish_decompress` could still
+object to it. A file cut off shows the rows that arrived and then grey, as in
+every program built on libjpeg; `dimensions` reads the header as libjpeg
+does, so a file whose header libjpeg refuses no longer reports a size (the
+old walker reported the first frame's size whatever surrounded it).
+
+Two parts of the old decoder live on: its compact coefficient store for
+thumbnails of progressive files (§1305), which keeps exactly the
+coefficients libjpeg's reduced transforms read and, for the rest, only
+whether each is zero -- all a refinement scan ever asks of a coefficient it
+does not produce -- so it stays exact, and a thumbnail of a large progressive
+photograph still costs a fraction of its coefficients; and the upsampling
+filters (§1306), now chosen as libjpeg chooses them, including its refusal of
+sampling ratios that are not whole numbers.
+
+### Not yet
+
+Lossless JPEG (`SOF3`), which libjpeg-turbo 3 reads through the same
+interface at up to 8 bits: refused for now (`known-issues.md`). 12-bit JPEG is
+refused, as libjpeg's 8-bit interface refuses it.
+
+### How it is held
+
+Every JPEG test in the crate now compares exactly; the tolerance is gone
+(`tests/common/mod.rs`). The 24x16 reference, every chroma layout at full
+size and at a half, a quarter and an eighth against TurboJPEG, the
+progressive fixtures and the EXIF orientation fixtures all pass to the bit.
+A libjpeg-turbo 3.1.1 oracle (its C build) answered 146 seeds made by
+`cjpeg` and Pillow -- baseline at five subsamplings, greyscale, progressive,
+arithmetic sequential and progressive, restart markers, RGB, optimised
+tables, 16-bit quantisers, separate-scan sequential, CMYK -- all identical
+at all four sizes; then 32,000 mutants of them (header fields, segment
+lengths, marker codes, markers spliced into entropy data, cuts, bit flips).
+The only disagreements, two thumbnails, came from the old header walker the
+thumbnail path still used; it now reads the header through the port.
 
 ## §200 — The B-KNULLJUMP hunt runs the *uninstrumented* kernel first (E), and escalates to the optimized KASAN build (A) only if that fails to settle it
 

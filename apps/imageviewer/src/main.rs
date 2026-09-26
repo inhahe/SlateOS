@@ -23,7 +23,6 @@ use guitk::style::CornerRadii;
 use guitk::theme::with_alpha;
 use guitk::wheel;
 
-
 use std::path::{Path, PathBuf};
 
 /// `path`'s file name as the window shows it: the name itself when it is
@@ -58,6 +57,7 @@ const TOOLBAR_HEIGHT: f32 = 40.0;
 /// names. `apps/rssreader` shipped an overlay of twenty-one shortcuts of which
 /// about four worked.
 const SHORTCUTS: &[(&str, &str)] = &[
+    ("Ctrl+O", "Open a picture"),
     ("Left / Right", "Previous / next image"),
     ("Home / End", "First / last image"),
     ("Ctrl+= / Ctrl+-", "Zoom in / out"),
@@ -80,6 +80,11 @@ const SHORTCUTS: &[(&str, &str)] = &[
 const STATUS_BAR_HEIGHT: f32 = 28.0;
 const INFO_PANEL_WIDTH: f32 = 280.0;
 const THUMBNAIL_STRIP_HEIGHT: f32 = 80.0;
+/// One thumbnail's side, and the gap before each.
+const THUMB_SIZE: f32 = 60.0;
+const THUMB_PAD: f32 = 4.0;
+/// From one thumbnail's left edge to the next one's.
+const THUMB_PITCH: f32 = THUMB_SIZE + THUMB_PAD;
 
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 4.0;
@@ -545,6 +550,43 @@ pub struct ViewerState {
     /// [`App::take_images`] between the render and the frame, which is what
     /// puts the pixels up before the frame that names them.
     pending_images: Vec<oswindow::app::ImageChange>,
+
+    /// The Open dialog, while it is up.
+    ///
+    /// It takes every key and click until it closes, so a letter typed into a
+    /// file name is not also a shortcut acting on the picture behind it --
+    /// `B` in `beach.jpg` would hide the toolbar.
+    picker: guitk::dialog::FilePicker,
+}
+
+/// Where each part of the window is, for the frame about to be drawn.
+///
+/// The one reading of the window's geometry. `render` draws each part where
+/// this says it is and the pointer handler hit-tests the same rectangles, so a
+/// click cannot land on a button that is drawn somewhere else -- the fault
+/// that left this viewer's toolbar and thumbnail strip drawn and unclickable:
+/// the renderer knew where they were and the mouse handler never asked.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Layout {
+    /// The toolbar's top, when it is shown.
+    toolbar: Option<f32>,
+    /// The picture's area: left, top, width, height.
+    image: (f32, f32, f32, f32),
+    /// The info panel's left edge, when it is shown. It runs down the
+    /// picture's area, beside it.
+    info: Option<f32>,
+    /// The thumbnail strip's top, when it is shown.
+    thumbs: Option<f32>,
+    /// The status bar's top, when it is shown.
+    status: Option<f32>,
+}
+
+impl Layout {
+    /// Whether (`x`, `y`) is over the picture's area.
+    fn in_image(&self, x: f32, y: f32) -> bool {
+        let (left, top, width, height) = self.image;
+        x >= left && x < left + width && y >= top && y < top + height
+    }
 }
 
 impl ViewerState {
@@ -576,6 +618,126 @@ impl ViewerState {
             hovered_button: None,
             zoom_wheel: wheel::Accumulator::default(),
             pending_images: Vec::new(),
+            picker: guitk::dialog::FilePicker::new(),
+        }
+    }
+
+    /// Where each part of the window is. See [`Layout`].
+    ///
+    /// Full screen hides the two bars and nothing else: the thumbnail strip
+    /// and the info panel are the user's to show there, and `T` and `I`
+    /// still answer.
+    fn layout(&self) -> Layout {
+        let bars = !self.fullscreen;
+        let toolbar = (self.show_toolbar && bars).then_some(0.0);
+        let top = if toolbar.is_some() {
+            TOOLBAR_HEIGHT
+        } else {
+            0.0
+        };
+        let status =
+            (self.show_status_bar && bars).then_some(self.window_height - STATUS_BAR_HEIGHT);
+        let bottom = status.unwrap_or(self.window_height);
+        let thumbs = self
+            .show_thumbnails
+            .then_some(bottom - THUMBNAIL_STRIP_HEIGHT);
+        let image_bottom = thumbs.unwrap_or(bottom);
+        let image_width = if self.show_info_panel {
+            self.window_width - INFO_PANEL_WIDTH
+        } else {
+            self.window_width
+        };
+        Layout {
+            toolbar,
+            image: (0.0, top, image_width, image_bottom - top),
+            info: self.show_info_panel.then_some(image_width),
+            thumbs,
+            status,
+        }
+    }
+
+    /// The toolbar button under (`x`, `y`), by its place in
+    /// [`toolbar_buttons`].
+    fn toolbar_button_at(&self, x: f32, y: f32) -> Option<usize> {
+        let (top, height) = toolbar_button_band(self.layout().toolbar?);
+        if y < top || y >= top + height {
+            return None;
+        }
+        toolbar_buttons()
+            .iter()
+            .position(|b| x >= b.x && x < b.x + b.width)
+    }
+
+    /// The thumbnails the strip has room for: each one's place in
+    /// [`Self::entries`] and its left edge, centred on the current picture.
+    ///
+    /// Read by the strip's drawing and by its hit-test alike, so a click lands
+    /// on the picture drawn under the pointer.
+    fn thumbnail_slots(&self) -> Vec<(usize, f32)> {
+        // Truncated on purpose: a thumbnail that does not fit whole is left
+        // out rather than drawn cut off.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let room = (self.window_width / THUMB_PITCH).max(0.0) as usize;
+        let start = self.current_index.saturating_sub(room / 2);
+        let end = start.saturating_add(room).min(self.entries.len());
+        (start..end)
+            .zip(0_u16..)
+            .map(|(entry, slot)| (entry, f32::from(slot) * THUMB_PITCH + THUMB_PAD))
+            .collect()
+    }
+
+    /// The thumbnail under (`x`, `y`), by its place in [`Self::entries`].
+    fn thumbnail_at(&self, x: f32, y: f32) -> Option<usize> {
+        let top = thumbnail_top(self.layout().thumbs?);
+        if y < top || y >= top + THUMB_SIZE {
+            return None;
+        }
+        self.thumbnail_slots()
+            .into_iter()
+            .find(|&(_, left)| x >= left && x < left + THUMB_SIZE)
+            .map(|(entry, _)| entry)
+    }
+
+    /// Show the picture at `index` in the directory's listing.
+    fn go_to_entry(&mut self, index: usize) {
+        if index < self.entries.len() {
+            self.current_index = index;
+            self.load_current_entry();
+        }
+    }
+
+    /// Put the Open dialog up, in the current picture's directory when there
+    /// is one -- the next picture wanted is most often beside the last.
+    fn ask_for_a_picture(&mut self) {
+        let start = self
+            .directory
+            .clone()
+            .filter(|dir| dir.is_dir())
+            .unwrap_or_else(guitk::dialog::FilePicker::default_start);
+        let patterns: Vec<String> = IMAGE_EXTENSIONS.iter().map(|e| format!("*.{e}")).collect();
+        let patterns: Vec<&str> = patterns.iter().map(String::as_str).collect();
+        self.picker.put_up(
+            guitk::dialog::FileDialog::open()
+                .with_initial_path(start)
+                .with_filter("Pictures", &patterns),
+            false,
+        );
+    }
+
+    /// Give the Open dialog first refusal on `event` while it is up.
+    fn picker_took(&mut self, event: &Event) -> bool {
+        match self
+            .picker
+            .handle(event, self.window_width, self.window_height)
+        {
+            guitk::dialog::Picked::Chose(path) => {
+                // What it came to is on screen either way: the picture, or
+                // why not.
+                let _ = self.open_file(&path);
+                true
+            }
+            guitk::dialog::Picked::Handled | guitk::dialog::Picked::Cancelled => true,
+            guitk::dialog::Picked::Ignored => false,
         }
     }
 
@@ -604,6 +766,17 @@ impl ViewerState {
         loaded
     }
 
+    /// The most bytes of picture file to read.
+    ///
+    /// Generous: a lossless photograph at the largest size the compositor can
+    /// store runs to tens of megabytes, and a caller has no way to ask for
+    /// more. The point is not the number but that there is one --
+    /// `std::fs::read` had no bound at all, so a file larger than memory was
+    /// read whole before `imagecodec::Limits` was consulted, and those limits
+    /// exist precisely to be checked "before any buffer the header describes
+    /// is allocated".
+    const MAX_PICTURE_BYTES: usize = 256 * 1024 * 1024;
+
     /// Load and display the image at `path` without touching the directory
     /// listing or `current_index`. Used both by `open_file` (which then
     /// (re)builds the listing) and by `load_current_entry` (which navigates
@@ -619,17 +792,6 @@ impl ViewerState {
     /// old dimensions, format and EXIF. "This picture is `holiday.jpg`" is the
     /// one claim an image viewer makes, and it was false in exactly the case
     /// the user most needed to be told about.
-    /// The most bytes of picture file to read.
-    ///
-    /// Generous: a lossless photograph at the largest size the compositor can
-    /// store runs to tens of megabytes, and a caller has no way to ask for
-    /// more. The point is not the number but that there is one --
-    /// `std::fs::read` had no bound at all, so a file larger than memory was
-    /// read whole before `imagecodec::Limits` was consulted, and those limits
-    /// exist precisely to be checked "before any buffer the header describes
-    /// is allocated".
-    const MAX_PICTURE_BYTES: usize = 256 * 1024 * 1024;
-
     fn display_image(&mut self, path: &Path) -> bool {
         let filename = shown_file_name(path).unwrap_or_else(|| String::from("(unknown)"));
 
@@ -890,35 +1052,23 @@ impl ViewerState {
 
     /// Width of the image display area.
     fn image_area_width(&self) -> f32 {
-        let mut w = self.window_width;
-        if self.show_info_panel {
-            w -= INFO_PANEL_WIDTH;
-        }
-        w.max(1.0)
+        self.layout().image.2.max(1.0)
     }
 
     /// Height of the image display area.
     fn image_area_height(&self) -> f32 {
-        let mut h = self.window_height;
-        if self.show_toolbar && !self.fullscreen {
-            h -= TOOLBAR_HEIGHT;
-        }
-        if self.show_status_bar && !self.fullscreen {
-            h -= STATUS_BAR_HEIGHT;
-        }
-        if self.show_thumbnails {
-            h -= THUMBNAIL_STRIP_HEIGHT;
-        }
-        h.max(1.0)
+        self.layout().image.3.max(1.0)
     }
 
     /// Execute a viewer action.
     pub fn execute_action(&mut self, action: ViewerAction) {
         match action {
-            ViewerAction::Open => {
-                // In a real implementation, this would open a file dialog.
-                // For now, this is a placeholder.
-            }
+            // It was a placeholder -- a comment reading "in a real
+            // implementation, this would open a file dialog" under a toolbar
+            // button and a tooltip naming Ctrl+O, neither of which did
+            // anything. A viewer started with no file had no way to be given
+            // one.
+            ViewerAction::Open => self.ask_for_a_picture(),
             ViewerAction::PrevImage => self.prev_image(),
             ViewerAction::NextImage => self.next_image(),
             ViewerAction::ZoomIn => self.transform.zoom_in(),
@@ -998,6 +1148,11 @@ impl ViewerState {
         let shift = event.modifiers.shift;
 
         match event.key {
+            Key::O if ctrl => {
+                self.execute_action(ViewerAction::Open);
+                true
+            }
+
             // Navigation
             Key::Left if !ctrl => {
                 self.execute_action(ViewerAction::PrevImage);
@@ -1165,13 +1320,20 @@ impl ViewerState {
                 true
             }
             MouseEventKind::Press(MouseButton::Left) => {
-                // Start panning
-                let toolbar_y = if self.show_toolbar && !self.fullscreen {
-                    TOOLBAR_HEIGHT
-                } else {
-                    0.0
-                };
-                if event.y > toolbar_y {
+                if let Some(button) = self.toolbar_button_at(event.x, event.y) {
+                    if let Some(action) = toolbar_buttons().get(button).map(|b| b.action) {
+                        self.execute_action(action);
+                    }
+                    return true;
+                }
+                if let Some(entry) = self.thumbnail_at(event.x, event.y) {
+                    self.go_to_entry(entry);
+                    return true;
+                }
+                // A drag pans the picture only when it starts on the
+                // picture. It started anywhere below the toolbar, so a click
+                // on the thumbnail strip or the info panel began a pan.
+                if self.layout().in_image(event.x, event.y) {
                     self.dragging = true;
                     self.drag_start_x = event.x;
                     self.drag_start_y = event.y;
@@ -1193,6 +1355,22 @@ impl ViewerState {
                 self.transform.pan_y = self.drag_start_pan_y + dy;
                 true
             }
+            // The button under the pointer is lit. `hovered_button` was read
+            // by the toolbar's drawing and written by nothing.
+            MouseEventKind::Move => {
+                let hovered = self.toolbar_button_at(event.x, event.y);
+                let changed = hovered != self.hovered_button;
+                self.hovered_button = hovered;
+                changed
+            }
+            // Over the picture only: a double click arrives after its second
+            // press, so double-clicking a toolbar button pressed it twice and
+            // then changed the zoom as well.
+            MouseEventKind::DoubleClick(MouseButton::Left)
+                if !self.layout().in_image(event.x, event.y) =>
+            {
+                false
+            }
             MouseEventKind::DoubleClick(MouseButton::Left) => {
                 // Double-click toggles between fit and actual size
                 if (self.transform.zoom - 1.0).abs() < 0.01 {
@@ -1208,6 +1386,9 @@ impl ViewerState {
 
     /// Handle any event type dispatched to the viewer.
     pub fn handle_event(&mut self, event: &Event) -> bool {
+        if self.picker.is_open() && self.picker_took(event) {
+            return true;
+        }
         match event {
             Event::Key(key_event) => self.handle_key_event(key_event),
             Event::Mouse(mouse_event) => self.handle_mouse_event(mouse_event),
@@ -1242,63 +1423,37 @@ pub fn render(state: &ViewerState) -> RenderTree {
         state.palette.base,
     );
 
-    let mut content_y = 0.0;
+    let layout = state.layout();
 
     // Toolbar (hidden in fullscreen)
-    if state.show_toolbar && !state.fullscreen {
-        render_toolbar(state, &mut tree, 0.0);
-        content_y = TOOLBAR_HEIGHT;
+    if let Some(y) = layout.toolbar {
+        render_toolbar(state, &mut tree, y);
     }
-
-    // Main image area
-    let status_y = if state.show_status_bar && !state.fullscreen {
-        state.window_height - STATUS_BAR_HEIGHT
-    } else {
-        state.window_height
-    };
-    let thumb_y = if state.show_thumbnails {
-        status_y - THUMBNAIL_STRIP_HEIGHT
-    } else {
-        status_y
-    };
-    let image_area_height = thumb_y - content_y;
-    let image_area_width = if state.show_info_panel {
-        state.window_width - INFO_PANEL_WIDTH
-    } else {
-        state.window_width
-    };
 
     // Clip to image area and render image
-    tree.clip(0.0, content_y, image_area_width, image_area_height);
-    render_image(
-        state,
-        &mut tree,
-        0.0,
-        content_y,
-        image_area_width,
-        image_area_height,
-    );
+    let (image_x, image_y, image_w, image_h) = layout.image;
+    tree.clip(image_x, image_y, image_w, image_h);
+    render_image(state, &mut tree, image_x, image_y, image_w, image_h);
     tree.unclip();
 
-    // Info panel
-    if state.show_info_panel {
-        render_info_panel(
-            state,
-            &mut tree,
-            image_area_width,
-            content_y,
-            image_area_height,
-        );
+    if let Some(x) = layout.info {
+        render_info_panel(state, &mut tree, x, image_y, image_h);
     }
-
-    // Thumbnail strip
-    if state.show_thumbnails {
-        render_thumbnail_strip(state, &mut tree, thumb_y);
+    if let Some(y) = layout.thumbs {
+        render_thumbnail_strip(state, &mut tree, y);
     }
-
     // Status bar (hidden in fullscreen)
-    if state.show_status_bar && !state.fullscreen {
-        render_status_bar(state, &mut tree, status_y);
+    if let Some(y) = layout.status {
+        render_status_bar(state, &mut tree, y);
+    }
+
+    // The Open dialog over the viewer, and under the shortcut list.
+    if state.picker.is_open() {
+        tree.commands.extend(state.picker.render(
+            &state.palette,
+            state.window_width,
+            state.window_height,
+        ));
     }
 
     // The shortcut list over everything, because it is the one thing a reader
@@ -1338,8 +1493,7 @@ fn render_toolbar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
     );
 
     let buttons = toolbar_buttons();
-    let button_y = y + 6.0;
-    let button_h = TOOLBAR_HEIGHT - 12.0;
+    let (button_y, button_h) = toolbar_button_band(y);
 
     for (idx, btn) in buttons.iter().enumerate() {
         let bg = if state.hovered_button == Some(idx) {
@@ -1394,7 +1548,9 @@ fn render_image(
             Some(err) => (String::from("Cannot display this image"), err.clone()),
             None => (
                 String::from("No image loaded"),
-                String::from("Open a file or drag an image here"),
+                // It said "or drag an image here", and no window receives a
+                // drop: there is no such event to deliver one.
+                String::from("Open a picture with Ctrl+O or the Open button"),
             ),
         };
         tree.push(RenderCommand::Text {
@@ -1727,25 +1883,10 @@ fn render_thumbnail_strip(state: &ViewerState, tree: &mut RenderTree, y: f32) {
     // Top border
     tree.fill_rect(0.0, y, state.window_width, 1.0, state.palette.border);
 
-    if state.entries.is_empty() {
-        return;
-    }
+    let thumb_size = THUMB_SIZE;
+    let thumb_y = thumbnail_top(y);
 
-    let thumb_size = 60.0;
-    let thumb_pad = 4.0;
-    let thumb_y = y + (THUMBNAIL_STRIP_HEIGHT - thumb_size) / 2.0;
-    let total_thumb_width = thumb_size + thumb_pad;
-
-    // Calculate visible range centered on current image
-    let visible_count = (state.window_width / total_thumb_width) as usize;
-    let half_visible = visible_count / 2;
-    let start_idx = state.current_index.saturating_sub(half_visible);
-    let end_idx = start_idx
-        .saturating_add(visible_count)
-        .min(state.entries.len());
-
-    for (rel_idx, abs_idx) in (start_idx..end_idx).enumerate() {
-        let thumb_x = (rel_idx as f32) * total_thumb_width + thumb_pad;
+    for (abs_idx, thumb_x) in state.thumbnail_slots() {
         let is_current = abs_idx == state.current_index;
 
         // Thumbnail border (highlight current)
@@ -1873,6 +2014,16 @@ fn render_status_bar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
             overflow: TextOverflow::Clip,
         });
     }
+}
+
+/// The toolbar's buttons' top and height, for a toolbar whose top is `top`.
+fn toolbar_button_band(top: f32) -> (f32, f32) {
+    (top + 6.0, TOOLBAR_HEIGHT - 12.0)
+}
+
+/// The top of the thumbnails in a strip whose top is `strip_top`.
+fn thumbnail_top(strip_top: f32) -> f32 {
+    strip_top + (THUMBNAIL_STRIP_HEIGHT - THUMB_SIZE) / 2.0
 }
 
 /// Build the toolbar button definitions with positions.
@@ -2125,18 +2276,6 @@ mod tests {
 
     use super::*;
 
-    /// **Every key the shortcut list advertises is one this program answers.**
-    ///
-    /// A list on screen and the handler behind it are two copies of one fact,
-    /// and they drift: `apps/rssreader` shipped an overlay of twenty-one
-    /// shortcuts of which about four worked. The label is read by
-    /// `guitk::shortcut` rather than matched against a table written beside it
-    /// here -- that table would be a third copy, drifting from both.
-    ///
-    /// The property is "some reachable state answers this key", not "this key
-    /// is taken right now": `Escape` means nothing until there is a full
-    /// screen or a slideshow to leave, and declining from its own arm is
-    /// answering.
     /// A file name that is text is shown as it is; one that is not, by its
     /// bytes -- two such names never look the same.
     #[test]
@@ -2169,6 +2308,18 @@ mod tests {
         assert_ne!(shown_a, shown_b, "two names became one");
     }
 
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// A list on screen and the handler behind it are two copies of one fact,
+    /// and they drift: `apps/rssreader` shipped an overlay of twenty-one
+    /// shortcuts of which about four worked. The label is read by
+    /// `guitk::shortcut` rather than matched against a table written beside it
+    /// here -- that table would be a third copy, drifting from both.
+    ///
+    /// The property is "some reachable state answers this key", not "this key
+    /// is taken right now": `Escape` means nothing until there is a full
+    /// screen or a slideshow to leave, and declining from its own arm is
+    /// answering.
     #[test]
     fn every_advertised_key_does_something() {
         for (label, what) in SHORTCUTS {
@@ -3200,6 +3351,315 @@ the picture at once, which reads as D advancing the slideshow"
     ///
     /// Bind the guard to a named local, never to `_`: a bare `_` drops it
     /// immediately and the directory is gone before the test's first line.
+    fn press_at(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    fn move_to(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        })
+    }
+
+    fn ctrl(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    /// What a toolbar button can change, read back.
+    fn what_it_did(state: &ViewerState) -> String {
+        format!(
+            "zoom {} rot {:?} flip {} {} show {} info {} picker {} at {}",
+            state.transform.zoom,
+            state.transform.rotation,
+            state.transform.flip_h,
+            state.transform.flip_v,
+            state.slideshow.active,
+            state.show_info_panel,
+            state.picker.is_open(),
+            state.current_index,
+        )
+    }
+
+    /// A viewer on the second of three pictures.
+    fn on_the_second_of_three(guard: &ScratchDir) -> ViewerState {
+        let dir = guard.dir();
+        for (name, w) in [("a.png", 4), ("b.png", 6), ("c.png", 8)] {
+            std::fs::write(dir.join(name), png_bytes(w, 4)).expect("write a picture");
+        }
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert!(state.open_file(&dir.join("b.png")));
+        // Neither the fit nor actual size, so both of those buttons show.
+        state.transform.zoom = 2.0;
+        state
+    }
+
+    /// **Every toolbar button does, when clicked, what its action does.**
+    ///
+    /// They were drawn, with a hover colour and tooltips naming their keys,
+    /// and the mouse handler never looked at them: a press over the toolbar
+    /// returned "not mine". Each is clicked at its middle and compared with
+    /// the action run directly, so a click routed to the wrong button fails
+    /// as surely as one routed to none.
+    #[test]
+    fn every_toolbar_button_answers_a_click() {
+        let guard = scratch("toolbar");
+        for (index, button) in toolbar_buttons().iter().enumerate() {
+            let mut clicked = on_the_second_of_three(&guard);
+            let mut run = on_the_second_of_three(&guard);
+            let (top, height) = toolbar_button_band(0.0);
+            let (x, y) = (button.x + button.width / 2.0, top + height / 2.0);
+            assert_eq!(clicked.toolbar_button_at(x, y), Some(index));
+            let before = what_it_did(&clicked);
+            assert!(clicked.handle_event(&press_at(x, y)), "{}", button.label);
+            run.execute_action(button.action);
+            assert_eq!(what_it_did(&clicked), what_it_did(&run), "{}", button.label);
+            assert_ne!(
+                what_it_did(&clicked),
+                before,
+                "{} changed nothing",
+                button.label
+            );
+        }
+    }
+
+    /// With the toolbar hidden, or in full screen, its place is the picture.
+    #[test]
+    fn a_hidden_toolbar_takes_no_click() {
+        let mut state = ViewerState::new(1024.0, 768.0);
+        let (top, height) = toolbar_button_band(0.0);
+        let first = &toolbar_buttons()[0];
+        let (x, y) = (first.x + 2.0, top + height / 2.0);
+        assert_eq!(state.toolbar_button_at(x, y), Some(0));
+        state.show_toolbar = false;
+        assert_eq!(state.toolbar_button_at(x, y), None);
+        state.show_toolbar = true;
+        state.fullscreen = true;
+        assert_eq!(state.toolbar_button_at(x, y), None);
+        assert!(!state.handle_event(&press_at(x, y + TOOLBAR_HEIGHT * 20.0)));
+    }
+
+    /// The button under the pointer is lit, and only a change redraws.
+    #[test]
+    fn the_button_under_the_pointer_is_lit() {
+        let mut state = ViewerState::new(1024.0, 768.0);
+        let (top, height) = toolbar_button_band(0.0);
+        let third = &toolbar_buttons()[2];
+        let over = move_to(third.x + 1.0, top + height / 2.0);
+        assert!(state.handle_event(&over));
+        assert_eq!(state.hovered_button, Some(2));
+        assert!(
+            !state.handle_event(&over),
+            "nothing changed; nothing to draw"
+        );
+        assert!(state.handle_event(&move_to(500.0, 400.0)));
+        assert_eq!(state.hovered_button, None);
+    }
+
+    /// **A thumbnail opens its picture.** The strip was drawn with the current
+    /// picture outlined and took no click.
+    #[test]
+    fn a_thumbnail_opens_its_picture() {
+        let guard = scratch("strip");
+        let mut state = on_the_second_of_three(&guard);
+        state.show_thumbnails = true;
+        let top = thumbnail_top(state.layout().thumbs.expect("the strip is up"));
+        let slots = state.thumbnail_slots();
+        assert_eq!(slots.len(), 3, "{slots:?}");
+        let (entry, left) = slots[2];
+        assert!(state.handle_event(&press_at(left + THUMB_SIZE / 2.0, top - 20.0)));
+        assert_eq!(
+            state.current_index, 1,
+            "the thumbnail answered above itself"
+        );
+        state.dragging = false;
+        assert!(state.handle_event(&press_at(left + THUMB_SIZE / 2.0, top + 1.0)));
+        assert_eq!(state.current_index, entry);
+        assert_eq!(state.image_info.filename, "c.png");
+        assert_eq!(state.current_image.as_ref().map(|i| i.width), Some(8));
+        assert!(!state.dragging, "a click on the strip is not a pan");
+        // Between two thumbnails is nothing.
+        let (_, first) = slots[0];
+        assert_eq!(
+            state.thumbnail_at(first + THUMB_SIZE + 1.0, top + 1.0),
+            None
+        );
+    }
+
+    /// A drag pans only when it starts on the picture: not on the status bar,
+    /// the strip or the info panel.
+    #[test]
+    fn only_a_press_on_the_picture_starts_a_pan() {
+        let mut state = ViewerState::new(1024.0, 768.0);
+        state.show_info_panel = true;
+        // Straight below the Open button: the picture's, not the button's.
+        assert!(state.handle_event(&press_at(toolbar_buttons()[0].x + 2.0, 300.0)));
+        assert!(state.dragging);
+        assert!(!state.picker.is_open(), "the button answered below itself");
+        state.dragging = false;
+        let panel = state.layout().info.expect("the panel is up");
+        assert!(!state.handle_event(&press_at(panel + 10.0, 300.0)));
+        let status = state.layout().status.expect("the bar is up");
+        assert!(!state.handle_event(&press_at(200.0, status + 5.0)));
+        assert!(!state.dragging);
+    }
+
+    /// **Ctrl+O puts the Open dialog up, beside the picture on screen**, and
+    /// while it is up the keys are its: a `B` typed there does not hide the
+    /// toolbar behind it.
+    #[test]
+    fn ctrl_o_asks_for_a_picture_beside_the_last() {
+        let guard = scratch("open-dialog");
+        std::fs::write(guard.dir().join("notes.txt"), b"not a picture").expect("write");
+        let mut state = on_the_second_of_three(&guard);
+        assert!(state.handle_event(&ctrl(Key::O)));
+        let dialog = state.picker.dialog().expect("the dialog is up");
+        assert_eq!(dialog.current_path(), guard.dir());
+        let listed: Vec<_> = dialog.entries().iter().map(|e| e.name.clone()).collect();
+        assert_eq!(listed, ["a.png", "b.png", "c.png"], "pictures only");
+        assert!(state.handle_event(&Event::Key(plain(Key::B))));
+        assert!(
+            state.show_toolbar,
+            "the key went to the viewer behind the dialog"
+        );
+        assert!(state.handle_event(&Event::Key(plain(Key::Escape))));
+        assert!(!state.picker.is_open());
+    }
+
+    /// Choosing a picture in the dialog opens it, and its directory with it.
+    #[test]
+    fn a_picture_chosen_in_the_dialog_opens() {
+        let guard = scratch("open-choose");
+        let dir = guard.dir();
+        std::fs::write(dir.join("only.png"), png_bytes(5, 3)).expect("write a picture");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        state.directory = Some(dir.to_path_buf());
+        state.execute_action(ViewerAction::Open);
+        let dialog = state.picker.dialog_mut().expect("the dialog is up");
+        let at = dialog
+            .entries()
+            .iter()
+            .position(|e| e.name == "only.png")
+            .expect("the picture is listed");
+        dialog.select_entry(at);
+        assert!(state.handle_event(&Event::Key(plain(Key::Enter))));
+        assert!(!state.picker.is_open());
+        assert_eq!(state.image_info.filename, "only.png");
+        assert_eq!(
+            state.current_image.as_ref().map(|i| (i.width, i.height)),
+            Some((5, 3))
+        );
+        assert_eq!(state.entries.len(), 1, "its directory is listed");
+    }
+
+    /// **The parts of the window tile it**: the toolbar, the picture, the
+    /// strip and the status bar stack without a gap or an overlap, the info
+    /// panel runs beside the picture, and full screen hides the two bars.
+    #[test]
+    fn the_layout_tiles_the_window() {
+        let mut state = ViewerState::new(1024.0, 768.0);
+        state.show_info_panel = true;
+        state.show_thumbnails = true;
+        let bottom = 768.0 - STATUS_BAR_HEIGHT;
+        assert_eq!(
+            state.layout(),
+            Layout {
+                toolbar: Some(0.0),
+                image: (
+                    0.0,
+                    TOOLBAR_HEIGHT,
+                    1024.0 - INFO_PANEL_WIDTH,
+                    bottom - THUMBNAIL_STRIP_HEIGHT - TOOLBAR_HEIGHT
+                ),
+                info: Some(1024.0 - INFO_PANEL_WIDTH),
+                thumbs: Some(bottom - THUMBNAIL_STRIP_HEIGHT),
+                status: Some(bottom),
+            }
+        );
+        state.fullscreen = true;
+        assert_eq!(
+            state.layout(),
+            Layout {
+                toolbar: None,
+                image: (
+                    0.0,
+                    0.0,
+                    1024.0 - INFO_PANEL_WIDTH,
+                    768.0 - THUMBNAIL_STRIP_HEIGHT
+                ),
+                info: Some(1024.0 - INFO_PANEL_WIDTH),
+                thumbs: Some(768.0 - THUMBNAIL_STRIP_HEIGHT),
+                status: None,
+            }
+        );
+        assert_eq!(state.image_area_height(), 768.0 - THUMBNAIL_STRIP_HEIGHT);
+    }
+
+    /// The strip shows the thumbnails around the current picture, as many as
+    /// fit whole, with the current one in the middle.
+    #[test]
+    fn the_strip_is_centred_on_the_current_picture() {
+        let mut state = ViewerState::new(1024.0, 768.0);
+        state.entries = (0..100)
+            .map(|i| DirectoryEntry {
+                path: PathBuf::from(format!("{i}.png")),
+                filename: format!("{i}.png"),
+                file_size: 0,
+            })
+            .collect();
+        state.current_index = 50;
+        let slots = state.thumbnail_slots();
+        let room = 16; // 1024 / 64
+        assert_eq!(slots.len(), room);
+        assert_eq!(slots[0], (50 - room / 2, THUMB_PAD));
+        assert_eq!(slots[room / 2].0, 50);
+        assert_eq!(slots[room - 1].1, 15.0 * THUMB_PITCH + THUMB_PAD);
+        state.current_index = 98;
+        assert_eq!(state.thumbnail_slots().last().map(|s| s.0), Some(99));
+    }
+
+    /// A double click on a toolbar button is two presses of the button, and
+    /// not a change of zoom as well.
+    #[test]
+    fn a_double_click_on_a_button_does_not_zoom() {
+        let mut state = ViewerState::new(1024.0, 768.0);
+        state.transform.zoom = 2.0;
+        let (top, height) = toolbar_button_band(0.0);
+        let info = toolbar_buttons()
+            .into_iter()
+            .find(|b| b.action == ViewerAction::ToggleInfo)
+            .expect("an Info button");
+        let (x, y) = (info.x + 2.0, top + height / 2.0);
+        state.handle_event(&press_at(x, y));
+        state.handle_event(&press_at(x, y));
+        let double = Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::DoubleClick(MouseButton::Left),
+        });
+        assert!(!state.handle_event(&double));
+        assert_eq!(state.transform.zoom, 2.0);
+        assert!(!state.show_info_panel, "pressed twice: on, then off");
+        // On the picture, it is still the zoom's.
+        let on_picture = Event::Mouse(MouseEvent {
+            x: 300.0,
+            y: 300.0,
+            kind: MouseEventKind::DoubleClick(MouseButton::Left),
+        });
+        assert!(state.handle_event(&on_picture));
+        assert_ne!(state.transform.zoom, 2.0);
+    }
+
     fn scratch(label: &str) -> ScratchDir {
         ScratchDir::new(&format!("slateos-imageviewer-{label}"))
     }

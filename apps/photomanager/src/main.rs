@@ -429,619 +429,20 @@ impl ColorLabel {
 // EXIF metadata
 // ============================================================================
 
-/// Parsed EXIF metadata for a photo.
-#[derive(Clone, Debug, Default)]
-pub struct ExifData {
-    pub camera_make: Option<String>,
-    pub camera_model: Option<String>,
-    pub lens: Option<String>,
-    pub focal_length_mm: Option<f32>,
-    pub aperture: Option<f32>,
-    pub shutter_speed: Option<String>,
-    pub iso: Option<u32>,
-    pub flash_fired: Option<bool>,
-    pub date_taken: Option<String>,
-    pub gps_latitude: Option<f64>,
-    pub gps_longitude: Option<f64>,
-    pub gps_altitude: Option<f32>,
-    pub orientation: Option<u16>,
-    pub software: Option<String>,
-    pub copyright: Option<String>,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
-    pub color_space: Option<String>,
-    pub white_balance: Option<String>,
-    pub metering_mode: Option<String>,
-    pub exposure_program: Option<String>,
-    pub exposure_bias: Option<f32>,
-}
-
-impl ExifData {
-    /// Create empty EXIF data.
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
-    /// Sample EXIF data, for tests.
-    ///
-    /// `#[cfg(test)]` since 2026-09-15. It was reachable from production and
-    /// `seeded_library` used it, so every photo in the window that opened was
-    /// described as a Canon EOS R5 shot in San Francisco. A fixture that
-    /// production can reach is a fixture that eventually ships.
-    #[cfg(test)]
-    pub fn sample() -> Self {
-        Self {
-            camera_make: Some("Canon".to_owned()),
-            camera_model: Some("EOS R5".to_owned()),
-            lens: Some("RF 24-70mm f/2.8L IS USM".to_owned()),
-            focal_length_mm: Some(50.0),
-            aperture: Some(2.8),
-            shutter_speed: Some("1/250".to_owned()),
-            iso: Some(400),
-            flash_fired: Some(false),
-            date_taken: Some("2025-06-15 14:30:22".to_owned()),
-            gps_latitude: Some(37.7749),
-            gps_longitude: Some(-122.4194),
-            gps_altitude: Some(16.0),
-            orientation: Some(1),
-            software: Some("Adobe Lightroom 7.0".to_owned()),
-            copyright: None,
-            width: Some(8192),
-            height: Some(5464),
-            color_space: Some("sRGB".to_owned()),
-            white_balance: Some("Auto".to_owned()),
-            metering_mode: Some("Multi-segment".to_owned()),
-            exposure_program: Some("Aperture Priority".to_owned()),
-            exposure_bias: Some(0.0),
-        }
-    }
-
-    /// Format resolution as "WxH" string.
-    pub fn resolution_str(&self) -> String {
-        match (self.width, self.height) {
-            (Some(w), Some(h)) => format!("{w} x {h}"),
-            _ => "Unknown".to_owned(),
-        }
-    }
-
-    /// Format GPS coordinates as a readable string.
-    pub fn gps_str(&self) -> Option<String> {
-        match (self.gps_latitude, self.gps_longitude) {
-            (Some(lat), Some(lon)) => {
-                let lat_dir = if lat >= 0.0 { "N" } else { "S" };
-                let lon_dir = if lon >= 0.0 { "E" } else { "W" };
-                Some(format!(
-                    "{:.4}{} {:.4}{}",
-                    lat.abs(),
-                    lat_dir,
-                    lon.abs(),
-                    lon_dir
-                ))
-            }
-            _ => None,
-        }
-    }
-
-    /// Format megapixels.
-    pub fn megapixels(&self) -> Option<f32> {
-        match (self.width, self.height) {
-            (Some(w), Some(h)) => {
-                let px = f64::from(w) * f64::from(h);
-                Some((px / 1_000_000.0) as f32)
-            }
-            _ => None,
-        }
-    }
-
-    /// Get exposure summary (aperture, shutter, ISO).
-    pub fn exposure_summary(&self) -> String {
-        let mut parts = Vec::new();
-        if let Some(ap) = self.aperture {
-            parts.push(format!("f/{ap:.1}"));
-        }
-        if let Some(ref ss) = self.shutter_speed {
-            parts.push(format!("{ss}s"));
-        }
-        if let Some(iso) = self.iso {
-            parts.push(format!("ISO {iso}"));
-        }
-        if parts.is_empty() {
-            "No exposure data".to_owned()
-        } else {
-            parts.join("  ")
-        }
-    }
-}
-
-/// Parse EXIF data from raw bytes (simplified parser for common tags).
-pub fn parse_exif_from_bytes(data: &[u8]) -> ExifData {
-    let mut exif = ExifData::empty();
-
-    // Check for JPEG SOI marker + EXIF APP1 header
-    if data.len() < 12 {
-        return exif;
-    }
-
-    // Look for "Exif\0\0" marker
-    let exif_header = b"Exif\0\0";
-    let mut offset = None;
-    for i in 0..data.len().saturating_sub(6) {
-        if data.get(i..i.saturating_add(6)) == Some(exif_header) {
-            offset = Some(i.saturating_add(6));
-            break;
-        }
-    }
-
-    let tiff_start = match offset {
-        Some(o) => o,
-        None => return exif,
-    };
-
-    // Determine byte order (II = little-endian, MM = big-endian)
-    let little_endian = match data.get(tiff_start..tiff_start.saturating_add(2)) {
-        Some(b"II") => true,
-        Some(b"MM") => false,
-        _ => return exif,
-    };
-
-    // Verify TIFF magic number
-    let magic = read_u16(data, tiff_start.saturating_add(2), little_endian);
-    if magic != Some(42) {
-        return exif;
-    }
-
-    // Get IFD0 offset
-    let ifd0_offset = match read_u32(data, tiff_start.saturating_add(4), little_endian) {
-        Some(o) => tiff_start.saturating_add(o as usize),
-        None => return exif,
-    };
-
-    // Parse IFD entries
-    parse_ifd_entries(data, ifd0_offset, tiff_start, little_endian, &mut exif, 0);
-
-    exif
-}
-
-fn read_u16(data: &[u8], offset: usize, little_endian: bool) -> Option<u16> {
-    let b0 = u16::from(*data.get(offset)?);
-    let b1 = u16::from(*data.get(offset.saturating_add(1))?);
-    if little_endian {
-        Some(b0 | (b1 << 8))
-    } else {
-        Some((b0 << 8) | b1)
-    }
-}
-
-fn read_u32(data: &[u8], offset: usize, little_endian: bool) -> Option<u32> {
-    let lo = u32::from(read_u16(data, offset, little_endian)?);
-    let hi = u32::from(read_u16(data, offset.saturating_add(2), little_endian)?);
-    if little_endian {
-        Some(lo | (hi << 16))
-    } else {
-        Some((lo << 16) | hi)
-    }
-}
-
-fn read_ascii_string(data: &[u8], offset: usize, count: usize) -> Option<String> {
-    let end = offset.saturating_add(count);
-    let slice = data.get(offset..end)?;
-    // Trim trailing nulls
-    let trimmed = slice
-        .iter()
-        .copied()
-        .take_while(|&b| b != 0)
-        .collect::<Vec<u8>>();
-    String::from_utf8(trimmed).ok()
-}
-
-/// How deep the directories are followed: IFD0 is depth 0, and the Exif and
-/// GPS directories it points to are depth 1.
+/// A photograph's EXIF, read by the shared `exif` crate.
 ///
-/// The standard puts those pointers in IFD0 only, so a pointer found any
-/// deeper is not followed. It was followed at any depth, and a file whose
-/// Exif pointer pointed back at its own directory recursed until the stack
-/// ran out: importing one such JPEG crashed the photo manager.
-const MAX_IFD_DEPTH: u8 = 1;
+/// The parser was this file's own until 2026-09-26: the image viewer's info
+/// panel and the file manager's columns want the same facts, and a parser of
+/// untrusted input kept in three copies is three attack surfaces with one set
+/// of fixes. The crate also finds the EXIF by the file's structure -- a JPEG's
+/// APP1 segment, a PNG's `eXIf` chunk -- where this searched the whole file for
+/// the bytes `Exif\0\0`, and reads the exposure program from its own tag: it
+/// was taken from ExposureMode, whose values mean something else.
+pub use exif::ExifData;
 
-/// Parse IFD entries for EXIF tags. `depth` is 0 for IFD0; see
-/// [`MAX_IFD_DEPTH`].
-fn parse_ifd_entries(
-    data: &[u8],
-    ifd_offset: usize,
-    tiff_start: usize,
-    le: bool,
-    exif: &mut ExifData,
-    depth: u8,
-) {
-    let entry_count = match read_u16(data, ifd_offset, le) {
-        Some(c) => c as usize,
-        None => return,
-    };
-
-    let entries_start = ifd_offset.saturating_add(2);
-
-    for i in 0..entry_count.min(200) {
-        let entry_offset = entries_start.saturating_add(i.saturating_mul(12));
-        let tag = match read_u16(data, entry_offset, le) {
-            Some(t) => t,
-            None => continue,
-        };
-        let data_type = match read_u16(data, entry_offset.saturating_add(2), le) {
-            Some(t) => t,
-            None => continue,
-        };
-        let count = match read_u32(data, entry_offset.saturating_add(4), le) {
-            Some(c) => c as usize,
-            None => continue,
-        };
-        let value_offset_raw = entry_offset.saturating_add(8);
-
-        match tag {
-            // ImageWidth
-            0x0100 => {
-                if let Some(v) =
-                    read_value_u32(data, value_offset_raw, tiff_start, le, data_type, count)
-                {
-                    exif.width = Some(v);
-                }
-            }
-            // ImageHeight
-            0x0101 => {
-                if let Some(v) =
-                    read_value_u32(data, value_offset_raw, tiff_start, le, data_type, count)
-                {
-                    exif.height = Some(v);
-                }
-            }
-            // Make
-            0x010F => {
-                if let Some(s) = read_value_string(data, value_offset_raw, tiff_start, le, count) {
-                    exif.camera_make = Some(s);
-                }
-            }
-            // Model
-            0x0110 => {
-                if let Some(s) = read_value_string(data, value_offset_raw, tiff_start, le, count) {
-                    exif.camera_model = Some(s);
-                }
-            }
-            // Orientation
-            0x0112 => {
-                if let Some(v) = read_u16(data, value_offset_raw, le) {
-                    exif.orientation = Some(v);
-                }
-            }
-            // Software
-            0x0131 => {
-                if let Some(s) = read_value_string(data, value_offset_raw, tiff_start, le, count) {
-                    exif.software = Some(s);
-                }
-            }
-            // Copyright
-            0x8298 => {
-                if let Some(s) = read_value_string(data, value_offset_raw, tiff_start, le, count) {
-                    exif.copyright = Some(s);
-                }
-            }
-            // ExifIFD pointer — recurse into the Exif sub-IFD, from IFD0 only
-            0x8769 if depth < MAX_IFD_DEPTH => {
-                if let Some(sub_offset) = read_u32(data, value_offset_raw, le) {
-                    parse_ifd_entries(
-                        data,
-                        tiff_start.saturating_add(sub_offset as usize),
-                        tiff_start,
-                        le,
-                        exif,
-                        depth.saturating_add(1),
-                    );
-                }
-            }
-            // GPS IFD pointer, from IFD0 only
-            0x8825 if depth < MAX_IFD_DEPTH => {
-                if let Some(sub_offset) = read_u32(data, value_offset_raw, le) {
-                    parse_gps_ifd(
-                        data,
-                        tiff_start.saturating_add(sub_offset as usize),
-                        tiff_start,
-                        le,
-                        exif,
-                    );
-                }
-            }
-            // ExposureTime
-            0x829A => {
-                if let Some((num, den)) =
-                    read_rational(data, value_offset_raw, tiff_start, le, count)
-                    && den != 0
-                {
-                    if num < den {
-                        exif.shutter_speed = Some(format!("{num}/{den}"));
-                    } else {
-                        let secs = f64::from(num) / f64::from(den);
-                        exif.shutter_speed = Some(format!("{secs:.1}"));
-                    }
-                }
-            }
-            // FNumber
-            0x829D => {
-                if let Some((num, den)) =
-                    read_rational(data, value_offset_raw, tiff_start, le, count)
-                    && den != 0
-                {
-                    exif.aperture = Some(num as f32 / den as f32);
-                }
-            }
-            // ISO
-            0x8827 => {
-                if let Some(v) = read_u16(data, value_offset_raw, le) {
-                    exif.iso = Some(u32::from(v));
-                }
-            }
-            // DateTimeOriginal
-            0x9003 => {
-                if let Some(s) = read_value_string(data, value_offset_raw, tiff_start, le, count) {
-                    exif.date_taken = Some(s);
-                }
-            }
-            // Flash
-            0x9209 => {
-                if let Some(v) = read_u16(data, value_offset_raw, le) {
-                    exif.flash_fired = Some((v & 1) != 0);
-                }
-            }
-            // FocalLength
-            0x920A => {
-                if let Some((num, den)) =
-                    read_rational(data, value_offset_raw, tiff_start, le, count)
-                    && den != 0
-                {
-                    exif.focal_length_mm = Some(num as f32 / den as f32);
-                }
-            }
-            // ColorSpace
-            0xA001 => {
-                if let Some(v) = read_u16(data, value_offset_raw, le) {
-                    exif.color_space = Some(match v {
-                        1 => "sRGB".to_owned(),
-                        0xFFFF => "Uncalibrated".to_owned(),
-                        _ => format!("Unknown({v})"),
-                    });
-                }
-            }
-            // PixelXDimension
-            0xA002 => {
-                if let Some(v) =
-                    read_value_u32(data, value_offset_raw, tiff_start, le, data_type, count)
-                {
-                    exif.width = Some(v);
-                }
-            }
-            // PixelYDimension
-            0xA003 => {
-                if let Some(v) =
-                    read_value_u32(data, value_offset_raw, tiff_start, le, data_type, count)
-                {
-                    exif.height = Some(v);
-                }
-            }
-            // WhiteBalance
-            0xA403 => {
-                if let Some(v) = read_u16(data, value_offset_raw, le) {
-                    exif.white_balance = Some(match v {
-                        0 => "Auto".to_owned(),
-                        1 => "Manual".to_owned(),
-                        _ => format!("Unknown({v})"),
-                    });
-                }
-            }
-            // ExposureMode
-            0xA402 => {
-                if let Some(v) = read_u16(data, value_offset_raw, le) {
-                    exif.exposure_program = Some(match v {
-                        0 => "Auto".to_owned(),
-                        1 => "Manual".to_owned(),
-                        2 => "Auto Bracket".to_owned(),
-                        _ => format!("Mode {v}"),
-                    });
-                }
-            }
-            // MeteringMode
-            0x9207 => {
-                if let Some(v) = read_u16(data, value_offset_raw, le) {
-                    exif.metering_mode = Some(match v {
-                        0 => "Unknown".to_owned(),
-                        1 => "Average".to_owned(),
-                        2 => "Center-weighted".to_owned(),
-                        3 => "Spot".to_owned(),
-                        4 => "Multi-spot".to_owned(),
-                        5 => "Multi-segment".to_owned(),
-                        6 => "Partial".to_owned(),
-                        _ => format!("Other({v})"),
-                    });
-                }
-            }
-            // ExposureBiasValue
-            0x9204 => {
-                if let Some((num, den)) =
-                    read_rational_signed(data, value_offset_raw, tiff_start, le, count)
-                    && den != 0
-                {
-                    exif.exposure_bias = Some(num as f32 / den as f32);
-                }
-            }
-            // LensModel
-            0xA434 => {
-                if let Some(s) = read_value_string(data, value_offset_raw, tiff_start, le, count) {
-                    exif.lens = Some(s);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Parse GPS IFD entries.
-fn parse_gps_ifd(data: &[u8], ifd_offset: usize, tiff_start: usize, le: bool, exif: &mut ExifData) {
-    let entry_count = match read_u16(data, ifd_offset, le) {
-        Some(c) => c as usize,
-        None => return,
-    };
-
-    let entries_start = ifd_offset.saturating_add(2);
-    let mut lat_ref: Option<char> = None;
-    let mut lon_ref: Option<char> = None;
-    let mut lat_vals: Option<(f64, f64, f64)> = None;
-    let mut lon_vals: Option<(f64, f64, f64)> = None;
-
-    for i in 0..entry_count.min(50) {
-        let entry_offset = entries_start.saturating_add(i.saturating_mul(12));
-        let tag = match read_u16(data, entry_offset, le) {
-            Some(t) => t,
-            None => continue,
-        };
-        let _data_type = read_u16(data, entry_offset.saturating_add(2), le);
-        let count = match read_u32(data, entry_offset.saturating_add(4), le) {
-            Some(c) => c as usize,
-            None => continue,
-        };
-        let value_offset_raw = entry_offset.saturating_add(8);
-
-        match tag {
-            // GPSLatitudeRef
-            1 => {
-                if let Some(s) = read_value_string(data, value_offset_raw, tiff_start, le, count) {
-                    lat_ref = s.chars().next();
-                }
-            }
-            // GPSLatitude
-            2 => {
-                lat_vals = read_gps_dms(data, value_offset_raw, tiff_start, le);
-            }
-            // GPSLongitudeRef
-            3 => {
-                if let Some(s) = read_value_string(data, value_offset_raw, tiff_start, le, count) {
-                    lon_ref = s.chars().next();
-                }
-            }
-            // GPSLongitude
-            4 => {
-                lon_vals = read_gps_dms(data, value_offset_raw, tiff_start, le);
-            }
-            // GPSAltitude
-            6 => {
-                if let Some(offset_val) = read_u32(data, value_offset_raw, le) {
-                    let abs_offset = tiff_start.saturating_add(offset_val as usize);
-                    if let (Some(num), Some(den)) = (
-                        read_u32(data, abs_offset, le),
-                        read_u32(data, abs_offset.saturating_add(4), le),
-                    ) && den != 0
-                    {
-                        exif.gps_altitude = Some(num as f32 / den as f32);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Convert DMS to decimal degrees
-    if let Some((d, m, s)) = lat_vals {
-        let mut dec = d + m / 60.0 + s / 3600.0;
-        if lat_ref == Some('S') {
-            dec = -dec;
-        }
-        exif.gps_latitude = Some(dec);
-    }
-    if let Some((d, m, s)) = lon_vals {
-        let mut dec = d + m / 60.0 + s / 3600.0;
-        if lon_ref == Some('W') {
-            dec = -dec;
-        }
-        exif.gps_longitude = Some(dec);
-    }
-}
-
-fn read_gps_dms(
-    data: &[u8],
-    value_offset: usize,
-    tiff_start: usize,
-    le: bool,
-) -> Option<(f64, f64, f64)> {
-    let offset_val = read_u32(data, value_offset, le)? as usize;
-    let abs = tiff_start.saturating_add(offset_val);
-
-    let d_num = f64::from(read_u32(data, abs, le)?);
-    let d_den = f64::from(read_u32(data, abs.saturating_add(4), le)?);
-    let m_num = f64::from(read_u32(data, abs.saturating_add(8), le)?);
-    let m_den = f64::from(read_u32(data, abs.saturating_add(12), le)?);
-    let s_num = f64::from(read_u32(data, abs.saturating_add(16), le)?);
-    let s_den = f64::from(read_u32(data, abs.saturating_add(20), le)?);
-
-    if d_den == 0.0 || m_den == 0.0 || s_den == 0.0 {
-        return None;
-    }
-
-    Some((d_num / d_den, m_num / m_den, s_num / s_den))
-}
-
-fn read_value_string(
-    data: &[u8],
-    value_offset: usize,
-    tiff_start: usize,
-    le: bool,
-    count: usize,
-) -> Option<String> {
-    if count <= 4 {
-        // Value stored inline in the 4-byte value field
-        read_ascii_string(data, value_offset, count)
-    } else {
-        // Value stored at an offset
-        let offset_val = read_u32(data, value_offset, le)? as usize;
-        read_ascii_string(data, tiff_start.saturating_add(offset_val), count)
-    }
-}
-
-fn read_value_u32(
-    data: &[u8],
-    value_offset: usize,
-    _tiff_start: usize,
-    le: bool,
-    data_type: u16,
-    _count: usize,
-) -> Option<u32> {
-    match data_type {
-        3 => read_u16(data, value_offset, le).map(u32::from), // SHORT
-        4 => read_u32(data, value_offset, le),                // LONG
-        _ => None,
-    }
-}
-
-fn read_rational(
-    data: &[u8],
-    value_offset: usize,
-    tiff_start: usize,
-    le: bool,
-    _count: usize,
-) -> Option<(u32, u32)> {
-    let offset_val = read_u32(data, value_offset, le)? as usize;
-    let abs = tiff_start.saturating_add(offset_val);
-    let num = read_u32(data, abs, le)?;
-    let den = read_u32(data, abs.saturating_add(4), le)?;
-    Some((num, den))
-}
-
-fn read_rational_signed(
-    data: &[u8],
-    value_offset: usize,
-    tiff_start: usize,
-    le: bool,
-    _count: usize,
-) -> Option<(i32, i32)> {
-    let offset_val = read_u32(data, value_offset, le)? as usize;
-    let abs = tiff_start.saturating_add(offset_val);
-    let num = read_u32(data, abs, le)? as i32;
-    let den = read_u32(data, abs.saturating_add(4), le)? as i32;
-    Some((num, den))
+/// The EXIF in a picture file's bytes: see [`exif::read`].
+pub fn parse_exif_from_bytes(data: &[u8]) -> ExifData {
+    exif::read(data)
 }
 
 // ============================================================================
@@ -5474,9 +4875,43 @@ mod tests {
 
     // --- ExifData tests ---
 
+    /// Sample EXIF data, for tests.
+    ///
+    /// A test helper, and only that. It was `ExifData::sample`, reachable from
+    /// production, and `seeded_library` used it -- so every photo in the
+    /// window that opened was described as a Canon EOS R5 shot in San
+    /// Francisco. A fixture that production can reach is a fixture that
+    /// eventually ships.
+    fn sample_exif() -> ExifData {
+        ExifData {
+            camera_make: Some("Canon".to_owned()),
+            camera_model: Some("EOS R5".to_owned()),
+            lens: Some("RF 24-70mm f/2.8L IS USM".to_owned()),
+            focal_length_mm: Some(50.0),
+            aperture: Some(2.8),
+            shutter_speed: Some("1/250".to_owned()),
+            iso: Some(400),
+            flash_fired: Some(false),
+            date_taken: Some("2025-06-15 14:30:22".to_owned()),
+            gps_latitude: Some(37.7749),
+            gps_longitude: Some(-122.4194),
+            gps_altitude: Some(16.0),
+            orientation: Some(1),
+            software: Some("Adobe Lightroom 7.0".to_owned()),
+            copyright: None,
+            width: Some(8192),
+            height: Some(5464),
+            color_space: Some("sRGB".to_owned()),
+            white_balance: Some("Auto".to_owned()),
+            metering_mode: Some("Multi-segment".to_owned()),
+            exposure_program: Some("Aperture Priority".to_owned()),
+            exposure_bias: Some(0.0),
+        }
+    }
+
     #[test]
     fn test_exif_sample() {
-        let exif = ExifData::sample();
+        let exif = sample_exif();
         assert_eq!(exif.camera_make.as_deref(), Some("Canon"));
         assert_eq!(exif.resolution_str(), "8192 x 5464");
         assert!(exif.megapixels().unwrap() > 44.0);
@@ -5502,34 +4937,6 @@ mod tests {
         let summary = exif.exposure_summary();
         assert!(summary.contains("f/2.8"));
         assert!(summary.contains("ISO 400"));
-    }
-
-    /// **An Exif pointer back at its own directory is not followed round.**
-    /// It recursed until the stack ran out, so importing such a JPEG crashed
-    /// the photo manager. The tags are still read, once.
-    #[test]
-    fn an_exif_directory_pointing_at_itself_is_read_once() {
-        let mut tiff: Vec<u8> = b"II".to_vec();
-        tiff.extend_from_slice(&42u16.to_le_bytes());
-        tiff.extend_from_slice(&8u32.to_le_bytes());
-        // IFD0 at 8: two entries, then no next directory; the text after it.
-        let text_at: u32 = 8 + 2 + 2 * 12 + 4;
-        tiff.extend_from_slice(&2u16.to_le_bytes());
-        for (tag, kind, count, value) in [
-            (0x010F_u16, 2_u16, 6_u32, text_at),
-            (0x8769, 4, 1, 8), // the Exif directory: IFD0 itself
-        ] {
-            tiff.extend_from_slice(&tag.to_le_bytes());
-            tiff.extend_from_slice(&kind.to_le_bytes());
-            tiff.extend_from_slice(&count.to_le_bytes());
-            tiff.extend_from_slice(&value.to_le_bytes());
-        }
-        tiff.extend_from_slice(&0u32.to_le_bytes());
-        tiff.extend_from_slice(b"Canon\0");
-        let mut data = b"Exif\0\0".to_vec();
-        data.extend_from_slice(&tiff);
-        let exif = parse_exif_from_bytes(&data);
-        assert_eq!(exif.camera_make.as_deref(), Some("Canon"));
     }
 
     #[test]
@@ -6139,7 +5546,7 @@ mod tests {
             "photo.jpg",
             ImageFormat::Jpeg,
             5_000_000,
-            ExifData::sample(),
+            sample_exif(),
         );
         let photo = app.find_photo(id).unwrap();
         assert_eq!(photo.exif.camera_make.as_deref(), Some("Canon"));
@@ -7739,7 +7146,7 @@ mod tests {
             "IMG_0001.jpg",
             ImageFormat::Jpeg,
             5_242_880,
-            ExifData::sample(),
+            sample_exif(),
         );
         let p2 = app.import_photo(
             "/photos/IMG_0002.png",
@@ -7781,7 +7188,7 @@ mod tests {
     #[test]
     fn every_parsed_exif_field_reaches_the_panel() {
         let app = PhotoApp::new();
-        let mut exif = ExifData::sample();
+        let mut exif = sample_exif();
         exif.copyright = Some("(c) nobody".to_owned());
         exif.exposure_program = Some("Aperture priority".to_owned());
         exif.exposure_bias = Some(-0.7);

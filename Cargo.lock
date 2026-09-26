@@ -819,6 +819,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "exif"
+version = "0.1.0"
+dependencies = [
+ "quoting",
+]
+
+[[package]]
 name = "explorer"
 version = "0.1.0"
 dependencies = [
@@ -1248,6 +1255,7 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "byteread",
+ "exif",
  "guitk",
  "imagecodec",
  "offloop",
@@ -2247,6 +2255,7 @@ name = "photomanager"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "exif",
  "guitk",
  "imagecodec",
  "offloop",

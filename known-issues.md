@@ -165389,9 +165389,10 @@ design-decisions §1325), which the compositor turns on from the settings. It
 agrees with FreeType point for point on every Latin, Greek, Cyrillic, Arabic,
 Hebrew, Armenian and Devanagari glyph of six fonts checked at eleven sizes
 (`gui/font/tools/hint_oracle.py`), bar the gaps filed below: ideographs and
-the fallback style are left unhinted, feature-reached glyphs use their script's
-default zones, and composites with borrowed metrics sit a hair off
-horizontally (which is not a hinting bug).
+the fallback style are left unhinted, and feature-reached glyphs use their
+script's default zones. (Composites with borrowed metrics, which sat a hair
+off horizontally, were a placement bug rather than a hinting one, and are
+fixed: see the entry below.)
 
 **In short (as filed):** the appearance settings have a "hinting" switch, on by default,
 and nothing reads it: glyph outlines are rasterized exactly as designed, never
@@ -165493,9 +165494,18 @@ and the super- and subscript digits (`latp_dflt`, `latb_dflt`).
 
 ### [F] A composite glyph that borrows a component's metrics sits a few units off FreeType horizontally -- 2026-09-26
 
-**Status:** OPEN — lane F's.
+**Status: FIXED 2026-09-26** (lane F) — the suspicion below was right.
+`read_components` now keeps the `USE_MY_METRICS` flag, and a composite is
+drawn where the last component so flagged places it, recursively
+(`Face::drawn_shift`), in `outline`, `outline_at` and `tagged_outline_at`
+alike -- as FreeType (`load_truetype_glyph`) and HarfBuzz's glyph drawing do.
+The ink box (`glyph_bbox`) keeps the composite's own bearing, because
+HarfBuzz's *extents* do, and the mark-positioning fallback that reads it has
+to agree with HarfBuzz. Arial's and Times' accented capitals now sit where
+FreeType puts them (`hint_oracle.py`); regression test
+`a_composite_using_its_components_metrics_is_placed_by_them`.
 
-**In short:** some accented letters built from two glyphs (`î` in Arial, `Ç`,
+**In short (as filed):** some accented letters built from two glyphs (`î` in Arial, `Ç`,
 `Å` in Times) are drawn a fraction of a pixel to one side of where FreeType
 draws them -- 10 font units for Arial's `î`, 0.06 px at 13 px. Hinted or not;
 this is where the outline is placed, not how it is fitted.

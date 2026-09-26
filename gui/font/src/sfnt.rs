@@ -2466,6 +2466,50 @@ impl Face {
             .map_or(0.0, |lsb| f32::from(lsb) - f32::from(x_min))
     }
 
+    /// How far a `glyf` glyph's outline moves right when it is *drawn*: the
+    /// [`glyf_shift`](Self::glyf_shift) of the glyph whose metrics place it.
+    ///
+    /// That is the glyph itself, except for a composite with a component
+    /// flagged `USE_MY_METRICS`, which the spec says takes that component's
+    /// metrics -- and FreeType (`load_truetype_glyph` keeps the component's
+    /// phantom points) and HarfBuzz's glyph drawing (`Glyph::get_points`)
+    /// both place the outline by them, the last such component winning and
+    /// recursively. Arial's accented capitals are built that way, with a
+    /// composite bearing that disagrees with the base letter's; drawing by
+    /// the composite's own put `î` ten units left of where every other
+    /// renderer puts it.
+    ///
+    /// [`glyph_bbox`](Self::glyph_bbox) keeps [`glyf_shift`](Self::glyf_shift)
+    /// all the same: HarfBuzz's *extents* read the composite's own bearing,
+    /// and the mark fallback that measures them must agree with HarfBuzz, not
+    /// with the drawing.
+    fn drawn_shift(&self, gid: u16) -> f32 {
+        let mut glyph = gid;
+        for _ in 0..=MAX_COMPOSITE_DEPTH {
+            match self.metrics_component(glyph) {
+                Some(next) => glyph = next,
+                None => break,
+            }
+        }
+        self.glyf_shift(glyph)
+    }
+
+    /// The last component of composite `gid` flagged `USE_MY_METRICS`, if
+    /// `gid` is a composite with one.
+    fn metrics_component(&self, gid: u16) -> Option<u16> {
+        let span = self.glyph_span(gid).ok()??;
+        let g = self.data.get(span.off..span.off.checked_add(span.len)?)?;
+        if i16_at(g, 0)? >= 0 {
+            return None;
+        }
+        read_components(g.get(10..)?)
+            .ok()?
+            .iter()
+            .rev()
+            .find(|c| c.use_my_metrics)
+            .map(|c| c.gid)
+    }
+
     /// Left side bearing for a glyph, in font units.
     ///
     /// # Errors
@@ -2593,8 +2637,8 @@ impl Face {
         let mut out = Outline::default();
         self.outline_into(gid, &mut out, 0)?;
         // The points are stored relative to the glyph's own `xMin`; the
-        // rasterizer positions them from `hmtx`. See `glyf_shift`.
-        out.translate_x(self.glyf_shift(gid));
+        // rasterizer positions them from `hmtx`. See `drawn_shift`.
+        out.translate_x(self.drawn_shift(gid));
         Ok(out)
     }
 
@@ -2623,7 +2667,6 @@ impl Face {
             return self.outline(gid);
         }
         let mut out = Outline::default();
-        let phantom = self.outline_into_at(gvar, gid, coords.as_slice(), &mut out, 0)?;
         // The outline is placed so that the left side bearing point lands on
         // the origin. That point moves with the glyph, so the shift computed
         // from the *default* `xMin` has to be corrected by however far `gvar`
@@ -2631,7 +2674,8 @@ impl Face {
         // delta. Getting this wrong shifts the varied glyph sideways relative
         // to its neighbours rather than deforming it, which is the sort of bug
         // that looks like bad kerning.
-        out.translate_x(self.glyf_shift(gid) - phantom);
+        let shift = self.outline_into_at(gvar, gid, coords.as_slice(), &mut out, 0)?;
+        out.translate_x(shift);
         Ok(out)
     }
 
@@ -2656,8 +2700,8 @@ impl Face {
             Outlines::Glyf { .. } => {
                 let gvar = self.gvar.as_ref().filter(|_| !coords.is_default());
                 let mut out = TaggedOutline::default();
-                let phantom = self.tagged_into(gvar, gid, coords.as_slice(), &mut out, 0)?;
-                out.translate_x(self.glyf_shift(gid) - phantom);
+                let shift = self.tagged_into(gvar, gid, coords.as_slice(), &mut out, 0)?;
+                out.translate_x(shift);
                 Ok(out)
             }
             Outlines::Cff(_) | Outlines::Pictures => self
@@ -2667,8 +2711,8 @@ impl Face {
     }
 
     /// [`outline_into_at`](Self::outline_into_at) for points: one glyph's
-    /// tagged points, varied by `gvar` when there is one, returning the left
-    /// phantom point's horizontal delta.
+    /// tagged points, varied by `gvar` when there is one, returning how far
+    /// the finished glyph moves right to sit on its phantom point.
     fn tagged_into(
         &self,
         gvar: Option<&gvar::Gvar>,
@@ -2693,7 +2737,7 @@ impl Face {
         if num_contours >= 0 {
             let n = usize::try_from(num_contours).map_err(|_| SfntError::MalformedTable("glyf"))?;
             let Some(mut glyph) = read_simple_glyph(body, n)? else {
-                return Ok(0.0);
+                return Ok(self.glyf_shift(gid));
             };
             let mut phantom = 0.0;
             if let Some(gvar) = gvar
@@ -2707,7 +2751,7 @@ impl Face {
                 phantom = deltas.get(glyph.points.len()).map_or(0.0, |&(dx, _)| dx);
             }
             out.push_glyph(&glyph);
-            Ok(phantom)
+            Ok(self.glyf_shift(gid) - phantom)
         } else {
             let mut components = read_components(body)?;
             let mut phantom = 0.0;
@@ -2731,27 +2775,36 @@ impl Face {
                     phantom = deltas.get(components.len()).map_or(0.0, |&(dx, _)| dx);
                 }
             }
+            // Placed by its own phantom point unless a component says to use
+            // its metrics instead (the last that does), as in `outline_into_at`.
+            let mut shift = self.glyf_shift(gid) - phantom;
             for c in components {
                 let mut child = TaggedOutline::default();
-                self.tagged_into(
+                let child_shift = self.tagged_into(
                     gvar,
                     c.gid,
                     coords,
                     &mut child,
                     depth.checked_add(1).ok_or(SfntError::CompositeTooDeep)?,
                 )?;
+                if c.use_my_metrics {
+                    shift = child_shift;
+                }
                 out.extend_transformed(&child, &c.xform);
             }
-            Ok(phantom)
+            Ok(shift)
         }
     }
 
-    /// Build one glyph at `coords`, returning the horizontal delta of its left
-    /// phantom point so the caller can correct the side-bearing shift.
+    /// Build one glyph at `coords`, returning how far the finished glyph moves
+    /// right to sit on its left phantom point: [`glyf_shift`](Self::glyf_shift)
+    /// corrected by that point's `gvar` delta.
     ///
-    /// Recursive calls discard that return value: a component is placed by the
-    /// parent's transform, and the parent's phantom points — not the child's —
-    /// are what position the finished glyph.
+    /// A component is placed by the parent's transform, and the parent's
+    /// phantom points position the finished glyph -- unless a component is
+    /// flagged `USE_MY_METRICS`, whose own phantom points then position it, in
+    /// its own coordinates (see [`drawn_shift`](Self::drawn_shift)). So a
+    /// recursive call's answer is used only for such a component.
     fn outline_into_at(
         &self,
         gvar: &gvar::Gvar,
@@ -2776,7 +2829,7 @@ impl Face {
         if num_contours >= 0 {
             let n = usize::try_from(num_contours).map_err(|_| SfntError::MalformedTable("glyf"))?;
             let Some(mut glyph) = read_simple_glyph(body, n)? else {
-                return Ok(0.0);
+                return Ok(self.glyf_shift(gid));
             };
             let phantom = match gvar.deltas(&self.data, gid, coords, &glyph.points, &glyph.ends) {
                 Some(deltas) => {
@@ -2789,7 +2842,7 @@ impl Face {
                 None => 0.0,
             };
             emit_glyph(&glyph, out);
-            Ok(phantom)
+            Ok(self.glyf_shift(gid) - phantom)
         } else {
             let mut components = read_components(body)?;
             // A composite's variation point array has one entry per component,
@@ -2819,18 +2872,22 @@ impl Face {
                 }
                 None => 0.0,
             };
+            let mut shift = self.glyf_shift(gid) - phantom;
             for c in components {
                 let mut child = Outline::default();
-                self.outline_into_at(
+                let child_shift = self.outline_into_at(
                     gvar,
                     c.gid,
                     coords,
                     &mut child,
                     depth.checked_add(1).ok_or(SfntError::CompositeTooDeep)?,
                 )?;
+                if c.use_my_metrics {
+                    shift = child_shift;
+                }
                 out.extend_transformed(&child, &c.xform);
             }
-            Ok(phantom)
+            Ok(shift)
         }
     }
 
@@ -2896,6 +2953,9 @@ pub(crate) struct Component {
     /// component is positioned by the *parent's* geometry, which has already
     /// moved, so adding a delta on top would move it twice.
     pub(crate) offset_placed: bool,
+    /// `USE_MY_METRICS`: the composite is placed by this component's metrics,
+    /// not its own. See [`Face::drawn_shift`].
+    pub(crate) use_my_metrics: bool,
 }
 
 /// Read a composite glyph's component list.
@@ -2906,6 +2966,7 @@ fn read_components(data: &[u8]) -> Result<Vec<Component>, SfntError> {
     const MORE_COMPONENTS: u16 = 0x0020;
     const WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
     const WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
+    const USE_MY_METRICS: u16 = 0x0200;
 
     // A composite with more components than a face has glyphs is malformed;
     // the bound stops a corrupt `MORE_COMPONENTS` chain from looping until the
@@ -2985,6 +3046,7 @@ fn read_components(data: &[u8]) -> Result<Vec<Component>, SfntError> {
             gid: component,
             xform,
             offset_placed,
+            use_my_metrics: flags & USE_MY_METRICS != 0,
         });
 
         if flags & MORE_COMPONENTS == 0 || out.len() >= MAX_COMPONENTS {
@@ -3537,6 +3599,12 @@ pub(crate) mod tests {
     /// the list — see [`build_test_font_with_gpos_scripts`] — rather than
     /// re-deriving four glyphs and a `cmap` to change one thing.
     fn build_test_tables(lsb_3: i16) -> Vec<([u8; 4], Vec<u8>)> {
+        build_test_tables_flagged(lsb_3, 0)
+    }
+
+    /// [`build_test_tables`] with `flags` or-ed into glyph 3's component
+    /// flags.
+    fn build_test_tables_flagged(lsb_3: i16, flags: u16) -> Vec<([u8; 4], Vec<u8>)> {
         fn be16(v: u16) -> [u8; 2] {
             v.to_be_bytes()
         }
@@ -3596,7 +3664,7 @@ pub(crate) mod tests {
         glyf.extend_from_slice(&be16i(200));
         glyf.extend_from_slice(&be16i(700));
         glyf.extend_from_slice(&be16i(300));
-        glyf.extend_from_slice(&be16(0x0003)); // ARG_1_AND_2_ARE_WORDS | ARGS_ARE_XY_VALUES
+        glyf.extend_from_slice(&be16(0x0003 | flags)); // ARG_1_AND_2_ARE_WORDS | ARGS_ARE_XY_VALUES
         glyf.extend_from_slice(&be16(1)); // component glyph index
         glyf.extend_from_slice(&be16i(500));
         glyf.extend_from_slice(&be16i(200));
@@ -4718,6 +4786,29 @@ pub(crate) mod tests {
             let ch = char::from_u32(cp).unwrap();
             assert_eq!(f.glyph_index(ch), Some(gid), "U+{cp:04X}");
         }
+    }
+
+    #[test]
+    fn a_composite_using_its_components_metrics_is_placed_by_them() {
+        // Glyph 3 is glyph 1 moved to (500, 200), its stored `xMin` 600. With
+        // a bearing of 550 it would be drawn 50 units left -- unless its
+        // component says `USE_MY_METRICS`, and glyph 1's bearing (100, equal
+        // to its `xMin`) places it where it is stored.
+        let own = Face::parse(build_test_font_with_trailing_lsb(550)).unwrap();
+        let first = |f: &Face| match f.outline(3).unwrap().commands.first() {
+            Some(PathCmd::MoveTo(p)) => p.x,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(first(&own), 550.0);
+        let flagged = Face::parse(assemble(&build_test_tables_flagged(550, 0x0200))).unwrap();
+        assert_eq!(first(&flagged), 600.0);
+        // The stored points agree with the path.
+        let tagged = flagged
+            .tagged_outline_at(3, &var::Coords::default())
+            .unwrap();
+        assert_eq!(tagged.points.first().map(|p| p.x), Some(600.0));
+        // The ink box HarfBuzz reports keeps the composite's own bearing.
+        assert_eq!(flagged.glyph_bbox(3).unwrap().x_min, 550.0);
     }
 
     #[test]

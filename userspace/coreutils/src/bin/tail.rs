@@ -47,6 +47,7 @@ use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::filekind;
 use coreutils::getopt::{self, Program, Takes};
+use coreutils::posixver;
 use coreutils::quote::{os_bytes, quote, quoteaf, quotef};
 use coreutils::stdfd;
 use std::collections::VecDeque;
@@ -208,7 +209,7 @@ fn main() -> ExitCode {
 
 fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    match parse_args(&args, getopt::posixly_correct()) {
+    match parse_args(&args, getopt::posixly_correct(), posixver::posix2_version()) {
         Ok(Request::Help) => {
             print!("{}", help_text());
             ExitCode::SUCCESS
@@ -292,13 +293,19 @@ named file in a way that accommodates renaming, removal and creation.
 /// `posixly_correct` is [`getopt::posixly_correct`], passed in so that a test
 /// can choose it. When it is set, the first operand ends option parsing, as it
 /// does in glibc's getopt -- see "Where option parsing stops" in that module.
-fn parse_args(args: &[OsString], posixly_correct: bool) -> Result<Request, getopt::Error> {
+/// `posix2_version` is [`posixver::posix2_version`], passed in for the same
+/// reason; it decides which obsolete forms [`parse_obsolete`] reads.
+fn parse_args(
+    args: &[OsString],
+    posixly_correct: bool,
+    posix2_version: i32,
+) -> Result<Request, getopt::Error> {
     let mut options = Options::default();
     let mut files: Vec<OsString> = Vec::new();
     let mut only_operands = false;
     let mut i = 0usize;
 
-    if parse_obsolete(args, &mut options)? {
+    if parse_obsolete(args, posix2_version, &mut options)? {
         i = 1;
     }
 
@@ -338,12 +345,24 @@ fn parse_args(args: &[OsString], posixly_correct: bool) -> Result<Request, getop
 /// whether `-2` is a count or an error depends on what follows it two
 /// arguments later.
 ///
+/// Which forms are read depends on the edition `_POSIX2_VERSION` names, as
+/// upstream's does. POSIX 1003.1-2001 withdrew `+NUM`, so in its window a
+/// leading `+` is a file name; and before 2001 a bare `-` and a bare `-c` were
+/// obsolete options too -- ten lines and ten bytes from the end -- where since
+/// then they are standard input and an option wanting its argument. Measured
+/// against GNU 9.4 on 2026-09-25: `_POSIX2_VERSION=200112 tail +2 f` fails to
+/// open `+2`, and `_POSIX2_VERSION=199209 tail -c` prints the last ten bytes.
+///
 /// # Errors
 ///
 /// Only one: digits that overflow, or whose `b` suffix overflows. A letter that
 /// does not belong is not an error here — it makes the word not an obsolete
 /// option, and it is then getopt's problem.
-fn parse_obsolete(args: &[OsString], options: &mut Options) -> Result<bool, getopt::Error> {
+fn parse_obsolete(
+    args: &[OsString],
+    posix2_version: i32,
+    options: &mut Options,
+) -> Result<bool, getopt::Error> {
     let Some(first) = args.first() else {
         return Ok(false);
     };
@@ -352,8 +371,14 @@ fn parse_obsolete(args: &[OsString], options: &mut Options) -> Result<bool, geto
     }
     let whole = arg_bytes(first);
     let mut at = 1usize;
+    // Upstream's two readings of the edition. Before 2001 everything was
+    // obsolete usage; from 2008 the traditional forms were allowed back; the
+    // window between is the only one that refuses `+NUM`.
+    let obsolete_usage = posix2_version < 200_112;
+    let traditional_usage = !posixver::withdraws_obsolete_forms(posix2_version);
     let from_start = match whole.first() {
-        Some(b'+') => true,
+        // Upstream: "Leading "+" is a file name in the standard form."
+        Some(b'+') if traditional_usage => true,
         Some(b'-') => {
             // Upstream: `if (!obsolete_usage && !p[p[0] == 'c']) return false;`
             // — under a modern `_POSIX2_VERSION`, a bare `-` is standard input
@@ -362,7 +387,7 @@ fn parse_obsolete(args: &[OsString], options: &mut Options) -> Result<bool, geto
             // candidate, including `-f` and `-b`, which have no digits at all.
             let body = whole.get(1..).unwrap_or_default();
             let probe = usize::from(body.first() == Some(&b'c'));
-            if body.get(probe).is_none() {
+            if !obsolete_usage && body.get(probe).is_none() {
                 return Ok(false);
             }
             false
@@ -1881,7 +1906,36 @@ mod tests {
     /// option after an operand does not depend on the environment `cargo test`
     /// inherited. The tests of the variable itself call `super::parse_args`.
     fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
-        super::parse_args(args, false)
+        super::parse_args(args, false, posixver::DEFAULT)
+    }
+
+    /// Measured against GNU 9.4 on 2026-09-25, row by row.
+    #[test]
+    fn the_obsolete_forms_follow_posix2_version() {
+        let argv = |words: &[&str]| -> Vec<OsString> { words.iter().map(OsString::from).collect() };
+        let run = |words: &[&str], version: i32| super::parse_args(&argv(words), false, version);
+        // `+2` is a count from the start in every edition but 2001's...
+        for version in [199_209, posixver::DEFAULT] {
+            let Ok(Request::Run(o, files)) = run(&["+2", "f"], version) else {
+                panic!("`+2 f` under {version}");
+            };
+            assert!(o.from_start);
+            assert_eq!(files, argv(&["f"]));
+        }
+        // ...where it is a file name.
+        let Ok(Request::Run(o, files)) = run(&["+2", "f"], 200_112) else {
+            panic!("`+2 f` under 200112");
+        };
+        assert!(!o.from_start);
+        assert_eq!(files, argv(&["+2", "f"]));
+        // A bare `-c` is an option wanting its argument since 2001...
+        assert!(run(&["-c"], posixver::DEFAULT).is_err());
+        // ...and before it, ten bytes from the end of standard input.
+        let Ok(Request::Run(o, files)) = run(&["-c"], 199_209) else {
+            panic!("`-c` under 199209");
+        };
+        assert!(files.is_empty());
+        assert!(!o.from_start);
     }
 
     /// Measured against GNU on 2026-09-25: `POSIXLY_CORRECT=1 tail f -n1` takes
@@ -1889,11 +1943,11 @@ mod tests {
     #[test]
     fn posixly_correct_makes_an_option_after_an_operand_an_operand() {
         let argv: Vec<OsString> = ["f", "-n1"].iter().map(OsString::from).collect();
-        let Ok(Request::Run(_, files)) = super::parse_args(&argv, true) else {
+        let Ok(Request::Run(_, files)) = super::parse_args(&argv, true, posixver::DEFAULT) else {
             panic!("expected a run");
         };
         assert_eq!(files, argv);
-        let Ok(Request::Run(_, files)) = super::parse_args(&argv, false) else {
+        let Ok(Request::Run(_, files)) = super::parse_args(&argv, false, posixver::DEFAULT) else {
             panic!("expected a run");
         };
         assert_eq!(files, argv[..1]);

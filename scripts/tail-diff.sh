@@ -166,7 +166,7 @@ run_case()  { compare - "$@"; report "${ENVV[*]:+${ENVV[*]} }tail $*"; }
 run_stdin() {
   local input="$1"; shift
   compare "$input" "$@"
-  report "printf '$input' | tail $*"
+  report "printf '$input' | ${ENVV[*]:+${ENVV[*]} }tail $*"
 }
 
 xfail_case() {
@@ -337,6 +337,18 @@ run_case -c
 # `-c` with a following word takes it as the count, so this is a number
 # diagnostic and belongs under the C locale like the rest of them.
 run_case -c five.txt
+# The edition decides two of those, as upstream's `posix2_version` does. In
+# POSIX 1003.1-2001's window a leading `+` is a file name; before 2001 a bare
+# `-c` was the obsolete option as well -- the last ten bytes -- and a bare `-`
+# the last ten lines. The digit forms are read in every edition.
+ENVV=(_POSIX2_VERSION=200112)
+run_case +3 five.txt
+run_case -3 five.txt
+ENVV=(_POSIX2_VERSION=199209)
+run_case +3 five.txt
+run_stdin 'abcdefghijklmno\n' -c
+run_stdin 'a\nb\nc\n' -
+ENVV=()
 # `f` inside the obsolete word means follow, which is why these time out.
 run_case -2f five.txt
 run_case -2lf five.txt

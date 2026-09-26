@@ -42,6 +42,12 @@ impl Buf {
     }
 }
 
+/// The widest column printed: 2^32 cells. Only a width hint no program
+/// sets -- `column --table-column width=`, negative or near 2^64, reaching
+/// C's undefined conversion (see `calc::to_size`) -- makes one wider, and
+/// upstream then pads it until it is killed.
+const MAX_PRINTED_WIDTH: usize = 1 << 32;
+
 /// The drawing symbols of a table printed with none set: Unicode box lines
 /// in a UTF-8 locale unless ASCII was asked for.
 fn default_symbols(ascii: bool, utf8: bool) -> Symbols {
@@ -565,6 +571,28 @@ impl Table {
         self.line(ln).is_some_and(|l| l.parent.is_none())
     }
 
+    /// The lines `scols_walk_tree` visits, in its order: each root in table
+    /// order, then its children, depth first. A line no root leads to --
+    /// one whose ancestry loops -- is not among them.
+    pub(crate) fn walk_order(&self) -> Vec<LineId> {
+        let mut order = Vec::with_capacity(self.lines.len());
+        let mut stack: Vec<LineId> = Vec::new();
+        for i in 0..self.lines.len() {
+            let root = LineId(i);
+            if !self.is_tree_root(root) {
+                continue;
+            }
+            stack.push(root);
+            while let Some(ln) = stack.pop() {
+                order.push(ln);
+                if let Some(line) = self.line(ln) {
+                    stack.extend(line.children.iter().rev().copied());
+                }
+            }
+        }
+        order
+    }
+
     fn is_last_tree_root(&self, ln: LineId) -> bool {
         self.walk_last_tree_root == Some(ln)
     }
@@ -756,6 +784,16 @@ impl Table {
         self.header_printed = false;
         let mut buf = Buf::default();
         self.initialize_printing(&mut buf);
+        if self
+            .columns
+            .iter()
+            .any(|c| !c.is_hidden() && c.width > MAX_PRINTED_WIDTH)
+        {
+            // Upstream starts printing and pads the column for as long as it
+            // is let; this refuses before the first byte.
+            self.cleanup_printing();
+            return Err(crate::Error::Invalid);
+        }
         if self.is_json() {
             self.json.open(out, None, Kind::Object);
             self.json.open(out, Some(&name), Kind::Array);

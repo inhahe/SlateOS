@@ -19,9 +19,13 @@
 //!
 //! Upstream links lines, columns and cells through reference-counted
 //! pointers and intrusive lists. Here a [`Table`] owns everything: columns
-//! and lines live in vectors in upstream's list order and are named by
-//! [`ColumnId`] and [`LineId`], indices that stay valid because nothing is
-//! ever removed (the removal API is not ported; no caller here uses it).
+//! and lines live in vectors in upstream's list order. A [`LineId`] is a
+//! line's place in the table, which never changes (the removal API is not
+//! ported; no caller here uses it); a [`ColumnId`] is a column's identity,
+//! which [`Table::move_column`] does not change though it moves the column.
+//! Each line's cells are indexed as upstream's are, by the column's
+//! `seqnum` -- its place in the list, except where upstream's own list
+//! surgery goes wrong (see `move_column`), which is kept.
 //! Output is written into a byte buffer the caller then writes out, so a
 //! failed write is the caller's to report, as `close_stdout` reports it.
 //!
@@ -39,8 +43,11 @@
 //! And when every column is at its minimum and the table still does not
 //! fit, the reduction stops after its last stage and the table prints as
 //! wide as it is, where upstream's reduction loop never ends (see
-//! `reduce_column`). All three are cases in which upstream never finishes;
-//! nothing that finishes differs.
+//! `reduce_column`). And a column more than 2^32 cells wide -- which only a
+//! width hint no program sets can ask for, through C's undefined
+//! double-to-`size_t` conversion -- is refused before anything is printed,
+//! where upstream pads it until it is killed. All four are cases in which
+//! upstream never finishes; nothing that finishes differs.
 //!
 //! # What is not ported yet
 //!
@@ -56,6 +63,7 @@ pub mod careful;
 pub mod json;
 pub mod mbs;
 mod print;
+mod props;
 pub mod tty;
 
 /// `SCOLS_FL_TRUNC`: cut the data when the column is too narrow.
@@ -117,7 +125,8 @@ pub(crate) enum Format {
     Json,
 }
 
-/// A column, by its position among the table's columns.
+/// A column, by identity: the order it was made in, which moving it does
+/// not change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ColumnId(pub(crate) usize);
 
@@ -169,6 +178,10 @@ pub(crate) struct WStat {
 /// `struct libscols_column`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Column {
+    /// Which column this is: its [`ColumnId`].
+    pub(crate) id: usize,
+    /// `seqnum`: which of each line's cells is this column's.
+    pub(crate) seqnum: usize,
     pub(crate) width: usize,
     /// Kept across printings, as upstream keeps it: only ever grows.
     pub(crate) width_treeart: usize,
@@ -247,7 +260,15 @@ pub(crate) struct Symbols {
 #[derive(Debug)]
 pub struct Table {
     pub(crate) name: Option<Vec<u8>>,
+    /// The columns, in their order: upstream's `tb_columns`.
     pub(crate) columns: Vec<Column>,
+    /// Columns `move_column` took out of the list without putting them back
+    /// in it -- one moved behind itself, or behind one of these. Still the
+    /// table's, and still holding their cells; never printed.
+    pub(crate) detached: Vec<Column>,
+    /// `tb->ncols`: every column ever added, detached ones too, and so the
+    /// number of cells in each line.
+    pub(crate) ncols: usize,
     pub(crate) lines: Vec<Line>,
     pub(crate) ntreecols: usize,
     pub(crate) termwidth: usize,
@@ -297,6 +318,8 @@ impl Table {
         Table {
             name: None,
             columns: Vec::new(),
+            detached: Vec::new(),
+            ncols: 0,
             lines: Vec::new(),
             ntreecols: 0,
             termwidth: cols.filter(|&c| c > 0).unwrap_or(80),
@@ -490,34 +513,73 @@ impl Table {
     /// `scols_table_new_column(tb, name, whint, flags)`: a whint below 1 is a
     /// fraction of the terminal, 1 or more a number of cells.
     pub fn new_column(&mut self, name: &[u8], whint: f64, flags: u32) -> ColumnId {
-        let id = ColumnId(self.columns.len());
+        self.add_column(Some(name), whint, flags)
+    }
+
+    /// `scols_table_new_column(tb, NULL, whint, flags)`: a column with no
+    /// name -- an empty header, and no key in `--json`.
+    pub fn new_unnamed_column(&mut self, whint: f64, flags: u32) -> ColumnId {
+        self.add_column(None, whint, flags)
+    }
+
+    /// `scols_table_add_column`: the column at the end of the list, and its
+    /// cell -- the `ncols`th, detached columns counted -- in every line.
+    fn add_column(&mut self, name: Option<&[u8]>, whint: f64, flags: u32) -> ColumnId {
+        let seqnum = self.ncols;
         if flags & FL_TREE != 0 {
             self.ntreecols = self.ntreecols.saturating_add(1);
         }
         self.columns.push(Column {
+            id: seqnum,
+            seqnum,
             width_hint: whint,
             flags,
             header: Cell {
-                data: Some(mbs::c_str(name).to_vec()),
+                data: name.map(|n| mbs::c_str(n).to_vec()),
                 ..Cell::default()
             },
             ..Column::default()
         });
+        self.ncols = seqnum.saturating_add(1);
         // `scols_line_alloc_cells`: every line has a cell for every column.
-        let ncols = self.columns.len();
         for line in &mut self.lines {
-            line.cells.resize_with(ncols, Cell::default);
+            line.cells.resize_with(self.ncols, Cell::default);
         }
-        id
+        ColumnId(seqnum)
     }
 
-    /// `scols_column_set_flags`, keeping the tree count right.
+    /// Where `cl` is in the list, if it is in it.
+    pub(crate) fn position(&self, cl: ColumnId) -> Option<usize> {
+        // A column never moved is where its id says.
+        if self.columns.get(cl.0).is_some_and(|c| c.id == cl.0) {
+            return Some(cl.0);
+        }
+        self.columns.iter().position(|c| c.id == cl.0)
+    }
+
+    /// The column `cl`, in the list or detached.
+    fn column_ref(&self, cl: ColumnId) -> Option<&Column> {
+        match self.position(cl) {
+            Some(i) => self.columns.get(i),
+            None => self.detached.iter().find(|c| c.id == cl.0),
+        }
+    }
+
+    fn column_mut(&mut self, cl: ColumnId) -> Option<&mut Column> {
+        match self.position(cl) {
+            Some(i) => self.columns.get_mut(i),
+            None => self.detached.iter_mut().find(|c| c.id == cl.0),
+        }
+    }
+
+    /// `scols_column_set_flags`, keeping the tree count right -- for a
+    /// detached column too, as upstream's is still the table's.
     ///
     /// # Errors
     ///
     /// The column is not this table's.
     pub fn column_set_flags(&mut self, cl: ColumnId, flags: u32) -> Result<(), Error> {
-        let column = self.columns.get_mut(cl.0).ok_or(Error::Invalid)?;
+        let column = self.column_mut(cl).ok_or(Error::Invalid)?;
         let was = column.flags & FL_TREE != 0;
         let is = flags & FL_TREE != 0;
         column.flags = flags;
@@ -529,13 +591,46 @@ impl Table {
         Ok(())
     }
 
+    /// `scols_column_get_flags`.
+    #[must_use]
+    pub fn column_flags(&self, cl: ColumnId) -> Option<u32> {
+        self.column_ref(cl).map(|c| c.flags)
+    }
+
+    /// `scols_column_get_name`: `None` for a column made without one.
+    #[must_use]
+    pub fn column_name(&self, cl: ColumnId) -> Option<&[u8]> {
+        self.column_ref(cl).and_then(|c| c.header.data())
+    }
+
+    /// `scols_column_set_name`: the header, or none.
+    ///
+    /// # Errors
+    ///
+    /// The column is not this table's.
+    pub fn column_set_name(&mut self, cl: ColumnId, name: Option<&[u8]>) -> Result<(), Error> {
+        self.column_mut(cl).ok_or(Error::Invalid)?.header.data =
+            name.map(|n| mbs::c_str(n).to_vec());
+        Ok(())
+    }
+
+    /// `scols_column_set_whint`.
+    ///
+    /// # Errors
+    ///
+    /// The column is not this table's.
+    pub fn column_set_whint(&mut self, cl: ColumnId, whint: f64) -> Result<(), Error> {
+        self.column_mut(cl).ok_or(Error::Invalid)?.width_hint = whint;
+        Ok(())
+    }
+
     /// `scols_column_set_json_type`.
     ///
     /// # Errors
     ///
     /// The column is not this table's.
     pub fn column_set_json_type(&mut self, cl: ColumnId, ty: JsonType) -> Result<(), Error> {
-        self.columns.get_mut(cl.0).ok_or(Error::Invalid)?.json_type = ty;
+        self.column_mut(cl).ok_or(Error::Invalid)?.json_type = ty;
         Ok(())
     }
 
@@ -546,8 +641,91 @@ impl Table {
     ///
     /// The column is not this table's.
     pub fn column_set_safechars(&mut self, cl: ColumnId, safe: &[u8]) -> Result<(), Error> {
-        self.columns.get_mut(cl.0).ok_or(Error::Invalid)?.safechars =
-            Some(mbs::c_str(safe).to_vec());
+        self.column_mut(cl).ok_or(Error::Invalid)?.safechars = Some(mbs::c_str(safe).to_vec());
+        Ok(())
+    }
+
+    /// The columns in their order (`scols_table_next_column`); detached
+    /// ones are not in it.
+    #[must_use]
+    pub fn column_ids(&self) -> Vec<ColumnId> {
+        self.columns.iter().map(|c| ColumnId(c.id)).collect()
+    }
+
+    /// `scols_table_get_column(tb, n)`: the column whose cells are each
+    /// line's `n`th -- in a table whose columns were never detached, the
+    /// `n`th column.
+    #[must_use]
+    pub fn column(&self, n: usize) -> Option<ColumnId> {
+        if n >= self.ncols {
+            return None;
+        }
+        self.columns
+            .iter()
+            .find(|c| c.seqnum == n)
+            .map(|c| ColumnId(c.id))
+    }
+
+    /// `scols_table_get_column_by_name`: the first column so named.
+    #[must_use]
+    pub fn column_by_name(&self, name: &[u8]) -> Option<ColumnId> {
+        self.columns
+            .iter()
+            .find(|c| c.header.data() == Some(name))
+            .map(|c| ColumnId(c.id))
+    }
+
+    /// `scols_table_move_column(tb, pre, cl)`: `cl` after `pre`, or first
+    /// with none, and each line's cells moved with it.
+    ///
+    /// Upstream's list surgery, kept exactly because `column --table-order`
+    /// shows it: when `pre` is `cl` itself (`-O 1,1`), unlinking `cl` and
+    /// linking it after itself leaves it in a list of its own, outside the
+    /// table's. It is then never printed; the columns after it are
+    /// renumbered while each line's cells stay where they were, so each of
+    /// them shows the cell of the column before it. A column moved after
+    /// such a detached one is detached with it, and a detached column moved
+    /// after one in the list rejoins it, taking its cells from where its old
+    /// number says they are.
+    ///
+    /// # Errors
+    ///
+    /// Either column is not this table's.
+    pub fn move_column(&mut self, pre: Option<ColumnId>, cl: ColumnId) -> Result<(), Error> {
+        let oldseq = self.column_ref(cl).ok_or(Error::Invalid)?.seqnum;
+        if let Some(p) = pre {
+            let pre_seq = self.column_ref(p).ok_or(Error::Invalid)?.seqnum;
+            if pre_seq.checked_add(1) == Some(oldseq) {
+                return Ok(());
+            }
+        } else if oldseq == 0 {
+            return Ok(());
+        }
+        // `list_del_init`: out of whichever list holds it.
+        let column = match self.position(cl) {
+            Some(i) => self.columns.remove(i),
+            None => {
+                let i = self
+                    .detached
+                    .iter()
+                    .position(|c| c.id == cl.0)
+                    .ok_or(Error::Invalid)?;
+                self.detached.remove(i)
+            }
+        };
+        // `list_add`: after `pre` in whichever list holds it.
+        match pre.map(|p| (p, self.position(p))) {
+            None => self.columns.insert(0, column),
+            Some((p, Some(i))) if p != cl => self.columns.insert(i.saturating_add(1), column),
+            Some(_) => self.detached.push(column),
+        }
+        for (n, c) in self.columns.iter_mut().enumerate() {
+            c.seqnum = n;
+        }
+        let newseq = self.column_ref(cl).map_or(oldseq, |c| c.seqnum);
+        for line in &mut self.lines {
+            line_move_cells(&mut line.cells, newseq, oldseq);
+        }
         Ok(())
     }
 
@@ -563,7 +741,7 @@ impl Table {
         }
         let id = LineId(self.lines.len());
         self.lines.push(Line {
-            cells: vec![Cell::default(); self.columns.len()],
+            cells: vec![Cell::default(); self.ncols],
             parent,
             children: Vec::new(),
         });
@@ -575,20 +753,113 @@ impl Table {
         Ok(id)
     }
 
-    /// `scols_line_set_data(ln, n, data)`: the cell's data, copied up to its
-    /// first NUL, as a C string is.
+    /// The lines in table order (`scols_table_next_line`), which moving a
+    /// line in the tree does not change.
+    pub fn line_ids(&self) -> impl Iterator<Item = LineId> + use<> {
+        (0..self.lines.len()).map(LineId)
+    }
+
+    /// `scols_line_set_column_data(ln, cl, data)`: the cell's data, copied
+    /// up to its first NUL, as a C string is.
     ///
     /// # Errors
     ///
     /// The line or the column is not this table's.
     pub fn line_set_data(&mut self, ln: LineId, cl: ColumnId, data: &[u8]) -> Result<(), Error> {
+        let n = self.column_ref(cl).ok_or(Error::Invalid)?.seqnum;
+        self.line_refer_data(ln, n, data)
+    }
+
+    /// `scols_line_refer_data(ln, n, data)`: the line's `n`th cell --
+    /// whichever column's that is.
+    ///
+    /// # Errors
+    ///
+    /// The line is not this table's, or has no `n`th cell.
+    pub fn line_refer_data(&mut self, ln: LineId, n: usize, data: &[u8]) -> Result<(), Error> {
         let cell = self
             .lines
             .get_mut(ln.0)
-            .and_then(|l| l.cells.get_mut(cl.0))
+            .and_then(|l| l.cells.get_mut(n))
             .ok_or(Error::Invalid)?;
         cell.data = Some(mbs::c_str(data).to_vec());
         Ok(())
+    }
+
+    /// `scols_line_get_column_cell` and `scols_cell_get_data`: the data in
+    /// `cl`'s cell of `ln`, if any was set.
+    #[must_use]
+    pub fn line_column_data(&self, ln: LineId, cl: ColumnId) -> Option<&[u8]> {
+        let n = self.column_ref(cl)?.seqnum;
+        self.line(ln)?.cells.get(n)?.data()
+    }
+
+    /// `scols_line_is_ancestor(ln, parent)`: whether `ln` is `parent` or
+    /// one of its ancestors -- so whether making `ln` a child of `parent`
+    /// would close a loop.
+    ///
+    /// Upstream follows the parents without end on a line whose ancestry
+    /// already loops (which only `line_add_child` without this check
+    /// makes); here the walk stops after as many steps as there are lines.
+    #[must_use]
+    pub fn line_is_ancestor(&self, ln: LineId, parent: LineId) -> bool {
+        let mut cur = Some(parent);
+        for _ in 0..=self.lines.len() {
+            let Some(p) = cur else {
+                return false;
+            };
+            if p == ln {
+                return true;
+            }
+            cur = self.line(p).and_then(|l| l.parent);
+        }
+        false
+    }
+
+    /// `scols_line_add_child(ln, child)`: `child` taken from its parent's
+    /// children, if it has a parent, and put last among `ln`'s.
+    ///
+    /// # Errors
+    ///
+    /// Either line is not this table's.
+    pub fn line_add_child(&mut self, ln: LineId, child: LineId) -> Result<(), Error> {
+        if ln.0 >= self.lines.len() || child.0 >= self.lines.len() {
+            return Err(Error::Invalid);
+        }
+        self.detach_line(child);
+        if let Some(line) = self.lines.get_mut(ln.0) {
+            line.children.push(child);
+        }
+        if let Some(line) = self.lines.get_mut(child.0) {
+            line.parent = Some(ln);
+        }
+        Ok(())
+    }
+
+    /// `scols_line_remove_child(ln, child)`: `child` taken from its parent's
+    /// children, a root again. As upstream's, from whichever line is its
+    /// parent, `ln` or not.
+    ///
+    /// # Errors
+    ///
+    /// Either line is not this table's.
+    pub fn line_remove_child(&mut self, ln: LineId, child: LineId) -> Result<(), Error> {
+        if ln.0 >= self.lines.len() || child.0 >= self.lines.len() {
+            return Err(Error::Invalid);
+        }
+        self.detach_line(child);
+        Ok(())
+    }
+
+    /// `list_del_init(&child->ln_children)` and `child->parent = NULL`.
+    fn detach_line(&mut self, child: LineId) {
+        let old = self.lines.get_mut(child.0).and_then(|l| l.parent.take());
+        if let Some(old) = old
+            && let Some(parent) = self.lines.get_mut(old.0)
+            && let Some(i) = parent.children.iter().position(|&c| c == child)
+        {
+            parent.children.remove(i);
+        }
     }
 
     /// `scols_table_get_nlines`.
@@ -597,10 +868,10 @@ impl Table {
         self.lines.len()
     }
 
-    /// `scols_table_get_ncols`.
+    /// `scols_table_get_ncols`: every column added, detached ones too.
     #[must_use]
     pub fn ncols(&self) -> usize {
-        self.columns.len()
+        self.ncols
     }
 
     /// `scols_print_table`, into `out`: the table, and a final newline unless
@@ -678,9 +949,28 @@ impl Table {
         self.lines.get(ln.0)
     }
 
+    /// The cell of `ln` for the column at position `cl`: the one its
+    /// `seqnum` names.
     pub(crate) fn cell(&self, ln: LineId, cl: usize) -> Option<&Cell> {
-        self.line(ln).and_then(|l| l.cells.get(cl))
+        let n = self.columns.get(cl)?.seqnum;
+        self.line(ln).and_then(|l| l.cells.get(n))
     }
+
+    pub(crate) fn cell_mut(&mut self, ln: LineId, cl: usize) -> Option<&mut Cell> {
+        let n = self.columns.get(cl)?.seqnum;
+        self.lines.get_mut(ln.0).and_then(|l| l.cells.get_mut(n))
+    }
+}
+
+/// `scols_line_move_cells(ln, newn, oldn)`: the cell at `oldn` moved to
+/// `newn`, those between shifted to make room. Nothing for a position past
+/// the cells, as upstream refuses it.
+fn line_move_cells(cells: &mut Vec<Cell>, newn: usize, oldn: usize) {
+    if newn >= cells.len() || oldn >= cells.len() || newn == oldn {
+        return;
+    }
+    let cell = cells.remove(oldn);
+    cells.insert(newn, cell);
 }
 
 #[cfg(test)]

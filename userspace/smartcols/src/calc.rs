@@ -30,18 +30,38 @@ fn sqrtroot(num: f64) -> f64 {
     sq
 }
 
-/// `(size_t) x` for a non-negative double: truncation.
+/// `(size_t) x`, as gcc compiles it for x86-64: `cvttsd2si` below 2^63,
+/// and above it the same after subtracting 2^63, with the top bit put back.
+///
+/// C leaves the conversion undefined outside `size_t`'s range, and this is
+/// what upstream's binary does there -- which a width hint from `column
+/// --table-column width=...` can reach: infinity and anything from 2^64 up
+/// convert to 0 (the hint is then ignored), NaN to 2^63, and a negative
+/// number wraps (-1 is `SIZE_MAX`).
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    reason = "C's conversion is exactly this truncation; a negative value is 0"
+    reason = "this is the conversion being reproduced, bit for bit"
 )]
 fn to_size(x: f64) -> usize {
-    if x.is_nan() || x <= 0.0 {
-        0
-    } else {
-        x as usize
+    /// `cvttsd2si`: truncation, or the "integer indefinite" `i64::MIN` for
+    /// NaN and anything outside `i64`.
+    fn cvttsd2si(x: f64) -> i64 {
+        const TWO63: f64 = 9_223_372_036_854_775_808.0;
+        if x.is_nan() || !(-TWO63..TWO63).contains(&x) {
+            i64::MIN
+        } else {
+            x as i64
+        }
     }
+    const TWO63: f64 = 9_223_372_036_854_775_808.0;
+    // `comisd x, 2^63; jnb`: NaN compares unordered and takes the first way.
+    let bits = if x >= TWO63 {
+        (cvttsd2si(x - TWO63) as u64) ^ (1 << 63)
+    } else {
+        cvttsd2si(x) as u64
+    };
+    bits as usize
 }
 
 /// `(double) n`.
@@ -68,7 +88,7 @@ impl Table {
         self.cell_to_buffer(ln, cl, buf);
         let len = self.text_width(&buf.data);
         let treewidth = buf.safe_pointer_width(self.utf8);
-        if let Some(cell) = self.lines.get_mut(ln.0).and_then(|l| l.cells.get_mut(cl)) {
+        if let Some(cell) = self.cell_mut(ln, cl) {
             cell.width = len;
         }
         if let Some(col) = self.columns.get_mut(cl) {
@@ -82,10 +102,8 @@ impl Table {
     /// `count_column_deviation`: the mean width over every line -- an
     /// integer division, as upstream's is -- and the sample deviation.
     fn count_column_deviation(&mut self, cl: usize) {
-        let widths: Vec<usize> = self
-            .lines
-            .iter()
-            .map(|l| l.cells.get(cl).map_or(0, |c| c.width))
+        let widths: Vec<usize> = (0..self.lines.len())
+            .map(|ln| self.cell(LineId(ln), cl).map_or(0, |c| c.width))
             .collect();
         let n = widths.len();
         let Some(col) = self.columns.get_mut(cl) else {
@@ -134,10 +152,16 @@ impl Table {
         if col.wstat.width_min == 0 {
             col.wstat.width_min = 1;
         }
-        // Every line is some root's descendant, so walking the tree measures
-        // the same cells as the list does; only the order differs.
-        for ln in 0..self.lines.len() {
-            self.count_cell_width(LineId(ln), cl, buf);
+        // A tree is measured as it is walked, so a line that no root leads
+        // to -- one whose ancestry loops -- is not measured, as it is not
+        // printed; a list, line by line.
+        let lines: Vec<LineId> = if self.is_tree() {
+            self.walk_order()
+        } else {
+            (0..self.lines.len()).map(LineId).collect()
+        };
+        for ln in lines {
+            self.count_cell_width(ln, cl, buf);
         }
         let Some(col) = self.columns.get_mut(cl) else {
             return;
@@ -463,9 +487,16 @@ mod tests {
     }
 
     #[test]
-    fn a_double_becomes_a_size_by_truncation() {
+    fn a_double_becomes_a_size_as_gcc_converts_it() {
         assert_eq!(to_size(2.9), 2);
-        assert_eq!(to_size(-1.0), 0);
-        assert_eq!(to_size(f64::NAN), 0);
+        assert_eq!(to_size(0.5), 0);
+        assert_eq!(to_size(-0.5), 0);
+        assert_eq!(to_size(1e19), 10_000_000_000_000_000_000);
+        // Outside size_t, x86-64's answers.
+        assert_eq!(to_size(-1.0), usize::MAX);
+        assert_eq!(to_size(f64::NAN), 1 << 63);
+        assert_eq!(to_size(f64::INFINITY), 0);
+        assert_eq!(to_size(1e30), 0);
+        assert_eq!(to_size(f64::NEG_INFINITY), 1 << 63);
     }
 }

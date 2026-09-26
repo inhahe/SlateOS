@@ -187,3 +187,120 @@ fn every_terminal_width_finishes_printing() {
         );
     }
 }
+
+/// Columns A, B, C and one line `a b c`, off a terminal.
+fn abc() -> (Table, [ColumnId; 3]) {
+    let mut tb = Table::new();
+    tb.set_utf8(true);
+    tb.set_termforce(TermForce::Never);
+    let ids = [
+        tb.new_column(b"A", 0.0, 0),
+        tb.new_column(b"B", 0.0, 0),
+        tb.new_column(b"C", 0.0, 0),
+    ];
+    let ln = tb.new_line(None).unwrap();
+    for (&cl, d) in ids.iter().zip([&b"a"[..], b"b", b"c"]) {
+        tb.line_set_data(ln, cl, d).unwrap();
+    }
+    (tb, ids)
+}
+
+#[test]
+fn a_moved_column_takes_its_cells_with_it() {
+    let (mut tb, [a, b, c]) = abc();
+    tb.move_column(None, c).unwrap();
+    assert_eq!(text(tb.print().unwrap()), "C A B\nc a b\n");
+    tb.move_column(Some(a), c).unwrap();
+    assert_eq!(text(tb.print().unwrap()), "A C B\na c b\n");
+    // Already after `pre`: nothing to do.
+    tb.move_column(Some(c), b).unwrap();
+    assert_eq!(text(tb.print().unwrap()), "A C B\na c b\n");
+    assert_eq!(tb.column_ids(), vec![a, c, b]);
+    assert_eq!(tb.column(1), Some(c));
+    assert_eq!(tb.column_by_name(b"B"), Some(b));
+    assert_eq!(tb.line_column_data(LineId(0), c), Some(&b"c"[..]));
+}
+
+#[test]
+fn a_column_moved_behind_itself_leaves_the_table_and_its_cell_behind() {
+    // `column -t -N A,B,C -O A,A`: upstream unlinks A and links it after
+    // itself, in a list of its own. B and C are renumbered 0 and 1 while
+    // the cells stay put, so each shows the cell before its own.
+    let (mut tb, [a, b, c]) = abc();
+    tb.move_column(Some(a), a).unwrap();
+    assert_eq!(text(tb.print().unwrap()), "B C\na b\n");
+    assert_eq!(tb.column_ids(), vec![b, c]);
+    assert_eq!(tb.ncols(), 3);
+    // Moved back after a column of the table, it rejoins it, and each
+    // line's cell moves from its old number, 0, to its new one, 2 -- which
+    // puts B's and C's own cells back under them.
+    tb.move_column(Some(c), a).unwrap();
+    assert_eq!(tb.column_ids(), vec![b, c, a]);
+    assert_eq!(text(tb.print().unwrap()), "B C A\nb c a\n");
+}
+
+#[test]
+fn a_column_moved_behind_a_detached_one_is_detached_too() {
+    let (mut tb, [a, b, c]) = abc();
+    tb.move_column(Some(a), a).unwrap();
+    // A kept its number, 0, and C is now 1: "already after A", upstream's
+    // test says, and nothing moves.
+    tb.move_column(Some(a), c).unwrap();
+    assert_eq!(tb.column_ids(), vec![b, c]);
+    // B, now 0, is not "after" A's stale 0: it is linked after A, outside
+    // the table, and C reads the first cell.
+    tb.move_column(Some(a), b).unwrap();
+    assert_eq!(tb.column_ids(), vec![c]);
+    assert_eq!(text(tb.print().unwrap()), "C\na\n");
+}
+
+#[test]
+fn a_line_changes_parents_and_its_new_parent_lists_it_last() {
+    let mut tb = Table::new();
+    tb.set_utf8(false);
+    tb.set_termforce(TermForce::Never);
+    let name = tb.new_column(b"N", 0.0, FL_TREE);
+    let l: Vec<LineId> = (0..4).map(|_| tb.new_line(None).unwrap()).collect();
+    for (&ln, d) in l.iter().zip([&b"1"[..], b"2", b"3", b"4"]) {
+        tb.line_set_data(ln, name, d).unwrap();
+    }
+    tb.line_add_child(l[0], l[2]).unwrap();
+    tb.line_add_child(l[0], l[3]).unwrap();
+    tb.line_add_child(l[1], l[2]).unwrap();
+    assert_eq!(text(tb.print().unwrap()), "N\n1\n`-4\n2\n`-3\n");
+    assert!(tb.line_is_ancestor(l[1], l[2]));
+    assert!(tb.line_is_ancestor(l[2], l[2]));
+    assert!(!tb.line_is_ancestor(l[0], l[2]));
+    tb.line_remove_child(l[1], l[2]).unwrap();
+    assert_eq!(text(tb.print().unwrap()), "N\n1\n`-4\n2\n3\n");
+}
+
+#[test]
+fn a_line_no_root_leads_to_is_neither_measured_nor_printed() {
+    // A line made its own child is its own parent: not a root, and under
+    // none. Upstream's walk never reaches it; nor does this one.
+    let mut tb = Table::new();
+    tb.set_utf8(false);
+    tb.set_termforce(TermForce::Never);
+    let name = tb.new_column(b"N", 0.0, FL_TREE);
+    let a = tb.new_line(None).unwrap();
+    let b = tb.new_line(None).unwrap();
+    tb.line_set_data(a, name, b"a").unwrap();
+    tb.line_set_data(b, name, b"a-much-wider-cell").unwrap();
+    tb.line_add_child(b, b).unwrap();
+    assert_eq!(text(tb.print().unwrap()), "N\na\n");
+}
+
+#[test]
+fn an_unnamed_column_has_an_empty_header() {
+    let mut tb = Table::new();
+    tb.set_utf8(true);
+    tb.set_termforce(TermForce::Never);
+    let a = tb.new_unnamed_column(0.0, 0);
+    let b = tb.new_column(b"B", 0.0, 0);
+    let ln = tb.new_line(None).unwrap();
+    tb.line_set_data(ln, a, b"xx").unwrap();
+    tb.line_set_data(ln, b, b"y").unwrap();
+    assert_eq!(tb.column_name(a), None);
+    assert_eq!(text(tb.print().unwrap()), "   B\nxx y\n");
+}

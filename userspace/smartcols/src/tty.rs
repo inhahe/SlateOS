@@ -23,6 +23,49 @@ pub fn terminal_dimension() -> (Option<usize>, Option<usize>) {
     (cols, rows)
 }
 
+/// `ENOTTY`, and `ERANGE`: what upstream's terminal probe leaves in `errno`
+/// on a host whose failure has no number, and a `strtol` overflow's.
+const ENOTTY: i32 = 25;
+const ERANGE: i32 = 34;
+
+/// What `get_terminal_dimension` leaves in `errno`, from `errno` before it:
+/// the `ioctl`'s failure (`ENOTTY` off a terminal), then -- for each size
+/// asked for (`cols`, `lines`) and not given by the terminal -- 0 if the
+/// variable (`COLUMNS`, `LINES`) is set, as `get_env_int` clears `errno`
+/// before its `strtol`, or `ERANGE` if that overflows.
+///
+/// Upstream never looks at the result, but callers read `errno` later
+/// without clearing it -- libsmartcols' `width=` column property does -- so
+/// a port reproducing them has to know. `scols_new_table` asks for both
+/// sizes; `get_terminal_width` for the columns.
+#[must_use]
+pub fn dimension_errno(errno: i32, cols: bool, lines: bool) -> i32 {
+    let mut errno = errno;
+    let (c, l) = match winsize() {
+        Ok(size) => size,
+        Err(e) => {
+            errno = e.raw_os_error().unwrap_or(ENOTTY);
+            (0, 0)
+        }
+    };
+    for (wanted, size, name) in [(cols, c, "COLUMNS"), (lines, l, "LINES")] {
+        if wanted
+            && size == 0
+            && let Some(value) = std::env::var_os(name)
+        {
+            errno = 0;
+            let value = quoting::os_bytes(&value);
+            if let Some(sc) = ulstrutils::scan_integer(&value, 10) {
+                let limit: u128 = if sc.negative { 1 << 63 } else { (1 << 63) - 1 };
+                if sc.saturated || sc.magnitude > limit {
+                    errno = ERANGE;
+                }
+            }
+        }
+    }
+    errno
+}
+
 /// `ioctl(STDOUT_FILENO, TIOCGWINSZ)`: the terminal's columns and rows, or
 /// why stdout has none -- `ENOTTY` when it is not a terminal, `EBADF` when it
 /// is closed.

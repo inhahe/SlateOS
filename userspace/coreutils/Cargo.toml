@@ -33,6 +33,10 @@ quoting = { path = "../quoting" }
 # is now shared with the programs outside coreutils. `coreutils::getopt`
 # re-exports it, so the binaries' imports did not change.
 getoptlong = { path = "../getoptlong" }
+# util-linux's lib/strutils.c number parsing -- `cal -c`, `cal -n`, the year
+# operands -- which lived in bin/cal.rs until 2026-09-26 and is now shared with
+# the util-linux ports outside coreutils (logger's -S and --id=).
+ulstrutils = { path = "../ulstrutils" }
 # One definition of an exact integer, shared with `bc`, `dc` and `genius-cli`.
 # GNU `expr` is arbitrary-precision — `expr 9223372036854775807 + 1` answers
 # 9223372036854775808 — and a shell script reaches those sizes by accident.

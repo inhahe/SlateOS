@@ -444,6 +444,7 @@ dependencies = [
  "sha2",
  "sm3",
  "sysroot-dep",
+ "ulstrutils",
  "userspec",
  "utmpfile",
 ]
@@ -3176,6 +3177,13 @@ name = "udisks"
 version = "0.1.0"
 dependencies = [
  "procinfo",
+ "quoting",
+]
+
+[[package]]
+name = "ulstrutils"
+version = "0.1.0"
+dependencies = [
  "quoting",
 ]
 

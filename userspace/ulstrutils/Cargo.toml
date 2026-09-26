@@ -1,0 +1,14 @@
+[package]
+name = "ulstrutils"
+version = "0.1.0"
+edition = "2024"
+description = "util-linux's lib/strutils.c number parsing and its refusals, ported once"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The operand in a refusal is argv bytes and is escaped, not pasted. `quoting`
+# has no dependencies and takes bytes, so this crate stays a pure formatter
+# over it -- no I/O, and so safe under section 768 (one libc per process).
+quoting = { path = "../quoting" }

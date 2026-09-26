@@ -1367,6 +1367,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "safeio",
+ "textarea",
  "unsaved",
 ]
 

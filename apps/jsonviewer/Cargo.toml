@@ -16,6 +16,8 @@ oswindow = { path = "../../gui/window" }
 safeio = { path = "../safeio" }
 # "Unsaved changes -- save them?", asked the way every editor here asks it.
 unsaved = { path = "../unsaved" }
+# The raw view's text, edited as it is: its caret, selection and keys.
+textarea = { path = "../textarea" }
 
 [lints]
 workspace = true

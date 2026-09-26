@@ -26,6 +26,25 @@ SRC = Path(__file__).parent / "src" / "main.rs"
 
 CLOSE = "closing_the_window_over_unsaved_work_asks_and_each_answer_is_kept"
 LAYOUT = "a_tree_edit_keeps_the_texts_layout"
+ENTER = "enter_in_the_raw_view_edits_the_text_itself"
+REPAIR = "a_document_that_does_not_parse_is_repaired_where_it_goes_wrong"
+NEW_DOC = "a_new_document_can_be_typed_into"
+ESCAPE = "escape_stops_editing_and_keeps_the_changes"
+TYPED = "a_typed_key_is_the_texts_while_it_is_edited"
+PRESS = "a_press_in_the_raw_view_puts_the_caret_where_it_lands"
+PRESS_ERROR = "a_press_on_a_parse_error_goes_to_it"
+SCROLLED = "a_press_after_scrolling_lands_on_the_line_under_it"
+COMMIT = "a_value_being_typed_over_is_committed_before_the_text_is_edited"
+LEAVE = "leaving_the_raw_view_stops_editing"
+FIND = "the_find_bar_takes_the_keys_from_the_text"
+CARET = "the_caret_stays_on_screen"
+TAB = "tab_indents_in_the_texts_own_step"
+CUT = "cut_and_paste_within_the_text"
+CAP = "the_text_stops_where_a_reopened_file_would_be_cut"
+SAVE = "what_is_typed_is_what_is_saved"
+WHEEL = "a_notch_of_the_wheel_moves_a_view_its_rows"
+BYTE_AT = "a_line_and_column_become_a_byte"
+TRUNC = "the_truncation_warning_leads_with_the_word_that_matters"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -184,6 +203,247 @@ MUTATIONS = [
         "            note: self.note.clone(),",
         "            note: None,",
         ["an_edited_file_is_saved_back_to_itself"],
+    ),
+    # ---- the text itself, edited in the raw view (2026-09-26) ----
+    (
+        "Enter in the raw view does nothing",
+        "            && (doc.view_mode == ViewMode::Raw\n                || (doc.view_mode == ViewMode::Tree && doc.parsed.is_none()))",
+        "            && (doc.view_mode == ViewMode::Tree && doc.parsed.is_none())",
+        [ENTER, ESCAPE, TYPED, TAB, CUT, SAVE],
+    ),
+    (
+        "Enter in an empty or broken tree does nothing",
+        "            && (doc.view_mode == ViewMode::Raw\n                || (doc.view_mode == ViewMode::Tree && doc.parsed.is_none()))",
+        "            && doc.view_mode == ViewMode::Raw",
+        [REPAIR, NEW_DOC],
+    ),
+    (
+        "the caret starts at the start, not where the parse failed",
+        "                .map_or(0, |e| byte_at(&doc.input, e.line, e.column));",
+        "                .map_or(0, |_| 0);",
+        [REPAIR],
+    ),
+    (
+        "a typed ? raises the shortcut list while the text is edited",
+        "        let typing = self.search_visible || self.editing_path.is_some() || editing_source;",
+        "        let typing = self.search_visible || self.editing_path.is_some();",
+        [TYPED],
+    ),
+    (
+        "the text's keys go to the view",
+        "        if editing_source {\n            self.source_key(ev);\n            return;\n        }",
+        "        if false {\n            self.source_key(ev);\n            return;\n        }",
+        [ENTER, TYPED],
+    ),
+    (
+        "Escape does not stop editing",
+        "        if ev.key == Key::Escape {\n            doc.source = None;\n            return;\n        }",
+        "        if ev.key == Key::Escape {\n            return;\n        }",
+        [ESCAPE],
+    ),
+    (
+        "Tab is left to the text area, which ignores it",
+        "        let edited = if ev.key == Key::Tab && !ev.modifiers.ctrl && !ev.modifiers.shift {",
+        "        let edited = if false {",
+        [TAB],
+    ),
+    (
+        "Tab puts in two spaces whatever the text is written with",
+        "            let step = IndentStyle::detect(source.area.text())",
+        "            let step = Some(IndentStyle::Spaces2)",
+        [TAB],
+    ),
+    (
+        "a cut is not kept for a paste",
+        "        if let Some(copied) = edited.copied {\n            self.clipboard = copied;\n        }",
+        "        drop(edited.copied);",
+        [CUT],
+    ),
+    (
+        "the text grows past what a reopen would read",
+        "        if source.area.text().len() > MAX_OPEN_BYTES {",
+        "        if source.area.text().len() > usize::MAX - 1 {",
+        [CAP],
+    ),
+    (
+        "a refused key is kept anyway",
+        "            source.area = before;\n",
+        "            drop(before);\n",
+        [CAP],
+    ),
+    (
+        "a refused key says nothing",
+        "            self.note = Some(format!(\n                \"Not added:",
+        "            let _ = Some(format!(\n                \"Not added:",
+        [CAP],
+    ),
+    (
+        "an edit is not written back to the document",
+        "            source.area.text().clone_into(&mut doc.input);",
+        "",
+        [ENTER, SAVE],
+    ),
+    (
+        "an edit is not marked unsaved",
+        "            source.area.text().clone_into(&mut doc.input);\n            doc.dirty = true;",
+        "            source.area.text().clone_into(&mut doc.input);",
+        [ENTER],
+    ),
+    (
+        "an edit is not parsed again",
+        "            doc.dirty = true;\n            doc.reparse();\n            doc.invalidate_caches();\n        }\n    }",
+        "            doc.dirty = true;\n            doc.invalidate_caches();\n        }\n    }",
+        [ENTER, REPAIR],
+    ),
+    (
+        "an edit is not counted as a change",
+        "            doc.reparse();\n            doc.invalidate_caches();\n        }\n    }",
+        "            doc.reparse();\n        }\n    }",
+        [ESCAPE],
+    ),
+    (
+        "a key does not keep the caret in view",
+        "        source.keep_caret_in_view(rows, width);\n        if edited.changed {",
+        "        if edited.changed {",
+        [CARET],
+    ),
+    (
+        "a caret below the view is not scrolled to",
+        "            self.scroll = line.saturating_add(1).saturating_sub(rows);",
+        "            self.scroll = self.scroll;",
+        [CARET],
+    ),
+    (
+        "a caret above the view is not scrolled to",
+        "        if line < self.scroll {\n            self.scroll = line;",
+        "        if false {\n            self.scroll = line;",
+        [CARET],
+    ),
+    (
+        "a long line does not scroll sideways",
+        "        } else if x + guitk::textedit::CARET_WIDTH > self.hscroll + width {",
+        "        } else if false {",
+        [CARET],
+    ),
+    (
+        "sideways scrolling does not come back",
+        "        if x < self.hscroll {\n            self.hscroll = (x - margin).max(0.0);",
+        "        if false {\n            self.hscroll = (x - margin).max(0.0);",
+        [CARET],
+    ),
+    (
+        "the whole of a long line is sent to be drawn",
+        "        if let Some(piece) = shown.get(from..to)",
+        "        if let Some(piece) = shown.get(..)",
+        [CARET],
+    ),
+    (
+        "the line that fails is not marked",
+        "                let bad = bad_line == Some(i);",
+        "                let bad = bad_line == Some(usize::MAX);",
+        [REPAIR],
+    ),
+    (
+        "the parse's verdict is not said",
+        '                format!("{error} -- Esc shows the formatted view"),',
+        '                String::from("Esc shows the formatted view"),',
+        [REPAIR],
+    ),
+    (
+        "a press in the raw view does nothing",
+        "                .is_some_and(|d| d.view_mode == ViewMode::Raw)\n        {\n            self.source_click(x, y - content_y);",
+        "                .is_some_and(|d| d.view_mode == ViewMode::Diff)\n        {\n            self.source_click(x, y - content_y);",
+        [PRESS, PRESS_ERROR, SCROLLED, COMMIT],
+    ),
+    (
+        "a press puts the caret at the start",
+        "        source\n            .area\n            .click(line, x - SOURCE_TEXT_X + source.hscroll, false);",
+        "        source.area.move_to(0, false);",
+        [PRESS, SCROLLED],
+    ),
+    (
+        "a press lands as if the view were not scrolled",
+        "        let line = source.scroll.saturating_add(row);",
+        "        let line = row;",
+        [SCROLLED],
+    ),
+    (
+        "a press opens the text at its top, not where the view was",
+        "            let at = byte_at(&doc.input, first.saturating_add(1), 1);",
+        "            let at = 0;",
+        [SCROLLED],
+    ),
+    (
+        "a press on a parse error goes to the start",
+        "                let at = byte_at(&doc.input, error.line, error.column);",
+        "                let at = error.line.min(0);",
+        [PRESS_ERROR],
+    ),
+    (
+        "a value being typed over is left pending",
+        "        if self.editing_path.is_some() {\n            self.commit_edit();\n        }\n        self.search_visible = false;",
+        "        self.search_visible = false;",
+        [COMMIT],
+    ),
+    (
+        "editing the text leaves the find bar open",
+        "        }\n        self.search_visible = false;\n        let (rows, width) = (self.source_rows(), self.source_width());",
+        "        }\n        let (rows, width) = (self.source_rows(), self.source_width());",
+        [FIND],
+    ),
+    (
+        "the find bar opens over the text",
+        "                    self.close_source();\n                    self.search_visible = !self.search_visible;",
+        "                    self.search_visible = !self.search_visible;",
+        [FIND],
+    ),
+    (
+        "leaving the raw view keeps editing",
+        "                    if *mode != ViewMode::Raw {\n                        doc.source = None;\n                    }",
+        "",
+        [LEAVE],
+    ),
+    (
+        "a notch of the wheel is three pixels again",
+        "            let step = wheel::pixels(dy, LINE_HEIGHT);",
+        "            let step = -dy * 3.0;",
+        [WHEEL],
+    ),
+    (
+        "the wheel scrolls the text past its end",
+        "                        source.scroll = source.scroll.saturating_add_signed(rows).min(last);",
+        "                        source.scroll = source.scroll.saturating_add_signed(rows).max(last.min(0));",
+        [WHEEL],
+    ),
+    (
+        "the wheel does not move the text",
+        "                ViewMode::Raw if doc.source.is_some() => {",
+        "                ViewMode::Raw if doc.source.is_some() && false => {",
+        [WHEEL],
+    ),
+    (
+        "a line and column land a line late",
+        "    for _ in 1..line {",
+        "    for _ in 0..line {",
+        [BYTE_AT, REPAIR],
+    ),
+    (
+        "a column counts bytes",
+        "    start.saturating_add(char_to_byte_pos(within, column.saturating_sub(1)))",
+        "    start.saturating_add(column.saturating_sub(1).min(within.len()))",
+        [BYTE_AT],
+    ),
+    (
+        "past the last line is its start",
+        "            None => return text.len(),",
+        "            None => return start,",
+        [BYTE_AT],
+    ),
+    (
+        "opening reads the whole file whatever its size",
+        "        let read = match safeio::read_to_string_capped(path, MAX_OPEN_BYTES) {",
+        "        let read = match safeio::read_to_string_capped(path, usize::MAX / 2) {",
+        [TRUNC],
     ),
 ]
 

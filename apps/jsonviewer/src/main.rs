@@ -8,6 +8,9 @@
 //! - `JSONPath` display for selected nodes
 //! - In-place edit mode for values, key add/delete
 //! - Real-time validation with line/column error reporting
+//! - The document's own text, edited as it is in the raw view (Enter or a
+//!   click), parsed again as it changes -- how a file that does not parse
+//!   is repaired
 //! - Statistics panel (node count, depth, type distribution)
 //! - YAML-like display conversion
 //! - Multi-tab document support
@@ -49,16 +52,18 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
 use guitk::dialog::{FileDialog, FilePicker, Picked};
-use guitk::event::{Event, EventResult, MouseButton, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::event::{Event, EventResult, KeyEvent, MouseButton, MouseEventKind};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
+use guitk::wheel;
 use oswindow::app::{self, Response};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
+use textarea::{Edited, TextArea};
 use unsaved::{Choice, Question};
 
 // ============================================================================
@@ -119,7 +124,19 @@ fn mode_width(mode: ViewMode) -> f32 {
 }
 
 // Limits
-const MAX_INPUT_LEN: usize = 1_048_576;
+/// The character bound handed to [`TextArea`] while the text is edited as it
+/// is: none. The real bound is [`MAX_OPEN_BYTES`] of UTF-8, checked after
+/// each key, because text this program writes must be text it can read back
+/// whole. A character bound at that number would stop an ASCII text at the
+/// same place -- first, and without a word -- since a text never has more
+/// characters than bytes.
+const SOURCE_CHARS_UNBOUNDED: usize = usize::MAX;
+/// The raw view's line-number gutter.
+const RAW_GUTTER: f32 = 50.0;
+/// Where the raw view's text begins.
+const SOURCE_TEXT_X: f32 = RAW_GUTTER + 4.0;
+/// Room kept beside the caret when a long line scrolls sideways to show it.
+const SOURCE_MARGIN: f32 = 40.0;
 const MAX_SEARCH_LEN: usize = 256;
 const MAX_TABS: usize = 20;
 const MAX_DEPTH: usize = 128;
@@ -1785,6 +1802,98 @@ const VIEW_MODES: [ViewMode; 5] = [
     ViewMode::Diff,
 ];
 
+/// The raw view's text being edited as it is.
+///
+/// The raw view otherwise draws a *formatted copy* -- re-indented, or
+/// minified, as `I` and `M` choose -- which is not what is in the file and so
+/// cannot be edited in place. This is the file's own text, verbatim, with a
+/// caret. Every change is written straight back to [`Document::input`] and
+/// parsed again, so the tree, the statistics and a save see it at once, and a
+/// document that does not parse can be repaired where it stands.
+///
+/// Before this, the only text entry was an "input area" whose keys were
+/// handled and which nothing could focus: `input_focused` had one writer,
+/// which set it to `false`. A new document could never be given content, and
+/// an opened one that did not parse could be looked at but not fixed.
+#[derive(Debug, Clone)]
+struct SourceEdit {
+    /// The text, its caret and its selection.
+    area: TextArea,
+    /// The first line on screen.
+    scroll: usize,
+    /// How far the lines are scrolled sideways, in pixels: a minified
+    /// document is one line, and the caret must stay on screen along it.
+    hscroll: f32,
+    /// The wheel's fractions of a line, until they make a whole one.
+    wheel: wheel::Accumulator,
+}
+
+impl SourceEdit {
+    /// `text`, with the caret at byte `at` and the first line on screen at
+    /// `scroll`.
+    fn new(text: &str, at: usize, scroll: usize) -> Self {
+        let mut area = TextArea::new(NORMAL_TEXT).with_family(FontFamily::Mono);
+        area.set_text(text);
+        area.move_to(at, false);
+        Self {
+            area,
+            scroll,
+            hscroll: 0.0,
+            wheel: wheel::Accumulator::default(),
+        }
+    }
+
+    /// How far into its line the caret is drawn, in pixels.
+    fn caret_x(&self) -> f32 {
+        let caret = self.area.caret();
+        let start = self.area.line_start(caret);
+        text::measure_in(
+            self.area.text().get(start..caret).unwrap_or(""),
+            NORMAL_TEXT,
+            FontWeightHint::Regular,
+            FontFamily::Mono,
+        )
+    }
+
+    /// Scroll so the caret is among the `rows` lines on screen, and within
+    /// the `width` pixels the text is drawn in.
+    fn keep_caret_in_view(&mut self, rows: usize, width: f32) {
+        let rows = rows.max(1);
+        let line = self.area.line_index(self.area.caret());
+        if line < self.scroll {
+            self.scroll = line;
+        } else if line >= self.scroll.saturating_add(rows) {
+            self.scroll = line.saturating_add(1).saturating_sub(rows);
+        }
+        let x = self.caret_x();
+        // The margin shrinks with a narrow window, or the caret could never
+        // be both inside it and on screen.
+        let margin = SOURCE_MARGIN.min(width / 4.0).max(0.0);
+        if x < self.hscroll {
+            self.hscroll = (x - margin).max(0.0);
+        } else if x + guitk::textedit::CARET_WIDTH > self.hscroll + width {
+            self.hscroll = (x + guitk::textedit::CARET_WIDTH + margin - width).max(0.0);
+        }
+    }
+}
+
+/// Byte offset of 1-based `line` and `column` (a column counts characters,
+/// as [`ParseError`] reports them) in `text`, clamped to the line's end and
+/// to the text's.
+fn byte_at(text: &str, line: usize, column: usize) -> usize {
+    let mut start = 0;
+    for _ in 1..line {
+        match text.get(start..).and_then(|rest| rest.find('\n')) {
+            Some(nl) => start = start.saturating_add(nl).saturating_add(1),
+            None => return text.len(),
+        }
+    }
+    let rest = text.get(start..).unwrap_or("");
+    let end = rest.find('\n').unwrap_or(rest.len());
+    let within = rest.get(..end).unwrap_or("");
+    start.saturating_add(char_to_byte_pos(within, column.saturating_sub(1)))
+}
+
 /// A single JSON document tab.
 struct Document {
     /// Tab identifier, unique for the life of the window.
@@ -1829,6 +1938,9 @@ struct Document {
     tree_scroll: f32,
     /// Scroll offset for raw view.
     raw_scroll: f32,
+    /// The text being edited as it is, in the raw view; `None` while the
+    /// view shows the formatted copy.
+    source: Option<SourceEdit>,
     /// Indent style.
     indent: IndentStyle,
     /// Whether to show minified.
@@ -1865,6 +1977,7 @@ impl Document {
             revision: 0,
             tree_scroll: 0.0,
             raw_scroll: 0.0,
+            source: None,
             indent: IndentStyle::Spaces2,
             minified: false,
             dirty: false,
@@ -2052,10 +2165,9 @@ struct App {
     /// tests — had no caller at all: Enter loaded a value into the buffer and
     /// nothing ever wrote it back.
     editing_path: Option<Vec<PathSegment>>,
-    /// Whether the app is focused on the input area.
-    input_focused: bool,
-    /// Cursor position in input.
-    cursor_pos: usize,
+    /// What Ctrl+C or Ctrl+X last took from the text being edited, for
+    /// Ctrl+V: the program's own, as in the other editors here.
+    clipboard: String,
     /// The open or save picker. Holds the dialog, the saving flag and
     /// the routing eleven applications used to write out by hand.
     pub picker: FilePicker,
@@ -2192,6 +2304,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Delete", "Remove this node"),
     ("I", "Cycle the indent, in the raw view"),
     ("M", "Minify or pretty-print, in the raw view"),
+    ("Enter", "Edit the text itself, in the raw view (Esc stops)"),
     ("Ctrl+O", "Open a file"),
     ("Ctrl+S", "Save"),
     ("Ctrl+Shift+S", "Save as a new file"),
@@ -2297,9 +2410,10 @@ struct Fingerprint {
     /// Whether the search is case-sensitive, which the "Aa" button draws.
     search_case_sensitive: bool,
     edit_mode: bool,
-    input_focused: bool,
     edit_buffer: String,
-    cursor_pos: usize,
+    /// The text being edited as it is: its caret, selection and scroll.
+    /// What it holds is counted by `revision`.
+    source: Option<(usize, Option<usize>, usize, f32)>,
     /// Document state: the selection, and the view it is shown in.
     selected_node: usize,
     view_mode: ViewMode,
@@ -2363,8 +2477,7 @@ impl App {
             edit_mode: false,
             edit_buffer: String::new(),
             editing_path: None,
-            input_focused: false,
-            cursor_pos: 0,
+            clipboard: String::new(),
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
         }
@@ -2495,13 +2608,12 @@ impl App {
     }
 
     /// Handle keyboard events.
-    fn handle_key(
-        &mut self,
-        key: guitk::event::Key,
-        modifiers: guitk::event::Modifiers,
-        text: Option<char>,
-    ) {
+    fn handle_key(&mut self, ev: &KeyEvent) {
         use guitk::event::Key;
+
+        let (key, modifiers) = (ev.key, ev.modifiers);
+        let text = ev.text.chars().next();
+        let editing_source = self.source_is_open();
 
         // The shortcut list, before anything else -- but **not** while the
         // find bar or a value edit is open, because both of those take typed
@@ -2512,7 +2624,7 @@ impl App {
         // argument to this function rather than through `key.text` or
         // `typed()`, so a search for either found nothing. The keystroke does
         // become text; it just arrives by a road the search did not cover.
-        let typing = self.search_visible || self.editing_path.is_some();
+        let typing = self.search_visible || self.editing_path.is_some() || editing_source;
         if !typing {
             if key == Key::F1 || (key == Key::Slash && modifiers.shift) {
                 self.show_help = !self.show_help;
@@ -2548,6 +2660,10 @@ impl App {
                     return;
                 }
                 Key::F => {
+                    // The find bar takes the keys while it is open, so the
+                    // text stops being edited first: otherwise each would
+                    // think a typed key was its own.
+                    self.close_source();
                     self.search_visible = !self.search_visible;
                     return;
                 }
@@ -2592,9 +2708,9 @@ impl App {
             }
         }
 
-        // Input area handling
-        if self.input_focused {
-            self.handle_input_key(key, modifiers, text);
+        // The text being edited as it is takes every other key.
+        if editing_source {
+            self.source_key(ev);
             return;
         }
 
@@ -2656,6 +2772,23 @@ impl App {
                     return;
                 }
             }
+        }
+
+        // Enter edits the text itself: in the raw view, and in a tree with
+        // nothing in it -- a new document, or one that does not parse, which
+        // is the one that most needs it. The caret starts where the parse
+        // failed, when it did.
+        if key == Key::Enter
+            && let Some(doc) = self.documents.get(self.active_tab)
+            && (doc.view_mode == ViewMode::Raw
+                || (doc.view_mode == ViewMode::Tree && doc.parsed.is_none()))
+        {
+            let at = doc
+                .error
+                .as_ref()
+                .map_or(0, |e| byte_at(&doc.input, e.line, e.column));
+            self.open_source(at, None);
+            return;
         }
 
         // View mode handling — extract mode first to avoid holding &mut doc across handle_tree_key
@@ -2887,81 +3020,159 @@ impl App {
         }
     }
 
-    fn handle_input_key(
-        &mut self,
-        key: guitk::event::Key,
-        _modifiers: guitk::event::Modifiers,
-        text: Option<char>,
-    ) {
-        use guitk::event::Key;
+    /// Whether the active document's text is being edited as it is.
+    fn source_is_open(&self) -> bool {
+        self.active_doc().is_some_and(|d| d.source.is_some())
+    }
 
-        let doc = match self.documents.get_mut(self.active_tab) {
-            Some(d) => d,
-            None => return,
-        };
-
-        match key {
-            Key::Escape => {
-                self.input_focused = false;
-            }
-            Key::Backspace => {
-                if self.cursor_pos > 0 && !doc.input.is_empty() {
-                    let byte_pos = char_to_byte_pos(&doc.input, self.cursor_pos - 1);
-                    let next_byte = char_to_byte_pos(&doc.input, self.cursor_pos);
-                    doc.input.drain(byte_pos..next_byte);
-                    self.cursor_pos -= 1;
-                    doc.dirty = true;
-                    doc.reparse();
-                }
-            }
-            Key::Delete => {
-                let char_count = doc.input.chars().count();
-                if self.cursor_pos < char_count {
-                    let byte_pos = char_to_byte_pos(&doc.input, self.cursor_pos);
-                    let next_byte = char_to_byte_pos(&doc.input, self.cursor_pos + 1);
-                    doc.input.drain(byte_pos..next_byte);
-                    doc.dirty = true;
-                    doc.reparse();
-                }
-            }
-            Key::Left => {
-                if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
-                }
-            }
-            Key::Right => {
-                let char_count = doc.input.chars().count();
-                if self.cursor_pos < char_count {
-                    self.cursor_pos += 1;
-                }
-            }
-            Key::Home => {
-                self.cursor_pos = 0;
-            }
-            Key::End => {
-                self.cursor_pos = doc.input.chars().count();
-            }
-            Key::Enter => {
-                if doc.input.len() < MAX_INPUT_LEN {
-                    let byte_pos = char_to_byte_pos(&doc.input, self.cursor_pos);
-                    doc.input.insert(byte_pos, '\n');
-                    self.cursor_pos += 1;
-                    doc.dirty = true;
-                    doc.reparse();
-                }
-            }
-            _ => {
-                if let Some(ch) = text
-                    && doc.input.len() < MAX_INPUT_LEN
-                {
-                    let byte_pos = char_to_byte_pos(&doc.input, self.cursor_pos);
-                    doc.input.insert(byte_pos, ch);
-                    self.cursor_pos += 1;
-                    doc.dirty = true;
-                    doc.reparse();
-                }
-            }
+    /// Edit the active document's own text, with the caret at byte `at` and,
+    /// when given, line `scroll` first on screen -- in the raw view, which
+    /// this switches to.
+    ///
+    /// A value being typed over in the tree is committed first, as switching
+    /// tabs commits it, and the find bar closes: both take typed keys, and
+    /// only one thing can.
+    fn open_source(&mut self, at: usize, scroll: Option<usize>) {
+        if self.editing_path.is_some() {
+            self.commit_edit();
         }
+        self.search_visible = false;
+        let (rows, width) = (self.source_rows(), self.source_width());
+        let Some(doc) = self.documents.get_mut(self.active_tab) else {
+            return;
+        };
+        doc.view_mode = ViewMode::Raw;
+        let mut source = SourceEdit::new(&doc.input, at, scroll.unwrap_or(0));
+        let lines = source.area.line_count();
+        source.scroll = source.scroll.min(lines.saturating_sub(1));
+        source.keep_caret_in_view(rows, width);
+        doc.source = Some(source);
+    }
+
+    /// Stop editing the active document's text; the raw view shows the
+    /// formatted copy again. The text keeps every change.
+    fn close_source(&mut self) {
+        if let Some(doc) = self.documents.get_mut(self.active_tab) {
+            doc.source = None;
+        }
+    }
+
+    /// How many lines of text the raw view shows: its height, less the line
+    /// at its foot that says whether the text parses.
+    fn source_rows(&self) -> usize {
+        let top = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 30.0;
+        let height = self.height - top - STATUS_BAR_HEIGHT - LINE_HEIGHT;
+        if height.is_finite() && height > 0.0 {
+            ((height / LINE_HEIGHT) as usize).max(1)
+        } else {
+            1
+        }
+    }
+
+    /// How wide the raw view's text is drawn, in pixels.
+    fn source_width(&self) -> f32 {
+        (self.width - SIDEBAR_WIDTH - SOURCE_TEXT_X - PADDING).max(1.0)
+    }
+
+    /// A key while the text is being edited as it is.
+    ///
+    /// Escape stops; Tab puts in a step of the indent the text is written
+    /// with, since in this view a Tab has no field to move to; every other
+    /// key is [`TextArea::apply_key`]'s. A change is written back to the
+    /// document at once and parsed again -- unless it would take the text past
+    /// [`MAX_OPEN_BYTES`], which this program would then fail to read back
+    /// whole, in which case the text is left as it was and the status line
+    /// says why.
+    fn source_key(&mut self, ev: &KeyEvent) {
+        use guitk::event::Key;
+        let (rows, width) = (self.source_rows(), self.source_width());
+        let Some(doc) = self.documents.get_mut(self.active_tab) else {
+            return;
+        };
+        let Some(source) = doc.source.as_mut() else {
+            return;
+        };
+        if ev.key == Key::Escape {
+            doc.source = None;
+            return;
+        }
+        let before = source.area.clone();
+        let edited = if ev.key == Key::Tab && !ev.modifiers.ctrl && !ev.modifiers.shift {
+            let step = IndentStyle::detect(source.area.text())
+                .unwrap_or(IndentStyle::Spaces2)
+                .indent_str();
+            Edited {
+                handled: true,
+                changed: source.area.insert(step, SOURCE_CHARS_UNBOUNDED),
+                copied: None,
+            }
+        } else {
+            source
+                .area
+                .apply_key(ev, SOURCE_CHARS_UNBOUNDED, &self.clipboard, rows)
+        };
+        if let Some(copied) = edited.copied {
+            self.clipboard = copied;
+        }
+        if source.area.text().len() > MAX_OPEN_BYTES {
+            source.area = before;
+            self.note = Some(format!(
+                "Not added: the text would be over {MAX_OPEN_BYTES} bytes, more than this program reads of a file"
+            ));
+            return;
+        }
+        source.keep_caret_in_view(rows, width);
+        if edited.changed {
+            source.area.text().clone_into(&mut doc.input);
+            doc.dirty = true;
+            doc.reparse();
+            doc.invalidate_caches();
+        }
+    }
+
+    /// A press in the raw view, `dy` pixels below its top: the text is edited
+    /// from there.
+    ///
+    /// When the view was showing the formatted copy, the text itself takes
+    /// its place first, from the same line, and the caret goes where the
+    /// pointer is in *that* -- what is under the pointer can change, since
+    /// the formatted copy is not the file's text. When it was showing a parse
+    /// error, there is no text on screen to point at, so the caret goes where
+    /// the parse failed.
+    fn source_click(&mut self, x: f32, dy: f32) {
+        let (rows, width) = (self.source_rows(), self.source_width());
+        let Some(doc) = self.documents.get(self.active_tab) else {
+            return;
+        };
+        if doc.source.is_none() {
+            if let Some(error) = &doc.error {
+                let at = byte_at(&doc.input, error.line, error.column);
+                self.open_source(at, None);
+                return;
+            }
+            // The caret starts on the first line shown, or keeping it in
+            // view would scroll back to the top before the press is placed.
+            let first = (doc.raw_scroll / LINE_HEIGHT) as usize;
+            let at = byte_at(&doc.input, first.saturating_add(1), 1);
+            self.open_source(at, Some(first));
+        }
+        let Some(source) = self
+            .documents
+            .get_mut(self.active_tab)
+            .and_then(|d| d.source.as_mut())
+        else {
+            return;
+        };
+        let row = if dy.is_finite() && dy > 0.0 {
+            (dy / LINE_HEIGHT) as usize
+        } else {
+            0
+        };
+        let line = source.scroll.saturating_add(row);
+        source
+            .area
+            .click(line, x - SOURCE_TEXT_X + source.hscroll, false);
+        source.keep_caret_in_view(rows, width);
     }
 
     fn handle_mouse(&mut self, x: f32, y: f32, button: MouseButton) {
@@ -3007,6 +3218,18 @@ impl App {
                     self.search_visible = false;
                 }
             }
+            return;
+        }
+
+        // The raw view: a press edits the text itself, from where it lands.
+        if y >= content_y
+            && x < self.width - SIDEBAR_WIDTH
+            && button == MouseButton::Left
+            && self
+                .active_doc()
+                .is_some_and(|d| d.view_mode == ViewMode::Raw)
+        {
+            self.source_click(x, y - content_y);
             return;
         }
 
@@ -3086,6 +3309,11 @@ impl App {
             if x >= mode_x && x < mode_x + mode_width {
                 if let Some(doc) = self.documents.get_mut(self.active_tab) {
                     doc.view_mode = *mode;
+                    // The text is edited in the raw view only; leaving it
+                    // stops, as Escape does, and the changes stay.
+                    if *mode != ViewMode::Raw {
+                        doc.source = None;
+                    }
                 }
                 return;
             }
@@ -3093,17 +3321,31 @@ impl App {
         }
     }
 
+    /// The wheel, whose `dy` is in notches (`guitk::event::MouseEventKind::Scroll`).
+    ///
+    /// It was treated as pixels, three to a notch: a notch moved the tree a
+    /// seventh of a line. `wheel::pixels` moves the same distance a notch
+    /// moves any list here. The text being edited scrolls by whole lines,
+    /// through its own accumulator.
     fn handle_scroll(&mut self, _x: f32, _y: f32, dy: f32) {
         if let Some(doc) = self.documents.get_mut(self.active_tab) {
+            let step = wheel::pixels(dy, LINE_HEIGHT);
             match doc.view_mode {
                 ViewMode::Tree => {
-                    doc.tree_scroll = (doc.tree_scroll - dy * 3.0).max(0.0);
+                    doc.tree_scroll = (doc.tree_scroll + step).max(0.0);
+                }
+                ViewMode::Raw if doc.source.is_some() => {
+                    if let Some(source) = doc.source.as_mut() {
+                        let rows = source.wheel.rows(dy);
+                        let last = source.area.line_count().saturating_sub(1);
+                        source.scroll = source.scroll.saturating_add_signed(rows).min(last);
+                    }
                 }
                 ViewMode::Raw | ViewMode::Yaml | ViewMode::Stats => {
-                    doc.raw_scroll = (doc.raw_scroll - dy * 3.0).max(0.0);
+                    doc.raw_scroll = (doc.raw_scroll + step).max(0.0);
                 }
                 ViewMode::Diff => {
-                    doc.diff_scroll = (doc.diff_scroll - dy * 3.0).max(0.0);
+                    doc.diff_scroll = (doc.diff_scroll + step).max(0.0);
                 }
             }
         }
@@ -3408,22 +3650,13 @@ impl App {
     /// file -- the worst kind, because it accuses the user's data.
     pub fn open_path(&mut self, path: &std::path::Path) -> String {
         let shown = path.display().to_string();
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
+        // Bounded before it is read, not after: `read_to_string` then a cut
+        // held the whole file first, so the cap stopped nothing a cap is for.
+        let read = match safeio::read_to_string_capped(path, MAX_OPEN_BYTES) {
+            Ok(read) => read,
             Err(err) => return format!("Could not read {shown}: {err}"),
         };
-        let whole = text.len();
-        let truncated = whole > MAX_OPEN_BYTES;
-        let input = if truncated {
-            // Cut on a character boundary, or the slice is not valid UTF-8.
-            let mut cut = MAX_OPEN_BYTES;
-            while cut > 0 && !text.is_char_boundary(cut) {
-                cut = cut.saturating_sub(1);
-            }
-            text.get(..cut).unwrap_or("").to_string()
-        } else {
-            text
-        };
+        let (input, whole, truncated) = (read.text, read.whole, read.truncated);
 
         let name = path
             .file_name()
@@ -3492,7 +3725,7 @@ impl App {
                 // the ones it ignored. Comparing the state around the call
                 // beats making every arm of a long match remember to report.
                 let before = self.state_fingerprint();
-                self.handle_key(key_ev.key, key_ev.modifiers, key_ev.text.chars().next());
+                self.handle_key(key_ev);
                 if self.state_fingerprint() == before {
                     EventResult::Ignored
                 } else {
@@ -3547,9 +3780,10 @@ impl App {
             search_visible: self.search_visible,
             search_case_sensitive: self.search_case_sensitive,
             edit_mode: self.edit_mode,
-            input_focused: self.input_focused,
             edit_buffer: self.edit_buffer.clone(),
-            cursor_pos: self.cursor_pos,
+            source: doc
+                .and_then(|d| d.source.as_ref())
+                .map(|s| (s.area.caret(), s.area.anchor(), s.scroll, s.hscroll)),
             selected_node: doc.map_or(0, |d| d.selected_node),
             view_mode: doc.map_or(ViewMode::Tree, |d| d.view_mode),
             picker_open: self.picker.is_open(),
@@ -3896,7 +4130,9 @@ impl App {
                 cmds.push(RenderCommand::Text {
                     x: PADDING,
                     y: top + 30.0,
-                    text: String::from("Nothing here yet -- press Ctrl+O to open a JSON file"),
+                    text: String::from(
+                        "Nothing here yet -- press Ctrl+O to open a JSON file, or Enter to type one",
+                    ),
                     color: self.palette.subtext0,
                     font_size: NORMAL_TEXT,
                     font_weight: FontWeightHint::Regular,
@@ -4032,6 +4268,10 @@ impl App {
         width: f32,
         height: f32,
     ) {
+        if self.source_is_open() {
+            self.render_source(cmds, top, width, height);
+            return;
+        }
         let doc = match self.documents.get_mut(self.active_tab) {
             Some(d) => d,
             None => return,
@@ -4050,7 +4290,7 @@ impl App {
         let last_visible = (first_visible + visible_count).min(highlighted.len());
 
         // Gutter (line numbers)
-        let gutter_width = 50.0;
+        let gutter_width = RAW_GUTTER;
         self.palette
             .push_surface(cmds, 0.0, top, gutter_width, height, 0.0, Surface::Sidebar);
 
@@ -4116,6 +4356,208 @@ impl App {
                 overflow: TextOverflow::Clip,
             });
         }
+    }
+
+    /// The text being edited as it is: its lines verbatim in the fixed-pitch
+    /// face, the selection under them, the caret, and the line the parse
+    /// failed on marked in the gutter -- with what the parse says at the foot.
+    ///
+    /// Only the part of a line that is on screen is sent: a minified document
+    /// is one line, and drawing all of it each frame would send the whole file
+    /// to the compositor for every key.
+    fn render_source(&self, cmds: &mut Vec<RenderCommand>, top: f32, width: f32, height: f32) {
+        let Some(doc) = self.active_doc() else {
+            return;
+        };
+        let Some(source) = doc.source.as_ref() else {
+            return;
+        };
+        let rows = self.source_rows();
+        let text_width = self.source_width();
+        let bad_line = doc.error.as_ref().map(|e| e.line.saturating_sub(1));
+
+        self.palette
+            .push_surface(cmds, 0.0, top, RAW_GUTTER, height, 0.0, Surface::Sidebar);
+        let selection = source.area.selection();
+        let caret = source.area.caret();
+        let mut start = 0_usize;
+        let lines = source.area.text().split('\n');
+        for (i, line) in lines.enumerate() {
+            let end = start.saturating_add(line.len());
+            if i >= source.scroll.saturating_add(rows) {
+                break;
+            }
+            if i >= source.scroll {
+                let row_y = top + (i - source.scroll) as f32 * LINE_HEIGHT;
+                let bad = bad_line == Some(i);
+                if bad {
+                    cmds.push(RenderCommand::FillRect {
+                        x: RAW_GUTTER,
+                        y: row_y,
+                        width: width - RAW_GUTTER,
+                        height: LINE_HEIGHT,
+                        color: Color::rgba(243, 139, 168, 24),
+                        corner_radii: CornerRadii::ZERO,
+                    });
+                }
+                cmds.push(RenderCommand::Text {
+                    x: 4.0,
+                    y: row_y + 14.0,
+                    text: format!("{}", i + 1),
+                    color: if bad {
+                        self.palette.ink(self.palette.red)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_size: SMALL_TEXT,
+                    font_weight: if bad {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    max_width: Some(RAW_GUTTER - 8.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+                self.render_source_line(
+                    cmds, source, line, start, row_y, text_width, selection, caret,
+                );
+            }
+            start = end.saturating_add(1);
+        }
+
+        let (said, color) = match &doc.error {
+            Some(error) => (
+                format!("{error} -- Esc shows the formatted view"),
+                self.palette.ink(self.palette.red),
+            ),
+            None if doc.parsed.is_some() => (
+                String::from("Valid JSON -- Esc shows it formatted"),
+                self.palette.subtext0,
+            ),
+            None => (
+                String::from("Type or paste JSON -- Esc stops editing"),
+                self.palette.subtext0,
+            ),
+        };
+        cmds.push(RenderCommand::Text {
+            x: PADDING,
+            y: top + height - 6.0,
+            text: said,
+            color,
+            font_size: SMALL_TEXT,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width - PADDING * 2.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    /// One line of the text being edited, `line` starting at byte `start` of
+    /// it, drawn at `row_y` within `text_width` pixels, scrolled sideways by
+    /// the editor's `hscroll`.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one drawing step, split from its loop; bundling these into a struct would only rename them"
+    )]
+    fn render_source_line(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        source: &SourceEdit,
+        line: &str,
+        start: usize,
+        row_y: f32,
+        text_width: f32,
+        selection: Option<(usize, usize)>,
+        caret: usize,
+    ) {
+        let measure =
+            |s: &str| text::measure_in(s, NORMAL_TEXT, FontWeightHint::Regular, FontFamily::Mono);
+        let end = start.saturating_add(line.len());
+        cmds.push(RenderCommand::PushClip {
+            x: SOURCE_TEXT_X,
+            y: row_y,
+            width: text_width,
+            height: LINE_HEIGHT,
+        });
+        if let Some((from, to)) = selection {
+            let a = from.clamp(start, end).saturating_sub(start);
+            let b = to.clamp(start, end).saturating_sub(start);
+            if a < b {
+                for (left, w) in text::selection_boxes_in(
+                    line,
+                    a,
+                    b,
+                    NORMAL_TEXT,
+                    FontWeightHint::Regular,
+                    FontFamily::Mono,
+                ) {
+                    cmds.push(RenderCommand::FillRect {
+                        x: SOURCE_TEXT_X + left - source.hscroll,
+                        y: row_y,
+                        width: w,
+                        height: LINE_HEIGHT,
+                        color: self.palette.surface2,
+                        corner_radii: CornerRadii::ZERO,
+                    });
+                }
+            }
+        }
+        // The part on screen: from the character at the left edge to the one
+        // past the right. A carriage return at the end is not drawn.
+        let shown = line.strip_suffix('\r').unwrap_or(line);
+        let from = text::cursor_at_in(
+            shown,
+            source.hscroll,
+            NORMAL_TEXT,
+            FontWeightHint::Regular,
+            FontFamily::Mono,
+        )
+        .byte;
+        let from = shown
+            .get(..from)
+            .and_then(|head| head.char_indices().next_back())
+            .map_or(0, |(i, _)| i);
+        let to = text::cursor_at_in(
+            shown,
+            source.hscroll + text_width,
+            NORMAL_TEXT,
+            FontWeightHint::Regular,
+            FontFamily::Mono,
+        )
+        .byte;
+        let to = shown
+            .get(to..)
+            .and_then(|tail| tail.chars().next())
+            .map_or(shown.len(), |c| to.saturating_add(c.len_utf8()));
+        if let Some(piece) = shown.get(from..to)
+            && !piece.is_empty()
+        {
+            cmds.push(RenderCommand::PushFont {
+                family: FontFamily::Mono,
+            });
+            cmds.push(RenderCommand::Text {
+                x: SOURCE_TEXT_X + measure(shown.get(..from).unwrap_or("")) - source.hscroll,
+                y: row_y + 14.0,
+                text: piece.to_owned(),
+                color: self.palette.text,
+                font_size: NORMAL_TEXT,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+            cmds.push(RenderCommand::PopFont);
+        }
+        if (start..=end).contains(&caret) {
+            let x = measure(line.get(..caret.saturating_sub(start)).unwrap_or(""));
+            cmds.push(RenderCommand::FillRect {
+                x: SOURCE_TEXT_X + x - source.hscroll,
+                y: row_y,
+                width: guitk::textedit::CARET_WIDTH,
+                height: LINE_HEIGHT,
+                color: self.palette.text,
+                corner_radii: CornerRadii::ZERO,
+            });
+        }
+        cmds.push(RenderCommand::PopClip);
     }
 
     fn render_yaml_view(
@@ -5085,6 +5527,18 @@ impl App {
                 error.line, error.column, error.message
             ),
             color: self.palette.text,
+            font_size: SMALL_TEXT,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width - PADDING * 2.0 - 24.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        // What to do about it: the one thing a reader of this banner wants.
+        cmds.push(RenderCommand::Text {
+            x: PADDING + 12.0,
+            y: top + PADDING + 60.0 + 22.0,
+            text: String::from("Press Enter to edit the text where it goes wrong"),
+            color: self.palette.subtext0,
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PADDING * 2.0 - 24.0),
@@ -7588,6 +8042,482 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // The text itself, edited in the raw view
+    // ------------------------------------------------------------------
+
+    /// A key as a keyboard sends it: the key, and the text it types.
+    fn keyed(k: Key, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: text.to_owned(),
+        })
+    }
+
+    /// The top of the view's text: below the toolbar, the tabs and the chips.
+    const CONTENT_Y: f32 = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 30.0;
+
+    /// A window whose one document holds `text`, parsed.
+    fn holding(text: &str) -> App {
+        let mut app = App::new();
+        app.documents[0].input = text.to_owned();
+        app.documents[0].reparse();
+        app
+    }
+
+    fn source(app: &App) -> &SourceEdit {
+        app.documents[app.active_tab]
+            .source
+            .as_ref()
+            .expect("the text is being edited")
+    }
+
+    /// **Enter in the raw view edits the text itself**, and what is typed is
+    /// the document at once: parsed, marked unsaved, and seen as a change.
+    #[test]
+    fn enter_in_the_raw_view_edits_the_text_itself() {
+        let mut app = two_tabs();
+        app.handle_event(&press(Key::Num2));
+        assert_eq!(app.handle_event(&press(Key::Enter)), EventResult::Consumed);
+        assert_eq!(
+            source(&app).area.caret(),
+            0,
+            "a document that parses starts at its start"
+        );
+        app.handle_event(&press_ctrl(Key::End));
+        app.handle_event(&press(Key::Left));
+        for c in r#","c":true"#.chars() {
+            assert_eq!(app.handle_event(&typed(c)), EventResult::Consumed, "{c:?}");
+        }
+        let doc = &app.documents[0];
+        assert_eq!(doc.input, r#"{"a":1,"b":"x","c":true}"#);
+        assert!(doc.dirty, "an edited text was not marked unsaved");
+        assert!(
+            matches!(&doc.parsed, Some(JsonValue::Object(entries))
+                if entries.iter().any(|(k, v)| k == "c" && *v == JsonValue::Bool(true))),
+            "the tree does not see what was typed"
+        );
+        assert!(help_text(&mut app).contains(r#"{"a":1,"b":"x","c":true}"#));
+    }
+
+    /// **A document that does not parse is repaired where it goes wrong.**
+    /// Enter in its tree -- which has only the error to show -- edits the
+    /// text with the caret at the place the parse failed.
+    #[test]
+    fn a_document_that_does_not_parse_is_repaired_where_it_goes_wrong() {
+        let mut app = holding(r#"{"a":1 "b":2}"#);
+        assert!(app.documents[0].error.is_some());
+        assert!(
+            help_text(&mut app).contains("Press Enter to edit the text where it goes wrong"),
+            "the banner does not say what to do"
+        );
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(app.documents[0].view_mode, ViewMode::Raw);
+        assert_eq!(
+            source(&app).area.caret(),
+            7,
+            "the caret is not at the failure"
+        );
+        let (w, h) = (app.width, app.height);
+        let red = app.palette.ink(app.palette.red);
+        assert!(
+            app.render(w, h).commands.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, color, .. } if text == "1" && *color == red
+            )),
+            "the line that fails is not marked"
+        );
+        let drawn = help_text(&mut app);
+        assert!(
+            drawn.contains("Line 1, Col 8"),
+            "the parse's verdict is not drawn: {drawn}"
+        );
+        app.handle_event(&typed(','));
+        let doc = &app.documents[0];
+        assert_eq!(doc.input, r#"{"a":1 ,"b":2}"#);
+        assert!(
+            doc.error.is_none() && doc.parsed.is_some(),
+            "the repair did not parse"
+        );
+        assert!(help_text(&mut app).contains("Valid JSON"));
+    }
+
+    /// A new document says how to give it content, and Enter does.
+    #[test]
+    fn a_new_document_can_be_typed_into() {
+        let mut app = App::new();
+        assert!(help_text(&mut app).contains("or Enter to type one"));
+        app.handle_event(&press(Key::Enter));
+        assert!(
+            app.source_is_open(),
+            "Enter on an empty tree did not edit the text"
+        );
+        assert!(help_text(&mut app).contains("Type or paste JSON"));
+        for c in "[1, 2]".chars() {
+            app.handle_event(&typed(c));
+        }
+        assert_eq!(app.documents[0].input, "[1, 2]");
+        assert!(app.documents[0].parsed.is_some());
+    }
+
+    /// Escape stops editing, and keeps every change; the keys are the view's
+    /// again.
+    #[test]
+    fn escape_stops_editing_and_keeps_the_changes() {
+        let mut app = two_tabs();
+        app.handle_event(&press(Key::Num2));
+        app.handle_event(&press(Key::Enter));
+        // Twice: the first also marks the tab unsaved, which is a change of
+        // its own; the second changes nothing but the text.
+        for _ in 0..2 {
+            assert_eq!(
+                app.handle_event(&press(Key::Delete)),
+                EventResult::Consumed,
+                "a deletion moves no caret, and was taken for nothing happening"
+            );
+        }
+        assert!(
+            app.documents[0].error.is_some(),
+            "a deleted brace still parsed"
+        );
+        assert_eq!(app.handle_event(&press(Key::Escape)), EventResult::Consumed);
+        assert!(!app.source_is_open());
+        assert_eq!(app.documents[0].input, r#"a":1,"b":"x"}"#);
+        app.handle_event(&press(Key::Num1));
+        assert_eq!(app.documents[0].view_mode, ViewMode::Tree);
+    }
+
+    /// While the text is edited, a key that types is typing: `5` is not the
+    /// diff view, `?` not the shortcut list, `i` and `m` not the indent.
+    #[test]
+    fn a_typed_key_is_the_texts_while_it_is_edited() {
+        let mut app = holding("[]");
+        app.handle_event(&press(Key::Num2));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press(Key::Right));
+        let (indent, minified) = (app.documents[0].indent, app.documents[0].minified);
+        app.handle_event(&keyed(Key::Num5, "5"));
+        app.handle_event(&keyed(Key::I, "i"));
+        app.handle_event(&keyed(Key::M, "m"));
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Slash,
+            pressed: true,
+            modifiers: Modifiers::shift(),
+            text: String::from("?"),
+        }));
+        let doc = &app.documents[0];
+        assert_eq!(doc.input, "[5im?]");
+        assert_eq!(doc.view_mode, ViewMode::Raw);
+        assert_eq!((doc.indent, doc.minified), (indent, minified));
+        assert!(!app.show_help, "the shortcut list took a typed ?");
+    }
+
+    /// A press in the raw view edits the text, with the caret where it lands;
+    /// a second press moves it.
+    #[test]
+    fn a_press_in_the_raw_view_puts_the_caret_where_it_lands() {
+        let mut app = holding("[\n  1,\n  2\n]");
+        app.handle_event(&press(Key::Num2));
+        click(
+            &mut app,
+            SOURCE_TEXT_X + 1.0,
+            CONTENT_Y + LINE_HEIGHT * 2.0 + 5.0,
+        );
+        let edit = source(&app);
+        assert_eq!(
+            edit.area.caret(),
+            edit.area.start_of_line(2),
+            "not the third line's start"
+        );
+        click(&mut app, SOURCE_TEXT_X + 500.0, CONTENT_Y + 5.0);
+        assert_eq!(source(&app).area.caret(), 1, "past a line's end is its end");
+    }
+
+    /// A press on a parse error's banner goes to the error: there is no text
+    /// on screen to point at.
+    #[test]
+    fn a_press_on_a_parse_error_goes_to_it() {
+        let mut app = holding("[1,\n 2,,\n 3]");
+        app.handle_event(&press(Key::Num2));
+        click(&mut app, 300.0, CONTENT_Y + 300.0);
+        let edit = source(&app);
+        assert_eq!(
+            edit.area.line_index(edit.area.caret()),
+            1,
+            "not on the line that fails"
+        );
+    }
+
+    /// Leaving the raw view stops editing, as Escape does.
+    #[test]
+    fn leaving_the_raw_view_stops_editing() {
+        let mut app = two_tabs();
+        app.handle_event(&press(Key::Num2));
+        app.handle_event(&press(Key::Enter));
+        click(
+            &mut app,
+            PADDING + 5.0,
+            TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 15.0,
+        );
+        assert_eq!(app.documents[0].view_mode, ViewMode::Tree);
+        assert!(
+            !app.source_is_open(),
+            "the tree view was left editing the text"
+        );
+    }
+
+    /// The find bar and the text both take typed keys, so opening one closes
+    /// the other.
+    #[test]
+    fn the_find_bar_takes_the_keys_from_the_text() {
+        let mut app = two_tabs();
+        app.handle_event(&press(Key::Num2));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press_ctrl(Key::F));
+        assert!(app.search_visible && !app.source_is_open());
+        app.handle_event(&typed('a'));
+        assert_eq!(app.search_query, "a");
+        assert_eq!(app.documents[0].input, r#"{"a":1,"b":"x"}"#);
+        // And editing the text again closes the find bar.
+        click(
+            &mut app,
+            SOURCE_TEXT_X + 1.0,
+            CONTENT_Y + SEARCH_BAR_HEIGHT + 5.0,
+        );
+        assert!(
+            app.source_is_open(),
+            "a press below the find bar did not edit the text"
+        );
+        assert!(
+            !app.search_visible,
+            "the find bar stayed open over the text"
+        );
+    }
+
+    /// The caret stays on screen: down a long document and along a long line.
+    /// Only the part of a line that shows is drawn.
+    #[test]
+    fn the_caret_stays_on_screen() {
+        let long = format!("[{}1]", "1,".repeat(400));
+        let mut app = holding(&format!("{}{long}", "[1,\n".repeat(300)));
+        app.handle_event(&press(Key::Num2));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press_ctrl(Key::End));
+        let (rows, edit) = (app.source_rows(), source(&app));
+        let line = edit.area.line_index(edit.area.caret());
+        assert_eq!(line, 300);
+        assert!(
+            edit.scroll <= line && line < edit.scroll + rows,
+            "the last line is off screen"
+        );
+        assert!(edit.hscroll > 0.0, "the end of a long line is off screen");
+        let (w, h) = (app.width, app.height);
+        let sent = app
+            .render(w, h)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } if long.contains(text.as_str()) => {
+                    Some(text.chars().count())
+                }
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        assert!(
+            (1..200).contains(&sent),
+            "{sent} characters of a long line were sent to be drawn"
+        );
+        app.handle_event(&press(Key::Home));
+        assert!(
+            source(&app).hscroll.abs() < f32::EPSILON,
+            "the start of the line is off screen"
+        );
+        app.handle_event(&press_ctrl(Key::Home));
+        assert_eq!(source(&app).scroll, 0);
+    }
+
+    /// Tab puts in a step of the indent the text is written with.
+    #[test]
+    fn tab_indents_in_the_texts_own_step() {
+        for (text, step) in [
+            ("{\n    \"a\": 1\n}", "    "),
+            ("[1]", "  "),
+            ("[\n\t1\n]", "\t"),
+        ] {
+            let mut app = holding(text);
+            app.handle_event(&press(Key::Num2));
+            app.handle_event(&press(Key::Enter));
+            app.handle_event(&press(Key::Tab));
+            assert_eq!(app.documents[0].input, format!("{step}{text}"), "{text:?}");
+        }
+    }
+
+    /// Ctrl+A, X and V: cut and paste within the program.
+    #[test]
+    fn cut_and_paste_within_the_text() {
+        let mut app = two_tabs();
+        app.handle_event(&press(Key::Num2));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press_ctrl(Key::A));
+        app.handle_event(&press_ctrl(Key::X));
+        assert_eq!(app.documents[0].input, "");
+        assert_eq!(app.clipboard, r#"{"a":1,"b":"x"}"#);
+        app.handle_event(&press_ctrl(Key::V));
+        app.handle_event(&press_ctrl(Key::V));
+        assert_eq!(app.documents[0].input, r#"{"a":1,"b":"x"}{"a":1,"b":"x"}"#);
+        assert!(app.documents[0].error.is_some());
+    }
+
+    /// The text cannot grow past what opening the file again would read
+    /// whole; the status line says why a key did nothing.
+    #[test]
+    fn the_text_stops_where_a_reopened_file_would_be_cut() {
+        // The caret stays at the start of a line, so no key has to measure
+        // the long one.
+        let full = format!("\n{}", "a".repeat(MAX_OPEN_BYTES - 1));
+        let mut app = holding(&full);
+        app.handle_event(&press(Key::Num2));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press_ctrl(Key::Home));
+        app.handle_event(&typed(' '));
+        assert!(app.documents[0].input == full, "the text grew past the cap");
+        assert!(
+            source(&app).area.text() == full,
+            "the refused key is still on screen"
+        );
+        assert!(
+            app.note
+                .as_deref()
+                .is_some_and(|n| n.starts_with("Not added")),
+            "{:?}",
+            app.note
+        );
+        app.handle_event(&press(Key::Delete));
+        app.handle_event(&typed(' '));
+        let doc = &app.documents[0];
+        assert_eq!(
+            doc.input.len(),
+            MAX_OPEN_BYTES,
+            "the cap is not the last byte"
+        );
+        assert!(doc.input.starts_with(" a"));
+    }
+
+    /// Ctrl+S saves what was typed, over the file it came from.
+    #[test]
+    fn what_is_typed_is_what_is_saved() {
+        let file = Scratch::with("source-save", "[1]");
+        let mut app = opened(&file);
+        app.handle_event(&press(Key::Num2));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press_ctrl(Key::End));
+        app.handle_event(&press(Key::Left));
+        app.handle_event(&typed(','));
+        app.handle_event(&typed('2'));
+        app.handle_event(&press_ctrl(Key::S));
+        assert_eq!(file.read(), "[1,2]");
+        assert!(!app.documents[app.active_tab].dirty);
+        assert!(app.source_is_open(), "saving stopped the editing");
+    }
+
+    /// A notch of the wheel moves a view the distance it moves every list
+    /// here -- not three pixels, as it did -- and the text by whole lines.
+    #[test]
+    fn a_notch_of_the_wheel_moves_a_view_its_rows() {
+        let mut app = holding(&"[1,\n".repeat(100));
+        app.handle_scroll(0.0, 0.0, -1.0);
+        let notch = wheel::pixels(-1.0, LINE_HEIGHT);
+        assert!((app.documents[0].tree_scroll - notch).abs() < 0.01);
+        assert!(
+            app.documents[0].tree_scroll >= LINE_HEIGHT,
+            "a notch moved less than a line"
+        );
+        app.handle_event(&press(Key::Num2));
+        app.handle_scroll(0.0, 0.0, -1.0);
+        assert!((app.documents[0].raw_scroll - notch).abs() < 0.01);
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press_ctrl(Key::Home));
+        assert_eq!(source(&app).scroll, 0);
+        app.handle_scroll(0.0, 0.0, -1.0);
+        let moved = source(&app).scroll;
+        assert!(moved >= 1, "a notch did not move the text");
+        app.handle_scroll(0.0, 0.0, 1.0);
+        assert_eq!(source(&app).scroll, 0);
+        app.handle_scroll(0.0, 0.0, -1000.0);
+        assert_eq!(source(&app).scroll, 100, "scrolled past the last line");
+    }
+
+    /// A press in a raw view scrolled down edits the line under the pointer,
+    /// with the text opened where the view was.
+    #[test]
+    fn a_press_after_scrolling_lands_on_the_line_under_it() {
+        let text = format!("[\n{}  0\n]", "  0,\n".repeat(60));
+        let mut app = holding(&text);
+        app.handle_event(&press(Key::Num2));
+        app.documents[0].raw_scroll = 10.0 * LINE_HEIGHT;
+        click(
+            &mut app,
+            SOURCE_TEXT_X + 1.0,
+            CONTENT_Y + LINE_HEIGHT * 2.0 + 5.0,
+        );
+        let edit = source(&app);
+        assert_eq!(edit.scroll, 10, "the text did not open where the view was");
+        assert_eq!(
+            edit.area.line_index(edit.area.caret()),
+            12,
+            "not the line under the pointer"
+        );
+    }
+
+    /// A value being typed over in the tree is committed before the text is
+    /// edited, so the text holds it and nothing is left pending.
+    #[test]
+    fn a_value_being_typed_over_is_committed_before_the_text_is_edited() {
+        let mut app = two_tabs();
+        app.edit_mode = true;
+        app.editing_path = Some(vec![PathSegment::Key(String::from("a"))]);
+        app.edit_buffer = String::from("5");
+        app.documents[0].view_mode = ViewMode::Raw;
+        click(&mut app, SOURCE_TEXT_X + 1.0, CONTENT_Y + 5.0);
+        assert!(
+            app.editing_path.is_none(),
+            "the value edit was left pending"
+        );
+        assert!(
+            source(&app).area.text().contains(r#""a":5"#),
+            "the text does not hold the committed value: {}",
+            source(&app).area.text()
+        );
+    }
+
+    /// Line and column as the parser counts them, to a byte.
+    #[test]
+    fn a_line_and_column_become_a_byte() {
+        let text = "ab\n\u{e9}cd\nx";
+        assert_eq!(byte_at(text, 1, 1), 0);
+        assert_eq!(byte_at(text, 1, 3), 2);
+        assert_eq!(byte_at(text, 2, 1), 3);
+        assert_eq!(
+            byte_at(text, 2, 2),
+            5,
+            "a column counts characters, not bytes"
+        );
+        assert_eq!(
+            byte_at(text, 2, 99),
+            7,
+            "past the end of the line is its end"
+        );
+        assert_eq!(byte_at(text, 3, 1), 8);
+        assert_eq!(
+            byte_at(text, 9, 1),
+            text.len(),
+            "past the last line is the end"
         );
     }
 }

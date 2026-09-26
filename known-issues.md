@@ -166506,8 +166506,16 @@ earlier records are gone from its output.
 file (anything outside `journalrec::escape`, which takes `&str`), a torn
 write, or disk corruption -- the three things a log reader exists to survive.
 
+**The same read, twice more.** `--vacuum-time` (`read_to_string`, then
+`continue` on failure) leaves such a file alone without saying so -- the safe
+direction, still silent. And `-f` re-reads the WHOLE file every 500 ms, then
+slices the `String` at the previous length, `&content[prev_size as usize..]`,
+which panics when that offset falls inside a multi-byte character -- as it
+does when a writer's append was torn mid-character and completed later.
+
 **The proper fix:** read the file as bytes and split on `\n`, so one bad
-record costs that record and no other; report a record that is not UTF-8,
+record costs that record and no other; in `-f`, read only the bytes past the
+previous offset and carry an unterminated last line to the next round; report a record that is not UTF-8,
 or not a record, as such (journald's own `journalctl` shows such data as
 `[N bytes blob data]` rather than dropping it); and report an unreadable
 file as an error naming it, with a non-zero status, instead of skipping it.

@@ -25,18 +25,14 @@
 //!   every attempt on it fails with `EAFNOSUPPORT` the message becomes a
 //!   journal record instead of being dropped; see [`deliver`]. `--journald`
 //!   writes the same journal, since there is no journald.
-//! * **A socket or file name in a diagnostic is quoted when it needs to be**
-//!   (`quoting::quotef`), where upstream pastes it: a name holding a newline
-//!   must not be able to forge a second diagnostic line (design-decisions
-//!   §370). For every ordinary name the two are byte-identical.
+//! * **A name or argument in a diagnostic** is printed where and as upstream
+//!   prints it -- pasted ([`shown`]), or inside upstream's own `'...'`
+//!   (`quoting::escaped_in_quotes`) -- except that what is not printable is
+//!   octal-escaped: a name holding a newline must not be able to forge a
+//!   second diagnostic line (design-decisions §370). For printable text the
+//!   two are byte-identical.
 //! * **`-S 0` with input from stdin** is one empty message per line; upstream
 //!   loops forever ([`input`]).
-//! * **`SCM_CREDENTIALS`**: upstream lets root claim another live process's
-//!   PID for a local message with `--id=PID`, by attaching credentials to the
-//!   datagram. Not implemented: std has no stable ancillary-data API, SlateOS
-//!   has no Unix sockets for it to matter on, and it could not be tested here
-//!   (no root in the harness). A root `--id` still writes the PID into the
-//!   frame, as every caller's does.
 
 mod deliver;
 mod frame;
@@ -48,7 +44,7 @@ mod sys;
 
 use getoptlong::{Opt, Program, Takes};
 use localtime::Zone;
-use quoting::{os_bytes, quoteaf_os, quotef, quotef_os};
+use quoting::{escape_unprintable, escaped_in_quotes, escaped_in_quotes_os, os_bytes};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -106,6 +102,20 @@ const HELP: &str = include_str!("help.txt");
 
 /// `LOG_USER | LOG_NOTICE`.
 const DEFAULT_PRI: i32 = (1 << 3) | 5;
+
+/// A name or argument as upstream's diagnostics print it -- as is -- except
+/// that a character that is not printable, and a byte that is not part of
+/// one, is octal-escaped: `a\nb` prints `a\012b`, so a name cannot write a
+/// line of its own into the diagnostics. Everything printable, spaces and
+/// quotes included, is left exactly as upstream leaves it.
+fn shown(text: &[u8]) -> String {
+    escape_unprintable(text)
+}
+
+/// [`shown`], for an argument or a path.
+fn shown_os(text: &std::ffi::OsStr) -> String {
+    escape_unprintable(&os_bytes(text))
+}
 
 /// The program's end: the status to exit with, everything already printed.
 #[derive(Debug, PartialEq, Eq)]
@@ -233,7 +243,7 @@ fn run(args: &[OsString]) -> Result<(), Exit> {
                     Err(e) => {
                         return Err(die(&format!(
                             "file {}: {}",
-                            quotef_os(&path),
+                            shown_os(&path),
                             errmsg::strerror(&e)
                         )));
                     }
@@ -267,10 +277,10 @@ fn run(args: &[OsString]) -> Result<(), Exit> {
             "priority" => {
                 ctl.pri = priority::pencode(&os_bytes(&arg())).map_err(|e| match e {
                     priority::PriorityError::Facility(name) => {
-                        die(&format!("unknown facility name: {}", quotef(&name)))
+                        die(&format!("unknown facility name: {}", shown(&name)))
                     }
                     priority::PriorityError::Priority(name) => {
-                        die(&format!("unknown priority name: {}", quotef(&name)))
+                        die(&format!("unknown priority name: {}", shown(&name)))
                     }
                 })?;
             }
@@ -314,7 +324,7 @@ fn run(args: &[OsString]) -> Result<(), Exit> {
                     Some(v) => Input::File(File::open(v).map_err(|e| {
                         die(&format!(
                             "cannot open {}: {}",
-                            quotef_os(v),
+                            shown_os(v),
                             errmsg::strerror(&e)
                         ))
                     })?),
@@ -329,13 +339,13 @@ fn run(args: &[OsString]) -> Result<(), Exit> {
                 if !sd::valid_id(&id) {
                     return Err(die(&format!(
                         "invalid structured data ID: {}",
-                        quoteaf_os(&v)
+                        escaped_in_quotes_os(&v)
                     )));
                 }
                 if ctl.user_sds.iter().any(|e| e.id == id) {
                     return Err(die(&format!(
                         "structured data ID {} is not unique",
-                        quoteaf_os(&v)
+                        escaped_in_quotes_os(&v)
                     )));
                 }
                 ctl.user_sds.push(sd::Element {
@@ -349,7 +359,7 @@ fn run(args: &[OsString]) -> Result<(), Exit> {
                 if !sd::valid_param(&param) {
                     return Err(die(&format!(
                         "invalid structured data parameter: {}",
-                        quoteaf_os(&v)
+                        escaped_in_quotes_os(&v)
                     )));
                 }
                 match ctl.user_sds.last_mut() {
@@ -357,7 +367,7 @@ fn run(args: &[OsString]) -> Result<(), Exit> {
                     None => {
                         return Err(die(&format!(
                             "--sd-id was not specified for --sd-param {}",
-                            quotef_os(&v)
+                            shown_os(&v)
                         )));
                     }
                 }
@@ -449,10 +459,7 @@ fn parse_rfc5424_flags(ctl: &mut Ctl, s: &[u8]) {
             }
             b"notq" => ctl.rfc5424_tq = false,
             b"nohost" => ctl.rfc5424_host = false,
-            _ => diag(&format!(
-                "ignoring unknown option argument: {}",
-                quotef(tok)
-            )),
+            _ => diag(&format!("ignoring unknown option argument: {}", shown(tok))),
         }
     }
 }
@@ -466,7 +473,7 @@ fn parse_unix_socket_errors_flags(s: &[u8]) -> SocketErrors {
         _ => {
             diag(&format!(
                 "invalid argument: {}: using automatic errors",
-                quotef(s)
+                shown(s)
             ));
             SocketErrors::Auto
         }
@@ -519,21 +526,21 @@ fn open_conn(ctl: &mut Ctl) -> Result<Conn, Exit> {
     };
     opened.map_err(|e| {
         die(&match e {
-            OpenError::PathTooLong(p) => format!("openlog {}: pathname too long", quotef_os(&p)),
+            OpenError::PathTooLong(p) => format!("openlog {}: pathname too long", shown_os(&p)),
             OpenError::Socket(p, err) => {
-                format!("socket {}: {}", quotef_os(&p), errmsg::strerror(&err))
+                format!("socket {}: {}", shown_os(&p), errmsg::strerror(&err))
             }
             OpenError::Resolve(s, p, text) => {
                 format!(
                     "failed to resolve name {} port {}: {text}",
-                    quotef_os(&s),
-                    quotef_os(&p)
+                    shown_os(&s),
+                    shown_os(&p)
                 )
             }
             OpenError::Connect(s, p) => format!(
                 "failed to connect to {} port {}",
-                quotef_os(&s),
-                quotef_os(&p)
+                shown_os(&s),
+                shown_os(&p)
             ),
         })
     })
@@ -610,7 +617,7 @@ fn rfc5424_header(ctl: &mut Ctl) -> Result<Vec<u8>, Exit> {
         if name.len() > 255 {
             return Err(die(&format!(
                 "hostname {} is too long",
-                quoteaf_os(quoting::os_from_bytes(&name))
+                escaped_in_quotes(&name)
             )));
         }
         name
@@ -620,7 +627,7 @@ fn rfc5424_header(ctl: &mut Ctl) -> Result<Vec<u8>, Exit> {
     if ctl.tag.len() > 48 {
         return Err(die(&format!(
             "tag {} is too long",
-            quoteaf_os(quoting::os_from_bytes(&ctl.tag))
+            escaped_in_quotes(&ctl.tag)
         )));
     }
     let procid = if ctl.pid == 0 {
@@ -665,13 +672,18 @@ fn write_output(ctl: &mut Ctl, msg: &[u8]) -> Result<(), Exit> {
     let tcp_newline = connected && ctl.socket_type == TYPE_TCP && !ctl.octet_count;
     let f = output::frame(&ctl.hdr, msg, ctl.octet_count, tcp_newline);
     if connected {
+        // `ctl->pid && !ctl->server && ctl->pid != getpid() && geteuid() == 0
+        // && kill(ctl->pid, 0) == 0`: root may name another live process as
+        // a local message's sender. Decided once; the retry sends the same.
+        let claim =
+            (ctl.pid != 0 && ctl.server.is_none() && sys::may_claim(ctl.pid)).then_some(ctl.pid);
         let parts = Parts {
             pri: ctl.pri,
             tag: &ctl.tag,
             pid: ctl.pid,
             msg,
         };
-        if deliver::send(&mut ctl.conn, &f.wire, parts).is_err() {
+        if deliver::send(&mut ctl.conn, &f.wire, parts, claim).is_err() {
             logger_reopen(ctl)?;
             let parts = Parts {
                 pri: ctl.pri,
@@ -679,7 +691,7 @@ fn write_output(ctl: &mut Ctl, msg: &[u8]) -> Result<(), Exit> {
                 pid: ctl.pid,
                 msg,
             };
-            if let Err(e) = deliver::send(&mut ctl.conn, &f.wire, parts) {
+            if let Err(e) = deliver::send(&mut ctl.conn, &f.wire, parts, claim) {
                 diag(&format!("send message failed: {}", errmsg::strerror(&e)));
             }
         }
@@ -821,6 +833,19 @@ mod tests {
 
     fn args(words: &[&str]) -> Vec<OsString> {
         words.iter().map(OsString::from).collect()
+    }
+
+    /// Upstream pastes these; so does the port, until a byte could forge a
+    /// line or is not text.
+    #[test]
+    fn a_name_in_a_diagnostic_is_upstreams_unless_it_is_unprintable() {
+        assert_eq!(shown(b"x=\"y\""), "x=\"y\"");
+        assert_eq!(shown(b"it's a name"), "it's a name");
+        assert_eq!(shown(b""), "");
+        assert_eq!(shown("café".as_bytes()), "café");
+        assert_eq!(shown(b"a\nb"), r"a\012b");
+        assert_eq!(shown(b"\x1b[31m"), r"\033[31m");
+        assert_eq!(shown(b"\xff"), r"\377");
     }
 
     #[test]

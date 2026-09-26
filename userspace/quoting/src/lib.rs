@@ -530,6 +530,38 @@ pub fn escape_unprintable(text: &[u8]) -> String {
     out
 }
 
+/// Render `text` as a C program's own `'%s'` prints it -- inside a literal
+/// pair of `'` -- with what is not printable escaped as [`escape_unprintable`]
+/// escapes it.
+///
+/// This is for ports whose upstream writes the quotes itself: util-linux's
+/// `errx(..., "%s: '%s'", errmesg, str)`, `logger`'s `"tag '%s' is too
+/// long"`. For every printable text the result is upstream's, byte for byte.
+/// It is **not** [`quoteaf`], whose output a shell can read back: an `'`
+/// inside is left as it is, as upstream leaves it, so `it's` renders `'it's'`
+/// where [`quoteaf`] gives `"it's"`. The quotes are decoration, not a
+/// delimiter; what makes the result safe to print is the escaping -- no text
+/// can end the line it is on, start another, or drive the terminal.
+///
+/// ```
+/// use quoting::escaped_in_quotes;
+/// assert_eq!(escaped_in_quotes(b"abc"), "'abc'");
+/// assert_eq!(escaped_in_quotes(b"it's"), "'it's'");
+/// assert_eq!(escaped_in_quotes(b"x=\"a b\""), "'x=\"a b\"'");
+/// assert_eq!(escaped_in_quotes(b""), "''");
+/// assert_eq!(escaped_in_quotes(b"a\nb"), r"'a\012b'");
+/// assert_eq!(escaped_in_quotes(b"\xff"), r"'\377'");
+/// ```
+#[must_use]
+pub fn escaped_in_quotes(text: &[u8]) -> String {
+    let body = escape_unprintable(text);
+    let mut out = String::with_capacity(body.len().saturating_add(2));
+    out.push('\'');
+    out.push_str(&body);
+    out.push('\'');
+    out
+}
+
 /// Render `arg` the way GNU's `quote()` does: always inside `‘...’`, with C
 /// escapes.
 ///
@@ -1432,6 +1464,18 @@ pub fn quotef_os<S: AsRef<std::ffi::OsStr>>(s: S) -> String {
 #[must_use]
 pub fn quoteaf_os<S: AsRef<std::ffi::OsStr>>(s: S) -> String {
     quoteaf(&os_bytes(s.as_ref()))
+}
+
+/// [`escaped_in_quotes`] for a path, a `String`, or anything else a call site
+/// holds.
+///
+/// ```
+/// use quoting::escaped_in_quotes_os;
+/// assert_eq!(escaped_in_quotes_os("zoo@1"), "'zoo@1'");
+/// ```
+#[must_use]
+pub fn escaped_in_quotes_os<S: AsRef<std::ffi::OsStr>>(s: S) -> String {
+    escaped_in_quotes(&os_bytes(s.as_ref()))
 }
 
 /// [`quote`] for a path, a `String`, or anything else a call site holds.

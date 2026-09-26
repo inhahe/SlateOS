@@ -22,6 +22,8 @@ use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
 #[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::net::{UnixDatagram, UnixStream};
 
 /// `TYPE_UDP`: datagrams (`SOCK_DGRAM`), for both a Unix socket and a server.
@@ -228,17 +230,34 @@ pub struct Parts<'a> {
 
 /// The send in `write_output`: the whole frame as one datagram or one write.
 ///
+/// `claim` is a PID to attach to a local message as the sender's credentials
+/// (`SCM_CREDENTIALS`), already decided by the caller as upstream decides it;
+/// only a Unix-domain socket can carry one. A stream that takes less than
+/// the whole frame in that one `sendmsg` gets the rest by plain writes,
+/// where upstream would silently drop it.
+///
 /// # Errors
 ///
 /// Whatever the socket or the journal file reports; the caller reconnects
 /// once and retries, as upstream does.
-pub fn send(conn: &mut Conn, wire: &[u8], parts: Parts<'_>) -> io::Result<()> {
+pub fn send(conn: &mut Conn, wire: &[u8], parts: Parts<'_>, claim: Option<i32>) -> io::Result<()> {
+    #[cfg(not(unix))]
+    let _ = claim; // No Unix-domain sockets here, so nothing to attach it to.
     match conn {
         Conn::None => Err(io::Error::from(io::ErrorKind::NotConnected)),
         #[cfg(unix)]
-        Conn::UnixDgram(s) => s.send(wire).map(drop),
+        Conn::UnixDgram(s) => match claim {
+            Some(pid) => crate::sys::send_as(s.as_raw_fd(), wire, pid).map(drop),
+            None => s.send(wire).map(drop),
+        },
         #[cfg(unix)]
-        Conn::UnixStream(s) => s.write_all(wire),
+        Conn::UnixStream(s) => match claim {
+            Some(pid) => {
+                let sent = crate::sys::send_as(s.as_raw_fd(), wire, pid)?;
+                s.write_all(wire.get(sent..).unwrap_or_default())
+            }
+            None => s.write_all(wire),
+        },
         Conn::Udp(s) => s.send(wire).map(drop),
         Conn::Tcp(s) => s.write_all(wire),
         Conn::Journal => append_record(&journal_record(parts, now_secs())?),

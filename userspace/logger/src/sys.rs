@@ -1,7 +1,8 @@
 //! The libc calls util-linux's `logger` makes that std does not wrap, reached
 //! through the C ABI as the one-libc rule requires (design-decisions §768):
 //! `getlogin`, `getpwuid`, `getuid`/`geteuid`, `gethostname`, `ntp_gettime`
-//! (as `adjtimex`), and name resolution for `-n`.
+//! (as `adjtimex`), name resolution for `-n`, and the `sendmsg` that attaches
+//! a claimed PID to a local message (`SCM_CREDENTIALS`).
 //!
 //! Each has a host fallback for the Windows build the unit tests run on, where
 //! none of these exist; the fallbacks answer "unknown", which the callers
@@ -31,6 +32,33 @@ pub fn synced_maxerror() -> Option<i64> {
     imp::adjtimex_maxerror()
 }
 
+/// Whether root may attach `pid` to a local message as its sender's PID:
+/// upstream's `ctl->pid != getpid() && geteuid() == 0 && kill(ctl->pid, 0) ==
+/// 0`, evaluated in that order, so `kill` is only reached as root. `pid` is
+/// used exactly as given -- `--id=4294967295` wraps to -1, and `kill(-1, 0)`
+/// asks about every process the caller may signal, as it does upstream. The
+/// kernel has the last word: it refuses the credentials unless the sender may
+/// claim them.
+#[must_use]
+pub fn may_claim(pid: i32) -> bool {
+    i32::try_from(std::process::id()).ok() != Some(pid)
+        && imp::geteuid() == Some(0)
+        && imp::process_exists(pid)
+}
+
+/// `sendmsg(fd, {wire}, MSG_NOSIGNAL)` with one `SCM_CREDENTIALS` control
+/// message naming `pid` -- upstream zeroes the buffer and sets only the PID,
+/// so the claimed uid and gid are 0 -- on a connected Unix-domain socket.
+///
+/// # Errors
+///
+/// Whatever `sendmsg` reports; `EPERM` when the kernel will not let this
+/// process claim `pid`.
+#[cfg(unix)]
+pub fn send_as(fd: std::os::fd::RawFd, wire: &[u8], pid: i32) -> std::io::Result<usize> {
+    imp::send_as(fd, wire, pid)
+}
+
 /// `getaddrinfo(node, service, {AF_UNSPEC, socktype})`'s first address --
 /// the only one `inet_socket` uses -- or `gai_strerror`'s text.
 ///
@@ -44,6 +72,7 @@ pub fn resolve(node: &[u8], service: &[u8], socktype: i32) -> Result<SocketAddr,
 #[cfg(unix)]
 mod imp {
     use std::ffi::{CStr, CString, c_char};
+    use std::io;
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
     /// `struct passwd` as glibc lays it out on x86_64, and as the SlateOS libc
@@ -101,19 +130,65 @@ mod imp {
         ai_next: *mut AddrInfo,
     }
 
+    /// `struct iovec`.
+    #[repr(C)]
+    struct Iovec {
+        iov_base: *const u8,
+        iov_len: usize,
+    }
+
+    /// `struct msghdr`, x86_64 layout (56 bytes, `msg_iovlen` and
+    /// `msg_controllen` a `size_t`), as glibc declares it and as
+    /// `posix::socket::Msghdr` does.
+    #[repr(C)]
+    struct Msghdr {
+        msg_name: *mut u8,
+        msg_namelen: u32,
+        msg_iov: *const Iovec,
+        msg_iovlen: usize,
+        msg_control: *mut u8,
+        msg_controllen: usize,
+        msg_flags: i32,
+    }
+    const _: () = assert!(std::mem::size_of::<Msghdr>() == 56);
+
+    /// Upstream's control buffer: a `struct cmsghdr` (16 bytes) and the
+    /// `struct ucred` after it (`pid`, `uid`, `gid`), padded to
+    /// `CMSG_SPACE(sizeof(struct ucred))` = 32. Every field is written, so no
+    /// byte of it is uninitialized.
+    #[repr(C)]
+    struct CredMsg {
+        cmsg_len: usize,
+        cmsg_level: i32,
+        cmsg_type: i32,
+        pid: i32,
+        uid: u32,
+        gid: u32,
+        pad: u32,
+    }
+    const _: () = assert!(std::mem::size_of::<CredMsg>() == 32);
+    /// `CMSG_LEN(sizeof(struct ucred))`: the header and the 12-byte `ucred`.
+    const CMSG_LEN_UCRED: usize = 16 + 12;
+    const SOL_SOCKET: i32 = 1;
+    const SCM_CREDENTIALS: i32 = 2;
+    const MSG_NOSIGNAL: i32 = 0x4000;
+
     const AF_INET: i32 = 2;
     const AF_INET6: i32 = 10;
     /// `TIME_OK`, `ntp_gettime`'s "clock synchronized" state.
     const TIME_OK: i32 = 0;
 
     mod ffi {
-        use super::{AddrInfo, Passwd, Timex};
+        use super::{AddrInfo, Msghdr, Passwd, Timex};
         use std::ffi::c_char;
 
         unsafe extern "C" {
             pub fn getlogin() -> *const c_char;
             pub fn getpwuid(uid: u32) -> *mut Passwd;
             pub fn getuid() -> u32;
+            pub fn geteuid() -> u32;
+            pub fn kill(pid: i32, sig: i32) -> i32;
+            pub fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isize;
             pub fn gethostname(name: *mut c_char, len: usize) -> i32;
             pub fn adjtimex(buf: *mut Timex) -> i32;
             pub fn getaddrinfo(
@@ -147,6 +222,55 @@ mod imp {
     pub fn getuid() -> Option<u32> {
         // SAFETY: `getuid` has no preconditions and cannot fail.
         Some(unsafe { ffi::getuid() })
+    }
+
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the host twin answers None; one signature serves both"
+    )]
+    pub fn geteuid() -> Option<u32> {
+        // SAFETY: `geteuid` has no preconditions and cannot fail.
+        Some(unsafe { ffi::geteuid() })
+    }
+
+    /// `kill(pid, 0) == 0`: `pid` names a process (or, for 0 and negative
+    /// values, a group) this process may signal. Signal 0 sends nothing.
+    pub fn process_exists(pid: i32) -> bool {
+        // SAFETY: signal 0 performs only the existence and permission
+        // checks; no signal is delivered, whatever `pid` is.
+        unsafe { ffi::kill(pid, 0) == 0 }
+    }
+
+    pub fn send_as(fd: i32, wire: &[u8], pid: i32) -> io::Result<usize> {
+        let iov = Iovec {
+            iov_base: wire.as_ptr(),
+            iov_len: wire.len(),
+        };
+        let mut cred = CredMsg {
+            cmsg_len: CMSG_LEN_UCRED,
+            cmsg_level: SOL_SOCKET,
+            cmsg_type: SCM_CREDENTIALS,
+            pid,
+            uid: 0,
+            gid: 0,
+            pad: 0,
+        };
+        let msg = Msghdr {
+            msg_name: std::ptr::null_mut(),
+            msg_namelen: 0,
+            msg_iov: &raw const iov,
+            msg_iovlen: 1,
+            msg_control: (&raw mut cred).cast(),
+            msg_controllen: std::mem::size_of::<CredMsg>(),
+            msg_flags: 0,
+        };
+        // SAFETY: `msg` is a valid `struct msghdr` for this ABI; its one
+        // iovec points at `wire`, readable for `wire.len()` bytes, and its
+        // control buffer at `cred`, a fully initialized, 8-aligned
+        // `CMSG_SPACE(sizeof(struct ucred))`; all three outlive the call,
+        // which only reads them. A bad `fd` is an error return, not UB.
+        let n = unsafe { ffi::sendmsg(fd, &raw const msg, MSG_NOSIGNAL) };
+        usize::try_from(n).map_err(|_| io::Error::last_os_error())
     }
 
     pub fn getpwuid_name(uid: u32) -> Option<Vec<u8>> {
@@ -294,6 +418,12 @@ mod imp {
     }
     pub fn getpwuid_name(_uid: u32) -> Option<Vec<u8>> {
         None
+    }
+    pub fn geteuid() -> Option<u32> {
+        None
+    }
+    pub fn process_exists(_pid: i32) -> bool {
+        false
     }
     pub fn gethostname() -> Option<Vec<u8>> {
         None

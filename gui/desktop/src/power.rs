@@ -8,13 +8,15 @@
 //! - Power profiles (Balanced, Performance, Power Saver, Custom)
 //! - Lid close / power button actions
 //! - Wake-on-LAN configuration
-//! - The power menu the start menu opens (shutdown, restart, sleep, lock,
-//!   log out)
+//! - The power menu the start menu opens ([`PowerChoice`]: shut down,
+//!   restart, sleep, hibernate, lock, log out), and the commands that carry
+//!   each out
 //!
 //! Designed to integrate with the taskbar's power/battery indicator
 //! and the settings app's power management page.
 
 use crate::Rect;
+use crate::hotkeys::{LOCK_COMMAND, Launch};
 use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -106,6 +108,95 @@ pub enum PowerAction {
     Shutdown,
     /// Lock the screen.
     Lock,
+}
+
+/// The power utility: `userspace/powerctl`, which asks the service manager for
+/// an orderly shutdown -- services stopped, filesystems synced -- and falls
+/// back to the power syscalls itself if nothing answers.
+///
+/// Every power action the desktop offers goes through it, from the start
+/// menu and from the login screen alike. Until 2026-09-25 the start menu's
+/// entries named `/sbin/shutdown`, `/sbin/reboot` and `/sbin/suspend`, which
+/// SlateOS has never had: the menu drew, the press launched, and the machine
+/// stayed on. And the login screen's buttons made the desktop exit, "no power
+/// service to ask" -- with this one in the tree.
+pub const POWERCTL: &str = "/bin/powerctl";
+
+/// `powerctl <subcommand>`.
+pub(crate) fn powerctl(subcommand: &str) -> Launch {
+    Launch {
+        program: POWERCTL.into(),
+        args: vec![subcommand.into()],
+    }
+}
+
+/// One entry in the start menu's power menu, top to bottom.
+///
+/// The shell's own list, not a slice of the application database: these are
+/// not programs a user starts but things the machine does, two of them with
+/// arguments and one (log out) with no program at all. They were database
+/// entries until 2026-09-25, which is how three of them came to name programs
+/// that do not exist -- a database entry is a path, and a path was all there
+/// was room to be wrong about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PowerChoice {
+    /// Power off, after an orderly shutdown.
+    ShutDown,
+    /// Restart the machine.
+    Restart,
+    /// Suspend to memory.
+    Sleep,
+    /// Save the session to disk and power off.
+    Hibernate,
+    /// Lock the screen; the session carries on behind it.
+    Lock,
+    /// End the session and return to the login screen.
+    LogOut,
+}
+
+impl PowerChoice {
+    /// Every choice, in the order the menu lists them.
+    pub const ALL: [Self; 6] = [
+        Self::ShutDown,
+        Self::Restart,
+        Self::Sleep,
+        Self::Hibernate,
+        Self::Lock,
+        Self::LogOut,
+    ];
+
+    /// The words on the row. Verbs, since each is something the button does
+    /// ("Shut down", not the noun "Shutdown").
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ShutDown => "Shut down",
+            Self::Restart => "Restart",
+            Self::Sleep => "Sleep",
+            Self::Hibernate => "Hibernate",
+            Self::Lock => "Lock",
+            Self::LogOut => "Log out",
+        }
+    }
+
+    /// The program that carries this out, or `None` for [`LogOut`], which
+    /// the shell does itself: it owns the login screen the user returns to.
+    ///
+    /// [`LogOut`]: Self::LogOut
+    #[must_use]
+    pub fn command(self) -> Option<Launch> {
+        match self {
+            Self::ShutDown => Some(powerctl("shutdown")),
+            Self::Restart => Some(powerctl("reboot")),
+            Self::Sleep => Some(powerctl("suspend")),
+            Self::Hibernate => Some(powerctl("hibernate")),
+            // The lock screen, as the shortcut starts it -- and through the
+            // same launch, so `design-decisions.md` 818 (a session with no
+            // password is never locked) applies to both.
+            Self::Lock => Some(Launch::program(LOCK_COMMAND)),
+            Self::LogOut => None,
+        }
+    }
 }
 
 /// Power profile presets.

@@ -21,11 +21,12 @@
 //! # Why this is not `ShellSession::run`
 //!
 //! [`ShellSession::run`] exists and loops correctly, and a shell cannot use it.
-//! Two of the session's outputs are *drained by the caller on purpose* —
-//! [`ShellSession::take_launches`] and [`ShellSession::take_login_power`] —
-//! because policy about how a program starts, or how a machine turns off,
-//! belongs outside the window manager. `run` never yields between pumps, so
-//! anything the user launched under it is queued and never started.
+//! One of the session's outputs is *drained by the caller on purpose* --
+//! [`ShellSession::take_launches`], the programs the user asked to start,
+//! power actions included (`powerctl` is a program) -- because policy about
+//! how a program starts belongs outside the window manager. `run` never
+//! yields between pumps, so anything the user launched under it is queued and
+//! never started.
 //!
 //! So this drives [`ShellSession::pump`] itself and drains after each turn.
 //! `run` stays for a caller with nothing to drain, which is every test.
@@ -172,9 +173,7 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
         }
-        if !drain(&mut session) {
-            break;
-        }
+        drain(&mut session);
         if !session.events_mut().connection().is_open() {
             break;
         }
@@ -182,15 +181,15 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Carry out the two intents the session deliberately cannot.
-///
-/// Answers whether the shell should keep running: a power action ends it.
+/// Carry out the one intent the session deliberately cannot: starting a
+/// program. The power buttons, the start menu's and the login screen's, are
+/// launches of `powerctl` and arrive here the same way.
 ///
 /// **A failed launch is reported, not swallowed.** The start menu names
 /// programs by path, and on a development host most of those paths do not
 /// exist. Saying so is the difference between "this desktop cannot start
 /// anything" and "that entry is wrong", and only the second is actionable.
-fn drain<T: guiremote::client::Transport>(session: &mut ShellSession<T>) -> bool {
+fn drain<T: guiremote::client::Transport>(session: &mut ShellSession<T>) {
     for launch in session.take_launches() {
         // `args`, not a path with spaces in it. `SCREENSHOT_COMMAND` was
         // "/usr/bin/screenshot --fullscreen" until 2026-09-17 and arrived here
@@ -198,19 +197,13 @@ fn drain<T: guiremote::client::Transport>(session: &mut ShellSession<T>) -> bool
         // with a space and two dashes in its name. Both screenshot shortcuts
         // failed at every press, and said so politely enough that it read like
         // a missing program rather than a malformed request.
+        // The whole command line, arguments and all: "cannot start
+        // /bin/powerctl suspend" says which button failed, where the program
+        // alone would read the same for four of them.
         if let Err(e) = Command::new(&launch.program).args(&launch.args).spawn() {
-            eprintln!("desktop: cannot start {}: {e}", launch.program.display());
+            eprintln!("desktop: cannot start {}: {e}", launch.display_line());
         }
     }
-    // Logging rather than acting, for now: there is no channel to whatever
-    // turns the machine off, and inventing one in the shell would put the
-    // policy in the window manager. `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`
-    // covers the same gap for programs.
-    if let Some(action) = session.take_login_power() {
-        eprintln!("desktop: {action:?} requested; no power service to ask, so exiting");
-        return false;
-    }
-    true
 }
 #[cfg(test)]
 mod tests {

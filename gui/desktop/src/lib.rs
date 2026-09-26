@@ -727,7 +727,7 @@ pub enum Hit {
     /// One of the buttons beside it -- Settings, Terminal.
     StartMenuShortcut(StartShortcut),
     /// An entry of the open power menu, by index into
-    /// [`power_menu_entries`](DesktopShell::power_menu_entries).
+    /// [`power_menu_choices`](DesktopShell::power_menu_choices).
     PowerMenuEntry(usize),
     /// The open power menu, but not one of its rows.
     PowerMenuPanel,
@@ -864,6 +864,15 @@ pub enum ShellAction {
     /// — the window closed between the list the button was drawn from and the
     /// click — needs no undo.
     Control(ShellRequest),
+    /// End the session: return to the login screen. Implies
+    /// [`Consumed`](Self::Consumed).
+    ///
+    /// Not a launch, because the login screen is the shell's own -- there is
+    /// no program to start, only a session to leave. What becomes of the
+    /// programs the user left running is the session manager's to decide, and
+    /// there is none yet: `known-issues.md`
+    /// `TD-C-LOGGING-OUT-LEAVES-THE-USERS-PROGRAMS-RUNNING`.
+    LogOut,
 }
 
 impl ShellAction {
@@ -2810,7 +2819,7 @@ impl DesktopShell {
     #[must_use]
     pub fn power_menu_rect(&self) -> Rect {
         let button = self.power_button_rect();
-        let rows = self.power_menu_entries().len() as f32;
+        let rows = power::PowerChoice::ALL.len() as f32;
         let pad = self.scale(POWER_MENU_PADDING);
         let h =
             (rows * self.scale(POWER_MENU_ROW_HEIGHT) + pad * 2.0).min(self.screen_height as f32);
@@ -2831,7 +2840,7 @@ impl DesktopShell {
             return 0;
         }
         let usable = self.power_menu_rect().h - self.scale(POWER_MENU_PADDING) * 2.0;
-        ((usable / row).max(0.0) as usize).min(self.power_menu_entries().len())
+        ((usable / row).max(0.0) as usize).min(power::PowerChoice::ALL.len())
     }
 
     /// The `row`-th drawn row of the power menu.
@@ -2847,17 +2856,11 @@ impl DesktopShell {
         )
     }
 
-    /// The system actions the power menu lists, in menu order.
-    ///
-    /// Exactly the entries [`start_menu_entries`](Self::start_menu_entries)
-    /// leaves out, from the same database, so a system action can never be in
-    /// both lists or in neither.
+    /// What the power menu lists, top to bottom: the shell's own list
+    /// ([`power::PowerChoice`]), not a slice of the application database.
     #[must_use]
-    pub fn power_menu_entries(&self) -> Vec<&AppEntry> {
-        self.apps
-            .iter()
-            .filter(|app| matches!(app.category, Category::System))
-            .collect()
+    pub fn power_menu_choices(&self) -> &'static [power::PowerChoice] {
+        &power::PowerChoice::ALL
     }
 
     /// Open or close the power menu.
@@ -2868,10 +2871,10 @@ impl DesktopShell {
     /// The programs the start menu lists, in menu order: the ones the user
     /// pinned first, then every program the launcher knows.
     ///
-    /// System actions — shutdown, lock, log out — are deliberately excluded:
-    /// they belong to the power options at the foot of the menu, not among the
-    /// applications, and mixing them in would make "Shutdown" one mis-click
-    /// away from "Screenshot".
+    /// The power actions -- shut down, lock, log out -- are not here: they are
+    /// the power menu's own list at the foot of the menu, not programs in the
+    /// database, and mixing them in would put "Shut down" one mis-click away
+    /// from "Screenshot".
     ///
     /// One list for the pins and the rest, rather than a second list drawn
     /// above the first: every row -- its hit test, its scroll, its
@@ -4065,23 +4068,21 @@ impl DesktopShell {
                 self.close_start_menu();
                 ShellAction::Launch(hotkeys::Launch::program(which.program()))
             }
-            // A system action starts a program like any other menu entry: the
-            // shell has no more business shutting the machine down itself than
-            // it has starting a text editor itself. `/sbin/shutdown` and its
-            // neighbours are what actually do it.
-            Hit::PowerMenuEntry(index) => {
-                let path = self
-                    .power_menu_entries()
-                    .get(index)
-                    .map(|entry| PathBuf::from(&entry.executable_path));
-                match path {
-                    Some(path) => {
-                        self.close_start_menu();
-                        ShellAction::Launch(hotkeys::Launch::program(path))
+            // A power action starts a program like a menu entry does: the shell
+            // has no more business shutting the machine down itself than it has
+            // starting a text editor itself. `powerctl` is what does it, and the
+            // lock screen what locks. Log out is the exception, because the
+            // login screen it returns to is the shell's own.
+            Hit::PowerMenuEntry(index) => match power::PowerChoice::ALL.get(index) {
+                Some(choice) => {
+                    self.close_start_menu();
+                    match choice.command() {
+                        Some(launch) => ShellAction::Launch(launch),
+                        None => ShellAction::LogOut,
                     }
-                    None => ShellAction::Consumed,
                 }
-            }
+                None => ShellAction::Consumed,
+            },
             Hit::Clock => {
                 self.toggle_calendar();
                 ShellAction::Consumed
@@ -6511,13 +6512,14 @@ impl DesktopShell {
             shadow(tree, panel, radii);
         }
 
-        let entries = self.power_menu_entries();
         let rows: Vec<power::PowerMenuRow<'_>> = (0..self.power_menu_visible_rows())
             .filter_map(|row| {
-                entries.get(row).map(|entry| power::PowerMenuRow {
-                    label: &entry.name,
-                    rect: self.power_menu_row_rect(row),
-                })
+                power::PowerChoice::ALL
+                    .get(row)
+                    .map(|choice| power::PowerMenuRow {
+                        label: choice.label(),
+                        rect: self.power_menu_row_rect(row),
+                    })
             })
             .collect();
 

@@ -226,6 +226,22 @@ pub enum LoginPowerAction {
     Hibernate,
 }
 
+impl LoginPowerAction {
+    /// The command that carries it out: `powerctl`, exactly as the start
+    /// menu's row of the same name runs it, so the same button does the same
+    /// thing on either side of a login (held so by a test in
+    /// `pointer_tests.rs`).
+    #[must_use]
+    pub fn command(self) -> crate::hotkeys::Launch {
+        crate::power::powerctl(match self {
+            Self::Shutdown => "shutdown",
+            Self::Reboot => "reboot",
+            Self::Sleep => "suspend",
+            Self::Hibernate => "hibernate",
+        })
+    }
+}
+
 /// Login configuration.
 #[derive(Clone, Debug)]
 pub struct LoginConfig {

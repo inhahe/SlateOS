@@ -179,9 +179,9 @@ fn main() {
     let power = desktop.power_button_rect();
     desktop.handle_mouse(&click(power.x + 8.0, power.y + 8.0));
     let shutdown_row = desktop
-        .power_menu_entries()
+        .power_menu_choices()
         .iter()
-        .position(|entry| entry.name == "Shutdown");
+        .position(|choice| *choice == desktop::power::PowerChoice::ShutDown);
     if let Some(row) = shutdown_row {
         let rect = desktop.power_menu_row_rect(row);
         match desktop.handle_mouse(&click(rect.x + 8.0, rect.y + 8.0)) {

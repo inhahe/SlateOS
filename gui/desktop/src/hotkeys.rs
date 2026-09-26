@@ -2716,9 +2716,18 @@ mod tests {
     /// what launches these same programs when they are clicked instead of typed.
     #[test]
     fn every_command_a_shortcut_names_is_a_program_the_shell_knows_about() {
+        // The database, and the power menu's own list: the lock screen left the
+        // database with the other power actions on 2026-09-25, and the power
+        // menu's Lock row is the other thing that starts it.
         let known: Vec<String> = crate::launcher::builtin_app_database()
             .iter()
             .map(|app| app.executable_path.clone())
+            .chain(
+                crate::power::PowerChoice::ALL
+                    .iter()
+                    .filter_map(|choice| choice.command())
+                    .map(|launch| launch.program.display().to_string()),
+            )
             .collect();
         // The fixed-command actions, plus whatever the *default* table puts on
         // `LaunchApp` — the one action whose command is not a constant. A

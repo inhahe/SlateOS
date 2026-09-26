@@ -4314,12 +4314,12 @@ fn the_login_surface_is_created_last_and_accepts_the_mouse() {
     );
 }
 
-/// The power menu's choice comes back out rather than being acted on here: a
-/// window manager has no channel to whatever turns the machine off, and
-/// inventing one would put the policy in the wrong place — the same rule
-/// `take_launches` follows.
+/// The login screen's power menu starts `powerctl`, through the launch queue
+/// every other program leaves by, rather than shutting anything down itself --
+/// and rather than, as until 2026-09-25, reporting the choice to a binary that
+/// answered it by exiting.
 #[test]
-fn a_power_choice_is_reported_rather_than_acted_on() {
+fn a_power_choice_is_launched_like_any_program() {
     let (mut session, desktop, _dir, _turn) = session_with_login();
     let (button, row) = {
         let screen = session.login().expect("locked");
@@ -4335,10 +4335,13 @@ fn a_power_choice_is_reported_rather_than_acted_on() {
     press_at(&desktop, session.login_surface(), row.x + 2.0, row.y + 2.0);
     session.pump().expect("pump");
     assert_eq!(
-        session.take_login_power(),
-        Some(crate::login_screen::LoginPowerAction::Shutdown)
+        session.take_launches(),
+        [crate::hotkeys::Launch {
+            program: crate::power::POWERCTL.into(),
+            args: vec!["shutdown".into()],
+        }]
     );
-    assert_eq!(session.take_login_power(), None, "draining it empties it");
+    assert!(session.take_launches().is_empty(), "draining it empties it");
 }
 
 /// An exclusion pattern keeps a picture out of the rotation.
@@ -5014,4 +5017,47 @@ fn at_the_automatic_modes_edge_the_desktop_turns_dark_and_says_so() {
             "the compositor was not told, so no other program will look"
         );
     });
+}
+
+// ---- the power menu --------------------------------------------------------
+
+/// **Log out returns to the login screen** -- the one the session started
+/// with, the same accounts -- and the desktop behind it is covered again.
+/// Before 2026-09-25 "Logout" launched `/usr/bin/logout`, a program SlateOS
+/// does not have, and nothing happened at all.
+#[test]
+fn log_out_returns_to_the_login_screen() {
+    let (mut session, desktop, _dir, _turn) = session_with_login();
+    type_password(&desktop, &mut session, "password");
+    assert!(session.login().is_none(), "the desktop should be open");
+
+    // The way a user does it: the start button, the power button, the row.
+    let start = centre(session.shell().start_button_rect());
+    press_at(&desktop, session.panel(), start.0, start.1);
+    session.pump().expect("pump");
+    let power = centre(session.shell().power_button_rect());
+    press_at(&desktop, session.popups(), power.0, power.1);
+    session.pump().expect("pump");
+    let row = crate::power::PowerChoice::ALL
+        .iter()
+        .position(|c| *c == crate::power::PowerChoice::LogOut)
+        .expect("the menu offers it");
+    let at = centre(session.shell().power_menu_row_rect(row));
+    press_at(&desktop, session.popups(), at.0, at.1);
+    session.pump().expect("pump");
+
+    assert!(
+        session.login().is_some(),
+        "the desktop is still open after logging out"
+    );
+    assert!(
+        session.take_launches().is_empty(),
+        "logging out started a program"
+    );
+    // The same screen, for the same people: Alice can sign straight back in.
+    type_password(&desktop, &mut session, "password");
+    assert!(
+        session.login().is_none(),
+        "the returning user was not let back in"
+    );
 }

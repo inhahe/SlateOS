@@ -1762,6 +1762,19 @@ live.
   than at the next change, once `ThemeWatch` watches through
   `appearance::watcher()` (lane F).
 
+- `[C]` **The power menu turns the machine off** -- done 2026-09-25
+  (`design-decisions.md` §877). Its five entries started `/sbin/shutdown`,
+  `/sbin/reboot`, `/sbin/suspend` and `/usr/bin/logout`, none of which SlateOS
+  has, and the login screen's power buttons made the desktop quit. Both now
+  run `powerctl` (shut down, restart, sleep and a new hibernate) through the
+  launch queue every program leaves by; Lock starts the lock screen, and Log
+  out brings back the login screen the session started with. The list is the
+  shell's own (`power::PowerChoice`), no longer database entries. Waiting on
+  others: `powerctl` in the image (lane D) and the separate launcher's copy of
+  the old entries (lane E). Logging out leaves the user's programs running
+  until there is a session manager
+  (`TD-C-LOGGING-OUT-LEAVES-THE-USERS-PROGRAMS-RUNNING`).
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's

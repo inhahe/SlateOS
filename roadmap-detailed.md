@@ -1708,7 +1708,7 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
 - [ ] Applications tree
 - [x] Settings icon — 2026-09-25: a Settings button in the start menu's footer beside Power (`StartShortcut::Settings`).
 - [x] Terminal shortcut — 2026-09-25: a Terminal button beside it (`StartShortcut::Terminal`).
-- [ ] Power options: off, logout, reboot, hibernate, sleep, reboot in safe mode
+- [-] Power options: off, logout, reboot, hibernate, sleep, reboot in safe mode — *2026-09-25: shut down, restart, sleep and hibernate run `powerctl`, lock runs the lock screen, and log out returns to the login screen (its programs keep running until there is a session manager: `TD-C-LOGGING-OUT-LEAVES-THE-USERS-PROGRAMS-RUNNING`). Reboot in safe mode needs a safe mode to reboot into -- nothing in the boot path has one yet.*
       _(the shell drives these directly as the user's own gesture; a program
       asking for the same transition needs the matching `power.*` capability —
       §1.5 → Capability Types — Power / Session Control)_

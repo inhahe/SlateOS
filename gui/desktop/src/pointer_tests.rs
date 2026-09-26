@@ -377,66 +377,120 @@ fn a_click_on_the_menu_but_not_on_a_row_does_nothing_but_stay_open() {
 
 // ---- the power menu -------------------------------------------------------
 
-/// The whole point: the machine can be shut down from the desktop. Before this
-/// the foot of the start menu drew the word "Power" in grey and did nothing,
-/// and the five system actions were in no menu at all.
+/// The whole point: the machine can be shut down from the desktop. Before the
+/// power menu the foot of the start menu drew the word "Power" in grey and did
+/// nothing; before 2026-09-25 the menu launched `/sbin/shutdown` and its
+/// neighbours, which SlateOS has never had.
 #[test]
-fn the_power_menu_offers_every_system_action_and_launches_them() {
-    let names: Vec<String> = {
-        let shell = shell();
-        shell
-            .power_menu_entries()
-            .iter()
-            .map(|entry| entry.name.clone())
-            .collect()
-    };
-    assert!(
-        names.iter().any(|name| name == "Shutdown"),
-        "no way to shut the machine down: {names:?}"
+fn the_power_menu_offers_every_power_action_and_carries_each_out() {
+    let labels: Vec<&str> = shell()
+        .power_menu_choices()
+        .iter()
+        .map(|choice| choice.label())
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "Shut down",
+            "Restart",
+            "Sleep",
+            "Hibernate",
+            "Lock",
+            "Log out"
+        ]
     );
 
-    for row in 0..names.len() {
+    for (row, choice) in crate::power::PowerChoice::ALL.iter().enumerate() {
         let mut shell = shell();
         shell.toggle_start_menu();
         let button = shell.power_button_rect();
         assert_eq!(click_at(&mut shell, button), ShellAction::Consumed);
         assert!(shell.power_menu_open);
 
-        let expected = shell.power_menu_entries()[row].executable_path.clone();
         let rect = shell.power_menu_row_rect(row);
-        let action = click_at(&mut shell, rect);
-        assert_eq!(
-            action,
-            ShellAction::Launch(crate::hotkeys::Launch::program(&expected)),
-            "row {row}"
-        );
-        // Both menus go: the machine is about to shut down behind them.
+        let expected = choice
+            .command()
+            .map_or(ShellAction::LogOut, ShellAction::Launch);
+        assert_eq!(click_at(&mut shell, rect), expected, "{choice:?}");
+        // Both menus go: the machine is about to change state behind them.
         assert!(!shell.power_menu_open);
         assert!(!shell.start_menu_open);
     }
 }
 
-/// The two menus divide the one database between them. An entry in neither list
-/// is an unreachable program; an entry in both puts "Shutdown" one mis-click
-/// below "Screenshot", which is why the split exists.
+/// The machine is turned off, restarted, put to sleep and hibernated by
+/// `powerctl`, a program SlateOS has, each with its own subcommand; the lock
+/// is the lock screen's; log out is the shell's own.
 #[test]
-fn the_two_menus_between_them_offer_every_program_exactly_once() {
+fn the_power_actions_are_carried_out_by_programs_that_exist() {
+    use crate::power::{POWERCTL, PowerChoice};
+    for (choice, subcommand) in [
+        (PowerChoice::ShutDown, "shutdown"),
+        (PowerChoice::Restart, "reboot"),
+        (PowerChoice::Sleep, "suspend"),
+        (PowerChoice::Hibernate, "hibernate"),
+    ] {
+        let launch = choice.command().expect("a program carries it out");
+        assert_eq!(
+            launch.program,
+            std::path::PathBuf::from(POWERCTL),
+            "{choice:?}"
+        );
+        assert_eq!(
+            launch.args,
+            [std::ffi::OsString::from(subcommand)],
+            "{choice:?}"
+        );
+    }
+    assert_eq!(
+        PowerChoice::Lock.command(),
+        Some(crate::hotkeys::Launch::program(
+            crate::hotkeys::LOCK_COMMAND
+        ))
+    );
+    assert_eq!(PowerChoice::LogOut.command(), None);
+}
+
+/// The login screen's power buttons do exactly what the start menu's do.
+#[test]
+fn the_login_screens_power_buttons_do_what_the_start_menus_do() {
+    use crate::login_screen::LoginPowerAction as Login;
+    use crate::power::PowerChoice as Menu;
+    for (button, row) in [
+        (Login::Shutdown, Menu::ShutDown),
+        (Login::Reboot, Menu::Restart),
+        (Login::Sleep, Menu::Sleep),
+        (Login::Hibernate, Menu::Hibernate),
+    ] {
+        assert_eq!(Some(button.command()), row.command(), "{button:?}");
+    }
+}
+
+/// The start menu lists every program in the database, once -- and the
+/// database holds no power actions, which are the power menu's own list and
+/// not programs at all. They were database entries until 2026-09-25, which is
+/// how three of them came to name programs that do not exist.
+#[test]
+fn the_start_menu_offers_every_program_once_and_no_power_action() {
     let shell = shell();
     let database = launcher::builtin_app_database();
     let mut offered: Vec<&str> = shell
         .start_menu_entries()
         .iter()
-        .chain(shell.power_menu_entries().iter())
         .map(|entry| entry.executable_path.as_str())
         .collect();
     offered.sort_unstable();
     let before = offered.len();
     offered.dedup();
-    assert_eq!(before, offered.len(), "a program is in both menus");
-    assert_eq!(offered.len(), database.len(), "a program is in neither");
-
-    for entry in shell.power_menu_entries() {
-        assert_eq!(entry.category, Category::System, "{}", entry.name);
+    assert_eq!(before, offered.len(), "a program is listed twice");
+    assert_eq!(offered.len(), database.len(), "a program is missing");
+    for entry in &database {
+        assert_ne!(
+            entry.category,
+            Category::System,
+            "{} is back in the database",
+            entry.name
+        );
     }
 }
 
@@ -548,7 +602,7 @@ fn a_wheel_over_the_power_menu_does_not_scroll_the_list_behind_it() {
     assert_eq!(shell.start_menu_scroll, 0, "the hidden rows moved");
 }
 
-/// Scaling must not put a system action off the screen or out from under the
+/// Scaling must not put a power action off the screen or out from under the
 /// pointer: unlike the application list the power menu has no scroll to rescue
 /// a row it fails to fit.
 #[test]
@@ -574,8 +628,8 @@ fn every_power_action_is_clickable_where_it_is_drawn_at_every_scale() {
 
         assert_eq!(
             shell.power_menu_visible_rows(),
-            shell.power_menu_entries().len(),
-            "a system action was dropped at {percent}%"
+            shell.power_menu_choices().len(),
+            "a power action was dropped at {percent}%"
         );
         for row in 0..shell.power_menu_visible_rows() {
             let (x, y) = centre(shell.power_menu_row_rect(row));
@@ -614,7 +668,7 @@ fn the_power_menu_follows_the_theme_and_the_corner_setting() {
     assert_eq!(panel.0, shell.theme.start_menu_bg);
     assert_eq!(panel.1, CornerRadii::all(16.0));
 
-    // Every system action is on screen, spelled as the database spells it.
+    // Every power action is on screen, under its own label.
     let drawn: Vec<String> = tree
         .commands
         .iter()
@@ -623,8 +677,11 @@ fn the_power_menu_follows_the_theme_and_the_corner_setting() {
             _ => None,
         })
         .collect();
-    for entry in shell.power_menu_entries() {
-        assert!(drawn.contains(&entry.name), "{} was not drawn", entry.name);
+    for choice in shell.power_menu_choices() {
+        assert!(
+            drawn.iter().any(|text| text == choice.label()),
+            "{choice:?} was not drawn"
+        );
     }
 }
 

@@ -81,7 +81,7 @@ use oswindow::{
 };
 
 use crate::animations::{AnimationManager, WindowAnimation};
-use crate::login_screen::{LoginAction, LoginPowerAction, LoginScreen};
+use crate::login_screen::{LoginAction, LoginScreen};
 use crate::notif_pane;
 use crate::taskbar_autohide::{AutoHideConfig, AutoHideManager, ScreenEdge};
 use crate::wallpaper::WallpaperManager;
@@ -314,6 +314,11 @@ pub struct ShellSession<T: Transport> {
     /// a screen that refuses everyone is a machine that cannot be used at all.
     /// See `design-decisions.md` §824.
     login: Option<LoginScreen>,
+    /// Where the accounts the login screen offers come from: the file given
+    /// at start, or `None` for the system's own. Kept so that logging out
+    /// returns to the screen the session started with, not to a different
+    /// list of people.
+    accounts: Option<PathBuf>,
     /// The full-screen surface the login screen is drawn on.
     ///
     /// Created last of the five, so within `Layer::Overlay` it stacks above the
@@ -331,9 +336,6 @@ pub struct ShellSession<T: Transport> {
     /// at the moment a password is submitted, which is the moment it is least
     /// affordable.
     authority: authlib::Authenticator,
-    /// What the user picked from the login screen's power menu, awaiting
-    /// somebody who can act on it. See [`take_login_power`](Self::take_login_power).
-    login_power: Option<LoginPowerAction>,
     /// Why the wallpaper file could not be shown, if it could not.
     ///
     /// Kept rather than returned, because failing to show a wallpaper is not a
@@ -640,37 +642,19 @@ impl<T: Transport> ShellSession<T> {
             login_image_next: 1,
             login_background_error: None,
             theme_problem: None,
-            // A login screen exactly when there is somebody to log in as. On a
-            // machine whose account database cannot be read there is nobody to
-            // authenticate — `authlib` would answer `Unusable` to every name —
-            // so a screen would be one nothing could ever unlock, which is a
-            // machine that cannot be used rather than a machine that is
-            // secure. See `design-decisions.md` §824.
-            login: {
-                let users = users_yaml.map_or_else(
-                    crate::login_screen::system_users,
-                    crate::login_screen::users_from_db,
-                );
-                if users.is_empty() {
-                    None
-                } else {
-                    Some(LoginScreen::new(
-                        f32::from(u16::try_from(display.width).unwrap_or(u16::MAX)),
-                        f32::from(u16::try_from(display.height).unwrap_or(u16::MAX)),
-                        users,
-                    ))
-                }
-            },
+            // A login screen exactly when there is somebody to log in as
+            // (`design-decisions.md` §824; see `greeter`).
+            login: Self::greeter(users_yaml, display.width, display.height),
             login_surface,
             // The compositor maps a new window; the first `paint_login` unmaps
             // it if no screen is up. Recording `true` here rather than `false`
             // is what makes that first unmap actually happen — the same reason
             // `popups_shown` and `osd_shown` start `true`.
             login_shown: true,
+            accounts: users_yaml.map(Path::to_path_buf),
             authority: users_yaml.map_or_else(authlib::Authenticator::new, |path| {
                 authlib::Authenticator::with_stores(path)
             }),
-            login_power: None,
         };
         session.repaint()?;
         Ok(session)
@@ -824,14 +808,14 @@ impl<T: Transport> ShellSession<T> {
             LoginAction::Authenticate { username, password } => {
                 self.answer_login(&username, &password);
             }
-            LoginAction::Power(choice) => {
-                // Nothing here can shut a machine down, for the same reason
-                // nothing here can start a program: that is the process
-                // server's job and inventing a path to it from the window
-                // manager would put the policy in the wrong place. Recorded
-                // for whoever drains it, exactly as a launch is.
-                self.login_power = Some(choice);
-            }
+            // A power button starts a program, as the start menu's power rows
+            // do -- the same program (`powerctl`), through the same queue, so
+            // the same button does the same thing on either side of a login.
+            // Nothing here shuts a machine down, for the reason nothing here
+            // starts a text editor: the session hands the launch to whoever
+            // drains `take_launches`. Until 2026-09-25 this had a queue of its
+            // own, which the binary answered by exiting.
+            LoginAction::Power(choice) => self.queue_launches(vec![choice.command()]),
         }
         self.paint_login()
     }
@@ -899,15 +883,6 @@ impl<T: Transport> ShellSession<T> {
                 screen.set_lockout_expiry(self.clock_ms);
             }
         }
-    }
-
-    /// What the user chose from the login screen's power menu, if anything.
-    ///
-    /// Drained like [`take_launches`](Self::take_launches) and for the same
-    /// reason: a shell has no channel to whatever turns the machine off, and
-    /// inventing one here would put the policy in the window manager.
-    pub fn take_login_power(&mut self) -> Option<LoginPowerAction> {
-        self.login_power.take()
     }
 
     /// Record programs the user asked to start, minus any this session refuses.
@@ -2712,8 +2687,52 @@ impl<T: Transport> ShellSession<T> {
                 self.dirty = true;
             }
             ShellAction::Control(request) => self.request(request)?,
+            ShellAction::LogOut => self.log_out(),
         }
         Ok(())
+    }
+
+    /// End the session: the login screen comes back, built as it was at
+    /// start -- from the same account list -- and the desktop behind it is
+    /// covered until someone signs in.
+    ///
+    /// A machine with nobody to sign in as has no login screen to return to,
+    /// and so nowhere to log out to; the press does nothing rather than leave
+    /// a screen nothing can unlock (`design-decisions.md` §824).
+    fn log_out(&mut self) {
+        // The screen's size now, not at start: the display may have changed
+        // resolution since, and the shell follows it.
+        self.login = Self::greeter(
+            self.accounts.as_deref(),
+            self.shell.screen_width,
+            self.shell.screen_height,
+        );
+        self.dirty = true;
+    }
+
+    /// A login screen `width` by `height` pixels for the accounts in
+    /// `accounts` (the system's own when `None`), or `None` when there is
+    /// nobody to sign in as.
+    ///
+    /// A login screen exactly when there is somebody to log in as. On a
+    /// machine whose account database cannot be read there is nobody to
+    /// authenticate -- `authlib` would answer `Unusable` to every name -- so a
+    /// screen would be one nothing could ever unlock, which is a machine that
+    /// cannot be used rather than a machine that is secure. See
+    /// `design-decisions.md` §824. One function for start and for logging out,
+    /// so that the rule is in one place.
+    fn greeter(accounts: Option<&Path>, width: u32, height: u32) -> Option<LoginScreen> {
+        let users = accounts.map_or_else(
+            crate::login_screen::system_users,
+            crate::login_screen::users_from_db,
+        );
+        if users.is_empty() {
+            return None;
+        }
+        // Through `u16`: a screen side is a handful of thousands, and a larger
+        // one saturates rather than rounding in `f32`.
+        let side = |px: u32| f32::from(u16::try_from(px).unwrap_or(u16::MAX));
+        Some(LoginScreen::new(side(width), side(height), users))
     }
 
     /// Send one thing the shell asked for on to the compositor.

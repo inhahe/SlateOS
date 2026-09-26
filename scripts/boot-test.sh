@@ -2812,12 +2812,14 @@ MONITOR_ARGS=()
 # one fails with "Failed to bind socket: Input/output error" — QEMU then exits
 # instantly and every armed boot fails ~2 s in (this silently wasted a full
 # wedge-soak run: the old hardcoded 55123 sits inside the reserved 55053-55152
-# range).  Choose the first candidate at/above a base port that is neither in
-# any excluded range nor currently LISTENing.  Falls back to the base port when
-# the query tools are unavailable (non-Windows), so Linux/CI behaviour is
-# unchanged.  An explicit MONITOR_PORT env override always wins.
+# range).  Choose the first candidate in [base, base + count) that is neither
+# in any excluded range nor currently LISTENing; `count` defaults to 201, and a
+# boot-lock slot passes its own range's length so its search can never wander
+# into another slot's ports (see monitor_port_base).  Falls back to the base
+# port when the query tools are unavailable (non-Windows), so Linux/CI
+# behaviour is unchanged.  An explicit MONITOR_PORT env override always wins.
 pick_monitor_port() {
-    local base="$1" p="" excl="" listen=""
+    local base="$1" count="${2:-201}" p="" excl="" listen=""
     # Excluded ranges as "start end" pairs (Windows only; empty elsewhere).
     if command -v netsh &>/dev/null; then
         excl="$(netsh interface ipv4 show excludedportrange protocol=tcp 2>/dev/null \
@@ -2829,7 +2831,7 @@ pick_monitor_port() {
         listen="$(netstat -ano 2>/dev/null | grep -iE 'LISTEN' \
                   | grep -oE ':[0-9]+' | tr -d ':' | sort -u)"
     fi
-    for p in $(seq "$base" $((base + 200))); do
+    for p in $(seq "$base" $((base + count - 1))); do
         local bad=0 s e
         while read -r s e; do
             [ -z "$s" ] && continue
@@ -2845,15 +2847,17 @@ pick_monitor_port() {
 # Port selection is inside the enable test on purpose: pick_monitor_port shells
 # out to netsh and netstat, which cost a second or two on Windows, and a run
 # that will not attach the monitor has no use for the answer.
+# The port itself is chosen later, once the boot lock is held -- see
+# monitor_port_base below the lock.  Choosing it here, hours before QEMU binds
+# it, was harmless while the lock admitted one QEMU; with two, both runs would
+# find 57000 free at setup and the second QEMU would die binding it.
 if [ "$MONITOR_ENABLED" -eq 1 ]; then
     if [ -n "${MONITOR_PORT:-}" ]; then
         MONITOR_PORT_SRC="env override"
+        echo "=== Diagnostic HMP monitor ENABLED (tcp:127.0.0.1:$MONITOR_PORT, $MONITOR_PORT_SRC) ==="
     else
-        MONITOR_PORT="$(pick_monitor_port 57000)"
-        MONITOR_PORT_SRC="auto-selected (excluded-range aware)"
+        echo "=== Diagnostic HMP monitor ENABLED (port chosen once the boot lock is held) ==="
     fi
-    MONITOR_ARGS=(-monitor "tcp:127.0.0.1:$MONITOR_PORT,server,nowait")
-    echo "=== Diagnostic HMP monitor ENABLED (tcp:127.0.0.1:$MONITOR_PORT, $MONITOR_PORT_SRC) ==="
 fi
 if [ "$HARD_LOCKUP_WATCHDOG" -eq 1 ]; then
     # SC2054 (use spaces, not commas, between array elements): the comma is
@@ -8826,6 +8830,15 @@ if [ "${BOOT_LOCK:-1}" != "0" ]; then
     fi
 fi
 
+# A benchmark boot is a measurement, and a second guest on the host is noise in
+# it, so it takes every slot of the lock (design-decisions.md §966).
+# `canary-load-test.sh` boots with `--bench`, so the load experiments are
+# covered too.  An explicit BOOT_LOCK_EXCLUSIVE=0 still wins, for a benchmark
+# run that wants to see what sharing does.
+if [ "$BENCH" -eq 1 ]; then
+    BOOT_LOCK_EXCLUSIVE="${BOOT_LOCK_EXCLUSIVE:-1}"
+fi
+
 # The region between the two BOOT-LOCK-REGION markers below is extracted
 # verbatim and executed by `scripts/test-boot-lock.sh`, which is the only test
 # this logic has: the acquire loop runs *after* the kernel build, so reaching it
@@ -8835,19 +8848,77 @@ fi
 # steps above — the harness supplies only PROJECT_ROOT, BOOT_LOCK_DIR and the
 # `which-lane.py` it points at.
 # --- BEGIN BOOT-LOCK-REGION ---
-# Release is idempotent and safe to call when we never acquired: we only remove
-# the lock if the owner file still names THIS process, so we can never delete a
-# lock that another lane acquired after we broke/released ours.  It also drops
-# our queue ticket, which exists from before the acquire loop and so outlives
-# every path through it — including the ones that never acquire anything.
-release_boot_lock() {
-    _boot_lock_drop_ticket
-    [ -n "$BOOT_LOCK_DIR" ] || return 0
-    [ -d "$BOOT_LOCK_DIR" ] || return 0
-    if [ "$(cat "$BOOT_LOCK_DIR/owner" 2>/dev/null || echo "")" = "$BOOT_LOCK_OWNER" ]; then
-        rm -rf "$BOOT_LOCK_DIR" 2>/dev/null || true
+# How many QEMUs the lock admits at once, and whether this run needs the host to
+# itself.  See "The slots" below for why the number is what it is and which runs
+# are exclusive.  Both are read here rather than set by the arg parser because
+# this region is extracted and run on its own by scripts/test-boot-lock.sh,
+# which sets them per case.
+_lock_slots="${BOOT_LOCK_SLOTS:-2}"
+case "$_lock_slots" in ''|*[!0-9]*|0) _lock_slots=1 ;; esac
+_lock_exclusive="${BOOT_LOCK_EXCLUSIVE:-0}"
+case "$_lock_exclusive" in 1) : ;; *) _lock_exclusive=0 ;; esac
+
+# Slot `k`'s directory.  Slot 1 is `$BOOT_LOCK_DIR` itself, the one lock there
+# used to be -- so a lane still running a boot-test.sh from before the slots,
+# which knows only that directory, keeps respecting it, and the number of QEMUs
+# on the host never exceeds the slot count however the lanes' copies differ.
+_boot_lock_slot_dir() {  # $1 = slot number, 1-based
+    if [ "$1" = "1" ]; then
+        printf '%s\n' "$BOOT_LOCK_DIR"
+    else
+        printf '%s\n' "$BOOT_LOCK_DIR.slot$1"
     fi
 }
+
+# Release is idempotent and safe to call when we never acquired: we only remove
+# a slot whose owner file still names THIS process, so we can never delete a
+# slot that another lane acquired after we broke/released ours.  It also drops
+# our queue ticket, which exists from before the acquire loop and so outlives
+# every path through it -- including the ones that never acquire anything.
+release_boot_lock() {
+    local k d
+    _boot_lock_drop_ticket
+    [ -n "$BOOT_LOCK_DIR" ] || return 0
+    for k in $(seq 1 "$_lock_slots"); do
+        d="$(_boot_lock_slot_dir "$k")"
+        [ -d "$d" ] || continue
+        if [ "$(cat "$d/owner" 2>/dev/null || echo "")" = "$BOOT_LOCK_OWNER" ]; then
+            rm -rf "$d" 2>/dev/null || true
+        fi
+    done
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# The slots.
+#
+# Until 2026-09-26 this lock admitted one QEMU, on the grounds that two concurrent
+# TCG QEMUs "roughly double each other's wall-clock boot time and push long
+# boots past TIMEOUT".  That was written in the three-lane era, before QEMU ran
+# above normal priority (design-decisions.md §963), and never measured.  What
+# was measured on 2026-09-26 (§966) is what the one slot cost: across the 12
+# boots recorded since the six-lane split, the time between a build finishing
+# and QEMU starting -- which contains the lock wait -- was a median 0.8 min and
+# at most 2.0 min, because a passing boot holds QEMU for 4-5 minutes of a 2-4
+# hour run.  The wait it did cost was the rare long one: a hung boot holds the
+# lock for its whole 40-minute timeout.  Each QEMU runs one TCG vCPU -- about one
+# of the host's twelve threads -- above normal priority, so two cannot come near
+# doubling each other.  No dedicated slowdown experiment was run, because it
+# would cost the loaded host more than the change can save; the boot histories
+# record when every QEMU ran, so boots that did overlap are the measurement.
+#
+# Exclusive runs take every slot: `--bench` (the scorecard is a measurement,
+# and a second guest on the host is noise in it), and with it the load canary
+# (canary-load-test.sh boots with `--bench`), which exists to measure exactly
+# what sharing does.  BOOT_LOCK_EXCLUSIVE=1 asks for the same; BOOT_LOCK_SLOTS
+# overrides the count (1 restores the old single lock).
+#
+# The queue decides who may try, and it stays FIFO with several slots: a waiter
+# may race for a slot only when fewer waiters are ahead of it than there are
+# free slots, and never with an exclusive waiter ahead of it -- which is what
+# lets an exclusive run collect every slot instead of being overtaken for ever
+# by ordinary boots slipping into each one as it frees.
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # The queue.
@@ -8866,9 +8937,11 @@ release_boot_lock() {
 #
 # So: keep `mkdir` as the atomic primitive and put a ticket queue in front of
 # it.  Every run drops a `<epoch>-<pid>` file in `$BOOT_LOCK_DIR.waiters/`
-# before the loop, and only attempts `mkdir` when its own ticket is the oldest.
-# A run that releases and immediately re-runs takes a *new* ticket at the back
-# of the queue, which is what turns the observed starvation into a handover.
+# before the loop, and only attempts `mkdir` when the queue says it may (see
+# `_boot_lock_may_try`).  A run that releases and immediately re-runs takes a
+# *new* ticket at the back of the queue, which is what turns the observed
+# starvation into a handover.  An exclusive run's ticket file holds the word
+# `exclusive`; every other ticket is empty.
 #
 # The tickets live in a sibling directory rather than inside `$BOOT_LOCK_DIR`,
 # because the lock dir is created and destroyed by acquisition; the queue has
@@ -8878,11 +8951,50 @@ release_boot_lock() {
 # script runs under `set -euo pipefail`, where an empty/absent queue directory
 # would otherwise make `ls` fail, `pipefail` propagate it, and the whole boot
 # test abort during what is merely a poll of a queue nobody is in.
+_boot_lock_queue() {
+    # Every ticket, oldest first.
+    ls "$BOOT_LOCK_WAITERS" 2>/dev/null | sort -t- -k1,1n -k2,2n || true
+}
+
 _boot_lock_head() {
     # `sed -n 1p` rather than `head -1`: head closes the pipe after one line,
     # which can SIGPIPE `sort` and — under `pipefail` — turn a successful query
     # into a failed one.
-    ls "$BOOT_LOCK_WAITERS" 2>/dev/null | sort -t- -k1,1n -k2,2n | sed -n '1p' || true
+    _boot_lock_queue | sed -n '1p' || true
+}
+
+_boot_lock_ticket_is_exclusive() {  # $1 = ticket name
+    [ "$(cat "$BOOT_LOCK_WAITERS/$1" 2>/dev/null || echo "")" = "exclusive" ]
+}
+
+# How many slots nobody holds right now.  A snapshot -- `mkdir` is still what
+# decides -- but it is what keeps the queue FIFO: see `_boot_lock_may_try`.
+_boot_lock_free_slots() {
+    local k free=0
+    for k in $(seq 1 "$_lock_slots"); do
+        [ -d "$(_boot_lock_slot_dir "$k")" ] || free=$(( free + 1 ))
+    done
+    echo "$free"
+}
+
+# May this run race for a slot now?  Walks the queue from the front: an
+# exclusive ticket ahead of ours means wait, whatever is free, and otherwise an
+# ordinary run may try while fewer tickets are ahead of it than slots are free
+# (so the first waiter, not whichever polls first, takes a lone free slot), and
+# an exclusive run only from the head.  Returns 0 for "try".
+_boot_lock_may_try() {
+    local ahead=0 t free
+    for t in $(_boot_lock_queue); do
+        [ "$t" = "$_lock_ticket" ] && break
+        _boot_lock_ticket_is_exclusive "$t" && return 1
+        ahead=$(( ahead + 1 ))
+    done
+    if [ "$_lock_exclusive" = "1" ]; then
+        [ "$ahead" -eq 0 ]
+        return
+    fi
+    free="$(_boot_lock_free_slots)"
+    [ "$ahead" -lt "$free" ]
 }
 
 # Is the process named by a ticket still running?  Returns non-zero for "no"
@@ -8912,7 +9024,11 @@ _boot_lock_drop_ticket() {
 _boot_lock_ensure_ticket() {
     [ -e "$BOOT_LOCK_WAITERS/$_lock_ticket" ] && return 0
     mkdir -p "$BOOT_LOCK_WAITERS" 2>/dev/null || true
-    : > "$BOOT_LOCK_WAITERS/$_lock_ticket" 2>/dev/null || true
+    if [ "$_lock_exclusive" = "1" ]; then
+        echo exclusive > "$BOOT_LOCK_WAITERS/$_lock_ticket" 2>/dev/null || true
+    else
+        : > "$BOOT_LOCK_WAITERS/$_lock_ticket" 2>/dev/null || true
+    fi
     return 0
 }
 
@@ -8962,6 +9078,132 @@ _boot_lock_sweep_tickets() {
     return 0
 }
 
+# One slot's state, for the stale breaker and the give-up decision: sets
+# `_slot_age`, `_slot_alive` (yes / no / unknown) and `_slot_pid`.
+#
+# Age: the owner file is written a moment AFTER the `mkdir` that acquires, so a
+# waiter polling inside that window sees a slot directory with no owner file.
+# That is a *young* slot, not an old one — treating the missing file as
+# "infinitely old" once let a waiter delete a lock another lane had just
+# legitimately taken, and then both booted QEMU at once.  So fall back to the
+# directory's own mtime, which `mkdir` stamps at acquisition, and only claim
+# ignorance when neither can be stat'd.
+#
+# Liveness: the owner string carries the holder's pid, and all lanes run this
+# script under the same MSYS bash, so `kill -0` answers across worktrees.  A
+# run killed by `run-timeout.py`'s Job Object is torn down without executing
+# any exit path, so `release_boot_lock` never fires and a slot outlives its
+# owner by up to the 20 minutes the age rule needs.  The 60s floor is
+# deliberate: a pid that cannot be seen is only evidence of death if the slot
+# has existed long enough for the owner to be observable at all.  Liveness is a
+# tri-state and all three answers matter: collapsing "unknown" into "dead"
+# breaks live locks whenever `kill` is unavailable, into "alive" breaks nothing
+# ever.
+_boot_lock_slot_state() {  # $1 = slot directory
+    local mtime
+    _slot_age=999999
+    _slot_alive="unknown"
+    _slot_pid=""
+    mtime="$(date -r "$1/owner" +%s 2>/dev/null \
+             || date -r "$1" +%s 2>/dev/null || echo 0)"
+    [ "$mtime" -gt 0 ] && _slot_age=$(( $(date +%s) - mtime ))
+    if [ "$_lock_pidcheck" = "1" ]; then
+        _slot_pid="$(sed -n 's#.*/pid-\([0-9][0-9]*\)/.*#\1#p' "$1/owner" 2>/dev/null || echo "")"
+        if [ -n "$_slot_pid" ]; then
+            if kill -0 "$_slot_pid" 2>/dev/null; then
+                _slot_alive="yes"
+            elif [ "$_slot_age" -ge 60 ]; then
+                _slot_alive="no"
+            fi
+        fi
+    fi
+    return 0
+}
+
+# Break any slot held by someone else that is provably dead, or stale by the
+# age backstop.  Returns 0 if it broke one (the caller re-polls at once).
+#
+# The age rule is the backstop for everything the pid check cannot see: a
+# recycled pid now belonging to something unrelated, an owner from a previous
+# Windows session, an owner whose pid lives in a different MSYS instance's
+# process table, an unparseable owner string, and the case where `kill` itself
+# is unavailable.  It deliberately does NOT apply to an owner we can prove is
+# alive: a boot that outlives the 1200s estimate is not dead, it is slow, and
+# breaking its slot starts one QEMU more than the lock admits alongside it.
+_boot_lock_break_stale() {
+    local k d
+    for k in $(seq 1 "$_lock_slots"); do
+        d="$(_boot_lock_slot_dir "$k")"
+        [ -d "$d" ] || continue
+        [ "$(cat "$d/owner" 2>/dev/null || echo "")" = "$BOOT_LOCK_OWNER" ] && continue
+        _boot_lock_slot_state "$d"
+        if [ "$_slot_alive" = "no" ]; then
+            echo "=== Breaking boot lock slot $k: owner pid $_slot_pid is gone (held by $(cat "$d/owner" 2>/dev/null || echo unknown), age ${_slot_age}s) ==="
+            rm -rf "$d" 2>/dev/null || true
+            return 0
+        fi
+        if [ "$_slot_alive" != "yes" ] && [ "$_slot_age" -gt 1200 ]; then
+            echo "=== Breaking stale boot lock slot $k (age ${_slot_age}s, held by $(cat "$d/owner" 2>/dev/null || echo unknown)) ==="
+            rm -rf "$d" 2>/dev/null || true
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Try to take the slots this run needs: any one free slot for an ordinary run,
+# every slot for an exclusive one -- keeping what it has while it waits for the
+# rest, since it is the head of the queue and nobody behind it may try.  The
+# owner is written the moment each slot is taken.  Returns 0 once the run holds
+# what it needs.
+#
+# Highest slot first, slot 1 last.  A lane still running a boot-test.sh from
+# before the slots knows only slot 1, and tries it only from the head of the
+# queue; taking slot 1 while a higher one stood free would leave that lane
+# waiting behind a slot it cannot see.  Once every lane has merged the slots,
+# the order is immaterial.
+_boot_lock_take() {
+    local k d held=0
+    for k in $(seq "$_lock_slots" -1 1); do
+        d="$(_boot_lock_slot_dir "$k")"
+        if [ "$(cat "$d/owner" 2>/dev/null || echo "")" = "$BOOT_LOCK_OWNER" ]; then
+            held=$(( held + 1 ))
+            continue
+        fi
+        if mkdir "$d" 2>/dev/null; then
+            echo "$BOOT_LOCK_OWNER" > "$d/owner" 2>/dev/null || true
+            held=$(( held + 1 ))
+            _lock_slot_taken="$k"
+            [ "$_lock_exclusive" = "1" ] || return 0
+        fi
+    done
+    [ "$_lock_exclusive" = "1" ] && [ "$held" -eq "$_lock_slots" ]
+}
+
+# Who holds or heads the lock ahead of us and is provably alive, for the
+# give-up decision: prints a description, or nothing.
+_boot_lock_live_blocker() {
+    local k d t
+    for k in $(seq 1 "$_lock_slots"); do
+        d="$(_boot_lock_slot_dir "$k")"
+        [ -d "$d" ] || continue
+        [ "$(cat "$d/owner" 2>/dev/null || echo "")" = "$BOOT_LOCK_OWNER" ] && continue
+        _boot_lock_slot_state "$d"
+        if [ "$_slot_alive" = "yes" ]; then
+            echo "owner $(cat "$d/owner" 2>/dev/null || echo unknown) (slot $k)"
+            return 0
+        fi
+    done
+    for t in $(_boot_lock_queue); do
+        [ "$t" = "$_lock_ticket" ] && break
+        if _boot_lock_ticket_alive "$t"; then
+            echo "queued waiter $t"
+            return 0
+        fi
+    done
+    return 0
+}
+
 if [ -n "$BOOT_LOCK_DIR" ]; then
     BOOT_LOCK_WAITERS="$BOOT_LOCK_DIR.waiters"
     BOOT_LOCK_OWNER="$(python "$PROJECT_ROOT/scripts/which-lane.py" 2>/dev/null | awk '/^lane:/{print $2}' || true)"
@@ -8978,128 +9220,38 @@ if [ -n "$BOOT_LOCK_DIR" ]; then
     if kill -0 $$ 2>/dev/null; then _lock_pidcheck=1; else _lock_pidcheck=0; fi
     # Take our place in the queue *before* the first probe, and arm the exit
     # path immediately: from here on every way out of this script — acquire,
-    # give up, Ctrl-C, SIGTERM — has to drop the ticket, or the next lane
-    # queues behind a corpse.
+    # give up, Ctrl-C, SIGTERM — has to drop the ticket and any slot taken,
+    # or the next lane queues behind a corpse.
     _boot_lock_ensure_ticket
     trap 'release_boot_lock' EXIT INT TERM
+    _lock_acquired=0
+    _lock_slot_taken=""
     while :; do
         _boot_lock_ensure_ticket
         _boot_lock_sweep_tickets
-        _lock_head="$(_boot_lock_head)"
-        # Only the head of the queue races for the lock, so there is no race:
-        # everyone else sleeps.  `mkdir` can still fail here (the incumbent
-        # holds it), which is the ordinary wait.
-        if [ "$_lock_head" = "$_lock_ticket" ] && mkdir "$BOOT_LOCK_DIR" 2>/dev/null; then
+        if _boot_lock_may_try && _boot_lock_take; then
+            _lock_acquired=1
             break
         fi
-        # These describe the *lock*, and stay at their unknown values when
-        # there is no lock to describe — i.e. when we are merely queued behind
-        # another ticket.  Setting them per-iteration rather than leaving last
-        # iteration's values matters now that the loop body can run without
-        # ever looking at a lock directory.
-        _lock_age=999999
-        _lock_alive="unknown"
-        _lock_pid=""
-        if [ -d "$BOOT_LOCK_DIR" ]; then
-            # Age of the lock, for the stale breaker below.
-            #
-            # The owner file is written a moment AFTER the `mkdir` that
-            # acquires, so a waiter polling inside that window sees a lock
-            # directory with no owner file.  That is a *young* lock, not an old
-            # one — treating the missing file as "infinitely old" (which this
-            # did, via 999999) let a waiter delete a lock another lane had just
-            # legitimately taken, and then both would boot QEMU at once.  So
-            # fall back to the directory's own mtime, which `mkdir` stamps at
-            # acquisition, and only claim ignorance when neither can be stat'd.
-            _lock_mtime="$(date -r "$BOOT_LOCK_DIR/owner" +%s 2>/dev/null \
-                           || date -r "$BOOT_LOCK_DIR" +%s 2>/dev/null || echo 0)"
-            [ "$_lock_mtime" -gt 0 ] && _lock_age=$(( $(date +%s) - _lock_mtime ))
-            # Break a dead lock: the owner string carries the holder's pid, and
-            # all lanes run this script under the same MSYS bash, so `kill -0`
-            # answers across worktrees.  A run killed by `run-timeout.py`'s Job
-            # Object is torn down without executing any exit path, so
-            # `release_boot_lock` never fires and the lock outlives its owner by
-            # up to the 20 minutes the age rule needs — landing on whichever
-            # lane runs next as a stall indistinguishable from a hung boot.
-            #
-            # The 60s floor is deliberate.  A pid that cannot be seen is only
-            # evidence of death if the lock has existed long enough for the
-            # owner to be observable at all; below that we would be acting on a
-            # lock taken seconds ago, where a transient (an owner file not yet
-            # flushed, a pid not yet visible) is likelier than a real death.  A
-            # healthy boot holds the lock for minutes, so the floor costs a
-            # waiter nothing and still cuts the worst case from 1200s to ~60s.
-            #
-            # Liveness is a tri-state — alive / dead / unknown — and all three
-            # answers matter.  Collapsing "unknown" into either of the other two
-            # is how this goes wrong: into "dead" and we break live locks
-            # whenever `kill` is unavailable, into "alive" and we never break
-            # anything.
-            if [ "$_lock_pidcheck" = "1" ]; then
-                _lock_pid="$(sed -n 's#.*/pid-\([0-9][0-9]*\)/.*#\1#p' \
-                             "$BOOT_LOCK_DIR/owner" 2>/dev/null || echo "")"
-                if [ -n "$_lock_pid" ]; then
-                    if kill -0 "$_lock_pid" 2>/dev/null; then
-                        _lock_alive="yes"
-                    elif [ "$_lock_age" -ge 60 ]; then
-                        _lock_alive="no"
-                    fi
-                fi
-            fi
-            if [ "$_lock_alive" = "no" ]; then
-                echo "=== Breaking boot lock: owner pid $_lock_pid is gone (held by $(cat "$BOOT_LOCK_DIR/owner" 2>/dev/null || echo unknown), age ${_lock_age}s) ==="
-                rm -rf "$BOOT_LOCK_DIR" 2>/dev/null || true
-                continue
-            fi
-            # The age rule is the backstop for everything the pid check cannot
-            # see: a recycled pid now belonging to something unrelated, an owner
-            # from a previous Windows session, an owner whose pid lives in a
-            # different MSYS instance's process table, an unparseable owner
-            # string, and the case where `kill` itself is unavailable.
-            #
-            # It deliberately does NOT apply to an owner we can prove is alive.
-            # It was written when liveness was unknowable, so age was the only
-            # available proxy for death and 1200s was picked as "longer than any
-            # healthy boot".  But a boot that outlives that estimate is not
-            # dead, it is slow — a cold host, a QEMU stalled on I/O — and
-            # breaking its lock starts a second QEMU alongside the first, which
-            # is the one outcome worse than waiting: two mutually-slowed runs,
-            # either of which may now fail for reasons that have nothing to do
-            # with the code under test.
-            if [ "$_lock_alive" != "yes" ] && [ "$_lock_age" -gt 1200 ]; then
-                echo "=== Breaking stale boot lock (age ${_lock_age}s, held by $(cat "$BOOT_LOCK_DIR/owner" 2>/dev/null || echo unknown)) ==="
-                rm -rf "$BOOT_LOCK_DIR" 2>/dev/null || true
-                continue
-            fi
+        if _boot_lock_break_stale; then
+            continue
         fi
         if [ "$_lock_waited" -ge "$_lock_wait" ]; then
             # Two different endings, because they mean opposite things.
             #
-            # If we can point at a *live* process that is entitled to the lock
-            # ahead of us, booting anyway would put a second QEMU on the host
-            # alongside a run that is either in progress or about to start —
-            # precisely the outcome this lock exists to prevent, arrived at an
-            # hour later when nobody is watching, and then reported as an
-            # ordinary slow/failed boot of the code under test.  A wait that
-            # ends by doing the forbidden thing is not a bounded wait.  So
-            # refuse, with a status of its own: "I waited an hour and gave up"
-            # is a true statement a reader (or a retry loop) can act on; a
-            # phantom failure caused by contention is not.
-            #
-            # "Entitled ahead of us" is two things, not one.  The obvious one
-            # is a live lock owner.  The other is a live waiter at the head of
-            # the queue: it holds no lock yet, so the old owner-only test would
-            # cheerfully boot alongside it — and the head waiter is precisely
-            # the process most likely to enter QEMU in the next few seconds.
-            # Adding the queue and then not consulting it here would leave the
-            # two-QEMU escalation intact, just moved.
-            _lock_blocker=""
-            if [ "$_lock_alive" = "yes" ]; then
-                _lock_blocker="owner $(cat "$BOOT_LOCK_DIR/owner" 2>/dev/null || echo unknown)"
-            elif [ -n "$_lock_head" ] && [ "$_lock_head" != "$_lock_ticket" ] \
-                 && _boot_lock_ticket_alive "$_lock_head"; then
-                _lock_blocker="queued waiter $_lock_head"
-            fi
+            # If we can point at a *live* process that is entitled to a slot
+            # ahead of us -- a live owner of a slot we need, or a live waiter
+            # ahead of us in the queue -- booting anyway would put one QEMU more
+            # on the host than the lock admits, alongside a run that is either
+            # in progress or about to start: precisely the outcome this lock
+            # exists to prevent, arrived at an hour later when nobody is
+            # watching, and then reported as an ordinary slow/failed boot of the
+            # code under test.  A wait that ends by doing the forbidden thing is
+            # not a bounded wait.  So refuse, with a status of its own: "I
+            # waited an hour and gave up" is a true statement a reader (or a
+            # retry loop) can act on; a phantom failure caused by contention is
+            # not.
+            _lock_blocker="$(_boot_lock_live_blocker)"
             if [ -n "$_lock_blocker" ]; then
                 echo "=== Boot lock unavailable after ${_lock_waited}s: LIVE $_lock_blocker is ahead of us; refusing to boot alongside it ==="
                 echo "=== Nothing was booted — this says nothing about the code under test.  Retry, or raise BOOT_LOCK_WAIT. ==="
@@ -9107,44 +9259,86 @@ if [ -n "$BOOT_LOCK_DIR" ]; then
                 # normally truncated a few lines below, *after* the lock, so on
                 # this path it still holds the last boot's output — and every
                 # soak wrapper we have greps it for wedge/panic signatures the
-                # moment the script returns.  A caller that has not been taught
-                # about exit 4 would then classify a stale log as this run's
-                # result: re-reporting an old catch as new, or inventing one.
-                # Deleting them makes "nothing was booted" self-evident to any
-                # caller, including ones written later that never heard of this
-                # status.  (`${…:-}` because the lock region is extracted and
-                # run standalone by scripts/test-boot-lock.sh, which supplies
-                # none of the build variables.)
+                # moment the script returns.  Deleting them makes "nothing was
+                # booted" self-evident to any caller, including ones written
+                # later that never heard of this status.  (`${…:-}` because the
+                # lock region is extracted and run standalone by
+                # scripts/test-boot-lock.sh, which supplies none of the build
+                # variables.)
                 rm -f "${SERIAL_FILE:-}" "${SERIAL_FILE:+${SERIAL_FILE%.txt}-regs.txt}" 2>/dev/null || true
                 exit 4
             fi
-            # Otherwise nothing live can be demonstrated — an ownerless or
-            # unreadable lock, a queue of processes we cannot see — so
-            # proceeding is the same conservative default it always was.
+            # Otherwise nothing live can be demonstrated — ownerless or
+            # unreadable slots, a queue of processes we cannot see — so
+            # proceeding is the same conservative default it always was.  Any
+            # slot already taken is kept, and released as usual on exit.
             echo "=== Boot lock still held after ${_lock_waited}s; booting anyway (results may be slow) ==="
-            BOOT_LOCK_DIR=""
             break
         fi
         if [ $(( _lock_waited % 60 )) -eq 0 ]; then
-            if [ -d "$BOOT_LOCK_DIR" ]; then
-                echo "=== Waiting for boot lock, held by $(cat "$BOOT_LOCK_DIR/owner" 2>/dev/null || echo unknown) (${_lock_waited}s) ==="
+            _lock_held_by=""
+            for _k in $(seq 1 "$_lock_slots"); do
+                _d="$(_boot_lock_slot_dir "$_k")"
+                [ -d "$_d" ] && _lock_held_by="$_lock_held_by ${_k}:$(cat "$_d/owner" 2>/dev/null || echo unknown)"
+            done
+            if [ -n "$_lock_held_by" ]; then
+                echo "=== Waiting for boot lock ($_lock_slots slot(s)$([ "$_lock_exclusive" = 1 ] && echo ', need all: exclusive')), held:$_lock_held_by (${_lock_waited}s) ==="
             else
-                echo "=== Waiting for boot lock: queued behind ticket ${_lock_head:-unknown} (${_lock_waited}s) ==="
+                echo "=== Waiting for boot lock: queued behind ticket $(_boot_lock_head) (${_lock_waited}s) ==="
             fi
         fi
         sleep 5
         _lock_waited=$(( _lock_waited + 5 ))
     done
-    if [ -n "$BOOT_LOCK_DIR" ]; then
-        echo "$BOOT_LOCK_OWNER" > "$BOOT_LOCK_DIR/owner" 2>/dev/null || true
-        echo "=== Boot lock acquired: $BOOT_LOCK_OWNER ==="
+    # "Boot lock acquired: <owner>" is kept byte for byte from the one-slot
+    # lock -- scripts/test-boot-lock.sh and anyone reading an old log match on
+    # it -- and the slot goes after it.
+    if [ "$_lock_acquired" = "1" ]; then
+        if [ "$_lock_exclusive" = "1" ]; then
+            echo "=== Boot lock acquired: $BOOT_LOCK_OWNER (all $_lock_slots slot(s), exclusive) ==="
+        else
+            echo "=== Boot lock acquired: $BOOT_LOCK_OWNER (slot $_lock_slot_taken of $_lock_slots) ==="
+        fi
     fi
-    # We hold the lock (or gave up on it); either way our place in the queue is
-    # spent, and leaving it would make the next lane wait behind a ticket whose
-    # holder is no longer waiting for anything.
+    # We hold what we need (or gave up waiting); either way our place in the
+    # queue is spent, and leaving it would make the next lane wait behind a
+    # ticket whose holder is no longer waiting for anything.
     _boot_lock_drop_ticket
 fi
 # --- END BOOT-LOCK-REGION ---
+
+# --- BEGIN MONITOR-PORT-REGION ---
+# The monitor port, chosen now that the boot lock is held.  Every QEMU on the
+# host is either holding a slot or (BOOT_LOCK=0, or a run that gave up waiting
+# with nothing live to wait for) holding none, so ranges by slot are disjoint
+# by construction: slot k searches 57000 + 50*(k-1) onwards for 50 ports, and
+# a run with no slot searches 56950-56999, below every slot's range whatever
+# the slot count.  pick_monitor_port still skips what Windows has reserved or
+# something is listening on, but only within the range, so two runs choosing
+# at the same moment cannot pick the same port.
+#
+# A lane still running a boot-test.sh from before the slots chooses at setup
+# from 57000 and can only boot holding slot 1, whose range starts there too;
+# at worst it collides with a slot-1 run of its own vintage, which the one-slot
+# lock it runs never let happen.  Extracted and run by
+# scripts/test-boot-lock.sh, like the lock region above.
+monitor_port_base() {  # $1 = the slot held, or empty for none
+    case "$1" in
+        ''|*[!0-9]*|0) echo 56950 ;;
+        *) echo $(( 57000 + 50 * ($1 - 1) )) ;;
+    esac
+}
+if [ "$MONITOR_ENABLED" -eq 1 ]; then
+    if [ -z "${MONITOR_PORT:-}" ]; then
+        MONITOR_PORT="$(pick_monitor_port "$(monitor_port_base "${_lock_slot_taken:-}")" 50)"
+        MONITOR_PORT_SRC="auto-selected in slot ${_lock_slot_taken:-(none)}'s range, excluded-range aware"
+    else
+        MONITOR_PORT_SRC="${MONITOR_PORT_SRC:-env override}"
+    fi
+    MONITOR_ARGS=(-monitor "tcp:127.0.0.1:$MONITOR_PORT,server,nowait")
+    echo "=== Diagnostic HMP monitor on tcp:127.0.0.1:$MONITOR_PORT ($MONITOR_PORT_SRC) ==="
+fi
+# --- END MONITOR-PORT-REGION ---
 
 # Step 4: Boot QEMU
 contention_notice "the moment before QEMU"

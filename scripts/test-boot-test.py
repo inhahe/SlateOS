@@ -1579,6 +1579,50 @@ def _shpath(path):
     return path.replace(os.sep, "/")
 
 
+#: How long the boot-lock suite may take on a host with room before it counts
+#: as hung: it is about a hundred short bash subshells and one 5 s sleep, and
+#: takes seconds on an idle host. On a starved one `run_measured` declines it
+#: by name instead (on 2026-09-26, with the host at 100% CPU and its shells
+#: lowered by Process Lasso's ProBalance, it took 28 minutes).
+BOOT_LOCK_SUITE_GUARD_S = 900
+
+
+def test_the_boot_lock_suite_passes():
+    """`scripts/test-boot-lock.sh` is the only test of the boot lock and of the
+    monitor-port choice beside it -- the BOOT-LOCK-REGION and
+    MONITOR-PORT-REGION of `boot-test.sh`, extracted and run against lock
+    directories, tickets and port tables it controls.
+
+    It is run from here because nothing else ran it. The push hook's gate 20
+    pairs a changed script with `scripts/test-<stem>.py` by name, so a change
+    to `boot-test.sh` brings this file, and a shell suite with a different stem
+    is never reached; the boot test's own sweep globs `scripts/test-*.py` only.
+    The lock took two slots on 2026-09-26 (design-decisions.md §966) with this
+    suite as its whole test, and no gate would have noticed it failing.
+    """
+    suite = os.path.join("scripts", "test-boot-lock.sh")
+    try:
+        proc = hostload.run_measured(
+            [msysbash.bash(), suite], BOOT_LOCK_SUITE_GUARD_S,
+            "the boot-lock suite", cwd=REPO_ROOT,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    except subprocess.TimeoutExpired:
+        proc = None
+    if proc is None:
+        check("the boot-lock suite finishes", "hung", "finished")
+        return
+    failed = [line.strip() for line in proc.stdout.splitlines()
+              if line.startswith("  FAIL") or line.startswith("FAIL")]
+    check("the boot-lock suite passes",
+          ("exit 0" if proc.returncode == 0 else f"exit {proc.returncode}: "
+           + "; ".join(failed[:6])),
+          "exit 0")
+    # The suite's own banner, so a run that exited 0 without running its cases
+    # -- a region that failed to extract, say -- is not taken for a pass.
+    check("...and says it ran its cases",
+          "=== boot-lock tests PASSED ===" in proc.stdout, True)
+
+
 def main():
     """Run every `test_*` in this file, in definition order.
 

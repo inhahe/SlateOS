@@ -711,7 +711,7 @@ const SORT: Program = Program::new("sort", 2);
 /// `--random-sort` precedes `--random-source`, which is not the order anyone
 /// would guess. The instrument is one command: an empty prefix matches every
 /// option, so `sort --=x` prints the whole table in declaration order. See
-/// [`Program::resolve_long`], which is what makes the order observable.
+/// [`Program::resolve_long`](getoptlong::Program::resolve_long), which is what makes the order observable.
 const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("ignore-leading-blanks", Takes::Nothing),
     ("check", Takes::Optional),

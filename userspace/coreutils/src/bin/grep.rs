@@ -1765,7 +1765,7 @@ fn max_count_arg(value: &[u8]) -> Result<Option<usize>, getopt::Error> {
 /// GNU routes this through gnulib's `argmatch`, so a bad value prints **seven**
 /// lines — the rejected value, `Valid arguments are:` and the three of them,
 /// then `Usage: …` and `Try 'grep --help' …` — and exits **1**, not grep's
-/// usual 2. [`Program::argmatch`] is that function, status included, and
+/// usual 2. [`Program::argmatch`](getoptlong::Program::argmatch) is that function, status included, and
 /// [`run_main`] prints the [`USAGE`] pair below it, so all seven lines and the
 /// status now match. It is also a **prefix** match, which is upstream's
 /// behaviour and not an accident: `grep -d rec` recurses.

@@ -224,7 +224,7 @@ const SHORT_OPTIONS: &str = "-cxtvpkUf:C:b:?";
 /// of every name was put to the binary and its verdict compared with this
 /// table's — resolved, unrecognised, or ambiguous, and for ambiguous ones the
 /// candidate list in order — for **zero** mismatches. That is also what
-/// establishes tar needs [`Program::resolve_long`] rather than
+/// establishes tar needs [`Program::resolve_long`](getoptlong::Program::resolve_long) rather than
 /// `resolve_long_aliased`: tar does have aliases (`--extract`/`--get`), but no
 /// two of them share a prefix, so name-only resolution is exact here. Were that
 /// untrue, some prefix would have been accepted by GNU and called ambiguous by

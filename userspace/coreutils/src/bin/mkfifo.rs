@@ -228,7 +228,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
 
 /// The diagnostic for an option that GNU `mkfifo` has and this one does not.
 ///
-/// Deliberately not [`Program::invalid_option`]: `-Z` is not a typo, and telling
+/// Deliberately not [`Program::invalid_option`](getoptlong::Program::invalid_option): `-Z` is not a typo, and telling
 /// the user it is invalid sends them to check the spelling of a flag they
 /// spelled correctly.
 fn unimplemented_short(flag: u8) -> getopt::Error {

@@ -266,7 +266,7 @@ enum Which {
 
 /// `--time`'s words, with the values that decide which spellings are synonyms.
 ///
-/// The grouping is not cosmetic: [`Program::argmatch`] judges an ambiguous
+/// The grouping is not cosmetic: [`Program::argmatch`](getoptlong::Program::argmatch) judges an ambiguous
 /// abbreviation by *value*, so `--time=a` is ambiguous (it prefixes `atime` and
 /// `access`, which agree, but the empty-ish prefix rule still needs the values
 /// to compare) while `--time=m` resolves. It is also what renders GNU's list:

@@ -86,7 +86,7 @@ const LN: Program = Program::new("ln", 1);
 /// GNU `ln`'s `long_options[]`, **in its declaration order**, which is
 /// observable: `getopt_long` lists an ambiguous prefix's candidates in table
 /// order. Measured with the instrument described in
-/// [`Program::resolve_long`] — an empty prefix matches everything, so
+/// [`Program::resolve_long`](getoptlong::Program::resolve_long) — an empty prefix matches everything, so
 /// `ln --=x` prints the whole table:
 ///
 /// ```text
@@ -313,7 +313,7 @@ fn apply_short(flag: u8, flags: &mut LnFlags) -> Result<(), getopt::Error> {
 
 /// The diagnostic for an option that GNU `ln` has and this one does not.
 ///
-/// Deliberately not [`Program::invalid_option`]: `-r` is not a typo, and telling
+/// Deliberately not [`Program::invalid_option`](getoptlong::Program::invalid_option): `-r` is not a typo, and telling
 /// the user it is invalid sends them to check their spelling of a flag they
 /// spelled correctly.
 fn unimplemented_short(flag: u8) -> getopt::Error {

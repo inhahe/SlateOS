@@ -1422,31 +1422,5 @@ mod tests {
             assert_eq!(ret, -1);
             assert_eq!(errno::get_errno(), errno::EACCES);
         }
-
-        // -- Cross-checks ------------------------------------------------
-
-        /// **Cross-phase invariant**: Phase 185 (landlock) and
-        /// Phase 186 (seccomp) implement the same NNP||CAP_SYS_ADMIN
-        /// gate but with *different* errnos.  Landlock returns EPERM;
-        /// seccomp returns EACCES.  Verify they don't accidentally
-        /// converge on the same errno (which would mean the seccomp
-        /// gate is wrong).
-        #[test]
-        fn test_seccomp_phase186_errno_differs_from_landlock_phase185() {
-            let _g = CapGuard::snapshot();
-            drop_sys_admin();
-
-            errno::set_errno(0);
-            let _ = seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
-            let seccomp_errno = errno::get_errno();
-
-            errno::set_errno(0);
-            let _ = crate::linux_landlock::landlock_restrict_self(0, 0);
-            let landlock_errno = errno::get_errno();
-
-            assert_eq!(seccomp_errno, errno::EACCES);
-            assert_eq!(landlock_errno, errno::EPERM);
-            assert_ne!(seccomp_errno, landlock_errno);
-        }
     }
 }

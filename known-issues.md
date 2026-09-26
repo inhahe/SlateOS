@@ -24327,6 +24327,18 @@ adjtime.c.
   Linux's, and `adjtime` did not exist -- `B-D-ADJTIMEX-WAS-NOT-LINUXS` (new,
   fixed with it).
 
+**Thirty-sixth pass, 2026-09-26 — `linux_landlock.rs` (3 sites), lane D.**
+Against Linux 6.6's security/landlock/syscalls.c and glibc 2.39, which has
+no Landlock functions.
+
+- **`landlock_create_ruleset(NULL, …)`, `landlock_add_rule(…, NULL, 0)`,
+  `landlock_restrict_self`'s gate** -- the three sites were validators for a
+  call that cannot succeed here: the kernel has no Landlock. They went with
+  the calls themselves.
+- Beside them, the finding of the pass: the version probe said ABI 1 and
+  every ruleset was then refused -- `B-D-LANDLOCK-SAID-YES-THEN-NO` (new,
+  fixed with it).
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24340,17 +24352,18 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-thirty-five swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
+thirty-six swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
 `sched.rs`, `mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`,
 `linux_module.rs`, `sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs`, `sysv_sem.rs`,
 `linux_aio_abi.rs`, `linux_seccomp.rs`, `mman.rs`, `resource.rs`, `crypt.rs`,
-`iconv.rs`, `linux_io_uring.rs`, `sysv_shm.rs`, `sys_quota.rs` and
-`sys_timex.rs`. That finishes every file the sweep counted at four and at
-three, the three the recount of 2026-09-26 added among them: `pwd.rs`,
-`dirent.rs` and `signal.rs` needed nothing at their NULLs -- `pwd.rs`'s
-database did (`B-D-PWD-KNEW-ONLY-ROOT`). Of the files at two, `sysv_shm.rs`,
-`sys_quota.rs` and `sys_timex.rs` are done; next are `fts.rs`, `ftw.rs`,
-`linux_landlock.rs` and `xattr.rs` (walked by the fourth pass).
+`iconv.rs`, `linux_io_uring.rs`, `sysv_shm.rs`, `sys_quota.rs`,
+`sys_timex.rs` and `linux_landlock.rs`. That finishes every file the sweep
+counted at four and at three, the three the recount of 2026-09-26 added among
+them: `pwd.rs`, `dirent.rs` and `signal.rs` needed nothing at their NULLs --
+`pwd.rs`'s database did (`B-D-PWD-KNEW-ONLY-ROOT`). Of the files at two,
+`sysv_shm.rs`, `sys_quota.rs`, `sys_timex.rs` and `linux_landlock.rs` are
+done; next are `fts.rs`, `ftw.rs` and `xattr.rs` (walked by the fourth
+pass).
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
@@ -169974,6 +169987,33 @@ the clock.
 **Still not Linux's:** the slew is only kept and reported -- the clock here
 has no slew, so the time does not move by it -- and the discipline state is
 this process's, not the system's.
+
+### [D] B-D-LANDLOCK-SAID-YES-THEN-NO — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/linux_landlock.rs`.
+
+**In short:** Landlock lets a program lock itself out of files it does not
+need -- a sandbox it sets up for itself. SlateOS's kernel does not enforce
+it. A program asks first which Landlock version is there; ours answered
+"version 1", and then refused every attempt to use it. So a program told
+Landlock was available tried to sandbox itself and failed; a careful one
+stopped rather than run unconfined. A kernel without Landlock answers the
+first question "not supported", and the program carries on without it.
+
+**What it was.** The module exported `landlock_create_ruleset`,
+`landlock_add_rule` and `landlock_restrict_self` as C functions -- glibc has
+none; programs make the three system calls through `syscall()` -- and the
+version probe returned 1 while a real create answered `ENOSYS`, after
+validators for arguments that could never be used.
+
+**Fix.** The functions are gone, as the kernel-AIO ones went
+(design-decisions.md §1114); the module is the header's constants and
+structures. `syscall(SYS_landlock_*)` answers `ENOSYS` to all three, the
+probe included -- "not supported by the current kernel", which every
+Landlock-aware program tests for.
+
+**What would change it:** a kernel that enforces Landlock (VFS and network
+hooks, lane A's), at which point `syscall()` routes the three numbers to it.
 
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 

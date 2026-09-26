@@ -204,32 +204,42 @@ mod gnu_asprintf {
 // Rust entry points (called by the fortified `__*_chk` trampolines)
 // ---------------------------------------------------------------------------
 
-/// Stack buffer size for printf/fprintf (format to buffer, then write).
+/// Stack buffer size for printf/fprintf/dprintf.  Output streams through it
+/// to the stream or descriptor a buffer at a time, so it bounds memory, not
+/// output.
 const PRINTF_BUF_SIZE: usize = 4096;
+
+/// Format to `sink` through a [`PRINTF_BUF_SIZE`] stack buffer, handing the
+/// sink each full buffer and then the tail.  Returns the number of bytes
+/// formatted, or -1 (with `errno` from the write) if the sink refused one.
+///
+/// Until 2026-09-26 `printf`, `fprintf` and `dprintf` formatted into the
+/// buffer and wrote *at most one buffer's worth*, while returning the full
+/// count: every output over 4096 bytes was cut at 4096, silently, and the
+/// return value said it had all been written.
+fn format_to_sink(sink: Sink, fmt: *const u8, args: &mut Args) -> i32 {
+    let mut buf = [0u8; PRINTF_BUF_SIZE];
+    let mut dst = FmtOutput::streaming(buf.as_mut_ptr(), PRINTF_BUF_SIZE, sink);
+    let n = format_into(&mut dst, fmt, args);
+    if n < 0 {
+        return n;
+    }
+    dst.drain(); // the tail
+    if dst.failed { -1 } else { n }
+}
 
 /// `printf(fmt, ...)` — write formatted output to stdout.
 ///
 /// Output goes through the stdio buffer (line-buffered on stdout) so
 /// printf output is properly coalesced with other stdout writes.
 pub(crate) fn _printf_impl(fmt: *const u8, args: &mut Args) -> i32 {
-    let mut buf = [0u8; PRINTF_BUF_SIZE];
-    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args);
-    if n <= 0 {
-        return n;
-    }
-    let write_len = if (n as usize) < PRINTF_BUF_SIZE {
-        n as usize
-    } else {
-        PRINTF_BUF_SIZE
-    };
     // Use STDOUT_SENTINEL (1) explicitly — dangling_mut::<u8>() happens to
     // return the same value today but is not guaranteed to.
-    let ret = crate::stdio::write_stream(
-        crate::stdio::STDOUT_SENTINEL as *mut u8,
-        buf.as_ptr(),
-        write_len,
-    );
-    if ret < 0 { ret as i32 } else { n }
+    format_to_sink(
+        Sink::Stream(crate::stdio::STDOUT_SENTINEL as *mut u8),
+        fmt,
+        args,
+    )
 }
 
 /// `fprintf(stream, fmt, ...)` — write formatted output to a stream.
@@ -237,18 +247,7 @@ pub(crate) fn _printf_impl(fmt: *const u8, args: &mut Args) -> i32 {
 /// Output goes through the stdio buffer so fprintf output is properly
 /// coalesced with other writes to the same stream.
 pub(crate) fn _fprintf_impl(stream: *mut u8, fmt: *const u8, args: &mut Args) -> i32 {
-    let mut buf = [0u8; PRINTF_BUF_SIZE];
-    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args);
-    if n <= 0 {
-        return n;
-    }
-    let write_len = if (n as usize) < PRINTF_BUF_SIZE {
-        n as usize
-    } else {
-        PRINTF_BUF_SIZE
-    };
-    let ret = crate::stdio::write_stream(stream, buf.as_ptr(), write_len);
-    if ret < 0 { ret as i32 } else { n }
+    format_to_sink(Sink::Stream(stream), fmt, args)
 }
 
 /// `dprintf(fd, fmt, ...)` — write formatted output to a file descriptor.
@@ -256,18 +255,7 @@ pub(crate) fn _fprintf_impl(stream: *mut u8, fmt: *const u8, args: &mut Args) ->
 /// Like `fprintf` but takes a raw fd (int) instead of a `FILE*`.
 /// Writes directly to the fd without stdio buffering.
 pub(crate) fn _dprintf_impl(fd: i32, fmt: *const u8, args: &mut Args) -> i32 {
-    let mut buf = [0u8; PRINTF_BUF_SIZE];
-    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args);
-    if n <= 0 {
-        return n;
-    }
-    let write_len = if (n as usize) < PRINTF_BUF_SIZE {
-        n as usize
-    } else {
-        PRINTF_BUF_SIZE
-    };
-    let ret = crate::file::write(fd, buf.as_ptr(), write_len);
-    if ret < 0 { ret as i32 } else { n }
+    format_to_sink(Sink::Fd(fd), fmt, args)
 }
 
 /// `snprintf(buf, size, fmt, ...)` — write formatted output to a buffer.
@@ -883,16 +871,102 @@ const NUM_BUF_SIZE: usize = 32;
 ///
 /// Bundles buffer pointer, size, and write position so they don't need
 /// to be threaded through every function individually.
+/// Where a [`FmtOutput`] sends its buffer when it fills.
+#[derive(Clone, Copy)]
+enum Sink {
+    /// A bounded buffer (`snprintf` and friends): what does not fit is
+    /// counted, for the return value, and dropped.
+    Bounded,
+    /// A stdio stream: each full buffer is written to it.
+    Stream(*mut u8),
+    /// A file descriptor (`dprintf`): each full buffer is written to it.
+    Fd(i32),
+    /// Host tests: each full buffer is appended to this vector.
+    #[cfg(test)]
+    Capture(*mut std::vec::Vec<u8>),
+}
+
 struct FmtOutput {
     buf: *mut u8,
     size: usize,
+    /// Bytes emitted so far: the count `printf` returns and `%n` stores.
     pos: usize,
+    /// How many of `pos` have been handed to the sink (always 0 when it is
+    /// [`Sink::Bounded`]).  The buffer holds bytes `flushed..pos`.
+    flushed: usize,
+    sink: Sink,
+    /// The sink refused a write; nothing more is written, and the call
+    /// fails.
+    failed: bool,
 }
 
 impl FmtOutput {
     const fn new(buf: *mut u8, size: usize) -> Self {
-        Self { buf, size, pos: 0 }
+        Self {
+            buf,
+            size,
+            pos: 0,
+            flushed: 0,
+            sink: Sink::Bounded,
+            failed: false,
+        }
     }
+
+    const fn streaming(buf: *mut u8, size: usize, sink: Sink) -> Self {
+        Self {
+            buf,
+            size,
+            pos: 0,
+            flushed: 0,
+            sink,
+            failed: false,
+        }
+    }
+
+    /// Hand the buffered bytes to the sink and empty the buffer.  `false`
+    /// for a bounded buffer, which has no sink and is never emptied.
+    fn drain(&mut self) -> bool {
+        let pending = self.pos.wrapping_sub(self.flushed).min(self.size);
+        let written = match self.sink {
+            Sink::Bounded => return false,
+            _ if pending == 0 || self.failed => true,
+            Sink::Stream(stream) => {
+                let r = crate::stdio::write_stream(stream, self.buf, pending);
+                usize::try_from(r).is_ok_and(|r| r == pending)
+            }
+            Sink::Fd(fd) => write_all(fd, self.buf, pending),
+            #[cfg(test)]
+            Sink::Capture(out) => {
+                // SAFETY: the test owns `out` for the call, and `buf` holds
+                // `pending` bytes.
+                unsafe {
+                    (*out).extend_from_slice(core::slice::from_raw_parts(self.buf, pending));
+                }
+                true
+            }
+        };
+        if !written {
+            self.failed = true;
+        }
+        self.flushed = self.pos;
+        true
+    }
+}
+
+/// Write all `len` bytes at `data` to `fd`, retrying short writes.  `false`
+/// if a write fails (with `errno` set by it) or makes no progress.
+fn write_all(fd: i32, data: *const u8, len: usize) -> bool {
+    let mut done = 0usize;
+    while done < len {
+        // SAFETY: `done < len`, and `data` holds `len` bytes.
+        // `done < len` here, so the subtraction is exact.
+        let r = crate::file::write(fd, unsafe { data.add(done) }, len.saturating_sub(done));
+        match usize::try_from(r) {
+            Ok(n) if n > 0 => done = done.saturating_add(n),
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// Parsed format specifier state.
@@ -1162,11 +1236,17 @@ fn dispatch_spec(
 /// (not counting null), even if `out_size` was too small (snprintf
 /// semantics).
 fn format_core(out: *mut u8, out_size: usize, fmt: *const u8, args: &mut Args) -> i32 {
+    let mut dst = FmtOutput::new(out, out_size);
+    format_into(&mut dst, fmt, args)
+}
+
+/// The engine behind [`format_core`] and [`format_to_sink`]: format `fmt`
+/// into `dst`, returning the number of bytes emitted.
+fn format_into(dst: &mut FmtOutput, fmt: *const u8, args: &mut Args) -> i32 {
     if fmt.is_null() {
         return -1;
     }
 
-    let mut dst = FmtOutput::new(out, out_size);
     let mut fpos: usize = 0;
 
     loop {
@@ -1176,7 +1256,7 @@ fn format_core(out: *mut u8, out_size: usize, fmt: *const u8, args: &mut Args) -
         }
 
         if ch != b'%' {
-            emit_byte(&mut dst, ch);
+            emit_byte(dst, ch);
             fpos = fpos.wrapping_add(1);
             continue;
         }
@@ -1190,7 +1270,7 @@ fn format_core(out: *mut u8, out_size: usize, fmt: *const u8, args: &mut Args) -
 
         let spec_start = fpos;
         let spec = parse_spec(fmt, &mut fpos, args);
-        fpos = dispatch_spec(&mut dst, fmt, fpos, spec_start, &spec, args);
+        fpos = dispatch_spec(dst, fmt, fpos, spec_start, &spec, args);
     }
 
     dst.pos as i32
@@ -1223,12 +1303,19 @@ impl FormatFlags {
     }
 }
 
-/// Emit a single byte to the output buffer.
+/// Emit a single byte to the output buffer, handing a full buffer to its
+/// sink first if it has one.
 fn emit_byte(dst: &mut FmtOutput, byte: u8) {
-    if !dst.buf.is_null() && dst.pos < dst.size {
-        // SAFETY: dst.pos < dst.size, so buf.add(dst.pos) is valid.
-        unsafe {
-            *dst.buf.add(dst.pos) = byte;
+    if !dst.buf.is_null() {
+        let mut at = dst.pos.wrapping_sub(dst.flushed);
+        if at >= dst.size && dst.size > 0 && dst.drain() {
+            at = 0;
+        }
+        if at < dst.size && !dst.failed {
+            // SAFETY: `at < dst.size`, so `buf.add(at)` is inside the buffer.
+            unsafe {
+                *dst.buf.add(at) = byte;
+            }
         }
     }
     dst.pos = dst.pos.wrapping_add(1);
@@ -2834,6 +2921,63 @@ mod tests {
     // -----------------------------------------------------------------------
     // 15. format_core with null format
     // -----------------------------------------------------------------------
+
+    /// Output longer than the stack buffer reaches the sink whole, in
+    /// order.  Until 2026-09-26 `printf`/`fprintf`/`dprintf` wrote only the
+    /// first 4096 bytes and returned the full count.
+    #[test]
+    fn format_to_sink_streams_past_the_buffer() {
+        let long: std::vec::Vec<u8> = (0..10_000u32)
+            .map(|i| b'a' + (i % 26) as u8)
+            .chain([0])
+            .collect();
+        for fmt in [b"%s\0".as_slice(), b"<%s>\0".as_slice()] {
+            let mut out = std::vec::Vec::new();
+            let n = with_args(&[long.as_ptr() as u64], &[], |a| {
+                format_to_sink(Sink::Capture(&raw mut out), fmt.as_ptr(), a)
+            });
+            let body = &long[..10_000];
+            let want: std::vec::Vec<u8> = if fmt.len() == 3 {
+                body.to_vec()
+            } else {
+                [b"<".as_slice(), body, b">".as_slice()].concat()
+            };
+            assert_eq!(n as usize, want.len());
+            assert_eq!(out, want);
+        }
+    }
+
+    /// Exactly one buffer's worth, and one byte more: the boundary cases of
+    /// the flush.
+    #[test]
+    fn format_to_sink_at_the_buffer_boundary() {
+        for len in [
+            PRINTF_BUF_SIZE - 1,
+            PRINTF_BUF_SIZE,
+            PRINTF_BUF_SIZE + 1,
+            2 * PRINTF_BUF_SIZE,
+        ] {
+            let text: std::vec::Vec<u8> = std::iter::repeat_n(b'x', len).chain([0]).collect();
+            let mut out = std::vec::Vec::new();
+            let n = with_args(&[text.as_ptr() as u64], &[], |a| {
+                format_to_sink(Sink::Capture(&raw mut out), b"%s\0".as_ptr(), a)
+            });
+            assert_eq!(n as usize, len, "len {len}");
+            assert_eq!(out.len(), len, "len {len}");
+        }
+    }
+
+    /// A bounded buffer is unchanged: it counts past its end and drops the
+    /// rest, which is `snprintf`'s contract.
+    #[test]
+    fn bounded_output_still_counts_and_drops() {
+        let mut buf = [0u8; 4];
+        let n = with_args(&[], &[], |a| {
+            format_core(buf.as_mut_ptr(), 4, b"abcdefgh\0".as_ptr(), a)
+        });
+        assert_eq!(n, 8);
+        assert_eq!(&buf, b"abcd");
+    }
 
     #[test]
     fn format_core_null_fmt() {

@@ -53,6 +53,7 @@
 #[cfg(feature = "testing")]
 pub mod palette_check;
 
+pub mod icons;
 /// Themes: the installed colour sets a user can choose between, and the one
 /// in use ([`AppearanceSettings::color_theme`]).
 pub mod themes;

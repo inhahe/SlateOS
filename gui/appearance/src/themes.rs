@@ -190,7 +190,7 @@ impl ThemeDirs {
     }
 
     /// The directories in the order they are searched: the user's first.
-    fn roots(&self) -> Vec<(&Path, Origin)> {
+    pub(crate) fn roots(&self) -> Vec<(&Path, Origin)> {
         let mut roots = Vec::with_capacity(2);
         if let Some(user) = self.user.as_deref() {
             roots.push((user, Origin::User));

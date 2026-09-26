@@ -23,6 +23,7 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 SRC = Path(__file__).parent / "src"
 
 MP4 = "an_mp4_is_read_for_its_length_its_picture_and_its_sound"
+QT = "a_quicktime_file_is_named_so_even_without_ftyp"
 MP3ESDS = "an_mp4a_entry_is_mp3_when_its_descriptor_says_so"
 V1 = "version_1_headers_have_64_bit_times"
 FRAG = "a_fragmented_mp4_is_timed_by_its_mehd_and_else_by_its_longest_track"
@@ -44,6 +45,7 @@ VINT = "an_ebml_integer_is_as_long_as_its_leading_zeros_say"
 AVI = "an_avi_is_read_for_its_length_its_picture_and_its_sound"
 ODML = "an_opendml_avi_counts_its_frames_past_the_first_gigabyte"
 STRN = "a_stream_says_its_name_and_whether_it_is_off"
+TWO_PICTURES = "the_first_picture_sets_the_length"
 EXT = "an_extensible_wave_format_names_its_sub_format_and_a_blank_compression_its_handler"
 NOTVIDEO = "what_is_not_a_video_says_nothing"
 PREFERRED = "the_preferred_track_is_the_default_one"
@@ -110,7 +112,9 @@ MP4_ROWS = [
         "the movie length is not read",
         "            probe.duration_secs = secs(scale, duration);\n",
         "",
-        [MP4],
+        # Not the full fixture's: its tracks are as long as the movie, and the
+        # longest track's length is the fallback.
+        [QT],
     ),
     (
         "a version 1 header is read as version 0",
@@ -492,9 +496,15 @@ AVI_ROWS = [
     ),
     (
         "the sound's clock is the picture's",
-        "                    if track.kind == Kind::Video && video_clock.is_none() {",
-        "                    if video_clock.is_none() {",
+        "    let clock = clock.filter(|_| track.kind == Kind::Video);\n",
+        "",
         [STRN],
+    ),
+    (
+        "the last picture's clock is taken, not the first's",
+        "                    video_clock = video_clock.or(clock);",
+        "                    video_clock = clock.or(video_clock);",
+        [TWO_PICTURES],
     ),
 ]
 

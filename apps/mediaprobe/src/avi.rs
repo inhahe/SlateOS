@@ -89,10 +89,10 @@ pub(crate) fn probe<R: Read + Seek>(r: &mut R, len: u64) -> io::Result<Probe> {
             }
             b"LIST" => {
                 if let Some(stream) = list(body, b"strl") {
+                    // Only a picture's stream has a clock (`read_stream`),
+                    // so the first one there is the first picture's.
                     let (track, clock) = read_stream(stream);
-                    if track.kind == Kind::Video && video_clock.is_none() {
-                        video_clock = clock;
-                    }
+                    video_clock = video_clock.or(clock);
                     probe.tracks.push(track);
                 } else if let Some(odml) = list(body, b"odml") {
                     opendml_frames = chunks(odml)

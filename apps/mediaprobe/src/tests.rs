@@ -605,6 +605,31 @@ fn a_stream_says_its_name_and_whether_it_is_off() {
 }
 
 #[test]
+fn the_first_picture_sets_the_length() {
+    // Sound first, then two pictures that disagree: three seconds of sound,
+    // then 48 frames at 24 a second, then 10 at 1 a second. The length is the
+    // first picture's.
+    let audio = [
+        strh(b"auds", &[0; 4], 1, 48_000, 144_000),
+        wave_format(0x0001, 2, 48_000),
+    ]
+    .concat();
+    let first = [strh(b"vids", b"H264", 1, 24, 48), bitmap(320, 240, b"H264")].concat();
+    let second = [strh(b"vids", b"MJPG", 1, 1, 10), bitmap(160, 120, b"MJPG")].concat();
+    let header = [
+        avih(1_000_000, 10, 320, 240),
+        avi_list(b"strl", &audio),
+        avi_list(b"strl", &first),
+        avi_list(b"strl", &second),
+    ]
+    .concat();
+    let p = read(&avi_file(&header));
+    assert_eq!(p.tracks.len(), 3);
+    assert_eq!(p.duration_secs, Some(2.0));
+    assert_eq!(p.tracks[1].frame_rate, Some(24.0));
+}
+
+#[test]
 fn an_extensible_wave_format_names_its_sub_format_and_a_blank_compression_its_handler() {
     // A wave format grown to hold the extension: its GUID's first two bytes
     // at 24.

@@ -816,7 +816,11 @@ fn discover() -> (Vec<PathBuf>, Vec<(PathBuf, io::Error)>) {
 /// The suffix is matched on the name's BYTES: a log file whose name is not
 /// valid UTF-8 is still a log file, and `to_str().unwrap_or("")` -- what this
 /// did before -- quietly left it out.
-fn collect_jsonl_files(dir: &Path, out: &mut Vec<PathBuf>, unreadable: &mut Vec<(PathBuf, io::Error)>) {
+fn collect_jsonl_files(
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+    unreadable: &mut Vec<(PathBuf, io::Error)>,
+) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
@@ -836,7 +840,10 @@ fn collect_jsonl_files(dir: &Path, out: &mut Vec<PathBuf>, unreadable: &mut Vec<
         if path.is_dir() {
             collect_jsonl_files(&path, out, unreadable);
         } else if path.is_file() {
-            let name = path.file_name().map(OsStr::as_encoded_bytes).unwrap_or_default();
+            let name = path
+                .file_name()
+                .map(OsStr::as_encoded_bytes)
+                .unwrap_or_default();
             if name.ends_with(b".jsonl") || name.ends_with(b".log") || name.ends_with(b".journal") {
                 out.push(path);
             }
@@ -850,7 +857,9 @@ fn collect_jsonl_files(dir: &Path, out: &mut Vec<PathBuf>, unreadable: &mut Vec<
 /// record -- but it is only that LINE. Reading the file as one `String`, as
 /// this program did, made one such byte cost every record in the file.
 fn record_of(line: &[u8]) -> Option<JournalEntry> {
-    std::str::from_utf8(line).ok().and_then(JournalEntry::from_json_line)
+    std::str::from_utf8(line)
+        .ok()
+        .and_then(JournalEntry::from_json_line)
 }
 
 /// Whether a line is blank, which is not worth a warning.
@@ -915,7 +924,10 @@ fn read_files(
         for line in complete.split(|&b| b == b'\n') {
             take(line);
         }
-        let mut tail = Tail { offset: len_u64(&bytes), partial: Vec::new() };
+        let mut tail = Tail {
+            offset: len_u64(&bytes),
+            partial: Vec::new(),
+        };
         if !unterminated.is_empty() {
             if hold_back_unterminated {
                 tail.partial = unterminated.to_vec();
@@ -936,14 +948,22 @@ fn read_files(
             .then(a.timestamp_usec.cmp(&b.timestamp_usec))
     });
 
-    Journal { entries, tails, not_records, unreadable }
+    Journal {
+        entries,
+        tails,
+        not_records,
+        unreadable,
+    }
 }
 
 /// `bytes` up to and including its last newline (without that newline), and
 /// what follows it -- an unterminated last line, or nothing.
 fn split_complete(bytes: &[u8]) -> (&[u8], &[u8]) {
     match bytes.iter().rposition(|&b| b == b'\n') {
-        Some(nl) => (bytes.get(..nl).unwrap_or_default(), bytes.get(nl.saturating_add(1)..).unwrap_or_default()),
+        Some(nl) => (
+            bytes.get(..nl).unwrap_or_default(),
+            bytes.get(nl.saturating_add(1)..).unwrap_or_default(),
+        ),
         None => (&[], bytes),
     }
 }
@@ -1697,10 +1717,14 @@ impl Tail {
         self.offset = self.offset.saturating_add(len_u64(&fresh));
         self.partial.extend_from_slice(&fresh);
         let (complete, unterminated) = split_complete(&self.partial);
-        let lines: Vec<Vec<u8>> = if complete.is_empty() && unterminated.len() == self.partial.len() {
+        let lines: Vec<Vec<u8>> = if complete.is_empty() && unterminated.len() == self.partial.len()
+        {
             Vec::new()
         } else {
-            complete.split(|&b| b == b'\n').map(<[u8]>::to_vec).collect()
+            complete
+                .split(|&b| b == b'\n')
+                .map(<[u8]>::to_vec)
+                .collect()
         };
         self.partial = unterminated.to_vec();
         Ok(lines)
@@ -2992,7 +3016,10 @@ mod tests {
     #[test]
     fn json_strings_decode_as_utf8() {
         assert_eq!(decoded("\"caf\u{e9}\"").as_deref(), Some("caf\u{e9}"));
-        assert_eq!(decoded("\"\u{65e5}\u{672c}\"").as_deref(), Some("\u{65e5}\u{672c}"));
+        assert_eq!(
+            decoded("\"\u{65e5}\u{672c}\"").as_deref(),
+            Some("\u{65e5}\u{672c}")
+        );
     }
 
     #[test]
@@ -3062,7 +3089,11 @@ mod tests {
     fn lines_that_are_not_records_are_counted_and_blank_ones_are_not() {
         let dir = ScratchDir::new("journalctl_text_lines");
         let file = dir.path("syslog");
-        fs::write(&file, "<13>Sep 26 06:37:16 t: hi\n\n<13>Sep 26 06:37:17 t: ho\n").unwrap();
+        fs::write(
+            &file,
+            "<13>Sep 26 06:37:16 t: hi\n\n<13>Sep 26 06:37:17 t: ho\n",
+        )
+        .unwrap();
         let j = read_files(std::slice::from_ref(&file), Vec::new(), false);
         assert!(j.entries.is_empty());
         assert_eq!(j.not_records, [(file, 2)]);

@@ -1979,9 +1979,27 @@ is this project's own and the operator set it both times.
 *Against:* a third knob, and the safe behaviour is off for everyone who does
 not know it exists — which is everyone.
 
-**Recommendation: C**, on the strength of the precedent rather than on my own
-judgement of the tradeoff — the operator has twice chosen exactly this shape
-for exactly this kind of bash divergence in this exact program.
+**D. Copy bash's text, but escape control characters inside the name**
+(added 2026-09-26). A control character is an invisible byte, such as a
+newline or the escape byte that starts a terminal colour code.
+*What changes:* nothing for any name you could see on screen —
+`osh: unset: my var: cannot unset` stays exactly as bash prints it; a name
+holding a newline prints it as `\012` instead of starting a new line.
+*For:* forging a line needs a control character, so this closes the hole
+while leaving every message a script could reasonably match byte-identical
+to bash's; no knob. `logger` has worked this way since 2026-09-26
+(design-decisions §1033), with a test comparing it against the real
+program.
+*Against:* still differs from bash for a name that contains a control
+character — which is exactly the hostile case, so a script matching such a
+message would see different text.
+
+**Recommendation: D** (revised 2026-09-26; it was C). D closes the hole A
+leaves open without the visible divergence B causes, and without a knob that
+is off for everyone who does not know about it. C was recommended on the
+strength of precedent — the operator has twice chosen a toggle for a bash
+divergence in `osh` — and remains a sound choice if bash's exact bytes should
+be the default even for a name containing a newline.
 
 **If it is never answered:** nothing breaks and nothing gets worse. The 16
 sites are exempted in the gate's IGNORE table pointing at this question, so the

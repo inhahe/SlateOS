@@ -165338,20 +165338,19 @@ in line with util-linux 2.39.3.
 
 **The fix.** The "small shared local-time facility" this entry asked for now
 exists -- `userspace/localtime`, glibc's `tzset`/`tzfile` resolution of `TZ`,
-`TZDIR` and `/etc/localtime` -- and `logger` is a caller: its RFC 3164
-TIMESTAMP is util-linux's `rfc3164_current_time`, `localtime_r` of the
-current second formatted `Mmm dd hh:mm:ss` with upstream's own English month
-table. `Zone::from_env()` is resolved once per run, as glibc's `localtime_r`
-reads `TZ` once. `--rfc3339` (this program's own) stays UTC with `Z`, which
-is honest; it now shares the crate's calendar instead of a private
-`days_to_date`, and the clock is read as `gettimeofday` reads it -- rounded
-down, so a time before 1970 is no longer clamped to 0. Tests pin a winter
-and a summer instant in US Eastern, a half-hour zone that moves the date, and
-the rounding.
-
-**What is still not util-linux here** is most of the rest of the program, and
-where its messages go -- see TD-B-NOTHING-RECEIVES-SYSLOG-MESSAGES, whose step
-3 is the faithful port.
+`TZDIR` and `/etc/localtime` -- and `logger` is a caller. First the old
+program's RFC 3164 TIMESTAMP moved to local time (ee4be2820); then the whole
+program was replaced by a port of util-linux 2.39.3's `logger.c` (413e56f1d,
+design-decisions §1033), whose clocks are all upstream's: the local and
+RFC 3164 headers are `rfc3164_current_time`, `localtime_r` of the current
+second formatted `Mmm dd hh:mm:ss` with upstream's English month table, and
+the RFC 5424 header is local time with microseconds and its numeric offset,
+`2026-09-26T06:37:16.599632-04:00`. The old program's own `--rfc3339` (UTC
+with `Z`) went with it: util-linux has no such option and refuses it.
+`scripts/logger-diff.sh` compares every header form in seven zones --
+including a half-hour zone, a POSIX-rule `TZ` and `/etc/localtime` -- reading
+each clock as a number within the time the case took, so a zone error shows
+as the hours it is.
 
 **In short:** the time stamped on every line `logger` writes is UTC, but the
 syslog format it is writing means *local* time. On a machine four hours behind
@@ -166454,7 +166453,8 @@ file position through every read. No writer's file reaches any of them, and
 **Status:** OPEN — waiting on
 `requests/b-ad-a-unix-socket-cannot-be-bound-to-a-path-so-nothing-can-receive-syslog.md`
 (path-bound `AF_UNIX` sockets). Found 2026-09-26 while fixing `logger`'s
-timestamps.
+timestamps. Step 3 below is done (413e56f1d): `logger`'s messages now reach
+`journalctl`. Steps 1, 2, 4 and 5 remain.
 
 **In short:** there is no system log on SlateOS in the sense a Unix program
 means. A program that logs the POSIX way sends a datagram to `/dev/log` and
@@ -166469,14 +166469,14 @@ word (`read_all_entries` -> `JournalEntry::from_json_line`):
 | writer | where its messages go |
 |---|---|
 | libc `syslog()` (lane D) | stderr (`posix/src/syslog.rs`, `let fd = 2`) |
-| `logger` | RFC 3164 text lines appended to `/var/log/syslog`, else stdout |
+| `logger` | a `journalrec` record in `/var/log/syslog.jsonl` -- since 2026-09-26; before, RFC 3164 text lines in `/var/log/syslog` that `journalctl` could not read |
 | `ntpdate -s` | nowhere: it `open`s `/dev/log` as a file, which fails, and discards the error (`userspace/ntpd/src/main.rs`, the `output` closure in `run_ntpdate`) |
 | `systemd-cat` (`systemctl`) | a `journalrec` record in `/var/log/syslog.jsonl` |
 | `syslogd log` | the same file |
 | `syslogd daemon` | receives nothing (`cmd_daemon`: "the daemon sits idle") |
 
-So `logger`'s lines, which are RFC 3164 text, are never shown by
-`journalctl` at all, and `ntpdate -s`'s are simply lost. (Corrected
+So `logger`'s lines, which were RFC 3164 text, were never shown by
+`journalctl` at all (fixed by step 3), and `ntpdate -s`'s are simply lost. (Corrected
 2026-09-26: this entry first said `journalctl` fell back to
 `/var/log/syslog` only when the JSON-lines file yielded nothing. The code
 reads both; it is the parser that drops the text lines.)
@@ -166486,10 +166486,11 @@ reads both; it is the parser that drops the text lines.)
 2. `syslogd daemon` binds `/dev/log` (`SOCK_DGRAM`), parses each frame — the
    local form `<PRI>Mmm dd hh:mm:ss TAG[PID]: MSG`, RFC 3164 with a hostname,
    and RFC 5424 — and writes it as a `journalrec` record.
-3. `logger` becomes a faithful port of util-linux 2.39.3's `logger.c`, sending
-   to `/dev/log` exactly as upstream does, verified by a `logger-diff.sh`
-   harness against WSL's util-linux. This need not wait for step 1: where the
-   platform has no Unix-domain sockets at all (`EAFNOSUPPORT` — not "no daemon
+3. **DONE 2026-09-26 (413e56f1d, design-decisions §1033).** `logger` is a
+   faithful port of util-linux 2.39.3's `logger.c`, sending to `/dev/log`
+   exactly as upstream does, verified by `scripts/logger-diff.sh` (138 cases)
+   against WSL's util-linux. It did not wait for step 1: where the platform
+   has no Unix-domain sockets at all (`EAFNOSUPPORT` — not "no daemon
    listening", which upstream handles its own way), it appends a `journalrec`
    record instead, which is what a daemon would have written. On a host with
    sockets that branch never runs, so the harness compares pure upstream
@@ -166500,11 +166501,11 @@ reads both; it is the parser that drops the text lines.)
 5. Lane D's libc `syslog()` can then send to `/dev/log` as glibc does (lane
    D's call).
 
-Step 3's port also needs a real `getopt_long` (permutation, abbreviated long
-options, optional arguments). Only coreutils has one, as a module of its own
-crate; it is to be extracted into a shared crate first, which every
-standalone util-linux port here can then use — today they match long options
-whole, so `--pri` is refused where util-linux accepts it.
+Step 3's port needed a real `getopt_long` (permutation, abbreviated long
+options, optional arguments). Only coreutils had one; it was extracted into
+the shared `getoptlong` crate (c8e63a0bf), which `logger` uses and every
+standalone util-linux port here can -- see
+TD-B-STANDALONE-PORTS-MATCH-LONG-OPTIONS-WHOLE for the rest.
 
 ## B-JOURNALCTL-SKIPS-A-WHOLE-LOG-FILE-OVER-ONE-BYTE-THAT-IS-NOT-UTF-8 (lane B, 2026-09-26) — FIXED 2026-09-26
 
@@ -166606,7 +166607,7 @@ loop has its own edge cases around values, `=`, and operands.
 diagnostic wording) but not a parser -- `blockdev`, `capsh`, `chattr`,
 `flock`, `getopt`, `hostnamectl`, `lscpu`, `lsmem`, `objdump`, `resolvectl`,
 `route`, `sanitize`, `systemctl`, `tput` -- plus hand-parsed programs that do
-not use it yet (`logger` among them).
+not use it yet. (`logger` was one; its port uses `getoptlong`, 413e56f1d.)
 
 **The proper fix,** now possible: `getoptlong` (extracted from
 `coreutils/src/getopt.rs` on 2026-09-26) is the shared parser. Converting a

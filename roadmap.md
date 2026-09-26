@@ -4234,7 +4234,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] column: columnate text formatter (fill columns/rows, table mode, custom separators, right-align, column hiding, JSON output, East Asian width)
   - [x] pgrep/pkill: process grep/kill (regex matching, cmdline/UID/PPID/terminal filters, newest/oldest, signal sending, inverse match)
   - [x] tac/rev: reverse line/character printer (custom separators, regex split, before/after mode, Unicode reversal)
-  - [x] logger: syslog message logger (facility.severity, BSD/RFC 3339 format, JSON-lines, size limits, tag/PID, stdin/file input)
+  - [x] logger: util-linux 2.39.3 port (local/RFC 3164/RFC 5424 headers, structured data, octet counting, prio-prefix, Unix/UDP/TCP delivery, `--journald`, root `--id` credentials; `/dev/log` messages become journal records while SlateOS has no Unix-domain sockets — design-decisions §1033; checked by `scripts/logger-diff.sh`)
   - [x] timeout/nohup/nice/renice: process control (time-limited execution, hangup immunity, priority adjustment, duration parsing)
   - [x] ftp: interactive FTP client (USER/PASS login, PORT/PASV data, ASCII/binary transfer, mget/mput with glob, resume, progress)
   - [x] chroot: change root directory (root check, --userspec, --groups, user/group resolution, privilege drop)

@@ -1888,8 +1888,8 @@ word; text inside them that says "lane C" is history.
   the window loses the keyboard). (`reminders` was examined 2026-09-18:
   keyboard-driven by design, its two gaps fixed.) The list is finished.
 
-- `[-]` `[E]` **Every document application asks before closing over unsaved
-  work, and can save it** — started 2026-09-25, `known-issues.md` →
+- `[x]` `[E]` **Every document application asks before closing over unsaved
+  work, and can save it** — started 2026-09-25, finished 2026-09-26, `known-issues.md` →
   `[E] Document applications closed over unsaved work, and the hex editor and
   the JSON viewer could not save at all`. Lane F's `Response::KeepOpen`
   (b82f06a11) lets a window decline a close; every application answered
@@ -1905,10 +1905,9 @@ word; text inside them that says "lane C" is history.
   front as CSV; design-decisions §1204), `notes`, `contacts` and `kanban`
   (which kept nothing at all: each a file in the settings folder, kept as it
   changes; §1205-§1207).
-  **To do:** `snippets`, which keeps nothing at all -- and cannot edit a
-  snippet, so there is little yet to keep
-  between runs (`known-issues.md` → `[E] Notes, contacts, snippets and
-  kanban keep nothing`) and want a store kept as it changes, not a question. **One
+  `snippets` (2026-09-26: a snippet can be written at last, in an editor of
+  its own column, and the library is kept as it changes; `known-issues.md` →
+  `[E] Notes, contacts, snippets and kanban keep nothing`). **One
   question, not thirteen:** `apps/unsaved` asks the toolkit's own
   `guitk::modal::AlertDialog` the one way, and every program above asks
   through it (2026-09-25) -- the six hand-drawn copies are gone.

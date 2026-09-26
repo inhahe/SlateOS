@@ -217,6 +217,64 @@ fn forward_covered(
     })
 }
 
+/// What a `ReverseChainSingleSubstFormat1` subtable at `sub` puts at
+/// position `i`: HarfBuzz's `ReverseChainSingleSubstFormat1::apply`, which
+/// substitutes the glyph when its coverage has it and its backtrack and
+/// lookahead match around it.
+///
+/// The context is matched by coverage, as a format-3 chaining rule matches
+/// its own, and through `skip`'s context view -- the backtrack from just
+/// before `i`, the lookahead from just after it. `None` when the subtable
+/// does not match here, or is not one it knows.
+pub(crate) fn reverse_chain_match(
+    data: &[u8],
+    sub: usize,
+    glyphs: &[SubGlyph],
+    i: usize,
+    skip: Skipper<'_>,
+) -> Option<u16> {
+    if u16_at(data, sub)? != 1 {
+        return None;
+    }
+    let coverage = sub_offset(data, sub, sub.checked_add(2)?)?;
+    let index = usize::from(coverage_index(data, coverage, glyphs.get(i)?.gid)?);
+    let back = usize::from(u16_at(data, sub.checked_add(4)?)?);
+    if back > MAX_CONTEXT {
+        return None;
+    }
+    let back_at = sub.checked_add(6)?;
+    let ahead_count_at = back_at.checked_add(back.checked_mul(2)?)?;
+    let ahead = usize::from(u16_at(data, ahead_count_at)?);
+    if ahead > MAX_CONTEXT {
+        return None;
+    }
+    let ahead_at = ahead_count_at.checked_add(2)?;
+    let substitutes = ahead_at.checked_add(ahead.checked_mul(2)?)?;
+    // A coverage index the substitute array does not reach is a malformed
+    // subtable, which HarfBuzz reads as no match.
+    if index >= usize::from(u16_at(data, substitutes)?) {
+        return None;
+    }
+    let context = skip.context();
+    backward_covered(data, sub, back_at, back, glyphs, i, context)?;
+    forward_covered(
+        data,
+        sub,
+        ahead_at,
+        ahead,
+        glyphs,
+        i.checked_add(1)?,
+        context,
+        |_, _| {},
+    )?;
+    u16_at(
+        data,
+        substitutes
+            .checked_add(2)?
+            .checked_add(index.checked_mul(2)?)?,
+    )
+}
+
 /// The backward counterpart of [`forward_covered`].
 fn backward_covered(
     data: &[u8],

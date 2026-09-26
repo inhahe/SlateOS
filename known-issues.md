@@ -26868,8 +26868,9 @@ coverage, so unlike `GSUB` there is no per-glyph eligibility to enforce.
 Covered by `a_substitution_tagged_feature_still_reaches_positioning_lookups`.
 The HarfBuzz sweep goes `agree` 11820 -> 11826, `misplaced` 28 -> 22.
 
-**Still open.** The set is still missing HarfBuzz's `rvrn`, which only matters
-for variable fonts, and the shaper-specific tags (`init`/`medi`/`fina` for
+**Still open.** ~~The set is still missing HarfBuzz's `rvrn`, which only matters
+for variable fonts~~ (in both lists since 2026-09-26, with `FeatureVariations`:
+see "[F] Variable fonts' feature variations were ignored"), and the shaper-specific tags (`init`/`medi`/`fina` for
 Arabic, the Indic reordering set) — those need the per-glyph masks `GSUB`
 already has, and no installed face was observed to file a positioning lookup
 under one.
@@ -169688,39 +169689,24 @@ cycles, the minimum of N) and Pillow's `Image.open(...).load()` measured
 with `QueryThreadCycleTime`; `target/jpeg_wip/jpeg_fuzz.py` holds any change
 to libjpeg-turbo's C build.
 
-### [F] Colour glyphs: bitmap emoji draw blank, and variable or dark-palette `COLR` draws at its defaults -- 2026-09-26
+### [F] Colour glyphs: a dark-mode palette is never chosen -- 2026-09-26
 
 **Status:** OPEN — lane F's.
 
-**In short:** emoji from a vector colour font (`COLR`, which Noto Color
-Emoji's vector build is) are drawn in colour, as Chrome draws them. Emoji
-from a *bitmap* colour font -- Noto Color Emoji's default build (`CBDT`),
-Apple's (`sbix`) -- come out blank: face fallback picks such a face for an
-emoji, as it should, and then there is nothing to draw, since the glyph's
-outline is empty. And a vector colour font drawn at a variation instance, or
-with a palette other than its first (a dark-mode one), draws at its defaults.
+**In short:** emoji are drawn in colour whichever way their font stores them
+-- a recipe (`COLR`, variable ones included) or pictures (`CBDT`, `sbix`) --
+and match Chrome. What is not yet honoured is a font's *second* palette: the
+dark-mode colours some colour fonts carry for text on a dark background.
 
-**Where:** `gui/font/src/colr.rs` (the renderer), `sfnt::Face::has_colour_glyphs`
-(which counts `CBDT`/`sbix` as colour faces), `itemize.rs` (which prefers
-them for emoji).
+**Where:** `gui/font/src/colr.rs` (`render` takes palette 0).
 
 **What is missing, and the proper fix:**
-1. **`CBDT`/`CBLC` and `sbix`**: find the strike nearest the requested size,
-   decode the glyph's PNG (`gui/imagecodec` has the decoder), scale it to
-   the size, return it as a `ColourImage` through the same cache and the same
-   `glyph_image` -- nothing downstream needs to know which kind it was.
-   Until then an installed bitmap-only emoji font is worse than none; the
-   OS image should ship the `COLR` build (the fonts request,
-   `requests/f-cd-the-os-image-ships-no-fonts...`, names it).
-2. **Variation deltas**: the `Var` paint formats' fields and the clip boxes
-   read at their default values; apply `COLR`'s `ItemVariationStore` (the
-   crate's `varstore` reads the same structure for `HVAR`) through the
-   `DeltaSetIndexMap`.
-3. **Palette choice**: `CPAL` version 1 marks palettes usable on light or
-   dark backgrounds; `render` takes palette 0. A `palette` argument, chosen
-   by the caller from the theme.
-4. **`PaintColrGlyph`'s clip box**: the referenced glyph's `ClipBox` should
-   clip its graph; it is ignored (the outer canvas still bounds it).
+1. **Palette choice**: `CPAL` version 1 marks palettes usable on light or
+   dark backgrounds. A `palette` argument to `render`, chosen by the caller
+   from the theme and made part of the colour cache's key.
+2. **`PaintColrGlyph`'s clip box**: the referenced glyph's `ClipBox` should
+   clip its graph; it is ignored (the outer canvas still bounds it). No font
+   seen so far depends on it.
 
 **How to see it.** `target/fontcheck` draws emoji lines from
 `target/fonts/notoemoji__Noto-COLRv1.ttf` (drawn) and
@@ -169790,3 +169776,192 @@ not stdio, so its failure is no lost diagnostic: `ulclosestream::stderr_raw`).
 Two refinements came out of the measuring: glibc sizes stdout's buffer at
 the first write (8192 on a closed descriptor, `st_blksize` otherwise), and
 upstream lsmem's held `/sys` descriptor is what descriptor 1 is by then.
+**How to see it.** `target/fontcheck` draws emoji lines from any font given
+it; `target/colr_compare.py` compares with Edge.
+
+### [F] Text is never hinted: the `hinting` font setting changes nothing -- 2026-09-26
+
+**Status: FIXED 2026-09-26** (lane F) — the setting now switches on a port of
+FreeType 2.13.2's auto-hinter in its light mode (`gui/font/src/hint/`,
+design-decisions §1325), which the compositor turns on from the settings. It
+agrees with FreeType point for point on every Latin, Greek, Cyrillic, Arabic,
+Hebrew, Armenian and Devanagari glyph of six fonts checked at eleven sizes
+(`gui/font/tools/hint_oracle.py`), and on every glyph of two CFF fonts with
+fractional coordinates, both coordinates exact -- small capitals, superscripts
+and the other feature forms included, each sorted into FreeType's style for
+it -- bar the gap filed below: ideographs and the fallback style are left
+unhinted. (Composites with borrowed metrics, which sat a hair off
+horizontally, were a placement bug rather than a hinting one, and are fixed:
+see the entry below.)
+
+**In short (as filed):** the appearance settings have a "hinting" switch, on by default,
+and nothing reads it: glyph outlines are rasterized exactly as designed, never
+nudged onto the pixel grid. At small sizes that leaves stems and horizontal
+bars straddling two pixels, so text looks softer than it does in programs that
+hint. (Smoothing and the subpixel order, the setting's two neighbours, are
+honoured: design-decisions §1324.)
+
+**Where:** `gui/font/src/raster.rs` (the rasterizer takes outlines as they
+come), `gui/compositor/src/lib.rs` `font_rendering` (which maps the other two
+settings and says why not this one).
+
+**The proper fix, and the choice in it:**
+1. **A light autohinter** -- snap each glyph's horizontal features (baseline,
+   x-height, cap height, horizontal stems) to whole pixels vertically, leave
+   the horizontal axis alone. This is what FreeType's "light" mode and
+   DirectWrite's ClearType natural mode do, needs no font data, and works on
+   CFF and TrueType alike. The better first step.
+2. **The TrueType instruction interpreter** -- run each font's own hinting
+   program. Exactly what the font's designer intended, but a large virtual
+   machine (FreeType's is some eight thousand lines of C), and useless for CFF
+   fonts and for the many modern fonts shipped unhinted.
+
+**How to see it.** `target/fontcheck modes` draws a line in each rendering
+mode; compare a small size against the same text in Chrome.
+
+### [F] Ideographs, and glyphs no script claims, are drawn unhinted -- 2026-09-26
+
+**Status:** OPEN — lane F's.
+
+**In short:** hinting (fitting text to the pixel grid) now works for nearly
+every script, but not for Chinese, Japanese and Korean characters, nor for the
+odd glyph in any font that no character reaches directly. Those are drawn
+exactly as they were before hinting existed: correct, a little softer at small
+sizes than the rest.
+
+**Why.** The hinter is a port of FreeType's auto-hinter (design-decisions
+§1325), and FreeType hints those glyphs with a second algorithm, its *CJK
+writing system* (`src/autofit/afcjk.c`), which is not ported. FreeType files
+every glyph no script claims under the same CJK style, so a Latin font's
+`.notdef` and its unreachable components go that way too. Four scripts
+FreeType puts in its Indic writing system (Limbu, Oriya, Syloti Nagri,
+Tibetan) are in the same position: FreeType's Indic system is a stub that
+borrows the CJK code.
+
+**Where.** `gui/font/src/hint/mod.rs` (`System::Cjk`, `System::Indic`: no
+metrics are made for them, so `Hinter::hint` returns `None`).
+
+**The proper fix.** Port `afcjk.c`'s vertical, light-mode path the way
+`latin.rs` ports `aflatin.c`: its blue zones (`af_cjk_metrics_init_blues`,
+top and bottom of the ideographs in `AF_BLUE_STRING_CJK_TOP`/`_BOTTOM`, whose
+`|` separates the "fill" letters from the others), its edge hinting
+(`af_cjk_hint_edges`) and its own `align_edge_points`; the point passes in
+`glyph.rs` are shared. Then extend `hint_oracle.py`'s check to a CJK font
+(`C:\Windows\Fonts\msgothic.ttc`, Malgun Gothic) and the fallback style.
+
+**How to see it.** `python gui/font/tools/hint_oracle.py <font>` reports these
+glyphs under "unhinted here".
+
+### [F] Superscripts, subscripts and small capitals are hinted with their script's ordinary zones -- 2026-09-26
+
+**Status: FIXED 2026-09-26** (lane F) — the port has FreeType's feature styles
+now, done the way the entry below proposed. `gen_autofit_tables.py` generates
+all 87 styles (27 of them feature styles, each with its tag); `FaceHints::new`
+lets each feature style claim, in FreeType's order, its feature's `GSUB`
+output less its `GPOS` input (`Face::feature_style_glyphs`, after HarfBuzz's
+`hb_ot_layout_collect_lookups` with a feature filter and feature variations,
+`collect_glyphs`, and `would_substitute` with its coverage digest); and each
+style measures its zones from reference letters shaped with its feature on,
+through optional features the shaper now has (`gsub`/`gpos::OPTIONAL_FROM`,
+`scaled::Extra`), off for every ordinary run. Every glyph of nine fonts is
+sorted into FreeType's style for it and every hinted glyph agrees
+(`hint_oracle.py`, which now compares the sorting too); the golden fixture
+has small capitals and superscripts, one positioned, mutation-checked.
+
+**In short (as filed):** a superscript ² or a small capital is aligned to the heights of
+its script's ordinary letters (or, for ² and ₂, of the modifier letters), where
+FreeType aligns it to heights measured from the font's own superscripts and
+small capitals. The difference is a pixel here and there on those glyphs only;
+everything else is unaffected.
+
+**Why.** FreeType built with HarfBuzz -- as every desktop's is -- gives each
+script *feature styles* besides its default one: small capitals (`smcp`,
+`c2sc`), petite capitals (`pcap`, `c2cp`), superscripts (`sups`), subscripts
+(`subs`), scientific inferiors (`sinf`), ordinals (`ordn`) and titling
+(`titl`). Each claims the glyphs its OpenType feature produces, before the
+default styles see them, and measures its zones from its reference letters
+*with the feature applied*. The port has only the default styles.
+
+**Where.** `gui/font/tools/gen_autofit_tables.py` (keeps only
+`AF_COVERAGE_DEFAULT` styles), `gui/font/src/hint/mod.rs` (`FaceHints::new`'s
+coverage).
+
+**The proper fix.**
+1. Generate the feature styles (the `META_STYLE_LATIN` expansions for Latin,
+   Greek and Cyrillic) with their feature tags from `afcover.h`, in FreeType's
+   order.
+2. In coverage, before the default styles' `GSUB` pass: for each feature
+   style, the output glyphs of its script's lookups for that feature
+   (`Face::gsub_outputs` restricted to one feature tag), minus the glyphs its
+   `GPOS` lookups for the feature take as input, and only if the feature
+   substitutes at least one of the style's reference letters
+   (`hb_ot_layout_lookup_would_substitute`).
+3. In measuring the zones, shape each reference cluster with the feature on,
+   and skip a cluster the feature leaves unchanged -- which needs the shaper
+   to take an extra feature.
+
+**How to see it.** `hint_oracle.py` on Noto Sans: the ~330 differing glyphs are
+all small capitals and other feature forms (unmapped glyphs in `cyrl_dflt`)
+and the super- and subscript digits (`latp_dflt`, `latb_dflt`).
+
+### [F] Variable fonts' feature variations were ignored: Bahnschrift's `$ ¢ Ø ø` wrong at its default instance, Cascadia Code's `$` at bold -- 2026-09-26
+
+**Status: FIXED 2026-09-26** (lane F), found and fixed in the same change.
+
+**In short:** a variable font can swap glyphs for other designs at some of
+its instances -- a dollar sign that needs a thinner stroke once the weight is
+heavy -- through OpenType *feature variations* (the `rvrn` feature and the
+`FeatureVariations` table). The shaper applied neither, so Bahnschrift drew
+its `$ ¢ Ø ø ₵ ₡` in the wrong design even at its default instance, and
+Cascadia Code and Cascadia Mono drew the regular `$` (and `฿`, `$>`, `<$`)
+at weights from about 520 up.
+
+**What was wrong, and the fix.** HarfBuzz enables `rvrn` for every run, in a
+`GSUB` stage of its own before any other feature, and compiles its plan with
+the feature tables of the first `FeatureVariationRecord` whose conditions
+hold at the font's instance. Now so does this crate: `rvrn` is bit 0 of
+`gsub::FEATURES` (in `ALWAYS`) with its own first stage in `apply_stages`,
+and in `gpos::FEATURES`' default part; `otl::variations` reads the records
+(condition format 1, as HarfBuzz 8.3 evaluates them); `Face` keeps a
+`Substitutions` and a `Positioning` per record (`parse_varied`), and
+`substitute_at`/`position_at`/`gpos_kerns` choose by the `ScaledFont`'s
+coordinates.
+
+**How to see it.** The HarfBuzz sweep's corpus now has `$ ¢ Ø ø`, which
+Bahnschrift failed at its default instance; `harfbuzz_sweep.py --corpus ...
+--axes wght=700` on Cascadia Code showed the rest (all agree now, at the
+default, 300, 550, 600, 700 and `wdth=75`). Unit tests in `gsub.rs`: record
+selection, condition semantics, and `rvrn` running before a lookup-order
+earlier feature.
+
+### [F] A composite glyph that borrows a component's metrics sits a few units off FreeType horizontally -- 2026-09-26
+
+**Status: FIXED 2026-09-26** (lane F) — the suspicion below was right.
+`read_components` now keeps the `USE_MY_METRICS` flag, and a composite is
+drawn where the last component so flagged places it, recursively
+(`Face::drawn_shift`), in `outline`, `outline_at` and `tagged_outline_at`
+alike -- as FreeType (`load_truetype_glyph`) and HarfBuzz's glyph drawing do.
+The ink box (`glyph_bbox`) keeps the composite's own bearing, because
+HarfBuzz's *extents* do, and the mark-positioning fallback that reads it has
+to agree with HarfBuzz. Arial's and Times' accented capitals now sit where
+FreeType puts them (`hint_oracle.py`); regression test
+`a_composite_using_its_components_metrics_is_placed_by_them`.
+
+**In short (as filed):** some accented letters built from two glyphs (`î` in Arial, `Ç`,
+`Å` in Times) are drawn a fraction of a pixel to one side of where FreeType
+draws them -- 10 font units for Arial's `î`, 0.06 px at 13 px. Hinted or not;
+this is where the outline is placed, not how it is fitted.
+
+**Why (suspected).** A composite's horizontal placement comes from its
+phantom points, and `Face::glyf_shift` takes them from the composite's own
+`hmtx` bearing and `xMin`. A component flagged `USE_MY_METRICS` makes the
+composite borrow *that component's* metrics instead, which FreeType honours
+(`TT_Process_Composite_Glyph`) and this crate does not read at all. The glyphs
+that differ are the ones built that way; confirm by dumping their component
+flags.
+
+**Where.** `gui/font/src/sfnt.rs`: `read_components` (does not keep the
+flag), `glyf_shift`, and the phantom-point handling in `outline_into_at`.
+
+**How to see it.** `python gui/font/tools/hint_oracle.py C:\Windows\Fonts\arial.ttf
+--gids 100,118`: every y agrees, every x is off by the same amount.

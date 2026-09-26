@@ -117,14 +117,17 @@
 
 use alloc::vec::Vec;
 
-use crate::context::{MAX_NESTING, Matched, Nested, chain_match, context_match, read_records};
+use crate::context::{
+    MAX_NESTING, Matched, Nested, chain_match, context_match, read_records, reverse_chain_match,
+};
 use crate::digest::Digest;
 use crate::indic::Char;
 use crate::joining::Form;
 use crate::lang::Lang;
 use crate::norm::Ignorable;
 use crate::otl::{
-    ByScript, Lookup, MAX_SUBTABLES, Subtable, coverage_index, lookup_at, lookup_list,
+    ByScript, Lookup, MAX_SUBTABLES, Subtable, coverage_glyphs, coverage_index, lookup_at,
+    lookup_list, offsets, spend,
 };
 use crate::script::ScriptTags;
 use crate::sfnt::{Span, u16_at};
@@ -135,7 +138,10 @@ use crate::would::would_apply;
 ///
 /// The unconditional ones come first so that "every feature a glyph always
 /// gets" is one contiguous run of bits ([`ALWAYS`]); the four positional ones
-/// follow, one bit each.
+/// follow, one bit each. `rvrn` opens the list: it is on for every glyph, and
+/// [`Substitutions::apply_stages`] runs it in a stage of its own before any
+/// other, as HarfBuzz does -- a variable font's substitutions for its
+/// instance are made before anything reads the glyphs.
 ///
 /// The positioning-sounding tags at the end of the unconditional run are here
 /// for the same reason the substitution-sounding ones are in
@@ -148,8 +154,8 @@ use crate::would::would_apply;
 /// against it.
 pub(crate) const FEATURES: &[&[u8; 4]] = &[
     // Unconditional: every glyph is eligible for all of these.
-    b"ccmp", b"locl", b"liga", b"rlig", b"clig", b"calt", b"rclt", b"abvm", b"blwm", b"curs",
-    b"dist", b"kern", b"mark", b"mkmk",
+    b"rvrn", b"ccmp", b"locl", b"liga", b"rlig", b"clig", b"calt", b"rclt", b"abvm", b"blwm",
+    b"curs", b"dist", b"kern", b"mark", b"mkmk",
     // Positional: a glyph is eligible for at most one, and only when the
     // cursive joining pass says so.
     b"isol", b"init", b"medi", b"fina",
@@ -177,37 +183,57 @@ pub(crate) const FEATURES: &[&[u8; 4]] = &[
     // were: `LJMO`, `VJMO` and `TJMO` are written as literal shifts, so
     // inserting this beside its Indic relatives would move them.
     b"cfar",
+    // Optional: on only when a caller asks for them by name, which today is
+    // only the auto-hinter -- it shapes each of FreeType's feature styles'
+    // reference letters with that style's feature on, as FreeType has
+    // HarfBuzz do (see `hint`). No glyph of an ordinary run carries these
+    // bits, so their lookups never apply to it, and `apply_stages` skips a
+    // lookup no glyph of the run can reach before looking at any glyph, so
+    // listing them costs ordinary text nothing. FreeType's feature-style tags
+    // (`afcover.h`), in its order; appended, like the Hangul three, so that no
+    // bit above moves.
+    b"c2cp", b"c2sc", b"ordn", b"pcap", b"sinf", b"smcp", b"subs", b"sups", b"titl",
 ];
 
-/// The feature mask every glyph carries: bits for the fourteen unconditional
+/// Where the optional features begin in [`FEATURES`]: every entry before this
+/// one is on by default for the glyphs its shaper says, and none from here on
+/// is on unless asked for. `the_optional_features_close_the_list` keeps it in
+/// step.
+pub(crate) const OPTIONAL_FROM: usize = 39;
+
+/// The feature mask every glyph carries: bits for the fifteen unconditional
 /// entries of [`FEATURES`], and none of the four positional ones.
 ///
 /// Written out rather than computed from `FEATURES`, so that no shift or
 /// subtraction appears in a path the arithmetic lints police. The two are
 /// kept in step by `the_masks_match_the_feature_list`, which fails if an
 /// entry is ever inserted or reordered.
-const ALWAYS: u64 = 0b0011_1111_1111_1111;
-/// The bit for `isol`, the fifteenth entry of [`FEATURES`].
-const ISOL: u64 = 0b0100_0000_0000_0000;
-/// The bit for `init`, the sixteenth.
-const INIT: u64 = 0b1000_0000_0000_0000;
-/// The bit for `medi`, the seventeenth.
-const MEDI: u64 = 0b1_0000_0000_0000_0000;
-/// The bit for `fina`, the eighteenth.
-const FINA: u64 = 0b10_0000_0000_0000_0000;
+const ALWAYS: u64 = 0b0111_1111_1111_1111;
+/// The bit for `isol`, the sixteenth entry of [`FEATURES`].
+const ISOL: u64 = 0b1000_0000_0000_0000;
+/// The bit for `init`, the seventeenth.
+const INIT: u64 = 0b1_0000_0000_0000_0000;
+/// The bit for `medi`, the eighteenth.
+const MEDI: u64 = 0b10_0000_0000_0000_0000;
+/// The bit for `fina`, the nineteenth.
+const FINA: u64 = 0b100_0000_0000_0000_0000;
 
-/// The bit for `calt`, the sixth entry of [`FEATURES`].
+/// The bit for `calt`, the seventh entry of [`FEATURES`].
 ///
 /// Named because the Hangul pass has to *clear* it, which is the one place a
 /// constructor takes a bit away rather than adding one.
-const CALT: u64 = 0b10_0000;
+const CALT: u64 = 0b100_0000;
 
-/// The bit for `ljmo`, the thirty-fifth entry of [`FEATURES`].
-const LJMO: u64 = 1 << 34;
-/// The bit for `vjmo`, the thirty-sixth.
-const VJMO: u64 = 1 << 35;
-/// The bit for `tjmo`, the thirty-seventh.
-const TJMO: u64 = 1 << 36;
+/// The bit for `ljmo`, the thirty-sixth entry of [`FEATURES`].
+const LJMO: u64 = 1 << 35;
+/// The bit for `vjmo`, the thirty-seventh.
+const VJMO: u64 = 1 << 36;
+/// The bit for `tjmo`, the thirty-eighth.
+const TJMO: u64 = 1 << 37;
+
+/// The bit for `rvrn`, the first entry of [`FEATURES`]: on for every glyph,
+/// and applied in a stage of its own before every other.
+const RVRN: u64 = 1;
 
 /// Every feature at once: the one stage a caller with no staging plan runs.
 ///
@@ -355,6 +381,20 @@ const NESTABLE: &[u16] = &[
     LOOKUP_LIGATURE,
     LOOKUP_CONTEXT,
     LOOKUP_CHAIN_CONTEXT,
+];
+
+/// The lookup types a feature may reach: every one a nested invocation may,
+/// and reverse-chaining substitution, which HarfBuzz applies only at the top
+/// level -- a `ReverseChainSingleSubst` invoked from a context refuses, "no
+/// chaining to this type" -- and so which [`NESTABLE`] leaves out.
+const TOP_LEVEL: &[u16] = &[
+    LOOKUP_SINGLE,
+    LOOKUP_MULTIPLE,
+    LOOKUP_ALTERNATE,
+    LOOKUP_LIGATURE,
+    LOOKUP_CONTEXT,
+    LOOKUP_CHAIN_CONTEXT,
+    LOOKUP_REVERSE_CHAIN,
 ];
 
 /// A ceiling on how many glyphs one ligature may swallow.
@@ -898,8 +938,28 @@ impl Substitutions {
     /// an error. Monospace faces in particular have no ligatures by design: a
     /// ligature would break the grid.
     pub(crate) fn parse(data: &[u8], gsub: Option<Span>, gdef: Option<Span>) -> Option<Self> {
+        Self::parse_varied(data, gsub, gdef, &[])
+    }
+
+    /// [`parse`](Self::parse) where a feature variation swaps in the feature
+    /// tables `alternates` names -- one [`Variation`](crate::otl::Variation)'s
+    /// -- which is what a variable face substitutes at the instances it holds
+    /// at.
+    pub(crate) fn parse_varied(
+        data: &[u8],
+        gsub: Option<Span>,
+        gdef: Option<Span>,
+        alternates: &[(u16, usize)],
+    ) -> Option<Self> {
         let base = gsub?.off;
-        let lookups = ByScript::parse(data, base, FEATURES, NESTABLE, LOOKUP_EXTENSION)?;
+        let lookups = ByScript::parse_varied(
+            data,
+            base,
+            FEATURES,
+            TOP_LEVEL,
+            LOOKUP_EXTENSION,
+            alternates,
+        )?;
         Some(Self {
             lookups,
             lookup_list: lookup_list(data, base)?,
@@ -977,13 +1037,47 @@ impl Substitutions {
         // per-syllable stage would otherwise allocate once per syllable per
         // lookup, and Devanagari text is nothing but syllables.
         let mut piece: Vec<SubGlyph> = Vec::new();
+        // `rvrn` first, in a stage of its own, whatever the shaper's stages
+        // are: HarfBuzz enables it and pauses before collecting anything
+        // else, so a variable font's substitutions for its instance are made
+        // before any other feature reads the glyphs. Every glyph carries the
+        // bit (it is in `ALWAYS`), no shaper stages it, and it is neither
+        // per-syllable nor manual about joiners.
+        {
+            let reach = glyphs.iter().fold(0u64, |m, g| m | g.mask);
+            ctx.dirty = true;
+            for (lookup, mask) in self.lookups.for_script(script, lang) {
+                if mask & RVRN == 0 || reach & RVRN == 0 {
+                    continue;
+                }
+                if ctx.dirty {
+                    ctx.run = Digest::EMPTY;
+                    for glyph in glyphs.iter() {
+                        ctx.run.add(glyph.gid);
+                    }
+                    ctx.dirty = false;
+                }
+                ctx.mask = RVRN;
+                apply_lookup(data, lookup, glyphs, &mut ctx);
+            }
+        }
         for (i, &stage) in staging.stages.iter().enumerate() {
+            // `rvrn` has had its stage.
+            let stage = stage & !RVRN;
             // `between` is free to rewrite the run between stages, so the
             // digest carried over from the last one may no longer describe it.
             ctx.dirty = true;
+            // Every feature bit some glyph of the run carries. A lookup whose
+            // features none of them carry has no glyph it may start at, so it
+            // is skipped without a look at the run -- which is what makes the
+            // optional features in `FEATURES` free for a run that does not ask
+            // for them. Taken per stage, since `between` may set bits; a
+            // substitution only ever copies a glyph's bits, never adds one, so
+            // it holds for the whole stage.
+            let reach = glyphs.iter().fold(0u64, |m, g| m | g.mask);
             for (lookup, mask) in self.lookups.for_script(script, lang) {
                 let mask = mask & stage;
-                if mask == 0 {
+                if mask == 0 || mask & reach == 0 {
                     continue;
                 }
                 // One pass over the run, and only when the last lookup changed
@@ -1224,6 +1318,10 @@ fn apply_lookup(data: &[u8], lookup: &Lookup, glyphs: &mut Vec<SubGlyph>, ctx: &
         return;
     }
     let skip = skipper(lookup, data, ctx);
+    if lookup.kind == LOOKUP_REVERSE_CHAIN {
+        apply_reverse(data, lookup, glyphs, skip, ctx);
+        return;
+    }
     let mut i = 0usize;
     while i < glyphs.len() {
         // And the second, per position: a lookup the run as a whole reaches
@@ -1245,6 +1343,47 @@ fn apply_lookup(data: &[u8], lookup: &Lookup, glyphs: &mut Vec<SubGlyph>, ctx: &
         ctx.dirty |= matched.is_some();
         let step = matched.unwrap_or(0).max(1);
         i = i.saturating_add(step);
+    }
+}
+
+/// Apply a reverse-chaining lookup across the run, from its last glyph back
+/// to its first: HarfBuzz's `apply_backward`.
+///
+/// Backward, and in place, because that is the point of the type: each
+/// glyph's context is read after the glyphs after it have already been
+/// substituted, so a run of forms that depend on their right-hand neighbour
+/// -- a Nastaliq cascade, a joined overline -- resolves in one pass. Every
+/// position the lookup considers is tried; a substitution never changes the
+/// run's length, so none is skipped over.
+fn apply_reverse(
+    data: &[u8],
+    lookup: &Lookup,
+    glyphs: &mut [SubGlyph],
+    skip: Skipper<'_>,
+    ctx: &mut Ctx,
+) {
+    let mut i = glyphs.len();
+    while let Some(at) = i.checked_sub(1) {
+        i = at;
+        let Some(gid) = glyphs.get(at).map(|g| g.gid) else {
+            continue;
+        };
+        if !lookup.digest.may_have(gid) || !skip.considers(glyphs, at) {
+            continue;
+        }
+        // The first subtable that matches wins, as for every type.
+        let Some(new) = admitting(&lookup.subtables, gid)
+            .find_map(|sub| reverse_chain_match(data, sub, glyphs, at, skip))
+        else {
+            continue;
+        };
+        if let Some(glyph) = glyphs.get_mut(at) {
+            glyph.gid = new;
+            // As a single substitution does: the font asked for this glyph.
+            glyph.ignorable = Ignorable::No;
+            glyph.substituted = true;
+        }
+        ctx.dirty = true;
     }
 }
 
@@ -1295,6 +1434,10 @@ fn apply_at(
         LOOKUP_LIGATURE => apply_ligature(data, subs, glyphs, i, skip, ctx),
         LOOKUP_CONTEXT => apply_context(data, subs, glyphs, i, skip, ctx),
         LOOKUP_CHAIN_CONTEXT => apply_chain_context(data, subs, glyphs, i, skip, ctx),
+        // Applied whole-run and backward by `apply_reverse`, never at one
+        // position: reached here only as a context's nested lookup, which
+        // HarfBuzz refuses for this type ("no chaining to this type").
+        LOOKUP_REVERSE_CHAIN => None,
         // `feature_lookups` and `lookup_at` are both asked for these types
         // only, so there is nothing else to reach here; ignoring anything that
         // does is what keeps adding a type to those lists from being able to
@@ -2002,6 +2145,238 @@ fn apply_nested(
     span.max(1)
 }
 
+// ---------------------------------------------------------------------------
+// What a lookup can produce
+// ---------------------------------------------------------------------------
+
+/// `GSUB` lookup type for reverse chaining single substitution, which the
+/// shaper does not apply but whose outputs are glyphs all the same.
+pub(crate) const LOOKUP_REVERSE_CHAIN: u16 = 8;
+
+/// The lookup types [`lookup_outputs`] reads: every substitution there is.
+const OUTPUT_KINDS: &[u16] = &[
+    LOOKUP_SINGLE,
+    LOOKUP_MULTIPLE,
+    LOOKUP_ALTERNATE,
+    LOOKUP_LIGATURE,
+    LOOKUP_CONTEXT,
+    LOOKUP_CHAIN_CONTEXT,
+    LOOKUP_REVERSE_CHAIN,
+];
+
+/// A ceiling on the records one face's [`lookup_outputs`] walk reads, across
+/// every lookup it is asked about.
+///
+/// A real face's substitutions are a few thousand records; the largest seen on
+/// the development host, a CJK face with every `vert` and `locl` form, is
+/// under 60,000. A hostile face can declare millions, and the walk runs when a
+/// font is opened, so it stops here -- which costs the auto-hinter the script
+/// of a few glyphs and nothing else.
+pub(crate) const MAX_OUTPUT_WALK: usize = 1 << 20;
+
+/// Lookup `index`, ready to be asked [`substitutes_alone`]: its subtables
+/// resolved and its coverage summarised, as HarfBuzz's lookup accelerator
+/// holds it. `None` for an index the LookupList does not have.
+pub(crate) fn probe_lookup(data: &[u8], lookup_list: usize, index: u16) -> Option<Lookup> {
+    let mut subtables = MAX_SUBTABLES;
+    let mut lookup = lookup_at(
+        data,
+        lookup_list,
+        index,
+        OUTPUT_KINDS,
+        LOOKUP_EXTENSION,
+        &mut subtables,
+    )?;
+    crate::otl::fill_digests(data, &mut lookup, LOOKUP_EXTENSION);
+    Some(lookup)
+}
+
+/// Would `lookup` substitute `glyph` alone, with nothing on either side?
+///
+/// HarfBuzz's `hb_ot_layout_lookup_would_substitute` asked about one glyph
+/// with `zero_context`, which is how FreeType's auto-hinter decides whether a
+/// feature style has a reference letter to measure -- down to its first
+/// test: the lookup's coverage digest ([`crate::digest`], HarfBuzz's own
+/// three-window summary) must admit the glyph before any subtable is asked,
+/// so a contextual subtable that never looks at its first glyph's coverage
+/// answers only for glyphs some subtable of the lookup covers. `lookup` comes
+/// from [`probe_lookup`], which fills the digest in.
+pub(crate) fn substitutes_alone(data: &[u8], lookup: &Lookup, glyph: u16) -> bool {
+    lookup.digest.may_have(glyph) && would_apply(data, lookup, &[glyph], true)
+}
+
+/// Append to `out` every glyph lookup `index` can put into a run, following
+/// the lookups its contextual subtables invoke.
+///
+/// HarfBuzz's `hb_ot_layout_lookup_collect_glyphs` with only the output set
+/// asked for, which is what FreeType's auto-hinter uses it for. `visited`
+/// (kept sorted) holds the lookups already walked, so a lookup named from many
+/// places, or from itself, is read once; a caller walking several lookups
+/// passes the same one each time. Iterative rather than recursive, since a
+/// font may chain nested lookups as deep as it likes.
+pub(crate) fn lookup_outputs(
+    data: &[u8],
+    lookup_list: usize,
+    index: u16,
+    out: &mut Vec<u16>,
+    visited: &mut Vec<u16>,
+    budget: &mut usize,
+) {
+    let mut pending = alloc::vec![index];
+    let mut nested = Vec::new();
+    while let Some(index) = pending.pop() {
+        let Err(at) = visited.binary_search(&index) else {
+            continue;
+        };
+        visited.insert(at, index);
+        let mut subtables = MAX_SUBTABLES;
+        let Some(lookup) = lookup_at(
+            data,
+            lookup_list,
+            index,
+            OUTPUT_KINDS,
+            LOOKUP_EXTENSION,
+            &mut subtables,
+        ) else {
+            continue;
+        };
+        for sub in &lookup.subtables {
+            if !spend(budget) {
+                return;
+            }
+            // `None` is a truncated subtable, which keeps what was read before
+            // the cut: the glyphs it did list are the font's own answer.
+            let _ = subtable_outputs(data, lookup.kind, sub.at, out, &mut nested, budget);
+            pending.append(&mut nested);
+        }
+    }
+}
+
+/// One subtable's contribution to [`lookup_outputs`]: the glyphs it
+/// substitutes in, appended to `out`, and the lookups it invokes, appended
+/// to `nested`.
+fn subtable_outputs(
+    data: &[u8],
+    kind: u16,
+    sub: usize,
+    out: &mut Vec<u16>,
+    nested: &mut Vec<u16>,
+    budget: &mut usize,
+) -> Option<()> {
+    let at = |o: usize| sub.checked_add(o);
+    let offset = |o: usize| sub.checked_add(usize::from(u16_at(data, at(o)?)?));
+    let format = u16_at(data, sub)?;
+    match (kind, format) {
+        (LOOKUP_SINGLE, 1) => {
+            let delta = u16_at(data, at(4)?)?;
+            let mut covered = Vec::new();
+            coverage_glyphs(data, offset(2)?, &mut covered, budget);
+            out.extend(covered.iter().map(|g| g.wrapping_add(delta)));
+        }
+        (LOOKUP_SINGLE, 2) => glyph_array(data, at(4)?, out, budget)?,
+        (LOOKUP_MULTIPLE | LOOKUP_ALTERNATE, 1) => {
+            // A list of offsets to glyph arrays: sequences or alternate sets.
+            for set in offsets(data, sub, at(4)?, budget)? {
+                glyph_array(data, set, out, budget)?;
+            }
+        }
+        (LOOKUP_LIGATURE, 1) => {
+            for set in offsets(data, sub, at(4)?, budget)? {
+                for lig in offsets(data, set, set, budget)? {
+                    out.push(u16_at(data, lig)?);
+                }
+            }
+        }
+        (LOOKUP_CONTEXT, 1 | 2) => {
+            // Rule sets, each a list of rules: glyphCount, lookupCount, the
+            // input after the first glyph, then the lookup records.
+            let sets_at = if format == 1 { 4 } else { 6 };
+            for set in offsets(data, sub, at(sets_at)?, budget)? {
+                for rule in offsets(data, set, set, budget)? {
+                    let input = usize::from(u16_at(data, rule)?.saturating_sub(1));
+                    let count = u16_at(data, rule.checked_add(2)?)?;
+                    let records = rule.checked_add(4)?.checked_add(input.checked_mul(2)?)?;
+                    push_records(data, records, count, nested);
+                }
+            }
+        }
+        (LOOKUP_CONTEXT, 3) => {
+            let glyphs = usize::from(u16_at(data, at(2)?)?);
+            let count = u16_at(data, at(4)?)?;
+            let records = at(6)?.checked_add(glyphs.checked_mul(2)?)?;
+            push_records(data, records, count, nested);
+        }
+        (LOOKUP_CHAIN_CONTEXT, 1 | 2) => {
+            let sets_at = if format == 1 { 4 } else { 10 };
+            for set in offsets(data, sub, at(sets_at)?, budget)? {
+                for rule in offsets(data, set, set, budget)? {
+                    // backtrack, input (less its first glyph), lookahead: each
+                    // a count and that many glyphs or classes.
+                    let back = usize::from(u16_at(data, rule)?);
+                    let input_at = rule.checked_add(2)?.checked_add(back.checked_mul(2)?)?;
+                    let input = usize::from(u16_at(data, input_at)?.saturating_sub(1));
+                    let ahead_at = input_at
+                        .checked_add(2)?
+                        .checked_add(input.checked_mul(2)?)?;
+                    let ahead = usize::from(u16_at(data, ahead_at)?);
+                    let count_at = ahead_at
+                        .checked_add(2)?
+                        .checked_add(ahead.checked_mul(2)?)?;
+                    let count = u16_at(data, count_at)?;
+                    push_records(data, count_at.checked_add(2)?, count, nested);
+                }
+            }
+        }
+        (LOOKUP_CHAIN_CONTEXT, 3) => {
+            let back = usize::from(u16_at(data, at(2)?)?);
+            let input_at = at(4)?.checked_add(back.checked_mul(2)?)?;
+            let input = usize::from(u16_at(data, input_at)?);
+            let ahead_at = input_at
+                .checked_add(2)?
+                .checked_add(input.checked_mul(2)?)?;
+            let ahead = usize::from(u16_at(data, ahead_at)?);
+            let count_at = ahead_at
+                .checked_add(2)?
+                .checked_add(ahead.checked_mul(2)?)?;
+            let count = u16_at(data, count_at)?;
+            push_records(data, count_at.checked_add(2)?, count, nested);
+        }
+        (LOOKUP_REVERSE_CHAIN, 1) => {
+            let back = usize::from(u16_at(data, at(4)?)?);
+            let ahead_at = at(6)?.checked_add(back.checked_mul(2)?)?;
+            let ahead = usize::from(u16_at(data, ahead_at)?);
+            let glyphs_at = ahead_at
+                .checked_add(2)?
+                .checked_add(ahead.checked_mul(2)?)?;
+            glyph_array(data, glyphs_at, out, budget)?;
+        }
+        _ => {}
+    }
+    Some(())
+}
+
+/// The lookups a list of `SequenceLookupRecord`s names.
+fn push_records(data: &[u8], at: usize, count: u16, nested: &mut Vec<u16>) {
+    let mut records = Vec::new();
+    read_records(data, at, usize::from(count), &mut records);
+    nested.extend(records.iter().map(|r| r.lookup));
+}
+
+/// A count at `at` and that many glyph ids after it, appended to `out`.
+fn glyph_array(data: &[u8], at: usize, out: &mut Vec<u16>, budget: &mut usize) -> Option<()> {
+    let count = usize::from(u16_at(data, at)?);
+    for i in 0..count {
+        if !spend(budget) {
+            return None;
+        }
+        out.push(u16_at(
+            data,
+            at.checked_add(2)?.checked_add(i.checked_mul(2)?)?,
+        )?);
+    }
+    Some(())
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -2471,6 +2846,70 @@ mod tests {
         let subs =
             Substitutions::parse(&data, Some(span(0, data.len())), None).expect("liga must parse");
         (data, subs)
+    }
+
+    /// What [`lookup_outputs`] finds for lookup `index` of `data`, sorted.
+    fn outputs(data: &[u8], index: u16) -> Vec<u16> {
+        let list = lookup_list(data, 0).unwrap();
+        let (mut out, mut visited, mut budget) = (Vec::new(), Vec::new(), MAX_OUTPUT_WALK);
+        lookup_outputs(data, list, index, &mut out, &mut visited, &mut budget);
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    #[test]
+    fn a_lookups_outputs_are_the_glyphs_it_substitutes_in() {
+        let delta = gsub_table(b"test", LOOKUP_SINGLE, &single_delta(&[5, 6], 10));
+        assert_eq!(outputs(&delta, 0), [15, 16]);
+        let list = gsub_table(b"test", LOOKUP_SINGLE, &single_list(&[5, 6], &[31, 30]));
+        assert_eq!(outputs(&list, 0), [30, 31]);
+        let multiple = gsub_table(b"test", LOOKUP_MULTIPLE, &multiple(&[5], &[&[41, 40]]));
+        assert_eq!(outputs(&multiple, 0), [40, 41]);
+        let alternate = gsub_table(
+            b"test",
+            LOOKUP_ALTERNATE,
+            &alternate(&[5], &[&[52, 50, 51]]),
+        );
+        assert_eq!(outputs(&alternate, 0), [50, 51, 52]);
+        let (ligatures, _) = fi_font();
+        assert_eq!(outputs(&ligatures, 0), [20, 21, 22]);
+    }
+
+    #[test]
+    fn a_contextual_lookup_outputs_what_the_lookups_it_invokes_do() {
+        // Lookup 0 invokes lookup 1 at its only position; lookup 1 adds 10.
+        let data = gsub_lookups(&[
+            (b"calt", LOOKUP_CONTEXT, context3(&[&[5]], &[(0, 1)])),
+            (b"test", LOOKUP_SINGLE, single_delta(&[5], 10)),
+        ]);
+        assert_eq!(outputs(&data, 0), [15]);
+    }
+
+    #[test]
+    fn a_lookup_that_invokes_itself_is_walked_once() {
+        let data = gsub_lookups(&[(b"calt", LOOKUP_CONTEXT, context3(&[&[5]], &[(0, 0)]))]);
+        assert!(outputs(&data, 0).is_empty());
+    }
+
+    #[test]
+    fn a_scripts_lookups_are_those_any_of_its_features_reach() {
+        let data = gsub_scripts(
+            &[(b"latn", b"liga"), (b"cyrl", b"smcp")],
+            LOOKUP_SINGLE,
+            &[&single_delta(&[5], 10)],
+        );
+        assert_eq!(
+            crate::otl::collect_lookups(&data, 0, &[*b"latn"], None),
+            [0]
+        );
+        assert_eq!(
+            crate::otl::collect_lookups(&data, 0, &[*b"cyrl", *b"latn"], None),
+            [0]
+        );
+        // A script the table does not name reaches nothing: no fallback to
+        // `DFLT`, which is a shaping rule and not a question of coverage.
+        assert!(crate::otl::collect_lookups(&data, 0, &[*b"grek"], None).is_empty());
     }
 
     #[test]
@@ -3131,6 +3570,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("{tag:?} is not in FEATURES"));
             1u64 << i
         };
+        assert_eq!(bit(b"rvrn"), RVRN);
+        // `rvrn` is on for every glyph.
+        assert_eq!(ALWAYS & RVRN, RVRN);
         assert_eq!(bit(b"isol"), ISOL);
         assert_eq!(bit(b"init"), INIT);
         assert_eq!(bit(b"medi"), MEDI);
@@ -3147,13 +3589,19 @@ mod tests {
             FEATURES.len() < u64::BITS as usize,
             "a feature past the 64th gets no bit"
         );
+        // No glyph is born with an optional feature's bit.
+        let optional = feature_bits(&FEATURES[OPTIONAL_FROM..]);
+        assert_eq!(
+            (ALWAYS | ISOL | INIT | MEDI | FINA | LJMO | VJMO | TJMO) & optional,
+            0
+        );
         // `ALWAYS` is a prefix of the list: every feature before the first
         // positional one and none after it. Being a *prefix* is the property
         // that lets it be a literal — an unconditional feature added after a
         // positional one would make it discontiguous and this fail.
         let positional = ISOL | INIT | MEDI | FINA;
         assert_eq!(ALWAYS.trailing_ones(), ALWAYS.count_ones());
-        assert_eq!(ALWAYS | positional, (1u64 << 18) - 1);
+        assert_eq!(ALWAYS | positional, (1u64 << 19) - 1);
         assert_eq!(ALWAYS & positional, 0);
     }
 
@@ -3183,6 +3631,384 @@ mod tests {
             );
             seen |= bit;
         }
+    }
+
+    /// FreeType's feature-style tags close the list, and nothing turns them on
+    /// by itself.
+    #[test]
+    fn the_optional_features_close_the_list() {
+        let optional: [&[u8; 4]; 9] = [
+            b"c2cp", b"c2sc", b"ordn", b"pcap", b"sinf", b"smcp", b"subs", b"sups", b"titl",
+        ];
+        assert_eq!(FEATURES.get(OPTIONAL_FROM..), Some(&optional[..]));
+        assert_eq!(FEATURES.get(OPTIONAL_FROM - 1), Some(&b"cfar"));
+    }
+
+    /// An optional feature's lookup leaves an ordinary run alone -- and
+    /// rewrites the glyphs that carry its bit.
+    #[test]
+    fn an_optional_feature_reaches_only_the_glyphs_that_ask_for_it() {
+        let data = gsub_table(b"smcp", LOOKUP_SINGLE, &single_delta(&[10, 11], 5));
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert_eq!(subst(&data, &subs, &[10, 11]), &[10, 11]);
+        let smcp = feature_bit(b"smcp");
+        assert_ne!(smcp, 0);
+        let mut glyphs = vec![SubGlyph::new(10, 0), SubGlyph::new(11, 1)];
+        if let Some(g) = glyphs.get_mut(1) {
+            g.mask |= smcp;
+        }
+        subs.apply(&data, None, None, &mut glyphs);
+        assert_eq!(glyphs.iter().map(|g| g.gid).collect::<Vec<_>>(), [10, 16]);
+    }
+
+    // --- feature variations -----------------------------------------------
+
+    /// A condition: axis, then the range as F2DOT14; `None` stands for a
+    /// condition of format 2, which HarfBuzz does not evaluate.
+    type Cond = Option<(u16, i16, i16)>;
+
+    /// A `FeatureVariations` record for [`gsub_varied`]: its conditions
+    /// (`None` for no ConditionSet) and its `(feature index, lookups)`
+    /// substitutions.
+    type Record<'a> = (Option<&'a [Cond]>, &'a [(u16, &'a [u16])]);
+
+    /// A `GSUB` 1.1: one `DFLT` language system listing every feature of
+    /// `features` (`(tag, lookups)`), a single-substitution lookup per entry
+    /// of `subs`, and a `FeatureVariations` record per entry of `records` --
+    /// its conditions (`None` for no ConditionSet at all) and its
+    /// `(feature index, lookups)` substitutions.
+    fn gsub_varied(
+        features: &[(&[u8; 4], &[u16])],
+        subs: &[Vec<u8>],
+        records: &[Record<'_>],
+    ) -> Vec<u8> {
+        let b16 = |v: u16| v.to_be_bytes();
+        let b32 = |v: usize| u32::try_from(v).unwrap().to_be_bytes();
+        let feature = |lookups: &[u16]| {
+            let mut t = Vec::new();
+            t.extend_from_slice(&b16(0));
+            t.extend_from_slice(&b16(u16::try_from(lookups.len()).unwrap()));
+            for &l in lookups {
+                t.extend_from_slice(&b16(l));
+            }
+            t
+        };
+        // ScriptList: DFLT, whose default system lists features 0..n.
+        let n = features.len();
+        let mut scripts = Vec::new();
+        scripts.extend_from_slice(&b16(1));
+        scripts.extend_from_slice(b"DFLT");
+        scripts.extend_from_slice(&b16(8));
+        scripts.extend_from_slice(&b16(4)); // defaultLangSys
+        scripts.extend_from_slice(&b16(0));
+        scripts.extend_from_slice(&b16(0)); // lookupOrder
+        scripts.extend_from_slice(&b16(0xFFFF));
+        scripts.extend_from_slice(&b16(u16::try_from(n).unwrap()));
+        for i in 0..n {
+            scripts.extend_from_slice(&b16(u16::try_from(i).unwrap()));
+        }
+        // FeatureList.
+        let mut list = Vec::new();
+        list.extend_from_slice(&b16(u16::try_from(n).unwrap()));
+        let mut tables = Vec::new();
+        for (tag, lookups) in features {
+            list.extend_from_slice(*tag);
+            list.extend_from_slice(&b16(u16::try_from(2 + n * 6 + tables.len()).unwrap()));
+            tables.extend(feature(lookups));
+        }
+        list.extend(tables);
+        // LookupList: one single-substitution lookup per subtable.
+        let mut lookups = Vec::new();
+        lookups.extend_from_slice(&b16(u16::try_from(subs.len()).unwrap()));
+        let mut bodies = Vec::new();
+        for sub in subs {
+            lookups.extend_from_slice(&b16(
+                u16::try_from(2 + subs.len() * 2 + bodies.len()).unwrap()
+            ));
+            bodies.extend_from_slice(&b16(LOOKUP_SINGLE));
+            bodies.extend_from_slice(&b16(0));
+            bodies.extend_from_slice(&b16(1));
+            bodies.extend_from_slice(&b16(8));
+            bodies.extend_from_slice(sub);
+        }
+        lookups.extend(bodies);
+        // FeatureVariations.
+        let mut fv = Vec::new();
+        fv.extend_from_slice(&b16(1));
+        fv.extend_from_slice(&b16(0));
+        fv.extend_from_slice(&b32(records.len()));
+        let mut tail = Vec::new();
+        let head = 8 + records.len() * 8;
+        for (conditions, swaps) in records {
+            match conditions {
+                None => fv.extend_from_slice(&b32(0)),
+                Some(conds) => {
+                    fv.extend_from_slice(&b32(head + tail.len()));
+                    let mut set = Vec::new();
+                    set.extend_from_slice(&b16(u16::try_from(conds.len()).unwrap()));
+                    let mut body = Vec::new();
+                    for cond in *conds {
+                        set.extend_from_slice(&b32(2 + conds.len() * 4 + body.len()));
+                        match cond {
+                            Some((axis, min, max)) => {
+                                body.extend_from_slice(&b16(1));
+                                body.extend_from_slice(&b16(*axis));
+                                body.extend_from_slice(&min.to_be_bytes());
+                                body.extend_from_slice(&max.to_be_bytes());
+                            }
+                            None => {
+                                body.extend_from_slice(&b16(2));
+                                body.extend_from_slice(&[0; 6]);
+                            }
+                        }
+                    }
+                    set.extend(body);
+                    tail.extend(set);
+                }
+            }
+            fv.extend_from_slice(&b32(head + tail.len()));
+            let mut sub = Vec::new();
+            sub.extend_from_slice(&b16(1));
+            sub.extend_from_slice(&b16(0));
+            sub.extend_from_slice(&b16(u16::try_from(swaps.len()).unwrap()));
+            let mut alts = Vec::new();
+            for (index, lookups) in *swaps {
+                sub.extend_from_slice(&b16(*index));
+                sub.extend_from_slice(&b32(6 + swaps.len() * 6 + alts.len()));
+                alts.extend(feature(lookups));
+            }
+            sub.extend(alts);
+            tail.extend(sub);
+        }
+        fv.extend(tail);
+
+        let scripts_at = 14;
+        let features_at = scripts_at + scripts.len();
+        let lookups_at = features_at + list.len();
+        let fv_at = lookups_at + lookups.len();
+        let mut out = Vec::new();
+        out.extend_from_slice(&b16(1));
+        out.extend_from_slice(&b16(1));
+        out.extend_from_slice(&b16(u16::try_from(scripts_at).unwrap()));
+        out.extend_from_slice(&b16(u16::try_from(features_at).unwrap()));
+        out.extend_from_slice(&b16(u16::try_from(lookups_at).unwrap()));
+        out.extend_from_slice(&b32(fv_at));
+        out.extend(scripts);
+        out.extend(list);
+        out.extend(lookups);
+        out.extend(fv);
+        out
+    }
+
+    /// `glyphs` substituted with the tables in force where `variation`
+    /// (an index into the table's records) holds, or the table's own.
+    fn subst_at(data: &[u8], variation: Option<usize>, glyphs: &[u16]) -> Vec<u16> {
+        let alternates = variation
+            .map(|i| crate::otl::variations(data, 0)[i].alternates.clone())
+            .unwrap_or_default();
+        let subs = Substitutions::parse_varied(data, Some(span(0, data.len())), None, &alternates)
+            .unwrap();
+        subst(data, &subs, glyphs)
+    }
+
+    #[test]
+    fn a_feature_variation_swaps_its_features_lookups_where_it_holds() {
+        // `liga` turns 10 into 11 -- or, where weight (axis 0) is at least
+        // half way to its maximum, into 12.
+        let data = gsub_varied(
+            &[(b"liga", &[0])],
+            &[single_delta(&[10], 1), single_delta(&[10], 2)],
+            &[(Some(&[Some((0, 0x2000, 0x4000))]), &[(0, &[1])])],
+        );
+        let records = crate::otl::variations(&data, 0);
+        assert_eq!(records.len(), 1);
+        assert!(records[0].holds(&[0x2000]));
+        assert!(records[0].holds(&[0x4000]));
+        assert!(!records[0].holds(&[0x1FFF]));
+        // An axis past the end of the coordinates is at its default, 0.
+        assert!(!records[0].holds(&[]));
+        assert_eq!(subst_at(&data, None, &[10]), [11]);
+        assert_eq!(subst_at(&data, Some(0), &[10]), [12]);
+    }
+
+    #[test]
+    fn conditions_hold_as_harfbuzz_evaluates_them() {
+        let data = gsub_varied(
+            &[(b"liga", &[0])],
+            &[single_delta(&[10], 1)],
+            &[
+                // No ConditionSet: always.
+                (None, &[]),
+                // Two conditions: both.
+                (Some(&[Some((0, 0, 0x4000)), Some((1, -0x4000, 0))]), &[]),
+                // A format HarfBuzz does not evaluate: never.
+                (Some(&[None]), &[]),
+            ],
+        );
+        let records = crate::otl::variations(&data, 0);
+        assert!(records[0].holds(&[]) && records[0].holds(&[0x4000, 0x4000]));
+        assert!(records[1].holds(&[0x1000, -0x1000]));
+        assert!(!records[1].holds(&[0x1000, 0x1000]));
+        assert!(!records[2].holds(&[]));
+    }
+
+    #[test]
+    fn rvrn_is_applied_before_every_other_feature() {
+        // `liga` (lookup 0) turns 11 into 20; `rvrn` (lookup 1) turns 10 into
+        // 11. In LookupList order `liga` would run first and see only 10;
+        // `rvrn` has a stage of its own before it, as in HarfBuzz, so the 11
+        // it makes is `liga`'s to rewrite.
+        let data = gsub_varied(
+            &[(b"liga", &[0]), (b"rvrn", &[1])],
+            &[single_delta(&[11], 9), single_delta(&[10], 1)],
+            &[],
+        );
+        assert_eq!(subst_at(&data, None, &[10]), [20]);
+    }
+
+    // --- reverse chaining -------------------------------------------------
+
+    /// A `ReverseChainSingleSubstFormat1`: `covered` becoming `substitutes` in
+    /// coverage order, when `back` (closest first) and `ahead` match around it.
+    fn reverse_chain(
+        covered: &[u16],
+        substitutes: &[u16],
+        back: &[&[u16]],
+        ahead: &[&[u16]],
+    ) -> Vec<u8> {
+        let coverages: Vec<Vec<u8>> = core::iter::once(covered)
+            .chain(back.iter().copied())
+            .chain(ahead.iter().copied())
+            .map(crate::fixture::coverage1)
+            .collect();
+        let head = 2 + 2 + 2 + back.len() * 2 + 2 + ahead.len() * 2 + 2 + substitutes.len() * 2;
+        let mut at = head;
+        let offsets: Vec<u16> = coverages
+            .iter()
+            .map(|c| {
+                let here = at;
+                at += c.len();
+                u16::try_from(here).unwrap()
+            })
+            .collect();
+        let mut out = Vec::new();
+        let mut put = |v: u16| out.extend_from_slice(&v.to_be_bytes());
+        put(1);
+        put(offsets[0]);
+        put(u16::try_from(back.len()).unwrap());
+        for k in 0..back.len() {
+            put(offsets[1 + k]);
+        }
+        put(u16::try_from(ahead.len()).unwrap());
+        for k in 0..ahead.len() {
+            put(offsets[1 + back.len() + k]);
+        }
+        put(u16::try_from(substitutes.len()).unwrap());
+        for &s in substitutes {
+            put(s);
+        }
+        assert_eq!(out.len(), head);
+        for c in &coverages {
+            out.extend_from_slice(c);
+        }
+        out
+    }
+
+    #[test]
+    fn a_reverse_chaining_substitution_resolves_from_the_right() {
+        // 20 becomes 21 before a 21 or a 30. Applied forward, only the last
+        // 20 of `20 20 20 30` could change; applied backward, as HarfBuzz
+        // applies the type, each 20's right-hand neighbour has already
+        // changed by the time it is looked at.
+        let sub = reverse_chain(&[20], &[21], &[], &[&[21, 30]]);
+        let data = gsub_table(b"calt", LOOKUP_REVERSE_CHAIN, &sub);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert_eq!(subst(&data, &subs, &[20, 20, 20, 30]), [21, 21, 21, 30]);
+        // With nothing after it to match, nothing changes.
+        assert_eq!(subst(&data, &subs, &[20, 20]), [20, 20]);
+    }
+
+    #[test]
+    fn a_reverse_chaining_substitution_needs_its_backtrack() {
+        let sub = reverse_chain(&[20, 22], &[21, 23], &[&[10]], &[]);
+        let data = gsub_table(b"calt", LOOKUP_REVERSE_CHAIN, &sub);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert_eq!(subst(&data, &subs, &[10, 20]), [10, 21]);
+        assert_eq!(subst(&data, &subs, &[10, 22]), [10, 23]);
+        assert_eq!(subst(&data, &subs, &[11, 20]), [11, 20]);
+    }
+
+    #[test]
+    fn a_context_cannot_invoke_a_reverse_chaining_lookup() {
+        // Lookup 0 matches 20 and invokes lookup 1, which would turn 20 into
+        // 21 with no context at all -- but only at the top level: HarfBuzz
+        // refuses the type as a nested lookup ("no chaining to this type").
+        let data = gsub_lookups(&[
+            (b"calt", LOOKUP_CONTEXT, context3(&[&[20]], &[(0, 1)])),
+            (
+                b"test",
+                LOOKUP_REVERSE_CHAIN,
+                reverse_chain(&[20], &[21], &[], &[]),
+            ),
+        ]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert_eq!(subst(&data, &subs, &[20]), [20]);
+    }
+
+    // --- substitutes_alone ------------------------------------------------
+
+    #[test]
+    fn a_lookup_substitutes_a_covered_glyph_alone() {
+        let data = gsub_table(b"smcp", LOOKUP_SINGLE, &single_delta(&[10, 11], 5));
+        let list = lookup_list(&data, 0).unwrap();
+        let lookup = probe_lookup(&data, list, 0).unwrap();
+        assert!(substitutes_alone(&data, &lookup, 10));
+        assert!(substitutes_alone(&data, &lookup, 11));
+        assert!(!substitutes_alone(&data, &lookup, 12));
+        // A lookup the list does not have answers nothing.
+        assert!(probe_lookup(&data, list, 1).is_none());
+    }
+
+    #[test]
+    fn a_one_glyph_context_answers_only_for_a_glyph_its_lookups_coverage_admits() {
+        // A ContextFormat3 of one glyph: HarfBuzz's `would_apply` for it
+        // counts glyphs and never reads the coverage -- the digest in front
+        // of it is what turns glyph 6 away.
+        let data = gsub_lookups(&[(b"smcp", LOOKUP_CONTEXT, context3(&[&[5]], &[]))]);
+        let list = lookup_list(&data, 0).unwrap();
+        let lookup = probe_lookup(&data, list, 0).unwrap();
+        assert!(substitutes_alone(&data, &lookup, 5));
+        assert!(!substitutes_alone(&data, &lookup, 6));
+    }
+
+    #[test]
+    fn a_reverse_chaining_substitution_answers_whatever_its_context() {
+        // ReverseChainSingleSubstFormat1: coverage [10], a backtrack of [9],
+        // no lookahead, one substitute. Its context would rule it out under
+        // `zero_context` for any other type; HarfBuzz asks it only for its
+        // coverage.
+        let cov = crate::fixture::coverage1(&[10]);
+        let back = crate::fixture::coverage1(&[9]);
+        let head = 14u16;
+        let mut sub = Vec::new();
+        for v in [
+            1u16,
+            head,
+            1,
+            head + u16::try_from(cov.len()).unwrap(),
+            0,
+            1,
+            50,
+        ] {
+            sub.extend_from_slice(&v.to_be_bytes());
+        }
+        sub.extend_from_slice(&cov);
+        sub.extend_from_slice(&back);
+        let data = gsub_lookups(&[(b"smcp", LOOKUP_REVERSE_CHAIN, sub)]);
+        let list = lookup_list(&data, 0).unwrap();
+        let lookup = probe_lookup(&data, list, 0).unwrap();
+        assert!(substitutes_alone(&data, &lookup, 10));
+        assert!(!substitutes_alone(&data, &lookup, 9));
     }
 
     /// A glyph eligible for no positional form at all — every glyph outside a
@@ -3471,13 +4297,15 @@ mod tests {
     }
 
     #[test]
-    fn a_lookup_type_we_cannot_apply_is_not_mistaken_for_one_we_can() {
-        // Type 8, `ReverseChainSingleSubst`, opens with a format and a
-        // coverage offset just as the single substitution above does, so a
-        // walk that ignored the lookup type would happily read it and
-        // substitute the wrong glyph.
+    fn a_lookup_is_read_as_the_type_it_claims() {
+        // A single substitution's bytes filed as type 8,
+        // `ReverseChainSingleSubst`, which opens with a format and a coverage
+        // offset just as they do. Read as what it claims to be, its format 2
+        // is no format of type 8 and nothing happens -- where a walk that
+        // ignored the lookup type would happily substitute 42.
         let data = gsub_table(b"liga", 8, &single_list(&[10], &[42]));
-        assert!(Substitutions::parse(&data, Some(span(0, data.len())), None).is_none());
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert_eq!(subst(&data, &subs, &[10]), [10]);
     }
 
     /// The first alternate is what an on-or-off feature selects: OpenType

@@ -698,7 +698,7 @@ impl BlurRenderer {
 
         let dx = col as f32 + 0.5 - cx;
         let dy = row as f32 + 0.5 - cy;
-        dx.mul_add(dx, dy * dy) <= r * r
+        dx * dx + dy * dy <= r * r
     }
 
     // ------------------------------------------------------------------
@@ -736,9 +736,11 @@ impl BlurRenderer {
     fn apply_saturation(buf: &mut [u32], factor: f32) {
         for px in buf.iter_mut() {
             let c = Rgb::from_argb(*px);
-            // Luma (Rec. 709 coefficients).
-            let luma =
-                (c.r as f32).mul_add(0.2126, (c.g as f32).mul_add(0.7152, c.b as f32 * 0.0722));
+            // Luma (Rec. 709 coefficients). Plain multiply-adds, not
+            // `mul_add`: without the FMA instruction set that is a call to a
+            // software `fmaf`, five of them a pixel here, over every pixel of
+            // a blurred backdrop, every frame.
+            let luma = c.r as f32 * 0.2126 + c.g as f32 * 0.7152 + c.b as f32 * 0.0722;
             *px = Rgb {
                 r: Self::sat_channel(c.r, luma, factor),
                 g: Self::sat_channel(c.g, luma, factor),
@@ -749,8 +751,12 @@ impl BlurRenderer {
     }
 
     fn sat_channel(val: u32, luma: f32, factor: f32) -> u32 {
-        let v = (val as f32 - luma).mul_add(factor, luma);
-        v.round().clamp(0.0, 255.0) as u32
+        let v = (val as f32 - luma) * factor + luma;
+        // Clamped first, then rounded by adding a half and truncating --
+        // `round()` for everything at or above zero, and without the call:
+        // with no SSE4.1 in the baseline, `f32::round` is `roundf` from the C
+        // library, three times a pixel here.
+        (v.clamp(0.0, 255.0) + 0.5) as u32
     }
 
     /// Add a subtle deterministic noise pattern.

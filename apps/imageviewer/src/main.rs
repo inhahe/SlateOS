@@ -98,12 +98,19 @@ const IMAGE_EXTENSIONS: &[&str] = &[
 // ============================================================================
 
 /// Detected image format from magic bytes.
+///
+/// Every format `imagecodec` decodes, so a file that fails is named for what
+/// it claims to be. WebP, ICO and TIFF were missing -- they decode, and a
+/// broken one was reported as a file of no known format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageFormat {
     Bmp,
     Png,
     Jpeg,
     Gif,
+    WebP,
+    Ico,
+    Tiff,
     Unknown,
 }
 
@@ -134,6 +141,26 @@ impl ImageFormat {
             return Self::Gif;
         }
 
+        // WebP: a RIFF container whose form type is "WEBP".
+        if byteread::starts_with(data, b"RIFF") && data.get(8..12) == Some(b"WEBP") {
+            return Self::WebP;
+        }
+
+        // ICO: a reserved zero, then type 1 -- or 2, a cursor, which is an
+        // icon with a hot spot and which `imagecodec` reads the same way.
+        if byteread::starts_with(data, &[0, 0, 1, 0]) || byteread::starts_with(data, &[0, 0, 2, 0])
+        {
+            return Self::Ico;
+        }
+
+        // TIFF: the byte order, then 42 -- or 43 for BigTIFF -- in that order.
+        if [b"II*\0", b"MM\0*", b"II+\0", b"MM\0+"]
+            .iter()
+            .any(|magic| byteread::starts_with(data, *magic))
+        {
+            return Self::Tiff;
+        }
+
         Self::Unknown
     }
 
@@ -144,76 +171,12 @@ impl ImageFormat {
             Self::Png => "PNG",
             Self::Jpeg => "JPEG",
             Self::Gif => "GIF",
+            Self::WebP => "WebP",
+            Self::Ico => "ICO",
+            Self::Tiff => "TIFF",
             Self::Unknown => "Unknown",
         }
     }
-}
-
-/// Parse image dimensions from header bytes.
-pub fn parse_dimensions(format: ImageFormat, data: &[u8]) -> Option<(u32, u32)> {
-    match format {
-        ImageFormat::Bmp => parse_bmp_dimensions(data),
-        ImageFormat::Png => parse_png_dimensions(data),
-        ImageFormat::Jpeg => parse_jpeg_dimensions(data),
-        ImageFormat::Gif => parse_gif_dimensions(data),
-        ImageFormat::Unknown => None,
-    }
-}
-
-fn parse_bmp_dimensions(data: &[u8]) -> Option<(u32, u32)> {
-    // BMP header: width at offset 18 (4 bytes LE), height at offset 22 (4 bytes LE)
-    let width = byteread::u32_le_at(data, 18)?;
-    // Height can be negative (top-down bitmap).
-    let height = byteread::i32_le_at(data, 22)?.unsigned_abs();
-    Some((width, height))
-}
-
-fn parse_png_dimensions(data: &[u8]) -> Option<(u32, u32)> {
-    // Delegated rather than read here. This used to be two `u32_be_at` calls at
-    // offsets 16 and 20 — the place a PNG's width and height *are*, if the file
-    // has an IHDR chunk there and it is intact. Neither was checked, so a
-    // truncated download reported whatever happened to sit at those offsets and
-    // the info panel showed a confident, invented size for a file that would
-    // never open. `imagecodec` checks the signature, the chunk name, the chunk
-    // length, the bit depth and the colour type before it answers.
-    imagecodec::dimensions(data).ok()
-}
-
-fn parse_jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
-    // JPEG is a stream of `FF <marker>` segments, so this walks rather than
-    // indexes: a segment's length is read from the segment before it.
-    let mut reader = byteread::Reader::at(data, 2); // skip FF D8
-    loop {
-        if reader.u8()? != 0xFF {
-            // Fill bytes and payload noise: resync on the next 0xFF.
-            continue;
-        }
-        let marker = reader.u8()?;
-
-        // SOF0 (baseline), SOF1 (extended), SOF2 (progressive) carry the
-        // dimensions: length(2) + precision(1), then height(2), width(2).
-        if marker == 0xC0 || marker == 0xC1 || marker == 0xC2 {
-            let height = reader.peek::<2>(3).map(u16::from_be_bytes)?;
-            let width = reader.peek::<2>(5).map(u16::from_be_bytes)?;
-            return Some((u32::from(width), u32::from(height)));
-        }
-
-        // Any other segment: its length counts itself, so skipping `len` from
-        // the length field lands on the next marker. A length below 2 would
-        // not advance, which is a malformed file rather than a segment.
-        let seg_len = usize::from(reader.peek::<2>(0).map(u16::from_be_bytes)?);
-        if seg_len < 2 {
-            return None;
-        }
-        reader.skip(seg_len)?;
-    }
-}
-
-fn parse_gif_dimensions(data: &[u8]) -> Option<(u32, u32)> {
-    // GIF logical screen descriptor: width at offset 6 (2 bytes LE), height at offset 8 (2 bytes LE)
-    let width = byteread::u16_le_at(data, 6)?;
-    let height = byteread::u16_le_at(data, 8)?;
-    Some((u32::from(width), u32::from(height)))
 }
 
 // ============================================================================
@@ -707,11 +670,16 @@ impl ViewerState {
         let format = ImageFormat::detect(&data);
         info.format = Some(format);
         // Read before the decode and from the header alone, because it is the
-        // only size available for a format this system can identify but not yet
-        // draw. A JPEG's dimensions in the info panel are worth having beside
-        // "JPEG images cannot be displayed yet"; they are what tells the user
-        // the file is the photograph they meant.
-        if let Some((w, h)) = parse_dimensions(format, &data) {
+        // only size available for a picture that will not decode -- a TIFF
+        // compressed in a way this system does not read, a file cut short. It
+        // is what tells the user the file is the picture they meant.
+        //
+        // `imagecodec`'s reading, for every format it knows. This app had its
+        // own for BMP, JPEG and GIF, which took whatever bytes sat at the
+        // offsets a size would be at -- the fault the PNG one had and lost --
+        // and gave a JPEG's size as stored rather than as shown, so a portrait
+        // photograph's panel said landscape until it had decoded.
+        if let Ok((w, h)) = imagecodec::dimensions(&data) {
             info.width = w;
             info.height = h;
         }
@@ -1979,16 +1947,19 @@ fn toolbar_buttons() -> Vec<ToolbarButton> {
 /// claims them" together mean *unsupported*, not *unrecognised*.
 fn decode_failure(format: ImageFormat, why: &imagecodec::ImageError) -> String {
     match (format, why) {
-        // A named format that no decoder claimed: not the file's fault.
+        // It begins as a format does and the decoder did not take it: the
+        // file is wrong, not this program.
         //
-        // JPEG left this list when `imagecodec` learned to decode it. Leaving
-        // it would have told someone whose file begins `FF D8` but is not a
-        // JPEG that "JPEG images cannot be displayed yet" -- a sentence about
-        // this program that stopped being true, pointed at a file that is
-        // genuinely wrong. The two diagnoses this function exists to keep
-        // apart had swapped places.
-        (ImageFormat::Bmp | ImageFormat::Gif, imagecodec::ImageError::UnknownFormat) => {
-            format!("{} images cannot be displayed yet", format.name())
+        // This said "BMP images cannot be displayed yet" (and GIF), a sentence
+        // about this program that stopped being true when `imagecodec` learned
+        // them -- as it did for JPEG before, which left this list for the same
+        // reason. Every format named here now decodes, so a named file the
+        // decoder does not claim is one whose first bytes are all it has.
+        (named, imagecodec::ImageError::UnknownFormat) if named != ImageFormat::Unknown => {
+            format!(
+                "it begins as a {} file does, but is not one this system can read",
+                named.name()
+            )
         }
         _ => why.to_string(),
     }
@@ -2433,56 +2404,121 @@ the picture at once, which reads as D advancing the slideshow"
         assert_eq!(ImageFormat::detect(data), ImageFormat::Unknown);
     }
 
-    #[test]
-    fn test_bmp_dimensions() {
-        // Minimal BMP header with width=100, height=200
-        let mut data = vec![0u8; 30];
-        data[0] = b'B';
-        data[1] = b'M';
-        // Width at offset 18 (LE)
-        let w: u32 = 100;
-        data[18..22].copy_from_slice(&w.to_le_bytes());
-        // Height at offset 22 (LE, signed)
-        let h: i32 = 200;
-        data[22..26].copy_from_slice(&h.to_le_bytes());
-
-        assert_eq!(parse_bmp_dimensions(&data), Some((100, 200)));
+    /// A real 24-bit BMP of `w` by `h.abs()` pixels, top-down when `h` is
+    /// negative -- a picture a decoder takes, not a header-shaped stub.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "a fixture's sizes, a few thousand pixels at most"
+    )]
+    fn bmp_24(w: u32, h: i32) -> Vec<u8> {
+        let row = (w * 3).div_ceil(4) * 4;
+        let pixels = row * h.unsigned_abs();
+        let mut out = Vec::new();
+        out.extend_from_slice(b"BM");
+        out.extend_from_slice(&(54 + pixels).to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&54u32.to_le_bytes());
+        out.extend_from_slice(&40u32.to_le_bytes());
+        out.extend_from_slice(&i32::try_from(w).unwrap().to_le_bytes());
+        out.extend_from_slice(&h.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&24u16.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&pixels.to_le_bytes());
+        out.extend_from_slice(&2835i32.to_le_bytes());
+        out.extend_from_slice(&2835i32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.resize(out.len() + usize::try_from(pixels).unwrap(), 0x80);
+        out
     }
 
-    #[test]
-    fn test_bmp_dimensions_negative_height() {
-        let mut data = vec![0u8; 30];
-        data[0] = b'B';
-        data[1] = b'M';
-        let w: u32 = 640;
-        data[18..22].copy_from_slice(&w.to_le_bytes());
-        let h: i32 = -480; // top-down bitmap
-        data[22..26].copy_from_slice(&h.to_le_bytes());
-
-        assert_eq!(parse_bmp_dimensions(&data), Some((640, 480)));
+    /// A real GIF: a 320x240 screen with one 1x1 frame on it.
+    fn gif_320x240() -> Vec<u8> {
+        let mut out = b"GIF89a".to_vec();
+        out.extend_from_slice(&320u16.to_le_bytes());
+        out.extend_from_slice(&240u16.to_le_bytes());
+        // A global table of two colours, then the colours.
+        out.extend_from_slice(&[0x80, 0, 0, 0, 0, 0, 255, 255, 255]);
+        // A frame at 0,0, 1 by 1, with no table of its own.
+        out.extend_from_slice(&[0x2C, 0, 0, 0, 0, 1, 0, 1, 0, 0]);
+        // Its pixels: two-bit LZW codes clear, 0, end, in one sub-block.
+        out.extend_from_slice(&[2, 2, 0x44, 0x01, 0]);
+        out.push(0x3B);
+        out
     }
 
+    /// The size shown before a picture decodes is `imagecodec`'s reading of
+    /// its header, for every format. This app read BMP, JPEG and GIF sizes
+    /// itself, from whatever bytes sat at the offsets a size would be at.
     #[test]
-    fn test_png_dimensions() {
-        // A real PNG, not a hand-laid header. The size now comes back through
-        // `imagecodec::dimensions`, which reads the IHDR *as a chunk* -- length,
-        // type, and the fields after the size -- so a 30-byte stub with a zero
-        // bit depth is no longer a picture and would report nothing. Building
-        // the fixture the same way every other test here does keeps this test
-        // measuring what it says it measures.
-        assert_eq!(parse_png_dimensions(&png_bytes(800, 600)), Some((800, 600)));
+    fn a_header_is_read_by_the_decoder_that_reads_the_picture() {
+        let limits = imagecodec::Limits::default();
+        let bmp = bmp_24(2, 3);
+        assert_eq!(imagecodec::dimensions(&bmp).ok(), Some((2, 3)));
+        assert!(
+            imagecodec::decode(&bmp, limits).is_ok(),
+            "control: the BMP is a picture"
+        );
+        // Top-down: the height is stored negative.
+        assert_eq!(
+            imagecodec::dimensions(&bmp_24(640, -480)).ok(),
+            Some((640, 480))
+        );
+        assert_eq!(
+            imagecodec::dimensions(&png_bytes(800, 600)).ok(),
+            Some((800, 600))
+        );
+        let gif = gif_320x240();
+        assert_eq!(imagecodec::dimensions(&gif).ok(), Some((320, 240)));
+        assert!(
+            imagecodec::decode(&gif, limits).is_ok(),
+            "control: the GIF is a picture"
+        );
+
+        // The stub the old BMP test used -- "BM" and two numbers where a size
+        // would be, and no header -- was given a size of 100 by 200.
+        let mut stub = vec![0u8; 30];
+        stub[..2].copy_from_slice(b"BM");
+        stub[18..22].copy_from_slice(&100u32.to_le_bytes());
+        stub[22..26].copy_from_slice(&200i32.to_le_bytes());
+        assert_eq!(
+            imagecodec::dimensions(&stub).ok(),
+            None,
+            "a file with no header was given a size"
+        );
     }
 
+    /// Every format the decoder reads is named, so a broken one is reported
+    /// as what it claims to be.
     #[test]
-    fn test_gif_dimensions() {
-        let mut data = vec![0u8; 13];
-        data[..6].copy_from_slice(b"GIF89a");
-        // Width at offset 6 (LE 16-bit)
-        data[6..8].copy_from_slice(&320u16.to_le_bytes());
-        // Height at offset 8 (LE 16-bit)
-        data[8..10].copy_from_slice(&240u16.to_le_bytes());
-
-        assert_eq!(parse_gif_dimensions(&data), Some((320, 240)));
+    fn every_format_the_decoder_reads_is_named() {
+        assert_eq!(
+            ImageFormat::detect(b"RIFF\x1a\x00\x00\x00WEBPVP8L"),
+            ImageFormat::WebP
+        );
+        // A RIFF of another form -- an AVI -- is not a WebP.
+        assert_eq!(
+            ImageFormat::detect(b"RIFF\x1a\x00\x00\x00AVI LIST"),
+            ImageFormat::Unknown
+        );
+        assert_eq!(
+            ImageFormat::detect(&[0, 0, 1, 0, 1, 0, 16, 16]),
+            ImageFormat::Ico
+        );
+        assert_eq!(
+            ImageFormat::detect(&[0, 0, 2, 0, 1, 0, 32, 32]),
+            ImageFormat::Ico,
+            "a cursor is not named, though it decodes"
+        );
+        for magic in [b"II*\0", b"MM\0*", b"II+\0", b"MM\0+"] {
+            let mut data = magic.to_vec();
+            data.extend_from_slice(&[8, 0, 0, 0]);
+            assert_eq!(ImageFormat::detect(&data), ImageFormat::Tiff, "{magic:?}");
+        }
+        for format in [ImageFormat::WebP, ImageFormat::Ico, ImageFormat::Tiff] {
+            assert_ne!(format.name(), ImageFormat::Unknown.name());
+        }
     }
 
     #[test]
@@ -2892,31 +2928,48 @@ the picture at once, which reads as D advancing the slideshow"
         assert!(read.bytes.len() <= 8, "and it stopped where it said");
     }
 
-    /// A format this system recognises but cannot decode must not be reported
-    /// as "not a picture". Those are opposite diagnoses — one blames the file,
-    /// the other the viewer — and telling a user their photograph is not a
-    /// picture sends them looking for a corrupt disk.
+    /// A file that begins as a format does and does not decode says which
+    /// format it claims to be, and blames the file.
     ///
-    /// This used to use a JPEG, and had to move when `imagecodec` learned to
-    /// decode one: the stub it wrote is not a valid JPEG, so the honest
-    /// diagnosis became "file ends mid-structure" -- which blames the file,
-    /// correctly. GIF is still recognised and still undecodable, so it carries
-    /// the property the test is about.
+    /// It said "GIF images cannot be displayed yet" -- a sentence about this
+    /// program, which stopped being true when `imagecodec` learned GIF
+    /// (9a61ec67c), after which this test failed and nothing ran it: the
+    /// decoder now takes the file for a GIF and says what is wrong with it.
+    /// JPEG went the same way before. Every format the viewer names decodes,
+    /// so the two cases left are these: a file the decoder takes for the
+    /// format and finds broken, and one whose first bytes are all there is of
+    /// the format -- which the decoder does not take at all.
     #[test]
-    fn an_undecodable_but_recognised_format_says_which_it_is() {
+    fn a_file_that_only_begins_as_a_picture_says_what_it_claimed_to_be() {
         let guard = scratch("unsupported-format");
         let dir = guard.dir().to_path_buf();
         let gif = dir.join("holiday.gif");
         // A real GIF signature and a logical screen descriptor: enough for
-        // `ImageFormat::detect`, and nothing this system can decode.
+        // `ImageFormat::detect`, and not a GIF.
         std::fs::write(&gif, b"GIF89a\x10\x00\x10\x00\x00\x00\x00").expect("write gif");
 
         let mut state = ViewerState::new(800.0, 600.0);
         assert!(!state.open_file(&gif));
         let reason = state.load_error.as_deref().expect("a reason");
         assert!(
-            reason.contains("GIF images cannot be displayed yet"),
-            "the reason must name the format, not blame the file: {reason}"
+            reason.contains("GIF"),
+            "the reason must name what the file claimed to be: {reason}"
+        );
+        assert!(
+            !reason.contains("cannot be displayed yet"),
+            "a format this system reads was called undisplayable: {reason}"
+        );
+
+        // A JPEG's start-of-image and nothing after it that a JPEG has: the
+        // decoder, which wants a marker next, does not take it for one at all,
+        // and the viewer says what it began as.
+        let jpeg = dir.join("scan.jpg");
+        std::fs::write(&jpeg, [0xFF, 0xD8, 0, 0, 0, 0, 0, 0, 0, 0]).expect("write jpeg");
+        assert!(!state.open_file(&jpeg));
+        let reason = state.load_error.as_deref().expect("a reason");
+        assert!(
+            reason.contains("begins as a JPEG file does, but is not one"),
+            "the reason must name what the file began as: {reason}"
         );
     }
 
@@ -2946,7 +2999,7 @@ the picture at once, which reads as D advancing the slideshow"
         data.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
 
         assert_eq!(
-            parse_dimensions(ImageFormat::Png, &data),
+            imagecodec::dimensions(&data).ok(),
             None,
             "a chunk that ends mid-header must not yield a size"
         );

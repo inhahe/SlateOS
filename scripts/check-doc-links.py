@@ -52,6 +52,15 @@ stays quiet and leaves the judgement to rustdoc.
 
 Consequently every finding is actionable: the name is simply gone.
 
+Actionable is not mechanical, though. A finding says a name is gone, never
+what it became, and substituting the successor can make the prose worse:
+lane A fixing the kernel's (requests/a-b-your-doc-link-gate-refuses-a-
+verdict-on-a-single-crate-root.md) found `awk_pattern_eval`'s successor
+takes no record at all, so the sentence citing it -- about asking "with a
+dummy record" -- described a technique that was deleted, and renaming the
+link would have turned a dead link into a live falsehood. Read the sentence
+before re-pointing its link.
+
 WHAT IT READS: `--head`
 -----------------------
 By default it reads the working tree. With `--head <rev>` it reads that

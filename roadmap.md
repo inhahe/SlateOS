@@ -1823,6 +1823,11 @@ D's to act on once answered).
       its thread table grows past 64 threads; a thread's slot exists before
       the thread does (§1111).  Ring-3 check `services/ctest-pthread`, run by
       lane A on request.
+    * aio, the fifteenth pass: each request's outcome is kept in its `aiocb`
+      (musl's private words), not a 16-entry table that evicted uncollected
+      outcomes; errors are reported where glibc reports them; completion is
+      notified as `aio_sigevent` asks; `aio_suspend` waits and `aio_cancel`
+      checks its descriptor; `O_DSYNC` is `fdatasync`.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

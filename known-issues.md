@@ -23896,6 +23896,29 @@ The defect-marker habit held again, in its strongest form yet: a comment
 quoting upstream code that upstream does not contain. **Check a quoted line
 against the source before believing the quotation.**
 
+**Fifteenth pass, 2026-09-26 — `aio.rs` (6 sites), lane D.** Against glibc
+2.39's rt/ (`aio_misc.c`, `aio_suspend.c`, `lio_listio-common.c`,
+`aio_cancel.c`), read in full. `aio_fsync` was right (the eleventh pass). The
+rest:
+
+- **`aio_read`/`aio_write`** refused a bad descriptor, buffer or offset at
+  once. glibc refuses only a priority outside `0..=AIO_PRIO_DELTA_MAX` before
+  it queues a request (recording `EINVAL` in the `aiocb` too); everything
+  else is the request's own outcome, read through `aio_error`. The priority
+  check was missing.
+- **`aio_suspend`** tested the list before `nent` and refused `nent == 0`;
+  glibc refuses a negative `nent` first, returns 0 for an empty list, and
+  reads the list only when it has entries.
+- **`lio_listio`** tested the list before `mode` and `nent`, refused an
+  unknown opcode at once, and returned the last request's `errno` where glibc
+  returns `EIO`.
+- **`aio_error(NULL)`** returned `EINVAL` as its *value* — "the request failed
+  with EINVAL" — where glibc faults; it is -1 with `EFAULT`, POSIX's shape for
+  `aio_error` itself failing.
+- Beside them, reading the rest of rt/ turned up the module's real faults —
+  outcomes evicted after 16 requests, notification ignored —
+  `B-D-AIO-OUTCOMES-EVICTED-AND-NEVER-NOTIFIED` (new, fixed with it).
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -23909,9 +23932,9 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-fourteen swept `ioctl.rs`, `semaphore.rs` and `time.rs`; next are `aio.rs` and
-`sched.rs` at six, `mqueue.rs` and `resolv.rs` at five, and twelve files at
-four, in that order.
+fifteen swept `ioctl.rs`, `semaphore.rs`, `time.rs` and `aio.rs`; next is
+`sched.rs` at six, then `mqueue.rs` and `resolv.rs` at five, and twelve files
+at four, in that order.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
@@ -165772,6 +165795,66 @@ Host tests cover the attribute reading, the layout arithmetic, the table's
 growth and the sentinels; `services/ctest-pthread` checks it all in ring 3,
 once lane A runs it (`requests/d-a-run-the-ctest-pthread-fixture.md`).
 Design choices in `design-decisions.md` §1111.
+
+### [D] B-D-AIO-OUTCOMES-EVICTED-AND-NEVER-NOTIFIED — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/aio.rs`.
+
+**What it was.** Found in the fifteenth NULL-pointer pass, reading glibc's
+rt/ in full:
+
+- Each request's outcome lived in a 16-entry table keyed by the `aiocb`'s
+  address, and the 17th request evicted the oldest outcome whether or not
+  anyone had collected it. `aio_error` then answered `EINVAL` — "that I/O
+  failed with EINVAL" — for a request that had succeeded: a `lio_listio` of
+  17 requests lost its first. `aio_return` also dropped the outcome, so the
+  common `n = aio_return(cb); if (n < 0) e = aio_error(cb);` read `EINVAL`.
+- `aio_sigevent` was ignored, and `lio_listio`'s `sig`: a program waiting for
+  its `SIGEV_THREAD` callback or its signal waited forever.
+- `aio_cancel` answered `AIO_ALLDONE` to everything, a descriptor that is not
+  open (glibc: `EBADF`) and another descriptor's `aiocb` (`EINVAL`) included.
+- `aio_fsync(O_DSYNC)` ran `fsync`; a positioned read or write on a pipe or
+  socket failed with `ESPIPE` where glibc falls back to a plain one; an
+  interrupted one failed with `EINTR` where glibc retries.
+- `aio_suspend` never waited, so a request another thread was still
+  performing was reported complete.
+
+**Fix.** The outcome lives in the `aiocb`, in the two private words musl keeps
+there (`__err`, `__ret`) — no table and no limit — and reads as glibc's does,
+`EINPROGRESS` while another thread performs the request. Completion is
+notified as `aio_sigevent` asks: `SIGEV_THREAD` on a new detached thread,
+`SIGEV_SIGNAL` by `raise`. `aio_suspend` sleeps on a futex until a listed
+request completes; `aio_cancel` follows glibc's order and answers
+`AIO_NOTCANCELED` for a request being performed. Host tests drive reads and
+writes through an eventfd, which also takes the `ESPIPE` fallback.
+
+**What remains, by design.** Requests are still performed in the calling
+thread before the call returns, as this module always has — a program gains
+no overlap from aio. `SIGEV_SIGNAL` carries no value, since `sigqueue`
+delivers none yet (plain `raise` is glibc's own fallback without queued
+signals).
+
+### [D] TD-D-TSD-IS-A-GLOBAL-TABLE-KEYED-BY-TASK-ID — 2026-09-26 — OPEN
+
+**Where:** `posix/src/pthread.rs` — `TSD_TABLE` and `pthread_key_create`,
+`pthread_key_delete`, `pthread_getspecific`, `pthread_setspecific`.
+
+**What it is.** Thread-specific data lives in one process-wide table of 64
+rows, one per thread that has set a key, keyed by kernel task id, under a spin
+lock. Every `pthread_getspecific` makes a `SYS_TASK_ID` syscall, takes the
+lock and scans up to 64 rows -- for what glibc does with two loads. A 65th
+thread holding values at once gets `ENOMEM` from `pthread_setspecific`. And
+keys are never reused: `pthread_key_delete` leaves the index taken, so a
+program that creates and deletes keys runs out after 64 creations (`EAGAIN`)
+with none alive. The row count was the thread table's until that table
+learned to grow (`B-D-PTHREAD-CREATE-IGNORED-ITS-ATTRIBUTE`).
+
+**Proper fix.** glibc's design: each thread's values in its own per-thread
+block (an inline first block, further blocks allocated on first use), keys
+carrying a sequence number so that a deleted-and-recreated key reads NULL in a
+thread holding a stale value, and neither a lock nor a syscall on
+`pthread_getspecific`. The inline block goes in `PerThread`, within its
+2048-byte budget (`the_block_stays_small_enough_to_ride_in_every_thread`).
 
 ### [D] TD-D-TSEARCH-IS-AN-UNBALANCED-TREE — 2026-09-26 — FIXED 2026-09-26
 

@@ -49,16 +49,16 @@ const RED_DOT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1
 
 const INK: Color = Color::rgb(0x20, 0x80, 0xc0);
 
-fn opaque_pixels(icon: &Icon) -> Vec<u32> {
-    icon.argb
-        .iter()
-        .copied()
-        .filter(|px| px & 0xFF00_0000 == 0xFF00_0000)
-        .collect()
-}
-
-/// Every built-in icon parses, draws something at the sizes the desktop uses,
-/// and draws it in the colour asked for -- they are all `currentColor`.
+/// Every built-in icon parses, draws something legible at the sizes the
+/// desktop uses, and draws it in the colour asked for -- they are all
+/// `currentColor`.
+///
+/// Legible is a pixel at least three-quarters covered. Not a wholly solid one:
+/// a line two units wide in a 24-unit icon is a pixel and a third wide at 16
+/// pixels, and whether any pixel lies wholly inside it depends on where it
+/// falls. This asked for a solid pixel while strokes were drawn two pixels wide
+/// at every size, and a curved icon drawn to scale at 16 has none. An icon
+/// with nothing even three-quarters covered is a smear.
 #[test]
 fn every_built_in_icon_draws_in_the_colour_it_is_asked_for() {
     let theme = IconTheme::named(OsStr::new("no-such-theme"), Fixture::new("builtin").dirs());
@@ -69,9 +69,17 @@ fn every_built_in_icon_draws_in_the_colour_it_is_asked_for() {
                 .unwrap_or_else(|| panic!("{name} at {size} draws nothing"));
             assert_eq!(icon.size, size);
             assert_eq!(icon.argb.len(), (size * size) as usize);
-            let solid = opaque_pixels(&icon);
-            assert!(!solid.is_empty(), "{name} at {size} has no solid pixel");
-            for px in solid {
+            let strong: Vec<u32> = icon
+                .argb
+                .iter()
+                .copied()
+                .filter(|px| px >> 24 >= 0xC0)
+                .collect();
+            assert!(
+                !strong.is_empty(),
+                "{name} at {size} has no pixel three-quarters covered"
+            );
+            for px in strong {
                 assert_eq!(
                     px & 0x00FF_FFFF,
                     0x0020_80C0,

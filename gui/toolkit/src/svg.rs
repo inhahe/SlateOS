@@ -7,16 +7,26 @@
 //!
 //! - Basic shapes: rect, circle, ellipse, line, polyline, polygon
 //! - Path element with full command set (M, L, H, V, C, S, Q, T, A, Z)
-//! - Styling: fill, stroke, stroke-width, opacity, transforms
+//! - Styling: fill, fill-rule, stroke, stroke-width, stroke-linecap,
+//!   stroke-linejoin, stroke-miterlimit, opacity, transforms -- as presentation
+//!   attributes; a `style` attribute or a stylesheet is not read
 //! - Container elements: svg (with viewBox), g (with inheritance)
 //! - Color parsing: hex, named colors, rgb(), rgba(), none, transparent, currentColor
+//!
+//! # Rasterizing
+//!
+//! A shape's fill, and separately its stroke, is one coverage pass: every edge
+//! of every subpath takes part in one winding count, and each pixel is blended
+//! once with the share of it the shape covers. A stroke is the union of a quad
+//! per segment, a join per corner and a cap per open end, wound alike and
+//! filled nonzero. Curves are cut finely enough for the size they are drawn
+//! at, and a stroke's width scales with the drawing, as a length in user space
+//! does.
 
 // Geometry functions inherently need many coordinate parameters.
 #![allow(clippy::too_many_arguments)]
 
 use crate::color::Color;
-use crate::render::RenderCommand;
-use crate::style::CornerRadii;
 
 use core::f32::consts::PI;
 
@@ -272,6 +282,17 @@ impl Default for Transform {
 }
 
 impl Transform {
+    /// How much this transform scales a length, as one number: the square
+    /// root of how much it scales an area.
+    ///
+    /// Exact for a uniform scale and for a rotation. For a scale that differs
+    /// by axis it is the geometric mean of the two -- the one number a length
+    /// with no direction, such as a stroke's width, can honestly be given.
+    #[must_use]
+    pub fn length_scale(&self) -> f32 {
+        (self.a * self.d - self.b * self.c).abs().sqrt()
+    }
+
     pub const IDENTITY: Self = Self {
         a: 1.0,
         b: 0.0,
@@ -871,12 +892,57 @@ fn parse_path_number(s: &str) -> Result<f32, SvgError> {
 
 // ─── SVG Node Tree ───────────────────────────────────────────────────────────
 
+/// How the inside of a filled shape is decided where its outline crosses
+/// itself or one subpath lies inside another (`fill-rule`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FillRule {
+    /// Inside where the outline winds around the point at all: a subpath
+    /// inside another, drawn the same way round, fills rather than cuts.
+    #[default]
+    NonZero,
+    /// Inside where the outline crosses an odd number of times on the way
+    /// out: every nested subpath alternates between filled and hole.
+    EvenOdd,
+}
+
+/// The shape of a stroke's open ends (`stroke-linecap`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineCap {
+    /// Cut square at the end point.
+    #[default]
+    Butt,
+    /// A half disc past the end point.
+    Round,
+    /// Carried on past the end point by half the stroke's width.
+    Square,
+}
+
+/// The shape of a stroke where two of its segments meet (`stroke-linejoin`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineJoin {
+    /// The outer edges carried on to meet in a point, unless that point is
+    /// further out than `stroke-miterlimit` allows; then a bevel.
+    #[default]
+    Miter,
+    /// A disc around the corner.
+    Round,
+    /// The outer corners joined straight across.
+    Bevel,
+}
+
 /// Style properties for an SVG node.
+///
+/// `None` in a field is "not said here", which inherits the parent's value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SvgStyle {
     pub fill: Option<SvgPaint>,
+    pub fill_rule: Option<FillRule>,
     pub stroke: Option<SvgPaint>,
     pub stroke_width: Option<f32>,
+    pub stroke_linecap: Option<LineCap>,
+    pub stroke_linejoin: Option<LineJoin>,
+    /// At least 1, as SVG requires; a smaller value is not said.
+    pub stroke_miterlimit: Option<f32>,
     pub opacity: f32,
     pub fill_opacity: f32,
     pub stroke_opacity: f32,
@@ -886,8 +952,12 @@ impl Default for SvgStyle {
     fn default() -> Self {
         Self {
             fill: None,
+            fill_rule: None,
             stroke: None,
             stroke_width: None,
+            stroke_linecap: None,
+            stroke_linejoin: None,
+            stroke_miterlimit: None,
             opacity: 1.0,
             fill_opacity: 1.0,
             stroke_opacity: 1.0,
@@ -1011,25 +1081,6 @@ impl SvgDocument {
         renderer.render_node(&self.root, base_transform, &ResolvedStyle::default());
         renderer.buffer
     }
-
-    /// Convert the SVG into a list of `RenderCommand`s positioned at (x, y) with size (w, h).
-    /// Rects and lines emit native commands; paths are rasterized to an image.
-    pub fn render_commands(&self, x: f32, y: f32, w: f32, h: f32) -> Vec<RenderCommand> {
-        let (vb_x, vb_y, vb_w, vb_h) = self.viewbox();
-        let scale_x = w / vb_w;
-        let scale_y = h / vb_h;
-
-        let mut cmds = Vec::new();
-        cmds.push(RenderCommand::PushTranslate { dx: x, dy: y });
-        collect_render_commands(
-            &self.root,
-            Transform::scale(scale_x, scale_y).then(Transform::translate(-vb_x, -vb_y)),
-            &ResolvedStyle::default(),
-            &mut cmds,
-        );
-        cmds.push(RenderCommand::PopTranslate);
-        cmds
-    }
 }
 
 // ─── Resolved (Inherited) Style ──────────────────────────────────────────────
@@ -1038,8 +1089,13 @@ impl SvgDocument {
 #[derive(Clone, Debug)]
 struct ResolvedStyle {
     fill: SvgPaint,
+    fill_rule: FillRule,
     stroke: SvgPaint,
+    /// In user space: `paint` scales it to the drawing.
     stroke_width: f32,
+    line_cap: LineCap,
+    line_join: LineJoin,
+    miter_limit: f32,
     opacity: f32,
     fill_opacity: f32,
     stroke_opacity: f32,
@@ -1047,10 +1103,15 @@ struct ResolvedStyle {
 
 impl Default for ResolvedStyle {
     fn default() -> Self {
+        // SVG's initial values.
         Self {
             fill: SvgPaint::Color(Color::BLACK),
+            fill_rule: FillRule::NonZero,
             stroke: SvgPaint::None,
             stroke_width: 1.0,
+            line_cap: LineCap::Butt,
+            line_join: LineJoin::Miter,
+            miter_limit: 4.0,
             opacity: 1.0,
             fill_opacity: 1.0,
             stroke_opacity: 1.0,
@@ -1062,8 +1123,12 @@ impl ResolvedStyle {
     fn with_overrides(&self, style: &SvgStyle) -> Self {
         Self {
             fill: style.fill.unwrap_or(self.fill),
+            fill_rule: style.fill_rule.unwrap_or(self.fill_rule),
             stroke: style.stroke.unwrap_or(self.stroke),
             stroke_width: style.stroke_width.unwrap_or(self.stroke_width),
+            line_cap: style.stroke_linecap.unwrap_or(self.line_cap),
+            line_join: style.stroke_linejoin.unwrap_or(self.line_join),
+            miter_limit: style.stroke_miterlimit.unwrap_or(self.miter_limit),
             opacity: self.opacity * style.opacity,
             fill_opacity: style.fill_opacity,
             stroke_opacity: style.stroke_opacity,
@@ -1452,13 +1517,20 @@ fn build_group(elem: &XmlElement) -> Result<SvgNode, SvgError> {
 }
 
 fn build_rect(elem: &XmlElement) -> Result<SvgNode, SvgError> {
+    // One radius given is both, as SVG has it: `rx="2"` alone rounds the
+    // corners, where reading the missing `ry` as 0 left them square.
+    let (rx, ry) = match (elem.attr_f32("rx"), elem.attr_f32("ry")) {
+        (Some(rx), Some(ry)) => (rx, ry),
+        (Some(r), None) | (None, Some(r)) => (r, r),
+        (None, None) => (0.0, 0.0),
+    };
     Ok(SvgNode::Rect {
         x: elem.attr_f32("x").unwrap_or(0.0),
         y: elem.attr_f32("y").unwrap_or(0.0),
         width: elem.attr_f32("width").unwrap_or(0.0),
         height: elem.attr_f32("height").unwrap_or(0.0),
-        rx: elem.attr_f32("rx").unwrap_or(0.0),
-        ry: elem.attr_f32("ry").unwrap_or(0.0),
+        rx,
+        ry,
         transform: elem
             .attr("transform")
             .map(parse_transform)
@@ -1567,15 +1639,58 @@ fn parse_style_attrs(elem: &XmlElement) -> Result<SvgStyle, SvgError> {
     let opacity = elem.attr_f32("opacity").unwrap_or(1.0);
     let fill_opacity = elem.attr_f32("fill-opacity").unwrap_or(1.0);
     let stroke_opacity = elem.attr_f32("stroke-opacity").unwrap_or(1.0);
+    // Keywords a renderer does not know are ignored, as browsers ignore them:
+    // the property is then not said here and is inherited.
+    let fill_rule = keyword(
+        elem.attr("fill-rule"),
+        &[
+            ("nonzero", FillRule::NonZero),
+            ("evenodd", FillRule::EvenOdd),
+        ],
+    );
+    let stroke_linecap = keyword(
+        elem.attr("stroke-linecap"),
+        &[
+            ("butt", LineCap::Butt),
+            ("round", LineCap::Round),
+            ("square", LineCap::Square),
+        ],
+    );
+    let stroke_linejoin = keyword(
+        elem.attr("stroke-linejoin"),
+        &[
+            ("miter", LineJoin::Miter),
+            // SVG 2's clipped miter: the nearest this renderer draws.
+            ("miter-clip", LineJoin::Miter),
+            ("round", LineJoin::Round),
+            ("bevel", LineJoin::Bevel),
+        ],
+    );
+    let stroke_miterlimit = elem
+        .attr_f32("stroke-miterlimit")
+        .filter(|limit| limit.is_finite() && *limit >= 1.0);
 
     Ok(SvgStyle {
         fill,
+        fill_rule,
         stroke,
         stroke_width,
+        stroke_linecap,
+        stroke_linejoin,
+        stroke_miterlimit,
         opacity,
         fill_opacity,
         stroke_opacity,
     })
+}
+
+/// The value `table` gives the keyword `value` names, if it names one.
+fn keyword<T: Copy>(value: Option<&str>, table: &[(&str, T)]) -> Option<T> {
+    let value = value?.trim();
+    table
+        .iter()
+        .find(|(name, _)| *name == value)
+        .map(|&(_, meaning)| meaning)
 }
 
 fn parse_viewbox(s: &str) -> Result<(f32, f32, f32, f32), SvgError> {
@@ -1775,6 +1890,7 @@ fn flatten_arc(
     sweep: bool,
     target_x: f32,
     target_y: f32,
+    scale: f32,
     output: &mut Vec<(f32, f32)>,
 ) {
     // Implementation of the SVG arc endpoint-to-center parameterization
@@ -1845,8 +1961,10 @@ fn flatten_arc(
         dtheta += 2.0 * PI;
     }
 
-    // Approximate with line segments
-    let n_segs = ((dtheta.abs() / (PI / 4.0)).ceil() as u32).max(1);
+    // Approximate with line segments, as many as the arc needs at the size it
+    // is drawn -- `scale` carries its radius to device pixels. It was a fixed
+    // one per eighth of a turn, which a large icon showed as corners.
+    let n_segs = curve_segments(rx.max(ry) * scale, dtheta);
     let step = dtheta / n_segs as f32;
 
     for i in 1..=n_segs {
@@ -1874,43 +1992,382 @@ fn angle_between(ux: f32, uy: f32, vx: f32, vy: f32) -> f32 {
     }
 }
 
-/// The segments of an open point list: each point paired with the next.
+// ─── Geometry ────────────────────────────────────────────────────────────────
+
+/// How far a flattened circle or arc may stray from the true curve, in device
+/// pixels.
 ///
-/// This is `windows(2)` with the length put into the type. `windows` yields a
-/// slice, so all six callers in this file read it back out as `w[0]` and
-/// `w[1]` — indexes the compiler cannot check against a length it was never
-/// told. Destructuring it once, here, hands them a pair instead.
-fn segments(points: &[(f32, f32)]) -> impl Iterator<Item = ((f32, f32), (f32, f32))> + '_ {
-    points.windows(2).filter_map(|w| match *w {
-        [a, b] => Some((a, b)),
-        // Unreachable: `windows(2)` yields nothing else. Expressed as a
-        // fallthrough rather than an index so it stays unreachable.
+/// A tenth of a pixel is invisible at any size. Arcs used to be cut into a
+/// fixed eight segments per turn and circles into thirty-two, whatever their
+/// size, so a ring drawn a few hundred pixels across came out as a visible
+/// polygon.
+const CURVE_TOLERANCE_PX: f32 = 0.1;
+
+/// The most segments one circle or arc is cut into, however large it is drawn.
+const MAX_CURVE_SEGMENTS: u32 = 1024;
+
+/// Points closer than this, in device pixels, are one point: a segment shorter
+/// has no direction to stroke along.
+const SAME_POINT_PX: f32 = 1e-4;
+
+/// How many straight segments a curve of `radius` device pixels, turning
+/// through `sweep` radians, needs to stay within [`CURVE_TOLERANCE_PX`].
+fn curve_segments(radius: f32, sweep: f32) -> u32 {
+    let radius = radius.abs();
+    let sweep = sweep.abs();
+    if !radius.is_finite() || !sweep.is_finite() {
+        return MAX_CURVE_SEGMENTS;
+    }
+    if radius <= CURVE_TOLERANCE_PX {
+        // Smaller than the tolerance: any polygon is within it. A quarter
+        // turn a segment keeps the shape's extent.
+        return ((sweep / (PI / 2.0)).ceil() as u32).clamp(1, 4);
+    }
+    // A chord spanning `step` radians strays `radius * (1 - cos(step / 2))`
+    // from the arc it cuts off.
+    let step = 2.0 * (1.0 - CURVE_TOLERANCE_PX / radius).acos();
+    ((sweep / step).ceil() as u32).clamp(1, MAX_CURVE_SEGMENTS)
+}
+
+/// One run of a shape's outline in device pixels, and whether it closes on
+/// itself.
+///
+/// The closing matters to the stroke and not to the fill: a fill treats every
+/// run as closed, as SVG does, but a closed run is stroked with a join where it
+/// meets itself and an open one with a cap at each end.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Subpath {
+    points: Vec<(f32, f32)>,
+    closed: bool,
+}
+
+/// Everything a stroke needs besides its outline, in device pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StrokeGeometry {
+    width: f32,
+    cap: LineCap,
+    join: LineJoin,
+    miter_limit: f32,
+}
+
+fn vec_sub(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
+    (a.0 - b.0, a.1 - b.1)
+}
+
+fn vec_add(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
+    (a.0 + b.0, a.1 + b.1)
+}
+
+fn vec_scale(v: (f32, f32), k: f32) -> (f32, f32) {
+    (v.0 * k, v.1 * k)
+}
+
+/// `v` scaled to length one, or `None` when it has no direction.
+fn unit(v: (f32, f32)) -> Option<(f32, f32)> {
+    let len = v.0.hypot(v.1);
+    (len.is_finite() && len > SAME_POINT_PX).then(|| (v.0 / len, v.1 / len))
+}
+
+/// `d` turned a quarter turn: the side of a segment its stroke spreads to.
+fn normal(d: (f32, f32)) -> (f32, f32) {
+    (-d.1, d.0)
+}
+
+/// Twice the signed area of `poly`: its sign is the way it winds.
+fn signed_area(poly: &[(f32, f32)]) -> f32 {
+    let closing = match poly {
+        [first, .., last] => Some((*last, *first)),
         _ => None,
+    };
+    poly.windows(2)
+        .filter_map(|w| match *w {
+            [a, b] => Some((a, b)),
+            _ => None,
+        })
+        .chain(closing)
+        .map(|(a, b)| a.0 * b.1 - b.0 * a.1)
+        .sum()
+}
+
+/// A circle of `radius` around `centre`, as a polygon fine enough for its
+/// size.
+fn disk(centre: (f32, f32), radius: f32) -> Vec<(f32, f32)> {
+    let n = curve_segments(radius, 2.0 * PI).max(8);
+    (0..n)
+        .map(|i| {
+            let angle = 2.0 * PI * (i as f32 / n as f32);
+            (
+                centre.0 + radius * angle.cos(),
+                centre.1 + radius * angle.sin(),
+            )
+        })
+        .collect()
+}
+
+/// `points` without its non-finite points, and with each run of points too
+/// close to tell apart kept once.
+fn distinct_points(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    let mut out: Vec<(f32, f32)> = Vec::with_capacity(points.len());
+    for &p in points {
+        if !p.0.is_finite() || !p.1.is_finite() {
+            continue;
+        }
+        let repeat = out
+            .last()
+            .is_some_and(|&last| unit(vec_sub(p, last)).is_none());
+        if !repeat {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// The polygon that fills the outer corner where a stroke turns at `at`,
+/// coming in along `d_in` and going out along `d_out` (both unit length), or
+/// `None` where it runs straight on.
+fn join_polygon(
+    at: (f32, f32),
+    d_in: (f32, f32),
+    d_out: (f32, f32),
+    half: f32,
+    join: LineJoin,
+    miter_limit: f32,
+) -> Option<Vec<(f32, f32)>> {
+    let cross = d_in.0 * d_out.1 - d_in.1 * d_out.0;
+    let dot = d_in.0 * d_out.0 + d_in.1 * d_out.1;
+    if cross.abs() < 1e-6 && dot > 0.0 {
+        return None;
+    }
+    if join == LineJoin::Round {
+        return Some(disk(at, half));
+    }
+    // The corner opens on the side away from the turn: the two segments'
+    // edges on that side leave a wedge the quads do not cover.
+    let side = if cross > 0.0 { -half } else { half };
+    let (n_in, n_out) = (normal(d_in), normal(d_out));
+    let from = vec_add(at, vec_scale(n_in, side));
+    let to = vec_add(at, vec_scale(n_out, side));
+    if join == LineJoin::Miter {
+        // The miter's length over the stroke's width is 1 / cos(turn / 2),
+        // and |n_in + n_out| is 2 cos(turn / 2).
+        let bisector = vec_add(n_in, n_out);
+        let length = bisector.0.hypot(bisector.1);
+        if length > 1e-6 {
+            let ratio = 2.0 / length;
+            if ratio <= miter_limit {
+                let tip = vec_add(at, vec_scale(bisector, side * ratio / length));
+                return Some(vec![at, from, tip, to]);
+            }
+        }
+    }
+    Some(vec![at, from, to])
+}
+
+/// The polygons whose union is `subpaths` stroked as `stroke` says: one quad
+/// per segment, a join where segments meet, a cap at each open end.
+///
+/// Every polygon comes out wound the same way, so filling them together under
+/// the nonzero rule fills their union and covers an overlap once. They used to
+/// be drawn one quad at a time, each blended on its own: where two quads met
+/// on a curve, each covered part of a pixel and the pixel never became solid,
+/// so a circle's outline was drawn at half strength and a translucent stroke
+/// darkened at every joint.
+fn stroke_polygons(subpaths: &[Subpath], stroke: StrokeGeometry) -> Vec<Vec<(f32, f32)>> {
+    let half = stroke.width / 2.0;
+    let mut out: Vec<Vec<(f32, f32)>> = Vec::new();
+    if half.is_nan() || half.is_infinite() || half <= 0.0 {
+        return out;
+    }
+    for subpath in subpaths {
+        let mut points = distinct_points(&subpath.points);
+        if subpath.closed && points.len() > 1 {
+            // A closed run that ends where it started has said the start twice.
+            let back_home = match points.as_slice() {
+                [first, .., last] => unit(vec_sub(*last, *first)).is_none(),
+                _ => false,
+            };
+            if back_home {
+                points.pop();
+            }
+        }
+        match points.as_slice() {
+            [] => continue,
+            // A run with no length has no direction: SVG draws it as its caps
+            // alone, a dot for a round cap and a square for a square one.
+            [only] => {
+                match stroke.cap {
+                    LineCap::Butt => {}
+                    LineCap::Round => out.push(disk(*only, half)),
+                    LineCap::Square => out.push(vec![
+                        (only.0 - half, only.1 - half),
+                        (only.0 + half, only.1 - half),
+                        (only.0 + half, only.1 + half),
+                        (only.0 - half, only.1 + half),
+                    ]),
+                }
+                continue;
+            }
+            _ => {}
+        }
+        // Each segment, as its two ends and its direction.
+        let pairs: Vec<((f32, f32), (f32, f32))> = if subpath.closed {
+            points
+                .iter()
+                .copied()
+                .zip(points.iter().copied().cycle().skip(1))
+                .collect()
+        } else {
+            points
+                .windows(2)
+                .filter_map(|w| match *w {
+                    [a, b] => Some((a, b)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let directions: Vec<(f32, f32)> = pairs
+            .iter()
+            .map(|&(a, b)| unit(vec_sub(b, a)).unwrap_or((1.0, 0.0)))
+            .collect();
+        let last_segment = pairs.len().saturating_sub(1);
+        for (index, (&(start, end), &direction)) in pairs.iter().zip(&directions).enumerate() {
+            let (mut start, mut end) = (start, end);
+            if !subpath.closed && stroke.cap == LineCap::Square {
+                // A square cap is the segment carried on by half the width.
+                if index == 0 {
+                    start = vec_sub(start, vec_scale(direction, half));
+                }
+                if index == last_segment {
+                    end = vec_add(end, vec_scale(direction, half));
+                }
+            }
+            let offset = vec_scale(normal(direction), half);
+            out.push(vec![
+                vec_add(start, offset),
+                vec_add(end, offset),
+                vec_sub(end, offset),
+                vec_sub(start, offset),
+            ]);
+        }
+        // Joins: at every vertex of a closed run, at the inner ones of an open.
+        let turns = directions.iter().zip(directions.iter().skip(1));
+        let closing_turn = if subpath.closed {
+            directions.last().copied().zip(directions.first().copied())
+        } else {
+            None
+        };
+        let vertices = pairs.iter().map(|&(_, end)| end);
+        for (at, (d_in, d_out)) in vertices.zip(turns.map(|(a, b)| (*a, *b)).chain(closing_turn)) {
+            if let Some(polygon) =
+                join_polygon(at, d_in, d_out, half, stroke.join, stroke.miter_limit)
+            {
+                out.push(polygon);
+            }
+        }
+        if !subpath.closed && stroke.cap == LineCap::Round {
+            if let (Some(first), Some(last)) = (points.first(), points.last()) {
+                out.push(disk(*first, half));
+                out.push(disk(*last, half));
+            }
+        }
+    }
+    // One winding for all, so the nonzero rule sums overlaps instead of
+    // letting two opposite windings cancel into a hole.
+    for polygon in &mut out {
+        if signed_area(polygon) > 0.0 {
+            polygon.reverse();
+        }
+    }
+    out
+}
+
+/// The outline of an axis-aligned rectangle in user space, rounded by `rx` by
+/// `ry`, carried to device space by `transform`.
+fn rect_subpath(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rx: f32,
+    ry: f32,
+    transform: Transform,
+) -> Option<Subpath> {
+    // SVG draws nothing for a rectangle with no width or no height.
+    if w.is_nan() || h.is_nan() || w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let rx = rx.max(0.0).min(w / 2.0);
+    let ry = ry.max(0.0).min(h / 2.0);
+    let points = if rx <= 0.0 || ry <= 0.0 {
+        vec![
+            transform.apply(x, y),
+            transform.apply(x + w, y),
+            transform.apply(x + w, y + h),
+            transform.apply(x, y + h),
+        ]
+    } else {
+        let n = curve_segments(rx.max(ry) * transform.length_scale(), PI / 2.0);
+        // The corners clockwise from the top right, each a quarter turn
+        // starting where the last ended.
+        let corners = [
+            (x + w - rx, y + ry, -PI / 2.0),
+            (x + w - rx, y + h - ry, 0.0),
+            (x + rx, y + h - ry, PI / 2.0),
+            (x + rx, y + ry, PI),
+        ];
+        let mut points = Vec::new();
+        for (cx, cy, from) in corners {
+            for i in 0..=n {
+                let angle = from + (PI / 2.0) * (i as f32 / n as f32);
+                points.push(transform.apply(cx + rx * angle.cos(), cy + ry * angle.sin()));
+            }
+        }
+        points
+    };
+    Some(Subpath {
+        points,
+        closed: true,
     })
 }
 
-/// The closing segment of a polygon: its last point back to its first.
-///
-/// `None` for fewer than two points — which is the `len() >= 2` test that used
-/// to stand beside each of the four `points[len - 1]` / `points[0]` pairs this
-/// replaces. Here the test is the thing that produces the two points, so an
-/// edit cannot separate them.
-fn closing_segment(points: &[(f32, f32)]) -> Option<((f32, f32), (f32, f32))> {
-    match points {
-        [first, .., last] => Some((*last, *first)),
-        _ => None,
+/// The outline of an ellipse in user space, carried to device space.
+fn ellipse_subpath(cx: f32, cy: f32, rx: f32, ry: f32, transform: Transform) -> Option<Subpath> {
+    // SVG draws nothing for an ellipse with a radius of zero.
+    if rx.is_nan() || ry.is_nan() || rx <= 0.0 || ry <= 0.0 {
+        return None;
+    }
+    let n = curve_segments(rx.max(ry) * transform.length_scale(), 2.0 * PI).max(8);
+    let points = (0..n)
+        .map(|i| {
+            let angle = 2.0 * PI * (i as f32 / n as f32);
+            transform.apply(cx + rx * angle.cos(), cy + ry * angle.sin())
+        })
+        .collect();
+    Some(Subpath {
+        points,
+        closed: true,
+    })
+}
+
+/// A run of user-space points carried to device space.
+fn points_subpath(points: &[(f32, f32)], transform: Transform, closed: bool) -> Subpath {
+    Subpath {
+        points: points.iter().map(|&(x, y)| transform.apply(x, y)).collect(),
+        closed,
     }
 }
 
-/// Every edge of a closed polygon, the closing one included.
-fn closed_edges(points: &[(f32, f32)]) -> impl Iterator<Item = ((f32, f32), (f32, f32))> + '_ {
-    segments(points).chain(closing_segment(points))
-}
-
-/// Convert path commands into a series of polygon outlines (lists of points).
-fn path_to_polygons(commands: &[PathCommand], transform: Transform) -> Vec<Vec<(f32, f32)>> {
-    let mut polygons: Vec<Vec<(f32, f32)>> = Vec::new();
+/// Convert path commands into the runs of points they draw, in device space.
+///
+/// A run begins at each moveto, and after each closepath when anything is
+/// drawn before the next moveto -- it begins at the closed run's start, as SVG
+/// has it. A moveto that nothing is drawn from is not a run: SVG strokes no
+/// subpath that is a single moveto.
+fn path_to_subpaths(commands: &[PathCommand], transform: Transform) -> Vec<Subpath> {
+    let mut subpaths: Vec<Subpath> = Vec::new();
     let mut current: Vec<(f32, f32)> = Vec::new();
+    // Whether `current` has had anything drawn in it since its moveto.
+    let mut drawn = false;
     let mut cursor_x: f32 = 0.0;
     let mut cursor_y: f32 = 0.0;
     let mut start_x: f32 = 0.0;
@@ -1918,15 +2375,26 @@ fn path_to_polygons(commands: &[PathCommand], transform: Transform) -> Vec<Vec<(
     // For smooth curves, we track the last control point
     let mut last_cubic_cp: Option<(f32, f32)> = None;
     let mut last_quad_cp: Option<(f32, f32)> = None;
+    let scale = transform.length_scale();
 
     for cmd in commands {
+        // Drawing after a closepath with no moveto between starts a new run
+        // from the closed run's start, which is where the pen is.
+        if current.is_empty() && !matches!(cmd, PathCommand::MoveTo { .. }) {
+            current.push(transform.apply(start_x, start_y));
+            drawn = false;
+        }
         match cmd {
             PathCommand::MoveTo { x, y } => {
-                if !current.is_empty() {
-                    polygons.push(core::mem::take(&mut current));
+                if drawn {
+                    subpaths.push(Subpath {
+                        points: core::mem::take(&mut current),
+                        closed: false,
+                    });
                 }
-                let (tx, ty) = transform.apply(*x, *y);
-                current.push((tx, ty));
+                current.clear();
+                drawn = false;
+                current.push(transform.apply(*x, *y));
                 cursor_x = *x;
                 cursor_y = *y;
                 start_x = *x;
@@ -1935,23 +2403,23 @@ fn path_to_polygons(commands: &[PathCommand], transform: Transform) -> Vec<Vec<(
                 last_quad_cp = None;
             }
             PathCommand::LineTo { x, y } => {
-                let (tx, ty) = transform.apply(*x, *y);
-                current.push((tx, ty));
+                current.push(transform.apply(*x, *y));
+                drawn = true;
                 cursor_x = *x;
                 cursor_y = *y;
                 last_cubic_cp = None;
                 last_quad_cp = None;
             }
             PathCommand::HorizontalLineTo { x } => {
-                let (tx, ty) = transform.apply(*x, cursor_y);
-                current.push((tx, ty));
+                current.push(transform.apply(*x, cursor_y));
+                drawn = true;
                 cursor_x = *x;
                 last_cubic_cp = None;
                 last_quad_cp = None;
             }
             PathCommand::VerticalLineTo { y } => {
-                let (tx, ty) = transform.apply(cursor_x, *y);
-                current.push((tx, ty));
+                current.push(transform.apply(cursor_x, *y));
+                drawn = true;
                 cursor_y = *y;
                 last_cubic_cp = None;
                 last_quad_cp = None;
@@ -1980,6 +2448,7 @@ fn path_to_polygons(commands: &[PathCommand], transform: Transform) -> Vec<Vec<(
                     DEFAULT_FLATNESS,
                     &mut current,
                 );
+                drawn = true;
                 last_cubic_cp = Some((*x2, *y2));
                 last_quad_cp = None;
                 cursor_x = *x;
@@ -2007,6 +2476,7 @@ fn path_to_polygons(commands: &[PathCommand], transform: Transform) -> Vec<Vec<(
                     DEFAULT_FLATNESS,
                     &mut current,
                 );
+                drawn = true;
                 last_cubic_cp = Some((*x2, *y2));
                 last_quad_cp = None;
                 cursor_x = *x;
@@ -2017,6 +2487,7 @@ fn path_to_polygons(commands: &[PathCommand], transform: Transform) -> Vec<Vec<(
                 let (tx1, ty1) = transform.apply(*x1, *y1);
                 let (tx2, ty2) = transform.apply(*x, *y);
                 flatten_quadratic(tx0, ty0, tx1, ty1, tx2, ty2, DEFAULT_FLATNESS, &mut current);
+                drawn = true;
                 last_quad_cp = Some((*x1, *y1));
                 last_cubic_cp = None;
                 cursor_x = *x;
@@ -2031,6 +2502,7 @@ fn path_to_polygons(commands: &[PathCommand], transform: Transform) -> Vec<Vec<(
                 let (tx1, ty1) = transform.apply(rx1, ry1);
                 let (tx2, ty2) = transform.apply(*x, *y);
                 flatten_quadratic(tx0, ty0, tx1, ty1, tx2, ty2, DEFAULT_FLATNESS, &mut current);
+                drawn = true;
                 last_quad_cp = Some((rx1, ry1));
                 last_cubic_cp = None;
                 cursor_x = *x;
@@ -2045,7 +2517,9 @@ fn path_to_polygons(commands: &[PathCommand], transform: Transform) -> Vec<Vec<(
                 x,
                 y,
             } => {
-                // We flatten in untransformed space then transform points
+                // Flattened in user space and then carried to device space;
+                // `scale` is what lets it cut as many segments as the curve
+                // will be drawn large.
                 let mut arc_pts = Vec::new();
                 flatten_arc(
                     cursor_x,
@@ -2057,23 +2531,26 @@ fn path_to_polygons(commands: &[PathCommand], transform: Transform) -> Vec<Vec<(
                     *sweep,
                     *x,
                     *y,
+                    scale,
                     &mut arc_pts,
                 );
                 for (px, py) in &arc_pts {
-                    let (tx, ty) = transform.apply(*px, *py);
-                    current.push((tx, ty));
+                    current.push(transform.apply(*px, *py));
                 }
+                drawn = true;
                 last_cubic_cp = None;
                 last_quad_cp = None;
                 cursor_x = *x;
                 cursor_y = *y;
             }
             PathCommand::Close => {
-                let (tx, ty) = transform.apply(start_x, start_y);
-                current.push((tx, ty));
-                if !current.is_empty() {
-                    polygons.push(core::mem::take(&mut current));
-                }
+                // Closed runs are closed by the flag, not by a repeated point:
+                // the stroke joins the ends, and the fill closes every run.
+                subpaths.push(Subpath {
+                    points: core::mem::take(&mut current),
+                    closed: true,
+                });
+                drawn = false;
                 cursor_x = start_x;
                 cursor_y = start_y;
                 last_cubic_cp = None;
@@ -2082,14 +2559,31 @@ fn path_to_polygons(commands: &[PathCommand], transform: Transform) -> Vec<Vec<(
         }
     }
 
-    if !current.is_empty() {
-        polygons.push(current);
+    if drawn {
+        subpaths.push(Subpath {
+            points: current,
+            closed: false,
+        });
     }
 
-    polygons
+    subpaths
 }
 
 // ─── Scanline Rasterizer ─────────────────────────────────────────────────────
+
+/// One edge of a shape being filled, running down the page.
+struct FillEdge {
+    /// Where it starts: its topmost end.
+    x_top: f32,
+    y_top: f32,
+    /// Where it stops, exclusive: a scanline through its bottom end is not
+    /// crossed by it, which is what counts a shared vertex once.
+    y_bottom: f32,
+    /// How far it moves right per pixel down.
+    slope: f32,
+    /// +1 where the outline ran downwards here, -1 where it ran up.
+    winding: i32,
+}
 
 /// Software rasterizer that renders SVG to a pixel buffer.
 struct SvgRenderer {
@@ -2098,7 +2592,8 @@ struct SvgRenderer {
     /// 4 bytes per pixel, `[r, g, b, a]`, straight alpha, row by row -- what
     /// `blend_pixel` writes.
     buffer: Vec<u8>,
-    /// 2x supersampling grid for anti-aliasing
+    /// Sub-scanlines per pixel row, for anti-aliasing vertically; coverage
+    /// across a row is measured exactly.
     ss_factor: u32,
 }
 
@@ -2153,7 +2648,8 @@ impl SvgRenderer {
             } => {
                 let combined = transform.then(*local_xf);
                 let resolved = parent_style.with_overrides(style);
-                self.render_rect(*x, *y, *width, *height, *rx, *ry, combined, &resolved);
+                let outline = rect_subpath(*x, *y, *width, *height, *rx, *ry, combined);
+                self.paint(outline.as_slice(), &resolved, combined);
             }
             SvgNode::Circle {
                 cx,
@@ -2164,7 +2660,8 @@ impl SvgRenderer {
             } => {
                 let combined = transform.then(*local_xf);
                 let resolved = parent_style.with_overrides(style);
-                self.render_ellipse(*cx, *cy, *r, *r, combined, &resolved);
+                let outline = ellipse_subpath(*cx, *cy, *r, *r, combined);
+                self.paint(outline.as_slice(), &resolved, combined);
             }
             SvgNode::Ellipse {
                 cx,
@@ -2176,7 +2673,8 @@ impl SvgRenderer {
             } => {
                 let combined = transform.then(*local_xf);
                 let resolved = parent_style.with_overrides(style);
-                self.render_ellipse(*cx, *cy, *rx, *ry, combined, &resolved);
+                let outline = ellipse_subpath(*cx, *cy, *rx, *ry, combined);
+                self.paint(outline.as_slice(), &resolved, combined);
             }
             SvgNode::Line {
                 x1,
@@ -2188,11 +2686,8 @@ impl SvgRenderer {
             } => {
                 let combined = transform.then(*local_xf);
                 let resolved = parent_style.with_overrides(style);
-                if let Some(color) = resolved.effective_stroke_color() {
-                    let (tx1, ty1) = combined.apply(*x1, *y1);
-                    let (tx2, ty2) = combined.apply(*x2, *y2);
-                    self.draw_line(tx1, ty1, tx2, ty2, resolved.stroke_width, color);
-                }
+                let outline = points_subpath(&[(*x1, *y1), (*x2, *y2)], combined, false);
+                self.paint(&[outline], &resolved, combined);
             }
             SvgNode::Polyline {
                 points,
@@ -2201,16 +2696,9 @@ impl SvgRenderer {
             } => {
                 let combined = transform.then(*local_xf);
                 let resolved = parent_style.with_overrides(style);
-                let transformed: Vec<(f32, f32)> = points
-                    .iter()
-                    .map(|(px, py)| combined.apply(*px, *py))
-                    .collect();
-                if let Some(color) = resolved.effective_stroke_color() {
-                    // A polyline is open: no closing segment.
-                    for ((x1, y1), (x2, y2)) in segments(&transformed) {
-                        self.draw_line(x1, y1, x2, y2, resolved.stroke_width, color);
-                    }
-                }
+                // A polyline is open: no closing segment.
+                let outline = points_subpath(points, combined, false);
+                self.paint(&[outline], &resolved, combined);
             }
             SvgNode::Polygon {
                 points,
@@ -2219,18 +2707,8 @@ impl SvgRenderer {
             } => {
                 let combined = transform.then(*local_xf);
                 let resolved = parent_style.with_overrides(style);
-                let transformed: Vec<(f32, f32)> = points
-                    .iter()
-                    .map(|(px, py)| combined.apply(*px, *py))
-                    .collect();
-                if let Some(fill_color) = resolved.effective_fill_color() {
-                    self.fill_polygon(&transformed, fill_color);
-                }
-                if let Some(stroke_color) = resolved.effective_stroke_color() {
-                    for ((x1, y1), (x2, y2)) in closed_edges(&transformed) {
-                        self.draw_line(x1, y1, x2, y2, resolved.stroke_width, stroke_color);
-                    }
-                }
+                let outline = points_subpath(points, combined, true);
+                self.paint(&[outline], &resolved, combined);
             }
             SvgNode::Path {
                 commands,
@@ -2239,274 +2717,157 @@ impl SvgRenderer {
             } => {
                 let combined = transform.then(*local_xf);
                 let resolved = parent_style.with_overrides(style);
-                let polygons = path_to_polygons(commands, combined);
-                if let Some(fill_color) = resolved.effective_fill_color() {
-                    for poly in &polygons {
-                        self.fill_polygon(poly, fill_color);
-                    }
-                }
-                if let Some(stroke_color) = resolved.effective_stroke_color() {
-                    for poly in &polygons {
-                        for ((x1, y1), (x2, y2)) in segments(poly) {
-                            self.draw_line(x1, y1, x2, y2, resolved.stroke_width, stroke_color);
-                        }
-                    }
-                }
+                let subpaths = path_to_subpaths(commands, combined);
+                self.paint(&subpaths, &resolved, combined);
             }
         }
     }
 
-    fn render_rect(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        rx: f32,
-        ry: f32,
-        transform: Transform,
-        style: &ResolvedStyle,
-    ) {
-        if rx <= 0.0 && ry <= 0.0 {
-            // Simple rectangle — generate 4-point polygon
-            let corners = [
-                transform.apply(x, y),
-                transform.apply(x + w, y),
-                transform.apply(x + w, y + h),
-                transform.apply(x, y + h),
-            ];
-            if let Some(fill_color) = style.effective_fill_color() {
-                self.fill_polygon(&corners, fill_color);
-            }
-            if let Some(stroke_color) = style.effective_stroke_color() {
-                // `closed_edges` is the four sides including the one from the
-                // last corner back to the first, which the `(i + 1) % 4` walk
-                // spelled out with an index the compiler could not check.
-                for ((x0, y0), (x1, y1)) in closed_edges(&corners) {
-                    self.draw_line(x0, y0, x1, y1, style.stroke_width, stroke_color);
-                }
-            }
-        } else {
-            // Rounded rectangle — approximate corners with arcs
-            let rx = rx.min(w / 2.0);
-            let ry = ry.min(h / 2.0);
-            let mut points = Vec::new();
-            let segments_per_corner = 8;
-
-            // Top-right corner
-            for i in 0..=segments_per_corner {
-                let t = i as f32 / segments_per_corner as f32;
-                let angle = -PI / 2.0 + t * (PI / 2.0);
-                let px = x + w - rx + rx * angle.cos();
-                let py = y + ry + ry * angle.sin();
-                points.push(transform.apply(px, py));
-            }
-            // Bottom-right corner
-            for i in 0..=segments_per_corner {
-                let t = i as f32 / segments_per_corner as f32;
-                let angle = t * (PI / 2.0);
-                let px = x + w - rx + rx * angle.cos();
-                let py = y + h - ry + ry * angle.sin();
-                points.push(transform.apply(px, py));
-            }
-            // Bottom-left corner
-            for i in 0..=segments_per_corner {
-                let t = i as f32 / segments_per_corner as f32;
-                let angle = PI / 2.0 + t * (PI / 2.0);
-                let px = x + rx + rx * angle.cos();
-                let py = y + h - ry + ry * angle.sin();
-                points.push(transform.apply(px, py));
-            }
-            // Top-left corner
-            for i in 0..=segments_per_corner {
-                let t = i as f32 / segments_per_corner as f32;
-                let angle = PI + t * (PI / 2.0);
-                let px = x + rx + rx * angle.cos();
-                let py = y + ry + ry * angle.sin();
-                points.push(transform.apply(px, py));
-            }
-
-            if let Some(fill_color) = style.effective_fill_color() {
-                self.fill_polygon(&points, fill_color);
-            }
-            if let Some(stroke_color) = style.effective_stroke_color() {
-                for ((x1, y1), (x2, y2)) in closed_edges(&points) {
-                    self.draw_line(x1, y1, x2, y2, style.stroke_width, stroke_color);
-                }
-            }
-        }
-    }
-
-    fn render_ellipse(
-        &mut self,
-        cx: f32,
-        cy: f32,
-        rx: f32,
-        ry: f32,
-        transform: Transform,
-        style: &ResolvedStyle,
-    ) {
-        // Approximate ellipse as polygon
-        let n_segments = 32u32;
-        let points: Vec<(f32, f32)> = (0..n_segments)
-            .map(|i| {
-                let angle = 2.0 * PI * (i as f32 / n_segments as f32);
-                let px = cx + rx * angle.cos();
-                let py = cy + ry * angle.sin();
-                transform.apply(px, py)
-            })
-            .collect();
-
-        if let Some(fill_color) = style.effective_fill_color() {
-            self.fill_polygon(&points, fill_color);
-        }
-        if let Some(stroke_color) = style.effective_stroke_color() {
-            for ((x1, y1), (x2, y2)) in closed_edges(&points) {
-                self.draw_line(x1, y1, x2, y2, style.stroke_width, stroke_color);
-            }
-        }
-    }
-
-    /// Fill a polygon using the even-odd scanline rule with 4x vertical supersampling.
-    fn fill_polygon(&mut self, points: &[(f32, f32)], color: Color) {
-        if points.len() < 3 {
+    /// Fill and stroke one shape, `subpaths` in device space, as `style` says.
+    ///
+    /// The fill first, as SVG paints them. `transform` is the one the shape
+    /// was carried to device space by: a stroke's width is a length in user
+    /// space, so it grows and shrinks with the drawing. It was drawn in device
+    /// pixels, so every icon's lines were two pixels thick at every size --
+    /// too heavy at 16 and hairlines at 64.
+    fn paint(&mut self, subpaths: &[Subpath], style: &ResolvedStyle, transform: Transform) {
+        if subpaths.is_empty() {
             return;
         }
+        if let Some(fill) = style.effective_fill_color() {
+            let outlines: Vec<&[(f32, f32)]> =
+                subpaths.iter().map(|s| s.points.as_slice()).collect();
+            self.fill_shape(&outlines, style.fill_rule, fill);
+        }
+        if let Some(stroke) = style.effective_stroke_color() {
+            let geometry = StrokeGeometry {
+                width: style.stroke_width * transform.length_scale(),
+                cap: style.line_cap,
+                join: style.line_join,
+                miter_limit: style.miter_limit,
+            };
+            let polygons = stroke_polygons(subpaths, geometry);
+            let outlines: Vec<&[(f32, f32)]> = polygons.iter().map(Vec::as_slice).collect();
+            self.fill_shape(&outlines, FillRule::NonZero, stroke);
+        }
+    }
 
-        // Find bounding box
-        let min_y = points.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
-        let max_y = points.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
-        let min_x = points.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
-        let max_x = points.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
-
-        let y_start = (min_y.floor() as i32).max(0);
-        let y_end = (max_y.ceil() as i32).min(self.height as i32);
-        let x_start = (min_x.floor() as i32).max(0);
-        let x_end = (max_x.ceil() as i32).min(self.width as i32);
-
-        if y_start >= y_end || x_start >= x_end {
+    /// Fill the shape `outlines` bound -- each closed back to its start -- as
+    /// one shape under `rule`, and blend it into the buffer once.
+    ///
+    /// One shape, not one polygon at a time: every edge of every outline takes
+    /// part in one winding count, so an outline inside another is a hole where
+    /// the rule makes it one, and a pixel two outlines overlap is covered once
+    /// rather than blended twice. Each sub-scanline's crossings are found from
+    /// the edges it passes through, which a list sorted by top keeps short.
+    fn fill_shape(&mut self, outlines: &[&[(f32, f32)]], rule: FillRule, color: Color) {
+        if self.buffer.is_empty() || color.a == 0 {
             return;
         }
+        let mut edges: Vec<FillEdge> = Vec::new();
+        let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
+        let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
+        for outline in outlines {
+            let closing = match outline {
+                [first, .., last] => Some((*last, *first)),
+                _ => None,
+            };
+            let sides = outline
+                .windows(2)
+                .filter_map(|w| match *w {
+                    [a, b] => Some((a, b)),
+                    _ => None,
+                })
+                .chain(closing);
+            for (a, b) in sides {
+                if !(a.0.is_finite() && a.1.is_finite() && b.0.is_finite() && b.1.is_finite()) {
+                    continue;
+                }
+                let (top, bottom, winding) = match a.1.partial_cmp(&b.1) {
+                    Some(core::cmp::Ordering::Less) => (a, b, 1),
+                    Some(core::cmp::Ordering::Greater) => (b, a, -1),
+                    // Level: crosses no scanline.
+                    _ => continue,
+                };
+                min_x = min_x.min(a.0).min(b.0);
+                max_x = max_x.max(a.0).max(b.0);
+                min_y = min_y.min(top.1);
+                max_y = max_y.max(bottom.1);
+                edges.push(FillEdge {
+                    x_top: top.0,
+                    y_top: top.1,
+                    y_bottom: bottom.1,
+                    slope: (bottom.0 - top.0) / (bottom.1 - top.1),
+                    winding,
+                });
+            }
+        }
+        if edges.is_empty() {
+            return;
+        }
+        edges.sort_by(|a, b| a.y_top.total_cmp(&b.y_top));
 
-        // The clamps above hold both starts at or above zero and both ends at
-        // or below the surface, and the early return proved each start is below
-        // its end — so neither conversion can fail. They are written as
-        // conversions rather than casts so that a later change to the clamping
-        // is caught here, instead of wrapping a negative into a column index
-        // near `usize::MAX` and an allocation to match.
-        let (Ok(col_first), Ok(col_last)) = (usize::try_from(x_start), usize::try_from(x_end))
-        else {
+        // Rows and columns the shape can reach, on the surface.
+        let rows = (min_y.floor().max(0.0) as u32)..(max_y.ceil().min(self.height as f32) as u32);
+        let first_col = min_x.floor().max(0.0) as u32;
+        let end_col = max_x.ceil().min(self.width as f32) as u32;
+        let Ok(columns) = usize::try_from(end_col.saturating_sub(first_col)) else {
             return;
         };
-        let x_range = col_last.saturating_sub(col_first);
-        let x_start_f = x_start as f32;
-        let x_end_f = x_end as f32;
-
-        let ss = self.ss_factor;
-        let ss_f = ss as f32;
-        let total_ss = ss.saturating_mul(ss);
-
-        // One coverage row, cleared per scanline rather than reallocated: the
-        // width does not change between rows.
-        let mut coverage = vec![0u32; x_range];
-        let mut intersections: Vec<f32> = Vec::new();
-
-        for py in y_start..y_end {
-            coverage.fill(0);
-
-            for sub_y in 0..ss {
-                let scan_y = py as f32 + (sub_y as f32 + 0.5) / ss_f;
-
-                // Where this scanline crosses the polygon's edges.
-                intersections.clear();
-                for ((x0, y0), (x1, y1)) in closed_edges(points) {
-                    // Half-open in y: a vertex shared by two edges is counted
-                    // once, which is what keeps the even-odd parity below right.
-                    if (y0 <= scan_y && y1 > scan_y) || (y1 <= scan_y && y0 > scan_y) {
-                        let t = (scan_y - y0) / (y1 - y0);
-                        intersections.push(x0 + t * (x1 - x0));
-                    }
-                }
-
-                intersections.sort_unstable_by(|a, b| {
-                    a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal)
-                });
-
-                // Even-odd rule: fill between successive pairs of crossings.
-                for pair in intersections.chunks_exact(2) {
-                    // `chunks_exact(2)` yields exactly two. The fallthrough is
-                    // the formality that lets this be a destructuring rather
-                    // than a `pair[0]`/`pair[1]`.
-                    let &[span_left, span_right] = pair else {
-                        continue;
-                    };
-                    let left = span_left.max(x_start_f);
-                    let right = span_right.min(x_end_f);
-                    if left >= right {
-                        continue;
-                    }
-
-                    // Columns relative to the left edge of the coverage row.
-                    // `left` is at or right of `x_start` and `x_start` is a
-                    // whole number, so the subtraction cannot go negative.
-                    let first = (left.floor() - x_start_f) as usize;
-                    let last = ((right.ceil() - x_start_f) as usize).min(x_range);
-                    let Some(row) = coverage.get_mut(first..last) else {
-                        continue;
-                    };
-
-                    for (offset, cov_slot) in row.iter_mut().enumerate() {
-                        let column = col_first.saturating_add(first).saturating_add(offset);
-                        let px_left = column as f32;
-                        let px_right = px_left + 1.0;
-                        // How much of this pixel this span covers, horizontally.
-                        let covered_left = left.max(px_left);
-                        let covered_right = right.min(px_right);
-                        if covered_right > covered_left {
-                            // Quantised to an integer out of `ss * ss`.
-                            let frac = ((covered_right - covered_left) * ss_f) as u32;
-                            *cov_slot = cov_slot.saturating_add(frac);
-                        }
-                    }
-                }
-            }
-
-            // Blend the row according to the coverage it accumulated.
-            for (offset, &cov) in coverage.iter().enumerate() {
-                if cov == 0 {
-                    continue;
-                }
-                let Ok(px) = u32::try_from(col_first.saturating_add(offset)) else {
-                    continue;
-                };
-                let alpha = ((cov.min(total_ss) as f32 / total_ss as f32) * color.a as f32) as u8;
-                let c = Color::rgba(color.r, color.g, color.b, alpha);
-                self.blend_pixel(px, py as u32, c);
-            }
-        }
-    }
-
-    /// Draw a line with the given width using simple rectangle expansion.
-    fn draw_line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, width: f32, color: Color) {
-        let dx = x2 - x1;
-        let dy = y2 - y1;
-        let len = (dx * dx + dy * dy).sqrt();
-        if len < 1e-6 {
+        if rows.is_empty() || columns == 0 {
             return;
         }
+        let origin = first_col as f32;
+        let ss = self.ss_factor.max(1);
+        let weight = 1.0 / ss as f32;
 
-        // Normal to the line
-        let nx = -dy / len * (width / 2.0);
-        let ny = dx / len * (width / 2.0);
-
-        // Line as a 4-point polygon
-        let poly = [
-            (x1 + nx, y1 + ny),
-            (x2 + nx, y2 + ny),
-            (x2 - nx, y2 - ny),
-            (x1 - nx, y1 - ny),
-        ];
-        self.fill_polygon(&poly, color);
+        let mut coverage = vec![0.0f32; columns];
+        let mut active: Vec<usize> = Vec::new();
+        let mut next_edge = 0usize;
+        let mut crossings: Vec<(f32, i32)> = Vec::new();
+        for row in rows {
+            coverage.fill(0.0);
+            for sub in 0..ss {
+                let scan_y = row as f32 + (sub as f32 + 0.5) * weight;
+                // Edges that have begun by this line join the active list...
+                while let Some(edge) = edges.get(next_edge) {
+                    if edge.y_top > scan_y {
+                        break;
+                    }
+                    active.push(next_edge);
+                    next_edge = next_edge.saturating_add(1);
+                }
+                // ...and those that have ended leave it.
+                active.retain(|&i| edges.get(i).is_some_and(|e| e.y_bottom > scan_y));
+                crossings.clear();
+                crossings.extend(active.iter().filter_map(|&i| {
+                    edges
+                        .get(i)
+                        .map(|e| (e.x_top + (scan_y - e.y_top) * e.slope, e.winding))
+                }));
+                crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let mut winding = 0i32;
+                for pair in crossings.windows(2) {
+                    let &[(left, turn), (right, _)] = pair else {
+                        continue;
+                    };
+                    winding = winding.saturating_add(turn);
+                    let inside = match rule {
+                        FillRule::NonZero => winding != 0,
+                        FillRule::EvenOdd => winding & 1 != 0,
+                    };
+                    if inside {
+                        cover_span(&mut coverage, left - origin, right - origin, weight);
+                    }
+                }
+            }
+            for (col, &cov) in (first_col..).zip(&coverage) {
+                let alpha = (cov.min(1.0) * f32::from(color.a)).round() as u8;
+                if alpha > 0 {
+                    self.blend_pixel(col, row, Color::rgba(color.r, color.g, color.b, alpha));
+                }
+            }
+        }
     }
 
     /// The four bytes of one pixel, or `None` if it lies outside the surface.
@@ -2545,293 +2906,24 @@ impl SvgRenderer {
     }
 }
 
-// ─── RenderCommand Generation ────────────────────────────────────────────────
-
-/// Collect RenderCommands from an SVG node tree (for compositor integration).
-fn collect_render_commands(
-    node: &SvgNode,
-    transform: Transform,
-    parent_style: &ResolvedStyle,
-    cmds: &mut Vec<RenderCommand>,
-) {
-    match node {
-        SvgNode::Svg { children, .. } => {
-            for child in children {
-                collect_render_commands(child, transform, parent_style, cmds);
-            }
-        }
-        SvgNode::Group {
-            transform: local_xf,
-            style,
-            children,
-        } => {
-            let combined = transform.then(*local_xf);
-            let resolved = parent_style.with_overrides(style);
-            for child in children {
-                collect_render_commands(child, combined, &resolved, cmds);
-            }
-        }
-        SvgNode::Rect {
-            x,
-            y,
-            width,
-            height,
-            rx,
-            ry,
-            transform: local_xf,
-            style,
-        } => {
-            let combined = transform.then(*local_xf);
-            let resolved = parent_style.with_overrides(style);
-            // For axis-aligned rects without rotation, emit native FillRect
-            let (tx, ty) = combined.apply(*x, *y);
-            let (tx2, ty2) = combined.apply(*x + *width, *y + *height);
-            let rw = tx2 - tx;
-            let rh = ty2 - ty;
-
-            let corner_radii = if *rx > 0.0 || *ry > 0.0 {
-                let r = rx.max(*ry);
-                // Scale radius by transform: the mean of the two column norms,
-                // which is the closest single number to a non-uniform scale.
-                let scale = f32::midpoint(
-                    (combined.a * combined.a + combined.c * combined.c).sqrt(),
-                    (combined.b * combined.b + combined.d * combined.d).sqrt(),
-                );
-                let sr = r * scale;
-                CornerRadii {
-                    top_left: sr,
-                    top_right: sr,
-                    bottom_right: sr,
-                    bottom_left: sr,
-                }
-            } else {
-                CornerRadii::ZERO
-            };
-
-            if let Some(fill_color) = resolved.effective_fill_color() {
-                cmds.push(RenderCommand::FillRect {
-                    x: tx,
-                    y: ty,
-                    width: rw,
-                    height: rh,
-                    color: fill_color,
-                    corner_radii,
-                });
-            }
-            if let Some(stroke_color) = resolved.effective_stroke_color() {
-                cmds.push(RenderCommand::StrokeRect {
-                    x: tx,
-                    y: ty,
-                    width: rw,
-                    height: rh,
-                    color: stroke_color,
-                    line_width: resolved.stroke_width,
-                    corner_radii,
-                });
-            }
-        }
-        SvgNode::Line {
-            x1,
-            y1,
-            x2,
-            y2,
-            transform: local_xf,
-            style,
-        } => {
-            let combined = transform.then(*local_xf);
-            let resolved = parent_style.with_overrides(style);
-            if let Some(stroke_color) = resolved.effective_stroke_color() {
-                let (tx1, ty1) = combined.apply(*x1, *y1);
-                let (tx2, ty2) = combined.apply(*x2, *y2);
-                cmds.push(RenderCommand::Line {
-                    x1: tx1,
-                    y1: ty1,
-                    x2: tx2,
-                    y2: ty2,
-                    color: stroke_color,
-                    width: resolved.stroke_width,
-                });
-            }
-        }
-        SvgNode::Polyline {
-            points,
-            transform: local_xf,
-            style,
-        } => {
-            let combined = transform.then(*local_xf);
-            let resolved = parent_style.with_overrides(style);
-            if let Some(stroke_color) = resolved.effective_stroke_color() {
-                // A polyline is open: no closing segment.
-                for ((x1, y1), (x2, y2)) in segments(points) {
-                    let (tx1, ty1) = combined.apply(x1, y1);
-                    let (tx2, ty2) = combined.apply(x2, y2);
-                    cmds.push(RenderCommand::Line {
-                        x1: tx1,
-                        y1: ty1,
-                        x2: tx2,
-                        y2: ty2,
-                        color: stroke_color,
-                        width: resolved.stroke_width,
-                    });
-                }
-            }
-        }
-        // For complex shapes (circles, ellipses, polygons, paths), we would
-        // ideally rasterize to a temporary buffer and emit as an Image command.
-        // For now, emit FillRects for polygons and approximate circles/ellipses.
-        SvgNode::Circle {
-            cx,
-            cy,
-            r,
-            transform: local_xf,
-            style,
-        }
-        | SvgNode::Ellipse {
-            cx,
-            cy,
-            rx: r,
-            ry: _,
-            transform: local_xf,
-            style,
-        } => {
-            let combined = transform.then(*local_xf);
-            let resolved = parent_style.with_overrides(style);
-            let ry_val = match node {
-                SvgNode::Ellipse { ry, .. } => *ry,
-                _ => *r,
-            };
-            // Approximate as a FillRect with full corner radii
-            let (tx, ty) = combined.apply(*cx - *r, *cy - ry_val);
-            let (tx2, ty2) = combined.apply(*cx + *r, *cy + ry_val);
-            let rw = tx2 - tx;
-            let rh = ty2 - ty;
-            let radii = CornerRadii {
-                top_left: rw.min(rh) / 2.0,
-                top_right: rw.min(rh) / 2.0,
-                bottom_right: rw.min(rh) / 2.0,
-                bottom_left: rw.min(rh) / 2.0,
-            };
-            if let Some(fill_color) = resolved.effective_fill_color() {
-                cmds.push(RenderCommand::FillRect {
-                    x: tx,
-                    y: ty,
-                    width: rw,
-                    height: rh,
-                    color: fill_color,
-                    corner_radii: radii,
-                });
-            }
-            if let Some(stroke_color) = resolved.effective_stroke_color() {
-                cmds.push(RenderCommand::StrokeRect {
-                    x: tx,
-                    y: ty,
-                    width: rw,
-                    height: rh,
-                    color: stroke_color,
-                    line_width: resolved.stroke_width,
-                    corner_radii: radii,
-                });
-            }
-        }
-        SvgNode::Polygon {
-            points,
-            transform: local_xf,
-            style,
-        } => {
-            let combined = transform.then(*local_xf);
-            let resolved = parent_style.with_overrides(style);
-            // Emit as line segments for stroke, the closing one included.
-            if let Some(stroke_color) = resolved.effective_stroke_color() {
-                for ((x1, y1), (x2, y2)) in closed_edges(points) {
-                    let (tx1, ty1) = combined.apply(x1, y1);
-                    let (tx2, ty2) = combined.apply(x2, y2);
-                    cmds.push(RenderCommand::Line {
-                        x1: tx1,
-                        y1: ty1,
-                        x2: tx2,
-                        y2: ty2,
-                        color: stroke_color,
-                        width: resolved.stroke_width,
-                    });
-                }
-            }
-            // Fill approximation: bounding rect
-            if let Some(fill_color) = resolved.effective_fill_color() {
-                let transformed: Vec<(f32, f32)> = points
-                    .iter()
-                    .map(|(px, py)| combined.apply(*px, *py))
-                    .collect();
-                if !transformed.is_empty() {
-                    let min_x = transformed
-                        .iter()
-                        .map(|p| p.0)
-                        .fold(f32::INFINITY, f32::min);
-                    let max_x = transformed
-                        .iter()
-                        .map(|p| p.0)
-                        .fold(f32::NEG_INFINITY, f32::max);
-                    let min_y = transformed
-                        .iter()
-                        .map(|p| p.1)
-                        .fold(f32::INFINITY, f32::min);
-                    let max_y = transformed
-                        .iter()
-                        .map(|p| p.1)
-                        .fold(f32::NEG_INFINITY, f32::max);
-                    cmds.push(RenderCommand::FillRect {
-                        x: min_x,
-                        y: min_y,
-                        width: max_x - min_x,
-                        height: max_y - min_y,
-                        color: fill_color,
-                        corner_radii: CornerRadii::ZERO,
-                    });
-                }
-            }
-        }
-        SvgNode::Path {
-            commands,
-            transform: local_xf,
-            style,
-        } => {
-            let combined = transform.then(*local_xf);
-            let resolved = parent_style.with_overrides(style);
-            let polygons = path_to_polygons(commands, combined);
-            // Emit strokes as Line commands
-            if let Some(stroke_color) = resolved.effective_stroke_color() {
-                for poly in &polygons {
-                    for ((x1, y1), (x2, y2)) in segments(poly) {
-                        cmds.push(RenderCommand::Line {
-                            x1,
-                            y1,
-                            x2,
-                            y2,
-                            color: stroke_color,
-                            width: resolved.stroke_width,
-                        });
-                    }
-                }
-            }
-            // Fill approximation: bounding rect per polygon
-            if let Some(fill_color) = resolved.effective_fill_color() {
-                for poly in &polygons {
-                    if poly.len() < 3 {
-                        continue;
-                    }
-                    let min_x = poly.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
-                    let max_x = poly.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
-                    let min_y = poly.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
-                    let max_y = poly.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
-                    cmds.push(RenderCommand::FillRect {
-                        x: min_x,
-                        y: min_y,
-                        width: max_x - min_x,
-                        height: max_y - min_y,
-                        color: fill_color,
-                        corner_radii: CornerRadii::ZERO,
-                    });
-                }
-            }
+/// Add `weight` times the share of each pixel the span `left..right` covers to
+/// `coverage`, whose first entry is the pixel whose left edge is at 0.
+fn cover_span(coverage: &mut [f32], left: f32, right: f32, weight: f32) {
+    let left = left.max(0.0);
+    let right = right.min(coverage.len() as f32);
+    if left.is_nan() || right.is_nan() || right <= left {
+        return;
+    }
+    let first = left.floor() as usize;
+    let end = (right.ceil() as usize).min(coverage.len());
+    let Some(cells) = coverage.get_mut(first..end) else {
+        return;
+    };
+    for (col, cell) in (first..).zip(cells.iter_mut()) {
+        let pixel_left = col as f32;
+        let covered = right.min(pixel_left + 1.0) - left.max(pixel_left);
+        if covered > 0.0 {
+            *cell += covered * weight;
         }
     }
 }
@@ -3388,28 +3480,270 @@ mod tests {
         assert!(buf[center + 3] > 200); // A (should be full or near-full)
     }
 
-    #[test]
-    fn test_render_commands_rect() {
-        let doc = SvgDocument::parse(
-            r#"<svg viewBox="0 0 100 100"><rect x="10" y="20" width="30" height="40" fill="green"/></svg>"#,
-        ).unwrap();
-        let cmds = doc.render_commands(0.0, 0.0, 100.0, 100.0);
-        // Should have PushTranslate, FillRect, PopTranslate
-        assert!(cmds.len() >= 3);
-        // First and last should be translate/untranslate
-        assert!(matches!(cmds[0], RenderCommand::PushTranslate { .. }));
-        assert!(matches!(cmds.last().unwrap(), RenderCommand::PopTranslate));
+    // --- rasterizing: strokes and fills ---
+
+    /// The alpha of pixel `(x, y)` in a `size`-square render of `svg`.
+    fn alpha_at(buf: &[u8], size: usize, x: usize, y: usize) -> u8 {
+        buf[(y * size + x) * 4 + 3]
     }
 
-    #[test]
-    fn test_render_commands_line() {
-        let doc = SvgDocument::parse(
-            r#"<svg viewBox="0 0 100 100"><line x1="0" y1="0" x2="100" y2="100" stroke="black" stroke-width="2"/></svg>"#,
-        ).unwrap();
-        let cmds = doc.render_commands(0.0, 0.0, 200.0, 200.0);
-        let has_line = cmds.iter().any(|c| matches!(c, RenderCommand::Line { .. }));
-        assert!(has_line);
+    /// How many pixels of column `x` are drawn at all.
+    fn inked_in_column(buf: &[u8], size: usize, x: usize) -> usize {
+        (0..size).filter(|&y| alpha_at(buf, size, x, y) > 0).count()
     }
+
+    /// **A stroke's width is a length in the drawing**, so it grows with the
+    /// size the drawing is rendered at. It was drawn in device pixels: two
+    /// units were two pixels at every size, too heavy small and a hairline
+    /// large.
+    #[test]
+    fn a_stroke_is_as_wide_as_the_drawing_is_large() {
+        let doc = SvgDocument::parse(
+            r#"<svg viewBox="0 0 10 10"><line x1="0" y1="5" x2="10" y2="5" stroke="black" stroke-width="2"/></svg>"#,
+        )
+        .unwrap();
+        assert_eq!(inked_in_column(&doc.render(10, 10), 10, 5), 2);
+        assert_eq!(inked_in_column(&doc.render(40, 40), 40, 20), 8);
+    }
+
+    /// **A curved stroke is solid where it covers a pixel.** Drawn a quad per
+    /// segment, each blended on its own, the short segments of a curve each
+    /// covered part of a pixel and none made it solid: a ring came out at half
+    /// strength.
+    #[test]
+    fn a_curved_stroke_is_solid_where_it_covers_a_pixel() {
+        let doc = SvgDocument::parse(
+            r#"<svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="12" fill="none" stroke="black" stroke-width="4"/></svg>"#,
+        )
+        .unwrap();
+        let buf = doc.render(40, 40);
+        // The ring's middle, left and right, top and bottom.
+        for (x, y) in [(32, 20), (7, 20), (20, 32), (20, 7)] {
+            assert_eq!(alpha_at(&buf, 40, x, y), 255, "at ({x}, {y})");
+        }
+        // And its hole and the outside are clear.
+        assert_eq!(alpha_at(&buf, 40, 20, 20), 0);
+        assert_eq!(alpha_at(&buf, 40, 1, 1), 0);
+    }
+
+    /// **A translucent stroke is one shade across its joints.** Blended quad by
+    /// quad, the pixels two segments shared were blended twice and darkened at
+    /// every corner of the line.
+    #[test]
+    fn a_translucent_stroke_is_one_shade_across_its_joints() {
+        let doc = SvgDocument::parse(
+            r#"<svg viewBox="0 0 40 40"><polyline points="4,30 20,8 36,30" fill="none" stroke="rgba(0,0,0,0.5)" stroke-width="4" stroke-linejoin="round"/></svg>"#,
+        )
+        .unwrap();
+        let buf = doc.render(40, 40);
+        let SvgPaint::Color(ink) = parse_color("rgba(0,0,0,0.5)").unwrap() else {
+            panic!("not a colour");
+        };
+        let most = (0..40 * 40).map(|i| buf[i * 4 + 3]).max().unwrap();
+        assert!(most <= ink.a, "a pixel was covered twice: alpha {most}");
+        // Just inside the corner, where the two segments and the join all
+        // cover: drawn once, at the stroke's own strength.
+        assert_eq!(alpha_at(&buf, 40, 20, 9), ink.a);
+    }
+
+    /// **A subpath inside another is a hole where the fill rule says so.**
+    /// Every subpath was filled as a shape of its own, so a ring drawn as two
+    /// circles was a solid disc under any rule.
+    #[test]
+    fn a_subpath_inside_another_is_a_hole_as_the_fill_rule_says() {
+        let render = |rule: &str, inner: &str| {
+            let svg = format!(
+                r#"<svg viewBox="0 0 10 10"><path fill-rule="{rule}" d="M0 0H10V10H0Z {inner}"/></svg>"#
+            );
+            SvgDocument::parse(&svg).unwrap().render(10, 10)
+        };
+        let same_way = "M3 3H7V7H3Z";
+        let other_way = "M3 3V7H7V3Z";
+        // Even-odd: a hole whichever way the inner square is drawn.
+        assert_eq!(alpha_at(&render("evenodd", same_way), 10, 5, 5), 0);
+        assert_eq!(alpha_at(&render("evenodd", other_way), 10, 5, 5), 0);
+        // Nonzero, SVG's default: a hole only when drawn the other way round.
+        assert_eq!(alpha_at(&render("nonzero", same_way), 10, 5, 5), 255);
+        assert_eq!(alpha_at(&render("nonzero", other_way), 10, 5, 5), 0);
+        // The outer square is filled in every case.
+        assert_eq!(alpha_at(&render("evenodd", same_way), 10, 1, 1), 255);
+    }
+
+    /// **The three line caps**: butt stops at the end point, square carries on
+    /// half the width, round adds a half disc.
+    #[test]
+    fn the_line_cap_shapes_the_open_ends() {
+        let render = |cap: &str| {
+            let svg = format!(
+                r#"<svg viewBox="0 0 20 20"><line x1="6" y1="10" x2="14" y2="10" stroke="black" stroke-width="8" stroke-linecap="{cap}"/></svg>"#
+            );
+            SvgDocument::parse(&svg).unwrap().render(20, 20)
+        };
+        let butt = render("butt");
+        let square = render("square");
+        let round = render("round");
+        // Just past the start, on the line.
+        assert_eq!(alpha_at(&butt, 20, 4, 10), 0);
+        assert_eq!(alpha_at(&square, 20, 4, 10), 255);
+        assert_eq!(alpha_at(&round, 20, 4, 10), 255);
+        // Past the start and off to the side: the square's corner, not the disc.
+        assert_eq!(alpha_at(&square, 20, 2, 6), 255);
+        assert_eq!(alpha_at(&round, 20, 2, 6), 0);
+    }
+
+    /// **The three line joins**, at a right angle: a miter fills the corner
+    /// square, a bevel cuts it off, a round one rounds it.
+    #[test]
+    fn the_line_join_shapes_the_corners() {
+        let render = |join: &str, limit: &str| {
+            let svg = format!(
+                r#"<svg viewBox="0 0 20 20"><polyline points="4,6 14,6 14,16" fill="none" stroke="black" stroke-width="8" stroke-linejoin="{join}" stroke-miterlimit="{limit}"/></svg>"#
+            );
+            SvgDocument::parse(&svg).unwrap().render(20, 20)
+        };
+        // The outer corner of the turn, toward (18, 2): inside a miter only.
+        assert_eq!(alpha_at(&render("miter", "4"), 20, 17, 2), 255);
+        assert_eq!(alpha_at(&render("bevel", "4"), 20, 17, 2), 0);
+        assert_eq!(alpha_at(&render("round", "4"), 20, 17, 2), 0);
+        // A right angle's miter is sqrt(2) the width: a limit under that bevels.
+        assert_eq!(alpha_at(&render("miter", "1.2"), 20, 17, 2), 0);
+        // Every join covers the corner's inside.
+        for join in ["miter", "bevel", "round"] {
+            assert_eq!(alpha_at(&render(join, "4"), 20, 14, 6), 255, "{join}");
+        }
+    }
+
+    /// **`rx` alone rounds both ways**, as SVG has it. The missing `ry` was
+    /// read as 0, which left every such rectangle square.
+    #[test]
+    fn a_rect_with_rx_alone_is_rounded() {
+        let doc = SvgDocument::parse(
+            r#"<svg viewBox="0 0 20 20"><rect x="0" y="0" width="20" height="20" rx="6"/></svg>"#,
+        )
+        .unwrap();
+        let buf = doc.render(20, 20);
+        assert_eq!(alpha_at(&buf, 20, 0, 0), 0, "the corner is square");
+        assert_eq!(alpha_at(&buf, 20, 10, 10), 255);
+    }
+
+    /// **Drawing after a closepath carries on from the closed run's start.**
+    /// The run begun after `Z` lost its first point, so its first segment was
+    /// never drawn.
+    #[test]
+    fn drawing_after_a_closepath_starts_where_the_run_began() {
+        let doc = SvgDocument::parse(
+            r#"<svg viewBox="0 0 20 20"><path d="M4 4H16V10Z L4 16" fill="none" stroke="black" stroke-width="2"/></svg>"#,
+        )
+        .unwrap();
+        let buf = doc.render(20, 20);
+        // The segment from (4, 4) down to (4, 16).
+        assert_eq!(alpha_at(&buf, 20, 4, 13), 255);
+    }
+
+    /// **A run with no length is its caps**: a dot for a round cap, nothing for
+    /// a butt one -- and a moveto alone is not a run.
+    #[test]
+    fn a_run_with_no_length_is_drawn_as_its_caps() {
+        let render = |d: &str, cap: &str| {
+            let svg = format!(
+                r#"<svg viewBox="0 0 20 20"><path d="{d}" stroke="black" stroke-width="6" stroke-linecap="{cap}"/></svg>"#
+            );
+            SvgDocument::parse(&svg).unwrap().render(20, 20)
+        };
+        assert_eq!(alpha_at(&render("M10 10L10 10", "round"), 20, 10, 10), 255);
+        assert_eq!(alpha_at(&render("M10 10L10 10", "square"), 20, 8, 8), 255);
+        assert_eq!(alpha_at(&render("M10 10L10 10", "butt"), 20, 10, 10), 0);
+        assert_eq!(alpha_at(&render("M10 10", "round"), 20, 10, 10), 0);
+    }
+
+    /// **An arc is cut as finely as it is drawn large.** It was a fixed eight
+    /// segments to the turn, which a large icon showed as corners.
+    #[test]
+    fn an_arc_is_cut_as_finely_as_it_is_drawn() {
+        let cut = |scale: f32| {
+            let mut out = Vec::new();
+            flatten_arc(
+                0.0, 10.0, 10.0, 10.0, 0.0, false, true, 20.0, 10.0, scale, &mut out,
+            );
+            out
+        };
+        let small = cut(1.0);
+        let large = cut(40.0);
+        assert!(
+            large.len() > small.len() * 4,
+            "{} vs {}",
+            large.len(),
+            small.len()
+        );
+        // Each chord at the large size strays at most the tolerance: the
+        // midpoint of every chord is within it of the circle.
+        let mut previous = (0.0f32, 10.0f32);
+        for point in large {
+            let mid = (
+                f32::midpoint(previous.0, point.0),
+                f32::midpoint(previous.1, point.1),
+            );
+            let off = 10.0 - (mid.0 - 10.0).hypot(mid.1 - 10.0);
+            assert!(
+                off * 40.0 <= CURVE_TOLERANCE_PX * 1.01,
+                "strays {} px",
+                off * 40.0
+            );
+            previous = point;
+        }
+    }
+
+    /// Stroking hostile geometry draws nothing rather than failing: infinite
+    /// and NaN points are dropped, a NaN width is no stroke.
+    #[test]
+    fn stroking_numbers_that_are_not_numbers_draws_nothing() {
+        let run = Subpath {
+            points: vec![(f32::NAN, 0.0), (f32::INFINITY, 1.0), (0.0, f32::NAN)],
+            closed: false,
+        };
+        let geometry = StrokeGeometry {
+            width: 2.0,
+            cap: LineCap::Round,
+            join: LineJoin::Miter,
+            miter_limit: 4.0,
+        };
+        assert!(stroke_polygons(std::slice::from_ref(&run), geometry).is_empty());
+        let no_width = StrokeGeometry {
+            width: f32::NAN,
+            ..geometry
+        };
+        let fine = Subpath {
+            points: vec![(0.0, 0.0), (5.0, 0.0)],
+            closed: false,
+        };
+        assert!(stroke_polygons(&[fine], no_width).is_empty());
+    }
+
+    /// Every polygon of a stroke winds the same way, which is what lets the
+    /// nonzero rule fill their union.
+    #[test]
+    fn every_polygon_of_a_stroke_winds_the_same_way() {
+        let run = Subpath {
+            points: vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+            closed: true,
+        };
+        for join in [LineJoin::Miter, LineJoin::Round, LineJoin::Bevel] {
+            let polygons = stroke_polygons(
+                std::slice::from_ref(&run),
+                StrokeGeometry {
+                    width: 2.0,
+                    cap: LineCap::Butt,
+                    join,
+                    miter_limit: 4.0,
+                },
+            );
+            assert!(!polygons.is_empty());
+            for polygon in &polygons {
+                assert!(signed_area(polygon) <= 0.0, "{join:?}: {polygon:?}");
+            }
+        }
+    }
+
     /// Presentation attributes on the root `<svg>` are inherited, as they are
     /// on a `<g>`: an outline icon written `fill="none" stroke="..."` on the
     /// root draws its outline, not a solid black shape.

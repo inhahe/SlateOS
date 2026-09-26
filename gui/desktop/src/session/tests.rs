@@ -1009,7 +1009,8 @@ fn a_start_menu_row_comes_out_as_a_program_to_start() {
     press_at(&desktop, session.panel(), start.0, start.1);
     session.pump().expect("pump");
 
-    let row = centre(session.shell().start_menu_row_rect(0));
+    let first = session.shell().start_row_of_program(0).expect("a program");
+    let row = centre(session.shell().start_menu_row_rect(first));
     press_at(&desktop, session.popups(), row.0, row.1);
     session.pump().expect("pump");
     assert!(
@@ -3079,6 +3080,32 @@ fn a_program_installed_in_a_subdirectory_is_noticed() {
     assert!(
         menu_names(&session).contains(&"Sketchpad".to_owned()),
         "a program installed one directory down was not noticed"
+    );
+}
+
+/// **An entry edited in place is read again** the next time the menu opens:
+/// the file's size and time are what is compared, not only its directory's.
+#[test]
+fn an_entry_edited_in_place_is_read_again() {
+    let (mut session, desktop, _turn) = session();
+    let scratch = scratchdir::ScratchDir::new("session-installed-edited");
+    let dir = data_dir(&scratch, &[("sketch.desktop", SKETCHPAD)]);
+    session.set_app_dirs(desktopentry::scan::DataDirs::new(vec![dir.clone()]));
+    assert!(menu_names(&session).contains(&"Sketchpad".to_owned()));
+
+    std::fs::write(
+        dir.join("applications").join("sketch.desktop"),
+        SKETCHPAD.replace("Name=Sketchpad", "Name=Sketchpad Pro"),
+    )
+    .expect("rewrite");
+
+    let start = centre(session.shell().start_button_rect());
+    press_at(&desktop, session.panel(), start.0, start.1);
+    session.pump().expect("pump");
+    let names = menu_names(&session);
+    assert!(
+        names.contains(&"Sketchpad Pro".to_owned()) && !names.contains(&"Sketchpad".to_owned()),
+        "the edit was not read: {names:?}"
     );
 }
 
@@ -6255,10 +6282,20 @@ fn the_start_menus_icons_go_up_before_the_frame_that_names_them() {
 
         let tree = session.shell().render_start_menu().expect("open");
         let wanted = icon_ids(&tree);
-        assert_eq!(
-            wanted.len(),
-            crate::StartShortcut::ALL.len() + 1,
-            "a place or the power button drew no icon"
+        let names: Vec<String> = wanted
+            .iter()
+            .filter_map(|(id, _)| session.shell().icon_request(*id))
+            .map(|request| request.name.into_owned())
+            .collect();
+        for place in crate::StartShortcut::ALL {
+            assert!(
+                names.iter().any(|n| n == place.icon_name()),
+                "{place:?} drew no icon: {names:?}"
+            );
+        }
+        assert!(
+            names.iter().any(|n| n == "system-shutdown"),
+            "the power button drew no icon"
         );
         let sent = icon_uploads(&desktop);
         for (id, px) in &wanted {

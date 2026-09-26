@@ -318,6 +318,25 @@ const BUILT_IN: &[(&str, &str)] = &[
         "accessories-text-editor",
         include_str!("../themes/aero/icons/text-x-generic.svg"),
     ),
+    // The start menu's folders: whether one is open, and the pictures of the
+    // shell's own programs that the set did not already draw.
+    ("pan-end", include_str!("../themes/aero/icons/pan-end.svg")),
+    (
+        "pan-down",
+        include_str!("../themes/aero/icons/pan-down.svg"),
+    ),
+    (
+        "accessories-calculator",
+        include_str!("../themes/aero/icons/accessories-calculator.svg"),
+    ),
+    (
+        "system-file-manager",
+        include_str!("../themes/aero/icons/system-file-manager.svg"),
+    ),
+    (
+        "applets-screenshooter",
+        include_str!("../themes/aero/icons/applets-screenshooter.svg"),
+    ),
 ];
 
 /// The names the built-in theme draws, for a caller that lists them.

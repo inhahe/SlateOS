@@ -125,36 +125,44 @@ fn default_app_dirs() -> desktopentry::scan::DataDirs {
     }
 }
 
-/// When each directory that can hold desktop entries last changed -- each
-/// `applications` directory and the directories directly inside it -- `None`
-/// for one that does not exist.
+/// Every desktop entry file where installed programs are looked for, with
+/// its size and when it was last written, in order: what changes when a
+/// program is installed, removed, or has its entry edited.
 ///
-/// A directory's time changes when a file is added to it or removed, which is
-/// how programs are installed and uninstalled. An entry edited in place is
-/// not noticed until something else changes, or the next login.
-fn app_dir_stamps(
-    dirs: &desktopentry::scan::DataDirs,
-) -> Vec<(PathBuf, Option<std::time::SystemTime>)> {
-    let stamp = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
-    let mut stamps = Vec::new();
-    for dir in dirs.dirs() {
-        let apps = dir.join("applications");
-        stamps.push((apps.clone(), stamp(&apps)));
-        if let Ok(listing) = std::fs::read_dir(&apps) {
-            let mut inner: Vec<PathBuf> = listing
-                .filter_map(Result::ok)
-                .map(|item| item.path())
-                .filter(|path| path.is_dir())
-                .collect();
-            inner.sort();
-            stamps.extend(inner.into_iter().map(|path| {
-                let when = stamp(&path);
-                (path, when)
-            }));
+/// The files themselves rather than their directories' times, which move on
+/// some filesystems when a file is added and not on others, and never when
+/// one is edited in place. A stat per entry, against a read and a parse per
+/// entry for the scan it saves.
+fn app_dir_stamps(dirs: &desktopentry::scan::DataDirs) -> Vec<AppStamp> {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<AppStamp>) {
+        let Ok(listing) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for path in listing.filter_map(Result::ok).map(|item| item.path()) {
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() {
+                // The scan's own bound, and for its reason: a link to a
+                // parent directory is not walked for ever.
+                if depth < 8 {
+                    walk(&path, depth.saturating_add(1), out);
+                }
+            } else if path.extension() == Some(std::ffi::OsStr::new("desktop")) {
+                out.push((path, meta.len(), meta.modified().ok()));
+            }
         }
     }
+    let mut stamps = Vec::new();
+    for dir in dirs.dirs() {
+        walk(&dir.join("applications"), 0, &mut stamps);
+    }
+    stamps.sort();
     stamps
 }
+
+/// One desktop entry file as last seen: where, how big, when written.
+type AppStamp = (PathBuf, u64, Option<std::time::SystemTime>);
 
 /// What became of an attempt to put a picture on a surface.
 ///
@@ -384,11 +392,11 @@ pub struct ShellSession<T: Transport> {
     pictures: PictureWorker,
     /// Where installed programs' desktop entries are looked for.
     app_dirs: desktopentry::scan::DataDirs,
-    /// When each directory holding them had last changed, at the last read
-    /// -- `None` before the first. Compared on the way into the start menu,
-    /// so a program installed while the desktop is up is in the menu the
-    /// next time it opens, without reading every entry on every open.
-    app_dirs_seen: Option<Vec<(PathBuf, Option<std::time::SystemTime>)>>,
+    /// Every entry file as it was at the last read (`app_dir_stamps`) --
+    /// `None` before the first. Compared on the way into the start menu, so
+    /// a program installed while the desktop is up is in the menu the next
+    /// time it opens, without reading every entry on every open.
+    app_dirs_seen: Option<Vec<AppStamp>>,
     /// Whether the start menu was open at the end of the last pump: what
     /// tells a pump the menu has just opened.
     start_menu_was_open: bool,
@@ -1323,8 +1331,8 @@ impl<T: Transport> ShellSession<T> {
     }
 
     /// Read the installed programs' desktop entries into the shell's list, if
-    /// a directory holding them has changed since the last read -- or always,
-    /// the first time.
+    /// any entry file has been added, removed or rewritten since the last read
+    /// -- or always, the first time.
     ///
     /// What the menu shows is decided here, where the filesystem is: the
     /// entries a menu lists (`desktopentry::menu::shows_in_menu`: not

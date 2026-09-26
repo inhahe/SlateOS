@@ -1837,6 +1837,18 @@ live.
   for in a row only the newest is decoded; and a login screen showing the
   desktop's picture shares its decode.
 
+- `[C]` **The start menu is the applications tree, read from what is
+  installed** -- done 2026-09-26 (`design-decisions.md` §884). The menu's
+  programs were ten typed into the shell's source. It now lists the programs
+  installed on the machine as their freedesktop desktop entries describe them
+  (`gui/desktopentry`: the specification's parser, command lines, locales,
+  and the XDG directories in precedence order), read at login and again when
+  the menu opens if an entry changed; in folders by kind, open until clicked,
+  each program with its picture from the icon theme; started with the
+  arguments its entry gives. The shell's own ten remain for programs no entry
+  names. Waiting on others: entries shipped with the programs (lane E), the
+  image installing them (lane D), and the terminal taking `-e` (lane E).
+
 - `[C]` **Text falls back to other fonts, and the UI font is Open Sans** --
   done 2026-09-26 (`design-decisions.md` §883). A character the UI font
   lacked was a box. The toolkit now draws it from the first of a chosen list

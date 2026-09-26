@@ -187,9 +187,11 @@ fn clicking_settings_in_the_start_menu_asks_for_the_settings_program() {
     shell.toggle_start_menu();
 
     let row = shell
-        .start_menu_entries()
+        .start_menu_rows()
         .iter()
-        .position(|entry| entry.name == "Settings")
+        .position(
+            |row| matches!(row, crate::StartRow::Program { entry, .. } if entry.name == "Settings"),
+        )
         .expect("the start menu must offer Settings");
     assert!(
         row < shell.start_menu_visible_rows(),
@@ -232,23 +234,58 @@ fn the_start_menu_offers_only_programs_the_launcher_knows() {
     }
 }
 
-/// Every drawn row must launch the program whose name is on it — the one
+/// Every drawn row must do what it shows -- a program's row launch the program
+/// whose name is on it, a folder's row open or close that folder -- the one
 /// property a shared geometry exists to guarantee.
 #[test]
 fn every_visible_row_launches_the_program_named_on_it() {
-    // More programs than rows, so that every visible row has one to launch.
+    // More programs than rows, so that every visible row has something on it.
     let mut shell = shell_with_a_long_menu();
+    let mut programs = 0;
+    let mut folders = 0;
     for row in 0..shell.start_menu_visible_rows() {
-        shell.toggle_start_menu();
-        let expected = shell.start_menu_entries()[row].executable_path.clone();
+        if !shell.start_menu_open {
+            shell.toggle_start_menu();
+        }
         let rect = shell.start_menu_row_rect(row);
-        let action = choose_at(&mut shell, rect);
-        assert_eq!(
-            action,
-            ShellAction::Launch(crate::hotkeys::Launch::program(&expected)),
-            "row {row}"
-        );
+        // Owned out of the rows, which borrow the shell the press needs.
+        let shown = match shell.start_menu_rows().get(row).copied() {
+            Some(crate::StartRow::Program { entry, .. }) => Ok(entry.executable_path.clone()),
+            Some(crate::StartRow::Folder { folder, open }) => Err((folder, open)),
+            None => panic!("row {row} is empty in a menu longer than the screen"),
+        };
+        match shown {
+            Ok(expected) => {
+                assert_eq!(
+                    choose_at(&mut shell, rect),
+                    ShellAction::Launch(crate::hotkeys::Launch::program(&expected)),
+                    "row {row}"
+                );
+                programs += 1;
+            }
+            Err((folder, open)) => {
+                assert_eq!(
+                    choose_at(&mut shell, rect),
+                    ShellAction::Consumed,
+                    "row {row}"
+                );
+                assert!(
+                    matches!(
+                        shell.start_menu_rows().get(row),
+                        Some(crate::StartRow::Folder { folder: f, open: o }) if *f == folder && *o != open
+                    ),
+                    "row {row}: the folder's row did not open or close it"
+                );
+                // As it was, so the rows below are where they were.
+                choose_at(&mut shell, rect);
+                folders += 1;
+            }
+        }
     }
+    assert!(
+        programs > 0 && folders > 0,
+        "{programs} programs, {folders} folders"
+    );
 }
 
 /// And must go on doing so once the list has been scrolled, which is where a
@@ -265,7 +302,11 @@ fn a_scrolled_row_launches_the_program_named_on_it() {
     shell.handle_mouse(&scroll(x, y, -1.0));
     assert_eq!(shell.start_menu_scroll, 3);
 
-    let expected = shell.start_menu_entries()[3].executable_path.clone();
+    let expected = shell
+        .start_program_at(3)
+        .expect("the fourth row is a program")
+        .executable_path
+        .clone();
     let rect = shell.start_menu_row_rect(0);
     let action = choose_at(&mut shell, rect);
     assert_eq!(
@@ -286,7 +327,7 @@ fn the_list_cannot_scroll_past_either_end() {
     let last_row = shell.start_menu_visible_rows() - 1;
     assert_eq!(
         shell.start_menu_entry_at(last_row),
-        Some(shell.start_menu_entries().len() - 1)
+        Some(shell.start_menu_rows().len() - 1)
     );
 
     shell.scroll_start_menu(-1_000);
@@ -630,7 +671,10 @@ fn closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it() {
 
     let mut by_launching = shell();
     open(&mut by_launching);
-    let row = by_launching.start_menu_row_rect(0);
+    let first = by_launching
+        .start_row_of_program(0)
+        .expect("a program in the menu");
+    let row = by_launching.start_menu_row_rect(first);
     // The first click dismisses the popup; the second launches.
     click_at(&mut by_launching, row);
     assert!(matches!(
@@ -2193,7 +2237,7 @@ fn a_scaled_start_menu_still_reaches_every_program() {
         let row = shell.start_menu_row_rect(0);
         assert!((row.h - shell.scale(START_MENU_ROW_HEIGHT)).abs() < 0.01);
 
-        let total = shell.start_menu_entries().len();
+        let total = shell.start_menu_rows().len();
         let mut seen = std::collections::BTreeSet::new();
         // Scroll to the far end a row at a time, collecting what is on screen.
         for _ in 0..=total {
@@ -2206,7 +2250,7 @@ fn a_scaled_start_menu_still_reaches_every_program() {
             }
             shell.scroll_start_menu(1);
         }
-        assert_eq!(seen.len(), total, "unreachable programs at {percent}%");
+        assert_eq!(seen.len(), total, "unreachable rows at {percent}%");
     }
 }
 

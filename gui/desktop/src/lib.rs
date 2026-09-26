@@ -411,6 +411,19 @@ const START_MENU_LEFT_WIDTH: f32 = 312.0;
 /// Space above the first application row.
 const START_MENU_TOP_PADDING: f32 = 8.0;
 const START_MENU_ROW_HEIGHT: f32 = 36.0;
+/// A program's picture on its start menu row, in logical pixels.
+const START_ROW_ICON: f32 = 20.0;
+/// Where a row's picture starts, from the column's left edge.
+const START_ROW_ICON_X: f32 = 14.0;
+/// Between a row's picture and its name.
+const START_ROW_ICON_GAP: f32 = 10.0;
+/// How far a program in a folder is set in from the folder's own row.
+const START_FOLDER_INDENT: f32 = 18.0;
+/// The chevron that says whether a folder is open.
+const START_FOLDER_CHEVRON: f32 = 12.0;
+/// Down: open. Right: closed -- the picture of what a click does next.
+const FOLDER_OPEN_ICON: &str = "pan-down";
+const FOLDER_CLOSED_ICON: &str = "pan-end";
 /// How strongly the start menu marks the row the keyboard is on: the accent
 /// at this alpha, under the row's own text.
 const START_MENU_SELECTED_ALPHA: u8 = 70;
@@ -914,6 +927,26 @@ impl Hit {
     }
 }
 
+/// One row of the start menu's list.
+#[derive(Clone, Copy, Debug)]
+pub enum StartRow<'a> {
+    /// A program: pinned, found by a search, or in its folder.
+    Program {
+        /// The program.
+        entry: &'a AppEntry,
+        /// Whether it is listed inside a folder of the applications tree,
+        /// and so set in under the folder's row.
+        in_folder: bool,
+    },
+    /// A folder of the applications tree.
+    Folder {
+        /// Which.
+        folder: launcher::Folder,
+        /// Whether its programs are listed under it.
+        open: bool,
+    },
+}
+
 /// What the shell wants its host — the compositor's event loop — to do about a
 /// pointer event.
 ///
@@ -1381,6 +1414,11 @@ pub struct DesktopShell {
     /// key is pressed, and again whenever the search changes. Enter starts it;
     /// with none, Enter starts the best match.
     start_selected: Option<usize>,
+    /// The start menu's folders the user has closed. Open is the default: a
+    /// menu whose programs all sit behind closed folders asks two clicks for
+    /// everything, and with a handful of programs installed shows nothing but
+    /// folders. Closing one is kept for the rest of the session.
+    start_closed_folders: std::collections::BTreeSet<launcher::Folder>,
     /// Programs the user pinned to the top of the start menu, in their
     /// order: dropped there, or chosen with "Pin to Start menu". Listed
     /// above the launcher's programs, and a pinned program is still listed
@@ -2022,6 +2060,7 @@ impl DesktopShell {
             start_pins_dirty: false,
             start_query: TextInput::new(),
             start_selected: None,
+            start_closed_folders: std::collections::BTreeSet::new(),
             carry_at: (0.0, 0.0),
             button_order: Vec::new(),
             window_press: None,
@@ -3102,26 +3141,129 @@ impl DesktopShell {
         self.power_menu_open = !self.power_menu_open;
     }
 
-    /// The programs the start menu lists, in menu order: the ones the user
-    /// pinned first, then every program the launcher knows.
+    /// The programs on the start menu's rows, top to bottom: the rows of
+    /// [`Self::start_menu_rows`] that are programs, without the folders.
+    #[must_use]
+    pub fn start_menu_entries(&self) -> Vec<&AppEntry> {
+        self.start_menu_rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                StartRow::Program { entry, .. } => Some(entry),
+                StartRow::Folder { .. } => None,
+            })
+            .collect()
+    }
+
+    /// The rows of the start menu's list, top to bottom: the pinned
+    /// programs, then the applications tree -- a row per folder that has
+    /// programs in it, each followed by its programs when it is open. While
+    /// something is typed, what the search finds instead, and no folders.
+    ///
+    /// A program is in the folder its entry's first main category names
+    /// (`desktopentry::menu::Category::of`), and appears there even when it
+    /// is pinned as well, as a pin is a shortcut rather than a move.
+    #[must_use]
+    pub fn start_menu_rows(&self) -> Vec<StartRow<'_>> {
+        let found = self.start_menu_programs();
+        if !self.start_query.text().trim().is_empty() {
+            return found
+                .into_iter()
+                .map(|entry| StartRow::Program {
+                    entry,
+                    in_folder: false,
+                })
+                .collect();
+        }
+        let pins = self.start_pins.len().min(found.len());
+        let (pinned, listed) = found.split_at(pins);
+        let mut rows: Vec<StartRow<'_>> = pinned
+            .iter()
+            .map(|entry| StartRow::Program {
+                entry,
+                in_folder: false,
+            })
+            .collect();
+        for folder in launcher::Folder::ALL {
+            let mut members: Vec<&AppEntry> = listed
+                .iter()
+                .copied()
+                .filter(|entry| entry.folder == folder)
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            members.sort_by_key(|entry| entry.name.to_lowercase());
+            let open = !self.start_closed_folders.contains(&folder);
+            rows.push(StartRow::Folder { folder, open });
+            if open {
+                rows.extend(members.into_iter().map(|entry| StartRow::Program {
+                    entry,
+                    in_folder: true,
+                }));
+            }
+        }
+        rows
+    }
+
+    /// The row the `n`-th program of the list is on, counting programs only
+    /// -- for tests, which name a program by its place among programs and
+    /// then need the row to press.
+    #[cfg(test)]
+    pub(crate) fn start_row_of_program(&self, n: usize) -> Option<usize> {
+        self.start_menu_rows()
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row, StartRow::Program { .. }))
+            .nth(n)
+            .map(|(at, _)| at)
+    }
+
+    /// The program on the list's `row`-th row, if that row is a program.
+    #[must_use]
+    pub fn start_program_at(&self, row: usize) -> Option<&AppEntry> {
+        match self.start_menu_rows().get(row) {
+            Some(StartRow::Program { entry, .. }) => Some(entry),
+            _ => None,
+        }
+    }
+
+    /// Open a folder of the applications tree if it is closed, close it if
+    /// it is open. The keyboard's row stays on the folder, wherever the
+    /// folder's row now is.
+    pub fn toggle_start_folder(&mut self, folder: launcher::Folder) {
+        if !self.start_closed_folders.remove(&folder) {
+            self.start_closed_folders.insert(folder);
+        }
+        // Read out of the rows before anything is assigned: they borrow the
+        // shell.
+        let (position, len) = {
+            let rows = self.start_menu_rows();
+            let position = rows
+                .iter()
+                .position(|row| matches!(row, StartRow::Folder { folder: f, .. } if *f == folder));
+            (position, rows.len())
+        };
+        if self.start_selected.is_some() {
+            self.start_selected = position;
+        }
+        let furthest = len.saturating_sub(self.start_menu_visible_rows());
+        self.start_menu_scroll = self.start_menu_scroll.min(furthest);
+    }
+
+    /// The programs the list is made of, before the tree arranges them: the
+    /// ones the user pinned first, then every program the launcher knows.
     ///
     /// The power actions -- shut down, lock, log out -- are not here: they are
     /// the power menu's own list at the foot of the menu, not programs in the
     /// database, and mixing them in would put "Shut down" one mis-click away
     /// from "Screenshot".
     ///
-    /// One list for the pins and the rest, rather than a second list drawn
-    /// above the first: every row -- its hit test, its scroll, its
-    /// right-click menu, a drag from it -- is then the same row, asked of
-    /// the same index.
-    ///
     /// While something is typed in the search field, only the programs it
     /// finds, best first and each once -- a pinned program is also in the
     /// list below, and a search that found it twice would say so twice.
     /// Ranked by the launcher's own rule (`launcher::search_score`); ties
     /// keep menu order.
-    #[must_use]
-    pub fn start_menu_entries(&self) -> Vec<&AppEntry> {
+    fn start_menu_programs(&self) -> Vec<&AppEntry> {
         let listed = self.start_pins.iter().chain(
             self.apps
                 .iter()
@@ -3376,12 +3518,12 @@ impl DesktopShell {
     /// Which entry the `row`-th drawn row shows, if any.
     fn start_menu_entry_at(&self, row: usize) -> Option<usize> {
         let index = self.start_menu_scroll.checked_add(row)?;
-        (index < self.start_menu_entries().len()).then_some(index)
+        (index < self.start_menu_rows().len()).then_some(index)
     }
 
     /// The furthest the menu can scroll and still be full.
     fn start_menu_max_scroll(&self) -> usize {
-        self.start_menu_entries()
+        self.start_menu_rows()
             .len()
             .saturating_sub(self.start_menu_visible_rows())
     }
@@ -4332,6 +4474,8 @@ impl DesktopShell {
         if button == MouseButton::Right {
             match hit {
                 Hit::StartMenuEntry(index) => {
+                    // A folder's row names no program, and `open_pin_menu`
+                    // opens nothing for a target that names none.
                     self.open_pin_menu(PinTarget::StartMenuRow(index), x, y);
                     return ShellAction::Consumed;
                 }
@@ -4387,12 +4531,18 @@ impl DesktopShell {
             // desktop (`design.txt` line 712). This used to start the program
             // on the press, which is what made the row impossible to drag.
             Hit::StartMenuEntry(index) => {
-                if let Some(entry) = self.start_menu_entries().get(index) {
-                    let (exec, name) = (entry.executable_path.clone(), entry.name.clone());
-                    let mut source = tray_dnd::DragSource::default();
-                    source.on_press(exec, x, y);
-                    self.start_drag = Some(StartDrag { source, name });
-                    self.carry_at = (x, y);
+                match self.start_menu_rows().get(index).copied() {
+                    Some(StartRow::Program { entry, .. }) => {
+                        let (exec, name) = (entry.executable_path.clone(), entry.name.clone());
+                        let mut source = tray_dnd::DragSource::default();
+                        source.on_press(exec, x, y);
+                        self.start_drag = Some(StartDrag { source, name });
+                        self.carry_at = (x, y);
+                    }
+                    // A folder is not carried anywhere: the press opens or
+                    // closes it, as a tree's node does.
+                    Some(StartRow::Folder { folder, .. }) => self.toggle_start_folder(folder),
+                    None => {}
                 }
                 ShellAction::Consumed
             }
@@ -5495,6 +5645,16 @@ impl DesktopShell {
                 HotkeyOutcome::consumed()
             }
             Key::Enter => self.start_menu_enter(),
+            // Left and Right open and close the folder the keyboard is on, as
+            // they do in a tree; anywhere else they move through what is typed.
+            Key::Right | Key::Left if self.start_selected_folder().is_some() => {
+                if let Some((folder, open)) = self.start_selected_folder()
+                    && open == (key.key == Key::Left)
+                {
+                    self.toggle_start_folder(folder);
+                }
+                HotkeyOutcome::consumed()
+            }
             _ => {
                 let size = self.font_size(TextRole::Body);
                 match self
@@ -5526,10 +5686,18 @@ impl DesktopShell {
         self.start_menu_wheel.reset();
     }
 
+    /// The folder the keyboard's row is on, and whether it is open.
+    fn start_selected_folder(&self) -> Option<(launcher::Folder, bool)> {
+        match self.start_menu_rows().get(self.start_selected?) {
+            Some(StartRow::Folder { folder, open }) => Some((*folder, *open)),
+            _ => None,
+        }
+    }
+
     /// Move the keyboard's row one step, keeping it on screen. From no row,
     /// Down goes to the first and Up to the last.
     fn move_start_selection(&mut self, down: bool) {
-        let count = self.start_menu_entries().len();
+        let count = self.start_menu_rows().len();
         let Some(last) = count.checked_sub(1) else {
             return;
         };
@@ -5557,9 +5725,14 @@ impl DesktopShell {
         let row = self
             .start_selected
             .or_else(|| (!query.is_empty()).then_some(0));
+        if let Some(StartRow::Folder { folder, .. }) =
+            row.and_then(|row| self.start_menu_rows().get(row).copied())
+        {
+            self.toggle_start_folder(folder);
+            return HotkeyOutcome::consumed();
+        }
         let chosen = row.and_then(|row| {
-            self.start_menu_entries()
-                .get(row)
+            self.start_program_at(row)
                 .map(|entry| entry.executable_path.clone())
         });
         if let Some(exec) = chosen {
@@ -6692,13 +6865,13 @@ impl DesktopShell {
         // `start_menu_entry_at`, the same function the hit test asks, so a
         // scrolled menu cannot launch the program on the row above the one
         // that was clicked.
-        let entries = self.start_menu_entries();
+        let list = self.start_menu_rows();
         let rows = self.start_menu_visible_rows();
         for row in 0..rows {
             let Some(index) = self.start_menu_entry_at(row) else {
                 break;
             };
-            let Some(entry) = entries.get(index) else {
+            let Some(item) = list.get(index).copied() else {
                 break;
             };
             let rect = self.start_menu_row_rect(row);
@@ -6717,13 +6890,7 @@ impl DesktopShell {
                     CornerRadii::all(self.scale(4.0)),
                 );
             }
-            tree.text(
-                rect.x + self.scale(24.0),
-                rect.y + self.scale(8.0),
-                &entry.name,
-                self.theme.start_menu_fg,
-                self.font_size(TextRole::Item),
-            );
+            self.render_start_row(&mut tree, rect, item);
             // A line along the top of the first row after the pins, so the
             // user's own choices read as a group apart from the launcher's
             // list -- which may name the same programs again below.
@@ -6742,7 +6909,7 @@ impl DesktopShell {
 
         // A scroll indicator, so a list that continues past the last row says
         // so. Sized and placed in proportion to the part of the list on screen.
-        let total = entries.len();
+        let total = list.len();
         if total > rows && rows > 0 {
             let row_h = self.scale(START_MENU_ROW_HEIGHT);
             let bar_w = self.scale(START_MENU_SCROLLBAR_WIDTH);
@@ -6881,6 +7048,79 @@ impl DesktopShell {
         }
     }
 
+    /// One row of the start menu's list, in `rect`: a program's picture and
+    /// name -- set in when it is inside a folder -- or a folder's chevron,
+    /// picture and name.
+    fn render_start_row(&self, tree: &mut RenderTree, rect: Rect, item: StartRow<'_>) {
+        let fg = self.theme.start_menu_fg;
+        let size = self.font_size(TextRole::Item);
+        let px = self.icon_px(START_ROW_ICON);
+        #[allow(clippy::cast_precision_loss)]
+        let side = px as f32;
+        let icon_y = rect.y + (rect.h - side).max(0.0) / 2.0;
+        let text_y = rect.y + (rect.h - size).max(0.0) / 2.0;
+        let (icon_x, image_id, name) = match item {
+            StartRow::Program { entry, in_folder } => {
+                let indent = if in_folder {
+                    self.scale(START_FOLDER_INDENT)
+                } else {
+                    0.0
+                };
+                let x = rect.x + self.scale(START_ROW_ICON_X) + indent;
+                (x, self.program_icon(entry, px, fg), entry.name.as_str())
+            }
+            StartRow::Folder { folder, open } => {
+                let chevron = Rect::new(
+                    rect.x + self.scale(START_ROW_ICON_X) - self.scale(START_FOLDER_CHEVRON) / 2.0,
+                    rect.y,
+                    self.scale(START_FOLDER_CHEVRON),
+                    rect.h,
+                );
+                let which = if open {
+                    FOLDER_OPEN_ICON
+                } else {
+                    FOLDER_CLOSED_ICON
+                };
+                self.icon_in(tree, chevron, which, START_FOLDER_CHEVRON, fg);
+                let x =
+                    rect.x + self.scale(START_ROW_ICON_X) + self.scale(START_FOLDER_INDENT) / 2.0;
+                let image_id = self
+                    .icon_registry
+                    .icon_or(folder.icon_name(), "folder", px, fg);
+                (x, image_id, folder.label())
+            }
+        };
+        tree.push(guitk::render::RenderCommand::Image {
+            x: icon_x,
+            y: icon_y,
+            width: side,
+            height: side,
+            image_id,
+        });
+        let text_x = icon_x + side + self.scale(START_ROW_ICON_GAP);
+        tree.text_in(
+            text_x,
+            text_y,
+            (rect.x + rect.w - text_x - self.scale(START_ROW_ICON_X)).max(0.0),
+            name,
+            fg,
+            size,
+        );
+    }
+
+    /// The image id of a program's picture, `px` square in `color`: its
+    /// entry's icon, or the generic program's when it names none or one the
+    /// theme does not draw.
+    fn program_icon(&self, entry: &AppEntry, px: u32, color: Color) -> u64 {
+        match &entry.icon {
+            Some(icon) => {
+                self.icon_registry
+                    .icon_or(icon.clone(), launcher::GENERIC_PROGRAM_ICON, px, color)
+            }
+            None => self.icon(launcher::GENERIC_PROGRAM_ICON, px, color),
+        }
+    }
+
     /// Draw the start menu's search field: what has been typed, with a caret,
     /// or a hint saying what typing does -- and, when the search finds
     /// nothing, what Enter will do instead.
@@ -6921,7 +7161,7 @@ impl DesktopShell {
                 with_alpha(self.theme.start_menu_fg, START_MENU_HINT_ALPHA),
                 size,
             );
-        } else if self.start_menu_entries().is_empty() {
+        } else if self.start_menu_rows().is_empty() {
             let row = self.start_menu_row_rect(0);
             tree.text_in(
                 row.x + self.scale(24.0),
@@ -7375,10 +7615,9 @@ impl DesktopShell {
             return;
         };
         let name = match target {
-            PinTarget::StartMenuRow(index) => self
-                .start_menu_entries()
-                .get(index)
-                .map(|entry| entry.name.clone()),
+            PinTarget::StartMenuRow(index) => {
+                self.start_program_at(index).map(|entry| entry.name.clone())
+            }
             PinTarget::Pinned(index) => self
                 .taskbar
                 .pinned_apps()
@@ -7402,8 +7641,7 @@ impl DesktopShell {
     fn exec_of(&self, target: PinTarget) -> Option<String> {
         match target {
             PinTarget::StartMenuRow(index) => self
-                .start_menu_entries()
-                .get(index)
+                .start_program_at(index)
                 .map(|entry| entry.executable_path.clone()),
             PinTarget::Pinned(index) => self
                 .taskbar
@@ -7428,10 +7666,9 @@ impl DesktopShell {
             return;
         }
         let name = match target {
-            PinTarget::StartMenuRow(index) => self
-                .start_menu_entries()
-                .get(index)
-                .map(|entry| entry.name.clone()),
+            PinTarget::StartMenuRow(index) => {
+                self.start_program_at(index).map(|entry| entry.name.clone())
+            }
             // Already pinned by construction, so this arm is unreachable in
             // practice; the name it would use is the launcher's.
             PinTarget::Pinned(_) => None,
@@ -17300,9 +17537,10 @@ mod taskbar_pin_tests {
         with_scratch_config("shell-pin-menu", |_root| {
             let mut shell = shell();
             shell.toggle_start_menu();
-            let row = shell.start_menu_row_rect(0);
+            let first = shell.start_row_of_program(0).expect("a program");
+            let row = shell.start_menu_row_rect(first);
             let (cx, cy) = (row.x + row.w / 2.0, row.y + row.h / 2.0);
-            assert_eq!(shell.hit_test(cx, cy), Hit::StartMenuEntry(0));
+            assert_eq!(shell.hit_test(cx, cy), Hit::StartMenuEntry(first));
 
             shell.handle_press(cx, cy, MouseButton::Right);
             let drawn = format!("{:?}", shell.render_pin_menu().expect("no menu opened"));
@@ -18088,7 +18326,7 @@ mod icon_menu_tests {
         let (exec, _) = first_entry(shell);
         shell.activate_pin_menu_item(
             DesktopShell::MENU_ADD_TO_DESKTOP,
-            PinTarget::StartMenuRow(0),
+            PinTarget::StartMenuRow(shell.start_row_of_program(0).expect("a program")),
         );
         shell
             .icons
@@ -18161,7 +18399,11 @@ mod icon_menu_tests {
     #[test]
     fn the_pin_menu_offers_add_to_desktop() {
         let mut shell = DesktopShell::new(1920, 1080);
-        shell.open_pin_menu(PinTarget::StartMenuRow(0), 100.0, 100.0);
+        shell.open_pin_menu(
+            PinTarget::StartMenuRow(shell.start_row_of_program(0).expect("a program")),
+            100.0,
+            100.0,
+        );
         let labels: Vec<String> = shell
             .pin_menu
             .as_ref()
@@ -18442,7 +18684,7 @@ mod rename_tests {
         let mut shell = DesktopShell::new(1920, 1080);
         shell.activate_pin_menu_item(
             DesktopShell::MENU_ADD_TO_DESKTOP,
-            super::PinTarget::StartMenuRow(0),
+            super::PinTarget::StartMenuRow(shell.start_row_of_program(0).expect("a program")),
         );
         let id = shell.icons.selected_ids()[0];
         assert!(
@@ -18598,8 +18840,14 @@ mod carry_tests {
         release(shell, to)
     }
 
-    fn row_centre(shell: &DesktopShell, row: usize) -> (f32, f32) {
-        let r = shell.start_menu_row_rect(row);
+    /// The centre of the row the `program`-th program of the start menu is
+    /// on -- counting programs, as `app` does, so the two name one program
+    /// whatever folders are listed between them.
+    fn row_centre(shell: &DesktopShell, program: usize) -> (f32, f32) {
+        let row = shell
+            .start_row_of_program(program)
+            .expect("that many programs in the menu");
+        let r = shell.start_menu_row_rect(row.saturating_sub(shell.start_menu_scroll));
         (r.x + r.w / 2.0, r.y + r.h / 2.0)
     }
 
@@ -19398,15 +19646,24 @@ mod start_pin_tests {
         release(shell, to)
     }
 
-    fn row_centre(shell: &DesktopShell, row: usize) -> (f32, f32) {
-        let r = shell.start_menu_row_rect(row);
+    /// The centre of the row the `program`-th program of the start menu is
+    /// on -- counting programs, as `app` does, so the two name one program
+    /// whatever folders are listed between them.
+    fn row_centre(shell: &DesktopShell, program: usize) -> (f32, f32) {
+        let row = shell
+            .start_row_of_program(program)
+            .expect("that many programs in the menu");
+        let r = shell.start_menu_row_rect(row.saturating_sub(shell.start_menu_scroll));
         (r.x + r.w / 2.0, r.y + r.h / 2.0)
     }
 
     /// A point on the lower or upper half of a row: which half decides
     /// whether a drop goes after the row or before it.
-    fn row_half(shell: &DesktopShell, row: usize, lower: bool) -> (f32, f32) {
-        let r = shell.start_menu_row_rect(row);
+    fn row_half(shell: &DesktopShell, program: usize, lower: bool) -> (f32, f32) {
+        let row = shell
+            .start_row_of_program(program)
+            .expect("that many programs in the menu");
+        let r = shell.start_menu_row_rect(row.saturating_sub(shell.start_menu_scroll));
         let y = if lower {
             r.y + r.h * 0.75
         } else {
@@ -19529,7 +19786,7 @@ mod start_pin_tests {
         let last_row = shell.start_menu_visible_rows() - 1;
         assert_eq!(
             shell.start_menu_entry_at(last_row),
-            Some(shell.start_menu_entries().len() - 1)
+            Some(shell.start_menu_rows().len() - 1)
         );
     }
 
@@ -19967,6 +20224,317 @@ mod start_search_tests {
         (entry.name.clone(), entry.executable_path.clone())
     }
 
+    /// A pointer press and release at `at`, as a click on the menu is.
+    fn click_row(shell: &mut DesktopShell, at: (f32, f32)) -> [super::ShellAction; 2] {
+        use guitk::event::{MouseButton, MouseEvent, MouseEventKind};
+        let event = |kind| MouseEvent {
+            x: at.0,
+            y: at.1,
+            kind,
+        };
+        [
+            shell.handle_mouse(&event(MouseEventKind::Press(MouseButton::Left))),
+            shell.handle_mouse(&event(MouseEventKind::Release(MouseButton::Left))),
+        ]
+    }
+
+    /// The rows as `[Folder]` (`[Folder +]` when closed) for a folder,
+    /// `"  name"` for a program in one and `"name"` for one at the top level.
+    fn tree(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .start_menu_rows()
+            .iter()
+            .map(|row| match row {
+                crate::StartRow::Folder { folder, open } => {
+                    format!("[{}{}]", folder.label(), if *open { "" } else { " +" })
+                }
+                crate::StartRow::Program { entry, in_folder } => {
+                    format!("{}{}", if *in_folder { "  " } else { "" }, entry.name)
+                }
+            })
+            .collect()
+    }
+
+    /// **The programs are listed in folders by what they are** -- the
+    /// applications tree `design.txt` asks for -- each folder that has any
+    /// in the menu's order, its programs by name under it, and the pins
+    /// above them all, in their folders as well.
+    #[test]
+    fn the_programs_are_listed_in_folders_by_what_they_are() {
+        let mut shell = shell();
+        shell.pin_to_start(super::launcher::TERMINAL);
+        assert_eq!(
+            tree(&shell),
+            [
+                "Terminal",
+                "[Accessories]",
+                "  Calculator",
+                "  File Explorer",
+                "  Screenshot",
+                "  Text Editor",
+                "[Graphics]",
+                "  Image Viewer",
+                "[Multimedia]",
+                "  Music Player",
+                "[Settings]",
+                "  Settings",
+                "[System]",
+                "  Process Explorer",
+                "  System Info",
+                "  Terminal",
+            ]
+        );
+    }
+
+    /// **A folder's row closes it and opens it again**, by pointer: its
+    /// programs leave the list and come back, and nothing is started.
+    #[test]
+    fn a_folders_row_closes_and_opens_it() {
+        let mut shell = shell();
+        let at = |shell: &DesktopShell, label: &str| {
+            let row = tree(shell)
+                .iter()
+                .position(|r| r.starts_with(&format!("[{label}")))
+                .expect("the folder is listed");
+            let r = shell.start_menu_row_rect(row);
+            (r.x + r.w / 2.0, r.y + r.h / 2.0)
+        };
+        let point = at(&shell, "Accessories");
+        assert_eq!(
+            click_row(&mut shell, point),
+            [super::ShellAction::Consumed, super::ShellAction::Consumed]
+        );
+        assert!(tree(&shell).contains(&"[Accessories +]".to_owned()));
+        assert!(
+            !tree(&shell).contains(&"  Calculator".to_owned()),
+            "a closed folder still lists its programs"
+        );
+        assert!(shell.start_menu_open, "a folder's row closed the menu");
+
+        // Kept while the menu is closed and opened again.
+        shell.toggle_start_menu();
+        shell.toggle_start_menu();
+        assert!(tree(&shell).contains(&"[Accessories +]".to_owned()));
+
+        let point = at(&shell, "Accessories");
+        click_row(&mut shell, point);
+        assert!(tree(&shell).contains(&"  Calculator".to_owned()));
+    }
+
+    /// The keyboard opens and closes a folder: Enter toggles the one it is
+    /// on, Left closes it and Right opens it -- while elsewhere Left and
+    /// Right still move through what is typed.
+    #[test]
+    fn the_keyboard_opens_and_closes_folders() {
+        let mut shell = shell();
+        drop(shell.handle_hotkey(&press(Key::Down)));
+        assert_eq!(
+            tree(&shell)[0],
+            "[Accessories]",
+            "the premise: row 0 is a folder"
+        );
+        drop(shell.handle_hotkey(&press(Key::Left)));
+        assert_eq!(tree(&shell)[0], "[Accessories +]", "Left did not close it");
+        drop(shell.handle_hotkey(&press(Key::Left)));
+        assert_eq!(
+            tree(&shell)[0],
+            "[Accessories +]",
+            "Left opened a closed one"
+        );
+        drop(shell.handle_hotkey(&press(Key::Right)));
+        assert_eq!(tree(&shell)[0], "[Accessories]", "Right did not open it");
+        let outcome = shell.handle_hotkey(&press(Key::Enter));
+        assert!(
+            outcome.launches.is_empty(),
+            "Enter on a folder started something"
+        );
+        assert_eq!(
+            tree(&shell)[0],
+            "[Accessories +]",
+            "Enter did not toggle it"
+        );
+        assert_eq!(
+            shell.start_selected,
+            Some(0),
+            "the keyboard left the folder"
+        );
+    }
+
+    /// Not on a folder, Left and Right belong to the search field.
+    #[test]
+    fn off_a_folder_the_arrows_move_through_what_is_typed() {
+        let mut shell = shell();
+        type_text(&mut shell, "ab");
+        drop(shell.handle_hotkey(&press(Key::Left)));
+        assert_eq!(shell.start_query.text(), "ab");
+        assert!(
+            shell.start_query.cursor().byte() < 2,
+            "Left did not move the caret in the search field"
+        );
+    }
+
+    /// **A folder closed by the pointer takes the keyboard's row with it**:
+    /// the rows below it move up, and a keyboard row left where it was would
+    /// now be on some other program -- Enter would start that one.
+    #[test]
+    fn a_folder_closed_by_the_pointer_takes_the_keyboards_row_with_it() {
+        let mut shell = shell();
+        let below = shell.start_row_of_program(5).expect("a sixth program");
+        for _ in 0..=below {
+            drop(shell.handle_hotkey(&press(Key::Down)));
+        }
+        assert_eq!(shell.start_selected, Some(below), "the premise");
+        let first = shell.start_menu_row_rect(0);
+        click_row(
+            &mut shell,
+            (first.x + first.w / 2.0, first.y + first.h / 2.0),
+        );
+        assert_eq!(tree(&shell)[0], "[Accessories +]", "the premise: it closed");
+        assert_eq!(
+            shell.start_selected,
+            Some(0),
+            "the keyboard's row was left on whatever moved into it"
+        );
+    }
+
+    /// A right-click on a folder's row offers nothing: there is no program in
+    /// it to pin or put on the desktop.
+    #[test]
+    fn a_folder_has_no_pin_menu() {
+        use guitk::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut shell = shell();
+        let row = shell.start_menu_row_rect(0);
+        shell.handle_mouse(&MouseEvent {
+            x: row.x + row.w / 2.0,
+            y: row.y + row.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        });
+        assert!(
+            shell.render_pin_menu().is_none(),
+            "a folder opened a pin menu"
+        );
+    }
+
+    /// **A program in a folder is set in under the folder's row**, so the
+    /// tree reads as one: the pinned Calculator at the top and the Calculator
+    /// in Accessories are the same picture, the second drawn further in.
+    #[test]
+    fn a_program_in_a_folder_is_set_in_under_it() {
+        let mut shell = shell();
+        shell.pin_to_start("/usr/bin/calculator");
+        let column = shell.start_menu_left_rect();
+        let tree = shell.render_start_menu().expect("open");
+        // The programs column only: the places column draws pictures of its
+        // own, some of the same programs.
+        let xs: Vec<f32> = tree
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::Image { image_id, x, .. }
+                    if *x < column.x + column.w =>
+                {
+                    shell
+                        .icon_request(*image_id)
+                        .filter(|r| r.name == "accessories-calculator")
+                        .map(|_| *x)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(xs.len(), 2, "pinned and in its folder: {xs:?}");
+        assert!(
+            (xs[1] - xs[0] - shell.scale(super::START_FOLDER_INDENT)).abs() < 0.5,
+            "the Calculator in Accessories is not set in by the indent: {xs:?}"
+        );
+    }
+
+    /// A program's picture falls back to the generic program's, for an
+    /// entry naming an icon the theme does not draw.
+    #[test]
+    fn a_programs_picture_falls_back_to_the_generic_program() {
+        let shell = shell();
+        let tree = shell.render_start_menu().expect("open");
+        let calculator = tree
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::Image { image_id, .. } => {
+                    shell.icon_request(*image_id)
+                }
+                _ => None,
+            })
+            .find(|r| r.name == "accessories-calculator")
+            .expect("the calculator's picture");
+        assert_eq!(
+            calculator.fallback,
+            Some(super::launcher::GENERIC_PROGRAM_ICON)
+        );
+    }
+
+    /// A search lists what it finds and no folders; clearing it brings the
+    /// tree back.
+    #[test]
+    fn a_search_lists_no_folders() {
+        let mut shell = shell();
+        type_text(&mut shell, "Calc");
+        assert!(
+            tree(&shell)
+                .iter()
+                .all(|r| !r.starts_with('[') && !r.starts_with(' ')),
+            "{:?}",
+            tree(&shell)
+        );
+        drop(shell.handle_hotkey(&press(Key::Escape)));
+        assert!(tree(&shell).iter().any(|r| r.starts_with('[')));
+    }
+
+    /// **Every row draws its picture**: a program's own (its entry's, or the
+    /// generic program when there is none), a folder's chevron and its
+    /// picture.
+    #[test]
+    fn every_row_draws_its_picture() {
+        let shell = shell();
+        let tree = shell.render_start_menu().expect("open");
+        let names: Vec<String> = tree
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::Image { image_id, .. } => {
+                    shell.icon_request(*image_id)
+                }
+                _ => None,
+            })
+            .map(|request| request.name.into_owned())
+            .collect();
+        for wanted in [
+            "pan-down",
+            "applications-accessories",
+            "accessories-calculator",
+            "utilities-terminal",
+        ] {
+            assert!(
+                names.iter().any(|n| n == wanted),
+                "no {wanted} in {names:?}"
+            );
+        }
+        let folder = tree
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::Image { image_id, .. } => {
+                    shell.icon_request(*image_id)
+                }
+                _ => None,
+            })
+            .find(|r| r.name == "applications-accessories")
+            .expect("the folder's picture");
+        assert_eq!(
+            folder.fallback,
+            Some("folder"),
+            "a folder falls back to a folder"
+        );
+    }
+
     /// Typing with the menu open searches it: the list becomes what the
     /// search finds, the best match first.
     #[test]
@@ -20036,9 +20604,10 @@ mod start_search_tests {
             after.contains(&"Terminal".to_owned()),
             "an unnamed own entry went"
         );
-        let mut sorted = after.clone();
+        let listed: Vec<String> = shell.apps.iter().map(|a| a.name.clone()).collect();
+        let mut sorted = listed.clone();
         sorted.sort_by_key(|n| n.to_lowercase());
-        assert_eq!(after, sorted, "the menu is not in name order");
+        assert_eq!(listed, sorted, "the list is not in name order");
     }
 
     /// **A program that runs in a terminal is started in one**, as the
@@ -20114,14 +20683,17 @@ mod start_search_tests {
         assert!(!shell.start_menu_open);
     }
 
-    /// The arrows walk the rows, and Enter starts the one the keyboard is on.
+    /// The arrows walk the rows -- the folders' among them -- and Enter
+    /// starts the program the keyboard is on.
     #[test]
     fn the_arrows_choose_a_row_and_enter_starts_it() {
         let mut shell = shell();
         let (_, second) = some_program(&shell, 1);
-        drop(shell.handle_hotkey(&press(Key::Down)));
-        drop(shell.handle_hotkey(&press(Key::Down)));
-        assert_eq!(shell.start_selected, Some(1));
+        let target = shell.start_row_of_program(1).expect("a second program");
+        for _ in 0..=target {
+            drop(shell.handle_hotkey(&press(Key::Down)));
+        }
+        assert_eq!(shell.start_selected, Some(target));
         drop(shell.handle_hotkey(&press(Key::Up)));
         drop(shell.handle_hotkey(&press(Key::Down)));
 

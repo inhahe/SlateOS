@@ -1249,6 +1249,7 @@ dependencies = [
  "byteread",
  "guitk",
  "imagecodec",
+ "offloop",
  "oswindow",
  "quoting",
  "safeio",
@@ -2116,6 +2117,10 @@ version = "0.1.0"
 dependencies = [
  "usageerror",
 ]
+
+[[package]]
+name = "offloop"
+version = "0.1.0"
 
 [[package]]
 name = "oils"

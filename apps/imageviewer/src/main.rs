@@ -4,7 +4,9 @@
 //! - Image display with zoom, pan, rotation, and flip transforms
 //! - Directory browsing (next/prev image navigation)
 //! - Slideshow mode with configurable intervals
-//! - Image format detection (BMP, PNG, JPEG, GIF)
+//! - Every format `imagecodec` decodes, and SVG drawings
+//! - Pictures read and decoded off the window's thread, so the window never
+//!   freezes on a large one (`offloop`)
 //! - Image information panel with metadata/EXIF display
 //! - Toolbar and status bar
 //! - Keyboard shortcuts for all operations
@@ -86,9 +88,21 @@ const THUMB_PAD: f32 = 4.0;
 /// From one thumbnail's left edge to the next one's.
 const THUMB_PITCH: f32 = THUMB_SIZE + THUMB_PAD;
 
-const MIN_ZOOM: f32 = 0.25;
-const MAX_ZOOM: f32 = 4.0;
-const ZOOM_STEP: f32 = 0.25;
+/// The smallest zoom: a picture 16,384 pixels wide fits a window 164 across.
+///
+/// It was 0.25, so a 24-megapixel photograph -- 6000 x 4000, an ordinary
+/// camera's -- could not be made to fit a 1024-pixel window at all: Fit
+/// stopped at a quarter and left it overflowing.
+const MIN_ZOOM: f32 = 0.01;
+/// The largest zoom: one pixel of an icon as a 32-pixel square.
+const MAX_ZOOM: f32 = 32.0;
+/// One zoom step multiplies the zoom by this, or divides it by it: four steps
+/// double it.
+///
+/// A step was a fixed 0.25 added or taken away, so from a photograph fitted at
+/// 0.2, "zoom out" made it *larger* (0.2 - 0.25, raised to the 0.25 floor),
+/// and at 3.75 a step was a change of a fifteenth.
+const ZOOM_FACTOR: f32 = 1.189_207;
 
 // The colours live in the user's palette, not here.
 //
@@ -126,6 +140,8 @@ pub enum ImageFormat {
     WebP,
     Ico,
     Tiff,
+    /// A drawing, drawn by `guitk::svg` rather than decoded.
+    Svg,
     Unknown,
 }
 
@@ -176,6 +192,10 @@ impl ImageFormat {
             return Self::Tiff;
         }
 
+        if looks_like_svg(data) {
+            return Self::Svg;
+        }
+
         Self::Unknown
     }
 
@@ -189,6 +209,7 @@ impl ImageFormat {
             Self::WebP => "WebP",
             Self::Ico => "ICO",
             Self::Tiff => "TIFF",
+            Self::Svg => "SVG",
             Self::Unknown => "Unknown",
         }
     }
@@ -243,45 +264,116 @@ const VIEWER_IMAGE_ID: u64 = 1;
 // Transform state
 // ============================================================================
 
-/// Rotation angle in 90-degree increments.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Rotation {
-    None,
-    Cw90,
-    Cw180,
-    Cw270,
+/// How the picture is turned for showing, on top of the turn its own EXIF
+/// asks for (which `imagecodec` has already made): mirrored left to right
+/// first when `mirrored`, then turned `quarter_turns` quarter turns clockwise.
+///
+/// One of the eight ways a rectangle can be turned over, not the three
+/// independent switches it replaces. Those -- a rotation, a flip across and a
+/// flip down -- were each changed on their own and would have been combined in
+/// one fixed order, so a flip after a quarter turn mirrors along the wrong
+/// axis: "flip horizontally" on a picture turned on its side turns it upside
+/// down. They were not drawn at all, either: the picture was shown as decoded
+/// whatever they said, and Rotate and Flip changed two lines of the info
+/// panel and nothing else.
+///
+/// **Every change here applies to the picture as it is on screen.**
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct View {
+    /// Quarter turns clockwise, 0 to 3, after the mirroring.
+    quarter_turns: u8,
+    /// Mirrored left to right, before the turning.
+    mirrored: bool,
 }
 
-impl Rotation {
-    /// Rotate clockwise by 90 degrees.
-    pub fn rotate_cw(self) -> Self {
-        match self {
-            Self::None => Self::Cw90,
-            Self::Cw90 => Self::Cw180,
-            Self::Cw180 => Self::Cw270,
-            Self::Cw270 => Self::None,
+impl View {
+    /// Turned a quarter turn clockwise, as it is on screen.
+    #[must_use]
+    pub fn rotated_cw(self) -> Self {
+        Self {
+            quarter_turns: self.quarter_turns.wrapping_add(1) & 3,
+            ..self
         }
     }
 
-    /// Rotate counter-clockwise by 90 degrees.
-    pub fn rotate_ccw(self) -> Self {
-        match self {
-            Self::None => Self::Cw270,
-            Self::Cw90 => Self::None,
-            Self::Cw180 => Self::Cw90,
-            Self::Cw270 => Self::Cw180,
+    /// Turned a quarter turn anticlockwise, as it is on screen.
+    #[must_use]
+    pub fn rotated_ccw(self) -> Self {
+        Self {
+            quarter_turns: self.quarter_turns.wrapping_add(3) & 3,
+            ..self
         }
     }
 
-    /// Angle in degrees for display purposes.
-    pub fn degrees(self) -> u16 {
-        match self {
-            Self::None => 0,
-            Self::Cw90 => 90,
-            Self::Cw180 => 180,
-            Self::Cw270 => 270,
+    /// Mirrored left to right, as it is on screen.
+    ///
+    /// A mirror after a turn is the mirror before the opposite turn, which is
+    /// what keeps the result in mirrored-then-turned form.
+    #[must_use]
+    pub fn flipped_across(self) -> Self {
+        Self {
+            quarter_turns: 4_u8.wrapping_sub(self.quarter_turns) & 3,
+            mirrored: !self.mirrored,
         }
     }
+
+    /// Mirrored top to bottom, as it is on screen: a mirror left to right,
+    /// then a half turn.
+    #[must_use]
+    pub fn flipped_down(self) -> Self {
+        Self {
+            quarter_turns: 6_u8.wrapping_sub(self.quarter_turns) & 3,
+            mirrored: !self.mirrored,
+        }
+    }
+
+    /// The turn as `imagecodec` names it, to make of the decoded picture.
+    #[must_use]
+    pub fn orientation(self) -> imagecodec::orientation::Orientation {
+        use imagecodec::orientation::Orientation;
+        match (self.mirrored, self.quarter_turns & 3) {
+            (false, 0) => Orientation::TopLeft,
+            (false, 1) => Orientation::RightTop,
+            (false, 2) => Orientation::BottomRight,
+            (false, _) => Orientation::LeftBottom,
+            (true, 0) => Orientation::TopRight,
+            (true, 1) => Orientation::RightBottom,
+            (true, 2) => Orientation::BottomLeft,
+            (true, _) => Orientation::LeftTop,
+        }
+    }
+
+    /// The turn in words, for the info panel.
+    #[must_use]
+    pub fn describe(self) -> &'static str {
+        match (self.mirrored, self.quarter_turns & 3) {
+            (false, 0) => "As the file has it",
+            (false, 1) => "Turned right",
+            (false, 2) => "Upside down",
+            (false, _) => "Turned left",
+            (true, 0) => "Mirrored",
+            (true, 1) => "Mirrored, turned right",
+            (true, 2) => "Flipped top to bottom",
+            (true, _) => "Mirrored, turned left",
+        }
+    }
+}
+
+/// How the zoom follows the window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Fit {
+    /// Whole, and never larger than its own size: how a picture opens.
+    ///
+    /// A picture opened at its own size whatever it was -- a phone's
+    /// photograph showed a corner of itself -- except the very first, which
+    /// `main` fitted, enlarging a small one to fill the window. A small icon
+    /// blown up to fill a screen is a blur, not a view of it.
+    #[default]
+    Shrink,
+    /// Whole, as large as the window allows: Fit, and Ctrl+0.
+    Fill,
+    /// Where the user put it: any zoom or pan of theirs.
+    Free,
 }
 
 /// Complete transform state for the viewed image.
@@ -290,9 +382,10 @@ pub struct Transform {
     pub zoom: f32,
     pub pan_x: f32,
     pub pan_y: f32,
-    pub rotation: Rotation,
-    pub flip_h: bool,
-    pub flip_v: bool,
+    /// How the zoom follows the window. Until the user zooms or pans, a
+    /// resize, a panel shown or hidden, or a quarter turn fits the picture
+    /// again.
+    pub fit: Fit,
 }
 
 impl Default for Transform {
@@ -301,9 +394,7 @@ impl Default for Transform {
             zoom: 1.0,
             pan_x: 0.0,
             pan_y: 0.0,
-            rotation: Rotation::None,
-            flip_h: false,
-            flip_v: false,
+            fit: Fit::Shrink,
         }
     }
 }
@@ -314,14 +405,28 @@ impl Transform {
         *self = Self::default();
     }
 
-    /// Zoom in by one step, clamping to MAX_ZOOM.
+    /// Zoom in by one step, clamping to MAX_ZOOM. A step that would pass
+    /// actual size stops at it, so 100% is always a step away.
     pub fn zoom_in(&mut self) {
-        self.zoom = (self.zoom + ZOOM_STEP).min(MAX_ZOOM);
+        let next = self.zoom * ZOOM_FACTOR;
+        self.zoom = if self.zoom < 1.0 && next > 1.0 {
+            1.0
+        } else {
+            next.min(MAX_ZOOM)
+        };
+        self.fit = Fit::Free;
     }
 
-    /// Zoom out by one step, clamping to MIN_ZOOM.
+    /// Zoom out by one step, clamping to MIN_ZOOM, and stopping at actual
+    /// size on the way past it.
     pub fn zoom_out(&mut self) {
-        self.zoom = (self.zoom - ZOOM_STEP).max(MIN_ZOOM);
+        let next = self.zoom / ZOOM_FACTOR;
+        self.zoom = if self.zoom > 1.0 && next < 1.0 {
+            1.0
+        } else {
+            next.max(MIN_ZOOM)
+        };
+        self.fit = Fit::Free;
     }
 }
 
@@ -557,6 +662,56 @@ pub struct ViewerState {
     /// file name is not also a shortcut acting on the picture behind it --
     /// `B` in `beach.jpg` would hide the toolbar.
     picker: guitk::dialog::FilePicker,
+
+    /// The worker that reads and decodes pictures off this thread, once the
+    /// window has handed over a way to be woken (`App::attach_waker`).
+    ///
+    /// Decoding a photograph on the thread that draws froze the window for as
+    /// long as it took (`known-issues.md` ->
+    /// `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT`). With
+    /// no loader -- before the window exists, and in every test that gives it
+    /// no waker -- a picture is decoded where it is asked for, as it was.
+    loader: Option<offloop::Latest<(PathBuf, View), Loaded>>,
+    /// The picture asked for last: its file, and how it is turned.
+    wanted: Option<(PathBuf, View)>,
+    /// The picture on screen -- or the file whose failure is -- and how it is
+    /// turned.
+    shown: Option<(PathBuf, View)>,
+}
+
+/// What asking for a picture came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Opened {
+    /// It is on screen.
+    Shown,
+    /// It could not be shown, and `load_error` says why, on screen.
+    Failed,
+    /// It is being read and decoded off the window's thread. The picture
+    /// before it stays up until it is ready, and the status bar says what is
+    /// coming.
+    Loading,
+}
+
+/// A picture read and decoded -- or why not -- as [`load_picture`] gives it.
+pub struct Loaded {
+    /// The file.
+    path: PathBuf,
+    /// How it was turned.
+    view: View,
+    /// Its details, from its header even when it would not decode.
+    info: ImageInfo,
+    /// The pixels, turned as `view` says; or what to say instead.
+    picture: Result<Picture, String>,
+}
+
+/// Pixels ready to show.
+pub struct Picture {
+    /// What to upload, turned as asked.
+    image: imagecodec::Image,
+    /// The size to lay it out at. The image's own for a raster; a drawing's
+    /// own size for an SVG, which is drawn larger than that so that it stays
+    /// sharp when zoomed.
+    size: (u32, u32),
 }
 
 /// Where each part of the window is, for the frame about to be drawn.
@@ -619,6 +774,38 @@ impl ViewerState {
             zoom_wheel: wheel::Accumulator::default(),
             pending_images: Vec::new(),
             picker: guitk::dialog::FilePicker::new(),
+            loader: None,
+            wanted: None,
+            shown: None,
+        }
+    }
+
+    /// The file being read and decoded off this thread, if one is.
+    pub fn loading(&self) -> Option<&Path> {
+        let busy = self.loader.as_ref().is_some_and(offloop::Latest::busy);
+        self.wanted
+            .as_ref()
+            .filter(|_| busy)
+            .map(|(path, _)| path.as_path())
+    }
+
+    /// Set the zoom the fit asks for, unless the user has taken it over.
+    fn refit(&mut self) {
+        let zoom = match self.transform.fit {
+            Fit::Free => return,
+            Fit::Shrink => self.fit_zoom().min(1.0),
+            Fit::Fill => self.fit_zoom(),
+        };
+        self.transform.zoom = zoom;
+        self.transform.pan_x = 0.0;
+        self.transform.pan_y = 0.0;
+    }
+
+    /// Turn the picture asked for last, as `how` says, on screen.
+    fn turn(&mut self, how: fn(View) -> View) {
+        if let Some((path, view)) = self.wanted.clone() {
+            // What it comes to is on screen either way.
+            let _ = self.request(path, how(view));
         }
     }
 
@@ -741,13 +928,13 @@ impl ViewerState {
         }
     }
 
-    /// Open an image file by path, returning whether it could be loaded.
+    /// Open an image file by path, saying what that came to.
     ///
     /// The directory listing is rebuilt either way: a file that will not open
     /// is still a place in a directory the user can browse away from, and
     /// leaving them with no next/previous is a second failure on top of the
     /// first.
-    pub fn open_file(&mut self, path: &Path) -> bool {
+    pub fn open_file(&mut self, path: &Path) -> Opened {
         let loaded = self.display_image(path);
 
         // Update directory listing. This is only done when opening a file
@@ -792,93 +979,65 @@ impl ViewerState {
     /// old dimensions, format and EXIF. "This picture is `holiday.jpg`" is the
     /// one claim an image viewer makes, and it was false in exactly the case
     /// the user most needed to be told about.
-    fn display_image(&mut self, path: &Path) -> bool {
-        let filename = shown_file_name(path).unwrap_or_else(|| String::from("(unknown)"));
+    fn display_image(&mut self, path: &Path) -> Opened {
+        self.request(path.to_path_buf(), View::default())
+    }
 
-        // Built fresh so nothing can survive from the last image.
-        let mut info = ImageInfo {
-            filename,
-            ..ImageInfo::default()
+    /// Ask for the picture at `path`, turned as `view` says: from the loader
+    /// when there is one, here when there is not.
+    fn request(&mut self, path: PathBuf, view: View) -> Opened {
+        self.wanted = Some((path.clone(), view));
+        let asked = match self.loader.as_mut() {
+            Some(loader) => loader.ask((path, view)),
+            None => Err((path, view)),
         };
-
-        let data = match safeio::read_capped(path, Self::MAX_PICTURE_BYTES) {
-            Ok(read) if read.truncated => {
-                // Refused rather than decoded: the tail of a picture is not
-                // optional. A JPEG's scan runs to the end of the file and a
-                // PNG's `IEND` is the last chunk, so a cut file decodes to
-                // something that is not what the photographer took -- and
-                // would be shown without a word about it.
-                self.image_info = info;
-                self.fail_with(format!(
-                    "{} is larger than {} MiB",
-                    path.display(),
-                    Self::MAX_PICTURE_BYTES / (1024 * 1024)
-                ));
-                return false;
+        match asked {
+            Ok(_) => Opened::Loading,
+            Err((path, view)) => {
+                // No loader, or one whose thread has gone -- which only a
+                // panic does, and only a test's build survives one. Either way
+                // the picture is still wanted, and this thread can make it.
+                self.loader = None;
+                self.apply_loaded(load_picture(&path, view))
             }
-            Ok(read) => read.bytes,
-            Err(e) => {
-                // Committed anyway: the user asked for *this* file, so the UI
-                // must name this file — but with no image and no borrowed
-                // metadata beside it.
-                self.image_info = info;
-                self.fail_with(format!("{}: {}", path.display(), e));
-                return false;
-            }
-        };
-
-        // `read` already succeeded, so a failing `metadata` is a genuine
-        // oddity rather than the ordinary missing-file case; 0 is the honest
-        // answer for "unknown" here and the file itself is still displayable.
-        info.file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        info.date_modified = std::fs::metadata(path)
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .map(|_t| String::from("(available)"));
-
-        let format = ImageFormat::detect(&data);
-        info.format = Some(format);
-        // Read before the decode and from the header alone, because it is the
-        // only size available for a picture that will not decode -- a TIFF
-        // compressed in a way this system does not read, a file cut short. It
-        // is what tells the user the file is the picture they meant.
-        //
-        // `imagecodec`'s reading, for every format it knows. This app had its
-        // own for BMP, JPEG and GIF, which took whatever bytes sat at the
-        // offsets a size would be at -- the fault the PNG one had and lost --
-        // and gave a JPEG's size as stored rather than as shown, so a portrait
-        // photograph's panel said landscape until it had decoded.
-        if let Ok((w, h)) = imagecodec::dimensions(&data) {
-            info.width = w;
-            info.height = h;
         }
+    }
 
-        let decoded = imagecodec::decode(&data, imagecodec::Limits::default());
-        let image = match decoded {
-            Ok(image) => image,
+    /// Put a loaded picture on screen, or its failure.
+    ///
+    /// **Every field is replaced, not updated.** This used to assign into
+    /// `self.image_info` field by field and keep the previously-displayed
+    /// picture when the read failed, so a file the viewer could not open left
+    /// a mixture: the status bar and info panel named the *new* file, while
+    /// the canvas still showed the *old* image and the panel still listed the
+    /// old dimensions, format and EXIF. "This picture is `holiday.jpg`" is the
+    /// one claim an image viewer makes, and it was false in exactly the case
+    /// the user most needed to be told about.
+    fn apply_loaded(&mut self, loaded: Loaded) -> Opened {
+        let Loaded {
+            path,
+            view,
+            info,
+            picture,
+        } = loaded;
+        // Another turn of the same file keeps the user's zoom; a new file
+        // opens whole.
+        let new_file = self.shown.as_ref().is_none_or(|(shown, _)| *shown != path);
+        self.shown = Some((path, view));
+        self.image_info = info;
+        let picture = match picture {
+            Ok(picture) => picture,
             Err(why) => {
-                self.image_info = info;
-                self.fail_with(format!(
-                    "{}: {}",
-                    path.display(),
-                    decode_failure(format, &why)
-                ));
-                return false;
+                self.fail_with(why);
+                return Opened::Failed;
             }
         };
-
-        // The decoder's answer overrides the header's. They agree for any file
-        // that decoded at all — `imagecodec` allocates from the header — but
-        // saying so once here means nothing downstream has to know which of the
-        // two `fit_zoom` and the info panel are reading.
-        info.width = image.width;
-        info.height = image.height;
-
+        let image = picture.image;
         // Cleared, not appended to. Paging through a directory faster than the
-        // loop draws — holding an arrow key down, or a slideshow with a short
-        // interval — would otherwise queue every picture passed over and upload
-        // all of them before one frame, at a full photograph's worth of wire
-        // traffic per file nobody sees. Only the last one is ever drawn.
+        // loop draws -- holding an arrow key down, or a slideshow with a short
+        // interval -- would otherwise queue every picture passed over and
+        // upload all of them before one frame, at a full photograph's worth of
+        // wire traffic per file nobody sees. Only the last one is ever drawn.
         self.pending_images.clear();
         self.pending_images
             .push(oswindow::app::ImageChange::Upload {
@@ -891,23 +1050,23 @@ impl ViewerState {
                 // form; a copy retained "in case something wants it" would
                 // double the viewer's footprint for a reader that does not
                 // exist. The compositor is where the pixels live once they are
-                // sent, and re-reading the file is how they would come back.
+                // sent, and re-reading the file is how they come back -- which
+                // is what a turn does.
                 // Typed rather than `Image::to_argb_bytes`'s bare `Vec<u8>`:
                 // the other ARGB byte order cannot reach an upload.
                 bytes: guitk::canvas::WireBytes::from_le_argb(&image.pixels),
             });
-
-        self.image_info = info;
         self.current_image = Some(ImageData {
-            width: image.width,
-            height: image.height,
+            width: picture.size.0,
+            height: picture.size.1,
             image_id: VIEWER_IMAGE_ID,
         });
         self.load_error = None;
-
-        // Reset transform for new image
-        self.transform.reset();
-        true
+        if new_file {
+            self.transform.reset();
+        }
+        self.refit();
+        Opened::Shown
     }
 
     /// Record that there is no picture, and stop paying for the last one.
@@ -1036,11 +1195,11 @@ impl ViewerState {
         zoom_x.min(zoom_y).clamp(MIN_ZOOM, MAX_ZOOM)
     }
 
-    /// Apply fit-to-window zoom.
+    /// Fit the picture to the window, as large as it allows -- and keep it
+    /// fitted as the window changes, until the user zooms or pans.
     pub fn fit_to_window(&mut self) {
-        self.transform.zoom = self.fit_zoom();
-        self.transform.pan_x = 0.0;
-        self.transform.pan_y = 0.0;
+        self.transform.fit = Fit::Fill;
+        self.refit();
     }
 
     /// Set zoom to actual size (1:1 pixels).
@@ -1048,6 +1207,7 @@ impl ViewerState {
         self.transform.zoom = 1.0;
         self.transform.pan_x = 0.0;
         self.transform.pan_y = 0.0;
+        self.transform.fit = Fit::Free;
     }
 
     /// Width of the image display area.
@@ -1075,18 +1235,10 @@ impl ViewerState {
             ViewerAction::ZoomOut => self.transform.zoom_out(),
             ViewerAction::FitToWindow => self.fit_to_window(),
             ViewerAction::ActualSize => self.actual_size(),
-            ViewerAction::RotateCw => {
-                self.transform.rotation = self.transform.rotation.rotate_cw();
-            }
-            ViewerAction::RotateCcw => {
-                self.transform.rotation = self.transform.rotation.rotate_ccw();
-            }
-            ViewerAction::FlipHorizontal => {
-                self.transform.flip_h = !self.transform.flip_h;
-            }
-            ViewerAction::FlipVertical => {
-                self.transform.flip_v = !self.transform.flip_v;
-            }
+            ViewerAction::RotateCw => self.turn(View::rotated_cw),
+            ViewerAction::RotateCcw => self.turn(View::rotated_ccw),
+            ViewerAction::FlipHorizontal => self.turn(View::flipped_across),
+            ViewerAction::FlipVertical => self.turn(View::flipped_down),
             ViewerAction::ToggleSlideshow => {
                 self.slideshow.active = !self.slideshow.active;
                 self.slideshow.elapsed_ms = 0;
@@ -1353,6 +1505,8 @@ impl ViewerState {
                 let dy = event.y - self.drag_start_y;
                 self.transform.pan_x = self.drag_start_pan_x + dx;
                 self.transform.pan_y = self.drag_start_pan_y + dy;
+                // Where the user put it, it stays: a resize no longer refits.
+                self.transform.fit = Fit::Free;
                 true
             }
             // The button under the pointer is lit. `hovered_button` was read
@@ -1544,9 +1698,16 @@ fn render_image(
         // haven't opened anything" versus "the thing you opened would not
         // open". The second used to render as the first, so a corrupt or
         // unreadable file looked exactly like a freshly-started viewer.
-        let (headline, detail) = match &state.load_error {
-            Some(err) => (String::from("Cannot display this image"), err.clone()),
-            None => (
+        let (headline, detail) = match (state.loading(), &state.load_error) {
+            (Some(path), _) => (
+                format!(
+                    "Opening {}",
+                    shown_file_name(path).unwrap_or_else(|| shown_path(path))
+                ),
+                String::new(),
+            ),
+            (None, Some(err)) => (String::from("Cannot display this image"), err.clone()),
+            (None, None) => (
                 String::from("No image loaded"),
                 // It said "or drag an image here", and no window receives a
                 // drop: there is no such event to deliver one.
@@ -1831,17 +1992,14 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
     let view_fields: Vec<(&str, String)> = vec![
         ("Zoom:", format!("{}%", zoom_pct)),
         (
-            "Rotation:",
-            format!("{}deg", state.transform.rotation.degrees()),
-        ),
-        (
-            "Flip:",
-            match (state.transform.flip_h, state.transform.flip_v) {
-                (false, false) => String::from("None"),
-                (true, false) => String::from("Horizontal"),
-                (false, true) => String::from("Vertical"),
-                (true, true) => String::from("Both"),
-            },
+            "Turned:",
+            String::from(
+                state
+                    .shown
+                    .as_ref()
+                    .map_or(View::default(), |(_, view)| *view)
+                    .describe(),
+            ),
         ),
     ];
 
@@ -1957,11 +2115,22 @@ fn render_status_bar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
     let text_y = y + 8.0;
     let pad = 10.0;
 
-    // Left: filename
+    // Left: the file on screen -- or, while the next is being decoded, the
+    // one that is coming, so a key pressed on a large photograph visibly did
+    // something.
+    let name = state.loading().map_or_else(
+        || state.image_info.filename.clone(),
+        |path| {
+            format!(
+                "Opening {}",
+                shown_file_name(path).unwrap_or_else(|| shown_path(path))
+            )
+        },
+    );
     tree.push(RenderCommand::Text {
         x: pad,
         y: text_y,
-        text: state.image_info.filename.clone(),
+        text: name,
         color: state.palette.text,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
@@ -2083,6 +2252,200 @@ fn toolbar_buttons() -> Vec<ToolbarButton> {
 }
 
 // ============================================================================
+// Loading a picture
+// ============================================================================
+
+/// The longest side an SVG drawing is drawn at.
+///
+/// A drawing has no pixels of its own; it is drawn at this size and laid out
+/// at its own, so it stays sharp up to the zoom that takes its own size to
+/// this. An icon's 24 pixels are drawn at 2048, and a poster's viewBox of a
+/// hundred thousand units is drawn at 2048 too rather than as 40 GB.
+const SVG_DRAWN_AT: f32 = 2048.0;
+
+/// `path` as the viewer shows it: its bytes as escapes where they are not
+/// text (`quoting::escape_unprintable`), never a lossy decode.
+fn shown_path(path: &Path) -> String {
+    let os = path.as_os_str();
+    os.to_str().map_or_else(
+        || quoting::escape_unprintable(os.as_encoded_bytes()),
+        str::to_owned,
+    )
+}
+
+/// Whether `data` begins as an SVG drawing does: an `<svg` element, or an XML
+/// prologue with one soon after -- past a byte-order mark and white space.
+fn looks_like_svg(data: &[u8]) -> bool {
+    let text = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(data);
+    let start = text
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(text.len());
+    let text = text.get(start..).unwrap_or_default();
+    if text.starts_with(b"<svg") {
+        return true;
+    }
+    // A prologue is any XML's; the drawing is the one whose root is `<svg`,
+    // within the first kilobyte, where every editor puts it.
+    text.starts_with(b"<?xml")
+        && text
+            .get(..text.len().min(1024))
+            .is_some_and(|head| head.windows(4).any(|w| w == b"<svg"))
+}
+
+/// Draw the SVG in `data`: pixels at up to [`SVG_DRAWN_AT`] on the longer
+/// side, and the drawing's own size to lay them out at.
+fn draw_svg(data: &[u8]) -> Result<Picture, String> {
+    let text =
+        std::str::from_utf8(data).map_err(|_| String::from("the drawing is not UTF-8 text"))?;
+    let doc = guitk::svg::SvgDocument::parse(text)
+        .map_err(|e| format!("the drawing is not one this system can read: {e}"))?;
+    let (_, _, width, height) = doc.viewbox();
+    if !(width.is_finite() && height.is_finite()) || width <= 0.0 || height <= 0.0 {
+        return Err(String::from("the drawing has no size"));
+    }
+    let scale = SVG_DRAWN_AT / width.max(height);
+    // Rounded up and at least one, so a drawing under a pixel still has one;
+    // at most `SVG_DRAWN_AT`, so the casts cannot truncate.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let (drawn_w, drawn_h) = (
+        (width * scale).ceil().clamp(1.0, SVG_DRAWN_AT) as u32,
+        (height * scale).ceil().clamp(1.0, SVG_DRAWN_AT) as u32,
+    );
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let size = (
+        width.ceil().clamp(1.0, f32::from(u16::MAX)) as u32,
+        height.ceil().clamp(1.0, f32::from(u16::MAX)) as u32,
+    );
+    // `render` gives four bytes a pixel, red, green, blue, alpha.
+    let pixels = doc
+        .render(drawn_w, drawn_h)
+        .chunks_exact(4)
+        .map(|p| match *p {
+            [r, g, b, a] => u32::from_be_bytes([a, r, g, b]),
+            _ => 0,
+        })
+        .collect();
+    Ok(Picture {
+        image: imagecodec::Image {
+            width: drawn_w,
+            height: drawn_h,
+            pixels,
+        },
+        size,
+    })
+}
+
+/// Read the picture at `path`, decode it, and turn it as `view` says.
+///
+/// Everything opening a picture does but the showing, and nothing that needs
+/// the viewer: it runs on the loader's thread, or on the caller's when there
+/// is no loader, and gives the same answer on either.
+fn load_picture(path: &Path, view: View) -> Loaded {
+    let filename = shown_file_name(path).unwrap_or_else(|| String::from("(unknown)"));
+    // Built fresh so nothing can survive from the last image.
+    let mut info = ImageInfo {
+        filename,
+        ..ImageInfo::default()
+    };
+    let failed = |info: ImageInfo, why: String| Loaded {
+        path: path.to_path_buf(),
+        view,
+        info,
+        picture: Err(why),
+    };
+
+    let data = match safeio::read_capped(path, ViewerState::MAX_PICTURE_BYTES) {
+        Ok(read) if read.truncated => {
+            // Refused rather than decoded: the tail of a picture is not
+            // optional. A JPEG's scan runs to the end of the file and a
+            // PNG's `IEND` is the last chunk, so a cut file decodes to
+            // something that is not what the photographer took -- and
+            // would be shown without a word about it.
+            let why = format!(
+                "{} is larger than {} MiB",
+                shown_path(path),
+                ViewerState::MAX_PICTURE_BYTES / (1024 * 1024)
+            );
+            return failed(info, why);
+        }
+        Ok(read) => read.bytes,
+        // The user asked for *this* file, so the window names this file --
+        // with no image and no borrowed metadata beside it.
+        Err(e) => return failed(info, format!("{}: {e}", shown_path(path))),
+    };
+
+    // `read` already succeeded, so a failing `metadata` is a genuine oddity
+    // rather than the ordinary missing-file case; the picture is still
+    // displayable, and the panel leaves what it cannot know blank.
+    let metadata = std::fs::metadata(path).ok();
+    info.file_size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
+    // It said "(available)" for every file: a placeholder where the date
+    // belonged. UTC, as every file's time in this desktop is until the system
+    // has a zone of its own (`TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`).
+    info.date_modified = metadata
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| {
+            guitk::datetime::stamp(
+                i64::try_from(since.as_secs()).unwrap_or(i64::MAX),
+                &guitk::tzrules::Tz::utc(),
+            )
+        });
+
+    let format = ImageFormat::detect(&data);
+    info.format = Some(format);
+    // Read before the decode and from the header alone, because it is the
+    // only size available for a picture that will not decode -- a TIFF
+    // compressed in a way this system does not read, a file cut short. It
+    // is what tells the user the file is the picture they meant.
+    //
+    // `imagecodec`'s reading, for every format it knows. This app had its
+    // own for BMP, JPEG and GIF, which took whatever bytes sat at the
+    // offsets a size would be at -- the fault the PNG one had and lost --
+    // and gave a JPEG's size as stored rather than as shown, so a portrait
+    // photograph's panel said landscape until it had decoded.
+    if let Ok((w, h)) = imagecodec::dimensions(&data) {
+        info.width = w;
+        info.height = h;
+    }
+
+    let picture = if format == ImageFormat::Svg {
+        draw_svg(&data)
+    } else {
+        imagecodec::decode(&data, imagecodec::Limits::default())
+            .map(|image| Picture {
+                size: (image.width, image.height),
+                image,
+            })
+            .map_err(|why| decode_failure(format, &why))
+    };
+    let picture = match picture {
+        Ok(picture) => picture,
+        Err(why) => return failed(info, format!("{}: {why}", shown_path(path))),
+    };
+
+    // The decoder's answer overrides the header's. They agree for any file
+    // that decoded at all -- `imagecodec` allocates from the header -- but
+    // saying so once here means nothing downstream has to know which of the
+    // two the info panel is reading.
+    (info.width, info.height) = picture.size;
+
+    // Turned last, and the size to lay out at with it.
+    let turn = view.orientation();
+    let picture = Picture {
+        size: turn.shown(picture.size),
+        image: turn.apply(picture.image),
+    };
+    Loaded {
+        path: path.to_path_buf(),
+        view,
+        info,
+        picture: Ok(picture),
+    }
+}
+
+// ============================================================================
 // Utility functions
 // ============================================================================
 
@@ -2188,6 +2551,34 @@ impl oswindow::app::App for ViewerState {
         std::mem::take(&mut self.pending_images)
     }
 
+    /// Pictures are decoded off the loop's thread, and the loop is woken when
+    /// one is ready.
+    fn wants_waker(&self) -> bool {
+        true
+    }
+
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        // A worker that cannot be started leaves the viewer decoding on this
+        // thread, as it always did: slower to answer, never wrong.
+        self.loader = offloop::Latest::start(
+            "imageviewer-loader",
+            waker,
+            |(path, view): (PathBuf, View)| load_picture(&path, view),
+        )
+        .ok();
+    }
+
+    /// A picture asked for is ready: show it, or why not.
+    fn on_wake(&mut self) -> oswindow::app::Response {
+        match self.loader.as_mut().and_then(offloop::Latest::take) {
+            Some(loaded) => {
+                let _ = self.apply_loaded(loaded);
+                oswindow::app::Response::Redraw
+            }
+            None => oswindow::app::Response::Idle,
+        }
+    }
+
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
         // The size the compositor last reported wins over the one the viewer
         // remembers. They agree whenever a `Resize` event was delivered, and
@@ -2196,6 +2587,9 @@ impl oswindow::app::App for ViewerState {
         // at the size this viewer *asked* for rather than the size it got.
         self.window_width = width;
         self.window_height = height;
+        // A fitted picture follows the window: its size, and the panels and
+        // bars beside the picture, which any key may have shown or hidden.
+        self.refit();
         render(self)
     }
 }
@@ -2243,15 +2637,18 @@ fn main() -> ExitCode {
         // key which reached a broken file can carry the user off it again. The
         // stderr line is what a terminal user gets immediately; the canvas is
         // what everyone else gets. See design-decisions.md §558.
-        if !state.open_file(&path) {
+        //
+        // Before the window exists there is no loader, so this is decoded
+        // here and its answer is known at once. It opens whole, like every
+        // picture after it; it was the one picture fitted, and fitted by
+        // enlarging -- a small icon filled the first window and no other.
+        if state.open_file(&path) == Opened::Failed {
             let reason = state
                 .load_error
                 .as_deref()
                 .unwrap_or("the file could not be read");
             eprintln!("imageviewer: {reason}");
         }
-        // Auto-fit the first image
-        state.fit_to_window();
     }
 
     oswindow::app::launch_with("imageviewer", args.display.as_deref(), &mut state)
@@ -2271,7 +2668,8 @@ mod tests {
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        clippy::float_cmp
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
     )]
 
     use super::*;
@@ -2516,7 +2914,7 @@ the picture at once, which reads as D advancing the slideshow"
             y: 100.0,
             kind: MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
         });
-        assert_eq!(state.transform.zoom, start + ZOOM_STEP);
+        assert_eq!(state.transform.zoom, start * ZOOM_FACTOR);
         state.handle_mouse_event(&MouseEvent {
             x: 100.0,
             y: 100.0,
@@ -2542,7 +2940,7 @@ the picture at once, which reads as D advancing the slideshow"
                 kind: MouseEventKind::Scroll { dx: 0.0, dy: 0.05 },
             });
         }
-        assert_eq!(state.transform.zoom, start + 2.0 * ZOOM_STEP);
+        assert_eq!(state.transform.zoom, start * ZOOM_FACTOR * ZOOM_FACTOR);
         assert!(
             state.transform.zoom < MAX_ZOOM,
             "a two-notch gesture must not reach the limit"
@@ -2708,31 +3106,80 @@ the picture at once, which reads as D advancing the slideshow"
         }
     }
 
+    /// Every view there is: all eight ways to turn a rectangle over.
+    fn every_view() -> Vec<View> {
+        let mut views = vec![View::default()];
+        let mut at = 0;
+        while let Some(&view) = views.get(at) {
+            for next in [view.rotated_cw(), view.flipped_across()] {
+                if !views.contains(&next) {
+                    views.push(next);
+                }
+            }
+            at += 1;
+        }
+        views
+    }
+
+    /// **A turn applies to the picture as it is on screen**, whatever turn it
+    /// has already: from each of the eight views, each of the four changes
+    /// makes the pixels on screen what that change makes of them.
+    ///
+    /// Three independent switches -- a rotation and two flips -- combined in
+    /// one fixed order could not do this: a flip after a quarter turn mirrors
+    /// along the other axis.
     #[test]
-    fn test_rotation() {
-        let r = Rotation::None;
-        assert_eq!(r.rotate_cw(), Rotation::Cw90);
-        assert_eq!(r.rotate_cw().rotate_cw(), Rotation::Cw180);
-        assert_eq!(r.rotate_cw().rotate_cw().rotate_cw(), Rotation::Cw270);
+    fn a_turn_applies_to_the_picture_on_screen() {
+        use imagecodec::orientation::Orientation;
+        // Three by two, every pixel different, so any wrong turn shows.
+        let picture = || imagecodec::Image {
+            width: 3,
+            height: 2,
+            pixels: (0..6).collect(),
+        };
+        let views = every_view();
+        assert_eq!(views.len(), 8);
+        type Change = (fn(View) -> View, Orientation, &'static str);
+        let changes: [Change; 4] = [
+            (View::rotated_cw, Orientation::RightTop, "right"),
+            (View::rotated_ccw, Orientation::LeftBottom, "left"),
+            (View::flipped_across, Orientation::TopRight, "across"),
+            (View::flipped_down, Orientation::BottomLeft, "down"),
+        ];
+        for view in views {
+            let on_screen = view.orientation().apply(picture());
+            for (change, on_its_own, name) in changes {
+                assert_eq!(
+                    change(view).orientation().apply(picture()),
+                    on_its_own.apply(on_screen.clone()),
+                    "{name} from {view:?}"
+                );
+            }
+        }
+    }
+
+    /// Four quarter turns, or two mirrors, are no turn at all; and each of the
+    /// eight views says what it is in its own words.
+    #[test]
+    fn turns_undo_and_say_what_they_are() {
+        let none = View::default();
+        let four = none.rotated_cw().rotated_cw().rotated_cw().rotated_cw();
+        assert_eq!(four, none);
+        assert_eq!(none.rotated_cw().rotated_ccw(), none);
+        assert_eq!(none.flipped_across().flipped_across(), none);
+        assert_eq!(none.flipped_down().flipped_down(), none);
         assert_eq!(
-            r.rotate_cw().rotate_cw().rotate_cw().rotate_cw(),
-            Rotation::None
+            none.flipped_across().flipped_down(),
+            none.rotated_cw().rotated_cw(),
+            "both mirrors are a half turn"
         );
-    }
-
-    #[test]
-    fn test_rotation_ccw() {
-        let r = Rotation::None;
-        assert_eq!(r.rotate_ccw(), Rotation::Cw270);
-        assert_eq!(r.rotate_ccw().rotate_ccw(), Rotation::Cw180);
-    }
-
-    #[test]
-    fn test_rotation_degrees() {
-        assert_eq!(Rotation::None.degrees(), 0);
-        assert_eq!(Rotation::Cw90.degrees(), 90);
-        assert_eq!(Rotation::Cw180.degrees(), 180);
-        assert_eq!(Rotation::Cw270.degrees(), 270);
+        let mut words: Vec<&str> = every_view().into_iter().map(View::describe).collect();
+        words.sort_unstable();
+        words.dedup();
+        assert_eq!(words.len(), 8, "{words:?}");
+        assert_eq!(none.describe(), "As the file has it");
+        assert_eq!(none.rotated_cw().describe(), "Turned right");
+        assert_eq!(none.flipped_down().describe(), "Flipped top to bottom");
     }
 
     #[test]
@@ -2757,17 +3204,13 @@ the picture at once, which reads as D advancing the slideshow"
             zoom: 2.5,
             pan_x: 100.0,
             pan_y: -50.0,
-            rotation: Rotation::Cw180,
-            flip_h: true,
-            flip_v: true,
+            fit: Fit::Free,
         };
         t.reset();
         assert!((t.zoom - 1.0).abs() < f32::EPSILON);
         assert!((t.pan_x).abs() < f32::EPSILON);
         assert!((t.pan_y).abs() < f32::EPSILON);
-        assert_eq!(t.rotation, Rotation::None);
-        assert!(!t.flip_h);
-        assert!(!t.flip_v);
+        assert_eq!(t.fit, Fit::Shrink, "a picture opens whole");
     }
 
     #[test]
@@ -2959,7 +3402,11 @@ the picture at once, which reads as D advancing the slideshow"
         std::fs::write(&file, png_bytes(9, 7)).expect("write png");
 
         let mut state = ViewerState::new(800.0, 600.0);
-        assert!(state.open_file(&file), "the fixture PNG must decode");
+        assert_eq!(
+            state.open_file(&file),
+            Opened::Shown,
+            "the fixture PNG must decode"
+        );
 
         assert_eq!(
             queued(&state),
@@ -2984,7 +3431,7 @@ the picture at once, which reads as D advancing the slideshow"
         std::fs::write(&file, png_bytes(4, 3)).expect("write png");
 
         let mut state = ViewerState::new(800.0, 600.0);
-        assert!(state.open_file(&file));
+        assert_eq!(state.open_file(&file), Opened::Shown);
 
         let oswindow::app::ImageChange::Upload { bytes, stride, .. } = &state.pending_images[0]
         else {
@@ -3015,7 +3462,7 @@ the picture at once, which reads as D advancing the slideshow"
         std::fs::write(dir.join("b.png"), png_bytes(6, 5)).expect("write b");
 
         let mut state = ViewerState::new(800.0, 600.0);
-        assert!(state.open_file(&dir.join("a.png")));
+        assert_eq!(state.open_file(&dir.join("a.png")), Opened::Shown);
         state.pending_images.clear();
 
         state.next_image();
@@ -3039,7 +3486,7 @@ the picture at once, which reads as D advancing the slideshow"
         std::fs::write(dir.join("c.png"), png_bytes(8, 8)).expect("write c");
 
         let mut state = ViewerState::new(800.0, 600.0);
-        assert!(state.open_file(&dir.join("a.png")));
+        assert_eq!(state.open_file(&dir.join("a.png")), Opened::Shown);
         state.next_image();
         state.next_image();
 
@@ -3062,10 +3509,10 @@ the picture at once, which reads as D advancing the slideshow"
         std::fs::write(&good, png_bytes(8, 8)).expect("write png");
 
         let mut state = ViewerState::new(800.0, 600.0);
-        assert!(state.open_file(&good));
+        assert_eq!(state.open_file(&good), Opened::Shown);
         state.pending_images.clear();
 
-        assert!(!state.open_file(&dir.join("gone.png")));
+        assert_eq!(state.open_file(&dir.join("gone.png")), Opened::Failed);
         assert_eq!(
             queued(&state),
             [("down", VIEWER_IMAGE_ID, 0, 0, 0)],
@@ -3082,7 +3529,10 @@ the picture at once, which reads as D advancing the slideshow"
         let dir = guard.dir().to_path_buf();
 
         let mut state = ViewerState::new(800.0, 600.0);
-        assert!(!state.open_file(&dir.join("never-existed.png")));
+        assert_eq!(
+            state.open_file(&dir.join("never-existed.png")),
+            Opened::Failed
+        );
         assert!(queued(&state).is_empty());
     }
 
@@ -3136,7 +3586,7 @@ the picture at once, which reads as D advancing the slideshow"
         std::fs::write(&gif, b"GIF89a\x10\x00\x10\x00\x00\x00\x00").expect("write gif");
 
         let mut state = ViewerState::new(800.0, 600.0);
-        assert!(!state.open_file(&gif));
+        assert_eq!(state.open_file(&gif), Opened::Failed);
         let reason = state.load_error.as_deref().expect("a reason");
         assert!(
             reason.contains("GIF"),
@@ -3152,7 +3602,7 @@ the picture at once, which reads as D advancing the slideshow"
         // and the viewer says what it began as.
         let jpeg = dir.join("scan.jpg");
         std::fs::write(&jpeg, [0xFF, 0xD8, 0, 0, 0, 0, 0, 0, 0, 0]).expect("write jpeg");
-        assert!(!state.open_file(&jpeg));
+        assert_eq!(state.open_file(&jpeg), Opened::Failed);
         let reason = state.load_error.as_deref().expect("a reason");
         assert!(
             reason.contains("begins as a JPEG file does, but is not one"),
@@ -3169,7 +3619,12 @@ the picture at once, which reads as D advancing the slideshow"
         std::fs::write(&path, imagecodec::testing::SMALL_JPEG).expect("write jpeg");
 
         let mut state = ViewerState::new(800.0, 600.0);
-        assert!(state.open_file(&path), "{:?}", state.load_error);
+        assert_eq!(
+            state.open_file(&path),
+            Opened::Shown,
+            "{:?}",
+            state.load_error
+        );
     }
 
     /// A truncated PNG used to report a size: `parse_png_dimensions` read
@@ -3379,11 +3834,9 @@ the picture at once, which reads as D advancing the slideshow"
     /// What a toolbar button can change, read back.
     fn what_it_did(state: &ViewerState) -> String {
         format!(
-            "zoom {} rot {:?} flip {} {} show {} info {} picker {} at {}",
+            "zoom {} view {:?} show {} info {} picker {} at {}",
             state.transform.zoom,
-            state.transform.rotation,
-            state.transform.flip_h,
-            state.transform.flip_v,
+            state.wanted.as_ref().map(|(_, view)| *view),
             state.slideshow.active,
             state.show_info_panel,
             state.picker.is_open(),
@@ -3398,9 +3851,10 @@ the picture at once, which reads as D advancing the slideshow"
             std::fs::write(dir.join(name), png_bytes(w, 4)).expect("write a picture");
         }
         let mut state = ViewerState::new(1024.0, 768.0);
-        assert!(state.open_file(&dir.join("b.png")));
+        assert_eq!(state.open_file(&dir.join("b.png")), Opened::Shown);
         // Neither the fit nor actual size, so both of those buttons show.
         state.transform.zoom = 2.0;
+        state.transform.fit = Fit::Free;
         state
     }
 
@@ -3660,6 +4114,425 @@ the picture at once, which reads as D advancing the slideshow"
         assert_ne!(state.transform.zoom, 2.0);
     }
 
+    /// A step that would pass actual size stops at it, from either side; and
+    /// a step is a factor, so zooming out always makes the picture smaller.
+    #[test]
+    fn a_zoom_step_is_a_factor_and_stops_at_actual_size() {
+        let mut t = Transform {
+            zoom: 0.9,
+            ..Transform::default()
+        };
+        t.zoom_in();
+        assert_eq!(t.zoom, 1.0, "stepped past actual size");
+        t.zoom_in();
+        assert_eq!(t.zoom, ZOOM_FACTOR);
+        t.zoom = 1.1;
+        t.zoom_out();
+        assert_eq!(t.zoom, 1.0);
+        t.zoom = 2.0;
+        t.zoom_out();
+        assert_eq!(t.zoom, 2.0 / ZOOM_FACTOR);
+        t.zoom = 0.2;
+        t.zoom_out();
+        assert!(t.zoom < 0.2, "zooming out made it larger: {}", t.zoom);
+        assert_eq!(t.fit, Fit::Free, "a zoom is the user's");
+    }
+
+    /// **A photograph from a camera fits the window.** At a floor of a quarter
+    /// a 6000 x 4000 picture overflowed a 1024-pixel window whatever Fit did.
+    #[test]
+    fn a_large_photograph_still_fits_the_window() {
+        let mut state = ViewerState::new(1024.0, 768.0);
+        state.current_image = Some(ImageData {
+            width: 6000,
+            height: 4000,
+            image_id: VIEWER_IMAGE_ID,
+        });
+        state.fit_to_window();
+        let (_, _, width, height) = state.layout().image;
+        assert!(
+            6000.0 * state.transform.zoom <= width,
+            "{}",
+            state.transform.zoom
+        );
+        assert!(4000.0 * state.transform.zoom <= height);
+    }
+
+    /// **A picture opens whole, and no larger than itself**: a wide one is
+    /// shrunk to the window, a small one is shown at its own size. Each was
+    /// opened at its own size, a photograph showing a corner of itself.
+    #[test]
+    fn a_picture_opens_whole_and_no_larger_than_itself() {
+        let guard = scratch("opens-whole");
+        let dir = guard.dir();
+        std::fs::write(dir.join("wide.png"), png_bytes(1600, 100)).expect("write");
+        std::fs::write(dir.join("tiny.png"), png_bytes(4, 4)).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(state.open_file(&dir.join("wide.png")), Opened::Shown);
+        assert_eq!(state.transform.zoom, 1024.0 / 1600.0);
+        // A zoom of the user's is theirs for this picture, not the next.
+        assert!(state.handle_event(&ctrl(Key::Equals)));
+        state.next_image();
+        assert_eq!(state.image_info.filename, "tiny.png");
+        assert_eq!(state.transform.zoom, 1.0, "a small picture was enlarged");
+        // Fit, asked for, fills the window, as far as the zoom goes.
+        assert!(state.handle_event(&ctrl(Key::Num0)));
+        assert_eq!(state.transform.zoom, MAX_ZOOM);
+    }
+
+    /// **A fitted picture follows the window** -- its size, and the panels
+    /// beside it -- until the user zooms, when it stays where they put it.
+    #[test]
+    fn a_fitted_picture_follows_the_window_until_the_user_zooms() {
+        use oswindow::app::App;
+        let guard = scratch("follows");
+        std::fs::write(guard.dir().join("wide.png"), png_bytes(1600, 100)).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(
+            state.open_file(&guard.dir().join("wide.png")),
+            Opened::Shown
+        );
+        App::render(&mut state, 800.0, 768.0);
+        assert_eq!(state.transform.zoom, 0.5);
+        App::render(&mut state, 4000.0, 768.0);
+        assert_eq!(state.transform.zoom, 1.0, "shrunk to fit, never enlarged");
+        App::render(&mut state, 1024.0, 768.0);
+        assert!(state.handle_event(&Event::Key(plain(Key::I))));
+        App::render(&mut state, 1024.0, 768.0);
+        assert_eq!(state.transform.zoom, (1024.0 - INFO_PANEL_WIDTH) / 1600.0);
+        assert!(state.handle_event(&ctrl(Key::Equals)));
+        let zoomed = state.transform.zoom;
+        App::render(&mut state, 3000.0, 768.0);
+        assert_eq!(
+            state.transform.zoom, zoomed,
+            "the user's zoom was taken back"
+        );
+        assert!(state.handle_event(&ctrl(Key::Num1)));
+        App::render(&mut state, 500.0, 768.0);
+        assert_eq!(state.transform.zoom, 1.0, "actual size was fitted away");
+    }
+
+    /// A picture dragged is left where it was put when the window changes.
+    #[test]
+    fn a_dragged_picture_stays_where_it_was_put() {
+        use oswindow::app::App;
+        let guard = scratch("dragged");
+        std::fs::write(guard.dir().join("wide.png"), png_bytes(1600, 100)).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(
+            state.open_file(&guard.dir().join("wide.png")),
+            Opened::Shown
+        );
+        let fitted = state.transform.zoom;
+        assert!(state.handle_event(&press_at(500.0, 400.0)));
+        assert!(state.handle_event(&move_to(530.0, 420.0)));
+        App::render(&mut state, 800.0, 768.0);
+        assert_eq!(state.transform.zoom, fitted, "the drag was fitted away");
+        assert_eq!((state.transform.pan_x, state.transform.pan_y), (30.0, 20.0));
+    }
+
+    /// The upload queued last, as the compositor would receive it.
+    fn uploaded(state: &ViewerState) -> (u32, u32, Vec<u8>) {
+        match state.pending_images.last() {
+            Some(oswindow::app::ImageChange::Upload {
+                width,
+                height,
+                bytes,
+                ..
+            }) => (*width, *height, bytes.as_slice().to_vec()),
+            other => panic!("no upload queued: {other:?}"),
+        }
+    }
+
+    /// The fixture `png_bytes(w, h)` as decoded, and turned `turn`.
+    fn fixture_turned(
+        w: u32,
+        h: u32,
+        turn: imagecodec::orientation::Orientation,
+    ) -> (u32, u32, Vec<u8>) {
+        let decoded = imagecodec::decode(&png_bytes(w, h), imagecodec::Limits::default())
+            .expect("the fixture decodes");
+        let turned = turn.apply(decoded);
+        (
+            turned.width,
+            turned.height,
+            guitk::canvas::WireBytes::from_le_argb(&turned.pixels).into_vec(),
+        )
+    }
+
+    /// **Rotate turns the picture itself**, and a flip after it mirrors what is
+    /// on screen. Both changed two lines of the info panel and nothing else:
+    /// the picture was drawn as decoded whatever they said.
+    #[test]
+    fn rotating_and_flipping_turn_the_picture_itself() {
+        use imagecodec::orientation::Orientation;
+        let guard = scratch("turns");
+        let file = guard.dir().join("p.png");
+        std::fs::write(&file, png_bytes(3, 2)).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(state.open_file(&file), Opened::Shown);
+        assert!(state.handle_event(&ctrl(Key::R)));
+        assert_eq!(
+            uploaded(&state),
+            fixture_turned(3, 2, Orientation::RightTop)
+        );
+        let size = state.current_image.as_ref().map(|i| (i.width, i.height));
+        assert_eq!(size, Some((2, 3)), "laid out the turned way round");
+        assert!(state.handle_event(&ctrl(Key::H)));
+        // Turned right, then mirrored as it is on screen: each pixel where
+        // its row and column are swapped.
+        assert_eq!(uploaded(&state), fixture_turned(3, 2, Orientation::LeftTop));
+        state.show_info_panel = true;
+        let said = collect_text(&render(&state));
+        assert!(
+            said.iter().any(|t| t == "Mirrored, turned left"),
+            "{said:?}"
+        );
+        // The next picture opens as its file has it.
+        state.next_image();
+        assert_eq!(uploaded(&state), fixture_turned(3, 2, Orientation::TopLeft));
+    }
+
+    /// Rotate left and flip down turn it too, each the way it says.
+    #[test]
+    fn turning_left_and_flipping_down_turn_the_picture() {
+        use imagecodec::orientation::Orientation;
+        let guard = scratch("turns-left");
+        let file = guard.dir().join("p.png");
+        std::fs::write(&file, png_bytes(3, 2)).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(state.open_file(&file), Opened::Shown);
+        let shift_ctrl_r = Event::Key(KeyEvent {
+            key: Key::R,
+            pressed: true,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::ctrl()
+            },
+            text: String::new(),
+        });
+        assert!(state.handle_event(&shift_ctrl_r));
+        assert_eq!(
+            uploaded(&state),
+            fixture_turned(3, 2, Orientation::LeftBottom)
+        );
+        assert!(state.handle_event(&shift_ctrl_r));
+        assert!(state.handle_event(&ctrl(Key::V)));
+        // A half turn, then flipped top to bottom: mirrored left to right.
+        assert_eq!(
+            uploaded(&state),
+            fixture_turned(3, 2, Orientation::TopRight)
+        );
+    }
+
+    /// A turn fits a fitted picture again -- a quarter turn swaps its sides --
+    /// and keeps a zoom the user chose.
+    #[test]
+    fn a_turn_refits_a_fitted_picture_and_keeps_a_chosen_zoom() {
+        let guard = scratch("turn-fit");
+        let file = guard.dir().join("wide.png");
+        std::fs::write(&file, png_bytes(1600, 100)).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(state.open_file(&file), Opened::Shown);
+        assert!(state.handle_event(&ctrl(Key::R)));
+        let (_, _, _, height) = state.layout().image;
+        assert_eq!(state.transform.zoom, height / 1600.0);
+        state.transform.zoom = 0.3;
+        state.transform.fit = Fit::Free;
+        assert!(state.handle_event(&ctrl(Key::R)));
+        assert_eq!(state.transform.zoom, 0.3);
+    }
+
+    /// A viewer given a loader, as the window gives it one, and the channel
+    /// the loader's wakes are said on.
+    fn with_a_loader() -> (ViewerState, std::sync::mpsc::Receiver<()>) {
+        use oswindow::app::App;
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert!(state.wants_waker());
+        let (waker, heard) = offloop::channel_waker();
+        state.attach_waker(waker);
+        assert!(state.loader.is_some(), "no loader was started");
+        (state, heard)
+    }
+
+    /// Run the window's side of the loader until nothing is loading: wait for
+    /// a wake, then do what the loop does with it.
+    fn until_loaded(state: &mut ViewerState, heard: &std::sync::mpsc::Receiver<()>) -> usize {
+        use oswindow::app::App;
+        let mut redraws = 0;
+        while state.loading().is_some() {
+            heard
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the loader never woke the window");
+            if state.on_wake() == oswindow::app::Response::Redraw {
+                redraws += 1;
+            }
+        }
+        redraws
+    }
+
+    /// **A picture is decoded off the window's thread**, and drawn when it
+    /// wakes the window. Until then the window says what is coming.
+    #[test]
+    fn a_picture_is_decoded_off_the_window_and_drawn_when_it_wakes_it() {
+        let guard = scratch("loader");
+        let file = guard.dir().join("a.png");
+        std::fs::write(&file, png_bytes(9, 7)).expect("write");
+        let (mut state, heard) = with_a_loader();
+        assert_eq!(state.open_file(&file), Opened::Loading);
+        assert_eq!(state.loading(), Some(file.as_path()));
+        assert!(
+            collect_text(&render(&state))
+                .iter()
+                .any(|t| t == "Opening a.png")
+        );
+        // With the status bar hidden, the empty canvas says it.
+        state.show_status_bar = false;
+        assert!(
+            collect_text(&render(&state))
+                .iter()
+                .any(|t| t == "Opening a.png")
+        );
+        state.show_status_bar = true;
+        assert_eq!(until_loaded(&mut state, &heard), 1);
+        assert_eq!(
+            state.current_image.as_ref().map(|i| (i.width, i.height)),
+            Some((9, 7))
+        );
+        assert_eq!(queued(&state), [("up", VIEWER_IMAGE_ID, 9, 7, 9 * 7 * 4)]);
+        assert_eq!(state.image_info.filename, "a.png");
+    }
+
+    /// **The last picture stays up until the next is ready**, named as it is,
+    /// with the status bar saying which one is coming.
+    #[test]
+    fn the_last_picture_stays_up_until_the_next_is_ready() {
+        let guard = scratch("stays-up");
+        let dir = guard.dir();
+        std::fs::write(dir.join("a.png"), png_bytes(4, 4)).expect("write");
+        std::fs::write(dir.join("b.png"), png_bytes(6, 5)).expect("write");
+        let (mut state, heard) = with_a_loader();
+        let _ = state.open_file(&dir.join("a.png"));
+        until_loaded(&mut state, &heard);
+        state.next_image();
+        assert_eq!(state.loading(), Some(dir.join("b.png").as_path()));
+        assert_eq!(state.current_image.as_ref().map(|i| i.width), Some(4));
+        assert_eq!(state.image_info.filename, "a.png");
+        let said = collect_text(&render(&state));
+        assert!(said.iter().any(|t| t == "Opening b.png"), "{said:?}");
+        until_loaded(&mut state, &heard);
+        assert_eq!(state.current_image.as_ref().map(|i| i.width), Some(6));
+        assert_eq!(state.image_info.filename, "b.png");
+    }
+
+    /// **A picture paged past is never shown**: holding the arrow key across
+    /// a directory ends with the picture it stopped on, uploaded once.
+    #[test]
+    fn a_picture_paged_past_is_never_shown() {
+        let guard = scratch("paged-past");
+        let dir = guard.dir();
+        for (name, w) in [("a.png", 2), ("b.png", 3), ("c.png", 4), ("d.png", 5)] {
+            std::fs::write(dir.join(name), png_bytes(w, 2)).expect("write");
+        }
+        let (mut state, heard) = with_a_loader();
+        let _ = state.open_file(&dir.join("a.png"));
+        until_loaded(&mut state, &heard);
+        state.pending_images.clear();
+        for _ in 0..3 {
+            state.next_image();
+        }
+        until_loaded(&mut state, &heard);
+        assert_eq!(state.image_info.filename, "d.png");
+        assert_eq!(queued(&state), [("up", VIEWER_IMAGE_ID, 5, 2, 5 * 2 * 4)]);
+    }
+
+    /// A file that fails off the window's thread takes the last picture down
+    /// and says why, exactly as one that fails on it.
+    #[test]
+    fn a_failure_off_the_window_takes_the_last_picture_down() {
+        let guard = scratch("fails-off");
+        let dir = guard.dir();
+        std::fs::write(dir.join("a.png"), png_bytes(4, 4)).expect("write");
+        let (mut state, heard) = with_a_loader();
+        let _ = state.open_file(&dir.join("a.png"));
+        until_loaded(&mut state, &heard);
+        state.pending_images.clear();
+        assert_eq!(state.open_file(&dir.join("gone.png")), Opened::Loading);
+        until_loaded(&mut state, &heard);
+        assert!(state.current_image.is_none());
+        assert_eq!(queued(&state), [("down", VIEWER_IMAGE_ID, 0, 0, 0)]);
+        assert!(
+            state
+                .load_error
+                .as_deref()
+                .is_some_and(|e| e.contains("gone.png"))
+        );
+    }
+
+    /// **An SVG drawing opens**, laid out at its own size and drawn at a
+    /// larger one so that it stays sharp when zoomed. `svg` was in the list of
+    /// extensions the viewer browses, and every one failed to open.
+    #[test]
+    fn an_svg_drawing_opens() {
+        let guard = scratch("svg");
+        let file = guard.dir().join("flag.svg");
+        std::fs::write(
+            &file,
+            "<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" \
+             viewBox=\"0 0 20 10\"><rect x=\"0\" y=\"0\" width=\"20\" height=\"10\" \
+             fill=\"#ff0000\"/></svg>",
+        )
+        .expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(
+            state.open_file(&file),
+            Opened::Shown,
+            "{:?}",
+            state.load_error
+        );
+        assert_eq!(state.image_info.format, Some(ImageFormat::Svg));
+        assert_eq!(
+            state.current_image.as_ref().map(|i| (i.width, i.height)),
+            Some((20, 10))
+        );
+        let (width, height, bytes) = uploaded(&state);
+        assert_eq!((width, height), (2048, 1024));
+        // The middle pixel, in the wire's blue-green-red-alpha order: red.
+        let middle = ((512 * 2048 + 1024) * 4) as usize;
+        assert_eq!(&bytes[middle..middle + 4], &[0, 0, 255, 255]);
+    }
+
+    /// What begins as a drawing is one; other XML is not.
+    #[test]
+    fn a_drawing_is_known_by_its_first_element() {
+        assert!(looks_like_svg(b"<svg viewBox=\"0 0 1 1\"/>"));
+        assert!(looks_like_svg(b"\xEF\xBB\xBF \n<svg/>"));
+        assert!(looks_like_svg(
+            b"<?xml version=\"1.0\"?>\n<!-- x -->\n<svg/>"
+        ));
+        assert!(!looks_like_svg(b"<?xml version=\"1.0\"?>\n<html/>"));
+        assert!(!looks_like_svg(b"not a drawing at all"));
+    }
+
+    /// The info panel says when the file was last changed. It said
+    /// "(available)" for every file.
+    #[test]
+    fn the_info_panel_says_when_the_file_was_changed() {
+        let guard = scratch("modified");
+        let file = guard.dir().join("a.png");
+        std::fs::write(&file, png_bytes(2, 2)).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(state.open_file(&file), Opened::Shown);
+        let when = state.image_info.date_modified.clone().expect("a date");
+        // `2026-09-26 14:03`
+        assert_eq!(when.len(), 16, "{when}");
+        assert_eq!(
+            (&when[4..5], &when[7..8], &when[13..14]),
+            ("-", "-", ":"),
+            "{when}"
+        );
+    }
+
     fn scratch(label: &str) -> ScratchDir {
         ScratchDir::new(&format!("slateos-imageviewer-{label}"))
     }
@@ -3697,14 +4570,19 @@ the picture at once, which reads as D advancing the slideshow"
         std::fs::write(&good, png_bytes(640, 480)).expect("write png");
 
         let mut state = ViewerState::new(800.0, 600.0);
-        assert!(state.open_file(&good), "the fixture PNG must load");
+        assert_eq!(
+            state.open_file(&good),
+            Opened::Shown,
+            "the fixture PNG must load"
+        );
         assert!(state.current_image.is_some());
         assert_eq!(state.image_info.width, 640);
         assert_eq!(state.image_info.height, 480);
 
         let missing = dir.join("gone.png");
-        assert!(
-            !state.open_file(&missing),
+        assert_eq!(
+            state.open_file(&missing),
+            Opened::Failed,
             "a missing file must report failure"
         );
 
@@ -3740,7 +4618,7 @@ the picture at once, which reads as D advancing the slideshow"
 
         let guard = scratch("render-error");
         let dir = guard.dir().to_path_buf();
-        assert!(!state.open_file(&dir.join("nope.png")));
+        assert_eq!(state.open_file(&dir.join("nope.png")), Opened::Failed);
 
         let failed = render(&state);
         let failed_text = collect_text(&failed);
@@ -3770,10 +4648,10 @@ the picture at once, which reads as D advancing the slideshow"
         std::fs::write(&good, png_bytes(32, 16)).expect("write png");
 
         let mut state = ViewerState::new(800.0, 600.0);
-        assert!(!state.open_file(&dir.join("absent.png")));
+        assert_eq!(state.open_file(&dir.join("absent.png")), Opened::Failed);
         assert!(state.load_error.is_some());
 
-        assert!(state.open_file(&good));
+        assert_eq!(state.open_file(&good), Opened::Shown);
         assert!(state.load_error.is_none());
         assert_eq!(state.image_info.filename, "real.png");
         assert_eq!((state.image_info.width, state.image_info.height), (32, 16));
@@ -3791,7 +4669,7 @@ the picture at once, which reads as D advancing the slideshow"
         std::fs::write(dir.join("c.png"), png_bytes(30, 30)).expect("write c");
 
         let mut state = ViewerState::new(800.0, 600.0);
-        assert!(state.open_file(&dir.join("a.png")));
+        assert_eq!(state.open_file(&dir.join("a.png")), Opened::Shown);
         assert_eq!(state.entries.len(), 3, "all three are listed");
 
         state.next_image();

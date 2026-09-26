@@ -1,0 +1,13 @@
+[package]
+name = "offloop"
+version = "0.1.0"
+edition = "2024"
+description = "Work done off an application's event-loop thread, newest request first, and handed back through the loop's waker"
+
+# The standard library only: a thread, two channels and a `Waker`. The waker
+# comes from `oswindow::app::App::attach_waker`, but this crate takes it as the
+# `std::task::Waker` it is, so it needs nothing of the window's.
+[dependencies]
+
+[lints]
+workspace = true

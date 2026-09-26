@@ -13,6 +13,15 @@ dialog", so a viewer started with no file could not be given one.  Now one
 reading of the window's layout (`ViewerState::layout`) places each part for
 the renderer and for the hit-tests alike.
 
+Later the same day: pictures decoded off the window's thread (`offloop`), the
+last one kept up until the next is ready; Rotate and Flip turning the picture
+itself, as one of the eight views, each change applied to what is on screen;
+a picture opening whole and following the window until the user zooms or
+pans; zoom steps as factors; SVG drawings; the file's real date.
+
+The loader's own rule -- a result for a superseded request is never handed
+back -- is `offloop`'s, and is swept by `apps/offloop/mutate.py`.
+
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
 """
@@ -36,6 +45,22 @@ CHOSEN = "a_picture_chosen_in_the_dialog_opens"
 TILES = "the_layout_tiles_the_window"
 CENTRED = "the_strip_is_centred_on_the_current_picture"
 DOUBLE = "a_double_click_on_a_button_does_not_zoom"
+OFF_LOOP = "a_picture_is_decoded_off_the_window_and_drawn_when_it_wakes_it"
+STAYS_UP = "the_last_picture_stays_up_until_the_next_is_ready"
+TURN = "a_turn_applies_to_the_picture_on_screen"
+TURNS = "rotating_and_flipping_turn_the_picture_itself"
+LEFT_DOWN = "turning_left_and_flipping_down_turn_the_picture"
+REFIT_TURN = "a_turn_refits_a_fitted_picture_and_keeps_a_chosen_zoom"
+WHOLE = "a_picture_opens_whole_and_no_larger_than_itself"
+FOLLOWS = "a_fitted_picture_follows_the_window_until_the_user_zooms"
+DRAGGED = "a_dragged_picture_stays_where_it_was_put"
+STEP = "a_zoom_step_is_a_factor_and_stops_at_actual_size"
+NOTCH = "one_wheel_notch_is_one_zoom_step"
+LARGE = "a_large_photograph_still_fits_the_window"
+SVG = "an_svg_drawing_opens"
+SVG_KNOWN = "a_drawing_is_known_by_its_first_element"
+DATE = "the_info_panel_says_when_the_file_was_changed"
+FAILS_OFF = "a_failure_off_the_window_takes_the_last_picture_down"
 
 MUTATIONS = [
     # -- the layout ---------------------------------------------------------
@@ -188,6 +213,232 @@ MUTATIONS = [
         "        if self.picker.is_open() && self.picker_took(event) {\n            return true;\n        }",
         "",
         [CTRL_O, CHOSEN],
+    ),
+    # -- the loader -----------------------------------------------------------
+    (
+        "a picture is decoded here even with a loader",
+        "            Some(loader) => loader.ask((path, view)),",
+        "            Some(_) => Err((path, view)),",
+        [OFF_LOOP],
+    ),
+    (
+        "the viewer asks for no waker",
+        "    fn wants_waker(&self) -> bool {\n        true",
+        "    fn wants_waker(&self) -> bool {\n        false",
+        [OFF_LOOP],
+    ),
+    (
+        "no loader is started",
+        "        self.loader = offloop::Latest::start(",
+        "        self.loader = None;\n        let _unused = offloop::Latest::start(",
+        [OFF_LOOP],
+    ),
+    (
+        "a picture ready is not redrawn",
+        "                let _ = self.apply_loaded(loaded);\n                oswindow::app::Response::Redraw",
+        "                let _ = self.apply_loaded(loaded);\n                oswindow::app::Response::Idle",
+        [OFF_LOOP],
+    ),
+    (
+        "nothing is ever loading",
+        "        let busy = self.loader.as_ref().is_some_and(offloop::Latest::busy);",
+        "        let busy = false;",
+        [OFF_LOOP, STAYS_UP],
+    ),
+    (
+        "the status bar does not say what is coming",
+        "    let name = state.loading().map_or_else(",
+        "    let name = None::<&Path>.map_or_else(",
+        [STAYS_UP],
+    ),
+    (
+        "the empty canvas does not say what is coming",
+        "        let (headline, detail) = match (state.loading(), &state.load_error) {",
+        "        let (headline, detail) = match (None::<&Path>, &state.load_error) {",
+        [OFF_LOOP],
+    ),
+    (
+        "a failure names no file",
+        "        Err(e) => return failed(info, format!(\"{}: {e}\", shown_path(path))),",
+        "        Err(e) => return failed(info, format!(\"{e}\")),",
+        [FAILS_OFF],
+    ),
+    # -- turning ------------------------------------------------------------
+    (
+        "Rotate turns nothing",
+        "            ViewerAction::RotateCw => self.turn(View::rotated_cw),",
+        "            ViewerAction::RotateCw => {}",
+        [TURNS, BUTTONS],
+    ),
+    (
+        "Rotate left turns right",
+        "            ViewerAction::RotateCcw => self.turn(View::rotated_ccw),",
+        "            ViewerAction::RotateCcw => self.turn(View::rotated_cw),",
+        [LEFT_DOWN],
+    ),
+    (
+        "Flip down flips across",
+        "            ViewerAction::FlipVertical => self.turn(View::flipped_down),",
+        "            ViewerAction::FlipVertical => self.turn(View::flipped_across),",
+        [LEFT_DOWN],
+    ),
+    (
+        "a turn re-reads nothing",
+        "            let _ = self.request(path, how(view));",
+        "            let _ = (path, how(view));",
+        [TURNS],
+    ),
+    (
+        "a quarter turn is three",
+        "            quarter_turns: self.quarter_turns.wrapping_add(1) & 3,",
+        "            quarter_turns: self.quarter_turns.wrapping_add(3) & 3,",
+        [TURN],
+    ),
+    (
+        "a flip across after a turn flips along the other axis",
+        "            quarter_turns: 4_u8.wrapping_sub(self.quarter_turns) & 3,",
+        "            quarter_turns: self.quarter_turns,",
+        [TURN],
+    ),
+    (
+        "a flip down after a turn flips along the other axis",
+        "            quarter_turns: 6_u8.wrapping_sub(self.quarter_turns) & 3,",
+        "            quarter_turns: 2_u8.wrapping_add(self.quarter_turns) & 3,",
+        [TURN],
+    ),
+    (
+        "the two diagonals are swapped",
+        "            (true, 1) => Orientation::RightBottom,",
+        "            (true, 1) => Orientation::LeftTop,",
+        [TURN],
+    ),
+    # -- fitting and zooming ----------------------------------------------------
+    (
+        "a turn drops the user's zoom",
+        "        if new_file {\n            self.transform.reset();\n        }",
+        "        let _ = new_file;\n        self.transform.reset();",
+        [REFIT_TURN],
+    ),
+    (
+        "a new file keeps the last one's zoom",
+        "        if new_file {\n            self.transform.reset();\n        }",
+        "        let _ = new_file;",
+        [WHOLE],
+    ),
+    (
+        "a picture opens enlarged",
+        "            Fit::Shrink => self.fit_zoom().min(1.0),",
+        "            Fit::Shrink => self.fit_zoom(),",
+        [WHOLE, FOLLOWS],
+    ),
+    (
+        "a loaded picture is not fitted",
+        "        if new_file {\n            self.transform.reset();\n        }\n        self.refit();",
+        "        if new_file {\n            self.transform.reset();\n        }",
+        [WHOLE, REFIT_TURN],
+    ),
+    (
+        "a fitted picture does not follow the window",
+        "        self.refit();\n        render(self)",
+        "        render(self)",
+        [FOLLOWS],
+    ),
+    (
+        "Fit does not fill",
+        "        self.transform.fit = Fit::Fill;",
+        "        self.transform.fit = Fit::Shrink;",
+        [WHOLE],
+    ),
+    (
+        "actual size is fitted away",
+        "        self.transform.pan_y = 0.0;\n        self.transform.fit = Fit::Free;\n    }",
+        "        self.transform.pan_y = 0.0;\n    }",
+        [FOLLOWS],
+    ),
+    (
+        "a drag is fitted away",
+        "                // Where the user put it, it stays: a resize no longer refits.\n                self.transform.fit = Fit::Free;",
+        "",
+        [DRAGGED],
+    ),
+    (
+        "a zoom in is not the user's",
+        "            next.min(MAX_ZOOM)\n        };\n        self.fit = Fit::Free;",
+        "            next.min(MAX_ZOOM)\n        };",
+        [FOLLOWS, STEP],
+    ),
+    (
+        "a zoom out is not the user's",
+        "            next.max(MIN_ZOOM)\n        };\n        self.fit = Fit::Free;",
+        "            next.max(MIN_ZOOM)\n        };",
+        [STEP],
+    ),
+    (
+        "a zoom step adds",
+        "        let next = self.zoom * ZOOM_FACTOR;",
+        "        let next = self.zoom + 0.25;",
+        [NOTCH, STEP],
+    ),
+    (
+        "a zoom step out takes away",
+        "        let next = self.zoom / ZOOM_FACTOR;",
+        "        let next = self.zoom - 0.25;",
+        [STEP],
+    ),
+    (
+        "a zoom in steps past actual size",
+        "        self.zoom = if self.zoom < 1.0 && next > 1.0 {",
+        "        self.zoom = if false {",
+        [STEP],
+    ),
+    (
+        "a zoom out steps past actual size",
+        "        self.zoom = if self.zoom > 1.0 && next < 1.0 {",
+        "        self.zoom = if false {",
+        [STEP],
+    ),
+    (
+        "a camera's photograph cannot be fitted",
+        "const MIN_ZOOM: f32 = 0.01;",
+        "const MIN_ZOOM: f32 = 0.25;",
+        [LARGE],
+    ),
+    # -- drawings and dates -------------------------------------------------------
+    (
+        "an SVG is not known",
+        "        if looks_like_svg(data) {",
+        "        if false {",
+        [SVG],
+    ),
+    (
+        "any XML is a drawing",
+        "    text.starts_with(b\"<?xml\")\n        && text",
+        "    text.starts_with(b\"<?xml\")\n        || text",
+        [SVG_KNOWN],
+    ),
+    (
+        "a byte-order mark hides a drawing",
+        "    let text = data.strip_prefix(b\"\\xEF\\xBB\\xBF\").unwrap_or(data);",
+        "    let text = data;",
+        [SVG_KNOWN],
+    ),
+    (
+        "a drawing is drawn at its own size",
+        "    let scale = SVG_DRAWN_AT / width.max(height);",
+        "    let scale = 1.0_f32;",
+        [SVG],
+    ),
+    (
+        "a drawing's red and blue are swapped",
+        "            [r, g, b, a] => u32::from_be_bytes([a, r, g, b]),",
+        "            [r, g, b, a] => u32::from_be_bytes([a, b, g, r]),",
+        [SVG],
+    ),
+    (
+        "the date is a placeholder again",
+        "        .map(|since| {\n            guitk::datetime::stamp(\n                i64::try_from(since.as_secs()).unwrap_or(i64::MAX),\n                &guitk::tzrules::Tz::utc(),\n            )\n        });",
+        "        .map(|_| String::from(\"(available)\"));",
+        [DATE],
     ),
     (
         "a chosen picture is not opened",

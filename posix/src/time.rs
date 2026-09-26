@@ -337,6 +337,11 @@ fn is_valid_clock(clk_id: ClockidT) -> bool {
     )
 }
 
+/// Linux's `TIME_SETTOD_SEC_MAX`: `KTIME_SEC_MAX` (`KTIME_MAX` in seconds)
+/// less `TIME_UPTIME_SEC_MAX` (30 years), the largest `tv_sec` that
+/// `clock_settime` accepts.
+const TIME_SETTOD_SEC_MAX: i64 = i64::MAX / 1_000_000_000 - 30 * 365 * 86_400;
+
 /// Check whether a clock ID is one that may be modified by
 /// `clock_settime`.
 ///
@@ -450,6 +455,14 @@ pub extern "C" fn clock_settime(clk_id: ClockidT, tp: *const Timespec) -> i32 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    // `timespec64_valid_settod` (include/linux/time64.h): a time past
+    // `TIME_SETTOD_SEC_MAX` -- 30 years short of where `ktime_t` overflows --
+    // is refused, so the clock cannot be set somewhere an uptime could carry
+    // it past the end.  Missing until 2026-09-26.
+    if ts.tv_sec >= TIME_SETTOD_SEC_MAX {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
 
     // 5. Phase 177: gate on CAP_SYS_TIME.  Linux's settable clocks
     //    (CLOCK_REALTIME via posix_clock_realtime_set, CLOCK_TAI via
@@ -546,72 +559,98 @@ pub extern "C" fn clock_nanosleep(
     request: *const Timespec,
     remain: *mut Timespec,
 ) -> i32 {
-    // Phase 102 invariant: any flag bit other than TIMER_ABSTIME is
-    // a programming error.  Reject up-front so a buggy caller is
-    // told about it before any other diagnostic dilutes the signal.
-    // clock_nanosleep returns the error number directly (no errno
-    // set), per POSIX.
-    if flags & !TIMER_ABSTIME != 0 {
+    // glibc 2.39 (sysdeps/unix/sysv/linux/clock_nanosleep.c) answers the
+    // calling thread's CPU clock itself, before any other check.
+    if clk_id == CLOCK_THREAD_CPUTIME_ID {
         return errno::EINVAL;
     }
-
-    // Phase 153: clock dispatch precedes the user-pointer check, to
-    // match Linux's `clockid_to_kclock` running before
-    // `get_timespec64`.  Observable effect: `clock_nanosleep(
-    // BAD_CLOCK, 0, NULL, NULL)` returns EINVAL (clock reason) rather
-    // than EFAULT (NULL reason).
+    // Linux 6.6 (kernel/time/posix-timers.c:1373): an unknown clock, then a
+    // clock that cannot be slept on -- `CLOCK_MONOTONIC_RAW` and the two
+    // `_COARSE` clocks have no `nsleep` -- then the copy of the request, then
+    // `timespec64_valid`.  `flags` is only ever asked whether TIMER_ABSTIME
+    // is set: the other bits are ignored.  Until 2026-09-26 any other bit was
+    // EINVAL, ahead of everything, under a comment citing a check in
+    // `common_nsleep` that is not there.
     if !is_valid_clock(clk_id) {
         return errno::EINVAL;
     }
-
-    // Phase 153: NULL request → EFAULT, matching Linux's
-    // get_timespec64 / copy_from_user failure path.  Pre-Phase-153
-    // this returned EINVAL.
+    if matches!(
+        clk_id,
+        CLOCK_MONOTONIC_RAW | CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE
+    ) {
+        return errno::EOPNOTSUPP;
+    }
     if request.is_null() {
         return errno::EFAULT;
     }
-
-    // POSIX: EINVAL if tv_nsec not in [0, 999_999_999].
-    // SAFETY: request is non-null (checked above).
-    let req = unsafe { &*request };
-    if req.tv_nsec < 0 || req.tv_nsec > 999_999_999 {
+    // SAFETY: `request` is non-null, and the caller's contract makes it a
+    // readable `timespec`; read unaligned, as a C caller's may not be.
+    let req = unsafe { core::ptr::read_unaligned(request) };
+    // `timespec64_valid`: a negative second or an out-of-range nanosecond.
+    // A negative `tv_sec` was taken for "already past" in the absolute form,
+    // and reported as EINTR in the relative one, until 2026-09-26.
+    if req.tv_sec < 0 || !(0..1_000_000_000).contains(&req.tv_nsec) {
         return errno::EINVAL;
     }
 
-    if flags & TIMER_ABSTIME != 0 {
-        // Absolute time: compute the relative duration.
+    let absolute = flags & TIMER_ABSTIME != 0;
+    let sleep_ns = if absolute {
         let mut now = Timespec {
             tv_sec: 0,
             tv_nsec: 0,
         };
         if clock_gettime(clk_id, &raw mut now) < 0 {
-            return errno::EINVAL;
+            return errno::get_errno();
         }
-
-        // SAFETY: request is non-null.
-        let req = unsafe { &*request };
-        #[allow(clippy::arithmetic_side_effects)]
-        let target_ns = req.tv_sec * 1_000_000_000 + req.tv_nsec;
-        #[allow(clippy::arithmetic_side_effects)]
-        let now_ns = now.tv_sec * 1_000_000_000 + now.tv_nsec;
-
-        if target_ns <= now_ns {
-            return 0; // Already past.
+        let target = timespec_to_ns_saturating(&req);
+        let current = timespec_to_ns_saturating(&now);
+        if target <= current {
+            return 0;
         }
-
-        #[allow(clippy::arithmetic_side_effects)]
-        let sleep_ns = (target_ns - now_ns) as u64;
-        let _ = syscall1(SYS_SLEEP, sleep_ns);
+        target.saturating_sub(current)
     } else {
-        // Relative time: same as nanosleep.
-        // Propagate EINTR if interrupted (clock_nanosleep returns error
-        // codes directly, not via errno).
-        if nanosleep(request, remain) != 0 {
-            return errno::EINTR;
-        }
-    }
+        timespec_to_ns_saturating(&req)
+    };
 
+    if sleep_ns == 0 {
+        // `hrtimer_nanosleep` of nothing returns at once; so does this, with no
+        // syscall to be interrupted.
+        return 0;
+    }
+    let ret = syscall1(SYS_SLEEP, sleep_ns);
+    if ret < 0 {
+        // The kernel's own answer, which is EINTR when a signal cut the sleep
+        // short -- not EINTR for every failure, as the relative form reported
+        // until 2026-09-26.  Only the relative form reports what is left
+        // (Linux drops `rmtp` for TIMER_ABSTIME), and the kernel does not say,
+        // so it is reported as nothing: the approximation `nanosleep` makes.
+        let e = errno::errno_for(ret);
+        if e == errno::EINTR && !absolute && !remain.is_null() {
+            // SAFETY: a non-null `remain` is writable, per the contract.
+            unsafe {
+                core::ptr::write_unaligned(
+                    remain,
+                    Timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    },
+                );
+            }
+        }
+        // The absolute form was never told about an interruption until
+        // 2026-09-26: it slept and answered 0.
+        return e;
+    }
     0
+}
+
+/// A non-negative `timespec` as nanoseconds, saturating at `u64::MAX`: an
+/// absolute deadline years away is a sleep that outlasts the caller, not an
+/// overflow.  Until 2026-09-26 the absolute form multiplied unchecked.
+fn timespec_to_ns_saturating(ts: &Timespec) -> u64 {
+    let secs = u64::try_from(ts.tv_sec).unwrap_or(0);
+    let nsecs = u64::try_from(ts.tv_nsec).unwrap_or(0);
+    secs.saturating_mul(1_000_000_000).saturating_add(nsecs)
 }
 
 /// Get time of day (legacy interface).
@@ -3152,19 +3191,32 @@ pub extern "C" fn setitimer(
     new_value: *const Itimerval,
     old_value: *mut Itimerval,
 ) -> i32 {
-    if which != ITIMER_REAL && which != ITIMER_VIRTUAL && which != ITIMER_PROF {
+    // Linux 6.6's order (kernel/time/itimer.c): the new value is read and
+    // validated first, then `which` (`do_setitimer`).  A NULL new value is not
+    // EFAULT: Linux takes it as all zeros -- disarm -- a "misfeature" it still
+    // supports, with a warning, and glibc passes the call straight through.
+    // Until 2026-09-26 `which` came first and NULL was EFAULT.
+    let val = if new_value.is_null() {
+        Itimerval {
+            it_interval: Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            it_value: Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+        }
+    } else {
+        // SAFETY: new_value is non-NULL (just checked).  Read unaligned to
+        // tolerate caller buffers that aren't naturally aligned.
+        unsafe { core::ptr::read_unaligned(new_value) }
+    };
+    if !itimer_timeval_valid(&val.it_value) || !itimer_timeval_valid(&val.it_interval) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if new_value.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
-    // SAFETY: new_value is non-NULL (just checked).  Read unaligned to
-    // tolerate caller buffers that aren't naturally aligned.
-    let val = unsafe { core::ptr::read_unaligned(new_value) };
-    if !itimer_timeval_valid(&val.it_value) || !itimer_timeval_valid(&val.it_interval) {
+    if which != ITIMER_REAL && which != ITIMER_VIRTUAL && which != ITIMER_PROF {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -7909,14 +7961,27 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    /// Linux 6.6 takes a NULL new value as zeros -- disarm -- rather than
+    /// EFAULT (kernel/time/itimer.c, "Misfeature support will be removed"),
+    /// and glibc passes the call through.  It was EFAULT until 2026-09-26.
     #[test]
-    fn test_setitimer_null_new_value() {
-        crate::errno::set_errno(0);
+    fn test_setitimer_null_new_value_disarms() {
+        reset_timers();
+        let armed = itimerval(0, 0, 5, 0);
         assert_eq!(
-            setitimer(ITIMER_REAL, core::ptr::null(), core::ptr::null_mut()),
-            -1
+            setitimer(ITIMER_REAL, &raw const armed, core::ptr::null_mut()),
+            0
         );
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        let mut old = itimerval(9, 9, 9, 9);
+        assert_eq!(setitimer(ITIMER_REAL, core::ptr::null(), &raw mut old), 0);
+        assert_eq!(old.it_value.tv_sec, 5, "the old value comes back");
+        let mut now = itimerval(9, 9, 9, 9);
+        assert_eq!(getitimer(ITIMER_REAL, &raw mut now), 0);
+        assert_eq!(
+            (now.it_value.tv_sec, now.it_value.tv_usec),
+            (0, 0),
+            "disarmed"
+        );
     }
 
     #[test]
@@ -8200,13 +8265,13 @@ mod tests {
     }
 
     #[test]
-    fn test_setitimer_phase87_efault_takes_precedence_over_field_check() {
-        // NULL pointer beats bogus fields we can't even read.
+    fn test_setitimer_phase87_null_value_still_checks_which() {
+        // A NULL value is zeros, not a fault, so `which` is still judged.
         reset_timers();
         errno::set_errno(0);
-        let ret = setitimer(ITIMER_REAL, core::ptr::null(), core::ptr::null_mut());
+        let ret = setitimer(42, core::ptr::null(), core::ptr::null_mut());
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
@@ -8399,15 +8464,12 @@ mod tests {
         );
     }
 
-    // -- Phase 102: clock_nanosleep flag-mask validation --
+    // -- clock_nanosleep's flags: only TIMER_ABSTIME is read --
     //
-    // Linux semantics (kernel/time/posix-timers.c::common_nsleep):
-    //   if (flags & ~TIMER_ABSTIME) return -EINVAL;
-    // The check precedes request / clk_id / nsec inspection.  Our
-    // previous code never inspected the flag mask at all; only
-    // TIMER_ABSTIME (== 1) was conditionally used, and stray bits
-    // were silently dropped.  clock_nanosleep returns the error
-    // number directly (not via errno) per POSIX.
+    // Linux 6.6 never tests the other bits (kernel/time/posix-timers.c:
+    // `common_nsleep` asks `flags & TIMER_ABSTIME` and nothing else).
+    // The tests here asserted an EINVAL for them, citing a check that
+    // `common_nsleep` does not contain, until 2026-09-26.
 
     #[test]
     fn test_clock_nanosleep_timer_abstime_is_bit_zero() {
@@ -8420,58 +8482,6 @@ mod tests {
             TIMER_ABSTIME & (TIMER_ABSTIME - 1),
             0,
             "TIMER_ABSTIME must be a single bit"
-        );
-    }
-
-    #[test]
-    fn test_clock_nanosleep_unknown_flag_einval() {
-        // An arbitrary stray bit must yield EINVAL up-front, BEFORE
-        // any of the other validations.  We pass a null request +
-        // bad clock id deliberately so that if the mask check were
-        // missing, we'd still see EINVAL from the existing paths —
-        // i.e. this test depends on the mask path returning first.
-        // We can't observe ordering via the value alone (all paths
-        // return EINVAL), but we can observe that the mask path is
-        // hit BEFORE the null-request dereference.
-        let bad = 1 << 4;
-        assert_eq!(
-            clock_nanosleep(
-                CLOCK_REALTIME,
-                bad,
-                core::ptr::null(),
-                core::ptr::null_mut()
-            ),
-            crate::errno::EINVAL
-        );
-    }
-
-    #[test]
-    fn test_clock_nanosleep_high_bit_einval() {
-        // i32::MIN sets the sign bit — far outside the valid mask.
-        let req = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        assert_eq!(
-            clock_nanosleep(CLOCK_REALTIME, i32::MIN, &req, core::ptr::null_mut()),
-            crate::errno::EINVAL
-        );
-    }
-
-    #[test]
-    fn test_clock_nanosleep_einval_wins_with_garbage_inputs() {
-        // Both bad flags AND bad request would normally trigger
-        // separate EINVAL paths.  Regression guard: the flag-mask
-        // check fires first, before the null check or clock check.
-        // We verify the path is reachable with otherwise-valid
-        // inputs except the stray flag bit.
-        let req = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        assert_eq!(
-            clock_nanosleep(CLOCK_REALTIME, 1 << 5, &req, core::ptr::null_mut()),
-            crate::errno::EINVAL
         );
     }
 
@@ -8516,107 +8526,94 @@ mod tests {
     }
 
     #[test]
-    fn test_clock_nanosleep_abstime_plus_unknown_einval() {
-        // Mixing TIMER_ABSTIME with a stray bit must still EINVAL —
-        // no partial acceptance.
+    fn test_clock_nanosleep_ignores_every_other_flag_bit() {
+        // Every single bit but TIMER_ABSTIME, and the sign bit, is ignored:
+        // a zero relative sleep succeeds with any of them set.
         let req = Timespec {
             tv_sec: 0,
             tv_nsec: 0,
         };
-        let mixed = TIMER_ABSTIME | (1 << 8);
-        assert_eq!(
-            clock_nanosleep(CLOCK_REALTIME, mixed, &req, core::ptr::null_mut()),
-            crate::errno::EINVAL
-        );
-    }
-
-    #[test]
-    fn test_clock_nanosleep_o_append_value_rejected() {
-        // O_APPEND (a file flag) has no meaning here.  In our
-        // numbering it's 0o2000 == 1<<10, which is not TIMER_ABSTIME
-        // (1<<0).  Must EINVAL.
-        let req = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
+        for bit in (1..31)
+            .map(|shift| 1i32 << shift)
+            .chain([i32::MIN, crate::fcntl::O_APPEND])
+        {
+            assert_eq!(
+                clock_nanosleep(CLOCK_REALTIME, bit, &req, core::ptr::null_mut()),
+                0,
+                "bit {bit:#x}"
+            );
+        }
+        // With TIMER_ABSTIME alongside, the absolute form still runs: a
+        // deadline at the epoch has passed.
         assert_eq!(
             clock_nanosleep(
                 CLOCK_REALTIME,
-                crate::fcntl::O_APPEND,
+                TIMER_ABSTIME | (1 << 8),
                 &req,
+                core::ptr::null_mut()
+            ),
+            0
+        );
+    }
+
+    /// The clocks Linux cannot sleep on are EOPNOTSUPP, after the clock
+    /// check and before the request is read; the calling thread's CPU clock
+    /// is glibc's EINVAL, before anything.
+    #[test]
+    fn test_clock_nanosleep_clocks_that_cannot_sleep() {
+        for clk in [
+            CLOCK_MONOTONIC_RAW,
+            CLOCK_REALTIME_COARSE,
+            CLOCK_MONOTONIC_COARSE,
+        ] {
+            assert_eq!(
+                clock_nanosleep(clk, 0, core::ptr::null(), core::ptr::null_mut()),
+                crate::errno::EOPNOTSUPP,
+                "clk={clk}"
+            );
+        }
+        assert_eq!(
+            clock_nanosleep(
+                CLOCK_THREAD_CPUTIME_ID,
+                0,
+                core::ptr::null(),
                 core::ptr::null_mut()
             ),
             crate::errno::EINVAL
         );
     }
 
+    /// `timespec64_valid` refuses a negative second in both forms.  The
+    /// relative form answered EINTR and the absolute form 0 until 2026-09-26.
     #[test]
-    fn test_clock_nanosleep_recovery_after_einval() {
-        // A rejected call must not corrupt state — a subsequent
-        // valid-flags call still behaves correctly.
+    fn test_clock_nanosleep_negative_seconds_einval() {
         let req = Timespec {
-            tv_sec: 0,
+            tv_sec: -1,
             tv_nsec: 0,
         };
-        let r1 = clock_nanosleep(CLOCK_REALTIME, 1 << 7, &req, core::ptr::null_mut());
-        assert_eq!(r1, crate::errno::EINVAL);
-        let r2 = clock_nanosleep(CLOCK_REALTIME, 0, &req, core::ptr::null_mut());
-        assert_ne!(
-            r2,
-            crate::errno::EINVAL,
-            "valid call after rejected one must still succeed"
-        );
-    }
-
-    #[test]
-    fn test_clock_nanosleep_single_bits_outside_mask_all_rejected() {
-        // Exhaustive: every single-bit value 1<<1 .. 1<<30 must be
-        // rejected (1<<0 is TIMER_ABSTIME itself and is valid).
-        // Guards against a future TIMER_ABSTIME change silently
-        // widening the accepted mask.
-        let req = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        for shift in 1..31 {
-            let bit = 1i32 << shift;
+        for flags in [0, TIMER_ABSTIME] {
             assert_eq!(
-                clock_nanosleep(CLOCK_REALTIME, bit, &req, core::ptr::null_mut()),
+                clock_nanosleep(CLOCK_REALTIME, flags, &req, core::ptr::null_mut()),
                 crate::errno::EINVAL,
-                "bit {:#x} should be rejected by clock_nanosleep mask",
-                bit
+                "flags {flags}"
             );
         }
     }
 
+    /// An absolute deadline far in the future does not overflow: the sum
+    /// saturates, where it used to multiply unchecked.
     #[test]
-    fn test_clock_nanosleep_bad_flags_before_invalid_clock() {
-        // Both bad flags AND bad clock id would normally produce
-        // EINVAL via different paths.  Mask check must fire first
-        // (matches Linux ordering).  We can't differentiate the
-        // value, but the test exercises the path with valid clock
-        // checks unreachable.
-        let req = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
+    fn test_timespec_to_ns_saturates() {
+        let far = Timespec {
+            tv_sec: i64::MAX,
+            tv_nsec: 999_999_999,
         };
-        assert_eq!(
-            clock_nanosleep(99_999, 1 << 9, &req, core::ptr::null_mut()),
-            crate::errno::EINVAL
-        );
-    }
-
-    #[test]
-    fn test_clock_nanosleep_bad_flags_before_invalid_nsec() {
-        // Bad flags must fire before the nsec validation.
-        let req = Timespec {
-            tv_sec: 0,
-            tv_nsec: 2_000_000_000,
+        assert_eq!(timespec_to_ns_saturating(&far), u64::MAX);
+        let one = Timespec {
+            tv_sec: 1,
+            tv_nsec: 5,
         };
-        assert_eq!(
-            clock_nanosleep(CLOCK_REALTIME, 1 << 6, &req, core::ptr::null_mut()),
-            crate::errno::EINVAL
-        );
+        assert_eq!(timespec_to_ns_saturating(&one), 1_000_000_005);
     }
 
     // -- Phase 153: clock_nanosleep clock-vs-NULL ordering + NULL→EFAULT --
@@ -8647,15 +8644,12 @@ mod tests {
 
     #[test]
     fn test_clock_nanosleep_every_valid_clock_null_request_efault_phase153() {
-        // The EFAULT path must apply uniformly to every valid clock.
+        // The EFAULT path applies to every clock that can be slept on; the
+        // others are `test_clock_nanosleep_clocks_that_cannot_sleep`'s.
         for &clk in &[
             CLOCK_REALTIME,
             CLOCK_MONOTONIC,
             CLOCK_PROCESS_CPUTIME_ID,
-            CLOCK_THREAD_CPUTIME_ID,
-            CLOCK_MONOTONIC_RAW,
-            CLOCK_REALTIME_COARSE,
-            CLOCK_MONOTONIC_COARSE,
             CLOCK_BOOTTIME,
         ] {
             assert_eq!(
@@ -8704,11 +8698,9 @@ mod tests {
     }
 
     #[test]
-    fn test_clock_nanosleep_flag_mask_still_beats_null_phase153() {
-        // Phase 102 invariant must survive Phase 153: stray flag bits
-        // are diagnosed BEFORE the clock check and BEFORE the NULL
-        // check.  Bad flag + valid clock + NULL must give EINVAL
-        // (from flag mask), not EFAULT (from NULL).
+    fn test_clock_nanosleep_stray_flag_does_not_beat_null_phase153() {
+        // A stray flag bit is not a verdict, so a NULL request is EFAULT
+        // with it as without it.  (EINVAL, from the mask, until 2026-09-26.)
         assert_eq!(
             clock_nanosleep(
                 CLOCK_REALTIME,
@@ -8716,17 +8708,7 @@ mod tests {
                 core::ptr::null(),
                 core::ptr::null_mut()
             ),
-            crate::errno::EINVAL,
-            "flag mask must still fire before clock/NULL checks"
-        );
-    }
-
-    #[test]
-    fn test_clock_nanosleep_flag_mask_still_beats_bad_clock_phase153() {
-        // Bad flag + bad clock + NULL: still EINVAL via flag mask.
-        assert_eq!(
-            clock_nanosleep(99_999, i32::MIN, core::ptr::null(), core::ptr::null_mut()),
-            crate::errno::EINVAL
+            crate::errno::EFAULT
         );
     }
 
@@ -9586,18 +9568,27 @@ mod tests {
 
     #[test]
     fn test_clock_settime_large_tv_sec_realtime_cap_gate() {
-        // A far-future timestamp (year ~2262) — must still pass the
-        // argument check and reach the cap gate (EPERM, cap dropped).
+        // `timespec64_valid_settod` runs before the capability check
+        // (kernel/time/time.c:174), so a time at or past
+        // `TIME_SETTOD_SEC_MAX` is EINVAL even without CAP_SYS_TIME; one just
+        // short of it reaches the cap gate.  The year-2262 time here reached
+        // the gate until 2026-09-26.
         let _g = CapGuard::snapshot();
         drop_cap_sys_time();
-        let ts = Timespec {
-            tv_sec: 9_223_372_036,
-            tv_nsec: 500,
-        };
-        errno::set_errno(0);
-        let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
-        assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        for (secs, want) in [
+            (9_223_372_036, errno::EINVAL),
+            (TIME_SETTOD_SEC_MAX, errno::EINVAL),
+            (TIME_SETTOD_SEC_MAX - 1, errno::EPERM),
+        ] {
+            let ts = Timespec {
+                tv_sec: secs,
+                tv_nsec: 500,
+            };
+            errno::set_errno(0);
+            let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
+            assert_eq!(ret, -1, "tv_sec {secs}");
+            assert_eq!(errno::get_errno(), want, "tv_sec {secs}");
+        }
     }
 
     // ------------------------------------------------------------------

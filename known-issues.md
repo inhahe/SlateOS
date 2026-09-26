@@ -23839,6 +23839,51 @@ opened onto more:
 its copy, and our kernel makes that check inside the call, which a NULL
 pointer never reaches.
 
+**Thirteenth pass, 2026-09-26 — `semaphore.rs` (8 sites), lane D.** Against
+glibc 2.39's nptl and posix/shm-directory.c. `sem_wait`, `sem_trywait`,
+`sem_post` and `sem_getvalue` were right: the pointer is the first thing each
+touches. The rest:
+
+- **`sem_init`** tested `sem` before the value; glibc refuses a value past
+  `SEM_VALUE_MAX` first.
+- **`sem_timedwait`** tested both pointers before the deadline; glibc reads
+  `abstime->tv_nsec` first, so a NULL `sem` with a malformed deadline is
+  `EINVAL`.
+- **`sem_close(NULL)`** was `EFAULT`; glibc looks the pointer up among its
+  mappings and never dereferences it, so it is `EINVAL`.
+- **The name check** required one leading `/`, refused a second, and called a
+  long name `EINVAL`. glibc's `__shm_get_name` strips *every* leading `/` —
+  `"sem"`, `"/sem"` and `"//sem"` are one semaphore — refuses only an empty
+  name or an inner `/`, and a name too long for `/dev/shm/sem.NAME` is
+  `ENAMETOOLONG`; names were also capped at 63 bytes.
+- Beside them: `sem_init` accepts a non-zero `pshared` and then works only
+  inside one process, and the pthread calls that ask for process-shared
+  objects do not exist — `B-D-PROCESS-SHARED-SYNC-IS-SILENTLY-PRIVATE` (new).
+
+**Fourteenth pass, 2026-09-26 — `time.rs` (6 sites; `clock_gettime` and
+`timer_create` were the eleventh pass's), lane D.** `nanosleep`,
+`timer_gettime` and `getitimer` were right.
+
+- **`clock_nanosleep`** refused every flag bit but `TIMER_ABSTIME`, ahead of
+  everything, under a comment citing `if (flags & ~TIMER_ABSTIME) return
+  -EINVAL;` in `common_nsleep` — which is not there; Linux reads only
+  `TIMER_ABSTIME`. Behind it: the clocks that cannot be slept on
+  (`CLOCK_MONOTONIC_RAW` and the `_COARSE` pair) are `EOPNOTSUPP`, and the
+  calling thread's CPU clock is glibc's `EINVAL`; a negative `tv_sec` was
+  "already past" (0) in the absolute form and `EINTR` in the relative one,
+  where `timespec64_valid` says `EINVAL`; every failure of a relative sleep
+  was reported as `EINTR`; an interrupted absolute sleep answered 0; and a
+  distant absolute deadline overflowed its nanosecond sum.
+- **`clock_settime`** lacked `timespec64_valid_settod`'s upper bound
+  (`TIME_SETTOD_SEC_MAX`).
+- **`setitimer`** refused a NULL new value with `EFAULT`; Linux 6.6 takes it as
+  zeros — disarm — a "misfeature" it still supports, and reads the value before
+  judging `which`.
+
+The defect-marker habit held again, in its strongest form yet: a comment
+quoting upstream code that upstream does not contain. **Check a quoted line
+against the source before believing the quotation.**
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -23851,8 +23896,8 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 `epoll.rs`, walked by passes five to ten. What is left is a long tail, and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
-files — about a dozen of them classified by that pass. The twelfth pass swept
-`ioctl.rs`; next are `semaphore.rs` and `time.rs` at eight each, `aio.rs` and
+files — about a dozen of them classified by that pass. Passes twelve to
+fourteen swept `ioctl.rs`, `semaphore.rs` and `time.rs`; next are `aio.rs` and
 `sched.rs` at six, `mqueue.rs` and `resolv.rs` at five, and twelve files at
 four, in that order.
 
@@ -165603,6 +165648,38 @@ Then no depth cap is needed but `PATH_MAX`'s, and `nopenfd < 1` becomes 1, as
 glibc's `ftw_startup` makes it, instead of `EINVAL`. Symlink cycles without
 `FTW_PHYS` then need glibc's other half, the set of directories already walked
 (`find_object`), since `MAX_DEPTH` is what stops them today.
+
+### [D] B-D-PROCESS-SHARED-SYNC-IS-SILENTLY-PRIVATE — 2026-09-26 — OPEN
+
+**Where:** `posix/src/semaphore.rs` (`sem_init`), `posix/src/pthread.rs` (the
+attribute calls), `kernel/src/ipc/futex.rs` (lane A).
+
+**In short:** a semaphore made with `sem_init(sem, 1, n)` — "shared between
+processes" — is accepted and then works only inside one process: a waiter in
+one process is never woken by a post in another, because the kernel's futex
+queues are keyed by (address space, virtual address), not by the physical page
+two processes share. And the calls that ask for a process-shared mutex,
+condition variable or barrier do not exist, so a program using them fails to
+link: `pthread_mutexattr_setpshared`/`getpshared`,
+`pthread_condattr_setpshared`/`getpshared`, the whole `pthread_barrierattr_*`
+family, and the mutex protocol and robustness attributes
+(`pthread_mutexattr_setprotocol`, `setprioceiling`, `setrobust`,
+`pthread_mutex_consistent`). Only `pthread_rwlockattr_setpshared` exists, and
+it already refuses `PTHREAD_PROCESS_SHARED` with `ENOTSUP`.
+
+**Found by:** the NULL-pointer audit's thirteenth pass (`semaphore.rs`), whose
+`sem_init` says "`pshared` is ignored".
+
+**Proper fix:**
+1. Now, in libc: glibc's own answer where shared futexes are unsupported —
+   `futex_supports_pshared` returns `ENOTSUP` — for `sem_init` with a non-zero
+   `pshared` and for each `setpshared(PTHREAD_PROCESS_SHARED)`; add the missing
+   attribute calls, with `ENOTSUP` for what the kernel cannot back
+   (process-shared objects, `PTHREAD_PRIO_INHERIT` without PI futexes, robust
+   mutexes without a robust list).
+2. Then, in the kernel (a request to lane A): key a futex on a shared mapping by
+   its physical page, as Linux does for a non-private futex, so that
+   process-shared objects can be allowed.
 
 ### [D] TD-D-TSEARCH-IS-AN-UNBALANCED-TREE — 2026-09-26 — FIXED 2026-09-26
 

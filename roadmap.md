@@ -1805,6 +1805,12 @@ D's to act on once answered).
       glibc's ioctls, so a descriptor that is not a terminal is `ENOTTY`;
       inotify names are no longer cut at 63 bytes.  The kernel's halves are
       requested of lane A.
+    * the thirteenth and fourteenth passes (`semaphore.rs`, `time.rs`):
+      semaphore names are glibc's (leading slashes stripped, up to 251
+      bytes), `sem_close(NULL)` is `EINVAL`; `clock_nanosleep` ignores the
+      flag bits Linux ignores, refuses the clocks it cannot sleep on, and
+      reports what the kernel reports; `setitimer(which, NULL, …)` disarms,
+      as on Linux.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

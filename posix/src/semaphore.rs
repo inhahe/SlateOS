@@ -104,18 +104,21 @@ pub const SEM_FAILED: *mut SemT = core::ptr::null_mut();
 /// `pshared` is ignored (cross-process semaphores not supported).
 /// `value` is the initial semaphore count.
 ///
-/// Returns 0 on success, -1 on error.
+/// Returns 0 on success, -1 on error.  glibc's order (nptl/sem_init.c):
+/// `value > SEM_VALUE_MAX` is `EINVAL` before `sem` is touched, so a NULL
+/// `sem` is `EFAULT` -- this libc's substitute for the write's fault
+/// (design-decisions.md §303) -- only for a valid value.  The NULL test came
+/// first until 2026-09-26.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_init(sem: *mut SemT, _pshared: i32, value: u32) -> i32 {
-    if sem.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
     // Guard against u32 values that would wrap to negative when cast
     // to i32.  Our SEM_VALUE_MAX is i32::MAX.
     if value > i32::MAX as u32 {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if sem.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -313,7 +316,11 @@ pub extern "C" fn sem_post(sem: *mut SemT) -> i32 {
 /// `abstime` passes before the semaphore can be decremented.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Timespec) -> i32 {
-    if sem.is_null() || abstime.is_null() {
+    // glibc reads `abstime->tv_nsec` first, then `sem` (nptl/sem_timedwait.c):
+    // a NULL deadline is the first fault, a malformed one the first EINVAL,
+    // and only then is a NULL `sem` reached.  Both pointers were tested
+    // together, ahead of the deadline, until 2026-09-26.
+    if abstime.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
@@ -328,6 +335,10 @@ pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Tim
     // SAFETY: abstime verified non-null above.
     if !crate::time::valid_nanoseconds(unsafe { (*abstime).tv_nsec }) {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if sem.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -416,8 +427,14 @@ pub extern "C" fn sem_getvalue(sem: *mut SemT, sval: *mut i32) -> i32 {
 /// Maximum number of distinct named semaphores live at once.
 const MAX_NAMED_SEMS: usize = 16;
 
-/// Maximum length of a semaphore name (including the leading `/`).
-const MAX_SEM_NAME: usize = 64;
+/// The longest semaphore name, leading slashes stripped: `NAME_MAX` less the
+/// `sem.` that glibc puts in front of it to name `/dev/shm/sem.NAME`.  (glibc's
+/// `__shm_get_name` itself allows `NAME_MAX`; a name of 252 to 255 bytes then
+/// fails as `ENAMETOOLONG` in the `open`, which is the answer here too.)
+///
+/// It was 64, counting the leading slash, until 2026-09-26, and a longer
+/// name was `EINVAL`.
+const MAX_SEM_NAME: usize = 255 - 4;
 
 #[repr(C)]
 struct NamedSem {
@@ -477,39 +494,38 @@ fn acquire_sem_lock() -> crate::perprocess::PoolGuard<'static> {
     unsafe { crate::perprocess::lock_pool(sem_lock()) }
 }
 
-/// Validate a POSIX semaphore name: starts with `/`, no further `/`,
-/// fits in `MAX_SEM_NAME` bytes.  Returns the name length on success.
-fn validate_sem_name(name: *const u8) -> Result<usize, i32> {
+/// A POSIX semaphore name as glibc's `__shm_get_name` (posix/shm-directory.c)
+/// reads it: every leading `/` is stripped -- `"sem"`, `"/sem"` and
+/// `"//sem"` are one semaphore -- and what is left must be non-empty with no
+/// `/` in it (`EINVAL`), and no longer than [`MAX_SEM_NAME`]
+/// (`ENAMETOOLONG`).  Returns the stripped name and its length.
+///
+/// A NULL `name` is `EFAULT`, this libc's substitute for glibc's fault on
+/// `name[0]` (design-decisions.md §303).  Until 2026-09-26 the leading `/`
+/// was required, only one was allowed, and a long name was `EINVAL`.
+fn validate_sem_name(name: *const u8) -> Result<(*const u8, usize), i32> {
     if name.is_null() {
         return Err(errno::EFAULT);
     }
-    let mut len: usize = 0;
-    while len <= MAX_SEM_NAME {
-        // SAFETY: caller contract — `name` is NUL-terminated.
-        let b = unsafe { *name.add(len) };
-        if b == 0 {
-            break;
+    let mut start = name;
+    // SAFETY: caller contract -- `name` is NUL-terminated, so every byte up
+    // to and including its NUL may be read.
+    unsafe {
+        while *start == b'/' {
+            start = start.add(1);
         }
-        len = len.wrapping_add(1);
     }
-    if len == 0 || len > MAX_SEM_NAME {
+    // SAFETY: as above; `start` is within the same string.
+    let len = unsafe { crate::string::strlen(start) };
+    // SAFETY: `start` holds `len` bytes before its NUL.
+    let bytes = unsafe { core::slice::from_raw_parts(start, len) };
+    if len == 0 || bytes.contains(&b'/') {
         return Err(errno::EINVAL);
     }
-    // SAFETY: bounded above.
-    let first = unsafe { *name };
-    if first != b'/' {
-        return Err(errno::EINVAL);
+    if len > MAX_SEM_NAME {
+        return Err(errno::ENAMETOOLONG);
     }
-    let mut i: usize = 1;
-    while i < len {
-        // SAFETY: i < len.
-        let b = unsafe { *name.add(i) };
-        if b == b'/' {
-            return Err(errno::EINVAL);
-        }
-        i = i.wrapping_add(1);
-    }
-    Ok(len)
+    Ok((start, len))
 }
 
 /// Find the slot index whose name matches `name[..len]`, considering
@@ -589,16 +605,16 @@ fn slot_for_ptr(sem: *mut SemT) -> Option<usize> {
 /// # Errors
 ///
 /// - `EFAULT` — `name` is NULL.
-/// - `EINVAL` — name doesn't start with `/`, contains internal `/`, is
-///   empty, or exceeds `MAX_SEM_NAME` bytes; or `value` exceeds
-///   `i32::MAX`.
+/// - `EINVAL` — the name, its leading slashes stripped, is empty or
+///   contains a `/` ([`validate_sem_name`]); or `value` exceeds `i32::MAX`.
+/// - `ENAMETOOLONG` — the stripped name is longer than [`MAX_SEM_NAME`].
 /// - `EEXIST` — `O_CREAT | O_EXCL` and the name already exists.
 /// - `ENOENT` — name doesn't exist and `O_CREAT` is not set.
 /// - `ENOSPC` — the named-sem pool is exhausted.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_open(name: *const u8, oflag: i32, mode: u32, value: u32) -> *mut SemT {
     let _ = mode;
-    let name_len = match validate_sem_name(name) {
+    let (name, name_len) = match validate_sem_name(name) {
         Ok(n) => n,
         Err(e) => {
             errno::set_errno(e);
@@ -669,14 +685,12 @@ pub extern "C" fn sem_open(name: *const u8, oflag: i32, mode: u32, value: u32) -
 ///
 /// # Errors
 ///
-/// - `EFAULT` — `sem` is NULL.
-/// - `EINVAL` — `sem` doesn't refer to a known named semaphore.
+/// - `EINVAL` — `sem` doesn't refer to a known named semaphore, NULL
+///   included: glibc looks the pointer up among its mappings and never
+///   dereferences it (sysdeps/pthread/sem_close.c).  NULL was `EFAULT`
+///   until 2026-09-26.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_close(sem: *mut SemT) -> i32 {
-    if sem.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
     let _guard = acquire_sem_lock();
     let Some(idx) = slot_for_ptr(sem) else {
         errno::set_errno(errno::EINVAL);
@@ -707,11 +721,11 @@ pub extern "C" fn sem_close(sem: *mut SemT) -> i32 {
 /// # Errors
 ///
 /// - `EFAULT` — `name` is NULL.
-/// - `EINVAL` — invalid name format.
+/// - `EINVAL`, `ENAMETOOLONG` — as for [`sem_open`].
 /// - `ENOENT` — no semaphore with this name exists.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_unlink(name: *const u8) -> i32 {
-    let name_len = match validate_sem_name(name) {
+    let (name, name_len) = match validate_sem_name(name) {
         Ok(n) => n,
         Err(e) => {
             errno::set_errno(e);
@@ -823,6 +837,15 @@ mod tests {
         // i32::MAX + 1 = 2147483648 — should be rejected
         let ret = sem_init(&raw mut sem, 0, (i32::MAX as u32).wrapping_add(1));
         assert_eq!(ret, -1);
+    }
+
+    /// glibc tests the value before it touches `sem`: a NULL `sem` with too
+    /// large a value is EINVAL.  (EFAULT until 2026-09-26.)
+    #[test]
+    fn test_sem_init_bad_value_beats_null_sem() {
+        crate::errno::set_errno(0);
+        assert_eq!(sem_init(core::ptr::null_mut(), 0, u32::MAX), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
@@ -1033,18 +1056,60 @@ mod tests {
 
     #[test]
     fn test_sem_open_invalid_name() {
-        // No leading '/'.
-        crate::errno::set_errno(0);
-        let p = sem_open(b"bad\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
-        assert_eq!(p, SEM_FAILED);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         // Embedded '/'.
         let p = sem_open(b"/a/b\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
         assert_eq!(p, SEM_FAILED);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-        // Empty.
-        let p = sem_open(b"\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
-        assert_eq!(p, SEM_FAILED);
+        // Empty, and nothing but slashes.
+        for name in [&b"\0"[..], b"/\0", b"///\0"] {
+            crate::errno::set_errno(0);
+            let p = sem_open(name.as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+            assert_eq!(p, SEM_FAILED);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+    }
+
+    /// glibc strips every leading `/`, so "sem", "/sem" and "//sem" name one
+    /// semaphore; the first was EINVAL and the last EINVAL until 2026-09-26.
+    #[test]
+    fn test_sem_open_strips_leading_slashes() {
+        let p = sem_open(b"lead13\0".as_ptr(), crate::fcntl::O_CREAT, 0, 3);
+        assert_ne!(p, SEM_FAILED, "no leading slash is a valid name");
+        let q = sem_open(b"/lead13\0".as_ptr(), 0, 0, 0);
+        let r = sem_open(b"//lead13\0".as_ptr(), 0, 0, 0);
+        assert_eq!((q, r), (p, p), "one semaphore by all three names");
+        assert_eq!(sem_close(p), 0);
+        assert_eq!(sem_close(q), 0);
+        assert_eq!(sem_close(r), 0);
+        assert_eq!(sem_unlink(b"///lead13\0".as_ptr()), 0);
+    }
+
+    /// Past `NAME_MAX` less `sem.` a name is ENAMETOOLONG -- unless it also
+    /// has a `/` in it, which glibc tests first.
+    #[test]
+    fn test_sem_open_long_names() {
+        let mut name = std::vec![b'n'; MAX_SEM_NAME + 1];
+        name[0] = b'/';
+        name.push(0); // "/" + MAX_SEM_NAME bytes: just fits
+        let p = sem_open(name.as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+        assert_ne!(p, SEM_FAILED, "errno {}", crate::errno::get_errno());
+        assert_eq!(sem_close(p), 0);
+        assert_eq!(sem_unlink(name.as_ptr()), 0);
+        let mut long = std::vec![b'n'; MAX_SEM_NAME + 1];
+        long.push(0);
+        crate::errno::set_errno(0);
+        assert_eq!(
+            sem_open(long.as_ptr(), crate::fcntl::O_CREAT, 0, 0),
+            SEM_FAILED
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENAMETOOLONG);
+        let last = long.len() - 2;
+        long[last] = b'/';
+        crate::errno::set_errno(0);
+        assert_eq!(
+            sem_open(long.as_ptr(), crate::fcntl::O_CREAT, 0, 0),
+            SEM_FAILED
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
@@ -1135,11 +1200,12 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
     }
 
+    /// NULL is not a mapping glibc knows: EINVAL.  (EFAULT until 2026-09-26.)
     #[test]
-    fn test_sem_close_null_efault() {
+    fn test_sem_close_null_einval() {
         crate::errno::set_errno(0);
         assert_eq!(sem_close(core::ptr::null_mut()), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
@@ -1273,6 +1339,19 @@ mod tests {
         let ret = sem_timedwait(core::ptr::null_mut(), &raw const ts);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// The deadline is read before the semaphore: a NULL `sem` with a
+    /// malformed deadline is EINVAL.  (EFAULT until 2026-09-26.)
+    #[test]
+    fn test_sem_timedwait_bad_deadline_beats_null_sem() {
+        let ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 1_000_000_000,
+        };
+        crate::errno::set_errno(0);
+        assert_eq!(sem_timedwait(core::ptr::null_mut(), &raw const ts), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]

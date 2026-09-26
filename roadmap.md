@@ -1957,6 +1957,17 @@ word; text inside them that says "lane C" is history.
   (design-decisions §1215). Tested end to end against a loopback HTTP
   server.
 
+- `[x]` `[E]` **The IRC client connects** — 2026-09-26. `/connect
+  irc.libera.chat` opens a plain-text connection on its own thread,
+  registers (a taken nickname is retried with `_`), answers PING at once,
+  and every line both ways goes through the parser and handlers that were
+  already there: a `/join` opens the channel when the server says so and
+  switches to it, a `/nick` renames on the server's word, one's own lines
+  are shown because a server never sends them back, a CTCP VERSION is
+  answered rather than drawn. Without a connection nothing is pretended --
+  a command says it was not sent. The window says "plain text" while
+  connected (see E-Q2). Tested end to end against a loopback server.
+
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane
 C's standing note before the split). **Baseline, 2026-09-24:** every `apps/*`

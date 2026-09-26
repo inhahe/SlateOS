@@ -56410,26 +56410,22 @@ own `arg0` call, whose comment shows the author knew and had no way to check.
 Worth a gate; not built here because one command in a hook needs to be right
 about which crates have unix-only code, and that is its own piece of work.
 
-## ircclient: no transport, and no clock a message can be stamped with
+## ircclient: no clock a message can be stamped with (the transport is DONE)
 
-`apps/ircclient` parses IRC and renders it, and has no socket. Two consequences
-are visible in the code and both are deliberate:
+**2026-09-26, lane E: the transport half is done.** `apps/ircclient/src/net.rs`
+connects (`/connect server [port]`, plain text), registers, answers PING, and
+`run_command` sends the line and lets `handle_message` pick up the server's
+echo, exactly as planned below; `tick_interval` is `Some` while connected,
+beside a waker. What is left is the second bullet.
 
-* **Slash commands are applied locally and logged, not sent.** `parse_command`
-  builds the wire line; `run_command` applies the effect of the ones that have
-  a local meaning (`/join`, `/part`, `/nick`, `/me`, `/msg`) and pushes
-  `-> <line>` into the server buffer for the rest, so what would have gone out
-  is visible rather than dropped. When there is a TCP socket, `run_command`
-  sends the line instead and `handle_message` picks the server's echo back up
-  -- which is already written and already tested.
+* ~~**Slash commands are applied locally and logged, not sent.**~~ Done: sent.
 * **`IrcClientApp::timestamp` reuses the stamp of the previous message.** This
   tree has no wall clock a userspace program can read, and inventing a time
   would be wrong in a way nobody could see. Replace it with the real clock when
   one exists; every `ChatMessage` already carries a `timestamp` string.
 
-`tick_interval` returns `None` for the same reason: nothing arrives on a timer.
-It becomes `Some(...)` -- or better, a wakeup on the socket -- when there is a
-connection to read from.
+~~`tick_interval` returns `None` for the same reason.~~ Done: a waker on the
+connection, and a 500 ms clock beside it while connected.
 
 ## radio: two player states with no way into them
 

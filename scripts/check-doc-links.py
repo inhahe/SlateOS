@@ -137,7 +137,11 @@ DEF_RE = re.compile(
     r"|\bconst\s+(?:fn\s+)?(?P<cn>[A-Za-z_][A-Za-z0-9_]*)"
     r"|\bstatic\s+(?:mut\s+)?(?P<st>[A-Za-z_][A-Za-z0-9_]*)"
     r"|\bmacro_rules!\s*(?P<mc>[A-Za-z_][A-Za-z0-9_]*)"
-    r"|^[ \t]+(?P<va>[A-Z][A-Za-z0-9_]*)\s*[,({]"
+    # A variant is followed by `,` `(` `{`, or -- missed until lane A's tree
+    # was first scanned, where it was 170 of 209 findings -- by `=` and an
+    # explicit discriminant (`ResourceExhausted = -304,`), by a comment, or by
+    # nothing at all when it is the last one and has no comma.
+    r"|^[ \t]+(?P<va>[A-Z][A-Za-z0-9_]*)\s*(?:[,({=]|//|$)"
     r"|^[ \t]+(?:pub\s+)?(?P<fl>[a-z_][A-Za-z0-9_]*)\s*:",
     re.M,
 )
@@ -614,6 +618,14 @@ SELFTEST_MUTANTS = [
     ("the unit-yields-a-file check never fires",
      "if cov.files < cov.units:", "if False:"),
 
+    # The named-roots regime: its own floor, and only for named roots.
+    ("the variant branch forgets discriminants and last variants",
+     r"(?:[,({=]|//|$)", r"[,({]"),
+    ("the named-roots judged floor never fires", "if cov.judged < 1:",
+     "if False:"),
+    ("named roots get the absolute floors after all", "if named_roots:",
+     "if False:"),
+
     # The regime split: the absolute floors must apply to one side only.
     ("absolute floors are skipped for EVERY run", "if not whole_tree:",
      "if True:"),
@@ -658,7 +670,7 @@ SELFTEST_MUTANTS = [
 
 
 def coverage_breach(cov: Coverage, whole_tree: bool,
-                    calibrated: bool) -> str | None:
+                    calibrated: bool, named_roots: bool = False) -> str | None:
     """Why this scan is too small to be worth a verdict, or None if it is fine.
 
     Two regimes, because the gate is invoked two ways and a single set of
@@ -700,6 +712,17 @@ def coverage_breach(cov: Coverage, whole_tree: bool,
     off a cliff. The other four are floored ~12x below the surviving corpus
     and ~25x below today's, which is enough room for years of churn and
     still nowhere near the zero that a broken regex or an empty walk yields.
+
+    NAMED ROOTS (`--roots`, `named_roots`) are a third regime. Every number
+    above describes ROOTS, so a caller who names other trees is outside the
+    domain the absolute floors were measured in -- the same reasoning as an
+    uncalibrated tree. Lane A's whole tree is ONE crate, which no crate
+    floor of 5 can admit however much it holds (807 files, 5853 links
+    judged: requests/a-b-your-doc-link-gate-refuses-a-verdict-on-a-single-
+    crate-root.md). What a named set owes instead is to have been seen at
+    all: every root yields a crate (`main` checks that, where the roots are
+    known), and the scan judged at least one link path -- which a broken
+    regex or an empty walk cannot. The default run keeps every floor.
     """
     if cov.crates < 1:
         return "no crate was scanned"
@@ -719,6 +742,12 @@ def coverage_breach(cov: Coverage, whole_tree: bool,
         # a particular corpus, and this is not that corpus. See `TREE_MARKERS`
         # -- refusing here would be a false accusation, not a cautious one.
         # The caller announces the omission so it cannot pass unnoticed.
+        return None
+    if named_roots:
+        # The floors below describe ROOTS; see the docstring's last section.
+        if cov.judged < 1:
+            return ("a scan of the named roots judged no link path at all, so "
+                    "nothing about them was established")
         return None
     for got, floor, what in (
         (cov.crates, MIN_TREE_CRATES, "crate(s)"),
@@ -984,6 +1013,28 @@ def selftest() -> int:
     # nothing, or every `assert_eq!(x, ...)` would make its local `x` an item.
     check("status" not in d.scope, "an std macro's argument was taken as a name")
 
+    # Every shape a variant ends in. The kernel's `KernelError` gives each of
+    # its variants a discriminant, and until the gate first read that tree
+    # none of them was seen: 170 false findings in one scan.
+    variants = """
+        pub enum KernelError {
+            ResourceExhausted = -304,
+            NoSuchDevice = -601, // a comment after the comma
+            Tuple(u8),
+            Struct { x: u8 },
+            Commented // no comma, a comment
+        }
+        enum Last {
+            OnlyOne
+        }
+    """
+    d = Defs()
+    defs_in_text(variants, d)
+    d.resolve()
+    for name in ("ResourceExhausted", "NoSuchDevice", "Tuple", "Struct",
+                 "Commented", "OnlyOne"):
+        check(name in d.scope, f"variant {name!r} missing from scope")
+
     # THE EXIT-CODE CONTRACT, which is not a detail of link-finding and is the
     # one thing above that nothing above tests.
     #
@@ -1099,6 +1150,21 @@ def selftest() -> int:
           "an empty whole-tree scan is a breach")
     check(coverage_breach(Coverage(), False, True) is not None,
           "an empty subset run is a breach too -- it has no crates")
+
+    # Named roots: lane A's kernel, one crate holding thousands of links, is
+    # a verdict; the same scan under the default roots is not; and a named
+    # scan that judged nothing is refused.
+    kernel = cov_with(crates=1, units=1)
+    check(coverage_breach(kernel, True, True, named_roots=True) is None,
+          "a named single-crate root that judged links is a verdict")
+    check(coverage_breach(kernel, True, True) is not None,
+          "...while the same scan of the DEFAULT roots is below their floors")
+    check(coverage_breach(cov_with(crates=1, units=1, judged=0), True, True,
+                          named_roots=True) is not None,
+          "a named scan that judged no link path is refused")
+    check(coverage_breach(cov_with(units=0), True, True,
+                          named_roots=True) is not None,
+          "a named scan still owes the structural floors")
 
     # The structural floors bite in BOTH regimes, which is the whole reason a
     # subset run is safe to exempt from the absolute ones.
@@ -1482,6 +1548,19 @@ def main() -> int:
             crates = all_crates
         findings, cov = scan(tree, crates)
         whole_tree = not paths
+        named = bool(args.roots) and roots != ROOTS
+        if whole_tree and named:
+            # A named root that holds no crate is a scan that did not happen
+            # for that root -- a typo, or a tree renamed away -- and the other
+            # roots' links would otherwise vouch for it.
+            empty = [r for r in roots
+                     if not any(c == r.rstrip("/") or c.startswith(r.rstrip("/") + "/")
+                                for c in all_crates)]
+            if empty:
+                print(f"check-doc-links: refusing to report a verdict -- no "
+                      f"crate found under {', '.join(r + '/' for r in empty)}",
+                      file=sys.stderr)
+                return 2
         calibrated = is_calibrated_corpus(ROOT)
         if whole_tree and not calibrated:
             # Said out loud, every time. A floor that quietly stops applying is
@@ -1493,7 +1572,7 @@ def main() -> int:
                   f"{', '.join(TREE_MARKERS)}, so it is not the corpus the "
                   f"absolute floors were measured against; structural floors "
                   f"only.", file=sys.stderr)
-        breach = coverage_breach(cov, whole_tree, calibrated)
+        breach = coverage_breach(cov, whole_tree, calibrated, named_roots=named)
         if breach:
             # Exit 2, not 1: nothing was established about anyone's links, so
             # this is "could not look", not "looked and found something". The

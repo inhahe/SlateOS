@@ -7139,6 +7139,9 @@ about anything -- it drew {} text command(s)",
             probe::scroll_at_point(&mut app, Target::TransferList, 3.0);
         }
         assert_eq!(app.transfer_scroll, 0);
+        // Newest name first, so the list on screen is not the order the
+        // transfers were added in -- Down must walk the one on screen.
+        app.sort_ascending = false;
         for _ in 0..30 {
             probe::key(&mut app, &probe::press(Key::Down));
         }
@@ -7246,6 +7249,14 @@ about anything -- it drew {} text command(s)",
         assert!(!app.search_active && app.search_query.is_empty());
         probe::key(&mut app, &probe::press(Key::Slash));
         assert!(app.search_active, "/ did not start a search");
+        // A press anywhere else takes the keys back from the box.
+        probe::click(&mut app, Target::TransferList);
+        assert!(!app.search_active, "the search box kept the keys");
+        probe::type_str(&mut app, "q");
+        assert!(
+            app.search_query.is_empty(),
+            "a key went into the search box"
+        );
     }
 
     #[test]

@@ -61,6 +61,10 @@ pub enum Choice {
 /// `P` is the application's own: which tab, the window, an Open. It comes
 /// back from [`pending`](Self::pending) when the answer arrives, so the
 /// question and what it was about cannot be separated.
+///
+/// `Clone` and `Debug` because the toolkit's dialog is both, and some
+/// applications derive them on their whole state.
+#[derive(Clone, Debug)]
 pub struct Question<P> {
     dialog: AlertDialog,
     pending: P,
@@ -79,7 +83,11 @@ impl<P: Copy> Question<P> {
         ]);
         let mut dialog = AlertDialog::warning("Unsaved changes", message)
             .with_buttons(buttons)
-            .with_detail(prompt);
+            .with_detail(prompt)
+            // A click beside the card answers nothing, as with any desktop's
+            // modal question: a stray click must not be what takes it away.
+            // Escape and Cancel are the ways out.
+            .with_click_outside_dismiss(false);
         dialog.show();
         dialog.tick(FADE_DONE_MS);
         Self { dialog, pending }
@@ -101,8 +109,8 @@ impl<P: Copy> Question<P> {
     /// it is still being asked.
     ///
     /// Call it before anything else looks at the event, for every event while
-    /// the question is up. It takes every key and every click -- a click
-    /// outside the card cancels, like Escape.
+    /// the question is up. It takes every key and every click; a click
+    /// beside its card answers nothing.
     pub fn handle(&mut self, event: &Event) -> Option<Choice> {
         if let Event::Key(key) = event
             && key.pressed
@@ -283,12 +291,15 @@ mod tests {
         }
     }
 
-    /// A click beside the card cancels, like Escape.
+    /// A click beside the card is not an answer: a stray click must not take
+    /// the question away.
     #[test]
-    fn a_click_outside_cancels() {
+    fn a_click_outside_answers_nothing() {
         let mut q = question();
         drawn(&mut q);
-        assert_eq!(q.handle(&click(2.0, 2.0)), Some(Choice::Cancel));
+        assert_eq!(q.handle(&click(2.0, 2.0)), None);
+        let (x, y) = q.button_centre(Choice::Cancel).expect("drawn");
+        assert_eq!(q.handle(&click(x, y)), Some(Choice::Cancel), "still asking");
     }
 
     /// It is on the screen from the first frame, with no clock to fade it in.

@@ -166598,12 +166598,25 @@ never saved. None records unsaved changes, and each answers a close with
 and the question. Four more that looked like the same case are a worse one --
 see `[E] Notes, contacts, snippets and kanban keep nothing` below.
 
-**One question, not thirteen.** The six applications fixed so far each drew
-the question by hand, beside the toolkit's own `guitk::modal::AlertDialog`,
-which has focus, hover, Escape, a scrim and the destructive colour for the one
-button that loses work. `apps/unsaved` (new, lane E) is that dialog asked the
-one way -- Save, Don't save, Cancel; S, D, Escape -- and the six move onto it as
-the three get theirs.
+**One question, not thirteen -- done the same day.** The six applications
+fixed first each drew the question by hand, beside the toolkit's own
+`guitk::modal::AlertDialog`, which has focus, hover, Escape, a scrim and the
+destructive colour for the one button that loses work. `apps/unsaved` is that
+dialog asked the one way -- Save, Don't save, Cancel; S, D, Escape, Tab; a
+click beside the card answers nothing; shown at once rather than faded in, for
+the applications that have no clock -- and paint, the text editor, the
+markdown editor, the hex editor, the JSON viewer and slides all ask through it
+now. What changed for a user: slides' Y ("yes, go on") and the markdown
+editor's C ("cancel") are gone in favour of the shared keys, and a key that
+answers nothing is swallowed rather than read as Keep. Mutation table
+`apps/unsaved/mutate.py` (7 rows); each application's table follows its own
+routing to the question.
+
+**Left behind on purpose:** the two editors' *other* modal question -- "the
+file changed on disk" -- is still drawn by hand in both. It has four answers
+and a merge review behind one of them, which is more than a dialog's row of
+buttons; it is the next candidate for the same treatment, not a reason to
+have left this one hand-drawn.
 
 ### [E] Notes, contacts, snippets and kanban keep nothing -- 2026-09-25
 **Status:** OPEN -- lane E
@@ -166655,3 +166668,24 @@ Enter) in it edits `input` itself -- drawn verbatim, with a caret, Up/Down by
 line, the caret kept on screen, the parse re-run as the text changes -- and
 Escape returns to the formatted view. `guitk` has no multi-line editor to lend
 (`textedit` is single-line), so the editing stays in this crate.
+
+### [E] The mutation harness scored every failure in a submodule's tests as a crash -- 2026-09-25
+**Status:** FIXED (lane E, 2026-09-25) -- `scripts/mutation_harness.py`
+
+**In short:** the tool that proves a test suite catches broken code read a
+failing test's name only when the test lived in the crate's root module
+(`tests::name`). A test in a module the root declares is listed as
+`input::tests::name`, and went unread -- so for a crate tested that way, every
+mutation looked like a crash and was scored "caught", whatever the tests had
+said. A table could pass a crate whose tests caught nothing.
+
+**How it was found.** The text editor's close question is tested in
+`apps/editor/src/input.rs`; its first sweep reported all seven rows "caught by a
+crash", and its `main.rs` rows were refused as naming "no such test", because
+the table check looked for test functions only in the file being mutated.
+
+**The fix, additive:** failures are read under any module path, and a table's
+test names are looked up in every `.rs` file beside the mutated one. Tables
+that mutate a file other than the crate root: `apps/editor` (now swept),
+`apps/email` and `apps/mediaconvert` -- both never swept, so no recorded
+result rests on the old reading; their sweeps are in lane E's queue.

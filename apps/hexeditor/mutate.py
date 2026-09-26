@@ -74,16 +74,15 @@ MUTATIONS = [
         ["closing_the_window_over_unsaved_work_asks_and_each_answer_is_kept"],
     ),
     (
-        "keys edit the file under the question",
-        "        if self.close_prompt.is_some() {\n            let typed = key.typed()",
-        "        if false {\n            let typed = key.typed()",
-        ["closing_the_window_over_unsaved_work_asks_and_each_answer_is_kept"],
-    ),
-    (
-        "the question's buttons take no click",
-        "        if self.close_prompt.is_some() {\n            if matches!(ev.kind, MouseEventKind::Press(MouseButton::Left))",
-        "        if false {\n            if matches!(ev.kind, MouseEventKind::Press(MouseButton::Left))",
-        ["closing_the_window_over_unsaved_work_asks_and_each_answer_is_kept"],
+        "keys and clicks reach the file under the question",
+        "        if let Some(question) = self.question.as_mut()\n"
+        "            && matches!(event, Event::Key(_) | Event::Mouse(_))",
+        "        if let Some(question) = self.question.as_mut()\n"
+        "            && false",
+        [
+            "closing_the_window_over_unsaved_work_asks_and_each_answer_is_kept",
+            "ctrl_w_asks_before_closing_a_modified_tab",
+        ],
     ),
     (
         "saving the untitled document does not carry on closing",

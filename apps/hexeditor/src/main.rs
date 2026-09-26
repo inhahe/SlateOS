@@ -44,6 +44,7 @@ use oswindow::app::{self, App, Response};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
+use unsaved::{Choice, Question};
 
 use std::collections::VecDeque;
 
@@ -1513,8 +1514,10 @@ pub struct HexEditor {
     /// What the file picker is choosing a path for, since one picker serves
     /// opening and saving.
     pub picker_purpose: PickerPurpose,
-    /// "Unsaved changes -- save them?", while it is being asked.
-    pub close_prompt: Option<CloseScope>,
+    /// "Unsaved changes -- save them?", while it is being asked, and what it
+    /// would close: the toolkit's own dialog, asked the one way every editor
+    /// here asks it (`apps/unsaved`).
+    pub question: Option<Question<CloseScope>>,
     /// Set when the window may close. The next response is `Exit`.
     pub quit: bool,
 }
@@ -1539,17 +1542,6 @@ pub enum CloseScope {
     Tab(usize),
     /// The whole window.
     Window,
-}
-
-/// The answers to "this has unsaved changes".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CloseChoice {
-    /// Save, then close if the save worked.
-    Save,
-    /// Close without saving.
-    Discard,
-    /// Do not close.
-    Cancel,
 }
 
 /// The toolbar's buttons: label, what it does, and where it is drawn -- the
@@ -1643,7 +1635,7 @@ impl HexEditor {
             clipboard: Vec::new(),
             status_message: String::new(),
             picker_purpose: PickerPurpose::Open,
-            close_prompt: None,
+            question: None,
             quit: false,
         }
     }
@@ -1923,22 +1915,6 @@ impl HexEditor {
         }
         if key.key == Key::Escape && self.show_help {
             self.show_help = false;
-            return EventResult::Consumed;
-        }
-
-        // The close question has the keyboard while it is up: a byte typed
-        // into the document under it would be a change nobody was asked about.
-        if self.close_prompt.is_some() {
-            let typed = key.typed().next().map(|c| c.to_ascii_lowercase());
-            let choice = match (key.key, typed) {
-                (Key::Enter, _) | (Key::S, _) | (_, Some('s')) => Some(CloseChoice::Save),
-                (Key::D, _) | (_, Some('d')) => Some(CloseChoice::Discard),
-                (Key::Escape, _) => Some(CloseChoice::Cancel),
-                _ => None,
-            };
-            if let Some(choice) = choice {
-                self.answer_close(choice);
-            }
             return EventResult::Consumed;
         }
 
@@ -2729,7 +2705,12 @@ impl HexEditor {
         match self.documents.get(idx).map(|d| d.modified) {
             Some(true) => {
                 self.active_tab = idx;
-                self.close_prompt = Some(CloseScope::Tab(idx));
+                let name = self.active_doc().display_name();
+                self.question = Some(Question::new(
+                    &unsaved::message_for(&[&name]),
+                    "Save them before the tab closes?",
+                    CloseScope::Tab(idx),
+                ));
             }
             Some(false) => self.close_tab(idx),
             None => {}
@@ -2740,7 +2721,22 @@ impl HexEditor {
     /// the question is up.
     pub fn request_quit(&mut self) -> bool {
         if self.documents.iter().any(|d| d.modified) {
-            self.close_prompt = Some(CloseScope::Window);
+            let names: Vec<String> = self
+                .documents
+                .iter()
+                .filter(|d| d.modified)
+                .map(HexDocument::display_name)
+                .collect();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            // The question replaces whatever was up: a picker left open would
+            // take the keys it needs, and be drawn over it.
+            self.picker.close();
+            self.show_help = false;
+            self.question = Some(Question::new(
+                &unsaved::message_for(&names),
+                "Save them before closing?",
+                CloseScope::Window,
+            ));
             false
         } else {
             self.quit = true;
@@ -2748,15 +2744,12 @@ impl HexEditor {
         }
     }
 
-    /// Answer the pending close.
-    pub fn answer_close(&mut self, choice: CloseChoice) {
-        let Some(scope) = self.close_prompt.take() else {
-            return;
-        };
+    /// Answer the close question put before `scope`.
+    pub fn answer_close(&mut self, scope: CloseScope, choice: Choice) {
         match (scope, choice) {
-            (_, CloseChoice::Cancel) => {}
-            (CloseScope::Tab(idx), CloseChoice::Discard) => self.close_tab(idx),
-            (CloseScope::Tab(idx), CloseChoice::Save) => {
+            (_, Choice::Cancel) => {}
+            (CloseScope::Tab(idx), Choice::Discard) => self.close_tab(idx),
+            (CloseScope::Tab(idx), Choice::Save) => {
                 self.active_tab = idx;
                 if self
                     .documents
@@ -2772,8 +2765,8 @@ impl HexEditor {
                     self.status_message = said;
                 }
             }
-            (CloseScope::Window, CloseChoice::Discard) => self.quit = true,
-            (CloseScope::Window, CloseChoice::Save) => self.continue_quitting(),
+            (CloseScope::Window, Choice::Discard) => self.quit = true,
+            (CloseScope::Window, Choice::Save) => self.continue_quitting(),
         }
     }
 
@@ -2801,30 +2794,6 @@ impl HexEditor {
             }
             None => self.quit = true,
         }
-    }
-
-    /// Where the close question's card is.
-    fn close_prompt_card(&self) -> (f32, f32, f32, f32) {
-        let dw = 440.0_f32.min(self.window_width - 40.0).max(0.0);
-        let dh = 150.0_f32;
-        (
-            (self.window_width - dw) / 2.0,
-            (self.window_height - dh) / 2.0,
-            dw,
-            dh,
-        )
-    }
-
-    /// The close question's three answers, where they are drawn and clicked.
-    pub fn close_prompt_buttons(&self) -> [(CloseChoice, f32, f32, f32, f32); 3] {
-        let (x, y, w, h) = self.close_prompt_card();
-        let bw = (w - 48.0) / 3.0;
-        let by = y + h - 44.0;
-        [
-            (CloseChoice::Save, x + 12.0, by, bw, 30.0),
-            (CloseChoice::Discard, x + 24.0 + bw, by, bw, 30.0),
-            (CloseChoice::Cancel, x + 36.0 + bw * 2.0, by, bw, 30.0),
-        ]
     }
 
     /// Where each tab is drawn: the one walk the drawing and the click share.
@@ -2862,80 +2831,6 @@ impl HexEditor {
                 self.goto_visible = true;
                 self.focused_panel = FocusedPanel::GoToDialog;
             }
-        }
-    }
-
-    /// The close question, over everything the editor draws.
-    fn render_close_prompt(&self, tree: &mut RenderTree, scope: CloseScope) {
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: self.window_height,
-            color: Color::rgba(0x11, 0x11, 0x1B, 0xB0),
-            corner_radii: CornerRadii::ZERO,
-        });
-        let (dx, dy, dw, dh) = self.close_prompt_card();
-        self.palette
-            .push_surface(tree, dx, dy, dw, dh, 8.0, Surface::Panel);
-        let body = match scope {
-            CloseScope::Tab(idx) => format!(
-                "{} has changes that are not saved.",
-                self.documents
-                    .get(idx)
-                    .map_or_else(|| String::from("This document"), HexDocument::display_name)
-            ),
-            CloseScope::Window => {
-                let names: Vec<String> = self
-                    .documents
-                    .iter()
-                    .filter(|d| d.modified)
-                    .map(HexDocument::display_name)
-                    .collect();
-                format!("Not saved: {}.", names.join(", "))
-            }
-        };
-        for (i, (text, size, color)) in [
-            ("Unsaved changes".to_string(), 13.0, self.palette.yellow),
-            (body, UI_FONT_SIZE, self.palette.text),
-            (
-                "Save them before closing?".to_string(),
-                UI_FONT_SIZE,
-                self.palette.subtext0,
-            ),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            tree.push(RenderCommand::Text {
-                x: dx + 12.0,
-                y: dy + 12.0 + i as f32 * 22.0,
-                text,
-                color,
-                font_size: size,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(dw - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-        for (choice, bx, by, bw, bh) in self.close_prompt_buttons() {
-            let label = match choice {
-                CloseChoice::Save => "S — Save",
-                CloseChoice::Discard => "D — Don't save",
-                CloseChoice::Cancel => "Esc — Cancel",
-            };
-            self.palette
-                .push_surface(tree, bx, by, bw, bh, 4.0, Surface::Card);
-            tree.push(RenderCommand::Text {
-                x: bx + 8.0,
-                y: by + 8.0,
-                text: label.to_string(),
-                color: self.palette.text,
-                font_size: UI_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(bw - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
         }
     }
 
@@ -2991,6 +2886,20 @@ impl HexEditor {
     }
 
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The close question has every key and click while it is up: a byte
+        // typed into the document under it would be a change nobody was asked
+        // about. Each one it takes is a redraw -- focus and hover inside it
+        // are its own business.
+        if let Some(question) = self.question.as_mut()
+            && matches!(event, Event::Key(_) | Event::Mouse(_))
+        {
+            if let Some(choice) = question.handle(event) {
+                let scope = question.pending();
+                self.question = None;
+                self.answer_close(scope, choice);
+            }
+            return EventResult::Consumed;
+        }
         // The picker takes input first while it is up. A tick or a
         // resize comes back as `Ignored` and falls through to its own arm
         // below -- the guard arms this replaced had that property by
@@ -3030,21 +2939,6 @@ impl HexEditor {
 
     /// Apply a mouse event.
     fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
-        // The close question is modal: its buttons, and nothing else.
-        if self.close_prompt.is_some() {
-            if matches!(ev.kind, MouseEventKind::Press(MouseButton::Left))
-                && let Some((choice, ..)) =
-                    self.close_prompt_buttons()
-                        .into_iter()
-                        .find(|(_, x, y, w, h)| {
-                            ev.x >= *x && ev.x < x + w && ev.y >= *y && ev.y < y + h
-                        })
-            {
-                self.answer_close(choice);
-                return EventResult::Consumed;
-            }
-            return EventResult::Ignored;
-        }
         if matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
             let (bw, bh, by) = TOOLBAR_BUTTON;
             if let Some(&(_, action, _)) = TOOLBAR_BUTTONS
@@ -3125,9 +3019,6 @@ impl HexEditor {
         }
         if self.goto_visible {
             self.render_goto_dialog(&mut tree);
-        }
-        if let Some(scope) = self.close_prompt {
-            self.render_close_prompt(&mut tree, scope);
         }
 
         tree
@@ -4053,6 +3944,14 @@ impl App for HexEditor {
         tree.commands
             .extend(self.picker.render(&self.palette, width, height));
 
+        // The close question over the document it is about. It and the picker
+        // are never up together: raising it takes the picker down, and
+        // answering it takes it down before any picker goes up.
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
+        }
+
         // And the shortcut list over even that, because it is the one thing a
         // reader asked for explicitly.
         if self.show_help {
@@ -4633,6 +4532,11 @@ mod tests {
 
     // -- closing over unsaved work --
 
+    /// What the close question is asking about, while it is up.
+    fn asking(editor: &HexEditor) -> Option<CloseScope> {
+        editor.question.as_ref().map(Question::pending)
+    }
+
     #[test]
     fn closing_the_window_over_unsaved_work_asks_and_each_answer_is_kept() {
         let mut editor = make_test_editor(vec![0; 4]);
@@ -4647,19 +4551,28 @@ mod tests {
             editor.on_event(&Event::CloseRequested),
             Response::KeepOpen
         ));
-        assert_eq!(editor.close_prompt, Some(CloseScope::Window));
-        editor.handle_key(&key_press(Key::F, Modifiers::NONE));
+        assert_eq!(asking(&editor), Some(CloseScope::Window));
+        // Through `handle_event`, where the window's events arrive: the
+        // question is what takes them there.
+        editor.handle_event(&Event::Key(key_press(Key::F, Modifiers::NONE)));
         assert_eq!(
             editor.active_doc().data[0],
             0,
             "a key typed under the question edited the file"
         );
-        editor.handle_key(&key_press(Key::Escape, Modifiers::NONE));
-        assert_eq!(editor.close_prompt, None);
+        editor.handle_event(&Event::Key(key_press(Key::Escape, Modifiers::NONE)));
+        assert_eq!(asking(&editor), None);
 
         editor.on_event(&Event::CloseRequested);
-        let (_, x, y, w, h) = editor.close_prompt_buttons()[1];
-        let _ = click(&mut editor, x + w / 2.0, y + h / 2.0);
+        // Drawn first: a dialog's buttons are where it last drew them.
+        let (w, h) = (editor.window_width, editor.window_height);
+        let _ = editor.render(w, h);
+        let (x, y) = editor
+            .question
+            .as_ref()
+            .and_then(|q| q.button_centre(Choice::Discard))
+            .expect("the question is drawn");
+        let _ = click(&mut editor, x, y);
         assert!(editor.quit, "Don't save, clicked, lets it go");
     }
 
@@ -4697,8 +4610,8 @@ mod tests {
         editor.active_doc_mut().modified = true;
         editor.handle_key(&ctrl_key(Key::W, false));
         assert_eq!(editor.documents.len(), 2, "closed unsaved work");
-        assert_eq!(editor.close_prompt, Some(CloseScope::Tab(1)));
-        editor.handle_key(&typed_key('d'));
+        assert_eq!(asking(&editor), Some(CloseScope::Tab(1)));
+        editor.handle_event(&Event::Key(typed_key('d')));
         assert_eq!(editor.documents.len(), 1);
     }
 

@@ -83,13 +83,22 @@ MUTATIONS = [
     ),
     (
         "a document with unsaved changes closes without asking",
-        "            Some(doc) if doc.modified => self.close_prompt = Some(CloseScope::Tab(idx)),",
-        "            Some(doc) if false && doc.modified => {\n"
-        "                self.close_prompt = Some(CloseScope::Tab(idx));\n"
-        "            }",
+        "            Some(doc) if doc.modified => {\n                self.question = Some(Question::new(",
+        "            Some(doc) if false && doc.modified => {\n                self.question = Some(Question::new(",
         [
             "closing_an_unsaved_document_asks_and_each_answer_is_kept",
             "saving_an_untitled_document_on_close_asks_where_then_closes_it",
+        ],
+    ),
+    (
+        "keys and clicks reach the document under the question",
+        "        if let Some(question) = self.question.as_mut()\n"
+        "            && matches!(event, GEvent::Key(_) | GEvent::Mouse(_))",
+        "        if let Some(question) = self.question.as_mut()\n"
+        "            && false",
+        [
+            "closing_an_unsaved_document_asks_and_each_answer_is_kept",
+            "a_press_outside_a_dialog_does_not_reach_the_document",
         ],
     ),
     (

@@ -90,16 +90,12 @@ MUTATIONS = [
         [CLOSE],
     ),
     (
-        "keys edit the document under the question",
-        "        if self.close_prompt.is_some() {\n            let typed = text.map",
-        "        if false {\n            let typed = text.map",
-        [CLOSE],
-    ),
-    (
-        "the question's buttons take no click",
-        "        if self.close_prompt.is_some() {\n            if button == MouseButton::Left",
-        "        if false {\n            if button == MouseButton::Left",
-        [CLOSE],
+        "keys and clicks reach the document under the question",
+        "        if let Some(question) = self.question.as_mut()\n"
+        "            && matches!(event, Event::Key(_) | Event::Mouse(_))",
+        "        if let Some(question) = self.question.as_mut()\n"
+        "            && false",
+        [CLOSE, "a_tab_with_unsaved_changes_asks_before_it_closes"],
     ),
     (
         "saving the untitled document does not carry on closing",

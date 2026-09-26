@@ -331,8 +331,8 @@ impl EditorState {
         if self.external_prompt.is_some() {
             return self.prompt_key(key);
         }
-        if self.close_prompt.is_some() {
-            return self.close_prompt_key(key);
+        if self.question.is_some() {
+            return self.question_event(&Event::Key(key.clone()));
         }
         // The bar sees the key after the modal prompt, which is asking a
         // question that has to be answered first, and before the typing tables,
@@ -389,21 +389,19 @@ impl EditorState {
         Response::Redraw
     }
 
-    /// Keys while the close question is up: S or Enter saves, D does not,
-    /// Escape keeps the tab or the window open. Every other key is swallowed --
-    /// a keystroke typed into the document under the question would be a
-    /// change nobody was asked about.
-    fn close_prompt_key(&mut self, key: &KeyEvent) -> Response {
-        // The letter typed as well as the key: a key code is a place on the
-        // keyboard, and S is not where S is on every layout.
-        let typed = key.typed().next().map(|c| c.to_ascii_lowercase());
-        let choice = match (key.key, typed) {
-            (Key::Enter, _) | (Key::S, _) | (_, Some('s')) => crate::CloseChoice::Save,
-            (Key::D, _) | (_, Some('d')) => crate::CloseChoice::Discard,
-            (Key::Escape, _) => crate::CloseChoice::Cancel,
-            _ => return Response::Idle,
+    /// A key or a click while the close question is up. It has them all: a
+    /// keystroke typed into the document under it would be a change nobody
+    /// was asked about. Every one is a redraw -- focus and hover move inside
+    /// the dialog.
+    fn question_event(&mut self, event: &Event) -> Response {
+        let Some(question) = self.question.as_mut() else {
+            return Response::Idle;
         };
-        self.answer_close(choice);
+        if let Some(choice) = question.handle(event) {
+            let scope = question.pending();
+            self.question = None;
+            self.answer_close(scope, choice);
+        }
         Response::Redraw
     }
 
@@ -1079,8 +1077,8 @@ impl EditorState {
         // extended past the top of the window must not be taken over by a menu
         // the pointer merely crossed on the way. And not while the modal prompt
         // is up, for the reason the keyboard does not reach it either.
-        if self.close_prompt.is_some() {
-            return self.close_prompt_mouse(mouse);
+        if self.question.is_some() {
+            return self.question_event(&Event::Mouse(mouse.clone()));
         }
         if !self.dragging
             && self.external_prompt.is_none()
@@ -1161,27 +1159,6 @@ impl EditorState {
     }
 
     /// A left press: put the caret where the pointer is, or act on the tab bar.
-    /// The pointer while the close question is up: its three buttons, and
-    /// nothing else -- it is modal.
-    fn close_prompt_mouse(&mut self, mouse: &MouseEvent) -> Response {
-        if !matches!(mouse.kind, MouseEventKind::Press(MouseButton::Left)) {
-            return Response::Idle;
-        }
-        let hit = self
-            .close_prompt_buttons()
-            .into_iter()
-            .find(|(_, x, y, w, h)| {
-                mouse.x >= *x && mouse.x < x + w && mouse.y >= *y && mouse.y < y + h
-            });
-        match hit {
-            Some((choice, ..)) => {
-                self.answer_close(choice);
-                Response::Redraw
-            }
-            None => Response::Idle,
-        }
-    }
-
     fn mouse_press(&mut self, x: f32, y: f32) -> Response {
         if let Some((index, on_close)) = self.tab_at(x, y) {
             if on_close {
@@ -2374,7 +2351,7 @@ mod tests {
             kind: MouseEventKind::Press(MouseButton::Left),
         }));
         assert_eq!(editor.tabs.count(), 2, "the close box closed unsaved work");
-        assert_eq!(editor.close_prompt, Some(crate::CloseScope::Tab(1)));
+        assert_eq!(asking(&editor), Some(crate::CloseScope::Tab(1)));
         assert_eq!(
             editor.tabs.active_index(),
             1,
@@ -2384,8 +2361,13 @@ mod tests {
 
     // -- closing the window over unsaved work --
 
+    /// What the close question is asking about, while it is up.
+    fn asking(editor: &EditorState) -> Option<crate::CloseScope> {
+        editor.question.as_ref().map(unsaved::Question::pending)
+    }
+
     /// Every string the frame draws.
-    fn drawn_text(editor: &EditorState) -> Vec<String> {
+    fn drawn_text(editor: &mut EditorState) -> Vec<String> {
         editor
             .render_tree()
             .commands
@@ -2411,8 +2393,12 @@ mod tests {
             editor.handle_event(&Event::CloseRequested),
             Response::KeepOpen
         );
-        assert_eq!(editor.close_prompt, Some(crate::CloseScope::Window));
-        assert!(drawn_text(&editor).iter().any(|t| t == "Unsaved changes"));
+        assert_eq!(asking(&editor), Some(crate::CloseScope::Window));
+        assert!(
+            drawn_text(&mut editor)
+                .iter()
+                .any(|t| t == "Unsaved changes")
+        );
 
         // The question has the keyboard: nothing typed reaches the document.
         editor.handle_event(&typed('x'));
@@ -2420,7 +2406,7 @@ mod tests {
 
         // Escape keeps the window.
         assert_ne!(editor.handle_event(&plain(Key::Escape)), Response::Exit);
-        assert_eq!(editor.close_prompt, None);
+        assert_eq!(asking(&editor), None);
         assert!(!editor.quit);
 
         // Don't save lets it go.
@@ -2461,23 +2447,25 @@ mod tests {
 
     #[test]
     fn the_questions_buttons_answer_the_pointer() {
-        let click = |editor: &mut EditorState, choice: crate::CloseChoice| {
-            let (_, x, y, w, h) = editor
-                .close_prompt_buttons()
-                .into_iter()
-                .find(|b| b.0 == choice)
-                .expect("the button");
+        // Drawn first: a dialog's buttons are where it last drew them.
+        let click = |editor: &mut EditorState, choice: unsaved::Choice| {
+            drop(editor.render_tree());
+            let (x, y) = editor
+                .question
+                .as_ref()
+                .and_then(|q| q.button_centre(choice))
+                .expect("the question is drawn");
             editor.handle_event(&Event::Mouse(MouseEvent {
-                x: x + w / 2.0,
-                y: y + h / 2.0,
+                x,
+                y,
                 kind: MouseEventKind::Press(MouseButton::Left),
             }))
         };
         let mut editor = editor_with("text");
         editor.active_document_mut().modified = true;
         editor.handle_event(&Event::CloseRequested);
-        click(&mut editor, crate::CloseChoice::Cancel);
-        assert_eq!(editor.close_prompt, None);
+        click(&mut editor, unsaved::Choice::Cancel);
+        assert_eq!(asking(&editor), None);
         assert!(!editor.quit);
 
         editor.handle_event(&Event::CloseRequested);
@@ -2487,11 +2475,8 @@ mod tests {
             y: 1.0,
             kind: MouseEventKind::Press(MouseButton::Left),
         }));
-        assert!(editor.close_prompt.is_some());
-        assert_eq!(
-            click(&mut editor, crate::CloseChoice::Discard),
-            Response::Exit
-        );
+        assert!(editor.question.is_some());
+        assert_eq!(click(&mut editor, unsaved::Choice::Discard), Response::Exit);
     }
 
     #[test]
@@ -2539,10 +2524,10 @@ mod tests {
         editor.active_document_mut().modified = true;
         editor.handle_event(&ctrl(Key::W));
         assert_eq!(editor.tabs.count(), 2, "closed without asking");
-        assert_eq!(editor.close_prompt, Some(crate::CloseScope::Tab(1)));
+        assert_eq!(asking(&editor), Some(crate::CloseScope::Tab(1)));
         editor.handle_event(&plain(Key::Escape));
         assert_eq!(editor.tabs.count(), 2, "Escape keeps it");
-        assert_eq!(editor.close_prompt, None);
+        assert_eq!(asking(&editor), None);
 
         editor.handle_event(&ctrl(Key::W));
         editor.handle_event(&plain(Key::D));

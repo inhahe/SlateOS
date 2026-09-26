@@ -302,14 +302,8 @@ MUTATIONS = [
     ),
     (
         "open does not ask",
-        "            self.question = Some(Pending::Open);",
-        "            self.question = None;",
-        ["open_asks_before_losing_unsaved_changes"],
-    ),
-    (
-        "any key opens over unsaved changes",
-        "                _ => Answer::Keep,",
-        "                _ => Answer::Discard,",
+        "            self.ask(Pending::Open);",
+        "            let _ = Pending::Open;",
         ["open_asks_before_losing_unsaved_changes"],
     ),
     (
@@ -354,11 +348,11 @@ MUTATIONS = [
         ["saving_on_close_asks_where_and_a_failure_keeps_the_window"],
     ),
     (
-        "the question's answers take no click",
-        "                if let Some(pending) = self.question {\n"
-        "                    self.answer(pending, answer);",
-        "                if let Some(pending) = self.question {\n"
-        "                    let _ = (pending, answer);",
+        "keys and clicks reach the deck under the question",
+        "        if let Some(question) = self.question.as_mut()\n"
+        "            && matches!(event, Event::Key(_) | Event::Mouse(_))",
+        "        if let Some(question) = self.question.as_mut()\n"
+        "            && false",
         [
             "open_asks_before_losing_unsaved_changes",
             "closing_over_unsaved_changes_asks_and_each_answer_is_kept",

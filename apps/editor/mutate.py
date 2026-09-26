@@ -36,8 +36,8 @@ MAIN_MUTATIONS = [
     ),
     (
         "Save on close saves nothing",
-        "            (CloseScope::Window, CloseChoice::Save) => self.continue_quitting(),",
-        "            (CloseScope::Window, CloseChoice::Save) => self.quit = true,",
+        "            (CloseScope::Window, Choice::Save) => self.continue_quitting(),",
+        "            (CloseScope::Window, Choice::Save) => self.quit = true,",
         ["saving_on_close_writes_what_has_a_file_and_asks_where_for_the_rest"],
     ),
     (
@@ -57,13 +57,13 @@ INPUT_MUTATIONS = [
     ),
     (
         "keys go to the document under the question",
-        "            return self.close_prompt_key(key);",
-        "            let _ = self.close_prompt_key(key);",
+        "            return self.question_event(&Event::Key(key.clone()));",
+        "            let _ = self.question_event(&Event::Key(key.clone()));",
         ["closing_the_window_over_unsaved_work_asks_and_each_answer_is_kept"],
     ),
     (
         "the question's buttons take no click",
-        "            return self.close_prompt_mouse(mouse);",
+        "            return self.question_event(&Event::Mouse(mouse.clone()));",
         "            let _ = mouse;",
         ["the_questions_buttons_answer_the_pointer"],
     ),

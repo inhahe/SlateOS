@@ -14,6 +14,8 @@ oswindow = { path = "../../gui/window" }
 # Saving: a document is written whole to a sibling and swapped in, so a crash
 # mid-save leaves the old file rather than half of the new one.
 safeio = { path = "../safeio" }
+# "Unsaved changes -- save them?", asked the way every editor here asks it.
+unsaved = { path = "../unsaved" }
 
 [lints]
 workspace = true

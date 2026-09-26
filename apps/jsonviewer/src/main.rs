@@ -59,6 +59,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
+use unsaved::{Choice, Question};
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -2061,8 +2062,10 @@ struct App {
     /// What the picker is choosing a path for, since one picker serves
     /// opening and saving.
     picker_purpose: PickerPurpose,
-    /// "Unsaved changes -- save them?", while it is being asked.
-    close_prompt: Option<CloseScope>,
+    /// "Unsaved changes -- save them?", while it is being asked, and what
+    /// it would close. The toolkit's own dialog, asked the one way every
+    /// editor here asks it (`apps/unsaved`).
+    question: Option<Question<CloseScope>>,
     /// Set once the window may close; the next answer to the loop is `Exit`.
     quit: bool,
     /// What the last open or save did, for the status line.
@@ -2224,17 +2227,6 @@ enum CloseScope {
     Window,
 }
 
-/// The answers to "this has unsaved changes".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CloseChoice {
-    /// Save, then close if the save worked.
-    Save,
-    /// Close without saving.
-    Discard,
-    /// Do not close.
-    Cancel,
-}
-
 /// What a toolbar button does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolbarAction {
@@ -2337,8 +2329,10 @@ struct Fingerprint {
     tabs: Vec<(String, bool)>,
     /// What the status line says about the last open or save.
     note: Option<String>,
-    /// The close question, raised or answered.
-    close_prompt: Option<CloseScope>,
+    /// The close question, raised or answered. What happens *inside* it --
+    /// focus moving between its buttons, the pointer over one -- is not
+    /// seen here; `handle_event` answers every event it takes as a redraw.
+    question: Option<CloseScope>,
     quit: bool,
 }
 
@@ -2355,7 +2349,7 @@ impl App {
             documents: vec![doc],
             picker: FilePicker::new(),
             picker_purpose: PickerPurpose::Open,
-            close_prompt: None,
+            question: None,
             quit: false,
             note: Some(String::from("Press Ctrl+O to open a JSON file")),
             active_tab: 0,
@@ -2508,23 +2502,6 @@ impl App {
         text: Option<char>,
     ) {
         use guitk::event::Key;
-
-        // The close question has the keyboard while it is up: a key that
-        // reached the document under it would be a change nobody was asked
-        // about, made while being asked whether to keep the changes.
-        if self.close_prompt.is_some() {
-            let typed = text.map(|c| c.to_ascii_lowercase());
-            let choice = match (key, typed) {
-                (Key::Enter | Key::S, _) | (_, Some('s')) => Some(CloseChoice::Save),
-                (Key::D, _) | (_, Some('d')) => Some(CloseChoice::Discard),
-                (Key::Escape, _) => Some(CloseChoice::Cancel),
-                _ => None,
-            };
-            if let Some(choice) = choice {
-                self.answer_close(choice);
-            }
-            return;
-        }
 
         // The shortcut list, before anything else -- but **not** while the
         // find bar or a value edit is open, because both of those take typed
@@ -2988,19 +2965,6 @@ impl App {
     }
 
     fn handle_mouse(&mut self, x: f32, y: f32, button: MouseButton) {
-        // The close question is modal: its buttons, and nothing else.
-        if self.close_prompt.is_some() {
-            if button == MouseButton::Left
-                && let Some((choice, ..)) = self
-                    .close_prompt_buttons()
-                    .into_iter()
-                    .find(|&(_, bx, by, bw, bh)| x >= bx && x < bx + bw && y >= by && y < by + bh)
-            {
-                self.answer_close(choice);
-            }
-            return;
-        }
-
         // The toolbar. Its buttons were drawn above a handler that began at
         // the tab bar, so none of them could be clicked.
         if y < TOOLBAR_HEIGHT {
@@ -3315,9 +3279,13 @@ impl App {
         }
         match self.documents.get(index) {
             Some(doc) if doc.dirty => {
-                let id = doc.id;
+                let (id, message) = (doc.id, unsaved::message_for(&[&doc.title]));
                 self.switch_to(index);
-                self.close_prompt = Some(CloseScope::Tab(id));
+                self.question = Some(Question::new(
+                    &message,
+                    "Save them before the tab closes?",
+                    CloseScope::Tab(id),
+                ));
             }
             Some(_) => self.close_tab(index),
             None => {}
@@ -3335,7 +3303,17 @@ impl App {
             // take the keys the question needs, and be drawn over it.
             self.picker.close();
             self.show_help = false;
-            self.close_prompt = Some(CloseScope::Window);
+            let names: Vec<&str> = self
+                .documents
+                .iter()
+                .filter(|d| d.dirty)
+                .map(|d| d.title.as_str())
+                .collect();
+            self.question = Some(Question::new(
+                &unsaved::message_for(&names),
+                "Save them before closing?",
+                CloseScope::Window,
+            ));
             false
         } else {
             self.quit = true;
@@ -3343,19 +3321,16 @@ impl App {
         }
     }
 
-    /// Answer the pending close.
-    fn answer_close(&mut self, choice: CloseChoice) {
-        let Some(scope) = self.close_prompt.take() else {
-            return;
-        };
+    /// Answer the close question put before `scope`.
+    fn answer_close(&mut self, scope: CloseScope, choice: Choice) {
         match (scope, choice) {
-            (_, CloseChoice::Cancel) => {}
-            (CloseScope::Tab(id), CloseChoice::Discard) => {
+            (_, Choice::Cancel) => {}
+            (CloseScope::Tab(id), Choice::Discard) => {
                 if let Some(index) = self.index_of(id) {
                     self.close_tab(index);
                 }
             }
-            (CloseScope::Tab(id), CloseChoice::Save) => {
+            (CloseScope::Tab(id), Choice::Save) => {
                 let Some(index) = self.index_of(id) else {
                     return;
                 };
@@ -3374,8 +3349,8 @@ impl App {
                     self.ask_where_to_save(PickerPurpose::SaveThenClose(id));
                 }
             }
-            (CloseScope::Window, CloseChoice::Discard) => self.quit = true,
-            (CloseScope::Window, CloseChoice::Save) => self.continue_quitting(),
+            (CloseScope::Window, Choice::Discard) => self.quit = true,
+            (CloseScope::Window, Choice::Save) => self.continue_quitting(),
         }
     }
 
@@ -3416,104 +3391,6 @@ impl App {
             ToolbarAction::Save => self.save_active(),
             ToolbarAction::Search => self.search_visible = !self.search_visible,
             ToolbarAction::Edit => self.edit_mode = !self.edit_mode,
-        }
-    }
-
-    /// Where the close question's card is.
-    fn close_prompt_card(&self) -> (f32, f32, f32, f32) {
-        let w = 440.0_f32.min(self.width - 40.0).max(0.0);
-        let h = 150.0_f32;
-        ((self.width - w) / 2.0, (self.height - h) / 2.0, w, h)
-    }
-
-    /// The close question's three answers, where each is drawn and clicked.
-    fn close_prompt_buttons(&self) -> [(CloseChoice, f32, f32, f32, f32); 3] {
-        let (x, y, w, h) = self.close_prompt_card();
-        let bw = ((w - 48.0) / 3.0).max(0.0);
-        let by = y + h - 44.0;
-        [
-            (CloseChoice::Save, x + 12.0, by, bw, 30.0),
-            (CloseChoice::Discard, x + 24.0 + bw, by, bw, 30.0),
-            (CloseChoice::Cancel, x + 36.0 + bw * 2.0, by, bw, 30.0),
-        ]
-    }
-
-    /// The close question, over everything else the window draws.
-    fn render_close_prompt(&self, cmds: &mut Vec<RenderCommand>, scope: CloseScope) {
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.width,
-            height: self.height,
-            color: self.palette.scrim(),
-            corner_radii: CornerRadii::ZERO,
-        });
-        let (x, y, w, h) = self.close_prompt_card();
-        self.palette
-            .push_surface(cmds, x, y, w, h, 8.0, Surface::Panel);
-        let body = match scope {
-            CloseScope::Tab(id) => format!(
-                "{} has changes that are not saved.",
-                self.documents
-                    .iter()
-                    .find(|d| d.id == id)
-                    .map_or("This document", |d| d.title.as_str())
-            ),
-            CloseScope::Window => {
-                let names: Vec<&str> = self
-                    .documents
-                    .iter()
-                    .filter(|d| d.dirty)
-                    .map(|d| d.title.as_str())
-                    .collect();
-                format!("Not saved: {}.", names.join(", "))
-            }
-        };
-        let lines = [
-            (
-                String::from("Unsaved changes"),
-                HEADER_TEXT,
-                self.palette.ink(self.palette.yellow),
-            ),
-            (body, NORMAL_TEXT, self.palette.text),
-            (
-                String::from("Save them before closing?"),
-                NORMAL_TEXT,
-                self.palette.subtext0,
-            ),
-        ];
-        let mut line_y = y + 14.0;
-        for (text, size, color) in lines {
-            cmds.push(RenderCommand::Text {
-                x: x + 12.0,
-                y: line_y,
-                text,
-                color,
-                font_size: size,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some((w - 24.0).max(0.0)),
-                overflow: TextOverflow::Ellipsis,
-            });
-            line_y += 24.0;
-        }
-        for (choice, bx, by, bw, bh) in self.close_prompt_buttons() {
-            let label = match choice {
-                CloseChoice::Save => "S — Save",
-                CloseChoice::Discard => "D — Don't save",
-                CloseChoice::Cancel => "Esc — Cancel",
-            };
-            self.palette
-                .push_surface(cmds, bx, by, bw, bh, 4.0, Surface::Card);
-            cmds.push(RenderCommand::Text {
-                x: bx + 8.0,
-                y: by + 9.0,
-                text: label.to_string(),
-                color: self.palette.text,
-                font_size: SMALL_TEXT,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some((bw - 16.0).max(0.0)),
-                overflow: TextOverflow::Ellipsis,
-            });
         }
     }
 
@@ -3579,6 +3456,20 @@ impl App {
     }
 
     fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The close question has every key and click while it is up: a key
+        // that reached the document under it would be a change made while
+        // being asked whether to keep the changes. Each one it takes is a
+        // redraw, since focus and hover inside it are its own business.
+        if let Some(question) = self.question.as_mut()
+            && matches!(event, Event::Key(_) | Event::Mouse(_))
+        {
+            if let Some(choice) = question.handle(event) {
+                let scope = question.pending();
+                self.question = None;
+                self.answer_close(scope, choice);
+            }
+            return EventResult::Consumed;
+        }
         // The picker takes the event first while it is up, or a click meant
         // for a filename lands on the tree behind it.
         match self.picker.handle(event, self.width, self.height) {
@@ -3674,7 +3565,7 @@ impl App {
                 .map(|d| (d.title.clone(), d.dirty))
                 .collect(),
             note: self.note.clone(),
-            close_prompt: self.close_prompt,
+            question: self.question.as_ref().map(Question::pending),
             quit: self.quit,
         }
     }
@@ -5334,8 +5225,9 @@ impl oswindow::app::App for App {
         // The close question over the document it is asking about. It and the
         // picker are never up together: answering the question takes it down
         // before any picker goes up, and raising it takes the picker down.
-        if let Some(scope) = self.close_prompt {
-            self.render_close_prompt(&mut commands, scope);
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            commands.extend(question.commands(&palette, width, height));
         }
         // Last, so it is above everything -- the same order in which
         // `handle_event` gives it the click.
@@ -5981,6 +5873,11 @@ mod tests {
         app.picked(path);
     }
 
+    /// What the close question is asking about, while it is up.
+    fn asking(app: &App) -> Option<CloseScope> {
+        app.question.as_ref().map(Question::pending)
+    }
+
     fn click(app: &mut App, x: f32, y: f32) -> EventResult {
         app.handle_event(&Event::Mouse(MouseEvent {
             x,
@@ -6174,7 +6071,7 @@ mod tests {
             Response::KeepOpen,
             "the window must wait for the answer"
         );
-        assert_eq!(app.close_prompt, Some(CloseScope::Window));
+        assert_eq!(asking(&app), Some(CloseScope::Window));
         assert!(
             help_text(&mut app).contains("Unsaved changes"),
             "the question is not drawn"
@@ -6186,7 +6083,7 @@ mod tests {
 
         // Cancel: the window stays, and so do the changes.
         assert_eq!(app.on_event(&press(Key::Escape)), Response::Redraw);
-        assert_eq!(app.close_prompt, None);
+        assert_eq!(asking(&app), None);
         assert!(app.documents[app.active_tab].dirty);
         assert_eq!(file.read(), original);
 
@@ -6200,10 +6097,16 @@ mod tests {
         let mut app = opened(&other);
         set_key(&mut app, "a", "3");
         assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
-        let (_, x, y, w, h) = app.close_prompt_buttons()[1];
+        // Drawn first: a dialog's buttons are where it last drew them.
+        help_text(&mut app);
+        let (x, y) = app
+            .question
+            .as_ref()
+            .and_then(|q| q.button_centre(Choice::Discard))
+            .expect("the question is drawn");
         let discard = Event::Mouse(MouseEvent {
-            x: x + w / 2.0,
-            y: y + h / 2.0,
+            x,
+            y,
             kind: MouseEventKind::Press(MouseButton::Left),
         });
         assert_eq!(app.on_event(&discard), Response::Exit);
@@ -6251,7 +6154,7 @@ mod tests {
         app.handle_event(&press_ctrl(Key::W));
         assert_eq!(app.documents.len(), 2, "closed without asking");
         let id = app.documents[0].id;
-        assert_eq!(app.close_prompt, Some(CloseScope::Tab(id)));
+        assert_eq!(asking(&app), Some(CloseScope::Tab(id)));
 
         app.handle_event(&typed('d'));
         assert_eq!(app.documents.len(), 1, "Don't save did not close it");

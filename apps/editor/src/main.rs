@@ -49,6 +49,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use unsaved::{Choice, Question};
 
 // ============================================================================
 // Document buffer
@@ -1587,17 +1588,6 @@ pub enum CloseScope {
     Window,
 }
 
-/// The answers to "this has unsaved changes".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CloseChoice {
-    /// Save, then close if the save worked.
-    Save,
-    /// Close without saving.
-    Discard,
-    /// Do not close.
-    Cancel,
-}
-
 /// Height of the tab strip along the top, in pixels.
 ///
 /// A constant rather than a literal in each of the four places that used to
@@ -1716,7 +1706,10 @@ pub struct EditorState {
     /// Ctrl+Shift+W to discard -- a key nothing bound -- and closing the window
     /// went at once whatever it held, every unsaved change in every tab with
     /// it. Both ask now. Modal, like the other two questions.
-    pub close_prompt: Option<CloseScope>,
+    ///
+    /// The toolkit's own dialog, asked the one way every editor here asks it
+    /// (`apps/unsaved`).
+    pub question: Option<Question<CloseScope>>,
     /// Set when the window may close: the question was answered, or there
     /// was nothing to ask. The next response is `Exit`.
     pub quit: bool,
@@ -1777,7 +1770,7 @@ impl EditorState {
             dialog: None,
             dialog_purpose: DialogPurpose::Open,
             menu_bar: menubar::MenuBar::new(Vec::new()),
-            close_prompt: None,
+            question: None,
             quit: false,
         };
         // The opening frame is drawn before any event arrives, so the bar's
@@ -1829,7 +1822,12 @@ impl EditorState {
         match modified {
             Some(true) => {
                 self.tabs.set_active(idx);
-                self.close_prompt = Some(CloseScope::Tab(idx));
+                let name = self.active_document().name.clone();
+                self.question = Some(Question::new(
+                    &unsaved::message_for(&[&name]),
+                    "Save them before the tab closes?",
+                    CloseScope::Tab(idx),
+                ));
             }
             Some(false) => {
                 self.tabs.set_active(idx);
@@ -1843,7 +1841,17 @@ impl EditorState {
     /// not, the question is up.
     pub fn request_quit(&mut self) -> bool {
         if self.tabs.iter().any(|d| d.modified) {
-            self.close_prompt = Some(CloseScope::Window);
+            let names: Vec<&str> = self
+                .tabs
+                .iter()
+                .filter(|d| d.modified)
+                .map(|d| d.name.as_str())
+                .collect();
+            self.question = Some(Question::new(
+                &unsaved::message_for(&names),
+                "Save them before the window closes?",
+                CloseScope::Window,
+            ));
             false
         } else {
             self.quit = true;
@@ -1851,20 +1859,17 @@ impl EditorState {
         }
     }
 
-    /// Answer the pending close.
-    pub fn answer_close(&mut self, choice: CloseChoice) {
-        let Some(scope) = self.close_prompt.take() else {
-            return;
-        };
+    /// Answer the close question put before `scope`.
+    pub fn answer_close(&mut self, scope: CloseScope, choice: Choice) {
         match (scope, choice) {
-            (_, CloseChoice::Cancel) => {}
-            (CloseScope::Tab(idx), CloseChoice::Discard) => {
+            (_, Choice::Cancel) => {}
+            (CloseScope::Tab(idx), Choice::Discard) => {
                 self.tabs.set_active(idx);
                 self.tabs.close_active();
             }
-            (CloseScope::Tab(idx), CloseChoice::Save) => self.save_then_close(idx),
-            (CloseScope::Window, CloseChoice::Discard) => self.quit = true,
-            (CloseScope::Window, CloseChoice::Save) => self.continue_quitting(),
+            (CloseScope::Tab(idx), Choice::Save) => self.save_then_close(idx),
+            (CloseScope::Window, Choice::Discard) => self.quit = true,
+            (CloseScope::Window, Choice::Save) => self.continue_quitting(),
         }
     }
 
@@ -1926,87 +1931,6 @@ impl EditorState {
             "Choose where to save {} before it closes",
             self.active_document().name
         ));
-    }
-
-    /// Where the close question's three answers are drawn, and so where a
-    /// click answers them: one function for both, so the two cannot disagree.
-    pub fn close_prompt_buttons(&self) -> [(CloseChoice, f32, f32, f32, f32); 3] {
-        let (x, y, w, h) = self.close_prompt_card();
-        let bw = (w - 48.0) / 3.0;
-        let by = y + h - 44.0;
-        [
-            (CloseChoice::Save, x + 12.0, by, bw, 30.0),
-            (CloseChoice::Discard, x + 24.0 + bw, by, bw, 30.0),
-            (CloseChoice::Cancel, x + 36.0 + bw * 2.0, by, bw, 30.0),
-        ]
-    }
-
-    /// The close question's card: centred, as the other questions are.
-    fn close_prompt_card(&self) -> (f32, f32, f32, f32) {
-        let w = self.window_width as f32;
-        let h = self.window_height as f32;
-        let dw = 480.0_f32.min(w - 40.0).max(0.0);
-        let dh = 170.0_f32;
-        ((w - dw) / 2.0, (h - dh) / 2.0, dw, dh)
-    }
-
-    /// The close question, over everything but the file dialog it can lead to.
-    fn render_close_prompt(&self, tree: &mut RenderTree, scope: CloseScope) {
-        let w = self.window_width as f32;
-        let h = self.window_height as f32;
-        tree.fill_rect(0.0, 0.0, w, h, Color::rgba(0x11, 0x11, 0x1B, 0xB0));
-        let (dx, dy, dw, dh) = self.close_prompt_card();
-        tree.fill_rect(dx, dy, dw, dh, self.palette.base);
-        tree.fill_rect(dx, dy, dw, 32.0, self.palette.surface0);
-        tree.text(
-            dx + 12.0,
-            dy + 9.0,
-            "Unsaved changes",
-            self.palette.yellow,
-            13.0,
-        );
-        let body = match scope {
-            CloseScope::Tab(idx) => {
-                let name = self
-                    .tabs
-                    .get(idx)
-                    .map_or("This document", |d| d.name.as_str());
-                format!("\"{name}\" has changes that are not saved.")
-            }
-            CloseScope::Window => {
-                let names: Vec<&str> = self
-                    .tabs
-                    .iter()
-                    .filter(|d| d.modified)
-                    .map(|d| d.name.as_str())
-                    .collect();
-                match names.as_slice() {
-                    [one] => format!("\"{one}\" has changes that are not saved."),
-                    many => format!(
-                        "{} documents have changes that are not saved: {}.",
-                        many.len(),
-                        many.join(", ")
-                    ),
-                }
-            }
-        };
-        tree.text(dx + 12.0, dy + 48.0, &body, self.palette.text, 11.0);
-        let what = match scope {
-            CloseScope::Tab(_) => "Save them before the tab closes?",
-            CloseScope::Window => "Save them before the window closes?",
-        };
-        tree.text(dx + 12.0, dy + 70.0, what, self.palette.subtext0, 11.0);
-        for (choice, bx, by, bw, bh) in self.close_prompt_buttons() {
-            // Each one leads with the key that chooses it, as the disk prompt's
-            // do: the keyboard answers it as well as the pointer.
-            let label = match choice {
-                CloseChoice::Save => "S — Save",
-                CloseChoice::Discard => "D — Don't save",
-                CloseChoice::Cancel => "Esc — Cancel",
-            };
-            tree.fill_rect(bx, by, bw, bh, self.palette.surface1);
-            tree.text(bx + 10.0, by + 8.0, label, self.palette.text, 12.0);
-        }
     }
 
     /// Number of visible lines in the editor viewport.
@@ -2183,7 +2107,7 @@ impl EditorState {
     /// than a name that says which one is meant. (The silent version of this
     /// trap is real: at equal arity the inherent method wins method lookup and
     /// every existing call keeps compiling while testing the other function.)
-    pub fn render_tree(&self) -> RenderTree {
+    pub fn render_tree(&mut self) -> RenderTree {
         let mut tree = RenderTree::new();
         let w = self.window_width as f32;
         let h = self.window_height as f32;
@@ -2219,8 +2143,9 @@ impl EditorState {
 
         // The close question. The file dialog it can lead to comes after it
         // is answered, never with it.
-        if let Some(scope) = self.close_prompt {
-            self.render_close_prompt(&mut tree, scope);
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, w, h, &mut tree);
         }
 
         // External-change prompt / merge review (modal overlay)
@@ -3493,7 +3418,7 @@ mod against_the_real_compositor {
     fn a_frame_the_editor_draws_reaches_the_compositor() {
         let desktop = Desktop::start();
         let mut events = dial(&desktop);
-        let editor = EditorState::new();
+        let mut editor = EditorState::new();
 
         let window = WindowBuilder::new("Editor", 900, 600)
             .build(&mut events)
@@ -3871,7 +3796,7 @@ mod caret_tests {
     }
 
     /// The x of the caret in a rendered frame.
-    fn caret_x(editor: &EditorState) -> f32 {
+    fn caret_x(editor: &mut EditorState) -> f32 {
         let tree = editor.render_tree();
         tree.commands
             .iter()
@@ -3886,14 +3811,14 @@ mod caret_tests {
 
     #[test]
     fn the_caret_sits_where_the_text_before_it_ends() {
-        let editor = editor_with("hello world", 5);
+        let mut editor = editor_with("hello world", 5);
         let expected = editor.gutter_width
             + 8.0
             + text::measure("hello", editor.font_size, FontWeightHint::Regular);
         assert!(
-            (caret_x(&editor) - expected).abs() < 0.01,
+            (caret_x(&mut editor) - expected).abs() < 0.01,
             "the caret is at {}, but the text before it ends at {expected}",
-            caret_x(&editor)
+            caret_x(&mut editor)
         );
     }
 
@@ -3922,11 +3847,11 @@ mod caret_tests {
     fn the_caret_on_a_bidirectional_line_is_not_the_prefix_width() {
         // Byte 4 is between the two Hebrew letters: `a`, `b`, then aleph at
         // 2..4 and bet at 4..6.
-        let editor = editor_with(MIXED, 4);
+        let mut editor = editor_with(MIXED, 4);
         let text_left = editor.gutter_width + 8.0;
 
         let prefix = text::measure(&MIXED[..4], editor.font_size, FontWeightHint::Regular);
-        let drawn = caret_x(&editor) - text_left;
+        let drawn = caret_x(&mut editor) - text_left;
 
         assert!(
             (drawn - prefix).abs() > 0.5,
@@ -3944,7 +3869,7 @@ mod caret_tests {
     #[test]
     fn the_caret_on_a_left_to_right_line_is_still_the_prefix_width() {
         for col in [0usize, 1, 5, 11] {
-            let editor = editor_with("hello world", col);
+            let mut editor = editor_with("hello world", col);
             let expected = editor.gutter_width
                 + 8.0
                 + text::measure(
@@ -3953,9 +3878,9 @@ mod caret_tests {
                     FontWeightHint::Regular,
                 );
             assert!(
-                (caret_x(&editor) - expected).abs() < 0.01,
+                (caret_x(&mut editor) - expected).abs() < 0.01,
                 "at col {col} the caret moved to {}, expected {expected}",
-                caret_x(&editor)
+                caret_x(&mut editor)
             );
         }
     }
@@ -3985,7 +3910,7 @@ mod caret_tests {
                 .expect("a click inside the text area resolves");
             editor.active_document_mut().set_cursor(line, cursor);
 
-            let drawn = caret_x(&editor);
+            let drawn = caret_x(&mut editor);
             // Within half a character: the caret goes to the nearest stop, not
             // to the exact pixel clicked.
             assert!(
@@ -4070,7 +3995,7 @@ mod caret_tests {
             },
         );
         assert!(
-            (caret_x(&down) - caret_x(&up)).abs() > 0.5,
+            (caret_x(&mut down) - caret_x(&mut up)).abs() > 0.5,
             "both affinities drew the caret at the same x, so the field is \
              doing nothing and a click at one end resolves to the other"
         );
@@ -4078,9 +4003,9 @@ mod caret_tests {
 
     #[test]
     fn the_caret_starts_at_the_left_edge_of_the_text() {
-        let editor = editor_with("hello world", 0);
+        let mut editor = editor_with("hello world", 0);
         assert!(
-            (caret_x(&editor) - (editor.gutter_width + 8.0)).abs() < 0.01,
+            (caret_x(&mut editor) - (editor.gutter_width + 8.0)).abs() < 0.01,
             "the caret at column 0 is not at the text's left edge"
         );
     }
@@ -4098,7 +4023,7 @@ mod caret_tests {
         // same advance and the two are legitimately equal. What is checkable
         // in either backend is that the caret moves with what the font
         // reports, and not with the old constant.
-        let editor = editor_with("xxxxxxxxxx", 10);
+        let mut editor = editor_with("xxxxxxxxxx", 10);
         let measured = text::measure("xxxxxxxxxx", editor.font_size, FontWeightHint::Regular);
         let old_guess = 10.0 * editor.font_size * 0.6;
         assert!(
@@ -4107,7 +4032,7 @@ mod caret_tests {
              exists to rule out, so the assertion below proves nothing"
         );
         assert!(
-            (caret_x(&editor) - (editor.gutter_width + 8.0 + measured)).abs() < 0.01,
+            (caret_x(&mut editor) - (editor.gutter_width + 8.0 + measured)).abs() < 0.01,
             "the caret is not at the measured width of the text before it"
         );
     }
@@ -4120,14 +4045,14 @@ mod caret_tests {
     /// drawn in.
     #[test]
     fn a_horizontal_scroll_slides_the_caret_by_the_scrolled_distance() {
-        let unscrolled = caret_x(&editor_with("hello world", 8));
+        let unscrolled = caret_x(&mut editor_with("hello world", 8));
 
         let mut editor = editor_with("hello world", 8);
         editor.active_document_mut().scroll_px = 37.0;
         assert!(
-            (caret_x(&editor) - (unscrolled - 37.0)).abs() < 0.01,
+            (caret_x(&mut editor) - (unscrolled - 37.0)).abs() < 0.01,
             "a 37px scroll moved the caret from {unscrolled} to {}, not by 37",
-            caret_x(&editor)
+            caret_x(&mut editor)
         );
     }
 
@@ -4141,9 +4066,9 @@ mod caret_tests {
         let expected = editor.gutter_width + 8.0 - 20.0
             + text::measure("hello wo", editor.font_size, FontWeightHint::Regular);
         assert!(
-            (caret_x(&editor) - expected).abs() < 0.01,
+            (caret_x(&mut editor) - expected).abs() < 0.01,
             "the caret is at {}, but the whole prefix ends at {expected}",
-            caret_x(&editor)
+            caret_x(&mut editor)
         );
     }
 
@@ -4159,7 +4084,7 @@ mod caret_tests {
         let scroll = editor.active_document().scroll_px;
         assert!(scroll > 0.0, "a caret 4000 characters along did not scroll");
 
-        let caret = caret_x(&editor);
+        let caret = caret_x(&mut editor);
         assert!(
             caret >= editor.text_x() && caret <= editor.window_width as f32,
             "after scrolling, the caret is at {caret}, outside the text area \
@@ -4300,7 +4225,7 @@ mod highlight_render_tests {
     /// a span *has* no independent x, which is the entire point of the command
     /// (a run is positioned once and shaped once; where within it a given byte
     /// lands is the renderer's answer, not the caller's).
-    fn drawn(editor: &EditorState) -> Vec<(String, Color)> {
+    fn drawn(editor: &mut EditorState) -> Vec<(String, Color)> {
         let mut out = Vec::new();
         for c in &editor.render_tree().commands {
             match c {
@@ -4410,8 +4335,8 @@ mod highlight_render_tests {
 
     #[test]
     fn a_rust_line_is_drawn_as_several_coloured_runs() {
-        let editor = editor_showing("fn main() {}", Language::Rust);
-        let runs = drawn(&editor);
+        let mut editor = editor_showing("fn main() {}", Language::Rust);
+        let runs = drawn(&mut editor);
         let keyword = Theme::from_palette(&Palette::from_settings(
             &appearance::AppearanceSettings::default(),
         ))
@@ -4434,12 +4359,12 @@ mod highlight_render_tests {
     /// was wired up the editor drew every one of these lines in one colour.
     #[test]
     fn a_block_comment_keeps_its_colour_onto_the_next_line() {
-        let editor = editor_showing("/* opens here\nstill a comment\n*/ code", Language::Rust);
+        let mut editor = editor_showing("/* opens here\nstill a comment\n*/ code", Language::Rust);
         let comment = Theme::from_palette(&Palette::from_settings(
             &appearance::AppearanceSettings::default(),
         ))
         .color_for(Token::Comment);
-        let runs = drawn(&editor);
+        let runs = drawn(&mut editor);
         assert!(
             runs.iter()
                 .any(|(t, c)| t.contains("still a comment") && *c == comment),
@@ -4462,7 +4387,7 @@ mod highlight_render_tests {
             &appearance::AppearanceSettings::default(),
         ))
         .color_for(Token::Comment);
-        let runs = drawn(&editor);
+        let runs = drawn(&mut editor);
         assert!(
             runs.iter()
                 .any(|(t, c)| t.contains("body line 149") && *c == comment),
@@ -5582,7 +5507,7 @@ mod external_merge_tests {
     /// the prompt does not answer.
     #[test]
     fn the_disk_change_prompt_names_the_keys_that_answer_it() {
-        let drawn = |editor: &EditorState| {
+        let drawn = |editor: &mut EditorState| {
             editor
                 .render_tree()
                 .commands
@@ -5618,8 +5543,8 @@ mod external_merge_tests {
             (scratch, editor)
         };
 
-        let (_scratch, editor) = raise();
-        let shown = drawn(&editor);
+        let (_scratch, mut editor) = raise();
+        let shown = drawn(&mut editor);
         for key in [
             "K — Keep current",
             "R — Reload from disk",
@@ -5675,7 +5600,7 @@ mod external_merge_tests {
     /// cannot name a key that does nothing.
     #[test]
     fn the_find_panel_shows_case_sensitivity_and_names_its_key() {
-        let drawn = |editor: &EditorState| {
+        let drawn = |editor: &mut EditorState| {
             editor
                 .render_tree()
                 .commands
@@ -5699,7 +5624,7 @@ mod external_merge_tests {
         editor.open_file(&path).expect("open");
         editor.find_visible = true;
         assert!(
-            drawn(&editor).contains("Aa off (Ctrl+I)"),
+            drawn(&mut editor).contains("Aa off (Ctrl+I)"),
             "the panel never says case is off"
         );
 
@@ -5714,7 +5639,7 @@ mod external_merge_tests {
             "Ctrl+I did not turn case sensitivity on"
         );
         assert!(
-            drawn(&editor).contains("Aa on  (Ctrl+I)"),
+            drawn(&mut editor).contains("Aa on  (Ctrl+I)"),
             "the panel never says case is on"
         );
     }

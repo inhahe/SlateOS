@@ -1905,10 +1905,9 @@ word; text inside them that says "lane C" is history.
   `contacts`, `snippets`, `kanban`, which are worse: they keep nothing at all
   between runs (`known-issues.md` → `[E] Notes, contacts, snippets and
   kanban keep nothing`) and want a store kept as it changes, not a question. **One
-  question, not thirteen:** the six written so far are hand-drawn copies of
-  the toolkit's `guitk::modal::AlertDialog`, which already has focus, hover,
-  Escape and a destructive colour for "Don't save"; `apps/unsaved` asks it
-  the one way, and the six move onto it as the three get theirs.
+  question, not thirteen:** `apps/unsaved` asks the toolkit's own
+  `guitk::modal::AlertDialog` the one way, and every program above asks
+  through it (2026-09-25) -- the six hand-drawn copies are gone.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane

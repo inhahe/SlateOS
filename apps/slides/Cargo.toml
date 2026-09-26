@@ -15,6 +15,8 @@ oswindow = { path = "../../gui/window" }
 # The export replaces a file the user chose, and `fs::write` truncates
 # the target before writing it.
 safeio = { path = "../safeio" }
+# "Unsaved changes -- save them?", asked the way every editor here asks it.
+unsaved = { path = "../unsaved" }
 
 # A deck is kept as YAML, like everything else here a person might open in an
 # editor, and read back through the same library.

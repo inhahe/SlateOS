@@ -51,6 +51,7 @@ use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
+use unsaved::{Choice, Question};
 
 use std::collections::VecDeque;
 
@@ -881,17 +882,6 @@ pub enum Pending {
     Close,
 }
 
-/// The answers to the unsaved-changes question.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Answer {
-    /// Save the deck, then go on.
-    Save,
-    /// Go on without saving.
-    Discard,
-    /// Do nothing: the deck stays as it is, open and unsaved.
-    Keep,
-}
-
 /// The colours an element steps through with `C`, after the theme's own four.
 const EXTRA_COLOURS: [Color; 6] = [
     Color::rgb(255, 255, 255),
@@ -949,14 +939,6 @@ pub enum Target {
     /// The sorter's grid, which scrolls.
     SorterGrid,
     SorterThumb(usize),
-    /// An answer to the question before Open or Close throws away unsaved
-    /// changes.
-    Answer(Answer),
-    /// Around the question: a press keeps the deck, as a key that answers
-    /// nothing does.
-    QuestionBackdrop,
-    /// The question's card, where a press does nothing.
-    QuestionCard,
     HelpCard,
     /// The slide show: a press goes on to the next slide.
     Show,
@@ -1130,7 +1112,10 @@ pub struct SlidesApp {
     picker_for: PickerFor,
     /// Asking before Open or closing the window throws away unsaved changes:
     /// what the question is holding up, while it is being asked.
-    question: Option<Pending>,
+    ///
+    /// The toolkit's own dialog, asked the one way every editor here asks it
+    /// (`apps/unsaved`).
+    question: Option<Question<Pending>>,
     /// Set once the window may close; the next answer to the loop is `Exit`.
     quit: bool,
     /// The slide show, while one is running.
@@ -2345,7 +2330,7 @@ impl SlidesApp {
     /// one way, and nothing read a deck back.
     fn open_deck(&mut self) -> EventResult {
         if self.dirty {
-            self.question = Some(Pending::Open);
+            self.ask(Pending::Open);
             return EventResult::Consumed;
         }
         self.go_on(Pending::Open);
@@ -2367,12 +2352,11 @@ impl SlidesApp {
     ///
     /// Save goes on only if the save worked: a deck that could not be written
     /// is still the only copy, and a failure says why on the status line.
-    fn answer(&mut self, pending: Pending, answer: Answer) {
-        self.question = None;
-        match answer {
-            Answer::Keep => {}
-            Answer::Discard => self.go_on(pending),
-            Answer::Save => match self.deck_path.clone() {
+    fn answer(&mut self, pending: Pending, choice: Choice) {
+        match choice {
+            Choice::Cancel => {}
+            Choice::Discard => self.go_on(pending),
+            Choice::Save => match self.deck_path.clone() {
                 Some(path) => {
                     let said = self.write_deck(&path);
                     self.status_message = Some(said);
@@ -2405,8 +2389,21 @@ impl SlidesApp {
         self.picker.close();
         self.layout_menu = None;
         self.show_help = false;
-        self.question = Some(Pending::Close);
+        self.ask(Pending::Close);
         false
+    }
+
+    /// Put the unsaved-changes question up before `pending`.
+    fn ask(&mut self, pending: Pending) {
+        let prompt = match pending {
+            Pending::Open => "Save them before opening another deck?",
+            Pending::Close => "Save them before closing?",
+        };
+        self.question = Some(Question::new(
+            &unsaved::message_for(&[&self.title]),
+            prompt,
+            pending,
+        ));
     }
 
     /// Save the deck where it was last saved or opened, or ask where.
@@ -2566,6 +2563,20 @@ impl SlidesApp {
     }
 
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The unsaved-changes question has every key and click while it is
+        // up: S saves, D goes on without saving, Escape keeps the deck, and
+        // any other key is swallowed -- a stray key must never be the one
+        // that loses the deck. Each is a redraw; focus and hover move inside.
+        if let Some(question) = self.question.as_mut()
+            && matches!(event, Event::Key(_) | Event::Mouse(_))
+        {
+            if let Some(choice) = question.handle(event) {
+                let pending = question.pending();
+                self.question = None;
+                self.answer(pending, choice);
+            }
+            return EventResult::Consumed;
+        }
         // The picker takes input first while it is up, or a filename is typed
         // into the slide behind it.
         match self
@@ -2632,19 +2643,6 @@ impl SlidesApp {
         }
         if let Some(reached) = self.layout_menu {
             return self.handle_layout_menu_key(key, reached);
-        }
-        // A question about unsaved changes takes the next key. S (or Enter)
-        // saves and goes on, D (or Y, "yes, go on") goes on without saving,
-        // and every other key keeps the deck: a stray key must never be the
-        // one that loses it.
-        if let Some(pending) = self.question {
-            let answer = match key.key {
-                Key::S | Key::Enter => Answer::Save,
-                Key::D | Key::Y => Answer::Discard,
-                _ => Answer::Keep,
-            };
-            self.answer(pending, answer);
-            return EventResult::Consumed;
         }
         // What the last save, open or export said stays up until the next
         // thing is done.
@@ -3065,9 +3063,6 @@ impl SlidesApp {
         }
         if let Some(reached) = self.layout_menu {
             self.render_layout_menu(&mut f, reached);
-        }
-        if let Some(pending) = self.question {
-            self.render_question(&mut f, pending);
         }
 
         // The picker over the slide rather than under it.
@@ -4428,64 +4423,6 @@ impl SlidesApp {
         }
     }
 
-    /// The question before Open or closing the window loses unsaved changes.
-    fn render_question(&self, f: &mut Frame<Target>, pending: Pending) {
-        let (w, h) = (self.window_width, self.window_height);
-        f.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: w,
-            height: h,
-            color: self.palette.scrim(),
-            corner_radii: CornerRadii::ZERO,
-        });
-        f.hit(Target::QuestionBackdrop, Rect::new(0.0, 0.0, w, h));
-        let card_w = 460.0_f32.min(w - 20.0).max(0.0);
-        let card = Rect::new((w - card_w) / 2.0, (h - 140.0) / 2.0, card_w, 140.0);
-        self.palette
-            .push_surface(f, card.x, card.y, card.w, card.h, 12.0, Surface::Card);
-        f.hit(Target::QuestionCard, card);
-        f.push(RenderCommand::Text {
-            x: card.x + 20.0,
-            y: card.y + 20.0,
-            text: String::from("This deck has changes that are not saved."),
-            color: self.palette.text,
-            font_size: 14.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some((card.w - 40.0).max(0.0)),
-            overflow: TextOverflow::Ellipsis,
-        });
-        let (asked, go_on) = match pending {
-            Pending::Open => (
-                "Save them before opening another deck?",
-                "Open without saving (D)",
-            ),
-            Pending::Close => ("Save them before closing?", "Close without saving (D)"),
-        };
-        f.push(RenderCommand::Text {
-            x: card.x + 20.0,
-            y: card.y + 46.0,
-            text: format!("{asked} Any other key keeps them."),
-            color: self.palette.subtext0,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some((card.w - 40.0).max(0.0)),
-            overflow: TextOverflow::Ellipsis,
-        });
-        // Save, go on without saving, keep: widest in the middle, where the
-        // label is longest.
-        let by = card.bottom() - 48.0;
-        let inner = (card.w - 40.0 - 16.0).max(0.0);
-        let (save_w, go_w) = (inner * 0.25, inner * 0.5);
-        let keep_w = inner - save_w - go_w;
-        let save = Rect::new(card.x + 20.0, by, save_w, 30.0);
-        let go = Rect::new(save.right() + 8.0, by, go_w, 30.0);
-        let keep = Rect::new(go.right() + 8.0, by, keep_w, 30.0);
-        self.button(f, save, "Save (S)", Target::Answer(Answer::Save), true);
-        self.button(f, go, go_on, Target::Answer(Answer::Discard), true);
-        self.button(f, keep, "Keep", Target::Answer(Answer::Keep), true);
-    }
-
     /// The new-slide menu: every layout, under the + Slide button.
     fn render_layout_menu(&self, f: &mut Frame<Target>, reached: usize) {
         // A press anywhere but on the menu closes it.
@@ -4787,17 +4724,6 @@ impl SlidesApp {
     fn press(&mut self, target: Target, x: f32, y: f32) -> EventResult {
         let had_message = self.status_message.take().is_some();
         let result = match target {
-            Target::Answer(answer) => {
-                if let Some(pending) = self.question {
-                    self.answer(pending, answer);
-                }
-                EventResult::Consumed
-            }
-            Target::QuestionBackdrop => {
-                self.question = None;
-                EventResult::Consumed
-            }
-            Target::QuestionCard => EventResult::Ignored,
             Target::HelpCard => {
                 self.show_help = false;
                 EventResult::Consumed
@@ -5532,7 +5458,14 @@ impl App for SlidesApp {
         self.window_height = height;
         let frame = self.frame();
         self.last_hits = frame.hits().to_vec();
-        frame.into_tree()
+        let mut tree = frame.into_tree();
+        // Over everything the frame drew. A dialog places its buttons as it
+        // draws them, which `frame` -- `&self` -- cannot do.
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
+        }
+        tree
     }
 }
 
@@ -8157,38 +8090,66 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Open asks before it throws unsaved changes away: Y or D (or its
-    /// button) opens without saving, and a key that answers nothing keeps the
-    /// deck.
+    /// Open asks before it throws unsaved changes away: D (or its button)
+    /// opens without saving, Escape keeps the deck, and a key that answers
+    /// nothing is swallowed rather than taken as an answer.
     #[test]
     fn open_asks_before_losing_unsaved_changes() {
         let mut app = fresh();
         app.handle_event(&press(Key::T));
         app.handle_event(&press_ctrl(Key::O));
-        assert_eq!(app.question, Some(Pending::Open));
+        assert_eq!(asking(&app), Some(Pending::Open));
         assert!(!app.picker.is_open());
         app.handle_event(&press(Key::N));
-        assert_eq!(app.question, None);
-        assert!(
-            !app.picker.is_open(),
-            "a key that answers nothing went on to open"
-        );
+        assert_eq!(asking(&app), Some(Pending::Open), "a stray key answered it");
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(asking(&app), None);
+        assert!(!app.picker.is_open(), "Escape went on to open");
         app.handle_event(&press_ctrl(Key::O));
-        app.handle_event(&press(Key::Y));
+        app.handle_event(&press(Key::D));
         assert!(app.picker.is_open());
         app.handle_event(&press(Key::Escape));
 
         app.handle_event(&press_ctrl(Key::O));
-        probe::click(&mut app, Target::Answer(Answer::Keep));
+        choose(&mut app, Choice::Cancel);
         assert!(app.question.is_none() && !app.picker.is_open());
         app.handle_event(&press_ctrl(Key::O));
-        assert_eq!(
-            probe::click(&mut app, Target::QuestionCard),
-            EventResult::Ignored
-        );
-        assert_eq!(app.question, Some(Pending::Open));
-        probe::click(&mut app, Target::Answer(Answer::Discard));
+        // A press beside the card answers nothing.
+        app.handle_event(&mouse(2.0, 2.0, MouseEventKind::Press(MouseButton::Left)));
+        assert_eq!(asking(&app), Some(Pending::Open));
+        choose(&mut app, Choice::Discard);
         assert!(app.picker.is_open());
+    }
+
+    /// What the unsaved-changes question is holding up, while it is up.
+    fn asking(app: &SlidesApp) -> Option<Pending> {
+        app.question.as_ref().map(Question::pending)
+    }
+
+    /// Everything drawn, the question included -- which the frame alone
+    /// does not draw: `render` does, after it.
+    fn rendered_text(app: &mut SlidesApp) -> String {
+        let (w, h) = (app.window_width, app.window_height);
+        app.render(w, h)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Click the question's `choice` where it is drawn.
+    fn choose(app: &mut SlidesApp, choice: Choice) -> Response {
+        rendered_text(app);
+        let (x, y) = app
+            .question
+            .as_ref()
+            .and_then(|q| q.button_centre(choice))
+            .expect("the question is drawn");
+        app.on_event(&mouse(x, y, MouseEventKind::Press(MouseButton::Left)))
     }
 
     /// Open's question can save first, and then opens.
@@ -8227,17 +8188,22 @@ mod tests {
         app.write_deck(&path);
         app.handle_event(&press(Key::T));
         assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
-        assert_eq!(app.question, Some(Pending::Close));
+        assert_eq!(asking(&app), Some(Pending::Close));
         assert!(
-            drawn_text(&app).contains("Save them before closing?"),
+            rendered_text(&mut app).contains("Save them before closing?"),
             "the question is not drawn"
         );
 
-        // A key that answers nothing keeps the deck, and does nothing else.
+        // A key that answers nothing is swallowed: it neither answers nor
+        // reaches the slide.
         let before = element_count(&app);
         assert_eq!(app.on_event(&press(Key::T)), Response::Redraw);
-        assert_eq!(app.question, None);
+        assert_eq!(asking(&app), Some(Pending::Close));
         assert_eq!(element_count(&app), before, "the key reached the slide");
+
+        // Escape keeps the deck and the window.
+        assert_eq!(app.on_event(&press(Key::Escape)), Response::Redraw);
+        assert_eq!(asking(&app), None);
         assert!(app.dirty);
 
         // S saves, and the window goes.
@@ -8253,11 +8219,7 @@ mod tests {
         app.read_deck(&path);
         app.handle_event(&press(Key::T));
         assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
-        let (x, y) = centre(&app, Target::Answer(Answer::Discard));
-        assert_eq!(
-            app.on_event(&mouse(x, y, MouseEventKind::Press(MouseButton::Left))),
-            Response::Exit
-        );
+        assert_eq!(choose(&mut app, Choice::Discard), Response::Exit);
         let mut unchanged = fresh();
         unchanged.read_deck(&path);
         assert_eq!(element_count(&unchanged), element_count(&saved));
@@ -8343,7 +8305,7 @@ mod tests {
         assert!(app.show.is_some(), "control: the show is running");
         assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
         assert!(app.show.is_none());
-        assert!(drawn_text(&app).contains("Save them before closing?"));
+        assert!(rendered_text(&mut app).contains("Save them before closing?"));
     }
 
     /// The window bar marks unsaved changes, and a save clears the mark.

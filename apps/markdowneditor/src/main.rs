@@ -66,6 +66,7 @@ use diffcore::{
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
+use unsaved::{Choice, Question};
 
 // ============================================================================
 // Catppuccin Mocha theme constants
@@ -3795,8 +3796,6 @@ pub enum Target {
     ReviewAccept,
     /// Back out of the review to the four answers.
     ReviewCancel,
-    /// One of the answers to "this document has unsaved changes".
-    Closing(CloseChoice),
     /// The shortcut card; a press anywhere while it is up puts it away.
     HelpCard,
 }
@@ -5109,8 +5108,9 @@ pub struct App {
     /// The first row the table of contents shows.
     pub toc_scroll: usize,
     /// A close waiting on an answer, because what it would close has unsaved
-    /// changes.
-    pub close_prompt: Option<CloseScope>,
+    /// changes: the toolkit's own dialog, asked the one way every editor here
+    /// asks it (`apps/unsaved`).
+    pub question: Option<Question<CloseScope>>,
     /// The conflict the merge review's keys act on.
     pub review_focus: usize,
     /// A drop-down open over the window: the toolbar's or the tab bar's `»`.
@@ -5265,17 +5265,6 @@ pub enum CloseScope {
     Window,
 }
 
-/// The answers to "this has unsaved changes".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CloseChoice {
-    /// Save, then close if the save worked.
-    Save,
-    /// Close without saving.
-    Discard,
-    /// Do not close.
-    Cancel,
-}
-
 /// What a path chosen in the save picker is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SavePurpose {
@@ -5322,7 +5311,7 @@ impl App {
             template_chooser_open: false,
             template_focus: 0,
             toc_scroll: 0,
-            close_prompt: None,
+            question: None,
             review_focus: 0,
             menu: None,
             hover: None,
@@ -6031,9 +6020,6 @@ impl App {
         if let Some(prompt) = self.external_prompt.as_ref() {
             self.draw_external_prompt(&mut f, prompt, width, height);
         }
-        if let Some(scope) = self.close_prompt {
-            self.draw_close_prompt(&mut f, scope, width, height);
-        }
         if let Some((_, menu)) = self.menu.as_ref() {
             f.extend(menu.render(pal));
         }
@@ -6383,77 +6369,6 @@ impl App {
             bx -= 8.0;
         }
     }
-
-    /// Draw the "unsaved changes" dialog for a pending close.
-    fn draw_close_prompt(&self, f: &mut Frame<Target>, scope: CloseScope, width: f32, height: f32) {
-        let (title, body) = match scope {
-            CloseScope::Tab(idx) => {
-                let name = self
-                    .documents
-                    .get(idx)
-                    .map_or("This document", |d| d.name.as_str());
-                (
-                    "Unsaved changes",
-                    format!("\"{name}\" has changes that have not been saved."),
-                )
-            }
-            CloseScope::Window => {
-                let unsaved = self.documents.iter().filter(|d| d.modified).count();
-                (
-                    "Unsaved changes",
-                    if unsaved == 1 {
-                        "A document has changes that have not been saved.".to_string()
-                    } else {
-                        format!("{unsaved} documents have changes that have not been saved.")
-                    },
-                )
-            }
-        };
-        let offered: [(CloseChoice, &str, &str); 3] = match scope {
-            CloseScope::Tab(_) => [
-                (CloseChoice::Save, "Save  S", "save it, then close it"),
-                (
-                    CloseChoice::Discard,
-                    "Don't save  D",
-                    "close it and lose the changes",
-                ),
-                (CloseChoice::Cancel, "Cancel  Esc", "keep it open"),
-            ],
-            CloseScope::Window => [
-                (
-                    CloseChoice::Save,
-                    "Save all  S",
-                    "save each one, then close",
-                ),
-                (
-                    CloseChoice::Discard,
-                    "Don't save  D",
-                    "close and lose the changes",
-                ),
-                (CloseChoice::Cancel, "Cancel  Esc", "keep the window open"),
-            ],
-        };
-        let dw = 480.0_f32.min(width - 40.0);
-        let dh = 86.0 + 3.0 * 34.0;
-        let dialog = Rect::new((width - dw) / 2.0, (height - dh) / 2.0, dw, dh);
-        self.draw_dialog_frame(f, width, height, dialog, title);
-        f.push(RenderCommand::Text {
-            x: dialog.x + 12.0,
-            y: dialog.y + 44.0,
-            text: body,
-            font_size: 12.0,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(dw - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        let mut by = dialog.y + 74.0;
-        for (choice, label, hint) in offered {
-            let row = Rect::new(dialog.x + 12.0, by, dw - 24.0, 30.0);
-            self.draw_answer_row(f, row, label, hint, Target::Closing(choice));
-            by += 34.0;
-        }
-    }
 }
 
 /// Width of the column of three answer buttons at the left of each conflict
@@ -6502,7 +6417,13 @@ impl App {
     /// with unsaved changes asks rather than losing them.
     pub fn request_close_tab(&mut self, idx: usize) {
         match self.documents.get(idx) {
-            Some(doc) if doc.modified => self.close_prompt = Some(CloseScope::Tab(idx)),
+            Some(doc) if doc.modified => {
+                self.question = Some(Question::new(
+                    &unsaved::message_for(&[&doc.name]),
+                    "Save them before the tab closes?",
+                    CloseScope::Tab(idx),
+                ));
+            }
             Some(_) => self.close_document(idx),
             None => {}
         }
@@ -6522,7 +6443,23 @@ impl App {
             self.save_every_titled_document();
         }
         if self.documents.iter().any(|d| d.modified) {
-            self.close_prompt = Some(CloseScope::Window);
+            let names: Vec<&str> = self
+                .documents
+                .iter()
+                .filter(|d| d.modified)
+                .map(|d| d.name.as_str())
+                .collect();
+            let question = Question::new(
+                &unsaved::message_for(&names),
+                "Save them before the window closes?",
+                CloseScope::Window,
+            );
+            // The question replaces whatever was up: a picker or a menu left
+            // open would take the keys it needs, and be drawn over it.
+            self.picker.close();
+            self.menu = None;
+            self.show_help = false;
+            self.question = Some(question);
             false
         } else {
             true
@@ -6551,17 +6488,14 @@ impl App {
         }
     }
 
-    /// Answer the pending close.
-    pub fn answer_close(&mut self, choice: CloseChoice) {
-        let Some(scope) = self.close_prompt.take() else {
-            return;
-        };
+    /// Answer the close question put before `scope`.
+    pub fn answer_close(&mut self, scope: CloseScope, choice: Choice) {
         match (scope, choice) {
-            (_, CloseChoice::Cancel) => {}
-            (CloseScope::Tab(idx), CloseChoice::Discard) => self.close_document(idx),
-            (CloseScope::Tab(idx), CloseChoice::Save) => self.save_then_close(idx),
-            (CloseScope::Window, CloseChoice::Discard) => self.quit = true,
-            (CloseScope::Window, CloseChoice::Save) => self.continue_quitting(),
+            (_, Choice::Cancel) => {}
+            (CloseScope::Tab(idx), Choice::Discard) => self.close_document(idx),
+            (CloseScope::Tab(idx), Choice::Save) => self.save_then_close(idx),
+            (CloseScope::Window, Choice::Discard) => self.quit = true,
+            (CloseScope::Window, Choice::Save) => self.continue_quitting(),
         }
     }
 
@@ -6852,7 +6786,6 @@ impl App {
             }
             Target::ReviewAccept => self.review_accept(),
             Target::ReviewCancel => self.review_cancel(),
-            Target::Closing(choice) => self.answer_close(choice),
             Target::HelpCard => self.show_help = false,
             // Surfaces that answer the wheel or nothing at all; a press on
             // them is theirs, and stops there.
@@ -7339,20 +7272,6 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Esc", "Close the find panel"),
 ];
 
-/// Keys while the "unsaved changes" dialog is up. It is modal: every key stops
-/// here, answered or not, because typing into a document that is being closed
-/// is typing into a document the user has already decided about.
-fn handle_close_prompt_key(app: &mut App, key: Key) -> bool {
-    let choice = match key {
-        Key::Char('s' | 'S') | Key::Enter => CloseChoice::Save,
-        Key::Char('d' | 'D') => CloseChoice::Discard,
-        Key::Char('c' | 'C') | Key::Escape => CloseChoice::Cancel,
-        _ => return true,
-    };
-    app.answer_close(choice);
-    true
-}
-
 /// Keys while the "file changed on disk" dialog is up -- its answers, or the
 /// merge review's. Modal for the same reason as the close dialog.
 ///
@@ -7600,9 +7519,6 @@ pub fn handle_key(app: &mut App, key: Key, modifiers: Modifiers) -> bool {
         return true;
     }
     // The dialogs, each modal, most urgent first.
-    if app.close_prompt.is_some() {
-        return handle_close_prompt_key(app, key);
-    }
     if app.external_prompt.is_some() {
         return handle_external_prompt_key(app, key);
     }
@@ -7901,6 +7817,24 @@ impl oswindow::app::App for App {
         // `Resize` is let through first so the picker is laid out against the
         // size the compositor actually gave us; everything else stops here
         // while a dialog is up.
+        // The close question first of all, while it is up: every key and
+        // click is its, since typing into a document being closed is typing
+        // into one the user has already decided about. Each is a redraw --
+        // focus and hover move inside it.
+        if let Some(question) = self.question.as_mut()
+            && matches!(event, GEvent::Key(_) | GEvent::Mouse(_))
+        {
+            if let Some(choice) = question.handle(event) {
+                let scope = question.pending();
+                self.question = None;
+                self.answer_close(scope, choice);
+            }
+            return if self.quit {
+                Response::Exit
+            } else {
+                Response::Redraw
+            };
+        }
         if !matches!(event, GEvent::Resize { .. }) && self.picker_took(event) {
             // The picker's last answer may have been the save that lets a
             // closing window go.
@@ -8030,6 +7964,10 @@ impl oswindow::app::App for App {
         // different route.
         tree.commands
             .extend(self.picker.render(&self.palette, width, height));
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
+        }
         tree
     }
 }
@@ -11229,6 +11167,24 @@ mod tests {
         }
     }
 
+    /// What the close question is asking about, while it is up.
+    fn asking(app: &App) -> Option<CloseScope> {
+        app.question.as_ref().map(Question::pending)
+    }
+
+    /// Click the close question's `choice` where it is drawn. A dialog's
+    /// buttons are where it last drew them, so it is drawn first.
+    fn answer(app: &mut App, choice: Choice) -> Response {
+        let (w, h) = App::SIZE;
+        let _ = oswindow::app::App::render(app, w, h);
+        let (x, y) = app
+            .question
+            .as_ref()
+            .and_then(|q| q.button_centre(choice))
+            .expect("the question is drawn");
+        app.click_at(x, y, MouseButton::Left, App::SIZE)
+    }
+
     fn mouse(x: f32, y: f32, kind: MouseEventKind) -> guitk::event::Event {
         guitk::event::Event::Mouse(MouseEvent { x, y, kind })
     }
@@ -11473,15 +11429,15 @@ mod tests {
         app.open_file(&path).unwrap();
         app.active_document_mut().insert_char('!');
         probe::click(&mut app, Target::CloseTab(1));
-        assert_eq!(app.close_prompt, Some(CloseScope::Tab(1)));
+        assert_eq!(asking(&app), Some(CloseScope::Tab(1)));
         assert_eq!(app.documents.count(), 2, "it closed without asking");
-        probe::click(&mut app, Target::Closing(CloseChoice::Cancel));
+        answer(&mut app, Choice::Cancel);
         assert_eq!(app.documents.count(), 2);
-        assert_eq!(app.close_prompt, None);
+        assert_eq!(asking(&app), None);
 
         // Don't save closes it and leaves the file alone.
         probe::click(&mut app, Target::CloseTab(1));
-        probe::click(&mut app, Target::Closing(CloseChoice::Discard));
+        answer(&mut app, Choice::Discard);
         assert_eq!(app.documents.count(), 1);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "on disk");
 
@@ -11503,8 +11459,8 @@ mod tests {
         app.new_document();
         app.active_document_mut().insert_char('x');
         probe::key(&mut app, &probe::ctrl(guitk::event::Key::W));
-        assert_eq!(app.close_prompt, Some(CloseScope::Tab(1)));
-        probe::click(&mut app, Target::Closing(CloseChoice::Save));
+        assert_eq!(asking(&app), Some(CloseScope::Tab(1)));
+        answer(&mut app, Choice::Save);
         assert!(app.picker.is_saving(), "no picker to say where");
         assert_eq!(app.documents.count(), 2, "closed before it was saved");
 
@@ -11537,16 +11493,13 @@ mod tests {
             Response::KeepOpen,
             "unsaved work was thrown away: any answer but KeepOpen closes the window"
         );
-        assert_eq!(app.close_prompt, Some(CloseScope::Window));
-        assert_ne!(
-            probe::click(&mut app, Target::Closing(CloseChoice::Cancel)),
-            Response::Exit
-        );
+        assert_eq!(asking(&app), Some(CloseScope::Window));
+        assert_ne!(answer(&mut app, Choice::Cancel), Response::Exit);
 
         // Save all writes it and then goes.
         app.on_event(&close);
         assert_eq!(
-            probe::click(&mut app, Target::Closing(CloseChoice::Save)),
+            answer(&mut app, Choice::Save),
             Response::Exit,
             "saved everything and stayed open"
         );
@@ -11558,10 +11511,7 @@ mod tests {
         app.open_file(&path).unwrap();
         app.active_document_mut().insert_char('?');
         app.on_event(&close);
-        assert_eq!(
-            probe::click(&mut app, Target::Closing(CloseChoice::Discard)),
-            Response::Exit
-        );
+        assert_eq!(answer(&mut app, Choice::Discard), Response::Exit);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "!kept");
     }
 
@@ -11597,7 +11547,7 @@ mod tests {
             Response::Exit,
             "the untitled work was dropped"
         );
-        assert_eq!(app.close_prompt, Some(CloseScope::Window));
+        assert_eq!(asking(&app), Some(CloseScope::Window));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "?!kept");
     }
 
@@ -11609,7 +11559,7 @@ mod tests {
         app.new_document();
         app.active_document_mut().insert_char('x');
         probe::key(&mut app, &probe::ctrl(guitk::event::Key::W));
-        assert!(app.close_prompt.is_some());
+        assert!(app.question.is_some());
         // Where the first tab is drawn, under the dimmed window.
         let first_tab = {
             let mut plain = App::new(1280.0, 800.0);
@@ -11624,7 +11574,7 @@ mod tests {
             "the press went through the dialog to a tab"
         );
         assert!(
-            app.close_prompt.is_some(),
+            app.question.is_some(),
             "a press beside the dialog answered it"
         );
     }

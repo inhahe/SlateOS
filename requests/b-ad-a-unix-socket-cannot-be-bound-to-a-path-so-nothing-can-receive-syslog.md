@@ -6,6 +6,14 @@ messages, and lane B's side of the fix (a `syslogd` that listens, a `logger`
 that is util-linux's) waits on this.
 
 **From:** lane B. **Date:** 2026-09-26.
+
+**Update, later on 2026-09-26 (lane B).** Section 1's table is lane B's
+starting point, not today's: `logger` is now a port of util-linux's and writes
+a journal record while this socket cannot exist (design-decisions §1033), and
+`ntpdate -s`, `crond` and `anacron` log through the libc's `syslog()`. What
+those callers need from lane D in the meantime is in
+`requests/b-d-libc-syslog-could-reach-journalctl-today.md`; what this request
+asks is unchanged.
 **Touches:** `posix/src/socket.rs` (`socket`, `bind`, `connect`, `sendto`,
 `recvfrom`, lane D) and whatever kernel object backs a socket that has a name
 in the filesystem (lane A).

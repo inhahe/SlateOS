@@ -166453,8 +166453,11 @@ file position through every read. No writer's file reaches any of them, and
 **Status:** OPEN — waiting on
 `requests/b-ad-a-unix-socket-cannot-be-bound-to-a-path-so-nothing-can-receive-syslog.md`
 (path-bound `AF_UNIX` sockets). Found 2026-09-26 while fixing `logger`'s
-timestamps. Step 3 below is done (413e56f1d): `logger`'s messages now reach
-`journalctl`. Steps 1, 2, 4 and 5 remain.
+timestamps. Steps 3 and 4 below are done: `logger`'s messages reach
+`journalctl` (413e56f1d), and `ntpdate -s`, `crond` and `anacron` log through
+the libc's `syslog()` (the step-5 route) instead of losing their messages or
+printing them to stderr themselves. Steps 1, 2 and 5 remain, with lanes A
+and D.
 
 **In short:** there is no system log on SlateOS in the sense a Unix program
 means. A program that logs the POSIX way sends a datagram to `/dev/log` and
@@ -166470,7 +166473,8 @@ word (`read_all_entries` -> `JournalEntry::from_json_line`):
 |---|---|
 | libc `syslog()` (lane D) | stderr (`posix/src/syslog.rs`, `let fd = 2`) |
 | `logger` | a `journalrec` record in `/var/log/syslog.jsonl` -- since 2026-09-26; before, RFC 3164 text lines in `/var/log/syslog` that `journalctl` could not read |
-| `ntpdate -s` | nowhere: it `open`s `/dev/log` as a file, which fails, and discards the error (`userspace/ntpd/src/main.rs`, the `output` closure in `run_ntpdate`) |
+| `ntpdate -s` | the libc's `syslog()` -- since 2026-09-26; before, nowhere: it `open`ed `/dev/log` as a file, which failed, and discarded the error |
+| `crond`, `anacron` | the libc's `syslog()` -- since 2026-09-26; before, its own `crond2[PID]: ...` lines on stderr |
 | `systemd-cat` (`systemctl`) | a `journalrec` record in `/var/log/syslog.jsonl` |
 | `syslogd log` | the same file |
 | `syslogd daemon` | receives nothing (`cmd_daemon`: "the daemon sits idle") |
@@ -166496,10 +166500,18 @@ reads both; it is the parser that drops the text lines.)
    sockets that branch never runs, so the harness compares pure upstream
    behaviour; on SlateOS it reaches `journalctl` today, and switches to
    `/dev/log` by itself once step 1 lands.
-4. `ntpdate -s` sends through the same path instead of opening a socket path
-   as a file.
-5. Lane D's libc `syslog()` can then send to `/dev/log` as glibc does (lane
-   D's call).
+4. **DONE 2026-09-26.** `ntpdate -s` (and `sntp -s`) log through the C
+   library's `syslog()` -- `openlog(name, LOG_PID, LOG_DAEMON)`, as ntpdate
+   does -- by way of `userspace/libcsyslog`, a thin wrapper that keeps one
+   syslog client on the system; `crond` and `anacron` too, at `LOG_CRON`,
+   each message at its own severity. Checked end to end by
+   `scripts/syslog-client-check.sh`, which puts a private socket over
+   `/dev/log` in WSL. Where the messages go is now the libc's decision --
+   step 5.
+5. Lane D's libc `syslog()` sends to `/dev/log` as glibc does -- and until
+   step 1 lands, appends a journal record when `socket(AF_UNIX, ...)` fails
+   with `EAFNOSUPPORT`, as `logger` does. Asked in
+   `requests/b-d-libc-syslog-could-reach-journalctl-today.md`; lane D's call.
 
 Step 3's port needed a real `getopt_long` (permutation, abbreviated long
 options, optional arguments). Only coreutils had one; it was extracted into

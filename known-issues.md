@@ -166316,7 +166316,7 @@ coreutils 9.4's `nstrftime.c`, and each caller uses its upstream's. The
 `date-diff.sh` rows are `run_case`s again, and `scripts/strftime-diff.sh`
 checks every conversion under every flag, width and modifier against both.
 
-## B-PS-C-COLUMN-TRUNCATES-CPU-TIME-TO-SECONDS (lane B, 2026-09-26) — **open**
+## B-PS-C-COLUMN-TRUNCATES-CPU-TIME-TO-SECONDS (lane B, 2026-09-26) — FIXED 2026-09-26
 
 **In short:** `ps -f`'s `C` column (percent of CPU a process has used over its
 life) comes out lower than procps' for any process whose CPU time is not a
@@ -166341,3 +166341,11 @@ only when the host is slow.
 
 **Severity: low.** One column of one format, off by at most the fraction of a
 second of CPU time the process has used, divided by its age.
+
+**How it was closed (2026-09-26).** `cpu_percent` is procps-ng 4.0.4's
+`pr_c` over libproc2's `TIME_ELAPSED`, read from the source rather than
+inferred: `/proc/uptime` read once per listing into `boot_tics` (truncated),
+the age `(boot_tics - start_time) / Hz` as a double and back to whole jiffies,
+`ticks * 100 / jiffies`, the low 32 bits, capped at 99. Unit tests pin the
+arithmetic; `ps-diff.sh` 60/0. What is still missing is a harness case whose
+subject is busy and old enough to have a non-zero `C` on an idle host.

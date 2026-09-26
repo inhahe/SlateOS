@@ -1176,9 +1176,9 @@ fn read_one(
             String::new()
         },
         cpu_pct: cpu_percent(
-            stat.utime_ticks,
-            stat.stime_ticks,
-            ctx.now_epoch.saturating_sub(start_epoch),
+            stat.utime_ticks.saturating_add(stat.stime_ticks),
+            stat.starttime_ticks,
+            ctx.boot_tics,
         ),
         start_epoch,
         stime: ctx.format_stime(start_epoch),
@@ -1263,6 +1263,11 @@ struct ListCtx {
     zone: Zone,
     /// `btime` from `/proc/stat`: the wall-clock second the system booted.
     boot_epoch: i64,
+    /// libproc2's `boot_tics`: `/proc/uptime` read once for the whole listing
+    /// and turned into clock ticks, truncated -- what every process's age is
+    /// measured against for the `C` column. 0 if `/proc/uptime` cannot be
+    /// read, as libproc2 leaves it.
+    boot_tics: u64,
     /// Read once, so every `STIME` in one listing is judged against the same
     /// "today".
     now_epoch: i64,
@@ -1285,10 +1290,23 @@ impl ListCtx {
             .ok()
             .and_then(|d| i64::try_from(d.as_secs()).ok())
             .unwrap_or(0);
+        // `boot_tics = up_secs * hertz`, a `double` converted to `unsigned long
+        // long`: truncated.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss,
+            reason = "libproc2's double-to-unsigned conversion, truncation and all; \
+                      Rust's saturates where C's would be undefined"
+        )]
+        let boot_tics = procfs.uptime().ok().flatten().map_or(0, |u| {
+            (u.up.as_secs_f64() * procinfo::TICKS_PER_SEC as f64) as u64
+        });
         Self {
             db: pwdb::Db::load(),
             zone: Zone::from_env(),
             boot_epoch,
+            boot_tics,
             now_epoch,
         }
     }
@@ -1341,18 +1359,43 @@ fn read_wchan(procfs: &procinfo::ProcFs, pid: u64) -> String {
     text.chars().take(6).collect()
 }
 
-/// procps' `C` column: integer percent of CPU used over the process's life.
+/// procps' `C` column: the percent of one CPU a process has used over its
+/// life, capped at 99 -- procps-ng 4.0.4's `pr_c` (`src/ps/output.c`) over
+/// libproc2's `TIME_ELAPSED` (`library/pids.c`), in their arithmetic:
 ///
-/// Zero elapsed seconds yields 0 rather than a division by zero -- every
-/// process is younger than a second at some point, including `ps` itself,
-/// which is always in its own listing.
-fn cpu_percent(utime: u64, stime: u64, elapsed_secs: i64) -> u64 {
-    let elapsed = u64::try_from(elapsed_secs).unwrap_or(0);
-    if elapsed == 0 {
-        return 0;
-    }
-    let total_secs = utime.saturating_add(stime) / procinfo::TICKS_PER_SEC;
-    total_secs.saturating_mul(100) / elapsed
+/// ```c
+/// double t = boot_tics - start_time;              /* unsigned, then double */
+/// if (t > 0) elapsed = t / hertz;                 /* else 0 */
+/// jiffies = elapsed * Hertz;                      /* back to ticks, truncated */
+/// if (jiffies) pcpu = (total_time * 100ULL) / jiffies;
+/// if (pcpu > 99U) pcpu = 99U;                     /* pcpu is `unsigned` */
+/// ```
+///
+/// The CPU time is multiplied by 100 *before* it is divided: a process that has
+/// used 0.33 s in its first second is at 33, and was at 0 here while this
+/// divided the ticks down to whole seconds first
+/// (`known-issues.md` → `B-PS-C-COLUMN-TRUNCATES-CPU-TIME-TO-SECONDS`). A
+/// process younger than a tick -- or read before it started, which wraps the
+/// unsigned subtraction to an age of centuries -- is at 0.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "procps' own conversions between ticks and double seconds"
+)]
+fn cpu_percent(total_ticks: u64, start_ticks: u64, boot_tics: u64) -> u64 {
+    let hertz = procinfo::TICKS_PER_SEC as f64;
+    let t = boot_tics.wrapping_sub(start_ticks) as f64;
+    let elapsed = if t > 0.0 { t / hertz } else { 0.0 };
+    let jiffies = (elapsed * hertz) as u64;
+    // `if (jiffies) pcpu = …`: no age yet, no percentage.
+    let quotient = total_ticks
+        .wrapping_mul(100)
+        .checked_div(jiffies)
+        .unwrap_or(0);
+    // `unsigned pcpu = …`: the low 32 bits, then the cap.
+    let pcpu = u32::try_from(quotient & u64::from(u32::MAX)).unwrap_or(u32::MAX);
+    u64::from(pcpu.min(99))
 }
 
 /// Format the `tty_nr` field from /proc/<pid>/stat.  Zero is "?" (no
@@ -1798,6 +1841,22 @@ mod tests {
         assert_eq!(format_tty(34816), "pts/0");
         assert_eq!(format_tty(34817), "pts/1");
         assert_eq!(format_tty(0x8_00_ff), "pts/255");
+    }
+
+    #[test]
+    fn c_is_cpu_ticks_over_age_in_ticks_as_procps_computes_it() {
+        // 33 ticks of CPU in a life of 50: 66, where dividing the CPU time down
+        // to whole seconds first gave 0.
+        assert_eq!(cpu_percent(33, 950, 1000), 66);
+        assert_eq!(cpu_percent(33, 900, 1000), 33);
+        // Capped at 99, however busy.
+        assert_eq!(cpu_percent(500, 900, 1000), 99);
+        // No age yet, or started after the uptime was read: 0.
+        assert_eq!(cpu_percent(5, 1000, 1000), 0);
+        assert_eq!(cpu_percent(5, 1001, 1000), 0);
+        // An old, mostly idle process rounds down.
+        assert_eq!(cpu_percent(99, 0, 10_000), 0);
+        assert_eq!(cpu_percent(100, 0, 10_000), 1);
     }
 
     /// Ticks, not seconds. `procinfo::TICKS_PER_SEC` is the divisor, so this

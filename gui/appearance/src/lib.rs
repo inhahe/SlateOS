@@ -3522,87 +3522,98 @@ mod tests {
     fn test_config_round_trips_every_enum_variant() {
         // A typo in one `yaml_name` arm would otherwise only show up as one
         // user's setting quietly resetting itself.
-        let mut settings = AppearanceSettings::default();
-        for accent in AccentColor::presets()
-            .iter()
-            .copied()
-            .chain([AccentColor::Custom])
-        {
-            settings.accent_color = accent;
-            for theme in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::System] {
-                settings.theme_mode = theme;
-                let mut doc = Document::new();
-                settings.write_into(&mut doc);
-                let reread = AppearanceSettings::read_from(&Document::parse(&doc.to_text()));
-                assert_eq!(reread.accent_color, accent);
-                assert_eq!(reread.theme_mode, theme);
-            }
-        }
-        for (subpixel, corners, taskbar, cursor, icon, speed, transparency, scheme) in [
-            (
-                SubpixelMode::None,
-                WindowCorners::Square,
-                TaskbarStyle::Solid,
-                CursorSize::Small,
-                IconSize::Small,
-                AnimationSpeed::Off,
-                TransparencyLevel::Off,
-                CursorScheme::Default,
-            ),
-            (
-                SubpixelMode::Rgb,
-                WindowCorners::Subtle,
-                TaskbarStyle::Translucent,
-                CursorSize::Normal,
-                IconSize::Medium,
-                AnimationSpeed::Fast,
-                TransparencyLevel::Subtle,
-                CursorScheme::Inverted,
-            ),
-            (
-                SubpixelMode::Bgr,
-                WindowCorners::Rounded,
-                TaskbarStyle::Transparent,
-                CursorSize::Large,
-                IconSize::Large,
-                AnimationSpeed::Normal,
-                TransparencyLevel::Moderate,
-                CursorScheme::AccentColored,
-            ),
-            (
-                SubpixelMode::VRgb,
-                WindowCorners::ExtraRounded,
-                TaskbarStyle::Solid,
-                CursorSize::ExtraLarge,
-                IconSize::ExtraLarge,
-                AnimationSpeed::Slow,
-                TransparencyLevel::Full,
-                CursorScheme::Default,
-            ),
-            (
-                SubpixelMode::VBgr,
-                WindowCorners::Square,
-                TaskbarStyle::Translucent,
-                CursorSize::Small,
-                IconSize::Small,
-                AnimationSpeed::Off,
-                TransparencyLevel::Off,
-                CursorScheme::Inverted,
-            ),
-        ] {
-            settings.fonts.subpixel = subpixel;
-            settings.window_corners = corners;
-            settings.taskbar_style = taskbar;
-            settings.cursor_size = cursor;
-            settings.icon_size = icon;
-            settings.animation_speed = speed;
-            settings.transparency = transparency;
-            settings.cursor_scheme = scheme;
-            let mut doc = Document::new();
-            settings.write_into(&mut doc);
-            let reread = AppearanceSettings::read_from(&Document::parse(&doc.to_text()));
-            assert_eq!(reread, settings, "round trip of {settings:?}");
-        }
+        //
+        // In UTC at a fixed hour, because the first loop leaves the mode on
+        // `System (Auto)`, whose `auto_is_light` is not stored: it is worked
+        // out from the clock as the file is read. Unpinned, this failed every
+        // day from 07:00 to 19:00 in the host's zone -- it was written at
+        // night.
+        in_utc("round-trip-enums", |_| {
+            datetimesettings::clock::with_time(NIGHT, || {
+                let mut settings = AppearanceSettings::default();
+                for accent in AccentColor::presets()
+                    .iter()
+                    .copied()
+                    .chain([AccentColor::Custom])
+                {
+                    settings.accent_color = accent;
+                    for theme in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::System] {
+                        settings.theme_mode = theme;
+                        let mut doc = Document::new();
+                        settings.write_into(&mut doc);
+                        let reread =
+                            AppearanceSettings::read_from(&Document::parse(&doc.to_text()));
+                        assert_eq!(reread.accent_color, accent);
+                        assert_eq!(reread.theme_mode, theme);
+                    }
+                }
+                for (subpixel, corners, taskbar, cursor, icon, speed, transparency, scheme) in [
+                    (
+                        SubpixelMode::None,
+                        WindowCorners::Square,
+                        TaskbarStyle::Solid,
+                        CursorSize::Small,
+                        IconSize::Small,
+                        AnimationSpeed::Off,
+                        TransparencyLevel::Off,
+                        CursorScheme::Default,
+                    ),
+                    (
+                        SubpixelMode::Rgb,
+                        WindowCorners::Subtle,
+                        TaskbarStyle::Translucent,
+                        CursorSize::Normal,
+                        IconSize::Medium,
+                        AnimationSpeed::Fast,
+                        TransparencyLevel::Subtle,
+                        CursorScheme::Inverted,
+                    ),
+                    (
+                        SubpixelMode::Bgr,
+                        WindowCorners::Rounded,
+                        TaskbarStyle::Transparent,
+                        CursorSize::Large,
+                        IconSize::Large,
+                        AnimationSpeed::Normal,
+                        TransparencyLevel::Moderate,
+                        CursorScheme::AccentColored,
+                    ),
+                    (
+                        SubpixelMode::VRgb,
+                        WindowCorners::ExtraRounded,
+                        TaskbarStyle::Solid,
+                        CursorSize::ExtraLarge,
+                        IconSize::ExtraLarge,
+                        AnimationSpeed::Slow,
+                        TransparencyLevel::Full,
+                        CursorScheme::Default,
+                    ),
+                    (
+                        SubpixelMode::VBgr,
+                        WindowCorners::Square,
+                        TaskbarStyle::Translucent,
+                        CursorSize::Small,
+                        IconSize::Small,
+                        AnimationSpeed::Off,
+                        TransparencyLevel::Off,
+                        CursorScheme::Inverted,
+                    ),
+                ] {
+                    settings.fonts.subpixel = subpixel;
+                    settings.window_corners = corners;
+                    settings.taskbar_style = taskbar;
+                    settings.cursor_size = cursor;
+                    settings.icon_size = icon;
+                    settings.animation_speed = speed;
+                    settings.transparency = transparency;
+                    settings.cursor_scheme = scheme;
+                    let mut doc = Document::new();
+                    settings.write_into(&mut doc);
+                    let reread = AppearanceSettings::read_from(&Document::parse(&doc.to_text()));
+                    assert_eq!(reread, settings, "round trip of {settings:?}");
+                }
+            });
+        });
     }
 
     #[test]

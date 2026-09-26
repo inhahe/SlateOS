@@ -1277,13 +1277,29 @@ if [ -z "${DIFF_NO_BINDIR:-}" ]; then
           DIFF_SKIPPED="$DIFF_SKIPPED $diff_b"
           continue
         fi
-        ln -s "$diff_bin" "$bindir/ours/$diff_b"
-        ln -s "$diff_gnu" "$bindir/gnu/$diff_b"
+        ln -s "$diff_bin" "$bindir/ours/$diff_b" || exit 1
+        ln -s "$diff_gnu" "$bindir/gnu/$diff_b" || exit 1
       done
       ;;
     *)
-      ln -s "$OURS" "$bindir/ours/$DIFF_PROG"
-      ln -s "$gnu_real" "$bindir/gnu/$DIFF_PROG"
+      # One subject, reached on both sides as `DIFF_PROG` -- the knob's
+      # contract, and why `time-diff.sh` can build `time_cmd` and run `time`.
+      #
+      # So there must be a reference to link. `DIFF_NO_REF` with one
+      # `DIFF_BINS` and these directories has none, and `ln -s ''` failing is
+      # the only sign of it: every later `env PATH=$bindir/gnu NAME` then fails
+      # "not found" exactly as the ours side does if *its* link is misnamed,
+      # the two errors agree, and the harness passes having compared nothing.
+      # That is not hypothetical -- `strftime-diff.sh` did it on its first run,
+      # 225 green chunks of which the `date` half had run nothing at all.
+      if [ -z "$gnu_real" ]; then
+        echo "$DIFF_PROG-diff: nothing to put on the gnu PATH as $DIFF_PROG" >&2
+        echo "  (DIFF_NO_REF with a single DIFF_BINS: set DIFF_PROG to the name both" >&2
+        echo "  sides are run by and let the reference be found, or DIFF_NO_BINDIR=1)" >&2
+        exit 1
+      fi
+      ln -s "$OURS" "$bindir/ours/$DIFF_PROG" || exit 1
+      ln -s "$gnu_real" "$bindir/gnu/$DIFF_PROG" || exit 1
       ;;
   esac
 fi

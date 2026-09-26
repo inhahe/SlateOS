@@ -50,6 +50,15 @@ use appearance::Surface;
 use std::collections::BTreeMap;
 use std::fmt;
 
+// The transport's parts land a stage at a time, each tested; the session that
+// drives them comes after the tracker and peer ones. `expect` rather than
+// `allow`, so this goes the moment something uses them.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the download session, which lands after it")
+)]
+mod storage;
+
 // ─── Bencode ─────────────────────────────────────────────────────────
 
 /// Bencode value types per BEP 3
@@ -424,6 +433,10 @@ pub struct TorrentMetainfo {
     /// As the torrent gives it: the single file's name, or the folder the
     /// files go in. Checked by [`checked_part`].
     pub name_bytes: Vec<u8>,
+    /// Whether the torrent is a folder of files (its info has a `files`
+    /// list) rather than one file -- which decides whether `name` is a
+    /// folder the files go in or the file itself.
+    pub multi_file: bool,
     pub piece_length: u64,
     pub pieces: Vec<[u8; 20]>,
     pub files: Vec<TorrentFile>,
@@ -530,7 +543,9 @@ impl TorrentMetainfo {
             u64::try_from(n).map_err(|_| format!("a file of {n} bytes"))
         };
         // Single file or multi-file?
-        let files = if let Some(files_list) = info_dict.get("files").and_then(|v| v.as_list()) {
+        let listed = info_dict.get("files").and_then(|v| v.as_list());
+        let multi_file = listed.is_some();
+        let files = if let Some(files_list) = listed {
             // Multi-file torrent: every entry must be a file with a length
             // and a path. One skipped would shift every byte after it into
             // the wrong file.
@@ -600,6 +615,7 @@ impl TorrentMetainfo {
             info_hash,
             name,
             name_bytes,
+            multi_file,
             piece_length,
             pieces,
             files,
@@ -5099,6 +5115,7 @@ fn create_sample_torrent(name: &str, size: u64, piece_len: u64, announce: &str) 
         info_hash: sha1::sha1(name.as_bytes()),
         name: name.to_string(),
         name_bytes: name.as_bytes().to_vec(),
+        multi_file: false,
         piece_length: piece_len,
         pieces,
         files: vec![TorrentFile::named(&format!("{name}.iso"), size)],

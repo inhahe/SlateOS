@@ -1791,6 +1791,10 @@ D's to act on once answered).
       and `timer_create` (the read-only clocks cannot be armed) take Linux's
       order and answers; the STREAMS calls are glibc's stubs again; `getdents`
       writes the legacy record instead of answering `ENOSYS`.
+    * `ftw`/`nftw` walk the whole tree, whatever `nopenfd` (they stopped
+      `nopenfd` levels down, and never deeper than 32), on one descriptor,
+      each directory once; they are glibc's walker now, `FTW_ACTIONRETVAL`
+      included (§1109).
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

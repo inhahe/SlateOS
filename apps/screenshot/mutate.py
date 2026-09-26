@@ -120,8 +120,8 @@ MUTATIONS = [
     ),
     (
         "saving again makes a new file",
-        "            Some(existing) => {\n                write_bmp(existing, capture.width, capture.height, &pixels)?;\n                existing.clone()\n            }",
-        "            Some(_) => write_new_bmp(\n                &self.settings.save_directory,\n                &capture.default_filename(),\n                capture.width,\n                capture.height,\n                &pixels,\n            )?,",
+        "            Some(existing) => {\n                write_png(existing, capture.width, capture.height, &pixels)?;\n                existing.clone()\n            }",
+        "            Some(_) => write_new_png(\n                &self.settings.save_directory,\n                &capture.default_filename(),\n                capture.width,\n                capture.height,\n                &pixels,\n            )?,",
         [RESAVE],
     ),
     (
@@ -129,6 +129,34 @@ MUTATIONS = [
         "            if let Ok(path) = &outcome {\n                self.current_saved_path = Some(path.clone());\n            }",
         "",
         [TWO],
+    ),
+]
+
+MUTATIONS += [
+    # -- PNG, the folder, the clock (2026-09-26) ------------------------------
+    (
+        "a new capture's folder is not made",
+        "    std::fs::create_dir_all(dir)?;\n",
+        "",
+        ["a_new_capture_makes_its_folder"],
+    ),
+    (
+        "the default folder is a literal ~",
+        "            save_directory: default_save_directory(),",
+        "            save_directory: PathBuf::from(\"~/Pictures/Screenshots/\"),",
+        ["the_default_folder_is_under_home"],
+    ),
+    (
+        "every capture is stamped with one fixed date",
+        "            timestamp: now_utc(),",
+        "            timestamp: (2026, 1, 1, 0, 0, 0),",
+        ["a_new_capture_is_stamped_with_the_clock"],
+    ),
+    (
+        "the clock's hours are its minutes",
+        "        part(into_day / 3_600),",
+        "        part(into_day % 3_600 / 60),",
+        ["a_new_capture_is_stamped_with_the_clock"],
     ),
 ]
 

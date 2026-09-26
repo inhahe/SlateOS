@@ -331,8 +331,17 @@ const TRAY_ICON_SLOT: f32 = 24.0;
 /// still crowd a 1024-wide netbook and would waste two thirds of a 4K bar.
 const TRAY_ICON_SHARE: f32 = 0.25;
 
-/// The glyph for "there are more icons than fit".
-const TRAY_OVERFLOW_GLYPH: &str = "\u{2039}";
+/// The icon for "there are more icons than fit": a chevron pointing the way
+/// the run would carry on.
+const TRAY_OVERFLOW_ICON: &str = "pan-start";
+
+/// The side of the taskbar's own icons -- the start button's and the
+/// notification bell's -- in logical pixels.
+const TASKBAR_ICON: f32 = 20.0;
+
+/// The side of the tray's chevron, in logical pixels: smaller than the icons
+/// it stands beside, as it is a way to them rather than one of them.
+const TRAY_CHEVRON_ICON: f32 = 16.0;
 
 /// A press on a tray icon, in flight.
 struct TrayDrag {
@@ -376,14 +385,13 @@ const SHORTCUT_CARD_HINT: &str = "Enter: new keys \u{b7} F2: change action \u{b7
 
 /// The bell the tray draws when nothing is being silenced.
 ///
-/// Not read by the renderer, which asks the focus manager for the glyph of
-/// whatever mode is in force; this is the same codepoint that
+/// Not read by the renderer, which asks the focus manager for the icon of
+/// whatever mode is in force; this is the name that
 /// [`focus_assist::FocusMode::Off`] answers, kept so a test can say *which*
-/// glyph "not silencing anything" is without asserting it against the very
-/// function under test. `focus_assist` and `widgets` use the same codepoint, so
-/// the desktop has one bell rather than three.
+/// icon "not silencing anything" is without asserting it against the very
+/// function under test.
 #[cfg(test)]
-const NOTIF_BELL_GLYPH: &str = "\u{1F514}";
+const NOTIF_BELL_ICON: &str = "notifications";
 /// Extra room the window buttons leave beyond the tray, so the last button does
 /// not end flush against the desktop indicator.
 const TRAY_RESERVE_GAP: f32 = 20.0;
@@ -3154,6 +3162,28 @@ impl DesktopShell {
         self.icon_registry
             .request(id)
             .or_else(|| self.icons.icon_request(id))
+    }
+
+    /// Draw the icon `name`, `logical` pixels square at this scale and in
+    /// `color`, centred in `rect`.
+    fn icon_in(
+        &self,
+        tree: &mut RenderTree,
+        rect: Rect,
+        name: &'static str,
+        logical: f32,
+        color: Color,
+    ) {
+        let px = self.icon_px(logical);
+        #[allow(clippy::cast_precision_loss)]
+        let side = px as f32;
+        tree.push(guitk::render::RenderCommand::Image {
+            x: rect.x + (rect.w - side) / 2.0,
+            y: rect.y + (rect.h - side) / 2.0,
+            width: side,
+            height: side,
+            image_id: self.icon(name, px, color),
+        });
     }
 
     /// An icon's side, `logical` pixels at this scale, as a whole number.
@@ -6273,12 +6303,14 @@ impl DesktopShell {
             self.theme.taskbar_bg
         };
         fill(&mut tree, start, start_bg);
-        tree.text(
-            start.x + self.scale(12.0),
-            start.y + self.scale(12.0),
-            "\u{2261}", // hamburger menu icon
+        // An icon, not the `≡` it used to be: the built-in font has no such
+        // character, and the start button drew a box (design-decisions §881).
+        self.icon_in(
+            &mut tree,
+            start,
+            "start-here",
+            TASKBAR_ICON,
             self.theme.taskbar_accent,
-            self.font_size(TextRole::Glyph),
         );
 
         // Window buttons. Rounded like the windows they stand for — the corner
@@ -6394,12 +6426,12 @@ impl DesktopShell {
         // The chevron first, at the left of the run, so that a reader of this
         // function meets the strip in the order it is drawn.
         if let Some(rect) = self.tray_overflow_rect() {
-            tree.text(
-                rect.x,
-                tray_text_y,
-                TRAY_OVERFLOW_GLYPH,
+            self.icon_in(
+                &mut tree,
+                rect,
+                TRAY_OVERFLOW_ICON,
+                TRAY_CHEVRON_ICON,
                 self.theme.taskbar_fg,
-                self.font_size(TextRole::Glyph),
             );
         }
         for (rect, icon) in self.tray_icon_rects().iter().zip(self.ordered_tray_icons()) {
@@ -6427,11 +6459,20 @@ impl DesktopShell {
 
         let bell = self.bell_rect();
         let unread = self.notifications.attention_count();
-        tree.text(
+        // In the bell's own width at the slot's left, as the glyph was: the
+        // badge below is right-aligned in the slot.
+        let bell_icon = Rect::new(
             bell.x,
-            tray_text_y,
-            self.focus.effective_mode().icon(),
-            // Accent when something is waiting. The glyph alone would be a
+            bar.y,
+            self.scale(TRAY_BELL_WIDTH).min(bell.w),
+            bar.h,
+        );
+        self.icon_in(
+            &mut tree,
+            bell_icon,
+            self.focus.effective_mode().icon_name(),
+            TASKBAR_ICON,
+            // Accent when something is waiting. The icon alone would be a
             // silent difference: a bell that looks the same whether or not it
             // has anything behind it is a bell nobody presses.
             //
@@ -6440,13 +6481,12 @@ impl DesktopShell {
             // pill fill; on the taskbar the only pair this theme guarantees
             // legible is accent-on-background (pinned by
             // `the_taskbar_accent_contrasts_with_the_bar`), and the changed
-            // glyph already carries the mode.
+            // icon already carries the mode.
             if unread == 0 {
                 self.theme.taskbar_fg
             } else {
                 self.theme.taskbar_accent
             },
-            self.font_size(TextRole::Glyph),
         );
         if unread > 0 {
             // Two characters at most, so a hundred notifications cannot widen
@@ -12704,7 +12744,7 @@ mod window_manager_tests {
 mod overview_wiring_tests {
     use super::{
         DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
-        RenderTree, ShellAction, ShellControlAction, ShellRequest, TRAY_OVERFLOW_GLYPH, WindowId,
+        RenderTree, ShellAction, ShellControlAction, ShellRequest, TRAY_OVERFLOW_ICON, WindowId,
         WindowInfo, WindowList, focus_assist, notif_pane, overview, tray_dnd,
     };
     use guitk::render::RenderCommand;
@@ -13216,6 +13256,57 @@ mod overview_wiring_tests {
             .collect()
     }
 
+    /// The icons the taskbar draws, in order, as `(name, colour)`.
+    fn taskbar_icons(s: &DesktopShell) -> Vec<(&'static str, super::Color)> {
+        s.render_taskbar()
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Image { image_id, .. } => s.icon_request(*image_id),
+                _ => None,
+            })
+            .map(|request| (request.name, request.color))
+            .collect()
+    }
+
+    /// **The start button, the bell and the chevron are icons**, each one the
+    /// built-in set draws. They were characters -- `≡`, a bell emoji, `‹` --
+    /// that no font the desktop has can draw, so each was a box.
+    #[test]
+    fn the_taskbars_own_pictures_are_icons_the_built_in_set_draws() {
+        let s = shell();
+        let icons = taskbar_icons(&s);
+        assert!(
+            icons
+                .iter()
+                .any(|(name, color)| *name == "start-here" && *color == s.theme.taskbar_accent),
+            "no start button icon in the accent: {icons:?}"
+        );
+        assert!(
+            icons
+                .iter()
+                .any(|(name, _)| *name == super::NOTIF_BELL_ICON)
+        );
+        let drawn = appearance::icons::built_in_names();
+        for (name, _) in &icons {
+            assert!(drawn.contains(name), "{name} is not in the built-in set");
+        }
+        for mode in [
+            focus_assist::FocusMode::Off,
+            focus_assist::FocusMode::PriorityOnly,
+            focus_assist::FocusMode::AlarmsOnly,
+            focus_assist::FocusMode::TotalSilence,
+        ] {
+            assert!(drawn.contains(&mode.icon_name()), "{mode:?}");
+        }
+        assert!(drawn.contains(&TRAY_OVERFLOW_ICON));
+        // And none of the old characters is left as text.
+        let text = taskbar_text(&s);
+        for gone in ["\u{2261}", "\u{2039}", "\u{1F514}"] {
+            assert!(!text.iter().any(|t| t == gone), "{gone:?} is still text");
+        }
+    }
+
     /// Post `n` unread notifications from `Desktop`, carrying no action.
     fn post(s: &mut DesktopShell, n: usize) {
         for i in 0..n {
@@ -13386,15 +13477,11 @@ mod overview_wiring_tests {
         assert!(drawn > 0 && hidden > 0);
 
         // And the chevron is drawn, not merely computed.
-        let glyphs = s
-            .render_taskbar()
-            .commands
+        let chevrons = taskbar_icons(&s)
             .iter()
-            .filter(
-                |c| matches!(c, RenderCommand::Text { text, .. } if text == TRAY_OVERFLOW_GLYPH),
-            )
+            .filter(|(name, _)| *name == TRAY_OVERFLOW_ICON)
             .count();
-        assert_eq!(glyphs, 1, "the chevron was not painted");
+        assert_eq!(chevrons, 1, "the chevron was not painted");
     }
 
     /// Choosing a row from the overflow list clicks that program's icon.
@@ -14403,9 +14490,9 @@ mod overview_wiring_tests {
     fn the_tray_draws_a_bell() {
         let s = shell();
         assert!(
-            taskbar_text(&s)
+            taskbar_icons(&s)
                 .iter()
-                .any(|t| t == super::NOTIF_BELL_GLYPH),
+                .any(|(name, _)| *name == super::NOTIF_BELL_ICON),
             "the tray drew no bell"
         );
     }
@@ -14545,15 +14632,9 @@ mod overview_wiring_tests {
         // A bell that looks the same whether or not it has anything behind it
         // is a bell nobody presses.
         fn bell_colour(s: &DesktopShell) -> super::Color {
-            s.render_taskbar()
-                .commands
-                .iter()
-                .find_map(|cmd| match cmd {
-                    RenderCommand::Text { text, color, .. } if text == super::NOTIF_BELL_GLYPH => {
-                        Some(*color)
-                    }
-                    _ => None,
-                })
+            taskbar_icons(s)
+                .into_iter()
+                .find_map(|(name, color)| (name == super::NOTIF_BELL_ICON).then_some(color))
                 .expect("the tray drew no bell")
         }
         let mut s = shell();
@@ -14640,9 +14721,9 @@ mod overview_wiring_tests {
         let s = shell();
         assert_eq!(s.focus.effective_mode(), focus_assist::FocusMode::Off);
         assert!(
-            taskbar_text(&s)
+            taskbar_icons(&s)
                 .iter()
-                .any(|t| t == super::NOTIF_BELL_GLYPH),
+                .any(|(name, _)| *name == super::NOTIF_BELL_ICON),
             "the tray drew something other than a plain bell with nothing silenced"
         );
     }
@@ -14723,15 +14804,15 @@ mod overview_wiring_tests {
         // been quiet". A tray that looked identical in Total Silence would
         // leave the user with no way to find out why nothing has arrived.
         let mut s = shell();
-        let quiet = taskbar_text(&s);
+        let quiet = taskbar_icons(&s);
         s.focus.set_mode(focus_assist::FocusMode::TotalSilence);
-        let silenced = taskbar_text(&s);
+        let silenced = taskbar_icons(&s);
         assert_ne!(quiet, silenced, "the tray drew the same thing either way");
         assert!(
             silenced
                 .iter()
-                .any(|t| t == focus_assist::FocusMode::TotalSilence.icon()),
-            "the tray drew no mode glyph: {silenced:?}"
+                .any(|(name, _)| *name == focus_assist::FocusMode::TotalSilence.icon_name()),
+            "the tray drew no mode icon: {silenced:?}"
         );
     }
 

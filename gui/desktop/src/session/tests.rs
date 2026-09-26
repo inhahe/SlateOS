@@ -5670,6 +5670,59 @@ fn after_an_appearance_change_the_desktops_icons_are_sent_again() {
     });
 }
 
+/// **Every icon the taskbar names reaches the taskbar's surface before its
+/// frame does** -- the start button, the bell -- each once however many frames
+/// name it.
+#[test]
+fn the_taskbars_icons_go_up_before_the_frame_that_names_them() {
+    let (mut session, desktop, _turn) = session();
+    let panel = session.panel().window();
+    // The taskbar's icons went up with its first frame, at start; a change of
+    // mode draws a bell the taskbar has not been sent.
+    session
+        .shell_mut()
+        .focus
+        .set_mode(crate::focus_assist::FocusMode::TotalSilence);
+    let frames = desktop.borrow_mut().drawn().len();
+
+    session.paint_chrome().expect("paint");
+
+    let wanted = icon_ids(&session.shell().render_taskbar());
+    assert!(
+        wanted.len() >= 2,
+        "the start button and the bell: {wanted:?}"
+    );
+    assert!(
+        wanted.iter().any(|(id, _)| session
+            .shell()
+            .icon_request(*id)
+            .is_some_and(|r| r.name == "action-unavailable")),
+        "the silenced bell is not drawn"
+    );
+    let sent = icon_uploads(&desktop);
+    for (id, px) in &wanted {
+        let bytes = usize::try_from(px * px * 4).unwrap();
+        assert!(
+            sent.contains(&(panel, *id, *px, *px, px * 4, bytes)),
+            "icon {id:x} did not go up to the taskbar at {px} px: {sent:?}"
+        );
+    }
+    // The uploads are round trips and were answered; the taskbar's frame,
+    // one-way, is still unread in the pipe -- so the icons went first.
+    assert!(
+        !desktop.borrow().submitted[frames..]
+            .iter()
+            .any(|(window, _)| *window == panel),
+        "the taskbar's frame overtook its icons"
+    );
+    session.paint_chrome().expect("paint again");
+    assert_eq!(
+        icon_uploads(&desktop).len(),
+        sent.len(),
+        "an icon went up twice"
+    );
+}
+
 /// **A change of appearance puts the icons back to the compositor** -- the
 /// old ones dropped, the new ones (in the new colours, under new ids) sent
 /// when a frame next names them.

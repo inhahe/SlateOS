@@ -787,10 +787,7 @@ impl<T: Transport> ShellSession<T> {
         let palette = Palette::from_settings(&self.shell.appearance);
         let mut tree = RenderTree::new();
         tree.extend(screen.render(&palette));
-        self.events.submit(
-            self.login_surface.window,
-            &self.login_surface.localize(&tree),
-        )
+        self.send_frame(self.login_surface, &tree)
     }
 
     /// Deliver an event to the login screen and act on what it asks for.
@@ -1468,8 +1465,7 @@ impl<T: Transport> ShellSession<T> {
         // that somebody is here.
         self.refresh_run_browser();
         let bar = self.shell.render_taskbar();
-        self.events
-            .submit(self.panel.window, &self.panel.localize(&bar))?;
+        self.send_frame(self.panel, &bar)?;
 
         let open = self.popups_open();
         if open != self.popups_shown {
@@ -1545,9 +1541,7 @@ impl<T: Transport> ShellSession<T> {
             {
                 tree.commands.extend(part.commands);
             }
-            self.upload_icons(self.popups.window, &tree)?;
-            self.events
-                .submit(self.popups.window, &self.popups.localize(&tree))?;
+            self.send_frame(self.popups, &tree)?;
         }
 
         // The overlays, on their own surface and on their own schedule: an OSD
@@ -1580,10 +1574,20 @@ impl<T: Transport> ShellSession<T> {
             self.osd_shown = showing;
         }
         if let Some(tree) = overlays {
-            self.events
-                .submit(self.osd.window, &self.osd.localize(&tree))?;
+            self.send_frame(self.osd, &tree)?;
         }
         Ok(())
+    }
+
+    /// Send `tree` to `surface`, the icons it names uploaded first.
+    ///
+    /// The one door every surface's frame goes through but the background's,
+    /// which compares its frame before sending and uploads in
+    /// [`refresh_background`](Self::refresh_background): an icon a frame names
+    /// on a surface that was never sent it is drawn as nothing, silently.
+    fn send_frame(&mut self, surface: Surface, tree: &RenderTree) -> Result<(), Error<T>> {
+        self.upload_icons(surface.window, tree)?;
+        self.events.submit(surface.window, &surface.localize(tree))
     }
 
     /// Whether anything the popup surface exists to show is showing.

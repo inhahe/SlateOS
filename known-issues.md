@@ -24338,6 +24338,30 @@ at the size they are drawn. Twelve tests, fourteen mutations, all killed.
 **Also gone:** `SvgDocument::render_commands`, which approximated every path
 fill by its bounding box and which nothing called.
 
+## TD-C-THE-SHELL-DREW-ITS-PICTURES-AS-EMOJI-NO-FONT-IT-HAS-CAN-DRAW (lane C, 2026-09-26) -- PARTLY FIXED the same day
+
+**Status:** PARTLY FIXED 2026-09-26 -- the taskbar's start button, bell and
+tray chevron are icons (design-decisions §881); the volume and brightness
+overlays, the login screen and the widgets are next, in that order.
+
+**In short:** the shell drew its small pictures as characters -- a bell, a
+speaker, a sun, a padlock, a person, a power symbol, the start button's `≡` --
+and no font it has can draw most of them. The built-in font covers Basic Latin,
+box drawing and block elements; Inter and DejaVu Sans, the UI faces it looks
+for, have no emoji. So each was drawn as the replacement box: on the taskbar,
+in every volume change, on the login screen, in every widget's title bar.
+
+**Where:** `gui/desktop/src/lib.rs` (`render_taskbar`), `osd.rs`,
+`login_screen.rs`, `widgets.rs`, `focus_assist.rs`.
+
+**The fix:** each picture is a named icon from the icon theme (§880), with the
+built-in set drawing every one (`appearance::icons`), and every surface uploads
+the icons its frame names before sending it (`ShellSession::send_frame`).
+
+**Not in reach here:** the icons *programs* put in the tray are characters they
+send (`guiremote::tray::TrayIcon::glyph`); naming a theme icon there is a wire
+change, lane F's.
+
 ## TD-APPS-ESTIMATE-TEXT-WIDTH — apps still guess at text width instead of measuring it
 
 **Status.** **Closed for the original defect** as of 2026-08-14. `gui/**` was

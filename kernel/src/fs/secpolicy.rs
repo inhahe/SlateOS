@@ -13,9 +13,13 @@
 //!   and here it is a stored enum. An unenforced *mandatory* access control
 //!   is worse than none, because "mandatory" is precisely the claim that
 //!   stops someone adding their own check.
-//! - `stats()`'s denial count can only ever be 0, since nothing asks this
-//!   module for a decision it could refuse. In `/proc` that reads as
-//!   *nothing was denied*, not as *nothing was asked* (dd-942).
+//! - `stats()`'s denial count IS incremented -- `total_denied += 1` on
+//!   `Decision::Deny` in `check_access` -- but `check_access` has one
+//!   caller outside this module, `kshell`, a command a human types. So it
+//!   reads 0 on any boot where nobody ran it, and in `/proc` that reads as
+//!   *nothing was denied* rather than *nothing in a permission path asks*
+//!   (dd-942). An earlier version of this line said the count "can only
+//!   ever be 0", which was false -- one kshell command moves it.
 //!
 //! The architecture block below also advertises `secpolicy::check(...)`,
 //! which does not exist; the function is `check_access`.

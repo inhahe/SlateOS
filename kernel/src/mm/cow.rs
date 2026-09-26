@@ -434,9 +434,10 @@ unsafe fn map_child_pte(
 ) -> KernelResult<()> {
     let user = virt.is_user();
     // SAFETY: child_pml4 is a valid PML4 (caller guarantee); each level is
-    // created or returned by walk_or_create.
-    let pdpt =
-        unsafe { page_table::walk_or_create(child_pml4, virt.pml4_index(), true, user, hhdm)? };
+    // created or returned by walk_or_create. The top level goes through
+    // `walk_or_create_pml4`, which refuses to add a kernel-half entry after
+    // boot should a kernel address ever reach here.
+    let pdpt = unsafe { page_table::walk_or_create_pml4(child_pml4, virt, true, user, hhdm)? };
     // SAFETY: pdpt was returned by walk_or_create above.
     let pd = unsafe { page_table::walk_or_create(pdpt, virt.pdpt_index(), true, user, hhdm)? };
     // SAFETY: pd was returned by walk_or_create above.

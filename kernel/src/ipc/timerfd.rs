@@ -1086,7 +1086,7 @@ pub fn self_test_blocking_multi_waiter() -> KernelResult<()> {
     run_settime_wake_phase(2)
 }
 
-/// One phase of [`test_multi_waiter_settime_wake`]: park `readers` tasks on a
+/// One phase of [`self_test_blocking_multi_waiter`]: park `readers` tasks on a
 /// disarmed timerfd, arm it periodically, and require every one of them to come
 /// back with an expiration.
 fn run_settime_wake_phase(readers: u32) -> KernelResult<()> {

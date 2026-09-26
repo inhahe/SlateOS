@@ -292,6 +292,7 @@ pub mod path;
 pub mod pathbar;
 pub mod pathutil;
 pub mod peninput;
+pub mod perfile;
 pub mod perfmon;
 pub mod pftrack;
 pub mod pgtable;

@@ -354,66 +354,65 @@ impl PriorityRoundRobin {
         }
     }
 
-    /// Remove a specific task from its queue.
+    /// Remove a task from the run queue: every entry it has, at whatever
+    /// level each one sits.
     ///
-    /// Used when a task blocks or is suspended.  Returns `true` if
-    /// the task was found and removed.
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn dequeue(&mut self, id: TaskId, priority: u8) -> bool {
-        let level = (priority as usize).min(NUM_PRIORITIES.saturating_sub(1));
-        let Some(queue) = self.queues.get_mut(level) else {
-            return false;
-        };
-
-        // Linear scan within the priority queue.  Each individual
-        // queue should be short (a few tasks), so this is acceptable.
-        if let Some(pos) = queue.iter().position(|&tid| tid == id) {
-            queue.remove(pos);
-            if queue.is_empty() {
-                self.bitmap &= !(1 << level);
-            }
-            return true;
-        }
-
-        false
-    }
-
-    /// Remove a task from whatever priority queue(s) it currently sits in,
-    /// scanning every level.  Returns `true` if at least one entry was
-    /// removed.
+    /// `_priority` is the level the caller computed from the task's fields,
+    /// and it is deliberately not trusted.  This used to scan that one level
+    /// and nothing else, but a queued task does not always sit at the level
+    /// its fields compute *now*: the anti-starvation booster moves a task to
+    /// level 0 without touching its priority, and a timer tick can drop the
+    /// interactive boost of a task that was queued while still on the CPU.
+    /// The removal then missed -- silently, since no caller checks the result
+    /// -- and left the entry behind for a task that had just been killed,
+    /// suspended or re-levelled.  The next pick ran it anyway: a killed task
+    /// came back to life, and a task that later exited was "resumed" by its
+    /// own stale entry and halted the CPU with interrupts off.  See
+    /// known-issues.md `B-FORKEXEC-BOOT-HANG` (2026-09-25).
     ///
-    /// Unlike [`dequeue`], the caller does not need to know the task's
-    /// current queue level.  This is required by the anti-starvation
-    /// booster, which moves a task to priority 0 without changing its
-    /// `priority` field: a subsequent `dequeue(id, base_priority)` would
-    /// scan the wrong level, fail to find the task (it is in queue 0), and
-    /// leave a stale entry behind while a fresh enqueue created a duplicate.
-    /// `dequeue_any` removes the task wherever it is and also sweeps up any
-    /// pre-existing duplicate entries, keeping the run queue consistent.
-    pub fn dequeue_any(&mut self, id: TaskId) -> bool {
+    /// Removing every entry, rather than the first one found, also sweeps up
+    /// a duplicate left by any earlier miss.  Only non-empty levels are
+    /// visited -- the bitmap names them -- so the cost is one pass over the
+    /// tasks actually queued on this CPU.
+    ///
+    /// The anti-starvation booster needed a removal like this first, being the
+    /// first place a task's level stopped matching its fields, and had its own
+    /// `dequeue_any` for it.  That is this method now; there is no other.
+    ///
+    /// Returns `true` if at least one entry was removed.
+    pub fn dequeue(&mut self, id: TaskId, _priority: u8) -> bool {
         let mut removed = false;
-        for level in 0..NUM_PRIORITIES {
-            let Some(queue) = self.queues.get_mut(level) else {
+        let mut pending = self.bitmap;
+        while pending != 0 {
+            let level = pending.trailing_zeros();
+            // Clear the lowest set bit.  `pending` is non-zero, so this
+            // cannot wrap.
+            pending &= pending.wrapping_sub(1);
+            let Some(queue) = self.queues.get_mut(level as usize) else {
                 continue;
             };
-            // Remove *all* occurrences at this level (defensive: clears any
-            // duplicates that an earlier wrong-level enqueue may have left).
-            let mut found_here = false;
-            while let Some(pos) = queue.iter().position(|&tid| tid == id) {
-                queue.remove(pos);
-                found_here = true;
-            }
-            if found_here {
+            let before = queue.len();
+            queue.retain(|&tid| tid != id);
+            if queue.len() != before {
                 removed = true;
                 if queue.is_empty() {
-                    #[allow(clippy::cast_possible_truncation)]
-                    {
-                        self.bitmap &= !(1u32 << (level as u32));
-                    }
+                    // `level` is the index of a set bit of a `u32`, so below
+                    // 32: the shift cannot overflow.
+                    self.bitmap &= !1u32.wrapping_shl(level);
                 }
             }
         }
         removed
+    }
+
+    /// How many entries name `id`, at every level: 0 or 1 in a consistent
+    /// queue.  A diagnostic for the scheduler self-test; O(queued tasks).
+    #[must_use]
+    pub fn entries_for(&self, id: TaskId) -> usize {
+        self.queues
+            .iter()
+            .map(|queue| queue.iter().filter(|&&tid| tid == id).count())
+            .sum()
     }
 
     /// Handle a timer tick for the current task.
@@ -744,8 +743,10 @@ impl PerCpuScheduler {
         let backend_id = super::backend::desired_backend();
         super::backend::set_active_backend(backend_id);
 
-        for i in 0..n {
-            *self.queues[i].lock() = super::backend::SchedulerBackend::from_id(backend_id);
+        for queue in self.queues.iter().take(n) {
+            Self::locked_irqs_off(queue, |backend| {
+                *backend = super::backend::SchedulerBackend::from_id(backend_id);
+            });
         }
     }
 
@@ -775,28 +776,95 @@ impl PerCpuScheduler {
         }
     }
 
-    /// Dequeue a task from the specified CPU's run queue.
-    #[allow(clippy::arithmetic_side_effects)]
+    /// Take a task off the run queues entirely: every entry it has, on every
+    /// online CPU, at every level.
+    ///
+    /// `priority` and `cpu` are where the caller believes the task is queued,
+    /// and neither is trusted.  The backends ignore the level (see
+    /// [`PriorityRoundRobin::dequeue`] for why that became necessary), and
+    /// every online CPU's queue is swept, not only `cpu`'s: a push-balance
+    /// migration that could not take the task table leaves `last_cpu` naming
+    /// the CPU the task was moved *off*, and a removal that looked only there
+    /// would miss it exactly as the level-only scan did.
+    ///
+    /// Not a hot path -- nothing calls it per context switch -- so the sweep
+    /// costs one short lock per online CPU.  Each lock is taken and released
+    /// on its own; no two are ever held together.
+    ///
+    /// Returns `true` if any entry was removed.
     pub fn dequeue(&self, id: super::task::TaskId, priority: u8, cpu: usize) -> bool {
-        let n = self.num_cpus.load(Ordering::Relaxed);
-        let target = cpu.min(n.saturating_sub(1));
-        self.queues
-            .get(target)
-            .is_some_and(|q| q.lock().dequeue(id, priority))
+        let n = self.num_cpus.load(Ordering::Relaxed).max(1);
+        // The named CPU first, only so the common case touches the lock it
+        // always touched before any other.
+        let named = cpu.min(n.saturating_sub(1));
+        let mut removed = self
+            .queues
+            .get(named)
+            .is_some_and(|q| q.lock().dequeue(id, priority));
+        for other in (0..n).filter(|&c| c != named) {
+            if self
+                .queues
+                .get(other)
+                .is_some_and(|q| q.lock().dequeue(id, priority))
+            {
+                removed = true;
+            }
+        }
+        removed
     }
 
-    /// Dequeue a task from the specified CPU's run queue regardless of which
-    /// priority level it currently sits in.  See
-    /// [`PriorityQueue::dequeue_any`] — used by the anti-starvation booster,
-    /// which must remove a task whose live queue level no longer matches its
-    /// base `priority` field.
-    #[allow(clippy::arithmetic_side_effects)]
-    pub fn dequeue_any(&self, id: super::task::TaskId, cpu: usize) -> bool {
-        let n = self.num_cpus.load(Ordering::Relaxed);
-        let target = cpu.min(n.saturating_sub(1));
+    /// How many run-queue entries name `id`, over every online CPU: 0 or 1 in
+    /// a consistent scheduler.
+    ///
+    /// A diagnostic -- the scheduler self-test uses it to prove a removal left
+    /// nothing behind.  O(queued tasks), taking each queue lock in turn, with
+    /// interrupts off: its caller need not hold `SCHED` (see
+    /// [`locked_irqs_off`](Self::locked_irqs_off)).
+    #[must_use]
+    pub fn entries_for(&self, id: super::task::TaskId) -> usize {
+        let n = self.num_cpus.load(Ordering::Relaxed).max(1);
         self.queues
-            .get(target)
-            .is_some_and(|q| q.lock().dequeue_any(id))
+            .iter()
+            .take(n)
+            .map(|q| Self::locked_irqs_off(q, |backend| backend.entries_for(id)))
+            .sum()
+    }
+
+    /// Run `f` on one CPU's queue, holding its lock with interrupts disabled
+    /// -- the way to lock a queue from a path that does not hold `SCHED`.
+    ///
+    /// Interrupt handlers take these locks too, and block for them: an
+    /// hrtimer callback's `try_wake`, and the timer tick's anti-starvation
+    /// booster and `unthrottle_expired`.  Each takes `SCHED` first, with
+    /// `try_lock`, and that is what makes a holder of `SCHED` safe from them:
+    /// their `try_lock` fails and they back off.  A holder of only a queue
+    /// lock has no such protection.  An interrupt landing on its CPU while it
+    /// holds one gets `SCHED`, then spins on the queue lock with interrupts
+    /// disabled, and the holder never runs again to release it: a silent
+    /// wedge, total on a uniprocessor boot.
+    ///
+    /// Every method of this type that locks a queue goes through this or
+    /// [`try_locked_irqs_off`](Self::try_locked_irqs_off), except the four the
+    /// scheduler calls holding `SCHED` -- `pick_next_local`, `enqueue`,
+    /// `dequeue` and `try_steal` -- and `tick`, which runs in the timer
+    /// interrupt with interrupts already off.
+    fn locked_irqs_off<R>(
+        queue: &Mutex<super::backend::SchedulerBackend>,
+        f: impl FnOnce(&mut super::backend::SchedulerBackend) -> R,
+    ) -> R {
+        crate::cpu::without_interrupts(|| f(&mut queue.lock()))
+    }
+
+    /// [`locked_irqs_off`](Self::locked_irqs_off) with `try_lock`: `None` if
+    /// the lock is held.  A `try_lock` that succeeds holds the lock just as a
+    /// `lock` does, so it needs interrupts off just as much -- its callers
+    /// used to be called ISR-safe for never blocking, which is true and is
+    /// not the hazard.
+    fn try_locked_irqs_off<R>(
+        queue: &Mutex<super::backend::SchedulerBackend>,
+        f: impl FnOnce(&mut super::backend::SchedulerBackend) -> R,
+    ) -> Option<R> {
+        crate::cpu::without_interrupts(|| queue.try_lock().map(|mut guard| f(&mut guard)))
     }
 
     /// Handle a timer tick for the given CPU.
@@ -818,16 +886,16 @@ impl PerCpuScheduler {
     #[must_use]
     #[allow(dead_code)] // Used by preemption accounting once implemented.
     pub fn current_remaining(&self, cpu: usize) -> u32 {
-        self.queues
-            .get(cpu)
-            .map_or(0, |q| q.lock().current_remaining())
+        self.queues.get(cpu).map_or(0, |q| {
+            Self::locked_irqs_off(q, |backend| backend.current_remaining())
+        })
     }
 
     /// Set the remaining ticks for the currently running task on a CPU.
     #[allow(dead_code)] // Paired with current_remaining.
     pub fn set_current_remaining(&self, cpu: usize, ticks: u32) {
         if let Some(q) = self.queues.get(cpu) {
-            q.lock().set_current_remaining(ticks);
+            Self::locked_irqs_off(q, |backend| backend.set_current_remaining(ticks));
         }
     }
 
@@ -933,13 +1001,24 @@ impl PerCpuScheduler {
     ///
     /// # Lock safety
     ///
-    /// This runs from softirq context with **interrupts enabled**.
-    /// A timer interrupt can fire at any point and call `timer_tick()`,
-    /// which acquires the local CPU's per-CPU lock.  To avoid deadlock,
-    /// ALL lock acquisitions use `try_lock`.  If any lock is contended
-    /// (likely because a timer ISR is accessing it), we bail and retry
-    /// on the next balance interval (100 ms).
+    /// This is called from softirq context with interrupts enabled and
+    /// without `SCHED`, so it disables interrupts for the whole balance (see
+    /// [`locked_irqs_off`](Self::locked_irqs_off)).  It used to rely on
+    /// `try_lock` alone, which covers only half of the hazard: it stops this
+    /// code from spinning on a lock an interrupt handler holds, but not an
+    /// interrupt handler from spinning, with interrupts disabled, on a lock
+    /// this code holds -- which is what an hrtimer callback's `try_wake`, or
+    /// the timer tick's anti-starvation booster, does when it lands here.
+    /// Every acquisition still uses `try_lock`, for the remote CPUs, and a
+    /// contended one still means bail and retry at the next balance interval
+    /// (100 ms).
     pub fn try_push_balance(&self, cpu: usize) -> alloc::vec::Vec<(super::task::TaskId, usize)> {
+        crate::cpu::without_interrupts(|| self.push_balance_irqs_off(cpu))
+    }
+
+    /// [`try_push_balance`](Self::try_push_balance)'s body, run with
+    /// interrupts disabled.
+    fn push_balance_irqs_off(&self, cpu: usize) -> alloc::vec::Vec<(super::task::TaskId, usize)> {
         let mut migrations = alloc::vec::Vec::new();
         let n = self.num_cpus.load(Ordering::Relaxed);
         if n <= 1 {
@@ -1035,19 +1114,21 @@ impl PerCpuScheduler {
     pub fn drain_all(&self, cpu: usize) -> alloc::vec::Vec<(super::task::TaskId, u8)> {
         if let Some(q) = self.queues.get(cpu) {
             // Steal everything (up to MAX_STEAL per call — drain in
-            // batches if needed).
-            let mut result = alloc::vec::Vec::new();
-            let mut guard = q.lock();
-            loop {
-                let batch = guard.steal(MAX_STEAL);
-                if batch.is_empty() {
-                    break;
+            // batches if needed).  Interrupts off for the hold: this runs
+            // without `SCHED` -- see `locked_irqs_off`.
+            Self::locked_irqs_off(q, |backend| {
+                let mut result = alloc::vec::Vec::new();
+                loop {
+                    let batch = backend.steal(MAX_STEAL);
+                    if batch.is_empty() {
+                        break;
+                    }
+                    for &(id, prio) in batch.iter() {
+                        result.push((id, prio));
+                    }
                 }
-                for &(id, prio) in batch.iter() {
-                    result.push((id, prio));
-                }
-            }
-            result
+                result
+            })
         } else {
             alloc::vec::Vec::new()
         }
@@ -1058,7 +1139,10 @@ impl PerCpuScheduler {
     #[allow(dead_code)] // Used by idle/wakeup decision logic.
     pub fn has_ready(&self) -> bool {
         let n = self.num_cpus.load(Ordering::Relaxed);
-        self.queues.iter().take(n).any(|m| m.lock().has_ready())
+        self.queues
+            .iter()
+            .take(n)
+            .any(|m| Self::locked_irqs_off(m, |backend| backend.has_ready()))
     }
 
     /// Check if a specific CPU's local queue has real work
@@ -1069,10 +1153,9 @@ impl PerCpuScheduler {
     /// Uses `try_lock` to avoid deadlock with the softirq push balancer.
     #[must_use]
     pub fn local_has_real_work(&self, cpu: usize) -> bool {
-        self.queues
-            .get(cpu)
-            .and_then(|m| m.try_lock())
-            .is_some_and(|guard| guard.has_real_work())
+        self.queues.get(cpu).is_some_and(|m| {
+            Self::try_locked_irqs_off(m, |backend| backend.has_real_work()).unwrap_or(false)
+        })
     }
 
     /// Get the total number of tasks in a CPU's run queue.
@@ -1081,10 +1164,9 @@ impl PerCpuScheduler {
     /// contended (uses `try_lock` — safe in ISR context).
     #[must_use]
     pub fn queue_length(&self, cpu: usize) -> usize {
-        self.queues
-            .get(cpu)
-            .and_then(|m| m.try_lock())
-            .map_or(0, |guard| guard.total_tasks())
+        self.queues.get(cpu).map_or(0, |m| {
+            Self::try_locked_irqs_off(m, |backend| backend.total_tasks()).unwrap_or(0)
+        })
     }
 
     /// Get the number of *non-idle* tasks queued on a CPU.
@@ -1095,10 +1177,9 @@ impl PerCpuScheduler {
     /// rather than [`queue_length`](Self::queue_length).
     #[must_use]
     pub fn real_queue_length(&self, cpu: usize) -> usize {
-        self.queues
-            .get(cpu)
-            .and_then(|m| m.try_lock())
-            .map_or(0, |guard| guard.real_tasks())
+        self.queues.get(cpu).map_or(0, |m| {
+            Self::try_locked_irqs_off(m, |backend| backend.real_tasks()).unwrap_or(0)
+        })
     }
 
     /// Check if any *other* CPU has real work that could be stolen.
@@ -1109,11 +1190,10 @@ impl PerCpuScheduler {
     #[must_use]
     pub fn others_have_real_work(&self, cpu: usize) -> bool {
         let n = self.num_cpus.load(Ordering::Relaxed);
-        self.queues
-            .iter()
-            .take(n)
-            .enumerate()
-            .any(|(i, m)| i != cpu && m.try_lock().is_some_and(|g| g.has_real_work()))
+        self.queues.iter().take(n).enumerate().any(|(i, m)| {
+            i != cpu
+                && Self::try_locked_irqs_off(m, |backend| backend.has_real_work()).unwrap_or(false)
+        })
     }
 
     // --- Global configuration (applies to all CPUs) ---
@@ -1123,7 +1203,7 @@ impl PerCpuScheduler {
         let n = self.num_cpus.load(Ordering::Relaxed);
         let mut ok = true;
         for q in self.queues.iter().take(n) {
-            if !q.lock().set_time_slice(level, ticks) {
+            if !Self::locked_irqs_off(q, |backend| backend.set_time_slice(level, ticks)) {
                 ok = false;
             }
         }
@@ -1133,7 +1213,7 @@ impl PerCpuScheduler {
     /// Get the time slice for a priority level (from CPU 0).
     #[must_use]
     pub fn time_slice(&self, level: usize) -> Option<u32> {
-        self.queues.first()?.lock().time_slice(level)
+        Self::locked_irqs_off(self.queues.first()?, |backend| backend.time_slice(level))
     }
 
     /// Reconfigure time slices on all CPUs.
@@ -1141,7 +1221,7 @@ impl PerCpuScheduler {
         let n = self.num_cpus.load(Ordering::Relaxed);
         let mut ok = true;
         for q in self.queues.iter().take(n) {
-            if !q.lock().reconfigure_slices(base, increment) {
+            if !Self::locked_irqs_off(q, |backend| backend.reconfigure_slices(base, increment)) {
                 ok = false;
             }
         }
@@ -1152,7 +1232,7 @@ impl PerCpuScheduler {
     pub fn apply_profile(&self, profile: WorkloadProfile) {
         let n = self.num_cpus.load(Ordering::Relaxed);
         for q in self.queues.iter().take(n) {
-            q.lock().apply_profile(profile);
+            Self::locked_irqs_off(q, |backend| backend.apply_profile(profile));
         }
     }
 }

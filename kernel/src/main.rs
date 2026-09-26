@@ -2121,6 +2121,26 @@ extern "C" fn kernel_main() -> ! {
     // fallocate(2) PUNCH_HOLE / ZERO_RANGE zeroing test — drives the
     // fallocate_zero_vfs / fallocate_zero_memfd path against /tmp files and a
     // kernel-created memfd (the syscall entry needs a per-process fd table).
+    // BLKDISCARD byte-range arithmetic — the only part of a data-destroying
+    // ioctl testable without a process and an fd, and the part where an error
+    // discards the wrong sectors rather than just failing. The layer below is
+    // covered by `blkdev::self_test_discard`.
+    // fcntl record-lock range resolution -- SEEK_CUR/SEEK_END bases, and the
+    // two POSIX shapes that quietly lock the wrong bytes if mishandled:
+    // l_len == 0 meaning to-EOF, and a NEGATIVE l_len meaning the range below
+    // the anchor.
+    selftest::dispatch_debug(
+        "fcntl flock range",
+        selftest::Severity::Diagnostic,
+        syscall::linux::self_test_flock_range(),
+    );
+
+    selftest::dispatch_debug(
+        "blkdiscard range",
+        selftest::Severity::Diagnostic,
+        syscall::linux::self_test_blk_discard_range(),
+    );
+
     selftest::dispatch_debug(
         "fallocate range",
         selftest::Severity::Diagnostic,
@@ -2751,6 +2771,14 @@ extern "C" fn kernel_main() -> ! {
     // stale binary came to look staged in the first place. A condition phrased
     // over provenance can pass for the wrong reason; phrase it over content.
     // See design-decisions.md 944.
+    //
+    // ROOT CAUSE, 2026-09-24, of every failure since (45, and the debug-kernel
+    // hang): the kernel only turned a `^C` into SIGINT when something READ the
+    // slave, and this fixture's child -- correctly -- never reads after its
+    // readiness byte; it waits for the signal, as a busy program would. The
+    // theories recorded above (starvation, the fixture racing itself) were
+    // about symptoms of that. The line discipline now runs in the master's
+    // write: known-issues.md A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER.
     {
         #[inline(never)]
         fn case() {
@@ -6485,6 +6513,14 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 fs::queryable::self_test(),
             );
+            // After the four suites whose tables it drives: ACLs, flags, seals
+            // and indexed attributes must end with their file and move with
+            // its name, through the real VFS on /tmp (fs::perfile).
+            selftest::dispatch_debug(
+                "per-file state",
+                selftest::Severity::Diagnostic,
+                fs::perfile::self_test(),
+            );
             selftest::dispatch_debug(
                 "readdir-plus",
                 selftest::Severity::Diagnostic,
@@ -8294,6 +8330,15 @@ extern "C" fn kernel_main() -> ! {
         mm::vmalloc::self_test(),
     );
 
+    // Step 22e¾+: kernel heap allocations above the buddy maximum (16 MiB),
+    // which the heap maps from vmalloc. Here rather than with the early heap
+    // self-test because it needs page_table::init and a working vmalloc.
+    selftest::dispatch_debug(
+        "HeapVirtual",
+        selftest::Severity::Integrity,
+        mm::heap::virtual_alloc_self_test(),
+    );
+
     // Step 22e⅞: Reverse mapping (rmap) self-test.
     // Verifies add/remove/lookup of physical frame → virtual address mappings.
     selftest::dispatch_debug("Rmap", selftest::Severity::Integrity, mm::rmap::self_test());
@@ -9139,10 +9184,18 @@ extern "C" fn kernel_main() -> ! {
             {
                 let pml4 = mm::page_table::active_pml4_phys();
 
+                // page_table::init already set NX on the direct map's top-level
+                // entries, before any address space copied them; this is now
+                // the check that it did, and 0 is the expected count.
                 let hhdm_hardened = mm::protect::harden_hhdm_nx(pml4);
                 serial_println!(
-                    "[protect] HHDM NX hardened: {} PML4 entries updated",
-                    hhdm_hardened
+                    "[protect] HHDM NX hardened: {} PML4 entries updated{}",
+                    hhdm_hardened,
+                    if hhdm_hardened == 0 {
+                        " (all already set by page_table::init)"
+                    } else {
+                        " -- page_table::init missed these, so address spaces created before now lack it"
+                    }
                 );
 
                 let (sections_hardened, section_errors) = mm::protect::harden_kernel_sections(pml4);

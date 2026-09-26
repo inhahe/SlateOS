@@ -32,7 +32,7 @@
 //! ## References
 //!
 //! - bzip2 source code (compress.c, decompress.c) by Julian Seward
-//! - https://en.wikipedia.org/wiki/Bzip2#File_format
+//! - <https://en.wikipedia.org/wiki/Bzip2#File_format>
 
 #![allow(dead_code)]
 

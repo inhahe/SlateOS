@@ -43,6 +43,9 @@ import tempfile
 import time
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import msysbash  # noqa: E402  (the bash boot-test.sh runs under; see run_fn)
+
 ROOT = Path(__file__).resolve().parent.parent
 BOOT = ROOT / "scripts" / "boot-test.sh"
 LEDGER = "bench/boot-history.jsonl"
@@ -177,8 +180,12 @@ def run_fn(body: str, repo: Path) -> subprocess.CompletedProcess[str]:
     # the child's stdin into os.linesep, so on Windows bash received CRLF and
     # died on `syntax error near unexpected token $'{\r'`. Encoding here and
     # decoding the output by hand keeps the script exactly as written.
+    # Git's MSYS bash, the one `boot-test.sh` runs under -- never a bare
+    # "bash", which Windows resolves to WSL's launcher in System32 before it
+    # searches PATH (lane F, 2026-09-25: this suite ran under Ubuntu's bash
+    # and git, and failed on WSL's startup warnings). See `msysbash.py`.
     done = subprocess.run(
-        ["bash", "-s"],
+        [msysbash.bash(), "-s"],
         input=script.encode("utf-8"),
         capture_output=True,
         check=False,

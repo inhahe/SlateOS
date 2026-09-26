@@ -120,15 +120,31 @@ Running it
     python scripts/getopt-ambiguity-check.py --selftest # check the checker
 
 It needs a GNU userland to compare against.  On this Windows host that means
-WSL, which it finds itself; on a Linux host it runs the utilities directly.  If
-neither is available it exits 0 with a note, because a check that cannot run is
-not a failure — it just has nothing to say.
+WSL, which it finds itself; on a Linux host it runs the utilities directly.
 
-Exit codes: 0 agreed (or could not run), 1 disagreements found, 2 bad usage or a
-revision that cannot be read.  Those two share a code deliberately: exit 1 is
+Exit codes: 0 agreed, 1 disagreements found, 2 bad usage or a revision that
+cannot be read, 3 could not run -- there is no GNU userland to ask.  Exit 1 is
 read by ``scripts/run-checker.sh`` as "the checker found something", and the
 gate prints its refusal text over it.  A revision that will not open is not a
 finding against anyone's table, and must not be dressed as one.
+
+Exit 3 is ``run-checker.sh``'s "I could not run, and here is why": the gate is
+tallied as *skipped*, loudly, with this checker's first line as the reason.  It
+covers every way the GNU side can be missing: no WSL and not Linux; WSL
+installed but not starting a command (``Wsl/Service/E_UNEXPECTED``, seen
+2026-09-25); and WSL that stops answering part-way through a sweep
+(``HCS_E_CONNECTION_TIMEOUT``).  Until 2026-09-25 the first of those exited 0
+-- tallied as a gate that *ran* and passed, which is how a push went out
+unjudged for as long as WSL was down -- the second was folded into the first,
+and the third either crashed on an uncaught timeout or reported every table as
+"utility missing?".  A sweep that had already found disagreements before the
+GNU side went away still exits 1: those findings are real, and the last line
+says how far it got.
+
+Every probe's shell prints ``PROBE_RAN`` before anything else.  That is the
+positive proof the GNU side ran it; a probe whose output lacks it never reached
+bash, and nothing -- neither "the utility is missing" nor "the table is empty"
+-- may be concluded from it.
 """
 
 from __future__ import annotations
@@ -410,20 +426,86 @@ def parse_table(tree: gittree.Tree, rel: str) -> Table | None:
     return table
 
 
-def find_runner() -> list[str] | None:
-    """How to run a GNU utility, as an argv prefix, or ``None``."""
+# Printed by every probe's shell before anything else: see the module docstring.
+PROBE_RAN = "__getopt_probe_ran__"
+
+
+class GnuUnreachable(Exception):
+    """The GNU side could not be asked, so nothing may be concluded (exit 3)."""
+
+
+def describe_failure(stdout: str, stderr: str) -> str:
+    """One printable ASCII line saying why a runner failed.
+
+    wsl.exe writes its own errors in UTF-16LE, so read as text they arrive with
+    a NUL after every character ("C\0a\0t\0...").  Those are dropped and the
+    rest is folded to one line: this becomes the first line of the checker's
+    output, which ``run-checker.sh`` quotes as the reason for the skip, and a
+    reason nobody can read is no reason.
+    """
+    text = (stderr or "") + " " + (stdout or "")
+    text = text.replace("\0", "")
+    text = "".join(ch if 32 <= ord(ch) < 127 else " " for ch in text)
+    text = " ".join(text.split())
+    return text[:160] or "no output"
+
+
+def run_probe(runner: list[str], script: str, args: list[str], timeout: int,
+              what: str) -> str:
+    """Run `script` under bash on the GNU side; its stdout, without the marker.
+
+    Raises `GnuUnreachable` unless the GNU side demonstrably ran it -- a timeout,
+    a runner that would not start, and a runner that exited without printing
+    `PROBE_RAN` are all the same fact: nobody asked GNU anything.
+    """
+    try:
+        proc = subprocess.run(
+            [*runner, "bash", "-c", f"printf '%s\\n' {PROBE_RAN}; {script}",
+             "probe", *args],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise GnuUnreachable(
+            f"the GNU side did not answer the {what} probe within {timeout}s"
+        ) from None
+    except OSError as exc:
+        raise GnuUnreachable(
+            f"could not start the {what} probe: {describe_failure('', str(exc))}"
+        ) from None
+    first, _, rest = proc.stdout.partition("\n")
+    if first.strip() != PROBE_RAN:
+        raise GnuUnreachable(
+            f"the {what} probe never reached bash (exit {proc.returncode}: "
+            f"{describe_failure(proc.stdout, proc.stderr)})"
+        )
+    return rest
+
+
+def find_runner() -> tuple[list[str] | None, str]:
+    """How to run a GNU utility, as an argv prefix -- or ``None`` and why not.
+
+    A WSL that is installed but will not start a command is not "no GNU
+    userland on this host", and the reason says which it was: they are fixed
+    by different people, and the second one is usually temporary.
+    """
     if sys.platform.startswith("linux"):
-        return []
+        return [], ""
     wsl = shutil.which("wsl")
-    if wsl:
-        try:
-            subprocess.run(
-                [wsl, "-e", "true"], capture_output=True, timeout=30, check=True
-            )
-        except (subprocess.SubprocessError, OSError):
-            return None
-        return [wsl, "-e"]
-    return None
+    if not wsl:
+        return None, "no GNU userland on this host (no WSL, not Linux)"
+    try:
+        # 90s, not the 30s this used to allow: a cold distro took 37s to
+        # answer on 2026-09-25 and was working, and WSL's own give-up on a
+        # dead VM (HCS_E_CONNECTION_TIMEOUT) comes after about a minute --
+        # better that it says why than that this times out first and cannot.
+        run_probe([wsl, "-e"], "true", [], 90, "startup")
+    except GnuUnreachable as exc:
+        return None, f"WSL is installed but not usable: {exc}"
+    return [wsl, "-e"], ""
 
 
 POSSIBILITY_RE = re.compile(r"'--([^']*)'")
@@ -438,17 +520,15 @@ def gnu_table(runner: list[str], util: str) -> list[str] | None:
     ambiguous — which is not the same as "the table is empty" and must not be
     reported as every name having been deleted.
     """
-    proc = subprocess.run(
-        [*runner, "bash", "-c",
-         'export LC_ALL=C.UTF-8; cd "$(mktemp -d)" || exit 1; '
-         'exec timeout 5 "$1" --=x 2>&1 </dev/null',
-         "probe", util],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
+    out = run_probe(
+        runner,
+        'export LC_ALL=C.UTF-8; cd "$(mktemp -d)" || exit 1; '
+        'exec timeout 5 "$1" --=x 2>&1 </dev/null',
+        [util],
+        60,
+        f"`{util} --=x`",
     )
-    for line in proc.stdout.splitlines():
+    for line in out.splitlines():
         if "is ambiguous" not in line:
             continue
         _, _, tail = line.partition("possibilities:")
@@ -479,18 +559,16 @@ def gnu_help_table(runner: list[str], util: str) -> set[str] | None:
     and may legitimately mention an option this utility does not have (`ed`'s
     own help talks about `red`; other utilities cross-reference each other).
     """
-    proc = subprocess.run(
-        [*runner, "bash", "-c",
-         'export LC_ALL=C.UTF-8; cd "$(mktemp -d)" || exit 1; '
-         'exec timeout 5 "$1" --help 2>&1 </dev/null',
-         "probe", util],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
+    out = run_probe(
+        runner,
+        'export LC_ALL=C.UTF-8; cd "$(mktemp -d)" || exit 1; '
+        'exec timeout 5 "$1" --help 2>&1 </dev/null',
+        [util],
+        60,
+        f"`{util} --help`",
     )
     names: set[str] = set()
-    for line in proc.stdout.splitlines():
+    for line in out.splitlines():
         m = HELP_OPT_RE.match(line)
         if not m:
             continue
@@ -716,21 +794,14 @@ for p in "$@"; do
 done
 cd /; rmdir "$d" 2>/dev/null || true
 """
-    try:
-        proc = subprocess.run(
-            [*runner, "bash", "-c", script, "probe", util, *prefixes],
-            capture_output=True,
-            text=True,
-            timeout=600,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        # Partial output is unreachable through TimeoutExpired here, so treat
-        # the whole utility as unmeasured rather than half-measured: a verdict
-        # table missing an unknown subset would report phantom disagreements.
-        return {}
+    # A timeout raises GnuUnreachable from run_probe. It used to return {} --
+    # "unmeasured rather than half-measured", which was right about half
+    # measurements, but `check` then reported the empty answer as "no GNU
+    # verdicts came back (utility missing?)", a finding against the table.
+    raw = run_probe(runner, script, [util, *prefixes], 600,
+                    f"`{util}` prefix sweep")
     out: dict[str, str] = {}
-    for line in proc.stdout.splitlines():
+    for line in raw.splitlines():
         parts = line.split()
         if len(parts) == 2:
             out[parts[0]] = parts[1]
@@ -915,6 +986,35 @@ def selftest() -> int:
     ta = Table(util="u", names=["alpha"], aliases={"alias": "alpha"})
     expect("alias-is-ours", compare_name_sets(ta, {"alpha", "alias"}, {}), [])
 
+    # 6. A runner that never reached bash is GnuUnreachable -- never a table,
+    #    never an empty answer. Python stands in for the runner, so this needs
+    #    no WSL: it is the host-independent half of the decline channel, and
+    #    the half a sick WSL cannot be relied on to demonstrate.
+    rule("unreachable")
+    py = [sys.executable, "-c"]
+
+    def reached(runner: list[str], timeout: int = 20) -> object:
+        try:
+            return run_probe(runner, "true", [], timeout, "selftest")
+        except GnuUnreachable as exc:
+            return f"unreachable: {exc}"
+
+    # wsl.exe's own error, in the UTF-16LE it really writes, from the runner.
+    wsl_err = [*py, "import sys; sys.stderr.buffer.write('Catastrophic failure"
+                    "\\r\\nError code: Wsl/Service/E_UNEXPECTED'.encode("
+                    "'utf-16-le')); sys.exit(4294967295 & 255)"]
+    got = reached(wsl_err)
+    expect("failed-runner-declines", str(got).startswith("unreachable"), True)
+    expect("reason-is-readable", "Wsl/Service/E_UNEXPECTED" in str(got), True)
+    silent = [*py, "import sys; print('not bash'); sys.exit(0)"]
+    expect("no-marker-declines",
+           str(reached(silent)).startswith("unreachable"), True)
+    slow = [*py, "import time; time.sleep(30)"]
+    expect("timeout-declines", str(reached(slow, timeout=1)).startswith(
+        "unreachable"), True)
+    ok = [*py, f"print('{PROBE_RAN}'); print('payload')"]
+    expect("marker-strips", reached(ok), "payload\n")
+
     for f in failures:
         print(f"selftest FAIL {f}")
     print(
@@ -947,11 +1047,12 @@ def main() -> int:
         # reading any revision of the repository.
         return selftest()
     wanted = set(args.bins)
-    runner = find_runner()
+    runner, why = find_runner()
     if runner is None:
-        # ASCII only: this console's code page is not UTF-8 and mangles the rest.
-        print("no GNU userland available (no WSL, not Linux); nothing to check")
-        return 0
+        # Exit 3, first line the reason: see the module docstring. ASCII only:
+        # this console's code page is not UTF-8 and mangles the rest.
+        print(f"getopt-ambiguity-check: could not run -- {why}. Nothing was checked.")
+        return 3
 
     try:
         tree = gittree.open_tree(str(ROOT), args.head)
@@ -963,7 +1064,14 @@ def main() -> int:
               file=sys.stderr)
         return 2
     with tree:
-        return sweep(tree, wanted, runner)
+        try:
+            return sweep(tree, wanted, runner)
+        except GnuUnreachable as exc:
+            # Reached only before the sweep printed anything (see `sweep`), so
+            # this is the first line, as run-checker.sh requires of a skip.
+            print(f"getopt-ambiguity-check: could not run -- {exc}. "
+                  f"Nothing was checked.")
+            return 3
 
 
 def sweep(tree: gittree.Tree, wanted: set[str], runner: list[str]) -> int:
@@ -1029,6 +1137,55 @@ def sweep(tree: gittree.Tree, wanted: set[str], runner: list[str]) -> int:
             for rel in sources
             if rel.count("/") == BIN_REL.count("/") + 1 or rel.endswith("/main.rs")
         }
+    problems: list[str] = []
+    for name in stale_exemptions:
+        line = (
+            f"{name}: listed in NOT_GETOPT, but it now has a LONG_OPTIONS "
+            f"table. Remove the exemption so the table is actually compared, "
+            f"and delete the recorded reason -- it is no longer true."
+        )
+        print(line, flush=True)
+        problems.append(line)
+
+    for name in stale_own_parser:
+        line = (
+            f"{name}: listed in OWN_PARSER, but --=x now reads back a candidate "
+            f"list, so it does use glibc getopt_long after all. Remove the "
+            f"entry -- it is costing the ordered comparison and the recorded "
+            f"reason ({OWN_PARSER[name]}) is no longer true."
+        )
+        print(line, flush=True)
+        problems.append(line)
+
+    checked = 0
+    for t in tables:
+        # Printed per table rather than at the end: a full sweep is minutes of
+        # WSL round trips, and a finding you can see at minute two is worth
+        # more than the same finding at minute ten.
+        try:
+            found = check(t, runner)
+        except GnuUnreachable as exc:
+            if not problems:
+                # Nothing printed yet: main reports the skip as the first line.
+                raise
+            # Findings are already out, and they are real -- the GNU side
+            # answered them. Say how far the sweep got rather than let the
+            # summary read as a complete audit.
+            print(
+                f"\nthe GNU side stopped answering after {checked} of "
+                f"{len(tables)} table(s) ({exc}); the {len(problems)} "
+                f"disagreement(s) above stand, and the rest was not checked.",
+                flush=True,
+            )
+            return 1
+        checked += 1
+        for line in found:
+            print(line, flush=True)
+        problems.extend(found)
+
+    # Notes come after the checks, not before: they are not findings, and a
+    # sweep the GNU side abandons must be able to make its reason the first
+    # line of output (see main).
     if wanted:
         # Three reasons a requested name may not be checked, and only the last
         # is worth a warning. The pre-push hook passes whichever bins a push
@@ -1050,35 +1207,6 @@ def sweep(tree: gittree.Tree, wanted: set[str], runner: list[str]) -> int:
                 f"compare (not yet converted to coreutils::getopt?)",
                 file=sys.stderr,
             )
-
-    problems: list[str] = []
-    for name in stale_exemptions:
-        line = (
-            f"{name}: listed in NOT_GETOPT, but it now has a LONG_OPTIONS "
-            f"table. Remove the exemption so the table is actually compared, "
-            f"and delete the recorded reason -- it is no longer true."
-        )
-        print(line, flush=True)
-        problems.append(line)
-
-    for name in stale_own_parser:
-        line = (
-            f"{name}: listed in OWN_PARSER, but --=x now reads back a candidate "
-            f"list, so it does use glibc getopt_long after all. Remove the "
-            f"entry -- it is costing the ordered comparison and the recorded "
-            f"reason ({OWN_PARSER[name]}) is no longer true."
-        )
-        print(line, flush=True)
-        problems.append(line)
-
-    for t in tables:
-        # Printed per table rather than at the end: a full sweep is minutes of
-        # WSL round trips, and a finding you can see at minute two is worth
-        # more than the same finding at minute ten.
-        found = check(t, runner)
-        for line in found:
-            print(line, flush=True)
-        problems.extend(found)
 
     # The denominator, not just the numerator. See the note above `missing`:
     # "63 table(s) checked" is true of a tree with 63 bins and of a tree with

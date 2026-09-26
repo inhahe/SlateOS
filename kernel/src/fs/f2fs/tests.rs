@@ -417,7 +417,7 @@ fn put_inode(img: &mut [u8], spec: &InodeSpec) {
 ///
 /// One `i_addr` slot past the extra-attribute area, running to the end of the
 /// slots the inode owns. Written out here rather than taken from
-/// [`Inode::inline_area`] so the two can disagree.
+/// [`crate::fs::f2fs::node::Inode::inline_area`] so the two can disagree.
 const fn inline_area(spec: &InodeSpec) -> (usize, usize) {
     let start = addr_off(spec, 1);
     let words = addrs_per_inode(spec).saturating_sub(1) as usize;

@@ -1,5 +1,7 @@
 # C → A, B: `deflate` inflates whole buffers only, and that is what puts a ceiling on picture previews
 
+**Status:** LANDED 2026-09-07 by lane A (`deflate::inflate_stream`), confirmed by lane C 2026-09-16 — see `requests/a-c-deflate-streaming-inflate-landed.md`. Stamped here 2026-09-25.
+
 **From:** lane C. **Date:** 2026-09-07.
 **Kind:** a request for an API in an unowned crate, with the caller already
 written and waiting.

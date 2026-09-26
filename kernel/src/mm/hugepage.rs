@@ -170,11 +170,12 @@ pub unsafe fn map_huge_2m(
     let user = virt.is_user();
 
     // Walk to the PD level (PML4 → PDPT → PD), creating intermediate
-    // tables as needed.
+    // tables as needed. The top level goes through `walk_or_create_pml4`,
+    // which refuses to add a kernel-half PML4 entry after boot (such an
+    // entry would be missing from every other address space).
     // SAFETY: pml4_phys is valid (caller guarantee).  walk_or_create
     // and read_entry target valid page table levels at valid indices.
-    let pml4_idx = virt.pml4_index();
-    let pdpt_phys = unsafe { page_table::walk_or_create(pml4_phys, pml4_idx, true, user, hhdm)? };
+    let pdpt_phys = unsafe { page_table::walk_or_create_pml4(pml4_phys, virt, true, user, hhdm)? };
 
     let pdpt_idx = virt.pdpt_index();
     let pd_phys = unsafe { page_table::walk_or_create(pdpt_phys, pdpt_idx, true, user, hhdm)? };

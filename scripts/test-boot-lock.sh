@@ -54,7 +54,7 @@ if [ ! -s "$REGION" ]; then
 fi
 # Sanity-check that we extracted the thing we think we did, so a future edit
 # that moves the acquire loop out of the region can't quietly pass everything.
-for _needle in 'mkdir "$BOOT_LOCK_DIR"' 'release_boot_lock()' 'is gone' \
+for _needle in '_boot_lock_take()' 'mkdir "$d"' 'release_boot_lock()' 'is gone' \
                'Breaking stale boot lock' '_boot_lock_head' '_boot_lock_sweep_tickets' \
                'refusing to boot alongside it'; do
     if ! grep -qF "$_needle" "$REGION"; then
@@ -90,6 +90,12 @@ run_region() {  # $1 = lock dir, $2 = optional BOOT_LOCK_WAIT (default 0)
             BOOT_LOCK_DIR="$1"
             BOOT_LOCK_OWNER=""
             BOOT_LOCK_WAIT="${2:-0}"
+            # SC2034 (appears unused): read by the region sourced below, which
+            # the linter cannot follow (the reason SC1090 is disabled too).
+            # shellcheck disable=SC2034
+            BOOT_LOCK_SLOTS="${RUN_SLOTS:-1}"
+            # shellcheck disable=SC2034
+            BOOT_LOCK_EXCLUSIVE="${RUN_EXCLUSIVE:-0}"
             # shellcheck disable=SC1090
             . "$REGION"
         ) 2>&1
@@ -114,7 +120,7 @@ queue_is_empty() {  # $1 = lock dir
 # Every case starts from a clean lock *and* a clean queue; a ticket left by an
 # earlier case would silently change the next one's head-of-queue.
 fresh() {  # $1 = lock dir
-    rm -rf "$1" "$1.waiters"
+    rm -rf "$1" "$1.waiters" "$1".slot*
 }
 
 # A pid that is certainly dead: spawn one and reap it.
@@ -148,8 +154,14 @@ if kill -0 "$DEAD" 2>/dev/null; then
     echo "FAIL: harness could not produce a dead pid (got $DEAD, still alive)"
     exit 1
 fi
-# A live holder, for the cases that must NOT break.
-sleep 120 & LIVE=$!
+# A live holder, for the cases that must NOT break.  It has to stay alive for
+# the whole run, and a fixed `sleep 120` did not: on a host at 100% CPU this
+# script once took 28 minutes, the stand-in died two minutes in, and every
+# later "a LIVE holder is not broken" case then broke a holder that really was
+# dead -- sixteen failures that were the harness's, not the lock's.  So it
+# lives exactly as long as this script does: it exits when `$$` does, and the
+# EXIT trap kills it sooner on a normal finish.
+( while kill -0 "$$" 2>/dev/null; do sleep 5; done ) & LIVE=$!
 trap 'kill "$LIVE" 2>/dev/null; rm -rf "$TMPROOT"' EXIT
 
 echo
@@ -261,6 +273,7 @@ L="$TMPROOT/l8"; new_lock "$L" "lane-B/pid-$DEAD/1" 10
     BOOT_LOCK_DIR="$L"
     BOOT_LOCK_OWNER=""
     BOOT_LOCK_WAIT=0
+    BOOT_LOCK_SLOTS=1
     # shellcheck disable=SC1090
     . "$REGION"
     release_boot_lock
@@ -291,6 +304,8 @@ L="$TMPROOT/l9"; fresh "$L"
     BOOT_LOCK_OWNER=""
     # shellcheck disable=SC2034
     BOOT_LOCK_WAIT=0
+    # shellcheck disable=SC2034
+    BOOT_LOCK_SLOTS=1
     # shellcheck disable=SC1090
     . "$REGION"
     release_boot_lock
@@ -386,6 +401,195 @@ out="$(run_region "$L")"
 check "acquires" "$out" "Boot lock acquired:"
 if queue_is_empty "$L"; then pass "the queue is empty afterwards"
 else fail "the queue is empty afterwards" "left behind: $(ls "$L.waiters" 2>/dev/null)"; fi
+
+
+# ---------------------------------------------------------------------------
+# Cases 16-23: the slots.
+#
+# Cases 1-15 run with BOOT_LOCK_SLOTS=1 (see `run_region`), which is the lock
+# they were written against: one QEMU at a time.  These run it with two, and
+# with an exclusive run, which is what the lock admits since 2026-09-26
+# (design-decisions.md §966).  `RUN_SLOTS` and `RUN_EXCLUSIVE` reach the region
+# through `run_region`.
+# ---------------------------------------------------------------------------
+
+echo
+echo "== case 16: with two slots, a live holder of one leaves the other to take =="
+L="$TMPROOT/l16"; new_lock "$L" "lane-B/pid-$LIVE/1" 300
+out="$(RUN_SLOTS=2 run_region "$L")"
+check "acquires the free slot" "$out" "Boot lock acquired:"
+check "and says which" "$out" "(slot 2 of 2)"
+check_not "without touching the live holder's" "$out" "is gone"
+if [ "$(cat "$L/owner" 2>/dev/null)" = "lane-B/pid-$LIVE/1" ]; then
+    pass "slot 1 still names its owner"
+else
+    fail "slot 1 still names its owner" "owner is now '$(cat "$L/owner" 2>/dev/null)'"
+fi
+
+echo
+echo "== case 17: with two slots both held by live owners, it refuses =="
+L="$TMPROOT/l17"; new_lock "$L" "lane-B/pid-$LIVE/1" 300
+new_lock "$L.slot2" "lane-C/pid-$LIVE/1" 300
+out="$(RUN_SLOTS=2 run_region "$L")"; LAST_STATUS=$?
+check_not "takes neither" "$out" "Boot lock acquired:"
+check "refuses rather than making a third QEMU" "$out" "refusing to boot alongside it"
+if [ "$LAST_STATUS" -eq 4 ]; then pass "with the refusal status"
+else fail "with the refusal status" "got status $LAST_STATUS"; fi
+
+echo
+echo "== case 18: a dead holder of the second slot is broken like the first =="
+L="$TMPROOT/l18"; new_lock "$L" "lane-B/pid-$LIVE/1" 300
+new_lock "$L.slot2" "lane-C/pid-$DEAD/1" 300
+out="$(RUN_SLOTS=2 run_region "$L")"
+check "breaks the dead slot" "$out" "owner pid $DEAD is gone"
+check "then takes it" "$out" "(slot 2 of 2)"
+
+echo
+echo "== case 19: an exclusive run with both slots free takes both =="
+L="$TMPROOT/l19"; fresh "$L"; rm -rf "$L.slot2"
+out="$(RUN_SLOTS=2 RUN_EXCLUSIVE=1 run_region "$L")"
+check "acquires" "$out" "Boot lock acquired:"
+check "every slot" "$out" "(all 2 slot(s), exclusive)"
+
+echo
+echo "== case 20: an exclusive run beside a live holder takes nothing, and keeps nothing =="
+# It may take the free slot while it waits for the other -- that is how it
+# collects the host -- but a run that then gives up must not leave that slot
+# held, or it strands a slot nobody is using.
+L="$TMPROOT/l20"; new_lock "$L" "lane-B/pid-$LIVE/1" 300; rm -rf "$L.slot2"
+out="$(RUN_SLOTS=2 RUN_EXCLUSIVE=1 run_region "$L")"; LAST_STATUS=$?
+check_not "does not report itself acquired" "$out" "Boot lock acquired:"
+check "refuses beside the live holder" "$out" "refusing to boot alongside it"
+if [ ! -d "$L.slot2" ]; then pass "and the slot it held while waiting is released"
+else fail "and the slot it held while waiting is released" "slot 2 still held by '$(cat "$L.slot2/owner" 2>/dev/null)'"; fi
+
+echo
+echo "== case 21: the queue stays FIFO: one free slot goes to the older waiter =="
+# One slot held, one free, one live waiter queued ahead of us: the free slot
+# is the older waiter's, so we must not take it -- the multi-slot form of
+# case 10.
+L="$TMPROOT/l21"; new_lock "$L" "lane-B/pid-$LIVE/1" 300; rm -rf "$L.slot2"
+plant_ticket "$L" 300 "$LIVE"
+out="$(RUN_SLOTS=2 run_region "$L")"
+check_not "does not take the older waiter's slot" "$out" "Boot lock acquired:"
+if [ ! -d "$L.slot2" ]; then pass "slot 2 is left free for it"
+else fail "slot 2 is left free for it" "slot 2 was taken"; fi
+
+echo
+echo "== case 22: two free slots admit the second waiter too =="
+L="$TMPROOT/l22"; fresh "$L"; rm -rf "$L.slot2"
+plant_ticket "$L" 300 "$LIVE"
+out="$(RUN_SLOTS=2 run_region "$L")"
+check "the second waiter acquires beside the first" "$out" "Boot lock acquired:"
+check "taking the highest slot first" "$out" "(slot 2 of 2)"
+
+echo
+echo "== case 23: an exclusive waiter ahead holds everyone behind it =="
+# Otherwise ordinary boots slip into each slot as it frees and the exclusive
+# run -- a benchmark boot -- never collects the host at all.
+L="$TMPROOT/l23"; fresh "$L"; rm -rf "$L.slot2"
+mkdir -p "$L.waiters"; echo exclusive > "$L.waiters/$(( $(date +%s) - 300 ))-$LIVE"
+out="$(RUN_SLOTS=2 run_region "$L")"
+check_not "waits although both slots are free" "$out" "Boot lock acquired:"
+if [ ! -d "$L" ] && [ ! -d "$L.slot2" ]; then pass "and takes no slot"
+else fail "and takes no slot" "a slot was taken"; fi
+
+# ---------------------------------------------------------------------------
+# Cases 24-30: the monitor port.
+#
+# With one QEMU at a time the port could be chosen at setup, hours before
+# QEMU binds it.  With two slots, two runs would both find 57000 free at setup
+# and the second QEMU would die binding it, so the choice moved to just after
+# the lock, into ranges by slot.  MONITOR-PORT-REGION is extracted like the
+# lock region, together with pick_monitor_port, and run against stand-ins for
+# `netsh` (Windows' reserved port ranges) and `netstat` (listening ports):
+# shell functions, which `command -v` finds before any real binary.
+# ---------------------------------------------------------------------------
+PORT_REGION="$TMPROOT/port-region.sh"
+PICK_FN="$TMPROOT/pick-monitor-port.sh"
+awk '/^# --- BEGIN MONITOR-PORT-REGION ---$/{f=1;next} /^# --- END MONITOR-PORT-REGION ---$/{f=0} f' \
+    "$BOOT_TEST" > "$PORT_REGION"
+awk '/^pick_monitor_port\(\) \{$/{f=1} f{print} f&&/^\}$/{f=0}' "$BOOT_TEST" > "$PICK_FN"
+if ! grep -qF 'monitor_port_base()' "$PORT_REGION" || ! grep -qF 'pick_monitor_port()' "$PICK_FN"; then
+    echo "FAIL: could not extract MONITOR-PORT-REGION and pick_monitor_port from $BOOT_TEST"
+    exit 1
+fi
+
+# $1 = slot held ("" for none); FAKE_LISTEN / FAKE_EXCLUDED = port lists;
+# MONITOR_PORT and MONITOR_ENABLED pass through.  Prints what the region chose.
+run_port_region() {
+    (
+        set -u
+        netsh() {
+            local r
+            echo "Protocol tcp Port Exclusion Ranges"
+            echo
+            echo "Start Port    End Port"
+            echo "----------    --------"
+            for r in ${FAKE_EXCLUDED:-}; do printf '     %s       %s\n' "${r%-*}" "${r#*-}"; done
+        }
+        netstat() {
+            local q
+            for q in ${FAKE_LISTEN:-}; do
+                printf '  TCP    127.0.0.1:%s        0.0.0.0:0              LISTENING       4242\n' "$q"
+            done
+        }
+        MONITOR_ENABLED="${MONITOR_ENABLED:-1}"
+        MONITOR_ARGS=()
+        _lock_slot_taken="$1"
+        # shellcheck disable=SC1090
+        . "$PICK_FN"
+        # shellcheck disable=SC1090
+        . "$PORT_REGION"
+        echo "PORT=${MONITOR_PORT:-} ARGS=${MONITOR_ARGS[*]:-}"
+    ) 2>&1
+}
+
+echo
+echo "== case 24: slot 1 takes the bottom of the old range =="
+out="$(run_port_region 1)"
+check "slot 1 -> 57000" "$out" "PORT=57000 "
+check "and QEMU is told about it" "$out" "ARGS=-monitor tcp:127.0.0.1:57000,server,nowait"
+
+echo
+echo "== case 25: slot 2 searches its own range, not slot 1's =="
+out="$(run_port_region 2)"
+check "slot 2 -> 57050, although 57000 is free" "$out" "PORT=57050 "
+
+echo
+echo "== case 26: a run holding no slot searches below every slot's range =="
+out="$(run_port_region "")"
+check "no slot -> 56950" "$out" "PORT=56950 "
+
+echo
+echo "== case 27: a listening port in the range is skipped =="
+out="$(FAKE_LISTEN="57050 57051" run_port_region 2)"
+check "slot 2 steps past 57050-57051" "$out" "PORT=57052 "
+
+echo
+echo "== case 28: a reserved range is skipped, but the search stays in the slot =="
+# Slot 1's whole range reserved: the old 201-port scan would have walked on to
+# 57050 -- slot 2's first port, which a concurrent slot-2 run is choosing at the
+# same moment.  Falling back to the base lets QEMU report the reserved port, as
+# it always has when nothing was free.
+out="$(FAKE_EXCLUDED="57000-57049" run_port_region 1)"
+check_not "never strays into slot 2's range" "$out" "PORT=57050 "
+check "falls back to the slot's base" "$out" "PORT=57000 "
+out="$(FAKE_EXCLUDED="57000-57009" run_port_region 1)"
+check "and a partly reserved range yields its first free port" "$out" "PORT=57010 "
+
+echo
+echo "== case 29: MONITOR_PORT from the environment wins =="
+out="$(MONITOR_PORT=58123 run_port_region 2)"
+check "the override is used as given" "$out" "PORT=58123 "
+check "and QEMU is told about it" "$out" "tcp:127.0.0.1:58123,server,nowait"
+
+echo
+echo "== case 30: --no-monitor attaches nothing =="
+out="$(MONITOR_ENABLED=0 run_port_region 1)"
+check "the region ran" "$out" "PORT= ARGS="
+check_not "no -monitor argument" "$out" "-monitor"
+check_not "and no port is chosen" "$out" "tcp:127.0.0.1"
 
 echo
 if [ "$failures" -eq 0 ]; then

@@ -424,6 +424,30 @@ const START_MENU_AVATAR: f32 = 44.0;
 const START_LINK_HEIGHT: f32 = 32.0;
 /// The band at the foot of the places column that holds the power button.
 const START_MENU_POWER_BAND: f32 = 52.0;
+/// The side of a place's icon, and of the power button's.
+const START_LINK_ICON: f32 = 18.0;
+/// The gap between an icon and the words beside it.
+const START_LINK_ICON_GAP: f32 = 10.0;
+
+/// The image ids icons are uploaded under: a range of their own, so that no id
+/// the wallpaper or the greeter's picture is given can ever be one. See
+/// [`DesktopShell::icon_request`].
+pub const ICON_ID_TAG: u64 = 1 << 62;
+/// The bits of an icon's id below the tag.
+const ICON_ID_MASK: u64 = ICON_ID_TAG - 1;
+
+/// An icon a render tree names by its image id: which, how many pixels
+/// square, and in what colour -- everything the session needs to draw and
+/// upload it before the frame that names it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IconRequest {
+    /// The icon's name, as an icon theme knows it (`folder`, `user-home`).
+    pub name: &'static str,
+    /// Its side, in pixels.
+    pub px: u32,
+    /// The colour a `currentColor` icon is drawn in.
+    pub color: Color,
+}
 
 // --- Power menu ------------------------------------------------------------
 
@@ -606,9 +630,22 @@ impl StartShortcut {
         }
     }
 
-    /// The words in the places column. Words rather than icons: the UI face
-    /// is not guaranteed to have a gear, and a box where a gear should be
-    /// says nothing at all.
+    /// The icon beside it, by its freedesktop name.
+    #[must_use]
+    pub const fn icon_name(self) -> &'static str {
+        match self {
+            Self::Home => "user-home",
+            Self::Documents => "folder-documents",
+            Self::Pictures => "folder-pictures",
+            Self::Music => "folder-music",
+            Self::Downloads => "folder-download",
+            Self::Settings => "preferences-system",
+            Self::Terminal => "utilities-terminal",
+        }
+    }
+
+    /// The words in the places column, beside the place's icon -- words as
+    /// well as the icon, since an icon alone is a thing to learn.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -1473,6 +1510,11 @@ pub struct DesktopShell {
     /// The offset is what stops a drag snapping the widget's corner to the
     /// pointer on the first pixel of movement.
     widget_drag: Option<(WidgetInstanceId, f32, f32)>,
+    /// The icons the frames drew, by the image id each was given: what the
+    /// session reads to upload an icon before submitting a tree that names it.
+    /// Filled as trees are drawn and emptied when the appearance changes, when
+    /// every icon is drawn again in the new colours under new ids.
+    icon_requests: core::cell::RefCell<std::collections::BTreeMap<u64, IconRequest>>,
     /// The name of the person using the desktop, for the top of the start
     /// menu's places column. Empty until somebody is known: a desktop
     /// started behind a login screen does not know who will sign in.
@@ -2012,6 +2054,7 @@ impl DesktopShell {
             menu_icon: None,
             widget_drag: None,
             user_name: String::new(),
+            icon_requests: core::cell::RefCell::new(std::collections::BTreeMap::new()),
             note_selecting: false,
             widgets_dirty: false,
             // `appearance::watcher`, not a plain one: an edit to the chosen
@@ -2107,6 +2150,10 @@ impl DesktopShell {
     /// that a later appearance change cannot forget it.
     pub fn set_appearance(&mut self, appearance: AppearanceSettings) {
         self.theme = DesktopTheme::from_settings(&appearance);
+        // Every icon is drawn again, in the new colours and the new theme's
+        // pictures, under new ids; the old requests would only be a registry
+        // of images the session has dropped.
+        self.icon_requests.borrow_mut().clear();
         // The caret width goes to the surface that draws one. Pushed here
         // rather than read at draw time because `render` is handed a
         // `Palette`, and a palette is colours: 839 put the caret's width in
@@ -3052,6 +3099,37 @@ impl DesktopShell {
             (left.w - inset * 2.0).max(0.0),
             h,
         )
+    }
+
+    /// The image id of `name` drawn `px` square in `color`, remembering the
+    /// request under it so the session can upload the icon before the frame
+    /// that names it.
+    ///
+    /// The id is the request's hash under [`ICON_ID_TAG`]: the same icon asked
+    /// for again, in any frame, is the same id, so it is uploaded once.
+    fn icon(&self, name: &'static str, px: u32, color: Color) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let request = IconRequest { name, px, color };
+        let mut hasher = std::hash::DefaultHasher::new();
+        request.hash(&mut hasher);
+        let id = ICON_ID_TAG | (hasher.finish() & ICON_ID_MASK);
+        self.icon_requests.borrow_mut().insert(id, request);
+        id
+    }
+
+    /// What the icon uploaded under `id` is, if a frame has drawn one there.
+    #[must_use]
+    pub fn icon_request(&self, id: u64) -> Option<IconRequest> {
+        self.icon_requests.borrow().get(&id).cloned()
+    }
+
+    /// An icon's side, `logical` pixels at this scale, as a whole number.
+    fn icon_px(&self, logical: f32) -> u32 {
+        // A few dozen pixels, finite and positive at any scale the settings
+        // allow; `as` saturates anything past them rather than wrapping.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let px = self.scale(logical).round().max(1.0) as u32;
+        px
     }
 
     /// Say who is using the desktop, for the start menu's places column.
@@ -6607,15 +6685,27 @@ impl DesktopShell {
             fill_round(&mut tree, button, self.theme.accent_color, button_radii);
         }
         let label_size = self.font_size(TextRole::Body);
+        let ink = if self.power_menu_open {
+            self.theme.start_menu_bg
+        } else {
+            self.theme.start_menu_fg
+        };
+        let px = self.icon_px(START_LINK_ICON);
+        #[allow(clippy::cast_precision_loss)]
+        let side = px as f32;
+        let inset = self.scale(POWER_MENU_TEXT_INSET);
+        tree.push(guitk::render::RenderCommand::Image {
+            x: button.x + inset,
+            y: button.y + (button.h - side).max(0.0) / 2.0,
+            width: side,
+            height: side,
+            image_id: self.icon("system-shutdown", px, ink),
+        });
         tree.text(
-            button.x + self.scale(POWER_MENU_TEXT_INSET),
+            button.x + inset + side + self.scale(START_LINK_ICON_GAP),
             button.y + (button.h - label_size).max(0.0) / 2.0,
             "Power",
-            if self.power_menu_open {
-                self.theme.start_menu_bg
-            } else {
-                self.theme.start_menu_fg
-            },
+            ink,
             label_size,
         );
 
@@ -6667,15 +6757,26 @@ impl DesktopShell {
         }
         let size = self.font_size(TextRole::Body);
         let inset = self.scale(10.0);
+        let px = self.icon_px(START_LINK_ICON);
+        #[allow(clippy::cast_precision_loss)]
+        let side = px as f32;
+        let text_x = inset + side + self.scale(START_LINK_ICON_GAP);
         for which in StartShortcut::ALL {
             let place = self.start_shortcut_rect(*which);
             if place.w <= 0.0 || place.h <= 0.0 {
                 continue;
             }
+            tree.push(guitk::render::RenderCommand::Image {
+                x: place.x + inset,
+                y: place.y + (place.h - side).max(0.0) / 2.0,
+                width: side,
+                height: side,
+                image_id: self.icon(which.icon_name(), px, self.theme.start_menu_fg),
+            });
             tree.text_in(
-                place.x + inset,
+                place.x + text_x,
                 place.y + (place.h - size).max(0.0) / 2.0,
-                (place.w - inset * 2.0).max(0.0),
+                (place.w - text_x - inset).max(0.0),
                 which.label(),
                 self.theme.start_menu_fg,
                 size,

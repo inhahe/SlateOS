@@ -5149,3 +5149,110 @@ fn a_note_is_written_through_the_desktop_and_saved_as_it_is_written() {
         assert_eq!(texts, ["milk"], "the note is not on disk while it is open");
     });
 }
+
+// ---- icons -----------------------------------------------------------------------
+
+/// The icon ids a tree names, with the side each is drawn at.
+fn icon_ids(tree: &guitk::render::RenderTree) -> Vec<(u64, u32)> {
+    tree.commands
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::Image {
+                image_id, width, ..
+            } if image_id & crate::ICON_ID_TAG != 0 => {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let px = *width as u32;
+                Some((*image_id, px))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// **The start menu's icons reach the compositor before the frame that
+/// names them**, on the surface that frame is for, each at the size it is
+/// drawn and each once however many frames name it.
+#[test]
+fn the_start_menus_icons_go_up_before_the_frame_that_names_them() {
+    settingsfile::testing::with_scratch_config("session-icons", |_root| {
+        let (mut session, desktop, _turn) = session();
+        let popups = session.popups().window();
+        session.shell_mut().toggle_start_menu();
+        let before = desktop.borrow_mut().drawn().len();
+
+        session.paint_chrome().expect("paint");
+
+        let tree = session.shell().render_start_menu().expect("open");
+        let wanted = icon_ids(&tree);
+        assert_eq!(
+            wanted.len(),
+            crate::StartShortcut::ALL.len() + 1,
+            "a place or the power button drew no icon"
+        );
+        let sent = uploads(&desktop);
+        for (id, px) in &wanted {
+            let bytes = usize::try_from(px * px * 4).unwrap();
+            assert!(
+                sent.contains(&(popups, *id, *px, *px, px * 4, bytes)),
+                "icon {id:x} did not go up at {px} px: {sent:?}"
+            );
+        }
+        // The popups' frame is still unread in the pipe while the uploads,
+        // which are round trips, have been answered: the icons went first.
+        // (The taskbar's frame, submitted before them, has been read with the
+        // first of them -- it names no icon.)
+        let frames_since: Vec<u64> = desktop.borrow().submitted[before..]
+            .iter()
+            .map(|(window, _)| *window)
+            .collect();
+        assert!(
+            !frames_since.contains(&popups),
+            "the popups' frame overtook its icons: {frames_since:?}"
+        );
+
+        session.paint_chrome().expect("paint again");
+        assert_eq!(uploads(&desktop).len(), sent.len(), "an icon went up twice");
+    });
+}
+
+/// **A change of appearance puts the icons back to the compositor** -- the
+/// old ones dropped, the new ones (in the new colours, under new ids) sent
+/// when a frame next names them.
+#[test]
+fn an_appearance_change_drops_the_icons_and_the_next_frame_sends_new_ones() {
+    settingsfile::testing::with_scratch_config("session-icons-change", |_root| {
+        let (mut session, desktop, _turn) = session();
+        session.shell_mut().load_appearance();
+        session.shell_mut().toggle_start_menu();
+        session.paint_chrome().expect("paint");
+        let old: Vec<u64> = uploads(&desktop).iter().map(|u| u.1).collect();
+        assert!(!old.is_empty());
+
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.theme_mode = match file.settings.theme_mode {
+            appearance::ThemeMode::Light => appearance::ThemeMode::Dark,
+            _ => appearance::ThemeMode::Light,
+        };
+        file.save().expect("save");
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+
+        let dropped: Vec<u64> = drops(&desktop).iter().map(|d| d.1).collect();
+        for id in &old {
+            assert!(dropped.contains(id), "icon {id:x} was kept past the change");
+        }
+        if !session.shell().start_menu_open {
+            session.shell_mut().toggle_start_menu();
+        }
+        session.paint_chrome().expect("paint");
+        let now = icon_ids(&session.shell().render_start_menu().expect("open"));
+        let sent: Vec<u64> = uploads(&desktop).iter().map(|u| u.1).collect();
+        for (id, _) in &now {
+            assert!(!old.contains(id), "the new colours reused an old id");
+            assert!(
+                sent.contains(id),
+                "icon {id:x} was not sent after the change"
+            );
+        }
+    });
+}

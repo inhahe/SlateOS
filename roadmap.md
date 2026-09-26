@@ -1798,6 +1798,20 @@ live.
   power button at the foot. Next: the pinned programs as tiles, jump lists,
   and a Shut down button with the rest behind a caret.
 
+- `[C]` **Icon themes, and the start menu drawn with them** -- done
+  2026-09-26 (`design-decisions.md` §880). `appearance::icons` finds an icon
+  by its freedesktop name in the chosen theme's `icons` folder (the user's
+  copy first), falls back to shorter names and then to a built-in set
+  compiled in -- thirteen outline pictograms drawn for this desktop -- and
+  tints `currentColor` icons to the colour around them. `theme.icons`
+  chooses the icons apart from the colours; a folder of icons alone is an
+  icon pack. The shell names an icon by a deterministic image id and the
+  session uploads each once before the frame that names it. The start
+  menu's places and power button are drawn with them; the taskbar, the
+  desktop's icons and the tray are next. The toolkit's SVG renderer learned
+  to inherit the root element's style, which is how most icon sets are
+  written.
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's

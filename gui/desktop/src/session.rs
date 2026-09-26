@@ -74,7 +74,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use appearance::Palette;
 use guitk::event::{Event, Key, Modifiers, MouseEvent, SettingsGroup};
-use guitk::render::RenderTree;
+use guitk::render::{RenderCommand, RenderTree};
 use oswindow::{
     BlurKind, ConnectionError, ConnectionTransport as Transport, Error, EventLoop, Layer,
     PixelFormat, Spec,
@@ -329,6 +329,8 @@ pub struct ShellSession<T: Transport> {
     /// Whether that surface is currently mapped, reconciled as `popups_shown`
     /// is.
     login_shown: bool,
+    /// The icons each surface has been sent, as `(window, image id)`.
+    icons_uploaded: std::collections::BTreeSet<(u64, u64)>,
     /// The verifier, held across attempts rather than rebuilt per guess.
     ///
     /// A rate limit rebuilt for every guess is not a rate limit. Held even
@@ -651,6 +653,7 @@ impl<T: Transport> ShellSession<T> {
             // is what makes that first unmap actually happen — the same reason
             // `popups_shown` and `osd_shown` start `true`.
             login_shown: true,
+            icons_uploaded: std::collections::BTreeSet::new(),
             accounts: users_yaml.map(Path::to_path_buf),
             authority: users_yaml.map_or_else(authlib::Authenticator::new, |path| {
                 authlib::Authenticator::with_stores(path)
@@ -1485,6 +1488,7 @@ impl<T: Transport> ShellSession<T> {
             {
                 tree.commands.extend(part.commands);
             }
+            self.upload_icons(self.popups.window, &tree)?;
             self.events
                 .submit(self.popups.window, &self.popups.localize(&tree))?;
         }
@@ -1796,7 +1800,76 @@ impl<T: Transport> ShellSession<T> {
             // see `sync_wallpaper`, where the guard stops an unrelated
             // settings change re-decoding a full-screen photograph.
             self.sync_wallpaper();
+            // The icons, in the old colours and perhaps the old theme's
+            // pictures: dropped, to be drawn again as the next frames ask.
+            self.drop_icons();
             self.dirty = true;
+        }
+    }
+
+    /// Upload every icon `tree` names that `window` does not have yet.
+    ///
+    /// Before the tree is submitted, for the reason the wallpaper's pixels go
+    /// before the background that names them: the compositor draws nothing,
+    /// silently, for an image id it holds no bytes for. An icon is drawn by
+    /// the icon theme the appearance settings name, from the request the
+    /// shell recorded under its id.
+    ///
+    /// An icon nothing draws, or one the compositor refuses (its per-link
+    /// image budget), is remembered as sent all the same: the tree still
+    /// names it and draws its label beside the gap, and asking again every
+    /// frame would only be refused again every frame.
+    fn upload_icons(&mut self, window: u64, tree: &RenderTree) -> Result<(), Error<T>> {
+        for command in &tree.commands {
+            let RenderCommand::Image { image_id, .. } = command else {
+                continue;
+            };
+            let id = *image_id;
+            if id & crate::ICON_ID_TAG == 0 || self.icons_uploaded.contains(&(window, id)) {
+                continue;
+            }
+            self.icons_uploaded.insert((window, id));
+            let Some(request) = self.shell.icon_request(id) else {
+                continue;
+            };
+            let Some(icon) =
+                self.shell
+                    .appearance
+                    .icon_theme
+                    .render(request.name, request.px, request.color)
+            else {
+                continue;
+            };
+            let Some(mut handle) = self.events.window_mut(window) else {
+                continue;
+            };
+            let stride = icon.size.saturating_mul(4);
+            let bytes = guitk::canvas::WireBytes::from_le_argb(&icon.argb);
+            match handle.upload_image(
+                id,
+                icon.size,
+                icon.size,
+                stride,
+                PixelFormat::Argb8888,
+                bytes,
+            ) {
+                Ok(()) | Err(ConnectionError::Refused(_)) => {}
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(())
+    }
+
+    /// Give back every icon uploaded, on every surface. A drop the compositor
+    /// cannot carry out is one it has no bytes for already.
+    fn drop_icons(&mut self) {
+        for (window, id) in std::mem::take(&mut self.icons_uploaded) {
+            if let Some(mut handle) = self.events.window_mut(window) {
+                // Dropping an id that was never stored succeeds; a connection
+                // that failed here fails the next request too, which is where
+                // the loop reports it.
+                let _ = handle.drop_image(id);
+            }
         }
     }
 

@@ -43,6 +43,20 @@ about line 3866).
 - **High contrast wins.** With a high-contrast scheme on, no theme's colours
   show. Worth a line when both are set.
 
+## Icons too (added 2026-09-26)
+
+A theme can now carry icons, and the icons are chosen apart from the colours
+(`design-decisions.md` §880): `theme.icons` in `appearance.yaml`.
+
+- `ThemeInfo::has_icons` says whether a listed theme draws icons. A folder of
+  icons with no `theme.yaml` -- an icon pack -- is listed with `has_icons` and
+  no colours, and nothing wrong with it (`problem` is `None`).
+- To choose one: `settings.icon_theme = appearance::icons::IconTheme::load(&info.id)`,
+  then save. Nothing is read until an icon is drawn.
+- A preview: `IconTheme::render(name, size, color)` gives an icon's pixels
+  (straight-alpha `0xAARRGGBB`) for, say, `folder`, `user-home` and
+  `utilities-terminal` beside each listed theme.
+
 ## What happens until it is done
 
 Nothing breaks. A theme can be chosen by adding `colors: <name>` under `theme:`

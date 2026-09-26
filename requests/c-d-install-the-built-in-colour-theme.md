@@ -21,6 +21,11 @@ cp -R gui/appearance/themes/. "$STAGE/usr/share/slateos/themes/"
 The whole directory rather than the one file, so a theme added later needs no
 second request. Files only, no build step: a theme is data.
 
+Since 2026-09-26 the built-in theme's folder holds an `icons` directory of
+SVG files as well (`design-decisions.md` §880) -- the copy above takes them
+with it; nothing more to do. They are compiled into the desktop too, so the
+installed copy is the template to edit, not a dependency.
+
 ## What happens until it is done
 
 Nothing breaks. The built-in theme's colours are compiled into the desktop, so

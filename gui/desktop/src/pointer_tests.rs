@@ -3268,6 +3268,86 @@ fn a_menu_too_short_for_every_place_leaves_the_lower_ones_out() {
     assert_eq!(shell.hit_test(x, y), Hit::PowerButton);
 }
 
+/// Every place, and the power button, draws its icon to the left of its
+/// words; the id each is drawn under names that icon, at that size, in the
+/// colour of the words -- the same id every frame, and forgotten when the
+/// appearance changes, when every icon is drawn again in new colours.
+#[test]
+fn every_place_and_the_power_button_draws_its_icon() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let tree = shell.render_start_menu().expect("open");
+    let images: Vec<(f32, f32, f32, u64)> = tree
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::Image {
+                x,
+                y,
+                width,
+                image_id,
+                ..
+            } => Some((*x, *y, *width, *image_id)),
+            _ => None,
+        })
+        .collect();
+    let text_x = |label: &str| {
+        tree.commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { x, text, .. } if text == label => Some(*x),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label} is not drawn"))
+    };
+    let mut targets: Vec<(Rect, &str, &str)> = crate::StartShortcut::ALL
+        .iter()
+        .map(|w| (shell.start_shortcut_rect(*w), w.icon_name(), w.label()))
+        .collect();
+    targets.push((shell.power_button_rect(), "system-shutdown", "Power"));
+    for (rect, name, label) in targets {
+        let &(x, _, width, id) = images
+            .iter()
+            .find(|(x, y, ..)| rect.contains(*x + 1.0, *y + 1.0))
+            .unwrap_or_else(|| panic!("{label} has no icon"));
+        assert_ne!(
+            id & crate::ICON_ID_TAG,
+            0,
+            "{label}'s icon is outside the icons' ids"
+        );
+        let request = shell.icon_request(id).expect("the request was not kept");
+        assert_eq!(request.name, name, "{label}");
+        assert_eq!(request.color, shell.theme.start_menu_fg, "{label}");
+        assert_eq!(request.px as f32, width, "{label}");
+        assert!(
+            text_x(label) >= x + width,
+            "{label}'s words overlap its icon"
+        );
+    }
+
+    let again: Vec<u64> = shell
+        .render_start_menu()
+        .expect("open")
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::Image { image_id, .. } => Some(*image_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        again,
+        images.iter().map(|i| i.3).collect::<Vec<_>>(),
+        "ids change between frames"
+    );
+
+    shell.set_appearance(AppearanceSettings::default());
+    assert!(
+        shell.icon_request(images[0].3).is_none(),
+        "a request outlived the appearance it was drawn in"
+    );
+}
+
 /// The places column says who is using the desktop, once somebody is known:
 /// their name, and its first letter as their picture.
 #[test]

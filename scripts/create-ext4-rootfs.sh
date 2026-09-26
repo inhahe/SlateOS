@@ -2257,6 +2257,128 @@ if [ "$SLATE_MISSING" -gt 0 ]; then
     echo "[rootfs]       typo, and the two look identical from this side."
 fi
 
+# --- fonts: the faces the desktop draws its text in ---------------------------
+#
+# Without these the toolkit and the compositor find no /usr/share/fonts
+# (`guitk::fontdb::system_font_dirs`, which walks it recursively), fall back to
+# the built-in 8x16 bitmap face, and draw every word on the OS in it: none of
+# the font engine's work -- scalable anti-aliased text, kerning, ligatures,
+# every script's shaping -- reaches the system it was built for. Lane F's
+# request, which chose the faces:
+# requests/f-cd-the-os-image-ships-no-fonts-so-slateos-draws-every-word-in-the-8x16-bitmap-face.md
+#
+#   Open Sans         the default theme's UI face (C-Q6, design-decisions §815)
+#   JetBrains Mono    its monospace, first in the toolkit's DEFAULT_MONO_FAMILIES
+#   Noto Sans         the first fallback: 3,094 characters to Open Sans's 1,010
+#   Noto Color Emoji  the COLRv1 build: vector, any size, 5 MB
+#
+# All four are under the SIL Open Font License 1.1, which permits
+# redistribution provided the licence goes with the font -- hence each
+# directory's licence file, which is staged as part of the set, not beside it.
+#
+# FETCHED, NOT COMMITTED (design-decisions §1112). 11.5 MB of binaries in git
+# would stay in its history for good. Instead each file is named by a URL at a
+# fixed commit or tag and by its SHA-256, and is kept in $FONT_CACHE under that
+# hash once fetched: the network is needed once per machine, and a file that is
+# not the one pinned is refused however it arrived -- a mismatch is fatal, and a
+# cached copy that has rotted is fetched again rather than trusted.
+#
+# A file that cannot be fetched is fatal too. SLATEOS_ROOTFS_NO_FONTS=1 builds
+# the image without any fonts instead -- for a machine that is offline and has
+# never fetched them. It is an explicit request and not a fallback because
+# nothing at boot notices a fontless image: the desktop still comes up, in the
+# bitmap face, and a boot test still passes.
+FONT_CACHE="${FONT_CACHE:-$HOME/.cache/slateos/fonts}"
+
+# Put the file whose SHA-256 is <sum> in $FONT_CACHE, fetching it from <url> if
+# it is not already there -- unless a third argument, `cached-only`, says the
+# network has already failed once. 0: it is there; 1: it could not be fetched;
+# 2: what arrived is not that file.
+font_fetch() {
+    local url=$1 sum=$2 mode=${3:-}
+    local dest="$FONT_CACHE/$sum"
+    local got
+    if [ -f "$dest" ]; then
+        got=$(sha256sum < "$dest" | cut -d' ' -f1)
+        [ "$got" = "$sum" ] && return 0
+        echo "[rootfs] cached $dest is $got: fetching it again"
+    fi
+    [ "$mode" = cached-only ] && return 1
+    mkdir -p "$FONT_CACHE" || return 1
+    # `.part` and a rename (as diff-wsl.sh fetches), so an interrupted fetch is
+    # never mistaken for a whole file on the next run. The timeouts bound a
+    # network that drops packets rather than refusing them: curl's own connect
+    # timeout is five minutes, per attempt.
+    rm -f "$dest.part"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 20 --max-time 600 --retry 3 -o "$dest.part" "$url"             || { rm -f "$dest.part"; return 1; }
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --timeout=20 --tries=4 -O "$dest.part" "$url" || { rm -f "$dest.part"; return 1; }
+    else
+        echo "[rootfs] neither curl nor wget is installed"
+        return 1
+    fi
+    got=$(sha256sum < "$dest.part" | cut -d' ' -f1)
+    if [ "$got" != "$sum" ]; then
+        echo "[rootfs] ERROR: $url"
+        echo "[rootfs]        has SHA-256 $got,"
+        echo "[rootfs]        not the pinned $sum. Refusing it."
+        rm -f "$dest.part"
+        return 2
+    fi
+    mv "$dest.part" "$dest"
+}
+
+_gf="https://raw.githubusercontent.com/google/fonts/23e54b51ddffbc7713c583748e3bd86f62b1fa4a/ofl"
+_ne="https://raw.githubusercontent.com/googlefonts/noto-emoji/v2026-09-24-unicode18_0/2D/fonts"
+# <path under /usr/share/fonts>  <url>  <sha256>
+FONT_LIST="
+opensans/OpenSans[wdth,wght].ttf $_gf/opensans/OpenSans%5Bwdth%2Cwght%5D.ttf 36643644f318a812aab2d2ed3bb98f8cf0872527f835fe9398d95fe6b9adb878
+opensans/OpenSans-Italic[wdth,wght].ttf $_gf/opensans/OpenSans-Italic%5Bwdth%2Cwght%5D.ttf fe269381e992f32e135801740998544d6235061e37c93ec067ad2be3edd5b17b
+opensans/OFL.txt $_gf/opensans/OFL.txt fbbbcfef55318de350562559b671360de6d597112ecc5c73881b05092db89602
+notosans/NotoSans[wdth,wght].ttf $_gf/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf bfb7bb691513f12e734dc346c03a03f784912432d7e3fa8e56efcf906fe86b3d
+notosans/NotoSans-Italic[wdth,wght].ttf $_gf/notosans/NotoSans-Italic%5Bwdth%2Cwght%5D.ttf 58e6e0ebd1931b29a365aa2d3e2ee9a9e831a3af7cf3ad1462d4e72154f0b291
+notosans/OFL.txt $_gf/notosans/OFL.txt cee9892f9f0cc8fe882c9e9537ee6a89621d86ee7ceaf70b02e2b2b1c25c061a
+jetbrainsmono/JetBrainsMono[wght].ttf $_gf/jetbrainsmono/JetBrainsMono%5Bwght%5D.ttf 48715a42ec242c21e9f02692891e147d022299a52e48d5e413e1a942193ffeda
+jetbrainsmono/JetBrainsMono-Italic[wght].ttf $_gf/jetbrainsmono/JetBrainsMono-Italic%5Bwght%5D.ttf 85ae2a5cd3f56baf1ce1c21a851322c58e3d8fbe8e8ad4a4d090a820dd7fe558
+jetbrainsmono/OFL.txt $_gf/jetbrainsmono/OFL.txt b2fe5e8987594e9ffd1d2ca52a2f5d73eb8335243893c5d6254b5ad69269591d
+notoemoji/Noto-COLRv1.ttf $_ne/Noto-COLRv1.ttf b8e25ea68db82f9e4d0aee921f4420be2be39887bd5c893a2ad98710531f9d0c
+notoemoji/LICENSE $_ne/LICENSE 6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2
+"
+
+if [ "${SLATEOS_ROOTFS_NO_FONTS:-0}" = "1" ]; then
+    echo "[rootfs] WARNING: SLATEOS_ROOTFS_NO_FONTS=1 -- the image carries NO fonts;"
+    echo "[rootfs]          the OS will draw all text in the 8x16 bitmap face."
+else
+    FONTS_STAGED=0
+    FONTS_UNFETCHED=()
+    # After one fetch fails, the rest are looked for in the cache only: a
+    # network that is down is not asked eleven times.
+    font_mode=""
+    while read -r font_rel font_url font_sum; do
+        [ -n "$font_rel" ] || continue
+        font_rc=0
+        font_fetch "$font_url" "$font_sum" ${font_mode:+"$font_mode"} || font_rc=$?
+        if [ "$font_rc" -eq 2 ]; then
+            exit 1
+        elif [ "$font_rc" -ne 0 ]; then
+            FONTS_UNFETCHED+=("$font_rel")
+            font_mode=cached-only
+            continue
+        fi
+        install -D -m 0644 "$FONT_CACHE/$font_sum" "$STAGE/usr/share/fonts/$font_rel"
+        FONTS_STAGED=$((FONTS_STAGED + 1))
+    done <<< "$FONT_LIST"
+    if [ "${#FONTS_UNFETCHED[@]}" -ne 0 ]; then
+        echo "[rootfs] ERROR: could not fetch these fonts, and none is cached:"
+        for font_rel in "${FONTS_UNFETCHED[@]}"; do echo "[rootfs]          $font_rel"; done
+        echo "[rootfs]        Fix the network, or set SLATEOS_ROOTFS_NO_FONTS=1 to build"
+        echo "[rootfs]        an image without fonts, knowingly."
+        exit 1
+    fi
+    echo "[rootfs] staged $FONTS_STAGED font files under /usr/share/fonts (cache: $FONT_CACHE)"
+fi
+
 # --- Completeness: the check that replaces the retired content stamps ---------
 #
 # There used to be a second gate here, hashing build.py + main.c + libc.a into a

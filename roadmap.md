@@ -1870,6 +1870,15 @@ D's to act on once answered).
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 
+- `[x]` `[D]` **The image carries fonts -- 2026-09-26**, lane D's half of
+  `requests/f-cd-the-os-image-ships-no-fonts-so-slateos-draws-every-word-in-the-8x16-bitmap-face.md`.
+  `rootfs.ext4` had no `/usr/share/fonts`, so the OS drew every word in the
+  8x16 bitmap face. `scripts/create-ext4-rootfs.sh` now stages Open Sans,
+  Noto Sans, JetBrains Mono and Noto Color Emoji (COLRv1) with their
+  licences: fetched by pinned URL, checked by SHA-256, cached by hash
+  (§1112). Lane C's half -- Open Sans first among the toolkit's UI
+  families, and the fallback list -- is theirs.
+
 - `[-]` `[D]` **Pseudo-terminals — scoped 2026-08-21, unblocked 2026-08-23.**
   **Status: the block is cleared; the remaining work is lane B's.** Lane A
   landed the pty family (syscalls 544–556, plus 869 `READABLE_BYTES` and

@@ -5363,7 +5363,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     use guitk::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent};
-    // The trait, so `app.render(w, h)` resolves: this app'"'"'s state type is also
+    // The trait, so `app.render(w, h)` resolves: this app's state type is also
     // called `App`, which is why the impl names the trait in full.
     use oswindow::app::App as _;
 

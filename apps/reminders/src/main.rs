@@ -3822,7 +3822,7 @@ fn system_now() -> Option<DateTime> {
     // The civil date comes from `guitk::date`, the toolkit's one calendar,
     // rather than a private day-number formula in this file.
     let (year, month, day) = guitk::date::Date::from_unix_utc(local).ymd();
-    //  already returns exactly the widths Fri Sep  4 02:10:08 EDT 2026 holds, so there is
+    // `ymd` already returns exactly the widths `Date` holds, so there is
     // nothing left to convert here.
     Some(DateTime::new(
         Date { year, month, day },
@@ -3839,7 +3839,7 @@ mod tests {
     // A test that overflows, indexes out of range or unwraps a `None` should
     // fail loudly and point at the line that did it — that is the diagnosis.
     // The defensive lints exist to keep panics out of code that runs on a
-    // user'"'"'s data, which this is not.
+    // user's data, which this is not.
     #![allow(
         clippy::unwrap_used,
         clippy::expect_used,

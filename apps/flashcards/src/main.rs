@@ -2111,7 +2111,7 @@ impl FlashcardsApp {
             Key::Escape => "Escape",
             Key::Backspace => "Backspace",
             Key::Delete => "Delete",
-            // "Enter" and not "Return": this app'"'"'s own key strings say Enter,
+            // "Enter" and not "Return": this app's own key strings say Enter,
             // and a translation table that disagrees with the vocabulary it
             // translates into silently drops the key. `apps/habits` spells the
             // same key "Return"; the name is per-app and has to be read off

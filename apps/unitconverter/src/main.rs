@@ -1975,7 +1975,7 @@ fn main() -> ExitCode {
 mod tests {
     // A test that indexes out of range or overflows should fail loudly and
     // point at the line that did it — that is the diagnosis. The defensive
-    // lints exist to keep panics out of code that runs on a user'"'"'s data,
+    // lints exist to keep panics out of code that runs on a user's data,
     // which this is not.
     #![allow(
         clippy::unwrap_used,

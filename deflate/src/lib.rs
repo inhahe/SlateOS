@@ -117,6 +117,14 @@ pub enum Error {
         /// The value the decompressed bytes actually produce.
         actual: u32,
     },
+    /// The stream ended before the caller's fixed-size buffer was full
+    /// ([`zlib_decompress_into`], libdeflate's `LIBDEFLATE_SHORT_OUTPUT`). The
+    /// stream may be perfectly well formed; it is shorter than the caller
+    /// said it would be, and its checksum was not examined.
+    ShortOutput {
+        /// The bytes the stream produced before it ended.
+        produced: usize,
+    },
     /// The gzip trailer's ISIZE did not match the decompressed length.
     ///
     /// Separate from [`Error::ChecksumMismatch`] because it usually means
@@ -173,6 +181,11 @@ impl core::fmt::Display for Error {
                 "checksum mismatch: stream declares {expected:#010x}, \
                  the decompressed bytes give {actual:#010x}"
             ),
+            Self::ShortOutput { produced } => write!(
+                f,
+                "compressed stream ended after {produced} byte(s), before the \
+                 expected size"
+            ),
             Self::SizeMismatch { expected, actual } => write!(
                 f,
                 "length mismatch: gzip trailer declares {expected} byte(s), \
@@ -184,6 +197,9 @@ impl core::fmt::Display for Error {
 
 /// Shorthand for this crate's fallible operations.
 pub type Result<T> = core::result::Result<T, Error>;
+
+mod fixed_buffer;
+pub use fixed_buffer::{Filled, ZlibStop, zlib_decompress_into, zlib_inflate_into};
 
 // ---------------------------------------------------------------------------
 // Bit reader — reads bits from a byte stream, LSB first
@@ -2082,7 +2098,7 @@ pub fn deflate(data: &[u8]) -> Vec<u8> {
 /// `Result`.
 ///
 /// `deflate(data)` is **not** `deflate_level(data, 6)` — it is level 3. See
-/// [`DEFAULT_MAX_CHAIN`] for why the default was left where it was.
+/// `DEFAULT_MAX_CHAIN` for why the default was left where it was.
 ///
 /// # Example
 ///

@@ -464,6 +464,10 @@ mod tests {
             ]
         );
         assert!(a.next_requests(2).is_empty(), "two already in flight");
+        assert!(
+            !a.receive(BLOCK + 1, &vec![1; BLOCK as usize]),
+            "a whole block, asked for, but off a block's edge"
+        );
         assert!(!a.receive(BLOCK * 2, &[1; 100]), "not asked for yet");
         assert!(!a.receive(1, &[1; 100]), "not on a block's edge");
         assert!(!a.receive(0, &[1; 10]), "the wrong length");

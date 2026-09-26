@@ -1166,8 +1166,22 @@ mod tests {
                 SocketAddr::V6(_) => unreachable!(),
             };
             let body = [b"d8:intervali1800e5:peers6:".as_slice(), &compact, b"e"].concat();
+            // Waits a bounded time for each announce: a session that fails
+            // before it announces (a broken build under the mutation sweep)
+            // must end this test, not hold it in `accept` for ever.
+            listener.set_nonblocking(true).unwrap();
             for answer in [true, false] {
-                let (mut s, _) = listener.accept().unwrap();
+                let deadline = Instant::now() + Duration::from_secs(30);
+                let mut s = loop {
+                    match listener.accept() {
+                        Ok((s, _)) => break s,
+                        Err(_) if Instant::now() < deadline => {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(_) => return,
+                    }
+                };
+                s.set_nonblocking(false).unwrap();
                 let mut buf = [0_u8; 4096];
                 let _ = s.read(&mut buf);
                 if answer {

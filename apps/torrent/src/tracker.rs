@@ -717,9 +717,14 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        // The server holds the connection open, saying nothing, until the
+        // test is done with it -- up to half a minute, so a client that waited
+        // for it to hang up rather than for its own timeout is plain to see
+        // however loaded the machine is.
+        let (done, wait) = std::sync::mpsc::channel::<()>();
         let silent = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            thread::sleep(Duration::from_millis(1500));
+            let _ = wait.recv_timeout(Duration::from_secs(30)); // Either answer ends the wait.
             drop(stream);
         });
         let started = Instant::now();
@@ -731,9 +736,10 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("in time"), "{err}");
         assert!(
-            started.elapsed() < Duration::from_millis(1400),
-            "waited past the timeout"
+            started.elapsed() < Duration::from_secs(10),
+            "waited for the server to hang up, not for the timeout"
         );
+        done.send(()).unwrap();
         silent.join().unwrap();
     }
 
@@ -766,6 +772,11 @@ mod tests {
         let t = parse_http("http://[::1]:99/").unwrap();
         assert_eq!((t.host.as_str(), t.port), ("::1", 99));
         assert!(parse_http("http://t.example:0/").is_err());
+        assert!(
+            parse_http("http://user@t.example/a")
+                .unwrap_err()
+                .contains("user name")
+        );
         assert!(parse_http("http://t.example:99999/").is_err());
         assert!(parse_http("http://:80/").is_err());
     }

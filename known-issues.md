@@ -165977,9 +165977,16 @@ with everything under it. Deleting a map leaves its changes in the history too.
 apply_forward, switch_map, delete_active_map}`, `MindMap::new` (the cloned
 `IdGenerator`).
 
+**And the tabs cannot be reached.** The tab strip is drawn, but no click
+selects a tab and no key does: `switch_map`, `add_map` and `delete_active_map`
+have no caller. Ctrl+O reads an outline into a new tab and makes it the one
+showing, so every map before it is then out of reach for the rest of the
+session.
+
 **The proper fix** is the whiteboard's (known-issues, the document
 applications entry): each map keeps its own history, and a change is undone on
-the map it was made on. With it, the mind map wants what the diagram and the
+the map it was made on. The tabs want to work -- a click, Ctrl+Tab, a new map
+and closing one (asking first when it has unsaved changes). With it, the mind map wants what the diagram and the
 whiteboard got -- a file of its own that keeps every colour, shape and fold (its
 outline save keeps only the words and the tree, as its notice says), the
 unsaved mark, and the question before a close or an Open.

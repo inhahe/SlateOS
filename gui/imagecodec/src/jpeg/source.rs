@@ -87,6 +87,22 @@ impl<'a> Source<'a> {
         byte
     }
 
+    /// The next eight real bytes as a big-endian word, without taking them:
+    /// `None` within eight bytes of the end, where [`Self::byte`] is the way
+    /// on. For a reader that takes several bytes at once and has to see
+    /// them first -- the entropy decoder, which may take none of them.
+    #[inline]
+    pub(super) fn peek8(&self) -> Option<u64> {
+        let bytes = self.data.get(self.at..self.at.checked_add(8)?)?;
+        Some(u64::from_be_bytes(bytes.try_into().ok()?))
+    }
+
+    /// Take `n` real bytes that [`Self::peek8`] showed: never past the end.
+    #[inline]
+    pub(super) fn advance(&mut self, n: usize) {
+        self.at = self.at.saturating_add(n).min(self.data.len());
+    }
+
     /// `INPUT_2BYTES`: a big-endian 16-bit value.
     pub(super) fn word(&mut self) -> u16 {
         let high = self.byte();

@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 
 use crate::FontMetrics;
 use crate::bidi::{self, Base, Level};
+use crate::colr::{self, ColourImage};
 use crate::device::Corrections;
 use crate::fallback::{self, Extents};
 use crate::gpos::{Adjust, Run};
@@ -58,6 +59,19 @@ use crate::var;
 /// grow the cache without bound. At 13 px a cached mask is a couple of
 /// hundred bytes, so the ceiling is well under a megabyte.
 pub const GLYPH_CACHE_LIMIT: usize = 512;
+
+/// How many colour glyphs one [`ScaledFont`] keeps before it starts evicting.
+///
+/// Colour glyphs are rarer than outline ones -- the emoji in a chat, not every
+/// letter of it -- but each weighs four bytes a pixel where a mask weighs one,
+/// so they have a cache of their own and a pixel ceiling as well as a count
+/// ([`COLOUR_CACHE_PIXELS`]).
+pub const COLOUR_CACHE_LIMIT: usize = 256;
+
+/// How many pixels of colour glyphs one [`ScaledFont`] keeps: 16 MiB of
+/// them. At 32 px that is every one of [`COLOUR_CACHE_LIMIT`]; at 256 px, a
+/// screenful.
+pub const COLOUR_CACHE_PIXELS: usize = 4 << 20;
 
 /// Why a [`ScaledFont`] could not be built or could not draw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,6 +147,28 @@ pub struct ScaledFont {
     /// over, so first-in-first-out evicts almost the same entries for none of
     /// the bookkeeping.
     order: Vec<u16>,
+    /// Colour glyphs drawn so far, by glyph id -- including the glyphs found
+    /// to have no colour recipe, so that they are not looked for again.
+    colour: BTreeMap<u16, Colour>,
+    /// Insertion order of `colour`, for eviction, as `order` is for `cache`.
+    colour_order: Vec<u16>,
+    /// Pixels held in `colour`, against [`COLOUR_CACHE_PIXELS`].
+    colour_pixels: usize,
+}
+
+/// A colour glyph as cached: the image, or `None` if the face draws the glyph
+/// as an outline, and the text colour it was drawn with -- which matters only
+/// if the image used it.
+#[derive(Clone, Debug)]
+struct Colour {
+    image: Option<ColourImage>,
+    foreground: u32,
+}
+
+impl Colour {
+    fn pixels(&self) -> usize {
+        self.image.as_ref().map_or(0, |i| i.pixels.len())
+    }
 }
 
 impl core::fmt::Debug for ScaledFont {
@@ -273,6 +309,9 @@ impl ScaledFont {
             metrics,
             cache: BTreeMap::new(),
             order: Vec::new(),
+            colour: BTreeMap::new(),
+            colour_order: Vec::new(),
+            colour_pixels: 0,
         })
     }
 
@@ -466,10 +505,14 @@ impl ScaledFont {
         self.cache.len()
     }
 
-    /// Drop every cached glyph. Useful when memory is tight.
+    /// Drop every cached glyph, outline and colour. Useful when memory is
+    /// tight.
     pub fn clear_cache(&mut self) {
         self.cache.clear();
         self.order.clear();
+        self.colour.clear();
+        self.colour_order.clear();
+        self.colour_pixels = 0;
     }
 
     /// The glyph id `ch` maps to, or glyph 0 (`.notdef`) if the face has no
@@ -516,6 +559,54 @@ impl ScaledFont {
     /// the backend-agnostic form.
     pub fn glyph_mask(&mut self, key: GlyphKey) -> Option<&GlyphMask> {
         Some(&self.glyph(key.gid()).ok()?.mask)
+    }
+
+    /// Glyph `gid` in colour, if the face paints it in colour -- an emoji
+    /// from a face with a `COLR` table -- drawn with `foreground`
+    /// (`0xAARRGGBB`) as the text colour. `None` for a glyph the face draws
+    /// as an outline, which [`glyph`](Self::glyph) then draws in the text
+    /// colour; and for a colour glyph too big to paint
+    /// ([`colr::MAX_COLOUR_PIXELS`]), which the outline stands in for.
+    ///
+    /// A colour glyph that paints nothing is an empty image, not `None`: the
+    /// glyph is drawn, and it is blank.
+    ///
+    /// Cached, like the masks. An image that used the text colour is drawn
+    /// again when asked for in another; one that did not -- most emoji -- is
+    /// drawn once for every colour of text.
+    pub fn colour_glyph(&mut self, gid: u16, foreground: u32) -> Option<&ColourImage> {
+        self.face.colour_tables()?;
+        let stale = self.colour.get(&gid).is_none_or(|c| {
+            c.image
+                .as_ref()
+                .is_some_and(|i| i.uses_foreground && c.foreground != foreground)
+        });
+        if stale {
+            let image = colr::render(&self.face, gid, self.scale, &self.coords, foreground);
+            self.insert_colour(gid, Colour { image, foreground });
+        }
+        self.colour.get(&gid)?.image.as_ref()
+    }
+
+    fn insert_colour(&mut self, gid: u16, entry: Colour) {
+        if let Some(old) = self.colour.remove(&gid) {
+            self.colour_pixels = self.colour_pixels.saturating_sub(old.pixels());
+            self.colour_order.retain(|&g| g != gid);
+        }
+        let pixels = entry.pixels();
+        // Oldest first, until the newcomer fits both ceilings.
+        while !self.colour_order.is_empty()
+            && (self.colour.len() >= COLOUR_CACHE_LIMIT
+                || self.colour_pixels.saturating_add(pixels) > COLOUR_CACHE_PIXELS)
+        {
+            let victim = self.colour_order.remove(0);
+            if let Some(old) = self.colour.remove(&victim) {
+                self.colour_pixels = self.colour_pixels.saturating_sub(old.pixels());
+            }
+        }
+        self.colour_pixels = self.colour_pixels.saturating_add(pixels);
+        self.colour.insert(gid, entry);
+        self.colour_order.push(gid);
     }
 
     fn rasterize_glyph(&self, gid: u16) -> Result<Glyph, ScaledFontError> {
@@ -679,18 +770,6 @@ impl ScaledFont {
     /// correct and is not free.
     #[must_use]
     pub fn shape_with(&self, text: &str, lang: Option<Lang>, base: Base) -> ShapedRun {
-        // Six passes, because each one needs all of the previous one's
-        // output. Bidi settles which characters are mirrored and where the
-        // direction boundaries are, and it reads the string as typed;
-        // normalization settles *which characters there are* and so must
-        // finish before any of them is looked up in `cmap`; `GSUB` decides
-        // which glyphs there are, and cannot run while characters are still
-        // arriving; kerning applies to the glyphs that *survive* substitution,
-        // so `fi` must be kerned as the single glyph it became, not as the `f`
-        // and `i` it was; reordering needs the finished glyphs; and a mark's
-        // placement is measured from a pen that both kerning and reordering
-        // are still moving.
-        let space = self.glyph_id(' ');
         // A level per byte of `text`, indexed by the byte offset a character
         // starts at — which is what a glyph's cluster is, whatever
         // substitution did to the glyph count. Empty for text that needs no
@@ -704,6 +783,37 @@ impl ScaledFont {
             let _t = Timer::start(Phase::ByteLevels);
             byte_levels(text, base)
         };
+        self.shape_leveled(text, lang, levels)
+    }
+
+    /// [`shape_with`](Self::shape_with) with the bidi levels already
+    /// resolved: one per byte of `text`, as [`byte_levels`] makes them, or
+    /// empty for text with no right-to-left in it at all.
+    ///
+    /// For a caller shaping one stretch of a paragraph on its own:
+    /// [`SystemFont`](crate::system::SystemFont)'s face fallback shapes each
+    /// face's stretch of a line separately, and a stretch's levels are its
+    /// paragraph's -- resolved over the whole line, where the first strong
+    /// character and every neutral's neighbours are -- not the ones the
+    /// stretch would resolve to alone.
+    pub(crate) fn shape_leveled(
+        &self,
+        text: &str,
+        lang: Option<Lang>,
+        levels: Vec<Level>,
+    ) -> ShapedRun {
+        // Six passes, because each one needs all of the previous one's
+        // output. Bidi settles which characters are mirrored and where the
+        // direction boundaries are, and it reads the string as typed;
+        // normalization settles *which characters there are* and so must
+        // finish before any of them is looked up in `cmap`; `GSUB` decides
+        // which glyphs there are, and cannot run while characters are still
+        // arriving; kerning applies to the glyphs that *survive* substitution,
+        // so `fi` must be kerned as the single glyph it became, not as the `f`
+        // and `i` it was; reordering needs the finished glyphs; and a mark's
+        // placement is measured from a pen that both kerning and reordering
+        // are still moving.
+        let space = self.glyph_id(' ');
         let mut pieces = {
             let _t = Timer::start(Phase::Norm);
             norm::pieces(text, |ch| self.face.glyph_index(ch).is_some())
@@ -1946,8 +2056,24 @@ impl ScaledFont {
         // differ, and it is this loop's accumulating pen that makes the
         // difference visible.
         let drawn: Vec<ShapedGlyph> = run.draw_order().copied().collect();
+        // Colour glyphs are drawn as for opaque text, and the text colour's
+        // alpha is applied to the whole image by `blit_image`: passing it in
+        // as well would apply it twice to whatever used the text colour.
+        let foreground = target.color | 0xFF00_0000;
         for shaped in &drawn {
             let advance = shaped.advance;
+            if let Some(image) = self.colour_glyph(shaped.key.gid(), foreground) {
+                #[allow(clippy::cast_precision_loss)]
+                let placed = (
+                    pixel_coord(pen + shaped.offset.0 + image.left as f32),
+                    pixel_coord(y - shaped.offset.1 + image.top as f32),
+                );
+                if let (Some(gx), Some(gy)) = placed {
+                    blit_image(image, target, gx, gy);
+                }
+                pen += advance;
+                continue;
+            }
             let Ok(glyph) = self.glyph(shaped.key.gid()) else {
                 pen += advance;
                 continue;
@@ -1994,7 +2120,7 @@ impl ScaledFont {
 /// take the paragraph's direction rather than the word's. Taking the fast path
 /// there would silently ignore the base the caller just asked for, which is
 /// the one thing this function must not do.
-fn byte_levels(text: &str, base: Base) -> Vec<Level> {
+pub(crate) fn byte_levels(text: &str, base: Base) -> Vec<Level> {
     if base != Base::Rtl && bidi::is_trivially_ltr(text) {
         return Vec::new();
     }
@@ -2430,6 +2556,65 @@ pub fn blit_mask(mask: &GlyphMask, target: &mut Target<'_>, x: i32, y: i32) {
                 | blend_channel(src.blue, under.blue, alpha);
         }
     }
+}
+
+/// Blend a colour glyph onto a surface at `(x, y)`, its top-left corner in
+/// surface coordinates (clipped like [`blit_mask`]'s).
+///
+/// The image is premultiplied and carries its own colours; of the target's
+/// colour only the alpha is used, as the opacity of the image as a whole, so
+/// that an emoji in half-transparent text is half-transparent too.
+pub fn blit_image(image: &ColourImage, target: &mut Target<'_>, x: i32, y: i32) {
+    let opacity = (target.color >> 24) & 0xFF;
+    if opacity == 0 || image.width == 0 {
+        return;
+    }
+    let max_y = i32::try_from(target.height).unwrap_or(i32::MAX);
+    let max_x = i32::try_from(target.stride).unwrap_or(i32::MAX);
+    let width = usize::try_from(image.width).unwrap_or(usize::MAX);
+    for (row, pixels) in image.pixels.chunks_exact(width).enumerate() {
+        let Ok(dy) = i32::try_from(row) else { break };
+        let py = y.saturating_add(dy);
+        if py < 0 || py >= max_y {
+            continue;
+        }
+        for (col, &src) in pixels.iter().enumerate() {
+            let Ok(dx) = i32::try_from(col) else { break };
+            let px = x.saturating_add(dx);
+            if px < 0 || px >= max_x || src >> 24 == 0 {
+                continue;
+            }
+            let (Ok(px), Ok(py)) = (u32::try_from(px), u32::try_from(py)) else {
+                continue;
+            };
+            let Some(dest) = py
+                .checked_mul(target.stride)
+                .and_then(|start| start.checked_add(px))
+                .and_then(|i| target.buffer.get_mut(i as usize))
+            else {
+                continue;
+            };
+            *dest = premultiplied_over(src, *dest, opacity);
+        }
+    }
+}
+
+/// Premultiplied `src`, at `opacity`/255, over opaque `dst`; the result is
+/// opaque, as every pixel [`blit_mask`] writes is.
+///
+/// Every channel of `src` is at most its alpha, so `s + d * (255 - a) / 255`
+/// stays within a byte: the `min` only guards an image that breaks that rule.
+fn premultiplied_over(src: u32, dst: u32, opacity: u32) -> u32 {
+    let scale = |c: u32| (c.saturating_mul(opacity).saturating_add(127)) / 255;
+    let alpha = scale(src >> 24);
+    let inv = 255_u32.saturating_sub(alpha);
+    let channel = |shift: u32| {
+        let s = scale((src >> shift) & 0xFF);
+        let d = (dst >> shift) & 0xFF;
+        s.saturating_add(d.saturating_mul(inv).saturating_add(127) / 255)
+            .min(255)
+    };
+    0xFF00_0000 | (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
 #[cfg(test)]
@@ -3459,6 +3644,101 @@ mod tests {
             levels[1].is_multiple_of(2),
             "the digits are at {}",
             levels[1]
+        );
+    }
+
+    #[test]
+    fn a_colour_glyph_is_cached_and_redrawn_only_for_a_text_colour_it_uses() {
+        let colour_face = Arc::new(Face::parse(crate::colr::tests::colour_fixture()).unwrap());
+        let mut font = ScaledFont::shared(colour_face, 100.0).unwrap();
+        let (blue, green) = (0xFF00_00FF, 0xFF00_FF00);
+        // The red square: its own colour, whatever the text's.
+        let red = font.colour_glyph(1, blue).cloned().unwrap();
+        assert_eq!(
+            (red.left, red.top, red.width, red.height),
+            (10, -10, 10, 10)
+        );
+        assert!(red.pixels.iter().all(|&p| p == 0xFFFF_0000));
+        assert!(!red.uses_foreground);
+        assert_eq!(font.colour_glyph(1, green), Some(&red));
+        // The triangle in the text colour: drawn again for another.
+        let in_blue = font.colour_glyph(2, blue).cloned().unwrap();
+        assert!(in_blue.uses_foreground);
+        assert!(in_blue.pixels.contains(&blue));
+        let in_green = font.colour_glyph(2, green).cloned().unwrap();
+        assert!(in_green.pixels.contains(&green) && !in_green.pixels.contains(&blue));
+        assert_eq!(font.colour.len(), 2);
+        // Glyph 3 has no recipe: drawn from its outline, and remembered as
+        // such rather than looked for again.
+        assert!(font.colour_glyph(3, blue).is_none());
+        assert_eq!(font.colour.len(), 3);
+        // A face without `COLR` never caches anything.
+        let mut plain = ScaledFont::from_bytes(build_test_font(), 100.0).unwrap();
+        assert!(plain.colour_glyph(1, blue).is_none());
+        assert!(plain.colour.is_empty());
+        // Clearing the cache clears colour glyphs too.
+        font.clear_cache();
+        assert!(font.colour.is_empty() && font.colour_order.is_empty());
+        assert_eq!(font.colour_pixels, 0);
+    }
+
+    #[test]
+    fn the_colour_cache_keeps_to_its_count_and_its_pixels() {
+        let face = Arc::new(Face::parse(crate::colr::tests::colour_fixture()).unwrap());
+        let mut font = ScaledFont::shared(face, 100.0).unwrap();
+        // Every glyph id there is: the fixture's four and hundreds that do not
+        // exist, each remembered as "no colour".
+        for gid in 0..600 {
+            let _ = font.colour_glyph(gid, 0xFF00_0000);
+            assert!(font.colour.len() <= COLOUR_CACHE_LIMIT);
+            assert_eq!(font.colour.len(), font.colour_order.len());
+        }
+        // Big images: the pixel ceiling evicts before the count does.
+        let big = || Colour {
+            image: Some(ColourImage {
+                width: 1024,
+                height: 1024,
+                pixels: vec![0; 1 << 20],
+                ..ColourImage::default()
+            }),
+            foreground: 0,
+        };
+        for gid in 0..10 {
+            font.insert_colour(gid, big());
+            assert!(font.colour_pixels <= COLOUR_CACHE_PIXELS);
+            let held: usize = font.colour.values().map(Colour::pixels).sum();
+            assert_eq!(held, font.colour_pixels);
+        }
+        assert_eq!(font.colour.len(), COLOUR_CACHE_PIXELS >> 20);
+        // Replacing an entry does not count it twice.
+        font.insert_colour(9, big());
+        let held: usize = font.colour.values().map(Colour::pixels).sum();
+        assert_eq!(held, font.colour_pixels);
+    }
+
+    #[test]
+    fn premultiplied_over_blends_at_the_given_opacity() {
+        // Opaque red over white, fully and at half opacity.
+        assert_eq!(
+            premultiplied_over(0xFFFF_0000, 0xFFFF_FFFF, 255),
+            0xFFFF_0000
+        );
+        assert_eq!(
+            premultiplied_over(0xFFFF_0000, 0xFFFF_FFFF, 128),
+            0xFFFF_7F7F
+        );
+        // Half-covered red (premultiplied: 0x80, 0x80, 0, 0) over black.
+        assert_eq!(
+            premultiplied_over(0x8080_0000, 0xFF00_0000, 255),
+            0xFF80_0000
+        );
+        // Transparent is nothing.
+        assert_eq!(premultiplied_over(0, 0xFF12_3456, 255), 0xFF12_3456);
+        // A channel brighter than its alpha breaks premultiplication; it must
+        // not overflow the byte.
+        assert_eq!(
+            premultiplied_over(0x10FF_FFFF, 0xFFFF_FFFF, 255),
+            0xFFFF_FFFF
         );
     }
 }

@@ -397,6 +397,7 @@ mod tests {
     use crate::vk::Handle;
     use alloc::format;
     use alloc::vec::Vec;
+    use core::cell::Cell;
     use core::ffi::c_void;
 
     #[test]
@@ -529,12 +530,16 @@ mod tests {
         loader_data: usize,
     }
 
-    /// What the driver's end of a trampolined call saw.
-    ///
-    /// A `static` rather than a captured variable because the callee is an
-    /// `extern "C"` function reached through assembly: there is nowhere to put a
-    /// closure environment.
-    static mut SEEN: (usize, u64, u64, u64, u64, u64, u64) = (0, 0, 0, 0, 0, 0, 0);
+    std::thread_local! {
+        /// What the driver's end of a trampolined call saw.
+        ///
+        /// A `static` rather than a captured variable because the callee is an
+        /// `extern "C"` function reached through assembly: there is nowhere to
+        /// put a closure environment. Per thread, so per test: the trampoline
+        /// jumps to the callee on the caller's own thread.
+        static SEEN: Cell<(usize, u64, u64, u64, u64, u64, u64)> =
+            const { Cell::new((0, 0, 0, 0, 0, 0, 0)) };
+    }
 
     /// Seven arguments, so that the ones the callee reads off the *stack* are
     /// covered too. Windows x64 passes four in registers and the rest on the
@@ -550,11 +555,7 @@ mod tests {
         e: u64,
         f: u64,
     ) -> u64 {
-        // SAFETY: single-threaded test, and nothing else touches `SEEN` while
-        // this runs.
-        unsafe {
-            SEEN = (device as usize, a, b, c, d, e, f);
-        }
+        SEEN.set((device as usize, a, b, c, d, e, f));
         0xC0FF_EE00_1234_5678
     }
 
@@ -601,7 +602,7 @@ mod tests {
             "the driver's return value did not reach the caller"
         );
         // SAFETY: the call above has returned, so nothing else is writing.
-        let seen = unsafe { SEEN };
+        let seen = SEEN.get();
         assert_eq!(
             seen.0, handle as usize,
             "the driver was handed the loader's wrapper instead of its own device"

@@ -26,6 +26,11 @@
 # * `ntpdate -s` / `sntp -s`: results at daemon.notice, failures at
 #   daemon.err, nothing on stdout or stderr, and the exit status unchanged.
 # * `ntpdate` without `-s`: the same results on stdout, and nothing logged.
+# * `ntpd`, the daemon: its start, its sync, a correction it cannot make, a
+#   server it cannot reach -- each at its severity -- and, under a `logfile`
+#   directive, the same lines in that file in ntpd's format and none in the
+#   log. The server runs 10 s ahead, so there is always a correction to make,
+#   and on this host (no SlateOS kernel) making one always fails the same way.
 set -u
 
 # --- into private namespaces ------------------------------------------------------
@@ -91,9 +96,9 @@ for _ in {1..100}; do [ -e "$log.ready" ] && break; sleep 0.05; done
 mount --bind "$log" /dev/log || { echo "syslog-client-check: cannot bind over /dev/log"; exit 1; }
 
 # --- an NTP server --------------------------------------------------------------
-# Answers every client packet as a stratum-2 server whose clock is this one:
-# mode 4, the client's transmit time as the origin, the time now as receive
-# and transmit.
+# Answers every client packet as a stratum-2 server whose clock is this one's
+# plus `$2` seconds: mode 4, the client's transmit time as the origin, that
+# time as receive and transmit.
 cat > "$DIFF_TMP/ntpserver.py" <<'PY'
 import socket, struct, sys, time
 
@@ -113,13 +118,13 @@ while True:
     if len(data) < 48:
         continue
     version = (data[0] >> 3) & 7
-    now = time.time()
+    now = time.time() + float(sys.argv[2])
     reply = struct.pack("!BBbb", (version << 3) | 4, 2, 6, -20)
     reply += struct.pack("!II", 0, 0) + b"LOCL" + stamp(now)
     reply += data[40:48] + stamp(now) + stamp(now)
     s.sendto(reply, peer)
 PY
-python3 "$DIFF_TMP/ntpserver.py" "$DIFF_TMP/ntp.ready" 2>"$DIFF_TMP/ntp.err" & server=$!
+python3 "$DIFF_TMP/ntpserver.py" "$DIFF_TMP/ntp.ready" 10 2>"$DIFF_TMP/ntp.err" & server=$!
 for _ in {1..100}; do [ -e "$DIFF_TMP/ntp.ready" ] && break; sleep 0.05; done
 [ -e "$DIFF_TMP/ntp.ready" ] || { echo "syslog-client-check: the NTP server never started"; exit 1; }
 trap 'kill "$listener" "$server" 2>/dev/null' EXIT
@@ -131,26 +136,35 @@ ln -s "$OURS" "$DIFF_TMP/bin/sntp"
 log_args=$(diff_ours_example log_args)
 
 # --- running one case -------------------------------------------------------------
-# run WANT_LINES CMD...: run CMD, then wait (up to 5 s) for WANT_LINES new
-# lines in the log, and a moment more for any that should not be there. Sets
-# rc, out, err, and logged -- the new lines, with each clock replaced by DATE
-# and this process's PID by PID, so a wrong PID still shows.
-run() {
-  local want=$1; shift
-  local before after pid
+# start CMD...: run CMD in the background; `pid` is its PID.
+start() {
   before=$(wc -l < "$DIFF_TMP/log.out")
   "$@" > "$DIFF_TMP/out" 2> "$DIFF_TMP/err" & pid=$!
-  wait "$pid"; rc=$?
-  for _ in {1..100}; do
+}
+# settle WANT_LINES [SECS]: wait (up to SECS, default 5) for WANT_LINES new
+# lines in the log, and a moment more for any that should not be there. Sets
+# out, err, and logged -- the new lines, with each clock replaced by DATE and
+# the process's PID by PID, so a wrong PID still shows.
+settle() {
+  local want=$1 tries=$(( ${2:-5} * 20 )) after
+  while [ "$tries" -gt 0 ]; do
     after=$(wc -l < "$DIFF_TMP/log.out")
     [ $((after - before)) -ge "$want" ] && break
     sleep 0.05
+    tries=$((tries - 1))
   done
   sleep 0.2
   out=$(cat "$DIFF_TMP/out"); err=$(cat "$DIFF_TMP/err")
   logged=$(tail -n +"$((before + 1))" "$DIFF_TMP/log.out" | sed -E \
     -e 's/^(<[0-9]+>)[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} /\1DATE /' \
     -e "s/\\[$pid\\]: /[PID]: /")
+}
+# run WANT_LINES CMD...: CMD to its end; `rc` is its status.
+run() {
+  local want=$1; shift
+  start "$@"
+  wait "$pid"; rc=$?
+  settle "$want"
 }
 
 # expect LABEL WANT-RC WANT-OUT WANT-ERR WANT-LOGGED: after `run`.
@@ -210,6 +224,41 @@ run 0 "$DIFF_TMP/bin/ntpdate" -q -u -p 1 -t 1 127.0.0.2
 expect 'ntpdate: without -s failures are on stderr and nothing is logged' 1 '' \
 'ntpdate: no response from 127.0.0.2
 ntpdate: no usable responses from any server' ''
+
+# --- ntpd, the daemon ------------------------------------------------------------
+conf=$DIFF_TMP/ntp.conf
+printf 'server 127.0.0.1\ndriftfile %s/ntp1.drift\n' "$DIFF_TMP" > "$conf"
+run 3 "$OURS" -q -g -c "$conf"
+expect 'ntpd: its start and sync are notices, a step it cannot make an error' 0 '' '' \
+'<29>DATE ntpd[PID]: ntpd starting; servers: 127.0.0.1
+<29>DATE ntpd[PID]: synchronized to 127.0.0.1, stratum 2
+<27>DATE ntpd[PID]: cannot adjust the clock: clock_settime: not supported on this host (no SlateOS kernel)'
+
+printf 'server 127.0.0.1\ndriftfile %s/ntp2.drift\nlogfile %s/ntpd.log\n' "$DIFF_TMP" "$DIFF_TMP" > "$conf"
+run 0 "$OURS" -q -c "$conf"
+expect 'ntpd: under a logfile directive, nothing goes to syslog' 0 '' '' ''
+got=$(sed -E -e 's/^[ 0-9][0-9] [A-Z][a-z]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} /DATE /' \
+  -e "s/ ntpd\\[$pid\\]: / ntpd[PID]: /" "$DIFF_TMP/ntpd.log" 2>&1)
+want='DATE ntpd[PID]: ntpd starting; servers: 127.0.0.1
+DATE ntpd[PID]: synchronized to 127.0.0.1, stratum 2
+DATE ntpd[PID]: cannot adjust the clock: clock_adjtime: not supported on this host (no SlateOS kernel)'
+if [ "$got" = "$want" ]; then ok 'ntpd: ... it goes to the file, in ntpd'"'"'s own format'
+else bad 'ntpd: ... it goes to the file, in ntpd'"'"'s own format' "$(printf '  got:\n%s\n  want:\n%s' "$got" "$want")"; fi
+# 10 s ahead is 10 000 PPM of frequency error unbounded; ntpd steers 500 at most.
+got=$(cat "$DIFF_TMP/ntp2.drift" 2>&1)
+if [ "$got" = '500.000000' ]; then ok 'ntpd: the saved drift is within ntpd'"'"'s bound'
+else bad 'ntpd: the saved drift is within ntpd'"'"'s bound' "  got: $got  want: 500.000000"; fi
+
+# Nothing answers at 127.0.0.2, and the daemon's socket is not connected, so
+# each of its four queries waits out its 5 s: the report comes after ~21 s.
+# The daemon then sleeps until its next poll, and is stopped.
+printf 'server 127.0.0.2\ndriftfile %s/ntp3.drift\n' "$DIFF_TMP" > "$conf"
+start "$OURS" -q -c "$conf"
+settle 2 30
+kill "$pid" 2>/dev/null; wait "$pid"; rc=$?
+expect 'ntpd: an unreachable server is a warning, said once' 143 '' '' \
+'<29>DATE ntpd[PID]: ntpd starting; servers: 127.0.0.2
+<28>DATE ntpd[PID]: no server reachable (127.0.0.2)'
 
 echo "syslog-client-check: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

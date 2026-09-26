@@ -7,8 +7,16 @@ description = "SlateOS ntpd/ntpdate - NTP time synchronization"
 # Reading a file whose absence is normal but whose unreadability is not;
 # see that crate's docs for the four programs that each wrote it wrong.
 optionalfile = { path = "../../optionalfile" }
-# `ntpdate -s` logs through the C library's syslog(3), as ntpdate does.
+# `ntpdate -s` and the daemon log through the C library's syslog(3), as
+# ntpdate and ntpd do.
 libcsyslog = { path = "../libcsyslog" }
+# The daemon's `logfile` lines carry local time, as ntpd's do.
+localtime = { path = "../localtime" }
+# File names in log messages are quoted where they need to be.
+quoting = { path = "../quoting" }
+
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }
 
 [lints]
 workspace = true

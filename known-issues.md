@@ -166475,6 +166475,7 @@ word (`read_all_entries` -> `JournalEntry::from_json_line`):
 | `logger` | a `journalrec` record in `/var/log/syslog.jsonl` -- since 2026-09-26; before, RFC 3164 text lines in `/var/log/syslog` that `journalctl` could not read |
 | `ntpdate -s` | the libc's `syslog()` -- since 2026-09-26; before, nowhere: it `open`ed `/dev/log` as a file, which failed, and discarded the error |
 | `crond`, `anacron` | the libc's `syslog()` -- since 2026-09-26; before, its own `crond2[PID]: ...` lines on stderr |
+| `ntpd` (the daemon) | the libc's `syslog()`, or the file its `logfile` directive names -- since 2026-09-26; before, nothing at all outside `-d`, and its clock and drift-file failures were discarded |
 | `systemd-cat` (`systemctl`) | a `journalrec` record in `/var/log/syslog.jsonl` |
 | `syslogd log` | the same file |
 | `syslogd daemon` | receives nothing (`cmd_daemon`: "the daemon sits idle") |

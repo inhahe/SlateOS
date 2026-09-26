@@ -13,11 +13,13 @@
 // readable status print) and full RFC 5905 server-mode support. Kept
 // as documentation for the continuing daemon implementation.
 
+mod log;
+
 use std::env;
 use std::fmt;
 use std::fs;
 use std::net::UdpSocket;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Duration;
 
@@ -931,19 +933,52 @@ fn logfile_from_config(directives: &[ConfigDirective]) -> Option<String> {
 // Drift file
 // ---------------------------------------------------------------------------
 
-/// Read the frequency drift value from a drift file (PPM as f64).
-fn read_drift(path: &str) -> Option<f64> {
-    let content = fs::read_to_string(path).ok()?;
-    content.trim().parse::<f64>().ok()
+/// The largest frequency error a drift file may claim, in PPM: ntpd's own
+/// bound on the frequency it will steer (`NTP_MAXFREQ`, 500 PPM).
+const MAX_DRIFT_PPM: f64 = 500.0;
+
+/// The saved frequency correction, in PPM: `Ok(None)` when there is none yet
+/// -- no file, or an empty one, which is how every install starts.
+///
+/// # Errors
+///
+/// The file exists but cannot be read, or holds something that is not a
+/// finite number within [`MAX_DRIFT_PPM`] -- a torn write, or someone
+/// else's file. Either way the daemon starts from 0 and says why, rather
+/// than steering the clock by a number it cannot trust.
+fn read_drift(path: &str) -> Result<Option<f64>, String> {
+    let shown = quoting::quotef(path.as_bytes());
+    let text = optionalfile::read_or_empty(Path::new(path))
+        .map_err(|e| format!("cannot read the drift file {shown}: {e}"))?;
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    match text.parse::<f64>() {
+        Ok(ppm) if ppm.is_finite() && ppm.abs() <= MAX_DRIFT_PPM => Ok(Some(ppm)),
+        _ => Err(format!(
+            "the drift file {shown} does not hold a frequency within {MAX_DRIFT_PPM} PPM"
+        )),
+    }
 }
 
-/// Write the frequency drift value to a drift file.
+/// Save the frequency drift, in PPM, as ntpd does: to `PATH.TEMP`, then
+/// renamed over `PATH`, so a crash mid-write leaves the old value rather than
+/// a torn one.
+///
+/// # Errors
+///
+/// The temporary file cannot be written or renamed.
 fn write_drift(path: &str, ppm: f64) -> Result<(), String> {
-    // Ensure parent directory exists.
-    if let Some(parent) = std::path::Path::new(path).parent() {
+    let path = Path::new(path);
+    if let Some(parent) = path.parent() {
+        // A directory that cannot be made shows up, more precisely, as the
+        // write's own error just below.
         let _ = fs::create_dir_all(parent);
     }
-    fs::write(path, format!("{ppm:.6}\n").as_bytes()).map_err(|e| format!("{path}: {e}"))
+    let temp = quoting::with_suffix(path, b".TEMP");
+    fs::write(&temp, format!("{ppm:.6}\n").as_bytes()).map_err(|e| e.to_string())?;
+    fs::rename(&temp, path).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -995,8 +1030,12 @@ impl ClockDiscipline {
         // Proportional + Integral.
         // P gain: 1/4 of the offset.
         let p_correction = offset_us / 4;
-        // I gain: accumulate frequency error.
-        self.freq_ppm += (offset_us as f64) * 0.001;
+        // I gain: accumulate frequency error -- within ntpd's bound on the
+        // frequency it will steer (`NTP_MAXFREQ`). Unbounded, one large
+        // offset left a correction no oscillator has, which then went to the
+        // drift file, which `read_drift` rightly refuses on the next start.
+        self.freq_ppm =
+            (self.freq_ppm + (offset_us as f64) * 0.001).clamp(-MAX_DRIFT_PPM, MAX_DRIFT_PPM);
         let i_correction = self.freq_ppm as i64;
 
         let correction = p_correction.saturating_add(i_correction);
@@ -1238,7 +1277,11 @@ fn run_ntpd(opts: &NtpdOpts) -> Result<(), String> {
     };
 
     let drift_path = driftfile_from_config(&directives);
-    let _log_path = logfile_from_config(&directives);
+    let log = log::Log::open(
+        logfile_from_config(&directives).map(PathBuf::from),
+        opts.debug,
+    );
+    log.notice(&format!("ntpd starting; servers: {}", servers.join(", ")));
 
     if opts.debug {
         eprintln!("ntpd: config from {}", opts.config_path);
@@ -1247,13 +1290,27 @@ fn run_ntpd(opts: &NtpdOpts) -> Result<(), String> {
     }
 
     // Load saved drift.
-    let initial_drift = read_drift(&drift_path).unwrap_or(0.0);
+    let initial_drift = match read_drift(&drift_path) {
+        Ok(ppm) => ppm.unwrap_or(0.0),
+        Err(e) => {
+            log.warning(&format!("{e}; starting from 0 PPM"));
+            0.0
+        }
+    };
     if opts.debug {
         eprintln!("ntpd: initial drift: {initial_drift:.6} PPM");
     }
 
     let mut discipline = ClockDiscipline::new(initial_drift);
     let mut first_update = true;
+    // Each reported when it changes, not every poll (`log`'s docs).
+    let mut reach = log::Reach::default();
+    let mut clock = log::Trouble::default();
+    let mut drift = log::Trouble::default();
+    let drift_what = format!(
+        "write the drift file {}",
+        quoting::quotef(drift_path.as_bytes())
+    );
 
     // Main loop.
     loop {
@@ -1275,6 +1332,7 @@ fn run_ntpd(opts: &NtpdOpts) -> Result<(), String> {
         }
 
         if all_samples.is_empty() {
+            reach.report(&log, None, &servers);
             if opts.debug {
                 eprintln!("ntpd: no usable responses this cycle");
             }
@@ -1289,6 +1347,7 @@ fn run_ntpd(opts: &NtpdOpts) -> Result<(), String> {
         let Some(best) = all_samples.first() else {
             continue;
         };
+        reach.report(&log, Some((&best_server, best.stratum)), &servers);
 
         if opts.debug {
             eprintln!(
@@ -1307,22 +1366,20 @@ fn run_ntpd(opts: &NtpdOpts) -> Result<(), String> {
         let correction_ns = correction.saturating_mul(1_000);
 
         if step {
-            match read_system_time_ns() {
-                Ok(now_ns) => {
-                    let _ = set_system_time_ns(now_ns.saturating_add(correction_ns));
-                }
-                Err(e) => {
-                    if opts.debug {
-                        eprintln!("ntpd: cannot read clock to step: {e}");
-                    }
-                }
-            }
-            if opts.debug {
-                eprintln!("ntpd: stepped clock by {} us", correction);
+            let stepped = read_system_time_ns()
+                .and_then(|now_ns| set_system_time_ns(now_ns.saturating_add(correction_ns)));
+            let ok = stepped.is_ok();
+            clock.report(&log, "adjust the clock", stepped);
+            if ok {
+                log.notice(&format!("stepped the clock by {correction} us"));
             }
         } else if correction != 0 {
             // Race-free relative slew via SYS_CLOCK_ADJTIME.
-            let _ = adjust_system_time_ns(correction_ns);
+            clock.report(
+                &log,
+                "adjust the clock",
+                adjust_system_time_ns(correction_ns),
+            );
             if opts.debug {
                 eprintln!("ntpd: slew correction {} us", correction);
             }
@@ -1331,7 +1388,11 @@ fn run_ntpd(opts: &NtpdOpts) -> Result<(), String> {
         first_update = false;
 
         // Save drift.
-        let _ = write_drift(&drift_path, discipline.freq_ppm);
+        drift.report(
+            &log,
+            &drift_what,
+            write_drift(&drift_path, discipline.freq_ppm),
+        );
 
         // Print status.
         if opts.debug || opts.no_daemonize {
@@ -2138,18 +2199,43 @@ logfile /var/log/ntp.log
 
     #[test]
     fn test_drift_read_missing() {
-        assert!(read_drift("/nonexistent/drift").is_none());
+        let dir = scratchdir::ScratchDir::new("ntpd_drift_missing");
+        let path = dir.path("ntp.drift");
+        assert_eq!(read_drift(path.to_str().unwrap()), Ok(None));
     }
 
     #[test]
     fn test_drift_write_read_roundtrip() {
-        let path = "/tmp/ntpd_test_drift";
+        let dir = scratchdir::ScratchDir::new("ntpd_drift_roundtrip");
+        let path = dir.path("ntp.drift");
+        let path = path.to_str().unwrap();
         let ppm = -3.252_5;
         write_drift(path, ppm).unwrap();
-        let read_val = read_drift(path).unwrap();
+        let read_val = read_drift(path).unwrap().unwrap();
         assert!((read_val - ppm).abs() < 0.001);
-        // Cleanup.
-        let _ = fs::remove_file(path);
+        // Written through a temporary file, which is gone afterwards.
+        assert!(!dir.path("ntp.drift.TEMP").exists());
+    }
+
+    #[test]
+    fn test_drift_an_empty_file_is_no_drift_yet() {
+        let dir = scratchdir::ScratchDir::new("ntpd_drift_empty");
+        let path = dir.path("ntp.drift");
+        fs::write(&path, "\n").unwrap();
+        assert_eq!(read_drift(path.to_str().unwrap()), Ok(None));
+    }
+
+    #[test]
+    fn test_drift_that_cannot_be_trusted_is_an_error_not_zero() {
+        let dir = scratchdir::ScratchDir::new("ntpd_drift_garbage");
+        let path = dir.path("ntp.drift");
+        for text in ["12.5xyz\n", "inf\n", "NaN\n", "500.1\n", "-9999\n"] {
+            fs::write(&path, text).unwrap();
+            let e = read_drift(path.to_str().unwrap()).unwrap_err();
+            assert!(e.contains("does not hold a frequency"), "{text:?}: {e}");
+        }
+        fs::write(&path, "-500\n").unwrap();
+        assert_eq!(read_drift(path.to_str().unwrap()), Ok(Some(-500.0)));
     }
 
     // -- Calendar helpers ---------------------------------------------------
@@ -2462,6 +2548,18 @@ logfile /var/log/ntp.log
         let (step, correction) = disc.update(PANIC_THRESHOLD_US + 1, true);
         assert!(!step);
         assert_eq!(correction, 0);
+    }
+
+    #[test]
+    fn test_discipline_frequency_stays_within_ntpds_bound() {
+        let mut disc = ClockDiscipline::new(0.0);
+        // 10 s, not allowed to step: slewed, and the frequency term would
+        // reach 10 000 PPM unclamped.
+        let (step, _) = disc.update(10_000_000, false);
+        assert!(!step);
+        assert!((disc.freq_ppm - MAX_DRIFT_PPM).abs() < f64::EPSILON);
+        let (_, _) = disc.update(-900_000_000, false);
+        assert!((disc.freq_ppm + MAX_DRIFT_PPM).abs() < f64::EPSILON);
     }
 
     #[test]

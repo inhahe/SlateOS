@@ -2053,7 +2053,10 @@ name = "ntpd"
 version = "0.1.0"
 dependencies = [
  "libcsyslog",
+ "localtime",
  "optionalfile",
+ "quoting",
+ "scratchdir",
 ]
 
 [[package]]

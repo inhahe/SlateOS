@@ -3470,7 +3470,7 @@ impl App {
                 doc.dirty = false;
                 if let Some(name) = path.file_name() {
                     // The tab's label only; the real name is `path`.
-                    doc.title = name.to_string_lossy().into_owned();
+                    doc.title = name.shown().to_string();
                 }
                 Ok(format!("Saved {}", path.shown()))
             }
@@ -3661,7 +3661,7 @@ impl App {
 
         let name = path
             .file_name()
-            .map_or_else(|| shown.clone(), |n| n.to_string_lossy().into_owned());
+            .map_or_else(|| shown.clone(), |n| n.shown().to_string());
         let id = self.next_tab_id;
         self.next_tab_id = self.next_tab_id.saturating_add(1);
         let mut doc = Document::new(id, name);

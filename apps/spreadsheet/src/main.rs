@@ -4157,10 +4157,7 @@ impl SpreadsheetApp {
             .as_deref()
             .and_then(std::path::Path::file_name)
             // The window bar's label only; the real name is the path.
-            .map_or_else(
-                || String::from("Untitled"),
-                |n| n.to_string_lossy().into_owned(),
-            )
+            .map_or_else(|| String::from("Untitled"), |n| n.shown().to_string())
     }
 
     /// The name offered for an export or a first save, with `extension`:
@@ -4233,11 +4230,13 @@ impl SpreadsheetApp {
         format!("Opened {} as a new workbook", path.shown())
     }
 
-    /// The name a sheet made from `path` is given.
+    /// The name a sheet made from `path` is given: the file's stem exactly
+    /// whenever it is text, since it is kept in the workbook -- not only
+    /// shown -- and its shown form when it is not.
     fn stem_of(&self, path: &std::path::Path) -> String {
         path.file_stem().map_or_else(
             || String::from("Sheet1"),
-            |n| n.to_string_lossy().into_owned(),
+            |n| n.text_or_shown().into_owned(),
         )
     }
 

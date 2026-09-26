@@ -2117,10 +2117,7 @@ impl DiagramApp {
             .as_deref()
             .and_then(std::path::Path::file_name)
             // The window bar's label only; the real name is the path.
-            .map_or_else(
-                || String::from("Untitled"),
-                |n| n.to_string_lossy().into_owned(),
-            )
+            .map_or_else(|| String::from("Untitled"), |n| n.shown().to_string())
     }
 
     /// The name offered for an export or a first save, with `extension`:

@@ -1275,8 +1275,11 @@ fn scan_directory(
 
         // Check extension filters.
         if file_type == FileType::Regular {
-            if let Some(ext) = path.extension() {
-                let ext_str = format!(".{}", ext.to_string_lossy());
+            // An extension that is not text matches none of the filters,
+            // which are text: it is simply not filtered, where a lossy decode
+            // could have matched a filter holding U+FFFD.
+            if let Some(ext) = path.extension().and_then(std::ffi::OsStr::to_str) {
+                let ext_str = format!(".{ext}");
                 let ext_lower = ext_str.to_ascii_lowercase();
 
                 // Check exclude extensions.

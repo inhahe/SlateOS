@@ -574,7 +574,13 @@ impl HardwareProvider for SyscallProvider {
 
         let mut disks = Vec::new();
         for entry in dir.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
+            // The name builds the paths read next, so it must be exact: a
+            // device whose name is not text cannot be addressed through them,
+            // and is skipped -- decoded lossily, its reads would have gone to
+            // a path that names nothing.
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
             let base = format!("{SYSDEV_BLOCK}/{name}");
             // A device unregistered between the listing and the read is
             // skipped rather than failing the whole query: the same race a

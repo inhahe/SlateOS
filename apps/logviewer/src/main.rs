@@ -799,10 +799,9 @@ impl LogFile {
             bytes.drain(..cut);
             start = start.saturating_add(u64::try_from(cut).unwrap_or(0));
         }
-        let name = path.file_name().map_or_else(
-            || path.shown().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
+        let name = path
+            .file_name()
+            .map_or_else(|| path.shown().to_string(), |n| n.shown().to_string());
         let mut log = Self::new(&name, &path.shown().to_string());
         log.parse_bytes(&bytes);
         log.start_offset = start;

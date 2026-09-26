@@ -1137,7 +1137,7 @@ impl DocumentTab {
                 self.document.as_ref().map(|d| {
                     d.path
                         .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
+                        .map(|n| n.shown().to_string())
                         .unwrap_or_else(|| "Untitled".to_string())
                 })
             })
@@ -2701,7 +2701,7 @@ impl PdfViewerApp {
                 let name = entry
                     .path
                     .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
+                    .map(|n| n.shown().to_string())
                     .unwrap_or_else(|| "unknown".to_string());
 
                 // Recorded after `Target::Document`, which covers the whole
@@ -3467,7 +3467,7 @@ impl PdfViewerApp {
                 let name = doc
                     .path
                     .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
+                    .map(|n| n.shown().to_string())
                     .unwrap_or_else(|| "Untitled".to_string());
                 frame.push(RenderCommand::Text {
                     x: sx,

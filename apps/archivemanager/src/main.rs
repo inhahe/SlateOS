@@ -3520,7 +3520,7 @@ impl App for AppState {
                 "{} — Archive Manager",
                 archive.path.file_name().map_or_else(
                     || archive.path.shown().to_string(),
-                    |n| n.to_string_lossy().into_owned()
+                    |n| n.shown().to_string()
                 )
             ),
             None => String::from("Archive Manager"),

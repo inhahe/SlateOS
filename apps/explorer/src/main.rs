@@ -1133,13 +1133,9 @@ impl ExplorerState {
     /// over-long label is a worse-looking row, while an unwrap here would be a
     /// crash in a file manager for a cosmetic reason.
     fn relative_label(path: &Path, root: &Path) -> String {
-        let shown = path.strip_prefix(root).unwrap_or(path);
-        // Lossy on purpose and safe here: this is the text a row is drawn
-        // with, and `FileEntry::path` beside it is what opening the row uses.
-        // Named rather than chained so the exemption in `lossy-decode.py` has
-        // something specific to anchor on -- a bare `.to_string_lossy()` would
-        // match every future lossy call in this file too.
-        shown.to_string_lossy().into_owned()
+        // The text a row is drawn with (`pathtext`); `FileEntry::path` beside
+        // it is what opening the row uses.
+        path.strip_prefix(root).unwrap_or(path).shown().to_string()
     }
 
     /// Ask what to look for.

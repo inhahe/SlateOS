@@ -1848,7 +1848,7 @@ impl FileSearchApp {
         }
 
         self.status_message = describe_index_pass(
-            &root.to_string_lossy(),
+            &root.shown().to_string(),
             indexed,
             self.skipped_unrepresentable,
             truncated,

@@ -2583,7 +2583,7 @@ impl PaintApp {
             .map_or_else(
                 || String::from("Untitled"),
                 // The window bar's label only; the real name is the path.
-                |n| n.to_string_lossy().into_owned(),
+                |n| n.shown().to_string(),
             )
     }
 

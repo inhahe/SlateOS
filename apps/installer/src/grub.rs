@@ -13,6 +13,7 @@
 //! * **Direct** — GRUB loads the kernel directly via `multiboot2`.  Useful on
 //!   legacy-BIOS systems or when Limine is not installed.
 
+use pathtext::ShowPath;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -580,9 +581,7 @@ impl GrubInstaller {
         }
 
         if !self.custom_dir.is_dir() {
-            return Err(GrubError::InvalidPath(
-                self.custom_dir.to_string_lossy().into_owned(),
-            ));
+            return Err(GrubError::InvalidPath(self.custom_dir.shown().to_string()));
         }
 
         let script = generate_custom_script(entry)?;

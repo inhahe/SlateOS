@@ -1497,10 +1497,17 @@ impl ContentStore {
             if !prefix_entry.file_type()?.is_dir() {
                 continue;
             }
-            let prefix = prefix_entry.file_name().to_string_lossy().to_string();
+            // A blob's name is its hash, in hex: a name that is not text is
+            // not one of the store's, and a lossy decode of it would have been
+            // listed as a hash that names nothing.
+            let Ok(prefix) = prefix_entry.file_name().into_string() else {
+                continue;
+            };
             for blob_entry in fs::read_dir(prefix_entry.path())? {
                 let blob_entry = blob_entry?;
-                let rest = blob_entry.file_name().to_string_lossy().to_string();
+                let Ok(rest) = blob_entry.file_name().into_string() else {
+                    continue;
+                };
                 blobs.push(format!("{}{}", prefix, rest));
             }
         }

@@ -47,11 +47,12 @@
 
 use crate::errno;
 use crate::linux_ipc::{IPC_INFO, IpcPerm};
+use crate::objtable::{Slots, Waits};
 use crate::perprocess::process_global;
 use crate::stat::Timespec;
 use crate::sysv_ipc::{
-    Caller, Perm, S_IRUGO, S_IWUGO, SEQ_MASK, Slots, Waits, caller, decode_id, encode_id,
-    may_control, now_secs, permits,
+    Caller, Perm, S_IRUGO, S_IWUGO, SEQ_MASK, caller, decode_id, encode_id, may_control, now_secs,
+    permits,
 };
 
 // ---------------------------------------------------------------------------

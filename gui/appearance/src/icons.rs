@@ -528,7 +528,14 @@ const ICON_ID_MASK: u64 = ICON_ID_TAG - 1;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct IconRequest {
     /// The icon's name, as an icon theme knows it (`folder`, `user-home`).
-    pub name: &'static str,
+    ///
+    /// Owned or borrowed: the shell's own pictures are names in its source,
+    /// but a program's is whatever its desktop entry says.
+    pub name: Cow<'static, str>,
+    /// Drawn instead when nothing draws `name` -- a program whose entry
+    /// names an icon the theme does not have still gets a picture, the
+    /// generic one, rather than a gap in its row.
+    pub fallback: Option<&'static str>,
     /// Its side, in pixels.
     pub px: u32,
     /// The colour a `currentColor` icon is drawn in; its alpha fades the
@@ -552,8 +559,35 @@ impl IconRegistry {
     ///
     /// The id is the request's hash under [`ICON_ID_TAG`]: the same icon asked
     /// for again, in any frame, is the same id, so it is uploaded once.
-    pub fn icon(&self, name: &'static str, px: u32, color: Color) -> u64 {
-        let request = IconRequest { name, px, color };
+    pub fn icon(&self, name: impl Into<Cow<'static, str>>, px: u32, color: Color) -> u64 {
+        self.remember(IconRequest {
+            name: name.into(),
+            fallback: None,
+            px,
+            color,
+        })
+    }
+
+    /// [`Self::icon`], drawing `fallback` when nothing draws `name`: for a
+    /// name that comes from outside -- a program's desktop entry -- which the
+    /// theme may not have.
+    pub fn icon_or(
+        &self,
+        name: impl Into<Cow<'static, str>>,
+        fallback: &'static str,
+        px: u32,
+        color: Color,
+    ) -> u64 {
+        self.remember(IconRequest {
+            name: name.into(),
+            fallback: Some(fallback),
+            px,
+            color,
+        })
+    }
+
+    /// File `request` under its id, and answer the id.
+    fn remember(&self, request: IconRequest) -> u64 {
         let mut hasher = std::hash::DefaultHasher::new();
         request.hash(&mut hasher);
         let id = ICON_ID_TAG | (hasher.finish() & ICON_ID_MASK);
@@ -608,7 +642,14 @@ pub fn upload_missing<E>(
         let Some(request) = lookup(id) else {
             continue;
         };
-        if let Some(icon) = theme.render(request.name, request.px, request.color) {
+        let icon = theme
+            .render(&request.name, request.px, request.color)
+            .or_else(|| {
+                request
+                    .fallback
+                    .and_then(|fallback| theme.render(fallback, request.px, request.color))
+            });
+        if let Some(icon) = icon {
             upload(id, &icon)?;
         }
     }

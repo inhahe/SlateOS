@@ -160,6 +160,62 @@ fn an_icon_styled_as_breeze_writes_them_draws_in_the_colour_asked_for() {
 /// commands name is drawn and handed to the upload once, a picture's own id is
 /// left alone, and an id nobody asked for, or one nothing draws, is passed
 /// over -- and all three recorded, so none is looked at again.
+/// **An icon named at run time -- a program's desktop entry says which --
+/// falls back to the one it names when nothing draws it**, and is its own
+/// icon, under its own id, when something does.
+#[test]
+fn a_run_time_name_draws_itself_or_its_fallback() {
+    use guitk::render::RenderCommand;
+    let registry = IconRegistry::default();
+    let entry_says = String::from("no-such-icon-anywhere");
+    let missing = registry.icon_or(entry_says, "folder", 16, INK);
+    let present = registry.icon_or(String::from("user-home"), "folder", 16, INK);
+    let plain = registry.icon("no-such-icon-anywhere", 16, INK);
+    assert_ne!(missing, plain, "a fallback is part of what was asked for");
+    assert_eq!(
+        registry.request(missing).map(|r| r.fallback),
+        Some(Some("folder"))
+    );
+
+    let theme = IconTheme::named(OsStr::new("no-such-theme"), Fixture::new("fallback").dirs());
+    let image = |image_id: u64| RenderCommand::Image {
+        x: 0.0,
+        y: 0.0,
+        width: 16.0,
+        height: 16.0,
+        image_id,
+    };
+    let mut uploaded: Vec<(u64, Vec<u32>)> = Vec::new();
+    let result: Result<(), ()> = upload_missing(
+        &[image(missing), image(present), image(plain)],
+        &theme,
+        |id| registry.request(id),
+        |_| true,
+        |id, icon| {
+            uploaded.push((id, icon.argb.clone()));
+            Ok(())
+        },
+    );
+    assert!(result.is_ok());
+    let ids: Vec<u64> = uploaded.iter().map(|(id, _)| *id).collect();
+    assert_eq!(
+        ids,
+        [missing, present],
+        "the plain unknown name draws nothing"
+    );
+    let folder = theme
+        .render("folder", 16, INK)
+        .expect("the built-in folder");
+    let home = theme
+        .render("user-home", 16, INK)
+        .expect("the built-in home");
+    assert_eq!(uploaded[0].1, folder.argb, "the fallback's pixels");
+    assert_eq!(
+        uploaded[1].1, home.argb,
+        "its own pixels, not the fallback's"
+    );
+}
+
 #[test]
 fn a_frames_icons_are_uploaded_once_and_nothing_else_is() {
     use guitk::render::RenderCommand;

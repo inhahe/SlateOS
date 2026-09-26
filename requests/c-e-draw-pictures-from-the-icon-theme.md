@@ -80,6 +80,10 @@ for id in std::mem::take(&mut uploaded) { let _ = window.drop_image(id); }
   icon, uploaded once.
 - Ids carry `appearance::icons::ICON_ID_TAG`, so they never collide with ids a
   program gives its own pictures (numbered from one upwards).
+- **A name that comes from outside the program** -- a file's type, another
+  program's desktop entry -- need not be a `&'static str`, and may not be one
+  the theme draws: `registry.icon_or(name, "text-x-generic", 16, color)` draws
+  the fallback instead of nothing (added 2026-09-26).
 
 ## What happens until it is done
 

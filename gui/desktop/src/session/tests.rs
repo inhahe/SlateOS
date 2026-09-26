@@ -6338,7 +6338,7 @@ fn an_overlays_icon_goes_up_before_the_frame_that_names_it() {
     assert_eq!(wanted.len(), 1, "the speaker: {wanted:?}");
     let (id, px) = wanted[0];
     assert_eq!(
-        session.shell().icon_request(id).map(|r| r.name),
+        session.shell().icon_request(id).map(|r| r.name).as_deref(),
         Some("audio-volume-medium")
     );
     let bytes = usize::try_from(px * px * 4).unwrap();

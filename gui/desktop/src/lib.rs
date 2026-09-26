@@ -109,8 +109,8 @@ pub mod network_indicator;
 pub mod network_settings;
 pub mod notif_pane;
 pub mod osd;
-mod pictures;
 pub mod overview;
+mod pictures;
 /// The sweep that proves a module was converted off its own colour constants.
 ///
 pub mod power;
@@ -13215,7 +13215,15 @@ mod overview_wiring_tests {
                 RenderCommand::Image { image_id, .. } => s.icon_request(*image_id),
                 _ => None,
             })
-            .map(|request| (request.name, request.color))
+            .map(|request| {
+                // The taskbar names its pictures in its own source; a name
+                // made at run time here would be a program's icon, which the
+                // taskbar does not draw.
+                let std::borrow::Cow::Borrowed(name) = request.name else {
+                    panic!("an icon named at run time: {:?}", request.name)
+                };
+                (name, request.color)
+            })
             .collect()
     }
 

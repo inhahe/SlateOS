@@ -1982,7 +1982,7 @@ mod tests {
         let name = |kind: OsdKind| {
             let (_, icons) = overlay_with_icons(kind, &p);
             assert_eq!(icons.len(), 1, "one icon: {icons:?}");
-            icons[0].name
+            icons[0].name.clone()
         };
         for (kind, want) in [
             (
@@ -2079,7 +2079,7 @@ mod tests {
             let (commands, icons) = overlay_with_icons(kind, &p);
             assert_eq!(icons.len(), 1, "{what}: one picture, {icons:?}");
             assert!(
-                drawn.contains(&icons[0].name),
+                drawn.contains(&icons[0].name.as_ref()),
                 "{what}: {} is not in the built-in set",
                 icons[0].name
             );
@@ -2845,7 +2845,7 @@ mod tests {
         let icon_of = |kind: OsdKind| {
             let (_, icons) = overlay_with_icons(kind, &p);
             assert_eq!(icons.len(), 1, "one icon: {icons:?}");
-            icons[0].name
+            icons[0].name.clone()
         };
         for (level, icon) in [
             (0_u8, "audio-volume-muted"),

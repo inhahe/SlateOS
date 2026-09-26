@@ -24317,6 +24317,16 @@ Linux 6.6's fs/quota/quota.c.
 - Beside them, the finding of the pass: the whole order was its own --
   `B-D-QUOTACTL-WAS-NOT-LINUXS` (new, fixed with it).
 
+**Thirty-fifth pass, 2026-09-26 — `sys_timex.rs` (2 sites), lane D.** Against
+Linux 6.6's kernel/time/timekeeping.c and ntp.c, and glibc 2.39's
+adjtime.c.
+
+- **`adjtimex(NULL)`, `clock_adjtime(id, NULL)`** were `EFAULT`, first --
+  right, as `copy_from_user` is -- and a block in the kernel half now is too.
+- Beside them, the finding of the pass: what came after the copy was not
+  Linux's, and `adjtime` did not exist -- `B-D-ADJTIMEX-WAS-NOT-LINUXS` (new,
+  fixed with it).
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24330,17 +24340,17 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-thirty-four swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
+thirty-five swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
 `sched.rs`, `mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`,
 `linux_module.rs`, `sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs`, `sysv_sem.rs`,
 `linux_aio_abi.rs`, `linux_seccomp.rs`, `mman.rs`, `resource.rs`, `crypt.rs`,
-`iconv.rs`, `linux_io_uring.rs`, `sysv_shm.rs` and `sys_quota.rs`. That
-finishes every file the sweep counted at four and at three, the three the
-recount of 2026-09-26 added among them: `pwd.rs`, `dirent.rs` and `signal.rs`
-needed nothing at their NULLs -- `pwd.rs`'s database did
-(`B-D-PWD-KNEW-ONLY-ROOT`). Of the files at two, `sysv_shm.rs` and
-`sys_quota.rs` are done; next are `fts.rs`, `ftw.rs`, `linux_landlock.rs`,
-`sys_timex.rs` and `xattr.rs` (walked by the fourth pass).
+`iconv.rs`, `linux_io_uring.rs`, `sysv_shm.rs`, `sys_quota.rs` and
+`sys_timex.rs`. That finishes every file the sweep counted at four and at
+three, the three the recount of 2026-09-26 added among them: `pwd.rs`,
+`dirent.rs` and `signal.rs` needed nothing at their NULLs -- `pwd.rs`'s
+database did (`B-D-PWD-KNEW-ONLY-ROOT`). Of the files at two, `sysv_shm.rs`,
+`sys_quota.rs` and `sys_timex.rs` are done; next are `fts.rs`, `ftw.rs`,
+`linux_landlock.rs` and `xattr.rs` (walked by the fourth pass).
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
@@ -169935,6 +169945,35 @@ denied" rather than "not supported".
 | a NULL `addr` | `EFAULT`, before the device | never reached: a filesystem's quota operations read it, and there are none |
 | `special` naming no file, or not a block device | `ENOSYS` | `stat`'s error, or `ENOTBLK` (`lookup_bdev`) |
 | no `CAP_SYS_ADMIN` | `EPERM`, before `ENOSYS` | never reached: `do_quotactl`'s `ENOSYS` comes first |
+
+### [D] B-D-ADJTIMEX-WAS-NOT-LINUXS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/sys_timex.rs` -- `adjtimex`, `ntp_adjtime`,
+`clock_adjtime`, and `adjtime` (new).
+
+**In short:** `adjtimex` is how time daemons -- chrony, ntpd,
+systemd-timesyncd -- steer the system clock, and `adjtime` is the older call
+many programs still use to nudge it. Ours refused `adjtime`'s form of the
+call outright, so there was no `adjtime` at all, and it judged the rest in a
+different order from Linux, so an unprivileged daemon could be told its
+values were wrong when Linux would have said it lacked the right to change
+the clock.
+
+**What was wrong, against Linux 6.6 (`timekeeping_validate_timex`,
+`__do_adjtimex`) and glibc 2.39:**
+
+| | was | now |
+|---|---|---|
+| `ADJ_OFFSET_SINGLESHOT`, `ADJ_OFFSET_SS_READ` -- `adjtime`'s modes | `EINVAL`, as unknown mode bits | Linux's: a one-time slew kept and the pending one returned; reading needs no capability |
+| any other unknown mode bit | `EINVAL` | accepted: Linux has no such check |
+| a change without `CAP_SYS_TIME` beside a bad value | the value's `EINVAL` | `EPERM`, which Linux asks first |
+| `ADJ_FREQUENCY` that overflows when scaled | accepted | `EINVAL` |
+| `time` in the reply | 0 | the current time, in microseconds or nanoseconds by `STA_NANO` |
+| `adjtime(3)` | missing | glibc's: `ADJ_OFFSET_SINGLESHOT` over `clock_adjtime`, `EINVAL` past its ±2145 s, the pending slew split as glibc splits it |
+
+**Still not Linux's:** the slew is only kept and reported -- the clock here
+has no slew, so the time does not move by it -- and the discipline state is
+this process's, not the system's.
 
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 

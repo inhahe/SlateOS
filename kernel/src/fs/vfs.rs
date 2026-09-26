@@ -5603,13 +5603,21 @@ impl Vfs {
         lock_type: LockType,
     ) -> KernelResult<()> {
         let path = path.as_ref();
-        let mut table = LOCK_TABLE.lock();
-
-        // Find or create the entry for this path.
         // Identity of the file this path names, resolved per call. Not
         // cached: if the name is repointed between operations the identity
         // should differ, which is the whole reason for keying on it.
+        //
+        // Resolved BEFORE `LOCK_TABLE` is taken, never under it: resolving
+        // locks the mounted filesystem, and procfs's `/proc/locks` takes
+        // `LOCK_TABLE` while its own filesystem lock is held -- so resolving
+        // under the table was the reverse order, an AB/BA deadlock lockdep
+        // reported on the 2026-09-26 integration boot (a `/proc/locks` read
+        // against an advisory lock on any procfs file). The table lock never
+        // kept a rename out anyway, so nothing is lost by looking first.
         let id = Self::file_identity_resolved(path).unwrap_or(None);
+        let mut table = LOCK_TABLE.lock();
+
+        // Find or create the entry for this path.
         let entry_idx = table.iter().position(|e| lock_entry_matches(e, path, id));
 
         if let Some(idx) = entry_idx {
@@ -5688,12 +5696,19 @@ impl Vfs {
     /// [`flock_resolved`](Self::flock_resolved)).
     pub fn funlock_resolved(path: impl AsRef<Path>, owner: u64) -> KernelResult<()> {
         let path = path.as_ref();
-        let mut table = LOCK_TABLE.lock();
-
         // Identity of the file this path names, resolved per call. Not
         // cached: if the name is repointed between operations the identity
         // should differ, which is the whole reason for keying on it.
+        //
+        // Resolved BEFORE `LOCK_TABLE` is taken, never under it: resolving
+        // locks the mounted filesystem, and procfs's `/proc/locks` takes
+        // `LOCK_TABLE` while its own filesystem lock is held -- so resolving
+        // under the table was the reverse order, an AB/BA deadlock lockdep
+        // reported on the 2026-09-26 integration boot (a `/proc/locks` read
+        // against an advisory lock on any procfs file). The table lock never
+        // kept a rename out anyway, so nothing is lost by looking first.
         let id = Self::file_identity_resolved(path).unwrap_or(None);
+        let mut table = LOCK_TABLE.lock();
         if let Some(idx) = table.iter().position(|e| lock_entry_matches(e, path, id)) {
             let entry = &mut table[idx];
             entry.locks.retain(|l| l.owner != owner);
@@ -5736,12 +5751,19 @@ impl Vfs {
     /// [`flock_resolved`](Self::flock_resolved)).
     pub fn lock_query_resolved(path: impl AsRef<Path>) -> KernelResult<Option<(LockType, usize)>> {
         let path = path.as_ref();
-        let table = LOCK_TABLE.lock();
-
         // Identity of the file this path names, resolved per call. Not
         // cached: if the name is repointed between operations the identity
         // should differ, which is the whole reason for keying on it.
+        //
+        // Resolved BEFORE `LOCK_TABLE` is taken, never under it: resolving
+        // locks the mounted filesystem, and procfs's `/proc/locks` takes
+        // `LOCK_TABLE` while its own filesystem lock is held -- so resolving
+        // under the table was the reverse order, an AB/BA deadlock lockdep
+        // reported on the 2026-09-26 integration boot (a `/proc/locks` read
+        // against an advisory lock on any procfs file). The table lock never
+        // kept a rename out anyway, so nothing is lost by looking first.
         let id = Self::file_identity_resolved(path).unwrap_or(None);
+        let table = LOCK_TABLE.lock();
         if let Some(entry) = table.iter().find(|e| lock_entry_matches(e, path, id)) {
             if entry.locks.is_empty() {
                 return Ok(None);

@@ -23958,6 +23958,18 @@ timeouts and attributes Linux's.
   no access modes, no `mq_notify` --
   `B-D-MQUEUE-LIMITS-ACCESS-AND-ERROR-ORDER` (new, fixed with it).
 
+**Eighteenth pass, 2026-09-26 — `linux_futex.rs` (4 sites), lane D.** Against
+Linux 6.6's kernel/futex/ (`SYSCALL_DEFINE6(futex)`, `do_futex`,
+`get_futex_key`).
+
+- A malformed timeout is `EINVAL` before the word is looked at (it was
+  `EFAULT` for a NULL word); a misaligned word is `EINVAL` before `EFAULT`;
+  a private `FUTEX_WAKE` never reads its word, so a NULL one answers 0.
+- `FUTEX_CLOCK_REALTIME` was stripped and ignored; Linux answers `ENOSYS`
+  for it on any command without an absolute timeout.
+- Beside them, the finding of the pass: `FUTEX_WAIT_BITSET` was `ENOSYS` --
+  `B-D-FUTEX-WAIT-BITSET-WAS-ENOSYS` (new, fixed with it).
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -23971,9 +23983,9 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-seventeen swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`, `sched.rs`
-and `mqueue.rs`; next is `resolv.rs` at five, then twelve files at four, in
-that order.
+eighteen swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`, `sched.rs`,
+`mqueue.rs` and `linux_futex.rs`; next is `resolv.rs` at five, then the
+files at four, in that order.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
@@ -165834,6 +165846,30 @@ Host tests cover the attribute reading, the layout arithmetic, the table's
 growth and the sentinels; `services/ctest-pthread` checks it all in ring 3,
 once lane A runs it (`requests/d-a-run-the-ctest-pthread-fixture.md`).
 Design choices in `design-decisions.md` §1111.
+
+### [D] B-D-FUTEX-WAIT-BITSET-WAS-ENOSYS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/linux_futex.rs` (`futex`, which `syscall(SYS_futex, …)`
+routes to).
+
+**What it was.** Rust's standard library puts a thread to sleep with
+`futex(FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG, …, FUTEX_BITSET_MATCH_ANY)`
+and an absolute `CLOCK_MONOTONIC` deadline -- in `Mutex`, `Condvar`,
+`thread::park` and `Once`. Here that command was `ENOSYS`, which std reads as
+"woken", so every contended Rust lock and every condition-variable wait on
+this system spun at full speed instead of sleeping -- and on one CPU, spun
+against the very thread it was waiting for.
+
+**Fix.** `FUTEX_WAIT_BITSET` and `FUTEX_WAKE_BITSET` are served by the
+kernel's plain futex wait and wake: the absolute deadline is turned into the
+kernel's relative one (an expired one is `ETIMEDOUT`, after the value is
+compared, as `futex_wait` orders it), and a bitset is treated as matching
+everything -- at worst a spurious wake-up, which every futex caller must
+already tolerate. A zero bitset is `EINVAL`.
+
+**What remains.** The requeue and `WAKE_OP` commands, `FUTEX_TRYLOCK_PI` and
+`FUTEX_LOCK_PI2` are still `ENOSYS`: the kernel has no futex requeue yet.
+glibc and Rust's std use none of them for their locks.
 
 ### [D] B-D-MQUEUE-LIMITS-ACCESS-AND-ERROR-ORDER — 2026-09-26 — FIXED 2026-09-26
 

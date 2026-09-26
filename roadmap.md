@@ -1840,6 +1840,9 @@ D's to act on once answered).
     * thread-specific data in each thread's own storage (glibc's design): no
       lock and no syscall per `pthread_getspecific`, 128 keys whose indices
       are reused, no limit of 64 threads holding values.
+    * `futex()`: `FUTEX_WAIT_BITSET`/`FUTEX_WAKE_BITSET`, which Rust's std
+      sleeps and wakes with -- they were `ENOSYS`, so every contended Rust
+      lock spun -- and Linux's argument order (the eighteenth pass).
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

@@ -271,10 +271,17 @@ fn coordinate(plan: &Plan, stop: &Arc<AtomicBool>, tx: &Sender<Event>) {
     } else {
         vec![true; count]
     };
+    // The pieces the window has been told of: what was on disk, then each
+    // Piece event as it is sent. Whether the download is done is judged by
+    // this, not by the picker -- a peer thread marks a piece done there
+    // before its report reaches this thread, so the picker can be complete
+    // while reports are still queued, and finishing then would drop them.
+    let mut told = have.clone();
+    let complete = |told: &[bool]| told.iter().zip(&wanted).all(|(&h, &w)| h || !w);
     let picker = Arc::new(Mutex::new(Picker {
         have,
         busy: vec![false; count],
-        wanted,
+        wanted: wanted.clone(),
         seen: vec![0; count],
     }));
     let left = |picker: &Mutex<Picker>| -> u64 {
@@ -297,7 +304,7 @@ fn coordinate(plan: &Plan, stop: &Arc<AtomicBool>, tx: &Sender<Event>) {
         numwant: Some(50),
     };
 
-    if lock(&picker).complete() {
+    if complete(&told) {
         return say(Event::Finished);
     }
 
@@ -392,7 +399,10 @@ fn coordinate(plan: &Plan, stop: &Arc<AtomicBool>, tx: &Sender<Event>) {
                 }
                 Report::Piece(index) => {
                     say(Event::Piece { index });
-                    if lock(&picker).complete() {
+                    if let Some(t) = told.get_mut(index) {
+                        *t = true;
+                    }
+                    if complete(&told) {
                         stop.store(true, Ordering::Relaxed);
                         finish(&urls, &request(TrackerEvent::Completed, 0, downloaded));
                         say(Event::Finished);

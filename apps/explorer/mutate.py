@@ -84,6 +84,26 @@ COLUMNS = [
         "    if true {",
         [LATE],
     ),
+    # The Orientation column says the turn `imagecodec` applies -- the
+    # thumbnail's -- not the one the EXIF asks for.
+    (
+        "a picture imagecodec does not turn is said to be turned",
+        "        } else {\n            Orientation::TopLeft\n        }\n    };",
+        "        } else {\n            Orientation::RightTop\n        }\n    };",
+        [LATE],
+    ),
+    (
+        "a JPEG's turn is not read",
+        "            imagecodec::jpeg::orientation(bytes)",
+        "            Orientation::TopLeft",
+        [EXIF],
+    ),
+    (
+        "a TIFF is read as a JPEG",
+        "            imagecodec::tiff::orientation(bytes)",
+        "            imagecodec::jpeg::orientation(bytes)",
+        [EXIF],
+    ),
 ]
 
 TABLES = {

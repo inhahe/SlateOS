@@ -53,6 +53,7 @@ use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
+use imagecodec::orientation::Orientation;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -978,6 +979,7 @@ impl ColumnProvider for ImageColumns {
     fn value(&self, path: &str, column_id: ColumnId) -> ColumnValue {
         static SIZES: OnceLock<FactCache<Option<(u32, u32)>>> = OnceLock::new();
         static EXIFS: OnceLock<FactCache<Option<exif::ExifData>>> = OnceLock::new();
+        static TURNS: OnceLock<FactCache<Orientation>> = OnceLock::new();
         let size = || {
             SIZES
                 .get_or_init(FactCache::new)
@@ -994,12 +996,20 @@ impl ColumnProvider for ImageColumns {
         match column_id {
             ColumnId::CAMERA => text(exif().and_then(|e| e.camera())),
             ColumnId::DATE_TAKEN => text(exif().and_then(|e| e.date_taken).map(|d| exif_date(&d))),
-            ColumnId::ORIENTATION => text(
-                exif()
-                    .and_then(|e| e.orientation)
-                    .and_then(orientation_words)
-                    .map(str::to_owned),
-            ),
+            // The turn the thumbnail beside it gets, read as `imagecodec`
+            // reads it, so the two cannot disagree: a WebP whose EXIF says
+            // "turned right" is shown as stored, and said so. Blank only when
+            // nothing is turned and the file records nothing.
+            ColumnId::ORIENTATION => {
+                let turn = TURNS.get_or_init(FactCache::new).get(path, image_turn);
+                let recorded = exif().is_some_and(|e| e.orientation.is_some());
+                match turn {
+                    Some(turn) if turn != Orientation::TopLeft || recorded => {
+                        text(orientation_words(exif_value(turn)).map(str::to_owned))
+                    }
+                    _ => ColumnValue::Empty,
+                }
+            }
             ColumnId::DIMENSIONS => size().map_or(ColumnValue::Empty, |(w, h)| {
                 ColumnValue::Text(format!("{w} \u{00d7} {h}"))
             }),
@@ -1559,6 +1569,52 @@ fn orientation_words(value: u16) -> Option<&'static str> {
         8 => "Turned left",
         _ => return None,
     })
+}
+
+/// Which way up `imagecodec` shows the picture: the turn its thumbnail and the
+/// image viewer apply. It turns a JPEG, a PNG and a TIFF by what they record,
+/// and shows any other picture as stored.
+///
+/// Read from the head of the file, as [`image_exif`] reads a JPEG's and a
+/// PNG's -- where their EXIF is -- and whole for a TIFF, whose directory may
+/// be anywhere. A JPEG whose EXIF comes after more than the head's worth of
+/// other segments is read as unturned here and turned by the decoder: rare,
+/// and cheaper than reading every large photograph whole for one column.
+fn image_turn(path: &str) -> Orientation {
+    let turn = |bytes: &[u8]| {
+        if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            imagecodec::jpeg::orientation(bytes)
+        } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            imagecodec::png::orientation(bytes)
+        } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
+            imagecodec::tiff::orientation(bytes)
+        } else {
+            Orientation::TopLeft
+        }
+    };
+    let Some(head) = read_prefix(path, IMAGE_HEAD_BYTES) else {
+        return Orientation::TopLeft;
+    };
+    let tiff = head.starts_with(b"II*\0") || head.starts_with(b"MM\0*");
+    if tiff && head.len() == IMAGE_HEAD_BYTES {
+        return read_prefix(path, IMAGE_WHOLE_BYTES)
+            .map_or(Orientation::TopLeft, |whole| turn(&whole));
+    }
+    turn(&head)
+}
+
+/// The EXIF value (1 to 8) of a turn, for [`orientation_words`].
+fn exif_value(turn: Orientation) -> u16 {
+    match turn {
+        Orientation::TopLeft => 1,
+        Orientation::TopRight => 2,
+        Orientation::BottomRight => 3,
+        Orientation::BottomLeft => 4,
+        Orientation::LeftTop => 5,
+        Orientation::RightTop => 6,
+        Orientation::RightBottom => 7,
+        Orientation::LeftBottom => 8,
+    }
 }
 
 /// A picture's size, as shown -- `imagecodec` turns it by the orientation the
@@ -3244,6 +3300,44 @@ mod tests {
         }
     }
 
+    /// A 2x1 grey TIFF libtiff opens -- uncompressed, one strip -- recording
+    /// `orientation`. (An EXIF block alone is a TIFF structure with no
+    /// picture in it, which libtiff refuses, and so shows no turn.)
+    fn grey_tiff(orientation: u16) -> Vec<u8> {
+        const ENTRIES: u32 = 10;
+        let data_at = 8 + 2 + 12 * ENTRIES + 4;
+        let entries: [(u16, u16, u32); 10] = [
+            (256, 3, 2),                      // ImageWidth
+            (257, 3, 1),                      // ImageLength
+            (258, 3, 8),                      // BitsPerSample
+            (259, 3, 1),                      // Compression: none
+            (262, 3, 1),                      // Photometric: black is zero
+            (273, 4, data_at),                // StripOffsets
+            (274, 3, u32::from(orientation)), // Orientation
+            (277, 3, 1),                      // SamplesPerPixel
+            (278, 3, 1),                      // RowsPerStrip
+            (279, 4, 2),                      // StripByteCounts
+        ];
+        let mut t = b"II*\0".to_vec();
+        t.extend_from_slice(&8_u32.to_le_bytes());
+        t.extend_from_slice(&u16::try_from(ENTRIES).unwrap().to_le_bytes());
+        for (tag, kind, value) in entries {
+            t.extend_from_slice(&tag.to_le_bytes());
+            t.extend_from_slice(&kind.to_le_bytes());
+            t.extend_from_slice(&1_u32.to_le_bytes());
+            if kind == 3 {
+                // A SHORT sits at the start of the value field.
+                t.extend_from_slice(&u16::try_from(value).unwrap().to_le_bytes());
+                t.extend_from_slice(&[0, 0]);
+            } else {
+                t.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        t.extend_from_slice(&0_u32.to_le_bytes());
+        t.extend_from_slice(&[0x20, 0xE0]);
+        t
+    }
+
     /// **A photograph's camera, date and turn are columns**, read from its
     /// EXIF; a picture with none leaves them blank.
     #[test]
@@ -3269,6 +3363,12 @@ mod tests {
         );
         assert_eq!(
             mgr.get_value(&photo, ColumnId::ORIENTATION),
+            text("Turned right")
+        );
+        // A TIFF's own orientation tag turns it too.
+        let scan = dir.file("scan.tif", &grey_tiff(6));
+        assert_eq!(
+            mgr.get_value(&scan, ColumnId::ORIENTATION),
             text("Turned right")
         );
         for column in [
@@ -3301,6 +3401,13 @@ mod tests {
         assert_eq!(
             mgr.get_value(&photo, ColumnId::CAMERA),
             ColumnValue::Text(String::from("Canon EOS R5"))
+        );
+        // Its EXIF says "turned right", but `imagecodec` shows a WebP as
+        // stored -- the thumbnail beside it is not turned -- so the column
+        // says that, where it said "Turned right" beside an unturned picture.
+        assert_eq!(
+            mgr.get_value(&photo, ColumnId::ORIENTATION),
+            ColumnValue::Text(String::from("As stored"))
         );
     }
 

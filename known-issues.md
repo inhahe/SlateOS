@@ -168371,7 +168371,11 @@ file position through every read. No writer's file reaches any of them, and
 
 ### [A] Four loopback network self-tests fail into a WARNING that no boot counts -- 2026-09-26
 
-**Status:** OPEN — lane A's; to be converted after the next boot that reaches them (trigger below).
+**Status:** FIXED on lane-a 2026-09-26, the trigger below having fired. The
+integration boot of `d3741b26b` reached `run_persistent_netstack` and printed
+all four passing (server object layer, connect6, udp6, udp-connect), with
+listen/accept beside them; each `Err` arm now prints `FAIL:` and dispatches
+`Severity::Diagnostic`, as proposed below.
 
 **In short:** four of the boot's network self-tests run entirely inside the
 machine, over the network daemon's software loopback, so an error from any of

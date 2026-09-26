@@ -5032,10 +5032,25 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         Ok(None) => serial_println!(
             "[spawn]   net::socket server object layer: no daemon session — check skipped"
         ),
-        Err(e) => serial_println!(
-            "[spawn]   WARNING: net::socket server object-layer error ({:?})",
-            e
-        ),
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: net::socket server object layer ({:?}) — the bind/listen/accept \
+                 state machine the syscalls use is broken",
+                e
+            );
+            // Fails the run. These four checks drive the daemon's in-process
+            // software loopback -- no upstream, no slirp peer, no variance -- so
+            // an error is a real break, not the environment. They used to end in
+            // a WARNING alone, which boot-test.sh does not count (it reds a run
+            // on `self-test failed`, never on a bare `FAIL:` or `WARNING:`), so a
+            // regression here passed the boot. Diagnostic, not Integrity: the
+            // checks after it still run.
+            crate::selftest::dispatch_debug(
+                "net::socket server object layer",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
     }
 
     // The head-of-line witness for D-NETSOCK-SYNC. The tests above prove the
@@ -5101,10 +5116,20 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         Ok(None) => {
             serial_println!("[spawn]   persistent netstack connect6: no NIC MAC — check skipped")
         }
-        Err(e) => serial_println!(
-            "[spawn]   WARNING: persistent netstack connect6 error ({:?})",
-            e
-        ),
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: persistent netstack connect6 ({:?}) — an IPv6 connection over the \
+                 daemon's own loopback failed",
+                e
+            );
+            // Fails the run -- loopback, so an error is a real break; see the
+            // server object-layer check above for why a WARNING was not enough.
+            crate::selftest::dispatch_debug(
+                "persistent netstack connect6",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
     }
 
     // IPv6 UDP datagram parity (D-NETSOCK-SYNC): OP_UDP_SEND6 + v6-aware
@@ -5120,10 +5145,20 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         Ok(None) => {
             serial_println!("[spawn]   persistent netstack udp6: no NIC MAC — check skipped")
         }
-        Err(e) => serial_println!(
-            "[spawn]   WARNING: persistent netstack udp6 error ({:?})",
-            e
-        ),
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: persistent netstack udp6 ({:?}) — an IPv6 datagram over the \
+                 daemon's own loopback failed",
+                e
+            );
+            // Fails the run -- loopback, so an error is a real break; see the
+            // server object-layer check above for why a WARNING was not enough.
+            crate::selftest::dispatch_debug(
+                "persistent netstack udp6",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
     }
 
     // UDP connect() default-peer parity (D-NETSOCK-SYNC): drive the net::socket
@@ -5138,10 +5173,20 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         Ok(None) => {
             serial_println!("[spawn]   persistent netstack udp-connect: no NIC MAC — check skipped")
         }
-        Err(e) => serial_println!(
-            "[spawn]   WARNING: persistent netstack udp-connect error ({:?})",
-            e
-        ),
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: persistent netstack udp-connect ({:?}) — a connected UDP socket's \
+                 default-peer send or filter failed",
+                e
+            );
+            // Fails the run -- loopback, so an error is a real break; see the
+            // server object-layer check above for why a WARNING was not enough.
+            crate::selftest::dispatch_debug(
+                "persistent netstack udp-connect",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
     }
 
     // Ring-3 socket-syscall HTTP capstone (netstack Phase 5.6, deferred from 5.5;

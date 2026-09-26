@@ -65,7 +65,7 @@
 use crate::context::MAX_RULES;
 use crate::gsub::{
     LOOKUP_ALTERNATE, LOOKUP_CHAIN_CONTEXT, LOOKUP_CONTEXT, LOOKUP_LIGATURE, LOOKUP_MULTIPLE,
-    LOOKUP_SINGLE,
+    LOOKUP_REVERSE_CHAIN, LOOKUP_SINGLE,
 };
 use crate::otl::{Lookup, coverage_index, glyph_class};
 use crate::sfnt::u16_at;
@@ -105,10 +105,12 @@ fn subtable(
     zero_context: bool,
 ) -> Option<bool> {
     match kind {
-        // All three replace one glyph, so all three answer only about a
-        // one-glyph sequence, and all three keep their coverage in the same
-        // place in every format they have.
-        LOOKUP_SINGLE | LOOKUP_MULTIPLE | LOOKUP_ALTERNATE => {
+        // All four replace one glyph, so all four answer only about a
+        // one-glyph sequence, and all four keep their coverage in the same
+        // place in every format they have. A reverse-chaining substitution's
+        // context is not consulted, even under `zero_context`: HarfBuzz's
+        // `would_apply` for it asks only the length and the coverage.
+        LOOKUP_SINGLE | LOOKUP_MULTIPLE | LOOKUP_ALTERNATE | LOOKUP_REVERSE_CHAIN => {
             if glyphs.len() != 1 {
                 return Some(false);
             }

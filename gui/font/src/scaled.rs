@@ -117,6 +117,40 @@ pub struct Glyph {
     pub advance: f32,
 }
 
+/// Optional features a run asks for, besides the ones shaping turns on by
+/// itself: bits of the optional tails of [`gsub::FEATURES`](crate::gsub::FEATURES)
+/// and [`gpos::FEATURES`](crate::gpos::FEATURES), which list the same
+/// features at different positions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Extra {
+    gsub: u64,
+    gpos: u64,
+}
+
+impl Extra {
+    /// Nothing besides the defaults.
+    pub(crate) const NONE: Self = Self { gsub: 0, gpos: 0 };
+
+    /// The optional feature `tag` on. Nothing for any other tag: a feature
+    /// shaping decides on by itself -- a positional form, an Indic one --
+    /// cannot be forced onto every glyph from here.
+    pub(crate) fn feature(tag: &[u8; 4]) -> Self {
+        let optional = |features: &[&[u8; 4]], from: usize| {
+            features
+                .iter()
+                .position(|want| *want == tag)
+                .filter(|&i| i >= from)
+                .and_then(|i| u32::try_from(i).ok())
+                .and_then(|i| 1u64.checked_shl(i))
+                .unwrap_or(0)
+        };
+        Self {
+            gsub: optional(crate::gsub::FEATURES, crate::gsub::OPTIONAL_FROM),
+            gpos: optional(&crate::gpos::FEATURES, crate::gpos::OPTIONAL_FROM),
+        }
+    }
+}
+
 /// Where a font's auto-hinter stands.
 #[derive(Clone, Debug)]
 enum Hinting {
@@ -403,7 +437,7 @@ impl ScaledFont {
     /// is off, and for a face the hinter cannot use.
     fn hinter(&mut self) -> Option<&Hinter> {
         if matches!(self.hinting, Hinting::Unmeasured) {
-            let shape = |cluster: &str| self.reference_glyphs(cluster);
+            let shape = |cluster: &str, feature| self.reference_glyphs(cluster, feature);
             let hinter = Hinter::new(
                 FaceHints::new(&self.face, &self.coords, &shape),
                 self.px_per_em,
@@ -455,20 +489,38 @@ impl ScaledFont {
     /// the form the face draws it -- FreeType's auto-hinter has HarfBuzz shape
     /// its reference letters for the same reason. A glyph from anywhere but
     /// this face (the built-in bitmap face) is left out.
-    fn reference_glyphs(&self, cluster: &str) -> Glyphs {
-        self.shape(cluster)
-            .glyphs()
-            .iter()
-            .filter(|g| g.key.face() == 0)
-            .map(|g| {
-                // Pixels back to font units: the offsets are whole units
-                // scaled, so the rounding recovers them.
-                let units = (g.offset.1 / self.scale).round();
-                #[allow(clippy::cast_possible_truncation, reason = "a GPOS offset fits i32")]
-                let units = if units.is_finite() { units as i32 } else { 0 };
-                (g.key.gid(), units)
-            })
-            .collect()
+    ///
+    /// With `feature`, the cluster is shaped with that optional feature on as
+    /// well -- a feature style's letters -- and comes back empty when the
+    /// feature changes none of its glyphs.
+    fn reference_glyphs(&self, cluster: &str, feature: Option<[u8; 4]>) -> Glyphs {
+        let glyphs = |run: ShapedRun| -> Glyphs {
+            run.glyphs()
+                .iter()
+                .filter(|g| g.key.face() == 0)
+                .map(|g| {
+                    // Pixels back to font units: the offsets are whole units
+                    // scaled, so the rounding recovers them.
+                    let units = (g.offset.1 / self.scale).round();
+                    #[allow(clippy::cast_possible_truncation, reason = "a GPOS offset fits i32")]
+                    let units = if units.is_finite() { units as i32 } else { 0 };
+                    (g.key.gid(), units)
+                })
+                .collect()
+        };
+        let Some(tag) = feature else {
+            return glyphs(self.shape(cluster));
+        };
+        let with = glyphs(self.shape_extra(cluster, Extra::feature(&tag)));
+        // A cluster the feature leaves as it was is not one of the feature's
+        // letters, and FreeType drops it (`af_shaper_get_cluster`) -- comparing
+        // the glyphs only, so a feature that just moves them drops it too.
+        let plain = glyphs(self.shape(cluster));
+        if with.iter().map(|g| g.0).eq(plain.iter().map(|g| g.0)) {
+            Glyphs::new()
+        } else {
+            with
+        }
     }
 
     /// Move to the instance named by `(tag, value)` pairs, leaving axes the
@@ -947,7 +999,16 @@ impl ScaledFont {
             let _t = Timer::start(Phase::ByteLevels);
             byte_levels(text, base)
         };
-        self.shape_leveled(text, lang, levels)
+        self.shape_leveled(text, lang, levels, Extra::NONE)
+    }
+
+    /// [`shape`](Self::shape) with optional features on besides the ones
+    /// shaping turns on by itself -- today only for the auto-hinter, which
+    /// measures each of FreeType's feature styles from reference letters
+    /// shaped with that style's feature, as FreeType has HarfBuzz shape them.
+    pub(crate) fn shape_extra(&self, text: &str, extra: Extra) -> ShapedRun {
+        let levels = byte_levels(text, Base::Auto);
+        self.shape_leveled(text, None, levels, extra)
     }
 
     /// [`shape_with`](Self::shape_with) with the bidi levels already
@@ -965,6 +1026,7 @@ impl ScaledFont {
         text: &str,
         lang: Option<Lang>,
         levels: Vec<Level>,
+        extra: Extra,
     ) -> ShapedRun {
         // Six passes, because each one needs all of the previous one's
         // output. Bidi settles which characters are mirrored and where the
@@ -1267,6 +1329,14 @@ impl ScaledFont {
             tabs.push(tab);
         }
         drop(build);
+        // The optional features the caller asked for, on every glyph: HarfBuzz
+        // gives a feature a caller turns on for the whole buffer the global
+        // mask, which every glyph starts with and no shaper takes away.
+        if extra.gsub != 0 {
+            for glyph in &mut glyphs {
+                glyph.mask |= extra.gsub;
+            }
+        }
 
         let segments = {
             let _t = Timer::start(Phase::Gsub);
@@ -1403,7 +1473,7 @@ impl ScaledFont {
         // instead left every Myanmar mark in it a missing-glyph box wide.
         let (adjusted, kept_at) = {
             let _t = Timer::start(Phase::Gpos);
-            self.position_segments(&segments, lang, &glyphs, &advances, &marks, &levels)
+            self.position_segments(&segments, lang, &glyphs, &advances, &marks, &levels, extra)
         };
         let tail = Timer::start(Phase::Tail);
         // Whether pairs still have to be kerned one at a time here. They do
@@ -1847,6 +1917,10 @@ impl ScaledFont {
     /// zeroed that segment's marks *before* its lookups, so that whatever a
     /// lookup then charged back on is the final word and must not be zeroed a
     /// second time. True only where the pass actually ran — see the call site.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each is one of the shaping pass's own products, passed on rather than bundled for one call"
+    )]
     fn position_segments(
         &self,
         segments: &[Segment],
@@ -1855,6 +1929,7 @@ impl ScaledFont {
         advances: &[i32],
         marks: &[bool],
         levels: &[Level],
+        extra: Extra,
     ) -> (Vec<Adjust>, Vec<bool>) {
         let mut out: Vec<Adjust> = advances.iter().copied().map(Adjust::plain).collect();
         let mut kept: Vec<bool> = alloc::vec![false; advances.len()];
@@ -1896,6 +1971,7 @@ impl ScaledFont {
                 rtl,
                 script: segment.script,
                 lang,
+                features: crate::gpos::DEFAULT_FEATURES | extra.gpos,
                 corrections: self.corrections(),
             }) else {
                 continue;

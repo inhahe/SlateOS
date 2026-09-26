@@ -2,6 +2,7 @@ r"""Check the auto-hinter in `gui/font/src/hint/` against FreeType's own.
 
     python gui/font/tools/hint_oracle.py FONT [--sizes 9,10,...] [--gids 1,2,...]
                                               [--show N] [--no-build]
+                                              [--freetype DIR]
 
 Needs `freetype-py` (`pip install freetype-py`), whose wheels bundle FreeType
 2.13.2 built with HarfBuzz -- the release and configuration the port follows.
@@ -13,6 +14,13 @@ The hinter is a port of FreeType's auto-hinter in its light mode, so for every
 glyph at every size the two must put every stored point in the same place.
 This builds and runs the `hint_dump` example, loads the same glyphs through
 FreeType with `FT_LOAD_FORCE_AUTOHINT | FT_LOAD_TARGET_LIGHT`, and compares:
+
+* **the style each glyph is sorted into**, read out of FreeType itself (its
+  autofitter's `glyph-to-script-map` property) and named from the style
+  table `gen_autofit_tables.py` builds -- FreeType's sources from `DIR`, or
+  fetched as that script fetches them. A glyph in the wrong style is hinted
+  to the wrong heights however right the rest is, and the style is what
+  explains most other differences, so it is reported first.
 
 * **the points themselves** -- how many, and which are on the curve -- which
   catch a glyph read into different points: a composite assembled
@@ -43,10 +51,15 @@ import os
 import subprocess
 import sys
 
+import ctypes
+from collections import Counter, defaultdict
+
 import freetype
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CRATE = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+import gen_autofit_tables  # noqa: E402  (a sibling tool, not a package)
 
 
 # The workspace's host target on the development machine; see build-env.md.
@@ -99,6 +112,38 @@ def theirs(face, px, gid):
     return [(x, y, (t & 1) == 1) for (x, y), t in zip(o.points, o.tags)]
 
 
+def style_names(freetype_dir):
+    """FreeType's styles, by index, as `gen_autofit_tables.py` reads them."""
+    src = gen_autofit_tables.fetch(freetype_dir)
+    cover = gen_autofit_tables.coverages(src["afcover.h"])
+    return [st["name"] for st in gen_autofit_tables.styles(src["afstyles.h"], cover)]
+
+
+class GlyphToScriptMap(ctypes.Structure):
+    """`FT_Prop_GlyphToScriptMap`: a face, and FreeType's style per glyph."""
+
+    _fields_ = [("face", ctypes.c_void_p), ("map", ctypes.POINTER(ctypes.c_ushort))]
+
+
+def freetype_styles(face, names):
+    """The style FreeType's auto-hinter sorted each glyph into, and whether
+    it marked the glyph non-base -- read from the autofitter's own table."""
+    lib = freetype.raw._lib
+    lib.FT_Property_Get.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p]
+    lib.FT_Property_Get.restype = ctypes.c_int
+    prop = GlyphToScriptMap(ctypes.cast(face._FT_Face, ctypes.c_void_p), None)
+    handle = ctypes.cast(freetype.get_handle(), ctypes.c_void_p)
+    if lib.FT_Property_Get(handle, b"autofitter", b"glyph-to-script-map", ctypes.byref(prop)):
+        sys.exit("FreeType would not give its glyph-to-style map")
+    out = []
+    for gid in range(face.num_glyphs):
+        v = prop.map[gid]
+        index = v & 0x3FFF
+        name = names[index] if index < len(names) else f"#{index}"
+        out.append((name, bool(v & 0x4000)))
+    return out
+
+
 def compare(pts, ft):
     """What differs between this crate's points and FreeType's: `None`, or
     `"points"`, `"y"` or `"x"`, the first that does."""
@@ -122,6 +167,7 @@ def main():
     ap.add_argument("--show", type=int, default=5)
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--target", default=TARGET)
+    ap.add_argument("--freetype", help="directory holding FreeType's autofit sources")
     args = ap.parse_args()
     if not args.no_build:
         build(args.target)
@@ -130,6 +176,24 @@ def main():
     asked = [int(g) for g in args.gids.split(",")] if args.gids else None
     table = mine(args.font, sizes, asked, args.target)
     gids = asked if asked is not None else list(range(face.num_glyphs))
+
+    # The sorting first: a glyph in the wrong style is hinted to the wrong
+    # heights however right everything else is.
+    theirs_style = freetype_styles(face, style_names(args.freetype))
+    first = sizes[0]
+    sorted_apart = Counter()
+    examples = defaultdict(list)
+    for gid in gids:
+        style, nonbase, _ = table[(first, gid)]
+        want, want_nonbase = theirs_style[gid]
+        if (style, nonbase) != (want, want_nonbase):
+            key = (want + (" non-base" if want_nonbase else ""), style + (" non-base" if nonbase else ""))
+            sorted_apart[key] += 1
+            examples[key].append(gid)
+    agree = len(gids) - sum(sorted_apart.values())
+    print(f"styles: {agree}/{len(gids)} glyphs sorted as FreeType sorts them")
+    for (want, got), n in sorted_apart.most_common():
+        print(f"  FreeType {want:20} here {got:20} {n:5}  e.g. {examples[(want, got)][:args.show]}")
 
     shown = []
     grand = dict.fromkeys(KINDS, 0)

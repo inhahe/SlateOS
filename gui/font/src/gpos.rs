@@ -62,8 +62,8 @@ use crate::gsub::SubGlyph;
 use crate::lang::Lang;
 use crate::mark::{attachment, lig_attachment};
 use crate::otl::{
-    ByScript, Lookup, MAX_SUBTABLES, binary_search, coverage_index, glyph_class, lookup_at,
-    lookup_list, value_size,
+    ByScript, Lookup, MAX_SUBTABLES, binary_search, class_coverage, class_glyphs, coverage_glyphs,
+    coverage_index, glyph_class, lookup_at, lookup_list, offsets, spend, value_size,
 };
 use crate::script::ScriptTags;
 use crate::sfnt::{Span, i16_at, u16_at};
@@ -113,7 +113,8 @@ const KINDS: [u16; 8] = [
     CHAIN_CONTEXT_POS,
 ];
 
-/// The positioning features applied to every run.
+/// The positioning features: the ones applied to every run, then the ones
+/// applied only to a run that asks for them.
 ///
 /// HarfBuzz's unconditional set, minus the vertical ones this crate has no
 /// layout for. Not just the seven that *sound* like positioning: HarfBuzz
@@ -124,17 +125,29 @@ const KINDS: [u16; 8] = [
 /// lookup: asking `GPOS` for only the positioning-sounding tags left every
 /// letter after an `i` 64 units out of place.
 ///
-/// All of them are on for every run: unlike `GSUB`, where the Arabic
+/// The first fourteen are on for every run: unlike `GSUB`, where the Arabic
 /// positional features must reach only the glyphs the shaper marked eligible,
 /// a positioning feature is gated by its own glyph coverage — a face's `abvm`
-/// simply does not cover glyphs that have nothing above them.
+/// simply does not cover glyphs that have nothing above them. The rest, from
+/// [`OPTIONAL_FROM`], are the same optional features that close
+/// [`gsub::FEATURES`](crate::gsub::FEATURES), on only for a [`Run`] whose
+/// `features` names them: a superscript's `sups` positioning must not lift
+/// ordinary text.
 ///
 /// Visible to the crate so that `the_two_tables_ask_for_the_same_features` in
 /// [`otl`](crate::otl) can pin the "one feature map" claim above.
-pub(crate) const FEATURES: [&[u8; 4]; 14] = [
+pub(crate) const FEATURES: [&[u8; 4]; 23] = [
     b"abvm", b"blwm", b"calt", b"ccmp", b"clig", b"curs", b"dist", b"kern", b"liga", b"locl",
-    b"mark", b"mkmk", b"rclt", b"rlig",
+    b"mark", b"mkmk", b"rclt", b"rlig", // Optional, as in `gsub::FEATURES`.
+    b"c2cp", b"c2sc", b"ordn", b"pcap", b"sinf", b"smcp", b"subs", b"sups", b"titl",
 ];
+
+/// Where the optional features begin in [`FEATURES`].
+pub(crate) const OPTIONAL_FROM: usize = 14;
+
+/// The features every run gets: the bits of [`FEATURES`] before
+/// [`OPTIONAL_FROM`].
+pub(crate) const DEFAULT_FEATURES: u64 = (1 << OPTIONAL_FROM) - 1;
 
 /// Where `kern` sits in [`FEATURES`], and so which bit of the mask
 /// [`ByScript::for_script`] hands back means "the `kern` feature reached this
@@ -310,6 +323,10 @@ pub(crate) struct Run<'a> {
     /// `None` — and any language the script does not register — takes the
     /// script's default language system. See [`lang`](crate::lang).
     pub(crate) lang: Option<Lang>,
+    /// The features the run gets, as bits of [`FEATURES`]:
+    /// [`DEFAULT_FEATURES`] for every ordinary run, and the bit of each
+    /// optional feature it asked for besides.
+    pub(crate) features: u64,
     /// The size the run will be drawn at — which selects the row of every
     /// device table the lookups reach — and the variation instance, which
     /// selects the delta of every `VariationIndex` they reach.
@@ -390,8 +407,8 @@ impl Positioning {
         for glyph in run.glyphs {
             seen.add(glyph.gid);
         }
-        for (lookup, _) in self.lookups.for_script(run.script, run.lang) {
-            if !seen.may_intersect(lookup.digest) {
+        for (lookup, mask) in self.lookups.for_script(run.script, run.lang) {
+            if mask & run.features == 0 || !seen.may_intersect(lookup.digest) {
                 continue;
             }
             self.run_lookup(data, lookup, run, &mut out);
@@ -1123,6 +1140,173 @@ fn resolve(out: &mut [Adjust], i: usize, j: usize, kind: Attach, rtl: bool) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// What a lookup takes as input
+// ---------------------------------------------------------------------------
+
+/// Append to `out` every glyph `GPOS` lookup `index` takes as input.
+///
+/// HarfBuzz's `hb_ot_layout_lookup_collect_glyphs` for `GPOS` with only the
+/// input set asked for, which is what FreeType's auto-hinter subtracts from a
+/// feature style's glyphs: a glyph a feature both substitutes in and then
+/// positions is one it may be moving off its zone, so no style claims it (see
+/// `hint`). Each subtable contributes what HarfBuzz's `collect_glyphs` does --
+/// the coverage it is applied at, a pair's second glyphs, a mark attachment's
+/// base, ligature or second-mark coverage, a context's input sequence -- and
+/// none of the lookups a context invokes: HarfBuzz follows those only for the
+/// output set, which `GPOS` has none of.
+pub(crate) fn lookup_inputs(
+    data: &[u8],
+    lookup_list: usize,
+    index: u16,
+    out: &mut Vec<u16>,
+    budget: &mut usize,
+) {
+    let mut subtables = MAX_SUBTABLES;
+    let Some(lookup) = lookup_at(
+        data,
+        lookup_list,
+        index,
+        &KINDS,
+        EXTENSION_POS,
+        &mut subtables,
+    ) else {
+        return;
+    };
+    for sub in &lookup.subtables {
+        if !spend(budget) {
+            return;
+        }
+        // `None` is a truncated subtable, which keeps what was read before
+        // the cut: the glyphs it did list are the font's own answer.
+        let _ = subtable_inputs(data, lookup.kind, sub.at, out, budget);
+    }
+}
+
+/// One subtable's contribution to [`lookup_inputs`].
+fn subtable_inputs(
+    data: &[u8],
+    kind: u16,
+    sub: usize,
+    out: &mut Vec<u16>,
+    budget: &mut usize,
+) -> Option<()> {
+    let at = |o: usize| sub.checked_add(o);
+    let offset = |o: usize| sub.checked_add(usize::from(u16_at(data, at(o)?)?));
+    let format = u16_at(data, sub)?;
+    match (kind, format) {
+        (SINGLE_POS, 1 | 2) | (CURSIVE_POS, 1) => coverage_glyphs(data, offset(2)?, out, budget),
+        (PAIR_POS, 1) => {
+            coverage_glyphs(data, offset(2)?, out, budget);
+            // Each PairSet: a count, then records of the second glyph and
+            // the two value records.
+            let record = value_size(u16_at(data, at(4)?)?)
+                .checked_add(value_size(u16_at(data, at(6)?)?))?
+                .checked_add(2)?;
+            for set in offsets(data, sub, at(8)?, budget)? {
+                let count = usize::from(u16_at(data, set)?);
+                for i in 0..count {
+                    if !spend(budget) {
+                        return None;
+                    }
+                    let glyph = i
+                        .checked_mul(record)
+                        .and_then(|d| set.checked_add(2)?.checked_add(d))
+                        .and_then(|o| u16_at(data, o))?;
+                    out.push(glyph);
+                }
+            }
+        }
+        (PAIR_POS, 2) => {
+            coverage_glyphs(data, offset(2)?, out, budget);
+            class_coverage(data, offset(10)?, out, budget);
+        }
+        (MARK_BASE_POS | MARK_LIG_POS | MARK_MARK_POS, 1) => {
+            coverage_glyphs(data, offset(2)?, out, budget);
+            coverage_glyphs(data, offset(4)?, out, budget);
+        }
+        (CONTEXT_POS, 1 | 2) => {
+            coverage_glyphs(data, offset(2)?, out, budget);
+            // Format 2 names input classes, from its ClassDef.
+            let classes = if format == 2 { Some(offset(4)?) } else { None };
+            let sets_at = if format == 1 { 4 } else { 6 };
+            for set in offsets(data, sub, at(sets_at)?, budget)? {
+                for rule in offsets(data, set, set, budget)? {
+                    // glyphCount, seqLookupCount, then the input less its
+                    // first glyph.
+                    let input = usize::from(u16_at(data, rule)?.saturating_sub(1));
+                    sequence_inputs(data, rule.checked_add(4)?, input, classes, out, budget)?;
+                }
+            }
+        }
+        (CONTEXT_POS, 3) => {
+            let glyphs = usize::from(u16_at(data, at(2)?)?);
+            for i in 0..glyphs {
+                let coverage = i
+                    .checked_mul(2)
+                    .and_then(|d| at(6)?.checked_add(d))
+                    .and_then(|o| u16_at(data, o))
+                    .and_then(|off| sub.checked_add(usize::from(off)))?;
+                coverage_glyphs(data, coverage, out, budget);
+            }
+        }
+        (CHAIN_CONTEXT_POS, 1 | 2) => {
+            coverage_glyphs(data, offset(2)?, out, budget);
+            // Format 2's input classes come from its second ClassDef.
+            let classes = if format == 2 { Some(offset(6)?) } else { None };
+            let sets_at = if format == 1 { 4 } else { 10 };
+            for set in offsets(data, sub, at(sets_at)?, budget)? {
+                for rule in offsets(data, set, set, budget)? {
+                    // backtrack (a count and that many), then the input: a
+                    // count and all but its first entry.
+                    let back = usize::from(u16_at(data, rule)?);
+                    let input_at = rule.checked_add(2)?.checked_add(back.checked_mul(2)?)?;
+                    let input = usize::from(u16_at(data, input_at)?.saturating_sub(1));
+                    sequence_inputs(data, input_at.checked_add(2)?, input, classes, out, budget)?;
+                }
+            }
+        }
+        (CHAIN_CONTEXT_POS, 3) => {
+            let back = usize::from(u16_at(data, at(2)?)?);
+            let input_at = at(4)?.checked_add(back.checked_mul(2)?)?;
+            let input = usize::from(u16_at(data, input_at)?);
+            for i in 0..input {
+                let coverage = i
+                    .checked_mul(2)
+                    .and_then(|d| input_at.checked_add(2)?.checked_add(d))
+                    .and_then(|o| u16_at(data, o))
+                    .and_then(|off| sub.checked_add(usize::from(off)))?;
+                coverage_glyphs(data, coverage, out, budget);
+            }
+        }
+        _ => {}
+    }
+    Some(())
+}
+
+/// A rule's input sequence -- `count` glyph ids at `at`, or class values of
+/// `classes` -- appended to `out` as glyphs.
+fn sequence_inputs(
+    data: &[u8],
+    at: usize,
+    count: usize,
+    classes: Option<usize>,
+    out: &mut Vec<u16>,
+    budget: &mut usize,
+) -> Option<()> {
+    for i in 0..count {
+        if !spend(budget) {
+            return None;
+        }
+        let value = u16_at(data, at.checked_add(i.checked_mul(2)?)?)?;
+        match classes {
+            None => out.push(value),
+            Some(table) => class_glyphs(data, table, value, out, budget),
+        }
+    }
+    Some(())
+}
+
 #[cfg(test)]
 // A test that indexes past the end of its own fixture *should* panic — that is
 // the failure being reported, not a defect to guard against.
@@ -1136,6 +1320,144 @@ fn resolve(out: &mut [Adjust], i: usize, j: usize, kind: Attach, rtl: bool) {
 mod tests {
     use super::*;
     use crate::device::Ppem;
+
+    // --- optional features ----------------------------------------------
+
+    #[test]
+    fn an_optional_feature_positions_only_a_run_that_asks_for_it() {
+        let value = Value {
+            x_placement: 30,
+            ..Value::default()
+        };
+        let data = gpos_table_for(b"DFLT", b"sups", &[(SINGLE_POS, single_pos1(&[7], value))]);
+        let pos = Positioning::parse(&data, span(0, data.len()), None).unwrap();
+        let run = glyphs(&[7]);
+        let advances = alloc::vec![0i32];
+        let marks = alloc::vec![false];
+        let offset = |features| {
+            pos.apply(
+                &data,
+                &Run {
+                    glyphs: &run,
+                    advances: &advances,
+                    marks: &marks,
+                    zero_marks_first: false,
+                    rtl: false,
+                    script: None,
+                    lang: None,
+                    features,
+                    corrections: Corrections::NONE,
+                },
+            )[0]
+            .x_offset
+        };
+        assert_eq!(offset(DEFAULT_FEATURES), 0);
+        let sups = FEATURES.iter().position(|t| *t == b"sups").unwrap();
+        assert!(sups >= OPTIONAL_FROM);
+        assert_eq!(offset(DEFAULT_FEATURES | 1 << sups), 30);
+    }
+
+    // --- lookup_inputs --------------------------------------------------
+
+    /// The input glyphs of lookup 0 of the `GPOS` holding `subtable`.
+    fn inputs_of(kind: u16, subtable: Vec<u8>) -> Vec<u16> {
+        let data = gpos_table(&[(kind, subtable)]);
+        let list = lookup_list(&data, 0).unwrap();
+        let mut out = Vec::new();
+        let mut budget = usize::MAX;
+        lookup_inputs(&data, list, 0, &mut out, &mut budget);
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    #[test]
+    fn a_single_adjustments_inputs_are_its_coverage() {
+        let value = Value {
+            x_placement: 1,
+            ..Value::default()
+        };
+        assert_eq!(inputs_of(SINGLE_POS, single_pos1(&[7, 9], value)), [7, 9]);
+    }
+
+    #[test]
+    fn a_pairs_inputs_are_both_its_glyphs() {
+        assert_eq!(inputs_of(PAIR_POS, pair_pos1(7, 12, -40, None)), [7, 12]);
+    }
+
+    #[test]
+    fn a_class_pairs_inputs_are_its_coverage_and_harfbuzzs_reading_of_its_second_classes() {
+        // PairPosFormat2 with no value records: one class-1 and one class-2
+        // record of no bytes each. ClassDef2 is format 1 over 20-22, classed
+        // 1 0 2.
+        let cov = coverage1(&[7]);
+        let class1 = [2u16, 0];
+        let class2 = [1u16, 20, 3, 1, 0, 2];
+        let head = 16usize;
+        let mut sub = Vec::new();
+        for v in [
+            2u16,
+            u16::try_from(head).unwrap(),
+            0,
+            0,
+            u16::try_from(head + cov.len()).unwrap(),
+            u16::try_from(head + cov.len() + 4).unwrap(),
+            1,
+            1,
+        ] {
+            sub.extend_from_slice(&be16(v));
+        }
+        sub.extend_from_slice(&cov);
+        for v in class1.iter().chain(class2.iter()) {
+            sub.extend_from_slice(&be16(*v));
+        }
+        // HarfBuzz's format-1 `collect_coverage` takes each run one glyph
+        // past its end: 20 (with 21), then 22 (with 23).
+        assert_eq!(inputs_of(PAIR_POS, sub), [7, 20, 21, 22, 23]);
+    }
+
+    #[test]
+    fn a_mark_attachments_inputs_are_its_marks_and_what_they_attach_to() {
+        let marks = coverage1(&[30, 31]);
+        let bases = coverage1(&[5]);
+        let mut sub = Vec::new();
+        // format, markCoverage, baseCoverage, classCount, markArray, baseArray:
+        // the arrays are not inputs, and are not read.
+        for v in [1u16, 12, u16::try_from(12 + marks.len()).unwrap(), 1, 0, 0] {
+            sub.extend_from_slice(&be16(v));
+        }
+        sub.extend_from_slice(&marks);
+        sub.extend_from_slice(&bases);
+        assert_eq!(inputs_of(MARK_BASE_POS, sub), [5, 30, 31]);
+    }
+
+    #[test]
+    fn a_chaining_contexts_inputs_leave_out_its_backtrack_and_lookahead() {
+        // ChainContextFormat3: backtrack [1], input [2] then [3], lookahead
+        // [4], no lookup records.
+        let covs = [
+            coverage1(&[1]),
+            coverage1(&[2]),
+            coverage1(&[3]),
+            coverage1(&[4]),
+        ];
+        let head = 2 + 2 + 2 + 2 + 4 + 2 + 2 + 2;
+        let mut at = head;
+        let mut offs = Vec::new();
+        for c in &covs {
+            offs.push(u16::try_from(at).unwrap());
+            at += c.len();
+        }
+        let mut sub = Vec::new();
+        for v in [3u16, 1, offs[0], 2, offs[1], offs[2], 1, offs[3], 0] {
+            sub.extend_from_slice(&be16(v));
+        }
+        assert_eq!(sub.len(), head);
+        for c in &covs {
+            sub.extend_from_slice(c);
+        }
+        assert_eq!(inputs_of(CHAIN_CONTEXT_POS, sub), [2, 3]);
+    }
 
     /// [`KERN_MASK`] is a bit position written by hand against a list two
     /// declarations away, so the one thing that would silently break it —
@@ -2078,6 +2400,7 @@ mod tests {
                     rtl: false,
                     script: None,
                     lang: None,
+                    features: DEFAULT_FEATURES,
                     corrections: Corrections::NONE,
                 },
             )
@@ -2108,6 +2431,7 @@ mod tests {
                 rtl: false,
                 script: None,
                 lang: None,
+                features: DEFAULT_FEATURES,
                 corrections: Corrections::NONE,
             },
         )

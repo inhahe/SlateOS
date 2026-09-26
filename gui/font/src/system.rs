@@ -319,7 +319,12 @@ impl SystemFont {
                 .get(stretch.range.clone())
                 .map(<[Level]>::to_vec)
                 .unwrap_or_default();
-            let run = faces.font(stretch.face).shape_leveled(part, lang, share);
+            let run = faces.font(stretch.face).shape_leveled(
+                part,
+                lang,
+                share,
+                crate::scaled::Extra::NONE,
+            );
             let face = u8::try_from(stretch.face).unwrap_or(0);
             glyphs.extend(run.glyphs().iter().map(|g| ShapedGlyph {
                 key: GlyphKey::in_face(face, g.key.gid()),

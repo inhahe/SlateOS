@@ -26,14 +26,17 @@
 //!
 //! # What happens, in order
 //!
-//! 1. **Every glyph gets a style** ([`FaceHints::new`]): the script whose
-//!    characters reach it through the `cmap`, the earliest of FreeType's
-//!    styles winning a tie; then the glyphs only `GSUB` reaches -- ligatures,
-//!    positional forms -- the script whose features produce them; then the
-//!    rest, the fallback style.
+//! 1. **Every glyph gets a style** ([`FaceHints::new`]), FreeType's styles
+//!    taking their turns in its order, each claiming only what no earlier one
+//!    has: a script's default style claims the glyphs its characters reach
+//!    through the `cmap`; a *feature style* -- small capitals, superscripts
+//!    and the like, for Latin, Greek and Cyrillic -- the glyphs its OpenType
+//!    feature substitutes in, less those the feature also positions. Then the
+//!    glyphs only `GSUB` reaches -- ligatures, positional forms -- go to the
+//!    script whose features produce them, and the rest to the fallback style.
 //! 2. **Each style in use is measured** ([`latin::Metrics::new`]): its
 //!    standard stem width and its blue zones, from its script's reference
-//!    letters.
+//!    letters -- shaped with its feature on, for a feature style.
 //! 3. **At each size** ([`Hinter::new`]) the zones are fitted to the pixel
 //!    grid, after nudging the vertical scale so the x-height lands on a pixel.
 //! 4. **Each glyph** ([`Hinter::hint`]) is cut into segments and edges, its
@@ -104,7 +107,8 @@ pub(super) enum System {
     Indic,
 }
 
-/// One of FreeType's default styles.
+/// One of FreeType's styles: a script's default one, or one of the feature
+/// styles Latin, Greek and Cyrillic have besides.
 pub(super) struct Style {
     /// FreeType's name for it.
     pub(super) name: &'static str,
@@ -115,6 +119,11 @@ pub(super) struct Style {
     /// The code points whose glyphs are never snapped to a zone: combining
     /// marks and the like.
     pub(super) nonbase: &'static [(u32, u32)],
+    /// For a *feature style*, the OpenType feature whose `GSUB` output it
+    /// claims and with which its reference letters are shaped -- small
+    /// capitals, superscripts and the rest (FreeType's `afcover.h`). `None`
+    /// for a script's default style.
+    pub(super) feature: Option<[u8; 4]>,
 }
 
 /// What a cluster of text shapes to: each glyph with its vertical offset in
@@ -165,9 +174,15 @@ impl FaceHints {
     /// metrics initialisation it triggers).
     ///
     /// `shape` shapes a cluster of reference letters the way the face shapes
-    /// text; FreeType uses HarfBuzz for the same. A face with no Unicode
+    /// text -- with one feature on besides, when it names one -- and answers
+    /// nothing for a cluster that feature leaves as it was; FreeType uses
+    /// HarfBuzz for the same (`af_shaper_get_cluster`). A face with no Unicode
     /// `cmap` has every glyph in the fallback style, and is drawn unhinted.
-    pub(crate) fn new(face: &Face, coords: &Coords, shape: &dyn Fn(&str) -> Glyphs) -> Self {
+    pub(crate) fn new(
+        face: &Face,
+        coords: &Coords,
+        shape: &dyn Fn(&str, Option<[u8; 4]>) -> Glyphs,
+    ) -> Self {
         let units_per_em = i64::from(face.units_per_em());
         let count = usize::from(face.num_glyphs());
         let mut styles = alloc::vec![UNASSIGNED; count];
@@ -181,6 +196,32 @@ impl FaceHints {
         for &(cp, gid) in &mappings {
             if let (Some(style), Some(slot)) = (style_of(cp), styles.get_mut(usize::from(gid))) {
                 *slot = (*slot).min(style);
+            }
+        }
+        //    ... and, in the same pass and the same order, the glyphs each
+        //    feature style's feature produces. A feature style comes just
+        //    before its script's default style, so a small capital claimed
+        //    here stays the feature's even where a character also maps to it,
+        //    and one script's feature can claim glyphs of another's letters
+        //    when the font shares the lookup between scripts.
+        for (i, style) in STYLES.iter().enumerate() {
+            let (Some(feature), Some(script), Ok(index)) =
+                (style.feature, SCRIPTS.get(style.script), u8::try_from(i))
+            else {
+                continue;
+            };
+            // Every character of the style's zones, the spaces between them
+            // included, as FreeType walks the strings.
+            let probes: Vec<u16> = style
+                .blues
+                .iter()
+                .flat_map(|blue| blue.chars.chars())
+                .map(|ch| face.glyph_index(ch).unwrap_or(0))
+                .collect();
+            for gid in face.feature_style_glyphs(script.ot, feature, &probes) {
+                if let Some(slot) = styles.get_mut(usize::from(gid)) {
+                    *slot = (*slot).min(index);
+                }
             }
         }
         // A glyph is non-base if any character reaching it is in its own
@@ -199,8 +240,9 @@ impl FaceHints {
         drop(mappings);
 
         // 2. The glyphs only `GSUB` reaches, for the script whose features
-        //    produce them -- and then for Latin again with `DFLT`'s, FreeType's
-        //    default script.
+        //    produce them -- every feature, for each script's default style --
+        //    and then for Latin again with `DFLT`'s, FreeType's default
+        //    script.
         let assign = |styles: &mut Vec<u8>, style: usize, glyphs: Vec<u16>| {
             let Ok(style) = u8::try_from(style) else {
                 return;
@@ -217,14 +259,13 @@ impl FaceHints {
             let Some(script) = SCRIPTS.get(style.script) else {
                 continue;
             };
-            if !script.ot.is_empty() {
+            if style.feature.is_none() && !script.ot.is_empty() {
                 assign(&mut styles, i, face.gsub_outputs(script.ot));
             }
         }
-        if let Some(latin) = STYLES
-            .iter()
-            .position(|s| SCRIPTS.get(s.script).is_some_and(|sc| sc.name == "latn"))
-        {
+        if let Some(latin) = STYLES.iter().position(|s| {
+            s.feature.is_none() && SCRIPTS.get(s.script).is_some_and(|sc| sc.name == "latn")
+        }) {
             assign(&mut styles, latin, face.gsub_outputs(&[*b"latn", *b"DFLT"]));
         }
 
@@ -243,11 +284,6 @@ impl FaceHints {
         } else {
             glyph::Units::Rounded
         };
-        let source = latin::Source {
-            shape,
-            outline: &outline,
-            units,
-        };
         let mut used = alloc::vec![false; STYLES.len()];
         for &s in &styles {
             if let Some(u) = used.get_mut(usize::from(s)) {
@@ -262,6 +298,14 @@ impl FaceHints {
                     return None;
                 }
                 let script = SCRIPTS.get(style.script)?;
+                // A feature style's letters are measured as its feature
+                // shapes them.
+                let shaped = |cluster: &str| shape(cluster, style.feature);
+                let source = latin::Source {
+                    shape: &shaped,
+                    outline: &outline,
+                    units,
+                };
                 latin::Metrics::new(
                     units_per_em,
                     script.standard,
@@ -507,13 +551,33 @@ mod tests {
         use crate::scaled::ScaledFont;
         let face = Face::parse(fixture::TTF.to_vec()).unwrap();
         let gid = |ch: char| face.glyph_index(ch).unwrap();
-        let (x, e_acute, comb) = (gid('x'), gid('\u{E9}'), gid('\u{301}'));
+        let (x, h, e_acute, comb) = (gid('x'), gid('h'), gid('\u{E9}'), gid('\u{301}'));
         let mut font = ScaledFont::new(face, 13.0).unwrap();
         font.set_rendering(Rendering {
             hinting: true,
             ..Rendering::default()
         });
         assert_eq!(font.hint_style(x), Some(("latn_dflt", false)));
+        // The glyphs `smcp` and `sups` make, each its feature style's -- bar
+        // `x.sups`, which `sups` also positions and so no feature style
+        // claims: the default style's pass over every feature does.
+        let made = |font: &ScaledFont, text: &str, tag: &[u8; 4]| {
+            font.shape_extra(text, crate::scaled::Extra::feature(tag))
+                .glyphs()
+                .first()
+                .map(|g| g.key.gid())
+                .unwrap()
+        };
+        let (h_sc, o_sups, x_sups) = (
+            made(&font, "h", b"smcp"),
+            made(&font, "o", b"sups"),
+            made(&font, "x", b"sups"),
+        );
+        assert_ne!(h_sc, h);
+        assert_ne!(x_sups, x);
+        assert_eq!(font.hint_style(h_sc), Some(("latn_smcp", false)));
+        assert_eq!(font.hint_style(o_sups), Some(("latn_sups", false)));
+        assert_eq!(font.hint_style(x_sups), Some(("latn_dflt", false)));
         assert_eq!(font.hint_style(e_acute), Some(("latn_dflt", false)));
         // A combining mark is never snapped to a zone.
         assert_eq!(font.hint_style(comb), Some(("latn_dflt", true)));

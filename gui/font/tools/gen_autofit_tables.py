@@ -5,7 +5,8 @@ Run from anywhere:
     python gui/font/tools/gen_autofit_tables.py [--freetype DIR]
 
 `DIR` holds FreeType 2.13.2's `src/autofit/afscript.h`, `afstyles.h`,
-`afranges.c` and `afblue.dat`. Without it, the four files are fetched from the
+`afranges.c`, `afblue.dat` and `afcover.h`. Without it, the five files are
+fetched from the
 `VER-2-13-2` tag of FreeType's GitHub mirror. The version is pinned because the
 hinter in `gui/font/src/hint/` is a port of that release's `autofit` module and
 is checked against it (see `hint_oracle.py`): the tables and the algorithm that
@@ -26,12 +27,17 @@ script's letters to measure the heights from.
     measured from.
 
 `STYLES`
-    The scripts' default styles, in FreeType's order -- which is a priority
-    order: a glyph two scripts could claim goes to the earlier one. Each names
-    its writing system (the algorithm that hints it) and its alignment zones,
-    every zone a string of reference letters and a set of properties.
-    FreeType's feature styles (small capitals, superscripts and the rest) are
-    left out: they need per-feature coverage the port does not do.
+    Every style FreeType builds with HarfBuzz, in its order -- which is a
+    priority order: a glyph two styles could claim goes to the earlier one.
+    Each names its writing system (the algorithm that hints it) and its
+    alignment zones, every zone a string of reference letters and a set of
+    properties. Most are a script's default style. Latin, Greek and Cyrillic
+    also have *feature styles* (`afcover.h`): small capitals, petite
+    capitals, ordinals, superscripts, subscripts, scientific inferiors and
+    titling forms, each naming the OpenType feature whose `GSUB` output it
+    claims and with which its reference letters are shaped. They come just
+    before their script's default style, as FreeType's `META_STYLE_LATIN`
+    expands them.
 
 `RANGES`
     Code points to styles, as sorted, disjoint ranges -- FreeType's per-script
@@ -60,7 +66,7 @@ import urllib.request
 from rustfmt_out import rustfmt
 
 TAG = "VER-2-13-2"
-FILES = ("afscript.h", "afstyles.h", "afranges.c", "afblue.dat")
+FILES = ("afscript.h", "afstyles.h", "afranges.c", "afblue.dat", "afcover.h")
 URL = "https://raw.githubusercontent.com/freetype/freetype/{tag}/src/autofit/{name}"
 
 # FreeType's default `ftoption.h` defines these two and not the third.
@@ -224,7 +230,13 @@ def scripts(text):
     return out
 
 
-def styles(text):
+def coverages(text):
+    """afcover.h: each COVERAGE's upper-case name to its OpenType tag."""
+    pat = re.compile(r"COVERAGE\(\s*\w+,\s*(\w+),\s*\"[^\"]*\",\s*'(.)',\s*'(.)',\s*'(.)',\s*'(.)'\s*\)")
+    return {m.group(1): "".join(m.group(2, 3, 4, 5)) for m in pat.finditer(preprocess(text))}
+
+
+def styles(text, cover):
     text = preprocess(text)
     out = []
     style = re.compile(
@@ -232,25 +244,31 @@ def styles(text):
     )
     meta = re.compile(r'^\s*META_STYLE_LATIN\(\s*(\w+),\s*(\w+),\s*"[^"]*"\s*\)', re.M)
     indic = re.compile(r'^\s*STYLE_DEFAULT_INDIC\(\s*(\w+),\s*(\w+),\s*"[^"]*"\s*\)', re.M)
+    # The members a meta style expands to, in the order its #define lists
+    # them: (suffix, coverage name).
+    define = text[text.index("#define META_STYLE_LATIN"):]
+    define = define[:define.index("\n\n")].replace("\\\n", " ")
+    members = re.findall(r"STYLE_LATIN\(\s*s,\s*S,\s*(\w+),\s*\w+,\s*ds,\s*\"[^\"]*\",\s*(\w+)\s*\)", define)
     events = []
     for m in style.finditer(text):
         if m.group(5) != "AF_COVERAGE_DEFAULT":
             continue
-        events.append((m.start(), m.group(1), SYSTEMS[m.group(2)],
+        events.append((m.start(), 0, m.group(1), SYSTEMS[m.group(2)],
                        m.group(3).replace("AF_SCRIPT_", "").lower(),
-                       m.group(4)))
+                       m.group(4), None))
     for m in meta.finditer(text):
-        # Only the `dflt` member of the ten a meta style expands to has the
-        # default coverage.
-        events.append((m.start(), m.group(1) + "_dflt", "Latin", m.group(1),
-                       "AF_BLUE_STRINGSET_" + m.group(2)))
+        for k, (suffix, coverage) in enumerate(members):
+            tag = None if coverage == "DEFAULT" else cover[coverage]
+            events.append((m.start(), k, m.group(1) + "_" + suffix, "Latin", m.group(1),
+                           "AF_BLUE_STRINGSET_" + m.group(2), tag))
     for m in indic.finditer(text):
         if m.group(1) == "s":
             continue
-        events.append((m.start(), m.group(1) + "_dflt", "Indic", m.group(1), None))
+        events.append((m.start(), 0, m.group(1) + "_dflt", "Indic", m.group(1), None, None))
     events.sort()
-    for _, name, system, script, stringset in events:
-        out.append({"name": name, "system": system, "script": script, "stringset": stringset})
+    for _, _, name, system, script, stringset, feature in events:
+        out.append({"name": name, "system": system, "script": script,
+                    "stringset": stringset, "feature": feature})
     return out
 
 
@@ -325,6 +343,10 @@ def resolve(style_list, base):
         return spans
 
     for i, st in enumerate(style_list):
+        # A feature style reaches glyphs through `GSUB`, never through a
+        # character: it has no ranges.
+        if st.get("feature"):
+            continue
         for lo, hi in base.get(st["script"], []):
             for x, y in free(lo, hi):
                 painted.append((x, y, i))
@@ -350,7 +372,7 @@ def main():
 
     script_list = scripts(src["afscript.h"])
     by_name = {s["name"]: i for i, s in enumerate(script_list)}
-    style_list = styles(src["afstyles.h"])
+    style_list = styles(src["afstyles.h"], coverages(src["afcover.h"]))
     base, nonbase = ranges(src["afranges.c"])
     sets = blues(src["afblue.dat"])
     table = resolve(style_list, base)
@@ -401,8 +423,12 @@ def main():
                 w(f"            // {blue_name}\n")
                 w(f"            Blue {{ chars: {rust_str(chars)}, props: {props} }},\n")
             w("        ],\n")
-            nb = sorted(nonbase.get(st["script"], []))
+            # FreeType marks non-base glyphs only in a default style's
+            # coverage pass; a feature style has none.
+            nb = [] if st["feature"] else sorted(nonbase.get(st["script"], []))
             w("        nonbase: &[" + ", ".join(f"(0x{a:04X}, 0x{b:04X})" for a, b in nb) + "],\n")
+            feature = f"Some(*b{rust_str(st['feature'])})" if st["feature"] else "None"
+            w(f"        feature: {feature},\n")
             w("    },\n")
         w("];\n\n")
 

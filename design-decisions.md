@@ -11941,14 +11941,22 @@ choices FreeType does, and a tool compares the two glyph by glyph.
 * **Every script FreeType's Latin writing system serves** -- most of them:
   Latin, Greek, Cyrillic, Arabic, Hebrew, Armenian, the Brahmic scripts, Thai
   and some fifty more, each measured from its own reference letters. Each
-  glyph is given a script as FreeType gives it one (by `cmap`, then by the
+  glyph is given a style as FreeType gives it one (by `cmap`, then by the
   `GSUB` lookups that produce it), and the reference letters are shaped by
-  this crate's shaper, as FreeType has HarfBuzz shape them.
+  this crate's shaper, as FreeType has HarfBuzz shape them. That includes
+  FreeType's *feature styles* for Latin, Greek and Cyrillic -- small and
+  petite capitals, ordinals, superscripts, subscripts, scientific inferiors,
+  titling forms -- which claim what their OpenType feature substitutes in
+  (less what it also positions) and measure their zones from reference
+  letters shaped with the feature on: the shaper has optional features for
+  that, off for every ordinary run.
 * **Checked against FreeType.** `tools/hint_oracle.py` runs FreeType (from
   `freetype-py`) and this crate over every glyph of a face at eleven sizes
-  and compares every hinted point, both coordinates, to the 64th of a pixel.
-  On Noto Sans, Open Sans, JetBrains Mono, Segoe UI, Arial and Times New
-  Roman every glyph of the ported styles agrees exactly, bar the gaps below --
+  and compares every hinted point, both coordinates, to the 64th of a pixel,
+  after comparing the sorting itself against FreeType's own glyph-to-style
+  map. On Noto Sans, Open Sans, JetBrains Mono,
+  Segoe UI, Arial, Times New Roman, Calibri, Verdana and Georgia every glyph
+  lands in FreeType's style and every hinted glyph agrees exactly --
   and so does every glyph of the CFF fonts David CLM and Frank Ruehl CLM,
   whose coordinates are fractions of a unit. That last took reading a glyph's
   points as FreeType's loaders read them, not as its outline draws: a CFF
@@ -11957,8 +11965,9 @@ choices FreeType does, and a tool compares the two glyph by glyph.
   that ends a hair short of its start folded (`sfnt::CffPoints`), and a
   composite placed by the component whose metrics it borrows. A generated
   fixture (`tools/gen_hint_fixture.py`: a synthetic face as TrueType and CFF,
-  one glyph drawn in 16.16 fractions, with FreeType's answers at eighteen
-  sizes) keeps that in `cargo test`.
+  one glyph drawn in 16.16 fractions, small capitals and superscripts behind
+  `smcp` and `sups`, with FreeType's answers at eighteen sizes) keeps that in
+  `cargo test`.
 * **Robust before faithful.** Every index goes through `get` and a failure
   abandons the glyph to be drawn unhinted, coordinates beyond `i16` and
   absurd sizes are refused at the door (which is what makes the unchecked
@@ -11970,13 +11979,12 @@ choices FreeType does, and a tool compares the two glyph by glyph.
 
 **Not done** (each filed in `known-issues.md`): FreeType's CJK writing system
 (ideographs, and the fallback style unclaimed glyphs go to, are drawn
-unhinted); its feature styles (superscripts and small capitals use their
-script's ordinary zones); stem darkening (off by default in FreeType too).
-The oracle also turned up a difference that is not hinting's: composites that
-borrow a component's metrics are placed a few units off FreeType
-horizontally, hinted or not. The face-level analysis -- scripts and zones,
-3-9 ms on large fonts -- is repeated for each size of a face; sharing it is an
-optimisation for later.
+unhinted); stem darkening (off by default in FreeType too). The oracle also
+turned up a difference that was not hinting's: composites that borrow a
+component's metrics were placed a few units off FreeType horizontally, hinted
+or not -- fixed. The face-level analysis -- styles and zones, 2-9 ms on large
+fonts, taken when a face first draws a hinted glyph -- is repeated for each
+size of a face; sharing it is an optimisation for later.
 
 **Alternatives.**
 

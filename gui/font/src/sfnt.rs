@@ -929,6 +929,10 @@ pub struct Face {
     /// which glyphs a script's features can produce -- every feature, not only
     /// the default-on ones the shaper applies. See [`Face::gsub_outputs`].
     gsub: Option<Span>,
+    /// Where the `GPOS` table is, for the same reader: a feature style's
+    /// glyphs exclude those its feature positions. See
+    /// [`Face::feature_style_glyphs`].
+    gpos: Option<Span>,
     /// The axes this face can vary along, from `fvar`, with `avar`'s correction
     /// folded in. `None` for the 549 of this host's 556 faces that are not
     /// variable, and also for a variable face whose `fvar` is unreadable — a
@@ -1337,6 +1341,7 @@ impl Face {
             gpos_scripts,
             gsub_scripts,
             gsub,
+            gpos,
             variation_axes,
             gvar,
             hvar,
@@ -1736,7 +1741,7 @@ impl Face {
     /// format-4 table: every segment's code points, each resolved as
     /// [`cmap_format4`](Self::cmap_format4) resolves it.
     fn walk_format4(&self, off: usize, budget: &mut usize, emit: &mut impl FnMut(u32, u16)) {
-        use crate::gsub::spend;
+        use crate::otl::spend;
         let Some(seg_count_x2) = off.checked_add(6).and_then(|o| u16_at(&self.data, o)) else {
             return;
         };
@@ -1778,7 +1783,7 @@ impl Face {
     /// [`for_each_unicode_mapping`](Self::for_each_unicode_mapping) over a
     /// format-12 table: every group's code points up to U+2FFFF.
     fn walk_format12(&self, off: usize, budget: &mut usize, emit: &mut impl FnMut(u32, u16)) {
-        use crate::gsub::spend;
+        use crate::otl::spend;
         let Some(num_groups) = off
             .checked_add(12)
             .and_then(|o| u32_at(&self.data, o))
@@ -1834,7 +1839,7 @@ impl Face {
         let mut out = Vec::new();
         let mut visited = Vec::new();
         let mut budget = crate::gsub::MAX_OUTPUT_WALK;
-        for index in otl::script_lookups(&self.data, span.off, scripts) {
+        for index in otl::collect_lookups(&self.data, span.off, scripts, None) {
             crate::gsub::lookup_outputs(
                 &self.data,
                 list,
@@ -1846,6 +1851,79 @@ impl Face {
         }
         out.sort_unstable();
         out.dedup();
+        out
+    }
+
+    /// The glyphs FreeType's auto-hinter gives the feature style whose
+    /// feature is `feature`, on `scripts` (`af_shaper_get_coverage` for a
+    /// style that is not a script's default).
+    ///
+    /// They are the glyphs the `GSUB` lookups of the features tagged
+    /// `feature`, in any language system of `scripts`, can produce -- less
+    /// every glyph the `GPOS` lookups of the same features take as input,
+    /// since a feature that also positions a glyph may be moving it off the
+    /// zone its style would snap it to -- sorted and deduplicated. None at all
+    /// unless one of those lookups would substitute one of `probes` by itself:
+    /// FreeType's test that the feature reaches one of the style's reference
+    /// letters, which the caller supplies as glyph ids (`0` for a character
+    /// the face lacks, as `FT_Get_Char_Index` gives it).
+    pub(crate) fn feature_style_glyphs(
+        &self,
+        scripts: &[[u8; 4]],
+        feature: [u8; 4],
+        probes: &[u16],
+    ) -> Vec<u16> {
+        let Some(gsub) = self.gsub else {
+            return Vec::new();
+        };
+        let lookups = otl::collect_lookups(&self.data, gsub.off, scripts, Some(feature));
+        let Some(list) = otl::lookup_list(&self.data, gsub.off) else {
+            return Vec::new();
+        };
+        let reaches = lookups
+            .iter()
+            .filter_map(|&index| crate::gsub::probe_lookup(&self.data, list, index))
+            .any(|lookup| {
+                probes
+                    .iter()
+                    .any(|&glyph| crate::gsub::substitutes_alone(&self.data, &lookup, glyph))
+            });
+        if !reaches {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut visited = Vec::new();
+        let mut budget = crate::gsub::MAX_OUTPUT_WALK;
+        for &index in &lookups {
+            crate::gsub::lookup_outputs(
+                &self.data,
+                list,
+                index,
+                &mut out,
+                &mut visited,
+                &mut budget,
+            );
+        }
+        out.sort_unstable();
+        out.dedup();
+        let mut positioned = Vec::new();
+        if let Some(gpos) = self.gpos
+            && let Some(gpos_list) = otl::lookup_list(&self.data, gpos.off)
+        {
+            let mut budget = crate::gsub::MAX_OUTPUT_WALK;
+            for index in otl::collect_lookups(&self.data, gpos.off, scripts, Some(feature)) {
+                crate::gpos::lookup_inputs(
+                    &self.data,
+                    gpos_list,
+                    index,
+                    &mut positioned,
+                    &mut budget,
+                );
+            }
+        }
+        positioned.sort_unstable();
+        positioned.dedup();
+        out.retain(|g| positioned.binary_search(g).is_err());
         out
     }
 

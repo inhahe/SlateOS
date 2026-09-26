@@ -165389,11 +165389,12 @@ design-decisions §1325), which the compositor turns on from the settings. It
 agrees with FreeType point for point on every Latin, Greek, Cyrillic, Arabic,
 Hebrew, Armenian and Devanagari glyph of six fonts checked at eleven sizes
 (`gui/font/tools/hint_oracle.py`), and on every glyph of two CFF fonts with
-fractional coordinates, both coordinates exact, bar the gaps filed below: ideographs and
-the fallback style are left unhinted, and feature-reached glyphs use their
-script's default zones. (Composites with borrowed metrics, which sat a hair
-off horizontally, were a placement bug rather than a hinting one, and are
-fixed: see the entry below.)
+fractional coordinates, both coordinates exact -- small capitals, superscripts
+and the other feature forms included, each sorted into FreeType's style for
+it -- bar the gap filed below: ideographs and the fallback style are left
+unhinted. (Composites with borrowed metrics, which sat a hair off
+horizontally, were a placement bug rather than a hinting one, and are fixed:
+see the entry below.)
 
 **In short (as filed):** the appearance settings have a "hinting" switch, on by default,
 and nothing reads it: glyph outlines are rasterized exactly as designed, never
@@ -165455,9 +165456,21 @@ glyphs under "unhinted here".
 
 ### [F] Superscripts, subscripts and small capitals are hinted with their script's ordinary zones -- 2026-09-26
 
-**Status:** OPEN — lane F's.
+**Status: FIXED 2026-09-26** (lane F) — the port has FreeType's feature styles
+now, done the way the entry below proposed. `gen_autofit_tables.py` generates
+all 87 styles (27 of them feature styles, each with its tag); `FaceHints::new`
+lets each feature style claim, in FreeType's order, its feature's `GSUB`
+output less its `GPOS` input (`Face::feature_style_glyphs`, after HarfBuzz's
+`hb_ot_layout_collect_lookups` with a feature filter and feature variations,
+`collect_glyphs`, and `would_substitute` with its coverage digest); and each
+style measures its zones from reference letters shaped with its feature on,
+through optional features the shaper now has (`gsub`/`gpos::OPTIONAL_FROM`,
+`scaled::Extra`), off for every ordinary run. Every glyph of nine fonts is
+sorted into FreeType's style for it and every hinted glyph agrees
+(`hint_oracle.py`, which now compares the sorting too); the golden fixture
+has small capitals and superscripts, one positioned, mutation-checked.
 
-**In short:** a superscript ² or a small capital is aligned to the heights of
+**In short (as filed):** a superscript ² or a small capital is aligned to the heights of
 its script's ordinary letters (or, for ² and ₂, of the modifier letters), where
 FreeType aligns it to heights measured from the font's own superscripts and
 small capitals. The difference is a pixel here and there on those glyphs only;

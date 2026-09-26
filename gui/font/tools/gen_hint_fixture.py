@@ -33,7 +33,16 @@ flat or round as the rule under test needs:
   so -0.387 is -1 -- a line of no length dropped, whether it has none at all
   or none in 1024ths of a unit, and a contour ending a 65536th short of its
   start folded, where one ending a 1024th short is not. As TrueType it is
-  rounded, which leaves it with coincident points instead.
+  rounded, which leaves it with coincident points instead;
+* and two of FreeType's *feature styles*: small capitals (`smcp` turns h x z
+  o e s into `.sc` glyphs at a 560 cap height, flat and round), so that
+  `latn_smcp` claims them and measures its zones from them -- its capitals'
+  zones dropped, since `smcp` leaves capitals alone -- and superscripts
+  (`sups` turns x and o into `.sups` glyphs; `x.sups` is also raised 300
+  units by a `sups` positioning rule). A glyph a feature both substitutes and
+  positions is no feature style's, so `x.sups` falls to `latn_dflt`, while
+  the raise still counts when `latn_sups` measures its zones -- and decides
+  whether its top zone exists at all.
 
 It is written twice: as TrueType (quadratic, clockwise) and as CFF (cubic,
 counter-clockwise), since the two reach the hinter through different loaders
@@ -215,7 +224,55 @@ def glyphs():
     g["acute"] = (0xB4, lambda p: poly(p, [(120, 560), (230, 720), (320, 720), (170, 560)]))
     g["acutecomb"] = (0x301, lambda p: poly(p, [(-200, 560), (-90, 720), (0, 720), (-150, 560)]))
     g["w"] = (ord("w"), fractional)
+
+    # Small capitals, reached only through `smcp`: flat at 560 and 0, round
+    # to 572 and -12.
+    g["h.sc"] = (None, lambda p: (rect(p, 60, 0, 140, 560), rect(p, 400, 0, 480, 560),
+                                  rect(p, 140, 250, 400, 320)))
+    g["x.sc"] = (None, lambda p: poly(p, [(20, 0), (200, 280), (30, 560), (120, 560), (250, 360),
+                                          (380, 560), (470, 560), (300, 280), (480, 0), (390, 0),
+                                          (250, 200), (110, 0)]))
+    g["z.sc"] = (None, lambda p: poly(p, [(40, 0), (40, 60), (350, 500), (50, 500), (50, 560),
+                                          (450, 560), (450, 500), (150, 60), (460, 60), (460, 0)]))
+    g["o.sc"] = (None, lambda p: ring(p, 270, 280, 230, 292, 75, 70))
+    g["e.sc"] = (None, lambda p: poly(p, [(60, 0), (60, 560), (420, 560), (420, 500), (140, 500),
+                                          (140, 310), (380, 310), (380, 250), (140, 250),
+                                          (140, 60), (430, 60), (430, 0)]))
+    g["s.sc"] = (None, lambda p: (ellipse(p, 240, 420, 180, 152), ellipse(p, 240, 140, 190, 152)))
+    # Superscripts, reached only through `sups`: `o.sups` drawn where it
+    # stands, round to 712; `x.sups` drawn on the baseline, 400 tall, for
+    # `GPOS` to raise 300 -- to a flat top at 700, twelve units under the o's.
+    # Measured with the raise, the two make a top zone small enough to be
+    # active; measured without it they are 312 apart and make none, so the
+    # raise decides where `o.sups`'s top is drawn.
+    g["o.sups"] = (None, lambda p: ring(p, 200, 560, 130, 152, 50, 45))
+    g["x.sups"] = (None, lambda p: poly(p, [(20, 0), (110, 200), (25, 400), (80, 400), (150, 253),
+                                            (220, 400), (275, 400), (190, 200), (280, 0), (225, 0),
+                                            (150, 147), (75, 0)]))
     return g
+
+
+# The fixture's OpenType features: small capitals and superscripts, as a font
+# registers them under Latin and the default script alike.
+FEATURES = """
+languagesystem DFLT dflt;
+languagesystem latn dflt;
+
+feature smcp {
+    sub h by h.sc;
+    sub x by x.sc;
+    sub z by z.sc;
+    sub o by o.sc;
+    sub e by e.sc;
+    sub s by s.sc;
+} smcp;
+
+feature sups {
+    sub x by x.sups;
+    sub o by o.sups;
+    pos x.sups <0 300 0 0>;
+} sups;
+"""
 
 
 def draw_all(pen_for, g):
@@ -250,6 +307,7 @@ def build_ttf(g):
     glyf["eacute"] = pen.glyph()
     fb.setupGlyf(glyf)
     fb.setupHorizontalMetrics(fb_metrics(g, order))
+    fb.addOpenTypeFeatures(FEATURES)
     finish(fb, "HintFixture")
     buf = io.BytesIO()
     fb.save(buf)
@@ -281,6 +339,7 @@ def build_otf(g):
             charstrings[name] = pen.getCharString()
     fb.setupCFF("HintFixtureCFF", {"FullName": "HintFixtureCFF"}, charstrings, {})
     fb.setupHorizontalMetrics(fb_metrics(g, order))
+    fb.addOpenTypeFeatures(FEATURES)
     finish(fb, "HintFixtureCFF")
     buf = io.BytesIO()
     fb.save(buf)

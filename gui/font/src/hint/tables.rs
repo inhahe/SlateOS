@@ -378,7 +378,7 @@ pub(super) static SCRIPTS: [Script; 60] = [
 
 /// The scripts' default styles, in FreeType's order, which is the
 /// priority order when two could claim one glyph.
-pub(super) static STYLES: [Style; 60] = [
+pub(super) static STYLES: [Style; 87] = [
     Style {
         name: "adlm_dflt",
         script: 0,
@@ -406,6 +406,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0x1D944, 0x1E94A)],
+        feature: None,
     },
     Style {
         name: "arab_dflt",
@@ -449,6 +450,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0xFE7C, 0xFE7C),
             (0xFE7E, 0xFE7E),
         ],
+        feature: None,
     },
     Style {
         name: "armn_dflt",
@@ -487,6 +489,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0x0559, 0x055F)],
+        feature: None,
     },
     Style {
         name: "avst_dflt",
@@ -505,6 +508,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0x10B39, 0x10B3F)],
+        feature: None,
     },
     Style {
         name: "bamu_dflt",
@@ -523,6 +527,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0xA6F0, 0xA6F1)],
+        feature: None,
     },
     Style {
         name: "beng_dflt",
@@ -558,6 +563,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0x09E2, 0x09E3),
             (0x09FE, 0x09FE),
         ],
+        feature: None,
     },
     Style {
         name: "buhd_dflt",
@@ -586,6 +592,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0x1752, 0x1753)],
+        feature: None,
     },
     Style {
         name: "cakm_dflt",
@@ -609,6 +616,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0x11100, 0x11102), (0x11127, 0x11134), (0x11146, 0x11146)],
+        feature: None,
     },
     Style {
         name: "cans_dflt",
@@ -647,6 +655,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "cari_dflt",
@@ -665,6 +674,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "cher_dflt",
@@ -703,6 +713,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "copt_dflt",
@@ -731,6 +742,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0x2CEF, 0x2CF1)],
+        feature: None,
     },
     Style {
         name: "cprt_dflt",
@@ -759,6 +771,313 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
+    },
+    Style {
+        name: "cyrl_c2cp",
+        script: 13,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_TOP
+            Blue {
+                chars: "Б В Е П З О С Э",
+                props: 1,
+            },
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_BOTTOM
+            Blue {
+                chars: "Б В Е Ш З О С Э",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 9,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL_DESCENDER
+            Blue {
+                chars: "р у ф",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"c2cp"),
+    },
+    Style {
+        name: "cyrl_c2sc",
+        script: 13,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_TOP
+            Blue {
+                chars: "Б В Е П З О С Э",
+                props: 1,
+            },
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_BOTTOM
+            Blue {
+                chars: "Б В Е Ш З О С Э",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 9,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL_DESCENDER
+            Blue {
+                chars: "р у ф",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"c2sc"),
+    },
+    Style {
+        name: "cyrl_ordn",
+        script: 13,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_TOP
+            Blue {
+                chars: "Б В Е П З О С Э",
+                props: 1,
+            },
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_BOTTOM
+            Blue {
+                chars: "Б В Е Ш З О С Э",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 9,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL_DESCENDER
+            Blue {
+                chars: "р у ф",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"ordn"),
+    },
+    Style {
+        name: "cyrl_pcap",
+        script: 13,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_TOP
+            Blue {
+                chars: "Б В Е П З О С Э",
+                props: 1,
+            },
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_BOTTOM
+            Blue {
+                chars: "Б В Е Ш З О С Э",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 9,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL_DESCENDER
+            Blue {
+                chars: "р у ф",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"pcap"),
+    },
+    Style {
+        name: "cyrl_sinf",
+        script: 13,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_TOP
+            Blue {
+                chars: "Б В Е П З О С Э",
+                props: 1,
+            },
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_BOTTOM
+            Blue {
+                chars: "Б В Е Ш З О С Э",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 9,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL_DESCENDER
+            Blue {
+                chars: "р у ф",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"sinf"),
+    },
+    Style {
+        name: "cyrl_smcp",
+        script: 13,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_TOP
+            Blue {
+                chars: "Б В Е П З О С Э",
+                props: 1,
+            },
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_BOTTOM
+            Blue {
+                chars: "Б В Е Ш З О С Э",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 9,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL_DESCENDER
+            Blue {
+                chars: "р у ф",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"smcp"),
+    },
+    Style {
+        name: "cyrl_subs",
+        script: 13,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_TOP
+            Blue {
+                chars: "Б В Е П З О С Э",
+                props: 1,
+            },
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_BOTTOM
+            Blue {
+                chars: "Б В Е Ш З О С Э",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 9,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL_DESCENDER
+            Blue {
+                chars: "р у ф",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"subs"),
+    },
+    Style {
+        name: "cyrl_sups",
+        script: 13,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_TOP
+            Blue {
+                chars: "Б В Е П З О С Э",
+                props: 1,
+            },
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_BOTTOM
+            Blue {
+                chars: "Б В Е Ш З О С Э",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 9,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL_DESCENDER
+            Blue {
+                chars: "р у ф",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"sups"),
+    },
+    Style {
+        name: "cyrl_titl",
+        script: 13,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_TOP
+            Blue {
+                chars: "Б В Е П З О С Э",
+                props: 1,
+            },
+            // AF_BLUE_STRING_CYRILLIC_CAPITAL_BOTTOM
+            Blue {
+                chars: "Б В Е Ш З О С Э",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 9,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL
+            Blue {
+                chars: "х п н ш е з о с",
+                props: 0,
+            },
+            // AF_BLUE_STRING_CYRILLIC_SMALL_DESCENDER
+            Blue {
+                chars: "р у ф",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"titl"),
     },
     Style {
         name: "cyrl_dflt",
@@ -797,6 +1116,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0xA66F, 0xA67F),
             (0xA69E, 0xA69F),
         ],
+        feature: None,
     },
     Style {
         name: "deva_dflt",
@@ -839,6 +1159,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0xA8E0, 0xA8F1),
             (0xA8FF, 0xA8FF),
         ],
+        feature: None,
     },
     Style {
         name: "dsrt_dflt",
@@ -867,6 +1188,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "ethi_dflt",
@@ -885,6 +1207,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0x135D, 0x135F)],
+        feature: None,
     },
     Style {
         name: "geor_dflt",
@@ -923,6 +1246,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "geok_dflt",
@@ -961,6 +1285,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "glag_dflt",
@@ -989,6 +1314,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0x1E000, 0x1E02F)],
+        feature: None,
     },
     Style {
         name: "goth_dflt",
@@ -1007,6 +1333,358 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
+    },
+    Style {
+        name: "grek_c2cp",
+        script: 21,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_GREEK_CAPITAL_TOP
+            Blue {
+                chars: "Γ Β Ε Ζ Θ Ο Ω",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_CAPITAL_BOTTOM
+            Blue {
+                chars: "Β Δ Ζ Ξ Θ Ο",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_BETA_TOP
+            Blue {
+                chars: "β θ δ ζ λ ξ",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 9,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_DESCENDER
+            Blue {
+                chars: "β γ η μ ρ φ χ ψ",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"c2cp"),
+    },
+    Style {
+        name: "grek_c2sc",
+        script: 21,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_GREEK_CAPITAL_TOP
+            Blue {
+                chars: "Γ Β Ε Ζ Θ Ο Ω",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_CAPITAL_BOTTOM
+            Blue {
+                chars: "Β Δ Ζ Ξ Θ Ο",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_BETA_TOP
+            Blue {
+                chars: "β θ δ ζ λ ξ",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 9,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_DESCENDER
+            Blue {
+                chars: "β γ η μ ρ φ χ ψ",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"c2sc"),
+    },
+    Style {
+        name: "grek_ordn",
+        script: 21,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_GREEK_CAPITAL_TOP
+            Blue {
+                chars: "Γ Β Ε Ζ Θ Ο Ω",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_CAPITAL_BOTTOM
+            Blue {
+                chars: "Β Δ Ζ Ξ Θ Ο",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_BETA_TOP
+            Blue {
+                chars: "β θ δ ζ λ ξ",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 9,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_DESCENDER
+            Blue {
+                chars: "β γ η μ ρ φ χ ψ",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"ordn"),
+    },
+    Style {
+        name: "grek_pcap",
+        script: 21,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_GREEK_CAPITAL_TOP
+            Blue {
+                chars: "Γ Β Ε Ζ Θ Ο Ω",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_CAPITAL_BOTTOM
+            Blue {
+                chars: "Β Δ Ζ Ξ Θ Ο",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_BETA_TOP
+            Blue {
+                chars: "β θ δ ζ λ ξ",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 9,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_DESCENDER
+            Blue {
+                chars: "β γ η μ ρ φ χ ψ",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"pcap"),
+    },
+    Style {
+        name: "grek_sinf",
+        script: 21,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_GREEK_CAPITAL_TOP
+            Blue {
+                chars: "Γ Β Ε Ζ Θ Ο Ω",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_CAPITAL_BOTTOM
+            Blue {
+                chars: "Β Δ Ζ Ξ Θ Ο",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_BETA_TOP
+            Blue {
+                chars: "β θ δ ζ λ ξ",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 9,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_DESCENDER
+            Blue {
+                chars: "β γ η μ ρ φ χ ψ",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"sinf"),
+    },
+    Style {
+        name: "grek_smcp",
+        script: 21,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_GREEK_CAPITAL_TOP
+            Blue {
+                chars: "Γ Β Ε Ζ Θ Ο Ω",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_CAPITAL_BOTTOM
+            Blue {
+                chars: "Β Δ Ζ Ξ Θ Ο",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_BETA_TOP
+            Blue {
+                chars: "β θ δ ζ λ ξ",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 9,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_DESCENDER
+            Blue {
+                chars: "β γ η μ ρ φ χ ψ",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"smcp"),
+    },
+    Style {
+        name: "grek_subs",
+        script: 21,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_GREEK_CAPITAL_TOP
+            Blue {
+                chars: "Γ Β Ε Ζ Θ Ο Ω",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_CAPITAL_BOTTOM
+            Blue {
+                chars: "Β Δ Ζ Ξ Θ Ο",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_BETA_TOP
+            Blue {
+                chars: "β θ δ ζ λ ξ",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 9,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_DESCENDER
+            Blue {
+                chars: "β γ η μ ρ φ χ ψ",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"subs"),
+    },
+    Style {
+        name: "grek_sups",
+        script: 21,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_GREEK_CAPITAL_TOP
+            Blue {
+                chars: "Γ Β Ε Ζ Θ Ο Ω",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_CAPITAL_BOTTOM
+            Blue {
+                chars: "Β Δ Ζ Ξ Θ Ο",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_BETA_TOP
+            Blue {
+                chars: "β θ δ ζ λ ξ",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 9,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_DESCENDER
+            Blue {
+                chars: "β γ η μ ρ φ χ ψ",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"sups"),
+    },
+    Style {
+        name: "grek_titl",
+        script: 21,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_GREEK_CAPITAL_TOP
+            Blue {
+                chars: "Γ Β Ε Ζ Θ Ο Ω",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_CAPITAL_BOTTOM
+            Blue {
+                chars: "Β Δ Ζ Ξ Θ Ο",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_BETA_TOP
+            Blue {
+                chars: "β θ δ ζ λ ξ",
+                props: 1,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 9,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL
+            Blue {
+                chars: "α ε ι ο π σ τ ω",
+                props: 0,
+            },
+            // AF_BLUE_STRING_GREEK_SMALL_DESCENDER
+            Blue {
+                chars: "β γ η μ ρ φ χ ψ",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"titl"),
     },
     Style {
         name: "grek_dflt",
@@ -1053,6 +1731,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0x1FED, 0x1FEF),
             (0x1FFD, 0x1FFE),
         ],
+        feature: None,
     },
     Style {
         name: "gujr_dflt",
@@ -1093,6 +1772,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0x0AE2, 0x0AE3),
             (0x0AFA, 0x0AFF),
         ],
+        feature: None,
     },
     Style {
         name: "guru_dflt",
@@ -1132,6 +1812,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0x0A70, 0x0A71),
             (0x0A75, 0x0A75),
         ],
+        feature: None,
     },
     Style {
         name: "hebr_dflt",
@@ -1161,6 +1842,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0x05C7, 0x05C7),
             (0xFB1E, 0xFB1E),
         ],
+        feature: None,
     },
     Style {
         name: "kali_dflt",
@@ -1194,6 +1876,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0xA926, 0xA92D)],
+        feature: None,
     },
     Style {
         name: "khmr_dflt",
@@ -1232,6 +1915,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0x17C9, 0x17D3),
             (0x17DD, 0x17DD),
         ],
+        feature: None,
     },
     Style {
         name: "khms_dflt",
@@ -1250,6 +1934,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "knda_dflt",
@@ -1275,6 +1960,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0x0CCC, 0x0CCD),
             (0x0CE2, 0x0CE3),
         ],
+        feature: None,
     },
     Style {
         name: "lao_dflt",
@@ -1308,6 +1994,358 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0x0EB1, 0x0EB1), (0x0EB4, 0x0EBC), (0x0EC8, 0x0ECD)],
+        feature: None,
+    },
+    Style {
+        name: "latn_c2cp",
+        script: 30,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_LATIN_CAPITAL_TOP
+            Blue {
+                chars: "T H E Z O C Q S",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_CAPITAL_BOTTOM
+            Blue {
+                chars: "H E Z L O C U S",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_F_TOP
+            Blue {
+                chars: "f i j k d b h",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_TOP
+            Blue {
+                chars: "u v x z o e s c",
+                props: 9,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_BOTTOM
+            Blue {
+                chars: "n r x z o e s c",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_DESCENDER
+            Blue {
+                chars: "p q g j y",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"c2cp"),
+    },
+    Style {
+        name: "latn_c2sc",
+        script: 30,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_LATIN_CAPITAL_TOP
+            Blue {
+                chars: "T H E Z O C Q S",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_CAPITAL_BOTTOM
+            Blue {
+                chars: "H E Z L O C U S",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_F_TOP
+            Blue {
+                chars: "f i j k d b h",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_TOP
+            Blue {
+                chars: "u v x z o e s c",
+                props: 9,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_BOTTOM
+            Blue {
+                chars: "n r x z o e s c",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_DESCENDER
+            Blue {
+                chars: "p q g j y",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"c2sc"),
+    },
+    Style {
+        name: "latn_ordn",
+        script: 30,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_LATIN_CAPITAL_TOP
+            Blue {
+                chars: "T H E Z O C Q S",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_CAPITAL_BOTTOM
+            Blue {
+                chars: "H E Z L O C U S",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_F_TOP
+            Blue {
+                chars: "f i j k d b h",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_TOP
+            Blue {
+                chars: "u v x z o e s c",
+                props: 9,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_BOTTOM
+            Blue {
+                chars: "n r x z o e s c",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_DESCENDER
+            Blue {
+                chars: "p q g j y",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"ordn"),
+    },
+    Style {
+        name: "latn_pcap",
+        script: 30,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_LATIN_CAPITAL_TOP
+            Blue {
+                chars: "T H E Z O C Q S",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_CAPITAL_BOTTOM
+            Blue {
+                chars: "H E Z L O C U S",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_F_TOP
+            Blue {
+                chars: "f i j k d b h",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_TOP
+            Blue {
+                chars: "u v x z o e s c",
+                props: 9,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_BOTTOM
+            Blue {
+                chars: "n r x z o e s c",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_DESCENDER
+            Blue {
+                chars: "p q g j y",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"pcap"),
+    },
+    Style {
+        name: "latn_sinf",
+        script: 30,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_LATIN_CAPITAL_TOP
+            Blue {
+                chars: "T H E Z O C Q S",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_CAPITAL_BOTTOM
+            Blue {
+                chars: "H E Z L O C U S",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_F_TOP
+            Blue {
+                chars: "f i j k d b h",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_TOP
+            Blue {
+                chars: "u v x z o e s c",
+                props: 9,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_BOTTOM
+            Blue {
+                chars: "n r x z o e s c",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_DESCENDER
+            Blue {
+                chars: "p q g j y",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"sinf"),
+    },
+    Style {
+        name: "latn_smcp",
+        script: 30,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_LATIN_CAPITAL_TOP
+            Blue {
+                chars: "T H E Z O C Q S",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_CAPITAL_BOTTOM
+            Blue {
+                chars: "H E Z L O C U S",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_F_TOP
+            Blue {
+                chars: "f i j k d b h",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_TOP
+            Blue {
+                chars: "u v x z o e s c",
+                props: 9,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_BOTTOM
+            Blue {
+                chars: "n r x z o e s c",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_DESCENDER
+            Blue {
+                chars: "p q g j y",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"smcp"),
+    },
+    Style {
+        name: "latn_subs",
+        script: 30,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_LATIN_CAPITAL_TOP
+            Blue {
+                chars: "T H E Z O C Q S",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_CAPITAL_BOTTOM
+            Blue {
+                chars: "H E Z L O C U S",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_F_TOP
+            Blue {
+                chars: "f i j k d b h",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_TOP
+            Blue {
+                chars: "u v x z o e s c",
+                props: 9,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_BOTTOM
+            Blue {
+                chars: "n r x z o e s c",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_DESCENDER
+            Blue {
+                chars: "p q g j y",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"subs"),
+    },
+    Style {
+        name: "latn_sups",
+        script: 30,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_LATIN_CAPITAL_TOP
+            Blue {
+                chars: "T H E Z O C Q S",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_CAPITAL_BOTTOM
+            Blue {
+                chars: "H E Z L O C U S",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_F_TOP
+            Blue {
+                chars: "f i j k d b h",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_TOP
+            Blue {
+                chars: "u v x z o e s c",
+                props: 9,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_BOTTOM
+            Blue {
+                chars: "n r x z o e s c",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_DESCENDER
+            Blue {
+                chars: "p q g j y",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"sups"),
+    },
+    Style {
+        name: "latn_titl",
+        script: 30,
+        system: System::Latin,
+        blues: &[
+            // AF_BLUE_STRING_LATIN_CAPITAL_TOP
+            Blue {
+                chars: "T H E Z O C Q S",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_CAPITAL_BOTTOM
+            Blue {
+                chars: "H E Z L O C U S",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_F_TOP
+            Blue {
+                chars: "f i j k d b h",
+                props: 1,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_TOP
+            Blue {
+                chars: "u v x z o e s c",
+                props: 9,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_BOTTOM
+            Blue {
+                chars: "n r x z o e s c",
+                props: 0,
+            },
+            // AF_BLUE_STRING_LATIN_SMALL_DESCENDER
+            Blue {
+                chars: "p q g j y",
+                props: 0,
+            },
+        ],
+        nonbase: &[],
+        feature: Some(*b"titl"),
     },
     Style {
         name: "latn_dflt",
@@ -1363,6 +2401,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0xA788, 0xA788),
             (0xA7F8, 0xA7FA),
         ],
+        feature: None,
     },
     Style {
         name: "latb_dflt",
@@ -1401,6 +2440,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "latp_dflt",
@@ -1439,6 +2479,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "lisu_dflt",
@@ -1457,6 +2498,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "mlym_dflt",
@@ -1480,6 +2522,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0x0D4D, 0x0D4E),
             (0x0D62, 0x0D63),
         ],
+        feature: None,
     },
     Style {
         name: "medf_dflt",
@@ -1523,6 +2566,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "mong_dflt",
@@ -1541,6 +2585,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0x1885, 0x1886), (0x18A9, 0x18A9)],
+        feature: None,
     },
     Style {
         name: "mymr_dflt",
@@ -1582,6 +2627,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0xA9E5, 0xA9E5),
             (0xAA7C, 0xAA7C),
         ],
+        feature: None,
     },
     Style {
         name: "nkoo_dflt",
@@ -1610,6 +2656,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0x07EB, 0x07F5), (0x07FD, 0x07FD)],
+        feature: None,
     },
     Style {
         name: "none_dflt",
@@ -1617,6 +2664,7 @@ pub(super) static STYLES: [Style; 60] = [
         system: System::Dummy,
         blues: &[],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "olck_dflt",
@@ -1635,6 +2683,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "orkh_dflt",
@@ -1653,6 +2702,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "osge_dflt",
@@ -1696,6 +2746,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "osma_dflt",
@@ -1714,6 +2765,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "rohg_dflt",
@@ -1737,6 +2789,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "saur_dflt",
@@ -1755,6 +2808,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0xA880, 0xA881), (0xA8B4, 0xA8C5)],
+        feature: None,
     },
     Style {
         name: "shaw_dflt",
@@ -1788,6 +2842,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "sinh_dflt",
@@ -1811,6 +2866,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0x0DCA, 0x0DCA), (0x0DD2, 0x0DD6)],
+        feature: None,
     },
     Style {
         name: "sund_dflt",
@@ -1834,6 +2890,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0x1B80, 0x1B82), (0x1BA1, 0x1BAD)],
+        feature: None,
     },
     Style {
         name: "taml_dflt",
@@ -1852,6 +2909,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0x0B82, 0x0B82), (0x0BC0, 0x0BC2), (0x0BCD, 0x0BCD)],
+        feature: None,
     },
     Style {
         name: "tavt_dflt",
@@ -1876,6 +2934,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0xAABE, 0xAABF),
             (0xAAC1, 0xAAC1),
         ],
+        feature: None,
     },
     Style {
         name: "telu_dflt",
@@ -1900,6 +2959,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0x0C46, 0x0C56),
             (0x0C62, 0x0C63),
         ],
+        feature: None,
     },
     Style {
         name: "tfng_dflt",
@@ -1918,6 +2978,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "thai_dflt",
@@ -1961,6 +3022,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0x0E31, 0x0E31), (0x0E34, 0x0E3A), (0x0E47, 0x0E4E)],
+        feature: None,
     },
     Style {
         name: "vaii_dflt",
@@ -1979,6 +3041,7 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[],
+        feature: None,
     },
     Style {
         name: "limb_dflt",
@@ -1986,6 +3049,7 @@ pub(super) static STYLES: [Style; 60] = [
         system: System::Indic,
         blues: &[],
         nonbase: &[(0x1920, 0x1922), (0x1927, 0x1934), (0x1937, 0x193B)],
+        feature: None,
     },
     Style {
         name: "orya_dflt",
@@ -2000,6 +3064,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0x0B4D, 0x0B56),
             (0x0B62, 0x0B63),
         ],
+        feature: None,
     },
     Style {
         name: "sylo_dflt",
@@ -2012,6 +3077,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0xA80B, 0xA80B),
             (0xA825, 0xA826),
         ],
+        feature: None,
     },
     Style {
         name: "tibt_dflt",
@@ -2029,6 +3095,7 @@ pub(super) static STYLES: [Style; 60] = [
             (0x0F86, 0x0F87),
             (0x0F8D, 0x0FBC),
         ],
+        feature: None,
     },
     Style {
         name: "hani_dflt",
@@ -2047,148 +3114,149 @@ pub(super) static STYLES: [Style; 60] = [
             },
         ],
         nonbase: &[(0x302A, 0x302F), (0x3190, 0x319F)],
+        feature: None,
     },
 ];
 
 /// Code points to styles: sorted, disjoint `(first, last, style)`
 /// ranges, resolved first-come-first-served in style order.
 pub(super) static RANGES: [(u32, u32, u8); 138] = [
-    (0x0020, 0x007F, 30),   // latn_dflt
-    (0x00A0, 0x00A9, 30),   // latn_dflt
-    (0x00AA, 0x00AA, 32),   // latp_dflt
-    (0x00AB, 0x00B1, 30),   // latn_dflt
-    (0x00B2, 0x00B3, 32),   // latp_dflt
-    (0x00B4, 0x00B8, 30),   // latn_dflt
-    (0x00B9, 0x00BA, 32),   // latp_dflt
-    (0x00BB, 0x02AF, 30),   // latn_dflt
-    (0x02B0, 0x02B8, 32),   // latp_dflt
-    (0x02B9, 0x02DF, 30),   // latn_dflt
-    (0x02E0, 0x02E4, 32),   // latp_dflt
-    (0x02E5, 0x036F, 30),   // latn_dflt
-    (0x0370, 0x03FF, 21),   // grek_dflt
-    (0x0400, 0x052F, 13),   // cyrl_dflt
+    (0x0020, 0x007F, 57),   // latn_dflt
+    (0x00A0, 0x00A9, 57),   // latn_dflt
+    (0x00AA, 0x00AA, 59),   // latp_dflt
+    (0x00AB, 0x00B1, 57),   // latn_dflt
+    (0x00B2, 0x00B3, 59),   // latp_dflt
+    (0x00B4, 0x00B8, 57),   // latn_dflt
+    (0x00B9, 0x00BA, 59),   // latp_dflt
+    (0x00BB, 0x02AF, 57),   // latn_dflt
+    (0x02B0, 0x02B8, 59),   // latp_dflt
+    (0x02B9, 0x02DF, 57),   // latn_dflt
+    (0x02E0, 0x02E4, 59),   // latp_dflt
+    (0x02E5, 0x036F, 57),   // latn_dflt
+    (0x0370, 0x03FF, 39),   // grek_dflt
+    (0x0400, 0x052F, 22),   // cyrl_dflt
     (0x0530, 0x058F, 2),    // armn_dflt
-    (0x0590, 0x05FF, 24),   // hebr_dflt
+    (0x0590, 0x05FF, 42),   // hebr_dflt
     (0x0600, 0x06FF, 1),    // arab_dflt
     (0x0750, 0x07FF, 1),    // arab_dflt
     (0x08A0, 0x08FF, 1),    // arab_dflt
-    (0x0900, 0x093B, 14),   // deva_dflt
-    (0x093D, 0x0950, 14),   // deva_dflt
-    (0x0953, 0x0963, 14),   // deva_dflt
-    (0x0966, 0x097F, 14),   // deva_dflt
+    (0x0900, 0x093B, 23),   // deva_dflt
+    (0x093D, 0x0950, 23),   // deva_dflt
+    (0x0953, 0x0963, 23),   // deva_dflt
+    (0x0966, 0x097F, 23),   // deva_dflt
     (0x0980, 0x09FF, 5),    // beng_dflt
-    (0x0A00, 0x0A7F, 23),   // guru_dflt
-    (0x0A80, 0x0AFF, 22),   // gujr_dflt
-    (0x0B00, 0x0B7F, 56),   // orya_dflt
-    (0x0B80, 0x0BFF, 49),   // taml_dflt
-    (0x0C00, 0x0C7F, 51),   // telu_dflt
-    (0x0C80, 0x0CFF, 28),   // knda_dflt
-    (0x0D00, 0x0D7F, 34),   // mlym_dflt
-    (0x0D80, 0x0DFF, 47),   // sinh_dflt
-    (0x0E00, 0x0E7F, 53),   // thai_dflt
-    (0x0E80, 0x0EFF, 29),   // lao_dflt
-    (0x0F00, 0x0FFF, 58),   // tibt_dflt
-    (0x1000, 0x109F, 37),   // mymr_dflt
-    (0x10A0, 0x10CD, 18),   // geok_dflt
-    (0x10D0, 0x10FF, 17),   // geor_dflt
-    (0x1100, 0x11FF, 59),   // hani_dflt
-    (0x1200, 0x139F, 16),   // ethi_dflt
+    (0x0A00, 0x0A7F, 41),   // guru_dflt
+    (0x0A80, 0x0AFF, 40),   // gujr_dflt
+    (0x0B00, 0x0B7F, 83),   // orya_dflt
+    (0x0B80, 0x0BFF, 76),   // taml_dflt
+    (0x0C00, 0x0C7F, 78),   // telu_dflt
+    (0x0C80, 0x0CFF, 46),   // knda_dflt
+    (0x0D00, 0x0D7F, 61),   // mlym_dflt
+    (0x0D80, 0x0DFF, 74),   // sinh_dflt
+    (0x0E00, 0x0E7F, 80),   // thai_dflt
+    (0x0E80, 0x0EFF, 47),   // lao_dflt
+    (0x0F00, 0x0FFF, 85),   // tibt_dflt
+    (0x1000, 0x109F, 64),   // mymr_dflt
+    (0x10A0, 0x10CD, 27),   // geok_dflt
+    (0x10D0, 0x10FF, 26),   // geor_dflt
+    (0x1100, 0x11FF, 86),   // hani_dflt
+    (0x1200, 0x139F, 25),   // ethi_dflt
     (0x13A0, 0x13FF, 10),   // cher_dflt
     (0x1400, 0x167F, 8),    // cans_dflt
     (0x1740, 0x175F, 6),    // buhd_dflt
-    (0x1780, 0x17FF, 26),   // khmr_dflt
-    (0x1800, 0x18AF, 36),   // mong_dflt
+    (0x1780, 0x17FF, 44),   // khmr_dflt
+    (0x1800, 0x18AF, 63),   // mong_dflt
     (0x18B0, 0x18FF, 8),    // cans_dflt
-    (0x1900, 0x194F, 55),   // limb_dflt
-    (0x19E0, 0x19FF, 27),   // khms_dflt
-    (0x1AB0, 0x1ABE, 30),   // latn_dflt
-    (0x1B80, 0x1BBF, 48),   // sund_dflt
-    (0x1C50, 0x1C7F, 40),   // olck_dflt
-    (0x1C80, 0x1C8F, 13),   // cyrl_dflt
-    (0x1C90, 0x1CBF, 17),   // geor_dflt
-    (0x1CC0, 0x1CCF, 48),   // sund_dflt
-    (0x1D00, 0x1D2B, 30),   // latn_dflt
-    (0x1D2C, 0x1D61, 32),   // latp_dflt
-    (0x1D62, 0x1D6A, 31),   // latb_dflt
-    (0x1D6B, 0x1D77, 30),   // latn_dflt
-    (0x1D78, 0x1D78, 32),   // latp_dflt
-    (0x1D79, 0x1D9A, 30),   // latn_dflt
-    (0x1D9B, 0x1DBF, 32),   // latp_dflt
-    (0x1DC0, 0x1EFF, 30),   // latn_dflt
-    (0x1F00, 0x1FFF, 21),   // grek_dflt
-    (0x2000, 0x206F, 30),   // latn_dflt
-    (0x2070, 0x207F, 32),   // latp_dflt
-    (0x2080, 0x209C, 31),   // latb_dflt
-    (0x20A0, 0x20B8, 30),   // latn_dflt
-    (0x20B9, 0x20B9, 14),   // deva_dflt
-    (0x20BA, 0x20CF, 30),   // latn_dflt
-    (0x2150, 0x218F, 30),   // latn_dflt
-    (0x2C00, 0x2C5F, 19),   // glag_dflt
-    (0x2C60, 0x2C7B, 30),   // latn_dflt
-    (0x2C7C, 0x2C7C, 31),   // latb_dflt
-    (0x2C7D, 0x2C7D, 32),   // latp_dflt
-    (0x2C7E, 0x2C7F, 30),   // latn_dflt
+    (0x1900, 0x194F, 82),   // limb_dflt
+    (0x19E0, 0x19FF, 45),   // khms_dflt
+    (0x1AB0, 0x1ABE, 57),   // latn_dflt
+    (0x1B80, 0x1BBF, 75),   // sund_dflt
+    (0x1C50, 0x1C7F, 67),   // olck_dflt
+    (0x1C80, 0x1C8F, 22),   // cyrl_dflt
+    (0x1C90, 0x1CBF, 26),   // geor_dflt
+    (0x1CC0, 0x1CCF, 75),   // sund_dflt
+    (0x1D00, 0x1D2B, 57),   // latn_dflt
+    (0x1D2C, 0x1D61, 59),   // latp_dflt
+    (0x1D62, 0x1D6A, 58),   // latb_dflt
+    (0x1D6B, 0x1D77, 57),   // latn_dflt
+    (0x1D78, 0x1D78, 59),   // latp_dflt
+    (0x1D79, 0x1D9A, 57),   // latn_dflt
+    (0x1D9B, 0x1DBF, 59),   // latp_dflt
+    (0x1DC0, 0x1EFF, 57),   // latn_dflt
+    (0x1F00, 0x1FFF, 39),   // grek_dflt
+    (0x2000, 0x206F, 57),   // latn_dflt
+    (0x2070, 0x207F, 59),   // latp_dflt
+    (0x2080, 0x209C, 58),   // latb_dflt
+    (0x20A0, 0x20B8, 57),   // latn_dflt
+    (0x20B9, 0x20B9, 23),   // deva_dflt
+    (0x20BA, 0x20CF, 57),   // latn_dflt
+    (0x2150, 0x218F, 57),   // latn_dflt
+    (0x2C00, 0x2C5F, 28),   // glag_dflt
+    (0x2C60, 0x2C7B, 57),   // latn_dflt
+    (0x2C7C, 0x2C7C, 58),   // latb_dflt
+    (0x2C7D, 0x2C7D, 59),   // latp_dflt
+    (0x2C7E, 0x2C7F, 57),   // latn_dflt
     (0x2C80, 0x2CFF, 11),   // copt_dflt
-    (0x2D00, 0x2D2D, 18),   // geok_dflt
-    (0x2D30, 0x2D7F, 52),   // tfng_dflt
-    (0x2D80, 0x2DDF, 16),   // ethi_dflt
-    (0x2DE0, 0x2DFF, 13),   // cyrl_dflt
-    (0x2E00, 0x2E7F, 30),   // latn_dflt
-    (0x2E80, 0x2FDF, 59),   // hani_dflt
-    (0x2FF0, 0x31FF, 59),   // hani_dflt
-    (0x3300, 0x9FFF, 59),   // hani_dflt
-    (0xA4D0, 0xA4FF, 33),   // lisu_dflt
-    (0xA500, 0xA63F, 54),   // vaii_dflt
-    (0xA640, 0xA69F, 13),   // cyrl_dflt
+    (0x2D00, 0x2D2D, 27),   // geok_dflt
+    (0x2D30, 0x2D7F, 79),   // tfng_dflt
+    (0x2D80, 0x2DDF, 25),   // ethi_dflt
+    (0x2DE0, 0x2DFF, 22),   // cyrl_dflt
+    (0x2E00, 0x2E7F, 57),   // latn_dflt
+    (0x2E80, 0x2FDF, 86),   // hani_dflt
+    (0x2FF0, 0x31FF, 86),   // hani_dflt
+    (0x3300, 0x9FFF, 86),   // hani_dflt
+    (0xA4D0, 0xA4FF, 60),   // lisu_dflt
+    (0xA500, 0xA63F, 81),   // vaii_dflt
+    (0xA640, 0xA69F, 22),   // cyrl_dflt
     (0xA6A0, 0xA6FF, 4),    // bamu_dflt
-    (0xA720, 0xA76F, 30),   // latn_dflt
-    (0xA770, 0xA770, 32),   // latp_dflt
-    (0xA771, 0xA7F7, 30),   // latn_dflt
-    (0xA7F8, 0xA7F9, 32),   // latp_dflt
-    (0xA7FA, 0xA7FF, 30),   // latn_dflt
-    (0xA800, 0xA82F, 57),   // sylo_dflt
-    (0xA880, 0xA8DF, 45),   // saur_dflt
-    (0xA8E0, 0xA8FF, 14),   // deva_dflt
-    (0xA900, 0xA92F, 25),   // kali_dflt
-    (0xA960, 0xA97F, 59),   // hani_dflt
-    (0xA9E0, 0xA9FF, 37),   // mymr_dflt
-    (0xAA60, 0xAA7F, 37),   // mymr_dflt
-    (0xAA80, 0xAADF, 50),   // tavt_dflt
-    (0xAB00, 0xAB2F, 16),   // ethi_dflt
-    (0xAB30, 0xAB5B, 30),   // latn_dflt
-    (0xAB5C, 0xAB5F, 32),   // latp_dflt
-    (0xAB60, 0xAB6F, 30),   // latn_dflt
+    (0xA720, 0xA76F, 57),   // latn_dflt
+    (0xA770, 0xA770, 59),   // latp_dflt
+    (0xA771, 0xA7F7, 57),   // latn_dflt
+    (0xA7F8, 0xA7F9, 59),   // latp_dflt
+    (0xA7FA, 0xA7FF, 57),   // latn_dflt
+    (0xA800, 0xA82F, 84),   // sylo_dflt
+    (0xA880, 0xA8DF, 72),   // saur_dflt
+    (0xA8E0, 0xA8FF, 23),   // deva_dflt
+    (0xA900, 0xA92F, 43),   // kali_dflt
+    (0xA960, 0xA97F, 86),   // hani_dflt
+    (0xA9E0, 0xA9FF, 64),   // mymr_dflt
+    (0xAA60, 0xAA7F, 64),   // mymr_dflt
+    (0xAA80, 0xAADF, 77),   // tavt_dflt
+    (0xAB00, 0xAB2F, 25),   // ethi_dflt
+    (0xAB30, 0xAB5B, 57),   // latn_dflt
+    (0xAB5C, 0xAB5F, 59),   // latp_dflt
+    (0xAB60, 0xAB6F, 57),   // latn_dflt
     (0xAB70, 0xABBF, 10),   // cher_dflt
-    (0xAC00, 0xD7FF, 59),   // hani_dflt
-    (0xF900, 0xFAFF, 59),   // hani_dflt
-    (0xFB00, 0xFB06, 30),   // latn_dflt
+    (0xAC00, 0xD7FF, 86),   // hani_dflt
+    (0xF900, 0xFAFF, 86),   // hani_dflt
+    (0xFB00, 0xFB06, 57),   // latn_dflt
     (0xFB13, 0xFB17, 2),    // armn_dflt
-    (0xFB1D, 0xFB4F, 24),   // hebr_dflt
+    (0xFB1D, 0xFB4F, 42),   // hebr_dflt
     (0xFB50, 0xFDFF, 1),    // arab_dflt
-    (0xFE10, 0xFE1F, 59),   // hani_dflt
-    (0xFE30, 0xFE4F, 59),   // hani_dflt
+    (0xFE10, 0xFE1F, 86),   // hani_dflt
+    (0xFE30, 0xFE4F, 86),   // hani_dflt
     (0xFE70, 0xFEFF, 1),    // arab_dflt
-    (0xFF00, 0xFFEF, 59),   // hani_dflt
+    (0xFF00, 0xFFEF, 86),   // hani_dflt
     (0x102A0, 0x102DF, 9),  // cari_dflt
-    (0x10330, 0x1034F, 20), // goth_dflt
-    (0x10400, 0x1044F, 15), // dsrt_dflt
-    (0x10450, 0x1047F, 46), // shaw_dflt
-    (0x10480, 0x104AF, 43), // osma_dflt
-    (0x104B0, 0x104FF, 42), // osge_dflt
+    (0x10330, 0x1034F, 29), // goth_dflt
+    (0x10400, 0x1044F, 24), // dsrt_dflt
+    (0x10450, 0x1047F, 73), // shaw_dflt
+    (0x10480, 0x104AF, 70), // osma_dflt
+    (0x104B0, 0x104FF, 69), // osge_dflt
     (0x10800, 0x1083F, 12), // cprt_dflt
     (0x10B00, 0x10B3F, 3),  // avst_dflt
-    (0x10C00, 0x10C4F, 41), // orkh_dflt
-    (0x10D00, 0x10D3F, 44), // rohg_dflt
+    (0x10C00, 0x10C4F, 68), // orkh_dflt
+    (0x10D00, 0x10D3F, 71), // rohg_dflt
     (0x11100, 0x1114F, 7),  // cakm_dflt
-    (0x11660, 0x1167F, 36), // mong_dflt
-    (0x16E40, 0x16E9F, 35), // medf_dflt
-    (0x1B000, 0x1B12F, 59), // hani_dflt
-    (0x1D300, 0x1D35F, 59), // hani_dflt
-    (0x1D400, 0x1D7FF, 30), // latn_dflt
-    (0x1E000, 0x1E02F, 19), // glag_dflt
+    (0x11660, 0x1167F, 63), // mong_dflt
+    (0x16E40, 0x16E9F, 62), // medf_dflt
+    (0x1B000, 0x1B12F, 86), // hani_dflt
+    (0x1D300, 0x1D35F, 86), // hani_dflt
+    (0x1D400, 0x1D7FF, 57), // latn_dflt
+    (0x1E000, 0x1E02F, 28), // glag_dflt
     (0x1E900, 0x1E95F, 0),  // adlm_dflt
     (0x1EE00, 0x1EEFF, 1),  // arab_dflt
-    (0x20000, 0x2A6DF, 59), // hani_dflt
-    (0x2A700, 0x2EBEF, 59), // hani_dflt
-    (0x2F800, 0x2FA1F, 59), // hani_dflt
+    (0x20000, 0x2A6DF, 86), // hani_dflt
+    (0x2A700, 0x2EBEF, 86), // hani_dflt
+    (0x2F800, 0x2FA1F, 86), // hani_dflt
 ];

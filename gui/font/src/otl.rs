@@ -745,15 +745,29 @@ pub(crate) fn chosen_from(names: &[[u8; 4]], script: Option<ScriptTags>) -> Opti
     fallback_chain(script).find(|want| names.binary_search(want).is_ok())
 }
 
-/// Every lookup that any feature of any language system of `scripts` reaches,
-/// ascending and deduplicated.
+/// The lookups that the features of `scripts` reach, in any of their
+/// language systems: HarfBuzz's `hb_ot_layout_collect_lookups` with every
+/// language, which is how FreeType's auto-hinter asks which lookups belong to
+/// a script. Ascending and deduplicated.
 ///
-/// HarfBuzz's `hb_ot_layout_collect_lookups` with every language and every
-/// feature -- the required feature included -- which is how FreeType's
-/// auto-hinter asks which lookups belong to a script. Not a shaping question,
-/// so none of [`select`]'s fallback applies: a script the table does not name
-/// contributes nothing. Feature variations are not followed.
-pub(crate) fn script_lookups(data: &[u8], base: usize, scripts: &[[u8; 4]]) -> Vec<u16> {
+/// `feature` `None` asks for every feature, each language system's required
+/// one included; `Some(tag)` for the features tagged `tag` only -- and then,
+/// as HarfBuzz has it, not a language system's required feature, however it
+/// is tagged, unless the system also lists it among its features.
+///
+/// A feature's lookups include those of every alternate feature table its
+/// `FeatureVariations` records substitute for it, whatever their conditions:
+/// the question is which lookups the feature can ever run, not which it runs
+/// at one instance.
+///
+/// Not a shaping question, so none of [`select`]'s fallback applies: a
+/// script the table does not name contributes nothing.
+pub(crate) fn collect_lookups(
+    data: &[u8],
+    base: usize,
+    scripts: &[[u8; 4]],
+    feature: Option<[u8; 4]>,
+) -> Vec<u16> {
     let Some(list) = script_list(data, base) else {
         return Vec::new();
     };
@@ -764,6 +778,20 @@ pub(crate) fn script_lookups(data: &[u8], base: usize, scripts: &[[u8; 4]]) -> V
     else {
         return Vec::new();
     };
+    let feature_count = u16_at(data, feature_list).unwrap_or(0);
+    // The FeatureList record for feature `index`: its tag, and where its
+    // table is.
+    let record = |index: u16| -> Option<([u8; 4], usize)> {
+        if index >= feature_count {
+            return None;
+        }
+        let at = usize::from(index)
+            .checked_mul(6)
+            .and_then(|d| feature_list.checked_add(2)?.checked_add(d))?;
+        let tag = <[u8; 4]>::try_from(data.get(at..at.checked_add(4)?)?).ok()?;
+        let table = feature_list.checked_add(usize::from(u16_at(data, at.checked_add(4)?)?))?;
+        Some((tag, table))
+    };
     let mut features: Vec<u16> = Vec::new();
     for tag in scripts {
         let Some(table) = find_script(data, list, tag) else {
@@ -772,50 +800,144 @@ pub(crate) fn script_lookups(data: &[u8], base: usize, scripts: &[[u8; 4]]) -> V
         let default = u16_at(data, table)
             .filter(|&off| off != 0)
             .and_then(|off| table.checked_add(usize::from(off)));
-        features.extend(feature_indices(data, default));
         let count = table
             .checked_add(2)
             .and_then(|o| u16_at(data, o))
             .unwrap_or(0);
-        for i in 0..usize::from(count) {
-            let lang_sys = i
-                .checked_mul(6)
+        let systems = core::iter::once(default).chain((0..usize::from(count)).map(|i| {
+            i.checked_mul(6)
                 .and_then(|d| table.checked_add(4)?.checked_add(d)?.checked_add(4))
                 .and_then(|o| u16_at(data, o))
-                .and_then(|off| table.checked_add(usize::from(off)));
-            features.extend(feature_indices(data, lang_sys));
+                .and_then(|off| table.checked_add(usize::from(off)))
+        }));
+        for system in systems {
+            match feature {
+                None => features.extend(feature_indices(data, system)),
+                Some(want) => features.extend(
+                    listed_features(data, system)
+                        .into_iter()
+                        .filter(|&i| record(i).is_some_and(|(tag, _)| tag == want)),
+                ),
+            }
         }
     }
     features.sort_unstable();
     features.dedup();
-    let feature_count = u16_at(data, feature_list).unwrap_or(0);
     let mut lookups = Vec::new();
-    for index in features.into_iter().filter(|&i| i < feature_count) {
-        let Some(feature) = usize::from(index)
-            .checked_mul(6)
-            .and_then(|d| feature_list.checked_add(2)?.checked_add(d)?.checked_add(4))
-            .and_then(|o| u16_at(data, o))
-            .and_then(|off| feature_list.checked_add(usize::from(off)))
-        else {
-            continue;
-        };
-        let count = feature
-            .checked_add(2)
-            .and_then(|o| u16_at(data, o))
-            .unwrap_or(0);
-        for j in 0..usize::from(count) {
-            if let Some(lookup) = j
-                .checked_mul(2)
-                .and_then(|d| feature.checked_add(4)?.checked_add(d))
-                .and_then(|o| u16_at(data, o))
-            {
-                lookups.push(lookup);
-            }
+    for &index in &features {
+        if let Some((_, table)) = record(index) {
+            push_feature_lookups(data, table, &mut lookups);
         }
+    }
+    if let Some(variations) = feature_variations(data, base) {
+        variation_lookups(data, variations, &features, &mut lookups);
     }
     lookups.sort_unstable();
     lookups.dedup();
     lookups
+}
+
+/// The features a language system lists, without its required feature:
+/// [`feature_indices`] less its first entry's special case.
+fn listed_features(data: &[u8], lang_sys: Option<usize>) -> Vec<u16> {
+    let Some(at) = lang_sys else {
+        return Vec::new();
+    };
+    let count = at.checked_add(4).and_then(|o| u16_at(data, o)).unwrap_or(0);
+    (0..usize::from(count))
+        .filter_map(|i| {
+            at.checked_add(6)
+                .and_then(|o| i.checked_mul(2).and_then(|d| o.checked_add(d)))
+                .and_then(|o| u16_at(data, o))
+        })
+        .collect()
+}
+
+/// Append the lookup indices a Feature table lists.
+fn push_feature_lookups(data: &[u8], feature: usize, out: &mut Vec<u16>) {
+    let count = feature
+        .checked_add(2)
+        .and_then(|o| u16_at(data, o))
+        .unwrap_or(0);
+    for j in 0..usize::from(count) {
+        if let Some(lookup) = j
+            .checked_mul(2)
+            .and_then(|d| feature.checked_add(4)?.checked_add(d))
+            .and_then(|o| u16_at(data, o))
+        {
+            out.push(lookup);
+        }
+    }
+}
+
+/// Where a `GSUB`/`GPOS` table's `FeatureVariations` table is: version 1.1
+/// headers only, and only when the offset is set.
+fn feature_variations(data: &[u8], base: usize) -> Option<usize> {
+    if u16_at(data, base)? != 1 || u16_at(data, base.checked_add(2)?)? < 1 {
+        return None;
+    }
+    let off = u32_at(data, base.checked_add(10)?)?;
+    if off == 0 {
+        return None;
+    }
+    base.checked_add(usize::try_from(off).ok()?)
+}
+
+/// The most `FeatureVariations` records, and substitutions per record, read:
+/// a real font has a handful; this bounds what a hostile one can make the
+/// walk cost.
+const MAX_VARIATION_RECORDS: usize = 1 << 12;
+
+/// Append the lookups of every alternate feature table a `FeatureVariations`
+/// table substitutes for one of `features` (sorted), whatever the record's
+/// conditions -- HarfBuzz's `feature_variation_collect_lookups` with no
+/// substitutes map.
+fn variation_lookups(data: &[u8], table: usize, features: &[u16], out: &mut Vec<u16>) {
+    let Some(count) = table
+        .checked_add(4)
+        .and_then(|o| u32_at(data, o))
+        .and_then(|c| usize::try_from(c).ok())
+    else {
+        return;
+    };
+    for i in 0..count.min(MAX_VARIATION_RECORDS) {
+        let Some(substitution) = i
+            .checked_mul(8)
+            .and_then(|d| table.checked_add(8)?.checked_add(d)?.checked_add(4))
+            .and_then(|o| u32_at(data, o))
+            .filter(|&off| off != 0)
+            .and_then(|off| table.checked_add(usize::try_from(off).ok()?))
+        else {
+            continue;
+        };
+        // FeatureTableSubstitution: version (two u16s), a count, then records
+        // of a feature index and a 32-bit offset from this table.
+        let records = substitution
+            .checked_add(4)
+            .and_then(|o| u16_at(data, o))
+            .unwrap_or(0);
+        for j in 0..usize::from(records).min(MAX_VARIATION_RECORDS) {
+            let Some(at) = j
+                .checked_mul(6)
+                .and_then(|d| substitution.checked_add(6)?.checked_add(d))
+            else {
+                continue;
+            };
+            let Some(index) = u16_at(data, at) else {
+                continue;
+            };
+            if features.binary_search(&index).is_err() {
+                continue;
+            }
+            if let Some(alternate) = at
+                .checked_add(2)
+                .and_then(|o| u32_at(data, o))
+                .and_then(|off| substitution.checked_add(usize::try_from(off).ok()?))
+            {
+                push_feature_lookups(data, alternate, out);
+            }
+        }
+    }
 }
 
 /// Every script tag the table's ScriptList registers, in file order.
@@ -1206,7 +1328,7 @@ pub(crate) fn coverage_digest(data: &[u8], table: usize) -> Option<Digest> {
 /// [`Digest::full`] too, and the lookup is never skipped as a whole. That is
 /// the right answer and costs less than it used to: the *readable* subtables
 /// beside it keep their own digests, so the walk still skips them.
-fn fill_digests(data: &[u8], lookup: &mut Lookup, extension: u16) {
+pub(crate) fn fill_digests(data: &[u8], lookup: &mut Lookup, extension: u16) {
     let kind = lookup.kind;
     let mut all = Digest::EMPTY;
     for sub in &mut lookup.subtables {
@@ -1416,6 +1538,262 @@ pub(crate) fn value_size(format: u16) -> usize {
     (format.count_ones() as usize).saturating_mul(2)
 }
 
+/// Take one unit of a walk's budget: `false` once it is spent.
+pub(crate) fn spend(budget: &mut usize) -> bool {
+    match budget.checked_sub(1) {
+        Some(left) => {
+            *budget = left;
+            true
+        }
+        None => false,
+    }
+}
+
+/// A count at `count_at` and that many 16-bit offsets after it, each measured
+/// from `base`: the tables they point at.
+pub(crate) fn offsets(
+    data: &[u8],
+    base: usize,
+    count_at: usize,
+    budget: &mut usize,
+) -> Option<Vec<usize>> {
+    let count = usize::from(u16_at(data, count_at)?);
+    let mut out = Vec::with_capacity(count.min(1024));
+    for i in 0..count {
+        if !spend(budget) {
+            break;
+        }
+        let off = u16_at(
+            data,
+            count_at.checked_add(2)?.checked_add(i.checked_mul(2)?)?,
+        )?;
+        // A null offset is an empty set (class-based rule sets use them).
+        if off != 0 {
+            out.push(base.checked_add(usize::from(off))?);
+        }
+    }
+    Some(out)
+}
+
+/// Every glyph a Coverage table lists, appended to `out`.
+pub(crate) fn coverage_glyphs(data: &[u8], table: usize, out: &mut Vec<u16>, budget: &mut usize) {
+    let (Some(format), Some(count)) = (
+        u16_at(data, table),
+        table.checked_add(2).and_then(|o| u16_at(data, o)),
+    ) else {
+        return;
+    };
+    for i in 0..usize::from(count) {
+        if !spend(budget) {
+            return;
+        }
+        match format {
+            1 => {
+                let Some(g) = i
+                    .checked_mul(2)
+                    .and_then(|d| table.checked_add(4)?.checked_add(d))
+                    .and_then(|o| u16_at(data, o))
+                else {
+                    return;
+                };
+                out.push(g);
+            }
+            2 => {
+                let Some(rec) = i
+                    .checked_mul(6)
+                    .and_then(|d| table.checked_add(4)?.checked_add(d))
+                else {
+                    return;
+                };
+                let (Some(first), Some(last)) = (
+                    u16_at(data, rec),
+                    rec.checked_add(2).and_then(|o| u16_at(data, o)),
+                ) else {
+                    return;
+                };
+                for g in first..=last {
+                    if !spend(budget) {
+                        return;
+                    }
+                    out.push(g);
+                }
+            }
+            _ => return,
+        }
+    }
+}
+
+/// Every glyph a ClassDef table gives a class other than 0, appended to
+/// `out` -- as HarfBuzz's `ClassDef::collect_coverage` lists them, which for
+/// format 1 is one glyph more per run than the table classes.
+///
+/// HarfBuzz adds each run of classed glyphs in a format-1 table as an
+/// inclusive range ending *at* the unclassed glyph that closes it, and the
+/// last run at one past the array. That is what it hands FreeType's
+/// auto-hinter, which subtracts it from a feature style's glyphs, so a
+/// faithful port lists the same glyphs. Format 2 has no such quirk.
+pub(crate) fn class_coverage(data: &[u8], table: usize, out: &mut Vec<u16>, budget: &mut usize) {
+    let Some(format) = u16_at(data, table) else {
+        return;
+    };
+    let push = |out: &mut Vec<u16>, first: u32, last: u32, budget: &mut usize| {
+        for g in first..=last.min(u32::from(u16::MAX)) {
+            if !spend(budget) {
+                return false;
+            }
+            if let Ok(g) = u16::try_from(g) {
+                out.push(g);
+            }
+        }
+        true
+    };
+    match format {
+        1 => {
+            let (Some(start), Some(count)) = (
+                table.checked_add(2).and_then(|o| u16_at(data, o)),
+                table.checked_add(4).and_then(|o| u16_at(data, o)),
+            ) else {
+                return;
+            };
+            let start = u32::from(start);
+            let mut run = 0u32;
+            for i in 0..u32::from(count) {
+                let Some(class) = usize::try_from(i)
+                    .ok()
+                    .and_then(|i| i.checked_mul(2))
+                    .and_then(|d| table.checked_add(6)?.checked_add(d))
+                    .and_then(|o| u16_at(data, o))
+                else {
+                    return;
+                };
+                if class != 0 {
+                    continue;
+                }
+                if run != i
+                    && !push(
+                        out,
+                        start.saturating_add(run),
+                        start.saturating_add(i),
+                        budget,
+                    )
+                {
+                    return;
+                }
+                run = i.saturating_add(1);
+            }
+            if run != u32::from(count) {
+                push(
+                    out,
+                    start.saturating_add(run),
+                    start.saturating_add(u32::from(count)),
+                    budget,
+                );
+            }
+        }
+        2 => {
+            let Some(count) = table.checked_add(2).and_then(|o| u16_at(data, o)) else {
+                return;
+            };
+            for i in 0..usize::from(count) {
+                let Some(rec) = i
+                    .checked_mul(6)
+                    .and_then(|d| table.checked_add(4)?.checked_add(d))
+                else {
+                    return;
+                };
+                let (Some(first), Some(last), Some(class)) = (
+                    u16_at(data, rec),
+                    rec.checked_add(2).and_then(|o| u16_at(data, o)),
+                    rec.checked_add(4).and_then(|o| u16_at(data, o)),
+                ) else {
+                    return;
+                };
+                // HarfBuzz stops at a range whose end is before its start.
+                if first > last {
+                    return;
+                }
+                if class != 0 && !push(out, u32::from(first), u32::from(last), budget) {
+                    return;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every glyph a ClassDef table puts in class `class` in so many words,
+/// appended to `out`: HarfBuzz's `ClassDef::collect_class`, which for class
+/// 0 lists only the glyphs the table itself assigns it, not every glyph it
+/// leaves out.
+pub(crate) fn class_glyphs(
+    data: &[u8],
+    table: usize,
+    class: u16,
+    out: &mut Vec<u16>,
+    budget: &mut usize,
+) {
+    let Some(format) = u16_at(data, table) else {
+        return;
+    };
+    match format {
+        1 => {
+            let (Some(start), Some(count)) = (
+                table.checked_add(2).and_then(|o| u16_at(data, o)),
+                table.checked_add(4).and_then(|o| u16_at(data, o)),
+            ) else {
+                return;
+            };
+            for i in 0..count {
+                if !spend(budget) {
+                    return;
+                }
+                let Some(value) = usize::from(i)
+                    .checked_mul(2)
+                    .and_then(|d| table.checked_add(6)?.checked_add(d))
+                    .and_then(|o| u16_at(data, o))
+                else {
+                    return;
+                };
+                if value == class
+                    && let Some(g) = start.checked_add(i)
+                {
+                    out.push(g);
+                }
+            }
+        }
+        2 => {
+            let Some(count) = table.checked_add(2).and_then(|o| u16_at(data, o)) else {
+                return;
+            };
+            for i in 0..usize::from(count) {
+                let Some(rec) = i
+                    .checked_mul(6)
+                    .and_then(|d| table.checked_add(4)?.checked_add(d))
+                else {
+                    return;
+                };
+                let (Some(first), Some(last), Some(value)) = (
+                    u16_at(data, rec),
+                    rec.checked_add(2).and_then(|o| u16_at(data, o)),
+                    rec.checked_add(4).and_then(|o| u16_at(data, o)),
+                ) else {
+                    return;
+                };
+                if value != class {
+                    continue;
+                }
+                for g in first..=last {
+                    if !spend(budget) {
+                        return;
+                    }
+                    out.push(g);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -1426,6 +1804,244 @@ pub(crate) fn value_size(format: u16) -> usize {
 )]
 mod tests {
     use super::*;
+
+    // --- collect_lookups ------------------------------------------------
+
+    /// A language system: its required feature (`0xFFFF` for none) and the
+    /// features it lists.
+    type Sys<'a> = (u16, &'a [u16]);
+
+    fn lang_sys((required, features): Sys<'_>) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(0)); // lookupOrder
+        out.extend_from_slice(&be16(required));
+        out.extend_from_slice(&be16(u16::try_from(features.len()).unwrap()));
+        for &f in features {
+            out.extend_from_slice(&be16(f));
+        }
+        out
+    }
+
+    /// A Script table: its DefaultLangSys, if any, and named systems.
+    fn script(default: Option<Sys<'_>>, named: &[(&[u8; 4], Sys<'_>)]) -> Vec<u8> {
+        let head = 4 + named.len() * 6;
+        let mut tables: Vec<u8> = Vec::new();
+        let mut out = Vec::new();
+        let default_at = default.map(|sys| {
+            let at = head + tables.len();
+            tables.extend(lang_sys(sys));
+            at
+        });
+        out.extend_from_slice(&be16(default_at.map_or(0, |a| u16::try_from(a).unwrap())));
+        out.extend_from_slice(&be16(u16::try_from(named.len()).unwrap()));
+        for (tag, sys) in named {
+            out.extend_from_slice(*tag);
+            out.extend_from_slice(&be16(u16::try_from(head + tables.len()).unwrap()));
+            tables.extend(lang_sys(*sys));
+        }
+        out.extend(tables);
+        out
+    }
+
+    /// A Feature table naming `lookups`.
+    fn feature(lookups: &[u16]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(0)); // featureParams
+        out.extend_from_slice(&be16(u16::try_from(lookups.len()).unwrap()));
+        for &l in lookups {
+            out.extend_from_slice(&be16(l));
+        }
+        out
+    }
+
+    type ScriptSpec<'a> = (&'a [u8; 4], Option<Sys<'a>>, &'a [(&'a [u8; 4], Sys<'a>)]);
+
+    /// A layout table for [`collect_lookups`]: a ScriptList, a FeatureList of
+    /// `(tag, lookups)`, an empty LookupList -- which the function never
+    /// reads -- and, when `variations` has records, a version 1.1 header
+    /// with a FeatureVariations table, each record substituting
+    /// `(feature index, lookups)` pairs.
+    fn layout(
+        scripts: &[ScriptSpec<'_>],
+        features: &[(&[u8; 4], &[u16])],
+        variations: &[&[(u16, &[u16])]],
+    ) -> Vec<u8> {
+        let header = if variations.is_empty() { 10 } else { 14 };
+        let mut script_list = Vec::new();
+        script_list.extend_from_slice(&be16(u16::try_from(scripts.len()).unwrap()));
+        let mut tables = Vec::new();
+        let head = 2 + scripts.len() * 6;
+        for (tag, default, named) in scripts {
+            script_list.extend_from_slice(*tag);
+            script_list.extend_from_slice(&be16(u16::try_from(head + tables.len()).unwrap()));
+            tables.extend(script(*default, named));
+        }
+        script_list.extend(tables);
+
+        let mut feature_list = Vec::new();
+        feature_list.extend_from_slice(&be16(u16::try_from(features.len()).unwrap()));
+        let mut tables = Vec::new();
+        let head = 2 + features.len() * 6;
+        for (tag, lookups) in features {
+            feature_list.extend_from_slice(*tag);
+            feature_list.extend_from_slice(&be16(u16::try_from(head + tables.len()).unwrap()));
+            tables.extend(feature(lookups));
+        }
+        feature_list.extend(tables);
+
+        let features_at = header + script_list.len();
+        let lookups_at = features_at + feature_list.len();
+        let variations_at = lookups_at + 2;
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(1));
+        out.extend_from_slice(&be16(u16::from(!variations.is_empty())));
+        out.extend_from_slice(&be16(u16::try_from(header).unwrap()));
+        out.extend_from_slice(&be16(u16::try_from(features_at).unwrap()));
+        out.extend_from_slice(&be16(u16::try_from(lookups_at).unwrap()));
+        if !variations.is_empty() {
+            out.extend_from_slice(&u32::try_from(variations_at).unwrap().to_be_bytes());
+        }
+        out.extend(script_list);
+        out.extend(feature_list);
+        out.extend_from_slice(&be16(0)); // an empty LookupList
+        if !variations.is_empty() {
+            // FeatureVariations: version, a 32-bit count, then records of a
+            // condition set (none here) and a substitution table offset.
+            let mut table = Vec::new();
+            table.extend_from_slice(&be16(1));
+            table.extend_from_slice(&be16(0));
+            table.extend_from_slice(&u32::try_from(variations.len()).unwrap().to_be_bytes());
+            let mut subs = Vec::new();
+            let head = 8 + variations.len() * 8;
+            for record in variations {
+                table.extend_from_slice(&0u32.to_be_bytes());
+                table.extend_from_slice(&u32::try_from(head + subs.len()).unwrap().to_be_bytes());
+                // FeatureTableSubstitution: version, count, then records of a
+                // feature index and a 32-bit offset from this table.
+                let mut sub = Vec::new();
+                sub.extend_from_slice(&be16(1));
+                sub.extend_from_slice(&be16(0));
+                sub.extend_from_slice(&be16(u16::try_from(record.len()).unwrap()));
+                let mut alts = Vec::new();
+                let inner = 6 + record.len() * 6;
+                for (index, lookups) in *record {
+                    sub.extend_from_slice(&be16(*index));
+                    sub.extend_from_slice(
+                        &u32::try_from(inner + alts.len()).unwrap().to_be_bytes(),
+                    );
+                    alts.extend(feature(lookups));
+                }
+                sub.extend(alts);
+                subs.extend(sub);
+            }
+            table.extend(subs);
+            out.extend(table);
+        }
+        out
+    }
+
+    const NONE: u16 = 0xFFFF;
+
+    #[test]
+    fn every_feature_of_every_language_system_is_collected_required_ones_too() {
+        let data = layout(
+            &[
+                (b"latn", Some((2, &[0])), &[(b"TRK ", (NONE, &[1]))]),
+                (b"cyrl", Some((NONE, &[3])), &[]),
+            ],
+            &[
+                (b"liga", &[4]),
+                (b"locl", &[1]),
+                (b"ccmp", &[0, 4]),
+                (b"smcp", &[7]),
+            ],
+            &[],
+        );
+        assert_eq!(collect_lookups(&data, 0, &[*b"latn"], None), [0, 1, 4]);
+        assert_eq!(
+            collect_lookups(&data, 0, &[*b"cyrl", *b"latn"], None),
+            [0, 1, 4, 7]
+        );
+        // A script the table does not name reaches nothing: no fallback to
+        // `DFLT`, which is a shaping rule and not a question of coverage.
+        assert!(collect_lookups(&data, 0, &[*b"grek"], None).is_empty());
+    }
+
+    #[test]
+    fn one_feature_is_collected_from_every_language_system_but_not_as_a_required_one() {
+        let data = layout(
+            &[
+                // `smcp` (feature 1) is the default system's required feature
+                // and nothing lists it; `TRK ` lists another `smcp` (2).
+                (b"latn", Some((1, &[0])), &[(b"TRK ", (NONE, &[2]))]),
+                // Here the required `smcp` (1) is also listed, which counts.
+                (b"cyrl", Some((1, &[1])), &[]),
+            ],
+            &[(b"liga", &[3]), (b"smcp", &[5]), (b"smcp", &[6])],
+            &[],
+        );
+        assert_eq!(collect_lookups(&data, 0, &[*b"latn"], Some(*b"smcp")), [6]);
+        assert_eq!(collect_lookups(&data, 0, &[*b"cyrl"], Some(*b"smcp")), [5]);
+        assert!(collect_lookups(&data, 0, &[*b"latn"], Some(*b"sups")).is_empty());
+    }
+
+    #[test]
+    fn a_feature_variation_adds_its_alternate_lookups_whatever_its_conditions() {
+        let data = layout(
+            &[(b"latn", Some((NONE, &[0, 1])), &[])],
+            &[(b"rvrn", &[1]), (b"liga", &[2]), (b"smcp", &[3])],
+            // Two records: one swaps `rvrn` (0) for lookups 8 and 9, the other
+            // `smcp` (2), which latn does not reach.
+            &[&[(0, &[8, 9])], &[(2, &[10])]],
+        );
+        assert_eq!(collect_lookups(&data, 0, &[*b"latn"], None), [1, 2, 8, 9]);
+        assert_eq!(
+            collect_lookups(&data, 0, &[*b"latn"], Some(*b"rvrn")),
+            [1, 8, 9]
+        );
+        assert_eq!(collect_lookups(&data, 0, &[*b"latn"], Some(*b"liga")), [2]);
+    }
+
+    // --- ClassDef enumeration -------------------------------------------
+
+    #[test]
+    fn a_format_1_classdefs_coverage_is_harfbuzzs_one_glyph_long_per_run() {
+        // Glyphs 10-15 classed 1 1 0 2 0 3: runs 10-11, 13 and 15.
+        let mut table = Vec::new();
+        for v in [1u16, 10, 6, 1, 1, 0, 2, 0, 3] {
+            table.extend_from_slice(&be16(v));
+        }
+        let mut out = Vec::new();
+        let mut budget = usize::MAX;
+        class_coverage(&table, 0, &mut out, &mut budget);
+        // Each run reaches one past its end -- 12, 14 and 16 are in -- as
+        // HarfBuzz's `collect_coverage` lists it.
+        assert_eq!(out, [10, 11, 12, 13, 14, 15, 16]);
+        let mut out = Vec::new();
+        class_glyphs(&table, 0, 1, &mut out, &mut budget);
+        assert_eq!(out, [10, 11]);
+        let mut out = Vec::new();
+        // Class 0 is only the glyphs the table itself says are 0.
+        class_glyphs(&table, 0, 0, &mut out, &mut budget);
+        assert_eq!(out, [12, 14]);
+    }
+
+    #[test]
+    fn a_format_2_classdefs_coverage_is_its_classed_ranges() {
+        // 20-22 class 1, 30-30 class 0, 40-41 class 2.
+        let mut table = Vec::new();
+        for v in [2u16, 3, 20, 22, 1, 30, 30, 0, 40, 41, 2] {
+            table.extend_from_slice(&be16(v));
+        }
+        let mut out = Vec::new();
+        let mut budget = usize::MAX;
+        class_coverage(&table, 0, &mut out, &mut budget);
+        assert_eq!(out, [20, 21, 22, 40, 41]);
+        let mut out = Vec::new();
+        class_glyphs(&table, 0, 0, &mut out, &mut budget);
+        assert_eq!(out, [30]);
+    }
     use alloc::vec;
 
     fn be16(v: u16) -> [u8; 2] {
@@ -1592,7 +2208,14 @@ mod tests {
     #[test]
     fn the_survey_matches_the_shapers_feature_list() {
         let mut surveyed = survey_features();
-        let mut asked: Vec<[u8; 4]> = crate::gsub::FEATURES.iter().map(|&&t| t).collect();
+        // The survey is of what the shaper turns on by itself; the optional
+        // tail is on only when a caller asks.
+        let mut asked: Vec<[u8; 4]> = crate::gsub::FEATURES
+            .get(..crate::gsub::OPTIONAL_FROM)
+            .unwrap_or_default()
+            .iter()
+            .map(|&&t| t)
+            .collect();
         surveyed.sort_unstable();
         asked.sort_unstable();
         assert_eq!(surveyed, asked);
@@ -1608,7 +2231,18 @@ mod tests {
     /// would reach and the other would silently skip.
     #[test]
     fn the_two_tables_ask_for_the_same_features() {
-        let mut positioning: Vec<[u8; 4]> = crate::gpos::FEATURES.iter().map(|&&t| t).collect();
+        // The optional features close both lists, the same ones in the same
+        // order: a caller asks for them once and both tables hear it.
+        assert_eq!(
+            crate::gsub::FEATURES.get(crate::gsub::OPTIONAL_FROM..),
+            crate::gpos::FEATURES.get(crate::gpos::OPTIONAL_FROM..)
+        );
+        let mut positioning: Vec<[u8; 4]> = crate::gpos::FEATURES
+            .get(..crate::gpos::OPTIONAL_FROM)
+            .unwrap_or_default()
+            .iter()
+            .map(|&&t| t)
+            .collect();
         // The unconditional run is the head of the substitution list; its tail
         // is gated per glyph by a shaper, which positioning has no equivalent
         // of — a positioning feature is gated by its own glyph coverage.

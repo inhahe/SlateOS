@@ -2146,35 +2146,6 @@ impl StartupUI {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // After the background, or it would be painted over.
-        //
-        // Keyed on the list being empty rather than on a constant, so it
-        // retires itself the day something fills the list instead of becoming
-        // a stale claim of its own.
-        if self.manager.entry_count() == 0 {
-            for (i, line) in CANNOT_SEE_LINES.iter().enumerate() {
-                frame.push(RenderCommand::Text {
-                    x: 10.0,
-                    #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
-                    y: 2.0 + i as f32 * 13.0,
-                    text: (*line).to_string(),
-                    color: if i == 0 {
-                        self.palette.ink(self.palette.yellow)
-                    } else {
-                        self.palette.subtext0
-                    },
-                    font_size: if i == 0 { 12.0 } else { 10.0 },
-                    font_weight: if i == 0 {
-                        FontWeightHint::Bold
-                    } else {
-                        FontWeightHint::Regular
-                    },
-                    max_width: Some(l.width - 20.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-        }
-
         self.draw_header(&mut frame, &l);
         self.draw_toolbar(&mut frame, &l);
         self.draw_search(&mut frame, &l);
@@ -2465,6 +2436,44 @@ impl StartupUI {
         // Recorded first, so the rows drawn on top of it win the hit test
         // where they are drawn and the wheel still works everywhere else.
         frame.hit(Target::Table, l.table);
+
+        // The empty list's three lines, in the list they explain. They were
+        // drawn at the top of the window, where the header was then drawn over
+        // them. Wrapped to the table rather than cut, because the second line
+        // is the one that says what the program cannot do. Keyed on the list
+        // being empty, so they retire themselves the day something fills it.
+        if self.manager.entry_count() == 0 {
+            let width = (l.table.w - 24.0).max(0.0);
+            let mut y = l.table.y + 12.0;
+            for (i, line) in CANNOT_SEE_LINES.iter().enumerate() {
+                let (size, weight) = if i == 0 {
+                    (13.0, FontWeightHint::Bold)
+                } else {
+                    (12.0, FontWeightHint::Regular)
+                };
+                for piece in text::wrap(line, width, size, weight) {
+                    if y + 18.0 > l.table.y + l.table.h {
+                        break;
+                    }
+                    frame.push(RenderCommand::Text {
+                        x: l.table.x + 12.0,
+                        y,
+                        text: piece,
+                        color: if i == 0 {
+                            self.palette.ink(self.palette.yellow)
+                        } else {
+                            self.palette.subtext0
+                        },
+                        font_size: size,
+                        font_weight: weight,
+                        max_width: Some(width),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                    y += 18.0;
+                }
+                y += 4.0;
+            }
+        }
 
         for (i, entry) in self.entries_in(l).iter().enumerate() {
             let row = l.row(i);
@@ -5362,5 +5371,65 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    /// The warning lines are where they can be seen: nothing drawn after a
+    /// line fills the point it is drawn at. The sweep that added them drew
+    /// them "after the background, or it would be painted over" -- and in
+    /// several apps a bar was then drawn over the same pixels, while a test
+    /// that read the frame's texts said they were there. known-issues.md,
+    /// `[E] Warnings drawn where the next thing drawn covers them`.
+    #[test]
+    fn the_warning_lines_are_not_painted_over() {
+        let ui = StartupUI::new();
+        let commands: Vec<RenderCommand> = ui.render().commands;
+        // Each line is wrapped to the list it explains: its pieces, in the
+        // order drawn, are the line.
+        let pieces: Vec<(usize, &str, f32, f32, f32)> = commands
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| match c {
+                RenderCommand::Text {
+                    text,
+                    x,
+                    y,
+                    max_width,
+                    ..
+                } if !text.is_empty()
+                    && CANNOT_SEE_LINES.iter().any(|l| l.contains(text.as_str())) =>
+                {
+                    Some((
+                        i,
+                        text.as_str(),
+                        *x,
+                        *y,
+                        x + max_width.unwrap_or(f32::INFINITY),
+                    ))
+                }
+                _ => None,
+            })
+            .collect();
+        let joined = pieces.iter().map(|p| p.1).collect::<Vec<_>>().join(" ");
+        for line in CANNOT_SEE_LINES {
+            assert!(
+                joined.contains(line),
+                "{line:?} is not drawn whole: {joined:?}"
+            );
+        }
+        for (at, piece, x, y, reach) in &pieces {
+            let covered = commands.iter().skip(at + 1).any(|c| {
+                matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
+                    if *x >= *rx && *x < rx + width && *y >= *ry && *y < ry + height)
+            });
+            assert!(!covered, "{piece:?} is painted over");
+            let crowded = commands.iter().any(|c| {
+                matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
+                    if !CANNOT_SEE_LINES.iter().any(|l| l.contains(text.as_str()))
+                        && (ty - y).abs() < 10.0
+                        && tx < reach
+                        && tx + tw.unwrap_or(f32::INFINITY) > *x)
+            });
+            assert!(!crowded, "{piece:?} shares its row with other text");
+        }
     }
 }

@@ -1098,11 +1098,27 @@ pub struct Layout {
     pub sidebar: Option<Rect>,
     /// Everything below the top bar and right of the sidebar.
     pub content: Rect,
+    /// The strip under the top bar the empty calendar's two lines are drawn
+    /// in, or `None` when there are no lines to draw.
+    pub notice: Option<Rect>,
 }
+
+/// One line of the notice strip, top to top.
+const NOTICE_LINE_H: f32 = 14.0;
 
 impl Layout {
     /// Work out where everything goes in a `width` x `height` window.
     pub fn new(width: f32, height: f32, sidebar_wanted: bool) -> Self {
+        Self::with_notice(width, height, sidebar_wanted, 0)
+    }
+
+    /// [`new`](Self::new), with room under the top bar for `notice_lines`
+    /// lines that nothing else is drawn over.
+    ///
+    /// The lines were drawn at the top of the window, before the top bar,
+    /// which filled the same pixels: in every frame, on no screen. The sidebar
+    /// and the views start below the strip now.
+    pub fn with_notice(width: f32, height: f32, sidebar_wanted: bool, notice_lines: usize) -> Self {
         let window = Rect::new(0.0, 0.0, width, height);
         let top_bar = Rect::new(0.0, 0.0, width, TOP_BAR_H.min(height));
 
@@ -1133,7 +1149,14 @@ impl Layout {
             None
         };
 
-        let content_top = CONTENT_Y.min(height);
+        #[allow(clippy::cast_precision_loss, reason = "a handful of lines")]
+        let notice_h = if notice_lines == 0 {
+            0.0
+        } else {
+            (notice_lines as f32 * NOTICE_LINE_H + 6.0).min((height - CONTENT_Y).max(0.0))
+        };
+        let notice = (notice_h > 0.0).then(|| Rect::new(0.0, CONTENT_Y, width, notice_h));
+        let content_top = (CONTENT_Y + notice_h).min(height);
         let sidebar = if sidebar_wanted && width - SIDEBAR_W >= MIN_CONTENT_W {
             Some(Rect::new(
                 0.0,
@@ -1164,6 +1187,7 @@ impl Layout {
             view_tab_pitch,
             sidebar,
             content,
+            notice,
         }
     }
 
@@ -1388,7 +1412,22 @@ impl CalendarApp {
 
     /// Where everything goes at the current window size.
     pub fn layout(&self) -> Layout {
-        Layout::new(self.width, self.height, self.sidebar_visible)
+        Layout::with_notice(
+            self.width,
+            self.height,
+            self.sidebar_visible,
+            self.notice_lines().len(),
+        )
+    }
+
+    /// What the window has to say above everything else: the empty
+    /// calendar's two lines, until the first event.
+    fn notice_lines(&self) -> &'static [&'static str] {
+        if self.store.is_empty() {
+            &NO_EVENTS_LINES
+        } else {
+            &[]
+        }
     }
 
     fn week_start(&self, date: Date) -> Date {
@@ -1620,22 +1659,27 @@ impl CalendarApp {
     /// at the moment it is painted.
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let mut frame = Frame::new(width, height);
-        let layout = Layout::new(width, height, self.sidebar_visible);
+        let layout = Layout::with_notice(
+            width,
+            height,
+            self.sidebar_visible,
+            self.notice_lines().len(),
+        );
 
         fill(&mut frame, layout.window, self.palette.base, 0.0);
 
-        // After the background, or it would be painted over. Keyed on the
-        // store being empty so it retires itself at the first real event.
-        if self.store.is_empty() {
-            for (i, line) in NO_EVENTS_LINES.iter().enumerate() {
-                #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
-                let ty = layout.window.y + 1.0 + i as f32 * 11.0;
-                let avail = (layout.window.w - 16.0).max(0.0);
-                if avail <= 0.0 || ty + 11.0 > layout.window.y + layout.window.h {
+        self.draw_top_bar(&mut frame, &layout);
+        // In the strip under the top bar, which nothing else is drawn in.
+        if let Some(strip) = layout.notice {
+            for (i, line) in self.notice_lines().iter().enumerate() {
+                #[expect(clippy::cast_precision_loss, reason = "two lines")]
+                let ty = strip.y + 3.0 + i as f32 * NOTICE_LINE_H;
+                let avail = (strip.w - 16.0).max(0.0);
+                if avail <= 0.0 || ty + NOTICE_LINE_H > strip.y + strip.h {
                     break;
                 }
                 frame.push(RenderCommand::Text {
-                    x: layout.window.x + 8.0,
+                    x: strip.x + 8.0,
                     y: ty,
                     text: (*line).to_string(),
                     color: if i == 0 {
@@ -1643,7 +1687,7 @@ impl CalendarApp {
                     } else {
                         self.palette.subtext0
                     },
-                    font_size: if i == 0 { 10.0 } else { 9.0 },
+                    font_size: if i == 0 { 11.0 } else { 10.0 },
                     font_weight: if i == 0 {
                         FontWeightHint::Bold
                     } else {
@@ -1654,8 +1698,6 @@ impl CalendarApp {
                 });
             }
         }
-
-        self.draw_top_bar(&mut frame, &layout);
 
         if let Some(bar) = layout.sidebar {
             // Clipped, so a category row pushed below a short sidebar is
@@ -5586,5 +5628,57 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    /// The warning lines are where they can be seen: nothing drawn after a
+    /// line fills the point it is drawn at. The sweep that added them drew
+    /// them "after the background, or it would be painted over" -- and in
+    /// several apps a bar was then drawn over the same pixels, while a test
+    /// that read the frame's texts said they were there. known-issues.md,
+    /// `[E] Warnings drawn where the next thing drawn covers them`.
+    #[test]
+    fn the_warning_lines_are_not_painted_over() {
+        let app = CalendarApp::new(
+            DEFAULT_WIDTH,
+            DEFAULT_HEIGHT,
+            Date {
+                year: 2026,
+                month: 5,
+                day: 18,
+            },
+        );
+        let commands: Vec<RenderCommand> =
+            app.frame(DEFAULT_WIDTH, DEFAULT_HEIGHT).commands().to_vec();
+        for line in NO_EVENTS_LINES {
+            let (at, x, y, reach) = commands
+                .iter()
+                .enumerate()
+                .find_map(|(i, c)| match c {
+                    RenderCommand::Text {
+                        text,
+                        x,
+                        y,
+                        max_width,
+                        ..
+                    } if text == line => Some((i, *x, *y, x + max_width.unwrap_or(f32::INFINITY))),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{line:?} is not drawn"));
+            let covered = commands.iter().skip(at + 1).any(|c| {
+                matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
+                    if x >= *rx && x < rx + width && y >= *ry && y < ry + height)
+            });
+            assert!(!covered, "{line:?} is painted over");
+            // Nor drawn on the same row as other text: a header's title over
+            // a warning is as unreadable as a fill over it.
+            let crowded = commands.iter().any(|c| {
+                matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
+                    if !NO_EVENTS_LINES.contains(&text.as_str())
+                        && (ty - y).abs() < 10.0
+                        && *tx < reach
+                        && tx + tw.unwrap_or(f32::INFINITY) > x)
+            });
+            assert!(!crowded, "{line:?} shares its row with other text");
+        }
     }
 }

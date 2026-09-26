@@ -76,6 +76,13 @@ const NODE_COLORS: [Color; 8] = [
 
 /// Height of the top toolbar.
 const TOOLBAR_HEIGHT: f32 = 40.0;
+/// The strip under the tabs that says what a save keeps, and one line of it.
+///
+/// Its own strip, which the canvas and the sidebar start below. The two lines
+/// were drawn at the top of the window, before the toolbar, which filled the
+/// same pixels: in every frame, on no screen.
+const NOTICE_H: f32 = 34.0;
+const NOTICE_LINE_H: f32 = 15.0;
 
 /// Every key this program answers, and what it does.
 ///
@@ -1261,9 +1268,10 @@ impl MindMapApp {
         }
     }
 
-    /// Y origin of the canvas area.
+    /// Y origin of the canvas area: below the toolbar, the tabs and the
+    /// notice strip.
     fn canvas_y(&self) -> f32 {
-        TOOLBAR_HEIGHT + TAB_HEIGHT
+        TOOLBAR_HEIGHT + TAB_HEIGHT + NOTICE_H
     }
 
     /// Width of the canvas area.
@@ -1278,7 +1286,7 @@ impl MindMapApp {
 
     /// Height of the canvas area.
     fn canvas_height(&self) -> f32 {
-        (self.win_height - TOOLBAR_HEIGHT - TAB_HEIGHT - STATUS_BAR_HEIGHT).max(1.0)
+        (self.win_height - TOOLBAR_HEIGHT - TAB_HEIGHT - NOTICE_H - STATUS_BAR_HEIGHT).max(1.0)
     }
 
     // ========================================================================
@@ -2249,12 +2257,15 @@ impl MindMapApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // After the background, or it would be painted over.
+        self.render_toolbar(&mut cmds);
+        self.render_tabs(&mut cmds);
+        // In the strip under the tabs, which nothing else is drawn in.
+        let strip_y = TOOLBAR_HEIGHT + TAB_HEIGHT;
         for (i, line) in NOTHING_KEPT_LINES.iter().enumerate() {
             #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
-            let ty = 1.0 + i as f32 * 11.0;
+            let ty = strip_y + 3.0 + i as f32 * NOTICE_LINE_H;
             let avail = (self.win_width - 16.0).max(0.0);
-            if avail <= 0.0 || ty + 11.0 > self.win_height {
+            if avail <= 0.0 || ty + NOTICE_LINE_H > self.win_height {
                 break;
             }
             cmds.push(RenderCommand::Text {
@@ -2266,7 +2277,7 @@ impl MindMapApp {
                 } else {
                     self.palette.subtext0
                 },
-                font_size: if i == 0 { 10.0 } else { 9.0 },
+                font_size: if i == 0 { 12.0 } else { 11.0 },
                 font_weight: if i == 0 {
                     FontWeightHint::Bold
                 } else {
@@ -2276,9 +2287,6 @@ impl MindMapApp {
                 overflow: TextOverflow::Ellipsis,
             });
         }
-
-        self.render_toolbar(&mut cmds);
-        self.render_tabs(&mut cmds);
         self.render_canvas_background(&mut cmds);
         self.render_connections(&mut cmds);
         self.render_nodes(&mut cmds);
@@ -5369,5 +5377,48 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    /// The warning lines are where they can be seen: nothing drawn after a
+    /// line fills the point it is drawn at. The sweep that added them drew
+    /// them "after the background, or it would be painted over" -- and in
+    /// several apps a bar was then drawn over the same pixels, while a test
+    /// that read the frame's texts said they were there. known-issues.md,
+    /// `[E] Warnings drawn where the next thing drawn covers them`.
+    #[test]
+    fn the_warning_lines_are_not_painted_over() {
+        let app = MindMapApp::new();
+        let commands: Vec<RenderCommand> = app.render_commands();
+        for line in NOTHING_KEPT_LINES {
+            let (at, x, y, reach) = commands
+                .iter()
+                .enumerate()
+                .find_map(|(i, c)| match c {
+                    RenderCommand::Text {
+                        text,
+                        x,
+                        y,
+                        max_width,
+                        ..
+                    } if text == line => Some((i, *x, *y, x + max_width.unwrap_or(f32::INFINITY))),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{line:?} is not drawn"));
+            let covered = commands.iter().skip(at + 1).any(|c| {
+                matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
+                    if x >= *rx && x < rx + width && y >= *ry && y < ry + height)
+            });
+            assert!(!covered, "{line:?} is painted over");
+            // Nor drawn on the same row as other text: a header's title over
+            // a warning is as unreadable as a fill over it.
+            let crowded = commands.iter().any(|c| {
+                matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
+                    if !NOTHING_KEPT_LINES.contains(&text.as_str())
+                        && (ty - y).abs() < 10.0
+                        && *tx < reach
+                        && tx + tw.unwrap_or(f32::INFINITY) > x)
+            });
+            assert!(!crowded, "{line:?} shares its row with other text");
+        }
     }
 }

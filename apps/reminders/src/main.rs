@@ -120,6 +120,8 @@ const WINDOW_HEIGHT: f32 = 720.0;
 const SIDEBAR_WIDTH: f32 = 220.0;
 const DETAIL_PANEL_WIDTH: f32 = 300.0;
 const HEADER_HEIGHT: f32 = 56.0;
+/// One line of the empty list's notice, under the header, top to top.
+const NOTICE_LINE_H: f32 = 14.0;
 const PADDING: f32 = 12.0;
 const ITEM_HEIGHT: f32 = 72.0;
 const NOTIFICATION_HEIGHT: f32 = 48.0;
@@ -2171,39 +2173,50 @@ impl RemindersApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // After the background, or it would be painted over. Keyed on the
-        // store being empty so it retires itself at the first real task.
-        if self.store.tasks.is_empty() {
-            for (i, line) in NO_TASKS_LINES.iter().enumerate() {
-                cmds.push(RenderCommand::Text {
-                    x: 8.0,
-                    #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
-                    y: 2.0 + i as f32 * 12.0,
-                    text: (*line).to_string(),
-                    color: if i == 0 {
-                        self.palette.ink(self.palette.yellow)
-                    } else {
-                        self.palette.subtext0
-                    },
-                    font_size: if i == 0 { 11.0 } else { 9.0 },
-                    font_weight: if i == 0 {
-                        FontWeightHint::Bold
-                    } else {
-                        FontWeightHint::Regular
-                    },
-                    max_width: Some(self.width - 16.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-        }
-
         // Notification banner (if any active notifications)
         let notification_offset = self.render_notifications(&mut cmds);
 
         // Header
         self.render_header(&mut cmds, notification_offset);
 
-        let content_y = HEADER_HEIGHT + notification_offset;
+        // The empty list's lines, in a strip of their own under the header,
+        // until the first task. They were drawn at the top of the window,
+        // before the header -- which drew its title over them.
+        let notice: &[&str] = if self.store.tasks.is_empty() {
+            &NO_TASKS_LINES
+        } else {
+            &[]
+        };
+        let notice_y = HEADER_HEIGHT + notification_offset;
+        #[allow(clippy::cast_precision_loss, reason = "three lines at most")]
+        let notice_h = if notice.is_empty() {
+            0.0
+        } else {
+            notice.len() as f32 * NOTICE_LINE_H + 6.0
+        };
+        for (i, line) in notice.iter().enumerate() {
+            cmds.push(RenderCommand::Text {
+                x: 8.0,
+                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                y: notice_y + 3.0 + i as f32 * NOTICE_LINE_H,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 11.0 } else { 10.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some((self.width - 16.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
+        let content_y = notice_y + notice_h;
         let content_h = self.height - content_y;
 
         // Sidebar
@@ -6282,5 +6295,48 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    /// The warning lines are where they can be seen: nothing drawn after a
+    /// line fills the point it is drawn at. The sweep that added them drew
+    /// them "after the background, or it would be painted over" -- and in
+    /// several apps a bar was then drawn over the same pixels, while a test
+    /// that read the frame's texts said they were there. known-issues.md,
+    /// `[E] Warnings drawn where the next thing drawn covers them`.
+    #[test]
+    fn the_warning_lines_are_not_painted_over() {
+        let app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, make_now());
+        let commands: Vec<RenderCommand> = app.render_commands();
+        for line in NO_TASKS_LINES {
+            let (at, x, y, reach) = commands
+                .iter()
+                .enumerate()
+                .find_map(|(i, c)| match c {
+                    RenderCommand::Text {
+                        text,
+                        x,
+                        y,
+                        max_width,
+                        ..
+                    } if text == line => Some((i, *x, *y, x + max_width.unwrap_or(f32::INFINITY))),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{line:?} is not drawn"));
+            let covered = commands.iter().skip(at + 1).any(|c| {
+                matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
+                    if x >= *rx && x < rx + width && y >= *ry && y < ry + height)
+            });
+            assert!(!covered, "{line:?} is painted over");
+            // Nor drawn on the same row as other text: a header's title over
+            // a warning is as unreadable as a fill over it.
+            let crowded = commands.iter().any(|c| {
+                matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
+                    if !NO_TASKS_LINES.contains(&text.as_str())
+                        && (ty - y).abs() < 10.0
+                        && *tx < reach
+                        && tx + tw.unwrap_or(f32::INFINITY) > x)
+            });
+            assert!(!crowded, "{line:?} shares its row with other text");
+        }
     }
 }

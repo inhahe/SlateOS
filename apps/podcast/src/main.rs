@@ -92,6 +92,12 @@ const PLAYBACK_TICK: Duration = Duration::from_millis(250);
 /// one more podcast, discover the line was needed, and drop it again.
 const LIST_MORE_HEIGHT: f32 = 16.0;
 const NOW_PLAYING_HEIGHT: f32 = 80.0;
+/// The strip along the bottom that says this app cannot fetch or download,
+/// and one line of it. Its own strip, which the sidebar and the content end
+/// above: the three lines were drawn at the top of the window, where the
+/// sidebar and the episode list were then drawn over them.
+const NOTICE_H: f32 = 50.0;
+const NOTICE_LINE_H: f32 = 15.0;
 
 /// One row of the sidebar's scrolling list.
 ///
@@ -2491,40 +2497,13 @@ impl PodcastApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // After the background, or it would be painted over.
-        for (i, line) in CANNOT_FETCH_LINES.iter().enumerate() {
-            cmds.push(RenderCommand::Text {
-                x: 8.0,
-                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
-                y: 1.0 + i as f32 * 12.0,
-                text: (*line).to_string(),
-                color: if i == 0 {
-                    self.palette.ink(self.palette.yellow)
-                } else {
-                    self.palette.subtext0
-                },
-                font_size: if i == 0 { 11.0 } else { 9.0 },
-                font_weight: if i == 0 {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(self.width - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
         // Sidebar.
         self.render_sidebar(&mut cmds);
 
         // Main content area.
         let content_x = SIDEBAR_WIDTH;
         let content_w = self.width - SIDEBAR_WIDTH;
-        let content_h = if self.player_state != PlayerState::Stopped {
-            self.height - NOW_PLAYING_HEIGHT
-        } else {
-            self.height
-        };
+        let content_h = self.content_bottom();
 
         cmds.push(RenderCommand::PushClip {
             x: content_x,
@@ -2554,6 +2533,44 @@ impl PodcastApp {
         }
 
         cmds.push(RenderCommand::PopClip);
+
+        // Along the bottom, above the now-playing bar, in a strip the sidebar
+        // and the content end above.
+        let strip_y = self.content_bottom();
+        self.palette.push_surface(
+            &mut cmds,
+            0.0,
+            strip_y,
+            self.width,
+            NOTICE_H.min((self.height - strip_y).max(0.0)),
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
+        for (i, line) in CANNOT_FETCH_LINES.iter().enumerate() {
+            #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+            let ty = strip_y + 3.0 + i as f32 * NOTICE_LINE_H;
+            if ty + NOTICE_LINE_H > self.height {
+                break;
+            }
+            cmds.push(RenderCommand::Text {
+                x: 8.0,
+                y: ty,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 12.0 } else { 11.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some((self.width - 16.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         // Now playing bar.
         if self.player_state != PlayerState::Stopped {
@@ -2694,11 +2711,12 @@ impl PodcastApp {
     /// bar when that bar is up. The bar is drawn *over* the bottom of both the
     /// sidebar and the content area, so neither may lay out below it.
     fn content_bottom(&self) -> f32 {
-        if self.player_state == PlayerState::Stopped {
+        let bottom = if self.player_state == PlayerState::Stopped {
             self.height
         } else {
             self.height - NOW_PLAYING_HEIGHT
-        }
+        };
+        (bottom - NOTICE_H).max(0.0)
     }
 
     /// The sidebar's rows and the window over them that is on screen.
@@ -7974,5 +7992,48 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    /// The warning lines are where they can be seen: nothing drawn after a
+    /// line fills the point it is drawn at. The sweep that added them drew
+    /// them "after the background, or it would be painted over" -- and in
+    /// several apps a bar was then drawn over the same pixels, while a test
+    /// that read the frame's texts said they were there. known-issues.md,
+    /// `[E] Warnings drawn where the next thing drawn covers them`.
+    #[test]
+    fn the_warning_lines_are_not_painted_over() {
+        let app = PodcastApp::new(1100.0, 750.0);
+        let commands: Vec<RenderCommand> = app.render_commands();
+        for line in CANNOT_FETCH_LINES {
+            let (at, x, y, reach) = commands
+                .iter()
+                .enumerate()
+                .find_map(|(i, c)| match c {
+                    RenderCommand::Text {
+                        text,
+                        x,
+                        y,
+                        max_width,
+                        ..
+                    } if text == line => Some((i, *x, *y, x + max_width.unwrap_or(f32::INFINITY))),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{line:?} is not drawn"));
+            let covered = commands.iter().skip(at + 1).any(|c| {
+                matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
+                    if x >= *rx && x < rx + width && y >= *ry && y < ry + height)
+            });
+            assert!(!covered, "{line:?} is painted over");
+            // Nor drawn on the same row as other text: a header's title over
+            // a warning is as unreadable as a fill over it.
+            let crowded = commands.iter().any(|c| {
+                matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
+                    if !CANNOT_FETCH_LINES.contains(&text.as_str())
+                        && (ty - y).abs() < 10.0
+                        && *tx < reach
+                        && tx + tw.unwrap_or(f32::INFINITY) > x)
+            });
+            assert!(!crowded, "{line:?} shares its row with other text");
+        }
     }
 }

@@ -3201,34 +3201,6 @@ impl VideoPlayerApp {
             Surface::Card,
         );
 
-        // After the background, or it would be painted over.
-        //
-        // Keyed on there being no file, so it retires itself the day something
-        // can open one rather than becoming a stale claim of its own.
-        if self.current_file.is_none() {
-            for (i, line) in CANNOT_PLAY_LINES.iter().enumerate() {
-                cmds.push(RenderCommand::Text {
-                    x: 10.0,
-                    #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
-                    y: 2.0 + i as f32 * 13.0,
-                    text: (*line).to_string(),
-                    color: if i == 0 {
-                        self.palette.ink(self.palette.yellow)
-                    } else {
-                        self.palette.subtext0
-                    },
-                    font_size: if i == 0 { 12.0 } else { 10.0 },
-                    font_weight: if i == 0 {
-                        FontWeightHint::Bold
-                    } else {
-                        FontWeightHint::Regular
-                    },
-                    max_width: Some(self.width - 20.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-        }
-
         match self.active_tab {
             PlayerTab::Player => self.render_player_view(&mut cmds),
             PlayerTab::Playlist => self.render_playlist_panel(&mut cmds),
@@ -3416,29 +3388,40 @@ impl VideoPlayerApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // If no file loaded, show placeholder
+        // With no file, what this player cannot do, where a picture would be.
+        //
+        // It said "No file loaded" and "Ctrl+O to open" here -- and Ctrl+O is
+        // bound to nothing -- while the true lines were drawn at the top of the
+        // window, under the video area and the tab bar that were then drawn
+        // over them. Keyed on there being no file, so they retire themselves
+        // the day something can open one.
         if self.current_file.is_none() {
-            cmds.push(RenderCommand::Text {
-                x: self.width / 2.0 - 80.0,
-                y: top + video_h / 2.0 - 20.0,
-                text: "No file loaded".to_string(),
-                font_size: 18.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(300.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            cmds.push(RenderCommand::Text {
-                x: self.width / 2.0 - 60.0,
-                y: top + video_h / 2.0 + 10.0,
-                text: "Ctrl+O to open".to_string(),
-                font_size: 13.0,
-                color: self.palette.surface2,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(200.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            let avail = (self.width - 32.0).max(0.0);
+            for (i, line) in CANNOT_PLAY_LINES.iter().enumerate() {
+                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                let ty = top + video_h / 2.0 - 30.0 + i as f32 * 22.0;
+                if avail <= 0.0 || ty < top || ty + 22.0 > top + video_h {
+                    continue;
+                }
+                cmds.push(RenderCommand::Text {
+                    x: 16.0,
+                    y: ty,
+                    text: (*line).to_string(),
+                    font_size: if i == 0 { 16.0 } else { 13.0 },
+                    color: if i == 0 {
+                        self.palette.ink(self.palette.yellow)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_weight: if i == 0 {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    max_width: Some(avail),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
         } else {
             // Video frame placeholder
             if let Some(file) = &self.current_file
@@ -7676,5 +7659,48 @@ as many times as before",
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    /// The warning lines are where they can be seen: nothing drawn after a
+    /// line fills the point it is drawn at. The sweep that added them drew
+    /// them "after the background, or it would be painted over" -- and in
+    /// several apps a bar was then drawn over the same pixels, while a test
+    /// that read the frame's texts said they were there. known-issues.md,
+    /// `[E] Warnings drawn where the next thing drawn covers them`.
+    #[test]
+    fn the_warning_lines_are_not_painted_over() {
+        let app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let commands: Vec<RenderCommand> = app.render_commands();
+        for line in CANNOT_PLAY_LINES {
+            let (at, x, y, reach) = commands
+                .iter()
+                .enumerate()
+                .find_map(|(i, c)| match c {
+                    RenderCommand::Text {
+                        text,
+                        x,
+                        y,
+                        max_width,
+                        ..
+                    } if text == line => Some((i, *x, *y, x + max_width.unwrap_or(f32::INFINITY))),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{line:?} is not drawn"));
+            let covered = commands.iter().skip(at + 1).any(|c| {
+                matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
+                    if x >= *rx && x < rx + width && y >= *ry && y < ry + height)
+            });
+            assert!(!covered, "{line:?} is painted over");
+            // Nor drawn on the same row as other text: a header's title over
+            // a warning is as unreadable as a fill over it.
+            let crowded = commands.iter().any(|c| {
+                matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
+                    if !CANNOT_PLAY_LINES.contains(&text.as_str())
+                        && (ty - y).abs() < 10.0
+                        && *tx < reach
+                        && tx + tw.unwrap_or(f32::INFINITY) > x)
+            });
+            assert!(!crowded, "{line:?} shares its row with other text");
+        }
     }
 }

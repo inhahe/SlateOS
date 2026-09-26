@@ -165964,7 +165964,7 @@ given in the request with a regression case for `test-pre-push-gates.py`.
 Until then, run a script's `test-<stem>.py` by hand before pushing it.
 
 ### [E] Warnings drawn where the next thing drawn covers them -- 2026-09-25
-**Status:** FIXED for notes, kanban, the alarm clock and the spreadsheet (lane E, 2026-09-25); OPEN for eleven more -- lane E's, in progress.
+**Status:** FIXED (lane E, 2026-09-25) -- all fifteen apps.
 
 **In short:** a sweep in mid-September gave many apps one or two lines of
 text at the very top of the window saying something the user must know: the
@@ -165988,13 +165988,29 @@ false since it kept workbooks and asked before losing one (design-decisions
 §1204). One true line now, on the status bar, while the sheet is the example
 nobody has touched.
 
-**Open -- the same comment marks each:** `calendar`, `clipmanager`,
-`credmanager`, `filediff`, `podcast`, `mindmap`, `musicplayer`,
-`startupmanager`, `remotedesktop`, `videoplayer`, `reminders`. Not all may be
-covered -- where the lines land depends on what each app draws next -- so each
-wants the test first. The calendar's and the reminders list's lines say they
-keep nothing, which is so: two more apps that keep nothing, beside the four the
-entry below names.
+**The other eleven, the same day** -- each marked by the same comment. A test
+in each (`the_warning_lines_are_not_painted_over`) found eight painted over
+(`calendar`, `credmanager`, `filediff`, `mindmap`, `musicplayer`, `podcast`,
+`remotedesktop`, `videoplayer`) and, once it also asked that no other text share
+a line's row, two more drawn under other text (`clipmanager`'s under its search
+bar, `startupmanager`'s under its header; `reminders`' lines sat under its
+header's title too, though the default theme draws that header unfilled). Each
+got a place nothing else is drawn: a strip of its own under the top bar that
+the content starts below (`calendar`, `credmanager`, `mindmap`, `musicplayer`,
+`remotedesktop`, `reminders` -- while the notice is shown, where it is keyed
+on an empty list), a strip along the bottom (`podcast`, which has no top bar),
+or the empty panel the lines explain (`filediff`, `clipmanager`,
+`startupmanager`, `videoplayer`), wrapped there rather than cut where the panel
+is narrow. `videoplayer`'s empty picture also said "Ctrl+O to open", and Ctrl+O
+is bound to nothing: the true lines are there now. The test in each asks that
+nothing drawn after a line fills the point it is drawn at, and that no other
+text overlapping it horizontally is on its row.
+
+The calendar's and the reminders list's lines say they keep nothing, which is
+so: two more apps that keep nothing, beside the four the entry below names --
+and neither can make an item yet (the calendar only imports `.ics`, the
+reminders list only opens JSON), so each wants a way to add one before a store
+is worth much. Lane E's.
 
 ### [E] The explorer's file-type columns showed the same invented values for every file -- 2026-09-25
 **Status:** FIXED for pictures, source files and zip archives (lane E, 2026-09-25); OPEN for audio files, a picture's colour depth, and tar, gzip, 7z and rar archives -- lane E's.

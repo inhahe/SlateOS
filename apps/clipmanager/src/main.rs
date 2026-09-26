@@ -1227,36 +1227,6 @@ fn build_frame(state: &AppState, width: f32, height: f32) -> Frame {
 
     let inner_w = (width - MARGIN * 2.0).max(0.0);
 
-    // After the background, or it would be painted over. Keyed on the history
-    // being empty, so it retires itself the day a capture path lands.
-    if state.store.entries.is_empty() {
-        for (i, line) in NOT_WATCHING_LINES.iter().enumerate() {
-            #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
-            let ty = 1.0 + i as f32 * 11.0;
-            if inner_w <= 0.0 || ty + 11.0 > height {
-                break;
-            }
-            frame.push(RenderCommand::Text {
-                x: MARGIN,
-                y: ty,
-                text: (*line).to_string(),
-                color: if i == 0 {
-                    state.palette.ink(state.palette.yellow)
-                } else {
-                    state.palette.subtext0
-                },
-                font_size: if i == 0 { 10.0 } else { 9.0 },
-                font_weight: if i == 0 {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(inner_w),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-    }
-
     render_search_bar(&mut frame, state, MARGIN, 8.0, inner_w, TOP_BAR_H);
 
     let tab_y = 8.0 + TOP_BAR_H + 4.0;
@@ -1579,15 +1549,47 @@ fn render_history_panel(frame: &mut Frame, state: &AppState, rect: Rect, visible
         ry += ROW_H + ROW_GAP;
     }
 
-    if state.filtered_ids.is_empty() {
+    if state.store.total_entries() == 0 {
+        // Why the history is empty, in the list it explains, where "No
+        // entries" was. The two lines were drawn at the top of the window,
+        // where the search bar was then drawn over the second. Wrapped to the
+        // list rather than cut, because that line is the one that says the
+        // program cannot watch the clipboard.
+        let width = (list_w - 32.0).max(0.0);
+        let mut ty = y + 24.0;
+        for (i, line) in NOT_WATCHING_LINES.iter().enumerate() {
+            let (size, weight) = if i == 0 {
+                (14.0, FontWeightHint::Bold)
+            } else {
+                (12.0, FontWeightHint::Regular)
+            };
+            for piece in text::wrap(line, width, size, weight) {
+                if ty + 18.0 > y + h {
+                    break;
+                }
+                frame.push(RenderCommand::Text {
+                    x: x + 16.0,
+                    y: ty,
+                    text: piece,
+                    color: if i == 0 {
+                        state.palette.ink(state.palette.yellow)
+                    } else {
+                        state.palette.subtext0
+                    },
+                    font_size: size,
+                    font_weight: weight,
+                    max_width: Some(width),
+                    overflow: TextOverflow::Ellipsis,
+                });
+                ty += 18.0;
+            }
+            ty += 4.0;
+        }
+    } else if state.filtered_ids.is_empty() {
         frame.push(RenderCommand::Text {
             x: x + 16.0,
             y: y + 24.0,
-            text: if state.store.total_entries() == 0 {
-                "No entries".to_string()
-            } else {
-                "Nothing matches the current filter".to_string()
-            },
+            text: "Nothing matches the current filter".to_string(),
             color: state.palette.subtext0,
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
@@ -3211,11 +3213,10 @@ mod tests {
                 _ => None,
             })
             .collect();
+        // Wrapped to the list, so read as the frame says it, in order.
+        let said = texts.join(" ");
         for line in NOT_WATCHING_LINES {
-            assert!(
-                texts.iter().any(|t| t == line),
-                "the window never said {line:?}"
-            );
+            assert!(said.contains(line), "the window never said {line:?}");
         }
         assert!(
             NOT_WATCHING_LINES
@@ -5216,5 +5217,65 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    /// The warning lines are where they can be seen: nothing drawn after a
+    /// line fills the point it is drawn at. The sweep that added them drew
+    /// them "after the background, or it would be painted over" -- and in
+    /// several apps a bar was then drawn over the same pixels, while a test
+    /// that read the frame's texts said they were there. known-issues.md,
+    /// `[E] Warnings drawn where the next thing drawn covers them`.
+    #[test]
+    fn the_warning_lines_are_not_painted_over() {
+        let state = AppState::new();
+        let commands: Vec<RenderCommand> = build_frame(&state, 900.0, 700.0).commands().to_vec();
+        // Each line is wrapped to the list it explains: its pieces, in the
+        // order drawn, are the line.
+        let pieces: Vec<(usize, &str, f32, f32, f32)> = commands
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| match c {
+                RenderCommand::Text {
+                    text,
+                    x,
+                    y,
+                    max_width,
+                    ..
+                } if !text.is_empty()
+                    && NOT_WATCHING_LINES.iter().any(|l| l.contains(text.as_str())) =>
+                {
+                    Some((
+                        i,
+                        text.as_str(),
+                        *x,
+                        *y,
+                        x + max_width.unwrap_or(f32::INFINITY),
+                    ))
+                }
+                _ => None,
+            })
+            .collect();
+        let joined = pieces.iter().map(|p| p.1).collect::<Vec<_>>().join(" ");
+        for line in NOT_WATCHING_LINES {
+            assert!(
+                joined.contains(line),
+                "{line:?} is not drawn whole: {joined:?}"
+            );
+        }
+        for (at, piece, x, y, reach) in &pieces {
+            let covered = commands.iter().skip(at + 1).any(|c| {
+                matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
+                    if *x >= *rx && *x < rx + width && *y >= *ry && *y < ry + height)
+            });
+            assert!(!covered, "{piece:?} is painted over");
+            let crowded = commands.iter().any(|c| {
+                matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
+                    if !NOT_WATCHING_LINES.iter().any(|l| l.contains(text.as_str()))
+                        && (ty - y).abs() < 10.0
+                        && tx < reach
+                        && tx + tw.unwrap_or(f32::INFINITY) > *x)
+            });
+            assert!(!crowded, "{piece:?} shares its row with other text");
+        }
     }
 }

@@ -80,6 +80,11 @@ const CANNOT_PLAY_LINES: [&str; 3] = [
 const WINDOW_WIDTH: f32 = 1000.0;
 const WINDOW_HEIGHT: f32 = 700.0;
 const TAB_BAR_HEIGHT: f32 = 44.0;
+/// The strip under the tab bar that says the player cannot play, while the
+/// library is empty, and one line of it. The three lines were drawn at the top
+/// of the window, before the tab bar, which filled the same pixels.
+const NOTICE_H: f32 = 50.0;
+const NOTICE_LINE_H: f32 = 15.0;
 const CONTROLS_HEIGHT: f32 = 80.0;
 const TRACK_ROW_HEIGHT: f32 = 36.0;
 const VOLUME_BAR_WIDTH: f32 = 100.0;
@@ -1207,16 +1212,26 @@ impl PlayerState {
     /// -- i.e. the bottom edge of the non-scrolling column header.
     ///
     /// Content-relative, because that is the space the list is drawn in:
-    /// `render` pushes a `translate(0, TAB_BAR_HEIGHT)` before calling the
+    /// `render` pushes a `translate(0, content_top())` before calling the
     /// per-tab renderer. `row_at` converts a window coordinate into this
     /// space once, rather than each pointer path doing its own arithmetic.
     const fn rows_top() -> f32 {
         TRACK_ROW_HEIGHT
     }
 
+    /// The top of the content area: under the tab bar, and under the notice
+    /// strip while the library is empty.
+    fn content_top(&self) -> f32 {
+        if self.library.is_empty() {
+            TAB_BAR_HEIGHT + NOTICE_H
+        } else {
+            TAB_BAR_HEIGHT
+        }
+    }
+
     /// The height of the content area, between the tab bar and the controls.
     fn content_height(&self) -> f32 {
-        (self.height - TAB_BAR_HEIGHT - CONTROLS_HEIGHT).max(0.0)
+        (self.height - self.content_top() - CONTROLS_HEIGHT).max(0.0)
     }
 
     /// The height of the scrolling track-row area.
@@ -1255,7 +1270,7 @@ impl PlayerState {
     ///   click in the header strip -- or on the Now Playing tab -- selected
     ///   one too.
     fn row_at(&self, y: f32) -> Option<usize> {
-        let rel = y - TAB_BAR_HEIGHT - Self::rows_top();
+        let rel = y - self.content_top() - Self::rows_top();
         if !rel.is_finite() || rel < 0.0 || rel >= self.rows_height() {
             return None;
         }
@@ -1353,38 +1368,38 @@ pub fn render(state: &PlayerState) -> RenderTree {
     // Background
     tree.fill_rect(0.0, 0.0, state.width, state.height, state.palette.base);
 
-    // After the background, or it would be painted over. Keyed on the library
-    // being empty so it retires itself when a scanner lands.
+    // Tab bar at top
+    render_tab_bar(state, &mut tree);
+
+    // In the strip under the tab bar while the library is empty, which the
+    // content starts below.
     if state.library.is_empty() {
         for (i, line) in CANNOT_PLAY_LINES.iter().enumerate() {
             tree.push(RenderCommand::Text {
                 x: 10.0,
                 #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
-                y: 2.0 + i as f32 * 13.0,
+                y: TAB_BAR_HEIGHT + 3.0 + i as f32 * NOTICE_LINE_H,
                 text: (*line).to_string(),
                 color: if i == 0 {
                     state.palette.ink(state.palette.yellow)
                 } else {
                     state.palette.subtext0
                 },
-                font_size: if i == 0 { 12.0 } else { 10.0 },
+                font_size: if i == 0 { 12.0 } else { 11.0 },
                 font_weight: if i == 0 {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(state.width - 20.0),
+                max_width: Some((state.width - 20.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         }
     }
 
-    // Tab bar at top
-    render_tab_bar(state, &mut tree);
-
     // Main content area
-    let content_y = TAB_BAR_HEIGHT;
-    let content_height = state.height - TAB_BAR_HEIGHT - CONTROLS_HEIGHT;
+    let content_y = state.content_top();
+    let content_height = state.content_height();
     tree.clip(0.0, content_y, state.width, content_height);
     tree.translate(0.0, content_y);
 
@@ -2769,7 +2784,7 @@ fn handle_mouse(state: &mut PlayerState, mouse_event: &MouseEvent) -> bool {
 
         MouseEventKind::Scroll { dy, .. } => {
             // Scroll track list
-            let content_y = TAB_BAR_HEIGHT;
+            let content_y = state.content_top();
             let content_height = state.content_height();
             if y >= content_y && y < content_y + content_height {
                 let max_scroll = state.max_scroll();
@@ -4679,6 +4694,49 @@ mod tests {
                 let _ = parse_id3v2(prefix);
                 let _ = parse_flac_header(prefix);
             }
+        }
+    }
+
+    /// The warning lines are where they can be seen: nothing drawn after a
+    /// line fills the point it is drawn at. The sweep that added them drew
+    /// them "after the background, or it would be painted over" -- and in
+    /// several apps a bar was then drawn over the same pixels, while a test
+    /// that read the frame's texts said they were there. known-issues.md,
+    /// `[E] Warnings drawn where the next thing drawn covers them`.
+    #[test]
+    fn the_warning_lines_are_not_painted_over() {
+        let state = PlayerState::new();
+        let commands: Vec<RenderCommand> = render(&state).commands;
+        for line in CANNOT_PLAY_LINES {
+            let (at, x, y, reach) = commands
+                .iter()
+                .enumerate()
+                .find_map(|(i, c)| match c {
+                    RenderCommand::Text {
+                        text,
+                        x,
+                        y,
+                        max_width,
+                        ..
+                    } if text == line => Some((i, *x, *y, x + max_width.unwrap_or(f32::INFINITY))),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{line:?} is not drawn"));
+            let covered = commands.iter().skip(at + 1).any(|c| {
+                matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
+                    if x >= *rx && x < rx + width && y >= *ry && y < ry + height)
+            });
+            assert!(!covered, "{line:?} is painted over");
+            // Nor drawn on the same row as other text: a header's title over
+            // a warning is as unreadable as a fill over it.
+            let crowded = commands.iter().any(|c| {
+                matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
+                    if !CANNOT_PLAY_LINES.contains(&text.as_str())
+                        && (ty - y).abs() < 10.0
+                        && *tx < reach
+                        && tx + tw.unwrap_or(f32::INFINITY) > x)
+            });
+            assert!(!crowded, "{line:?} shares its row with other text");
         }
     }
 }

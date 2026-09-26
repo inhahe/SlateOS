@@ -24239,6 +24239,17 @@ Linux 6.6's mm/mmap.c, mm/mprotect.c, mm/mincore.c and mm/memfd.c.
 - `shm_open(NULL, …)` keeps the §303 substitute: glibc reads the name at
   once and faults.
 
+**Twenty-ninth pass, 2026-09-26 — `resource.rs` (5 sites), lane D.** Against
+glibc 2.39's getrlimit64.c/setrlimit64.c and Linux 6.6's `prlimit64`.
+
+- **`getrlimit(res, NULL)`, `setrlimit(res, NULL)`** were `EFAULT`.  glibc on
+  x86-64 makes neither system call: both are `prlimit64` with the other
+  pointer NULL, so a NULL pointer asks for nothing and a valid resource is 0
+  -- `B-D-RLIMIT-NULL-WAS-EFAULT` (new, fixed with it).
+- **`prlimit`**'s two pointers: the new limit is read first and the old one
+  written last, only if nothing before it failed.
+- **`getrusage(who, NULL)`** -- right: `who` first, then the copy.
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24252,13 +24263,16 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-twenty-eight swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
+twenty-nine swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
 `sched.rs`, `mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`,
 `linux_module.rs`, `sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs`, `sysv_sem.rs`,
-`linux_aio_abi.rs`, `linux_seccomp.rs` and `mman.rs`. That finishes the files
-at four: `pwd.rs`, `dirent.rs` and `signal.rs` needed nothing at their NULLs
--- `pwd.rs`'s database did (`B-D-PWD-KNEW-ONLY-ROOT`). Next is `resource.rs`,
-the last of the files at three.
+`linux_aio_abi.rs`, `linux_seccomp.rs`, `mman.rs` and `resource.rs`. That
+finishes the files the sweep had counted at four and at three: `pwd.rs`,
+`dirent.rs` and `signal.rs` needed nothing at their NULLs -- `pwd.rs`'s
+database did (`B-D-PWD-KNEW-ONLY-ROOT`). A recount by the eleventh pass's
+rule on 2026-09-26 finds three it had not listed: `crypt.rs` at four (one of
+its sites sampled by that pass) and `iconv.rs` and `linux_io_uring.rs` at
+three. They are next, then the files at two.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
@@ -169679,6 +169693,24 @@ and the second failed with `EEXIST`.
 **Fix.** The name is measured (`EFAULT`, and `EINVAL` past 249 bytes) and
 not used; the path is `/dev/shm/.memfd_<pid>_<n>`, retried past a name
 another process left.
+
+### [D] B-D-RLIMIT-NULL-WAS-EFAULT — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/resource.rs`: `getrlimit`, `setrlimit`, `prlimit`.
+
+**What it was.** `getrlimit(resource, NULL)` and `setrlimit(resource, NULL)`
+answered `EFAULT` -- the answers of Linux's old `getrlimit`/`setrlimit`
+system calls, which glibc on x86-64 never makes: its `getrlimit` is
+`prlimit64(0, resource, NULL, rlim)` and its `setrlimit`
+`prlimit64(0, resource, rlim, NULL)`, where a NULL pointer asks for nothing.
+So both are 0 for a valid resource, and a bad resource is `EINVAL` whatever
+the pointer (`setrlimit` said `EFAULT` for that too). `prlimit` itself wrote
+the old limit before trying the new one, so a refused call still overwrote
+the caller's buffer.
+
+**Fix.** `getrlimit` and `setrlimit` are `prlimit` with the other pointer
+NULL, as glibc's are; `prlimit` reads the new limit first and writes the old
+one last, only on success.
 
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 

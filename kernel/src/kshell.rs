@@ -10450,6 +10450,11 @@ fn interpret_echo_escapes(s: &str) -> String {
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
+    // Set by rung 21 when `syshealth` or `invariant` reports a real fault
+    // somewhere else in the kernel: the rungs after it still run, and the
+    // self-test fails at the end instead of panicking where it stood. See 21.
+    let mut kernel_health_fault = false;
+
     serial_println!("  kshell::self_test 1: echo -e escapes (ASCII)");
     assert_eq!(interpret_echo_escapes("a\\nb"), "a\nb");
     assert_eq!(interpret_echo_escapes("a\\tb"), "a\tb");
@@ -11598,12 +11603,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // success. These are the commands that end up in boot scripts and health
     // checks -- the one place where the status is the only thing read.
     //
-    // The failing side cannot be exercised from a healthy kernel: `syshealth`
-    // only says ISSUES DETECTED when the heap really is corrupt. That is
-    // exactly why the bug survived so long, so what is asserted here is the
-    // passing side (a checker that passes must still report 0 -- otherwise a
-    // blanket `set_exit(1)` would "fix" the bug and break every caller) plus
-    // the failure this rung *can* force: a category that checks nothing.
+    // What is asserted is that the status IS the verdict, in both directions:
+    // a checker whose report says it passed exits 0 (so a blanket
+    // `set_exit(1)` cannot "fix" the bug and break every caller), and one
+    // whose report says it failed exits 1. The failing side cannot be forced
+    // from here -- `syshealth` only fails when something really is wrong --
+    // so the rung also forces the failure it *can*: a category that checks
+    // nothing.
+    //
+    // WHETHER THE KERNEL IS HEALTHY IS NOT THIS RUNG'S SUBJECT, and it used to
+    // be asserted as if it were: `assert_eq!(last_exit(), 0)` turned a real
+    // fault found by `syshealth` into a kernel panic here. On the 2026-09-26
+    // integration boot that fault was a genuine lock-order inversion in the
+    // VFS (`flock` resolved a file under `LOCK_TABLE`, the reverse of
+    // `/proc/locks`), `syshealth` reported it correctly -- 6/7, exit 1 -- and
+    // the panic then threw away every self-test after this one, the network
+    // checks among them. An unhealthy kernel now fails this self-test at the
+    // end, after every rung has run and reported.
     {
         let out = capture_command("syshealth");
         assert_output_starts_with(
@@ -11618,7 +11634,20 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // boot. The checker already printed the answer; capturing it into a
         // buffer is what threw it away.
         dump_if_failed("syshealth", &out);
-        assert_eq!(last_exit(), 0, "a checker that passed reports success");
+        let healthy = output_contains(&out, b"System: ALL CHECKS PASSED");
+        assert_eq!(
+            last_exit(),
+            u8::from(!healthy),
+            "`syshealth`'s status is its verdict"
+        );
+        if !healthy {
+            serial_println!(
+                "  !! `syshealth` found a real fault (its report is above). It \
+                 fails this self-test at the end, not here: the rungs after \
+                 this one still run."
+            );
+            kernel_health_fault = true;
+        }
 
         let out = capture_command("invariant");
         assert_output_starts_with(
@@ -11627,7 +11656,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             b"=== Kernel Invariant Check ",
         );
         dump_if_failed("invariant", &out);
-        assert_eq!(last_exit(), 0, "all invariants hold on a healthy kernel");
+        let holds = output_contains(&out, b" invariants PASSED");
+        assert_eq!(
+            last_exit(),
+            u8::from(!holds),
+            "`invariant`'s status is its verdict"
+        );
+        if !holds {
+            serial_println!(
+                "  !! `invariant` found a violated invariant (its report is \
+                 above). It fails this self-test at the end, not here."
+            );
+            kernel_health_fault = true;
+        }
 
         // A misspelled category checks nothing, and nothing checked is not a
         // clean bill of health.
@@ -23566,6 +23607,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
+    if kernel_health_fault {
+        serial_println!(
+            "  kshell::self_test FAILED: every rung ran, and rung 21's health \
+             checkers found a real fault elsewhere in the kernel (reported there)"
+        );
+        return Err(crate::error::KernelError::InternalError);
+    }
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }

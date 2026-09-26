@@ -1859,6 +1859,12 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **The clock is the time over the date** -- done 2026-09-26
+  (`design-decisions.md` §1404). Two lines, as the reference's: the time,
+  bold, over the weekday and date, smaller and dimmer, each centred; the slot
+  takes the width of the wider line. One line when neither the weekday nor the
+  date is shown, or when the bar is too short for two.
+
 - `[C]` **"Show desktop" at the bar's end** -- done 2026-09-26
   (`design-decisions.md` §1403). The reference's strip, right of the clock:
   a press puts away every window on this desktop, the next brings the same

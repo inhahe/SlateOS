@@ -1270,43 +1270,55 @@ fn the_clocks_target_covers_the_reading_that_is_drawn_at_every_scaling() {
     for percent in [100, 125, 150, 200] {
         let shell = scaled(percent);
         let target = shell.clock_rect();
-        // The clock is the rightmost thing on the taskbar, so the rightmost
-        // text command is it — the desktop indicator sits at the tray's left
-        // edge.
-        let (x, y, size) = shell
+        // The clock is the rightmost text on the taskbar -- one line, or the
+        // reference's two, time over date -- and the desktop indicator sits at
+        // the tray's left edge. Every text command that starts inside the
+        // clock's slot is a line of it.
+        let lines: Vec<(f32, f32, f32, f32)> = shell
             .render_taskbar()
             .commands
             .iter()
             .filter_map(|c| match c {
                 RenderCommand::Text {
-                    x, y, font_size, ..
-                } => Some((*x, *y, *font_size)),
+                    x,
+                    y,
+                    font_size,
+                    text,
+                    font_weight,
+                    ..
+                } if *x >= target.x - 0.5 => Some((
+                    *x,
+                    *y,
+                    *font_size,
+                    guitk::text::measure(text, *font_size, *font_weight),
+                )),
                 _ => None,
             })
-            .max_by(|a, b| a.0.total_cmp(&b.0))
-            .expect("the taskbar draws a clock");
-
-        // The slot is sized for the *widest* reading the switches allow, so
-        // check that one rather than the current second.
-        let widest = shell.clock_width();
+            .collect();
         assert!(
-            x >= target.x,
-            "at {percent}% the reading starts left of its target"
+            !lines.is_empty(),
+            "at {percent}% the taskbar draws no clock"
         );
-        assert!(
-            x + widest <= target.x + target.w + 0.5,
-            "at {percent}% the reading runs past its target"
-        );
-        assert!(
-            y >= target.y && y + size <= target.y + target.h,
-            "at {percent}% the reading is drawn outside its target vertically"
-        );
-        // And the pixel it is drawn on is the pixel that opens the calendar.
-        assert_eq!(
-            shell.hit_test(x, y + size / 2.0),
-            Hit::Clock,
-            "at {percent}% the clock is drawn somewhere it cannot be clicked"
-        );
+        for (x, y, size, width) in lines {
+            assert!(
+                x >= target.x,
+                "at {percent}% a line starts left of its target"
+            );
+            assert!(
+                x + width <= target.x + target.w + 0.5,
+                "at {percent}% a line runs past its target"
+            );
+            assert!(
+                y >= target.y && y + size <= target.y + target.h,
+                "at {percent}% a line is drawn outside its target vertically"
+            );
+            // And the pixel it is drawn on is the pixel that opens the calendar.
+            assert_eq!(
+                shell.hit_test(x, y + size / 2.0),
+                Hit::Clock,
+                "at {percent}% the clock is drawn somewhere it cannot be clicked"
+            );
+        }
     }
 }
 
@@ -2429,11 +2441,15 @@ fn every_drawn_string_follows_the_users_font_size() {
         sizes
     };
 
+    // A bar tall enough for the clock's two lines at either size, so both
+    // renders lay the clock out alike and the lists pair up.
     let mut base = shell();
+    base.taskbar_height = 80;
     let plain = render(&mut base);
     assert!(!plain.is_empty());
 
     let mut bigger = shell();
+    bigger.taskbar_height = 80;
     let mut appearance = AppearanceSettings::default();
     appearance.fonts.ui_size *= 2.0;
     bigger.set_appearance(appearance);

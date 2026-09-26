@@ -367,6 +367,12 @@ const TASKBAR_TILE_GLOW_BLUR: f32 = 11.0;
 const TRAY_MIN_WIDTH: f32 = 120.0;
 /// Gap at the tray's outer edge and between the items inside it.
 const TRAY_PADDING: f32 = 8.0;
+/// The clock's line height, as a multiple of its text size: the reference's
+/// `line-height: 1.18`.
+const CLOCK_LINE_HEIGHT: f32 = 1.18;
+/// How strongly the clock's date line is drawn under the time: the bar's text
+/// colour at this alpha, the reference's `opacity: 0.85`.
+const CLOCK_DATE_ALPHA: u8 = 217;
 /// Width of the "Show desktop" strip at the taskbar's right end: the Aero
 /// reference's 14.
 const SHOW_DESKTOP_WIDTH: f32 = 14.0;
@@ -7225,14 +7231,52 @@ impl DesktopShell {
         // the reading keeps it still: the slot is sized for the widest reading
         // these switches can produce, so a narrower one leaves a few pixels of
         // slack at the end instead of sliding the text sideways every minute.
-        let time_str = self.current_clock_string();
-        tree.text(
-            self.tray_right() - padding - self.clock_width(),
-            tray_text_y,
-            &time_str,
-            self.theme.taskbar_fg,
-            self.font_size(TextRole::Body),
-        );
+        let clock_x = self.tray_right() - padding - self.clock_width();
+        if self.clock_has_two_lines() {
+            // The reference's two lines, each centred in the slot: the time,
+            // bold, and under it the weekday and date, smaller and dimmer.
+            let secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let (time, date) = self.clock_lines_at(secs);
+            let (time_size, date_size) = (
+                self.font_size(TextRole::Body),
+                self.font_size(TextRole::Caption),
+            );
+            let slot = self.clock_width();
+            let top = bar.y + (bar.h - CLOCK_LINE_HEIGHT * (time_size + date_size)).max(0.0) / 2.0;
+            let time_w = text::measure(&time, time_size, guitk::render::FontWeightHint::Bold);
+            tree.push(guitk::render::RenderCommand::Text {
+                x: clock_x + (slot - time_w).max(0.0) / 2.0,
+                y: top,
+                text: time,
+                color: self.theme.taskbar_fg,
+                font_size: time_size,
+                font_weight: guitk::render::FontWeightHint::Bold,
+                max_width: None,
+                overflow: guitk::render::TextOverflow::Clip,
+            });
+            if let Some(date) = date {
+                let date_w = text::width(&date, date_size);
+                tree.text(
+                    clock_x + (slot - date_w).max(0.0) / 2.0,
+                    top + CLOCK_LINE_HEIGHT * time_size,
+                    &date,
+                    with_alpha(self.theme.taskbar_fg, CLOCK_DATE_ALPHA),
+                    date_size,
+                );
+            }
+        } else {
+            let time_str = self.current_clock_string();
+            tree.text(
+                clock_x,
+                tray_text_y,
+                &time_str,
+                self.theme.taskbar_fg,
+                self.font_size(TextRole::Body),
+            );
+        }
 
         // The notification bell, in its own slot immediately left of the clock.
         // Without it the pane this shell owns had exactly one way in — Super+N
@@ -8149,6 +8193,12 @@ impl DesktopShell {
         self.clock().format_taskbar(utc_secs, &self.local_zone())
     }
 
+    /// The taskbar clock's two lines for a given UTC instant: the time, and
+    /// the weekday and date when either is switched on.
+    fn clock_lines_at(&self, utc_secs: u64) -> (String, Option<String>) {
+        self.clock().taskbar_lines(utc_secs, &self.local_zone())
+    }
+
     /// How wide the clock's slot in the tray is.
     ///
     /// The **widest** reading the current switches can produce, not the current
@@ -8156,7 +8206,26 @@ impl DesktopShell {
     /// the tray is positioned from this, so a width that followed the current
     /// second would shuffle the tray once a minute.
     fn clock_width(&self) -> f32 {
-        self.clock().reading_width(self.font_size(TextRole::Body))
+        let clock = self.clock();
+        if self.clock_has_two_lines() {
+            clock.lines_width(
+                self.font_size(TextRole::Body),
+                self.font_size(TextRole::Caption),
+            )
+        } else {
+            clock.reading_width(self.font_size(TextRole::Body))
+        }
+    }
+
+    /// Whether the clock is drawn in the Aero reference's two lines -- the
+    /// time over the weekday and date -- rather than one: when there is a
+    /// weekday or a date to show, and the bar is tall enough for two lines at
+    /// [`CLOCK_LINE_HEIGHT`] with [`TASKBAR_TILE_MARGIN`] above and below.
+    fn clock_has_two_lines(&self) -> bool {
+        (self.datetime.show_date || self.datetime.show_day_of_week)
+            && CLOCK_LINE_HEIGHT
+                * (self.font_size(TextRole::Body) + self.font_size(TextRole::Caption))
+                <= self.taskbar_rect().h - 2.0 * self.scale(TASKBAR_TILE_MARGIN)
     }
 
     /// How wide the virtual-desktop indicator's text is.
@@ -13905,6 +13974,96 @@ mod window_manager_tests {
         assert_eq!(shell.clock_string_at(INSTANT), "01:30");
     }
 
+    /// The clock's drawn lines, top to bottom: `(x, y, width, text, alpha,
+    /// bold)` for every text command that starts inside its slot.
+    fn clock_texts(shell: &DesktopShell) -> Vec<(f32, f32, f32, String, u8, bool)> {
+        let slot = shell.clock_rect();
+        let mut lines: Vec<(f32, f32, f32, String, u8, bool)> = shell
+            .render_taskbar()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Text {
+                    x,
+                    y,
+                    text: line,
+                    color,
+                    font_size,
+                    font_weight,
+                    ..
+                } if *x >= slot.x - 0.5 => Some((
+                    *x,
+                    *y,
+                    text::measure(line, *font_size, *font_weight),
+                    line.clone(),
+                    color.a,
+                    *font_weight == guitk::render::FontWeightHint::Bold,
+                )),
+                _ => None,
+            })
+            .collect();
+        lines.sort_by(|a, b| a.1.total_cmp(&b.1));
+        lines
+    }
+
+    /// **The clock is the reference's two lines**: the time, bold, over the
+    /// weekday and date, dimmer -- each centred in the clock's slot. One line
+    /// when there is no date to show, or no room for two.
+    #[test]
+    fn the_clock_is_the_time_over_the_date() {
+        let mut shell = shell();
+        shell.datetime.show_day_of_week = true;
+        shell.datetime.show_date = true;
+        let lines = clock_texts(&shell);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let (time, date) = (&lines[0], &lines[1]);
+        assert!(time.5, "the time is not bold: {time:?}");
+        assert_eq!(
+            date.4,
+            super::CLOCK_DATE_ALPHA,
+            "the date is not dimmer: {date:?}"
+        );
+        assert!(
+            !date.3.contains(':'),
+            "the date line holds the time: {date:?}"
+        );
+        // Stacked, the reading takes the room of its wider line, not of the
+        // two side by side -- which is the room the tiles get back.
+        assert!(
+            shell.clock_width()
+                < text::width(
+                    &shell.clock_string_at(INSTANT),
+                    shell.font_size(TextRole::Body)
+                ),
+            "two lines take the room of one"
+        );
+        let slot = shell.clock_rect();
+        let middle = slot.x + shell.clock_width() / 2.0;
+        for line in [time, date] {
+            assert!(
+                (line.0 + line.2 / 2.0 - middle).abs() < 0.5,
+                "{line:?} is not centred on {middle}"
+            );
+        }
+
+        shell.datetime.show_day_of_week = false;
+        shell.datetime.show_date = false;
+        assert_eq!(clock_texts(&shell).len(), 1, "a line for no date");
+
+        shell.datetime.show_date = true;
+        shell.taskbar_height = 24;
+        let one = clock_texts(&shell);
+        assert_eq!(
+            one.len(),
+            1,
+            "two lines in a bar with no room for them: {one:?}"
+        );
+        assert!(
+            one[0].3.contains(':') && one[0].3.contains(' '),
+            "the one line is not the date and the time: {one:?}"
+        );
+    }
+
     /// A clock the tray has no room for is a setting that did not arrive.
     ///
     /// The tray used to be a flat 180 px with the clock drawn 100 px into it,
@@ -13934,13 +14093,30 @@ mod window_manager_tests {
             // month rather than landing on the same hour each time.
             for step in 0..1100_u64 {
                 let t = INSTANT + step * 25 * 3600;
-                let reading = shell.clock_string_at(t);
-                let w = text::width(&reading, shell.font_size(TextRole::Body));
-                assert!(
-                    w <= slot,
-                    "{reading:?} is {w} wide but the tray reserves {slot} \
-                     (weekday {dow}, date {date}, seconds {secs})"
-                );
+                // Two lines when the date is shown and the bar has room: each
+                // line must fit, the time as bold as it is drawn.
+                let lines: Vec<(String, f32)> = if shell.clock_has_two_lines() {
+                    let (time, date) = shell.clock_lines_at(t);
+                    let body = shell.font_size(TextRole::Body);
+                    let caption = shell.font_size(TextRole::Caption);
+                    let mut lines = vec![(
+                        time.clone(),
+                        text::measure(&time, body, guitk::render::FontWeightHint::Bold),
+                    )];
+                    lines.extend(date.map(|d| (d.clone(), text::width(&d, caption))));
+                    lines
+                } else {
+                    let reading = shell.clock_string_at(t);
+                    let w = text::width(&reading, shell.font_size(TextRole::Body));
+                    vec![(reading, w)]
+                };
+                for (line, w) in lines {
+                    assert!(
+                        w <= slot,
+                        "{line:?} is {w} wide but the tray reserves {slot} \
+                         (weekday {dow}, date {date}, seconds {secs})"
+                    );
+                }
             }
         }
     }

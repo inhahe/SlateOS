@@ -1090,21 +1090,54 @@ impl ClockDisplay {
     /// `guitk::date` tables, so this is a second *presentation* of one calendar
     /// rather than a second calendar; see design-decisions §492.
     pub fn format_taskbar(&self, utc_timestamp: u64, tz: &Tz) -> String {
+        let (time, date) = self.taskbar_lines(utc_timestamp, tz);
+        match date {
+            Some(date) => format!("{date} {time}"),
+            None => time,
+        }
+    }
+
+    /// The taskbar reading as the Aero reference sets it, in two lines: the
+    /// time, and -- when the weekday or the date is switched on -- a second
+    /// with them, `("16:30", Some("Tue Aug 18"))`. `None` for the second when
+    /// both are off: a clock with nothing to say under the time says nothing.
+    ///
+    /// [`format_taskbar`](Self::format_taskbar) is the same two joined into
+    /// one line, for a bar with no room for two.
+    pub fn taskbar_lines(&self, utc_timestamp: u64, tz: &Tz) -> (String, Option<String>) {
         let (year, month, day, _, _, _) = timestamp_to_date(local_secs(utc_timestamp, tz));
-        let mut out = String::new();
+        let mut date = String::new();
         if self.show_day_of_week {
             let dow = day_of_week(year, month, day);
-            out.push_str(Weekday::from_index(i32::try_from(dow).unwrap_or(0)).short_name());
-            out.push(' ');
+            date.push_str(Weekday::from_index(i32::try_from(dow).unwrap_or(0)).short_name());
         }
         if self.show_date {
-            out.push_str(month_name_short(month));
-            out.push(' ');
-            out.push_str(&day.to_string());
-            out.push(' ');
+            if !date.is_empty() {
+                date.push(' ');
+            }
+            date.push_str(month_name_short(month));
+            date.push(' ');
+            date.push_str(&day.to_string());
         }
-        out.push_str(&self.format_time(utc_timestamp, tz));
-        out
+        let time = self.format_time(utc_timestamp, tz);
+        (time, (!date.is_empty()).then_some(date))
+    }
+
+    /// How much room the two-line reading needs: the wider of its widest time
+    /// at `time_size`, drawn bold as the reference's is, and its widest
+    /// weekday-and-date at `date_size`. Measured over the widest values, never
+    /// the current ones, for the reason [`reading_width`](Self::reading_width)
+    /// gives.
+    pub fn lines_width(&self, time_size: f32, date_size: f32) -> f32 {
+        let time = text::measure(
+            &self.widest_time(time_size),
+            time_size,
+            FontWeightHint::Bold,
+        );
+        let date = self
+            .widest_date(date_size)
+            .map_or(0.0, |date| text::width(&date, date_size));
+        time.max(date)
     }
 
     /// How much horizontal room to reserve for this clock at `font_size`.
@@ -1126,6 +1159,54 @@ impl ClockDisplay {
     /// which of those is widest is a property of the font face and changes when
     /// the face does.
     fn widest_reading(&self, font_size: f32) -> String {
+        match self.widest_date(font_size) {
+            Some(date) => format!("{date} {}", self.widest_time(font_size)),
+            None => self.widest_time(font_size),
+        }
+    }
+
+    /// The widest single character among `cands` at `font_size`.
+    fn widest_of(cands: &[&'static str], font_size: f32) -> &'static str {
+        cands.iter().copied().fold("", |best, c| {
+            if text::width(c, font_size) > text::width(best, font_size) {
+                c
+            } else {
+                best
+            }
+        })
+    }
+
+    /// The widest weekday-and-date part a reading can have at `font_size`, or
+    /// `None` when both switches are off.
+    fn widest_date(&self, font_size: f32) -> Option<String> {
+        let digit = Self::widest_of(
+            &["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+            font_size,
+        );
+        let mut out = String::new();
+        if self.show_day_of_week {
+            let days: [&'static str; 7] = core::array::from_fn(|i| {
+                Weekday::from_index(i32::try_from(i).unwrap_or(0)).short_name()
+            });
+            out.push_str(Self::widest_of(&days, font_size));
+        }
+        if self.show_date {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            let months: [&'static str; 12] = core::array::from_fn(|i| {
+                month_name_short(u32::try_from(i).unwrap_or(0).saturating_add(1))
+            });
+            out.push_str(Self::widest_of(&months, font_size));
+            out.push(' ');
+            out.push_str(digit);
+            out.push_str(digit);
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// The widest time a reading can have at `font_size`.
+    fn widest_time(&self, font_size: f32) -> String {
         let widest = |cands: &[&'static str]| -> &'static str {
             cands.iter().copied().fold("", |best, c| {
                 if text::width(c, font_size) > text::width(best, font_size) {
@@ -1142,22 +1223,6 @@ impl ClockDisplay {
         let dd = format!("{digit}{digit}");
 
         let mut out = String::new();
-        if self.show_day_of_week {
-            let days: [&'static str; 7] = core::array::from_fn(|i| {
-                Weekday::from_index(i32::try_from(i).unwrap_or(0)).short_name()
-            });
-            out.push_str(widest(&days));
-            out.push(' ');
-        }
-        if self.show_date {
-            let months: [&'static str; 12] = core::array::from_fn(|i| {
-                month_name_short(u32::try_from(i).unwrap_or(0).saturating_add(1))
-            });
-            out.push_str(widest(&months));
-            out.push(' ');
-            out.push_str(&dd);
-            out.push(' ');
-        }
         out.push_str(&dd);
         out.push(':');
         out.push_str(&dd);
@@ -4005,6 +4070,69 @@ mod tests {
                     text::width(&reading, SIZE) <= reserved,
                     "{reading:?} exceeds the reserved {reserved}"
                 );
+            }
+        }
+    }
+
+    /// **The reference's two lines**: the time, and under it the weekday and
+    /// date -- nothing under it when both are off. Joined, they are the
+    /// one-line reading.
+    #[test]
+    fn the_taskbar_lines_are_the_time_over_the_date() {
+        let mut clock = ClockDisplay::new();
+        // 2026-08-18 16:30:45 UTC -- a Tuesday.
+        let ts = 1_787_070_645;
+        let lines = |clock: &ClockDisplay| clock.taskbar_lines(ts, &Tz::UTC);
+        assert_eq!(lines(&clock), ("16:30".to_string(), None));
+        clock.show_day_of_week = true;
+        assert_eq!(
+            lines(&clock),
+            ("16:30".to_string(), Some("Tue".to_string()))
+        );
+        clock.show_date = true;
+        assert_eq!(
+            lines(&clock),
+            ("16:30".to_string(), Some("Tue Aug 18".to_string()))
+        );
+        clock.show_day_of_week = false;
+        assert_eq!(lines(&clock).1.as_deref(), Some("Aug 18"));
+        assert_eq!(clock.format_taskbar(ts, &Tz::UTC), "Aug 18 16:30");
+    }
+
+    /// **Every line fits the width reserved for the two**: the time bold at
+    /// its size, the date at its smaller one, over three years of readings.
+    #[test]
+    fn every_line_fits_the_width_reserved_for_the_two() {
+        const TIME: f32 = 13.0;
+        const DATE: f32 = 11.0;
+        let mut clock = ClockDisplay::new();
+        for (dow, date, secs, h24) in [
+            (false, false, false, true),
+            (true, false, false, true),
+            (false, true, false, true),
+            (true, true, true, true),
+            (true, true, true, false),
+        ] {
+            clock.show_day_of_week = dow;
+            clock.show_date = date;
+            clock.show_seconds = secs;
+            clock.use_24h = h24;
+            let reserved = clock.lines_width(TIME, DATE);
+            for step in 0..1100_u64 {
+                let ts = 1_787_070_645 + step * 25 * 3600;
+                let (time, day) = clock.taskbar_lines(ts, &Tz::UTC);
+                let time_w = text::measure(&time, TIME, FontWeightHint::Bold);
+                assert!(
+                    time_w <= reserved + 0.01,
+                    "{time:?} is {time_w}, past {reserved}"
+                );
+                if let Some(day) = day {
+                    let day_w = text::width(&day, DATE);
+                    assert!(
+                        day_w <= reserved + 0.01,
+                        "{day:?} is {day_w}, past {reserved}"
+                    );
+                }
             }
         }
     }

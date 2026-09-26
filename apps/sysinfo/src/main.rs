@@ -2997,6 +2997,143 @@ mod tests {
         })
     }
 
+    /// **A PCI function is read as the kernel writes it**: its address from
+    /// its file's name, `BB:DD.F`, and its ids and class from the `key: value`
+    /// lines inside (`kernel/src/fs/sysfs.rs`, `gen_pci_device`) -- and a name
+    /// that is not an address, or a file without both ids, is not a device.
+    #[test]
+    fn a_pci_function_is_read_as_the_kernel_writes_it() {
+        let file = |vendor: &str, class: &str, sub: &str| {
+            format!("address: x\nvendor: {vendor}\ndevice: 2922\nclass: {class}\nsubclass: {sub}\n")
+        };
+        let sata = hwquery::pci_function("00:1f.2", &file("8086", "01", "06")).expect("a device");
+        assert_eq!(
+            (
+                sata.bus,
+                sata.device,
+                sata.function,
+                sata.vendor_id,
+                sata.device_id
+            ),
+            (0, 0x1F, 2, 0x8086, 0x2922)
+        );
+        assert_eq!(sata.class, "Mass storage controller");
+        assert_eq!(sata.description, "SATA controller");
+        assert_eq!(sata.vendor_name, "Intel");
+        let odd = hwquery::pci_function("0a:00.0", &file("abcd", "ff", "00")).expect("a device");
+        assert_eq!(odd.bus, 0x0A);
+        assert_eq!(odd.class, "Unassigned class");
+        assert_eq!(odd.vendor_name, "", "an unknown vendor is not named");
+        assert!(hwquery::pci_function("notes", &file("8086", "01", "06")).is_none());
+        assert!(hwquery::pci_function("00:00.0", "vendor: 8086\n").is_none());
+    }
+
+    /// **The PCI functions the kernel publishes are listed**, one file per
+    /// function under `/sys/devices/pci`, in address order. This read
+    /// `/sys/hardware/pci`, which never existed, so the list was always empty.
+    /// Unix only: a file name holding `:` is an alternate data stream on
+    /// Windows, so the fixture cannot exist there.
+    #[cfg(unix)]
+    #[test]
+    fn the_pci_functions_the_kernel_publishes_are_read() {
+        let root =
+            std::env::temp_dir().join(format!("sysinfo-pci-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        let base = root.join("sys/devices/pci");
+        std::fs::create_dir_all(&base).expect("fixture");
+        let function = |name: &str, vendor: &str, device: &str, class: &str, sub: &str| {
+            std::fs::write(
+                base.join(name),
+                format!(
+                    "address: {name}\nvendor: {vendor}\ndevice: {device}\nclass: {class}\nsubclass: {sub}\n"
+                ),
+            )
+            .unwrap();
+        };
+        function("00:1f.2", "8086", "2922", "01", "06");
+        function("00:00.0", "8086", "1237", "06", "00");
+        function("00:02.0", "1234", "1111", "03", "00");
+        function("00:03.0", "abcd", "0001", "ff", "00");
+        std::fs::write(base.join("not-an-address"), b"vendor: 8086\n").unwrap();
+
+        let provider = hwquery::SyscallProvider::at(root.to_str().expect("a text path"));
+        let pci = {
+            use hwquery::HardwareProvider;
+            provider.query_pci().expect("the fixture tree is readable")
+        };
+        let seen: Vec<String> = pci
+            .iter()
+            .map(|d| {
+                format!(
+                    "{:02x}:{:02x}.{} {:04x}:{:04x} {} / {} / {}",
+                    d.bus,
+                    d.device,
+                    d.function,
+                    d.vendor_id,
+                    d.device_id,
+                    d.class,
+                    d.description,
+                    d.vendor_name
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                "00:00.0 8086:1237 Bridge / Host bridge / Intel",
+                "00:02.0 1234:1111 Display controller / VGA compatible controller / QEMU",
+                "00:03.0 abcd:0001 Unassigned class / Unassigned class / ",
+                "00:1f.2 8086:2922 Mass storage controller / SATA controller / Intel",
+            ],
+            "in address order, the file that is not an address skipped"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **The firmware memory map is read** from `/sys/devices/memmap`, a
+    /// numbered directory per region, in address order whatever the numbers
+    /// sort as -- and `end` as the last byte, where the kernel writes one past
+    /// it. This read `/sys/hardware/memmap`, which never existed.
+    #[test]
+    fn the_memory_map_the_kernel_publishes_is_read() {
+        let root =
+            std::env::temp_dir().join(format!("sysinfo-memmap-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        let base = root.join("sys/devices/memmap");
+        let region = |n: &str, start: u64, end: u64, kind: &str| {
+            let dir = base.join(n);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("start"), format!("0x{start:016x}\n")).unwrap();
+            std::fs::write(dir.join("end"), format!("0x{end:016x}\n")).unwrap();
+            std::fs::write(dir.join("type"), format!("{kind}\n")).unwrap();
+        };
+        region("10", 0x1_0000_0000, 0x2_0000_0000, "Usable RAM");
+        region("0", 0, 0x9_FC00, "Usable RAM");
+        region("2", 0xF0000, 0x10_0000, "Reserved");
+        std::fs::create_dir_all(base.join("notes")).unwrap();
+
+        let provider = hwquery::SyscallProvider::at(root.to_str().expect("a text path"));
+        let map = {
+            use hwquery::HardwareProvider;
+            provider
+                .query_memory_map()
+                .expect("the fixture tree is readable")
+        };
+        let seen: Vec<(u64, u64, &str)> = map
+            .iter()
+            .map(|r| (r.start, r.end, r.region_type.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (0, 0x9_FBFF, "Usable RAM"),
+                (0xF0000, 0xF_FFFF, "Reserved"),
+                (0x1_0000_0000, 0x1_FFFF_FFFF, "Usable RAM"),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The disks the kernel publishes are read, and nothing else is invented.
     ///
     /// `query_storage` read `/sys/hardware/block`, **a path this kernel has

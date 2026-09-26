@@ -11328,8 +11328,8 @@ of TIFF are not read yet (listed below) and are refused by name.
 
 ### Not yet read
 
-PixarLog: libtiff reads it, and this refuses it by name, for now.
-(`YCbCr` and CIE L*a*b* samples followed on the same day, held the same way:
+Nothing libtiff's reader decodes is refused now; that took the rest of the
+day. (`YCbCr` and CIE L*a*b* samples followed on the same day, held the same way:
 23 more fixtures, and 12,000 mutants of them without a disagreement. So did
 fax, whose leniency is kept whole -- a bad code word ends only its row, a
 Group 4 strip cut short keeps the rows it has, and a Group 3 strip whose data
@@ -11376,8 +11376,16 @@ double-double `exp` plus glibc's own answers for the 21 of its 33,790
 possible arguments where glibc is not correctly rounded, checked against
 glibc for every one; and through `sqrt`, done in integers, the crate having
 no maths library. 16 fixtures, written by an encoder in the generator, and
-8,000 mutants.) Only the first page of a multi-page TIFF is read -- as
-gdk-pixbuf reads it.
+8,000 mutants. Last, PixarLog: 11-bit log codes, differenced and deflated,
+turned to 8- or 16-bit samples through tables libtiff builds with glibc
+(kept here as glibc built them), with its bugs shown as it shows them -- for
+grey and grey with alpha, each row's last sum spills into the next row's
+first pixel, and a tile's rows are the image's width -- and the predictor
+it installs run over the output. It inflates with zlib, whose stopping
+place the shared `deflate` crate cannot find, so on damaged strips the two
+can differ (`known-issues.md`; asked of lane A). 18 fixtures, 12,000
+mutants.) Only the first page of a multi-page TIFF is read -- as gdk-pixbuf
+reads it.
 
 ### How it is held
 

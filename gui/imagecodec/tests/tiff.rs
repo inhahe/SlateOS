@@ -92,7 +92,7 @@ fn first_difference(name: &str, ours: &Image, want: &Image) {
 fn every_fixture_decodes_or_is_refused_exactly_as_libtiff_does() {
     let names = fixtures();
     assert!(
-        names.len() >= 298,
+        names.len() >= 316,
         "{} fixtures: some have gone missing",
         names.len()
     );

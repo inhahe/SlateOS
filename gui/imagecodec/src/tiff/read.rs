@@ -17,6 +17,7 @@ use super::fax::{self, Fax};
 use super::luv::{self, Luv};
 use super::lzw::Lzw;
 use super::ojpeg::Ojpeg;
+use super::pixarlog::{self, PixarLog};
 use super::{next, thunder};
 use crate::jpeg::{ColorSpace, Decompress, Headed, Tables};
 use crate::{ImageError, ImageResult, Limits};
@@ -56,6 +57,8 @@ pub(super) struct Reader<'a> {
     ojpeg: Option<Ojpeg>,
     /// The SGI LogLuv codec's state, once set up.
     luv: Option<Luv>,
+    /// The PixarLog codec's state, once set up.
+    pixarlog: Option<PixarLog>,
     /// The codec's one-time setup (`tif_setupdecode`), once it has run.
     setup: Option<bool>,
     /// What a JPEG strip's decode may allocate.
@@ -75,6 +78,7 @@ impl<'a> Reader<'a> {
             jpeg: None,
             ojpeg: None,
             luv: None,
+            pixarlog: None,
             setup: None,
             limits,
         }
@@ -208,7 +212,8 @@ impl<'a> Reader<'a> {
                 && self.setup_jpeg()
                 && (self.dir.compression != compression::THUNDERSCAN
                     || thunder::setup(self.dir.bits_per_sample))
-                && self.setup_luv();
+                && self.setup_luv()
+                && self.setup_pixarlog();
             self.setup = Some(ok);
         }
         if self.setup == Some(true) {
@@ -230,6 +235,15 @@ impl<'a> Reader<'a> {
         }
         self.luv = luv::setup(self.dir, self.limits.max_decompressed_bytes);
         self.luv.is_some()
+    }
+
+    /// `PixarLogSetupDecode`, for PixarLog: true for any other scheme.
+    fn setup_pixarlog(&mut self) -> bool {
+        if self.dir.compression != compression::PIXARLOG {
+            return true;
+        }
+        self.pixarlog = pixarlog::setup(self.dir, self.limits.max_decompressed_bytes);
+        self.pixarlog.is_some()
     }
 
     /// `Fax3SetupState`, for the fax schemes: true for any other.
@@ -483,6 +497,19 @@ impl<'a> Reader<'a> {
                     .map_err(|_| ImageError::Malformed("TIFF width"))?;
                 thunder::decode(bytes, out, scanline(self.dir)?, width)
             }
+            compression::PIXARLOG => {
+                let codec = self
+                    .pixarlog
+                    .as_ref()
+                    .ok_or(ImageError::Unsupported("TIFF PixarLog"))?;
+                codec.decode(
+                    bytes,
+                    out,
+                    self.dir.width,
+                    self.file.big_endian,
+                    self.limits.max_decompressed_bytes,
+                )
+            }
             compression::SGILOG | compression::SGILOG24 => {
                 // A row at a time: the image's scanline, or a tile's row, of
                 // the 8-bit samples the codec was asked for.
@@ -537,7 +564,10 @@ impl<'a> Reader<'a> {
         let swab16 = self.file.big_endian && dir.bits_per_sample == 16;
         let uses_predictor = matches!(
             dir.compression,
-            compression::LZW | compression::DEFLATE | compression::ADOBE_DEFLATE
+            compression::LZW
+                | compression::DEFLATE
+                | compression::ADOBE_DEFLATE
+                | compression::PIXARLOG
         );
         if uses_predictor && dir.predictor == 2 {
             let row = usize::try_from(
@@ -573,7 +603,9 @@ impl<'a> Reader<'a> {
             }
             return Ok(());
         }
-        if swab16 {
+        // `PixarLogSetupDecode` takes the byte swap away too -- but not the
+        // predictor's own, above.
+        if swab16 && dir.compression != compression::PIXARLOG {
             swap16(out);
         }
         Ok(())
@@ -599,7 +631,10 @@ enum Raw {
 fn predictor_valid(dir: &Directory) -> bool {
     let uses_predictor = matches!(
         dir.compression,
-        compression::LZW | compression::DEFLATE | compression::ADOBE_DEFLATE
+        compression::LZW
+            | compression::DEFLATE
+            | compression::ADOBE_DEFLATE
+            | compression::PIXARLOG
     );
     if !uses_predictor {
         return true;

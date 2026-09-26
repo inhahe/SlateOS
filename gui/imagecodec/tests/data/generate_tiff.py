@@ -1677,6 +1677,155 @@ def luv_fixtures() -> dict[str, bytes]:
     return out
 
 
+PIXARLOG = 32909
+# libtiff's `From8` (`PixarLogMakeTables`, built with glibc): each 8-bit
+# level's 11-bit code, as its encoder takes 8-bit samples.
+PIXARLOG_FROM8 = [
+    0, 54, 107, 161, 214, 267, 313, 351, 385, 414, 440, 464, 486, 506, 524, 542,
+    558, 573, 587, 601, 614, 626, 637, 649, 659, 669, 679, 689, 698, 707, 715, 723,
+    731, 739, 746, 754, 761, 767, 774, 781, 787, 793, 799, 805, 811, 816, 822, 827,
+    832, 838, 843, 848, 852, 857, 862, 867, 871, 875, 880, 884, 888, 892, 896, 900,
+    904, 908, 912, 916, 920, 923, 927, 930, 934, 937, 941, 944, 947, 951, 954, 957,
+    960, 963, 966, 969, 972, 975, 978, 981, 984, 987, 990, 992, 995, 998, 1001, 1003,
+    1006, 1008, 1011, 1013, 1016, 1018, 1021, 1023, 1026, 1028, 1031, 1033, 1035, 1038, 1040, 1042,
+    1044, 1047, 1049, 1051, 1053, 1055, 1057, 1059, 1062, 1064, 1066, 1068, 1070, 1072, 1074, 1076,
+    1078, 1080, 1082, 1083, 1085, 1087, 1089, 1091, 1093, 1095, 1096, 1098, 1100, 1102, 1104, 1105,
+    1107, 1109, 1111, 1112, 1114, 1116, 1117, 1119, 1121, 1122, 1124, 1126, 1127, 1129, 1130, 1132,
+    1133, 1135, 1137, 1138, 1140, 1141, 1143, 1144, 1146, 1147, 1149, 1150, 1152, 1153, 1154, 1156,
+    1157, 1159, 1160, 1162, 1163, 1164, 1166, 1167, 1168, 1170, 1171, 1172, 1174, 1175, 1176, 1178,
+    1179, 1180, 1182, 1183, 1184, 1185, 1187, 1188, 1189, 1191, 1192, 1193, 1194, 1195, 1197, 1198,
+    1199, 1200, 1201, 1203, 1204, 1205, 1206, 1207, 1209, 1210, 1211, 1212, 1213, 1214, 1215, 1216,
+    1218, 1219, 1220, 1221, 1222, 1223, 1224, 1225, 1226, 1227, 1229, 1230, 1231, 1232, 1233, 1234,
+    1235, 1236, 1237, 1238, 1239, 1240, 1241, 1242, 1243, 1244, 1245, 1246, 1247, 1248, 1249, 1250,
+]
+
+
+def pixarlog_codes(samples: list[int], stride: int, llen: int) -> list[int]:
+    """The codes libtiff's encoder stores for rows of `llen` 8-bit samples
+    (`horizontalDifference8`): for 3 or 4 samples a pixel each channel
+    differenced from the pixel before, masked to 11 bits; for any other
+    number the first two pixels as they are and the rest differenced, in 16
+    bits."""
+    out = []
+    for at in range(0, len(samples), llen):
+        c = [PIXARLOG_FROM8[v] for v in samples[at:at + llen]]
+        if stride in (3, 4):
+            out += c[:stride] + [(c[i] - c[i - stride]) & 0x7FF for i in range(stride, len(c))]
+        else:
+            out += [c[i] if i < 2 * stride else (c[i] - c[i - stride]) & 0xFFFF for i in range(len(c))]
+    return out
+
+
+def pixarlog_stream(codes: list[int], big_endian: bool, blocks: int = 1) -> bytes:
+    """The codes as 16-bit values in the file's byte order, deflated as one
+    zlib stream -- in `blocks` pieces, each ended with a full flush."""
+    raw = b"".join(struct.pack(">H" if big_endian else "<H", c) for c in codes)
+    if blocks == 1:
+        return zlib.compress(raw, 6)
+    z = zlib.compressobj(6)
+    out, step = bytearray(), -(-len(raw) // blocks)
+    for at in range(0, len(raw), step):
+        out += z.compress(raw[at:at + step]) + z.flush(zlib.Z_FULL_FLUSH)
+    return bytes(out + z.flush())
+
+
+def pixarlog_tiff(img: Image.Image, *, rows: int = 8, bits: int = 8, big_endian: bool = False,
+                  planar: bool = False, predictor: bool = False, tiles: tuple[int, int] | None = None,
+                  extra: list[tuple[int, int, object]] | None = None, blocks: int = 1, damage=None) -> bytes:
+    """A PixarLog TIFF of `img`, as libtiff's encoder would store its 8-bit
+    samples; `bits` 16 declares 16-bit samples of the same codes."""
+    spp = len(img.getbands())
+    w, h = img.size
+    px = [img.getpixel((x, y)) for y in range(h) for x in range(w)]
+    if spp == 1:
+        px = [(p,) for p in px]
+    if predictor:
+        # The horizontal predictor differences the 8-bit samples first.
+        diffed = []
+        for y in range(h):
+            row = px[y * w:(y + 1) * w]
+            diffed += [row[0]] + [tuple((a - b) & 255 for a, b in zip(row[x], row[x - 1])) for x in range(1, w)]
+        px = diffed
+    photometric = {1: 1, 2: 1, 3: 2, 4: 2}[spp]
+    chunks = []
+    if tiles is not None:
+        tw, tl = tiles
+        stride = spp
+        for ty in range(0, h, tl):
+            for tx in range(0, w, tw):
+                samples = [c for y in range(ty, ty + tl) for x in range(tx, tx + tw)
+                           for c in (px[y * w + x] if y < h and x < w else (0,) * spp)]
+                chunks.append(pixarlog_stream(pixarlog_codes(samples, stride, stride * w), big_endian, blocks))
+    elif planar:
+        for plane in range(spp):
+            for top in range(0, h, rows):
+                samples = [px[y * w + x][plane] for y in range(top, min(top + rows, h)) for x in range(w)]
+                chunks.append(pixarlog_stream(pixarlog_codes(samples, 1, w), big_endian, blocks))
+    else:
+        for top in range(0, h, rows):
+            samples = [c for y in range(top, min(top + rows, h)) for x in range(w) for c in px[y * w + x]]
+            chunks.append(pixarlog_stream(pixarlog_codes(samples, spp, spp * w), big_endian, blocks))
+    if damage:
+        chunks = damage(chunks)
+    entries = [(WIDTH, LONG, [w]), (LENGTH, LONG, [h]), (BITS, SHORT, [bits] * spp),
+               (COMPRESSION, SHORT, [PIXARLOG]), (PHOTOMETRIC, SHORT, [photometric]),
+               (SAMPLES, SHORT, [spp])]
+    if spp in (2, 4):
+        entries.append((EXTRA_SAMPLES, SHORT, [2]))
+    if planar:
+        entries.append((PLANAR, SHORT, [2]))
+    if predictor:
+        entries.append((PREDICTOR, SHORT, [2]))
+    if tiles is None:
+        entries.append((ROWS_PER_STRIP, LONG, [rows]))
+    else:
+        entries += [(TILE_WIDTH, LONG, [tiles[0]]), (TILE_LENGTH, LONG, [tiles[1]])]
+    ours = {tag for tag, _, _ in (extra or [])}
+    entries = [e for e in entries if e[0] not in ours] + list(extra or [])
+    if tiles is None:
+        return write_tiff(entries, chunks, big_endian=big_endian)
+    return write_tiff(entries, chunks, big_endian=big_endian, offsets_tag=TILE_OFFSETS,
+                      counts_tag=TILE_BYTE_COUNTS)
+
+
+def pixarlog_fixtures() -> dict[str, bytes]:
+    """PixarLog (32909): Pixar's film format -- 11-bit log codes,
+    differenced, deflated -- which libtiff's RGBA reader asks for as 8- or
+    16-bit samples through tables it builds with glibc."""
+    rng = random.Random(3290)
+    base = Image.new("RGB", (37, 21))
+    base.putdata([((x * 7 + rng.randrange(30)) % 256, (y * 12) % 256, (x * y + rng.randrange(25)) % 256)
+                  for y in range(21) for x in range(37)])
+    grey = base.convert("L")
+    out: dict[str, bytes] = {}
+    out["pixarlog_rgb"] = pixarlog_tiff(base)
+    out["pixarlog_rgb_one_strip"] = pixarlog_tiff(base, rows=21)
+    out["pixarlog_rgba"] = pixarlog_tiff(base.convert("RGBA"))
+    # One or two samples a pixel: libtiff's accumulation spills each row's
+    # last sum into the next row's first pixel.
+    out["pixarlog_grey"] = pixarlog_tiff(grey)
+    out["pixarlog_grey_alpha"] = pixarlog_tiff(base.convert("LA"))
+    out["pixarlog_rgb16"] = pixarlog_tiff(base, bits=16)
+    out["pixarlog_rgb_big_endian"] = pixarlog_tiff(base, big_endian=True)
+    out["pixarlog_rgb16_big_endian"] = pixarlog_tiff(base, bits=16, big_endian=True)
+    out["pixarlog_rgb_predictor"] = pixarlog_tiff(base, predictor=True)
+    out["pixarlog_rgb_planar"] = pixarlog_tiff(base, planar=True)
+    # Tiles: libtiff's rows are the image's width, not the tile's.
+    out["pixarlog_rgb_tiled"] = pixarlog_tiff(base, tiles=(16, 16))
+    out["pixarlog_rgb_blocks"] = pixarlog_tiff(base, blocks=5)
+    # What follows the Deflate data: junk is ignored, a missing checksum is
+    # not missed, a wrong one refuses the strip.
+    out["pixarlog_rgb_junk_after"] = pixarlog_tiff(base, damage=lambda c: [s + b"\x01\x02\x03\x04\x05" for s in c])
+    out["pixarlog_rgb_no_checksum"] = pixarlog_tiff(base, damage=lambda c: [s[:-4] for s in c])
+    out["pixarlog_rgb_bad_checksum_refused"] = pixarlog_tiff(
+        base, damage=lambda c: [c[0][:-1] + bytes([c[0][-1] ^ 1])] + c[1:])
+    out["pixarlog_rgb_cut_refused"] = pixarlog_tiff(base, damage=lambda c: [c[0][: len(c[0]) // 2]] + c[1:])
+    # Depths and kinds the codec will not guess a format for.
+    out["pixarlog_int8_refused"] = pixarlog_tiff(base, extra=[(SAMPLE_FORMAT, SHORT, [2, 2, 2])])
+    out["pixarlog_bits12_refused"] = pixarlog_tiff(base, bits=12)
+    return out
+
+
 def pillow_fixtures() -> dict[str, bytes]:
     """Pictures written by Pillow's writer, which is libtiff's encoder."""
     rng = random.Random(99)
@@ -1699,7 +1848,8 @@ def main() -> None:
     oracle = build_oracle()
     made = {f"tiff_{name}": data for name, data in
             (fixtures() | pillow_fixtures() | fax_fixtures() | jpeg_fixtures()
-             | next_thunder_fixtures() | ojpeg_fixtures() | luv_fixtures()).items()}
+             | next_thunder_fixtures() | ojpeg_fixtures() | luv_fixtures()
+             | pixarlog_fixtures()).items()}
     for old in HERE.glob("tiff_*.tif"):
         old.unlink()
     for old in HERE.glob("tiff_*.txt"):

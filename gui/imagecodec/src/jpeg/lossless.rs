@@ -445,15 +445,11 @@ pub(super) fn decompress_row(
             // `simple_upscale` or `noscale`: back up by the point transform,
             // kept to the sample's byte.
             let out_row = at.imcu_row * v + row;
-            let out_stride = plane.shape.stride;
             let (Some(samples), Some(out)) = (
                 ctl.undiff
                     .get(ci)
                     .and_then(|u| u.get(row * stride..row * stride + width)),
-                plane.data.get_mut(
-                    out_row * out_stride
-                        ..(out_row * out_stride + width).min((out_row + 1) * out_stride),
-                ),
+                plane.rows_mut(out_row, 1),
             ) else {
                 prev = row;
                 continue;

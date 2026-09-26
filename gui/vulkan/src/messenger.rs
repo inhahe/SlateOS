@@ -307,55 +307,37 @@ mod tests {
     use crate::registry::Entry;
     use crate::vk::{VK_ERROR_OUT_OF_HOST_MEMORY, VoidFn};
     use alloc::vec;
+    use core::cell::Cell;
     use core::ffi::c_char;
-    use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-    /// The stub drivers below report through statics, so the tests that read
-    /// them cannot run at the same time.
-    static ORDER: AtomicBool = AtomicBool::new(false);
+    // What the stub drivers below report, kept per thread: they are called on
+    // the thread that called the loader, and libtest runs each test on a
+    // thread of its own, so every test reads its own reports and none waits
+    // for another.
+    std::thread_local! {
+        static CREATED: Cell<usize> = const { Cell::new(0) };
+        static DESTROYED: Cell<usize> = const { Cell::new(0) };
+        static NEXT_HANDLE: Cell<u64> = const { Cell::new(0) };
 
-    struct Order;
+        /// The `VkInstance` a stub driver was last handed.
+        ///
+        /// The point of the unwrapping rule: this must be the *driver's* own
+        /// handle, never the address of the loader's [`Instance`].
+        static SEEN_INSTANCE: Cell<usize> = const { Cell::new(0) };
 
-    impl Order {
-        fn lock() -> Self {
-            while ORDER
-                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-                .is_err()
-            {
-                core::hint::spin_loop();
-            }
-            Self
-        }
+        /// The messenger a stub driver was last asked to destroy.
+        static SEEN_MESSENGER: Cell<u64> = const { Cell::new(0) };
     }
-
-    impl Drop for Order {
-        fn drop(&mut self) {
-            ORDER.store(false, Ordering::Release);
-        }
-    }
-
-    static CREATED: AtomicUsize = AtomicUsize::new(0);
-    static DESTROYED: AtomicUsize = AtomicUsize::new(0);
-    static NEXT_HANDLE: AtomicU64 = AtomicU64::new(0);
-
-    /// The `VkInstance` a stub driver was last handed.
-    ///
-    /// The point of the unwrapping rule: this must be the *driver's* own
-    /// handle, never the address of the loader's [`Instance`].
-    static SEEN_INSTANCE: AtomicUsize = AtomicUsize::new(0);
-
-    /// The messenger a stub driver was last asked to destroy.
-    static SEEN_MESSENGER: AtomicU64 = AtomicU64::new(0);
 
     fn reset() {
-        CREATED.store(0, Ordering::SeqCst);
-        DESTROYED.store(0, Ordering::SeqCst);
+        CREATED.set(0);
+        DESTROYED.set(0);
         // Starts at 1 so that no stub ever hands back 0, which `from_handle`
         // reads as "no messenger" -- a generator that could produce it would
         // make this module's null check look correct for the wrong reason.
-        NEXT_HANDLE.store(1, Ordering::SeqCst);
-        SEEN_INSTANCE.store(0, Ordering::SeqCst);
-        SEEN_MESSENGER.store(0, Ordering::SeqCst);
+        NEXT_HANDLE.set(1);
+        SEEN_INSTANCE.set(0);
+        SEEN_MESSENGER.set(0);
     }
 
     unsafe extern "C" fn stub_create(
@@ -364,9 +346,10 @@ mod tests {
         _allocator: *const c_void,
         out: *mut u64,
     ) -> VkResult {
-        SEEN_INSTANCE.store(instance as usize, Ordering::SeqCst);
-        CREATED.fetch_add(1, Ordering::SeqCst);
-        let handle = NEXT_HANDLE.fetch_add(1, Ordering::SeqCst);
+        SEEN_INSTANCE.set(instance as usize);
+        CREATED.set(CREATED.get().wrapping_add(1));
+        let handle = NEXT_HANDLE.get();
+        NEXT_HANDLE.set(handle.wrapping_add(1));
         // SAFETY: the loader passes a live slot it owns.
         unsafe { out.write(handle) };
         VK_SUCCESS
@@ -382,9 +365,9 @@ mod tests {
     }
 
     unsafe extern "C" fn stub_destroy(instance: Handle, messenger: u64, _allocator: *const c_void) {
-        SEEN_INSTANCE.store(instance as usize, Ordering::SeqCst);
-        SEEN_MESSENGER.store(messenger, Ordering::SeqCst);
-        DESTROYED.fetch_add(1, Ordering::SeqCst);
+        SEEN_INSTANCE.set(instance as usize);
+        SEEN_MESSENGER.set(messenger);
+        DESTROYED.set(DESTROYED.get().wrapping_add(1));
     }
 
     fn erase(f: *const ()) -> unsafe extern "C" fn() {
@@ -473,7 +456,6 @@ mod tests {
 
     #[test]
     fn every_driver_that_offers_the_command_gets_a_messenger() {
-        let _order = Order::lock();
         reset();
         let registry = registry_of(&[gipa_with_messenger, gipa_with_messenger]);
         let instance = instance_over(2);
@@ -483,7 +465,7 @@ mod tests {
             unsafe { create_across(&registry, &instance, nothing(), nothing()) }.expect("created");
 
         assert_eq!(built.drivers().len(), 2, "both drivers offered the command");
-        assert_eq!(CREATED.load(Ordering::SeqCst), 2);
+        assert_eq!(CREATED.get(), 2);
         // Distinct handles: a fan-out that called one driver twice, or copied
         // one answer into both slots, would pass a bare count.
         assert_ne!(
@@ -495,7 +477,6 @@ mod tests {
 
     #[test]
     fn a_driver_without_the_extension_is_not_a_failure() {
-        let _order = Order::lock();
         reset();
         let registry = registry_of(&[gipa_with_messenger, gipa_without_messenger]);
         let instance = instance_over(2);
@@ -509,7 +490,7 @@ mod tests {
             1,
             "the driver without the extension contributes nothing, and does not fail the call"
         );
-        assert_eq!(CREATED.load(Ordering::SeqCst), 1);
+        assert_eq!(CREATED.get(), 1);
 
         // The control: the same fan-out over two drivers that *do* offer it
         // builds two. Without this, a `create_across` that silently dropped
@@ -524,7 +505,6 @@ mod tests {
 
     #[test]
     fn a_driver_that_fails_unwinds_the_ones_already_built() {
-        let _order = Order::lock();
         reset();
         // Driver 0 succeeds, driver 1 offers the command and fails it.
         let registry = registry_of(&[gipa_with_messenger, gipa_failing_messenger]);
@@ -538,9 +518,9 @@ mod tests {
             Some(VK_ERROR_OUT_OF_HOST_MEMORY),
             "the failing driver's own error is what the application is told"
         );
-        assert_eq!(CREATED.load(Ordering::SeqCst), 1, "driver 0 built one");
+        assert_eq!(CREATED.get(), 1, "driver 0 built one");
         assert_eq!(
-            DESTROYED.load(Ordering::SeqCst),
+            DESTROYED.get(),
             1,
             "and it was destroyed again, so the call left nothing behind"
         );
@@ -554,12 +534,11 @@ mod tests {
         let built =
             unsafe { create_across(&both, &instance, nothing(), nothing()) }.expect("created");
         assert_eq!(built.drivers().len(), 2);
-        assert_eq!(DESTROYED.load(Ordering::SeqCst), 0);
+        assert_eq!(DESTROYED.get(), 0);
     }
 
     #[test]
     fn the_driver_is_given_its_own_instance_and_its_own_messenger() {
-        let _order = Order::lock();
         reset();
         let registry = registry_of(&[gipa_with_messenger]);
         let instance = instance_over(1);
@@ -569,12 +548,12 @@ mod tests {
         let built =
             unsafe { create_across(&registry, &instance, nothing(), nothing()) }.expect("created");
         assert_eq!(
-            SEEN_INSTANCE.load(Ordering::SeqCst),
+            SEEN_INSTANCE.get(),
             handle_a() as usize,
             "the driver is handed the instance it created"
         );
         assert_ne!(
-            SEEN_INSTANCE.load(Ordering::SeqCst),
+            SEEN_INSTANCE.get(),
             loader_address,
             "and never the loader's own object, which it would read as its own"
         );
@@ -586,14 +565,14 @@ mod tests {
         // SAFETY: the entry is one `create_across` made and has not destroyed.
         unsafe { destroy_across(&registry, reclaimed.drivers(), nothing()) };
 
-        assert_eq!(DESTROYED.load(Ordering::SeqCst), 1);
+        assert_eq!(DESTROYED.get(), 1);
         assert_eq!(
-            SEEN_MESSENGER.load(Ordering::SeqCst),
+            SEEN_MESSENGER.get(),
             driver_handle,
             "destruction hands back the driver's messenger"
         );
         assert_ne!(
-            SEEN_MESSENGER.load(Ordering::SeqCst),
+            SEEN_MESSENGER.get(),
             loader_handle,
             "not the loader's, which is the address of its own box"
         );
@@ -601,7 +580,6 @@ mod tests {
 
     #[test]
     fn no_driver_with_the_extension_means_no_entry_point() {
-        let _order = Order::lock();
         reset();
         let none = registry_of(&[gipa_without_messenger, gipa_without_messenger]);
         let instance = instance_over(2);
@@ -619,10 +597,9 @@ mod tests {
 
     #[test]
     fn destroying_a_null_messenger_does_nothing() {
-        let _order = Order::lock();
         reset();
         // SAFETY: zero is the documented null case.
         assert!(unsafe { from_handle(0) }.is_none());
-        assert_eq!(DESTROYED.load(Ordering::SeqCst), 0);
+        assert_eq!(DESTROYED.get(), 0);
     }
 }

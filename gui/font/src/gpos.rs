@@ -598,8 +598,19 @@ impl Positioning {
         }
     }
 
-    /// Run the lookups a context match calls for, and report how far the match
-    /// reaches.
+    /// Run the lookups a context match calls for, and report where the pass
+    /// resumes: the position just past the matched input, as an absolute index
+    /// like every other lookup type's answer.
+    ///
+    /// It was the match's *length* until 2026-09-26, which the caller read as
+    /// a position: right by coincidence for a match at the start of the run and
+    /// for a one-glyph input, and otherwise a resume *inside* the match, so a
+    /// second rule could fire on a glyph the first had already consumed.
+    /// HarfBuzz moves past the whole input (`apply_lookup` ends in
+    /// `buffer->move_to (end)`), and Segoe UI Emoji depends on it: its `dist`
+    /// lookup positions a family's parents as a pair and then, from the second
+    /// parent on, has a rule for a parent followed by a child -- which, re-run
+    /// on the second parent, moved her half an em.
     ///
     /// Simpler than `gsub`'s counterpart in exactly the one way that makes
     /// `gsub`'s hard: positioning never adds or removes a glyph, so the
@@ -615,15 +626,15 @@ impl Positioning {
         out: &mut [Adjust],
         depth: usize,
     ) -> usize {
-        // The span the match covers, which is not the number of glyphs it
+        // Past the span the match covers, which is not the number of glyphs it
         // matched: anything the lookup's flag skipped stands inside it and
         // still occupies a position the caller must step over.
-        let span = hit.end.saturating_sub(start).max(1);
+        let resume = hit.end.max(start.saturating_add(1));
         // Out of depth: the context still counts as matched, so the caller
         // steps over it, but nothing is invoked. Silently applying at depth
         // zero is what would let a lookup that invokes itself run forever.
         if depth == 0 {
-            return span;
+            return resume;
         }
         let mut records = Vec::new();
         read_records(data, hit.records, hit.count, &mut records);
@@ -644,7 +655,7 @@ impl Positioning {
             };
             self.at(data, &lookup, run, at, out, depth.saturating_sub(1));
         }
-        span
+        resume
     }
 }
 
@@ -2175,6 +2186,38 @@ mod tests {
         assert_eq!(positioned(&data, &[7, 10, 9]), alloc::vec![0, 0, 0]);
         // No backtrack at all: the input is at the start of the run.
         assert_eq!(positioned(&data, &[10, 8]), alloc::vec![0, 0]);
+    }
+
+    #[test]
+    fn a_context_match_is_stepped_over_whole_wherever_it_starts() {
+        // A rule for the pair (10, 10) that nudges its first glyph. After a
+        // match the pass resumes past both glyphs, as HarfBuzz does, so in a
+        // run of three the third cannot start a second pair -- and the second
+        // is never the start of one. The match's length was once taken for a
+        // position, which was right only for a match at the very start.
+        let data = gpos_table(&[
+            (CONTEXT_POS, context3(&[10, 10], &[(0, 1)])),
+            (SINGLE_POS, nudge(10, 30)),
+        ]);
+        assert_eq!(positioned(&data, &[10, 10, 10]), alloc::vec![30, 0, 0]);
+        assert_eq!(
+            positioned(&data, &[5, 10, 10, 10]),
+            alloc::vec![0, 30, 0, 0]
+        );
+        assert_eq!(
+            positioned(&data, &[5, 5, 5, 10, 10, 10, 10]),
+            alloc::vec![0, 0, 0, 30, 0, 30, 0]
+        );
+        // The same through a chained context, with a backtrack and a
+        // lookahead that are matched but not stepped over.
+        let data = gpos_table(&[
+            (CHAIN_CONTEXT_POS, chain3(&[7], &[10, 10], &[8], &[(0, 1)])),
+            (SINGLE_POS, nudge(10, 30)),
+        ]);
+        assert_eq!(
+            positioned(&data, &[5, 7, 10, 10, 8]),
+            alloc::vec![0, 0, 30, 0, 0]
+        );
     }
 
     #[test]

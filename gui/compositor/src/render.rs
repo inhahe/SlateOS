@@ -55,6 +55,7 @@
 
 use crate::buffer::{ImageAsset, SharedBuffer};
 use crate::{CompositorResult, Framebuffer, Rect};
+use osfont::colr::ColourImage;
 use osfont::raster::GlyphMask;
 
 /// A surface a frame can be composited onto.
@@ -162,6 +163,23 @@ pub trait RenderTarget {
         pen: f32,
         baseline: f32,
         color: u32,
+        opacity: f32,
+        clip: Option<&Rect>,
+    );
+
+    /// One colour glyph -- an emoji from a `COLR` face -- placed as
+    /// [`draw_glyph`](Self::draw_glyph)'s mask is, by its own `left`/`top`
+    /// from the pen position on the baseline, at `opacity`, clipped to `clip`.
+    ///
+    /// Its pixels are premultiplied and carry their own colours, so there is
+    /// no tint: the text colour, where the glyph uses it, is already painted
+    /// in, and the text colour's alpha arrives folded into `opacity`. A GPU
+    /// backend keeps these in a colour atlas beside the coverage one.
+    fn draw_colour_glyph(
+        &mut self,
+        image: &ColourImage,
+        pen: f32,
+        baseline: f32,
         opacity: f32,
         clip: Option<&Rect>,
     );
@@ -387,6 +405,20 @@ impl RenderTarget for RenderBackend {
     }
 
     #[inline]
+    fn draw_colour_glyph(
+        &mut self,
+        image: &ColourImage,
+        pen: f32,
+        baseline: f32,
+        opacity: f32,
+        clip: Option<&Rect>,
+    ) {
+        match self {
+            Self::Software(fb) => fb.draw_colour_glyph(image, pen, baseline, opacity, clip),
+        }
+    }
+
+    #[inline]
     fn blit_buffer(
         &mut self,
         buf: &SharedBuffer,
@@ -506,6 +538,14 @@ mod tests {
             color: u32,
             size: (u32, u32),
         },
+        /// A colour glyph, likewise by extent: its own colours, so no tint to
+        /// record, but the opacity it arrived at.
+        ColourGlyph {
+            pen: f32,
+            baseline: f32,
+            opacity: f32,
+            size: (u32, u32),
+        },
         Blit {
             at: (i32, i32),
             size: (u32, u32),
@@ -551,6 +591,7 @@ mod tests {
                     Primitive::Fill { .. } => "fill",
                     Primitive::Line { .. } => "line",
                     Primitive::Glyph { .. } => "glyph",
+                    Primitive::ColourGlyph { .. } => "colour-glyph",
                     Primitive::Blit { .. } => "blit",
                     Primitive::Image { .. } => "image",
                     Primitive::Present => "present",
@@ -635,6 +676,22 @@ mod tests {
                 baseline,
                 color,
                 size: (mask.width, mask.height),
+            });
+        }
+
+        fn draw_colour_glyph(
+            &mut self,
+            image: &ColourImage,
+            pen: f32,
+            baseline: f32,
+            opacity: f32,
+            _clip: Option<&Rect>,
+        ) {
+            self.ops.push(Primitive::ColourGlyph {
+                pen,
+                baseline,
+                opacity,
+                size: (image.width, image.height),
             });
         }
 
@@ -909,6 +966,110 @@ mod tests {
             pens.windows(2).all(|w| w[1] > w[0]),
             "glyph pens not monotonically advancing: {pens:?}"
         );
+    }
+
+    /// A `Text` command of `text`, white, at 100 px -- where `colour_face`'s
+    /// squares are 10 pixels a side.
+    fn big_text(text: &str) -> RenderCommand {
+        RenderCommand::Text {
+            x: 0.0,
+            y: 0.0,
+            text: text.to_string(),
+            color: white(),
+            font_size: 100.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        }
+    }
+
+    /// An engine whose UI face is `osfont::testing::colour_face`: `A` a red
+    /// colour glyph, `B` an ordinary outline.
+    fn colour_engine() -> RenderEngine {
+        let mut engine = RenderEngine::new();
+        let face = osfont::sfnt::Face::parse(osfont::testing::colour_face()).expect("fixture face");
+        engine.fonts.set_face(
+            osfont::system::Family::Ui,
+            osfont::system::Weight::Regular,
+            std::sync::Arc::new(face),
+        );
+        engine
+    }
+
+    #[test]
+    fn a_colour_glyph_crosses_the_seam_as_a_colour_quad_and_an_outline_as_a_mask() {
+        let mut rec = Recorder::default();
+        let mut engine = colour_engine();
+        engine.execute(
+            &mut rec,
+            &[big_text("AB")],
+            &HashMap::new(),
+            100,
+            50,
+            200,
+            100,
+            1.0,
+        );
+        assert_eq!(rec.kinds(), vec!["colour-glyph", "glyph"]);
+        let Some(Primitive::ColourGlyph {
+            pen, size, opacity, ..
+        }) = rec.ops.first()
+        else {
+            panic!("{:?}", rec.ops);
+        };
+        assert_eq!((*pen, *size, *opacity), (100.0, (10, 10), 1.0));
+        // The pen moved on by the colour glyph's advance, as by any glyph's.
+        assert_eq!(rec.pens(), vec![130.0]);
+    }
+
+    #[test]
+    fn the_software_backend_draws_a_colour_glyph_in_its_own_colours() {
+        let mut backend = RenderBackend::software(400, 300).expect("software backend");
+        backend.clear(0xFF00_0000);
+        let mut engine = colour_engine();
+        engine.execute(
+            &mut backend,
+            &[big_text("AB")],
+            &HashMap::new(),
+            100,
+            50,
+            200,
+            100,
+            1.0,
+        );
+        // The baseline sits the face's 800-unit ascent below the text's top:
+        // 80 px, so at y 130; each square spans the 10 rows above it. `A`'s
+        // is at x 110..120 and red, whatever colour the text is; `B`'s is at
+        // x 140..150 and white, the text colour.
+        let at = |x: usize, y: usize| backend.working_pixels()[y * 400 + x];
+        assert_eq!(at(115, 125), osfont::testing::COLOUR_FACE_RED);
+        assert_eq!(at(145, 125), 0xFFFF_FFFF);
+        assert_eq!(at(125, 125), 0xFF00_0000);
+    }
+
+    #[test]
+    fn a_colour_glyph_takes_the_opacity_and_the_clip() {
+        let mut backend = RenderBackend::software(20, 20).expect("software backend");
+        backend.clear(0xFF00_0000);
+        // Opaque red, half-transparent red (premultiplied), transparent, and
+        // opaque green -- in a row from x 2, with the clip ending at x 5.
+        let image = ColourImage {
+            width: 4,
+            height: 1,
+            left: 0,
+            top: 0,
+            pixels: vec![0xFFFF_0000, 0x8080_0000, 0, 0xFF00_FF00],
+            uses_foreground: false,
+        };
+        backend.draw_colour_glyph(&image, 2.0, 5.0, 0.5, Some(&Rect::new(0, 0, 5, 20)));
+        let red = |x: usize| (backend.working_pixels()[5 * 20 + x] >> 16) & 0xFF;
+        // Half opacity: red at half over black; the half-transparent pixel at
+        // a quarter.
+        assert!(red(2).abs_diff(128) <= 1, "{}", red(2));
+        assert!(red(3).abs_diff(64) <= 1, "{}", red(3));
+        // Transparent leaves the black; the clip keeps the green out.
+        assert_eq!(backend.working_pixels()[5 * 20 + 4], 0xFF00_0000);
+        assert_eq!(backend.working_pixels()[5 * 20 + 5], 0xFF00_0000);
     }
 
     #[test]

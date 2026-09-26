@@ -14,6 +14,10 @@ path = "src/lib.rs"
 # the `no_std` intent recorded in `lib.rs` does not allow, and it charges two
 # `Instant::now()` calls to every pass it measures. See `src/phase.rs`.
 phase-timing = []
+# `osfont::testing`: complete font files built byte by byte -- a face with a
+# colour glyph, say -- for the tests of crates that draw text. For
+# `[dev-dependencies]` only; nothing in a shipped build asks for it.
+testing = []
 
 [lints]
 workspace = true

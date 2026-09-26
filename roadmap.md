@@ -1754,6 +1754,21 @@ D's to act on once answered).
       limit, every root walked, `compar`, `fts_children`, `FTS_XDEV`,
       `FTS_SEEDOT` and `FTS_DC` cycle detection — and glibc's constants, which
       the old instruction values contradicted.
+  **The working directory, the sysroot's ABI and FORTIFY — 2026-09-25, later
+  (lane D).**
+    * the working directory and umask reach every program started with
+      `fork`+`exec*` or `posix_spawn`, and `addchdir_np` works: libc's half of
+      §960, over lane A's kernel record (`ec0e2f39c`; the ring-3 check is
+      `services/ctest-cwd-umask`, its rung requested of lane A);
+    * `posix_spawn` file actions have no 16-action or 255-byte-path cap, as in
+      glibc, and `addfchdir_np` exists;
+    * `mallinfo`, `mallinfo2`, `malloc_trim` and `malloc_stats` exist;
+    * `_FORTIFY_SOURCE` copies that do not fit abort, reads clamp (§1105), with
+      `__chk_fail`, `__fdelt_chk` and the `__open_2` family; the ring-3 check is
+      `services/ctest-fortify-abort`, its rung requested of lane A;
+    * `libc.a` is built for its own hard-float target with `-Zbuild-std`
+      (§1106), so a future rustc cannot break the sysroot and the archive has
+      one float ABI; compiler-rt's C-only builtins are ported into posix.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

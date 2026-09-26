@@ -3219,6 +3219,118 @@ fn a_slideshow_step_releases_the_old_picture_before_uploading_the_new_one() {
     );
 }
 
+/// One frame of `elapsed_ms`, as the compositor sends when a wake-up the
+/// shell armed comes due.
+fn woken_after(session: &mut Session, desktop: &Desktop, elapsed_ms: u64) {
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        session.panel().window(),
+        guitk::event::Event::Tick { elapsed_ms },
+    )]);
+    session.pump().expect("a frame should not fail");
+}
+
+/// How long until the wake-up the session has armed, if it has.
+fn armed_in(session: &mut Session) -> Option<std::time::Duration> {
+    session
+        .events_mut()
+        .next_wakeup()
+        .map(|at| at.saturating_duration_since(std::time::Instant::now()))
+}
+
+/// **An idle desktop with a slideshow sleeps until its next picture, and
+/// shows it.** Nothing woke the loop for a slideshow until 2026-09-26: it
+/// moved only when something else happened to tick it, so on a desktop the
+/// user was not touching it showed its first picture for ever.
+#[test]
+fn an_idle_desktop_is_woken_for_the_slideshows_next_picture() {
+    let (mut session, desktop, _turn) = session();
+    let background = session.background().window();
+    session
+        .wallpaper_mut()
+        .set_slideshow(std::path::Path::new("/pics"), 60, false);
+    session
+        .wallpaper_mut()
+        .populate_slideshow_paths(vec![fixture("rgb8"), fixture("gray8")]);
+    session.paint_background().expect("paint");
+    let first = session.wallpaper_mut().current_image_id();
+
+    // A frame starts the picture's interval, and the loop arms for its end.
+    woken_after(&mut session, &desktop, 16);
+    let until = armed_in(&mut session)
+        .expect("a slideshow registered no wake-up, so it would show one picture for ever");
+    assert!(
+        until > std::time::Duration::from_secs(50) && until <= std::time::Duration::from_mins(1),
+        "the wake-up is not the next picture: {until:?}"
+    );
+
+    // Woken then, the frame brings the next picture, on the screen.
+    woken_after(&mut session, &desktop, 60_000);
+    let second = session.wallpaper_mut().current_image_id();
+    assert_ne!(second, first, "the slideshow did not move");
+    assert!(
+        uploads(&desktop)
+            .iter()
+            .any(|u| u.0 == background && u.1 == second),
+        "the next picture was not sent"
+    );
+    assert!(background_is_current(&session), "the frame sent is stale");
+}
+
+/// **A dynamic wallpaper is drawn again once a minute**, not every frame and
+/// not never.
+#[test]
+fn a_dynamic_wallpaper_asks_to_be_woken_once_a_minute() {
+    let (mut session, desktop, _turn) = session();
+    session.wallpaper_mut().set_dynamic_theme([
+        guitk::color::Color::RED,
+        guitk::color::Color::GREEN,
+        guitk::color::Color::BLUE,
+        guitk::color::Color::WHITE,
+        guitk::color::Color::BLACK,
+    ]);
+    woken_after(&mut session, &desktop, 16);
+    let until = armed_in(&mut session).expect("a dynamic wallpaper registered no wake-up");
+    assert!(
+        until > std::time::Duration::from_secs(50) && until <= std::time::Duration::from_mins(1),
+        "not once a minute: {until:?}"
+    );
+}
+
+/// **A rotation chosen in Settings while the desktop is up is woken for**:
+/// the announcement is the one moment the shell learns of it, and nothing
+/// else would arm the loop -- the user may never touch the desktop again.
+#[test]
+fn a_rotation_chosen_while_running_arms_the_wake_up() {
+    settingsfile::testing::with_scratch_config("session-rotation-wake", |root| {
+        let (mut session, desktop, _turn) = session();
+        session.load_appearance();
+        assert_eq!(
+            armed_in(&mut session),
+            None,
+            "the fixture starts with a timer"
+        );
+
+        let folder = root.join("pictures");
+        std::fs::create_dir_all(&folder).expect("mkdir");
+        for name in ["rgb8", "gray8"] {
+            std::fs::copy(fixture(name), folder.join(format!("{name}.png"))).expect("copy");
+        }
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.wallpaper_folder = Some(folder);
+        file.settings.wallpaper_interval_secs = 600;
+        file.save().expect("save");
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+
+        let until = armed_in(&mut session)
+            .expect("the rotation registered no wake-up, so it would never turn");
+        assert!(
+            until <= std::time::Duration::from_mins(10),
+            "armed past the first interval: {until:?}"
+        );
+    });
+}
+
 #[test]
 fn a_wallpaper_that_is_not_there_costs_a_picture_and_not_a_desktop() {
     // The failure a user actually hits: a config carried over from another

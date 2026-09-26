@@ -1865,6 +1865,14 @@ impl<T: Transport> ShellSession<T> {
             // pictures: dropped, to be drawn again as the next frames ask.
             self.drop_icons();
             self.dirty = true;
+            // The settings may have started something timed that nothing
+            // else will wake the loop for -- a rotation folder, a dynamic
+            // wallpaper, the automatic light/dark mode's next edge. Not while
+            // something is moving: the frame loop is awake and re-arms each
+            // frame, and re-arming it here would shorten the frame in flight.
+            if !self.anything_moving() {
+                self.arm_next_frame();
+            }
         }
     }
 
@@ -2684,15 +2692,6 @@ impl<T: Transport> ShellSession<T> {
         // the manager's — it lives on the overview so that the overview can be
         // drawn correctly by a caller that has no manager at all.
         self.shell.overview.tick_fade(dt);
-        // The wallpaper keeps its own clock, in whole seconds, and until now
-        // nothing turned it: a slideshow never advanced and the time-of-day
-        // gradient never changed, because `WallpaperManager::tick` had no
-        // caller outside its own tests. The session's accumulated clock is
-        // monotonic, which is what `tick` compares -- it never asks what the
-        // time is, only how much of it has passed.
-        if self.wallpaper.tick(self.clock_ms / 1000) {
-            self.dirty = true;
-        }
         // The pane keeps its own clock too, and in seconds rather than
         // milliseconds: it is a `guitk` widget, whose animation convention is a
         // float of seconds. Converted here rather than changed there, because
@@ -2721,6 +2720,20 @@ impl<T: Transport> ShellSession<T> {
         // Auto-hide is dated rather than stepped, so the session's only
         // absolute clock is advanced here and nowhere else.
         self.clock_ms = self.clock_ms.saturating_add(elapsed_ms);
+        // The wallpaper keeps its own clock, in whole seconds, and until now
+        // nothing turned it: a slideshow never advanced and the time-of-day
+        // gradient never changed, because `WallpaperManager::tick` had no
+        // caller outside its own tests. The session's accumulated clock is
+        // monotonic, which is what `tick` compares -- it never asks what the
+        // time is, only how much of it has passed.
+        //
+        // After the clock has taken this frame's time, not before: ticked
+        // with the previous frame's clock, the frame the loop was woken for
+        // -- at the moment the next picture was due -- saw the moment before
+        // it, and the picture came a wake-up late.
+        if self.wallpaper.tick(self.clock_ms / 1000) {
+            self.dirty = true;
+        }
         // Widgets are dated like auto-hide rather than stepped: a clock is due
         // at a wall-clock moment, not after so many frames.
         if self.shell.widgets.tick(self.clock_ms) {
@@ -2795,7 +2808,19 @@ impl<T: Transport> ShellSession<T> {
             .map(|ms| Duration::from_millis(ms.max(1)));
         let schedule = self.shell.next_schedule_change(unix_now());
         let theme = self.shell.next_theme_change(unix_now());
-        if let Some(delay) = [widget, schedule, theme].into_iter().flatten().min() {
+        // The wallpaper's next picture, or a dynamic one's next shade, on the
+        // clock `step_frame` ticks it with. At least a millisecond: a
+        // slideshow whose timer has not started is due *now*, and a wake-up
+        // of nothing is not one.
+        let wallpaper = self
+            .wallpaper
+            .next_change_in(self.clock_ms / 1000)
+            .map(|secs| Duration::from_secs(secs).max(Duration::from_millis(1)));
+        if let Some(delay) = [widget, schedule, theme, wallpaper]
+            .into_iter()
+            .flatten()
+            .min()
+        {
             self.events.wake_after(self.panel.window, delay);
         }
     }

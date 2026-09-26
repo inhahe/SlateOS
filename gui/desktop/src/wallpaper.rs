@@ -297,6 +297,14 @@ impl DynamicTheme {
 /// Maximum entries tracked for wallpaper history.
 const HISTORY_CAPACITY: usize = 20;
 
+/// How often a dynamic wallpaper asks to be drawn again, in seconds.
+///
+/// Its colour moves through the day in blends hours long, so once a minute is
+/// finer than any step a person could see -- and a frame that comes out the
+/// same is not sent (`ShellSession::refresh_background`), so most of these
+/// wake-ups cost a comparison and nothing more.
+pub const DYNAMIC_REFRESH_SECS: u64 = 60;
+
 /// Runtime state for slideshow mode.
 ///
 /// The three index-bearing fields used to be public and independently
@@ -327,8 +335,15 @@ pub struct SlideshowState {
     order: Vec<usize>,
     /// Position within `order`. Always in range while `order` is non-empty.
     position: usize,
-    /// Timestamp (seconds) when the last image change occurred.
-    pub last_change_secs: u64,
+    /// When the picture now showing went up, in the seconds of the clock
+    /// [`WallpaperManager::tick`] is given -- or `None` until a tick has seen
+    /// it: the manager keeps no clock, so a picture's interval starts at the
+    /// first tick after it is shown.
+    ///
+    /// An `Option` rather than a `u64` whose 0 meant "not yet": the shell's
+    /// clock starts at 0, so a picture put up in its first second looked
+    /// untimed and had its interval started again.
+    shown_since: Option<u64>,
 }
 
 impl SlideshowState {
@@ -339,7 +354,7 @@ impl SlideshowState {
             paths,
             order,
             position: 0,
-            last_change_secs: 0,
+            shown_since: None,
         }
     }
 
@@ -849,13 +864,18 @@ impl WallpaperManager {
     // Tick / timing
     // ======================================================================
 
-    /// Advance the wallpaper state. Call once per frame (or per second).
+    /// Advance the wallpaper state. Call when [`next_change_in`] says a
+    /// change is due, or more often -- every frame is fine.
     ///
-    /// `current_time_secs` is seconds since midnight for dynamic mode,
-    /// or a monotonic timestamp for slideshow timing.
+    /// `current_time_secs` is a monotonic timestamp for slideshow timing; a
+    /// dynamic wallpaper is drawn from the time of day, which
+    /// [`get_render_commands`] is given, and ignores it.
     ///
-    /// Returns `true` if the wallpaper visually changed (slideshow advanced
-    /// or dynamic color shifted enough to warrant a redraw).
+    /// Returns `true` if the wallpaper may look different now (the slideshow
+    /// advanced, or it is a dynamic wallpaper, whose colour is always moving).
+    ///
+    /// [`next_change_in`]: Self::next_change_in
+    /// [`get_render_commands`]: Self::get_render_commands
     pub fn tick(&mut self, current_time_secs: u64) -> bool {
         match self.config.mode {
             WallpaperMode::Slideshow => self.tick_slideshow(current_time_secs),
@@ -870,6 +890,35 @@ impl WallpaperManager {
         }
     }
 
+    /// How many seconds after `current_time_secs` [`tick`](Self::tick) will
+    /// next have something new to show, or `None` if nothing here changes by
+    /// itself.
+    ///
+    /// What the shell arms its wake-up from. Without it a desktop with nothing
+    /// else to do slept until the user touched it, and a slideshow showed its
+    /// first picture for as long as they did not; the alternative, waking
+    /// every frame, would decode nothing and cost a machine its sleep.
+    ///
+    /// `Some(0)` for a slideshow a tick has not seen yet: the tick that starts
+    /// its timer is due now. `None` for a slideshow of one picture, which has
+    /// nothing to change to.
+    #[must_use]
+    pub fn next_change_in(&self, current_time_secs: u64) -> Option<u64> {
+        match self.config.mode {
+            WallpaperMode::Slideshow => {
+                let state = self.slideshow.as_ref().filter(|s| s.len() > 1)?;
+                Some(state.shown_since.map_or(0, |since| {
+                    let shown_for = current_time_secs.saturating_sub(since);
+                    self.config
+                        .slideshow_interval_secs
+                        .saturating_sub(shown_for)
+                }))
+            }
+            WallpaperMode::Dynamic => Some(DYNAMIC_REFRESH_SECS),
+            WallpaperMode::SolidColor | WallpaperMode::SingleImage => None,
+        }
+    }
+
     /// Internal slideshow tick logic.
     fn tick_slideshow(&mut self, current_time_secs: u64) -> bool {
         let interval = self.config.slideshow_interval_secs;
@@ -881,22 +930,25 @@ impl WallpaperManager {
                 return false;
             };
 
-            if state.is_empty() {
+            // One picture is a slideshow with nothing to change to. Stepping
+            // it would issue the same picture a new id, and the shell would
+            // read and decode the file again every interval to show what was
+            // already there.
+            if state.len() < 2 {
                 return false;
             }
 
-            // Initialize timestamp on first tick.
-            if state.last_change_secs == 0 {
-                state.last_change_secs = current_time_secs;
-                return false;
-            }
-
-            let elapsed = current_time_secs.saturating_sub(state.last_change_secs);
-            if elapsed >= interval {
-                state.last_change_secs = current_time_secs;
-                state.advance()
-            } else {
-                false
+            match state.shown_since {
+                // The first tick to see this picture starts its interval.
+                None => {
+                    state.shown_since = Some(current_time_secs);
+                    false
+                }
+                Some(since) if current_time_secs.saturating_sub(since) >= interval => {
+                    state.shown_since = Some(current_time_secs);
+                    state.advance()
+                }
+                Some(_) => false,
             }
         };
 
@@ -928,7 +980,8 @@ impl WallpaperManager {
                     .push(WallpaperChoice::Slideshow(path.to_path_buf()));
             }
             if let Some(ref mut s) = self.slideshow {
-                s.last_change_secs = 0; // Reset timer.
+                // A new picture: its interval starts at the next tick.
+                s.shown_since = None;
             }
         }
     }
@@ -943,7 +996,7 @@ impl WallpaperManager {
                     .push(WallpaperChoice::Slideshow(path.to_path_buf()));
             }
             if let Some(ref mut s) = self.slideshow {
-                s.last_change_secs = 0;
+                s.shown_since = None;
             }
         }
     }
@@ -981,7 +1034,7 @@ impl WallpaperManager {
                 return;
             };
             state.seek(position);
-            state.last_change_secs = 0;
+            state.shown_since = None;
             // Asking the state which image is showing, rather than working it
             // out a second way here — the inline version fell back to
             // `idx % paths.len()` where `effective_index` falls back to `None`.
@@ -2206,6 +2259,75 @@ mod tests {
             first,
             "the interval passed and the picture did not change"
         );
+    }
+
+    /// **A slideshow says when its next picture is due**, which is what the
+    /// shell sleeps until: now, to start the timer; then the rest of the
+    /// interval; then nothing for a slideshow with nothing to change to.
+    #[test]
+    fn a_slideshow_says_when_its_next_picture_is_due() {
+        let mut mgr = WallpaperManager::new();
+        mgr.set_slideshow(Path::new("/pics"), 30, false);
+        mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into()]);
+        assert_eq!(
+            mgr.next_change_in(0),
+            Some(0),
+            "the timer's start is due now"
+        );
+
+        // Started in the session's first second, which is second 0: the
+        // interval runs from there, and is not started again at the next tick.
+        assert!(!mgr.tick(0));
+        assert_eq!(mgr.next_change_in(0), Some(30));
+        assert!(!mgr.tick(1));
+        assert_eq!(mgr.next_change_in(12), Some(18));
+        assert!(mgr.tick(30), "the interval from second 0 passed");
+        assert_eq!(
+            mgr.next_change_in(30),
+            Some(30),
+            "the next picture's interval"
+        );
+
+        // Overdue is due now, not never.
+        assert_eq!(mgr.next_change_in(500), Some(0));
+    }
+
+    /// **A slideshow of one picture is not a slideshow**: it asks for no
+    /// wake-up, and its picture is not issued a new id -- which would have the
+    /// shell read and decode the same file every interval.
+    #[test]
+    fn a_slideshow_of_one_picture_does_not_change_or_ask_to() {
+        let mut mgr = WallpaperManager::new();
+        mgr.set_slideshow(Path::new("/pics"), 10, false);
+        mgr.populate_slideshow_paths(vec!["only.png".into()]);
+        let id = mgr.current_image_id();
+        assert_eq!(mgr.next_change_in(0), None);
+        assert!(!mgr.tick(100));
+        assert!(!mgr.tick(200));
+        assert_eq!(
+            mgr.current_image_id(),
+            id,
+            "the one picture was issued anew"
+        );
+    }
+
+    /// The other modes: a dynamic wallpaper is always moving, slowly; a colour
+    /// or a single picture never changes by itself.
+    #[test]
+    fn only_a_slideshow_or_a_dynamic_wallpaper_asks_to_be_woken() {
+        let mut mgr = WallpaperManager::new();
+        mgr.set_solid_color(Color::BLUE);
+        assert_eq!(mgr.next_change_in(0), None);
+        mgr.set_image(Path::new("/pics/a.png"), ImageFit::Fill);
+        assert_eq!(mgr.next_change_in(0), None);
+        mgr.set_dynamic_theme([
+            Color::RED,
+            Color::GREEN,
+            Color::BLUE,
+            Color::WHITE,
+            Color::BLACK,
+        ]);
+        assert_eq!(mgr.next_change_in(0), Some(DYNAMIC_REFRESH_SECS));
     }
 
     /// An interval of zero is read as one second, not as "every frame".

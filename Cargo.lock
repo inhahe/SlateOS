@@ -409,6 +409,9 @@ dependencies = [
  "guitk",
  "oswindow",
  "safeio",
+ "settingsfile",
+ "textfmt",
+ "unsaved",
 ]
 
 [[package]]

@@ -166673,7 +166673,7 @@ buttons; it is the next candidate for the same treatment, not a reason to
 have left this one hand-drawn.
 
 ### [E] Notes, contacts, snippets and kanban keep nothing -- 2026-09-25
-**Status:** FIXED for notes (lane E, 2026-09-25); OPEN for contacts, snippets and kanban -- lane E's next.
+**Status:** FIXED for notes and contacts (lane E, 2026-09-25); OPEN for snippets and kanban -- lane E's next.
 
 **In short:** the notes app, the address book, the snippet library and the
 kanban boards each hold everything the user puts in them in memory only. There
@@ -166722,7 +166722,41 @@ the export is Ctrl+E. Also fixed on the way:
   committed the body whether or not anything was typed, putting a copy of the
   same text in the history and moving the note to the top of the list; now
   the same text, title, notebook or name is no change.
-Mutation table `apps/notes/mutate.py` (new).
+Mutation table `apps/notes/mutate.py` (new, 26 rows, all caught).
+
+**Contacts, the same day.** The address book is
+`contacts/address-book.txt` in the settings directory: every contact with all
+its numbers, addresses, accounts and groups, the groups with their colours,
+and the recently viewed, in the notes library's kind of file, read whole or not
+at all (design-decisions §1206). The store counts its own changes
+(`ContactStore::revision`) and the window writes the book after any event that
+moved the count; a failed save is drawn in red on the status line and retried;
+closing over a contact being edited, or while a save fails, asks on
+`apps/unsaved`. Ctrl+S says where the book is kept; export moved to Ctrl+E.
+Also fixed on the way:
+- **Saving an edit lost data.** The form shows the names, the work fields,
+  the notes, the birthday and the *first* phone number, email address and
+  postal address. Saving rebuilt the contact from the form and copied back
+  four things (groups, the star, when it was added, when it was last reached),
+  so every other number, address and account, a display name imported from a
+  vCard, and the photo were dropped by the first edit -- beside a comment
+  saying they must not be. The form is now written onto the contact; an
+  emptied field removes what it showed; the display name follows the names
+  only when it was theirs. Saving an unchanged form changes nothing.
+- **Nothing had a time.** No contact was ever given one, so "recently added"
+  sorted nothing, and "recently contacted" ran on a counter from
+  2,000,000,000. Both are the clock's now, never earlier than a time already
+  kept; an import is stamped as added now.
+- **The vCard import read the whole file** into memory and cut it at 8 MiB
+  afterwards; it reads through `safeio::read_to_string_capped`, which stops at
+  the cap.
+- **A contact could be put in a group that did not exist**
+  (`add_contact_to_group` did not look); it cannot, since that would make the
+  book a file that cannot be read back.
+- The empty window said "Nothing is saved automatically -- press Ctrl+S to
+  write a vCard file"; it says where the book is kept.
+Mutation table `apps/contacts/mutate.py`: 31 rows added, and four of its
+older rows moved to where the code now is.
 
 ### [E] The JSON viewer's text input cannot be reached -- 2026-09-25
 **Status:** OPEN -- lane E

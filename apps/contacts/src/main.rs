@@ -14,6 +14,22 @@
 //! - Recently viewed contacts tracking
 //! - Quick actions (call, email, map -- stubs for future IPC)
 //!
+//! # What is kept
+//!
+//! Everything: every contact with all its numbers, addresses, accounts and
+//! groups, the groups, and who was looked at last, in one file in the settings
+//! directory (`contacts/address-book.txt`), written after every event that
+//! changed it -- there is no Save. Until 2026-09-25 nothing was: the book lived
+//! in memory, and the only way to keep anyone was to export a vCard file.
+//!
+//! The file is the notes library's kind (design-decisions §1205): tab-separated
+//! text, a record a line (`book_text`, `parse_book`), read whole or not at all.
+//! One that cannot be understood completely is left exactly as it is, nothing
+//! is written over it, and the window says so for as long as it is open. The
+//! store counts its own changes (`ContactStore::revision`), so the window
+//! cannot miss one: its fields are private, and every method that can change
+//! it counts.
+//!
 //! Uses the guitk library for UI rendering with Catppuccin Mocha theme.
 
 use appearance::Palette;
@@ -36,7 +52,8 @@ use oswindow::app::{self, App, Response};
 
 use std::collections::VecDeque;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use textfmt::tsv;
 
 // ============================================================================
 // Catppuccin Mocha theme colors
@@ -54,16 +71,13 @@ use std::time::Duration;
 // Constants
 // ============================================================================
 
-/// What the window says before any contact exists.
+/// What the window says before any contact exists. Under it goes
+/// [`ContactsApp::keeping_line`]: where the book is kept, or why it is not.
 ///
-/// The second line used to read "this app has no filesystem access", which was
-/// true when written and false from the moment Ctrl+S opened a save dialog.
-/// See `apps/calendar`'s NO_EVENTS_LINES for the reasoning; found by
-/// `scripts/find-stale-admissions.py`, which exists because of it.
-const NO_CONTACTS_LINES: [&str; 2] = [
-    "No contacts.",
-    "Nothing is saved automatically -- press Ctrl+S to write a vCard file, or anyone you add is gone when the window closes.",
-];
+/// The second line was "Nothing is saved automatically -- press Ctrl+S to
+/// write a vCard file, or anyone you add is gone when the window closes",
+/// which was true until the address book was kept (2026-09-25).
+const NO_CONTACTS: &str = "No contacts yet -- N adds one.";
 
 const SIDEBAR_WIDTH: f32 = 280.0;
 const ALPHABET_BAR_WIDTH: f32 = 24.0;
@@ -571,7 +585,7 @@ fn day_of_year(month: u8, day: u8) -> u16 {
 // ============================================================================
 
 /// A single contact entry.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Contact {
     pub id: u64,
     pub first_name: String,
@@ -598,13 +612,7 @@ pub struct Contact {
 impl Contact {
     /// Create a new contact with the given name and auto-generated ID.
     pub fn new(id: u64, first_name: &str, last_name: &str) -> Self {
-        let display = if last_name.is_empty() {
-            first_name.to_string()
-        } else if first_name.is_empty() {
-            last_name.to_string()
-        } else {
-            format!("{first_name} {last_name}")
-        };
+        let display = default_display_name(first_name, last_name);
         Self {
             id,
             first_name: first_name.to_string(),
@@ -1349,6 +1357,12 @@ pub struct ContactStore {
     next_contact_id: u64,
     next_group_id: u64,
     recently_viewed: VecDeque<u64>,
+    /// How many changes the store has had. Every method that can change it
+    /// counts one -- the ones that hand out `&mut` included, whether or not
+    /// the caller then changes anything -- so the window keeps the address
+    /// book whenever this has moved (`ContactsApp::keep`). The fields are
+    /// private, so there is no other way in to miss.
+    revision: u64,
 }
 
 impl ContactStore {
@@ -1359,7 +1373,19 @@ impl ContactStore {
             next_contact_id: 1,
             next_group_id: 1,
             recently_viewed: VecDeque::new(),
+            revision: 0,
         }
+    }
+
+    /// How many changes the store has had; see the field.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Count a change.
+    fn changed(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 
     // ----- Contact CRUD -----
@@ -1370,6 +1396,7 @@ impl ContactStore {
         self.next_contact_id = self.next_contact_id.saturating_add(1);
         contact.id = id;
         self.contacts.push(contact);
+        self.changed();
         id
     }
 
@@ -1378,8 +1405,10 @@ impl ContactStore {
         self.contacts.iter().find(|c| c.id == id)
     }
 
-    /// Get a mutable reference to a contact by ID.
+    /// Get a mutable reference to a contact by ID. Counted as a change: what
+    /// the caller does with it cannot be seen from here.
     pub fn get_contact_mut(&mut self, id: u64) -> Option<&mut Contact> {
+        self.changed();
         self.contacts.iter_mut().find(|c| c.id == id)
     }
 
@@ -1389,13 +1418,18 @@ impl ContactStore {
         self.contacts.retain(|c| c.id != id);
         // Also remove from recently viewed
         self.recently_viewed.retain(|&rid| rid != id);
-        self.contacts.len() != before
+        let deleted = self.contacts.len() != before;
+        if deleted {
+            self.changed();
+        }
+        deleted
     }
 
     /// Update a contact (replace by ID). Returns true if found and updated.
     pub fn update_contact(&mut self, contact: Contact) -> bool {
         if let Some(existing) = self.contacts.iter_mut().find(|c| c.id == contact.id) {
             *existing = contact;
+            self.changed();
             true
         } else {
             false
@@ -1420,6 +1454,7 @@ impl ContactStore {
         self.next_group_id = self.next_group_id.saturating_add(1);
         group.id = id;
         self.groups.push(group);
+        self.changed();
         id
     }
 
@@ -1428,8 +1463,10 @@ impl ContactStore {
         self.groups.iter().find(|g| g.id == id)
     }
 
-    /// Get a mutable reference to a group.
+    /// Get a mutable reference to a group. Counted as a change, as
+    /// `get_contact_mut` is.
     pub fn get_group_mut(&mut self, id: u64) -> Option<&mut ContactGroup> {
+        self.changed();
         self.groups.iter_mut().find(|g| g.id == id)
     }
 
@@ -1441,7 +1478,11 @@ impl ContactStore {
         for contact in &mut self.contacts {
             contact.groups.retain(|&gid| gid != id);
         }
-        self.groups.len() != before
+        let deleted = self.groups.len() != before;
+        if deleted {
+            self.changed();
+        }
+        deleted
     }
 
     /// Get all groups.
@@ -1449,12 +1490,18 @@ impl ContactStore {
         &self.groups
     }
 
-    /// Add a contact to a group.
+    /// Add a contact to a group -- one the store has: a contact in a group
+    /// that is not there would make the address book a file that cannot be
+    /// read back.
     pub fn add_contact_to_group(&mut self, contact_id: u64, group_id: u64) -> bool {
+        if !self.groups.iter().any(|g| g.id == group_id) {
+            return false;
+        }
         if let Some(contact) = self.contacts.iter_mut().find(|c| c.id == contact_id)
             && !contact.groups.contains(&group_id)
         {
             contact.groups.push(group_id);
+            self.changed();
             return true;
         }
         false
@@ -1465,7 +1512,11 @@ impl ContactStore {
         if let Some(contact) = self.contacts.iter_mut().find(|c| c.id == contact_id) {
             let before = contact.groups.len();
             contact.groups.retain(|&gid| gid != group_id);
-            return contact.groups.len() != before;
+            let removed = contact.groups.len() != before;
+            if removed {
+                self.changed();
+            }
+            return removed;
         }
         false
     }
@@ -1557,12 +1608,11 @@ impl ContactStore {
 
     /// Toggle favorite status for a contact. Returns new favorite state.
     pub fn toggle_favorite(&mut self, id: u64) -> Option<bool> {
-        if let Some(contact) = self.contacts.iter_mut().find(|c| c.id == id) {
-            contact.favorite = !contact.favorite;
-            Some(contact.favorite)
-        } else {
-            None
-        }
+        let contact = self.contacts.iter_mut().find(|c| c.id == id)?;
+        contact.favorite = !contact.favorite;
+        let now_favorite = contact.favorite;
+        self.changed();
+        Some(now_favorite)
     }
 
     /// Get favorite contacts.
@@ -1574,12 +1624,17 @@ impl ContactStore {
 
     /// Record that a contact was viewed.
     pub fn record_view(&mut self, id: u64) {
+        // Already the most recent: nothing to change, and nothing to keep.
+        if self.recently_viewed.front() == Some(&id) {
+            return;
+        }
         // Remove existing occurrence, push to front
         self.recently_viewed.retain(|&rid| rid != id);
         self.recently_viewed.push_front(id);
         while self.recently_viewed.len() > MAX_RECENT {
             self.recently_viewed.pop_back();
         }
+        self.changed();
     }
 
     /// Get the recently viewed contacts list (IDs, most recent first).
@@ -1601,6 +1656,7 @@ impl ContactStore {
     pub fn mark_contacted(&mut self, id: u64, timestamp: u64) {
         if let Some(contact) = self.contacts.iter_mut().find(|c| c.id == id) {
             contact.last_contacted = Some(timestamp);
+            self.changed();
         }
     }
 
@@ -1627,6 +1683,7 @@ impl ContactStore {
         // Update recently viewed
         self.recently_viewed
             .retain(|&rid| rid != id_a && rid != id_b);
+        self.changed();
 
         Some(merged_id)
     }
@@ -1638,11 +1695,15 @@ impl ContactStore {
         export_vcards(&self.contacts)
     }
 
-    /// Import contacts from vCard text. Returns number of contacts imported.
-    pub fn import_vcards(&mut self, data: &str) -> usize {
+    /// Import contacts from vCard text, as added at `now` (milliseconds since
+    /// 1970), so "recently added" puts them first. Returns number of contacts
+    /// imported.
+    pub fn import_vcards(&mut self, data: &str, now: u64) -> usize {
         let imported = import_vcards(data, self.next_contact_id);
         let count = imported.len();
-        for contact in imported {
+        for mut contact in imported {
+            contact.created_at = now;
+            contact.updated_at = now;
             let _id = self.add_contact(contact);
         }
         count
@@ -1688,6 +1749,511 @@ impl Default for ContactStore {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ============================================================================
+// The address book file
+// ============================================================================
+
+/// The address book file's first field, which says what the file is.
+const BOOK_MAGIC: &str = "slateos-contacts";
+
+/// The version of the address book file this writes, and the newest it reads.
+const BOOK_FORMAT: u32 = 1;
+
+/// The largest address book this will read. One cut short would be read as a
+/// smaller book with no sign anyone was missing, so a larger file is refused
+/// rather than read in part.
+const MAX_BOOK_BYTES: usize = 64 * 1024 * 1024;
+
+/// Why nothing is kept, when the environment names no home directory.
+const NO_HOME: &str = "Nothing is kept: no home directory is set";
+
+/// Where the address book is kept, or `None` when the environment names no
+/// home directory -- an early-boot or stripped service environment, where
+/// there is no user to have contacts.
+fn book_path() -> Option<std::path::PathBuf> {
+    settingsfile::config_dir().map(|dir| dir.join("contacts").join("address-book.txt"))
+}
+
+/// Milliseconds since 1970 by the clock; 0 if it reads earlier than that.
+fn clock_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// A yes-or-no as written.
+fn flag(on: bool) -> &'static str {
+    if on { "1" } else { "0" }
+}
+
+/// A yes-or-no as read, or `None` for anything [`flag`] never writes.
+fn read_flag(field: &str) -> Option<bool> {
+    match field {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// A group's colour as written: `#RRGGBB`, or `#RRGGBBAA` when it is not
+/// opaque -- every bit of it, so it comes back the same colour.
+fn colour_hex(c: Color) -> String {
+    if c.a == 255 {
+        format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+    } else {
+        format!("#{:02X}{:02X}{:02X}{:02X}", c.r, c.g, c.b, c.a)
+    }
+}
+
+/// A colour read back from `#RRGGBB` or `#RRGGBBAA`.
+fn parse_colour(text: &str) -> Option<Color> {
+    let hex = text.strip_prefix('#')?;
+    if !hex.is_ascii() || !(hex.len() == 6 || hex.len() == 8) {
+        return None;
+    }
+    let byte = |at: usize| {
+        hex.get(at..at.saturating_add(2))
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+    };
+    let a = if hex.len() == 8 { byte(6)? } else { 255 };
+    Some(Color::rgba(byte(0)?, byte(2)?, byte(4)?, a))
+}
+
+fn phone_key(t: PhoneType) -> &'static str {
+    match t {
+        PhoneType::Mobile => "mobile",
+        PhoneType::Home => "home",
+        PhoneType::Work => "work",
+        PhoneType::Fax => "fax",
+        PhoneType::Other => "other",
+    }
+}
+
+fn phone_from_key(key: &str) -> Option<PhoneType> {
+    Some(match key {
+        "mobile" => PhoneType::Mobile,
+        "home" => PhoneType::Home,
+        "work" => PhoneType::Work,
+        "fax" => PhoneType::Fax,
+        "other" => PhoneType::Other,
+        _ => return None,
+    })
+}
+
+fn email_key(t: EmailType) -> &'static str {
+    match t {
+        EmailType::Personal => "personal",
+        EmailType::Work => "work",
+        EmailType::Other => "other",
+    }
+}
+
+fn email_from_key(key: &str) -> Option<EmailType> {
+    Some(match key {
+        "personal" => EmailType::Personal,
+        "work" => EmailType::Work,
+        "other" => EmailType::Other,
+        _ => return None,
+    })
+}
+
+fn address_key(t: AddressType) -> &'static str {
+    match t {
+        AddressType::Home => "home",
+        AddressType::Work => "work",
+        AddressType::Other => "other",
+    }
+}
+
+fn address_from_key(key: &str) -> Option<AddressType> {
+    Some(match key {
+        "home" => AddressType::Home,
+        "work" => AddressType::Work,
+        "other" => AddressType::Other,
+        _ => return None,
+    })
+}
+
+/// A platform as written, and the name a custom one carries (empty for the
+/// others).
+fn platform_fields(platform: &SocialPlatform) -> (&'static str, &str) {
+    match platform {
+        SocialPlatform::Twitter => ("twitter", ""),
+        SocialPlatform::LinkedIn => ("linkedin", ""),
+        SocialPlatform::GitHub => ("github", ""),
+        SocialPlatform::Mastodon => ("mastodon", ""),
+        SocialPlatform::Custom(name) => ("custom", name.as_str()),
+    }
+}
+
+fn platform_from_fields(key: &str, name: String) -> Option<SocialPlatform> {
+    Some(match key {
+        "twitter" => SocialPlatform::Twitter,
+        "linkedin" => SocialPlatform::LinkedIn,
+        "github" => SocialPlatform::GitHub,
+        "mastodon" => SocialPlatform::Mastodon,
+        "custom" => SocialPlatform::Custom(name),
+        _ => return None,
+    })
+}
+
+/// The address book as text: a first line naming the format, a line per
+/// group, then each contact followed by the lines that belong to it, then the
+/// recently viewed.
+///
+/// ```text
+/// slateos-contacts  1
+/// group    <id>  <#RRGGBB>  <name>  <description>
+/// contact  <id>  <favourite 1|0>  <created>  <updated>  <last contacted, or nothing>
+///          <birthday YYYY-MM-DD, or nothing>  <first>  <last>  <display name>
+///          <nickname>  <company>  <job title>  <department>
+///          <photo: nothing, or = and the path>  <notes>
+/// phone    <mobile|home|work|fax|other>  <primary 1|0>  <number>
+/// email    <personal|work|other>  <primary 1|0>  <address>
+/// address  <home|work|other>  <street>  <city>  <state>  <zip>  <country>
+/// social   <twitter|linkedin|github|mastodon|custom>  <custom name>  <handle>
+/// member   <group id>
+/// viewed   <contact id>...
+/// ```
+///
+/// Fields are separated by tabs and escaped with `textfmt::tsv`; times are
+/// milliseconds since 1970. A line that belongs to a contact belongs to the
+/// contact line above it. A membership of a group the book does not have, or
+/// a view of a contact it does not have, is not written: neither can arise
+/// from the store's own methods, and either would make the file one that
+/// cannot be read back.
+fn book_text(store: &ContactStore) -> String {
+    let mut out = format!("{BOOK_MAGIC}\t{BOOK_FORMAT}\n");
+    for group in &store.groups {
+        out.push_str(&format!(
+            "group\t{}\t{}\t{}\t{}\n",
+            group.id,
+            colour_hex(group.color),
+            tsv::escape(&group.name),
+            tsv::escape(&group.description)
+        ));
+    }
+    for c in &store.contacts {
+        out.push_str(&format!(
+            "contact\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            c.id,
+            flag(c.favorite),
+            c.created_at,
+            c.updated_at,
+            c.last_contacted.map_or_else(String::new, |t| t.to_string()),
+            c.birthday.map_or_else(String::new, |b| b.format_display()),
+            tsv::escape(&c.first_name),
+            tsv::escape(&c.last_name),
+            tsv::escape(&c.display_name),
+            tsv::escape(&c.nickname),
+            tsv::escape(&c.company),
+            tsv::escape(&c.job_title),
+            tsv::escape(&c.department),
+            c.photo_path
+                .as_deref()
+                .map_or_else(String::new, |path| format!("={}", tsv::escape(path))),
+            tsv::escape(&c.notes)
+        ));
+        for phone in &c.phones {
+            out.push_str(&format!(
+                "phone\t{}\t{}\t{}\n",
+                phone_key(phone.phone_type),
+                flag(phone.primary),
+                tsv::escape(&phone.number)
+            ));
+        }
+        for email in &c.emails {
+            out.push_str(&format!(
+                "email\t{}\t{}\t{}\n",
+                email_key(email.email_type),
+                flag(email.primary),
+                tsv::escape(&email.email)
+            ));
+        }
+        for a in &c.addresses {
+            out.push_str(&format!(
+                "address\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                address_key(a.address_type),
+                tsv::escape(&a.street),
+                tsv::escape(&a.city),
+                tsv::escape(&a.state),
+                tsv::escape(&a.zip),
+                tsv::escape(&a.country)
+            ));
+        }
+        for social in &c.social_accounts {
+            let (key, name) = platform_fields(&social.platform);
+            out.push_str(&format!(
+                "social\t{key}\t{}\t{}\n",
+                tsv::escape(name),
+                tsv::escape(&social.handle)
+            ));
+        }
+        for gid in &c.groups {
+            if store.groups.iter().any(|g| g.id == *gid) {
+                out.push_str(&format!("member\t{gid}\n"));
+            }
+        }
+    }
+    let viewed: Vec<String> = store
+        .recently_viewed
+        .iter()
+        .filter(|id| store.contacts.iter().any(|c| c.id == **id))
+        .map(u64::to_string)
+        .collect();
+    if !viewed.is_empty() {
+        out.push_str(&format!("viewed\t{}\n", viewed.join("\t")));
+    }
+    out
+}
+
+/// An address book read from its text, or why it cannot be -- naming the
+/// line.
+///
+/// All or nothing, for the finance ledger's reason (design-decisions §1202,
+/// and the notes library's §1205): a book read in part and then kept again
+/// would lose, without a word, whoever was not read. So is one that puts a
+/// contact in a group it does not have, holds two things with one number, or
+/// names a contact it does not have among the recently viewed.
+fn parse_book(text: &str) -> Result<ContactStore, String> {
+    let mut lines = text.lines().enumerate();
+    let first = lines.next().map_or("", |(_, line)| line);
+    let head: Vec<&str> = first.split('\t').collect();
+    let version = match head.as_slice() {
+        [BOOK_MAGIC, version] => version
+            .parse::<u32>()
+            .map_err(|_| String::from("line 1 names no format"))?,
+        _ => return Err(String::from("it is not a SlateOS address book")),
+    };
+    if version > BOOK_FORMAT {
+        return Err(format!(
+            "it is a later format ({version}) than this version reads ({BOOK_FORMAT})"
+        ));
+    }
+    if version < BOOK_FORMAT {
+        return Err(format!("format {version} is not one this program wrote"));
+    }
+
+    let mut store = ContactStore::new();
+    let mut viewed: Option<VecDeque<u64>> = None;
+    // Each membership's line, to name it if its group is missing -- which is
+    // only known once every group has been read.
+    let mut memberships: Vec<(usize, u64)> = Vec::new();
+    let mut viewed_line = 0_usize;
+    for (i, line) in lines {
+        let at = i.saturating_add(1);
+        if line.is_empty() {
+            continue;
+        }
+        let bad = |why: &str| format!("line {at}: {why}");
+        let text = |field: &str| {
+            tsv::unescape(field)
+                .ok_or_else(|| bad("a text holds an escape this program never writes"))
+        };
+        let number = |field: &str, what: &str| {
+            field
+                .parse::<u64>()
+                .map_err(|_| bad(&format!("{what} is not a number")))
+        };
+        let yes_no =
+            |field: &str| read_flag(field).ok_or_else(|| bad("a yes-or-no is neither 1 nor 0"));
+        let fields: Vec<&str> = line.split('\t').collect();
+        match fields.as_slice() {
+            ["group", id, colour, name, description] => {
+                let id = number(id, "a group's number")?;
+                if store.groups.iter().any(|g| g.id == id) {
+                    return Err(bad("two groups have one number"));
+                }
+                let color = parse_colour(colour).ok_or_else(|| bad("a colour is not one"))?;
+                store.groups.push(
+                    ContactGroup::new(id, &text(name)?)
+                        .with_color(color)
+                        .with_description(&text(description)?),
+                );
+            }
+            [
+                "contact",
+                id,
+                favourite,
+                created,
+                updated,
+                contacted,
+                birthday,
+                first,
+                last,
+                display,
+                nickname,
+                company,
+                job,
+                department,
+                photo,
+                notes,
+            ] => {
+                let id = number(id, "a contact's number")?;
+                if store.contacts.iter().any(|c| c.id == id) {
+                    return Err(bad("two contacts have one number"));
+                }
+                let mut c = Contact::new(id, &text(first)?, &text(last)?);
+                c.favorite = yes_no(favourite)?;
+                c.created_at = number(created, "when a contact was added")?;
+                c.updated_at = number(updated, "when a contact was changed")?;
+                c.last_contacted = if contacted.is_empty() {
+                    None
+                } else {
+                    Some(number(contacted, "when a contact was last reached")?)
+                };
+                c.birthday = if birthday.is_empty() {
+                    None
+                } else {
+                    Some(
+                        SimpleDate::parse(birthday)
+                            .ok_or_else(|| bad("a birthday is not a date"))?,
+                    )
+                };
+                c.display_name = text(display)?;
+                c.nickname = text(nickname)?;
+                c.company = text(company)?;
+                c.job_title = text(job)?;
+                c.department = text(department)?;
+                c.photo_path = if photo.is_empty() {
+                    None
+                } else {
+                    let path = photo
+                        .strip_prefix('=')
+                        .ok_or_else(|| bad("a photo is neither nothing nor a path"))?;
+                    Some(text(path)?)
+                };
+                c.notes = text(notes)?;
+                store.contacts.push(c);
+            }
+            ["phone", kind, primary, number_text] => {
+                let phone = PhoneNumber {
+                    number: text(number_text)?,
+                    phone_type: phone_from_key(kind).ok_or_else(|| {
+                        bad("a phone number is of a kind this version does not know")
+                    })?,
+                    primary: yes_no(primary)?,
+                };
+                store
+                    .contacts
+                    .last_mut()
+                    .ok_or_else(|| bad("a phone number comes before any contact"))?
+                    .phones
+                    .push(phone);
+            }
+            ["email", kind, primary, address] => {
+                let email = EmailAddress {
+                    email: text(address)?,
+                    email_type: email_from_key(kind).ok_or_else(|| {
+                        bad("an email address is of a kind this version does not know")
+                    })?,
+                    primary: yes_no(primary)?,
+                };
+                store
+                    .contacts
+                    .last_mut()
+                    .ok_or_else(|| bad("an email address comes before any contact"))?
+                    .emails
+                    .push(email);
+            }
+            ["address", kind, street, city, state, zip, country] => {
+                let mut address =
+                    PostalAddress::new(address_from_key(kind).ok_or_else(|| {
+                        bad("an address is of a kind this version does not know")
+                    })?);
+                address.street = text(street)?;
+                address.city = text(city)?;
+                address.state = text(state)?;
+                address.zip = text(zip)?;
+                address.country = text(country)?;
+                store
+                    .contacts
+                    .last_mut()
+                    .ok_or_else(|| bad("an address comes before any contact"))?
+                    .addresses
+                    .push(address);
+            }
+            ["social", kind, name, handle] => {
+                let platform = platform_from_fields(kind, text(name)?)
+                    .ok_or_else(|| bad("an account is on a service this version does not know"))?;
+                let account = SocialAccount::new(platform, &text(handle)?);
+                store
+                    .contacts
+                    .last_mut()
+                    .ok_or_else(|| bad("an account comes before any contact"))?
+                    .social_accounts
+                    .push(account);
+            }
+            ["member", group] => {
+                let group = number(group, "a group's number")?;
+                let contact = store
+                    .contacts
+                    .last_mut()
+                    .ok_or_else(|| bad("a group membership comes before any contact"))?;
+                if contact.groups.contains(&group) {
+                    return Err(bad("a contact is in one group twice"));
+                }
+                contact.groups.push(group);
+                memberships.push((at, group));
+            }
+            ["viewed", ids @ ..] => {
+                if viewed.is_some() {
+                    return Err(bad("the recently viewed are listed twice"));
+                }
+                let mut list = VecDeque::new();
+                for &id in ids {
+                    let id = number(id, "a recently viewed contact")?;
+                    if list.contains(&id) {
+                        return Err(bad("a contact is viewed twice"));
+                    }
+                    list.push_back(id);
+                }
+                viewed = Some(list);
+                viewed_line = at;
+            }
+            _ => {
+                return Err(bad(
+                    "it is not a line this version reads, or has the wrong number of fields",
+                ));
+            }
+        }
+    }
+
+    for (at, group) in memberships {
+        if !store.groups.iter().any(|g| g.id == group) {
+            return Err(format!(
+                "line {at}: a contact is in a group the book does not have"
+            ));
+        }
+    }
+    let viewed = viewed.unwrap_or_default();
+    if viewed.len() > MAX_RECENT {
+        return Err(format!(
+            "line {viewed_line}: more are listed as recently viewed than are kept"
+        ));
+    }
+    if let Some(missing) = viewed
+        .iter()
+        .find(|id| !store.contacts.iter().any(|c| c.id == **id))
+    {
+        return Err(format!(
+            "line {viewed_line}: contact {missing}, recently viewed, is not in the book"
+        ));
+    }
+    store.recently_viewed = viewed;
+    store.next_contact_id = next_id_after(store.contacts.iter().map(|c| c.id));
+    store.next_group_id = next_id_after(store.groups.iter().map(|g| g.id));
+    Ok(store)
+}
+
+/// The first number after `ids`, for the next thing made: past every one
+/// read, so nothing made later takes the number of something kept.
+fn next_id_after(ids: impl Iterator<Item = u64>) -> u64 {
+    ids.max().map_or(1, |highest| highest.saturating_add(1))
 }
 
 // ============================================================================
@@ -2089,7 +2655,8 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Enter", "Open, or confirm what you typed"),
     ("Backspace", "Rub out a letter"),
     ("Esc", "Back, or give the keyboard up"),
-    ("Ctrl+S / Ctrl+O", "Export / import a file"),
+    ("Ctrl+S", "Save now -- the book is saved as you go"),
+    ("Ctrl+E / Ctrl+O", "Export / import vCards"),
     ("F1", "This list"),
 ];
 
@@ -2134,10 +2701,28 @@ pub struct ContactsApp {
     /// What the last press did, drawn along the bottom of the sidebar so a
     /// press that changed nothing visible still says so.
     pub status: String,
-    /// A monotonic stand-in for the wall clock, so "recently contacted" has
-    /// something to order by. Pressing Call twice must put the second call
-    /// after the first.
-    pub clock: u64,
+    /// The last stamp [`stamp`](Self::stamp) gave, so the next is later.
+    ///
+    /// It was `clock`, a counter from 2,000,000,000 standing in for the wall
+    /// clock, and "recently added" had nothing to order by at all: no contact
+    /// was ever given a time.
+    last_stamp: u64,
+    /// Whether changes are kept. Off in `new`, so no test can write the
+    /// user's address book; `from_settings`, which `main` uses, turns it on,
+    /// and a book that cannot be read turns it off again.
+    persist: bool,
+    /// The store's revision when the book was last written or read.
+    kept_revision: u64,
+    /// Why the book is not being kept, drawn for as long as it is true: it
+    /// could not be read (and so is left exactly as it is), there is nowhere
+    /// to keep it, or the last save failed.
+    store_error: Option<String>,
+    /// The question asked when the window is closed over a contact being
+    /// edited, or while a save is failing.
+    question: Option<unsaved::Question<Pending>>,
+    /// Set when the question has been answered with leave, so the event loop
+    /// can let the window go.
+    quit: bool,
 
     // Window dimensions, remembered so a press that arrives between a resize
     // and the next frame is answered against the size the window really is.
@@ -2190,9 +2775,12 @@ impl ContactsApp {
 
             focus: Focus::None,
             status: String::from("Ready"),
-            // Later than any timestamp the sample data carries, so a call
-            // placed now sorts above a call recorded in the fixture.
-            clock: 2_000_000_000,
+            last_stamp: 0,
+            persist: false,
+            kept_revision: 0,
+            store_error: None,
+            question: None,
+            quit: false,
 
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
@@ -2347,7 +2935,8 @@ impl ContactsApp {
         // Last, so nothing paints over it. Keyed on the store being empty so
         // it retires itself at the first real contact.
         if self.store.contacts.is_empty() {
-            for (i, line) in NO_CONTACTS_LINES.iter().enumerate() {
+            let keeping = self.keeping_line();
+            for (i, line) in [NO_CONTACTS, keeping.as_str()].iter().enumerate() {
                 #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
                 let y = l.window.y + 2.0 + i as f32 * 12.0;
                 // A window can be two pixels across. `w - 16.0` goes negative
@@ -3459,12 +4048,19 @@ impl ContactsApp {
             return;
         }
         f.push(fill(l.status, self.palette.crust, 0.0));
+        // Why the book is not being kept, in place of the last action, for as
+        // long as it is true: it is the one thing that decides whether closing
+        // the window loses anyone.
+        let (said, colour) = match &self.store_error {
+            Some(error) => (error.as_str(), self.palette.ink(self.palette.red)),
+            None => (self.status.as_str(), self.palette.subtext0),
+        };
         put_text(
             f,
             inset(l.status, 8.0),
-            &self.status,
+            said,
             11.0,
-            self.palette.subtext0,
+            colour,
             FontWeightHint::Regular,
         );
     }
@@ -3741,8 +4337,29 @@ fn put_text(
 // ============================================================================
 
 impl ContactsApp {
-    /// Route an event to whatever the drawing pass put under it.
+    /// Route an event, then keep whatever it changed.
+    ///
+    /// The book is written here, once per event, whenever the store's
+    /// revision has moved -- not by each place that changes it.
     fn handle_event(&mut self, event: &Event, size: (f32, f32)) {
+        self.route_event(event, size);
+        self.keep();
+    }
+
+    /// Route an event to whatever the drawing pass put under it.
+    fn route_event(&mut self, event: &Event, size: (f32, f32)) {
+        // The close question takes every key and click while it is up: a
+        // keystroke that reached the form under it would be a change made
+        // while being asked about the changes.
+        if let Some(question) = self.question.as_mut()
+            && matches!(event, Event::Key(_) | Event::Mouse(_))
+        {
+            if let Some(choice) = question.handle(event) {
+                self.question = None;
+                self.answer(choice);
+            }
+            return;
+        }
         // The picker takes the event first while it is up, or a keystroke
         // meant for a filename lands in the search box behind it.
         match self.picker.handle(event, size.0, size.1) {
@@ -3884,10 +4501,9 @@ impl ContactsApp {
             QuickAction::Call | QuickAction::Email => {
                 // Reaching someone is what "recently contacted" orders by, so
                 // the two buttons that reach them move the contact to the top
-                // of that order. The clock advances so a second call lands
-                // after the first rather than tying with it.
-                self.clock = self.clock.saturating_add(1);
-                let now = self.clock;
+                // of that order. A stamp is always later than the last, so a
+                // second call lands after the first rather than tying with it.
+                let now = self.stamp();
                 self.store.mark_contacted(id, now);
             }
             QuickAction::Map => {}
@@ -3936,30 +4552,133 @@ impl ContactsApp {
         }
     }
 
+    /// `existing` with the form written onto it: the fields the form shows,
+    /// and nothing else.
+    ///
+    /// The form shows the names, the work fields, the notes, the birthday and
+    /// the *first* phone number, email address and postal address. Saving used
+    /// to build a new contact from the form and copy four things across --
+    /// groups, the star, when it was added, when it was last reached -- so
+    /// every other number, address and account, a display name imported from
+    /// a vCard, and the photo were dropped by the first edit, with the comment
+    /// above it saying they must not be.
+    ///
+    /// A field emptied in the form removes what it showed: an emptied phone
+    /// field is the first number deleted, and the next one moves up. The
+    /// display name follows the names unless it was one of its own.
+    fn form_applied_to(&self, existing: &Contact) -> Contact {
+        let mut c = existing.clone();
+        let was_default = existing.display_name
+            == default_display_name(&existing.first_name, &existing.last_name);
+        c.first_name.clone_from(&self.edit_first_name);
+        c.last_name.clone_from(&self.edit_last_name);
+        if was_default {
+            c.display_name = default_display_name(&c.first_name, &c.last_name);
+        }
+        c.company.clone_from(&self.edit_company);
+        c.job_title.clone_from(&self.edit_job_title);
+        c.department.clone_from(&self.edit_department);
+        c.nickname.clone_from(&self.edit_nickname);
+        c.notes.clone_from(&self.edit_notes);
+        c.birthday = SimpleDate::parse(&self.edit_birthday);
+
+        match (self.edit_phone.is_empty(), c.phones.first_mut()) {
+            (true, Some(_)) => {
+                c.phones.remove(0);
+            }
+            (false, Some(phone)) => {
+                phone.number.clone_from(&self.edit_phone);
+                phone.phone_type = self.edit_phone_type;
+            }
+            (false, None) => c
+                .phones
+                .push(PhoneNumber::new(&self.edit_phone, self.edit_phone_type).with_primary(true)),
+            (true, None) => {}
+        }
+        match (self.edit_email.is_empty(), c.emails.first_mut()) {
+            (true, Some(_)) => {
+                c.emails.remove(0);
+            }
+            (false, Some(email)) => {
+                email.email.clone_from(&self.edit_email);
+                email.email_type = self.edit_email_type;
+            }
+            (false, None) => c
+                .emails
+                .push(EmailAddress::new(&self.edit_email, self.edit_email_type).with_primary(true)),
+            (true, None) => {}
+        }
+        let address_typed = [
+            &self.edit_street,
+            &self.edit_city,
+            &self.edit_state,
+            &self.edit_zip,
+            &self.edit_country,
+        ]
+        .iter()
+        .any(|f| !f.is_empty());
+        match (address_typed, c.addresses.first_mut()) {
+            (false, Some(_)) => {
+                c.addresses.remove(0);
+            }
+            (true, first) => {
+                let mut fresh = PostalAddress::new(self.edit_address_type);
+                let address = match first {
+                    Some(address) => address,
+                    None => &mut fresh,
+                };
+                address.street.clone_from(&self.edit_street);
+                address.city.clone_from(&self.edit_city);
+                address.state.clone_from(&self.edit_state);
+                address.zip.clone_from(&self.edit_zip);
+                address.country.clone_from(&self.edit_country);
+                address.address_type = self.edit_address_type;
+                if c.addresses.is_empty() {
+                    c.addresses.push(fresh);
+                }
+            }
+            (false, None) => {}
+        }
+        c
+    }
+
+    /// Whether saving the form would change anything: for a new contact,
+    /// whether anything has been typed; for one being edited, whether the
+    /// form now says something the contact does not.
+    #[must_use]
+    pub fn form_has_changes(&self) -> bool {
+        match self.view {
+            DetailView::NewContact => self.build_contact_from_form() != Contact::new(0, "", ""),
+            DetailView::EditContact(id) => self
+                .store
+                .get_contact(id)
+                .is_some_and(|existing| self.form_applied_to(existing) != *existing),
+            _ => false,
+        }
+    }
+
     /// Write the form back, either onto the contact being edited or as a new
     /// one.
     fn save_form(&mut self) {
-        let built = self.build_contact_from_form();
         match self.view {
             DetailView::EditContact(id) => {
-                let mut updated = built;
-                updated.id = id;
-                if let Some(existing) = self.store.get_contact(id) {
-                    // Everything the form does not carry -- groups, extra
-                    // phone numbers, the favourite flag, when it was created
-                    // -- belongs to the contact and not to the form, and
-                    // saving must not quietly drop it.
-                    updated.groups.clone_from(&existing.groups);
-                    updated.favorite = existing.favorite;
-                    updated.created_at = existing.created_at;
-                    updated.last_contacted = existing.last_contacted;
+                let Some(existing) = self.store.get_contact(id).cloned() else {
+                    return;
+                };
+                let mut updated = self.form_applied_to(&existing);
+                // The same contact again is no change, and not a new time.
+                if updated != existing {
+                    updated.updated_at = self.stamp();
+                    self.store.update_contact(updated);
                 }
-                if self.store.update_contact(updated) {
-                    self.view = DetailView::ViewContact(id);
-                    self.status = String::from("Saved");
-                }
+                self.view = DetailView::ViewContact(id);
+                self.status = String::from("Saved");
             }
             DetailView::NewContact => {
+                let mut built = self.build_contact_from_form();
+                let now = self.stamp();
+                built.created_at = now;
+                built.updated_at = now;
                 let id = self.store.add_contact(built);
                 self.view = DetailView::ViewContact(id);
                 self.status = String::from("Added");
@@ -4046,8 +4765,6 @@ impl ContactsApp {
         self.status = format!("Nothing filed under {letter}");
     }
 
-    /// A keystroke: text into whatever has the keyboard, otherwise a
-    /// shortcut.
     /// Put the open or save picker up.
     ///
     /// `export_vcards` and `import_vcards` were written, tested, and
@@ -4095,26 +4812,20 @@ impl ContactsApp {
     /// Bounded, and it says so when it cuts, because `import_vcards` stops at
     /// a truncation without complaining -- a cut file simply yields fewer
     /// names, which is the failure mode nobody notices.
+    ///
+    /// Read through `safeio::read_to_string_capped`, which stops at the cap:
+    /// this read the whole file into memory first and cut it afterwards, so a
+    /// multi-gigabyte file was read whole to import the first 8 MiB of it.
     pub fn read_vcards(&mut self, path: &std::path::Path) -> String {
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
+        let read = match safeio::read_to_string_capped(path, MAX_VCARD_BYTES) {
+            Ok(read) => read,
             Err(err) => return format!("{FILE_FAILED_PREFIX} read {}: {err}", path.display()),
         };
-        let whole = text.len();
-        let truncated = whole > MAX_VCARD_BYTES;
-        let body = if truncated {
-            let mut cut = MAX_VCARD_BYTES;
-            while cut > 0 && !text.is_char_boundary(cut) {
-                cut = cut.saturating_sub(1);
-            }
-            text.get(..cut).unwrap_or("").to_string()
-        } else {
-            text
-        };
-        let added = self.store.import_vcards(&body);
-        if truncated {
+        let now = self.stamp();
+        let added = self.store.import_vcards(&read.text, now);
+        if read.truncated {
             format!(
-                "INCOMPLETE: {added} contact(s) from the first {MAX_VCARD_BYTES} bytes of {}, which is {whole} bytes",
+                "INCOMPLETE: {added} contact(s) from the first {MAX_VCARD_BYTES} bytes of {}, which is larger",
                 path.display()
             )
         } else {
@@ -4122,6 +4833,8 @@ impl ContactsApp {
         }
     }
 
+    /// A keystroke: text into whatever has the keyboard, otherwise a
+    /// shortcut.
     fn handle_key(&mut self, event: &KeyEvent) {
         if !event.pressed {
             return;
@@ -4211,7 +4924,16 @@ impl ContactsApp {
         // unmodified by Search and Cycle sort.
         if event.modifiers.ctrl {
             match event.key {
-                Key::S => self.open_file_dialog(true),
+                // The book is kept as it changes, so there is nothing for
+                // Ctrl+S to save -- but it is the key people press to make
+                // sure, and the one to press to try again after a save failed.
+                // It says where the book is, or why it is not being kept.
+                Key::S => {
+                    self.keep();
+                    self.status = self.keeping_line();
+                }
+                // Export was Ctrl+S until the book was kept.
+                Key::E => self.open_file_dialog(true),
                 Key::O => self.open_file_dialog(false),
                 _ => {}
             }
@@ -4261,7 +4983,13 @@ impl App for ContactsApp {
 
     fn on_event(&mut self, event: &Event) -> Response {
         match event {
-            Event::CloseRequested => Response::Exit,
+            Event::CloseRequested => {
+                if self.request_close() {
+                    Response::Exit
+                } else {
+                    Response::KeepOpen
+                }
+            }
             Event::Resize { width, height } => {
                 // Remembered here as well as in `render`, because a press can
                 // arrive after a resize and before the next frame, and it has
@@ -4272,7 +5000,11 @@ impl App for ContactsApp {
             }
             _ => {
                 self.handle_event(event, (self.window_width, self.window_height));
-                Response::Redraw
+                if self.quit {
+                    Response::Exit
+                } else {
+                    Response::Redraw
+                }
             }
         }
     }
@@ -4280,7 +5012,13 @@ impl App for ContactsApp {
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
         self.window_width = width;
         self.window_height = height;
-        self.frame(width, height).into_tree()
+        let mut tree = self.frame(width, height).into_tree();
+        // Over everything, the picker included: they are never up together.
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
+        }
+        tree
     }
 }
 
@@ -4316,10 +5054,226 @@ impl Probe for ContactsApp {
 fn main() -> ExitCode {
     // The previous `main` was three lines: build the store, load the sample
     // data, render one frame into a `Vec` and drop it. It exercised the
-    // drawing code and showed nobody the result.
-    // Opens empty. It used to call `load_sample_data`.
-    let mut app = ContactsApp::new();
+    // drawing code and showed nobody the result. Then it opened empty, every
+    // time; it opens on the book kept last time.
+    let mut app = ContactsApp::from_settings();
     app::launch("contacts", &mut app)
+}
+
+/// What the close question is holding up. Only the close: nothing else in
+/// this app can lose a contact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pending {
+    /// The window, asked to close over a contact being edited or while a save
+    /// is failing.
+    Close,
+}
+
+/// The name a contact is shown by when nobody gave it another: "First Last",
+/// or whichever of the two it has.
+fn default_display_name(first: &str, last: &str) -> String {
+    if last.is_empty() {
+        first.to_string()
+    } else if first.is_empty() {
+        last.to_string()
+    } else {
+        format!("{first} {last}")
+    }
+}
+
+impl ContactsApp {
+    /// The window's address book: the one kept last time, and every change
+    /// kept from here on.
+    pub fn from_settings() -> Self {
+        let mut app = Self::new();
+        match book_path() {
+            Some(path) => {
+                app.persist = true;
+                app.load_book(&path);
+            }
+            // Nowhere to keep anything, and never will be while this window
+            // is open: said once, and not asked about again at every close.
+            None => app.store_error = Some(String::from(NO_HOME)),
+        }
+        app
+    }
+
+    /// Read the address book at `path`; with none there yet, this is a first
+    /// run.
+    ///
+    /// One that cannot be read whole is left exactly as it is: nothing is
+    /// saved over it, and the window says so for as long as it is open. A
+    /// save would write back only whoever was understood.
+    fn load_book(&mut self, path: &std::path::Path) {
+        self.load_book_within(path, MAX_BOOK_BYTES);
+    }
+
+    /// [`load_book`](Self::load_book) with the size limit given, so a test
+    /// can reach the limit without writing sixty-four megabytes.
+    fn load_book_within(&mut self, path: &std::path::Path, max_bytes: usize) {
+        let refused = |why: String| {
+            format!(
+                "{} was not read ({why}), so nothing is saved over it",
+                path.display()
+            )
+        };
+        let read = match safeio::read_to_string_capped(path, max_bytes) {
+            Ok(read) => read,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+            Err(err) => {
+                self.persist = false;
+                self.store_error = Some(refused(err.to_string()));
+                return;
+            }
+        };
+        if read.truncated {
+            self.persist = false;
+            self.store_error = Some(refused(format!(
+                "it is larger than {} MiB",
+                max_bytes / (1024 * 1024)
+            )));
+            return;
+        }
+        match parse_book(&read.text) {
+            Ok(store) => self.take_store(store),
+            Err(why) => {
+                self.persist = false;
+                self.store_error = Some(refused(why));
+            }
+        }
+    }
+
+    /// Make `store` this window's address book.
+    fn take_store(&mut self, store: ContactStore) {
+        // Every time in the file, so that a change made now is later than all
+        // of them even if the clock has since been set back.
+        let latest = store
+            .contacts
+            .iter()
+            .flat_map(|c| [c.created_at, c.updated_at, c.last_contacted.unwrap_or(0)])
+            .max()
+            .unwrap_or(0);
+        self.last_stamp = self.last_stamp.max(latest);
+        self.store = store;
+        self.kept_revision = self.store.revision();
+        self.view = DetailView::Empty;
+    }
+
+    /// Write the address book, if it has changed and this window keeps
+    /// anything.
+    ///
+    /// A failure is kept in `store_error`, drawn in the status line, and the
+    /// book stays unkept, so the next change -- or Ctrl+S, or the close
+    /// question's Save -- tries again.
+    pub fn keep(&mut self) {
+        if !self.persist || self.store.revision() == self.kept_revision {
+            return;
+        }
+        let Some(path) = book_path() else {
+            self.store_error = Some(String::from(NO_HOME));
+            return;
+        };
+        let text = book_text(&self.store);
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| safeio::write_str_atomically(&path, &text));
+        match written {
+            Ok(()) => {
+                self.kept_revision = self.store.revision();
+                self.store_error = None;
+            }
+            Err(err) => {
+                self.store_error = Some(format!("Not saved to {}: {err}", path.display()));
+            }
+        }
+    }
+
+    /// Whether the book has changes that are not written.
+    #[must_use]
+    pub fn unkept(&self) -> bool {
+        self.persist && self.store.revision() != self.kept_revision
+    }
+
+    /// Where the book is kept -- or why it is not -- for the empty window and
+    /// for Ctrl+S.
+    #[must_use]
+    pub fn keeping_line(&self) -> String {
+        if let Some(error) = &self.store_error {
+            return error.clone();
+        }
+        // Asked first, so a window that keeps nothing never reads where the
+        // settings are: a test's window does not, and must not see another
+        // test's scratch directory.
+        if !self.persist {
+            return String::from("Nothing added here is kept.");
+        }
+        book_path().map_or_else(
+            || String::from(NO_HOME),
+            |path| format!("Everyone added is kept in {}.", path.display()),
+        )
+    }
+
+    /// A stamp for a change made now: the clock's reading in milliseconds
+    /// since 1970 -- but always later than every stamp already given, so a
+    /// later change sorts later even within one millisecond, or after the
+    /// clock has been set back.
+    fn stamp(&mut self) -> u64 {
+        self.last_stamp = clock_ms().max(self.last_stamp.saturating_add(1));
+        self.last_stamp
+    }
+
+    /// Whether the window may close now.
+    ///
+    /// A contact being edited is asked about -- the form has Save and Cancel
+    /// of its own, and closing is neither -- and so is a book whose last save
+    /// failed, since closing then loses what it could not write. Neither is
+    /// asked in a window that keeps nothing: it has said so from the start,
+    /// and Save could not keep anything anyway.
+    pub fn request_close(&mut self) -> bool {
+        self.keep();
+        if !self.persist {
+            return true;
+        }
+        let (message, prompt) = if self.form_has_changes() {
+            (
+                String::from("The contact being edited has changes that are not saved."),
+                String::from("Save it before closing?"),
+            )
+        } else if self.unkept() {
+            let detail = self.store_error.clone().unwrap_or_default();
+            (
+                String::from("Your latest changes to your contacts are not saved."),
+                format!("{detail} -- try saving again before closing?"),
+            )
+        } else {
+            return true;
+        };
+        // The question replaces whatever is up: a picker would take the keys
+        // it needs, and be drawn over it.
+        self.picker.close();
+        self.show_help = false;
+        self.question = Some(unsaved::Question::new(&message, &prompt, Pending::Close));
+        false
+    }
+
+    /// Act on the close question's answer.
+    fn answer(&mut self, choice: unsaved::Choice) {
+        match choice {
+            // The contact being edited is saved, and the window goes only if
+            // the book is then written; if that fails, the error is on screen
+            // and the window stays, which is what Save asked for.
+            unsaved::Choice::Save => {
+                if self.form_has_changes() {
+                    self.save_form();
+                }
+                self.keep();
+                self.quit = !self.unkept();
+            }
+            unsaved::Choice::Discard => self.quit = true,
+            unsaved::Choice::Cancel => {}
+        }
+    }
 }
 
 // ============================================================================
@@ -4627,7 +5581,7 @@ mod tests {
     /// nobody could accidentally ring or mail these people. That care is why
     /// it lasted. A careful fixture is harder to notice than a careless one.
     #[test]
-    fn a_fresh_window_holds_nobody_and_says_nothing_is_kept() {
+    fn a_fresh_window_holds_nobody_and_says_how_to_start() {
         let app = ContactsApp::new();
         assert!(
             app.store.contacts.is_empty(),
@@ -4643,24 +5597,17 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for line in NO_CONTACTS_LINES {
-            assert!(
-                texts.iter().any(|t| t == line),
-                "the window never said {line:?}"
-            );
-        }
         assert!(
-            NO_CONTACTS_LINES
-                .iter()
-                // The property, not the sentence. The old assertion pinned the
-                // words "Nothing is saved between runs", which stayed true of
-                // the test long after it stopped being true of the program:
-                // this app gained a vCard door and the banner still said it
-                // had no filesystem access. What must hold is that the warning
-                // names the remedy, so a reader who believes it knows what to
-                // do instead of concluding the app cannot save at all.
-                .any(|l| l.contains("Ctrl+S")),
-            "nothing warns that a contact added today does not survive the window",
+            texts.iter().any(|t| t == NO_CONTACTS),
+            "the window never said {NO_CONTACTS:?}"
+        );
+        // The property, not the sentence: what the second line must say is
+        // whether what is added here is kept. A window made by `new` keeps
+        // nothing, and says so; `what_is_added_is_there_next_time` checks the
+        // one `main` makes says where.
+        assert!(
+            texts.iter().any(|t| t == "Nothing added here is kept."),
+            "a window that keeps nothing does not say so: {texts:?}"
         );
     }
 
@@ -6241,9 +7188,12 @@ mod tests {
     fn test_store_import_vcards() {
         let mut store = ContactStore::new();
         let data = "BEGIN:VCARD\r\nVERSION:3.0\r\nN:Doe;John;;;\r\nFN:John Doe\r\nEND:VCARD";
-        let count = store.import_vcards(data);
+        let count = store.import_vcards(data, 1_234);
         assert_eq!(count, 1);
         assert_eq!(store.contact_count(), 1);
+        // Stamped as added now, so "recently added" puts them first.
+        let added = &store.all_contacts()[0];
+        assert_eq!((added.created_at, added.updated_at), (1_234, 1_234));
     }
 
     #[test]
@@ -8574,5 +9524,670 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // The address book
+    //
+    // Nothing was kept: the book lived in memory and was gone when the
+    // window closed, and the one way to keep anyone was a vCard export.
+    // ------------------------------------------------------------------
+
+    fn key_event(key: Key, ctrl: bool, text: &str) -> Event {
+        let mut modifiers = guitk::event::Modifiers::NONE;
+        modifiers.ctrl = ctrl;
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    fn press(app: &mut ContactsApp, key: Key) {
+        app.handle_event(&key_event(key, false, ""), SIZE);
+    }
+
+    fn typed_in(app: &mut ContactsApp, text: &str) {
+        for c in text.chars() {
+            app.handle_event(&key_event(Key::Unknown(0), false, &c.to_string()), SIZE);
+        }
+    }
+
+    fn drawn(app: &ContactsApp) -> Vec<String> {
+        app.render()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Text a contact is full of and a line-based file mangles.
+    const AWKWARD: [&str; 8] = [
+        "plain",
+        "tab\there",
+        "new\nline",
+        "cr\rhere",
+        "back\\slash",
+        "\\n written out",
+        "caf\u{e9} \u{1F4DE}",
+        "ends in \\",
+    ];
+
+    /// A book with one of everything the file has to carry.
+    fn full_book() -> ContactStore {
+        let mut store = ContactStore::new();
+        let friends = store.add_group(
+            ContactGroup::new(0, AWKWARD[1])
+                .with_color(Color::rgba(0x12, 0x34, 0x56, 0x78))
+                .with_description(AWKWARD[2]),
+        );
+        let work =
+            store.add_group(ContactGroup::new(0, "Work").with_color(Color::from_hex(0xA6E3A1)));
+        for (i, awkward) in AWKWARD.iter().enumerate() {
+            let mut c = Contact::new(0, awkward, AWKWARD[(i + 1) % AWKWARD.len()]);
+            if i % 2 == 0 {
+                c.display_name = format!("Dr. {awkward}");
+            }
+            c.nickname = (*awkward).to_owned();
+            c.company = (*awkward).to_owned();
+            c.job_title = (*awkward).to_owned();
+            c.department = (*awkward).to_owned();
+            c.notes = (*awkward).to_owned();
+            c.favorite = i % 3 == 0;
+            c.created_at = 1_000 + i as u64;
+            c.updated_at = 2_000 + i as u64;
+            c.last_contacted = (i % 2 == 1).then_some(3_000 + i as u64);
+            c.birthday = (i % 2 == 0).then(|| SimpleDate::new(1990, 2, 28).unwrap());
+            c.photo_path = match i % 3 {
+                0 => None,
+                1 => Some(String::new()),
+                _ => Some((*awkward).to_owned()),
+            };
+            c.phones = vec![
+                PhoneNumber::new(awkward, PhoneType::Mobile).with_primary(true),
+                PhoneNumber::new("555", PhoneType::Fax),
+            ];
+            c.emails = vec![
+                EmailAddress::new(awkward, EmailType::Work),
+                EmailAddress::new("b@example.org", EmailType::Other).with_primary(true),
+            ];
+            let mut home = PostalAddress::new(AddressType::Home);
+            home.street = (*awkward).to_owned();
+            home.country = "NZ".to_owned();
+            c.addresses = vec![home, PostalAddress::new(AddressType::Other)];
+            c.social_accounts = vec![
+                SocialAccount::new(SocialPlatform::Mastodon, awkward),
+                SocialAccount::new(SocialPlatform::Custom((*awkward).to_owned()), "handle"),
+            ];
+            let id = store.add_contact(c);
+            if i % 2 == 0 {
+                assert!(store.add_contact_to_group(id, friends));
+            }
+            assert!(store.add_contact_to_group(id, work));
+            store.record_view(id);
+        }
+        store
+    }
+
+    #[test]
+    fn an_address_book_written_and_read_again_is_the_same_book() {
+        let store = full_book();
+        let text = book_text(&store);
+        let back = parse_book(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+        assert_eq!(back.contacts, store.contacts);
+        assert_eq!(back.groups, store.groups);
+        assert_eq!(back.recently_viewed, store.recently_viewed);
+        assert_eq!(back.next_contact_id, store.next_contact_id);
+        assert_eq!(back.next_group_id, store.next_group_id);
+        // No text broke a line: every line is one of the records.
+        for line in text.lines().skip(1) {
+            let kind = line.split('\t').next().unwrap();
+            assert!(
+                [
+                    "group", "contact", "phone", "email", "address", "social", "member", "viewed"
+                ]
+                .contains(&kind),
+                "{line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_address_book_that_cannot_be_read_whole_is_refused_and_says_where() {
+        let head = "slateos-contacts\t1";
+        let group = "group\t1\t#112233\tFriends\t";
+        let contact = "contact\t1\t0\t5\t6\t\t\tAda\tLovelace\tAda Lovelace\t\t\t\t\t\t";
+        let cases: [(String, &str); 17] = [
+            (String::new(), "not a SlateOS address book"),
+            (String::from("slateos-contacts\t2"), "a later format (2)"),
+            (
+                String::from("slateos-contacts\tx"),
+                "line 1 names no format",
+            ),
+            (
+                format!("{head}\n{group}\n{group}"),
+                "line 3: two groups have one number",
+            ),
+            (
+                format!("{head}\ngroup\t1\tred\tFriends\t"),
+                "line 2: a colour is not one",
+            ),
+            (
+                format!("{head}\n{contact}\n{contact}"),
+                "line 3: two contacts have one number",
+            ),
+            (
+                format!("{head}\n{contact}\nmember\t9"),
+                "line 3: a contact is in a group the book does not have",
+            ),
+            (
+                format!("{head}\n{group}\n{contact}\nmember\t1\nmember\t1"),
+                "line 5: a contact is in one group twice",
+            ),
+            (
+                format!("{head}\nphone\tmobile\t1\t555"),
+                "line 2: a phone number comes before any contact",
+            ),
+            (
+                format!("{head}\n{contact}\nphone\tpager\t1\t555"),
+                "line 3: a phone number is of a kind this version does not know",
+            ),
+            (
+                format!("{head}\n{contact}\nsocial\tmyspace\t\tada"),
+                "line 3: an account is on a service this version does not know",
+            ),
+            (
+                format!("{head}\ncontact\t1\t0\t5\t6\t\t1990-02-30\tAda\tL\tAda L\t\t\t\t\t\t"),
+                "line 2: a birthday is not a date",
+            ),
+            (
+                format!("{head}\ncontact\t1\t0\t5\t6\t\t\tAda\tL\tAda L\t\t\t\t\tphoto.png\t"),
+                "line 2: a photo is neither nothing nor a path",
+            ),
+            (
+                format!("{head}\ncontact\t1\t2\t5\t6\t\t\tAda\tL\tAda L\t\t\t\t\t\t"),
+                "line 2: a yes-or-no is neither 1 nor 0",
+            ),
+            (
+                format!("{head}\n{contact}\nviewed\t1\t7"),
+                "line 3: contact 7, recently viewed, is not in the book",
+            ),
+            (
+                format!("{head}\ncontact\t1\t0\t5\t6\t\t\tA\\q\tL\tA L\t\t\t\t\t\t"),
+                "line 2: a text holds an escape this program never writes",
+            ),
+            (
+                format!("{head}\n{contact}\nfax\t555"),
+                "line 3: it is not a line this version reads",
+            ),
+        ];
+        for (text, want) in &cases {
+            match parse_book(text) {
+                Ok(_) => panic!("read {text:?}"),
+                Err(why) => assert!(why.contains(want), "{text:?}: said {why:?}, not {want:?}"),
+            }
+        }
+        // The control: the pieces above make a book that reads.
+        let good =
+            format!("{head}\n{group}\n{contact}\nphone\tmobile\t1\t555\nmember\t1\nviewed\t1\n");
+        let read = parse_book(&good).unwrap();
+        assert_eq!(read.contacts.len(), 1);
+        assert_eq!(read.contacts[0].groups, [1]);
+        assert_eq!(read.recently_viewed, [1]);
+    }
+
+    #[test]
+    fn what_is_added_is_there_next_time() {
+        settingsfile::testing::with_scratch_config("contacts-kept", |_| {
+            let mut app = ContactsApp::from_settings();
+            assert!(app.store_error.is_none(), "{:?}", app.store_error);
+            let keeping = app.keeping_line();
+            assert!(
+                keeping.starts_with("Everyone added is kept in "),
+                "{keeping}"
+            );
+            assert!(
+                drawn(&app).contains(&keeping),
+                "the empty window does not say where the book is kept"
+            );
+
+            press(&mut app, Key::N);
+            typed_in(&mut app, "Ada");
+            press(&mut app, Key::Tab);
+            typed_in(&mut app, "Lovelace");
+            press(&mut app, Key::Enter);
+            let id = app.selected_id().expect("the new contact is not shown");
+            // Written by the keys themselves, with no save asked for.
+            let again = ContactsApp::from_settings();
+            assert_eq!(again.store.contacts, app.store.contacts);
+            let ada = &again.store.contacts[0];
+            assert_eq!(ada.computed_display_name(), "Ada Lovelace");
+            assert!(ada.created_at > 0, "a new contact was given no time");
+
+            // A star, from the store, kept by the next event.
+            app.store.toggle_favorite(id);
+            press(&mut app, Key::Unknown(0));
+            let again = ContactsApp::from_settings();
+            assert!(again.store.contacts[0].favorite, "the star was not kept");
+            assert_eq!(again.store.recently_viewed, app.store.recently_viewed);
+
+            let mut again = again;
+            let next = again.store.add_contact(Contact::new(0, "Next", ""));
+            assert_ne!(next, id, "a new contact took a kept one's number");
+        });
+    }
+
+    #[test]
+    fn a_window_made_by_new_keeps_nothing() {
+        settingsfile::testing::with_scratch_config("contacts-quiet", |dir| {
+            let mut app = ContactsApp::new();
+            press(&mut app, Key::N);
+            typed_in(&mut app, "Scratch");
+            press(&mut app, Key::Enter);
+            assert_eq!(app.store.contacts.len(), 1);
+            assert!(
+                !dir.join("slateos").join("contacts").exists(),
+                "a window made by new() wrote the user's address book"
+            );
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::Exit
+            ));
+        });
+    }
+
+    #[test]
+    fn a_book_that_cannot_be_read_is_left_as_it_is() {
+        settingsfile::testing::with_scratch_config("contacts-broken", |_| {
+            let path = book_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let broken = "slateos-contacts\t1\ncontact\t1\t0\t5\t6\t\t\tAda\tL\tAda L\t\t\t\t\t\t\nphone\tpager\t1\t555\n";
+            std::fs::write(&path, broken).unwrap();
+            let mut app = ContactsApp::from_settings();
+            let error = app
+                .store_error
+                .clone()
+                .expect("an unreadable book was taken without a word");
+            assert!(error.contains("line 3"), "{error}");
+            assert!(drawn(&app).contains(&error), "the refusal is not on screen");
+            assert!(
+                app.store.contacts.is_empty(),
+                "half a book was taken for the whole"
+            );
+
+            press(&mut app, Key::N);
+            typed_in(&mut app, "New");
+            press(&mut app, Key::Enter);
+            assert_eq!(app.store.contacts.len(), 1);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                broken,
+                "the unreadable book was saved over"
+            );
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::Exit
+            ));
+        });
+    }
+
+    #[test]
+    fn a_book_too_big_to_read_whole_is_refused() {
+        settingsfile::testing::with_scratch_config("contacts-big", |_| {
+            let mut source = ContactStore::new();
+            source.add_contact(Contact::new(0, &"x".repeat(400), ""));
+            let text = book_text(&source);
+            let path = book_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &text).unwrap();
+
+            let mut app = ContactsApp::new();
+            app.persist = true;
+            app.load_book_within(&path, text.len() - 1);
+            let error = app.store_error.clone().expect("a cut-short read was taken");
+            assert!(error.contains("larger than"), "{error}");
+            assert!(!app.persist, "a book read in part would be saved over");
+
+            let mut whole = ContactsApp::new();
+            whole.persist = true;
+            whole.load_book_within(&path, text.len());
+            assert!(whole.store_error.is_none(), "{:?}", whole.store_error);
+            assert_eq!(
+                whole.store.contacts, source.contacts,
+                "control: the whole file reads"
+            );
+        });
+    }
+
+    #[test]
+    fn a_save_that_fails_says_so_and_the_next_change_tries_again() {
+        settingsfile::testing::with_scratch_config("contacts-refused", |_| {
+            let mut app = ContactsApp::from_settings();
+            let path = book_path().unwrap();
+            // A directory where the file goes, so the write cannot land.
+            std::fs::create_dir_all(&path).unwrap();
+            press(&mut app, Key::N);
+            typed_in(&mut app, "First");
+            press(&mut app, Key::Enter);
+            let error = app.store_error.clone().expect("a failed save said nothing");
+            assert!(error.starts_with("Not saved to "), "{error}");
+            assert!(drawn(&app).contains(&error), "the failure is not on screen");
+            assert!(app.unkept());
+
+            std::fs::remove_dir(&path).unwrap();
+            app.handle_event(&key_event(Key::S, true, ""), SIZE);
+            assert!(app.store_error.is_none(), "{:?}", app.store_error);
+            assert!(!app.unkept());
+            assert!(
+                app.status.starts_with("Everyone added is kept in "),
+                "{}",
+                app.status
+            );
+            assert_eq!(
+                ContactsApp::from_settings().store.contacts,
+                app.store.contacts
+            );
+        });
+    }
+
+    #[test]
+    fn closing_over_a_contact_being_edited_asks_and_save_keeps_it() {
+        settingsfile::testing::with_scratch_config("contacts-close", |_| {
+            let mut app = ContactsApp::from_settings();
+            press(&mut app, Key::N);
+            typed_in(&mut app, "Half");
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            let asked = app.question.as_ref().expect("no question");
+            assert!(
+                asked.message().contains("being edited"),
+                "{}",
+                asked.message()
+            );
+            // A key under the question reaches nothing.
+            app.on_event(&key_event(Key::Unknown(0), false, "x"));
+            assert_eq!(app.edit_first_name, "Half");
+            // Cancel: the window stays, the form as it was.
+            app.on_event(&key_event(Key::Escape, false, ""));
+            assert!(app.question.is_none() && !app.quit);
+            assert_eq!(app.edit_first_name, "Half");
+            // Save: the contact is added, kept, and the window goes.
+            app.on_event(&Event::CloseRequested);
+            assert!(matches!(
+                app.on_event(&key_event(Key::S, false, "s")),
+                Response::Exit
+            ));
+            let again = ContactsApp::from_settings();
+            assert_eq!(again.store.contacts.len(), 1);
+            assert_eq!(again.store.contacts[0].first_name, "Half");
+        });
+    }
+
+    #[test]
+    fn closing_over_an_edit_can_leave_without_it() {
+        settingsfile::testing::with_scratch_config("contacts-discard", |_| {
+            let mut app = ContactsApp::from_settings();
+            press(&mut app, Key::N);
+            typed_in(&mut app, "Never");
+            app.on_event(&Event::CloseRequested);
+            assert!(matches!(
+                app.on_event(&key_event(Key::D, false, "d")),
+                Response::Exit
+            ));
+            assert!(ContactsApp::from_settings().store.contacts.is_empty());
+            // And with nothing typed, nothing is asked.
+            let mut idle = ContactsApp::from_settings();
+            press(&mut idle, Key::N);
+            assert!(matches!(
+                idle.on_event(&Event::CloseRequested),
+                Response::Exit
+            ));
+        });
+    }
+
+    #[test]
+    fn closing_while_a_save_fails_asks_first() {
+        settingsfile::testing::with_scratch_config("contacts-failing", |_| {
+            let mut app = ContactsApp::from_settings();
+            let path = book_path().unwrap();
+            std::fs::create_dir_all(&path).unwrap();
+            app.store.add_contact(Contact::new(0, "Unkept", ""));
+            press(&mut app, Key::Unknown(0));
+            assert!(app.unkept());
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            let asked = app.question.as_ref().expect("no question");
+            assert!(asked.message().contains("not saved"), "{}", asked.message());
+            // Save while the save still fails: the window stays.
+            assert!(matches!(
+                app.on_event(&key_event(Key::S, false, "s")),
+                Response::Redraw
+            ));
+            assert!(!app.quit, "the window left while its save was failing");
+            // Put right while the question is up, then Save: it goes.
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            std::fs::remove_dir(&path).unwrap();
+            assert!(matches!(
+                app.on_event(&key_event(Key::S, false, "s")),
+                Response::Exit
+            ));
+            assert_eq!(
+                ContactsApp::from_settings().store.contacts,
+                app.store.contacts
+            );
+        });
+    }
+
+    /// Saving an edit rebuilt the contact from the form, which shows the
+    /// names and the first phone, email and address, and dropped the rest.
+    #[test]
+    fn editing_keeps_what_the_form_does_not_show() {
+        let mut app = ContactsApp::new();
+        let mut full = full_book().contacts[1].clone();
+        full.display_name = String::from("Countess of Lovelace");
+        full.groups.clear();
+        let id = app.store.add_contact(full);
+        let before = app.store.get_contact(id).unwrap().clone();
+        app.view = DetailView::ViewContact(id);
+        press(&mut app, Key::E);
+        assert_eq!(app.view, DetailView::EditContact(id));
+        // Change one thing: the first name.
+        app.edit_first_name = String::from("Augusta");
+        press(&mut app, Key::Enter);
+        let after = app.store.get_contact(id).unwrap();
+        assert_eq!(after.first_name, "Augusta");
+        assert_eq!(after.phones, before.phones, "numbers were lost");
+        assert_eq!(after.emails, before.emails, "email addresses were lost");
+        assert_eq!(after.addresses, before.addresses, "addresses were lost");
+        assert_eq!(
+            after.social_accounts, before.social_accounts,
+            "accounts were lost"
+        );
+        assert_eq!(after.photo_path, before.photo_path, "the photo was lost");
+        assert_eq!(
+            after.display_name, "Countess of Lovelace",
+            "a name of its own was lost"
+        );
+        assert!(
+            after.updated_at > before.updated_at,
+            "an edit was given no time"
+        );
+
+        // A display name that was only the names follows them.
+        let plain = app.store.add_contact(Contact::new(0, "Ada", "Byron"));
+        app.view = DetailView::ViewContact(plain);
+        press(&mut app, Key::E);
+        app.edit_last_name = String::from("King");
+        press(&mut app, Key::Enter);
+        assert_eq!(
+            app.store
+                .get_contact(plain)
+                .unwrap()
+                .computed_display_name(),
+            "Ada King"
+        );
+
+        // An emptied field removes what it showed, and the next moves up.
+        app.view = DetailView::ViewContact(id);
+        press(&mut app, Key::E);
+        app.edit_phone.clear();
+        press(&mut app, Key::Enter);
+        assert_eq!(
+            app.store.get_contact(id).unwrap().phones,
+            before.phones[1..],
+            "an emptied phone field did not remove the first number"
+        );
+    }
+
+    #[test]
+    fn a_form_saved_unchanged_is_no_change() {
+        let mut app = ContactsApp::new();
+        let id = app.store.add_contact(full_book().contacts[0].clone());
+        app.view = DetailView::ViewContact(id);
+        press(&mut app, Key::E);
+        assert!(
+            !app.form_has_changes(),
+            "a form just opened says it has changes"
+        );
+        let revision = app.store.revision();
+        let before = app.store.get_contact(id).unwrap().clone();
+        press(&mut app, Key::Enter);
+        assert_eq!(app.store.get_contact(id).unwrap(), &before);
+        assert_eq!(
+            app.store.revision(),
+            revision,
+            "an unchanged form counted as a change"
+        );
+        // A new contact with nothing typed has nothing to lose either.
+        press(&mut app, Key::N);
+        assert!(!app.form_has_changes());
+        typed_in(&mut app, "A");
+        assert!(app.form_has_changes());
+    }
+
+    #[test]
+    fn every_change_to_the_store_is_counted() {
+        type Change = fn(&mut ContactStore, u64, u64) -> bool;
+        let changes: [(&str, Change); 13] = [
+            ("a new contact", |s, _, _| {
+                s.add_contact(Contact::new(0, "N", ""));
+                true
+            }),
+            ("a contact handed out to change", |s, c, _| {
+                s.get_contact_mut(c).is_some()
+            }),
+            ("a deleted contact", |s, c, _| s.delete_contact(c)),
+            ("a replaced contact", |s, c, _| {
+                let mut new = s.get_contact(c).unwrap().clone();
+                new.notes = String::from("changed");
+                s.update_contact(new)
+            }),
+            ("a new group", |s, _, _| {
+                s.add_group(ContactGroup::new(0, "G"));
+                true
+            }),
+            ("a group handed out to change", |s, _, g| {
+                s.get_group_mut(g).is_some()
+            }),
+            ("a deleted group", |s, _, g| s.delete_group(g)),
+            ("a membership", |s, c, _| {
+                let other = s.add_group(ContactGroup::new(0, "H"));
+                s.add_contact_to_group(c, other)
+            }),
+            ("a membership ended", |s, c, g| {
+                s.remove_contact_from_group(c, g)
+            }),
+            ("a star", |s, c, _| s.toggle_favorite(c).is_some()),
+            ("a view", |s, c, _| {
+                s.record_view(c);
+                true
+            }),
+            ("a call", |s, c, _| {
+                s.mark_contacted(c, 99);
+                true
+            }),
+            ("an import", |s, _, _| {
+                s.import_vcards("BEGIN:VCARD\r\nFN:X\r\nN:X;;;;\r\nEND:VCARD\r\n", 1) == 1
+            }),
+        ];
+        for (what, change) in changes {
+            let mut store = ContactStore::new();
+            let group = store.add_group(ContactGroup::new(0, "F"));
+            let contact = store.add_contact(Contact::new(0, "Ada", ""));
+            let other = store.add_contact(Contact::new(0, "Bob", ""));
+            assert!(store.add_contact_to_group(contact, group));
+            store.record_view(other);
+            let before = store.revision();
+            assert!(change(&mut store, contact, group), "{what} did not happen");
+            assert_ne!(store.revision(), before, "{what} was not counted");
+        }
+        // And a merge.
+        let mut store = ContactStore::new();
+        let a = store.add_contact(Contact::new(0, "Ada", ""));
+        let b = store.add_contact(Contact::new(0, "Ada", ""));
+        let before = store.revision();
+        assert!(store.merge_contacts(a, b).is_some());
+        assert_ne!(store.revision(), before, "a merge was not counted");
+    }
+
+    #[test]
+    fn a_contact_is_not_put_in_a_group_that_is_not_there() {
+        let mut store = ContactStore::new();
+        let id = store.add_contact(Contact::new(0, "Ada", ""));
+        assert!(!store.add_contact_to_group(id, 42));
+        assert!(store.get_contact(id).unwrap().groups.is_empty());
+        assert!(parse_book(&book_text(&store)).is_ok());
+    }
+
+    #[test]
+    fn a_call_made_now_is_later_than_every_kept_time() {
+        let late = 4_000_000_000_000_u64;
+        let text = format!(
+            "slateos-contacts\t1\ncontact\t1\t0\t5\t{late}\t\t\tAda\tL\tAda L\t\t\t\t\t\t\n"
+        );
+        let mut app = ContactsApp::new();
+        app.take_store(parse_book(&text).unwrap());
+        app.view = DetailView::ViewContact(1);
+        app.quick_action(QuickAction::Call);
+        let reached = app.store.get_contact(1).unwrap().last_contacted.unwrap();
+        assert!(
+            reached > late,
+            "a call now was stamped {reached}, before a kept time"
+        );
+        let before = clock_ms();
+        let first = app.stamp();
+        assert!(first >= before && app.stamp() > first);
+    }
+
+    #[test]
+    fn ctrl_s_says_where_the_book_is_kept() {
+        settingsfile::testing::with_scratch_config("contacts-ctrl-s", |_| {
+            let mut app = ContactsApp::from_settings();
+            app.store.add_contact(Contact::new(0, "Ada", ""));
+            app.handle_event(&key_event(Key::S, true, ""), SIZE);
+            assert!(!app.unkept(), "Ctrl+S kept nothing");
+            assert!(
+                app.status.starts_with("Everyone added is kept in "),
+                "{}",
+                app.status
+            );
+            assert!(book_path().unwrap().is_file());
+        });
+        let mut app = ContactsApp::new();
+        app.handle_event(&key_event(Key::S, true, ""), SIZE);
+        assert_eq!(app.status, "Nothing added here is kept.");
+        // Export moved to Ctrl+E.
+        app.handle_event(&key_event(Key::E, true, ""), SIZE);
+        assert!(app.picker.is_open() && app.picker.is_saving());
     }
 }

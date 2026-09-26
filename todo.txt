@@ -58753,11 +58753,24 @@ is already waiting, not whether the setter exists.
   SIMD lanes' saturating arithmetic.
 - **The crate's JPEG entry points take libjpeg's leftover choices as Chrome
   does** (`gui/imagecodec/src/jpeg.rs` `decode_at`, design-decisions §1318):
-  RGB out, CMYK/YCCK converted as inverted CMYK, two or five-plus components
-  refused, 100 scans at most, and `jpeg_finish_decompress` never called, so
-  what follows the last row cannot refuse a picture whose rows all decoded.
-  TIFF's JPEG path makes libtiff's choices instead (`tiff/read.rs`
-  `decode_jpeg`), finish included.
+  RGB out for RGB and YCbCr, CMYK/YCCK converted as inverted CMYK, two or
+  five-plus components refused, 100 scans at most, and
+  `jpeg_finish_decompress` never called, so what follows the last row cannot
+  refuse a picture whose rows all decoded. TIFF's JPEG path makes libtiff's
+  choices instead (`tiff/read.rs` `decode_jpeg`), finish included.
+- **Greyscale JPEG is decoded as greyscale, not asked of libjpeg as RGB**
+  (`gui/imagecodec/src/jpeg.rs` `decode_at`, design-decisions §1318): the one
+  leftover choice that is not Chrome's. Same pixels for every lossy file;
+  a lossless greyscale file decodes, where Chrome's request fails (libjpeg
+  converts nothing losslessly). To follow Chrome exactly, ask for
+  `ColorSpace::Rgb` for `Grayscale` too.
+- **A lossless JPEG strip of fewer than 8 bits in a TIFF** (`tiff/read.rs`
+  `decode_jpeg`): libtiff reads each 8-bit scanline straight into a strip
+  buffer sized for packed samples, so the scanlines overlap and the last runs
+  past the buffer's end -- a heap overflow in libtiff. This writes the same
+  overlapping scanlines and stops at the buffer's end, so it agrees with
+  libtiff wherever libtiff's run is defined. No fixture: the oracle's
+  behaviour there is undefined.
 - **The pointer is drawn over fullscreen direct-scanout frames**
   (`POINTER_OVER_DIRECT_SCANOUT = true`, `gui/compositor/src/server.rs`;
   design-decisions §1301). C-Q18 put the fullscreen case to the operator as a

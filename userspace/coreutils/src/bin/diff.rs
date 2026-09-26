@@ -56,8 +56,7 @@
 //!   -B, --ignore-blank-lines    Ignore blank line insertions/deletions
 //!   -t, --expand-tabs           Expand tabs to spaces in the output
 //!   -T, --initial-tab           Put a tab, not a space, after the marker
-//!       --color                 Force color output
-//!       --no-color              Force no color
+//!       --color[=WHEN]          Color the output: never, always or auto
 //!   -r, --recursive             Recursively compare directories
 //!   -N, --new-file              Treat absent files as empty
 //!       --help                  Display this help and exit
@@ -71,6 +70,8 @@
 //! - 2: error occurred
 
 use coreutils::errmsg::strerror;
+use coreutils::getopt::{Opt, Program, Takes};
+use coreutils::stdfd;
 use quoting::{quoteaf_os, quotef_os};
 use std::borrow::Cow;
 use std::env;
@@ -186,6 +187,9 @@ enum ParseResult {
     Run(Config),
     Help,
     Version,
+    /// A command line that will not run: everything to print, each line
+    /// already behind `diff: `, and the status is always 2.
+    Fail(String),
 }
 
 // ============================================================================
@@ -314,43 +318,233 @@ fn size_value(text: &[u8], max: usize) -> Option<usize> {
 /// Set `slot` from a `-W` or `--tabsize` value, or exit as upstream does:
 /// `invalid width 'x'` with the referral for a bad value, `conflicting width
 /// options` without one for a second value that disagrees with the first.
-fn set_size_option(slot: &mut Option<usize>, value: &OsString, max: usize, what: &str) {
+fn set_size_option(
+    slot: &mut Option<usize>,
+    value: &OsString,
+    max: usize,
+    what: &str,
+) -> Result<(), String> {
     let bytes = quoting::os_bytes(value);
     let Some(n) = size_value(&bytes, max) else {
-        eprintln!("diff: invalid {what} {}", quoteaf_os(value));
-        eprintln!("diff: Try 'diff --help' for more information.");
-        process::exit(2);
+        return Err(try_help(&format!("invalid {what} {}", quoteaf_os(value))));
     };
     match *slot {
-        Some(old) if old != n => {
-            eprintln!("diff: conflicting {what} options");
-            process::exit(2);
+        Some(old) if old != n => Err(fatal(&format!("conflicting {what} options"))),
+        _ => {
+            *slot = Some(n);
+            Ok(())
         }
-        _ => *slot = Some(n),
     }
 }
 
-/// Parse `diff`'s command line.
+/// `diff`'s name and the status of a command line it will not run: 2,
+/// upstream's `EXIT_TROUBLE`, which `try_help` and `fatal` both exit with.
+const DIFF: Program = Program::new("diff", 2);
+
+/// diffutils 3.10's `shortopts`, verbatim.
+const SHORT_OPTIONS: &str = "0123456789abBcC:dD:eEfF:hHiI:lL:nNpPqrsS:tTuU:vwW:x:X:yZ";
+
+/// diffutils 3.10's `longopts`, **in declaration order**, which is observable:
+/// an ambiguous abbreviation lists its candidates in table order. The last two
+/// are upstream's undocumented ones, spelled with a third dash (`---no-directory`
+/// for `diff3`, `---presume-output-tty` for its tests); the shared parser reads
+/// them the same way glibc does, as a long option whose name begins with `-`.
+const LONG_OPTIONS: &[(&str, Takes)] = &[
+    ("binary", Takes::Nothing),
+    ("brief", Takes::Nothing),
+    ("changed-group-format", Takes::Required),
+    ("color", Takes::Optional),
+    ("context", Takes::Optional),
+    ("ed", Takes::Nothing),
+    ("exclude", Takes::Required),
+    ("exclude-from", Takes::Required),
+    ("expand-tabs", Takes::Nothing),
+    ("forward-ed", Takes::Nothing),
+    ("from-file", Takes::Required),
+    ("help", Takes::Nothing),
+    ("horizon-lines", Takes::Required),
+    ("ifdef", Takes::Required),
+    ("ignore-all-space", Takes::Nothing),
+    ("ignore-blank-lines", Takes::Nothing),
+    ("ignore-case", Takes::Nothing),
+    ("ignore-file-name-case", Takes::Nothing),
+    ("ignore-matching-lines", Takes::Required),
+    ("ignore-space-change", Takes::Nothing),
+    ("ignore-tab-expansion", Takes::Nothing),
+    ("ignore-trailing-space", Takes::Nothing),
+    ("inhibit-hunk-merge", Takes::Nothing),
+    ("initial-tab", Takes::Nothing),
+    ("label", Takes::Required),
+    ("left-column", Takes::Nothing),
+    ("line-format", Takes::Required),
+    ("minimal", Takes::Nothing),
+    ("new-file", Takes::Nothing),
+    ("new-group-format", Takes::Required),
+    ("new-line-format", Takes::Required),
+    ("no-dereference", Takes::Nothing),
+    ("no-ignore-file-name-case", Takes::Nothing),
+    ("normal", Takes::Nothing),
+    ("old-group-format", Takes::Required),
+    ("old-line-format", Takes::Required),
+    ("paginate", Takes::Nothing),
+    ("palette", Takes::Required),
+    ("rcs", Takes::Nothing),
+    ("recursive", Takes::Nothing),
+    ("report-identical-files", Takes::Nothing),
+    ("sdiff-merge-assist", Takes::Nothing),
+    ("show-c-function", Takes::Nothing),
+    ("show-function-line", Takes::Required),
+    ("side-by-side", Takes::Nothing),
+    ("speed-large-files", Takes::Nothing),
+    ("starting-file", Takes::Required),
+    ("strip-trailing-cr", Takes::Nothing),
+    ("suppress-blank-empty", Takes::Nothing),
+    ("suppress-common-lines", Takes::Nothing),
+    ("tabsize", Takes::Required),
+    ("text", Takes::Nothing),
+    ("to-file", Takes::Required),
+    ("unchanged-group-format", Takes::Required),
+    ("unchanged-line-format", Takes::Required),
+    ("unidirectional-new-file", Takes::Nothing),
+    ("unified", Takes::Optional),
+    ("version", Takes::Nothing),
+    ("width", Takes::Required),
+    ("-no-directory", Takes::Nothing),
+    ("-presume-output-tty", Takes::Nothing),
+];
+
+/// Upstream's `CONTEXT_MAX`, `(LIN_MAX - 1) / 2` with `lin` a `ptrdiff_t`: the
+/// most context lines anything can ask for. Larger requests are clamped to it.
+const CONTEXT_MAX: u64 = (i64::MAX.unsigned_abs() - 1) / 2;
+
+/// `--color`'s three answers: upstream's `colors_style`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ColorStyle {
+    Never,
+    Auto,
+    Always,
+}
+
+/// Upstream's `try_help`: the diagnostic, then the referral, each behind
+/// `diff: `.
+fn try_help(sentence: &str) -> String {
+    format!("diff: {sentence}\ndiff: Try 'diff --help' for more information.")
+}
+
+/// Upstream's `fatal`: the diagnostic alone.
+fn fatal(sentence: &str) -> String {
+    format!("diff: {sentence}")
+}
+
+/// An option diffutils has and this `diff` does not.
 ///
-/// Words arrive as `OsString`, not `String`, because on this OS a filename may
-/// hold any byte but `/` and NUL — and `env::args()`'s iterator is a literal
-/// `unwrap`, so `diff <name holding 0x80> other` died with a Rust panic
-/// message before `diff` ran a line of its own.
+/// Refused by name, never ignored: each changes the output -- `-D` writes
+/// `#ifdef`s, the `--*-format`s rewrite every line, `-L` renames the headers,
+/// `-x` skips files -- and a `diff` that ignored one would print something
+/// other than what was asked for.
+fn unimplemented(item: &Opt<'_>) -> String {
+    match item {
+        Opt::Short(flag, _) => try_help(&format!(
+            "option -{} is not implemented by this diff",
+            char::from(*flag)
+        )),
+        Opt::Long(name, _) => try_help(&format!(
+            "option '--{name}' is not implemented by this diff"
+        )),
+        Opt::Operand(_) => try_help("internal error: an operand reached the option refusal"),
+    }
+}
+
+/// Upstream's `strtoimax (optarg, &numend, 10)` followed by `*numend` being
+/// the only test of the whole string: white space may lead, a sign may too,
+/// and nothing may trail. `Some` is the value, saturated as `strtoimax`
+/// saturates; `None` is a string with a trailing byte or no digits -- except
+/// the *empty* string, which `strtoimax` answers with 0 and an `numend` that
+/// already points at the terminating NUL, so it reads as zero.
+fn strtoimax_whole(text: &[u8]) -> Option<i64> {
+    if text.is_empty() {
+        return Some(0);
+    }
+    let start = text
+        .iter()
+        .position(|&c| !matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+        .unwrap_or(text.len());
+    let body = text.get(start..).unwrap_or_default();
+    let (negative, digits) = match body.split_first() {
+        Some((b'-', rest)) => (true, rest),
+        Some((b'+', rest)) => (false, rest),
+        _ => (false, body),
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let magnitude = digits.iter().fold(0u64, |v, &d| {
+        v.saturating_mul(10)
+            .saturating_add(u64::from(d.wrapping_sub(b'0')))
+            .min(i64::MAX.unsigned_abs())
+    });
+    let value = i64::try_from(magnitude).unwrap_or(i64::MAX);
+    Some(if negative {
+        value.saturating_neg()
+    } else {
+        value
+    })
+}
+
+/// `-C`/`-U`/`--context`/`--unified`'s value: 3 when there is none, and
+/// otherwise a whole non-negative number, clamped to [`CONTEXT_MAX`].
+fn context_value(value: Option<&OsString>) -> Result<u64, String> {
+    let Some(value) = value else {
+        return Ok(3);
+    };
+    match strtoimax_whole(&quoting::os_bytes(value)) {
+        Some(n) if n >= 0 => Ok(n.unsigned_abs().min(CONTEXT_MAX)),
+        _ => Err(try_help(&format!(
+            "invalid context length {}",
+            quoteaf_os(value)
+        ))),
+    }
+}
+
+/// Upstream's `specify_style`: the first style asked for, and any different
+/// one after it refused.
+fn specify_style(style: &mut Option<Format>, wanted: Format) -> Result<(), String> {
+    match *style {
+        Some(current) if current != wanted => Err(try_help("conflicting output style options")),
+        _ => {
+            *style = Some(wanted);
+            Ok(())
+        }
+    }
+}
+
+/// Parse argv -- `args[0]` is the program name -- the way upstream's `main`
+/// does, on the shared parser.
 ///
-/// Option NAMES are matched through a decoded `&str`, which is safe because
-/// every option `diff` has is ASCII and **every option VALUE it takes is
-/// numeric** — there is no `--from-file=PATH` here for a path to hide in. A
-/// word that is not valid Unicode decodes to `""`, which starts with no `-`
-/// and so falls through to the operand arm, where the original `OsString` is
-/// kept intact.
+/// So long options abbreviate to any unique prefix (`--unif`), `--` ends the
+/// options, and `POSIXLY_CORRECT` stops them at the first operand, none of
+/// which the ladder of exact spellings this replaces did. And upstream's rules
+/// come with it: two different output styles are `conflicting output style
+/// options` (the ladder kept the last), repeated context lengths keep the
+/// largest, and the obsolete `-NUM` digits accumulate across words.
+#[allow(clippy::too_many_lines)]
 fn parse_args(args: &[OsString]) -> ParseResult {
-    let mut format = Format::Normal;
-    let mut context_lines: Option<usize> = None;
-    // `None` until given: upstream's `0`, which is how it tells a second
-    // `-W` that disagrees with the first -- `conflicting width options` --
-    // from the first.
+    let words = args.get(1..).unwrap_or_default();
+
+    let mut style: Option<Format> = None;
+    // Upstream's `context` (the largest asked for), `explicit_context` (whether
+    // `-C`/`-U` asked at all) and `ocontext` (the obsolete `-NUM` digits).
+    let mut context: u64 = 0;
+    let mut explicit_context = false;
+    let mut ocontext: Option<u64> = None;
+    // Upstream's `prev`: whether the previous *option* was a digit. An operand
+    // is skipped by getopt, so it neither sets nor clears it.
+    let mut prev_digit = false;
+
     let mut width: Option<usize> = None;
     let mut tabsize: Option<usize> = None;
+    let mut color_style = ColorStyle::Never;
+    let mut presume_output_tty = false;
     let mut suppress_common_lines = false;
     let mut left_column = false;
     let mut brief = false;
@@ -360,373 +554,254 @@ fn parse_args(args: &[OsString]) -> ParseResult {
     let mut ignore_space_change = false;
     let mut ignore_all_space = false;
     let mut ignore_blank_lines = false;
-    let mut color: Option<bool> = None;
     let mut recursive = false;
     let mut new_file = false;
     let mut ignore_trailing_space = false;
     let mut text_mode = false;
     let mut expand_tabs = false;
     let mut initial_tab = false;
-    let mut positional: Vec<OsString> = Vec::new();
-    // Tracked by INDEX, not by value: an operand can be spelled the same as
-    // an option's value -- `diff -U 5 5 other` names a file called `5` -- and
-    // subtracting one list from the other by content would drop the wrong word.
-    let mut positional_at: Vec<usize> = Vec::new();
+    // Every operand with its index in `words`, so that the option words can be
+    // told from it by position rather than by content: `diff -U 5 5 other`
+    // names a file called `5`.
+    let mut operands: Vec<(usize, OsString)> = Vec::new();
 
-    let mut end_of_opts = false;
-    let mut i = 1;
-
-    while let Some(arg) = args.get(i) {
-        // `""` for a word that is not Unicode: it matches no option and is
-        // taken as an operand, which is what it must be. Decoding is for
-        // MATCHING only -- the operand arm below keeps `arg` itself.
-        let a: &str = arg.to_str().unwrap_or("");
-
-        // A bare `-` is stdin, and so an OPERAND. It was falling into the
-        // option branch on `starts_with('-')`, never reaching `positional`,
-        // and `diff base.txt -` answered `missing operand after '-'` --
-        // which is the most ordinary way anyone writes a diff in a pipeline.
-        if end_of_opts || !a.starts_with('-') || a == "-" {
-            positional.push(arg.clone());
-            positional_at.push(i);
-            i += 1;
-            continue;
-        }
-
-        if a == "--" {
-            end_of_opts = true;
-            i += 1;
-            continue;
-        }
-
-        // Long options.
-        if a.starts_with("--") {
-            if a == "--unified" {
-                format = Format::Unified;
-            } else if let Some(n_str) = a.strip_prefix("--unified=") {
-                format = Format::Unified;
-                match n_str.parse::<usize>() {
-                    Ok(n) => context_lines = Some(n),
-                    Err(_) => {
-                        eprintln!("diff: invalid context length {}", quoteaf_os(n_str));
-                        process::exit(2);
+    let mut parser = DIFF.parse(words, SHORT_OPTIONS, LONG_OPTIONS);
+    while let Some(item) = parser.next() {
+        let item = match item {
+            Ok(item) => item,
+            Err(e) => return ParseResult::Fail(try_help(&e.sentence)),
+        };
+        let mut this_is_a_digit = false;
+        let step: Result<(), String> = match &item {
+            Opt::Operand(word) => {
+                operands.push((parser.optind().saturating_sub(1), (*word).clone()));
+                continue;
+            }
+            Opt::Short(d @ b'0'..=b'9', _) => {
+                // Upstream's arithmetic, including the clamp: a digit
+                // continues the previous option's number only if that option
+                // was a digit too, so `-1 -2` is twelve.
+                let digit = u64::from(d.wrapping_sub(b'0'));
+                ocontext = Some(match ocontext {
+                    Some(oc) if prev_digit => {
+                        if oc.saturating_sub(u64::from(digit <= CONTEXT_MAX % 10))
+                            < CONTEXT_MAX / 10
+                        {
+                            oc.saturating_mul(10).saturating_add(digit)
+                        } else {
+                            CONTEXT_MAX
+                        }
                     }
-                }
-            } else if a == "--context" {
-                format = Format::Context;
-            } else if let Some(n_str) = a.strip_prefix("--context=") {
-                format = Format::Context;
-                match n_str.parse::<usize>() {
-                    Ok(n) => context_lines = Some(n),
-                    Err(_) => {
-                        eprintln!("diff: invalid context length {}", quoteaf_os(n_str));
-                        process::exit(2);
-                    }
-                }
-            } else if a == "--side-by-side" {
-                format = Format::SideBySide;
-            } else if a == "--width" {
-                i = i.saturating_add(1);
-                let Some(value) = args.get(i) else {
-                    eprintln!("diff: option '--width' requires an argument");
-                    eprintln!("diff: Try 'diff --help' for more information.");
-                    process::exit(2);
-                };
-                set_size_option(&mut width, value, usize::MAX, "width");
-            } else if let Some(w_str) = a.strip_prefix("--width=") {
-                set_size_option(&mut width, &OsString::from(w_str), usize::MAX, "width");
-            } else if a == "--tabsize" {
-                i = i.saturating_add(1);
-                let Some(value) = args.get(i) else {
-                    eprintln!("diff: option '--tabsize' requires an argument");
-                    eprintln!("diff: Try 'diff --help' for more information.");
-                    process::exit(2);
-                };
-                set_size_option(&mut tabsize, value, TABSIZE_MAX, "tabsize");
-            } else if let Some(t_str) = a.strip_prefix("--tabsize=") {
-                set_size_option(&mut tabsize, &OsString::from(t_str), TABSIZE_MAX, "tabsize");
-            } else if a == "--suppress-common-lines" {
-                suppress_common_lines = true;
-            } else if a == "--left-column" {
-                left_column = true;
-            } else if a == "--brief" {
-                brief = true;
-            } else if a == "--report-identical-files" {
-                report_identical = true;
-            } else if a == "--ignore-case" {
-                ignore_case = true;
-            } else if a == "--ignore-space-change" {
-                ignore_space_change = true;
-            } else if a == "--ignore-trailing-space" {
-                ignore_trailing_space = true;
-            } else if a == "--text" {
+                    _ => digit,
+                });
+                this_is_a_digit = true;
+                Ok(())
+            }
+            Opt::Short(b'a', _) | Opt::Long("text", _) => {
                 text_mode = true;
-            } else if a == "--expand-tabs" {
-                expand_tabs = true;
-            } else if a == "--initial-tab" {
-                initial_tab = true;
-            } else if a == "--ignore-all-space" {
-                ignore_all_space = true;
-            } else if a == "--ignore-blank-lines" {
+                Ok(())
+            }
+            Opt::Short(b'b', _) | Opt::Long("ignore-space-change", _) => {
+                ignore_space_change = true;
+                Ok(())
+            }
+            Opt::Short(b'Z', _) | Opt::Long("ignore-trailing-space", _) => {
+                ignore_trailing_space = true;
+                Ok(())
+            }
+            Opt::Short(b'B', _) | Opt::Long("ignore-blank-lines", _) => {
                 ignore_blank_lines = true;
-            } else if a == "--color" {
-                color = Some(true);
-            } else if a == "--no-color" {
-                color = Some(false);
-            } else if a == "--recursive" {
-                recursive = true;
-            } else if a == "--new-file" {
+                Ok(())
+            }
+            Opt::Short(b'C' | b'U', value) | Opt::Long("context" | "unified", value) => {
+                let wanted = if matches!(item, Opt::Short(b'U', _) | Opt::Long("unified", _)) {
+                    Format::Unified
+                } else {
+                    Format::Context
+                };
+                context_value(value.as_ref()).and_then(|n| {
+                    specify_style(&mut style, wanted)?;
+                    context = context.max(n);
+                    explicit_context = true;
+                    Ok(())
+                })
+            }
+            Opt::Short(b'c', _) => specify_style(&mut style, Format::Context).map(|()| {
+                context = context.max(3);
+            }),
+            Opt::Short(b'u', _) => specify_style(&mut style, Format::Unified).map(|()| {
+                context = context.max(3);
+            }),
+            // Upstream's `-d` asks for a minimal diff, and this one always
+            // computes one; `-h` "currently has no effect" upstream either;
+            // `-H` and `--horizon-lines` tune upstream's heuristics, which
+            // this build does not have; `--inhibit-hunk-merge` is obsolete
+            // upstream and accepted for compatibility; `--binary` matters only
+            // where `O_BINARY` does. Accepting them is the implementation.
+            Opt::Short(b'd' | b'h' | b'H', _)
+            | Opt::Long("minimal" | "speed-large-files" | "inhibit-hunk-merge" | "binary", _) => {
+                Ok(())
+            }
+            Opt::Long("horizon-lines", value) => {
+                let text = value.clone().unwrap_or_default();
+                match strtoimax_whole(&quoting::os_bytes(&text)) {
+                    Some(n) if n >= 0 => Ok(()),
+                    _ => Err(try_help(&format!(
+                        "invalid horizon length {}",
+                        quoteaf_os(&text)
+                    ))),
+                }
+            }
+            Opt::Short(b'e', _) | Opt::Long("ed", _) => specify_style(&mut style, Format::Ed),
+            Opt::Short(b'n', _) | Opt::Long("rcs", _) => specify_style(&mut style, Format::Rcs),
+            Opt::Long("normal", _) => specify_style(&mut style, Format::Normal),
+            Opt::Short(b'y', _) | Opt::Long("side-by-side", _) => {
+                specify_style(&mut style, Format::SideBySide)
+            }
+            Opt::Short(b'i', _) | Opt::Long("ignore-case", _) => {
+                ignore_case = true;
+                Ok(())
+            }
+            Opt::Short(b'I', value) | Opt::Long("ignore-matching-lines", value) => {
+                compile_ignore_pattern(&value.clone().unwrap_or_default())
+                    .map(|re| ignore_matching.push(re))
+            }
+            Opt::Short(b'N', _) | Opt::Long("new-file", _) => {
                 new_file = true;
-            } else if a == "--help" {
-                return ParseResult::Help;
-            } else if a == "--version" {
-                return ParseResult::Version;
-            } else {
-                eprintln!("diff: unrecognized option {}", quoteaf_os(arg));
-                eprintln!("diff: Try 'diff --help' for more information.");
-                process::exit(2);
+                Ok(())
             }
-
-            i += 1;
-            continue;
-        }
-
-        // Short options. Some accept an optional or required value.
-        // `a`, not `arg`: a non-Unicode word decoded to `""` above and was
-        // taken as an operand, so anything reaching here is ASCII.
-        let chars: Vec<char> = a.get(1..).unwrap_or("").chars().collect();
-        let mut j = 0;
-        while let Some(&cj) = chars.get(j) {
-            match cj {
-                'u' => {
-                    format = Format::Unified;
-                    // Check for optional inline number: `-u3`
-                    let rest: String = chars
-                        .get(j.saturating_add(1)..)
-                        .unwrap_or_default()
-                        .iter()
-                        .collect();
-                    if !rest.is_empty()
-                        && let Ok(n) = rest.parse::<usize>()
-                    {
-                        context_lines = Some(n);
-                        // Consumed rest of this arg group.
-                        j = chars.len();
-                        continue;
+            Opt::Short(b'q', _) | Opt::Long("brief", _) => {
+                brief = true;
+                Ok(())
+            }
+            Opt::Short(b'r', _) | Opt::Long("recursive", _) => {
+                recursive = true;
+                Ok(())
+            }
+            Opt::Short(b's', _) | Opt::Long("report-identical-files", _) => {
+                report_identical = true;
+                Ok(())
+            }
+            Opt::Short(b't', _) | Opt::Long("expand-tabs", _) => {
+                expand_tabs = true;
+                Ok(())
+            }
+            Opt::Short(b'T', _) | Opt::Long("initial-tab", _) => {
+                initial_tab = true;
+                Ok(())
+            }
+            Opt::Short(b'v', _) | Opt::Long("version", _) => return ParseResult::Version,
+            Opt::Long("help", _) => return ParseResult::Help,
+            Opt::Short(b'w', _) | Opt::Long("ignore-all-space", _) => {
+                ignore_all_space = true;
+                Ok(())
+            }
+            Opt::Short(b'W', value) | Opt::Long("width", value) => set_size_option(
+                &mut width,
+                &value.clone().unwrap_or_default(),
+                usize::MAX,
+                "width",
+            ),
+            Opt::Long("tabsize", value) => set_size_option(
+                &mut tabsize,
+                &value.clone().unwrap_or_default(),
+                TABSIZE_MAX,
+                "tabsize",
+            ),
+            Opt::Long("left-column", _) => {
+                left_column = true;
+                Ok(())
+            }
+            Opt::Long("suppress-common-lines", _) => {
+                suppress_common_lines = true;
+                Ok(())
+            }
+            Opt::Long("color", value) => {
+                // Upstream's `specify_colors_style`: the three words exactly,
+                // no abbreviation, and no value at all means `auto`.
+                match value
+                    .as_ref()
+                    .map(|v| quoting::os_bytes(v).into_owned())
+                    .as_deref()
+                {
+                    None | Some(b"auto") => {
+                        color_style = ColorStyle::Auto;
+                        Ok(())
                     }
-                }
-                'c' => {
-                    format = Format::Context;
-                    let rest: String = chars
-                        .get(j.saturating_add(1)..)
-                        .unwrap_or_default()
-                        .iter()
-                        .collect();
-                    if !rest.is_empty()
-                        && let Ok(n) = rest.parse::<usize>()
-                    {
-                        context_lines = Some(n);
-                        j = chars.len();
-                        continue;
+                    Some(b"always") => {
+                        color_style = ColorStyle::Always;
+                        Ok(())
                     }
-                }
-                // `-U N` -- unified with N lines of context, the argument in a
-                // SEPARATE word, unlike `-u3` which glues it on. GNU accepts
-                // both spellings and this build accepted only the glued one,
-                // so `diff -U 5` was refused outright as an unknown option.
-                //
-                // The argument is taken unconditionally rather than only when
-                // it does not look like an option, which is measured: GNU
-                // answers `diff -U -1` with `invalid context length '-1'`, so
-                // it consumed the `-1` as the value rather than treating it as
-                // a flag.
-                // `-C N` -- context format with N lines, the exact twin of
-                // `-U N` below and measured to behave identically: GNU answers
-                // `-C notanumber` with `invalid context length 'notanumber'`,
-                // the same sentence, and `-C` with no argument with
-                // `option requires an argument -- 'C'`.
-                //
-                // It was missing entirely, so `diff -C 1` exited 2 with
-                // `invalid option -- 'C'` -- a flag refused outright rather
-                // than a difference in what it printed. `-c` was there and
-                // `-U` was there; only the capital of the pair that takes a
-                // count was not.
-                'C' => {
-                    format = Format::Context;
-                    let rest: String = chars
-                        .get(j.saturating_add(1)..)
-                        .unwrap_or_default()
-                        .iter()
-                        .collect();
-                    let value = if rest.is_empty() {
-                        i = i.saturating_add(1);
-                        let Some(value) = args.get(i) else {
-                            eprintln!("diff: option requires an argument -- 'C'");
-                            eprintln!("diff: Try 'diff --help' for more information.");
-                            process::exit(2);
-                        };
-                        value.to_str().unwrap_or("").to_string()
-                    } else {
-                        rest
-                    };
-                    match value.parse::<usize>() {
-                        Ok(n) => context_lines = Some(n),
-                        Err(_) => {
-                            eprintln!("diff: invalid context length {}", quoteaf_os(&value));
-                            eprintln!("diff: Try 'diff --help' for more information.");
-                            process::exit(2);
-                        }
+                    Some(b"never") => {
+                        color_style = ColorStyle::Never;
+                        Ok(())
                     }
-                    j = chars.len();
-                    continue;
-                }
-                'U' => {
-                    format = Format::Unified;
-                    let rest: String = chars
-                        .get(j.saturating_add(1)..)
-                        .unwrap_or_default()
-                        .iter()
-                        .collect();
-                    let value = if rest.is_empty() {
-                        i = i.saturating_add(1);
-                        let Some(value) = args.get(i) else {
-                            eprintln!("diff: option requires an argument -- 'U'");
-                            eprintln!("diff: Try 'diff --help' for more information.");
-                            process::exit(2);
-                        };
-                        // Decoded: this value is a COUNT, so a word that is
-                        // not Unicode is simply not a number, and the
-                        // diagnostic below echoes the original bytes anyway.
-                        value.to_str().unwrap_or("").to_string()
-                    } else {
-                        rest
-                    };
-                    match value.parse::<usize>() {
-                        Ok(n) => context_lines = Some(n),
-                        Err(_) => {
-                            // GNU's wording, measured: `diff: invalid context
-                            // length 'notanumber'`. Not "invalid width", which
-                            // is what the neighbouring `-W` says, and not the
-                            // generic unknown-option line this used to give.
-                            eprintln!("diff: invalid context length {}", quoteaf_os(&value));
-                            eprintln!("diff: Try 'diff --help' for more information.");
-                            process::exit(2);
-                        }
-                    }
-                    j = chars.len();
-                    continue;
-                }
-                'y' => format = Format::SideBySide,
-                // `-I RE`: a change whose lines all match RE is not a change.
-                'I' => {
-                    let rest: String = chars
-                        .get(j.saturating_add(1)..)
-                        .unwrap_or_default()
-                        .iter()
-                        .collect();
-                    let value = if rest.is_empty() {
-                        i = i.saturating_add(1);
-                        let Some(v) = args.get(i) else {
-                            eprintln!("diff: option requires an argument -- 'I'");
-                            eprintln!("diff: Try 'diff --help' for more information.");
-                            process::exit(2);
-                        };
-                        v.clone()
-                    } else {
-                        OsString::from(rest)
-                    };
-                    ignore_matching.push(compile_ignore_pattern(&value));
-                    j = chars.len();
-                    continue;
-                }
-                'e' => format = Format::Ed,
-                'n' => format = Format::Rcs,
-                // GNU's `-v` is `--version`, and it was the only one of this
-                // program's thirteen missing short options that was purely an
-                // alias: the other twelve were features that did not exist.
-                'v' => return ParseResult::Version,
-                'W' => {
-                    // -W may have value glued on or as next arg.
-                    let rest: String = chars
-                        .get(j.saturating_add(1)..)
-                        .unwrap_or_default()
-                        .iter()
-                        .collect();
-                    if !rest.is_empty() {
-                        set_size_option(&mut width, &OsString::from(rest), usize::MAX, "width");
-                    } else {
-                        i = i.saturating_add(1);
-                        let Some(value) = args.get(i) else {
-                            eprintln!("diff: option requires an argument -- 'W'");
-                            eprintln!("diff: Try 'diff --help' for more information.");
-                            process::exit(2);
-                        };
-                        set_size_option(&mut width, value, usize::MAX, "width");
-                    }
-                    j = chars.len();
-                    continue;
-                }
-                'q' => brief = true,
-                's' => report_identical = true,
-                'i' => ignore_case = true,
-                'b' => ignore_space_change = true,
-                'w' => ignore_all_space = true,
-                'Z' => ignore_trailing_space = true,
-                'a' => text_mode = true,
-                't' => expand_tabs = true,
-                'T' => initial_tab = true,
-                'B' => ignore_blank_lines = true,
-                'r' => recursive = true,
-                'N' => new_file = true,
-                other => {
-                    eprintln!("diff: invalid option -- {}", quoteaf_os(other.to_string()));
-                    eprintln!("diff: Try 'diff --help' for more information.");
-                    process::exit(2);
+                    Some(_) => Err(try_help(&format!(
+                        "invalid color {}",
+                        quoteaf_os(value.clone().unwrap_or_default())
+                    ))),
                 }
             }
-            j += 1;
+            Opt::Long("-presume-output-tty", _) => {
+                presume_output_tty = true;
+                Ok(())
+            }
+            _ => Err(unimplemented(&item)),
+        };
+        if let Err(message) = step {
+            return ParseResult::Fail(message);
         }
-
-        i += 1;
+        prev_digit = this_is_a_digit;
     }
 
-    let [operand1, operand2] = positional.as_slice() else {
-        // GNU's two wordings, measured on all three counts rather than
-        // inferred from two:
-        //
-        //     diff                       missing operand after 'diff'
-        //     diff x.txt                 missing operand after 'x.txt'
-        //     diff x.txt y.txt z.txt     extra operand 'z.txt'
-        //
-        // "after WHAT" is the last word on the command line, not the last
-        // operand -- which is why bare `diff` names the program itself. A rule
-        // derived from the one-operand case alone would have printed an empty
-        // name there. `cmp` in this crate already says both of these; this was
-        // the one bin still answering with a sentence of its own invention.
-        if let Some(extra) = positional.get(2) {
-            eprintln!("diff: extra operand {}", quoteaf_os(extra));
-        } else {
-            // The last WORD as typed, byte-exact: it is usually a path, and
-            // this diagnostic is the one place a bad one is echoed back.
-            let fallback = OsString::from("diff");
-            let last = args.last().unwrap_or(&fallback);
-            eprintln!("diff: missing operand after {}", quoteaf_os(last));
-        }
-        eprintln!("diff: Try 'diff --help' for more information.");
-        process::exit(2);
+    // Upstream: `--color` alone is `auto`, and `auto` on a `dumb` terminal is
+    // `never`; otherwise it colours only a terminal, or anything under the
+    // testing option that says to presume one.
+    let term_is_dumb = std::env::var_os("TERM").is_some_and(|t| t == "dumb");
+    let color = match color_style {
+        ColorStyle::Always => true,
+        ColorStyle::Never => false,
+        ColorStyle::Auto => !term_is_dumb && (presume_output_tty || stdfd::is_tty(1)),
     };
 
-    // Default color: false (Slate OS does not have reliable isatty yet).
-    let use_color = color.unwrap_or(false);
-    let ctx = context_lines.unwrap_or(3);
+    let format = style.unwrap_or(Format::Normal);
+    // Upstream's reconciliation of the obsolete `-NUM` with `-C`/`-U`: it
+    // counts only for the two styles that have context, and it wins over a
+    // context that `-c`/`-u` merely defaulted, but not over an explicit one
+    // that is larger.
+    if let Some(oc) = ocontext
+        && matches!(format, Format::Context | Format::Unified)
+        && (context < oc || (oc < context && !explicit_context))
+    {
+        context = oc;
+    }
 
-    // Everything that was not an operand, in the order it was typed. `args[0]`
-    // is the program name and is not one of them.
-    let option_words: Vec<OsString> = args
+    // Two operands, exactly. Upstream names the *last word after getopt's
+    // permutation* when one is missing: the last operand if there is one, and
+    // otherwise the last word of all -- `argv[0]` itself when there is nothing
+    // else.
+    let [(_, operand1), (_, operand2)] = operands.as_slice() else {
+        let message = if let Some((_, extra)) = operands.get(2) {
+            format!("extra operand {}", quoteaf_os(extra))
+        } else {
+            let fallback = OsString::from("diff");
+            let last = operands
+                .last()
+                .map(|(_, w)| w)
+                .or_else(|| args.last())
+                .unwrap_or(&fallback);
+            format!("missing operand after {}", quoteaf_os(last))
+        };
+        return ParseResult::Fail(try_help(&message));
+    };
+
+    // Every word that was not an operand, in the order it was typed: upstream's
+    // `argv[1 .. optind)` after its permutation, which `option_list` joins
+    // into the header of each recursive comparison.
+    let option_words: Vec<OsString> = words
         .iter()
         .enumerate()
-        .skip(1)
-        .filter(|(at, _)| !positional_at.contains(at))
+        .filter(|(at, _)| !operands.iter().any(|(o, _)| o == at))
         .map(|(_, w)| w.clone())
         .collect();
 
@@ -734,7 +809,7 @@ fn parse_args(args: &[OsString]) -> ParseResult {
         path1: operand1.clone(),
         path2: operand2.clone(),
         format,
-        context_lines: ctx,
+        context_lines: usize::try_from(context).unwrap_or(usize::MAX),
         width: width.unwrap_or(130),
         brief,
         ignore_matching,
@@ -743,7 +818,7 @@ fn parse_args(args: &[OsString]) -> ParseResult {
         ignore_space_change,
         ignore_all_space,
         ignore_blank_lines,
-        color: use_color,
+        color,
         recursive,
         new_file,
         ignore_trailing_space,
@@ -1611,18 +1686,20 @@ fn range_str(start: usize, count: usize) -> String {
 /// GNU's refusal is `diff: [: Invalid regular expression` with exit 2, the
 /// pattern named bare rather than quoted -- measured, since this file quotes
 /// file names and does not quote this.
-fn compile_ignore_pattern(pattern: &OsString) -> ere::Regex {
+fn compile_ignore_pattern(pattern: &OsString) -> Result<ere::Regex, String> {
     let bytes = quoting::os_bytes(pattern.as_os_str());
-    match ere::bre::compile(&bytes, false) {
-        Ok(re) => re,
-        Err(_) => {
-            eprintln!(
-                "diff: {}: Invalid regular expression",
-                String::from_utf8_lossy(&bytes)
-            );
-            process::exit(2);
-        }
-    }
+    // Upstream's `add_regexp`: `error (EXIT_TROUBLE, 0, "%s: %s", pattern, m)`,
+    // `m` being the regex library's own sentence for what is wrong -- `Unmatched
+    // ( or \(` for `a\(`, not one fixed phrase for every failure. The pattern is
+    // printed as typed, except that a byte that could forge a line or garble the
+    // terminal is spelled in octal.
+    ere::bre::compile(&bytes, false).map_err(|e| {
+        format!(
+            "diff: {}: {}",
+            quoting::escape_unprintable(&bytes),
+            e.message()
+        )
+    })
 }
 
 /// Drop the hunks `-I` says are not changes.
@@ -2934,8 +3011,7 @@ fn print_help() {
     println!("  -B, --ignore-blank-lines    Ignore blank line changes");
     println!();
     println!("OUTPUT:");
-    println!("      --color               Force color output");
-    println!("      --no-color            Force no color");
+    println!("      --color[=WHEN]        Color the output: never, always or auto");
     println!();
     println!("DIRECTORY:");
     println!("  -r, --recursive           Recursively compare directories");
@@ -2968,6 +3044,10 @@ fn main() {
         ParseResult::Version => {
             println!("diff (Slate OS) {VERSION}");
             process::exit(0);
+        }
+        ParseResult::Fail(message) => {
+            stdfd::diag_line(&message);
+            process::exit(2);
         }
         ParseResult::Run(config) => {
             let p1 = PathBuf::from(&config.path1);
@@ -3388,6 +3468,138 @@ mod tests {
             ParseResult::Run(c) => c,
             _ => panic!("expected Run"),
         }
+    }
+
+    /// The text of a refusal, without its referral line.
+    fn fail(args: &[&str]) -> String {
+        match parse_args(&argv(args)) {
+            ParseResult::Fail(message) => message
+                .strip_suffix("\ndiff: Try 'diff --help' for more information.")
+                .unwrap_or(&message)
+                .to_string(),
+            _ => panic!("expected a refusal for {args:?}"),
+        }
+    }
+
+    // ---------------- the command line, as diffutils 3.10 reads it ----------------
+
+    /// Upstream's `specify_style`: the first style stands and a different one
+    /// after it is refused. The ladder this replaced kept the last.
+    #[test]
+    fn two_output_styles_conflict() {
+        assert_eq!(
+            fail(&["diff", "-u", "-c", "a", "b"]),
+            "diff: conflicting output style options"
+        );
+        assert_eq!(
+            fail(&["diff", "-y", "--normal", "a", "b"]),
+            "diff: conflicting output style options"
+        );
+        // The same style twice is not a conflict.
+        assert!(matches!(
+            run(&["diff", "-u", "--unified", "a", "b"]).format,
+            Format::Unified
+        ));
+    }
+
+    /// Long options abbreviate to a unique prefix; `--no-color` was never
+    /// diffutils' and is refused as GNU refuses it.
+    #[test]
+    fn long_options_abbreviate() {
+        assert!(matches!(
+            run(&["diff", "--unif", "a", "b"]).format,
+            Format::Unified
+        ));
+        assert!(matches!(
+            run(&["diff", "--side", "a", "b"]).format,
+            Format::SideBySide
+        ));
+        assert!(run(&["diff", "--ignore-c", "a", "b"]).ignore_case);
+        assert_eq!(
+            fail(&["diff", "--no-color", "a", "b"]),
+            "diff: unrecognized option '--no-color'"
+        );
+    }
+
+    /// Context lengths keep the largest asked for; `-u`/`-c` ask for three;
+    /// the obsolete digits accumulate across words and win over a defaulted
+    /// context but not over a larger explicit one.
+    #[test]
+    fn context_lengths_follow_upstream() {
+        assert_eq!(
+            run(&["diff", "-U", "5", "-U", "2", "a", "b"]).context_lines,
+            5
+        );
+        assert_eq!(run(&["diff", "-u", "-U", "1", "a", "b"]).context_lines, 3);
+        assert_eq!(run(&["diff", "-U", "0", "a", "b"]).context_lines, 0);
+        assert_eq!(run(&["diff", "-u2", "a", "b"]).context_lines, 2);
+        assert_eq!(run(&["diff", "-1", "-2", "-u", "a", "b"]).context_lines, 12);
+        assert_eq!(run(&["diff", "-U", "5", "-2", "a", "b"]).context_lines, 5);
+        assert_eq!(run(&["diff", "--context", "a", "b"]).context_lines, 3);
+        assert_eq!(run(&["diff", "--context=7", "a", "b"]).context_lines, 7);
+        assert_eq!(
+            fail(&["diff", "-U", "x", "a", "b"]),
+            "diff: invalid context length 'x'"
+        );
+        assert_eq!(
+            fail(&["diff", "-U", "-1", "a", "b"]),
+            "diff: invalid context length '-1'"
+        );
+    }
+
+    /// Upstream names the last word after getopt's permutation: the last
+    /// operand, so `diff x -u` is `after 'x'`, not `after '-u'`.
+    #[test]
+    fn operand_errors_name_upstreams_word() {
+        assert_eq!(
+            fail(&["diff", "x", "-u"]),
+            "diff: missing operand after 'x'"
+        );
+        assert_eq!(fail(&["diff", "-u"]), "diff: missing operand after '-u'");
+        assert_eq!(fail(&["diff"]), "diff: missing operand after 'diff'");
+        assert_eq!(fail(&["diff", "a", "b", "c"]), "diff: extra operand 'c'");
+        // `--` ends the options: a file called `-u`.
+        let c = run(&["diff", "--", "-u", "b"]);
+        assert_eq!(c.path1, OsString::from("-u"));
+        assert!(matches!(c.format, Format::Normal));
+    }
+
+    #[test]
+    fn color_takes_upstreams_three_words_exactly() {
+        assert!(run(&["diff", "--color=always", "a", "b"]).color);
+        assert!(!run(&["diff", "--color=never", "a", "b"]).color);
+        assert_eq!(
+            fail(&["diff", "--color=alw", "a", "b"]),
+            "diff: invalid color 'alw'"
+        );
+    }
+
+    /// An option diffutils has and this build does not is refused by name,
+    /// never ignored; the ones whose effect this build already has are taken.
+    #[test]
+    fn unimplemented_options_are_refused_and_no_ops_accepted() {
+        assert_eq!(
+            fail(&["diff", "-D", "X", "a", "b"]),
+            "diff: option -D is not implemented by this diff"
+        );
+        assert_eq!(
+            fail(&["diff", "--label=x", "a", "b"]),
+            "diff: option '--label' is not implemented by this diff"
+        );
+        let c = run(&[
+            "diff",
+            "-d",
+            "-H",
+            "--horizon-lines=5",
+            "--inhibit-hunk-merge",
+            "a",
+            "b",
+        ]);
+        assert!(matches!(c.format, Format::Normal));
+        assert_eq!(
+            fail(&["diff", "--horizon-lines=x", "a", "b"]),
+            "diff: invalid horizon length 'x'"
+        );
     }
 
     // ---------------- -t / -T ----------------

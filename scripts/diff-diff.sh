@@ -77,6 +77,11 @@ DIFF_NEED=timeout
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
+# Variables `diff` runs with, on both sides, and nothing else does:
+# `POSIXLY_CORRECT` changes where option parsing stops, and exported it would
+# reach this harness's own tools too. Empty unless a case block sets it.
+ENVV=()
+
 pass=0; fail=0; xfail=0; xpass=0
 
 fixtures=$DIFF_TMP/fixtures
@@ -234,7 +239,7 @@ compare() {
 # pinned so the `-u` and `-c` headers format identically on both sides.
 run_side() {
   local side=$1; shift
-  diff_run timeout -k 2 30 env TZ=UTC LC_ALL=C.UTF-8 PATH="$bindir/$side" diff "$@"
+  diff_run timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} TZ=UTC LC_ALL=C.UTF-8 PATH="$bindir/$side" diff "$@"
 }
 
 report() {
@@ -249,7 +254,7 @@ report() {
   return 0
 }
 
-run_case()  { compare - "$@"; report "diff $*"; }
+run_case()  { compare - "$@"; report "${ENVV[*]:+${ENVV[*]} }diff $*"; }
 run_stdin() { local i="$1"; shift; compare "$i" "$@"; report "printf '$i' | diff $*"; }
 
 # A case expected to differ, with the reason. Counted apart so that one which
@@ -548,6 +553,38 @@ run_case base.txt .
 # --- the two whose text is ours -------------------------------------------------
 xfail_case "our help text, not the GNU project's" --help
 xfail_case "our version string, not the GNU project's" --version
+
+# --- the command line, as diffutils 3.10 reads it --------------------------------
+# On the shared parser since 2026-09-25; the ladder of exact spellings it
+# replaced took the last of two styles, the last of two context lengths, and no
+# abbreviation at all.
+run_case --unif base.txt mid.txt
+run_case --side base.txt mid.txt
+run_case -u -c base.txt mid.txt
+run_case -y --normal base.txt mid.txt
+run_case -U 5 -U 1 base.txt mid.txt
+run_case -u -U 1 base.txt mid.txt
+run_case -u2 base.txt mid.txt
+run_case -1 -2 -u base.txt mid.txt
+run_case -U 0 -2 base.txt mid.txt
+run_case --context=1 base.txt mid.txt
+run_case -U '' base.txt mid.txt
+run_case base.txt -u
+run_case -- -u base.txt
+run_case --no-color base.txt mid.txt
+run_case --color=alw base.txt mid.txt
+run_case --color=never base.txt mid.txt
+run_case --horizon-lines=x base.txt mid.txt
+run_case -d base.txt mid.txt
+run_case --bogus --help
+xfail_case 'ifdef output is not implemented; ours refuses the option by name' -D X base.txt mid.txt
+xfail_case 'labels are not implemented; ours refuses the option by name' -L one -u base.txt mid.txt
+# POSIXLY_CORRECT: the first operand ends option parsing, so the `-u` after two
+# operands is a third one.
+ENVV=(POSIXLY_CORRECT=1)
+run_case base.txt mid.txt -u
+run_case -u base.txt mid.txt
+ENVV=()
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

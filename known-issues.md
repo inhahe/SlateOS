@@ -169727,11 +169727,15 @@ it and matches util-linux 2.39.3 at every terminal width
 and so does `column` (`scripts/column-diff.sh`: 594 cases in all its
 modes, plus 9 at which only upstream never finishes -- a port that
 needed the column moves, re-parenting and `--table-column` properties added
-to the crate); the others still do not use it.
+to the crate), and so does `lsirq` (`scripts/lsirq-diff.sh`: 212 cases on
+`/proc` files of its own, plus 1 at which only upstream never finishes);
+the others still do not use it.
 
 **Where:** `userspace/lsblk`, `findmnt`, `lscpu` (its `-e`/`-p` tables),
-`lsns`, `losetup` (`--list`), `swapon` (`--show`), `rfkill`, `lsirq`,
-`fdisk` (`-l`'s partition table).
+`lsns`, `losetup` (`--list`), `swapon` (`--show`), `rfkill`,
+`fdisk` (`-l`'s partition table). `rfkill`'s reference, like `lsirq`'s,
+is not installed in WSL; `scripts/util-linux-extra.sh` unpacks both without
+root.
 
 **The proper fix:** port each program from util-linux 2.39.3 onto
 `smartcols`, as `lsmem` was -- the program's own logic function by function,

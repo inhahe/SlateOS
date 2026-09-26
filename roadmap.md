@@ -4342,7 +4342,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] perf/perf-stat/perf-record/perf-report/perf-top: performance monitoring (14 events, binary perf.data format, 172 tests)
   - [x] dmsetup/dmstats/kpartx: device mapper control (19 commands, 12 target types, MBR/GPT partition parsing, 190 tests)
   - [x] capsh/getcap/setcap/getpcaps/captest: capability tools (41 Linux caps, 5 sets, securebits, 194 tests)
-  - [x] lsirq: IRQ information display (/proc/interrupts + softirqs, JSON/pairs output)
+  - [x] lsirq: IRQ information display (/proc/interrupts + softirqs, JSON/pairs output) -- since 2026-09-26 a port of util-linux 2.39.3's `lsirq.c` and `irq-common.c` on `smartcols`; `scripts/lsirq-diff.sh` (fake `/proc` files bound in a user namespace): 212 cases agree, 1 more where only upstream never finishes
   - [x] irqbalance: IRQ balancing daemon (load imbalance detection, CPU affinity migration)
   - [x] hardlink: duplicate file deduplication (FNV-1a hashing, byte-verify, dry-run mode)
   - [x] dmidecode/biosdecode: SMBIOS/DMI table decoder (type filtering, string keyword lookup, JSON output, hex dump)

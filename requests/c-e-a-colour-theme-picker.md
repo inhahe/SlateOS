@@ -48,9 +48,12 @@ about line 3866).
 A theme can now carry icons, and the icons are chosen apart from the colours
 (`design-decisions.md` §880): `theme.icons` in `appearance.yaml`.
 
-- `ThemeInfo::has_icons` says whether a listed theme draws icons. A folder of
-  icons with no `theme.yaml` -- an icon pack -- is listed with `has_icons` and
-  no colours, and nothing wrong with it (`problem` is `None`).
+- `ThemeInfo::provides_icons()` says whether a listed theme draws icons, as
+  `provides_colors()` says whether it has colours. A folder of icons with no
+  `theme.yaml` -- an icon pack -- is listed with `provides_icons()` true and no
+  colours, and nothing wrong with it (`problem` is `None`). (It was a field,
+  `has_icons`, until 2026-09-26; nothing in the desktop read it, so it is now
+  asked of the folder when you call it.)
 - To choose one: `settings.icon_theme = appearance::icons::IconTheme::load(&info.id)`,
   then save. Nothing is read until an icon is drawn.
 - A preview: `IconTheme::render(name, size, color)` gives an icon's pixels

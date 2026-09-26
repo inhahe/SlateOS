@@ -747,11 +747,6 @@ pub struct ThemeInfo {
     pub has_dark: bool,
     /// Whether it sets light-mode colours.
     pub has_light: bool,
-    /// Whether it draws icons: its folder holds an [`icons`](crate::icons)
-    /// directory. Always true of the built-in theme, whose icons are compiled
-    /// in. A folder with icons and no `theme.yaml` -- an icon pack -- is a
-    /// theme for the icons axis alone.
-    pub has_icons: bool,
     /// What in its file was ignored.
     pub warnings: Vec<String>,
     /// Why it could not be read, if it could not. A theme that cannot be read
@@ -766,6 +761,23 @@ impl ThemeInfo {
     #[must_use]
     pub fn provides_colors(&self) -> bool {
         self.problem.is_none() && (self.has_dark || self.has_light)
+    }
+
+    /// Whether it can be chosen for the icons axis: its folder holds an
+    /// [`icons`](crate::icons::ICONS_DIR) directory -- or it is the built-in
+    /// theme, whose icons are compiled in. A folder with icons and no
+    /// `theme.yaml`, an icon pack, is a theme for this axis alone.
+    ///
+    /// Asked of the folder when called rather than kept from the listing, as a
+    /// field the listing filled and nothing in the desktop read: its one reader
+    /// is the Settings app's picker, which asks it once for each row it draws.
+    #[must_use]
+    pub fn provides_icons(&self) -> bool {
+        self.origin == Origin::BuiltIn
+            || self
+                .dir
+                .as_ref()
+                .is_some_and(|dir| dir.join(crate::icons::ICONS_DIR).is_dir())
     }
 }
 
@@ -851,7 +863,6 @@ fn built_in_info(dirs: &ThemeDirs) -> ThemeInfo {
             screenshots: Vec::new(),
             has_dark: true,
             has_light: true,
-            has_icons: true,
             warnings: Vec::new(),
             problem: None,
         }
@@ -861,7 +872,6 @@ fn built_in_info(dirs: &ThemeDirs) -> ThemeInfo {
     // load.
     info.has_dark = true;
     info.has_light = true;
-    info.has_icons = true;
     info.problem = None;
     info
 }
@@ -874,7 +884,6 @@ fn describe(
     read: Result<ThemeFile, ThemeError>,
 ) -> ThemeInfo {
     let shown = pathcodec::display_os(id);
-    let has_icons = dir.join(crate::icons::ICONS_DIR).is_dir();
     match read {
         Ok(file) => {
             let mut warnings = file.warnings;
@@ -895,7 +904,6 @@ fn describe(
                 dir: Some(dir),
                 has_dark: !file.colors.dark.is_empty(),
                 has_light: !file.colors.light.is_empty(),
-                has_icons,
                 meta: file.meta,
                 screenshots,
                 warnings,
@@ -911,7 +919,6 @@ fn describe(
             screenshots: Vec::new(),
             has_dark: false,
             has_light: false,
-            has_icons,
             warnings: Vec::new(),
             problem: Some(err),
         },
@@ -1240,12 +1247,12 @@ colors:
                 .unwrap_or_else(|| panic!("{id} is not listed"))
         };
         let lines = by_id("lines");
-        assert!(lines.has_icons);
+        assert!(lines.provides_icons());
         assert!(!lines.provides_colors());
         assert_eq!(lines.problem, None, "an icon pack is not a broken theme");
-        assert!(by_id("nord").has_icons && by_id("nord").provides_colors());
-        assert!(!by_id("plain").has_icons);
-        assert!(list[0].has_icons, "the built-in theme draws icons");
+        assert!(by_id("nord").provides_icons() && by_id("nord").provides_colors());
+        assert!(!by_id("plain").provides_icons());
+        assert!(list[0].provides_icons(), "the built-in theme draws icons");
     }
 
     /// A screenshot is a path inside the theme's folder or it is nothing: a

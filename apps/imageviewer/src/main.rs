@@ -512,13 +512,43 @@ pub struct ImageInfo {
     pub color_depth: Option<u8>,
     pub dpi: Option<(u32, u32)>,
     pub date_modified: Option<String>,
-    // EXIF fields (populated if available)
+    // EXIF fields, from the file's EXIF when it has one (`exif::read`).
+    // They were declared, drawn when present, and filled by nothing: every
+    // photograph's panel said nothing of the camera that took it.
     pub camera_make: Option<String>,
     pub camera_model: Option<String>,
+    pub lens: Option<String>,
+    pub date_taken: Option<String>,
     pub exposure_time: Option<String>,
     pub iso: Option<u32>,
     pub aperture: Option<String>,
     pub focal_length: Option<String>,
+}
+
+impl ImageInfo {
+    /// Take the camera's facts from `exif`, written as the panel shows them.
+    fn take_exif(&mut self, exif: exif::ExifData) {
+        self.camera_make = exif.camera_make;
+        self.camera_model = exif.camera_model;
+        self.lens = exif.lens;
+        self.date_taken = exif.date_taken.map(|when| exif_date(&when));
+        self.exposure_time = exif.shutter_speed.map(|s| format!("{s} s"));
+        self.iso = exif.iso;
+        self.aperture = exif.aperture.map(|a| format!("f/{a:.1}"));
+        self.focal_length = exif.focal_length_mm.map(|f| format!("{f:.0} mm"));
+    }
+}
+
+/// An EXIF date, `2025:06:15 14:30:22`, as the rest of the desktop writes one:
+/// `2025-06-15 14:30:22`. Anything else is shown as the file has it.
+fn exif_date(when: &str) -> String {
+    let b = when.as_bytes();
+    if b.len() >= 10 && b.get(4) == Some(&b':') && b.get(7) == Some(&b':') {
+        let (date, rest) = when.split_at(10);
+        format!("{}{rest}", date.replace(':', "-"))
+    } else {
+        when.to_owned()
+    }
 }
 
 impl ImageInfo {
@@ -1901,6 +1931,8 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
     // EXIF section (if any data available)
     let has_exif = info.camera_make.is_some()
         || info.camera_model.is_some()
+        || info.lens.is_some()
+        || info.date_taken.is_some()
         || info.exposure_time.is_some()
         || info.iso.is_some()
         || info.aperture.is_some()
@@ -1932,6 +1964,8 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
         let exif_fields: Vec<(&str, Option<String>)> = vec![
             ("Camera:", info.camera_make.clone()),
             ("Model:", info.camera_model.clone()),
+            ("Lens:", info.lens.clone()),
+            ("Taken:", info.date_taken.clone()),
             ("Exposure:", info.exposure_time.clone()),
             ("ISO:", info.iso.map(|v| format!("{}", v))),
             ("Aperture:", info.aperture.clone()),
@@ -2392,6 +2426,8 @@ fn load_picture(path: &Path, view: View) -> Loaded {
                 &guitk::tzrules::Tz::utc(),
             )
         });
+
+    info.take_exif(exif::read(&data));
 
     let format = ImageFormat::detect(&data);
     info.format = Some(format);
@@ -4518,6 +4554,89 @@ the picture at once, which reads as D advancing the slideshow"
         ));
         assert!(!looks_like_svg(b"<?xml version=\"1.0\"?>\n<html/>"));
         assert!(!looks_like_svg(b"not a drawing at all"));
+    }
+
+    /// A TIFF structure holding a camera's EXIF: the make, and in the Exif
+    /// directory an ISO, an aperture and the date it was taken.
+    fn camera_exif() -> Vec<u8> {
+        let mut t: Vec<u8> = b"II".to_vec();
+        t.extend_from_slice(&42u16.to_le_bytes());
+        t.extend_from_slice(&8u32.to_le_bytes());
+        // IFD0 at 8 (30 bytes), the Exif directory at 38 (42 bytes), then the
+        // values that do not fit in an entry.
+        let (make_at, fnum_at, date_at) = (80u32, 86u32, 94u32);
+        let entry = |t: &mut Vec<u8>, tag: u16, kind: u16, count: u32, value: u32| {
+            t.extend_from_slice(&tag.to_le_bytes());
+            t.extend_from_slice(&kind.to_le_bytes());
+            t.extend_from_slice(&count.to_le_bytes());
+            t.extend_from_slice(&value.to_le_bytes());
+        };
+        t.extend_from_slice(&2u16.to_le_bytes());
+        entry(&mut t, 0x010F, 2, 6, make_at);
+        entry(&mut t, 0x8769, 4, 1, 38);
+        t.extend_from_slice(&0u32.to_le_bytes());
+        t.extend_from_slice(&3u16.to_le_bytes());
+        entry(&mut t, 0x8827, 3, 1, 400);
+        entry(&mut t, 0x829D, 5, 1, fnum_at);
+        entry(&mut t, 0x9003, 2, 20, date_at);
+        t.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(t.len(), make_at as usize);
+        t.extend_from_slice(b"Canon\0");
+        t.extend_from_slice(&28u32.to_le_bytes());
+        t.extend_from_slice(&10u32.to_le_bytes());
+        t.extend_from_slice(b"2025:06:15 14:30:22\0");
+        t
+    }
+
+    /// **The info panel tells the camera's story**: the EXIF fields it drew
+    /// when present were filled by nothing, for every photograph.
+    #[test]
+    fn the_info_panel_shows_the_cameras_exif() {
+        let guard = scratch("exif");
+        let file = guard.dir().join("photo.jpg");
+        let jpeg = imagecodec::testing::SMALL_JPEG;
+        let tiff = camera_exif();
+        let mut data = jpeg[..2].to_vec();
+        data.extend_from_slice(&[0xFF, 0xE1]);
+        data.extend_from_slice(&u16::try_from(2 + 6 + tiff.len()).unwrap().to_be_bytes());
+        data.extend_from_slice(b"Exif\0\0");
+        data.extend_from_slice(&tiff);
+        data.extend_from_slice(&jpeg[2..]);
+        std::fs::write(&file, &data).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(
+            state.open_file(&file),
+            Opened::Shown,
+            "{:?}",
+            state.load_error
+        );
+        let info = &state.image_info;
+        assert_eq!(info.camera_make.as_deref(), Some("Canon"));
+        assert_eq!(info.iso, Some(400));
+        assert_eq!(info.aperture.as_deref(), Some("f/2.8"));
+        assert_eq!(info.date_taken.as_deref(), Some("2025-06-15 14:30:22"));
+        state.show_info_panel = true;
+        let said = collect_text(&render(&state));
+        for shown in ["Canon", "f/2.8", "400", "2025-06-15 14:30:22"] {
+            assert!(
+                said.iter().any(|t| t == shown),
+                "{shown} is not on screen: {said:?}"
+            );
+        }
+    }
+
+    /// A file with no EXIF shows no EXIF section.
+    #[test]
+    fn a_picture_with_no_exif_says_nothing_of_a_camera() {
+        let guard = scratch("no-exif");
+        let file = guard.dir().join("a.png");
+        std::fs::write(&file, png_bytes(3, 3)).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(state.open_file(&file), Opened::Shown);
+        state.show_info_panel = true;
+        let said = collect_text(&render(&state));
+        assert!(!said.iter().any(|t| t == "EXIF Data"), "{said:?}");
+        assert_eq!(exif_date("not a date"), "not a date");
     }
 
     /// The info panel says when the file was last changed. It said

@@ -30,6 +30,10 @@ safeio = { path = "../safeio" }
 # TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE-ID-NAMES-NOTHING.
 imagecodec = { path = "../../gui/imagecodec" }
 
+# The camera's facts for the info panel -- make, lens, exposure, the date it
+# was taken -- which the panel drew when present and nothing ever filled.
+exif = { path = "../exif" }
+
 # Pictures are read and decoded off the window's thread, newest request
 # first, and handed back through the waker the window gives it -- so paging
 # through photographs never freezes the window on a large one.

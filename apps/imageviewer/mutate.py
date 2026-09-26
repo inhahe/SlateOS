@@ -61,6 +61,7 @@ SVG = "an_svg_drawing_opens"
 SVG_KNOWN = "a_drawing_is_known_by_its_first_element"
 DATE = "the_info_panel_says_when_the_file_was_changed"
 FAILS_OFF = "a_failure_off_the_window_takes_the_last_picture_down"
+EXIF = "the_info_panel_shows_the_cameras_exif"
 
 MUTATIONS = [
     # -- the layout ---------------------------------------------------------
@@ -439,6 +440,25 @@ MUTATIONS = [
         "        .map(|since| {\n            guitk::datetime::stamp(\n                i64::try_from(since.as_secs()).unwrap_or(i64::MAX),\n                &guitk::tzrules::Tz::utc(),\n            )\n        });",
         "        .map(|_| String::from(\"(available)\"));",
         [DATE],
+    ),
+    # -- the camera's EXIF --------------------------------------------------
+    (
+        "the camera's facts are not read",
+        "    info.take_exif(exif::read(&data));\n",
+        "",
+        [EXIF],
+    ),
+    (
+        "the date taken is not on the panel",
+        "            (\"Taken:\", info.date_taken.clone()),\n",
+        "",
+        [EXIF],
+    ),
+    (
+        "an EXIF date keeps its colons",
+        "        format!(\"{}{rest}\", date.replace(':', \"-\"))",
+        "        format!(\"{date}{rest}\")",
+        [EXIF],
     ),
     (
         "a chosen picture is not opened",

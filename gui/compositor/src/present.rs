@@ -3,7 +3,7 @@
 //!
 //! Everything else in this crate was real up to the last step and then stopped:
 //! [`Compositor::compose_frame`](crate::Compositor::compose_frame) blends every
-//! window, the cursor and the desktop furniture into a buffer, and
+//! window and the desktop furniture into a buffer, and
 //! [`front_buffer`](crate::Compositor::front_buffer) hands out finished ARGB
 //! pixels that nothing looked at. In the other direction,
 //! [`handle_input`](crate::Compositor::handle_input) routes keys and clicks
@@ -13,11 +13,22 @@
 //!
 //! ## The trait
 //!
-//! [`Present`] is deliberately tiny: show a rectangle of pixels, hand back
-//! whatever input has arrived, and say whether the display still exists. That
-//! is the whole of what a compositor needs from a screen, and keeping it to
-//! three methods is what lets a SlateOS framebuffer, a host window and a
-//! deliberate no-op all be the same thing to `Server::run_with`.
+//! [`Present`] is deliberately tiny: show a [`Frame`], hand back whatever input
+//! has arrived, and say whether the display still exists. That is the whole of
+//! what a compositor needs from a screen, and keeping it to three methods is
+//! what lets a SlateOS framebuffer, a host window and a deliberate no-op all be
+//! the same thing to `Server::run_with`.
+//!
+//! ## The pointer is a layer, and every presenter draws it
+//!
+//! A [`Frame`] is the composited picture *and* the pointer to draw over it,
+//! kept apart the way a display controller keeps its cursor plane apart from
+//! the primary one ([`crate::cursor`] says why). So a pointer that moves over a
+//! still desktop is a new frame with an unchanged picture: [`Frame::serial`]
+//! says so, and a presenter that keeps its own copy of the picture repaints
+//! only the few hundred pixels the pointer left and entered. There is no
+//! default for drawing the pointer, on purpose — a default that ignored it
+//! would be one every new presenter inherited silently.
 //!
 //! ## What implements it
 //!
@@ -55,6 +66,26 @@
 //! that its display grew a keyboard. This is what closed `known-issues.md` →
 //! `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`.
 //!
+//! ## Waiting for the user
+//!
+//! A display is also something the compositor's loop *waits on*: between
+//! frames it blocks until a client writes, the user does something, or a
+//! deadline comes due, rather than waking on a timer to ask
+//! (`known-issues.md` → `TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING`). Three
+//! methods make that possible without the loop knowing what kind of display it
+//! has, and all three default to "nothing", which is right for a display with
+//! no input:
+//!
+//! * [`Present::wait_on`] adds the handles input arrives on — evdev's file
+//!   descriptors — to the loop's [`WaitSet`].
+//! * [`Present::deadline`] says when the display needs a tick even if nothing
+//!   arrives: the next hotplug probe, the next key repeat.
+//! * [`Present::wait`] does the blocking, for the display whose input is not a
+//!   handle at all — the host window, whose input is a Windows message queue.
+//!
+//! **A display with input it cannot put in the set must give a deadline**, or
+//! that input is read only when something else happens to wake the loop.
+//!
 //! ## What is still missing
 //!
 //! Nothing in this module — but the SlateOS build only *works* if the process
@@ -64,9 +95,76 @@
 //! [`evdev::EvdevError::Denied`] says so in as many words, because a permission
 //! error that looks like a missing file is a day lost to the wrong hypothesis.
 
+use std::io;
+use std::time::{Duration, Instant};
+
+use guiremote::WaitSet;
 use inputsettings::InputSettings;
 
-use crate::InputEvent;
+use crate::{InputEvent, PointerSprite};
+
+/// The earlier of two optional instants, where `None` is "never".
+#[must_use]
+pub fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// One frame for a [`Present`] to put on the display: the composited picture
+/// and, over it, the pointer.
+#[derive(Clone, Copy, Debug)]
+pub struct Frame<'a> {
+    /// `width * height` values in `0xAARRGGBB`, top row first — exactly what
+    /// [`Compositor::present_pixels`](crate::Compositor::present_pixels)
+    /// returns. A short slice is the caller's bug and an implementation may
+    /// draw what it has rather than panicking; the display server must not be
+    /// brought down by a bad frame.
+    pub pixels: &'a [u32],
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Which picture `pixels` is, when the caller knows.
+    ///
+    /// Two frames with the same `Some` serial carry the same pixels, so a
+    /// presenter holding its own copy of the last picture may skip copying it
+    /// again when all that changed is the pointer. `None` promises nothing and
+    /// the picture must be taken whole — which is what a caller that is not
+    /// keeping count, a test above all, wants by default.
+    pub serial: Option<u64>,
+    /// The pointer, to be drawn over the picture, or `None` for no pointer.
+    pub pointer: Option<&'a PointerSprite>,
+}
+
+impl<'a> Frame<'a> {
+    /// A picture with no pointer and no serial.
+    #[must_use]
+    pub const fn new(pixels: &'a [u32], width: u32, height: u32) -> Self {
+        Self {
+            pixels,
+            width,
+            height,
+            serial: None,
+            pointer: None,
+        }
+    }
+
+    /// The same frame, stamped with which picture it is.
+    #[must_use]
+    pub const fn with_serial(mut self, serial: u64) -> Self {
+        self.serial = Some(serial);
+        self
+    }
+
+    /// The same frame, with `pointer` over it.
+    #[must_use]
+    pub const fn with_pointer(mut self, pointer: Option<&'a PointerSprite>) -> Self {
+        self.pointer = pointer;
+        self
+    }
+}
 
 /// One monitor a [`Present`] is driving.
 ///
@@ -108,14 +206,8 @@ pub struct MonitorInfo {
 /// [`Self::show`] runs once per composited frame and [`Self::input`] once per
 /// tick.
 pub trait Present {
-    /// Put `pixels` on the display.
-    ///
-    /// `pixels` is `width * height` values in `0xAARRGGBB`, top row first —
-    /// exactly what [`Compositor::front_buffer`](crate::Compositor::front_buffer)
-    /// returns. A short slice is the caller's bug and an implementation may
-    /// draw what it has rather than panicking; the display server must not be
-    /// brought down by a bad frame.
-    fn show(&mut self, pixels: &[u32], width: u32, height: u32);
+    /// Put `frame` on the display: its picture, and its pointer over it.
+    fn show(&mut self, frame: &Frame<'_>);
 
     /// Whatever the user has done since the last call.
     ///
@@ -190,6 +282,54 @@ pub trait Present {
     /// server, a recording and a host window have no pointer whose speed could
     /// change. Only the implementor that owns a device needs to care.
     fn reload_input(&mut self, _settings: &InputSettings) {}
+
+    /// Add the handles this display's input arrives on to `set`, so that the
+    /// loop's wait ends when the user does something.
+    ///
+    /// The default adds nothing: a display with no input, or one whose input
+    /// is not a handle and which therefore overrides [`Self::wait`] instead.
+    fn wait_on(&self, _set: &mut WaitSet) {}
+
+    /// When this display next needs the loop to run even if nothing arrives —
+    /// a hotplug probe, a key repeat — or `None` if nothing is scheduled.
+    ///
+    /// An instant already past means "now". The loop wakes at the earliest of
+    /// this, its own deadlines and the first handle to become ready, so a
+    /// display that forgets to report one does not break the loop, only
+    /// delays whatever it was waiting for until something else happens.
+    fn deadline(&self) -> Option<Instant> {
+        None
+    }
+
+    /// Block until something in `set` is ready, this display has input, or
+    /// `timeout` passes (`None`: no timeout).
+    ///
+    /// The default is [`WaitSet::wait`], which is right for every display
+    /// whose input is a handle [`Self::wait_on`] can add — or which has none.
+    /// Only a display whose input arrives some other way needs its own: the
+    /// host window, whose input is a Windows message queue, overrides this to
+    /// wake for messages too.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the wait reports. The loop treats a failed wait as a reason to
+    /// fall back to sleeping, not to stop the desktop.
+    fn wait(&mut self, set: &mut WaitSet, timeout: Option<Duration>) -> io::Result<()> {
+        set.wait(timeout).map(drop)
+    }
+
+    /// Put the display's own state back as it was set up, as part of the
+    /// desktop's artifact recovery (`Server::recover`).
+    ///
+    /// Whatever a display keeps between frames — a copy of the last picture it
+    /// was shown, a mode it programmed into the hardware — is exactly what an
+    /// artifact that survives ordinary redrawing could be living in. After
+    /// this, the next [`Self::show`] must put the whole frame up from scratch,
+    /// whatever its [`Frame::serial`] claims.
+    ///
+    /// The default does nothing, which is right for a display that keeps
+    /// nothing.
+    fn reset(&mut self) {}
 }
 
 /// A display server with no display.
@@ -203,7 +343,7 @@ pub trait Present {
 pub struct Headless;
 
 impl Present for Headless {
-    fn show(&mut self, _pixels: &[u32], _width: u32, _height: u32) {}
+    fn show(&mut self, _frame: &Frame<'_>) {}
 }
 
 /// A [`Present`] that keeps the last frame, so a test can look at it.
@@ -216,8 +356,12 @@ impl Present for Headless {
 /// precisely the distinction this module exists to make.
 #[derive(Clone, Debug, Default)]
 pub struct Recording {
-    /// The most recent frame, as `(width, height, pixels)`.
+    /// The most recent frame's picture, as `(width, height, pixels)`.
     last: Option<(u32, u32, Vec<u32>)>,
+    /// The pointer the most recent frame drew over it.
+    pointer: Option<PointerSprite>,
+    /// The serial the most recent frame carried.
+    serial: Option<u64>,
     /// How many frames have been shown.
     shown: u64,
     /// Input to hand back, one batch per call to [`Present::input`].
@@ -238,6 +382,34 @@ pub struct Recording {
     /// count of frames would never be reached on an idle desktop and the test
     /// would hang instead of failing.
     pub close_after: Option<u64>,
+    /// Close the display once this many frames have been shown.
+    ///
+    /// For a test about *when* the loop shows a frame. [`Self::close_after`]
+    /// cannot say that: it keeps the loop ticking back to back, so a frame the
+    /// loop holds back until the next refresh would never be reached. A
+    /// recording closed by this lets the loop wait as it would for a real
+    /// display, and ends it as soon as the frame in question arrives.
+    pub close_once_shown: Option<u64>,
+    /// Close the display at this instant whatever else has happened — the
+    /// watchdog that turns a frame never shown into a failed assertion rather
+    /// than a hung test.
+    pub close_at: Option<Instant>,
+    /// Close the display the moment the loop has nothing left to wait for:
+    /// its script is spent and it is about to wait with no deadline at all.
+    ///
+    /// For a test that feeds a burst of input and wants to see everything the
+    /// loop does about it, however long a loaded machine takes to do it. No
+    /// count of ticks or frames has to be guessed, and no timer has to be
+    /// short enough to keep the test quick yet long enough never to fire
+    /// early. While this is set, [`Self::close_at`] is still honoured but is
+    /// not offered to the loop as a deadline, since a watchdog is not work.
+    pub close_when_idle: bool,
+    /// Close the display once another thread sets this — the way a test ends
+    /// a loop it is not driving. The loop notices the next time it wakes, so
+    /// the test must also give it a reason to: hang up a client, say.
+    pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// How many times [`Present::reset`] has been called.
+    resets: u64,
     /// What [`Present::monitors`] answers, if this recorder is standing in for a
     /// display that has monitors at all.
     ///
@@ -256,11 +428,18 @@ impl Recording {
     pub fn new() -> Self {
         Self {
             last: None,
+            pointer: None,
+            serial: None,
             shown: 0,
             script: std::collections::VecDeque::new(),
             ticks: 0,
             open: true,
             close_after: None,
+            close_once_shown: None,
+            close_at: None,
+            close_when_idle: false,
+            stop: None,
+            resets: 0,
             monitors: None,
         }
     }
@@ -274,10 +453,46 @@ impl Recording {
         }
     }
 
-    /// The most recent frame shown, if any.
+    /// The picture of the most recent frame shown, if any — without the
+    /// pointer, which is a layer over it: see [`Self::last_pointer`] and
+    /// [`Self::seen`].
     #[must_use]
     pub fn last_frame(&self) -> Option<(u32, u32, &[u32])> {
         self.last.as_ref().map(|(w, h, p)| (*w, *h, p.as_slice()))
+    }
+
+    /// The pointer the most recent frame drew, if it drew one.
+    #[must_use]
+    pub const fn last_pointer(&self) -> Option<&PointerSprite> {
+        self.pointer.as_ref()
+    }
+
+    /// The serial the most recent frame carried: the same one as the frame
+    /// before it exactly when the picture did not change.
+    #[must_use]
+    pub const fn last_serial(&self) -> Option<u64> {
+        self.serial
+    }
+
+    /// What a person looking at the display sees at `(x, y)`: the picture,
+    /// with the pointer laid over it where the pointer is.
+    #[must_use]
+    pub fn seen(&self, x: u32, y: u32) -> Option<u32> {
+        let below = self.pixel(x, y)?;
+        let Some(pointer) = self.pointer.as_ref() else {
+            return Some(below);
+        };
+        let mut one = [below];
+        let (Ok(px), Ok(py)) = (i32::try_from(x), i32::try_from(y)) else {
+            return Some(below);
+        };
+        let local = PointerSprite {
+            image: std::sync::Arc::clone(&pointer.image),
+            x: pointer.x.saturating_sub(px),
+            y: pointer.y.saturating_sub(py),
+        };
+        local.blend_over(&mut one, 1, 1);
+        Some(one[0])
     }
 
     /// How many frames have reached the display.
@@ -290,6 +505,12 @@ impl Recording {
     #[must_use]
     pub const fn ticks(&self) -> u64 {
         self.ticks
+    }
+
+    /// How many times the display has been reset for recovery.
+    #[must_use]
+    pub const fn resets(&self) -> u64 {
+        self.resets
     }
 
     /// The colour at a point of the last frame, if it is inside it.
@@ -314,8 +535,10 @@ impl Recording {
 }
 
 impl Present for Recording {
-    fn show(&mut self, pixels: &[u32], width: u32, height: u32) {
-        self.last = Some((width, height, pixels.to_vec()));
+    fn show(&mut self, frame: &Frame<'_>) {
+        self.last = Some((frame.width, frame.height, frame.pixels.to_vec()));
+        self.pointer = frame.pointer.cloned();
+        self.serial = frame.serial;
         self.shown = self.shown.saturating_add(1);
     }
 
@@ -325,11 +548,52 @@ impl Present for Recording {
     }
 
     fn is_open(&self) -> bool {
-        self.open && self.close_after.is_none_or(|limit| self.ticks < limit)
+        self.open
+            && self.close_after.is_none_or(|limit| self.ticks < limit)
+            && self.close_once_shown.is_none_or(|limit| self.shown < limit)
+            && self.close_at.is_none_or(|at| Instant::now() < at)
+            && self
+                .stop
+                .as_ref()
+                .is_none_or(|stop| !stop.load(std::sync::atomic::Ordering::Acquire))
     }
 
     fn monitors(&mut self) -> Option<Vec<MonitorInfo>> {
         self.monitors.clone()
+    }
+
+    /// A recording is a script, not a device. While it has a batch of input
+    /// left, or is counting ticks down to closing, it is ready at once — each
+    /// batch is input the loop must go and fetch, and a countdown in ticks
+    /// only counts down if the loop ticks. Otherwise it wakes the loop only to
+    /// be closed at [`Self::close_at`], and leaves the loop to wait for its
+    /// own reasons, exactly as a real display with nobody touching it would.
+    fn deadline(&self) -> Option<Instant> {
+        if !self.script.is_empty() || self.close_after.is_some() {
+            return Some(Instant::now());
+        }
+        if self.close_when_idle {
+            // The watchdog is still checked by `is_open` whenever the loop
+            // wakes; offering it as a deadline would stop the loop ever being
+            // idle, which is the moment this recording is waiting for.
+            return None;
+        }
+        self.close_at
+    }
+
+    fn reset(&mut self) {
+        self.resets = self.resets.saturating_add(1);
+    }
+
+    /// Closes instead of waiting when [`Self::close_when_idle`] is set and
+    /// the loop has no deadline at all; otherwise waits as any display with
+    /// no input of its own does.
+    fn wait(&mut self, set: &mut WaitSet, timeout: Option<Duration>) -> io::Result<()> {
+        if self.close_when_idle && timeout.is_none() {
+            self.open = false;
+            return Ok(());
+        }
+        set.wait(timeout).map(drop)
     }
 }
 
@@ -372,6 +636,22 @@ pub trait InputSource {
     /// settings for the same reason [`Self::set_bounds`]'s does — a source with
     /// no pointer and no repeat clock has nothing to change.
     fn reload_input(&mut self, _settings: &InputSettings) {}
+
+    /// Add the handles this source's events arrive on to `set`.
+    ///
+    /// The [`InputSource`] half of [`Present::wait_on`]. The default adds
+    /// nothing, which is right for a source that has no handles — and wrong
+    /// for one that has events and no deadline, which the loop would then
+    /// read only when something else woke it.
+    fn wait_on(&self, _set: &mut WaitSet) {}
+
+    /// When this source next has something to report even if no device says
+    /// anything — a held key's next repeat — or `None`.
+    ///
+    /// The [`InputSource`] half of [`Present::deadline`].
+    fn deadline(&self) -> Option<Instant> {
+        None
+    }
 }
 
 /// A screen and an input source, presented as one display.
@@ -382,9 +662,9 @@ pub trait InputSource {
 /// screen, events to the source, and the screen alone decides when the display
 /// is gone — a keyboard being unplugged is not a reason to end the session.
 ///
-/// [`Self::show`] is also where [`InputSource::set_bounds`] is kept current. It
-/// forwards only on a *change*, so the common case is a comparison of two pairs
-/// of integers per frame rather than a call into the pointer.
+/// [`Present::show`] is also where [`InputSource::set_bounds`] is kept current.
+/// It forwards only on a *change*, so the common case is a comparison of two
+/// pairs of integers per frame rather than a call into the pointer.
 #[derive(Clone, Copy, Debug)]
 pub struct Paired<S, I> {
     /// The half that draws.
@@ -424,12 +704,12 @@ impl<S: Present, I: InputSource> Paired<S, I> {
 }
 
 impl<S: Present, I: InputSource> Present for Paired<S, I> {
-    fn show(&mut self, pixels: &[u32], width: u32, height: u32) {
-        if self.bounds != (width, height) {
-            self.bounds = (width, height);
-            self.input.set_bounds(width, height);
+    fn show(&mut self, frame: &Frame<'_>) {
+        if self.bounds != (frame.width, frame.height) {
+            self.bounds = (frame.width, frame.height);
+            self.input.set_bounds(frame.width, frame.height);
         }
-        self.screen.show(pixels, width, height);
+        self.screen.show(frame);
     }
 
     fn input(&mut self) -> Vec<InputEvent> {
@@ -446,6 +726,30 @@ impl<S: Present, I: InputSource> Present for Paired<S, I> {
 
     fn reload_input(&mut self, settings: &InputSettings) {
         self.input.reload_input(settings);
+    }
+
+    /// Both halves: the screen may have input of its own, and the source is
+    /// where the keyboard is.
+    fn wait_on(&self, set: &mut WaitSet) {
+        self.screen.wait_on(set);
+        self.input.wait_on(set);
+    }
+
+    /// Whichever half needs the loop first: the screen's next hotplug probe or
+    /// the source's next key repeat.
+    fn deadline(&self) -> Option<Instant> {
+        earliest(self.screen.deadline(), self.input.deadline())
+    }
+
+    /// The screen's wait, since a screen is what might need a special one; the
+    /// source's handles are already in `set`.
+    fn wait(&mut self, set: &mut WaitSet, timeout: Option<Duration>) -> io::Result<()> {
+        self.screen.wait(set, timeout)
+    }
+
+    /// The screen's: an input source holds nothing a redraw could fix.
+    fn reset(&mut self) {
+        self.screen.reset();
     }
 }
 
@@ -469,15 +773,17 @@ mod tests {
         clippy::arithmetic_side_effects
     )]
 
+    use std::time::{Duration, Instant};
+
     use inputsettings::InputSettings;
 
-    use super::{Headless, InputSource, MonitorInfo, Paired, Present, Recording};
+    use super::{Frame, Headless, InputSource, MonitorInfo, Paired, Present, Recording};
     use crate::InputEvent;
 
     #[test]
     fn a_headless_display_accepts_frames_and_never_closes() {
         let mut headless = Headless;
-        headless.show(&[0xFF00_0000; 4], 2, 2);
+        headless.show(&Frame::new(&[0xFF00_0000; 4], 2, 2));
         assert!(headless.input().is_empty());
         assert!(headless.is_open(), "a display with no screen never breaks");
     }
@@ -489,7 +795,7 @@ mod tests {
 
         // A 3x2 frame, distinct in every cell so a transposed index shows up.
         let frame: Vec<u32> = (0..6).map(|i| 0xFF00_0000 | i).collect();
-        rec.show(&frame, 3, 2);
+        rec.show(&Frame::new(&frame, 3, 2));
 
         assert_eq!(rec.shown(), 1);
         // Row-major, top row first: (2, 1) is the last value.
@@ -499,12 +805,51 @@ mod tests {
         assert_eq!(rec.pixel(2, 1), Some(0xFF00_0005));
     }
 
+    /// The recorder keeps the pointer apart from the picture, as a cursor plane
+    /// is kept apart from the primary one — and can say what the two look like
+    /// together.
+    #[test]
+    fn a_recording_keeps_the_pointer_as_a_layer_over_the_picture() {
+        use crate::{CursorCache, CursorShape, CursorStyle, PointerState};
+        let mut cache = CursorCache::new();
+        let sprite = cache
+            .sprite(&PointerState {
+                shape: CursorShape::Arrow,
+                x: 10,
+                y: 10,
+                style: CursorStyle {
+                    size_px: 24,
+                    fill: 0xFFFF_FFFF,
+                    outline: 0xFF00_0000,
+                },
+            })
+            .expect("an arrow");
+        let picture = vec![0xFF20_4060u32; 64 * 64];
+        let mut rec = Recording::new();
+        rec.show(&Frame::new(&picture, 64, 64).with_pointer(Some(&sprite)));
+
+        let (_, _, shown) = rec.last_frame().expect("a frame");
+        assert!(
+            shown.iter().all(|&p| p == 0xFF20_4060),
+            "the pointer was painted into the picture"
+        );
+        assert_eq!(rec.last_pointer(), Some(&sprite));
+        // At the hot spot the arrow's tip is inked, so what is seen there is
+        // not the picture; far away from it, it is.
+        assert_ne!(
+            rec.seen(10, 10),
+            Some(0xFF20_4060),
+            "the tip is not visible"
+        );
+        assert_eq!(rec.seen(60, 60), Some(0xFF20_4060));
+    }
+
     #[test]
     fn a_pixel_outside_the_frame_is_none_and_not_a_wrapped_neighbour() {
         // The bug this catches: `y * width + x` with no bounds check reads
         // (3, 0) as (0, 1), which is a real pixel and a wrong answer.
         let mut rec = Recording::new();
-        rec.show(&(0..6).collect::<Vec<u32>>(), 3, 2);
+        rec.show(&Frame::new(&(0..6).collect::<Vec<u32>>(), 3, 2));
         assert_eq!(rec.pixel(3, 0), None, "one past the right edge");
         assert_eq!(rec.pixel(0, 2), None, "one below the bottom edge");
     }
@@ -512,8 +857,8 @@ mod tests {
     #[test]
     fn the_newest_frame_replaces_the_one_before_it() {
         let mut rec = Recording::new();
-        rec.show(&[1, 2, 3, 4], 2, 2);
-        rec.show(&[9, 9, 9, 9], 2, 2);
+        rec.show(&Frame::new(&[1, 2, 3, 4], 2, 2));
+        rec.show(&Frame::new(&[9, 9, 9, 9], 2, 2));
         assert_eq!(rec.shown(), 2, "both were counted");
         assert_eq!(rec.pixel(0, 0), Some(9), "and the newest is what is there");
     }
@@ -521,8 +866,8 @@ mod tests {
     #[test]
     fn a_resized_display_is_reported_at_its_new_size() {
         let mut rec = Recording::new();
-        rec.show(&[0; 4], 2, 2);
-        rec.show(&[0; 6], 3, 2);
+        rec.show(&Frame::new(&[0; 4], 2, 2));
+        rec.show(&Frame::new(&[0; 6], 3, 2));
         let (w, h, pixels) = rec.last_frame().unwrap();
         assert_eq!((w, h), (3, 2));
         assert_eq!(pixels.len(), 6);
@@ -599,11 +944,17 @@ mod tests {
         bounds: Vec<(u32, u32)>,
         /// Every settings it was told about, in order.
         reloads: Vec<InputSettings>,
+        /// What it reports as its next deadline.
+        due: Option<Instant>,
     }
 
     impl InputSource for ScriptedSource {
         fn poll(&mut self) -> Vec<InputEvent> {
             self.script.pop_front().unwrap_or_default()
+        }
+
+        fn deadline(&self) -> Option<Instant> {
+            self.due
         }
 
         fn set_bounds(&mut self, width: u32, height: u32) {
@@ -627,7 +978,7 @@ mod tests {
             pair.input().as_slice(),
             [InputEvent::MouseMove { x: 7, y: 9 }]
         ));
-        pair.show(&[0xFF00_00AB; 4], 2, 2);
+        pair.show(&Frame::new(&[0xFF00_00AB; 4], 2, 2));
         assert_eq!(pair.screen().pixel(0, 0), Some(0xFF00_00AB));
         // The screen was never asked for input and the source was never asked
         // to draw: each half only does the thing it is.
@@ -652,15 +1003,15 @@ mod tests {
         // display that could never happen.
         let big = vec![0u32; 800 * 600];
         let small = vec![0u32; 640 * 480];
-        pair.show(&big, 800, 600);
-        pair.show(&big, 800, 600);
+        pair.show(&Frame::new(&big, 800, 600));
+        pair.show(&Frame::new(&big, 800, 600));
         assert_eq!(
             pair.input.bounds,
             vec![(800, 600)],
             "an unchanged size is two integer comparisons, not a call"
         );
 
-        pair.show(&small, 640, 480);
+        pair.show(&Frame::new(&small, 640, 480));
         assert_eq!(pair.input.bounds, vec![(800, 600), (640, 480)]);
     }
 
@@ -735,5 +1086,139 @@ mod tests {
         let mut rec = Recording::new();
         rec.reload_input(&InputSettings::default());
         assert!(headless.is_open() && rec.is_open(), "and nothing broke");
+    }
+
+    // -----------------------------------------------------------------------
+    // Waiting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_earliest_of_two_deadlines_is_the_sooner_and_none_is_never() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(1);
+        assert_eq!(super::earliest(Some(now), Some(later)), Some(now));
+        assert_eq!(super::earliest(Some(later), Some(now)), Some(now));
+        assert_eq!(super::earliest(None, Some(later)), Some(later));
+        assert_eq!(super::earliest(Some(later), None), Some(later));
+        assert_eq!(super::earliest(None, None), None);
+    }
+
+    #[test]
+    fn a_display_with_no_input_asks_for_nothing_and_waits_on_nothing() {
+        let headless = Headless;
+        assert_eq!(headless.deadline(), None);
+        let mut set = guiremote::WaitSet::new();
+        headless.wait_on(&mut set);
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn a_pair_wakes_for_whichever_half_needs_it_first() {
+        let soon = Instant::now() + Duration::from_millis(30);
+        let source = ScriptedSource {
+            due: Some(soon),
+            ..ScriptedSource::default()
+        };
+        let mut screen = Recording::new();
+        screen.close_at = Some(soon + Duration::from_secs(1));
+        let pair = Paired::new(screen, source, 2, 2);
+        assert_eq!(
+            pair.deadline(),
+            Some(soon),
+            "the source's key repeat comes first"
+        );
+
+        let mut screen = Recording::new();
+        screen.close_at = Some(soon);
+        let pair = Paired::new(screen, ScriptedSource::default(), 2, 2);
+        assert_eq!(
+            pair.deadline(),
+            Some(soon),
+            "and the screen's, when it is the only one"
+        );
+    }
+
+    #[test]
+    fn a_recording_with_input_left_is_ready_at_once_and_an_idle_one_is_not() {
+        let mut rec = Recording::new();
+        assert_eq!(
+            rec.deadline(),
+            None,
+            "nothing scripted: wait like a real display"
+        );
+
+        rec.feed(vec![InputEvent::MouseMove { x: 1, y: 1 }]);
+        let before = Instant::now();
+        assert!(
+            rec.deadline()
+                .is_some_and(|at| at >= before && at <= Instant::now())
+        );
+        rec.input();
+        assert_eq!(
+            rec.deadline(),
+            None,
+            "and once the script is read, idle again"
+        );
+
+        // A countdown in ticks only counts down if the loop ticks.
+        let counting = Recording::closing_after(3);
+        assert!(counting.deadline().is_some());
+    }
+
+    #[test]
+    fn a_recording_can_close_once_it_has_seen_enough_frames_or_at_a_time() {
+        let mut rec = Recording::new();
+        rec.close_once_shown = Some(1);
+        assert!(rec.is_open());
+        rec.show(&Frame::new(&[0; 4], 2, 2));
+        assert!(!rec.is_open(), "the frame it was waiting for arrived");
+
+        let mut rec = Recording::new();
+        let at = Instant::now() + Duration::from_millis(20);
+        rec.close_at = Some(at);
+        assert!(rec.is_open());
+        assert_eq!(rec.deadline(), Some(at), "it wakes the loop to be closed");
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(!rec.is_open(), "the watchdog fired");
+    }
+
+    #[test]
+    fn a_recording_closed_when_idle_closes_instead_of_waiting_for_ever() {
+        let mut rec = Recording::new();
+        rec.close_when_idle = true;
+        rec.close_at = Some(Instant::now() + Duration::from_hours(1));
+        assert_eq!(
+            rec.deadline(),
+            None,
+            "its watchdog is not work the loop should wake for"
+        );
+        let mut set = guiremote::WaitSet::new();
+        // A bounded wait is still a wait...
+        rec.wait(&mut set, Some(Duration::from_millis(1))).unwrap();
+        assert!(rec.is_open());
+        // ...and an unbounded one is the end of the session.
+        rec.wait(&mut set, None).unwrap();
+        assert!(!rec.is_open());
+    }
+
+    #[test]
+    fn a_pair_resets_its_screen() {
+        let mut pair = Paired::new(Recording::new(), ScriptedSource::default(), 2, 2);
+        pair.reset();
+        assert_eq!(pair.screen().resets(), 1);
+    }
+
+    #[test]
+    fn a_recording_can_be_stopped_from_another_thread() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut rec = Recording::new();
+        rec.stop = Some(Arc::clone(&stop));
+        assert!(rec.is_open());
+        std::thread::spawn(move || stop.store(true, Ordering::Release))
+            .join()
+            .unwrap();
+        assert!(!rec.is_open());
     }
 }

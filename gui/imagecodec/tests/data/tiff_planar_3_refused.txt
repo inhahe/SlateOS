@@ -1,0 +1,1 @@
+REFUSED open: /mnt/e/visual studio projects/os-lane-f/gui/imagecodec/tests/data/tiff_planar_3_refused.tif: Bad value 3 for "PlanarConfiguration" tag

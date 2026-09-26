@@ -71,6 +71,9 @@
 //! ```
 
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Wake, Waker};
 use std::time::{Duration, Instant};
 
 pub mod app;
@@ -168,13 +171,24 @@ pub enum EventResponse {
     Continue,
     /// Stop the event loop and return.
     Exit,
+    /// Keep the window open although it was asked to close.
+    ///
+    /// The answer to [`Event::CloseRequested`] of an application that has
+    /// something to ask the user first -- unsaved work -- and that will answer
+    /// [`Self::Exit`] itself, from whichever event brings the user's decision.
+    /// To any other event it is [`Self::Continue`].
+    ///
+    /// Declining is an explicit act. A close request answered with anything
+    /// else still closes the window, so an application that never thought
+    /// about closing cannot leave the user a title-bar X that does nothing.
+    KeepOpen,
 }
 
 /// What [`EventLoop::run_batched`] is handing over.
 ///
-/// Two things rather than one because drawing and reacting happen at different
-/// rates: an application reacts to every event and should draw only once the
-/// events have run out. See [`EventLoop::run_batched`].
+/// Separate kinds rather than one because drawing and reacting happen at
+/// different rates: an application reacts to every event and should draw only
+/// once the events have run out. See [`EventLoop::run_batched`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum Dispatch {
     /// One event, and the window it is addressed to.
@@ -183,6 +197,27 @@ pub enum Dispatch {
         window: u64,
         /// What happened.
         event: Event,
+    },
+    /// A [`EventLoop::waker`] was woken — by the application's own work,
+    /// finishing on another thread — since the loop last looked.
+    ///
+    /// Not an [`Event`]: it did not come from the compositor and is addressed
+    /// to no window. It arrives after the batch's events and before its
+    /// [`Dispatch::Settled`], so an application that picks up a result here
+    /// draws it in the same frame. Several wakes between two looks arrive as
+    /// one.
+    Woken,
+    /// The compositor asks for this window to be drawn whole again — part of
+    /// the desktop's artifact recovery (Ctrl+Super+R). Draw the entire window,
+    /// not just what you believe has changed: a region you believe is clean is
+    /// what recovery suspects.
+    ///
+    /// Not an [`Event`], for [`guiremote::repaint`]'s reason: it is the display
+    /// asking, not the user doing something to the window. Arrives after the
+    /// batch's events, before its [`Dispatch::Settled`].
+    Repaint {
+        /// The window to draw whole.
+        window: u64,
     },
     /// Everything readable has now been dispatched, so the application's state
     /// has settled. This is the moment to draw it, and the loop is about to
@@ -800,6 +835,120 @@ pub struct EventLoop<T: Transport> {
     /// that tick was delivered. Consumed by the next [`EventLoop::wake_at`]
     /// for that window, and discarded if none arrives.
     ticked: Vec<(u64, Instant)>,
+    /// Set by a [`Self::waker`] when it wakes, and cleared when the loop hands
+    /// the wake over. `None` until a waker is asked for.
+    woken: Option<Arc<AtomicBool>>,
+    /// The waker handed out, so that every one handed out is the same.
+    waker: Option<Waker>,
+    /// Presses so far, for recognising a double click. See [`Clicks`].
+    clicks: Clicks,
+}
+
+/// Two presses of one button in one window, close together in time and on
+/// screen: a double click, delivered as [`MouseEventKind::DoubleClick`] straight
+/// after the second press.
+///
+/// The compositor sends only presses -- double-click timing "belongs with the
+/// widget that has to honour it" (its `wire_mouse_kind`) -- and every widget
+/// that honours one, the file dialog's list, the grid, the text view, is on
+/// this side of the wire. So the loop recognises them, once, for every
+/// application, rather than each one inventing its own timing or, as until
+/// now, none of them receiving a double click at all.
+///
+/// The rules are the ones the compositor's own title-bar double click settled
+/// (design-decisions §502): a pair is keyed on the window and the button, any
+/// press in between breaks it, and a completed double click does not arm
+/// another, so three quick clicks are a double click and a click. On top of
+/// those, the second press must land within [`DOUBLE_CLICK_SLOP`] of the first:
+/// two quick clicks on neighbouring rows are two clicks.
+#[derive(Clone, Copy, Debug)]
+struct Clicks {
+    /// How far apart the presses may be: the user's setting, `input.yaml`.
+    interval: Duration,
+    /// The last press, if it could begin a double click.
+    last: Option<Click>,
+}
+
+/// A press, as [`Clicks`] remembers it.
+#[derive(Clone, Copy, Debug)]
+struct Click {
+    window: u64,
+    button: MouseButton,
+    x: f32,
+    y: f32,
+    /// The compositor's clock when it handled the press, if it said.
+    stamp: Option<u32>,
+    /// When this loop read it, for a press nothing stamped.
+    read: Instant,
+}
+
+/// How far, in pixels either way, the pointer may move between the presses of
+/// a double click: the four Windows allows by default.
+pub const DOUBLE_CLICK_SLOP: f32 = 4.0;
+
+impl Clicks {
+    const fn new() -> Self {
+        Self {
+            interval: Duration::from_millis(inputsettings::DEFAULT_DOUBLE_CLICK_MS as u64),
+            last: None,
+        }
+    }
+
+    /// Take one press, and say whether it completes a double click.
+    fn press(&mut self, click: Click) -> bool {
+        // Taken first, so any press breaks a pending pair and only a press
+        // that could begin one leaves a record behind (§502, point 2).
+        let previous = self.last.take();
+        let pairs = previous.is_some_and(|first| {
+            first.window == click.window
+                && first.button == click.button
+                && (first.x - click.x).abs() <= DOUBLE_CLICK_SLOP
+                && (first.y - click.y).abs() <= DOUBLE_CLICK_SLOP
+                && self.soon_enough(&first, &click)
+        });
+        // A completed double click arms nothing (§502, point 3).
+        if !pairs {
+            self.last = Some(click);
+        }
+        pairs
+    }
+
+    /// Whether `second` came within the interval of `first`: by the
+    /// compositor's clock when both carry it, which no delay in this process
+    /// can move -- a program busy for a second reads two clicks made a second
+    /// apart one straight after the other -- and by when this loop read them
+    /// otherwise.
+    fn soon_enough(&self, first: &Click, second: &Click) -> bool {
+        match (first.stamp, second.stamp) {
+            (Some(a), Some(b)) => {
+                // Wrapping: the clock is milliseconds modulo 2^32.
+                Duration::from_millis(u64::from(b.wrapping_sub(a))) <= self.interval
+            }
+            _ => second.read.saturating_duration_since(first.read) <= self.interval,
+        }
+    }
+}
+
+/// What an [`EventLoop::waker`] does: note that a wake happened, then end the
+/// transport's wait.
+///
+/// The note is what lets the loop tell a wake from a stray return of the
+/// wait, which the transport alone cannot say. It is written *before* the
+/// transport is woken, so a loop that returns from its wait always sees it.
+struct LoopWake {
+    woken: Arc<AtomicBool>,
+    transport: Waker,
+}
+
+impl Wake for LoopWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.woken.store(true, Ordering::Release);
+        self.transport.wake_by_ref();
+    }
 }
 
 /// How far ahead [`EventLoop::wake_after`] will let a delay reach.
@@ -826,7 +975,30 @@ impl<T: Transport> EventLoop<T> {
             unrouted: 0,
             wakeups: Vec::new(),
             ticked: Vec::new(),
+            woken: None,
+            waker: None,
+            clicks: Clicks::new(),
         }
+    }
+
+    /// How far apart two presses may be and still be a double click.
+    ///
+    /// [`app`] keeps this at the user's setting in `input.yaml`, as the
+    /// compositor does for its title bars; a program driving the loop itself
+    /// may set it. Clamped to the range the setting allows.
+    pub fn set_double_click_interval(&mut self, interval: Duration) {
+        let bounds = (
+            Duration::from_millis(u64::from(inputsettings::MIN_DOUBLE_CLICK_MS)),
+            Duration::from_millis(u64::from(inputsettings::MAX_DOUBLE_CLICK_MS)),
+        );
+        self.clicks.interval = interval.clamp(bounds.0, bounds.1);
+    }
+
+    /// The double-click interval in force: see
+    /// [`Self::set_double_click_interval`].
+    #[must_use]
+    pub const fn double_click_interval(&self) -> Duration {
+        self.clicks.interval
     }
 
     /// The connection underneath, for requests this crate does not wrap.
@@ -1274,6 +1446,22 @@ impl<T: Transport> EventLoop<T> {
         self.conn.confirm(RequestBody::ReloadSession)
     }
 
+    /// Ask the compositor to recover the display: the same full redraw as its
+    /// own Ctrl+Super+R.
+    ///
+    /// For a shell, or a diagnostic tool, that offers the recovery somewhere
+    /// other than the keyboard. Windows no live program owns are dropped, the
+    /// display is reset, the screen is redrawn from scratch, and every program
+    /// — this one included — is asked to draw its windows whole
+    /// ([`Dispatch::Repaint`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`notifications_changed`](Self::notifications_changed).
+    pub fn recover_display(&mut self) -> Result<(), Error<T>> {
+        self.conn.confirm(RequestBody::RecoverDisplay)
+    }
+
     /// Every window on the desktop, bottom-to-top, as of the last update.
     ///
     /// Empty until the first list arrives — which, for a client that never
@@ -1426,6 +1614,49 @@ impl<T: Transport> EventLoop<T> {
         self.wake_at(window, deadline);
     }
 
+    /// Ask to be woken with an [`Event::Tick`] at `deadline` or sooner: arm
+    /// the window if it is not armed, and bring an armed deadline forward if
+    /// this one is earlier — but never push one later.
+    ///
+    /// What a clock whose rate changes needs. [`Self::wake_at`] moves the
+    /// deadline whichever way it is told, so a caller re-arming on every event
+    /// would push the next tick further away with each one and an animation
+    /// would stall while the pointer moved. Leaving an armed deadline alone
+    /// avoids that, and instead makes an application that *speeds its clock
+    /// up* — a terminal going from its idle rate to its busy one on a
+    /// keystroke — wait out the slow interval first. This does neither.
+    ///
+    /// Bringing a deadline forward keeps the interval the tick will report
+    /// measured from where it was: only when the tick fires changes, not what
+    /// it says has elapsed.
+    pub fn wake_no_later_than(&mut self, window: u64, deadline: Instant) {
+        self.bring_forward(window, deadline, Instant::now());
+    }
+
+    /// [`Self::wake_no_later_than`] after `delay` from now, clamped as
+    /// [`Self::wake_after`] clamps. The usual way to keep an application's
+    /// declared interval in force from outside its tick handler.
+    pub fn wake_within(&mut self, window: u64, delay: Duration) {
+        let now = Instant::now();
+        let deadline = now.checked_add(delay.min(FURTHEST_WAKE)).unwrap_or(now);
+        self.bring_forward(window, deadline, now);
+    }
+
+    /// [`Self::wake_no_later_than`] with the clock passed in, as
+    /// [`Self::arm`] takes it, so the interval arithmetic is testable against a
+    /// synthetic clock.
+    fn bring_forward(&mut self, window: u64, deadline: Instant, now: Instant) {
+        if let Some(w) = self.wakeups.iter_mut().find(|w| w.window == window) {
+            if deadline < w.deadline {
+                // Only the deadline moves. `since` stays where the clock last
+                // ran from, so the deltas still partition wall time.
+                w.deadline = deadline;
+            }
+            return;
+        }
+        self.arm(window, deadline, now);
+    }
+
     /// Withdraw a window's wake-up, if it has one. Idempotent.
     ///
     /// This is how an animation stops. It also drops the reference point the
@@ -1495,6 +1726,56 @@ impl<T: Transport> EventLoop<T> {
             .collect()
     }
 
+    /// A handle any thread can use to wake this loop, or `None` if its
+    /// transport cannot be woken.
+    ///
+    /// For work an application does off the loop's thread — a photograph
+    /// decoding on a worker, a file being read — which must be able to say
+    /// "finished, draw again" to a loop parked with nothing on the wire. Hand
+    /// the [`Waker`] to the worker and call [`Waker::wake`] when the result is
+    /// ready; the loop wakes, and [`Self::run_batched`] hands the application a
+    /// [`Dispatch::Woken`] followed by [`Dispatch::Settled`], so the result is
+    /// drawn in that frame. A wake sent while the loop is busy is not lost: it
+    /// is handed over at the end of the batch in progress.
+    ///
+    /// [`Self::run`] does not report wakes — its handler is per event, and a
+    /// wake is not one. A caller driving the loop by hand asks
+    /// [`Self::take_woken`] after each [`Self::wait`].
+    ///
+    /// Every call returns the same waker. It costs a pipe, made on the first
+    /// call and not before, so a loop that never asks pays nothing.
+    ///
+    /// # Errors
+    ///
+    /// If the transport cannot make one — out of descriptors, most likely.
+    pub fn waker(&mut self) -> Result<Option<Waker>, Error<T>> {
+        if let Some(waker) = &self.waker {
+            return Ok(Some(waker.clone()));
+        }
+        let Some(transport) = self.conn.waker()? else {
+            return Ok(None);
+        };
+        let woken = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(LoopWake {
+            woken: Arc::clone(&woken),
+            transport,
+        }));
+        self.woken = Some(woken);
+        self.waker = Some(waker.clone());
+        Ok(Some(waker))
+    }
+
+    /// Whether a [`Self::waker`] has been woken since this was last asked,
+    /// clearing the answer.
+    ///
+    /// [`Self::run_batched`] asks this itself; only a caller driving the loop
+    /// by hand needs to.
+    pub fn take_woken(&mut self) -> bool {
+        self.woken
+            .as_ref()
+            .is_some_and(|woken| woken.swap(false, Ordering::AcqRel))
+    }
+
     /// Park until input arrives or the nearest wake-up comes due.
     ///
     /// The counterpart to [`Self::poll`], and the reason a caller driving the
@@ -1549,6 +1830,37 @@ impl<T: Transport> EventLoop<T> {
             // Folded in before the application sees it, so a handler that asks
             // the window how big it is during a `Resize` gets the new answer.
             window.apply(&ev.event);
+            // A press that completes a double click is followed at once by the
+            // double click itself, as its own event: consumers are written for
+            // both orders (the file dialog's list opens on either), and every
+            // one of them still sees the press.
+            if let Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }) = ev.event
+            {
+                let click = Click {
+                    window: ev.window,
+                    button,
+                    x,
+                    y,
+                    stamp: ev.time,
+                    read: Instant::now(),
+                };
+                if self.clicks.press(click) {
+                    let mut double = InputEvent::new(
+                        ev.window,
+                        Event::Mouse(MouseEvent {
+                            x,
+                            y,
+                            kind: MouseEventKind::DoubleClick(button),
+                        }),
+                    );
+                    double.time = ev.time;
+                    self.pending.push_front(double);
+                }
+            }
             return Ok(Some((ev.window, ev.event)));
         }
         Ok(None)
@@ -1571,7 +1883,9 @@ impl<T: Transport> EventLoop<T> {
     {
         self.run_batched(|events, dispatch| match dispatch {
             Dispatch::Event { window, event } => handler(events, window, event),
-            Dispatch::Settled => EventResponse::Continue,
+            Dispatch::Woken | Dispatch::Repaint { .. } | Dispatch::Settled => {
+                EventResponse::Continue
+            }
         })
     }
 
@@ -1605,14 +1919,41 @@ impl<T: Transport> EventLoop<T> {
             let mut dispatched = false;
             while let Some((window, event)) = self.poll()? {
                 dispatched = true;
-                // A close request the handler does not act on still closes the
-                // window. A title-bar X that does nothing is worse than an
-                // application that quits when it would rather not have.
+                // A close request closes the window unless the handler
+                // declines it in so many words. A title-bar X that does nothing
+                // is worse than an application that quits when it would rather
+                // not have, so doing nothing is not declining: only `KeepOpen`
+                // is, the answer of an application asking the user about
+                // unsaved work first (design-decisions §1309).
                 let requested_close = matches!(event, Event::CloseRequested);
                 let verdict = handler(self, Dispatch::Event { window, event });
-                if verdict == EventResponse::Exit || requested_close {
+                if verdict == EventResponse::Exit
+                    || (requested_close && verdict != EventResponse::KeepOpen)
+                {
                     self.running = false;
                     break;
+                }
+            }
+            // After the events and before `Settled`, so whatever the wake
+            // brought is drawn in the same frame as they are. Taken even when
+            // the batch was empty: a wake with nothing on the wire is the
+            // ordinary case, and is the whole reason the loop woke.
+            if self.running && self.take_woken() {
+                dispatched = true;
+                if handler(self, Dispatch::Woken) == EventResponse::Exit {
+                    self.running = false;
+                }
+            }
+            // The compositor's repaint requests, read by the same pumps as the
+            // events above, and handed over the same way: before `Settled`, so
+            // the whole-window frame is the one drawn at the batch's end.
+            if self.running {
+                for window in self.conn.take_repaints() {
+                    dispatched = true;
+                    if handler(self, Dispatch::Repaint { window }) == EventResponse::Exit {
+                        self.running = false;
+                        break;
+                    }
                 }
             }
             if dispatched && self.running && handler(self, Dispatch::Settled) == EventResponse::Exit
@@ -1911,6 +2252,16 @@ pub mod testing {
                 .unwrap();
         }
 
+        /// Ask the client to draw these windows whole again, as a compositor
+        /// does during recovery.
+        pub fn send_repaint(&mut self, windows: &[u64]) {
+            self.pipe
+                .write(&guiremote::encode_repaint(&guiremote::Repaint {
+                    windows: windows.to_vec(),
+                }))
+                .unwrap();
+        }
+
         /// Push a desktop window list, as a compositor does to a subscribed
         /// shell.
         ///
@@ -2012,6 +2363,7 @@ pub mod testing {
                 RequestBody::CreateWindow(_) => "CreateWindow",
                 RequestBody::WatchIdle { .. } => "WatchIdle",
                 RequestBody::ReloadSession => "ReloadSession",
+                RequestBody::RecoverDisplay => "RecoverDisplay",
                 RequestBody::DestroyWindow { .. } => "DestroyWindow",
                 RequestBody::SetTitle { .. } => "SetTitle",
                 RequestBody::Move { .. } => "Move",
@@ -2099,6 +2451,14 @@ pub mod testing {
         fn set_wait_timeout(&mut self, timeout: Option<Duration>) -> Result<(), Self::Error> {
             self.asked.push(timeout);
             Ok(())
+        }
+
+        /// A waker with nothing to interrupt: this transport's `wait` never
+        /// blocks, it only gives the compositor a turn. The loop's own note of
+        /// the wake is what a test observes, which is also what an application
+        /// observes on a real socket.
+        fn waker(&mut self) -> Result<Option<std::task::Waker>, Self::Error> {
+            Ok(Some(std::task::Waker::noop().clone()))
         }
     }
 
@@ -2459,6 +2819,279 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         assert!(!events.is_running());
+    }
+
+    #[test]
+    fn a_close_request_answered_keep_open_leaves_the_window_open() {
+        // An editor with unsaved work: it declines the close, asks the user,
+        // and goes when the answer comes -- here, the focus event after.
+        let (mut events, server) = wired();
+        let id = open(&mut events, "A");
+        server.borrow_mut().script.push_back(vec![
+            InputEvent::new(id, Event::CloseRequested),
+            InputEvent::new(id, Event::FocusIn),
+        ]);
+
+        let mut seen = Vec::new();
+        events
+            .run(|_loop, _w, event| {
+                seen.push(event.clone());
+                match event {
+                    Event::CloseRequested => EventResponse::KeepOpen,
+                    _ => EventResponse::Exit,
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            seen,
+            vec![Event::CloseRequested, Event::FocusIn],
+            "the loop should have gone on past the declined close"
+        );
+    }
+
+    #[test]
+    fn keep_open_answering_anything_but_a_close_is_continue() {
+        let (mut events, server) = wired();
+        let id = open(&mut events, "A");
+        server.borrow_mut().script.push_back(vec![
+            InputEvent::new(id, Event::FocusIn),
+            InputEvent::new(id, Event::FocusOut),
+        ]);
+
+        let mut count = 0u32;
+        events
+            .run(|_loop, _w, _event| {
+                count += 1;
+                EventResponse::KeepOpen
+            })
+            .unwrap();
+        assert_eq!(
+            count, 2,
+            "both events, and the loop ended with the connection"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Double clicks
+    // ---------------------------------------------------------------
+
+    fn mouse(kind: MouseEventKind, x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent { x, y, kind })
+    }
+
+    fn press(button: MouseButton, x: f32, y: f32) -> Event {
+        mouse(MouseEventKind::Press(button), x, y)
+    }
+
+    /// Every event the loop hands over for `script`, one batch.
+    fn delivered(script: Vec<(u64, Event, Option<u32>)>) -> Vec<Event> {
+        let (mut events, server) = wired();
+        let a = open(&mut events, "A");
+        let b = open(&mut events, "B");
+        let batch = script
+            .into_iter()
+            .map(|(window, event, time)| {
+                let window = if window == 0 { a } else { b };
+                let ev = InputEvent::new(window, event);
+                match time {
+                    Some(t) => ev.at(t),
+                    None => ev,
+                }
+            })
+            .collect();
+        server.borrow_mut().script.push_back(batch);
+        let mut seen = Vec::new();
+        events
+            .run(|_loop, _w, event| {
+                seen.push(event);
+                EventResponse::Continue
+            })
+            .unwrap();
+        seen
+    }
+
+    fn doubles(seen: &[Event]) -> usize {
+        seen.iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Event::Mouse(MouseEvent {
+                        kind: MouseEventKind::DoubleClick(_),
+                        ..
+                    })
+                )
+            })
+            .count()
+    }
+
+    const LEFT: MouseButton = MouseButton::Left;
+
+    #[test]
+    fn two_quick_presses_in_one_place_are_followed_by_a_double_click() {
+        let release = mouse(MouseEventKind::Release(LEFT), 10.0, 10.0);
+        let seen = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (0, release.clone(), Some(1060)),
+            (0, press(LEFT, 11.0, 9.0), Some(1200)),
+            (0, release.clone(), Some(1260)),
+        ]);
+        assert_eq!(
+            seen,
+            vec![
+                press(LEFT, 10.0, 10.0),
+                release.clone(),
+                press(LEFT, 11.0, 9.0),
+                mouse(MouseEventKind::DoubleClick(LEFT), 11.0, 9.0),
+                release,
+            ],
+            "the double click comes straight after the press that completes it, \
+             and the press itself is still delivered"
+        );
+    }
+
+    #[test]
+    fn presses_further_apart_than_the_interval_are_two_clicks() {
+        // The default interval is 400 ms: 400 apart pairs, 401 does not.
+        let at_the_edge = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (0, press(LEFT, 10.0, 10.0), Some(1400)),
+        ]);
+        assert_eq!(doubles(&at_the_edge), 1);
+        let past_it = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (0, press(LEFT, 10.0, 10.0), Some(1401)),
+        ]);
+        assert_eq!(doubles(&past_it), 0);
+    }
+
+    #[test]
+    fn clicks_made_apart_are_not_paired_by_a_client_that_read_them_together() {
+        // What the compositor's stamps are for. These two clicks were made
+        // 0.6 s apart; a program busy in between reads them in one batch,
+        // microseconds apart, and timing them by that would call it a double.
+        let seen = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(5000)),
+            (0, press(LEFT, 10.0, 10.0), Some(5600)),
+        ]);
+        assert_eq!(doubles(&seen), 0);
+    }
+
+    #[test]
+    fn the_stamps_are_compared_across_the_clocks_wrap() {
+        let seen = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(u32::MAX - 50)),
+            (0, press(LEFT, 10.0, 10.0), Some(100)),
+        ]);
+        assert_eq!(doubles(&seen), 1, "151 ms apart across the wrap");
+    }
+
+    #[test]
+    fn presses_in_two_windows_or_of_two_buttons_are_not_a_double_click() {
+        let windows = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (1, press(LEFT, 10.0, 10.0), Some(1100)),
+        ]);
+        assert_eq!(doubles(&windows), 0, "one click in each of two windows");
+        let buttons = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (0, press(MouseButton::Right, 10.0, 10.0), Some(1100)),
+        ]);
+        assert_eq!(doubles(&buttons), 0, "a left click and a right click");
+    }
+
+    #[test]
+    fn a_press_that_moved_further_than_the_slop_is_a_new_click() {
+        let within = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (
+                0,
+                press(LEFT, 10.0 + DOUBLE_CLICK_SLOP, 10.0 - DOUBLE_CLICK_SLOP),
+                Some(1100),
+            ),
+        ]);
+        assert_eq!(doubles(&within), 1);
+        let beyond = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (
+                0,
+                press(LEFT, 10.0, 10.0 + DOUBLE_CLICK_SLOP + 1.0),
+                Some(1100),
+            ),
+        ]);
+        assert_eq!(doubles(&beyond), 0, "two quick clicks on neighbouring rows");
+    }
+
+    #[test]
+    fn any_press_in_between_breaks_the_pair() {
+        // design-decisions §502, point 2: the user went somewhere else.
+        let seen = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (1, press(LEFT, 50.0, 50.0), Some(1050)),
+            (0, press(LEFT, 10.0, 10.0), Some(1100)),
+        ]);
+        assert_eq!(doubles(&seen), 0);
+    }
+
+    #[test]
+    fn three_quick_clicks_are_a_double_click_and_a_click() {
+        // §502, point 3: a completed double click arms nothing, so the third
+        // press does not pair with the second; the fourth pairs with the third.
+        let three = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (0, press(LEFT, 10.0, 10.0), Some(1100)),
+            (0, press(LEFT, 10.0, 10.0), Some(1200)),
+        ]);
+        assert_eq!(doubles(&three), 1);
+        let four = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (0, press(LEFT, 10.0, 10.0), Some(1100)),
+            (0, press(LEFT, 10.0, 10.0), Some(1200)),
+            (0, press(LEFT, 10.0, 10.0), Some(1300)),
+        ]);
+        assert_eq!(doubles(&four), 2);
+    }
+
+    #[test]
+    fn unstamped_presses_are_timed_by_when_the_loop_read_them() {
+        // An injected event has no stamp; two read at once are a double click.
+        let quick = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), None),
+            (0, press(LEFT, 10.0, 10.0), None),
+        ]);
+        assert_eq!(doubles(&quick), 1);
+
+        // And two read further apart than the interval are not. The handler
+        // sleeps between them at the shortest interval allowed: a sleep can
+        // only overrun, which widens the gap the assertion already expects.
+        let (mut events, server) = wired();
+        let a = open(&mut events, "A");
+        events.set_double_click_interval(Duration::from_millis(1));
+        assert_eq!(
+            events.double_click_interval(),
+            Duration::from_millis(u64::from(inputsettings::MIN_DOUBLE_CLICK_MS)),
+            "clamped to the setting's range"
+        );
+        server
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(a, press(LEFT, 10.0, 10.0))]);
+        server
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(a, press(LEFT, 10.0, 10.0))]);
+        let mut seen = Vec::new();
+        let pause = Duration::from_millis(u64::from(inputsettings::MIN_DOUBLE_CLICK_MS) + 60);
+        events
+            .run(|_loop, _w, event| {
+                if seen.is_empty() {
+                    std::thread::sleep(pause);
+                }
+                seen.push(event);
+                EventResponse::Continue
+            })
+            .unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(doubles(&seen), 0);
     }
 
     #[test]
@@ -3171,5 +3804,200 @@ mod tests {
         events.wait().unwrap();
         let bound = asked.borrow()[0].expect("the park should have been bounded");
         assert!(bound > Duration::ZERO, "a zero bound reached the transport");
+    }
+
+    // ---- waking from another thread ---------------------------------------
+
+    #[test]
+    fn a_wake_is_handed_over_before_the_frame_it_belongs_to() {
+        let (mut events, _desktop) = wired();
+        WindowBuilder::new("W", 100, 100)
+            .build(&mut events)
+            .unwrap();
+        let waker = events.waker().unwrap().expect("the test link can be woken");
+        waker.wake_by_ref();
+        let mut seen = Vec::new();
+        events
+            .run_batched(|_, dispatch| {
+                seen.push(dispatch);
+                EventResponse::Continue
+            })
+            .unwrap();
+        assert_eq!(seen, vec![Dispatch::Woken, Dispatch::Settled]);
+    }
+
+    #[test]
+    fn wakes_that_land_together_are_one() {
+        let (mut events, _desktop) = wired();
+        WindowBuilder::new("W", 100, 100)
+            .build(&mut events)
+            .unwrap();
+        let waker = events.waker().unwrap().unwrap();
+        waker.wake_by_ref();
+        waker.wake_by_ref();
+        // The consuming form too, through a clone of its own.
+        let another = waker.clone();
+        another.wake();
+        let mut wakes = 0;
+        events
+            .run_batched(|_, dispatch| {
+                if dispatch == Dispatch::Woken {
+                    wakes += 1;
+                }
+                EventResponse::Continue
+            })
+            .unwrap();
+        assert_eq!(wakes, 1);
+    }
+
+    #[test]
+    fn a_loop_nobody_can_wake_reports_no_wakes() {
+        let (mut events, _desktop) = wired();
+        assert!(!events.take_woken(), "no waker, so no wake");
+        let mut wakes = 0;
+        events
+            .run_batched(|_, dispatch| {
+                if dispatch == Dispatch::Woken {
+                    wakes += 1;
+                }
+                EventResponse::Continue
+            })
+            .unwrap();
+        assert_eq!(wakes, 0);
+    }
+
+    #[test]
+    fn every_waker_a_loop_hands_out_is_the_same() {
+        let (mut events, _desktop) = wired();
+        let first = events.waker().unwrap().unwrap();
+        let second = events.waker().unwrap().unwrap();
+        assert!(first.will_wake(&second));
+        second.wake_by_ref();
+        assert!(events.take_woken(), "a wake through either is a wake");
+        assert!(!events.take_woken(), "and it is taken once");
+    }
+
+    #[test]
+    fn a_link_that_cannot_be_woken_hands_out_no_waker() {
+        let (client, _server) = pipe();
+        let mut events = EventLoop::new(client);
+        assert!(events.waker().unwrap().is_none());
+    }
+
+    /// The whole path on a real socket: a loop parked with nothing on the wire
+    /// is woken from another thread and told why.
+    #[test]
+    fn a_parked_loop_is_woken_from_another_thread_over_a_real_socket() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let link = Link::connect(listener.local_addr().unwrap()).unwrap();
+        // The far end stays open, so the only thing that can end the wait is
+        // the wake -- or, if the wake is broken, this watchdog hanging up a
+        // minute from now, which ends the loop without a `Woken` and so fails
+        // the test instead of hanging it.
+        let (far_end, _) = listener.accept().unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_mins(1));
+            drop(far_end);
+        });
+        let mut events = EventLoop::new(link);
+        let waker = events.waker().unwrap().expect("a socket can be woken");
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            waker.wake();
+        });
+        let mut woken = false;
+        events
+            .run_batched(|_, dispatch| {
+                if dispatch == Dispatch::Woken {
+                    woken = true;
+                    return EventResponse::Exit;
+                }
+                EventResponse::Continue
+            })
+            .unwrap();
+        worker.join().unwrap();
+        assert!(woken, "the loop ended without being told of the wake");
+    }
+
+    // ---- a clock that changes rate ----------------------------------------
+
+    #[test]
+    fn an_earlier_deadline_brings_an_armed_one_forward() {
+        let (mut events, _server) = wired();
+        let t0 = Instant::now();
+        events.arm(7, t0 + ms(100), t0);
+        events.bring_forward(7, t0 + ms(10), t0);
+        assert_eq!(events.next_wakeup(), Some(t0 + ms(10)));
+    }
+
+    #[test]
+    fn a_later_deadline_leaves_an_armed_one_alone() {
+        // The property that keeps an animation running while the pointer
+        // moves: a re-arm on every event must never push the tick away.
+        let (mut events, _server) = wired();
+        let t0 = Instant::now();
+        events.arm(7, t0 + ms(10), t0);
+        events.bring_forward(7, t0 + ms(100), t0 + ms(5));
+        assert_eq!(events.next_wakeup(), Some(t0 + ms(10)));
+    }
+
+    #[test]
+    fn an_idle_window_is_armed_by_a_no_later_than() {
+        let (mut events, _server) = wired();
+        let t0 = Instant::now();
+        assert!(!events.is_waking(7));
+        events.bring_forward(7, t0 + ms(16), t0);
+        assert_eq!(events.next_wakeup(), Some(t0 + ms(16)));
+    }
+
+    #[test]
+    fn bringing_a_tick_forward_keeps_the_interval_it_reports() {
+        // Only when the tick fires moves. What it says has elapsed is still
+        // measured from where the clock last ran, so the deltas an animation
+        // accumulates still cover every millisecond.
+        let (mut events, _server) = wired();
+        let t0 = Instant::now();
+        events.arm(7, t0 + ms(16), t0);
+        let first = events.due_at(t0 + ms(16));
+        // Re-armed at the slow rate...
+        events.arm(7, t0 + ms(116), t0 + ms(20));
+        // ...then sped up before that came due.
+        events.bring_forward(7, t0 + ms(36), t0 + ms(30));
+        let second = events.due_at(t0 + ms(36));
+        assert_eq!(
+            tick_ms(&first) + tick_ms(&second),
+            36,
+            "the deltas should cover every millisecond from t0 to t0+36"
+        );
+    }
+
+    // ---- the compositor's repaint requests ---------------------------------
+
+    #[test]
+    fn a_repaint_request_is_handed_over_before_the_frame_it_belongs_to() {
+        let (mut events, desktop) = wired();
+        let window = WindowBuilder::new("W", 100, 100)
+            .build(&mut events)
+            .unwrap();
+        desktop.borrow_mut().send_repaint(&[window]);
+        let mut seen = Vec::new();
+        events
+            .run_batched(|_, dispatch| {
+                seen.push(dispatch);
+                EventResponse::Continue
+            })
+            .unwrap();
+        assert_eq!(seen, vec![Dispatch::Repaint { window }, Dispatch::Settled]);
+    }
+
+    #[test]
+    fn asking_for_recovery_is_one_request() {
+        let (mut events, desktop) = wired();
+        events.recover_display().unwrap();
+        assert_eq!(
+            desktop.borrow_mut().asked(),
+            vec!["RecoverDisplay"],
+            "one request, and nothing else sent"
+        );
     }
 }

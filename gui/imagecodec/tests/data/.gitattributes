@@ -1,0 +1,10 @@
+# The fixtures here are pictures, and are named binary rather than left to
+# git's NUL-byte guess, as the root `.gitattributes` asks of every binary in the
+# tree (`*.png` is declared there already). A single translated byte in a JPEG,
+# a GIF or a WebP is not a formatting problem: it is a fixture that decodes to a
+# different picture, or none, and a test that fails for a reason no diff shows.
+*.jpg  binary
+*.gif  binary
+*.webp binary
+*.bmp  binary
+*.ico  binary

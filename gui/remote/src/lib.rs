@@ -112,6 +112,9 @@ pub use submit::{
     try_decode_submit,
 };
 
+pub mod repaint;
+pub use repaint::{REPAINT_MAGIC, REPAINT_VERSION, Repaint, decode_repaint, encode_repaint};
+
 pub mod tray;
 pub mod window_list;
 pub use window_list::{
@@ -139,6 +142,9 @@ pub use loopback::{Pipe, pipe};
 
 pub mod socket;
 pub use socket::{DEFAULT_DISPLAY, DISPLAY_VAR, Listener, Socket, display_addr};
+
+pub mod wait;
+pub use wait::{AsWaitHandle, LISTENER_READINESS, WaitHandle, WaitSet};
 
 // Private: the decode cursor is an implementation detail of this crate's
 // decoders, and a *private module* is what makes its fields unreachable from
@@ -444,6 +450,9 @@ pub enum DecodeError {
     /// *scene* frame, so that a limit hit names the frame that hit it even if
     /// the two limits later diverge.
     TooManyListedWindows(u32),
+    /// A repaint frame names more windows than
+    /// [`repaint::MAX_REPAINT_WINDOWS`].
+    TooManyRepaints(u32),
     /// A [`ShellControlAction`](control::ShellControlAction) byte is not in this
     /// decoder's table.
     BadShellAction(u8),
@@ -519,6 +528,13 @@ impl core::fmt::Display for DecodeError {
                 )
             }
             Self::BadCursorShape(b) => write!(f, "unknown cursor shape {b:#04x}"),
+            Self::TooManyRepaints(n) => {
+                write!(
+                    f,
+                    "repaint window count {n} exceeds limit {}",
+                    repaint::MAX_REPAINT_WINDOWS
+                )
+            }
             Self::TooManyListedWindows(n) => {
                 write!(
                     f,

@@ -29,6 +29,9 @@ SRC = Path(__file__).parent / "src" / "lib.rs"
 HANDED = "a_result_is_handed_back_and_the_loop_woken"
 NEWEST = "requests_waiting_are_superseded_by_the_newest"
 STALE = "a_superseded_result_is_dropped"
+QUEUE = "a_queue_hands_back_every_result_as_it_is_made"
+REPLACED = "a_new_set_replaces_what_is_left_of_the_last"
+CANCEL = "an_empty_set_cancels_what_is_waiting"
 
 MUTATIONS = [
     (
@@ -39,8 +42,8 @@ MUTATIONS = [
     ),
     (
         "the loop is not woken",
-        "                    waker.wake_by_ref();\n",
-        "",
+        "                        // The `Latest` is gone; nobody is left to answer.\n                        break;\n                    }\n                    waker.wake_by_ref();",
+        "                        // The `Latest` is gone; nobody is left to answer.\n                        break;\n                    }",
         [HANDED],
     ),
     (
@@ -72,6 +75,31 @@ MUTATIONS = [
         "                Ok(done) if done.ticket == self.asked => {",
         "                Ok(done) => {",
         [NEWEST],
+    ),
+    # -- Queue ---------------------------------------------------------------
+    (
+        "a newer set does not replace the rest of the last",
+        "                    while let Ok(set) = requests.try_recv() {\n                        waiting = VecDeque::from(set);\n                    }\n",
+        "",
+        [REPLACED, CANCEL],
+    ),
+    (
+        "an empty set is not a cancel",
+        "                    while let Ok(set) = requests.try_recv() {\n                        waiting = VecDeque::from(set);",
+        "                    while let Ok(set) = requests.try_recv() {\n                        if set.is_empty() {\n                            continue;\n                        }\n                        waiting = VecDeque::from(set);",
+        [CANCEL],
+    ),
+    (
+        "a queue does not wake the loop",
+        "                        // The `Queue` is gone; nobody is left to answer.\n                        break;\n                    }\n                    waker.wake_by_ref();",
+        "                        // The `Queue` is gone; nobody is left to answer.\n                        break;\n                    }",
+        [QUEUE],
+    ),
+    (
+        "a take hands back one result",
+        "        self.results.try_iter().collect()",
+        "        self.results.try_recv().into_iter().collect()",
+        [QUEUE],
     ),
 ]
 

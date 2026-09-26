@@ -36,6 +36,16 @@
 //! The work runs one request at a time, in the order the surviving requests
 //! were made, on one thread that lives as long as the [`Latest`].
 //!
+//! # Every one wanted
+//!
+//! [`Queue`] is for work where each request's result is worth having, and the
+//! caller knows a whole set at once -- the thumbnails of every card a grid
+//! shows. Its request is that set, in the order to make them: a new set
+//! replaces whatever of the last is not yet started (cards scrolled away are
+//! not wanted any more), and each result is handed back as soon as it is
+//! made, waking the loop, so a grid fills card by card rather than all at
+//! the end.
+//!
 //! # A panic
 //!
 //! Userspace builds with `panic = "abort"` (the workspace's profiles), so a
@@ -44,6 +54,7 @@
 //! catch, and a result type carrying "the work panicked" would be a branch no
 //! build could take.
 
+use std::collections::VecDeque;
 use std::io;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::task::Waker;
@@ -188,6 +199,85 @@ impl<J: Send + 'static, R: Send + 'static> Latest<J, R> {
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return None,
             }
         }
+    }
+}
+
+/// Work run on a thread of its own, a set of requests at a time, every result
+/// handed back as it is made; see the module docs.
+///
+/// Dropping it ends the worker once the request it is running (if any) is
+/// done, without waiting for it -- as for [`Latest`].
+pub struct Queue<J, R> {
+    sets: Sender<Vec<J>>,
+    results: Receiver<R>,
+}
+
+impl<J: Send + 'static, R: Send + 'static> Queue<J, R> {
+    /// Start the worker: a thread called `name`, running `work` on each
+    /// request in turn and waking the loop through `waker` after each result.
+    ///
+    /// # Errors
+    ///
+    /// When the thread cannot be started; the caller can still do the work
+    /// itself.
+    pub fn start<F>(name: &str, waker: Waker, mut work: F) -> io::Result<Self>
+    where
+        F: FnMut(J) -> R + Send + 'static,
+    {
+        let (sets, requests) = mpsc::channel::<Vec<J>>();
+        let (answers, results) = mpsc::channel::<R>();
+        thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(move || {
+                let mut waiting = VecDeque::new();
+                loop {
+                    // With nothing to do, wait for a set; the `Queue` going
+                    // is the end.
+                    if waiting.is_empty() {
+                        match requests.recv() {
+                            Ok(set) => waiting = VecDeque::from(set),
+                            Err(_) => break,
+                        }
+                    }
+                    // A newer set replaces what is left of this one.
+                    while let Ok(set) = requests.try_recv() {
+                        waiting = VecDeque::from(set);
+                    }
+                    let Some(job) = waiting.pop_front() else {
+                        continue;
+                    };
+                    if answers.send(work(job)).is_err() {
+                        // The `Queue` is gone; nobody is left to answer.
+                        break;
+                    }
+                    waker.wake_by_ref();
+                }
+            })?;
+        Ok(Self { sets, results })
+    }
+
+    /// Ask for `jobs`, in this order, in place of every request not yet
+    /// started. An empty set cancels what is waiting.
+    ///
+    /// # Errors
+    ///
+    /// Gives the set back when the worker is gone (it can only have panicked,
+    /// in a build that unwinds); the caller can still do the work itself.
+    pub fn replace(&mut self, jobs: Vec<J>) -> Result<(), Vec<J>> {
+        self.sets.send(jobs).map_err(|mpsc::SendError(jobs)| jobs)
+    }
+
+    /// Every result made since the last call, in the order they were made.
+    pub fn take(&mut self) -> Vec<R> {
+        self.results.try_iter().collect()
+    }
+
+    /// Wait up to `timeout` for the next result.
+    ///
+    /// Not for the loop's thread; for a caller with nothing to draw -- a test,
+    /// or a tool that runs the same work to completion.
+    pub fn wait(&mut self, timeout: Duration) -> Option<R> {
+        self.results.recv_timeout(timeout).ok()
     }
 }
 
@@ -366,6 +456,76 @@ mod tests {
         release.send(()).unwrap();
         assert_eq!(latest.wait(LONG), Some(7));
         assert_eq!(latest.wait(Duration::from_millis(10)), None);
+    }
+
+    /// **A queue runs every request in a set, in order, and hands each result
+    /// back as it is made**, waking the loop each time.
+    #[test]
+    fn a_queue_hands_back_every_result_as_it_is_made() {
+        let (counter, waker, heard) = counted();
+        let mut queue = Queue::start("test", waker, |n: u32| n * 10).unwrap();
+        queue.replace(vec![1, 2, 3]).unwrap();
+        for _ in 0..3 {
+            heard.recv_timeout(LONG).expect("the loop was never woken");
+        }
+        // Everything made since the last `take`, in one.
+        assert_eq!(queue.take(), [10, 20, 30]);
+        assert_eq!(counter.wakes.load(Ordering::SeqCst), 3, "one wake a result");
+        assert!(queue.take().is_empty());
+    }
+
+    /// **A new set replaces what is left of the last** -- the cards scrolled
+    /// away are not made -- though the one already running finishes.
+    #[test]
+    fn a_new_set_replaces_what_is_left_of_the_last() {
+        let (_counter, waker, _heard) = counted();
+        let (release, held) = mpsc::channel::<()>();
+        let held = Mutex::new(held);
+        let (started, taken) = mpsc::channel::<()>();
+        let started = Mutex::new(started);
+        let mut queue = Queue::start("test", waker, move |n: u32| {
+            if n == 1 {
+                started.lock().unwrap().send(()).unwrap();
+                held.lock().unwrap().recv_timeout(LONG).unwrap();
+            }
+            n
+        })
+        .unwrap();
+        queue.replace(vec![1, 2, 3]).unwrap();
+        taken.recv_timeout(LONG).unwrap();
+        queue.replace(vec![7, 8]).unwrap();
+        release.send(()).unwrap();
+        let got: Vec<u32> = (0..3).filter_map(|_| queue.wait(LONG)).collect();
+        assert_eq!(got, [1, 7, 8], "2 and 3 were made after they were replaced");
+        assert_eq!(queue.wait(Duration::from_millis(100)), None);
+    }
+
+    /// An empty set cancels what is waiting.
+    #[test]
+    fn an_empty_set_cancels_what_is_waiting() {
+        let (_counter, waker, _heard) = counted();
+        let (release, held) = mpsc::channel::<()>();
+        let held = Mutex::new(held);
+        let (started, taken) = mpsc::channel::<()>();
+        let started = Mutex::new(started);
+        let mut queue = Queue::start("test", waker, move |n: u32| {
+            if n == 1 {
+                started.lock().unwrap().send(()).unwrap();
+                held.lock().unwrap().recv_timeout(LONG).unwrap();
+            }
+            n
+        })
+        .unwrap();
+        queue.replace(vec![1, 2, 3]).unwrap();
+        taken.recv_timeout(LONG).unwrap();
+        queue.replace(Vec::new()).unwrap();
+        release.send(()).unwrap();
+        assert_eq!(queue.wait(LONG), Some(1));
+        assert_eq!(
+            queue.wait(Duration::from_millis(200)),
+            None,
+            "2 and 3 were made"
+        );
     }
 
     /// `channel_waker` says every wake, and survives nobody listening.

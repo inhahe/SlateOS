@@ -1,161 +1,441 @@
-//! POSIX character set conversion (`<iconv.h>`).
+// The arithmetic here is on byte counts bounded by the caller's buffers and
+// on code points below 2^31; each subtraction is guarded by the comparison
+// before it.
+#![allow(clippy::arithmetic_side_effects)]
+
+//! POSIX character set conversion (`<iconv.h>`): `iconv_open`, `iconv`,
+//! `iconv_close`, with glibc 2.39's semantics for the character sets this
+//! libc converts -- UTF-8, ASCII and ISO-8859-1 (Latin-1).
 //!
-//! Provides `iconv_open`, `iconv`, `iconv_close` for character encoding
-//! conversion.  Our OS uses UTF-8 internally, so only UTF-8 ↔ ASCII
-//! (and identity) conversions are supported.  Requesting any other
-//! encoding pair fails with `EINVAL`.
+//! # What glibc does, and so what this does
 //!
-//! Many programs (shells, editors, curses) call `iconv_open("UTF-8",
-//! "UTF-8")` at startup to test locale support; this succeeds.
+//! Every conversion decodes a character from the source and encodes it for the
+//! target, and stops at the first one that cannot go through, leaving the
+//! caller's pointers and counts at the start of it:
+//!
+//! | the character | `errno` | unless the target named |
+//! |---|---|---|
+//! | is not valid in the source (a stray byte, an overlong or surrogate UTF-8 form, a byte above 0x7F in ASCII) | `EILSEQ` | `//IGNORE`: it is skipped |
+//! | is cut off by the end of the input | `EINVAL` | -- (never skipped) |
+//! | cannot be written in the target | `EILSEQ` | `//TRANSLIT`: a substitute is written; `//IGNORE`: it is skipped |
+//! | does not fit in the output | `E2BIG` | -- |
+//!
+//! `//TRANSLIT` substitutes what glibc's C-locale table does -- `"EUR"` for
+//! the euro sign, `"(C)"` for the copyright sign, `"ss"` for sharp s
+//! ([`crate::iconv_translit`]) -- and `?` for anything it does not list, and
+//! each substitution counts as one irreversible conversion, which is what a
+//! successful `iconv` returns.  A conversion that skipped anything under
+//! `//IGNORE` still converts all the rest, then fails with `EILSEQ`, as
+//! glibc's does.  Options follow the target's name, `//` or `,` apart and in
+//! any case; unknown ones are ignored, and the source's are ignored
+//! altogether.
+//!
+//! glibc's UTF-8 is the old, wider one: up to six bytes and U+7FFFFFFF, with
+//! overlong forms and surrogates refused.  So is this.
+//!
+//! Probed against Ubuntu 24.04's glibc 2.39 on 2026-09-26; the tests below
+//! pin what it answered.
+//!
+//! # Until 2026-09-26
+//!
+//! Converting to ASCII replaced what it could not write with `?` and counted
+//! it, where glibc refuses with `EILSEQ` unless asked to transliterate; the
+//! "identity" conversions copied bytes, where glibc validates them, so invalid
+//! UTF-8 went through a UTF-8 to UTF-8 conversion unchanged; `//TRANSLIT` and
+//! `//IGNORE` made the name unrecognised; a NULL name was `EINVAL` where glibc
+//! faults; the reset call and `iconv_close` accepted any descriptor
+//! (`B-D-ICONV-WAS-NOT-GLIBCS`).
+//!
+//! # Descriptors
+//!
+//! An `iconv_t` is a pointer-sized handle a program only compares with
+//! `(iconv_t)-1` and hands back.  No state survives between calls for these
+//! character sets, so the handle is the conversion itself: [`DESCRIPTOR_TAG`]
+//! with the two character sets and the target's options packed below it.
+//! Anything without the tag is refused with `EBADF`.
 
 use crate::errno;
 
-/// Opaque conversion descriptor.
-///
-/// We encode the conversion type in a small integer cast to a pointer.
-/// - 1: identity (same encoding, e.g. UTF-8 → UTF-8)
-/// - 2: ASCII → UTF-8 (passthrough for ASCII subset)
-/// - 3: UTF-8 → ASCII (lossy — non-ASCII bytes replaced with '?')
-/// - 4: Latin-1 → UTF-8 (0x00-0x7F passthrough, 0x80-0xFF → 2-byte UTF-8)
-/// - 5: UTF-8 → Latin-1 (code points > U+00FF set EILSEQ)
-/// - 6: Latin-1 → ASCII (lossy — 0x80-0xFF replaced with '?', one byte at a time)
+/// Opaque conversion descriptor (see the module docs).
 pub type IconvT = isize;
 
 /// Error return from `iconv_open`.
 pub const ICONV_OPEN_ERR: IconvT = -1;
 
-// ---------------------------------------------------------------------------
-// Encoding identifiers (case-insensitive matching)
-// ---------------------------------------------------------------------------
-
-/// Check if a C string matches an encoding name (case-insensitive).
-///
-/// Normalises the input by stripping hyphens/underscores and
-/// upper-casing, then compares against each alias.
-///
-/// Returns `true` if `s` matches any of the aliases.
-fn matches_encoding(s: *const u8, aliases: &[&[u8]]) -> bool {
-    if s.is_null() {
-        return false;
-    }
-
-    // Read the C string, stripping hyphens/underscores and uppercasing.
-    let mut normalized = [0u8; 32];
-    let mut norm_len = 0usize;
-    let mut i = 0usize;
-    loop {
-        // SAFETY: caller guarantees s is a valid C string; we stop at NUL.
-        let byte = unsafe { *s.add(i) };
-        if byte == 0 {
-            break;
-        }
-        i = i.wrapping_add(1);
-        // Skip hyphens and underscores for fuzzy matching.
-        if byte == b'-' || byte == b'_' {
-            continue;
-        }
-        if norm_len >= normalized.len() {
-            return false; // Too long to be a known encoding name.
-        }
-        if let Some(slot) = normalized.get_mut(norm_len) {
-            *slot = byte.to_ascii_uppercase();
-        }
-        norm_len = norm_len.wrapping_add(1);
-    }
-
-    for alias in aliases {
-        if alias.len() == norm_len {
-            let mut is_match = true;
-            for (j, &expected) in alias.iter().enumerate() {
-                let actual = normalized.get(j).copied().unwrap_or(0);
-                if actual != expected.to_ascii_uppercase() {
-                    is_match = false;
-                    break;
-                }
-            }
-            if is_match {
-                return true;
-            }
-        }
-    }
-    false
+/// The character sets this libc converts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Charset {
+    Utf8 = 0,
+    Ascii = 1,
+    Latin1 = 2,
 }
 
-/// UTF-8 encoding aliases (normalized to uppercase, no hyphens/underscores).
-const UTF8_ALIASES: &[&[u8]] = &[b"UTF8"];
+impl Charset {
+    fn from_index(i: isize) -> Option<Self> {
+        match i {
+            0 => Some(Self::Utf8),
+            1 => Some(Self::Ascii),
+            2 => Some(Self::Latin1),
+            _ => None,
+        }
+    }
+}
 
-/// ASCII encoding aliases.
-const ASCII_ALIASES: &[&[u8]] = &[b"ASCII", b"USASCII", b"US", b"ANSI"];
+/// `//TRANSLIT` on the target.
+const TRANSLIT: isize = 1;
+/// `//IGNORE` on the target.
+const IGNORE: isize = 2;
 
-/// Latin-1 (ISO-8859-1) encoding aliases.
+/// The high bits every descriptor carries.  Positive and far from -1, so a
+/// descriptor can never be mistaken for the error return.
+const DESCRIPTOR_TAG: isize = 0x1C0_0000;
+/// The bits below the tag: source, target and options.
+const DESCRIPTOR_FIELDS: isize = 0xFFF;
+
+/// A conversion: what [`iconv`] needs to know about a descriptor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Conversion {
+    from: Charset,
+    to: Charset,
+    flags: isize,
+}
+
+impl Conversion {
+    fn descriptor(self) -> IconvT {
+        DESCRIPTOR_TAG | (self.from as isize) | ((self.to as isize) << 4) | (self.flags << 8)
+    }
+
+    fn from_descriptor(cd: IconvT) -> Option<Self> {
+        if (cd & !DESCRIPTOR_FIELDS) != DESCRIPTOR_TAG {
+            return None;
+        }
+        let flags = (cd >> 8) & 0xF;
+        if flags & !(TRANSLIT | IGNORE) != 0 {
+            return None;
+        }
+        Some(Self {
+            from: Charset::from_index(cd & 0xF)?,
+            to: Charset::from_index((cd >> 4) & 0xF)?,
+            flags,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Names
+// ---------------------------------------------------------------------------
+
+/// glibc's names for the three character sets (gconv-modules' aliases), in
+/// the form [`normalise`] brings a name to: upper case, `-` and `_` removed.
+/// Removing those is more lenient than glibc, which lists each spelling; it
+/// accepts no name glibc would read as another character set.
+const UTF8_NAMES: &[&[u8]] = &[b"UTF8", b"ISO10646/UTF8/", b"ISO10646/UTF8"];
+const ASCII_NAMES: &[&[u8]] = &[
+    b"ANSIX3.41968",
+    b"ANSIX3.41986",
+    b"ISOIR6",
+    b"ISO646.IRV:1991",
+    b"ASCII",
+    b"ISO646US",
+    b"USASCII",
+    b"US",
+    b"IBM367",
+    b"CP367",
+    b"CSASCII",
+    b"OSF00010020",
+];
+const LATIN1_NAMES: &[&[u8]] = &[
+    b"ISO88591",
+    b"ISO88591:1987",
+    b"ISOIR100",
+    b"LATIN1",
+    b"L1",
+    b"IBM819",
+    b"CP819",
+    b"CSISOLATIN1",
+    b"OSF00010001",
+];
+
+/// Upper case with `-` and `_` removed, into `buf`; `None` if too long to be
+/// any name above.
+fn normalise<'b>(name: &[u8], buf: &'b mut [u8; 32]) -> Option<&'b [u8]> {
+    let mut n = 0;
+    for &b in name {
+        if b == b'-' || b == b'_' {
+            continue;
+        }
+        *buf.get_mut(n)? = b.to_ascii_uppercase();
+        n += 1;
+    }
+    buf.get(..n)
+}
+
+/// A name with its options: the character set, and `TRANSLIT`/`IGNORE`.
 ///
-/// Latin-1 is a superset of ASCII: 0x00-0x7F are identical to ASCII,
-/// but 0x80-0xFF map to Unicode code points U+0080-U+00FF and require
-/// 2-byte UTF-8 encoding (0xC2-0xC3 prefix).  This must NOT be treated
-/// as a simple ASCII alias.
-const LATIN1_ALIASES: &[&[u8]] = &[b"ISO88591", b"LATIN1", b"L1"];
+/// The name ends at the first `//`; the options after it are separated by
+/// `//` or `,`, compared without regard to case, and unknown ones are
+/// ignored, as glibc ignores them.  An empty name is the locale's character
+/// set, which in the C locale -- this libc's only one -- is ASCII
+/// (`nl_langinfo(CODESET)` says `ANSI_X3.4-1968`).
+fn parse_name(spec: &[u8]) -> Option<(Charset, isize)> {
+    let (name, options) = match spec.windows(2).position(|w| w == b"//") {
+        Some(i) => (spec.get(..i)?, spec.get(i + 2..)?),
+        None => (spec, &b""[..]),
+    };
+    let charset = if name.is_empty() {
+        Charset::Ascii
+    } else {
+        let mut buf = [0u8; 32];
+        let norm = normalise(name, &mut buf)?;
+        if UTF8_NAMES.contains(&norm) {
+            Charset::Utf8
+        } else if ASCII_NAMES.contains(&norm) {
+            Charset::Ascii
+        } else if LATIN1_NAMES.contains(&norm) {
+            Charset::Latin1
+        } else {
+            return None;
+        }
+    };
+    let mut flags = 0;
+    for option in options.split(|&b| b == b'/' || b == b',') {
+        if option.eq_ignore_ascii_case(b"TRANSLIT") {
+            flags |= TRANSLIT;
+        } else if option.eq_ignore_ascii_case(b"IGNORE") {
+            flags |= IGNORE;
+        }
+    }
+    Some((charset, flags))
+}
 
-/// Open a conversion descriptor.
+/// View a NUL-terminated C string as a byte slice (excluding the NUL).
 ///
-/// Supports UTF-8, ASCII, and Latin-1 (ISO-8859-1) in any combination.
-/// Returns `(IconvT)-1` and sets errno to `EINVAL` for unsupported
-/// encoding pairs.
+/// # Safety
+///
+/// `p` must be non-null and point to a valid NUL-terminated string.
+unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
+    // SAFETY: the caller's contract.
+    let len = unsafe { crate::string::strlen(p) };
+    // SAFETY: `p` is valid for `len` bytes, per the strlen scan above.
+    unsafe { core::slice::from_raw_parts(p, len) }
+}
+
+/// Open a conversion from `fromcode` to `tocode`.
+///
+/// `(iconv_t)-1` with `EINVAL` when either names no character set this libc
+/// converts, and with `EFAULT` for a NULL name, where glibc faults reading it.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iconv_open(tocode: *const u8, fromcode: *const u8) -> IconvT {
-    let from_utf8 = matches_encoding(fromcode, UTF8_ALIASES);
-    let from_ascii = matches_encoding(fromcode, ASCII_ALIASES);
-    let from_latin1 = matches_encoding(fromcode, LATIN1_ALIASES);
-    let to_utf8 = matches_encoding(tocode, UTF8_ALIASES);
-    let to_ascii = matches_encoding(tocode, ASCII_ALIASES);
-    let to_latin1 = matches_encoding(tocode, LATIN1_ALIASES);
-
-    // Identity conversions.
-    if (from_utf8 && to_utf8) || (from_ascii && to_ascii) || (from_latin1 && to_latin1) {
-        return 1; // Identity descriptor.
+    if tocode.is_null() || fromcode.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return ICONV_OPEN_ERR;
     }
-
-    // ASCII → UTF-8 (passthrough — ASCII is valid UTF-8).
-    if from_ascii && to_utf8 {
-        return 2;
+    // SAFETY: both non-NULL (checked) and, per the C contract, NUL-terminated.
+    let (to_spec, from_spec) = unsafe { (cstr_slice(tocode), cstr_slice(fromcode)) };
+    // The source's options are parsed and dropped: glibc applies only the
+    // target's.
+    match (parse_name(from_spec), parse_name(to_spec)) {
+        (Some((from, _)), Some((to, flags))) => Conversion { from, to, flags }.descriptor(),
+        _ => {
+            errno::set_errno(errno::EINVAL);
+            ICONV_OPEN_ERR
+        }
     }
+}
 
-    // UTF-8 → ASCII (lossy).
-    if from_utf8 && to_ascii {
-        return 3;
+// ---------------------------------------------------------------------------
+// Decoding and encoding one character
+// ---------------------------------------------------------------------------
+
+/// Why the next input character cannot be read.
+#[derive(Debug, PartialEq, Eq)]
+enum DecodeError {
+    /// Not valid in the source: `EILSEQ`, or skipped under `//IGNORE` (this
+    /// many bytes).
+    Invalid(usize),
+    /// Cut off by the end of the input: `EINVAL`.
+    Incomplete,
+}
+
+/// The first character of `input` (non-empty) and its length in bytes.
+fn decode(from: Charset, input: &[u8]) -> Result<(u32, usize), DecodeError> {
+    let Some(&b0) = input.first() else {
+        return Err(DecodeError::Incomplete);
+    };
+    match from {
+        Charset::Ascii if b0 < 0x80 => Ok((u32::from(b0), 1)),
+        Charset::Ascii => Err(DecodeError::Invalid(1)),
+        Charset::Latin1 => Ok((u32::from(b0), 1)),
+        Charset::Utf8 => decode_utf8(input),
     }
+}
 
-    // Latin-1 → UTF-8 (0x80-0xFF expand to 2-byte UTF-8 sequences).
-    if from_latin1 && to_utf8 {
-        return 4;
+/// glibc's UTF-8: up to six bytes, U+7FFFFFFF at most; a stray continuation
+/// byte, `0xFE`/`0xFF`, an overlong form or a surrogate is invalid, and the
+/// error is reported at the lead byte (one byte is skipped under `//IGNORE`).
+fn decode_utf8(input: &[u8]) -> Result<(u32, usize), DecodeError> {
+    let b0 = *input.first().ok_or(DecodeError::Incomplete)?;
+    let (len, init, min) = match b0 {
+        0x00..=0x7F => return Ok((u32::from(b0), 1)),
+        0xC2..=0xDF => (2, u32::from(b0 & 0x1F), 0x80),
+        0xE0..=0xEF => (3, u32::from(b0 & 0x0F), 0x800),
+        0xF0..=0xF7 => (4, u32::from(b0 & 0x07), 0x1_0000),
+        0xF8..=0xFB => (5, u32::from(b0 & 0x03), 0x20_0000),
+        0xFC..=0xFD => (6, u32::from(b0 & 0x01), 0x400_0000),
+        // 0x80..=0xC1 (a continuation byte, or an overlong two-byte lead)
+        // and 0xFE, 0xFF.
+        _ => return Err(DecodeError::Invalid(1)),
+    };
+    let mut cp = init;
+    for i in 1..len {
+        let Some(&b) = input.get(i) else {
+            // Every byte so far was a valid continuation: the character is
+            // cut off, not wrong.
+            return Err(DecodeError::Incomplete);
+        };
+        if b & 0xC0 != 0x80 {
+            return Err(DecodeError::Invalid(1));
+        }
+        cp = (cp << 6) | u32::from(b & 0x3F);
     }
-
-    // UTF-8 → Latin-1 (code points > U+00FF fail with EILSEQ).
-    if from_utf8 && to_latin1 {
-        return 5;
+    if cp < min || (0xD800..=0xDFFF).contains(&cp) {
+        return Err(DecodeError::Invalid(1));
     }
+    Ok((cp, len))
+}
 
-    // ASCII → Latin-1 (passthrough — ASCII is a subset of Latin-1).
-    if from_ascii && to_latin1 {
-        return 1; // Identity (ASCII bytes are valid Latin-1).
+/// `cp` in `to`, into `out`; the number of bytes, or `None` if `to` cannot
+/// represent it.
+fn encode(to: Charset, cp: u32, out: &mut [u8; 6]) -> Option<usize> {
+    let limit = match to {
+        Charset::Utf8 => return Some(encode_utf8(cp, out)),
+        Charset::Ascii => 0x80,
+        Charset::Latin1 => 0x100,
+    };
+    if cp >= limit {
+        return None;
     }
+    *out.first_mut()? = cp as u8;
+    Some(1)
+}
 
-    // Latin-1 → ASCII (lossy — non-ASCII bytes replaced with '?').
-    if from_latin1 && to_ascii {
-        return 6;
+/// glibc's UTF-8 encoder, six bytes at most (`cp` is below 2^31: it came
+/// from [`decode`]).  Each byte is masked to its bits before the cast.
+fn encode_utf8(cp: u32, out: &mut [u8; 6]) -> usize {
+    let (len, lead): (usize, u8) = match cp {
+        0..=0x7F => (1, 0),
+        0x80..=0x7FF => (2, 0xC0),
+        0x800..=0xFFFF => (3, 0xE0),
+        0x1_0000..=0x1F_FFFF => (4, 0xF0),
+        0x20_0000..=0x3FF_FFFF => (5, 0xF8),
+        _ => (6, 0xFC),
+    };
+    let mut v = cp;
+    for slot in out.iter_mut().take(len).skip(1).rev() {
+        *slot = 0x80 | (v & 0x3F) as u8;
+        v >>= 6;
     }
+    if let Some(first) = out.first_mut() {
+        *first = lead | v as u8;
+    }
+    len
+}
 
-    // Unsupported encoding pair.
-    errno::set_errno(errno::EINVAL);
-    ICONV_OPEN_ERR
+/// What `//TRANSLIT` writes for `cp`: glibc's C-locale table, or `?`.
+fn transliterate(cp: u32) -> &'static [u8] {
+    let table = crate::iconv_translit::C_TRANSLIT;
+    match table.binary_search_by_key(&cp, |&(k, _)| k) {
+        Ok(i) => table.get(i).map_or(b"?", |&(_, r)| r.as_bytes()),
+        Err(_) => b"?",
+    }
+}
+
+/// How a conversion ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Stop {
+    /// All the input went through: the irreversible count, or `EILSEQ` if
+    /// `//IGNORE` skipped anything.
+    Done { irreversible: usize, skipped: bool },
+    /// Stopped at a character: this `errno`.
+    Error(i32),
+}
+
+/// Convert `input` into `output` with `conv`: how far each got, and why it
+/// stopped.  The heart of [`iconv`], on slices.
+fn convert(conv: Conversion, input: &[u8], output: &mut [u8]) -> (usize, usize, Stop) {
+    let (mut i, mut o) = (0usize, 0usize);
+    let mut irreversible = 0usize;
+    let mut skipped = false;
+    let mut buf = [0u8; 6];
+    while let Some(rest) = input.get(i..).filter(|r| !r.is_empty()) {
+        // glibc asks for room for the smallest character before it looks at
+        // the next one, so a full buffer stops even ahead of one `//IGNORE`
+        // would have skipped.
+        if o >= output.len() {
+            return (i, o, Stop::Error(errno::E2BIG));
+        }
+        let (cp, len) = match decode(conv.from, rest) {
+            Ok(c) => c,
+            Err(DecodeError::Invalid(n)) if conv.flags & IGNORE != 0 => {
+                i += n;
+                skipped = true;
+                continue;
+            }
+            Err(DecodeError::Invalid(_)) => return (i, o, Stop::Error(errno::EILSEQ)),
+            Err(DecodeError::Incomplete) => return (i, o, Stop::Error(errno::EINVAL)),
+        };
+        let (written, substituted): (&[u8], bool) = match encode(conv.to, cp, &mut buf) {
+            Some(n) => (buf.get(..n).unwrap_or(&[]), false),
+            None if conv.flags & TRANSLIT != 0 => (transliterate(cp), true),
+            None if conv.flags & IGNORE != 0 => {
+                i += len;
+                skipped = true;
+                continue;
+            }
+            None => return (i, o, Stop::Error(errno::EILSEQ)),
+        };
+        // All of it or none: a substitute that does not fit is not begun.
+        let Some(dst) = output.get_mut(o..o + written.len()) else {
+            return (i, o, Stop::Error(errno::E2BIG));
+        };
+        dst.copy_from_slice(written);
+        if substituted {
+            irreversible += 1;
+        }
+        i += len;
+        o += written.len();
+    }
+    (
+        i,
+        o,
+        Stop::Done {
+            irreversible,
+            skipped,
+        },
+    )
 }
 
 /// Perform character set conversion.
 ///
-/// Converts bytes from `*inbuf` to `*outbuf`, updating all four
-/// pointer/size pairs as it progresses.
+/// Converts from `*inbuf` into `*outbuf`, advancing both and counting down
+/// `*inbytesleft` and `*outbytesleft` by what went through; see the module
+/// docs for where it stops and why.  Returns the number of irreversible
+/// conversions (`//TRANSLIT` substitutions), or `(size_t)-1` with `errno`.
 ///
-/// Returns the number of irreversible conversions (replacements),
-/// or `(size_t)-1` on error.
+/// With `inbuf` or `*inbuf` NULL it resets the conversion state -- these
+/// character sets have none, so it writes nothing and returns 0 -- after
+/// checking the descriptor (`EBADF`), as glibc does.
+///
+/// Where glibc reads through a NULL pointer -- `inbytesleft`, `outbuf` or
+/// `outbytesleft` on a conversion, `*outbuf` with room to write, or
+/// `outbytesleft` beside a non-NULL `*outbuf` on a reset -- this answers
+/// `EFAULT` instead.
+///
+/// # Safety
+///
+/// Each non-NULL pointer must be valid as C's `iconv` requires: `*inbuf` for
+/// `*inbytesleft` bytes of reading and `*outbuf` for `*outbytesleft` bytes of
+/// writing.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn iconv(
     cd: IconvT,
@@ -164,220 +444,84 @@ pub unsafe extern "C" fn iconv(
     outbuf: *mut *mut u8,
     outbytesleft: *mut usize,
 ) -> usize {
-    // NULL inbuf = reset conversion state (no state for our encodings).
-    if inbuf.is_null() || unsafe { (*inbuf).is_null() } {
-        return 0;
+    let fail = |e: i32| {
+        errno::set_errno(e);
+        usize::MAX
+    };
+    // SAFETY: each is NULL or, per the C contract, valid to read.
+    let in_start = if inbuf.is_null() {
+        core::ptr::null()
+    } else {
+        unsafe { *inbuf }
+    };
+    let out_start = if outbuf.is_null() {
+        core::ptr::null_mut()
+    } else {
+        unsafe { *outbuf }
+    };
+
+    if in_start.is_null() {
+        // The reset.  glibc computes the end of the output from
+        // `*outbytesleft` when there is an output pointer, before it looks at
+        // the descriptor.
+        if !out_start.is_null() && outbytesleft.is_null() {
+            return fail(errno::EFAULT);
+        }
+        return match Conversion::from_descriptor(cd) {
+            Some(_) => 0,
+            None => fail(errno::EBADF),
+        };
     }
 
-    if outbuf.is_null()
-        || unsafe { (*outbuf).is_null() }
-        || inbytesleft.is_null()
-        || outbytesleft.is_null()
-    {
-        errno::set_errno(errno::EFAULT);
-        return usize::MAX;
+    if inbytesleft.is_null() || outbuf.is_null() || outbytesleft.is_null() {
+        return fail(errno::EFAULT);
+    }
+    // SAFETY: both non-NULL (checked), per the C contract valid to read.
+    let (in_left, out_left) = unsafe { (*inbytesleft, *outbytesleft) };
+    let Some(conv) = Conversion::from_descriptor(cd) else {
+        return fail(errno::EBADF);
+    };
+    if out_start.is_null() && in_left > 0 && out_left > 0 {
+        return fail(errno::EFAULT);
     }
 
-    let mut replacements: usize = 0;
+    // SAFETY: the caller's buffers, for the lengths its counts give (a NULL
+    // `*outbuf` only with nothing to write into it, checked above).
+    let input = unsafe { core::slice::from_raw_parts(in_start, in_left) };
+    let output: &mut [u8] = if out_start.is_null() {
+        &mut []
+    } else {
+        // SAFETY: as above.
+        unsafe { core::slice::from_raw_parts_mut(out_start, out_left) }
+    };
 
-    // SAFETY: all pointers verified non-null.
-    let in_ptr = unsafe { &mut *inbuf };
-    let in_left = unsafe { &mut *inbytesleft };
-    let out_ptr = unsafe { &mut *outbuf };
-    let out_left = unsafe { &mut *outbytesleft };
-
-    match cd {
-        1 | 2 => {
-            // Identity or ASCII → UTF-8: copy bytes directly.
-            while *in_left > 0 && *out_left > 0 {
-                // SAFETY: in_left > 0 means *in_ptr is valid; out_left > 0 means *out_ptr is valid.
-                let byte = unsafe { **in_ptr };
-                unsafe {
-                    **out_ptr = byte;
-                }
-                *in_ptr = unsafe { (*in_ptr).add(1) };
-                *out_ptr = unsafe { (*out_ptr).add(1) };
-                *in_left = in_left.wrapping_sub(1);
-                *out_left = out_left.wrapping_sub(1);
-            }
+    let (read, written, stop) = convert(conv, input, output);
+    // SAFETY: the four pointers are the caller's, checked non-NULL above;
+    // `read` and `written` are within the buffers they index.
+    unsafe {
+        *inbuf = in_start.add(read);
+        *inbytesleft = in_left - read;
+        if !out_start.is_null() {
+            *outbuf = out_start.add(written);
         }
-        3 => {
-            // UTF-8 → ASCII: non-ASCII bytes become '?'.
-            while *in_left > 0 && *out_left > 0 {
-                let byte = unsafe { **in_ptr };
-                if byte > 127 {
-                    // Non-ASCII: skip the full UTF-8 sequence.
-                    let seq_len = if byte & 0xE0 == 0xC0 {
-                        2usize
-                    } else if byte & 0xF0 == 0xE0 {
-                        3usize
-                    } else if byte & 0xF8 == 0xF0 {
-                        4usize
-                    } else {
-                        1usize // Invalid UTF-8 lead byte — skip 1.
-                    };
-                    // Emit replacement character.
-                    unsafe {
-                        **out_ptr = b'?';
-                    }
-                    *out_ptr = unsafe { (*out_ptr).add(1) };
-                    *out_left = out_left.wrapping_sub(1);
-                    replacements = replacements.wrapping_add(1);
-                    // Consume the full sequence from input.
-                    let skip = seq_len.min(*in_left);
-                    *in_ptr = unsafe { (*in_ptr).add(skip) };
-                    *in_left = in_left.wrapping_sub(skip);
-                } else {
-                    // ASCII byte — copy directly.
-                    unsafe {
-                        **out_ptr = byte;
-                    }
-                    *in_ptr = unsafe { (*in_ptr).add(1) };
-                    *out_ptr = unsafe { (*out_ptr).add(1) };
-                    *in_left = in_left.wrapping_sub(1);
-                    *out_left = out_left.wrapping_sub(1);
-                }
-            }
-        }
-        4 => {
-            // Latin-1 → UTF-8: 0x00-0x7F copy as-is, 0x80-0xFF
-            // expand to 2-byte UTF-8 sequences.
-            //
-            // Latin-1 byte 0xAB (U+00AB) → UTF-8: 0xC2 0xAB
-            // Latin-1 byte 0xFF (U+00FF) → UTF-8: 0xC3 0xBF
-            //
-            // Formula: for code point cp in 0x80..=0xFF:
-            //   byte1 = 0xC0 | (cp >> 6)   = 0xC2 or 0xC3
-            //   byte2 = 0x80 | (cp & 0x3F)
-            while *in_left > 0 {
-                let byte = unsafe { **in_ptr };
-                if byte <= 0x7F {
-                    // ASCII: 1 byte output.
-                    if *out_left == 0 {
-                        errno::set_errno(errno::E2BIG);
-                        return usize::MAX;
-                    }
-                    unsafe {
-                        **out_ptr = byte;
-                    }
-                    *out_ptr = unsafe { (*out_ptr).add(1) };
-                    *out_left = out_left.wrapping_sub(1);
-                } else {
-                    // Latin-1 high byte: 2 bytes output.
-                    if *out_left < 2 {
-                        errno::set_errno(errno::E2BIG);
-                        return usize::MAX;
-                    }
-                    let cp = u32::from(byte);
-                    unsafe {
-                        **out_ptr = (0xC0 | (cp >> 6)) as u8;
-                        *(*out_ptr).add(1) = (0x80 | (cp & 0x3F)) as u8;
-                    }
-                    *out_ptr = unsafe { (*out_ptr).add(2) };
-                    *out_left = out_left.wrapping_sub(2);
-                }
-                *in_ptr = unsafe { (*in_ptr).add(1) };
-                *in_left = in_left.wrapping_sub(1);
-            }
-        }
-        5 => {
-            // UTF-8 → Latin-1: code points U+0000-U+00FF map to
-            // single Latin-1 bytes.  Code points > U+00FF fail with
-            // EILSEQ (not representable in Latin-1).
-            while *in_left > 0 && *out_left > 0 {
-                let byte = unsafe { **in_ptr };
-                if byte <= 0x7F {
-                    // ASCII — copy directly (valid in Latin-1).
-                    unsafe {
-                        **out_ptr = byte;
-                    }
-                    *in_ptr = unsafe { (*in_ptr).add(1) };
-                    *out_ptr = unsafe { (*out_ptr).add(1) };
-                    *in_left = in_left.wrapping_sub(1);
-                    *out_left = out_left.wrapping_sub(1);
-                } else if byte & 0xE0 == 0xC0 {
-                    // 2-byte UTF-8 sequence.
-                    if *in_left < 2 {
-                        // Incomplete sequence.
-                        errno::set_errno(errno::EINVAL);
-                        return usize::MAX;
-                    }
-                    let b2 = unsafe { *(*in_ptr).add(1) };
-                    // Validate continuation byte.
-                    if b2 & 0xC0 != 0x80 {
-                        errno::set_errno(errno::EILSEQ);
-                        return usize::MAX;
-                    }
-                    let cp = (u32::from(byte & 0x1F) << 6) | u32::from(b2 & 0x3F);
-                    if cp < 0x80 {
-                        // Overlong encoding (e.g. 0xC0 0x80 for U+0000):
-                        // must reject per Unicode security guidelines.
-                        errno::set_errno(errno::EILSEQ);
-                        return usize::MAX;
-                    }
-                    if cp > 0xFF {
-                        // Code point not representable in Latin-1.
-                        errno::set_errno(errno::EILSEQ);
-                        return usize::MAX;
-                    }
-                    unsafe {
-                        **out_ptr = cp as u8;
-                    }
-                    *in_ptr = unsafe { (*in_ptr).add(2) };
-                    *out_ptr = unsafe { (*out_ptr).add(1) };
-                    *in_left = in_left.wrapping_sub(2);
-                    *out_left = out_left.wrapping_sub(1);
-                } else {
-                    // 3-byte or 4-byte sequence: code point > U+00FF,
-                    // not representable in Latin-1.
-                    errno::set_errno(errno::EILSEQ);
-                    return usize::MAX;
-                }
-            }
-        }
-        6 => {
-            // Latin-1 → ASCII (lossy): non-ASCII bytes replaced with
-            // '?', one byte at a time.  Unlike descriptor 3 (UTF-8→ASCII)
-            // which skips multi-byte sequences, Latin-1 is a single-byte
-            // encoding so each byte > 127 is an independent character.
-            while *in_left > 0 && *out_left > 0 {
-                let byte = unsafe { **in_ptr };
-                if byte > 127 {
-                    unsafe {
-                        **out_ptr = b'?';
-                    }
-                    replacements = replacements.wrapping_add(1);
-                } else {
-                    unsafe {
-                        **out_ptr = byte;
-                    }
-                }
-                *in_ptr = unsafe { (*in_ptr).add(1) };
-                *out_ptr = unsafe { (*out_ptr).add(1) };
-                *in_left = in_left.wrapping_sub(1);
-                *out_left = out_left.wrapping_sub(1);
-            }
-        }
-        _ => {
-            errno::set_errno(errno::EBADF);
-            return usize::MAX;
-        }
+        *outbytesleft = out_left - written;
     }
-
-    // If input remains but output is full, set E2BIG.
-    if *in_left > 0 {
-        errno::set_errno(errno::E2BIG);
-        return usize::MAX;
+    match stop {
+        Stop::Done { skipped: true, .. } => fail(errno::EILSEQ),
+        Stop::Done { irreversible, .. } => irreversible,
+        Stop::Error(e) => fail(e),
     }
-
-    replacements
 }
 
-/// Close a conversion descriptor.
-///
-/// No resources to free — always succeeds.
+/// Close a conversion descriptor: 0, or -1 with `EBADF` for one `iconv_open`
+/// did not return -- `(iconv_t)-1` above all, which glibc refuses the same
+/// way.  Nothing is held, so nothing is freed.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn iconv_close(_cd: IconvT) -> i32 {
+pub extern "C" fn iconv_close(cd: IconvT) -> i32 {
+    if Conversion::from_descriptor(cd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
     0
 }
 
@@ -386,764 +530,461 @@ pub extern "C" fn iconv_close(_cd: IconvT) -> i32 {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::undocumented_unsafe_blocks)]
+#[allow(
+    clippy::undocumented_unsafe_blocks,
+    clippy::unwrap_used,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
+    use std::vec::Vec;
 
-    /// Null-terminated C string helper.
-    fn cstr(s: &str) -> Vec<u8> {
-        let mut v = s.as_bytes().to_vec();
-        v.push(0);
-        v
+    fn open(to: &str, from: &str) -> IconvT {
+        let to = [to.as_bytes(), b"\0"].concat();
+        let from = [from.as_bytes(), b"\0"].concat();
+        iconv_open(to.as_ptr(), from.as_ptr())
     }
 
-    /// Run an iconv conversion on `input` using descriptor `cd`.
-    /// Returns (output_bytes, replacements) on success, or None on error.
-    fn convert(cd: IconvT, input: &[u8]) -> core::option::Option<(Vec<u8>, usize)> {
-        let mut inbuf = input.as_ptr();
-        let mut inleft = input.len();
-        let mut outbuf_storage = vec![0u8; input.len().wrapping_mul(4).max(64)];
-        let mut outptr = outbuf_storage.as_mut_ptr();
-        let mut outleft = outbuf_storage.len();
-
-        let ret = unsafe {
-            iconv(
-                cd,
-                &mut inbuf as *mut *const u8,
-                &mut inleft,
-                &mut outptr,
-                &mut outleft,
-            )
-        };
-
-        if ret == usize::MAX {
-            return None;
-        }
-
-        let written = outbuf_storage.len().wrapping_sub(outleft);
-        outbuf_storage.truncate(written);
-        Some((outbuf_storage, ret))
+    /// What one `iconv` call answers: (return, errno, bytes left in the input,
+    /// what was written).
+    fn run(to: &str, from: &str, input: &[u8], cap: usize) -> (isize, i32, usize, Vec<u8>) {
+        let cd = open(to, from);
+        assert_ne!(cd, ICONV_OPEN_ERR, "{to} <- {from}");
+        let mut out = vec![0u8; cap];
+        let mut ip = input.as_ptr();
+        let mut il = input.len();
+        let mut op = out.as_mut_ptr();
+        let mut ol = cap;
+        errno::set_errno(0);
+        let r = unsafe { iconv(cd, &raw mut ip, &raw mut il, &raw mut op, &raw mut ol) };
+        let e = errno::get_errno();
+        assert_eq!(iconv_close(cd), 0);
+        out.truncate(cap - ol);
+        #[allow(clippy::cast_possible_wrap)]
+        (r as isize, e, il, out)
     }
 
-    // -----------------------------------------------------------------------
-    // iconv_open — encoding name matching
-    // -----------------------------------------------------------------------
+    // -- what Ubuntu 24.04's glibc 2.39 answered, probed 2026-09-26 --
 
     #[test]
-    fn test_open_utf8_to_utf8() {
-        let from = cstr("UTF-8");
-        let to = cstr("UTF-8");
-        let cd = iconv_open(to.as_ptr(), from.as_ptr());
-        assert_ne!(cd, ICONV_OPEN_ERR);
-        assert_eq!(cd, 1, "UTF-8 → UTF-8 should be identity (1)");
-    }
-
-    #[test]
-    fn test_open_ascii_to_utf8() {
-        let from = cstr("ASCII");
-        let to = cstr("UTF-8");
-        let cd = iconv_open(to.as_ptr(), from.as_ptr());
-        assert_ne!(cd, ICONV_OPEN_ERR);
-        assert_eq!(cd, 2, "ASCII → UTF-8 should be descriptor 2");
-    }
-
-    #[test]
-    fn test_open_utf8_to_ascii() {
-        let from = cstr("UTF-8");
-        let to = cstr("ASCII");
-        let cd = iconv_open(to.as_ptr(), from.as_ptr());
-        assert_ne!(cd, ICONV_OPEN_ERR);
-        assert_eq!(cd, 3, "UTF-8 → ASCII should be descriptor 3");
-    }
-
-    #[test]
-    fn test_open_ascii_to_ascii() {
-        let from = cstr("ASCII");
-        let to = cstr("ASCII");
-        let cd = iconv_open(to.as_ptr(), from.as_ptr());
-        assert_ne!(cd, ICONV_OPEN_ERR);
-        assert_eq!(cd, 1, "ASCII → ASCII should be identity (1)");
-    }
-
-    #[test]
-    fn test_open_case_insensitive() {
-        // "utf-8", "Utf-8", "UTF-8" should all match.
-        let lower = cstr("utf-8");
-        let mixed = cstr("Utf-8");
-        let upper = cstr("UTF-8");
-
-        let cd1 = iconv_open(lower.as_ptr(), lower.as_ptr());
-        let cd2 = iconv_open(mixed.as_ptr(), mixed.as_ptr());
-        let cd3 = iconv_open(upper.as_ptr(), upper.as_ptr());
-        assert_ne!(cd1, ICONV_OPEN_ERR);
-        assert_ne!(cd2, ICONV_OPEN_ERR);
-        assert_ne!(cd3, ICONV_OPEN_ERR);
-    }
-
-    #[test]
-    fn test_open_strips_hyphens_and_underscores() {
-        // "UTF8", "UTF_8", "UTF-8" should all work.
-        let no_sep = cstr("UTF8");
-        let underscore = cstr("UTF_8");
-        let hyphen = cstr("UTF-8");
-
-        let cd1 = iconv_open(no_sep.as_ptr(), no_sep.as_ptr());
-        let cd2 = iconv_open(underscore.as_ptr(), underscore.as_ptr());
-        let cd3 = iconv_open(hyphen.as_ptr(), hyphen.as_ptr());
-        assert_ne!(cd1, ICONV_OPEN_ERR);
-        assert_ne!(cd2, ICONV_OPEN_ERR);
-        assert_ne!(cd3, ICONV_OPEN_ERR);
-    }
-
-    #[test]
-    fn test_open_us_ascii_alias() {
-        let us = cstr("US-ASCII");
-        let utf8 = cstr("UTF-8");
-        let cd = iconv_open(utf8.as_ptr(), us.as_ptr());
-        assert_ne!(cd, ICONV_OPEN_ERR, "US-ASCII should be recognized");
-    }
-
-    #[test]
-    fn test_open_latin1_to_utf8() {
-        let latin = cstr("LATIN1");
-        let utf8 = cstr("UTF-8");
-        let cd = iconv_open(utf8.as_ptr(), latin.as_ptr());
-        assert_ne!(cd, ICONV_OPEN_ERR, "LATIN1 should be recognized");
-        assert_eq!(cd, 4, "Latin-1 → UTF-8 should be descriptor 4");
-    }
-
-    #[test]
-    fn test_open_utf8_to_latin1() {
-        let utf8 = cstr("UTF-8");
-        let latin = cstr("LATIN1");
-        let cd = iconv_open(latin.as_ptr(), utf8.as_ptr());
-        assert_ne!(cd, ICONV_OPEN_ERR, "UTF-8 → LATIN1 should be supported");
-        assert_eq!(cd, 5, "UTF-8 → Latin-1 should be descriptor 5");
-    }
-
-    #[test]
-    fn test_open_iso88591_to_utf8() {
-        let iso = cstr("ISO-8859-1");
-        let utf8 = cstr("UTF-8");
-        let cd = iconv_open(utf8.as_ptr(), iso.as_ptr());
-        assert_ne!(cd, ICONV_OPEN_ERR, "ISO-8859-1 should be recognized");
-        assert_eq!(cd, 4);
-    }
-
-    #[test]
-    fn test_open_latin1_to_latin1_identity() {
-        let l1 = cstr("LATIN1");
-        let l2 = cstr("ISO-8859-1");
-        let cd = iconv_open(l1.as_ptr(), l2.as_ptr());
-        assert_ne!(cd, ICONV_OPEN_ERR);
-        assert_eq!(cd, 1, "Latin-1 → Latin-1 should be identity");
-    }
-
-    #[test]
-    fn test_open_ascii_to_latin1() {
-        let ascii = cstr("ASCII");
-        let latin = cstr("LATIN1");
-        let cd = iconv_open(latin.as_ptr(), ascii.as_ptr());
-        assert_ne!(cd, ICONV_OPEN_ERR);
+    fn unencodable_is_eilseq_not_a_question_mark() {
+        // THE REGRESSION PIN: this wrote "a?z" and counted one irreversible
+        // conversion; glibc stops at the e-acute.
         assert_eq!(
-            cd, 1,
-            "ASCII → Latin-1 should be identity (ASCII is subset)"
+            run("ASCII", "UTF-8", "a\u{e9}z".as_bytes(), 16),
+            (-1, errno::EILSEQ, 3, b"a".to_vec())
+        );
+        assert_eq!(
+            run("ASCII", "ISO-8859-1", b"a\xe9z", 16),
+            (-1, errno::EILSEQ, 2, b"a".to_vec())
+        );
+        assert_eq!(
+            run("ISO-8859-1", "UTF-8", "a\u{20ac}z".as_bytes(), 16),
+            (-1, errno::EILSEQ, 4, b"a".to_vec())
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Invalid / unsupported encodings
-    // -----------------------------------------------------------------------
-
     #[test]
-    fn test_open_unsupported_encoding() {
-        let from = cstr("UTF-16");
-        let to = cstr("UTF-8");
-        let cd = iconv_open(to.as_ptr(), from.as_ptr());
-        assert_eq!(cd, ICONV_OPEN_ERR, "UTF-16 is not supported");
+    fn translit_is_glibcs_c_locale_table() {
+        let t = |s: &str| run("ASCII//TRANSLIT", "UTF-8", s.as_bytes(), 32);
+        assert_eq!(
+            t("a\u{e9}z"),
+            (1, 0, 0, b"a?z".to_vec()),
+            "not in the table: ?"
+        );
+        assert_eq!(t("\u{20ac}"), (1, 0, 0, b"EUR".to_vec()));
+        assert_eq!(t("\u{a9}"), (1, 0, 0, b"(C)".to_vec()));
+        assert_eq!(t("\u{ab}"), (1, 0, 0, b"<<".to_vec()));
+        assert_eq!(t("\u{fb01}"), (1, 0, 0, b"fi".to_vec()));
+        assert_eq!(t("\u{df}"), (1, 0, 0, b"ss".to_vec()));
+        assert_eq!(t("\u{201c}x\u{201d}"), (2, 0, 0, b"\"x\"".to_vec()));
+        assert_eq!(
+            run("ISO-8859-1//TRANSLIT", "UTF-8", "\u{20ac}".as_bytes(), 32),
+            (1, 0, 0, b"EUR".to_vec())
+        );
+        assert_eq!(
+            run("ASCII//TRANSLIT", "ISO-8859-1", b"\xe9", 32),
+            (1, 0, 0, b"?".to_vec())
+        );
     }
 
     #[test]
-    fn test_open_unknown_encoding() {
-        let from = cstr("EBCDIC");
-        let to = cstr("UTF-8");
-        let cd = iconv_open(to.as_ptr(), from.as_ptr());
-        assert_eq!(cd, ICONV_OPEN_ERR);
+    fn a_substitute_that_does_not_fit_is_e2big_and_not_written() {
+        assert_eq!(
+            run("ASCII//TRANSLIT", "UTF-8", "\u{20ac}".as_bytes(), 2),
+            (-1, errno::E2BIG, 3, Vec::new())
+        );
     }
 
     #[test]
-    fn test_open_null_from() {
-        let to = cstr("UTF-8");
-        let cd = iconv_open(to.as_ptr(), core::ptr::null());
-        assert_eq!(cd, ICONV_OPEN_ERR);
+    fn ignore_skips_and_then_fails_with_eilseq() {
+        assert_eq!(
+            run("ASCII//IGNORE", "UTF-8", "a\u{4e00}b".as_bytes(), 32),
+            (-1, errno::EILSEQ, 0, b"ab".to_vec())
+        );
+        assert_eq!(
+            run("ASCII//IGNORE", "UTF-8", b"a\xffb", 32),
+            (-1, errno::EILSEQ, 0, b"ab".to_vec()),
+            "invalid input is skipped too"
+        );
+        assert_eq!(
+            run("UTF-8//IGNORE", "UTF-8", b"a\xffb", 32),
+            (-1, errno::EILSEQ, 0, b"ab".to_vec())
+        );
     }
 
     #[test]
-    fn test_open_null_to() {
-        let from = cstr("UTF-8");
-        let cd = iconv_open(core::ptr::null(), from.as_ptr());
-        assert_eq!(cd, ICONV_OPEN_ERR);
+    fn a_full_buffer_stops_before_a_character_ignore_would_skip() {
+        assert_eq!(
+            run("ASCII//IGNORE", "UTF-8", "a\u{4e00}b".as_bytes(), 1),
+            (-1, errno::E2BIG, 4, b"a".to_vec())
+        );
     }
 
-    // -----------------------------------------------------------------------
-    // iconv_close
-    // -----------------------------------------------------------------------
+    #[test]
+    fn translit_comes_before_ignore() {
+        for to in ["ASCII//TRANSLIT//IGNORE", "ASCII//TRANSLIT,IGNORE"] {
+            assert_eq!(
+                run(to, "UTF-8", "a\u{4e00}b".as_bytes(), 32),
+                (1, 0, 0, b"a?b".to_vec()),
+                "{to}"
+            );
+        }
+    }
 
     #[test]
-    fn test_close_identity() {
-        let from = cstr("UTF-8");
-        let to = cstr("UTF-8");
-        let cd = iconv_open(to.as_ptr(), from.as_ptr());
-        assert_ne!(cd, ICONV_OPEN_ERR);
+    fn options_are_the_targets_and_any_case() {
+        assert_eq!(
+            run("ascii//translit", "utf-8", "\u{e9}".as_bytes(), 32),
+            (1, 0, 0, b"?".to_vec())
+        );
+        assert_eq!(
+            run("ASCII//FOO", "UTF-8", b"ab", 32),
+            (0, 0, 0, b"ab".to_vec())
+        );
+        assert_eq!(
+            run("UTF-8", "UTF-8//IGNORE", b"a\xffb", 32),
+            (-1, errno::EILSEQ, 2, b"a".to_vec()),
+            "the source's //IGNORE is not applied"
+        );
+    }
+
+    #[test]
+    fn utf8_input_is_validated_even_to_utf8() {
+        // The identity conversions copied bytes.
+        let t = |b: &[u8]| run("UTF-8", "UTF-8", b, 32);
+        assert_eq!(t(b"a\xffz"), (-1, errno::EILSEQ, 2, b"a".to_vec()));
+        assert_eq!(t(b"a\xc3"), (-1, errno::EINVAL, 1, b"a".to_vec()));
+        assert_eq!(
+            t(b"\xed\xa0\x80"),
+            (-1, errno::EILSEQ, 3, Vec::new()),
+            "surrogate"
+        );
+        assert_eq!(
+            t(b"\xc1\xbf"),
+            (-1, errno::EILSEQ, 2, Vec::new()),
+            "overlong"
+        );
+        assert_eq!(
+            t(b"\xe0\x9f\xbf"),
+            (-1, errno::EILSEQ, 3, Vec::new()),
+            "overlong"
+        );
+        assert_eq!(
+            t(b"\xf0\x8f\xbf\xbf"),
+            (-1, errno::EILSEQ, 4, Vec::new()),
+            "overlong"
+        );
+        assert_eq!(
+            t(b"\x80"),
+            (-1, errno::EILSEQ, 1, Vec::new()),
+            "stray continuation"
+        );
+        assert_eq!(t(b"\xfe"), (-1, errno::EILSEQ, 1, Vec::new()));
+        assert_eq!(
+            t(b"\xc2\x41"),
+            (-1, errno::EILSEQ, 2, Vec::new()),
+            "bad continuation"
+        );
+        assert_eq!(
+            t(b"\xe1\x80"),
+            (-1, errno::EINVAL, 2, Vec::new()),
+            "cut off"
+        );
+        assert_eq!(t(b"\xe1\x80\x41"), (-1, errno::EILSEQ, 3, Vec::new()));
+    }
+
+    #[test]
+    fn utf8_is_glibcs_six_byte_form() {
+        let t = |b: &[u8]| run("UTF-8", "UTF-8", b, 32);
+        for s in [
+            &b"\xef\xbf\xbf"[..],
+            b"\xf4\x8f\xbf\xbf",
+            b"\xf4\x90\x80\x80",
+            b"\xf8\x88\x80\x80\x80",
+            b"\xfc\x84\x80\x80\x80\x80",
+            b"\xef\xbb\xbfa",
+        ] {
+            assert_eq!(t(s), (0, 0, 0, s.to_vec()), "{s:x?}");
+        }
+        assert_eq!(
+            run("ISO-8859-1", "UTF-8", b"\xf4\x90\x80\x80", 32),
+            (-1, errno::EILSEQ, 4, Vec::new()),
+            "decoded, then unencodable"
+        );
+    }
+
+    #[test]
+    fn ascii_input_above_0x7f_is_invalid() {
+        assert_eq!(
+            run("UTF-8", "ASCII", b"a\xe9z", 16),
+            (-1, errno::EILSEQ, 2, b"a".to_vec())
+        );
+        assert_eq!(
+            run("UTF-8", "ASCII", b"\x7f", 16),
+            (0, 0, 0, b"\x7f".to_vec())
+        );
+        assert_eq!(run("ASCII", "UTF-8", b"\0", 16), (0, 0, 0, b"\0".to_vec()));
+    }
+
+    #[test]
+    fn e2big_stops_before_the_character_that_does_not_fit() {
+        assert_eq!(
+            run("UTF-8", "ISO-8859-1", b"a\xe9z", 2),
+            (-1, errno::E2BIG, 2, b"a".to_vec())
+        );
+        assert_eq!(
+            run("UTF-8", "UTF-8", b"abc", 2),
+            (-1, errno::E2BIG, 1, b"ab".to_vec())
+        );
+    }
+
+    #[test]
+    fn latin1_round_trips_through_utf8() {
+        let all: Vec<u8> = (0..=255).collect();
+        let (r, e, left, utf8) = run("UTF-8", "ISO-8859-1", &all, 512);
+        assert_eq!((r, e, left), (0, 0, 0));
+        assert_eq!(
+            utf8,
+            all.iter()
+                .map(|&b| char::from(b))
+                .collect::<std::string::String>()
+                .into_bytes()
+        );
+        let (r, e, left, back) = run("ISO-8859-1", "UTF-8", &utf8, 512);
+        assert_eq!((r, e, left, back), (0, 0, 0, all));
+    }
+
+    #[test]
+    fn the_empty_name_is_the_c_locales_ascii() {
+        assert_eq!(
+            run("", "UTF-8", "a\u{e9}".as_bytes(), 32),
+            (-1, errno::EILSEQ, 2, b"a".to_vec())
+        );
+    }
+
+    #[test]
+    fn names_are_glibcs_aliases() {
+        for n in [
+            "UTF-8",
+            "utf8",
+            "UTF8",
+            "ANSI_X3.4-1968",
+            "US-ASCII",
+            "us",
+            "CP367",
+            "ISO-8859-1",
+            "ISO_8859-1:1987",
+            "latin1",
+            "L1",
+            "CP819",
+            "IBM819",
+        ] {
+            assert_ne!(open(n, "UTF-8"), ICONV_OPEN_ERR, "{n}");
+        }
+        for n in ["UTF-16", "EBCDIC", "NOSUCH", "UTF-8x"] {
+            errno::set_errno(0);
+            assert_eq!(open(n, "UTF-8"), ICONV_OPEN_ERR, "{n}");
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+    }
+
+    // -- the NULL pointers, the descriptor, the reset --
+
+    #[test]
+    fn a_null_name_is_efault() {
+        for (to, from) in [
+            (core::ptr::null(), b"UTF-8\0".as_ptr()),
+            (b"UTF-8\0".as_ptr(), core::ptr::null()),
+        ] {
+            errno::set_errno(0);
+            assert_eq!(iconv_open(to, from), ICONV_OPEN_ERR);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+    }
+
+    #[test]
+    fn the_reset_is_zero_and_checks_the_descriptor() {
+        let cd = open("UTF-8", "UTF-8");
+        let mut nul: *const u8 = core::ptr::null();
+        let mut five = 5usize;
+        errno::set_errno(0);
+        let r = unsafe {
+            iconv(
+                cd,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!((r, errno::get_errno()), (0, 0));
+        let r = unsafe {
+            iconv(
+                cd,
+                &raw mut nul,
+                &raw mut five,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!((r, five), (0, 5), "the counts are left alone");
+        let mut out = [0u8; 4];
+        let mut op = out.as_mut_ptr();
+        let mut ol = out.len();
+        let r = unsafe {
+            iconv(
+                cd,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw mut op,
+                &raw mut ol,
+            )
+        };
+        assert_eq!((r, ol), (0, 4), "nothing to write: no state");
+        errno::set_errno(0);
+        let r = unsafe {
+            iconv(
+                -1,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(
+            (r, errno::get_errno()),
+            (usize::MAX, errno::EBADF),
+            "glibc: EBADF"
+        );
         assert_eq!(iconv_close(cd), 0);
     }
 
     #[test]
-    fn test_close_invalid_descriptor() {
-        // iconv_close always succeeds (no resources to free).
-        assert_eq!(iconv_close(99), 0);
-        assert_eq!(iconv_close(-1), 0);
-    }
-
-    // -----------------------------------------------------------------------
-    // Identity conversion (UTF-8 → UTF-8)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_identity_ascii_bytes() {
-        let input = b"Hello, world!";
-        let (output, replacements) = convert(1, input).expect("identity conversion should succeed");
-        assert_eq!(&output, input);
-        assert_eq!(replacements, 0);
-    }
-
-    #[test]
-    fn test_identity_empty_input() {
-        let (output, replacements) = convert(1, b"").expect("empty input should succeed");
-        assert!(
-            output.is_empty(),
-            "identity conversion of empty input must yield empty output"
-        );
-        assert_eq!(replacements, 0);
-    }
-
-    #[test]
-    fn test_identity_multibyte_utf8() {
-        // UTF-8 encoded "cafe\u{0301}" (e + combining accent) — multi-byte.
-        let input = "caf\u{00E9}".as_bytes(); // "cafe" with e-acute (2-byte UTF-8)
-        let (output, replacements) = convert(1, input).expect("identity should handle multi-byte");
-        assert_eq!(&output, input);
-        assert_eq!(replacements, 0);
-    }
-
-    // -----------------------------------------------------------------------
-    // ASCII → UTF-8 (passthrough, descriptor 2)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_ascii_to_utf8_simple() {
-        let input = b"Hello";
-        let (output, replacements) = convert(2, input).expect("ASCII → UTF-8 should succeed");
-        assert_eq!(&output, input, "ASCII bytes are valid UTF-8 unchanged");
-        assert_eq!(replacements, 0);
-    }
-
-    // -----------------------------------------------------------------------
-    // UTF-8 → ASCII (lossy, descriptor 3)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_utf8_to_ascii_simple_ascii() {
-        let input = b"Hello";
-        let (output, replacements) = convert(3, input).expect("pure ASCII should pass through");
-        assert_eq!(&output, input);
-        assert_eq!(replacements, 0);
-    }
-
-    #[test]
-    fn test_utf8_to_ascii_replaces_non_ascii() {
-        // "\xc3\xa9" is UTF-8 for 'e-acute' (U+00E9, 2-byte sequence).
-        let input = b"caf\xc3\xa9";
-        let (output, replacements) = convert(3, input).expect("conversion should succeed");
-        assert_eq!(&output, b"caf?", "non-ASCII replaced with '?'");
-        assert_eq!(replacements, 1);
-    }
-
-    #[test]
-    fn test_utf8_to_ascii_3byte_sequence() {
-        // Euro sign U+20AC: 0xE2 0x82 0xAC (3-byte UTF-8), followed by "100".
-        let input = b"price: \xe2\x82\xac100";
-        let (output, replacements) = convert(3, input).expect("3-byte sequence conversion");
-        assert_eq!(&output, b"price: ?100");
-        assert_eq!(replacements, 1);
-    }
-
-    #[test]
-    fn test_utf8_to_ascii_4byte_sequence() {
-        // U+1F600 (grinning face): 0xF0 0x9F 0x98 0x80 (4-byte UTF-8).
-        let input = b"hi \xf0\x9f\x98\x80 there";
-        let (output, replacements) = convert(3, input).expect("4-byte sequence conversion");
-        assert_eq!(&output, b"hi ? there");
-        assert_eq!(replacements, 1);
-    }
-
-    #[test]
-    fn test_utf8_to_ascii_multiple_replacements() {
-        // Two non-ASCII characters.
-        let input = b"\xc3\xa9\xc3\xa8"; // e-acute + e-grave
-        let (output, replacements) = convert(3, input).expect("multiple replacements");
-        assert_eq!(&output, b"??");
-        assert_eq!(replacements, 2);
-    }
-
-    // -----------------------------------------------------------------------
-    // Buffer overflow / E2BIG
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_output_buffer_too_small() {
-        let input = b"Hello, World!";
-        let mut inbuf = input.as_ptr();
-        let mut inleft = input.len();
-        // Tiny output buffer.
-        let mut outbuf_storage = [0u8; 4];
-        let mut outptr = outbuf_storage.as_mut_ptr();
-        let mut outleft: usize = 4;
-
-        let ret = unsafe {
-            iconv(
-                1, // identity
-                &mut inbuf as *mut *const u8,
-                &mut inleft,
-                &mut outptr,
-                &mut outleft,
-            )
-        };
-
-        assert_eq!(ret, usize::MAX, "should fail when output buffer is full");
-        assert_eq!(errno::get_errno(), errno::E2BIG);
-        // The first 4 bytes should have been written.
-        assert_eq!(&outbuf_storage, b"Hell");
-        // inleft should reflect remaining input.
-        assert_eq!(inleft, input.len().wrapping_sub(4));
-    }
-
-    // -----------------------------------------------------------------------
-    // Invalid descriptor
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_invalid_descriptor() {
+    fn a_descriptor_iconv_open_did_not_return_is_ebadf() {
         let input = b"test";
-        let mut inbuf = input.as_ptr();
-        let mut inleft = input.len();
-        let mut outbuf_storage = [0u8; 32];
-        let mut outptr = outbuf_storage.as_mut_ptr();
-        let mut outleft: usize = 32;
-
-        let ret = unsafe {
-            iconv(
-                99, // invalid descriptor
-                &mut inbuf as *mut *const u8,
-                &mut inleft,
-                &mut outptr,
-                &mut outleft,
-            )
-        };
-
-        assert_eq!(ret, usize::MAX);
-        assert_eq!(errno::get_errno(), errno::EBADF);
-    }
-
-    // -----------------------------------------------------------------------
-    // Null inbuf (reset conversion state)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_null_inbuf_resets() {
-        // Calling iconv with NULL inbuf should return 0 (state reset).
-        let mut outleft: usize = 32;
-        let mut outbuf_storage = [0u8; 32];
-        let mut outptr = outbuf_storage.as_mut_ptr();
-
-        let ret = unsafe {
-            iconv(
-                1,
-                core::ptr::null_mut(), // null inbuf
-                core::ptr::null_mut(),
-                &mut outptr,
-                &mut outleft,
-            )
-        };
-        assert_eq!(ret, 0);
-    }
-
-    #[test]
-    fn test_null_outbuf_is_error() {
-        let input = b"test";
-        let mut inbuf = input.as_ptr();
-        let mut inleft = input.len();
-
-        let ret = unsafe {
-            iconv(
-                1,
-                &mut inbuf as *mut *const u8,
-                &mut inleft,
-                core::ptr::null_mut(), // null outbuf
-                core::ptr::null_mut(),
-            )
-        };
-        assert_eq!(ret, usize::MAX);
-    }
-
-    // -----------------------------------------------------------------------
-    // matches_encoding internal tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_matches_encoding_null() {
-        assert!(!matches_encoding(core::ptr::null(), UTF8_ALIASES));
-    }
-
-    #[test]
-    fn test_matches_encoding_utf8_variants() {
-        let v1 = cstr("UTF-8");
-        let v2 = cstr("utf-8");
-        let v3 = cstr("utf8");
-        let v4 = cstr("UTF_8");
-        assert!(matches_encoding(v1.as_ptr(), UTF8_ALIASES));
-        assert!(matches_encoding(v2.as_ptr(), UTF8_ALIASES));
-        assert!(matches_encoding(v3.as_ptr(), UTF8_ALIASES));
-        assert!(matches_encoding(v4.as_ptr(), UTF8_ALIASES));
-    }
-
-    #[test]
-    fn test_matches_encoding_ascii_variants() {
-        let v1 = cstr("ASCII");
-        let v2 = cstr("ascii");
-        let v3 = cstr("US-ASCII");
-        let v4 = cstr("us-ascii");
-        let v5 = cstr("US");
-        assert!(matches_encoding(v1.as_ptr(), ASCII_ALIASES));
-        assert!(matches_encoding(v2.as_ptr(), ASCII_ALIASES));
-        assert!(matches_encoding(v3.as_ptr(), ASCII_ALIASES));
-        assert!(matches_encoding(v4.as_ptr(), ASCII_ALIASES));
-        assert!(matches_encoding(v5.as_ptr(), ASCII_ALIASES));
-    }
-
-    #[test]
-    fn test_matches_encoding_no_match() {
-        let v = cstr("EBCDIC");
-        assert!(!matches_encoding(v.as_ptr(), UTF8_ALIASES));
-        assert!(!matches_encoding(v.as_ptr(), ASCII_ALIASES));
-    }
-
-    #[test]
-    fn test_matches_encoding_latin1_variants() {
-        let v1 = cstr("LATIN1");
-        let v2 = cstr("latin1");
-        let v3 = cstr("ISO-8859-1");
-        let v4 = cstr("iso-8859-1");
-        let v5 = cstr("L1");
-        assert!(matches_encoding(v1.as_ptr(), LATIN1_ALIASES));
-        assert!(matches_encoding(v2.as_ptr(), LATIN1_ALIASES));
-        assert!(matches_encoding(v3.as_ptr(), LATIN1_ALIASES));
-        assert!(matches_encoding(v4.as_ptr(), LATIN1_ALIASES));
-        assert!(matches_encoding(v5.as_ptr(), LATIN1_ALIASES));
-    }
-
-    #[test]
-    fn test_open_latin1_to_ascii() {
-        let latin = cstr("LATIN1");
-        let ascii = cstr("ASCII");
-        let cd = iconv_open(ascii.as_ptr(), latin.as_ptr());
-        assert_ne!(cd, ICONV_OPEN_ERR, "Latin-1 → ASCII should be supported");
-        assert_eq!(cd, 6, "Latin-1 → ASCII should be descriptor 6");
-    }
-
-    #[test]
-    fn test_latin1_not_ascii() {
-        // Latin-1 must NOT match ASCII aliases.
-        let v = cstr("LATIN1");
-        assert!(!matches_encoding(v.as_ptr(), ASCII_ALIASES));
-        let v2 = cstr("ISO-8859-1");
-        assert!(!matches_encoding(v2.as_ptr(), ASCII_ALIASES));
-    }
-
-    // -----------------------------------------------------------------------
-    // Latin-1 → UTF-8 (descriptor 4)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_latin1_to_utf8_ascii_passthrough() {
-        // ASCII subset should pass through unchanged.
-        let input = b"Hello";
-        let (output, replacements) = convert(4, input).expect("ASCII Latin-1 → UTF-8");
-        assert_eq!(&output, b"Hello");
-        assert_eq!(replacements, 0);
-    }
-
-    #[test]
-    fn test_latin1_to_utf8_0x80() {
-        // Latin-1 0x80 = U+0080 → UTF-8 0xC2 0x80
-        let input = &[0x80u8];
-        let (output, replacements) = convert(4, input).expect("0x80 Latin-1 → UTF-8");
-        assert_eq!(&output, &[0xC2, 0x80]);
-        assert_eq!(replacements, 0);
-    }
-
-    #[test]
-    fn test_latin1_to_utf8_0xff() {
-        // Latin-1 0xFF = U+00FF (ÿ) → UTF-8 0xC3 0xBF
-        let input = &[0xFFu8];
-        let (output, replacements) = convert(4, input).expect("0xFF Latin-1 → UTF-8");
-        assert_eq!(&output, &[0xC3, 0xBF]);
-        assert_eq!(replacements, 0);
-    }
-
-    #[test]
-    fn test_latin1_to_utf8_e_acute() {
-        // Latin-1 0xE9 = U+00E9 (é) → UTF-8 0xC3 0xA9
-        let input = &[0xE9u8];
-        let (output, replacements) = convert(4, input).expect("0xE9 Latin-1 → UTF-8");
-        assert_eq!(&output, &[0xC3, 0xA9]);
-        assert_eq!(replacements, 0);
-    }
-
-    #[test]
-    fn test_latin1_to_utf8_mixed() {
-        // "café" in Latin-1: 0x63 0x61 0x66 0xE9
-        let input = &[0x63, 0x61, 0x66, 0xE9];
-        let (output, replacements) = convert(4, input).expect("café Latin-1 → UTF-8");
-        // Expected: "caf" + UTF-8(é) = 0x63 0x61 0x66 0xC3 0xA9
-        assert_eq!(&output, &[0x63, 0x61, 0x66, 0xC3, 0xA9]);
-        assert_eq!(replacements, 0);
-    }
-
-    #[test]
-    fn test_latin1_to_utf8_all_high_bytes() {
-        // Convert all Latin-1 bytes 0x80-0xBF (first batch: 0xC2 prefix)
-        let input = &[0x80u8, 0xBF];
-        let (output, _) = convert(4, input).expect("0x80-0xBF Latin-1 → UTF-8");
-        assert_eq!(&output, &[0xC2, 0x80, 0xC2, 0xBF]);
-    }
-
-    #[test]
-    fn test_latin1_to_utf8_second_batch() {
-        // Convert Latin-1 bytes 0xC0-0xFF (second batch: 0xC3 prefix)
-        let input = &[0xC0u8, 0xFF];
-        let (output, _) = convert(4, input).expect("0xC0-0xFF Latin-1 → UTF-8");
-        assert_eq!(&output, &[0xC3, 0x80, 0xC3, 0xBF]);
-    }
-
-    #[test]
-    fn test_latin1_to_utf8_empty() {
-        let (output, replacements) = convert(4, b"").expect("empty Latin-1 → UTF-8");
-        assert!(
-            output.is_empty(),
-            "Latin-1 -> UTF-8 of empty input must yield empty output"
-        );
-        assert_eq!(replacements, 0);
-    }
-
-    #[test]
-    fn test_latin1_to_utf8_output_too_small() {
-        // 0xE9 needs 2 output bytes; provide only 1.
-        let input = &[0xE9u8];
-        let mut inbuf = input.as_ptr();
-        let mut inleft = 1usize;
-        let mut outbuf_storage = [0u8; 1]; // Only 1 byte
-        let mut outptr = outbuf_storage.as_mut_ptr();
-        let mut outleft = 1usize;
-
-        let ret = unsafe {
-            iconv(
-                4,
-                &mut inbuf as *mut *const u8,
-                &mut inleft,
-                &mut outptr,
-                &mut outleft,
-            )
-        };
-        assert_eq!(ret, usize::MAX);
-        assert_eq!(errno::get_errno(), errno::E2BIG);
-    }
-
-    // -----------------------------------------------------------------------
-    // UTF-8 → Latin-1 (descriptor 5)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_utf8_to_latin1_ascii() {
-        let input = b"Hello";
-        let (output, replacements) = convert(5, input).expect("ASCII UTF-8 → Latin-1");
-        assert_eq!(&output, b"Hello");
-        assert_eq!(replacements, 0);
-    }
-
-    #[test]
-    fn test_utf8_to_latin1_e_acute() {
-        // UTF-8 0xC3 0xA9 = U+00E9 (é) → Latin-1 0xE9
-        let input = &[0xC3u8, 0xA9];
-        let (output, replacements) = convert(5, input).expect("é UTF-8 → Latin-1");
-        assert_eq!(&output, &[0xE9]);
-        assert_eq!(replacements, 0);
-    }
-
-    #[test]
-    fn test_utf8_to_latin1_0xff() {
-        // UTF-8 0xC3 0xBF = U+00FF (ÿ) → Latin-1 0xFF
-        let input = &[0xC3u8, 0xBF];
-        let (output, replacements) = convert(5, input).expect("ÿ UTF-8 → Latin-1");
-        assert_eq!(&output, &[0xFF]);
-        assert_eq!(replacements, 0);
-    }
-
-    #[test]
-    fn test_utf8_to_latin1_mixed() {
-        // "café" in UTF-8: 0x63 0x61 0x66 0xC3 0xA9
-        let input = &[0x63, 0x61, 0x66, 0xC3, 0xA9];
-        let (output, replacements) = convert(5, input).expect("café UTF-8 → Latin-1");
-        assert_eq!(&output, &[0x63, 0x61, 0x66, 0xE9]);
-        assert_eq!(replacements, 0);
-    }
-
-    #[test]
-    fn test_utf8_to_latin1_above_00ff_fails() {
-        // Euro sign U+20AC: 0xE2 0x82 0xAC (3-byte UTF-8)
-        // Not representable in Latin-1 → EILSEQ.
-        let input = &[0xE2u8, 0x82, 0xAC];
-        let result = convert(5, input);
-        assert!(result.is_none(), "U+20AC should fail for Latin-1");
-    }
-
-    #[test]
-    fn test_utf8_to_latin1_4byte_fails() {
-        // U+1F600 (emoji): 0xF0 0x9F 0x98 0x80 (4-byte UTF-8)
-        let input = &[0xF0u8, 0x9F, 0x98, 0x80];
-        let result = convert(5, input);
-        assert!(result.is_none(), "U+1F600 should fail for Latin-1");
-    }
-
-    #[test]
-    fn test_utf8_to_latin1_2byte_above_ff_fails() {
-        // U+0100 (Ā): 0xC4 0x80 — above U+00FF, not representable.
-        let input = &[0xC4u8, 0x80];
-        let result = convert(5, input);
-        assert!(result.is_none(), "U+0100 should fail for Latin-1");
-    }
-
-    #[test]
-    fn test_utf8_to_latin1_roundtrip() {
-        // Convert Latin-1 → UTF-8 → Latin-1 for a range of bytes.
-        for byte in 0x80u8..=0xFF {
-            let input_l1 = &[byte];
-            let (utf8, _) = convert(4, input_l1).expect("Latin-1 → UTF-8");
-            let (back_l1, _) = convert(5, &utf8).expect("UTF-8 → Latin-1 roundtrip");
-            assert_eq!(back_l1, &[byte], "roundtrip failed for byte 0x{byte:02X}");
+        for cd in [
+            -1,
+            0,
+            1,
+            6,
+            99,
+            DESCRIPTOR_TAG | 0xF,
+            DESCRIPTOR_TAG | 0xF00,
+        ] {
+            let mut ip = input.as_ptr();
+            let mut il = input.len();
+            let mut out = [0u8; 8];
+            let mut op = out.as_mut_ptr();
+            let mut ol = out.len();
+            errno::set_errno(0);
+            let r = unsafe { iconv(cd, &raw mut ip, &raw mut il, &raw mut op, &raw mut ol) };
+            assert_eq!(
+                (r, errno::get_errno()),
+                (usize::MAX, errno::EBADF),
+                "{cd:#x}"
+            );
+            errno::set_errno(0);
+            assert_eq!(
+                (iconv_close(cd), errno::get_errno()),
+                (-1, errno::EBADF),
+                "{cd:#x}"
+            );
         }
     }
 
     #[test]
-    fn test_utf8_to_latin1_incomplete_sequence() {
-        // Incomplete 2-byte sequence: 0xC3 without continuation.
-        let input = &[0xC3u8];
-        let result = convert(5, input);
-        assert!(result.is_none(), "incomplete UTF-8 should fail");
-    }
-
-    // -----------------------------------------------------------------------
-    // Latin-1 → ASCII (descriptor 6)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_latin1_to_ascii_pure_ascii() {
-        let input = b"Hello";
-        let (output, replacements) = convert(6, input).expect("ASCII Latin-1 → ASCII");
-        assert_eq!(&output, b"Hello");
-        assert_eq!(replacements, 0);
-    }
-
-    #[test]
-    fn test_latin1_to_ascii_replaces_high_bytes() {
-        // Latin-1 "café": 0x63 0x61 0x66 0xE9
-        // Each byte > 127 is ONE character, replaced with ONE '?'.
-        let input = &[0x63u8, 0x61, 0x66, 0xE9];
-        let (output, replacements) = convert(6, input).expect("café Latin-1 → ASCII");
-        assert_eq!(&output, b"caf?");
-        assert_eq!(replacements, 1);
-    }
-
-    #[test]
-    fn test_latin1_to_ascii_all_high_bytes() {
-        // Three high bytes: each should produce exactly one '?'.
-        let input = &[0xE9u8, 0xF1, 0xFC]; // é, ñ, ü
-        let (output, replacements) = convert(6, input).expect("all-high Latin-1 → ASCII");
-        assert_eq!(&output, b"???");
-        assert_eq!(replacements, 3);
-        // Critical: input and output must be the same length for Latin-1.
-        // (UTF-8→ASCII would wrongly skip multi-byte sequences here.)
-        assert_eq!(output.len(), 3);
-    }
-
-    #[test]
-    fn test_latin1_to_ascii_byte_0xe9_not_treated_as_utf8() {
-        // Regression test: Latin-1 byte 0xE9 has the bit pattern 0xF0 == 0xE0
-        // which the UTF-8→ASCII converter would interpret as a 3-byte sequence
-        // leader, consuming 3 input bytes. Latin-1 → ASCII must consume only 1.
-        let input = &[0xE9u8, 0x41, 0x42]; // é, A, B in Latin-1
-        let (output, replacements) = convert(6, input).expect("0xE9 + AB");
-        assert_eq!(&output, b"?AB");
-        assert_eq!(replacements, 1);
-    }
-
-    // -----------------------------------------------------------------------
-    // UTF-8 → Latin-1: overlong encoding rejection
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_utf8_to_latin1_overlong_c0_80_rejected() {
-        // 0xC0 0x80 is an overlong encoding of U+0000 (NUL).
-        // Must be rejected per Unicode security guidelines.
-        let input = &[0xC0u8, 0x80];
-        let result = convert(5, input);
-        assert!(result.is_none(), "overlong 0xC0 0x80 should be rejected");
+    fn a_null_count_or_output_pointer_is_efault() {
+        let cd = open("UTF-8", "UTF-8");
+        let input = b"x";
+        let mut out = [0u8; 8];
+        let mut ip = input.as_ptr();
+        let mut il = 1usize;
+        let mut op = out.as_mut_ptr();
+        let mut ol = out.len();
+        for (a, b, c) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            errno::set_errno(0);
+            let r = unsafe {
+                iconv(
+                    cd,
+                    &raw mut ip,
+                    if a {
+                        core::ptr::null_mut()
+                    } else {
+                        &raw mut il
+                    },
+                    if b {
+                        core::ptr::null_mut()
+                    } else {
+                        &raw mut op
+                    },
+                    if c {
+                        core::ptr::null_mut()
+                    } else {
+                        &raw mut ol
+                    },
+                )
+            };
+            assert_eq!((r, errno::get_errno()), (usize::MAX, errno::EFAULT));
+        }
+        let mut null_out: *mut u8 = core::ptr::null_mut();
+        let r = unsafe { iconv(cd, &raw mut ip, &raw mut il, &raw mut null_out, &raw mut ol) };
+        assert_eq!(
+            (r, errno::get_errno()),
+            (usize::MAX, errno::EFAULT),
+            "*outbuf NULL with room"
+        );
+        assert_eq!(iconv_close(cd), 0);
     }
 
     #[test]
-    fn test_utf8_to_latin1_overlong_c1_bf_rejected() {
-        // 0xC1 0xBF is an overlong encoding of U+007F (DEL).
-        // Must be rejected — valid encoding is the 1-byte form 0x7F.
-        let input = &[0xC1u8, 0xBF];
-        let result = convert(5, input);
-        assert!(result.is_none(), "overlong 0xC1 0xBF should be rejected");
+    fn a_descriptor_is_never_the_error_value() {
+        for from in ["UTF-8", "ASCII", "LATIN1"] {
+            for to in ["UTF-8", "ASCII//TRANSLIT//IGNORE", "LATIN1//IGNORE"] {
+                let cd = open(to, from);
+                assert!(cd > 0, "{to} <- {from}: {cd:#x}");
+                assert_eq!(iconv_close(cd), 0);
+            }
+        }
     }
 
     #[test]
-    fn test_utf8_to_latin1_overlong_c0_af_rejected() {
-        // 0xC0 0xAF is an overlong encoding of U+002F ('/').
-        let input = &[0xC0u8, 0xAF];
-        let result = convert(5, input);
-        assert!(result.is_none(), "overlong 0xC0 0xAF should be rejected");
+    fn the_table_is_sorted_and_ascii() {
+        let t = crate::iconv_translit::C_TRANSLIT;
+        assert_eq!(t.len(), 1659);
+        assert!(t.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(t.iter().all(|(_, r)| r.is_ascii()));
     }
 
     #[test]
-    fn test_utf8_to_latin1_minimal_2byte_c2_80_accepted() {
-        // 0xC2 0x80 = U+0080 — the smallest valid 2-byte sequence.
-        // Should be accepted (U+0080 is within Latin-1 range).
-        let input = &[0xC2u8, 0x80];
-        let (output, _) = convert(5, input).expect("0xC2 0x80 should be accepted");
-        assert_eq!(&output, &[0x80u8]);
-    }
-
-    #[test]
-    fn test_utf8_to_latin1_invalid_continuation_byte() {
-        // 0xC3 followed by non-continuation byte (0x41 = 'A').
-        let input = &[0xC3u8, 0x41];
-        let result = convert(5, input);
-        assert!(
-            result.is_none(),
-            "invalid continuation byte should be rejected"
+    fn a_zero_width_character_transliterates_to_nothing() {
+        assert_eq!(
+            run("ASCII//TRANSLIT", "UTF-8", "a\u{200b}b".as_bytes(), 32),
+            (1, 0, 0, b"ab".to_vec())
         );
     }
 }

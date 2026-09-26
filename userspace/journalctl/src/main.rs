@@ -35,10 +35,12 @@
 
 #![cfg_attr(not(test), no_main)]
 
-use quoting::quoteaf_os;
+use quoting::{quoteaf_os, quotef_os};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fmt::Write as FmtWrite;
 use std::fs;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -776,11 +778,22 @@ fn format_size(bytes: u64) -> String {
 
 /// Discover all journal files under the journal directory.
 fn discover_journal_files() -> Vec<PathBuf> {
+    discover().0
+}
+
+/// The log files `journalctl` reads, and the directories under
+/// `/var/log/journal/` it could not list.
+///
+/// The second half is what [`discover_journal_files`] throws away. A reader
+/// that cannot say "I could not look there" reports an empty journal and a
+/// journal it was not allowed to read in the same words.
+fn discover() -> (Vec<PathBuf>, Vec<(PathBuf, io::Error)>) {
     let journal_path = Path::new(JOURNAL_DIR);
     let mut files = Vec::new();
+    let mut unreadable = Vec::new();
 
     if journal_path.is_dir() {
-        collect_jsonl_files(journal_path, &mut files);
+        collect_jsonl_files(journal_path, &mut files, &mut unreadable);
     }
 
     // If no journal files found, try fallback paths.
@@ -794,45 +807,126 @@ fn discover_journal_files() -> Vec<PathBuf> {
     }
 
     files.sort();
-    files
+    (files, unreadable)
 }
 
-/// Recursively collect .jsonl and .log files from a directory.
-fn collect_jsonl_files(dir: &Path, out: &mut Vec<PathBuf>) {
+/// Recursively collect .jsonl, .log and .journal files from a directory,
+/// recording each directory that could not be listed.
+///
+/// The suffix is matched on the name's BYTES: a log file whose name is not
+/// valid UTF-8 is still a log file, and `to_str().unwrap_or("")` -- what this
+/// did before -- quietly left it out.
+fn collect_jsonl_files(dir: &Path, out: &mut Vec<PathBuf>, unreadable: &mut Vec<(PathBuf, io::Error)>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(e) => {
+            unreadable.push((dir.to_path_buf(), e));
+            return;
+        }
     };
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(e) => {
+                unreadable.push((dir.to_path_buf(), e));
+                continue;
+            }
         };
         let path = entry.path();
         if path.is_dir() {
-            collect_jsonl_files(&path, out);
+            collect_jsonl_files(&path, out, unreadable);
         } else if path.is_file() {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name.ends_with(".jsonl") || name.ends_with(".log") || name.ends_with(".journal") {
+            let name = path.file_name().map(OsStr::as_encoded_bytes).unwrap_or_default();
+            if name.ends_with(b".jsonl") || name.ends_with(b".log") || name.ends_with(b".journal") {
                 out.push(path);
             }
         }
     }
 }
 
-/// Read all journal entries from all discovered files.
-fn read_all_entries() -> Vec<JournalEntry> {
-    let files = discover_journal_files();
-    let mut entries = Vec::new();
+/// A line of a log file as a journal record, if it is one.
+///
+/// A record is JSON, and JSON is UTF-8, so a line that is not UTF-8 is not a
+/// record -- but it is only that LINE. Reading the file as one `String`, as
+/// this program did, made one such byte cost every record in the file.
+fn record_of(line: &[u8]) -> Option<JournalEntry> {
+    std::str::from_utf8(line).ok().and_then(JournalEntry::from_json_line)
+}
 
-    for file in &files {
-        if let Ok(content) = fs::read_to_string(file) {
-            for line in content.lines() {
-                if let Some(entry) = JournalEntry::from_json_line(line) {
-                    entries.push(entry);
-                }
+/// Whether a line is blank, which is not worth a warning.
+fn is_blank(line: &[u8]) -> bool {
+    line.iter().all(u8::is_ascii_whitespace)
+}
+
+/// Every log file's records, and an account of what could not be shown.
+struct Journal {
+    /// All records, oldest first.
+    entries: Vec<JournalEntry>,
+    /// For each file read: where the next read should start, and any
+    /// unterminated last line held back for it (see [`read_journal`]).
+    tails: BTreeMap<PathBuf, Tail>,
+    /// Files with lines that are not records, and how many.
+    not_records: Vec<(PathBuf, usize)>,
+    /// Files and directories that could not be read, and why.
+    unreadable: Vec<(PathBuf, io::Error)>,
+}
+
+/// Read every log file, as bytes, line by line.
+///
+/// `hold_back_unterminated` is for `-f`: a last line with no newline may be a
+/// record still being written, so it is neither shown nor counted, but kept in
+/// the file's [`Tail`] for the follow loop to complete. A plain listing shows
+/// it if it parses -- a writer that never ends its last record is still a
+/// writer whose record should be seen.
+fn read_journal(hold_back_unterminated: bool) -> Journal {
+    let (files, unreadable) = discover();
+    read_files(&files, unreadable, hold_back_unterminated)
+}
+
+/// [`read_journal`] over a given list of files -- everything but where the
+/// journal lives, so a test can hand it its own.
+fn read_files(
+    files: &[PathBuf],
+    mut unreadable: Vec<(PathBuf, io::Error)>,
+    hold_back_unterminated: bool,
+) -> Journal {
+    let mut entries = Vec::new();
+    let mut tails = BTreeMap::new();
+    let mut not_records = Vec::new();
+
+    for file in files {
+        let bytes = match fs::read(file) {
+            Ok(b) => b,
+            // Gone between discovery and reading -- rotated away. Not an
+            // error: there is nothing left that could have been shown.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                unreadable.push((file.clone(), e));
+                continue;
+            }
+        };
+        let (complete, unterminated) = split_complete(&bytes);
+        let mut bad = 0usize;
+        let mut take = |line: &[u8]| match record_of(line) {
+            Some(entry) => entries.push(entry),
+            None if is_blank(line) => {}
+            None => bad = bad.saturating_add(1),
+        };
+        for line in complete.split(|&b| b == b'\n') {
+            take(line);
+        }
+        let mut tail = Tail { offset: len_u64(&bytes), partial: Vec::new() };
+        if !unterminated.is_empty() {
+            if hold_back_unterminated {
+                tail.partial = unterminated.to_vec();
+            } else {
+                take(unterminated);
             }
         }
+        if bad > 0 {
+            not_records.push((file.clone(), bad));
+        }
+        tails.insert(file.clone(), tail);
     }
 
     // Sort by timestamp.
@@ -842,7 +936,38 @@ fn read_all_entries() -> Vec<JournalEntry> {
             .then(a.timestamp_usec.cmp(&b.timestamp_usec))
     });
 
-    entries
+    Journal { entries, tails, not_records, unreadable }
+}
+
+/// `bytes` up to and including its last newline (without that newline), and
+/// what follows it -- an unterminated last line, or nothing.
+fn split_complete(bytes: &[u8]) -> (&[u8], &[u8]) {
+    match bytes.iter().rposition(|&b| b == b'\n') {
+        Some(nl) => (bytes.get(..nl).unwrap_or_default(), bytes.get(nl.saturating_add(1)..).unwrap_or_default()),
+        None => (&[], bytes),
+    }
+}
+
+fn len_u64(bytes: &[u8]) -> u64 {
+    u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+}
+
+/// Say on stderr what [`read_journal`] could not show. Returns whether
+/// anything could not be READ, which is an error; lines that are not records
+/// are reported but are not one -- `/var/log/syslog` holds text lines, and
+/// saying so each time is the point, not a failure.
+fn report_journal(journal: &Journal) -> bool {
+    for (path, n) in &journal.not_records {
+        let what = if *n == 1 { "line is" } else { "lines are" };
+        eprintln!(
+            "journalctl: {}: {n} {what} not a journal record and not shown",
+            quotef_os(path)
+        );
+    }
+    for (path, e) in &journal.unreadable {
+        eprintln!("journalctl: cannot read {}: {e}", quotef_os(path));
+    }
+    !journal.unreadable.is_empty()
 }
 
 /// Compute total disk usage of all journal files.
@@ -1343,11 +1468,12 @@ fn render_verbose(entry: &JournalEntry, color: bool) {
 // Action commands
 // ============================================================================
 
-fn cmd_list_fields() {
-    let entries = read_all_entries();
+fn cmd_list_fields() -> i32 {
+    let journal = read_journal(false);
+    let failed = report_journal(&journal);
     let mut field_names: BTreeSet<String> = BTreeSet::new();
 
-    for entry in &entries {
+    for entry in &journal.entries {
         for key in entry.fields.keys() {
             field_names.insert(key.clone());
         }
@@ -1362,13 +1488,14 @@ fn cmd_list_fields() {
 
     if field_names.is_empty() {
         println!("No journal entries found.");
-        return;
+        return i32::from(failed);
     }
 
     println!("Known journal fields ({} total):", field_names.len());
     for name in &field_names {
         println!("  {name}");
     }
+    i32::from(failed)
 }
 
 fn cmd_disk_usage() {
@@ -1380,45 +1507,50 @@ fn cmd_disk_usage() {
     );
 }
 
-fn cmd_vacuum_time(max_age_secs: u64) {
+fn cmd_vacuum_time(max_age_secs: u64) -> i32 {
     let cutoff = now_secs().saturating_sub(max_age_secs);
-    let files = discover_journal_files();
+    let (files, mut unreadable) = discover();
     let mut total_removed = 0usize;
     let mut total_kept = 0usize;
+    let mut failures = 0usize;
 
     for file in &files {
-        let content = match fs::read_to_string(file) {
+        // Bytes, not a `String`: a file holding one byte that is not UTF-8
+        // used to be skipped here without a word.
+        let content = match fs::read(file) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                unreadable.push((file.clone(), e));
+                continue;
+            }
         };
 
-        let mut kept_lines = Vec::new();
+        let mut kept_lines: Vec<&[u8]> = Vec::new();
         let mut removed = 0usize;
 
-        for line in content.lines() {
-            if let Some(entry) = JournalEntry::from_json_line(line) {
-                if entry.timestamp >= cutoff {
-                    kept_lines.push(line);
-                } else {
-                    removed += 1;
-                }
-            } else {
-                // Preserve non-parseable lines.
-                kept_lines.push(line);
+        for line in lines_of(&content) {
+            match record_of(line) {
+                Some(entry) if entry.timestamp < cutoff => removed += 1,
+                // A record young enough, and anything that is not a record,
+                // are kept exactly as they were.
+                _ => kept_lines.push(line),
             }
         }
 
         if removed > 0 {
-            let new_content = if kept_lines.is_empty() {
-                String::new()
-            } else {
-                let mut s = kept_lines.join("\n");
-                s.push('\n');
-                s
-            };
-            if fs::write(file, new_content).is_ok() {
-                total_removed += removed;
-                total_kept += kept_lines.len();
+            let new_content = joined_lines(&kept_lines);
+            // A failed rewrite is reported and counted, as `--vacuum-size`
+            // reports its own; until 2026-09-26 this one was only not counted.
+            match fs::write(file, new_content) {
+                Ok(()) => {
+                    total_removed += removed;
+                    total_kept += kept_lines.len();
+                }
+                Err(e) => {
+                    eprintln!("journalctl: cannot rewrite {}: {e}", quoteaf_os(file));
+                    failures += 1;
+                }
             }
         } else {
             total_kept += kept_lines.len();
@@ -1429,6 +1561,28 @@ fn cmd_vacuum_time(max_age_secs: u64) {
         "Vacuumed by time: removed {} entries, kept {} entries.",
         total_removed, total_kept
     );
+    for (path, e) in &unreadable {
+        eprintln!("journalctl: cannot read {}: {e}", quotef_os(path));
+    }
+    i32::from(failures > 0 || !unreadable.is_empty())
+}
+
+/// The lines of a log file's bytes: split on newlines, with a final newline
+/// ending the last line rather than starting an empty one.
+fn lines_of(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    let empty = bytes.is_empty();
+    body.split(|&b| b == b'\n').filter(move |_| !empty)
+}
+
+/// Lines back into a file's bytes, each ended by a newline.
+fn joined_lines(lines: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for line in lines {
+        out.extend_from_slice(line);
+        out.push(b'\n');
+    }
+    out
 }
 
 fn cmd_vacuum_size(max_bytes: u64) {
@@ -1455,12 +1609,17 @@ fn cmd_vacuum_size(max_bytes: u64) {
             break;
         }
 
-        let content = match fs::read_to_string(file) {
+        let content = match fs::read(file) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                eprintln!("journalctl: cannot read {}: {e}", quotef_os(file));
+                failures += 1;
+                continue;
+            }
         };
 
-        let lines: Vec<&str> = content.lines().collect();
+        let lines: Vec<&[u8]> = lines_of(&content).collect();
         let mut keep_from = 0;
         let mut entries_cut = 0usize;
 
@@ -1474,14 +1633,8 @@ fn cmd_vacuum_size(max_bytes: u64) {
             keep_from = idx + 1;
         }
 
-        let kept = &lines[keep_from..];
-        let new_content = if kept.is_empty() {
-            String::new()
-        } else {
-            let mut s = kept.join("\n");
-            s.push('\n');
-            s
-        };
+        let kept = lines.get(keep_from..).unwrap_or_default();
+        let new_content = joined_lines(kept);
         // Counted only once the file has accepted the truncation. The
         // discarded `let _ =` here was the odd one out: `cmd_vacuum_time`
         // above already guards its identical write with `.is_ok()` and only
@@ -1503,7 +1656,7 @@ fn cmd_vacuum_size(max_bytes: u64) {
         format_size(new_total)
     );
     if failures > 0 {
-        eprintln!("journalctl: {failures} journal file(s) could not be truncated");
+        eprintln!("journalctl: {failures} journal file(s) could not be read or truncated");
         process::exit(1);
     }
 }
@@ -1512,11 +1665,57 @@ fn cmd_vacuum_size(max_bytes: u64) {
 // Follow mode
 // ============================================================================
 
+/// Where `-f` has read a file up to, and the unterminated line it is waiting
+/// to see finished.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Tail {
+    /// Bytes of the file already consumed.
+    offset: u64,
+    /// The start of a line whose newline has not been written yet.
+    partial: Vec<u8>,
+}
+
+impl Tail {
+    /// Take the bytes past `offset` in a file that is now `len` long, and
+    /// return the complete lines they finish.
+    ///
+    /// A file SHORTER than the offset was truncated or replaced (rotation),
+    /// and is read again from the start: the records written to it since are
+    /// new, and skipping to the old offset would lose them -- which this did
+    /// before 2026-09-26.
+    fn advance(&mut self, file: &Path, len: u64) -> io::Result<Vec<Vec<u8>>> {
+        if len < self.offset {
+            *self = Tail::default();
+        }
+        if len == self.offset {
+            return Ok(Vec::new());
+        }
+        let mut f = fs::File::open(file)?;
+        f.seek(SeekFrom::Start(self.offset))?;
+        let mut fresh = Vec::new();
+        f.read_to_end(&mut fresh)?;
+        self.offset = self.offset.saturating_add(len_u64(&fresh));
+        self.partial.extend_from_slice(&fresh);
+        let (complete, unterminated) = split_complete(&self.partial);
+        let lines: Vec<Vec<u8>> = if complete.is_empty() && unterminated.len() == self.partial.len() {
+            Vec::new()
+        } else {
+            complete.split(|&b| b == b'\n').map(<[u8]>::to_vec).collect()
+        };
+        self.partial = unterminated.to_vec();
+        Ok(lines)
+    }
+}
+
 fn cmd_follow(cfg: &Config) {
     // Print existing entries first (last N if -n specified, else last 10).
-    let entries = read_all_entries();
+    // The offsets `-f` continues from come out of the SAME read: taking file
+    // sizes afterwards, as this did, lost every record appended in between.
+    let journal = read_journal(true);
+    report_journal(&journal);
+    let entries = &journal.entries;
     let num = cfg.num_entries.unwrap_or(10);
-    let filtered = apply_filters(&entries, cfg);
+    let filtered = apply_filters(entries, cfg);
 
     let display_entries = if filtered.len() > num {
         &filtered[filtered.len() - num..]
@@ -1528,43 +1727,40 @@ fn cmd_follow(cfg: &Config) {
         render_entry(entry, cfg);
     }
 
-    // Track file sizes for change detection.
-    let mut file_sizes: BTreeMap<PathBuf, u64> = BTreeMap::new();
-    for file in &discover_journal_files() {
-        let size = fs::metadata(file).map(|m| m.len()).unwrap_or(0);
-        file_sizes.insert(file.clone(), size);
-    }
+    let mut tails = journal.tails;
 
-    // Poll for new content.
+    // Poll for new content. Only the bytes past each file's offset are read
+    // -- this used to re-read every file whole, twice a second, and then
+    // slice the `String` at the old length, which panicked whenever that
+    // length fell inside a multi-byte character.
     loop {
         std::thread::sleep(std::time::Duration::from_millis(500));
 
-        let current_files = discover_journal_files();
+        let (current_files, _) = discover();
         for file in &current_files {
-            let current_size = fs::metadata(file).map(|m| m.len()).unwrap_or(0);
-            let prev_size = file_sizes.get(file).copied().unwrap_or(0);
-
-            if current_size > prev_size {
-                if let Ok(content) = fs::read_to_string(file) {
-                    let new_data = if (prev_size as usize) < content.len() {
-                        &content[prev_size as usize..]
-                    } else {
-                        ""
-                    };
-                    for line in new_data.lines() {
-                        if let Some(entry) = JournalEntry::from_json_line(line) {
-                            // Apply filters except reverse and num_entries.
-                            let passes = entry_passes_filters(&entry, cfg);
-                            if passes {
-                                render_entry(&entry, cfg);
-                            }
-                        }
+            let len = match fs::metadata(file) {
+                Ok(m) => m.len(),
+                // Rotated away between discovery and now; its successor is
+                // found on the next round.
+                Err(_) => continue,
+            };
+            // A file first seen now is read from its start.
+            let tail = tails.entry(file.clone()).or_default();
+            let lines = match tail.advance(file, len) {
+                Ok(lines) => lines,
+                Err(e) => {
+                    eprintln!("journalctl: cannot read {}: {e}", quotef_os(file));
+                    continue;
+                }
+            };
+            for line in &lines {
+                if let Some(entry) = record_of(line) {
+                    // Apply filters except reverse and num_entries.
+                    if entry_passes_filters(&entry, cfg) {
+                        render_entry(&entry, cfg);
                     }
                 }
-            } else if current_size < prev_size {
-                // File was truncated or rotated.
             }
-            file_sizes.insert(file.clone(), current_size);
         }
     }
 }
@@ -1685,16 +1881,14 @@ fn run(args: &[String]) -> i32 {
 
     // Dispatch action commands.
     if cfg.list_fields {
-        cmd_list_fields();
-        return 0;
+        return cmd_list_fields();
     }
     if cfg.disk_usage {
         cmd_disk_usage();
         return 0;
     }
     if let Some(secs) = cfg.vacuum_time {
-        cmd_vacuum_time(secs);
-        return 0;
+        return cmd_vacuum_time(secs);
     }
     if let Some(bytes) = cfg.vacuum_size {
         cmd_vacuum_size(bytes);
@@ -1708,24 +1902,26 @@ fn run(args: &[String]) -> i32 {
     }
 
     // Normal display mode.
-    let entries = read_all_entries();
+    let journal = read_journal(false);
+    let failed = report_journal(&journal);
+    let entries = &journal.entries;
     if entries.is_empty() {
         eprintln!("No journal entries found.");
         eprintln!("(Looked in {} and fallback paths)", JOURNAL_DIR);
         return 1;
     }
 
-    let filtered = apply_filters(&entries, &cfg);
+    let filtered = apply_filters(entries, &cfg);
     if filtered.is_empty() {
         eprintln!("No entries match the specified filters.");
-        return 0;
+        return i32::from(failed);
     }
 
     for entry in &filtered {
         render_entry(entry, &cfg);
     }
 
-    0
+    i32::from(failed)
 }
 
 // ============================================================================
@@ -2833,5 +3029,146 @@ mod tests {
             decoded("\"\\u\u{e9}\u{e9}\u{e9}\"").as_deref(),
             Some("\\u\u{e9}\u{e9}\u{e9}")
         );
+    }
+
+    // --- Reading as bytes (B-JOURNALCTL-SKIPS-A-WHOLE-LOG-FILE-...) ---
+
+    use scratchdir::ScratchDir;
+
+    fn rec(ts: u64, msg: &str) -> String {
+        format!("{{\"ts\":{ts},\"level\":\"info\",\"service\":\"t\",\"msg\":\"{msg}\"}}")
+    }
+
+    /// One byte that is not UTF-8 costs its own line, not the file.
+    #[test]
+    fn a_bad_byte_costs_its_line_not_the_file() {
+        let dir = ScratchDir::new("journalctl_bad_byte");
+        let file = dir.path("syslog.jsonl");
+        let mut bytes = format!("{}\n", rec(1, "a")).into_bytes();
+        bytes.extend_from_slice(b"\xff\xfe not a record\n");
+        bytes.extend_from_slice(format!("{}\n", rec(2, "b")).as_bytes());
+        fs::write(&file, &bytes).unwrap();
+
+        let j = read_files(std::slice::from_ref(&file), Vec::new(), false);
+        let msgs: Vec<&str> = j.entries.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(msgs, ["a", "b"]);
+        assert_eq!(j.not_records, [(file, 1)]);
+        assert!(j.unreadable.is_empty());
+    }
+
+    /// Text lines -- `logger`'s, in `/var/log/syslog` -- are counted, so
+    /// they can be reported, rather than vanishing.
+    #[test]
+    fn lines_that_are_not_records_are_counted_and_blank_ones_are_not() {
+        let dir = ScratchDir::new("journalctl_text_lines");
+        let file = dir.path("syslog");
+        fs::write(&file, "<13>Sep 26 06:37:16 t: hi\n\n<13>Sep 26 06:37:17 t: ho\n").unwrap();
+        let j = read_files(std::slice::from_ref(&file), Vec::new(), false);
+        assert!(j.entries.is_empty());
+        assert_eq!(j.not_records, [(file, 2)]);
+    }
+
+    /// A file that cannot be read is reported, not skipped.
+    #[test]
+    fn an_unreadable_file_is_reported() {
+        let dir = ScratchDir::new("journalctl_unreadable");
+        // A directory where a file is expected: `fs::read` fails, and not
+        // with NotFound.
+        let not_a_file = dir.path("syslog.jsonl");
+        fs::create_dir(&not_a_file).unwrap();
+        let j = read_files(std::slice::from_ref(&not_a_file), Vec::new(), false);
+        assert_eq!(j.unreadable.len(), 1);
+        assert_eq!(j.unreadable[0].0, not_a_file);
+    }
+
+    /// A file rotated away between discovery and reading is simply absent.
+    #[test]
+    fn a_file_that_vanished_is_not_an_error() {
+        let dir = ScratchDir::new("journalctl_vanished");
+        let j = read_files(&[dir.path("gone.jsonl")], Vec::new(), false);
+        assert!(j.unreadable.is_empty() && j.entries.is_empty());
+    }
+
+    /// A listing shows an unterminated last record; `-f` holds it back and
+    /// shows it once, when its newline arrives.
+    #[test]
+    fn an_unterminated_last_record_is_shown_by_a_listing_and_held_by_follow() {
+        let dir = ScratchDir::new("journalctl_unterminated");
+        let file = dir.path("syslog.jsonl");
+        fs::write(&file, format!("{}\n{}", rec(1, "a"), rec(2, "b"))).unwrap();
+
+        let listing = read_files(std::slice::from_ref(&file), Vec::new(), false);
+        assert_eq!(listing.entries.len(), 2);
+
+        let follow = read_files(std::slice::from_ref(&file), Vec::new(), true);
+        assert_eq!(follow.entries.len(), 1);
+        let mut tail = follow.tails[&file].clone();
+        assert_eq!(tail.partial, rec(2, "b").into_bytes());
+
+        let mut f = fs::OpenOptions::new().append(true).open(&file).unwrap();
+        io::Write::write_all(&mut f, b"\n").unwrap();
+        drop(f);
+        let len = fs::metadata(&file).unwrap().len();
+        let lines = tail.advance(&file, len).unwrap();
+        assert_eq!(lines, [rec(2, "b").into_bytes()]);
+        assert!(tail.partial.is_empty());
+    }
+
+    /// Only the bytes past the offset are read, and a record written in two
+    /// pieces -- split inside a multi-byte character -- arrives whole. The
+    /// `String` slicing this replaced panicked on exactly that split.
+    #[test]
+    fn follow_joins_a_record_written_in_two_pieces_across_a_character() {
+        let dir = ScratchDir::new("journalctl_torn");
+        let file = dir.path("syslog.jsonl");
+        fs::write(&file, b"").unwrap();
+        let mut tail = Tail::default();
+
+        let whole = format!("{}\n", rec(3, "caf\u{e9}"));
+        let bytes = whole.as_bytes();
+        // Split inside the two bytes of U+00E9.
+        let cut = whole.find('\u{e9}').unwrap() + 1;
+        let mut f = fs::OpenOptions::new().append(true).open(&file).unwrap();
+
+        io::Write::write_all(&mut f, &bytes[..cut]).unwrap();
+        let len = fs::metadata(&file).unwrap().len();
+        assert!(tail.advance(&file, len).unwrap().is_empty());
+
+        io::Write::write_all(&mut f, &bytes[cut..]).unwrap();
+        let len = fs::metadata(&file).unwrap().len();
+        let lines = tail.advance(&file, len).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(record_of(&lines[0]).unwrap().message, "caf\u{e9}");
+    }
+
+    /// A file that got shorter was truncated or replaced, and is read again
+    /// from its start rather than from the old offset.
+    #[test]
+    fn follow_rereads_a_truncated_file_from_the_start() {
+        let dir = ScratchDir::new("journalctl_truncated");
+        let file = dir.path("syslog.jsonl");
+        fs::write(&file, format!("{}\n{}\n", rec(1, "old"), rec(2, "older"))).unwrap();
+        let mut tail = Tail::default();
+        let len = fs::metadata(&file).unwrap().len();
+        assert_eq!(tail.advance(&file, len).unwrap().len(), 2);
+
+        fs::write(&file, format!("{}\n", rec(3, "new"))).unwrap();
+        let len = fs::metadata(&file).unwrap().len();
+        let lines = tail.advance(&file, len).unwrap();
+        assert_eq!(lines, [rec(3, "new").into_bytes()]);
+    }
+
+    #[test]
+    fn lines_round_trip_through_vacuums_split_and_join() {
+        for text in ["", "a\n", "a\nb\n", "a\nb", "\n", "a\n\nb\n"] {
+            let lines: Vec<&[u8]> = lines_of(text.as_bytes()).collect();
+            let back = joined_lines(&lines);
+            let expected = if text.is_empty() || text.ends_with('\n') {
+                text.to_string()
+            } else {
+                format!("{text}\n")
+            };
+            assert_eq!(back, expected.as_bytes(), "{text:?}");
+        }
     }
 }

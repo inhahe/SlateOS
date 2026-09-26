@@ -7,3 +7,8 @@ description = "SlateOS journalctl - journal log viewer and manager"
 # Diagnostics name journal file paths, and a path may hold spaces or
 # newlines; scripts/quote-names.py enforces that they are quoted.
 quoting = { path = "../quoting" }
+
+[dev-dependencies]
+# Log files for the reading tests: a bad byte, text lines, a torn append,
+# truncation. Real files, because what is under test is how they are read.
+scratchdir = { path = "../scratchdir" }

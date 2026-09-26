@@ -166506,7 +166506,7 @@ crate; it is to be extracted into a shared crate first, which every
 standalone util-linux port here can then use — today they match long options
 whole, so `--pri` is refused where util-linux accepts it.
 
-## B-JOURNALCTL-SKIPS-A-WHOLE-LOG-FILE-OVER-ONE-BYTE-THAT-IS-NOT-UTF-8 (lane B, 2026-09-26) — **open**
+## B-JOURNALCTL-SKIPS-A-WHOLE-LOG-FILE-OVER-ONE-BYTE-THAT-IS-NOT-UTF-8 (lane B, 2026-09-26) — FIXED 2026-09-26
 
 **In short:** `journalctl` reads each log file with `fs::read_to_string` and,
 if that fails, moves on to the next file without a word
@@ -166539,6 +166539,21 @@ file as an error naming it, with a non-zero status, instead of skipping it.
 Found while correcting TD-B-NOTHING-RECEIVES-SYSLOG-MESSAGES, which had
 misdescribed how `journalctl` chooses its files.
 
+**Fixed 2026-09-26.** Every read is bytes, line by line: `record_of` parses
+one line, so a bad byte costs its line. Lines that are not records are
+counted per file and reported on stderr ("N lines are not a journal record
+and not shown"), which is what `/var/log/syslog`'s text lines now produce
+instead of vanishing. An unreadable file or directory -- including a log
+file whose NAME is not UTF-8, which discovery used to skip -- is reported,
+with exit status 1. `-f` takes its offsets from the same read as its
+listing (records appended between the two were lost), reads only the bytes
+past each offset, carries an unterminated last line to the next round (a
+record written in two pieces was lost), and re-reads a file that got
+shorter from its start (a truncated or rotated file lost what was written
+before the next poll). `--vacuum-time` reports a failed rewrite as
+`--vacuum-size` does, and exits 1. Eight tests; the torn-append one is what
+found B-JOURNALCTL-SHOWS-NON-ASCII-TEXT-AS-MOJIBAKE.
+
 ## B-JOURNALCTL-SHOWS-NON-ASCII-TEXT-AS-MOJIBAKE (lane B, 2026-09-26) — FIXED 2026-09-26
 
 **In short:** `journalctl` decoded every JSON string byte by byte, pushing each
@@ -166555,3 +166570,23 @@ Found by a test for the torn-append fix
 **Fixed** in 91fc6a349: unescaped runs are copied as the UTF-8 they are; every
 escape JSON defines is decoded, a surrogate pair as its one character; what
 cannot be decoded is kept exactly as written. Four tests.
+
+## B-JOURNALCTL-VACUUM-LOSES-RECORDS-APPENDED-DURING-ITS-REWRITE (lane B, 2026-09-26) — **open**
+
+**In short:** `--vacuum-time` and `--vacuum-size` read a log file, filter it,
+and write the survivors back over the same path. A record another program
+appends between the read and the write is overwritten and lost. Every writer
+here appends one record at a time (`syslogd log`, `systemd-cat`, `logger`),
+so a vacuum run on a live system can silently drop whatever was logged while
+it ran.
+
+**Where:** `cmd_vacuum_time` and `cmd_vacuum_size` in
+`userspace/journalctl/src/main.rs` (`fs::read`, then `fs::write` of the kept
+lines). Found while fixing their reads; not reproduced.
+
+**The proper fix** is to stop rewriting a live file: rotate instead -- rename
+the live file aside (writers that open, append and close per record then
+start a fresh one), filter the renamed file at leisure, and have the readers
+include rotated files. That changes where `journalctl` finds records outside
+`/var/log/journal/`, so it is a design change of its own, not a patch to the
+vacuum.

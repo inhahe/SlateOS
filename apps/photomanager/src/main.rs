@@ -1762,6 +1762,23 @@ struct ShownPicture {
 type PictureLoader =
     offloop::Latest<(PhotoId, std::path::PathBuf), (PhotoId, Result<imagecodec::Image, String>)>;
 
+/// The worker that makes the grid's thumbnails off the window's thread: asked
+/// with every card the grid shows, answering with each one's thumbnail as it
+/// is made.
+type ThumbWorker =
+    offloop::Queue<thumbs::ThumbnailRequest, Option<(thumbs::ThumbnailRequest, thumbs::Thumbnail)>>;
+
+/// Make one thumbnail with `generator` -- from its disk cache if it has one, else
+/// from the file.
+fn make_thumbnail(
+    generator: &mut thumbs::ThumbnailGenerator,
+    request: thumbs::ThumbnailRequest,
+) -> Option<(thumbs::ThumbnailRequest, thumbs::Thumbnail)> {
+    generator.push(request);
+    generator.process_batch(1);
+    generator.take_completed().pop()
+}
+
 /// Read and decode the photograph at `path`, or say why not.
 ///
 /// Nothing here needs the application, so it runs on the loader's thread or,
@@ -1908,6 +1925,13 @@ pub struct PhotoApp {
     /// no loader -- before the window exists, and in tests that give it no
     /// waker -- the photograph is decoded where it is asked for, as it was.
     picture_loader: Option<PictureLoader>,
+    /// The worker that makes the grid's thumbnails, once the window has
+    /// handed over a way to be woken; `thumb_gen` is its generator until then.
+    ///
+    /// They were made a few per frame inside `render`, and a camera's JPEG
+    /// costs about a third of a second even at thumbnail size, so every frame
+    /// that made two or three was a frame the window could not answer in.
+    thumb_worker: Option<ThumbWorker>,
     /// The photograph the two fields above were computed for, whether that
     /// ended in a picture or in a reason.
     ///
@@ -1997,6 +2021,7 @@ impl PhotoApp {
             picture_for: None,
             picture_error: None,
             picture_loader: None,
+            thumb_worker: None,
             thumb_cache: thumbs::ThumbnailCache::default_capacity(),
             thumb_gen: thumbs::ThumbnailGenerator::new(),
             thumb_ready: HashMap::new(),
@@ -2264,9 +2289,33 @@ impl PhotoApp {
     /// modification time and size, so a hit is a hit on *this* version of the
     /// file and a miss after an edit is automatic.
     fn queue_thumbnails(&mut self) {
+        let wanted = self.thumbnail_requests();
+        // The worker's set replaces what is left of the last one -- the cards
+        // scrolled away -- and an empty set cancels it.
+        let wanted = match self.thumb_worker.as_mut() {
+            Some(worker) => match worker.replace(wanted) {
+                Ok(()) => return,
+                // The worker is gone (only a panic does that, and only a
+                // test's build survives one): make them here, a few a frame.
+                Err(wanted) => {
+                    self.thumb_worker = None;
+                    wanted
+                }
+            },
+            None => wanted,
+        };
         self.thumb_gen.cancel_all();
+        for request in wanted {
+            self.thumb_gen.push(request);
+        }
+    }
+
+    /// A thumbnail request for every card the grid will draw that has none
+    /// in the cache -- and, for those that have, a note that they are ready.
+    fn thumbnail_requests(&mut self) -> Vec<thumbs::ThumbnailRequest> {
+        let mut requests = Vec::new();
         if self.view_mode != ViewMode::Grid {
-            return;
+            return requests;
         }
         let config = self.thumb_config();
         let wanted: Vec<PhotoId> = self.visible_photos();
@@ -2284,13 +2333,14 @@ impl PhotoApp {
                     .insert(pid, (mtime, thumbs::image_id(&path, mtime, size)));
                 continue;
             }
-            self.thumb_gen.push(thumbs::ThumbnailRequest {
+            requests.push(thumbs::ThumbnailRequest {
                 path,
                 mtime,
                 size,
                 config: config.clone(),
             });
         }
+        requests
     }
 
     /// How a thumbnail should look: the user's colours, at the grid's size.
@@ -2315,18 +2365,42 @@ impl PhotoApp {
     fn pump_thumbnails(&mut self) {
         self.thumb_gen.process_batch(Self::THUMB_BATCH);
         for (req, thumb) in self.thumb_gen.take_completed() {
-            let id = thumbs::image_id(&req.path, req.mtime, req.size);
-            let owner = self
-                .photos
-                .iter()
-                .find(|p| p.file_path == req.path)
-                .map(|p| p.id);
-            self.thumb_uploads.push((id, thumb.clone()));
-            self.thumb_cache
-                .insert(&req.path, req.mtime, req.size, thumb);
-            if let Some(pid) = owner {
-                self.thumb_ready.insert(pid, (req.mtime, id));
-            }
+            self.file_thumbnail(req, thumb);
+        }
+        self.collect_thumbnails();
+    }
+
+    /// File every thumbnail the worker has made since the last call; whether
+    /// there were any, so a wake that brought some can ask for a frame.
+    fn collect_thumbnails(&mut self) -> bool {
+        let made: Vec<_> = self
+            .thumb_worker
+            .as_mut()
+            .map(offloop::Queue::take)
+            .unwrap_or_default()
+            .into_iter()
+            .flatten()
+            .collect();
+        let any = !made.is_empty();
+        for (req, thumb) in made {
+            self.file_thumbnail(req, thumb);
+        }
+        any
+    }
+
+    /// File one made thumbnail.
+    fn file_thumbnail(&mut self, req: thumbs::ThumbnailRequest, thumb: thumbs::Thumbnail) {
+        let id = thumbs::image_id(&req.path, req.mtime, req.size);
+        let owner = self
+            .photos
+            .iter()
+            .find(|p| p.file_path == req.path)
+            .map(|p| p.id);
+        self.thumb_uploads.push((id, thumb.clone()));
+        self.thumb_cache
+            .insert(&req.path, req.mtime, req.size, thumb);
+        if let Some(pid) = owner {
+            self.thumb_ready.insert(pid, (req.mtime, id));
         }
     }
 
@@ -2396,6 +2470,22 @@ impl PhotoApp {
             self.picture_loader = None;
             self.show_picture(pid, decode_photo(&path));
         }
+    }
+
+    /// Put up the photograph the loader has finished, if it has; whether it
+    /// did.
+    fn take_decoded_picture(&mut self) -> bool {
+        let Some((pid, decoded)) = self.picture_loader.as_mut().and_then(offloop::Latest::take)
+        else {
+            return false;
+        };
+        // The loader answers only the newest request, which is the selection
+        // unless that has since moved to nothing.
+        if self.picture_for != Some(pid) {
+            return false;
+        }
+        self.show_picture(pid, decoded);
+        true
     }
 
     /// Put the decoded photograph `pid` up -- or, when it would not decode,
@@ -5175,30 +5265,36 @@ impl App for PhotoApp {
     }
 
     fn attach_waker(&mut self, waker: std::task::Waker) {
-        // A worker that cannot be started leaves the decode on this thread,
-        // as it always was: slower to answer, never wrong.
+        // A worker that cannot be started leaves its work on this thread, as
+        // it always was: slower to answer, never wrong.
         self.picture_loader = offloop::Latest::start(
             "photomanager-picture",
-            waker,
+            waker.clone(),
             |(pid, path): (PhotoId, std::path::PathBuf)| (pid, decode_photo(&path)),
         )
         .ok();
+        // The generator goes to the worker, with whatever disk cache it was
+        // given; an empty one is left here, which is what a worker that fails
+        // to start falls back on -- slower, never wrong.
+        let mut generator = std::mem::take(&mut self.thumb_gen);
+        self.thumb_worker = offloop::Queue::start("photomanager-thumbs", waker, move |request| {
+            make_thumbnail(&mut generator, request)
+        })
+        .ok();
+        // What the grid was filled for is forgotten, so the next frame asks
+        // for its cards again -- of the worker, or of the generator left here.
+        self.thumb_queued_for = None;
     }
 
     /// The selected photograph is decoded: put it up. `on_wake` runs before
     /// the frame, so its upload is drained into that frame by `take_images`.
     fn on_wake(&mut self) -> Response {
-        let Some((pid, decoded)) = self.picture_loader.as_mut().and_then(offloop::Latest::take)
-        else {
-            return Response::Idle;
-        };
-        // The loader answers only the newest request, which is the selection
-        // unless that has since moved to nothing.
-        if self.picture_for != Some(pid) {
-            return Response::Idle;
+        let thumbnails = self.collect_thumbnails();
+        if self.take_decoded_picture() || thumbnails {
+            Response::Redraw
+        } else {
+            Response::Idle
         }
-        self.show_picture(pid, decoded);
-        Response::Redraw
     }
 
     fn take_images(&mut self) -> Vec<app::ImageChange> {
@@ -8082,6 +8178,62 @@ mod tests {
             !app.take_images().is_empty(),
             "the pictures were drawn but never sent to the compositor"
         );
+    }
+
+    /// Run the window's side of the thumbnail worker until `n` cards have
+    /// their picture: wait for a wake, then do what the loop does with it.
+    fn until_thumbnails(
+        app: &mut PhotoApp,
+        heard: &std::sync::mpsc::Receiver<()>,
+        n: usize,
+    ) -> usize {
+        let mut redraws: usize = 0;
+        while app.thumb_ready.len() < n {
+            heard
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the thumbnail worker never woke the window");
+            if app.on_wake() == Response::Redraw {
+                redraws = redraws.saturating_add(1);
+            }
+        }
+        redraws
+    }
+
+    /// **The grid's thumbnails are made off the window's thread**, every card
+    /// the grid shows, and each is put up as it arrives. They were made a few
+    /// per frame inside `render`.
+    #[test]
+    fn the_grids_thumbnails_are_made_off_the_window() {
+        let n = PhotoApp::THUMB_BATCH + 3;
+        let mut app = app_with_n_pictures("thumbs-off", n);
+        let heard = with_a_loader(&mut app);
+        assert!(
+            app.thumb_worker.is_some(),
+            "no thumbnail worker was started"
+        );
+        let _ = app.render(900.0, 700.0);
+        assert_eq!(
+            app.thumb_gen.pending_count(),
+            0,
+            "the frame was left to make them"
+        );
+        assert!(
+            until_thumbnails(&mut app, &heard, n) > 0,
+            "thumbnails arrived and no frame was asked for"
+        );
+        let uploads = app
+            .take_images()
+            .iter()
+            .filter(|c| matches!(c, oswindow::app::ImageChange::Upload { .. }))
+            .count();
+        assert_eq!(uploads, n, "a thumbnail made was never sent");
+        let drawn = app
+            .render(900.0, 700.0)
+            .commands
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::Image { .. }))
+            .count();
+        assert_eq!(drawn, n, "a card still draws its placeholder");
     }
 
     /// More photographs than fit in one frame's budget still all arrive.

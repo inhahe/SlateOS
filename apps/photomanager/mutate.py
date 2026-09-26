@@ -27,6 +27,7 @@ OFF = "the_selected_photograph_is_decoded_off_the_window"
 GONE = "a_photograph_deselected_while_decoding_is_not_put_up"
 FAILS = "a_photograph_that_fails_off_the_window_says_why"
 NOT_A_PICTURE = "a_file_that_is_not_a_picture_says_why_instead_of_staying_blank"
+THUMBS = "the_grids_thumbnails_are_made_off_the_window"
 
 MUTATIONS = [
     (
@@ -49,19 +50,19 @@ MUTATIONS = [
     ),
     (
         "a decoded photograph is not put up",
-        "        self.show_picture(pid, decoded);\n        Response::Redraw",
-        "        let _ = (pid, decoded);\n        Response::Redraw",
+        "        self.show_picture(pid, decoded);\n        true",
+        "        let _ = (pid, decoded);\n        true",
         [OFF],
     ),
     (
         "a decoded photograph is not drawn",
-        "        self.show_picture(pid, decoded);\n        Response::Redraw",
-        "        self.show_picture(pid, decoded);\n        Response::Idle",
+        "        self.show_picture(pid, decoded);\n        true",
+        "        self.show_picture(pid, decoded);\n        false",
         [OFF],
     ),
     (
         "a photograph no longer selected is put up",
-        "        if self.picture_for != Some(pid) {\n            return Response::Idle;\n        }",
+        "        if self.picture_for != Some(pid) {\n            return false;\n        }",
         "",
         [GONE],
     ),
@@ -70,6 +71,31 @@ MUTATIONS = [
         "            Err(why) => {\n                self.picture_error = Some(why);\n                return;",
         "            Err(why) => {\n                let _ = why;\n                return;",
         [FAILS, NOT_A_PICTURE],
+    ),
+    # -- the grid's thumbnails ------------------------------------------------
+    (
+        "thumbnails are left to the frame even with a worker",
+        "            Some(worker) => match worker.replace(wanted) {",
+        "            Some(_) => match Err::<(), _>(wanted) {",
+        [THUMBS],
+    ),
+    (
+        "no thumbnail worker is started",
+        "        self.thumb_worker = offloop::Queue::start(",
+        "        self.thumb_worker = None;\n        let _unused = offloop::Queue::start(",
+        [THUMBS],
+    ),
+    (
+        "a made thumbnail is not filed",
+        "        for (req, thumb) in made {\n            self.file_thumbnail(req, thumb);\n        }\n        any",
+        "        let _ = made;\n        any",
+        [THUMBS],
+    ),
+    (
+        "a wake with thumbnails asks for no frame",
+        "        if self.take_decoded_picture() || thumbnails {",
+        "        if self.take_decoded_picture() {",
+        [THUMBS],
     ),
 ]
 

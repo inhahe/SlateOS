@@ -169468,6 +169468,19 @@ subtracted, and when the others have all called `pthread_exit` the kernel ends
 the process as before, without `exit`'s work. That is the old behaviour, and
 no worse; covering it needs the kernel to tell the process a thread died.
 
+### [D] B-D-IOPRIO-CHECK-WAS-PRE-6-5 — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/process.rs`, `ioprio_check_cap` (new) and `ioprio_set`.
+
+**What it was.** `ioprio_set` judged an I/O priority by the rule Linux
+dropped in 6.5: all thirteen data bits as the level, so a priority carrying a
+hint (bits 3-12, `IOPRIO_PRIO_HINT`) was `EINVAL`, and a class field above
+three bits was a class nothing matched. Linux 6.6's `ioprio_check_cap` masks
+the class to three bits and reads only the low three as the level.
+
+**Fix.** `ioprio_check_cap`, 6.6's, shared by `ioprio_set` and kernel AIO's
+`IOCB_FLAG_IOPRIO`.
+
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 
 **Status:** OPEN — worked around in lane F; the fix is lane A's (`requests/f-a-poll-never-reports-a-connection-waiting-on-a-listening-socket.md`).

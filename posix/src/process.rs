@@ -2911,6 +2911,11 @@ pub const IOPRIO_CLASS_SHIFT: i32 = 13;
 pub const IOPRIO_PRIO_MASK: i32 = (1 << IOPRIO_CLASS_SHIFT) - 1;
 /// Number of best-effort / real-time priority levels (0..7).
 pub const IOPRIO_BE_NR: i32 = 8;
+/// The class is three bits: `IOPRIO_PRIO_CLASS` masks with this.
+const IOPRIO_CLASS_MASK: i32 = 7;
+/// The level is the low three bits (`IOPRIO_PRIO_LEVEL`, Linux 6.5); the
+/// ten above it are hints, which the check does not look at.
+const IOPRIO_LEVEL_MASK: i32 = 7;
 
 /// Validate the `which` parameter of `ioprio_get`/`ioprio_set`.
 /// Returns `true` for `IOPRIO_WHO_PROCESS`, `_PGRP`, `_USER`.
@@ -2946,6 +2951,51 @@ pub extern "C" fn ioprio_get(which: i32, who: i32) -> i32 {
     0
 }
 
+/// Linux 6.6's `ioprio_check_cap` (block/ioprio.c): may the caller ask for
+/// `ioprio`?  [`ioprio_set`] asks it first, and so does kernel AIO for an
+/// iocb carrying `IOCB_FLAG_IOPRIO`.
+///
+/// The class is bits 13-15 -- masked to three bits, so bits above 15 are
+/// never looked at -- and the level is bits 0-2.  Bits 3-12 are hints
+/// (`IOPRIO_PRIO_HINT`, Linux 6.5), which this does not judge:
+///
+/// | class | rule |
+/// |---|---|
+/// | `IOPRIO_CLASS_RT` (1) | `CAP_SYS_ADMIN` or `CAP_SYS_NICE`, else `EPERM`; then as `BE` |
+/// | `IOPRIO_CLASS_BE` (2) | any level -- three bits cannot reach `IOPRIO_NR_LEVELS` |
+/// | `IOPRIO_CLASS_IDLE` (3) | anything |
+/// | `IOPRIO_CLASS_NONE` (0) | a non-zero level is `EINVAL` |
+/// | 4-7 | `EINVAL` |
+///
+/// Until 2026-09-26 the check was the one before Linux 6.5, which judged
+/// all thirteen data bits as the level: a hint was `EINVAL`, and a class
+/// field above three bits was one no class matched.
+pub(crate) fn ioprio_check_cap(ioprio: i32) -> Result<(), i32> {
+    use crate::sys_capability::{CAP_SYS_ADMIN, CAP_SYS_NICE, has_capability};
+    // Arithmetic shift, as the C `>>` of a negative `int` is on every
+    // compiler Linux builds with.
+    let class = (ioprio >> IOPRIO_CLASS_SHIFT) & IOPRIO_CLASS_MASK;
+    let level = ioprio & IOPRIO_LEVEL_MASK;
+    match class {
+        IOPRIO_CLASS_RT | IOPRIO_CLASS_BE => {
+            // CAP_SYS_ADMIN is asked first, as upstream does.
+            if class == IOPRIO_CLASS_RT
+                && !has_capability(CAP_SYS_ADMIN)
+                && !has_capability(CAP_SYS_NICE)
+            {
+                return Err(errno::EPERM);
+            }
+            // Upstream's `level >= IOPRIO_NR_LEVELS` cannot hold of a
+            // three-bit level, so there is nothing more to refuse.
+            Ok(())
+        }
+        IOPRIO_CLASS_IDLE => Ok(()),
+        IOPRIO_CLASS_NONE if level != 0 => Err(errno::EINVAL),
+        IOPRIO_CLASS_NONE => Ok(()),
+        _ => Err(errno::EINVAL),
+    }
+}
+
 /// Set the I/O scheduling class and priority of a process.
 ///
 /// Stub: validates arguments per Linux `block/ioprio.c::sys_ioprio_set`,
@@ -2954,104 +3004,24 @@ pub extern "C" fn ioprio_get(which: i32, who: i32) -> i32 {
 ///
 /// # Linux semantics
 ///
-/// Linux validates the class/data field *first*, then enters the
-/// `which` switch — so a malformed `ioprio` argument is rejected with
-/// EINVAL before the `who` lookup runs.  Within the class switch
-/// (`block/ioprio.c::ioprio_check_cap`):
-///
-/// * `IOPRIO_CLASS_RT`  — requires `CAP_SYS_NICE` *or* `CAP_SYS_ADMIN`
-///                        → EPERM if neither held; then `data ∈ [0,
-///                        IOPRIO_NR_LEVELS)`, else EINVAL.  The cap
-///                        check fires **before** the data-range check
-///                        in Linux's source, so a no-cap caller with
-///                        out-of-range RT data observes EPERM, not
-///                        EINVAL.
-/// * `IOPRIO_CLASS_BE`  — same `data` range as RT, no cap required.
-/// * `IOPRIO_CLASS_IDLE` — any `data` value is accepted (priority is
-///                        effectively fixed).  No cap required since
-///                        Linux 5.0 (the pre-5.0 CAP_SYS_ADMIN gate
-///                        on IDLE was removed in
-///                        `block/ioprio.c` commit f5f80df59f5b).
-/// * `IOPRIO_CLASS_NONE` — `data` must be `0`, else EINVAL.  This is
-///                        a strict check in modern Linux even though
-///                        the data field is otherwise unused for NONE
-///                        (it falls back to nice-derived priority).
-/// * any other class → EINVAL.
+/// `ioprio` is judged first, by [`ioprio_check_cap`] -- so a malformed
+/// value, or a real-time class the caller may not use, is refused before
+/// `which` or `who` is looked at.
 ///
 /// Errors (Linux-matching priority order):
-/// 1. `IOPRIO_CLASS_RT` without `CAP_SYS_NICE`/`CAP_SYS_ADMIN`
-///    → `EPERM` (Phase 191; fires before the RT data-range check)
-/// 2. malformed `class` / out-of-range RT or BE `data` / non-zero
-///    NONE `data` → `EINVAL`
+/// 1. `IOPRIO_CLASS_RT` without `CAP_SYS_ADMIN`/`CAP_SYS_NICE` → `EPERM`
+/// 2. a class of 4-7, or `IOPRIO_CLASS_NONE` with a non-zero level →
+///    `EINVAL`
 /// 3. `which` not in `{IOPRIO_WHO_PROCESS, _PGRP, _USER}` → `EINVAL`
 ///    (Linux: switch default arm.)
 /// 4. `who < 0` → `ESRCH` (matches Linux's find_task_by_vpid /
 ///    find_vpid / make_kuid rejection of negative inputs).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ioprio_set(which: i32, who: i32, ioprio: i32) -> i32 {
-    // 1. Class/data validation first — matches Linux's prologue
-    //    order in sys_ioprio_set.
-    let class = ioprio >> IOPRIO_CLASS_SHIFT;
-    let data = ioprio & IOPRIO_PRIO_MASK;
-    match class {
-        IOPRIO_CLASS_NONE => {
-            // Modern Linux (≥ 5.x) rejects non-zero data for NONE.
-            if data != 0 {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-        }
-        IOPRIO_CLASS_IDLE => {
-            // IDLE accepts any data value — priority is always 7 in
-            // the scheduler regardless of what was passed.
-        }
-        IOPRIO_CLASS_RT => {
-            // Phase 191: RT requires CAP_SYS_NICE or CAP_SYS_ADMIN.
-            // Linux's `ioprio_check_cap`:
-            //
-            //     case IOPRIO_CLASS_RT:
-            //         if (!capable(CAP_SYS_NICE) &&
-            //             !capable(CAP_SYS_ADMIN))
-            //             return -EPERM;
-            //         fallthrough;
-            //     case IOPRIO_CLASS_BE:
-            //         if (data >= IOPRIO_NR_LEVELS) return -EINVAL;
-            //
-            // The cap check sits BEFORE the data-range check, so a
-            // no-cap caller asking for RT with bad data sees EPERM,
-            // not EINVAL.  Pre-Phase-191 we returned EINVAL for that
-            // case (cap check absent), which misled tools that probe
-            // class availability — `ionice -c1 -n9` first tries to
-            // detect RT support by submitting any RT priority and
-            // checking the errno: EPERM = "no RT for you", EINVAL =
-            // "RT exists but priority is wrong, retry with -n7".
-            if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE)
-                && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN)
-            {
-                errno::set_errno(errno::EPERM);
-                return -1;
-            }
-            // 3-bit priority field: 0..7.  Data is masked from a
-            // u13 already, so the only way to fail is data >= 8.
-            if !(0..IOPRIO_BE_NR).contains(&data) {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-        }
-        IOPRIO_CLASS_BE => {
-            // BE has no cap requirement — the RT cap check above
-            // falls through to this data-range check in Linux's
-            // source, but we split the arm so the cap gate only
-            // fires for RT.
-            if !(0..IOPRIO_BE_NR).contains(&data) {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-        }
-        _ => {
-            errno::set_errno(errno::EINVAL);
-            return -1;
-        }
+    // 1. `ioprio_check_cap`, first, as in sys_ioprio_set.
+    if let Err(e) = ioprio_check_cap(ioprio) {
+        errno::set_errno(e);
+        return -1;
     }
     // 2. which validation — Linux's switch default arm returns EINVAL.
     if !ioprio_which_valid(which) {
@@ -11838,20 +11808,64 @@ mod tests {
     }
 
     #[test]
-    fn test_ioprio_set_rt_data_eight_einval() {
-        // data must be 0..7 for RT and BE.
+    fn test_ioprio_set_rt_bit_three_is_a_hint_not_the_level() {
+        // Linux 6.5 made bits 3-12 hints: the level is bits 0-2, so 8 is
+        // level 0 with a hint -- accepted.  It was EINVAL until
+        // 2026-09-26, the pre-6.5 check judging all thirteen bits.
         let prio = (IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT) | 8;
         crate::errno::set_errno(0);
-        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0);
+    }
+
+    #[test]
+    fn test_ioprio_set_be_with_every_hint_bit_is_accepted() {
+        let prio = (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | IOPRIO_PRIO_MASK;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0);
+    }
+
+    #[test]
+    fn test_ioprio_set_none_with_only_hint_bits_is_accepted() {
+        // NONE refuses a level, and a hint is not one.
+        for hints in [8, 0x1FF8] {
+            let prio = (IOPRIO_CLASS_NONE << IOPRIO_CLASS_SHIFT) | hints;
+            crate::errno::set_errno(0);
+            assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0, "{hints:#x}");
+        }
+    }
+
+    #[test]
+    fn test_ioprio_set_class_is_three_bits() {
+        // `IOPRIO_PRIO_CLASS` masks the class to three bits: 8 is NONE
+        // and 9 is RT, not classes nothing matches.
+        let none = 8 << IOPRIO_CLASS_SHIFT;
+        let rt = 9 << IOPRIO_CLASS_SHIFT;
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, none), 0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, rt), 0);
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, none | 1), -1, "level 1");
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
-    fn test_ioprio_set_be_data_at_limit_einval() {
-        let prio = (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | IOPRIO_PRIO_MASK;
-        crate::errno::set_errno(0);
-        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    fn test_ioprio_check_cap_table() {
+        // (ioprio, answer) with every capability held.
+        let rt = IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT;
+        let be = IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT;
+        let idle = IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT;
+        for (prio, want) in [
+            (0, Ok(())),
+            (1, Err(crate::errno::EINVAL)),
+            (rt | 7, Ok(())),
+            (be | 0x1FFF, Ok(())),
+            (idle | 0x1FFF, Ok(())),
+            (4 << IOPRIO_CLASS_SHIFT, Err(crate::errno::EINVAL)),
+            (7 << IOPRIO_CLASS_SHIFT, Err(crate::errno::EINVAL)),
+            (-1, Err(crate::errno::EINVAL)),
+            (i32::from(i16::MIN), Err(crate::errno::EINVAL)),
+        ] {
+            assert_eq!(ioprio_check_cap(prio), want, "{prio:#x}");
+        }
     }
 
     #[test]
@@ -12140,11 +12154,10 @@ mod tests {
 
     #[test]
     fn test_ioprio_workflow_buggy_negative_ioprio() {
-        // A signed-extension bug produces a negative ioprio.  Top bit
-        // set → class field extracted as a large value → EINVAL.
+        // A signed-extension bug produces a negative ioprio.  -1 >> 13 is
+        // -1, whose three class bits are 7, IOPRIO_CLASS_INVALID →
+        // EINVAL.
         crate::errno::set_errno(0);
-        // i32::MIN >> 13 is a large negative number — class != any
-        // valid class → EINVAL via the catch-all arm.
         assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, -1), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }

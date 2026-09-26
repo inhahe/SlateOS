@@ -55,6 +55,7 @@ from pathlib import Path
 
 _SIBLING = Path(__file__).resolve().parent / "check-recursive-locks.py"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import selftestflag  # noqa: E402
 import srcload  # noqa: E402
 
 # Loaded from source rather than through `importlib`: a `SourceFileLoader`
@@ -289,7 +290,9 @@ def self_test() -> int:
 
 def main() -> int:
     args = sys.argv[1:]
-    if args == ["--self-test"]:
+    # Every spelling (`--self-test`, `--selftest`): a mistyped one must not
+    # fall through to the real scan and exit 0 having tested nothing.
+    if len(args) == 1 and selftestflag.wants_selftest(args):
         return self_test()
     root = Path(__file__).resolve().parent.parent / "kernel" / "src"
     if len(args) == 2 and args[0] == "--root":

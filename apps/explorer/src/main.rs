@@ -4979,10 +4979,13 @@ impl oswindow::app::App for ExplorerState {
     /// buttons is elided from the right, so leading with the application name
     /// would give every open folder the same visible label.
     fn title(&self) -> String {
+        // By `shown_name`, not `Path::display`, which decodes lossily: two
+        // folders whose names differ only in bytes that are not text would
+        // have had the same title.
         match self.current_path.file_name() {
-            Some(name) => format!("{} — Files", Path::new(name).display()),
+            Some(name) => format!("{} — Files", shown_name(name)),
             // The root of the tree has no file name of its own.
-            None => format!("{} — Files", self.current_path.display()),
+            None => format!("{} — Files", shown_name(self.current_path.as_os_str())),
         }
     }
 
@@ -6217,6 +6220,37 @@ mod tests {
             ThumbnailGenerator::with_disk_cache(thumbs::DiskCache::new(dir.join(".thumbs")));
         state.queue_thumbnails();
         state
+    }
+
+    /// The title names the folder by its bytes where they are not text:
+    /// two such folders never share a title.
+    #[test]
+    fn a_folder_whose_name_is_not_text_is_titled_by_its_bytes() {
+        use oswindow::app::App;
+        #[cfg(windows)]
+        let (a, b) = {
+            use std::os::windows::ffi::OsStringExt;
+            (
+                std::ffi::OsString::from_wide(&[0x0066, 0xD800]),
+                std::ffi::OsString::from_wide(&[0x0066, 0xD801]),
+            )
+        };
+        #[cfg(not(windows))]
+        let (a, b) = {
+            use std::os::unix::ffi::OsStringExt;
+            (
+                std::ffi::OsString::from_vec(vec![b'f', 0xFE]),
+                std::ffi::OsString::from_vec(vec![b'f', 0xFF]),
+            )
+        };
+        let scratch = temp_dir("title_bytes");
+        let mut state = state_at(scratch.dir());
+        state.current_path = scratch.dir().join(&a);
+        let first = state.title();
+        state.current_path = scratch.dir().join(&b);
+        let second = state.title();
+        assert!(!first.contains('\u{FFFD}'), "{first}");
+        assert_ne!(first, second, "two folders, one title");
     }
 
     /// A path on the command line: a folder opens on itself, a file on its

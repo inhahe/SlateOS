@@ -94,6 +94,9 @@ const ALERT_PANEL_FOOTER: f32 = 2.0;
 /// of the panel is to say whether anything is wrong.
 const ALERT_MAX_ROWS: usize = 5;
 
+/// Why a priority cannot be changed, in the words the status bar uses.
+const CANNOT_RENICE: &str = "this system cannot yet change another program's priority";
+
 // ============================================================================
 // Ring buffer for time-series data
 // ============================================================================
@@ -1417,8 +1420,13 @@ impl SysMonitorState {
             ContextAction::SetHighPriority
             | ContextAction::SetNormalPriority
             | ContextAction::SetLowPriority => {
-                let level = action.label();
-                self.status_message = format!("{level} for PID {target_pid} (not yet implemented)");
+                // Not wired, on purpose. libc's `setpriority` ignores the pid
+                // it is given and renices the caller, so this would
+                // reprioritise the task manager itself and report that the
+                // chosen process had changed. Waits on
+                // requests/e-ad-renicing-another-process-renices-the-caller.md.
+                self.status_message =
+                    format!("Cannot change PID {target_pid}'s priority: {CANNOT_RENICE}");
             }
         }
     }
@@ -5007,6 +5015,31 @@ mod tests {
 
     /// A monitor showing `n` processes, with the visible list rebuilt so the
     /// scroll bound has something to clamp against.
+    /// The three priority actions say plainly that they cannot, naming the
+    /// process -- not "(not yet implemented)" -- and change nothing.
+    #[test]
+    fn the_priority_actions_say_why_they_cannot() {
+        let mut s = app_with_processes(2);
+        let before: Vec<(u32, ProcessStatus)> =
+            s.processes.iter().map(|p| (p.pid, p.status)).collect();
+        for action in [
+            ContextAction::SetHighPriority,
+            ContextAction::SetNormalPriority,
+            ContextAction::SetLowPriority,
+        ] {
+            s.status_message.clear();
+            s.execute_context_action(action, 7);
+            assert_eq!(
+                s.status_message,
+                "Cannot change PID 7's priority: this system cannot yet change another program's priority",
+                "{action:?}"
+            );
+        }
+        let after: Vec<(u32, ProcessStatus)> =
+            s.processes.iter().map(|p| (p.pid, p.status)).collect();
+        assert_eq!(before, after);
+    }
+
     fn app_with_processes(n: usize) -> SysMonitorState {
         let mut app = SysMonitorState::new();
         app.processes = (0..n)

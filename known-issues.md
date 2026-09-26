@@ -170306,7 +170306,7 @@ not, and cannot be from here:
 | Window picker ("which process owns this window?") | the compositor to report the window under the pointer and its owner | lane F |
 | Blocking analyzer (what a process waits on, deadlocks) | the kernel to publish a task's wait reason and what holds it (`/proc/<pid>/wchan` or better) | lane A |
 | Affinity control | `sched_setaffinity` reachable from a native program | lanes A/D |
-| Priority control | `setpriority` reachable from a native program | lanes A/D |
+| Priority control | `setpriority` that acts on the process it names: libc's ignores `who` and renices the caller, and no native syscall can name another process (`requests/e-ad-renicing-another-process-renices-the-caller.md`) | lanes A/D |
 
 Their invented fixtures (`with_demo_data`, `mock_pick`) are `#[cfg(test)]` or
 test-only now, so no build can show them. The memory map does not show what is

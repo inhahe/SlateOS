@@ -583,6 +583,9 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+N", "Run a new task"),
 ];
 
+/// Why a priority cannot be changed, in the words the status bar uses.
+const CANNOT_RENICE: &str = "this system cannot yet change another program's priority";
+
 /// The longest command line the New Task box takes, in characters.
 const RUN_BOX_CAPACITY: usize = 4096;
 
@@ -1882,7 +1885,13 @@ impl ProcessExplorerState {
             ContextAction::Pause => self.signal_pid(target_pid, libcall::SIGSTOP, "pause"),
             ContextAction::Resume => self.signal_pid(target_pid, libcall::SIGCONT, "resume"),
             ContextAction::ChangePriority => {
-                self.status_message = format!("Change priority for PID {target_pid} (dialog NYI)");
+                // Not wired, on purpose. libc's `setpriority` ignores the pid
+                // it is given and renices the caller, so this would
+                // reprioritise the task manager itself and report that the
+                // chosen process had changed. Waits on
+                // requests/e-ad-renicing-another-process-renices-the-caller.md.
+                self.status_message =
+                    format!("Cannot change PID {target_pid}'s priority: {CANNOT_RENICE}");
             }
             ContextAction::OpenFileLocation => {
                 self.open_file_location(&procinfo::ProcFs::new(), target_pid);
@@ -4216,6 +4225,24 @@ mod tests {
             "{}",
             app.status_message
         );
+    }
+
+    /// Change Priority says plainly that it cannot, naming the process --
+    /// not "(dialog NYI)" -- and changes nothing.
+    #[test]
+    fn change_priority_says_why_it_cannot() {
+        SPAWNED.with(|s| s.borrow_mut().clear());
+        let mut app = app_with_processes(2);
+        app.spawner = recording_spawner;
+        let before: Vec<i32> = app.processes.iter().map(|p| p.priority).collect();
+        app.execute_context_action(ContextAction::ChangePriority, 7);
+        assert_eq!(
+            app.status_message,
+            "Cannot change PID 7's priority: this system cannot yet change another program's priority"
+        );
+        let after: Vec<i32> = app.processes.iter().map(|p| p.priority).collect();
+        assert_eq!(before, after);
+        assert!(spawned().is_empty());
     }
 
     /// A list of `n` processes, already filtered so `visible_indices` is

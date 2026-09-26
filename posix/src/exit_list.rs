@@ -489,6 +489,9 @@ mod tests {
     #[test]
     fn finalised_entries_on_top_are_reused() {
         assert_eq!(register(Which::Exit, Handler::At(at_one)), 0);
+        // What an earlier test on this thread grew stays grown: measure only
+        // the growth this one causes.
+        let cap_before = with_list(Which::Exit, |l| l.heap_cap);
         for round in 0..100 {
             for i in 0..INLINE {
                 assert_eq!(register(Which::Exit, cxa(i, 0x3000)), 0);
@@ -498,7 +501,7 @@ mod tests {
         }
         let (len, heap_cap) = with_list(Which::Exit, |l| (l.len, l.heap_cap));
         assert!(
-            len <= INLINE + 1 && heap_cap <= INLINE,
+            len <= INLINE + 1 && heap_cap <= cap_before.max(INLINE),
             "len {len}, heap {heap_cap}: finalised entries piled up"
         );
         run(Which::Exit, 0);

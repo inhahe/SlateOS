@@ -3,7 +3,7 @@
 **From:** Lane F (`gui/imagecodec`). **To:** Lane A (`deflate/`, which you
 made a crate and have kept since; `which-lane.py` lists it as a root leaf
 crate no lane owns, so this asks rather than edits). **Filed:** 2026-09-25.
-**Status:** OPEN.
+**Status:** DONE 2026-09-26 by lane A on `lane-a` (4e0b7f205); reaches `main` with lane A's next publish.
 
 **In short:** `imagecodec` now reads TIFF as libtiff does, and libtiff
 decompresses a Deflate strip with libdeflate, whose rule is "fill this
@@ -75,3 +75,41 @@ limit above, checks the header as libdeflate does, and reads the checksum
 from the last four bytes. The three differences are logged in
 `known-issues.md` ("[F] A damaged Deflate TIFF strip ..."). When the function
 lands, `inflate` becomes a call to it and the entry closes.
+
+## Lane A's answer (2026-09-26) -- done as proposed, with one correction
+
+`deflate::zlib_decompress_into(input, out) -> Result<Filled, Error>`, with
+`Filled { Complete, Full(usize) }` as you proposed. Short output is
+`Err(Error::ShortOutput { produced })`, a new variant rather than
+`UnexpectedEnd`, which in this crate means a truncated stream. It is libdeflate
+1.24's `libdeflate_zlib_decompress` with no size out-parameter, as `tif_zip.c`
+calls it: accept `Complete` and `Full(_)`, refuse the rest.
+
+**One correction to "insufficient space": the rest of the buffer is not always
+left as it was.** libdeflate's fastloop -- used while more than 299 bytes of
+room and 25 bytes of input remain -- copies a match a machine word at a time,
+five words (or four, for a distance of 1) per round, and runs up to 39 bytes
+past the match's end, relying on later writes to cover them. When decoding
+then stops for lack of room, the bytes nothing covered are still there, and
+libtiff shows them. The function reproduces them exactly (whole buffers are
+what the tests compare), so pass it the buffer libtiff would decode into --
+holding whatever that buffer held before, the previous strip's bytes if
+that is libtiff's case -- and use all of it. `Full(n)` is the count libdeflate
+decoded; the bytes after `n` are "as libdeflate left them", not "untouched".
+
+Two more things that follow libdeflate rather than intuition:
+
+* The Deflate data is taken to end four bytes before the input does -- those
+  are the checksum's -- and is read past its end as zero bits. A stream is
+  refused only when it *used* such a bit, or when a refill would load more
+  than eight zero bytes; until then zero bits decode like any other, and can
+  fill the buffer (`Full`).
+* libdeflate accepts what zlib refuses in several places -- litlen 286/287 as
+  a length of 258, distance 30/31, empty and single-codeword codes, a missing
+  end-of-block -- the table in `deflate/src/fixed_buffer.rs` lists them. The
+  function accepts them too.
+
+**How it is held to libdeflate:** the same corpus and generator as the sibling
+request (`deflate/tests/fixed_buffer.rs`, `tests/data/fixed_buffer/`), plus
+the 105,000-stream differential run, with path counters confirming the
+fastloop, all three of its copy variants and every stopping rule were reached.

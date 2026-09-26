@@ -117,7 +117,9 @@
 
 use alloc::vec::Vec;
 
-use crate::context::{MAX_NESTING, Matched, Nested, chain_match, context_match, read_records};
+use crate::context::{
+    MAX_NESTING, Matched, Nested, chain_match, context_match, read_records, reverse_chain_match,
+};
 use crate::digest::Digest;
 use crate::indic::Char;
 use crate::joining::Form;
@@ -372,6 +374,20 @@ const NESTABLE: &[u16] = &[
     LOOKUP_LIGATURE,
     LOOKUP_CONTEXT,
     LOOKUP_CHAIN_CONTEXT,
+];
+
+/// The lookup types a feature may reach: every one a nested invocation may,
+/// and reverse-chaining substitution, which HarfBuzz applies only at the top
+/// level -- a `ReverseChainSingleSubst` invoked from a context refuses, "no
+/// chaining to this type" -- and so which [`NESTABLE`] leaves out.
+const TOP_LEVEL: &[u16] = &[
+    LOOKUP_SINGLE,
+    LOOKUP_MULTIPLE,
+    LOOKUP_ALTERNATE,
+    LOOKUP_LIGATURE,
+    LOOKUP_CONTEXT,
+    LOOKUP_CHAIN_CONTEXT,
+    LOOKUP_REVERSE_CHAIN,
 ];
 
 /// A ceiling on how many glyphs one ligature may swallow.
@@ -916,7 +932,7 @@ impl Substitutions {
     /// ligature would break the grid.
     pub(crate) fn parse(data: &[u8], gsub: Option<Span>, gdef: Option<Span>) -> Option<Self> {
         let base = gsub?.off;
-        let lookups = ByScript::parse(data, base, FEATURES, NESTABLE, LOOKUP_EXTENSION)?;
+        let lookups = ByScript::parse(data, base, FEATURES, TOP_LEVEL, LOOKUP_EXTENSION)?;
         Some(Self {
             lookups,
             lookup_list: lookup_list(data, base)?,
@@ -1249,6 +1265,10 @@ fn apply_lookup(data: &[u8], lookup: &Lookup, glyphs: &mut Vec<SubGlyph>, ctx: &
         return;
     }
     let skip = skipper(lookup, data, ctx);
+    if lookup.kind == LOOKUP_REVERSE_CHAIN {
+        apply_reverse(data, lookup, glyphs, skip, ctx);
+        return;
+    }
     let mut i = 0usize;
     while i < glyphs.len() {
         // And the second, per position: a lookup the run as a whole reaches
@@ -1270,6 +1290,47 @@ fn apply_lookup(data: &[u8], lookup: &Lookup, glyphs: &mut Vec<SubGlyph>, ctx: &
         ctx.dirty |= matched.is_some();
         let step = matched.unwrap_or(0).max(1);
         i = i.saturating_add(step);
+    }
+}
+
+/// Apply a reverse-chaining lookup across the run, from its last glyph back
+/// to its first: HarfBuzz's `apply_backward`.
+///
+/// Backward, and in place, because that is the point of the type: each
+/// glyph's context is read after the glyphs after it have already been
+/// substituted, so a run of forms that depend on their right-hand neighbour
+/// -- a Nastaliq cascade, a joined overline -- resolves in one pass. Every
+/// position the lookup considers is tried; a substitution never changes the
+/// run's length, so none is skipped over.
+fn apply_reverse(
+    data: &[u8],
+    lookup: &Lookup,
+    glyphs: &mut [SubGlyph],
+    skip: Skipper<'_>,
+    ctx: &mut Ctx,
+) {
+    let mut i = glyphs.len();
+    while let Some(at) = i.checked_sub(1) {
+        i = at;
+        let Some(gid) = glyphs.get(at).map(|g| g.gid) else {
+            continue;
+        };
+        if !lookup.digest.may_have(gid) || !skip.considers(glyphs, at) {
+            continue;
+        }
+        // The first subtable that matches wins, as for every type.
+        let Some(new) = admitting(&lookup.subtables, gid)
+            .find_map(|sub| reverse_chain_match(data, sub, glyphs, at, skip))
+        else {
+            continue;
+        };
+        if let Some(glyph) = glyphs.get_mut(at) {
+            glyph.gid = new;
+            // As a single substitution does: the font asked for this glyph.
+            glyph.ignorable = Ignorable::No;
+            glyph.substituted = true;
+        }
+        ctx.dirty = true;
     }
 }
 
@@ -1320,6 +1381,10 @@ fn apply_at(
         LOOKUP_LIGATURE => apply_ligature(data, subs, glyphs, i, skip, ctx),
         LOOKUP_CONTEXT => apply_context(data, subs, glyphs, i, skip, ctx),
         LOOKUP_CHAIN_CONTEXT => apply_chain_context(data, subs, glyphs, i, skip, ctx),
+        // Applied whole-run and backward by `apply_reverse`, never at one
+        // position: reached here only as a context's nested lookup, which
+        // HarfBuzz refuses for this type ("no chaining to this type").
+        LOOKUP_REVERSE_CHAIN => None,
         // `feature_lookups` and `lookup_at` are both asked for these types
         // only, so there is nothing else to reach here; ignoring anything that
         // does is what keeps adding a type to those lists from being able to
@@ -3540,6 +3605,95 @@ mod tests {
         assert_eq!(glyphs.iter().map(|g| g.gid).collect::<Vec<_>>(), [10, 16]);
     }
 
+    // --- reverse chaining -------------------------------------------------
+
+    /// A `ReverseChainSingleSubstFormat1`: `covered` becoming `substitutes` in
+    /// coverage order, when `back` (closest first) and `ahead` match around it.
+    fn reverse_chain(
+        covered: &[u16],
+        substitutes: &[u16],
+        back: &[&[u16]],
+        ahead: &[&[u16]],
+    ) -> Vec<u8> {
+        let coverages: Vec<Vec<u8>> = core::iter::once(covered)
+            .chain(back.iter().copied())
+            .chain(ahead.iter().copied())
+            .map(crate::fixture::coverage1)
+            .collect();
+        let head = 2 + 2 + 2 + back.len() * 2 + 2 + ahead.len() * 2 + 2 + substitutes.len() * 2;
+        let mut at = head;
+        let offsets: Vec<u16> = coverages
+            .iter()
+            .map(|c| {
+                let here = at;
+                at += c.len();
+                u16::try_from(here).unwrap()
+            })
+            .collect();
+        let mut out = Vec::new();
+        let mut put = |v: u16| out.extend_from_slice(&v.to_be_bytes());
+        put(1);
+        put(offsets[0]);
+        put(u16::try_from(back.len()).unwrap());
+        for k in 0..back.len() {
+            put(offsets[1 + k]);
+        }
+        put(u16::try_from(ahead.len()).unwrap());
+        for k in 0..ahead.len() {
+            put(offsets[1 + back.len() + k]);
+        }
+        put(u16::try_from(substitutes.len()).unwrap());
+        for &s in substitutes {
+            put(s);
+        }
+        assert_eq!(out.len(), head);
+        for c in &coverages {
+            out.extend_from_slice(c);
+        }
+        out
+    }
+
+    #[test]
+    fn a_reverse_chaining_substitution_resolves_from_the_right() {
+        // 20 becomes 21 before a 21 or a 30. Applied forward, only the last
+        // 20 of `20 20 20 30` could change; applied backward, as HarfBuzz
+        // applies the type, each 20's right-hand neighbour has already
+        // changed by the time it is looked at.
+        let sub = reverse_chain(&[20], &[21], &[], &[&[21, 30]]);
+        let data = gsub_table(b"calt", LOOKUP_REVERSE_CHAIN, &sub);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert_eq!(subst(&data, &subs, &[20, 20, 20, 30]), [21, 21, 21, 30]);
+        // With nothing after it to match, nothing changes.
+        assert_eq!(subst(&data, &subs, &[20, 20]), [20, 20]);
+    }
+
+    #[test]
+    fn a_reverse_chaining_substitution_needs_its_backtrack() {
+        let sub = reverse_chain(&[20, 22], &[21, 23], &[&[10]], &[]);
+        let data = gsub_table(b"calt", LOOKUP_REVERSE_CHAIN, &sub);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert_eq!(subst(&data, &subs, &[10, 20]), [10, 21]);
+        assert_eq!(subst(&data, &subs, &[10, 22]), [10, 23]);
+        assert_eq!(subst(&data, &subs, &[11, 20]), [11, 20]);
+    }
+
+    #[test]
+    fn a_context_cannot_invoke_a_reverse_chaining_lookup() {
+        // Lookup 0 matches 20 and invokes lookup 1, which would turn 20 into
+        // 21 with no context at all -- but only at the top level: HarfBuzz
+        // refuses the type as a nested lookup ("no chaining to this type").
+        let data = gsub_lookups(&[
+            (b"calt", LOOKUP_CONTEXT, context3(&[&[20]], &[(0, 1)])),
+            (
+                b"test",
+                LOOKUP_REVERSE_CHAIN,
+                reverse_chain(&[20], &[21], &[], &[]),
+            ),
+        ]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert_eq!(subst(&data, &subs, &[20]), [20]);
+    }
+
     // --- substitutes_alone ------------------------------------------------
 
     #[test]
@@ -3882,13 +4036,15 @@ mod tests {
     }
 
     #[test]
-    fn a_lookup_type_we_cannot_apply_is_not_mistaken_for_one_we_can() {
-        // Type 8, `ReverseChainSingleSubst`, opens with a format and a
-        // coverage offset just as the single substitution above does, so a
-        // walk that ignored the lookup type would happily read it and
-        // substitute the wrong glyph.
+    fn a_lookup_is_read_as_the_type_it_claims() {
+        // A single substitution's bytes filed as type 8,
+        // `ReverseChainSingleSubst`, which opens with a format and a coverage
+        // offset just as they do. Read as what it claims to be, its format 2
+        // is no format of type 8 and nothing happens -- where a walk that
+        // ignored the lookup type would happily substitute 42.
         let data = gsub_table(b"liga", 8, &single_list(&[10], &[42]));
-        assert!(Substitutions::parse(&data, Some(span(0, data.len())), None).is_none());
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert_eq!(subst(&data, &subs, &[10]), [10]);
     }
 
     /// The first alternate is what an on-or-off feature selects: OpenType

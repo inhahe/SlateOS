@@ -69,7 +69,33 @@ def cargo_env():
     """
     env = dict(os.environ)
     env["CARGO_INCREMENTAL"] = "0"
+    # The settings directory, pointed somewhere that is thrown away.  A mutant
+    # is by design a program with a guard removed, and the guard an
+    # application keeps its store behind -- "a window a test makes writes
+    # nothing" -- is one of them: with it gone, every test that makes a window
+    # without a scratch configuration writes into whatever directory
+    # `settingsfile::config_dir` names, which is the developer's own.  A
+    # calendar sweep left the sample events in ~/.config/slateos/calendar
+    # that way.  `with_scratch_config` saves and restores this variable, so the
+    # tests that use it are unaffected.
+    env["XDG_CONFIG_HOME"] = _throwaway_config_dir()
     return env
+
+
+_THROWAWAY_CONFIG = []
+
+
+def _throwaway_config_dir():
+    """One temporary settings directory for this sweep, removed at exit."""
+    if not _THROWAWAY_CONFIG:
+        import atexit
+        import shutil
+        import tempfile
+
+        path = tempfile.mkdtemp(prefix="slateos-sweep-config-")
+        atexit.register(shutil.rmtree, path, True)
+        _THROWAWAY_CONFIG.append(path)
+    return _THROWAWAY_CONFIG[0]
 
 # The repository root, from `scripts/mutation_harness.py`.
 #

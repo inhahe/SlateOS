@@ -275,22 +275,77 @@ fn scroll_rows(acc: &mut wheel::Accumulator, dy: f32) -> i32 {
 
 /// Width of the start button at the left end of the taskbar.
 const START_BUTTON_WIDTH: f32 = 48.0;
-/// Gap between the start button and the first window button.
-const TASKBAR_BUTTON_START_GAP: f32 = 8.0;
-/// Gap between adjacent window buttons.
-const TASKBAR_BUTTON_GAP: f32 = 4.0;
-/// Gap between the last pinned button and the first window's, with the
-/// divider drawn in its middle: `design.txt` asks for "a small space and a
-/// divider between the two sections". Only while both sections have buttons.
-const TASKBAR_SECTION_GAP: f32 = 13.0;
+/// Gap between the start button and the first taskbar tile: the Aero
+/// reference's `padding: 0 6px` on its row of tiles.
+const TASKBAR_BUTTON_START_GAP: f32 = 6.0;
+/// Gap between adjacent tiles: the reference's `gap: 1px`. They nearly touch,
+/// as the reference's do; a window's tile has an edge of its own, so two never
+/// run together.
+const TASKBAR_BUTTON_GAP: f32 = 1.0;
+/// Gap between the last pinned tile and the first window's, with the divider
+/// in it: `design.txt` asks for "a small space and a divider between the two
+/// sections". The reference's: the row's gap, 7 of margin, the 1-pixel
+/// divider, 9 of margin and the row's gap again. Only while both sections
+/// have tiles.
+const TASKBAR_SECTION_GAP: f32 = 19.0;
+/// From the last pinned tile's edge to the divider: the row's gap and the 7
+/// of margin before it.
+const TASKBAR_DIVIDER_OFFSET: f32 = 8.0;
+/// How tall the divider is: the reference's 30, in its 40-pixel bar.
+const TASKBAR_DIVIDER_HEIGHT: f32 = 30.0;
 /// How strongly the divider between the sections is drawn: the bar's own
-/// text colour at this alpha, so it follows the theme and stays quieter than
-/// anything that can be clicked.
+/// text colour at this alpha -- the reference's white at 0.32 -- so it follows
+/// the theme and stays quieter than anything that can be clicked.
 const TASKBAR_DIVIDER_ALPHA: u8 = 80;
-/// Vertical inset of a window button inside the panel.
-const TASKBAR_BUTTON_INSET: f32 = 4.0;
-/// Widest a window button gets, however few windows are open.
+/// The dark line one pixel right of the divider, the reference's
+/// `rgba(0, 0, 20, 0.3)`: it makes the divider a groove in the glass rather
+/// than a line drawn on it.
+const TASKBAR_DIVIDER_SHADOW: Color = Color::rgba(0, 0, 20, 77);
+/// Height of a tile -- a pinned program's square, a window's labelled one --
+/// centred in the bar: the reference's 36 in its 40-pixel bar. A taller bar
+/// keeps 36-pixel tiles, since a tile is sized for its picture; a shorter one
+/// shrinks them to fit.
+const TASKBAR_TILE: f32 = 36.0;
+/// The least room left above and below a tile in a bar too short for
+/// [`TASKBAR_TILE`].
+const TASKBAR_TILE_MARGIN: f32 = 2.0;
+/// A tile's corner radius as a share of the windows': half -- the reference's
+/// 4 at the default Rounded corners' 8. So a tile follows the corner setting at
+/// every step, square to extra-rounded, and looks as the reference draws it at
+/// the default, rather than a 36-pixel tile taking a window's 16 and becoming
+/// a pill.
+const TASKBAR_TILE_CORNER_SHARE: f32 = 0.5;
+/// The side of a pinned program's picture: the reference's 30, in a 36 tile.
+const TASKBAR_PIN_ICON: f32 = 30.0;
+/// The side of a window's picture, beside its title: the reference's 26.
+const TASKBAR_WINDOW_ICON: f32 = 26.0;
+/// A window tile's room before its picture: the reference's 8.
+const TASKBAR_TILE_PAD_START: f32 = 8.0;
+/// Between a window tile's picture and its title: the reference's 7.
+const TASKBAR_TILE_LABEL_GAP: f32 = 7.0;
+/// A window tile's room after its title: the reference's 11.
+const TASKBAR_TILE_PAD_END: f32 = 11.0;
+/// The least room worth drawing a title in. A tile squeezed below it shows its
+/// picture alone, in its middle: less would hold only the ellipsis.
+const TASKBAR_TILE_MIN_LABEL: f32 = 16.0;
+/// Widest a window's tile gets, however long its title: the reference's
+/// `max-width: 160px`.
 const TASKBAR_BUTTON_MAX_WIDTH: f32 = 160.0;
+/// How strongly a window's tile is filled, in white: the lower half of the
+/// reference's glass gradient, which runs from 0.2 at the top to 0.02.
+const TASKBAR_TILE_GLASS: u8 = 8;
+/// The brighter top half of a window's tile, over [`TASKBAR_TILE_GLASS`]: the
+/// upper half of the reference's gradient.
+const TASKBAR_TILE_SHEEN: u8 = 20;
+/// A window tile's edge, in the bar's text colour: the reference's 0.26.
+const TASKBAR_TILE_EDGE: u8 = 66;
+/// The edge of the tile of the window in front: the reference's 0.55.
+const TASKBAR_TILE_EDGE_IN_FRONT: u8 = 140;
+/// The highlight along a window tile's top edge, in white: the reference's
+/// `inset 0 1px 0` at 0.38.
+const TASKBAR_TILE_HIGHLIGHT: u8 = 97;
+/// The same highlight on the window in front's tile: the reference's 0.65.
+const TASKBAR_TILE_HIGHLIGHT_IN_FRONT: u8 = 166;
 /// Narrowest the system tray gets, however little is in it.
 ///
 /// The tray's real width is *measured* — see
@@ -560,6 +615,20 @@ enum PinTarget {
     StartMenuRow(usize),
     /// An application already pinned, by index into the pinned list.
     Pinned(usize),
+}
+
+/// What a tooltip on the taskbar names, kept beside it so that sliding along a
+/// row replaces the tooltip rather than leaving the first thing's name under
+/// the fourth thing's picture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TooltipKey {
+    /// A tray icon.
+    Tray(tray_dnd::TrayIconKey),
+    /// A pinned program's tile, by the program it starts -- not by its place,
+    /// which a drag along the row changes under the pointer.
+    Pin(String),
+    /// A window's tile.
+    Window(WindowId),
 }
 
 /// A place in the start menu's places column: the user's own folders, as the
@@ -925,6 +994,73 @@ impl Hit {
     pub fn is_shell_chrome(self) -> bool {
         !matches!(self, Self::Desktop)
     }
+}
+
+/// The widths a row of taskbar tiles gets from `available`, when tile `i`
+/// wants `wanted[i]` and may give way if `shrinks[i]`.
+///
+/// As wanted, when they fit. Otherwise the tiles that may shrink give way,
+/// the widest first, all to one width and none below `floor` -- a *water
+/// fill*: the width `cap` is the one at which those tiles, each
+/// `min(wanted, cap)`, use exactly what the others leave. So a window with a
+/// short title keeps all of it until every longer one has come down to its
+/// width, which is the order a reader would give them up in. When not even
+/// `floor` each fits, every tile shares `available` alike: past that point
+/// there is nothing left to choose between them.
+fn fit_tiles(wanted: &[f32], shrinks: &[bool], floor: f32, available: f32) -> Vec<f32> {
+    if wanted.iter().sum::<f32>() <= available {
+        return wanted.to_vec();
+    }
+    let fixed: f32 = wanted
+        .iter()
+        .zip(shrinks)
+        .filter(|&(_, &shrink)| !shrink)
+        .map(|(width, _)| *width)
+        .sum();
+    let mut flexible: Vec<f32> = wanted
+        .iter()
+        .zip(shrinks)
+        .filter(|&(_, &shrink)| shrink)
+        .map(|(width, _)| *width)
+        .collect();
+    #[allow(clippy::cast_precision_loss)]
+    let (all, some) = (wanted.len() as f32, flexible.len() as f32);
+    let budget = available - fixed;
+    if flexible.is_empty() || budget < floor * some {
+        return vec![available / all; wanted.len()];
+    }
+    flexible.sort_by(f32::total_cmp);
+    let (mut left, mut rest, mut cap) = (budget, some, f32::INFINITY);
+    for width in flexible {
+        if width * rest > left {
+            cap = left / rest;
+            break;
+        }
+        left -= width;
+        rest -= 1.0;
+    }
+    wanted
+        .iter()
+        .zip(shrinks)
+        .map(|(&width, &shrink)| {
+            if shrink {
+                width.min(cap.max(floor))
+            } else {
+                width
+            }
+        })
+        .collect()
+}
+
+/// Draw the picture `image_id`, `side` pixels square, in the middle of `rect`.
+fn image_centred(tree: &mut RenderTree, rect: Rect, side: f32, image_id: u64) {
+    tree.push(guitk::render::RenderCommand::Image {
+        x: rect.x + (rect.w - side) / 2.0,
+        y: rect.y + (rect.h - side) / 2.0,
+        width: side,
+        height: side,
+        image_id,
+    });
 }
 
 /// The file name of `path` as text, when it has one that is: how a program
@@ -1369,17 +1505,23 @@ pub struct DesktopShell {
     /// tray whose icons move when an unrelated program registers one is a tray
     /// where the user's muscle memory is wrong.
     tray_icons: Vec<guiremote::tray::TrayIcon>,
-    /// The tray icon the pointer is resting on, and the tooltip naming it.
+    /// What on the taskbar the pointer is resting on -- a tray icon or a tile
+    /// -- and the tooltip naming it.
     ///
     /// A tray icon is a single glyph chosen by another program, and the
     /// `tooltip` it registers alongside is the only words anywhere saying what
     /// that glyph is. Until this existed the shell received that string, held
     /// it, and never put it on screen -- so a user faced a row of symbols with
-    /// no way to learn what any of them were.
+    /// no way to learn what any of them were. A pinned tile is its program's
+    /// picture alone, so the same holds for it; a window's tile carries its
+    /// title, cut to fit.
     ///
     /// Keyed, so that sliding along the row replaces the tooltip rather than
     /// leaving the first icon's name under the fourth icon's glyph.
-    tray_tooltip: Option<(tray_dnd::TrayIconKey, guitk::menu::Tooltip)>,
+    tooltip: Option<(TooltipKey, guitk::menu::Tooltip)>,
+    /// Whether the tooltip has come, gone or begun waiting to appear since the
+    /// session last asked -- see [`take_tooltip_changed`](Self::take_tooltip_changed).
+    tooltip_changed: bool,
     /// The popup listing icons the bar had no room for, and which icons
     /// those were when it opened.
     ///
@@ -2072,7 +2214,8 @@ impl DesktopShell {
             carry_at: (0.0, 0.0),
             button_order: Vec::new(),
             window_press: None,
-            tray_tooltip: None,
+            tooltip: None,
+            tooltip_changed: false,
             alt_tab_active: false,
             alt_tab_index: 0,
             overview: overview::OverviewState::new(),
@@ -2655,32 +2798,103 @@ impl DesktopShell {
         (self.taskbar_rect().w - self.tray_width()).max(0.0)
     }
 
-    /// How wide each taskbar window button is.
-    ///
-    /// The buttons shrink as windows are opened, so this cannot be a constant
-    /// in either the renderer or the hit test.
-    fn taskbar_button_width(&self) -> f32 {
+    /// How tall a taskbar tile is, and where its top is: [`TASKBAR_TILE`]
+    /// centred in the bar, or less in a bar too short to hold it with
+    /// [`TASKBAR_TILE_MARGIN`] above and below.
+    fn taskbar_tile_band(&self) -> (f32, f32) {
         let bar = self.taskbar_rect();
-        let count = self.taskbar_slots().len().max(1);
+        let height = self
+            .scale(TASKBAR_TILE)
+            .min((bar.h - 2.0 * self.scale(TASKBAR_TILE_MARGIN)).max(0.0));
+        (bar.y + (bar.h - height) / 2.0, height)
+    }
+
+    /// How wide a window's tile would like to be -- its picture, its title and
+    /// the room around them, up to [`TASKBAR_BUTTON_MAX_WIDTH`] -- and never
+    /// narrower than `square`, a pinned program's tile.
+    ///
+    /// Measured, not guessed: the title is drawn in a proportional face, and
+    /// only the text layer knows how much wider "WWW Browser" is than
+    /// "initialising".
+    fn window_tile_width(&self, title: &str, square: f32) -> f32 {
+        let title = text::measure(
+            title,
+            self.font_size(TextRole::Caption),
+            guitk::render::FontWeightHint::Regular,
+        );
+        let wanted = self.scale(TASKBAR_TILE_PAD_START)
+            + self.scale(TASKBAR_WINDOW_ICON)
+            + self.scale(TASKBAR_TILE_LABEL_GAP)
+            + title
+            + self.scale(TASKBAR_TILE_PAD_END);
+        wanted.min(self.scale(TASKBAR_BUTTON_MAX_WIDTH)).max(square)
+    }
+
+    /// Where every taskbar tile stands, in [`taskbar_slots`](Self::taskbar_slots)'
+    /// order -- the Aero reference's row, in which a pinned program is a
+    /// square as tall as the tiles and a window is as wide as its picture and
+    /// title need, up to [`TASKBAR_BUTTON_MAX_WIDTH`].
+    ///
+    /// When they do not all fit, the widest windows give way first, each down
+    /// to a square, so a short title is the last to be cut; past that, every
+    /// tile shares what there is ([`fit_tiles`]). The tray is never given up:
+    /// it is measured first, and the tiles have what is left of the bar.
+    ///
+    /// All at once, because a tile's place depends on every tile before it:
+    /// anything asking about more than one tile should call this once rather
+    /// than [`taskbar_button_rect`](Self::taskbar_button_rect) for each.
+    #[must_use]
+    pub fn taskbar_layout(&self) -> Vec<Rect> {
+        let slots = self.taskbar_slots();
+        let bar = self.taskbar_rect();
+        let (top, height) = self.taskbar_tile_band();
+        let windows = self.taskbar_windows();
+        let (wanted, shrinks): (Vec<f32>, Vec<bool>) = slots
+            .iter()
+            .map(|slot| match *slot {
+                TaskbarSlot::Pinned(_) => (height, false),
+                TaskbarSlot::Window(id) => (
+                    windows
+                        .iter()
+                        .find(|w| w.id == id)
+                        .map_or(height, |w| self.window_tile_width(&w.title, height)),
+                    true,
+                ),
+            })
+            .unzip();
         // Everything between the start button and the tray that is not a
-        // button: the gap after the start button, the gap after every button
-        // but the last, the wider one between the sections, and the reserve
+        // tile: the gap after the start button, the gap after every tile but
+        // the last, the wider one between the sections, and the reserve
         // before the tray. The gaps used to be left out, so the buttons were
         // each given their share of the space and then spaced apart as well
         // -- fine while they were at their widest, and past the tray's edge
         // once enough windows were open: 108 px into it with thirty-one.
+        #[allow(clippy::cast_precision_loss)]
+        let between = slots.len().saturating_sub(1) as f32;
         let gaps = self.scale(TASKBAR_BUTTON_START_GAP)
-            + count.saturating_sub(1) as f32 * self.scale(TASKBAR_BUTTON_GAP)
+            + between * self.scale(TASKBAR_BUTTON_GAP)
             + self.section_gap_extra()
             + self.scale(TRAY_RESERVE_GAP);
         let available =
             (bar.w - self.scale(START_BUTTON_WIDTH) - self.tray_width() - gaps).max(0.0);
-        self.scale(TASKBAR_BUTTON_MAX_WIDTH)
-            .min(available / count as f32)
+        let pins = self.taskbar.pinned_apps().len();
+        let mut x = bar.x + self.scale(START_BUTTON_WIDTH) + self.scale(TASKBAR_BUTTON_START_GAP);
+        let mut tiles = Vec::with_capacity(slots.len());
+        for (index, width) in fit_tiles(&wanted, &shrinks, height, available)
+            .into_iter()
+            .enumerate()
+        {
+            if index == pins {
+                x += self.section_gap_extra();
+            }
+            tiles.push(Rect::new(x, top, width, height));
+            x += width + self.scale(TASKBAR_BUTTON_GAP);
+        }
+        tiles
     }
 
     /// How much wider than an ordinary gap the one between the pinned and
-    /// the running sections is -- nothing unless both sections have buttons,
+    /// the running sections is -- nothing unless both sections have tiles,
     /// since a divider with nothing on one side divides nothing.
     fn section_gap_extra(&self) -> f32 {
         let pins = self.taskbar.pinned_apps().len();
@@ -2692,43 +2906,40 @@ impl DesktopShell {
         }
     }
 
-    /// The taskbar button in slot `index` -- pinned applications first, then
-    /// the windows, the two set apart by [`taskbar_divider_rect`](Self::taskbar_divider_rect).
+    /// The taskbar tile in slot `index` -- pinned applications first, then the
+    /// windows, the two set apart by [`taskbar_divider_rect`](Self::taskbar_divider_rect).
+    /// An index past the last is an empty rectangle, which contains no point.
+    ///
+    /// Places the whole row to answer, as it must; see
+    /// [`taskbar_layout`](Self::taskbar_layout).
     #[must_use]
     pub fn taskbar_button_rect(&self, index: usize) -> Rect {
-        let bar = self.taskbar_rect();
-        let w = self.taskbar_button_width();
-        let inset = self.scale(TASKBAR_BUTTON_INSET).min(bar.h / 2.0);
-        let past_the_pins = if index >= self.taskbar.pinned_apps().len() {
-            self.section_gap_extra()
-        } else {
-            0.0
-        };
-        let x = bar.x
-            + self.scale(START_BUTTON_WIDTH)
-            + self.scale(TASKBAR_BUTTON_START_GAP)
-            + index as f32 * (w + self.scale(TASKBAR_BUTTON_GAP))
-            + past_the_pins;
-        Rect::new(x, bar.y + inset, w, bar.h - inset * 2.0)
+        self.taskbar_layout()
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| Rect::new(0.0, 0.0, 0.0, 0.0))
     }
 
-    /// The line between the pinned buttons and the windows', in the middle of
-    /// the gap between them -- `None` unless both sections have buttons.
+    /// The line between the pinned tiles and the windows', where the
+    /// reference draws it -- [`TASKBAR_DIVIDER_OFFSET`] past the last pin, as
+    /// tall as [`TASKBAR_DIVIDER_HEIGHT`] and centred in the bar -- or `None`
+    /// unless both sections have tiles.
     #[must_use]
     pub fn taskbar_divider_rect(&self) -> Option<Rect> {
         let pins = self.taskbar.pinned_apps().len();
         if pins == 0 || self.section_gap_extra() <= 0.0 {
             return None;
         }
-        let last_pin = self.taskbar_button_rect(pins.saturating_sub(1));
-        let first_window = self.taskbar_button_rect(pins);
+        let layout = self.taskbar_layout();
+        let last_pin = layout.get(pins.checked_sub(1)?)?;
+        let bar = self.taskbar_rect();
         let thickness = self.scale(1.0).max(1.0);
-        let middle = (last_pin.x + last_pin.w + first_window.x) / 2.0;
+        let height = self.scale(TASKBAR_DIVIDER_HEIGHT).min(last_pin.h);
         Some(Rect::new(
-            middle - thickness / 2.0,
-            last_pin.y + last_pin.h * 0.2,
+            last_pin.x + last_pin.w + self.scale(TASKBAR_DIVIDER_OFFSET),
+            bar.y + (bar.h - height) / 2.0,
             thickness,
-            last_pin.h * 0.6,
+            height,
         ))
     }
 
@@ -3391,13 +3602,7 @@ impl DesktopShell {
         let px = self.icon_px(logical);
         #[allow(clippy::cast_precision_loss)]
         let side = px as f32;
-        tree.push(guitk::render::RenderCommand::Image {
-            x: rect.x + (rect.w - side) / 2.0,
-            y: rect.y + (rect.h - side) / 2.0,
-            width: side,
-            height: side,
-            image_id: self.icon(name, px, color),
-        });
+        image_centred(tree, rect, side, self.icon(name, px, color));
     }
 
     /// An icon's side, `logical` pixels at this scale, as a whole number.
@@ -3725,7 +3930,7 @@ impl DesktopShell {
 
         if self.taskbar_rect().contains(x, y) {
             // Before the window buttons: the tray is at the far end and the
-            // buttons never reach it (`taskbar_button_width` subtracts the
+            // buttons never reach it (`taskbar_layout` subtracts the
             // tray), but the order is what makes that a fact rather than a
             // coincidence the two could stop sharing.
             if self.clock_rect().contains(x, y) {
@@ -3758,8 +3963,8 @@ impl DesktopShell {
             // The slot is resolved to a window *here*, while the list that
             // produced the rectangle is still in hand — see
             // [`Hit::TaskbarButton`].
-            for (index, slot) in self.taskbar_slots().iter().enumerate() {
-                if self.taskbar_button_rect(index).contains(x, y) {
+            for (slot, tile) in self.taskbar_slots().iter().zip(self.taskbar_layout()) {
+                if tile.contains(x, y) {
                     return match *slot {
                         TaskbarSlot::Window(id) => Hit::TaskbarButton(id),
                         TaskbarSlot::Pinned(pin) => Hit::TaskbarPinned(pin),
@@ -4233,43 +4438,93 @@ impl DesktopShell {
                 // bar on its way somewhere, and a client that stopped
                 // receiving motion because the shell was showing a tooltip
                 // would lose its own hover states.
-                self.hover_tray(event.x, event.y);
+                self.hover_taskbar(event.x, event.y);
                 ShellAction::Pass
             }
         }
     }
 
-    /// Note that the pointer is over a tray icon, or is no longer.
+    /// Note what on the taskbar the pointer is resting on -- a tray icon or a
+    /// tile -- and put up the tooltip naming it, or take the tooltip down.
     ///
     /// Resolved through [`hit_test`](Self::hit_test) rather than by walking
-    /// `tray_icon_rects` again, so that the icon a tooltip names and the icon
-    /// a click reaches are decided by one piece of geometry. Two hit tests
-    /// over the same row would be two chances to disagree, and the disagreement
+    /// the rectangles again, so that the thing a tooltip names and the thing a
+    /// click reaches are decided by one piece of geometry. Two hit tests over
+    /// the same row would be two chances to disagree, and the disagreement
     /// would read as the wrong name on the right icon.
-    fn hover_tray(&mut self, x: f32, y: f32) {
+    fn hover_taskbar(&mut self, x: f32, y: f32) {
         let over = match self.hit_test(x, y) {
             Hit::TrayIcon(index) => self.ordered_tray_icons().get(index).and_then(|icon| {
                 // A program that registered no tooltip has given the shell
                 // nothing to say. An empty bubble is worse than none.
-                (!icon.tooltip.is_empty())
-                    .then(|| (tray_dnd::TrayIconKey::of(icon), icon.tooltip.clone()))
+                (!icon.tooltip.is_empty()).then(|| {
+                    (
+                        TooltipKey::Tray(tray_dnd::TrayIconKey::of(icon)),
+                        icon.tooltip.clone(),
+                    )
+                })
             }),
+            // A pin is its picture alone, so this is the only place its name
+            // is -- and, as the reference's does, it says what a click does,
+            // which is not what most taskbars' pins do: start another copy,
+            // running or not (design-decisions §885).
+            Hit::TaskbarPinned(pin) => self.taskbar.pinned_apps().get(pin).map(|app| {
+                (
+                    TooltipKey::Pin(app.exec_path.clone()),
+                    format!("{} — pinned (click to open)", app.display_name),
+                )
+            }),
+            // A window's title is on its tile, but cut to what fits.
+            Hit::TaskbarButton(id) => self
+                .windows
+                .get(&id)
+                .filter(|window| !window.title.is_empty())
+                .map(|window| (TooltipKey::Window(id), window.title.clone())),
             _ => None,
         };
         match over {
-            None => self.tray_tooltip = None,
+            None => {
+                if self.tooltip.take().is_some() {
+                    self.tooltip_changed = true;
+                }
+            }
             Some((key, text)) => {
                 // Already resting on this one: leave the hover running, or the
                 // delay would restart on every motion event and the tooltip
                 // would never appear.
-                if self.tray_tooltip.as_ref().is_some_and(|(at, _)| *at == key) {
+                if self.tooltip.as_ref().is_some_and(|(at, _)| *at == key) {
                     return;
                 }
                 let mut tip = guitk::menu::Tooltip::new(&text);
                 tip.start_hover(x, y, self.osd_clock_ms, self.viewport());
-                self.tray_tooltip = Some((key, tip));
+                self.tooltip = Some((key, tip));
+                self.tooltip_changed = true;
             }
         }
+    }
+
+    /// How long until the tooltip the pointer is resting on appears, in
+    /// milliseconds of the overlay clock -- `None` when none is waiting to.
+    ///
+    /// For the session, which sleeps while nothing moves: the delay is a
+    /// deadline nothing else wakes the loop for.
+    #[must_use]
+    pub fn tooltip_due_in(&self) -> Option<u64> {
+        self.tooltip
+            .as_ref()
+            .and_then(|(_, tip)| tip.due_in(self.osd_clock_ms))
+    }
+
+    /// Whether the tooltip has come, gone or begun waiting to appear since
+    /// this was last asked -- clearing the answer.
+    ///
+    /// For the session, which repaints the surface the tooltip is drawn on
+    /// only when told something changed, and must wake for a waiting one's
+    /// delay. Neither happened until 2026-09-26: a tray icon's name appeared
+    /// only if something else on the desktop happened to draw after the delay,
+    /// and stayed up, after the pointer left, until something did again.
+    pub fn take_tooltip_changed(&mut self) -> bool {
+        core::mem::take(&mut self.tooltip_changed)
     }
 
     /// Whether `icon` is the one currently under a drag.
@@ -4285,7 +4540,8 @@ impl DesktopShell {
         })
     }
 
-    /// The tray tooltip's draw commands, empty unless one is showing.
+    /// The tooltip's draw commands -- a tray icon's or a tile's -- empty unless
+    /// one is showing.
     ///
     /// Drawn on the overlay surface beside the on-screen display, which is
     /// full-screen, above the menus and `input_transparent`. That last is why
@@ -4294,8 +4550,8 @@ impl DesktopShell {
     /// there to be read, and a tooltip is the same kind of thing -- a press
     /// aimed at the icon under it must reach the icon.
     #[must_use]
-    pub fn render_tray_tooltip(&self) -> Option<RenderTree> {
-        let (_, tip) = self.tray_tooltip.as_ref()?;
+    pub fn render_tooltip(&self) -> Option<RenderTree> {
+        let (_, tip) = self.tooltip.as_ref()?;
         if !tip.is_visible() {
             return None;
         }
@@ -6561,18 +6817,22 @@ impl DesktopShell {
             self.theme.taskbar_accent,
         );
 
-        // Window buttons. Rounded like the windows they stand for — the corner
-        // style is a property of the desktop, not of one surface in it.
-        let radii = self.corner_radii();
-        // Over *slots*, not windows: a pinned application has a button whether
+        // The tiles: pinned programs, then windows, as the Aero reference
+        // draws them. Rounded as the windows they stand for are, at half their
+        // radius -- see `TASKBAR_TILE_CORNER_SHARE`.
+        let radii = CornerRadii::all(
+            self.scale(self.appearance.window_corners.radius() * TASKBAR_TILE_CORNER_SHARE),
+        );
+        // Over *slots*, not windows: a pinned application has a tile whether
         // or not it is running, and it stands to the left of the windows.
         let windows = self.taskbar_windows();
-        let icon_px = self.icon_px(TASKBAR_ICON);
-        for (index, slot) in self.taskbar_slots().iter().enumerate() {
-            let button = self.taskbar_button_rect(index);
-
-            // What the button says, its colour, and its program's picture.
-            let (label, bg, image_id) = match *slot {
+        let pin_px = self.icon_px(TASKBAR_PIN_ICON);
+        let window_px = self.icon_px(TASKBAR_WINDOW_ICON);
+        #[allow(clippy::cast_precision_loss)]
+        let (pin_side, window_side) = (pin_px as f32, window_px as f32);
+        let title_size = self.font_size(TextRole::Caption);
+        for (slot, tile) in self.taskbar_slots().iter().zip(self.taskbar_layout()) {
+            match *slot {
                 TaskbarSlot::Pinned(pin) => {
                     let Some(app) = self.taskbar.pinned_apps().get(pin) else {
                         continue;
@@ -6581,72 +6841,80 @@ impl DesktopShell {
                         .apps
                         .iter()
                         .find(|a| a.executable_path == app.exec_path);
-                    let image_id = self.picture_of(program, icon_px, self.theme.taskbar_fg);
-                    // Never the focused colour: a pinned button is a way to
-                    // *start* the program, so drawing it as though it were the
-                    // window in front would say something untrue about it.
-                    (app.display_name.as_str(), self.theme.taskbar_bg, image_id)
+                    // Flat, as the reference draws a pin: its program's
+                    // picture and nothing else. A pinned tile is a way to
+                    // *start* the program -- another copy, if one is running
+                    // -- so nothing on it may look like a window's, running or
+                    // in front; its name is its tooltip.
+                    let image_id = self.picture_of(program, pin_px, self.theme.taskbar_fg);
+                    image_centred(&mut tree, tile, pin_side, image_id);
                 }
                 TaskbarSlot::Window(id) => {
                     let Some(window) = windows.iter().find(|w| w.id == id) else {
                         continue;
                     };
-                    let bg = if Some(id) == self.focused_window {
-                        self.theme.taskbar_active_bg
-                    } else {
-                        self.theme.taskbar_bg
-                    };
+                    self.draw_window_tile(&mut tree, tile, radii, Some(id) == self.focused_window);
                     let program = self.program_for_app_id(&window.app_id);
-                    let image_id = self.picture_of(program, icon_px, self.theme.taskbar_fg);
-                    (window.title.as_str(), bg, image_id)
+                    let image_id = self.picture_of(program, window_px, self.theme.taskbar_fg);
+                    let picture_x = tile.x + self.scale(TASKBAR_TILE_PAD_START);
+                    let title_x = picture_x + window_side + self.scale(TASKBAR_TILE_LABEL_GAP);
+                    let room = tile.x + tile.w - self.scale(TASKBAR_TILE_PAD_END) - title_x;
+                    if room < self.scale(TASKBAR_TILE_MIN_LABEL) {
+                        // Squeezed past its title: its picture alone, in the
+                        // middle, as a pin's is.
+                        image_centred(&mut tree, tile, window_side, image_id);
+                        continue;
+                    }
+                    tree.push(guitk::render::RenderCommand::Image {
+                        x: picture_x,
+                        y: tile.y + (tile.h - window_side) / 2.0,
+                        width: window_side,
+                        height: window_side,
+                        image_id,
+                    });
+                    // Window title, fitted to what the tile can hold — by the
+                    // renderer, which is the only thing that knows how wide
+                    // the title will be drawn. This used to take
+                    // `button.w / (size * 0.62)` *characters*: a guessed
+                    // average advance applied to a proportional face, so a
+                    // title of capitals ("WWW Browser") overran the button and
+                    // one of narrow letters ("initialising…") was cut with the
+                    // space to spare. Scaling the guess with the font size
+                    // fixes only the half of the error that depends on size;
+                    // the half that depends on *which letters* cannot be fixed
+                    // by any constant.
+                    //
+                    // `text_in` also marks the cut with `…`, so a truncated
+                    // title is distinguishable from a short one — a silently
+                    // clipped one is not, and a window called "Save changes to
+                    // report.docx?" reading as "Save changes to rep" is a
+                    // different sentence. The whole of it is the tile's
+                    // tooltip.
+                    tree.text_in(
+                        title_x,
+                        tile.y + (tile.h - title_size).max(0.0) / 2.0,
+                        room,
+                        &window.title,
+                        self.theme.taskbar_fg,
+                        title_size,
+                    );
                 }
-            };
-
-            fill_round(&mut tree, button, bg, radii);
-            #[allow(clippy::cast_precision_loss)]
-            let side = icon_px as f32;
-            let inset = self.scale(8.0);
-            tree.push(guitk::render::RenderCommand::Image {
-                x: button.x + inset,
-                y: button.y + (button.h - side).max(0.0) / 2.0,
-                width: side,
-                height: side,
-                image_id,
-            });
-
-            // Window title, fitted to what the button can hold — by the
-            // renderer, which is the only thing that knows how wide the title
-            // will be drawn. This used to take `button.w / (size * 0.62)`
-            // *characters*: a guessed average advance applied to a proportional
-            // face, so a title of capitals ("WWW Browser") overran the button
-            // and one of narrow letters ("initialising…") was cut with the
-            // space to spare. Scaling the guess with the font size, which the
-            // old comment was pleased about, fixes only the half of the error
-            // that depends on size; the half that depends on *which letters*
-            // cannot be fixed by any constant.
-            //
-            // `text_in` also marks the cut with `…`, so a truncated title is
-            // distinguishable from a short one — a silently clipped one is not,
-            // and a window called "Save changes to report.docx?" reading as
-            // "Save changes to rep" is a different sentence.
-            let title_size = self.font_size(TextRole::Caption);
-            let text_x = button.x + inset + side + self.scale(6.0);
-            tree.text_in(
-                text_x,
-                button.y + inset,
-                (button.x + button.w - inset - text_x).max(0.0),
-                label,
-                self.theme.taskbar_fg,
-                title_size,
-            );
+            }
         }
 
-        // The divider between the pinned buttons and the windows'.
+        // The divider between the pinned tiles and the windows': a line in the
+        // bar's own colour and, a pixel to its right, the dark one that makes
+        // it read as a groove in the glass, as the reference draws it.
         if let Some(divider) = self.taskbar_divider_rect() {
             fill(
                 &mut tree,
                 divider,
                 with_alpha(self.theme.taskbar_fg, TASKBAR_DIVIDER_ALPHA),
+            );
+            fill(
+                &mut tree,
+                Rect::new(divider.x + divider.w, divider.y, divider.w, divider.h),
+                TASKBAR_DIVIDER_SHADOW,
             );
         }
 
@@ -7189,6 +7457,63 @@ impl DesktopShell {
             }
             None => self.icon(launcher::GENERIC_PROGRAM_ICON, px, color),
         }
+    }
+
+    /// A window's tile, behind its picture and title: the Aero reference's
+    /// running tile -- faint glass, brighter across its top half, an edge in
+    /// the bar's text colour and a highlight along its top -- or, for the
+    /// window in front, the same shape in the theme's colour for it with a
+    /// brighter edge and highlight.
+    ///
+    /// The reference fills with gradients the renderer does not draw; two
+    /// fills, one over the upper half, are the same glass in two steps.
+    fn draw_window_tile(
+        &self,
+        tree: &mut RenderTree,
+        tile: Rect,
+        radii: CornerRadii,
+        in_front: bool,
+    ) {
+        let (body, edge, highlight) = if in_front {
+            (
+                self.theme.taskbar_active_bg,
+                TASKBAR_TILE_EDGE_IN_FRONT,
+                TASKBAR_TILE_HIGHLIGHT_IN_FRONT,
+            )
+        } else {
+            (
+                with_alpha(Color::WHITE, TASKBAR_TILE_GLASS),
+                TASKBAR_TILE_EDGE,
+                TASKBAR_TILE_HIGHLIGHT,
+            )
+        };
+        fill_round(tree, tile, body, radii);
+        fill_round(
+            tree,
+            Rect::new(tile.x, tile.y, tile.w, tile.h / 2.0),
+            with_alpha(Color::WHITE, TASKBAR_TILE_SHEEN),
+            CornerRadii::top(radii.top_left),
+        );
+        let line = self.scale(1.0).max(1.0);
+        // Inside the edge, and clear of the rounded corners it would cut.
+        let inset = radii.top_left.max(line);
+        fill(
+            tree,
+            Rect::new(
+                tile.x + inset,
+                tile.y + line,
+                (tile.w - 2.0 * inset).max(0.0),
+                line,
+            ),
+            with_alpha(Color::WHITE, highlight),
+        );
+        stroke_round(
+            tree,
+            tile,
+            with_alpha(self.theme.taskbar_fg, edge),
+            line,
+            radii,
+        );
     }
 
     /// The image id of `program`'s picture, `px` square in `color` -- or the
@@ -8012,11 +8337,13 @@ impl DesktopShell {
     /// with its neighbour as soon as the pointer crossed its own centre -- a
     /// few pixels into the drag -- while a leftward drag behaved.
     fn row_drop_index(&self, first_slot: usize, count: usize, from: usize, x: f32) -> usize {
+        let layout = self.taskbar_layout();
         (0..count)
             .filter(|&index| index != from)
             .filter(|&index| {
-                let button = self.taskbar_button_rect(first_slot.saturating_add(index));
-                button.x + button.w / 2.0 < x
+                layout
+                    .get(first_slot.saturating_add(index))
+                    .is_some_and(|tile| tile.x + tile.w / 2.0 < x)
             })
             .count()
     }
@@ -8227,11 +8554,11 @@ impl DesktopShell {
     /// it can name the end, because a new button can go after the last one.
     fn pinned_insert_boundary(&self, x: f32) -> usize {
         let count = self.taskbar.pinned_apps().len();
-        (0..count)
-            .find(|&index| {
-                let button = self.taskbar_button_rect(index);
-                x < button.x + button.w / 2.0
-            })
+        let layout = self.taskbar_layout();
+        layout
+            .iter()
+            .take(count)
+            .position(|tile| x < tile.x + tile.w / 2.0)
             .unwrap_or(count)
     }
 
@@ -10123,8 +10450,10 @@ impl DesktopShell {
         // The tooltip rides the same clock rather than bringing its own. Two
         // clocks advanced from two call sites is one forgotten call away from
         // a tooltip that never appears, or never leaves.
-        if let Some((_, tip)) = self.tray_tooltip.as_mut() {
+        if let Some((_, tip)) = self.tooltip.as_mut() {
+            let was = tip.is_visible();
             tip.tick(self.osd_clock_ms);
+            self.tooltip_changed |= tip.is_visible() != was;
         }
     }
 
@@ -13076,7 +13405,7 @@ mod window_manager_tests {
         shell.datetime.show_day_of_week = false;
         shell.datetime.show_date = false;
         let narrow_tray = shell.tray_width();
-        let wide_buttons = shell.taskbar_button_width();
+        let wide_buttons = shell.taskbar_button_rect(0).w;
 
         shell.datetime.show_day_of_week = true;
         shell.datetime.show_date = true;
@@ -13085,7 +13414,7 @@ mod window_manager_tests {
             "the tray must grow to hold the longer reading"
         );
         assert!(
-            shell.taskbar_button_width() < wide_buttons,
+            shell.taskbar_button_rect(0).w < wide_buttons,
             "and the space has to come from somewhere"
         );
         assert!(
@@ -14037,13 +14366,13 @@ mod overview_wiring_tests {
     fn resting_on_a_tray_icon_shows_the_name_its_program_gave_it() {
         let mut s = DesktopShell::new(1920, 1080);
         s.apply_tray_icons(vec![tray_icon(1, "B", "Battery: 84%")]);
-        assert!(s.render_tray_tooltip().is_none(), "nothing hovered yet");
+        assert!(s.render_tooltip().is_none(), "nothing hovered yet");
 
         let rect = s.tray_icon_rects()[0];
         hover(&mut s, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
 
         let tree = s
-            .render_tray_tooltip()
+            .render_tooltip()
             .expect("resting on an icon showed no tooltip");
         assert!(
             tree.commands
@@ -14064,11 +14393,11 @@ mod overview_wiring_tests {
         let rects = s.tray_icon_rects();
 
         hover(&mut s, rects[0].x + rects[0].w / 2.0, rects[0].y + 8.0);
-        let first = format!("{:?}", s.render_tray_tooltip().expect("first icon"));
+        let first = format!("{:?}", s.render_tooltip().expect("first icon"));
         assert!(first.contains("Battery"));
 
         hover(&mut s, rects[1].x + rects[1].w / 2.0, rects[1].y + 8.0);
-        let second = format!("{:?}", s.render_tray_tooltip().expect("second icon"));
+        let second = format!("{:?}", s.render_tooltip().expect("second icon"));
 
         assert!(
             second.contains("Network") && !second.contains("Battery"),
@@ -14083,12 +14412,12 @@ mod overview_wiring_tests {
         s.apply_tray_icons(vec![tray_icon(1, "A", "Battery")]);
         let rect = s.tray_icon_rects()[0];
         hover(&mut s, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
-        assert!(s.render_tray_tooltip().is_some());
+        assert!(s.render_tooltip().is_some());
 
         hover(&mut s, 40.0, 40.0);
 
         assert!(
-            s.render_tray_tooltip().is_none(),
+            s.render_tooltip().is_none(),
             "the tooltip outlived the hover"
         );
     }
@@ -14102,7 +14431,7 @@ mod overview_wiring_tests {
 
         hover(&mut s, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
 
-        assert!(s.render_tray_tooltip().is_none());
+        assert!(s.render_tooltip().is_none());
     }
 
     /// The tooltip waits, rather than appearing the instant the pointer
@@ -14121,7 +14450,7 @@ mod overview_wiring_tests {
         s.advance_osd(50);
 
         assert!(
-            s.render_tray_tooltip().is_none(),
+            s.render_tooltip().is_none(),
             "the tooltip appeared after 50ms of hovering"
         );
     }
@@ -14139,7 +14468,7 @@ mod overview_wiring_tests {
         let rect = s.tray_icon_rects()[0];
         hover(&mut s, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
 
-        let tree = s.render_tray_tooltip().expect("a tooltip");
+        let tree = s.render_tooltip().expect("a tooltip");
         let mut plates = 0;
         for c in &tree.commands {
             if let RenderCommand::FillRect {
@@ -14974,7 +15303,7 @@ mod overview_wiring_tests {
 
     #[test]
     fn the_window_buttons_stop_short_of_the_bell() {
-        // `taskbar_button_width` sizes the buttons from what is left after the
+        // `taskbar_layout` sizes the tiles from what is left after the
         // tray. A bell the tray did not account for would be drawn over by the
         // last button.
         let mut s = shell();
@@ -17849,6 +18178,414 @@ mod taskbar_pin_tests {
                     "utilities-terminal".to_owned(),
                     super::launcher::GENERIC_PROGRAM_ICON.to_owned(),
                 ]
+            );
+        });
+    }
+
+    // ---- the tiles, as the Aero reference draws them ----
+
+    /// Every command drawn with its top-left corner inside `rect`.
+    fn drawn_inside(
+        tree: &guitk::render::RenderTree,
+        rect: super::Rect,
+    ) -> Vec<&guitk::render::RenderCommand> {
+        use guitk::render::RenderCommand;
+        tree.commands
+            .iter()
+            .filter(|c| match c {
+                RenderCommand::FillRect { x, y, .. }
+                | RenderCommand::StrokeRect { x, y, .. }
+                | RenderCommand::Image { x, y, .. }
+                | RenderCommand::Text { x, y, .. } => rect.contains(*x, *y),
+                _ => false,
+            })
+            .collect()
+    }
+
+    /// **A pin is its program's picture alone, and a window is its picture
+    /// and its title**, on a tile with an edge -- the reference's
+    /// `aero-task` and `aero-task is-labeled`.
+    #[test]
+    fn a_pin_is_its_picture_alone_and_a_window_its_picture_and_title() {
+        use guitk::render::RenderCommand;
+        with_scratch_config("shell-tiles", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![window_of(1, "terminal", "notes.txt")],
+            ));
+            let layout = shell.taskbar_layout();
+            let (pin, window) = (layout[0], layout[1]);
+            assert!((pin.w - pin.h).abs() < 0.01, "a pin is square: {pin:?}");
+            assert!(
+                (pin.h - shell.scale(super::TASKBAR_TILE)).abs() < 0.01,
+                "a tile is the reference's height in its 40-pixel bar: {pin:?}"
+            );
+            let bar = shell.taskbar_rect();
+            assert!(
+                (pin.y - (bar.y + (bar.h - pin.h) / 2.0)).abs() < 0.01
+                    && (window.y - pin.y).abs() < 0.01,
+                "the tiles are not centred in the bar: {pin:?} {window:?} in {bar:?}"
+            );
+            assert!(
+                window.w > pin.w,
+                "a window's tile holds its title too: {window:?}"
+            );
+            let tree = shell.render_taskbar();
+
+            let on_pin = drawn_inside(&tree, pin);
+            assert!(
+                on_pin
+                    .iter()
+                    .any(|c| matches!(c, RenderCommand::Image { .. })),
+                "the pin has no picture"
+            );
+            assert!(
+                !on_pin.iter().any(|c| matches!(
+                    c,
+                    RenderCommand::Text { .. }
+                        | RenderCommand::FillRect { .. }
+                        | RenderCommand::StrokeRect { .. }
+                )),
+                "a pin is flat, and its name is its tooltip: {on_pin:?}"
+            );
+
+            let on_window = drawn_inside(&tree, window);
+            assert!(
+                on_window
+                    .iter()
+                    .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "notes.txt")),
+                "the window's title is not on its tile: {on_window:?}"
+            );
+            assert!(
+                on_window.iter().any(|c| matches!(c,
+                    RenderCommand::StrokeRect { corner_radii, .. }
+                        if *corner_radii == super::CornerRadii::all(4.0))),
+                "a window's tile has no edge, or not the reference's 4-pixel \
+                 corners at the default corner setting: {on_window:?}"
+            );
+            let picture_x = window.x + shell.scale(super::TASKBAR_TILE_PAD_START);
+            assert!(
+                on_window.iter().any(
+                    |c| matches!(c, RenderCommand::Image { x, .. } if (*x - picture_x).abs() < 0.01)
+                ),
+                "the picture does not lead the title: {on_window:?}"
+            );
+        });
+    }
+
+    /// **The window in front has the theme's colour for it**, and only that
+    /// window's tile does -- never a pin's, whatever is running.
+    #[test]
+    fn only_the_window_in_front_takes_the_active_colour() {
+        use guitk::render::RenderCommand;
+        with_scratch_config("shell-tiles-front", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            let mut front = window_of(2, "terminal", "two");
+            front.focused = true;
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![window_of(1, "terminal", "one"), front],
+            ));
+            let active = shell.theme.taskbar_active_bg;
+            let tree = shell.render_taskbar();
+            let filled_active = |tile: super::Rect| {
+                tree.commands.iter().any(|c| {
+                    matches!(c, RenderCommand::FillRect { x, y, width, height, color, .. }
+                        if (*x, *y, *width, *height) == (tile.x, tile.y, tile.w, tile.h)
+                            && *color == active)
+                })
+            };
+            let layout = shell.taskbar_layout();
+            assert!(
+                !filled_active(layout[0]),
+                "the pin was drawn as the window in front"
+            );
+            assert!(
+                !filled_active(layout[1]),
+                "a window behind was drawn as in front"
+            );
+            assert!(filled_active(layout[2]), "the window in front was not");
+        });
+    }
+
+    /// **A long title gives way before a short one.** On a full bar the widest
+    /// windows come down to one width between them while a short title keeps
+    /// all of its tile, and the row still ends before the tray.
+    #[test]
+    fn a_long_title_gives_way_before_a_short_one() {
+        let mut shell = shell();
+        let mut windows: Vec<WindowInfo> = (1..=14)
+            .map(|i| window_of(i, "", &format!("a rather long document title, number {i}")))
+            .collect();
+        windows.push(window_of(99, "", "a"));
+        shell.apply_window_list(&WindowList::new(0, windows));
+        let layout = shell.taskbar_layout();
+        let short = *layout.last().expect("the short window has a tile");
+        assert!(
+            (short.w - shell.window_tile_width("a", short.h)).abs() < 0.01,
+            "the short title gave way: {short:?}"
+        );
+        let long = layout[0];
+        assert!(
+            long.w < shell.scale(super::TASKBAR_BUTTON_MAX_WIDTH) && long.w > short.w,
+            "the long titles did not come down, or came down past the short one: {long:?}"
+        );
+        assert!(
+            layout[..14].iter().all(|t| (t.w - long.w).abs() < 0.01),
+            "the long titles came down to different widths"
+        );
+        assert!(
+            short.x + short.w <= shell.tray_x(),
+            "the row ran into the tray"
+        );
+    }
+
+    /// **A window's tile is no wider than the reference's 160**, however long
+    /// its title, when the bar has room for more.
+    #[test]
+    fn a_windows_tile_is_no_wider_than_160() {
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(
+            0,
+            vec![window_of(
+                1,
+                "",
+                "a title long enough to fill any tile the taskbar could give it",
+            )],
+        ));
+        let tile = shell.taskbar_layout()[0];
+        assert!(
+            (tile.w - shell.scale(super::TASKBAR_BUTTON_MAX_WIDTH)).abs() < 0.01,
+            "{tile:?}"
+        );
+    }
+
+    /// **A tile squeezed past its title shows its picture alone, in its
+    /// middle** -- not a picture and an ellipsis, and not a picture hanging
+    /// off its edge.
+    #[test]
+    fn a_tile_squeezed_past_its_title_shows_its_picture_alone() {
+        use guitk::render::RenderCommand;
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(
+            0,
+            (1..=60)
+                .map(|i| window_of(i, "", &format!("window number {i}")))
+                .collect(),
+        ));
+        let layout = shell.taskbar_layout();
+        let tile = layout[0];
+        assert!(
+            tile.w < shell.scale(super::TASKBAR_TILE),
+            "the premise: sixty windows squeeze a tile below a square: {tile:?}"
+        );
+        let tree = shell.render_taskbar();
+        let on_tile = drawn_inside(&tree, tile);
+        assert!(
+            !on_tile
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { .. })),
+            "a squeezed tile drew its title: {on_tile:?}"
+        );
+        let side = shell.scale(super::TASKBAR_WINDOW_ICON).round();
+        assert!(
+            tree.commands.iter().any(|c| matches!(c,
+                RenderCommand::Image { x, width, .. }
+                    if (*x - (tile.x + (tile.w - side) / 2.0)).abs() < 0.01
+                        && (*width - side).abs() < 0.01)),
+            "the picture is not in the squeezed tile's middle"
+        );
+    }
+
+    /// A window with no title gets no empty bubble, as a tray icon with none
+    /// gets none.
+    #[test]
+    fn an_untitled_window_gets_no_empty_tooltip() {
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(0, vec![window_of(1, "", "")]));
+        let tile = shell.taskbar_layout()[0];
+        rest_on(&mut shell, tile);
+        assert!(shell.render_tooltip().is_none());
+    }
+
+    /// The row's arithmetic: tiles that fit are as wide as they want.
+    #[test]
+    fn tiles_that_fit_are_as_wide_as_they_want() {
+        assert_eq!(
+            super::fit_tiles(&[36.0, 100.0, 60.0], &[false, true, true], 36.0, 500.0),
+            vec![36.0, 100.0, 60.0]
+        );
+    }
+
+    /// The row's arithmetic: the widest give way first, to one width, and a
+    /// pin never does. 396 wanted, 300 to go round: the pin keeps its 36, the
+    /// short title its 60, and the two long ones share the 204 left.
+    #[test]
+    fn the_widest_windows_give_way_first() {
+        assert_eq!(
+            super::fit_tiles(
+                &[36.0, 150.0, 60.0, 150.0],
+                &[false, true, true, true],
+                36.0,
+                300.0
+            ),
+            vec![36.0, 102.0, 60.0, 102.0]
+        );
+    }
+
+    /// The row's arithmetic: when not even a square each fits, every tile
+    /// shares alike -- and so does a row with nothing that may give way.
+    #[test]
+    fn past_a_square_each_every_tile_shares_alike() {
+        assert_eq!(
+            super::fit_tiles(&[36.0, 150.0, 150.0], &[false, true, true], 36.0, 90.0),
+            vec![30.0, 30.0, 30.0]
+        );
+        assert_eq!(
+            super::fit_tiles(&[36.0, 36.0], &[false, false], 36.0, 50.0),
+            vec![25.0, 25.0]
+        );
+        assert_eq!(super::fit_tiles(&[], &[], 36.0, 0.0), Vec::<f32>::new());
+    }
+
+    /// **The divider stands where the reference puts it**: its gap and
+    /// margin past the last pin, the reference's height, before the first
+    /// window -- with its shadow a pixel to its right.
+    #[test]
+    fn the_divider_stands_where_the_reference_puts_it() {
+        use guitk::render::RenderCommand;
+        with_scratch_config("shell-tiles-divider", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            shell.apply_window_list(&WindowList::new(0, vec![window_of(1, "", "one")]));
+            let layout = shell.taskbar_layout();
+            let divider = shell
+                .taskbar_divider_rect()
+                .expect("two sections, one divider");
+            assert!(
+                (divider.x
+                    - (layout[0].x + layout[0].w + shell.scale(super::TASKBAR_DIVIDER_OFFSET)))
+                .abs()
+                    < 0.01,
+                "{divider:?} after {:?}",
+                layout[0]
+            );
+            assert!(
+                divider.x + 2.0 * divider.w <= layout[1].x,
+                "the divider's shadow is on the window"
+            );
+            assert!(
+                (divider.h - shell.scale(super::TASKBAR_DIVIDER_HEIGHT)).abs() < 0.01,
+                "{divider:?}"
+            );
+            let tree = shell.render_taskbar();
+            assert!(
+                tree.commands.iter().any(|c| matches!(c,
+                    RenderCommand::FillRect { x, color, .. }
+                        if (*x - (divider.x + divider.w)).abs() < 0.01
+                            && *color == super::TASKBAR_DIVIDER_SHADOW)),
+                "the divider has no shadow"
+            );
+        });
+    }
+
+    /// Rest the pointer on `rect`'s middle, and let the tooltip's delay pass.
+    fn rest_on(shell: &mut DesktopShell, rect: super::Rect) {
+        shell.handle_mouse(&at(
+            rect.x + rect.w / 2.0,
+            rect.y + rect.h / 2.0,
+            MouseEventKind::Move,
+        ));
+        shell.advance_osd(5_000);
+    }
+
+    /// **Resting on a tile names it**: a pin -- whose name is nowhere else --
+    /// with what a click on it does, as the reference's does; a window with
+    /// the whole of its title, which its tile may have cut.
+    #[test]
+    fn resting_on_a_tile_names_it() {
+        with_scratch_config("shell-tile-tooltip", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![window_of(1, "", "the whole title of the window")],
+            ));
+            let layout = shell.taskbar_layout();
+
+            rest_on(&mut shell, layout[0]);
+            let tip = format!(
+                "{:?}",
+                shell.render_tooltip().expect("a pin has no tooltip")
+            );
+            assert!(tip.contains("Terminal — pinned (click to open)"), "{tip}");
+
+            rest_on(&mut shell, layout[1]);
+            let tip = format!(
+                "{:?}",
+                shell.render_tooltip().expect("a window has no tooltip")
+            );
+            assert!(
+                tip.contains("the whole title of the window") && !tip.contains("pinned"),
+                "moving to the window did not rename the tooltip: {tip}"
+            );
+        });
+    }
+
+    /// **A tooltip says when it is due, and when it came or went** -- what the
+    /// session wakes and repaints for. Until it did, a tray icon's name
+    /// appeared only if something else on the desktop happened to draw.
+    #[test]
+    fn a_tooltip_says_when_it_is_due_and_when_it_changes() {
+        with_scratch_config("shell-tile-tooltip-due", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            assert!(!shell.take_tooltip_changed());
+            assert_eq!(shell.tooltip_due_in(), None);
+
+            let pin = shell.taskbar_layout()[0];
+            shell.handle_mouse(&at(
+                pin.x + pin.w / 2.0,
+                pin.y + pin.h / 2.0,
+                MouseEventKind::Move,
+            ));
+            assert!(
+                shell.take_tooltip_changed(),
+                "a tooltip began waiting and nobody was told"
+            );
+            assert!(!shell.take_tooltip_changed(), "asking clears the answer");
+            let due = shell
+                .tooltip_due_in()
+                .expect("a waiting tooltip has no deadline");
+            assert!(due > 0, "the tooltip was due at once");
+
+            // A motion within the same tile is not a change.
+            shell.handle_mouse(&at(pin.x + 2.0, pin.y + pin.h / 2.0, MouseEventKind::Move));
+            assert!(
+                !shell.take_tooltip_changed(),
+                "moving within the tile restarted it"
+            );
+
+            shell.advance_osd(due);
+            assert!(shell.render_tooltip().is_some(), "due, and not shown");
+            assert!(
+                shell.take_tooltip_changed(),
+                "it appeared and nobody was told to draw it"
+            );
+            assert_eq!(
+                shell.tooltip_due_in(),
+                None,
+                "a tooltip on screen is not waiting"
+            );
+
+            shell.handle_mouse(&at(40.0, 40.0, MouseEventKind::Move));
+            assert!(shell.render_tooltip().is_none());
+            assert!(
+                shell.take_tooltip_changed(),
+                "it went and nobody was told to take it off the screen"
             );
         });
     }

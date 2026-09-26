@@ -1859,6 +1859,15 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **The taskbar's tiles are the Aero reference's** -- done 2026-09-26
+  (`design-decisions.md` §1400). A pinned program is its picture on a
+  36-pixel square; a window is its picture and title on a glass tile as wide
+  as the title needs, up to 160, the widest giving way first when the bar is
+  full; the divider sits where the reference's does. Resting on any tile names
+  it. Fixed in passing: tooltips -- the tray's included -- never appeared on a
+  desktop nobody was otherwise touching, because nothing woke the desktop when
+  their delay ran out or redrew it when they came and went.
+
 - `[C]` **Every taskbar button draws its program's picture** -- done
   2026-09-26 (`design-decisions.md` §885). A window's declared name is matched
   against the installed programs' desktop entries, so a window's button draws

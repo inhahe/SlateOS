@@ -3652,6 +3652,70 @@ fn armed_in(session: &mut Session) -> Option<std::time::Duration> {
         .map(|at| at.saturating_duration_since(std::time::Instant::now()))
 }
 
+/// **Resting on a tray icon shows its name on an idle desktop, and leaving
+/// takes it away.** The tooltip's delay is a deadline, and nothing woke the
+/// loop for it; nor was the surface it is drawn on repainted when it came due,
+/// or when the pointer left. So until 2026-09-26 a tray icon's name appeared
+/// only if something else happened to draw -- and then stayed up.
+#[test]
+fn an_idle_desktop_is_woken_to_show_a_tooltip_and_repainted_to_hide_it() {
+    let (mut session, desktop, _turn) = session();
+    let panel = session.panel();
+    let osd = session.osd().window();
+    session
+        .shell_mut()
+        .apply_tray_icons(vec![guiremote::tray::TrayIcon {
+            owner: 99,
+            id: 1,
+            glyph: "B".to_string(),
+            tooltip: "Battery: 84%".to_string(),
+        }]);
+    let icon = session.shell().tray_icon_rects()[0];
+    let pointer_at = |x: f32, y: f32| {
+        InputEvent::new(
+            panel.window(),
+            guitk::event::Event::Mouse(guitk::event::MouseEvent {
+                x: x - panel.origin.0,
+                y: y - panel.origin.1,
+                kind: MouseEventKind::Move,
+            }),
+        )
+    };
+
+    desktop
+        .borrow_mut()
+        .send_input(&[pointer_at(icon.x + icon.w / 2.0, icon.y + icon.h / 2.0)]);
+    session.pump().expect("pump");
+    let until = armed_in(&mut session).expect("a waiting tooltip registered no wake-up");
+    assert!(
+        until <= std::time::Duration::from_millis(500),
+        "the wake-up is later than the tooltip's delay: {until:?}"
+    );
+
+    let before = desktop.borrow().seen.len();
+    woken_after(&mut session, &desktop, 1_000);
+    assert!(
+        desktop.borrow().seen[before..].iter().any(|r| r.body
+            == RequestBody::SetVisible {
+                window: osd,
+                visible: true
+            }),
+        "the tooltip came due and was never put on the screen"
+    );
+
+    let before = desktop.borrow().seen.len();
+    desktop.borrow_mut().send_input(&[pointer_at(400.0, 400.0)]);
+    session.pump().expect("pump");
+    assert!(
+        desktop.borrow().seen[before..].iter().any(|r| r.body
+            == RequestBody::SetVisible {
+                window: osd,
+                visible: false
+            }),
+        "the pointer left and the tooltip stayed on the screen"
+    );
+}
+
 /// **An idle desktop with a slideshow sleeps until its next picture, and
 /// shows it.** Nothing woke the loop for a slideshow until 2026-09-26: it
 /// moved only when something else happened to tick it, so on a desktop the

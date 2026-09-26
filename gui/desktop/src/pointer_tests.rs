@@ -2149,7 +2149,10 @@ fn a_screen_smaller_than_the_taskbar_does_not_invert_the_geometry() {
         shell.screen_height as f32,
         "the taskbar must sit on the bottom edge on a small screen too"
     );
-    assert!(shell.taskbar_button_width() >= 0.0);
+    assert!(
+        shell.taskbar_tile_band().1 >= 0.0,
+        "a tile with a negative height"
+    );
     assert_eq!(shell.work_area().3, 0);
     assert!(!Rect::new(0.0, 0.0, 0.0, 0.0).contains(0.0, 0.0));
 
@@ -2326,13 +2329,14 @@ fn the_corner_setting_reaches_the_start_menu_and_the_taskbar_buttons() {
     assert_eq!(fill_radii(&menu)[0], CornerRadii::all(16.0));
 
     // The taskbar panel itself is square — it has no free edge to round — but
-    // the buttons on it follow the setting.
+    // the tiles on it follow the setting, at half the windows' radius: the
+    // Aero reference's 4 at the default 8 (`TASKBAR_TILE_CORNER_SHARE`).
     let taskbar = shell.render_taskbar();
     let radii = fill_radii(&taskbar);
     assert_eq!(radii[0], CornerRadii::ZERO, "the panel spans the screen");
     assert!(
-        radii.iter().any(|r| *r == CornerRadii::all(16.0)),
-        "the window buttons must follow the corner setting"
+        radii.iter().any(|r| *r == CornerRadii::all(8.0)),
+        "the window tiles must follow the corner setting: {radii:?}"
     );
 }
 

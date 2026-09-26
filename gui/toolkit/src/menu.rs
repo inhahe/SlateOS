@@ -1063,6 +1063,23 @@ impl Tooltip {
         self.visible
     }
 
+    /// How long until this tooltip appears, in milliseconds from
+    /// `timestamp_ms` -- `None` when it is not waiting to: the pointer is not
+    /// resting on its trigger, or it is showing already.
+    ///
+    /// For a caller that sleeps while nothing moves. The delay is a deadline,
+    /// and a deadline with no wake-up behind it never comes: the desktop's
+    /// tray tooltips appeared only when something else happened to draw.
+    #[must_use]
+    pub fn due_in(&self, timestamp_ms: u64) -> Option<u64> {
+        let start = self.hover_start.filter(|_| !self.visible)?;
+        Some(
+            start
+                .saturating_add(u64::from(self.delay_ms))
+                .saturating_sub(timestamp_ms),
+        )
+    }
+
     /// Produce render commands for the tooltip.
     pub fn render(&self, palette: &Palette) -> Vec<RenderCommand> {
         if !self.visible {
@@ -2201,6 +2218,31 @@ mod tests {
 
         tooltip.tick(1200); // 200ms elapsed — should appear
         assert!(tooltip.is_visible());
+    }
+
+    /// **A waiting tooltip says when it is due**, and one that is showing, or
+    /// not waiting at all, says it is not -- the deadline a caller that sleeps
+    /// has to wake for.
+    #[test]
+    fn tooltip_says_when_it_is_due() {
+        let mut tooltip = Tooltip::new("Tip").with_delay(200);
+        assert_eq!(tooltip.due_in(0), None, "nothing is resting on it");
+
+        tooltip.start_hover(10.0, 10.0, 1000, SCREEN);
+        assert_eq!(tooltip.due_in(1000), Some(200));
+        assert_eq!(tooltip.due_in(1150), Some(50));
+        assert_eq!(tooltip.due_in(5000), Some(0), "overdue is due now");
+
+        tooltip.tick(1200);
+        assert!(tooltip.is_visible());
+        assert_eq!(
+            tooltip.due_in(1200),
+            None,
+            "a tooltip on screen is not waiting"
+        );
+
+        tooltip.end_hover();
+        assert_eq!(tooltip.due_in(1300), None);
     }
 
     #[test]

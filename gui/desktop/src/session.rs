@@ -1806,7 +1806,7 @@ impl<T: Transport> ShellSession<T> {
         // The overlays, on their own surface and on their own schedule: an OSD
         // is not a popup and neither one's visibility implies anything about
         // the other's.
-        // The volume overlay, a tray tooltip and the label that follows a
+        // The volume overlay, a tooltip and the label that follows a
         // program being carried share this surface: all are transient, all
         // are above the menus, and all are here to be read rather than
         // clicked. Merged rather than given surfaces of their own, because a
@@ -1816,7 +1816,7 @@ impl<T: Transport> ShellSession<T> {
         // one thing here the user is steering.
         let overlays = [
             self.shell.render_osd(),
-            self.shell.render_tray_tooltip(),
+            self.shell.render_tooltip(),
             self.shell.render_carry(),
         ]
         .into_iter()
@@ -3000,6 +3000,11 @@ impl<T: Transport> ShellSession<T> {
         // to saturate the `u32` above must not be quietly shortened to 49 days
         // when the whole point of that frame is to retire everything on screen.
         self.shell.advance_osd(elapsed_ms);
+        // A tooltip whose delay this frame ended is on the overlay surface
+        // only once that is drawn again.
+        if self.shell.take_tooltip_changed() {
+            self.dirty = true;
+        }
         // The stepped rectangles are deliberately not used here. A window's
         // geometry belongs to the compositor, not to the shell — the shell
         // cannot move a window by drawing it somewhere else — so a window
@@ -3108,7 +3113,14 @@ impl<T: Transport> ShellSession<T> {
             .wallpaper
             .next_change_in(self.clock_ms / 1000)
             .map(|secs| Duration::from_secs(secs).max(Duration::from_millis(1)));
-        if let Some(delay) = [widget, schedule, theme, wallpaper]
+        // A tooltip waiting out its delay: the pointer has come to rest on
+        // something with a name, and nothing else will wake the loop to show
+        // it. At least a millisecond, for the same reason as the wallpaper's.
+        let tooltip = self
+            .shell
+            .tooltip_due_in()
+            .map(|ms| Duration::from_millis(ms.max(1)));
+        if let Some(delay) = [widget, schedule, theme, wallpaper, tooltip]
             .into_iter()
             .flatten()
             .min()
@@ -3144,7 +3156,20 @@ impl<T: Transport> ShellSession<T> {
     fn pointer(&mut self, event: &MouseEvent) -> Result<(), Error<T>> {
         self.autohide_pointer(event);
         let action = self.shell.handle_mouse(event);
-        self.act(action)
+        self.act(action)?;
+        // A tooltip came, went or began waiting to appear. The surface it is
+        // drawn on is repainted only when the session is dirty, and its delay
+        // is a deadline nothing else wakes the loop for -- so, until this, a
+        // tray icon's name appeared only if something else happened to draw.
+        // Not while something is moving: the frame loop is awake and re-arms
+        // each frame, and re-arming here would shorten the frame in flight.
+        if self.shell.take_tooltip_changed() {
+            self.dirty = true;
+            if !self.anything_moving() {
+                self.arm_next_frame();
+            }
+        }
+        Ok(())
     }
 
     /// Carry out what the shell answered an event with -- a pointer event, or

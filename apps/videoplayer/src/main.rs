@@ -767,10 +767,7 @@ impl MediaFile {
         })?;
         let mut file = Self {
             path: path.to_path_buf(),
-            file_name: path.file_name().map_or_else(
-                || path.display().to_string(),
-                |n| n.to_string_lossy().into_owned(),
-            ),
+            file_name: shown_name(path),
             file_size: size,
             container,
             duration: probe
@@ -2097,6 +2094,27 @@ impl Default for ScreenshotConfig {
     }
 }
 
+/// A file's name as the window shows it: its bytes as text, with every byte
+/// that is not UTF-8 written as `\xNN`.
+///
+/// For showing only -- the path is kept whole beside it, and that is what is
+/// opened. A lossy decode would show both of two names that differ only in
+/// such a byte as the same `\u{FFFD}`, which is the name a user would then
+/// hunt for and not find; this shows each as it is.
+fn shown_name(path: &Path) -> String {
+    use std::fmt::Write as _;
+    let name = path.file_name().unwrap_or(path.as_os_str());
+    let mut out = String::new();
+    for chunk in name.as_encoded_bytes().utf8_chunks() {
+        out.push_str(chunk.valid());
+        for byte in chunk.invalid() {
+            // Writing to a String cannot fail.
+            let _ = write!(out, "\\x{byte:02X}");
+        }
+    }
+    out
+}
+
 // ============================================================================
 // Recent files
 // ============================================================================
@@ -2104,7 +2122,7 @@ impl Default for ScreenshotConfig {
 /// A recently opened file.
 #[derive(Debug, Clone)]
 pub struct RecentFile {
-    pub path: String,
+    pub path: PathBuf,
     pub file_name: String,
     pub last_position: Duration,
     pub last_opened_timestamp: u64,
@@ -2145,7 +2163,7 @@ impl RecentHistory {
 
     pub fn add(
         &mut self,
-        path: String,
+        path: PathBuf,
         file_name: String,
         position: Duration,
         timestamp: u64,
@@ -2178,7 +2196,7 @@ impl RecentHistory {
         self.files.clear();
     }
 
-    pub fn find_by_path(&self, path: &str) -> Option<&RecentFile> {
+    pub fn find_by_path(&self, path: &Path) -> Option<&RecentFile> {
         self.files.iter().find(|f| f.path == path)
     }
 }
@@ -6473,26 +6491,46 @@ test to be about anything -- it drew {} text command(s)",
         assert!(adj.is_default());
     }
 
+    /// A name is shown as its bytes: what is not UTF-8 is written `\xNN`,
+    /// not replaced, so two names differing only there look different.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_utf8_is_shown_as_its_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let a = Path::new(std::ffi::OsStr::from_bytes(b"/v/clip\xFF.mp4"));
+        let b = Path::new(std::ffi::OsStr::from_bytes(b"/v/clip\xFE.mp4"));
+        assert_eq!(shown_name(a), "clip\\xFF.mp4");
+        assert_ne!(shown_name(a), shown_name(b));
+    }
+
+    #[test]
+    fn a_name_is_shown_without_its_folder() {
+        assert_eq!(shown_name(Path::new("videos/holiday.mkv")), "holiday.mkv");
+        assert_eq!(shown_name(Path::new("caf\u{e9}.mp4")), "caf\u{e9}.mp4");
+        // A path with no last part is shown whole.
+        assert_eq!(shown_name(Path::new("..")), "..");
+    }
+
     // Recent files tests
     #[test]
     fn test_recent_history() {
         let mut recent = RecentHistory::new(3);
         recent.add(
-            "a.mp4".to_string(),
+            PathBuf::from("a.mp4"),
             "a.mp4".to_string(),
             Duration::ZERO,
             100,
             None,
         );
         recent.add(
-            "b.mp4".to_string(),
+            PathBuf::from("b.mp4"),
             "b.mp4".to_string(),
             Duration::ZERO,
             200,
             None,
         );
         recent.add(
-            "c.mp4".to_string(),
+            PathBuf::from("c.mp4"),
             "c.mp4".to_string(),
             Duration::ZERO,
             300,
@@ -6500,7 +6538,7 @@ test to be about anything -- it drew {} text command(s)",
         );
         assert_eq!(recent.files().len(), 3);
         recent.add(
-            "d.mp4".to_string(),
+            PathBuf::from("d.mp4"),
             "d.mp4".to_string(),
             Duration::ZERO,
             400,
@@ -6514,21 +6552,21 @@ test to be about anything -- it drew {} text command(s)",
     fn test_recent_dedup() {
         let mut recent = RecentHistory::new(10);
         recent.add(
-            "a.mp4".to_string(),
+            PathBuf::from("a.mp4"),
             "a.mp4".to_string(),
             Duration::from_secs(10),
             100,
             None,
         );
         recent.add(
-            "b.mp4".to_string(),
+            PathBuf::from("b.mp4"),
             "b.mp4".to_string(),
             Duration::ZERO,
             200,
             None,
         );
         recent.add(
-            "a.mp4".to_string(),
+            PathBuf::from("a.mp4"),
             "a.mp4".to_string(),
             Duration::from_secs(50),
             300,
@@ -6542,13 +6580,13 @@ test to be about anything -- it drew {} text command(s)",
     fn test_recent_find_by_path() {
         let mut recent = RecentHistory::new(10);
         recent.add(
-            "a.mp4".to_string(),
+            PathBuf::from("a.mp4"),
             "a.mp4".to_string(),
             Duration::from_secs(30),
             100,
             Some(Duration::from_secs(120)),
         );
-        let found = recent.find_by_path("a.mp4").unwrap();
+        let found = recent.find_by_path(Path::new("a.mp4")).unwrap();
         assert_eq!(found.last_position, Duration::from_secs(30));
         assert!((found.progress_fraction() - 0.25).abs() < 0.01);
     }
@@ -6835,7 +6873,7 @@ test to be about anything -- it drew {} text command(s)",
     #[test]
     fn test_recent_file_resume_label() {
         let rf = RecentFile {
-            path: "test.mp4".to_string(),
+            path: PathBuf::from("test.mp4"),
             file_name: "test.mp4".to_string(),
             last_position: Duration::from_secs(300),
             last_opened_timestamp: 0,

@@ -1048,6 +1048,32 @@ mod tests {
     }
 
     #[test]
+    fn an_lcd_glyph_blends_each_channel_at_its_own_coverage() {
+        let mut backend = RenderBackend::software(8, 4).expect("software backend");
+        backend.clear(0xFFFF_FFFF);
+        // One pixel whose red stripe is covered, green half, blue not at all:
+        // black text over white leaves it cyan-ish -- red gone, green halved,
+        // blue untouched.
+        let mask = GlyphMask {
+            width: 2,
+            height: 1,
+            left: 0,
+            top: 0,
+            coverage: vec![128, 255],
+            lcd: Some(vec![[255, 128, 0], [255, 255, 255]]),
+        };
+        backend.draw_glyph(&mask, 2.0, 1.0, 0xFF00_0000, 1.0, None);
+        let at = |x: usize| backend.working_pixels()[8 + x];
+        let [_, r, g, b] = at(2).to_be_bytes();
+        assert_eq!((r, b), (0, 255));
+        assert!(g.abs_diff(127) <= 1, "{g}");
+        assert_eq!(at(3), 0xFF00_0000);
+        // Untouched either side.
+        assert_eq!(at(1), 0xFFFF_FFFF);
+        assert_eq!(at(4), 0xFFFF_FFFF);
+    }
+
+    #[test]
     fn a_colour_glyph_takes_the_opacity_and_the_clip() {
         let mut backend = RenderBackend::software(20, 20).expect("software backend");
         backend.clear(0xFF00_0000);

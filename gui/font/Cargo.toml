@@ -19,5 +19,11 @@ phase-timing = []
 # `[dev-dependencies]` only; nothing in a shipped build asks for it.
 testing = []
 
+[dependencies]
+# The PNG decoder for colour bitmap glyphs (`bitmap.rs`: `CBDT` and `sbix`
+# store each emoji as a picture). `no_std` + `alloc` like this crate means to
+# be, and lane F's like this crate, so one decoder serves both.
+imagecodec = { path = "../imagecodec" }
+
 [lints]
 workspace = true

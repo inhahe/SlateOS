@@ -11759,13 +11759,261 @@ moves, nothing inside a glyph.
 | Draw the text colour's alpha into the picture | one fewer parameter | applied twice where the glyph used the text colour; a cache entry per alpha |
 | Rasterize the picture at draw time, no cache | nothing to invalidate | a millisecond per emoji per frame |
 
-**Not modelled** (`known-issues.md` [F] 2026-09-26): variation deltas in a
-variable `COLR`; palettes other than the first; a `PaintColrGlyph`'s clip
-box; colour *bitmaps* (`CBDT`, `sbix`).
+**Variations** (added the same day): a variable colour font's paints, colour
+stops and clip boxes move with its axes, each field by the delta its
+`varIndexBase` names -- through the `DeltaSetIndexMap` if there is one -- in
+the field's own units, read through the same `varstore` as `HVAR`'s.
+
+**Not modelled** (`known-issues.md` [F] 2026-09-26): palettes other than the
+first; a `PaintColrGlyph`'s clip box. Colour *bitmaps* (`CBDT`, `sbix`) are
+§1322.
 
 **How to reverse.** `ScaledFont::colour_glyph` and `SystemFont::glyph_image`
 are the only ways in; a face without `COLR` never reaches the renderer, and
 without them every glyph is drawn from its mask as before.
+
+## 1322. Colour bitmap glyphs: `CBDT` and `sbix` pictures decoded by imagecodec, taken from the strike at or above the size, resampled by area
+
+**Date:** 2026-09-26
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** some emoji fonts store each emoji as a finished picture at one
+or two fixed sizes rather than as a recipe -- Noto Color Emoji's bitmap build,
+Apple's emoji font. Face fallback already chose such a face for emoji, and
+then had nothing to draw: the emoji came out blank, and a face with no
+outlines at all (Noto's bitmap build has none) was refused outright. Now the
+picture is decoded, scaled to the text size, and drawn through the same cache
+and the same paths as a `COLR` glyph (§1321).
+
+**Decision.**
+
+* **A face of pictures parses** (`Outlines::Pictures`): no `glyf` or `CFF` is
+  accepted from a face with `CBLC`+`CBDT` or `sbix`, every outline empty.
+  A face with neither outlines nor pictures is still refused.
+* **The strike at or above the size asked for, else the biggest**:
+  shrinking a picture loses less than enlarging one. Noto has one strike, so
+  in practice this is "Noto's 109-pixel picture, shrunk".
+* **Resampled here, by area when shrinking and bilinearly when enlarging**,
+  in premultiplied colour so a transparent edge does not darken -- not with
+  imagecodec's `decode_scaled`, whose box filter assigns each source pixel
+  to one output cell (right for thumbnails, blocky for a 20-pixel emoji) and
+  which does not enlarge.
+* **Placed from the strike's metrics, scaled, rounded to a whole pixel**:
+  `CBDT`'s bearings name the top-left corner; `sbix`'s origin offset the
+  bottom-left, as FreeType reads it.
+* **imagecodec is a dependency of osfont.** Both are lane F's, both `no_std`
+  + `alloc` in intent, and it is the one PNG decoder in the tree; the
+  alternative, handing encoded bytes up for every caller to decode, puts a
+  decoder in the toolkit and another in the compositor.
+* **Everything a `CBDT` can say is read** -- index formats 1 to 5, image
+  formats 17, 18 and 19 -- and in `sbix` PNG, JPEG and TIFF pictures and one
+  `dupe` hop. The monochrome and grey formats (1 to 9) are not colour and
+  are left to the outline.
+* **A recipe wins over a picture** where a face has both, since it is drawn at
+  the size rather than resampled.
+
+**How to reverse.** `bitmap::render` is called from one place,
+`ScaledFont::colour_glyph`; `Outlines::Pictures` is reached only from a face
+with bitmap tables.
+
+## 1323. Per-pixel code avoids `f32::mul_add`, `round`, `floor` and `ceil`: on the baseline target each is a C-library call
+
+**Date:** 2026-09-26
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** four ordinary-looking float methods are not instructions on
+this workspace's x86_64 target but calls into the C library, because the
+target does not assume the CPU features that make them instructions. In code
+that runs once a pixel they were most of the cost: colour emoji painted at
+half speed and the compositor's backdrop blur spent 48 of its 62 ms a
+megapixel in them. Per-pixel loops in lane F now avoid them; code that runs
+once a row, a glyph or an event keeps them, where they cost nothing.
+
+**The facts** (`rustc -O --emit asm --target x86_64-pc-windows-gnu`, which
+has the same baseline as the SlateOS target):
+
+| Method | Compiles to | Why |
+|---|---|---|
+| `f32::mul_add` | `jmp fmaf` | FMA is not in the baseline; the single rounding it promises needs software |
+| `f32::round` | `jmp roundf` | `roundss` is SSE4.1 |
+| `f32::floor`, `ceil` | `jmp floorf`, `ceilf` | likewise |
+
+**Decision.** In a loop over pixels:
+
+* a multiply-add is written `a * b + c` (`osfont`'s `raster::mad` names it,
+  with the reason) -- two instructions, and the lost half-ulp is invisible in
+  a coverage value or a colour;
+* rounding a non-negative value to an integer is `(v + 0.5) as u32` after the
+  clamp, the same result as `round()` for every value at or above zero bar
+  exact float ties;
+* `floor` of a value known non-negative is `as` truncation.
+
+Measured: colour glyph painting (`colr.rs`, `bitmap.rs`) 2x faster; the
+backdrop blur's saturation pass 61.6 -> 13.4 ms a megapixel; glyph masks
+byte-identical before and after.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| Raise the baseline (x86-64-v2 for SSE4.1, v3 for FMA) | every method becomes one instruction everywhere | drops CPUs the OS otherwise runs on; lane A's and D's target specs, not lane F's; an operator decision |
+| Runtime dispatch (`is_x86_feature_detected!`) | fastest where available | two code paths per loop for a saving the plain arithmetic already gets |
+| Leave them | exact single rounding | a pixel has no use for it, and it halved throughput |
+
+**How to reverse.** Nothing depends on the unfused forms; a raised baseline
+would make `mul_add` and `round` single instructions and these rewrites
+merely equivalent.
+
+## 1324. The font settings' `smoothing` and `subpixel` now rasterize text: LCD planes with FreeType's filter, on/off pixels without smoothing, grey kept beside both
+
+**Date:** 2026-09-26
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** the appearance settings have offered "font smoothing" and a
+subpixel order (none, RGB, BGR, and the two vertical ones) since the settings
+existed, defaulting to smoothing on and RGB -- and neither changed a pixel:
+every glyph was drawn grey-anti-aliased whatever was chosen. Now both are
+honoured wherever the compositor draws text. Subpixel rendering lights a
+glyph's edge pixels a stripe at a time, sharper on an LCD at the price of faint
+colour fringes, the way Windows' ClearType and FreeType's LCD mode do;
+smoothing off draws every pixel fully on or off.
+
+**Decision.**
+
+* **Rasterized at three times the resolution along the stripes, then
+  FreeType's default LCD filter** (`FT_LCD_FILTER_DEFAULT`, taps 8, 77, 86,
+  77, 8 of 256), folded three samples to a pixel. The filter is FreeType's so
+  that text looks as it does in the programs people compare against; the
+  weights sum to 256, so solid runs stay solid.
+* **`GlyphMask` keeps `coverage` and gains optional `lcd` planes**: for an LCD
+  mask `coverage` is the stripes' mean, so a consumer that blends one alpha a
+  pixel (anything outside lane F) still draws the glyph correctly, in grey.
+  `lcd_at` reads either kind as three stripes.
+* **The mode belongs to the font, not to a draw call** (`ScaledFont`,
+  `SystemFont`, `FontCache::set_rendering`): every cached mask was rasterized
+  under it, so a change drops the cache, and the compositor sets it from the
+  settings at construction and on every `set_appearance`.
+* **Smoothing off ignores the subpixel order**: with no partial pixel there is
+  nothing to split.
+* **Blending per channel** in `osfont::scaled::blit_mask` and the compositor's
+  `Framebuffer::draw_glyph` (`blend_pixel_lcd`), each channel at the text
+  colour's alpha times its own stripe's coverage.
+* **The default stays what the settings default to: RGB.** The compositor
+  draws straight into the framebuffer that is scanned out, so it knows the
+  destination pixels exactly -- the condition LCD rendering needs.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| Keep grey only, remove the setting | simpler | the settings page (lane C's) offers it, and it is the platform norm on LCDs |
+| A lighter or no filter | sharper | visible fringes (FreeType's "light" filter exists for that choice) |
+| Subpixel in the toolkit's own text too | apps drawing their own buffers get it | they cannot know what is under a translucent window; the compositor can |
+
+**Not done:** `hinting` (fitting outlines to the pixel grid) had nothing to
+act on when this was written -- there was no hinter. It has one now: §1325.
+Subpixel *positioning* (placing glyphs at fractions of a pixel) is a separate
+change.
+
+**How to reverse.** `Rendering::default()` is grey; a cache never given a mode
+draws as before.
+
+## 1325. The `hinting` font setting runs a port of FreeType's auto-hinter, light mode, checked against FreeType point for point
+
+**Date:** 2026-09-26
+**Lane:** F
+**Decided by:** Claude (autonomous) -- within §86c, which left "a
+vertical-only autohinter" as the deferred-not-rejected alternative to a
+TrueType bytecode interpreter.
+
+**In short:** with hinting on (the setting's default), small text is now
+fitted to the pixel grid the way Linux desktops fit it: every glyph's
+horizontal lines -- baseline, x-height, cap height, the bars of an `e` or an
+`H` -- are moved up or down so they land cleanly on pixel rows, while nothing
+moves sideways and no stroke changes thickness. The code is a translation of
+FreeType's own auto-hinter rather than a new design, so it makes the same
+choices FreeType does, and a tool compares the two glyph by glyph.
+
+**Decision.**
+
+* **A port, not a reimplementation.** `gui/font/src/hint/` is FreeType
+  2.13.2's `autofit` module translated function by function: `glyph.rs` from
+  `afhints.c`, `latin.rs` from `aflatin.c`, its fixed-point arithmetic kept
+  to the bit (`fixed.rs`), its script tables generated from its sources
+  (`tools/gen_autofit_tables.py`). A first attempt was an original
+  hinter in FreeType's spirit; it matched FreeType's glyph *bounds* but not
+  its interiors -- it rounded stems to whole pixels, which light mode never
+  does -- and there was no way to tell which of its hundreds of small choices
+  were wrong. Hinting is a chain of rounding decisions: the only way to get
+  FreeType's look is to make FreeType's decisions.
+* **Light mode only, vertical only.** Stems keep their designed width, thin
+  ones are centred on a pixel row, and the horizontal axis is untouched, so
+  advances and kerning are exactly the unhinted ones (fontconfig's
+  `hintslight`, most Linux desktops' default). The same for grey, LCD and
+  smoothing-off rendering.
+* **Every script FreeType's Latin writing system serves** -- most of them:
+  Latin, Greek, Cyrillic, Arabic, Hebrew, Armenian, the Brahmic scripts, Thai
+  and some fifty more, each measured from its own reference letters. Each
+  glyph is given a style as FreeType gives it one (by `cmap`, then by the
+  `GSUB` lookups that produce it), and the reference letters are shaped by
+  this crate's shaper, as FreeType has HarfBuzz shape them. That includes
+  FreeType's *feature styles* for Latin, Greek and Cyrillic -- small and
+  petite capitals, ordinals, superscripts, subscripts, scientific inferiors,
+  titling forms -- which claim what their OpenType feature substitutes in
+  (less what it also positions) and measure their zones from reference
+  letters shaped with the feature on: the shaper has optional features for
+  that, off for every ordinary run.
+* **Checked against FreeType.** `tools/hint_oracle.py` runs FreeType (from
+  `freetype-py`) and this crate over every glyph of a face at eleven sizes
+  and compares every hinted point, both coordinates, to the 64th of a pixel,
+  after comparing the sorting itself against FreeType's own glyph-to-style
+  map. On Noto Sans, Open Sans, JetBrains Mono,
+  Segoe UI, Arial, Times New Roman, Calibri, Verdana and Georgia every glyph
+  lands in FreeType's style and every hinted glyph agrees exactly --
+  and so does every glyph of the CFF fonts David CLM and Frank Ruehl CLM,
+  whose coordinates are fractions of a unit. That last took reading a glyph's
+  points as FreeType's loaders read them, not as its outline draws: a CFF
+  coordinate kept exact (16.16 needs more than `f32` has) and floored to a
+  whole unit, a line of no length in 1024ths of a unit dropped, a contour
+  that ends a hair short of its start folded (`sfnt::CffPoints`), and a
+  composite placed by the component whose metrics it borrows. A generated
+  fixture (`tools/gen_hint_fixture.py`: a synthetic face as TrueType and CFF,
+  one glyph drawn in 16.16 fractions, small capitals and superscripts behind
+  `smcp` and `sups`, with FreeType's answers at eighteen sizes) keeps that in
+  `cargo test`.
+* **Robust before faithful.** Every index goes through `get` and a failure
+  abandons the glyph to be drawn unhinted, coordinates beyond `i16` and
+  absurd sizes are refused at the door (which is what makes the unchecked
+  fixed-point arithmetic provably safe), and every walk of font data is
+  budgeted. A bug in the port costs a glyph its hinting, never the compositor.
+* **Licensing.** FreeType's licence (FTL) permits this with a credit line; the
+  licence and the credit are in `gui/font/licenses/`, and every ported file
+  carries FreeType's copyright notice.
+
+**Not done** (each filed in `known-issues.md`): FreeType's CJK writing system
+(ideographs, and the fallback style unclaimed glyphs go to, are drawn
+unhinted); stem darkening (off by default in FreeType too). The oracle also
+turned up a difference that was not hinting's: composites that borrow a
+component's metrics were placed a few units off FreeType horizontally, hinted
+or not -- fixed. The face-level analysis -- styles and zones, 2-9 ms on large
+fonts, taken when a face first draws a hinted glyph -- is repeated for each
+size of a face; sharing it is an optimisation for later.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| An original light hinter | smaller, no licence | tried: different text from FreeType's, no oracle to find out why |
+| TrueType bytecode interpreter | the designer's own hints | §86c: runs attacker-supplied programs; nothing for CFF or unhinted fonts |
+| DirectWrite-style (Windows) | the other big reference | not documented to the level a port needs; no oracle to check against |
+| No hinting | nothing to maintain | soft small text on ordinary monitors, the setting a lie |
+
+**How to reverse.** The setting off draws exactly as before; `Rendering`'s
+`hinting` defaults to off for any caller that does not ask. Removing the
+module is removing `ScaledFont`'s `hinter` field.
 
 ## §200 — The B-KNULLJUMP hunt runs the *uninstrumented* kernel first (E), and escalates to the optimized KASAN build (A) only if that fails to settle it
 

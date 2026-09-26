@@ -130,6 +130,14 @@ impl core::error::Error for SfntError {}
 /// references glyph B which references glyph A.
 pub const MAX_COMPOSITE_DEPTH: u8 = 8;
 
+/// How many code points [`Face::for_each_unicode_mapping`] visits at most.
+///
+/// Four times the largest real `cmap` seen on the development host (a CJK
+/// face mapping some 65,000 characters, most of them twice over through its
+/// compatibility blocks), so no real face is cut short, while a table whose
+/// groups claim all of Unicode many times over costs a bounded walk.
+pub(crate) const MAX_CMAP_WALK: usize = 1 << 18;
+
 // ---------------------------------------------------------------------------
 // Big-endian primitive reads, all bounds-checked
 // ---------------------------------------------------------------------------
@@ -434,6 +442,360 @@ impl Outline {
     }
 }
 
+/// What one stored point of a glyph is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Tag {
+    /// On the outline.
+    On,
+    /// A quadratic's control point, as `glyf` stores them: two in a row imply
+    /// an on-curve point midway between them.
+    Conic,
+    /// One of a cubic's two control points, as CFF draws them.
+    Cubic,
+}
+
+/// A stored point, exactly.
+///
+/// `f64` rather than the outline's `f32` because a CFF charstring's
+/// coordinates are 16.16 fixed point -- 32 bits, where `f32` keeps 24 -- and
+/// the auto-hinter has to see them exactly as FreeType does: FreeType's CFF
+/// loader decides where a coordinate lands, and whether a contour closes, in
+/// 1024ths of a unit (see [`CffPoints`]), and a value `f32` rounded can sit
+/// in the next 1024th.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Exact {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+}
+
+impl Exact {
+    /// A point at `(x, y)`.
+    pub(crate) const fn new(x: f64, y: f64) -> Self {
+        Self { x, y }
+    }
+
+    /// An outline's point, widened.
+    fn from_point(p: Point) -> Self {
+        Self::new(f64::from(p.x), f64::from(p.y))
+    }
+
+    /// `self` transformed by `t`, exactly.
+    fn transformed(self, t: &Transform) -> Self {
+        let (a, b, c, d) = (
+            f64::from(t.a),
+            f64::from(t.b),
+            f64::from(t.c),
+            f64::from(t.d),
+        );
+        Self::new(
+            a * self.x + c * self.y + f64::from(t.e),
+            b * self.x + d * self.y + f64::from(t.f),
+        )
+    }
+
+    /// Narrowed to an outline's point.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "a glyph's coordinates are well inside f32's range; only precision is given up"
+    )]
+    pub(crate) fn to_point(self) -> Point {
+        Point::new(self.x as f32, self.y as f32)
+    }
+}
+
+/// A glyph as the font stores it: its points in order, each tagged, split
+/// into contours.
+///
+/// This is FreeType's `FT_Outline`, and it exists for the one reader that
+/// needs the designer's points rather than a path: the auto-hinter
+/// ([`crate::hint`]), which classifies every point as a corner, a curve's
+/// control or a point along a straight run. An [`Outline`] has already made a
+/// TrueType contour's implied on-curve midpoints explicit, and a hinter
+/// reading those as real points would see a corner at every one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct TaggedOutline {
+    /// The points, in font units -- or in pixels, once hinted.
+    pub(crate) points: Vec<Exact>,
+    /// What each point is; as long as `points`.
+    pub(crate) tags: Vec<Tag>,
+    /// One past each contour's last point, ascending.
+    pub(crate) ends: Vec<usize>,
+}
+
+impl TaggedOutline {
+    /// Append one simple glyph's points as contours.
+    fn push_glyph(&mut self, glyph: &SimpleGlyph) {
+        let base = self.points.len();
+        self.points
+            .extend(glyph.points.iter().map(|p| Exact::from_point(p.p)));
+        self.tags.extend(
+            glyph
+                .points
+                .iter()
+                .map(|p| if p.on_curve { Tag::On } else { Tag::Conic }),
+        );
+        self.ends
+            .extend(glyph.ends.iter().map(|&end| base.saturating_add(end)));
+    }
+
+    /// Append `other`, transformed by `t` -- a composite's component.
+    fn extend_transformed(&mut self, other: &Self, t: &Transform) {
+        let base = self.points.len();
+        self.points
+            .extend(other.points.iter().map(|&p| p.transformed(t)));
+        self.tags.extend_from_slice(&other.tags);
+        self.ends
+            .extend(other.ends.iter().map(|&end| base.saturating_add(end)));
+    }
+
+    /// Transform every point by `t` -- a CFF face's `FontMatrix`.
+    pub(crate) fn transform(&mut self, t: &Transform) {
+        for p in &mut self.points {
+            *p = p.transformed(t);
+        }
+    }
+
+    /// Move every point right by `dx`: [`Outline::translate_x`]'s twin.
+    fn translate_x(&mut self, dx: f32) {
+        let dx = f64::from(dx);
+        for p in &mut self.points {
+            p.x += dx;
+        }
+    }
+
+    /// Add one point to the contour being built.
+    fn push(&mut self, p: Exact, tag: Tag) {
+        self.points.push(p);
+        self.tags.push(tag);
+    }
+
+    /// The path these points draw.
+    ///
+    /// A contour of on-curve and quadratic points is walked exactly as
+    /// [`emit_contour`] walks a `glyf` contour, so a glyph read as points and
+    /// turned back into a path draws exactly what [`Face::outline_at`] draws.
+    /// A contour with cubic points is a CFF one: it starts at its first point,
+    /// which is on the curve, and closes back to it.
+    pub(crate) fn to_path(&self) -> Outline {
+        let mut out = Outline::default();
+        let mut start = 0usize;
+        for &end in &self.ends {
+            let (Some(points), Some(tags)) =
+                (self.points.get(start..end), self.tags.get(start..end))
+            else {
+                break;
+            };
+            start = end;
+            if tags.contains(&Tag::Cubic) {
+                emit_cubic_contour(points, tags, &mut out);
+            } else {
+                let contour: Vec<GlyphPoint> = points
+                    .iter()
+                    .zip(tags)
+                    .map(|(&p, &t)| GlyphPoint {
+                        p: p.to_point(),
+                        on_curve: t == Tag::On,
+                    })
+                    .collect();
+                emit_contour(&contour, &mut out);
+            }
+        }
+        out
+    }
+}
+
+/// What a CFF charstring draws on, in its own exact coordinates: a path to
+/// rasterize ([`Outline`], narrowed to `f32`), or the points FreeType's CFF
+/// loader would store ([`CffPoints`]), for the auto-hinter.
+pub(crate) trait CffPen {
+    /// Where the pen is before the charstring's first `moveto`.
+    fn start(&mut self, at: Exact);
+    /// Begin a contour at `p`, the open one having been ended.
+    fn move_to(&mut self, p: Exact);
+    /// A line from the pen to `p`.
+    fn line_to(&mut self, p: Exact);
+    /// A cubic from the pen through `c1` and `c2` to `p`.
+    fn curve_to(&mut self, c1: Exact, c2: Exact, p: Exact);
+    /// End the open contour, which closes back to its first point.
+    fn close(&mut self);
+}
+
+impl CffPen for Outline {
+    fn start(&mut self, _: Exact) {}
+
+    fn move_to(&mut self, p: Exact) {
+        self.commands.push(PathCmd::MoveTo(p.to_point()));
+    }
+
+    fn line_to(&mut self, p: Exact) {
+        self.commands.push(PathCmd::LineTo(p.to_point()));
+    }
+
+    fn curve_to(&mut self, c1: Exact, c2: Exact, p: Exact) {
+        self.commands
+            .push(PathCmd::CurveTo(c1.to_point(), c2.to_point(), p.to_point()));
+    }
+
+    fn close(&mut self) {
+        self.commands.push(PathCmd::Close);
+    }
+}
+
+/// A CFF glyph's points as FreeType's CFF loader stores them -- which is not
+/// quite as its charstring draws them.
+///
+/// FreeType's CFF engine (`cf2`) works out where each point lands in *device
+/// space* before storing it, and for the unscaled glyph the auto-hinter reads
+/// that is the coordinate in 1024ths of a unit, rounded half away from zero
+/// (see `hint::glyph::Units::Floored`). Three rules follow, and each changes
+/// which points the hinter sees:
+///
+/// * A line that ends where the last stored point is -- in device space, so
+///   a line a 65536th of a unit long counts -- is not stored
+///   (`cf2_glyphpath_pushPrevElem`: "output only non-zero length lines").
+///   A curve always is.
+/// * A contour's first point is stored only once something is drawn from it
+///   (`cf2_builder_lineTo`'s `path_begun`), so a `moveto` that draws nothing
+///   leaves no contour.
+/// * A contour closes with a line back to its first point that is never
+///   kept: where the last stored point is there already, it is dropped
+///   instead (`ps_builder_close_contour`), so the hinter sees one corner
+///   where the contour meets itself rather than two coincident ones. A
+///   contour that ends a 65536th of a unit short of its start, as David
+///   CLM's do, folds; one whose last point is a 1024th away keeps it.
+///
+/// FreeType also drops a contour left with a single point. None can be left
+/// here: a contour's second point is never where its first is, or the line
+/// to it would have had no length.
+#[derive(Debug, Default)]
+pub(crate) struct CffPoints {
+    out: TaggedOutline,
+    /// The contour's `moveto`, not yet stored because nothing has been drawn
+    /// from it.
+    pending: Option<Exact>,
+    /// Where the open contour's points start, while one is open.
+    open: Option<usize>,
+    /// The last stored point, or the pending move, in device space.
+    current: (f64, f64),
+}
+
+impl CffPoints {
+    /// Where FreeType's CFF engine puts `p`: in 1024ths of a unit, rounded
+    /// half away from zero as `FT_MulFix` rounds.
+    fn device(p: Exact) -> (f64, f64) {
+        let snap = |v: f64| {
+            let t = v * 1024.0;
+            if t < 0.0 {
+                -((-t + 0.5).floor())
+            } else {
+                (t + 0.5).floor()
+            }
+        };
+        (snap(p.x), snap(p.y))
+    }
+
+    /// Store the pending move, now that something is drawn from it.
+    ///
+    /// Something drawn with no move pending and no contour open -- which a
+    /// charstring cannot do, every contour after the first starting with a
+    /// `moveto` -- begins a contour of its own points, so that every point
+    /// stays inside one.
+    fn begin(&mut self) {
+        if let Some(p) = self.pending.take() {
+            self.open = Some(self.out.points.len());
+            self.out.push(p, Tag::On);
+        } else if self.open.is_none() {
+            self.open = Some(self.out.points.len());
+        }
+    }
+
+    /// The points, the last contour ended.
+    pub(crate) fn finish(mut self) -> TaggedOutline {
+        CffPen::close(&mut self);
+        self.out
+    }
+}
+
+impl CffPen for CffPoints {
+    fn start(&mut self, at: Exact) {
+        CffPen::move_to(self, at);
+    }
+
+    fn move_to(&mut self, p: Exact) {
+        CffPen::close(self);
+        self.pending = Some(p);
+        self.current = Self::device(p);
+    }
+
+    fn line_to(&mut self, p: Exact) {
+        let at = Self::device(p);
+        if at == self.current {
+            return;
+        }
+        self.begin();
+        self.out.push(p, Tag::On);
+        self.current = at;
+    }
+
+    fn curve_to(&mut self, c1: Exact, c2: Exact, p: Exact) {
+        self.begin();
+        self.out.push(c1, Tag::Cubic);
+        self.out.push(c2, Tag::Cubic);
+        self.out.push(p, Tag::On);
+        self.current = Self::device(p);
+    }
+
+    fn close(&mut self) {
+        self.pending = None;
+        let Some(start) = self.open.take() else {
+            return;
+        };
+        let out = &mut self.out;
+        let first = out.points.get(start).copied().map(Self::device);
+        if out.points.len() > start.saturating_add(1)
+            && out.tags.last() == Some(&Tag::On)
+            && out.points.last().copied().map(Self::device) == first
+        {
+            out.points.pop();
+            out.tags.pop();
+        }
+        if out.points.len() > start {
+            out.ends.push(out.points.len());
+        }
+    }
+}
+
+/// One CFF contour's points back into path commands: lines between on-curve
+/// points, a cubic for every two control points, and the closing segment
+/// back to the first point that the contour's closing point was folded into.
+fn emit_cubic_contour(points: &[Exact], tags: &[Tag], out: &mut Outline) {
+    let Some(first) = points.first().map(|p| p.to_point()) else {
+        return;
+    };
+    out.commands.push(PathCmd::MoveTo(first));
+    let mut pending: Vec<Point> = Vec::with_capacity(2);
+    for (&p, &tag) in points.iter().zip(tags).skip(1) {
+        let p = p.to_point();
+        match tag {
+            Tag::Cubic | Tag::Conic => pending.push(p),
+            Tag::On => {
+                out.commands.push(match pending.as_slice() {
+                    [c1, c2] => PathCmd::CurveTo(*c1, *c2, p),
+                    [c] => PathCmd::QuadTo(*c, p),
+                    _ => PathCmd::LineTo(p),
+                });
+                pending.clear();
+            }
+        }
+    }
+    out.commands.push(match pending.as_slice() {
+        [c1, c2] => PathCmd::CurveTo(*c1, *c2, first),
+        [c] => PathCmd::QuadTo(*c, first),
+        _ => PathCmd::LineTo(first),
+    });
+    out.commands.push(PathCmd::Close);
+}
+
 // ---------------------------------------------------------------------------
 // The face
 // ---------------------------------------------------------------------------
@@ -518,7 +880,19 @@ pub struct Face {
     /// Glyph substitution from `GSUB`. `None` for a face with no `GSUB`, or
     /// one whose `GSUB` carries no default-on feature reaching a lookup type
     /// this can apply.
+    ///
+    /// The face's own feature tables. Where a variable face's
+    /// `FeatureVariations` record holds, its tables are in
+    /// [`gsub_variations`](Self::gsub_variations) instead; see
+    /// [`substitutions_at`](Face::substitutions_at).
     substitutions: Option<Substitutions>,
+    /// A variable face's `GSUB` feature variations, in record order, each
+    /// with the substitutions in force at the instances it holds at: its
+    /// alternate feature tables swapped in (HarfBuzz compiles its plan with
+    /// the first record that holds). Built with the face, because a variable
+    /// face with them is rare -- three of this host's 556 -- and each has a
+    /// record or two. Empty for every other face.
+    gsub_variations: Vec<(otl::Variation, Option<Substitutions>)>,
     /// Which glyphs this face calls combining marks, from `GPOS` mark coverage
     /// and `GDEF` glyph classes. `None` for the many faces that only ever
     /// expect precomposed characters.
@@ -530,8 +904,11 @@ pub struct Face {
     marks: Option<MarkPositioning>,
     /// Every `GPOS` lookup the positioning pass can apply, resolved once per
     /// script the face registers. `None` for a face with no `GPOS`, or one
-    /// whose `GPOS` reaches nothing of a type the pass knows.
+    /// whose `GPOS` reaches nothing of a type the pass knows. The face's own
+    /// feature tables, as [`substitutions`](Self::substitutions) are.
     positioning: Option<Positioning>,
+    /// `GPOS`'s feature variations, as [`gsub_variations`](Self::gsub_variations).
+    gpos_variations: Vec<(otl::Variation, Option<Positioning>)>,
     /// Whether the file carries a `GPOS` table at all — which is a different
     /// question from whether any of the three things this crate reads out of
     /// it (kerning, `mark`, `mkmk`) is present. See
@@ -562,6 +939,15 @@ pub struct Face {
     /// `hb_ot_layout_table_select_script` reads the ScriptList and nothing
     /// else, and so does this.
     gsub_scripts: Vec<[u8; 4]>,
+    /// Where the `GSUB` table is, for the one reader that needs more of it than
+    /// [`substitutions`](Self::substitutions) keeps: the auto-hinter, which asks
+    /// which glyphs a script's features can produce -- every feature, not only
+    /// the default-on ones the shaper applies. See [`Face::gsub_outputs`].
+    gsub: Option<Span>,
+    /// Where the `GPOS` table is, for the same reader: a feature style's
+    /// glyphs exclude those its feature positions. See
+    /// [`Face::feature_style_glyphs`].
+    gpos: Option<Span>,
     /// The axes this face can vary along, from `fvar`, with `avar`'s correction
     /// folded in. `None` for the 549 of this host's 556 faces that are not
     /// variable, and also for a variable face whose `fvar` is unreadable — a
@@ -608,8 +994,21 @@ pub struct Face {
     colr: Option<Span>,
     /// The `CPAL` table: the palettes `COLR`'s colours index.
     cpal: Option<Span>,
-    /// Whether the face carries colour *bitmaps* (`CBDT` or `sbix`).
-    bitmap_colour: bool,
+    /// `CBLC` and `CBDT`, Google's colour bitmaps: the index of each strike's
+    /// glyphs, and their pictures. Both or neither.
+    cbdt: Option<(Span, Span)>,
+    /// `sbix`, Apple's colour bitmaps.
+    sbix: Option<Span>,
+}
+
+/// A face's colour bitmap tables, as bytes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BitmapTables<'a> {
+    /// `CBLC` (the index of each strike's glyphs) and `CBDT` (their
+    /// pictures), which come together or not at all.
+    pub(crate) cbdt: Option<(&'a [u8], &'a [u8])>,
+    /// `sbix`.
+    pub(crate) sbix: Option<&'a [u8]>,
 }
 
 /// Where a face sits within its family — the axes a font picker selects on.
@@ -679,6 +1078,12 @@ enum Outlines {
     /// larger of the two variants and every `Face` would otherwise carry its
     /// size.
     Cff(alloc::boxed::Box<crate::cff::Cff>),
+    /// None: a face whose glyphs are all pictures, colour bitmaps in
+    /// `CBDT` or `sbix` -- Noto Color Emoji's bitmap build has no `glyf`.
+    /// Every glyph's outline is empty, and [`bitmap`](crate::bitmap) draws
+    /// them. Accepted only from a face that has such pictures; a face with
+    /// neither outlines nor pictures is still refused.
+    Pictures,
 }
 
 impl Face {
@@ -718,7 +1123,9 @@ impl Face {
         let mut has_cff2 = false;
         let mut colr = None;
         let mut cpal = None;
-        let mut bitmap_colour = false;
+        let mut cblc = None;
+        let mut cbdt = None;
+        let mut sbix = None;
 
         for i in 0..usize::from(num_tables) {
             let rec = records
@@ -761,11 +1168,11 @@ impl Face {
                 b"CFF2" => has_cff2 = true,
                 b"COLR" => colr = Some(span),
                 b"CPAL" => cpal = Some(span),
-                // Colour bitmaps: Google's `CBDT` and Apple's `sbix`. Noted
-                // rather than kept, since nothing here draws them yet; what
-                // face fallback needs is only to know the face is a colour
-                // face (see `has_colour_glyphs`).
-                b"CBDT" | b"sbix" => bitmap_colour = true,
+                // Colour bitmaps: Google's `CBLC` + `CBDT` and Apple's `sbix`,
+                // drawn by `bitmap`.
+                b"CBLC" => cblc = Some(span),
+                b"CBDT" => cbdt = Some(span),
+                b"sbix" => sbix = Some(span),
                 _ => {}
             }
         }
@@ -813,6 +1220,8 @@ impl Face {
             // operators, an item-variation store. Running it as CFF would
             // misread it rather than fail.
             return Err(SfntError::CffUnsupported("CFF2 table"));
+        } else if (cblc.is_some() && cbdt.is_some()) || sbix.is_some() {
+            Outlines::Pictures
         } else {
             return Err(SfntError::MissingTable("glyf"));
         };
@@ -874,9 +1283,31 @@ impl Face {
         // the glyph classes it defines: "ignore marks" means nothing until
         // something has said which glyphs are marks.
         let substitutions = Substitutions::parse(&data, gsub, gdef);
+        let gsub_variations = gsub
+            .map(|span| {
+                otl::variations(&data, span.off)
+                    .into_iter()
+                    .map(|v| {
+                        let subs = Substitutions::parse_varied(&data, gsub, gdef, &v.alternates);
+                        (v, subs)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let marks = MarkPositioning::parse(&data, gpos, gdef);
         // And again: the feature walk is per face, the selection per run.
         let positioning = gpos.and_then(|span| Positioning::parse(&data, span, gdef));
+        let gpos_variations = gpos
+            .map(|span| {
+                otl::variations(&data, span.off)
+                    .into_iter()
+                    .map(|v| {
+                        let pos = Positioning::parse_varied(&data, span, gdef, &v.alternates);
+                        (v, pos)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         // Four bytes per script and a handful of scripts per face, so this is
         // cheaper than the offset walk that finds it and is wanted on a path
         // that runs once per shaped run.
@@ -941,11 +1372,15 @@ impl Face {
             monospaced,
             kerning,
             substitutions,
+            gsub_variations,
             marks,
             positioning,
+            gpos_variations,
             has_positioning: gpos.is_some(),
             gpos_scripts,
             gsub_scripts,
+            gsub,
+            gpos,
             variation_axes,
             gvar,
             hvar,
@@ -953,7 +1388,8 @@ impl Face {
             gdef_store,
             colr,
             cpal,
-            bitmap_colour,
+            cbdt: cblc.zip(cbdt),
+            sbix,
             data,
         })
     }
@@ -1170,7 +1606,25 @@ impl Face {
     /// for its emoji form. See [`itemize`](crate::itemize).
     #[must_use]
     pub fn has_colour_glyphs(&self) -> bool {
-        self.colr.is_some() || self.bitmap_colour
+        self.colr.is_some() || self.has_bitmap_glyphs()
+    }
+
+    /// Whether the face has colour *bitmaps*: `CBLC` with `CBDT`, or `sbix`.
+    #[must_use]
+    pub fn has_bitmap_glyphs(&self) -> bool {
+        self.cbdt.is_some() || self.sbix.is_some()
+    }
+
+    /// The bytes of the colour bitmap tables, for [`bitmap`](crate::bitmap)
+    /// to read.
+    pub(crate) fn bitmap_tables(&self) -> BitmapTables<'_> {
+        let table = |span: Span| self.data.get(span.off..span.off.checked_add(span.len)?);
+        BitmapTables {
+            cbdt: self
+                .cbdt
+                .and_then(|(index, data)| Some((table(index)?, table(data)?))),
+            sbix: self.sbix.and_then(table),
+        }
     }
 
     /// The bytes of `COLR`, and of `CPAL` if the face has one, for
@@ -1284,6 +1738,232 @@ impl Face {
             return self.lookup(sub, 0xF000_u32.checked_add(cp)?);
         }
         None
+    }
+
+    /// Call `f` with every code point the Unicode `cmap` maps, and its glyph.
+    ///
+    /// For the auto-hinter, which sorts a face's glyphs by script the way
+    /// FreeType does: by walking the characters that reach them. The order is
+    /// the subtable's own, and a glyph two characters share is reported twice.
+    ///
+    /// A face whose only table is a symbol one reports nothing -- it has no
+    /// Unicode mapping, which is what FreeType finds too when it asks for one.
+    /// Code points past U+2FFFF are skipped, since no script the hinter knows
+    /// has any there, and the whole walk is capped at [`MAX_CMAP_WALK`]
+    /// mappings: a format-12 table can declare a group spanning all of Unicode,
+    /// many times over, and walking it must not cost what that declares.
+    pub(crate) fn for_each_unicode_mapping(&self, mut f: impl FnMut(u32, u16)) {
+        let Some(sub) = self.cmap.filter(|sub| !sub.symbol) else {
+            return;
+        };
+        let mut budget = MAX_CMAP_WALK;
+        let mut emit = |cp: u32, gid: u16| {
+            if gid != 0 && gid < self.num_glyphs {
+                f(cp, gid);
+            }
+        };
+        match sub.format {
+            0 => {
+                for cp in 0u32..=0xFF {
+                    if let Some(gid) = self.cmap_format0(sub.off, cp) {
+                        emit(cp, gid);
+                    }
+                }
+            }
+            4 => self.walk_format4(sub.off, &mut budget, &mut emit),
+            12 => self.walk_format12(sub.off, &mut budget, &mut emit),
+            _ => {}
+        }
+    }
+
+    /// [`for_each_unicode_mapping`](Self::for_each_unicode_mapping) over a
+    /// format-4 table: every segment's code points, each resolved as
+    /// [`cmap_format4`](Self::cmap_format4) resolves it.
+    fn walk_format4(&self, off: usize, budget: &mut usize, emit: &mut impl FnMut(u32, u16)) {
+        use crate::otl::spend;
+        let Some(seg_count_x2) = off.checked_add(6).and_then(|o| u16_at(&self.data, o)) else {
+            return;
+        };
+        let seg_count = usize::from(seg_count_x2 / 2);
+        let Some(end_codes) = off.checked_add(14) else {
+            return;
+        };
+        let Some(start_codes) = end_codes
+            .checked_add(usize::from(seg_count_x2))
+            .and_then(|o| o.checked_add(2))
+        else {
+            return;
+        };
+        for seg in 0..seg_count {
+            let Some(at) = seg.checked_mul(2) else {
+                return;
+            };
+            let (Some(start), Some(end)) = (
+                start_codes
+                    .checked_add(at)
+                    .and_then(|o| u16_at(&self.data, o)),
+                end_codes
+                    .checked_add(at)
+                    .and_then(|o| u16_at(&self.data, o)),
+            ) else {
+                return;
+            };
+            for cp in u32::from(start)..=u32::from(end) {
+                if !spend(budget) {
+                    return;
+                }
+                if let Some(gid) = self.cmap_format4(off, cp) {
+                    emit(cp, gid);
+                }
+            }
+        }
+    }
+
+    /// [`for_each_unicode_mapping`](Self::for_each_unicode_mapping) over a
+    /// format-12 table: every group's code points up to U+2FFFF.
+    fn walk_format12(&self, off: usize, budget: &mut usize, emit: &mut impl FnMut(u32, u16)) {
+        use crate::otl::spend;
+        let Some(num_groups) = off
+            .checked_add(12)
+            .and_then(|o| u32_at(&self.data, o))
+            .and_then(|n| usize::try_from(n).ok())
+        else {
+            return;
+        };
+        let Some(groups) = off.checked_add(16) else {
+            return;
+        };
+        for i in 0..num_groups {
+            let Some(rec) = i.checked_mul(12).and_then(|d| groups.checked_add(d)) else {
+                return;
+            };
+            let (Some(start), Some(end), Some(start_gid)) = (
+                u32_at(&self.data, rec),
+                rec.checked_add(4).and_then(|o| u32_at(&self.data, o)),
+                rec.checked_add(8).and_then(|o| u32_at(&self.data, o)),
+            ) else {
+                return;
+            };
+            for cp in start..=end.min(0x2_FFFF) {
+                if !spend(budget) {
+                    return;
+                }
+                let gid = cp
+                    .checked_sub(start)
+                    .and_then(|d| start_gid.checked_add(d))
+                    .and_then(|g| u16::try_from(g).ok());
+                if let Some(gid) = gid {
+                    emit(cp, gid);
+                }
+            }
+        }
+    }
+
+    /// Every glyph the `GSUB` lookups of `scripts` can produce, sorted and
+    /// deduplicated: the output side of every lookup that any feature of any
+    /// language of those scripts reaches, nested lookups included.
+    ///
+    /// HarfBuzz's `hb_ot_layout_collect_lookups` followed by
+    /// `hb_ot_layout_lookup_collect_glyphs`, which is how FreeType's
+    /// auto-hinter finds the glyphs no character maps to -- ligatures,
+    /// contextual forms -- and files them under the script whose features
+    /// make them. Empty for a face with no `GSUB`.
+    pub(crate) fn gsub_outputs(&self, scripts: &[[u8; 4]]) -> Vec<u16> {
+        let Some(span) = self.gsub else {
+            return Vec::new();
+        };
+        let Some(list) = otl::lookup_list(&self.data, span.off) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut visited = Vec::new();
+        let mut budget = crate::gsub::MAX_OUTPUT_WALK;
+        for index in otl::collect_lookups(&self.data, span.off, scripts, None) {
+            crate::gsub::lookup_outputs(
+                &self.data,
+                list,
+                index,
+                &mut out,
+                &mut visited,
+                &mut budget,
+            );
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The glyphs FreeType's auto-hinter gives the feature style whose
+    /// feature is `feature`, on `scripts` (`af_shaper_get_coverage` for a
+    /// style that is not a script's default).
+    ///
+    /// They are the glyphs the `GSUB` lookups of the features tagged
+    /// `feature`, in any language system of `scripts`, can produce -- less
+    /// every glyph the `GPOS` lookups of the same features take as input,
+    /// since a feature that also positions a glyph may be moving it off the
+    /// zone its style would snap it to -- sorted and deduplicated. None at all
+    /// unless one of those lookups would substitute one of `probes` by itself:
+    /// FreeType's test that the feature reaches one of the style's reference
+    /// letters, which the caller supplies as glyph ids (`0` for a character
+    /// the face lacks, as `FT_Get_Char_Index` gives it).
+    pub(crate) fn feature_style_glyphs(
+        &self,
+        scripts: &[[u8; 4]],
+        feature: [u8; 4],
+        probes: &[u16],
+    ) -> Vec<u16> {
+        let Some(gsub) = self.gsub else {
+            return Vec::new();
+        };
+        let lookups = otl::collect_lookups(&self.data, gsub.off, scripts, Some(feature));
+        let Some(list) = otl::lookup_list(&self.data, gsub.off) else {
+            return Vec::new();
+        };
+        let reaches = lookups
+            .iter()
+            .filter_map(|&index| crate::gsub::probe_lookup(&self.data, list, index))
+            .any(|lookup| {
+                probes
+                    .iter()
+                    .any(|&glyph| crate::gsub::substitutes_alone(&self.data, &lookup, glyph))
+            });
+        if !reaches {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut visited = Vec::new();
+        let mut budget = crate::gsub::MAX_OUTPUT_WALK;
+        for &index in &lookups {
+            crate::gsub::lookup_outputs(
+                &self.data,
+                list,
+                index,
+                &mut out,
+                &mut visited,
+                &mut budget,
+            );
+        }
+        out.sort_unstable();
+        out.dedup();
+        let mut positioned = Vec::new();
+        if let Some(gpos) = self.gpos
+            && let Some(gpos_list) = otl::lookup_list(&self.data, gpos.off)
+        {
+            let mut budget = crate::gsub::MAX_OUTPUT_WALK;
+            for index in otl::collect_lookups(&self.data, gpos.off, scripts, Some(feature)) {
+                crate::gpos::lookup_inputs(
+                    &self.data,
+                    gpos_list,
+                    index,
+                    &mut positioned,
+                    &mut budget,
+                );
+            }
+        }
+        positioned.sort_unstable();
+        positioned.dedup();
+        out.retain(|g| positioned.binary_search(g).is_err());
+        out
     }
 
     /// The glyph a base character draws as when `selector` follows it, or
@@ -1699,7 +2379,21 @@ impl Face {
         lang: Option<Lang>,
         glyphs: &mut Vec<SubGlyph>,
     ) {
-        let subs = self.substitutions.as_ref();
+        self.substitute_at(script, lang, glyphs, &[]);
+    }
+
+    /// [`substitute`](Self::substitute) at the variation instance `coords`
+    /// (normalized, as [`var::Coords::as_slice`] gives them; empty for the
+    /// default instance), with the feature tables a variable face's
+    /// `FeatureVariations` put in force there.
+    pub(crate) fn substitute_at(
+        &self,
+        script: Option<ScriptTags>,
+        lang: Option<Lang>,
+        glyphs: &mut Vec<SubGlyph>,
+        coords: &[i16],
+    ) {
+        let subs = self.substitutions_at(coords);
         let chosen = self.gsub_chosen_script(script);
         // Khmer is asked about first and without the `shaped_as_default`
         // filter, because `khmr` is in
@@ -1804,7 +2498,26 @@ impl Face {
     /// all", and to let a caller skip the pass entirely.
     #[must_use]
     pub fn has_substitutions(&self) -> bool {
-        self.substitutions.is_some()
+        self.substitutions.is_some() || self.gsub_variations.iter().any(|(_, s)| s.is_some())
+    }
+
+    /// The substitutions in force at the variation instance `coords`: those
+    /// of the first `FeatureVariations` record that holds there, as HarfBuzz
+    /// compiles its plan, or the face's own where none does.
+    pub(crate) fn substitutions_at(&self, coords: &[i16]) -> Option<&Substitutions> {
+        match self.gsub_variations.iter().find(|(v, _)| v.holds(coords)) {
+            Some((_, subs)) => subs.as_ref(),
+            None => self.substitutions.as_ref(),
+        }
+    }
+
+    /// The positioning in force at `coords`, as
+    /// [`substitutions_at`](Self::substitutions_at) chooses.
+    pub(crate) fn positioning_at(&self, coords: &[i16]) -> Option<&Positioning> {
+        match self.gpos_variations.iter().find(|(v, _)| v.holds(coords)) {
+            Some((_, pos)) => pos.as_ref(),
+            None => self.positioning.as_ref(),
+        }
     }
 
     /// Whether `glyph` is a combining mark — drawn onto what precedes it
@@ -1843,9 +2556,13 @@ impl Face {
     ///
     /// `None` when the face has no `GPOS` the pass can use, which leaves the
     /// caller with the nominal advances it already had.
-    #[must_use]
-    pub(crate) fn position(&self, run: &Run<'_>) -> Option<Vec<Adjust>> {
-        Some(self.positioning.as_ref()?.apply(&self.data, run))
+    ///
+    /// `coords` is the variation instance (normalized, as
+    /// [`var::Coords::as_slice`] gives them; empty for the default), which
+    /// chooses the feature tables a variable face's `FeatureVariations` put in
+    /// force -- see [`positioning_at`](Self::positioning_at).
+    pub(crate) fn position_at(&self, run: &Run<'_>, coords: &[i16]) -> Option<Vec<Adjust>> {
+        Some(self.positioning_at(coords)?.apply(&self.data, run))
     }
 
     /// Whether this face has any `GPOS` lookup the positioning pass can apply.
@@ -1854,7 +2571,7 @@ impl Face {
     /// mark flag per glyph — for the faces that would do nothing with them.
     #[must_use]
     pub(crate) fn has_gpos_lookups(&self) -> bool {
-        self.positioning.is_some()
+        self.positioning.is_some() || self.gpos_variations.iter().any(|(_, p)| p.is_some())
     }
 
     /// Whether the face ships a legacy `kern` table this can read, whatever
@@ -1882,9 +2599,13 @@ impl Face {
     /// switched on by `!has_gpos_kern`, and `has_gpos_kern` is looked up in the
     /// shaping plan's *selected* script.
     #[must_use]
-    pub(crate) fn gpos_kerns(&self, script: Option<ScriptTags>, lang: Option<Lang>) -> bool {
-        self.positioning
-            .as_ref()
+    pub(crate) fn gpos_kerns(
+        &self,
+        script: Option<ScriptTags>,
+        lang: Option<Lang>,
+        coords: &[i16],
+    ) -> bool {
+        self.positioning_at(coords)
             .is_some_and(|gpos| gpos.kerns(script, lang))
     }
 
@@ -1991,8 +2712,10 @@ impl Face {
             x_max: 0.0,
             y_max: 0.0,
         };
-        if let Outlines::Cff(_) = &self.outlines {
-            return Some(self.outline(gid).ok()?.bbox().unwrap_or(EMPTY));
+        match &self.outlines {
+            Outlines::Cff(_) => return Some(self.outline(gid).ok()?.bbox().unwrap_or(EMPTY)),
+            Outlines::Pictures => return (gid < self.num_glyphs).then_some(EMPTY),
+            Outlines::Glyf { .. } => {}
         }
         let Some(span) = self.glyph_span(gid).ok()? else {
             return Some(EMPTY);
@@ -2075,6 +2798,57 @@ impl Face {
         };
         self.left_side_bearing(gid)
             .map_or(0.0, |lsb| f32::from(lsb) - f32::from(x_min))
+    }
+
+    /// How far a `glyf` glyph's outline moves right when it is *drawn*: the
+    /// [`glyf_shift`](Self::glyf_shift) of the glyph whose metrics place it.
+    ///
+    /// That is the glyph itself, except for a composite with a component
+    /// flagged `USE_MY_METRICS`, which the spec says takes that component's
+    /// metrics -- and FreeType (`load_truetype_glyph` keeps the component's
+    /// phantom points) and HarfBuzz's glyph drawing (`Glyph::get_points`)
+    /// both place the outline by them, the last such component winning and
+    /// recursively. Arial's accented capitals are built that way, with a
+    /// composite bearing that disagrees with the base letter's; drawing by
+    /// the composite's own put `î` ten units left of where every other
+    /// renderer puts it.
+    ///
+    /// [`glyph_bbox`](Self::glyph_bbox) keeps [`glyf_shift`](Self::glyf_shift)
+    /// all the same: HarfBuzz's *extents* read the composite's own bearing,
+    /// and the mark fallback that measures them must agree with HarfBuzz, not
+    /// with the drawing.
+    fn drawn_shift(&self, gid: u16) -> f32 {
+        let mut glyph = gid;
+        for _ in 0..=MAX_COMPOSITE_DEPTH {
+            match self.metrics_component(glyph) {
+                Some(next) => glyph = next,
+                None => break,
+            }
+        }
+        self.glyf_shift(glyph)
+    }
+
+    /// The last component of composite `gid` flagged `USE_MY_METRICS`, if
+    /// `gid` is a composite with one.
+    fn metrics_component(&self, gid: u16) -> Option<u16> {
+        let span = self.glyph_span(gid).ok()??;
+        let g = self.data.get(span.off..span.off.checked_add(span.len)?)?;
+        if i16_at(g, 0)? >= 0 {
+            return None;
+        }
+        read_components(g.get(10..)?)
+            .ok()?
+            .iter()
+            .rev()
+            .find(|c| c.use_my_metrics)
+            .map(|c| c.gid)
+    }
+
+    /// Whether this face's outlines are CFF charstrings rather than `glyf`
+    /// quadratics -- which the auto-hinter needs to know, because FreeType's
+    /// two loaders turn a fractional coordinate into font units differently.
+    pub(crate) fn has_cff_outlines(&self) -> bool {
+        matches!(self.outlines, Outlines::Cff(_))
     }
 
     /// Left side bearing for a glyph, in font units.
@@ -2183,6 +2957,14 @@ impl Face {
     /// self-inconsistent, [`SfntError::CompositeTooDeep`] when composite
     /// components nest past [`MAX_COMPOSITE_DEPTH`].
     pub fn outline(&self, gid: u16) -> Result<Outline, SfntError> {
+        if let Outlines::Pictures = &self.outlines {
+            // A face of pictures: every glyph it has is outline-less.
+            return if gid < self.num_glyphs {
+                Ok(Outline::default())
+            } else {
+                Err(SfntError::GlyphOutOfRange)
+            };
+        }
         if let Outlines::Cff(cff) = &self.outlines {
             // A CFF face's glyph count lives in the CharStrings INDEX as well
             // as in `maxp`. `maxp` is what every other part of this module
@@ -2196,8 +2978,8 @@ impl Face {
         let mut out = Outline::default();
         self.outline_into(gid, &mut out, 0)?;
         // The points are stored relative to the glyph's own `xMin`; the
-        // rasterizer positions them from `hmtx`. See `glyf_shift`.
-        out.translate_x(self.glyf_shift(gid));
+        // rasterizer positions them from `hmtx`. See `drawn_shift`.
+        out.translate_x(self.drawn_shift(gid));
         Ok(out)
     }
 
@@ -2226,7 +3008,6 @@ impl Face {
             return self.outline(gid);
         }
         let mut out = Outline::default();
-        let phantom = self.outline_into_at(gvar, gid, coords.as_slice(), &mut out, 0)?;
         // The outline is placed so that the left side bearing point lands on
         // the origin. That point moves with the glyph, so the shift computed
         // from the *default* `xMin` has to be corrected by however far `gvar`
@@ -2234,16 +3015,143 @@ impl Face {
         // delta. Getting this wrong shifts the varied glyph sideways relative
         // to its neighbours rather than deforming it, which is the sort of bug
         // that looks like bad kerning.
-        out.translate_x(self.glyf_shift(gid) - phantom);
+        let shift = self.outline_into_at(gvar, gid, coords.as_slice(), &mut out, 0)?;
+        out.translate_x(shift);
         Ok(out)
     }
 
-    /// Build one glyph at `coords`, returning the horizontal delta of its left
-    /// phantom point so the caller can correct the side-bearing shift.
+    /// A glyph's stored points at a variable-font instance, tagged on- or
+    /// off-curve: the form the auto-hinter reads. See [`TaggedOutline`].
     ///
-    /// Recursive calls discard that return value: a component is placed by the
-    /// parent's transform, and the parent's phantom points — not the child's —
-    /// are what position the finished glyph.
+    /// Placed exactly where [`outline_at`](Self::outline_at) places the path --
+    /// the same side-bearing shift, the same `gvar` deltas, the same composite
+    /// transforms -- so that [`TaggedOutline::to_path`] on the result draws
+    /// the same glyph. A CFF glyph's are the points FreeType's CFF loader
+    /// stores, exactly: see [`CffPoints`].
+    ///
+    /// # Errors
+    ///
+    /// As [`outline_at`](Self::outline_at).
+    pub(crate) fn tagged_outline_at(
+        &self,
+        gid: u16,
+        coords: &var::Coords,
+    ) -> Result<TaggedOutline, SfntError> {
+        match &self.outlines {
+            Outlines::Glyf { .. } => {
+                let gvar = self.gvar.as_ref().filter(|_| !coords.is_default());
+                let mut out = TaggedOutline::default();
+                let shift = self.tagged_into(gvar, gid, coords.as_slice(), &mut out, 0)?;
+                out.translate_x(shift);
+                Ok(out)
+            }
+            Outlines::Cff(cff) => {
+                // As `outline`: `maxp`'s count is the one trusted.
+                if gid >= self.num_glyphs {
+                    return Err(SfntError::GlyphOutOfRange);
+                }
+                cff.tagged_outline(&self.data, gid)
+            }
+            // A face of pictures has no points to hint.
+            Outlines::Pictures => self.outline(gid).map(|_| TaggedOutline::default()),
+        }
+    }
+
+    /// [`outline_into_at`](Self::outline_into_at) for points: one glyph's
+    /// tagged points, varied by `gvar` when there is one, returning how far
+    /// the finished glyph moves right to sit on its phantom point.
+    fn tagged_into(
+        &self,
+        gvar: Option<&gvar::Gvar>,
+        gid: u16,
+        coords: &[i16],
+        out: &mut TaggedOutline,
+        depth: u8,
+    ) -> Result<f32, SfntError> {
+        if depth > MAX_COMPOSITE_DEPTH {
+            return Err(SfntError::CompositeTooDeep);
+        }
+        let Some(span) = self.glyph_span(gid)? else {
+            return Ok(0.0);
+        };
+        let end = span.off.checked_add(span.len).ok_or(SfntError::TooShort)?;
+        let g = self
+            .data
+            .get(span.off..end)
+            .ok_or(SfntError::MalformedTable("glyf"))?;
+        let num_contours = i16_at(g, 0).ok_or(SfntError::MalformedTable("glyf"))?;
+        let body = g.get(10..).ok_or(SfntError::MalformedTable("glyf"))?;
+        if num_contours >= 0 {
+            let n = usize::try_from(num_contours).map_err(|_| SfntError::MalformedTable("glyf"))?;
+            let Some(mut glyph) = read_simple_glyph(body, n)? else {
+                return Ok(self.glyf_shift(gid));
+            };
+            let mut phantom = 0.0;
+            if let Some(gvar) = gvar
+                && let Some(deltas) =
+                    gvar.deltas(&self.data, gid, coords, &glyph.points, &glyph.ends)
+            {
+                for (pt, &(dx, dy)) in glyph.points.iter_mut().zip(deltas.iter()) {
+                    pt.p.x += dx;
+                    pt.p.y += dy;
+                }
+                phantom = deltas.get(glyph.points.len()).map_or(0.0, |&(dx, _)| dx);
+            }
+            out.push_glyph(&glyph);
+            Ok(self.glyf_shift(gid) - phantom)
+        } else {
+            let mut components = read_components(body)?;
+            let mut phantom = 0.0;
+            if let Some(gvar) = gvar {
+                // As in `outline_into_at`: one variation point per component,
+                // and only an offset-placed component may move.
+                let placements: Vec<GlyphPoint> = components
+                    .iter()
+                    .map(|c| GlyphPoint {
+                        p: Point::new(c.xform.e, c.xform.f),
+                        on_curve: true,
+                    })
+                    .collect();
+                if let Some(deltas) = gvar.deltas(&self.data, gid, coords, &placements, &[]) {
+                    for (c, &(dx, dy)) in components.iter_mut().zip(deltas.iter()) {
+                        if c.offset_placed {
+                            c.xform.e += dx;
+                            c.xform.f += dy;
+                        }
+                    }
+                    phantom = deltas.get(components.len()).map_or(0.0, |&(dx, _)| dx);
+                }
+            }
+            // Placed by its own phantom point unless a component says to use
+            // its metrics instead (the last that does), as in `outline_into_at`.
+            let mut shift = self.glyf_shift(gid) - phantom;
+            for c in components {
+                let mut child = TaggedOutline::default();
+                let child_shift = self.tagged_into(
+                    gvar,
+                    c.gid,
+                    coords,
+                    &mut child,
+                    depth.checked_add(1).ok_or(SfntError::CompositeTooDeep)?,
+                )?;
+                if c.use_my_metrics {
+                    shift = child_shift;
+                }
+                out.extend_transformed(&child, &c.xform);
+            }
+            Ok(shift)
+        }
+    }
+
+    /// Build one glyph at `coords`, returning how far the finished glyph moves
+    /// right to sit on its left phantom point: [`glyf_shift`](Self::glyf_shift)
+    /// corrected by that point's `gvar` delta.
+    ///
+    /// A component is placed by the parent's transform, and the parent's
+    /// phantom points position the finished glyph -- unless a component is
+    /// flagged `USE_MY_METRICS`, whose own phantom points then position it, in
+    /// its own coordinates (see [`drawn_shift`](Self::drawn_shift)). So a
+    /// recursive call's answer is used only for such a component.
     fn outline_into_at(
         &self,
         gvar: &gvar::Gvar,
@@ -2268,7 +3176,7 @@ impl Face {
         if num_contours >= 0 {
             let n = usize::try_from(num_contours).map_err(|_| SfntError::MalformedTable("glyf"))?;
             let Some(mut glyph) = read_simple_glyph(body, n)? else {
-                return Ok(0.0);
+                return Ok(self.glyf_shift(gid));
             };
             let phantom = match gvar.deltas(&self.data, gid, coords, &glyph.points, &glyph.ends) {
                 Some(deltas) => {
@@ -2281,7 +3189,7 @@ impl Face {
                 None => 0.0,
             };
             emit_glyph(&glyph, out);
-            Ok(phantom)
+            Ok(self.glyf_shift(gid) - phantom)
         } else {
             let mut components = read_components(body)?;
             // A composite's variation point array has one entry per component,
@@ -2311,18 +3219,22 @@ impl Face {
                 }
                 None => 0.0,
             };
+            let mut shift = self.glyf_shift(gid) - phantom;
             for c in components {
                 let mut child = Outline::default();
-                self.outline_into_at(
+                let child_shift = self.outline_into_at(
                     gvar,
                     c.gid,
                     coords,
                     &mut child,
                     depth.checked_add(1).ok_or(SfntError::CompositeTooDeep)?,
                 )?;
+                if c.use_my_metrics {
+                    shift = child_shift;
+                }
                 out.extend_transformed(&child, &c.xform);
             }
-            Ok(phantom)
+            Ok(shift)
         }
     }
 
@@ -2388,6 +3300,9 @@ pub(crate) struct Component {
     /// component is positioned by the *parent's* geometry, which has already
     /// moved, so adding a delta on top would move it twice.
     pub(crate) offset_placed: bool,
+    /// `USE_MY_METRICS`: the composite is placed by this component's metrics,
+    /// not its own. See [`Face::drawn_shift`].
+    pub(crate) use_my_metrics: bool,
 }
 
 /// Read a composite glyph's component list.
@@ -2398,6 +3313,7 @@ fn read_components(data: &[u8]) -> Result<Vec<Component>, SfntError> {
     const MORE_COMPONENTS: u16 = 0x0020;
     const WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
     const WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
+    const USE_MY_METRICS: u16 = 0x0200;
 
     // A composite with more components than a face has glyphs is malformed;
     // the bound stops a corrupt `MORE_COMPONENTS` chain from looping until the
@@ -2477,6 +3393,7 @@ fn read_components(data: &[u8]) -> Result<Vec<Component>, SfntError> {
             gid: component,
             xform,
             offset_placed,
+            use_my_metrics: flags & USE_MY_METRICS != 0,
         });
 
         if flags & MORE_COMPONENTS == 0 || out.len() >= MAX_COMPONENTS {
@@ -3029,6 +3946,12 @@ pub(crate) mod tests {
     /// the list — see [`build_test_font_with_gpos_scripts`] — rather than
     /// re-deriving four glyphs and a `cmap` to change one thing.
     fn build_test_tables(lsb_3: i16) -> Vec<([u8; 4], Vec<u8>)> {
+        build_test_tables_flagged(lsb_3, 0)
+    }
+
+    /// [`build_test_tables`] with `flags` or-ed into glyph 3's component
+    /// flags.
+    fn build_test_tables_flagged(lsb_3: i16, flags: u16) -> Vec<([u8; 4], Vec<u8>)> {
         fn be16(v: u16) -> [u8; 2] {
             v.to_be_bytes()
         }
@@ -3088,7 +4011,7 @@ pub(crate) mod tests {
         glyf.extend_from_slice(&be16i(200));
         glyf.extend_from_slice(&be16i(700));
         glyf.extend_from_slice(&be16i(300));
-        glyf.extend_from_slice(&be16(0x0003)); // ARG_1_AND_2_ARE_WORDS | ARGS_ARE_XY_VALUES
+        glyf.extend_from_slice(&be16(0x0003 | flags)); // ARG_1_AND_2_ARE_WORDS | ARGS_ARE_XY_VALUES
         glyf.extend_from_slice(&be16(1)); // component glyph index
         glyf.extend_from_slice(&be16i(500));
         glyf.extend_from_slice(&be16i(200));
@@ -3458,6 +4381,17 @@ pub(crate) mod tests {
         assemble(&tables)
     }
 
+    /// The fixture on [`build_variable_test_font`]'s one axis, `wght`, with
+    /// `extra` tables and no `gvar`: its outlines hold still, so what varies is
+    /// only what `extra` varies -- a `COLR`, say.
+    pub(crate) fn build_variable_test_font_with(extra: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
+        let mut tables = build_test_tables(TRUE_LSB_3);
+        tables.push((*b"fvar", variable_fvar()));
+        tables.extend(extra);
+        tables.sort_by_key(|(tag, _)| *tag);
+        assemble(&tables)
+    }
+
     /// A `cmap` holding one format-4 subtable with the given
     /// `(start, end, idDelta)` segments, which must be sorted and must end with
     /// the mandatory `0xFFFF` one.
@@ -3669,7 +4603,17 @@ pub(crate) mod tests {
     /// for a colour glyph test that needs outlines whose every coordinate it
     /// knows.
     pub(crate) fn build_test_font_with(extra: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
+        build_test_font_without(&[], extra)
+    }
+
+    /// The fixture without the tables tagged in `drop`, and with `extra` --
+    /// a face of colour bitmaps with no `glyf`, say.
+    pub(crate) fn build_test_font_without(
+        drop: &[[u8; 4]],
+        extra: Vec<([u8; 4], Vec<u8>)>,
+    ) -> Vec<u8> {
         let mut tables = build_test_tables(TRUE_LSB_3);
+        tables.retain(|(tag, _)| !drop.contains(tag));
         tables.extend(extra);
         assemble(&tables)
     }
@@ -4084,6 +5028,245 @@ pub(crate) mod tests {
                 PathCmd::Close,
             ]
         );
+    }
+
+    #[test]
+    fn a_glyphs_stored_points_draw_the_path_its_outline_does() {
+        let f = face();
+        for gid in 0..f.num_glyphs() {
+            let tagged = f.tagged_outline_at(gid, &var::Coords::default()).unwrap();
+            assert_eq!(
+                tagged.to_path().commands,
+                f.outline(gid).unwrap().commands,
+                "glyph {gid}"
+            );
+        }
+        // And at a varied instance, where the composite's offset moves too.
+        let v = variable_face();
+        let at = at_weight(&v, 700.0);
+        for gid in 0..v.num_glyphs() {
+            let tagged = v.tagged_outline_at(gid, &at).unwrap();
+            assert_eq!(
+                tagged.to_path().commands,
+                v.outline_at(gid, &at).unwrap().commands,
+                "glyph {gid}"
+            );
+        }
+    }
+
+    #[test]
+    fn stored_points_are_the_designers_without_implied_midpoints() {
+        let f = face();
+        let t = f.tagged_outline_at(2, &var::Coords::default()).unwrap();
+        assert_eq!(
+            t.points,
+            [
+                Exact::new(0.0, 0.0),
+                Exact::new(50.0, 200.0),
+                Exact::new(100.0, 0.0)
+            ]
+        );
+        assert_eq!(t.tags, [Tag::On, Tag::Conic, Tag::On]);
+        assert_eq!(t.ends, [3]);
+    }
+
+    #[test]
+    fn a_cff_contours_closing_point_folds_into_its_first() {
+        let e = Exact::new;
+        let mut pen = CffPoints::default();
+        pen.start(e(0.0, 0.0));
+        pen.move_to(e(0.0, 0.0));
+        pen.line_to(e(0.0, 100.0));
+        pen.curve_to(e(20.0, 120.0), e(80.0, 120.0), e(100.0, 100.0));
+        pen.line_to(e(100.0, 0.0));
+        pen.line_to(e(0.0, 0.0));
+        pen.move_to(e(10.0, 10.0));
+        pen.line_to(e(20.0, 10.0));
+        pen.line_to(e(20.0, 20.0));
+        let t = pen.finish();
+        assert_eq!(t.ends, [6, 9]);
+        assert_eq!(
+            t.tags,
+            [
+                Tag::On,
+                Tag::On,
+                Tag::Cubic,
+                Tag::Cubic,
+                Tag::On,
+                Tag::On,
+                Tag::On,
+                Tag::On,
+                Tag::On
+            ]
+        );
+        // Back to a path, each contour closing to its first point again.
+        let p = Point::new;
+        assert_eq!(
+            t.to_path().commands,
+            vec![
+                PathCmd::MoveTo(p(0.0, 0.0)),
+                PathCmd::LineTo(p(0.0, 100.0)),
+                PathCmd::CurveTo(p(20.0, 120.0), p(80.0, 120.0), p(100.0, 100.0)),
+                PathCmd::LineTo(p(100.0, 0.0)),
+                PathCmd::LineTo(p(0.0, 0.0)),
+                PathCmd::Close,
+                PathCmd::MoveTo(p(10.0, 10.0)),
+                PathCmd::LineTo(p(20.0, 10.0)),
+                PathCmd::LineTo(p(20.0, 20.0)),
+                PathCmd::LineTo(p(10.0, 10.0)),
+                PathCmd::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_closing_point_folds_where_freetypes_device_space_does() {
+        let e = Exact::new;
+        let closing = |last: Exact| {
+            let mut pen = CffPoints::default();
+            pen.move_to(e(10.0, 10.0));
+            pen.line_to(e(90.0, 10.0));
+            pen.line_to(e(90.0, 90.0));
+            pen.line_to(last);
+            pen.finish()
+        };
+        let t = closing(e(10.0, 10.0));
+        assert_eq!(t.points.len(), 3);
+        assert_eq!(t.ends, [3]);
+        // A 65536th short, as David CLM's contours end: the same point once
+        // snapped to 1024ths, so folded as FreeType folds it.
+        let ulp = 1.0 / 65536.0;
+        assert_eq!(closing(e(10.0 - ulp, 10.0 - ulp)).points.len(), 3);
+        // A 1024th off snaps elsewhere: FreeType closes it with a line of its
+        // own, drops only that, and keeps this point.
+        assert_eq!(closing(e(10.0 + 1.0 / 1024.0, 10.0)).points.len(), 4);
+        // Half a 1024th rounds away from zero, as `FT_MulFix` rounds: above
+        // the start it rounds onto the next 1024th, and a 65536th less
+        // rounds back; below the start it rounds up onto the start itself.
+        assert_eq!(closing(e(10.0 + 1.0 / 2048.0, 10.0)).points.len(), 4);
+        assert_eq!(closing(e(10.0 + 1.0 / 2048.0 - ulp, 10.0)).points.len(), 3);
+        assert_eq!(closing(e(10.0 - 1.0 / 2048.0, 10.0)).points.len(), 3);
+        // Below zero, away from zero is down, and the two cases trade places.
+        let mirrored = |last: Exact| {
+            let mut pen = CffPoints::default();
+            pen.move_to(e(-10.0, -10.0));
+            pen.line_to(e(-90.0, -10.0));
+            pen.line_to(e(-90.0, -90.0));
+            pen.line_to(last);
+            pen.finish()
+        };
+        assert_eq!(mirrored(e(-10.0 - 1.0 / 2048.0, -10.0)).points.len(), 4);
+        assert_eq!(mirrored(e(-10.0 + 1.0 / 2048.0, -10.0)).points.len(), 3);
+    }
+
+    #[test]
+    fn a_line_with_no_length_in_device_space_is_not_stored() {
+        let e = Exact::new;
+        let ulp = 1.0 / 65536.0;
+        let mut pen = CffPoints::default();
+        pen.move_to(e(0.0, 0.0));
+        pen.line_to(e(100.0, 0.0));
+        // No length at all, then a 65536th: none in device space either.
+        pen.line_to(e(100.0, 0.0));
+        pen.line_to(e(100.0 + ulp, 0.0));
+        pen.line_to(e(100.0, 100.0));
+        // Short lines are measured from the last point stored, not the last
+        // drawn: a 4096th is nothing, and so is a second, but together they
+        // reach half a 1024th, which rounds to the next one.
+        pen.line_to(e(100.0 + 1.0 / 4096.0, 100.0));
+        pen.line_to(e(100.0 + 2.0 / 4096.0, 100.0));
+        // A curve is stored whatever its length.
+        let end = e(100.0 + 2.0 / 4096.0, 100.0);
+        pen.curve_to(end, end, end);
+        let t = pen.finish();
+        assert_eq!(
+            t.points,
+            [
+                e(0.0, 0.0),
+                e(100.0, 0.0),
+                e(100.0, 100.0),
+                end,
+                end,
+                end,
+                end
+            ]
+        );
+        assert_eq!(t.ends, [7]);
+    }
+
+    #[test]
+    fn a_move_that_draws_nothing_leaves_no_contour() {
+        let e = Exact::new;
+        let mut pen = CffPoints::default();
+        pen.start(e(0.0, 0.0));
+        pen.move_to(e(5.0, 5.0));
+        pen.move_to(e(10.0, 10.0));
+        pen.line_to(e(20.0, 10.0));
+        pen.line_to(e(20.0, 20.0));
+        // A contour whose only line has no length has drawn nothing either.
+        pen.move_to(e(50.0, 50.0));
+        pen.line_to(e(50.0, 50.0));
+        let t = pen.finish();
+        assert_eq!(t.points, [e(10.0, 10.0), e(20.0, 10.0), e(20.0, 20.0)]);
+        assert_eq!(t.ends, [3]);
+    }
+
+    #[test]
+    fn a_path_pen_draws_what_the_charstring_says() {
+        // The rasterizer's pen keeps every command, lines of no length
+        // included: it is drawing, not reproducing FreeType's stored points.
+        let e = Exact::new;
+        let mut out = Outline::default();
+        out.start(e(0.0, 0.0));
+        CffPen::move_to(&mut out, e(1.0, 2.0));
+        CffPen::line_to(&mut out, e(1.0, 2.0));
+        CffPen::curve_to(&mut out, e(3.0, 4.0), e(5.0, 6.0), e(7.0, 8.0));
+        CffPen::close(&mut out);
+        let p = Point::new;
+        assert_eq!(
+            out.commands,
+            [
+                PathCmd::MoveTo(p(1.0, 2.0)),
+                PathCmd::LineTo(p(1.0, 2.0)),
+                PathCmd::CurveTo(p(3.0, 4.0), p(5.0, 6.0), p(7.0, 8.0)),
+                PathCmd::Close
+            ]
+        );
+    }
+
+    #[test]
+    fn every_unicode_mapping_is_the_one_glyph_index_reports() {
+        let f = face();
+        let mut seen = Vec::new();
+        f.for_each_unicode_mapping(|cp, gid| seen.push((cp, gid)));
+        assert!(!seen.is_empty());
+        for (cp, gid) in seen {
+            let ch = char::from_u32(cp).unwrap();
+            assert_eq!(f.glyph_index(ch), Some(gid), "U+{cp:04X}");
+        }
+    }
+
+    #[test]
+    fn a_composite_using_its_components_metrics_is_placed_by_them() {
+        // Glyph 3 is glyph 1 moved to (500, 200), its stored `xMin` 600. With
+        // a bearing of 550 it would be drawn 50 units left -- unless its
+        // component says `USE_MY_METRICS`, and glyph 1's bearing (100, equal
+        // to its `xMin`) places it where it is stored.
+        let own = Face::parse(build_test_font_with_trailing_lsb(550)).unwrap();
+        let first = |f: &Face| match f.outline(3).unwrap().commands.first() {
+            Some(PathCmd::MoveTo(p)) => p.x,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(first(&own), 550.0);
+        let flagged = Face::parse(assemble(&build_test_tables_flagged(550, 0x0200))).unwrap();
+        assert_eq!(first(&flagged), 600.0);
+        // The stored points agree with the path.
+        let tagged = flagged
+            .tagged_outline_at(3, &var::Coords::default())
+            .unwrap();
+        assert_eq!(tagged.points.first().map(|p| p.x), Some(600.0));
+        // The ink box HarfBuzz reports keeps the composite's own bearing.
+        assert_eq!(flagged.glyph_bbox(3).unwrap().x_min, 550.0);
     }
 
     #[test]

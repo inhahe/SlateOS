@@ -142,6 +142,72 @@ fn is_known_action(action: u32) -> bool {
     )
 }
 
+/// `BPF_MAXINSNS`: the most instructions a classic BPF program may have.
+const BPF_MAXINSNS: u16 = 4096;
+
+/// Linux 6.6's checks of a `SECCOMP_SET_MODE_FILTER` request, in its order,
+/// up to where it would compile the filter and install it -- which is where
+/// this library stops (`ENOSYS`):
+///
+/// ```text
+///   a flag outside SECCOMP_FILTER_FLAG_MASK     -> EINVAL  seccomp_set_mode_filter
+///   TSYNC | NEW_LISTENER without TSYNC_ESRCH    -> EINVAL
+///   WAIT_KILLABLE_RECV without NEW_LISTENER     -> EINVAL
+///   the sock_fprog unreadable (NULL, or not
+///   user memory)                                -> EFAULT  seccomp_prepare_user_filter
+///   len 0, or more than BPF_MAXINSNS            -> EINVAL  seccomp_prepare_filter
+///   neither no_new_privs nor CAP_SYS_ADMIN      -> EACCES
+///   filter NULL                                 -> EINVAL  bpf_check_basics_ok
+/// ```
+///
+/// `TSYNC` with `NEW_LISTENER` is refused because a failed `TSYNC` answers
+/// the id of the thread that failed and a listener answers an fd, and the
+/// two cannot be told apart -- unless `TSYNC_ESRCH` asks for `ESRCH`
+/// instead, which makes the pair unambiguous.  After the checks here come
+/// the copy of the program (`EFAULT`) and its validation (`EINVAL`), which
+/// this library does not make, since nothing here would run the program.
+///
+/// Until 2026-09-26 the pair was refused even with `TSYNC_ESRCH`,
+/// `TSYNC_ESRCH` without `TSYNC` was refused (6.6 accepts it), and the
+/// program header was never read: a length of 0 reached the privilege
+/// check, and a NULL program was `ENOSYS`.
+fn check_set_mode_filter(flags: u32, args: *mut u8) -> Result<(), i32> {
+    use crate::linux_filter::SockFprog;
+    if flags & !SECCOMP_FILTER_VALID_FLAGS != 0 {
+        return Err(errno::EINVAL);
+    }
+    if flags & SECCOMP_FILTER_FLAG_TSYNC != 0
+        && flags & SECCOMP_FILTER_FLAG_NEW_LISTENER != 0
+        && flags & SECCOMP_FILTER_FLAG_TSYNC_ESRCH == 0
+    {
+        return Err(errno::EINVAL);
+    }
+    if flags & SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV != 0
+        && flags & SECCOMP_FILTER_FLAG_NEW_LISTENER == 0
+    {
+        return Err(errno::EINVAL);
+    }
+    let head = args.cast::<SockFprog>();
+    if head.is_null() || !crate::uio::access_ok(head.addr(), size_of::<SockFprog>()) {
+        return Err(errno::EFAULT);
+    }
+    // SAFETY: a non-NULL `struct sock_fprog *` of the caller's, in user
+    // memory.
+    let prog = unsafe { head.read_unaligned() };
+    if prog.len == 0 || prog.len > BPF_MAXINSNS {
+        return Err(errno::EINVAL);
+    }
+    if !crate::unistd::no_new_privs_set()
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN)
+    {
+        return Err(errno::EACCES);
+    }
+    if prog.filter.is_null() {
+        return Err(errno::EINVAL);
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // seccomp() syscall
 // ---------------------------------------------------------------------------
@@ -159,16 +225,12 @@ fn is_known_action(action: u32) -> bool {
 /// * `SECCOMP_SET_MODE_STRICT`: `flags != 0 || uargs != NULL` ->
 ///   `-EINVAL` (single combined check; the two are
 ///   externally indistinguishable since both return the same errno).
-/// * `SECCOMP_SET_MODE_FILTER` (`seccomp_set_mode_filter`):
-///   1. unknown flag bit -> `-EINVAL`
-///   2. `TSYNC | NEW_LISTENER` set together -> `-EINVAL`
-///   3. `TSYNC_ESRCH` without `TSYNC` -> `-EINVAL`
-///   4. `WAIT_KILLABLE_RECV` without `NEW_LISTENER` -> `-EINVAL`
-///      (Linux 5.19+; Phase 131 added this check)
-///   5. `seccomp_prepare_user_filter(filter)` -> `-EFAULT` for NULL.
-///   Every flag-shape error is observable *before* the userspace
-///   pointer is dereferenced, so a caller passing a bad flag combo
-///   AND NULL args sees `EINVAL`, not `EFAULT`.
+/// * `SECCOMP_SET_MODE_FILTER`: the flags, the program header, the
+///   privilege and the program pointer, in `seccomp_set_mode_filter`'s
+///   order -- see [`check_set_mode_filter`].  Every flag-shape error is
+///   observable *before* the userspace pointer is dereferenced, so a
+///   caller passing a bad flag combo AND NULL args sees `EINVAL`, not
+///   `EFAULT`.
 /// * `SECCOMP_GET_ACTION_AVAIL`: `flags != 0` -> `EINVAL`; then
 ///   `copy_from_user(&action, uaction, 4)` -> `EFAULT` for NULL.
 /// * `SECCOMP_GET_NOTIF_SIZES`: `flags != 0` -> `EINVAL`; then
@@ -207,10 +269,11 @@ fn is_known_action(action: u32) -> bool {
 ///   implemented — it's a constant lookup with no side effects.
 /// * Other ops: `-1` with errno set per the validation table:
 ///   * `EFAULT` — `args` is NULL when the op requires a buffer
-///     (checked last, after every flag-shape check, matching Linux).
+///     (checked after every flag-shape check, matching Linux).
 ///   * `EINVAL` — unknown operation, unknown flag bit, contradictory
-///     flag combination, or `flags` non-zero for an op that requires
-///     `flags == 0`.
+///     flag combination, `flags` non-zero for an op that requires
+///     `flags == 0`, or a filter program of no instructions, of more
+///     than 4096, or with no instructions pointer.
 ///   * `EACCES` — Phase 186: `SECCOMP_SET_MODE_FILTER` with neither
 ///     `no_new_privs` set nor `CAP_SYS_ADMIN` held.
 ///   * `ENOSYS` — every input was valid but the underlying mechanism
@@ -236,74 +299,11 @@ pub extern "C" fn seccomp(operation: u32, flags: u32, args: *mut u8) -> i32 {
             -1
         }
         SECCOMP_SET_MODE_FILTER => {
-            // Linux's `seccomp_set_mode_filter` runs ALL flag validation
-            // before calling `seccomp_prepare_user_filter` (the function
-            // that ultimately does `copy_from_user` and yields EFAULT
-            // for NULL `filter`). Mirror that order so a caller passing
-            // a bad flag combo *and* NULL args observes EINVAL — the
-            // signal the kernel actually emits — rather than an EFAULT
-            // that hides the underlying flag mistake.
-            if (flags & !SECCOMP_FILTER_VALID_FLAGS) != 0 {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-            // TSYNC and NEW_LISTENER are mutually exclusive in Linux:
-            // a thread-synchronized filter has no single owning fd to
-            // hand back to userspace.
-            if (flags & SECCOMP_FILTER_FLAG_TSYNC) != 0
-                && (flags & SECCOMP_FILTER_FLAG_NEW_LISTENER) != 0
-            {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-            // TSYNC_ESRCH is meaningless without TSYNC.
-            if (flags & SECCOMP_FILTER_FLAG_TSYNC_ESRCH) != 0
-                && (flags & SECCOMP_FILTER_FLAG_TSYNC) == 0
-            {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-            // WAIT_KILLABLE_RECV (Linux 5.19+) makes the notification
-            // recv() loop interruptible by SIGKILL.  It is only
-            // meaningful when a notification listener exists, so Linux
-            // rejects it without NEW_LISTENER:
-            //
-            //     if ((flags & SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV) &&
-            //         ((flags & SECCOMP_FILTER_FLAG_NEW_LISTENER) == 0))
-            //         return -EINVAL;
-            //
-            // Phase 131 closes this missing constraint check.
-            if (flags & SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV) != 0
-                && (flags & SECCOMP_FILTER_FLAG_NEW_LISTENER) == 0
-            {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-            // NULL args check runs LAST, matching the
-            // copy_from_user-driven EFAULT in
-            // seccomp_prepare_user_filter.
-            if args.is_null() {
-                errno::set_errno(errno::EFAULT);
-                return -1;
-            }
-            // Phase 186: NNP || CAP_SYS_ADMIN gate per
-            // `kernel/seccomp.c::seccomp_prepare_filter`.  Same
-            // motivation as the landlock_restrict_self gate (Phase
-            // 185) — a seccomp filter can affect a privileged child
-            // via execve, so an unprivileged caller must first set
-            // no_new_privs.  But seccomp uses **EACCES**, not EPERM,
-            // so the two gates are not interchangeable.
-            //
-            // Placement note: this gate runs *after* every flag-shape
-            // EINVAL check above and *after* the EFAULT for NULL
-            // args, matching Linux's seccomp_prepare_user_filter →
-            // seccomp_prepare_filter call sequence (the cap test
-            // lives inside the prepare step, which copy_from_user
-            // runs first).
-            if !crate::unistd::no_new_privs_set()
-                && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN)
-            {
-                errno::set_errno(errno::EACCES);
+            // Every check upstream makes before it would compile the
+            // filter, in its order; then ENOSYS, since nothing here can
+            // install one.
+            if let Err(e) = check_set_mode_filter(flags, args) {
+                errno::set_errno(e);
                 return -1;
             }
             errno::set_errno(errno::ENOSYS);
@@ -366,6 +366,39 @@ pub extern "C" fn seccomp(operation: u32, flags: u32, args: *mut u8) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linux_filter::{SockFilter, SockFprog, bpf_stmt};
+
+    /// `BPF_RET | BPF_K`.
+    const RET_K: u16 = 0x06;
+
+    /// A one-instruction program (`RET ALLOW`) and the `sock_fprog` pointing
+    /// at it -- what `SECCOMP_SET_MODE_FILTER` reads.  Boxed, so the header's
+    /// pointer to the instruction stays put.
+    struct Prog {
+        insn: SockFilter,
+        head: SockFprog,
+    }
+
+    impl Prog {
+        // The box is the point: the header points at the instruction beside
+        // it, so the pair must not move once built.
+        #[allow(clippy::unnecessary_box_returns)]
+        fn allow() -> Box<Self> {
+            let mut p = Box::new(Self {
+                insn: bpf_stmt(RET_K, SECCOMP_RET_ALLOW),
+                head: SockFprog {
+                    len: 1,
+                    filter: core::ptr::null_mut(),
+                },
+            });
+            p.head.filter = &raw mut p.insn;
+            p
+        }
+
+        fn args(&mut self) -> *mut u8 {
+            (&raw mut self.head).cast()
+        }
+    }
 
     // -----------------------------------------------------------------
     // Constant invariants
@@ -474,11 +507,10 @@ mod tests {
     #[test]
     fn test_filter_valid_inputs_enosys() {
         errno::set_errno(0);
-        // Pretend `args` points to a sock_fprog — we never read it
-        // because validation succeeds and then ENOSYS short-circuits
-        // before touching it. Use a stack scratch buffer.
-        let mut scratch: [u8; 16] = [0; 16];
-        let ret = seccomp(SECCOMP_SET_MODE_FILTER, 0, scratch.as_mut_ptr());
+        // A well-formed one-instruction program: every check passes, and
+        // nothing here can install it.
+        let mut scratch = Prog::allow();
+        let ret = seccomp(SECCOMP_SET_MODE_FILTER, 0, scratch.args());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
@@ -486,8 +518,8 @@ mod tests {
     #[test]
     fn test_filter_unknown_flag_einval() {
         errno::set_errno(0);
-        let mut scratch: [u8; 16] = [0; 16];
-        let ret = seccomp(SECCOMP_SET_MODE_FILTER, 1 << 16, scratch.as_mut_ptr());
+        let mut scratch = Prog::allow();
+        let ret = seccomp(SECCOMP_SET_MODE_FILTER, 1 << 16, scratch.args());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -503,37 +535,90 @@ mod tests {
     #[test]
     fn test_filter_tsync_and_new_listener_einval() {
         errno::set_errno(0);
-        let mut scratch: [u8; 16] = [0; 16];
+        let mut scratch = Prog::allow();
         let ret = seccomp(
             SECCOMP_SET_MODE_FILTER,
             SECCOMP_FILTER_FLAG_TSYNC | SECCOMP_FILTER_FLAG_NEW_LISTENER,
-            scratch.as_mut_ptr(),
+            scratch.args(),
         );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
-    fn test_filter_tsync_esrch_without_tsync_einval() {
+    fn test_filter_tsync_esrch_alone_is_accepted() {
+        // Linux 6.6 has no "TSYNC_ESRCH needs TSYNC" check; it was EINVAL
+        // here until 2026-09-26.
         errno::set_errno(0);
-        let mut scratch: [u8; 16] = [0; 16];
+        let mut scratch = Prog::allow();
         let ret = seccomp(
             SECCOMP_SET_MODE_FILTER,
             SECCOMP_FILTER_FLAG_TSYNC_ESRCH,
-            scratch.as_mut_ptr(),
+            scratch.args(),
         );
         assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_filter_tsync_new_listener_with_tsync_esrch_is_accepted() {
+        // TSYNC_ESRCH makes the pair unambiguous, so 6.6 accepts it.
+        errno::set_errno(0);
+        let mut scratch = Prog::allow();
+        let ret = seccomp(
+            SECCOMP_SET_MODE_FILTER,
+            SECCOMP_FILTER_FLAG_TSYNC
+                | SECCOMP_FILTER_FLAG_NEW_LISTENER
+                | SECCOMP_FILTER_FLAG_TSYNC_ESRCH,
+            scratch.args(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_filter_program_length_is_judged_before_the_privilege() {
+        for len in [0u16, BPF_MAXINSNS + 1] {
+            let mut p = Prog::allow();
+            p.head.len = len;
+            errno::set_errno(0);
+            assert_eq!(seccomp(SECCOMP_SET_MODE_FILTER, 0, p.args()), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL, "len {len}");
+        }
+        let mut p = Prog::allow();
+        p.head.len = BPF_MAXINSNS;
+        errno::set_errno(0);
+        assert_eq!(seccomp(SECCOMP_SET_MODE_FILTER, 0, p.args()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS, "the largest length");
+    }
+
+    #[test]
+    fn test_filter_null_program_is_einval() {
+        // bpf_check_basics_ok: a header with no program is EINVAL, not
+        // EFAULT.  It was ENOSYS until 2026-09-26.
+        let mut p = Prog::allow();
+        p.head.filter = core::ptr::null_mut();
+        errno::set_errno(0);
+        assert_eq!(seccomp(SECCOMP_SET_MODE_FILTER, 0, p.args()), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_filter_header_outside_user_memory_efault() {
+        errno::set_errno(0);
+        let kernel = (1usize << 63) as *mut u8;
+        assert_eq!(seccomp(SECCOMP_SET_MODE_FILTER, 0, kernel), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
     fn test_filter_tsync_plus_tsync_esrch_ok() {
         errno::set_errno(0);
-        let mut scratch: [u8; 16] = [0; 16];
+        let mut scratch = Prog::allow();
         let ret = seccomp(
             SECCOMP_SET_MODE_FILTER,
             SECCOMP_FILTER_FLAG_TSYNC | SECCOMP_FILTER_FLAG_TSYNC_ESRCH,
-            scratch.as_mut_ptr(),
+            scratch.args(),
         );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
@@ -733,8 +818,8 @@ mod tests {
         // install rules — that's still ENOSYS in our world, so they
         // fall back to "no sandbox" or to seccomp_arch_remove() and
         // try a different policy strategy. The shape is what matters.
-        let mut scratch: [u8; 16] = [0; 16];
-        let install = seccomp(SECCOMP_SET_MODE_FILTER, 0, scratch.as_mut_ptr());
+        let mut scratch = Prog::allow();
+        let install = seccomp(SECCOMP_SET_MODE_FILTER, 0, scratch.args());
         assert_eq!(install, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
@@ -775,8 +860,9 @@ mod tests {
     }
 
     #[test]
-    fn test_seccomp_phase131_tsync_esrch_einval_wins_over_efault() {
-        // TSYNC_ESRCH without TSYNC AND NULL args -> EINVAL.
+    fn test_seccomp_phase131_tsync_esrch_alone_reaches_the_pointer() {
+        // TSYNC_ESRCH without TSYNC is a valid flag set in 6.6, so NULL
+        // args are the first fault: EFAULT.
         errno::set_errno(0);
         let ret = seccomp(
             SECCOMP_SET_MODE_FILTER,
@@ -784,7 +870,7 @@ mod tests {
             core::ptr::null_mut(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
@@ -803,12 +889,12 @@ mod tests {
         // Headline new check: WAIT_KILLABLE_RECV without NEW_LISTENER
         // must yield EINVAL.  Args is non-NULL so the EFAULT path
         // isn't hit even if our flag check were missing.
-        let mut scratch: [u8; 16] = [0; 16];
+        let mut scratch = Prog::allow();
         errno::set_errno(0);
         let ret = seccomp(
             SECCOMP_SET_MODE_FILTER,
             SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV,
-            scratch.as_mut_ptr(),
+            scratch.args(),
         );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -833,12 +919,12 @@ mod tests {
     fn test_seccomp_phase131_wait_killable_with_listener_reaches_enosys() {
         // WAIT_KILLABLE_RECV combined with NEW_LISTENER is valid —
         // passes every flag-shape check and reaches the ENOSYS stub.
-        let mut scratch: [u8; 16] = [0; 16];
+        let mut scratch = Prog::allow();
         errno::set_errno(0);
         let ret = seccomp(
             SECCOMP_SET_MODE_FILTER,
             SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV | SECCOMP_FILTER_FLAG_NEW_LISTENER,
-            scratch.as_mut_ptr(),
+            scratch.args(),
         );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
@@ -849,12 +935,12 @@ mod tests {
         // WAIT_KILLABLE_RECV | TSYNC: TSYNC implies NO listener
         // (TSYNC and NEW_LISTENER are mutually exclusive), and
         // WAIT_KILLABLE_RECV requires NEW_LISTENER.  Linux: EINVAL.
-        let mut scratch: [u8; 16] = [0; 16];
+        let mut scratch = Prog::allow();
         errno::set_errno(0);
         let ret = seccomp(
             SECCOMP_SET_MODE_FILTER,
             SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV | SECCOMP_FILTER_FLAG_TSYNC,
-            scratch.as_mut_ptr(),
+            scratch.args(),
         );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -863,12 +949,12 @@ mod tests {
     #[test]
     fn test_seccomp_phase131_listener_only_reaches_enosys() {
         // Sanity: NEW_LISTENER alone passes every check.
-        let mut scratch: [u8; 16] = [0; 16];
+        let mut scratch = Prog::allow();
         errno::set_errno(0);
         let ret = seccomp(
             SECCOMP_SET_MODE_FILTER,
             SECCOMP_FILTER_FLAG_NEW_LISTENER,
-            scratch.as_mut_ptr(),
+            scratch.args(),
         );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
@@ -878,14 +964,14 @@ mod tests {
     fn test_seccomp_phase131_listener_with_log_and_spec_allow_reaches_enosys() {
         // Realistic combination from systemd-nspawn-style sandboxing:
         // NEW_LISTENER | LOG | SPEC_ALLOW.  Should pass.
-        let mut scratch: [u8; 16] = [0; 16];
+        let mut scratch = Prog::allow();
         errno::set_errno(0);
         let ret = seccomp(
             SECCOMP_SET_MODE_FILTER,
             SECCOMP_FILTER_FLAG_NEW_LISTENER
                 | SECCOMP_FILTER_FLAG_LOG
                 | SECCOMP_FILTER_FLAG_SPEC_ALLOW,
-            scratch.as_mut_ptr(),
+            scratch.args(),
         );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
@@ -902,12 +988,12 @@ mod tests {
         // ensures both probe outcomes match Linux: the supported
         // combo reaches ENOSYS, the unsupported combo (without
         // listener) returns EINVAL.
-        let mut scratch: [u8; 16] = [0; 16];
+        let mut scratch = Prog::allow();
         errno::set_errno(0);
         let probe_ok = seccomp(
             SECCOMP_SET_MODE_FILTER,
             SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV | SECCOMP_FILTER_FLAG_NEW_LISTENER,
-            scratch.as_mut_ptr(),
+            scratch.args(),
         );
         assert_eq!(probe_ok, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
@@ -915,7 +1001,7 @@ mod tests {
         let probe_bad = seccomp(
             SECCOMP_SET_MODE_FILTER,
             SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV,
-            scratch.as_mut_ptr(),
+            scratch.args(),
         );
         assert_eq!(probe_bad, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -925,17 +1011,17 @@ mod tests {
     fn test_seccomp_phase131_recovery_after_einval() {
         // After a WAIT_KILLABLE_RECV-without-LISTENER EINVAL, a clean
         // call still produces ENOSYS — errno is rewritten, not sticky.
-        let mut scratch: [u8; 16] = [0; 16];
+        let mut scratch = Prog::allow();
         errno::set_errno(0);
         let r1 = seccomp(
             SECCOMP_SET_MODE_FILTER,
             SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV,
-            scratch.as_mut_ptr(),
+            scratch.args(),
         );
         assert_eq!(r1, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
-        let r2 = seccomp(SECCOMP_SET_MODE_FILTER, 0, scratch.as_mut_ptr());
+        let r2 = seccomp(SECCOMP_SET_MODE_FILTER, 0, scratch.args());
         assert_eq!(r2, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
@@ -943,9 +1029,9 @@ mod tests {
     #[test]
     fn test_seccomp_phase131_all_valid_flags_with_listener_reaches_enosys() {
         // Maximum valid flag combo: NEW_LISTENER + LOG + SPEC_ALLOW +
-        // WAIT_KILLABLE_RECV.  TSYNC and TSYNC_ESRCH are mutually
-        // exclusive with NEW_LISTENER so they're omitted.
-        let mut scratch: [u8; 16] = [0; 16];
+        // WAIT_KILLABLE_RECV.  TSYNC is left out: with NEW_LISTENER it
+        // needs TSYNC_ESRCH too, which has a test of its own.
+        let mut scratch = Prog::allow();
         errno::set_errno(0);
         let ret = seccomp(
             SECCOMP_SET_MODE_FILTER,
@@ -953,7 +1039,7 @@ mod tests {
                 | SECCOMP_FILTER_FLAG_LOG
                 | SECCOMP_FILTER_FLAG_SPEC_ALLOW
                 | SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV,
-            scratch.as_mut_ptr(),
+            scratch.args(),
         );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
@@ -964,9 +1050,9 @@ mod tests {
         // u32::MAX flags: the mask check is the first wall, so we
         // see EINVAL even though many sub-conditions would also
         // independently trigger EINVAL.
-        let mut scratch: [u8; 16] = [0; 16];
+        let mut scratch = Prog::allow();
         errno::set_errno(0);
-        let ret = seccomp(SECCOMP_SET_MODE_FILTER, u32::MAX, scratch.as_mut_ptr());
+        let ret = seccomp(SECCOMP_SET_MODE_FILTER, u32::MAX, scratch.args());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -1083,19 +1169,13 @@ mod tests {
         /// One-byte buffer good enough to satisfy the NULL-args
         /// EFAULT check.  The filter is never inspected by our stub.
         ///
-        /// Deliberately a `static` and not a `static mut`: the only thing
-        /// twelve concurrently-running tests need from this address is that
-        /// it is non-null and readable, and nothing ever writes through it.
-        /// It was previously `static mut` with a "single-threaded test"
-        /// SAFETY note, which was not true — libtest runs these on separate
-        /// threads — and the mutability it was excusing was never used.
-        static DUMMY: u8 = 0;
+        /// A well-formed one-instruction program's header: the gate is
+        /// reached only past the header's checks, which read it.  Leaked --
+        /// a few dozen bytes per call, in a test binary -- so the pointer
+        /// stays valid for as long as anything could read it.  (It was a
+        /// single static byte while nothing read through `args`.)
         fn nonnull_args() -> *mut u8 {
-            // Casting away constness is sound here because the pointer is
-            // only ever compared against null by the code under test; if the
-            // stub ever starts writing through `args`, this must become real
-            // per-caller storage rather than a shared byte.
-            (&raw const DUMMY).cast_mut()
+            Box::leak(super::Prog::allow()).args()
         }
 
         // -- Per-error-class ----------------------------------------------
@@ -1222,6 +1302,26 @@ mod tests {
             );
             assert_eq!(ret, -1);
             assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// Unprivileged + a zero-length program -> EINVAL beats EACCES
+        /// (`seccomp_prepare_filter` checks the length first), and
+        /// unprivileged + a NULL program -> EACCES beats EINVAL
+        /// (`bpf_check_basics_ok` runs after the gate).
+        #[test]
+        fn test_seccomp_phase186_program_checks_straddle_the_gate() {
+            let _g = CapGuard::snapshot();
+            drop_sys_admin();
+            let mut p = super::Prog::allow();
+            p.head.len = 0;
+            errno::set_errno(0);
+            assert_eq!(seccomp(SECCOMP_SET_MODE_FILTER, 0, p.args()), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+            let mut p = super::Prog::allow();
+            p.head.filter = core::ptr::null_mut();
+            errno::set_errno(0);
+            assert_eq!(seccomp(SECCOMP_SET_MODE_FILTER, 0, p.args()), -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
         }
 
         /// Unprivileged + NULL args → EFAULT beats EACCES (NULL

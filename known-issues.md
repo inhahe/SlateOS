@@ -24207,6 +24207,21 @@ Against Linux 6.6's fs/aio.c.
   id was a slot number libaio dereferences -- `B-D-AIO-WAS-NOT-LINUXS` (new,
   fixed with it).
 
+**Twenty-seventh pass, 2026-09-26 — `linux_seccomp.rs` (4 sites), lane D.**
+Against Linux 6.6's kernel/seccomp.c and net/core/filter.c.
+
+- **`SECCOMP_SET_MODE_FILTER`** faulted on a NULL program header in the right
+  place, but never read a real one: after the header come its length (0, or
+  more than 4096 instructions, is `EINVAL`), then the privilege gate
+  (`EACCES`), then the program pointer (NULL is `EINVAL`,
+  `bpf_check_basics_ok`) -- a length of 0 reached the gate, and a NULL
+  program was `ENOSYS`.
+- **`SECCOMP_GET_ACTION_AVAIL`, `SECCOMP_GET_NOTIF_SIZES`, strict mode** --
+  right.
+- Beside them, the finding of the pass: two flag rules 6.6 does not have,
+  and `prctl`'s seccomp options answering `EINVAL` --
+  `B-D-SECCOMP-FLAGS-AND-PRCTL` (new, fixed with it).
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24220,13 +24235,13 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-twenty-six swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
+twenty-seven swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
 `sched.rs`, `mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`,
-`linux_module.rs`, `sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs`, `sysv_sem.rs`
-and `linux_aio_abi.rs`. That finishes the files at four: `pwd.rs`,
-`dirent.rs` and `signal.rs` needed nothing at their NULLs -- `pwd.rs`'s
-database did (`B-D-PWD-KNEW-ONLY-ROOT`). Next are the other files at three:
-`linux_seccomp.rs`, `mman.rs` and `resource.rs`.
+`linux_module.rs`, `sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs`, `sysv_sem.rs`,
+`linux_aio_abi.rs` and `linux_seccomp.rs`. That finishes the files at four:
+`pwd.rs`, `dirent.rs` and `signal.rs` needed nothing at their NULLs --
+`pwd.rs`'s database did (`B-D-PWD-KNEW-ONLY-ROOT`). Next are the other files
+at three: `mman.rs` and `resource.rs`.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
@@ -169612,6 +169627,25 @@ its VFS already reads and writes at an offset (`read_at`/`write_at`, which
 `copy_file_range` uses, and the Linux-ABI `pread64` reaches) -- exposed as
 native syscalls, and `pread` built on them: lane A's, asked for in
 `requests/d-a-positional-file-read-and-write.md`.
+
+### [D] B-D-SECCOMP-FLAGS-AND-PRCTL — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/linux_seccomp.rs` (`check_set_mode_filter`, new);
+`posix/src/unistd.rs` (`prctl`).
+
+**What it was.** `seccomp(SECCOMP_SET_MODE_FILTER)` refused `TSYNC` with
+`NEW_LISTENER` even alongside `TSYNC_ESRCH` -- the flag that exists to make
+that pair unambiguous, which Linux accepts -- and refused `TSYNC_ESRCH`
+without `TSYNC`, a rule Linux 6.6 does not have. It never read the program
+header it was given, so a zero-length program reached the privilege gate and
+a header with no program answered `ENOSYS`. And `prctl(PR_GET_SECCOMP)` and
+`prctl(PR_SET_SECCOMP)` answered `EINVAL`: a sandbox asking whether it is
+already confined was told the call does not exist.
+
+**Fix.** Linux 6.6's order: the flags, the header (`EFAULT`), its length
+(`EINVAL`), the gate (`EACCES`), the program pointer (`EINVAL`), then
+`ENOSYS` as before. `PR_GET_SECCOMP` answers the mode, disabled;
+`PR_SET_SECCOMP` is `seccomp()` by `prctl_set_seccomp`'s mapping.
 
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 

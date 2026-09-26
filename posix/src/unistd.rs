@@ -3541,6 +3541,29 @@ pub extern "C" fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64)
             // Phase 160: report the persisted bit (was always 0 pre-fix).
             i32::from(nnp::get())
         }
+        PR_GET_SECCOMP => {
+            // `prctl_get_seccomp`: the thread's seccomp mode.  Nothing here
+            // enters strict mode or installs a filter -- seccomp() answers
+            // ENOSYS for both -- so every thread is SECCOMP_MODE_DISABLED.
+            crate::sys_prctl::SECCOMP_MODE_DISABLED
+        }
+        PR_SET_SECCOMP => {
+            // `prctl_set_seccomp`: strict mode is SECCOMP_SET_MODE_STRICT
+            // with the filter argument ignored (forced NULL, so seccomp()'s
+            // own check of it passes), filter mode is SECCOMP_SET_MODE_FILTER
+            // with no flags, and anything else is EINVAL.
+            use crate::linux_seccomp::{SECCOMP_SET_MODE_FILTER, SECCOMP_SET_MODE_STRICT, seccomp};
+            use crate::sys_prctl::{SECCOMP_MODE_FILTER, SECCOMP_MODE_STRICT};
+            let mode = i32::try_from(arg2).unwrap_or(-1);
+            if mode == SECCOMP_MODE_STRICT {
+                seccomp(SECCOMP_SET_MODE_STRICT, 0, core::ptr::null_mut())
+            } else if mode == SECCOMP_MODE_FILTER {
+                seccomp(SECCOMP_SET_MODE_FILTER, 0, arg3 as *mut u8)
+            } else {
+                crate::errno::set_errno(crate::errno::EINVAL);
+                -1
+            }
+        }
         _ => {
             crate::errno::set_errno(crate::errno::EINVAL);
             -1
@@ -5562,6 +5585,36 @@ mod tests {
     #[test]
     fn test_prctl_unknown_fails() {
         assert_eq!(prctl(-999, 0, 0, 0, 0), -1);
+    }
+
+    /// `PR_GET_SECCOMP` is the mode, and nothing here leaves mode 0.  It was
+    /// EINVAL until 2026-09-26.
+    #[test]
+    fn test_prctl_get_seccomp_is_disabled() {
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_GET_SECCOMP, 0, 0, 0, 0), 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    /// `PR_SET_SECCOMP` is seccomp() by another road: strict mode with its
+    /// filter argument ignored, filter mode with no flags, anything else
+    /// EINVAL.
+    #[test]
+    fn test_prctl_set_seccomp_is_seccomp() {
+        // Strict mode: the filter argument is forced NULL, so a garbage one
+        // does not make seccomp()'s own "args must be NULL" EINVAL.
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_SET_SECCOMP, 1, 0xDEAD, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        // Filter mode with no program: seccomp()'s EFAULT.
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_SET_SECCOMP, 2, 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        for mode in [0, 3, u64::MAX] {
+            crate::errno::set_errno(0);
+            assert_eq!(prctl(PR_SET_SECCOMP, mode, 0, 0, 0), -1, "mode {mode}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
     }
 
     // ------------------------------------------------------------------

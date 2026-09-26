@@ -17330,7 +17330,19 @@ QEMU boot self-test that spawns a native thread which reads/writes a
 the initiative-F milestone (first real fastpy component) is
 single-threaded, so this isn't yet on the critical path.
 
-### D-PTHREAD-SLOT-PUBLISH-RACE. A child thread can outrun the publication of its own `ThreadSlot` — 2026-07-30
+### D-PTHREAD-SLOT-PUBLISH-RACE. A child thread can outrun the publication of its own `ThreadSlot` — 2026-07-30 — FIXED 2026-09-26
+
+**Fixed 2026-09-26 (shape 1, below).** `pthread_create` claims and fills the
+slot before `SYS_THREAD_CREATE`, and leaves the slot's address in the new
+thread's per-thread block (`PerThread::thread_slot`), so the thread reaches
+its slot without a lookup by task id. A thread that exits before its creator
+has published its id waits for that store (a few of the creator's
+instructions) before it lets go of the slot, so a slot is never released
+under a creator about to write it. `pthread_getattr_np` of the calling thread
+answers from the same slot, which exists before the thread runs -- Rust's std
+asks as the thread starts, and a lookup by id then found nothing and reported
+the main thread's stack. The table also stopped being 64 slots: it grows a
+chunk at a time (`B-D-PTHREAD-CREATE-IGNORED-ITS-ATTRIBUTE`).
 
 **Where:** `posix/src/pthread.rs`, `pthread_create`. The sequence is
 `mmap` the combined stack+TLS region → `SYS_THREAD_CREATE` → *then*
@@ -165726,6 +165738,40 @@ condition variable was made with is kept and used, and glibc 2.30's
 `pthread_cond_clockwait`, `pthread_mutex_clocklock`,
 `pthread_rwlock_clock{rd,wr}lock` and `sem_clockwait` exist, with the
 `pthread_rwlock_timed*` pair. Host tests drive each with real threads.
+
+### [D] B-D-PTHREAD-CREATE-IGNORED-ITS-ATTRIBUTE — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/pthread.rs` — `pthread_create`, the thread table,
+`pthread_attr_init`; `posix/src/perthread.rs`.
+
+**What it was.** `pthread_create` took its attribute as `_attr` and never
+read it. Every thread got a 64 KiB stack whatever size it asked for -- Rust's
+std asks for 2 MiB -- with no guard page below it, so a thread that used more
+than 64 KiB wrote into whatever was mapped below its stack, silently. A
+thread asked to start `PTHREAD_CREATE_DETACHED` started joinable, and since
+nothing joined it, its stack leaked. A stack the caller supplied
+(`pthread_attr_setstack`) was ignored. And the thread table held 64 threads:
+the 65th ran untracked, its mapping leaked on join, `pthread_detach` told the
+caller it did not exist, and `pthread_getattr_np` reported the main thread's
+stack for it. `pthread_attr_init` recorded a guard of 0, where glibc records
+a page. Found reading `pthread_create` for the aio notification thread, which
+must be created detached.
+
+Two smaller faults beside it: `find_slot` matched the sentinels, so
+`pthread_detach(0)` found an empty slot, marked it detached and answered 0;
+and the slot was published only after the thread started
+(`D-PTHREAD-SLOT-PUBLISH-RACE`).
+
+**Fix.** `pthread_create` reads the attribute: the stack size (rounded up to
+pages), a guard of the attribute's size below the stack, mapped inaccessible
+(one page by default, as glibc and musl), a caller's stack as given with the
+TLS part in a small mapping of its own (never unmapping the caller's memory),
+and the detach state. The table grows a chunk of 64 slots at a time and never
+shrinks, so a slot's address is stable and can be handed to its thread.
+Host tests cover the attribute reading, the layout arithmetic, the table's
+growth and the sentinels; `services/ctest-pthread` checks it all in ring 3,
+once lane A runs it (`requests/d-a-run-the-ctest-pthread-fixture.md`).
+Design choices in `design-decisions.md` §1111.
 
 ### [D] TD-D-TSEARCH-IS-AN-UNBALANCED-TREE — 2026-09-26 — FIXED 2026-09-26
 

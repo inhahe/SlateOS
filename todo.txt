@@ -8891,6 +8891,9 @@ Remaining net improvements (diminishing returns):
       THREAD_TABLE and report their mmap'd stack region (guard = 0, since
       pthread_create installs no guard page).  Any other thread (i.e. the
       main thread) reports the kernel main-stack geometry.
+      [2026-09-26: pthread_create now maps a guard -- one page by default --
+      and pthread_getattr_np reports it; known-issues.md
+      B-D-PTHREAD-CREATE-IGNORED-ITS-ATTRIBUTE.]
     * pthread_attr_getstack / pthread_attr_setstack: read/write the stack
       address ([16..24)) and size ([0..8)) in the opaque attr buffer.
     * pthread_attr_getguardsize / pthread_attr_setguardsize: read/write the

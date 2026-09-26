@@ -2,21 +2,24 @@
 //!
 //! ## Thread Creation
 //!
-//! `pthread_create` allocates a user-mode stack via `mmap`, pushes the
-//! start routine and argument onto it, then calls `SYS_THREAD_CREATE`
-//! with an assembly trampoline as the entry point.  The trampoline pops
-//! the arguments, calls the start routine, and issues `SYS_THREAD_EXIT`
-//! with the return value.
+//! `pthread_create` maps the new thread's memory -- from the bottom, an
+//! inaccessible guard, the stack its attribute asked for, then the TLS
+//! block, TCB and per-thread block; or, on a stack the caller supplied, the
+//! TLS part alone.  It claims and fills the thread's slot in the thread
+//! table, pushes the start routine and argument, then calls
+//! `SYS_THREAD_CREATE` with an assembly trampoline as the entry point.  The
+//! trampoline pops the arguments, calls the start routine, and exits
+//! through `pthread_exit`.
 //!
 //! ## Thread Lifecycle
 //!
 //! - **Joinable** (default): Another thread calls `pthread_join` which
-//!   blocks on `SYS_THREAD_JOIN`, then frees the stack.
-//! - **Detached**: `pthread_detach` marks the thread; when it exits it
-//!   frees its *own* stack (glibc `__unmapself` style) via the
-//!   `__pthread_exit_unmap` primitive, so detached stacks are reclaimed
+//!   blocks on `SYS_THREAD_JOIN`, then frees the mapping.
+//! - **Detached** (created so, or marked by `pthread_detach`): when it exits
+//!   it frees its *own* mapping (glibc `__unmapself` style) via the
+//!   `__pthread_exit_unmap` primitive, so detached threads are reclaimed
 //!   without a joiner.  The per-slot atomic `state` arbitrates the
-//!   detach-vs-exit race so exactly one party frees the stack.
+//!   detach-vs-exit race so exactly one party frees the mapping.
 //!
 //! ## Synchronization Primitives
 //!
@@ -137,7 +140,9 @@ use crate::errno;
 // it rather than carry a second, hardcoded value of their own.
 use crate::linux_pthread_key_types::PTHREAD_STACK_MIN;
 use crate::syscall;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicPtr, AtomicU8, AtomicU64, AtomicUsize, Ordering,
+};
 
 /// Opaque pthread_t type — holds the kernel task ID.
 pub type PthreadT = u64;
@@ -276,14 +281,27 @@ pub const PTHREAD_MUTEX_INITIALIZER: PthreadMutexT = PthreadMutexT {
 // The table is lock-free.  Each slot's `task_id` doubles as an occupancy
 // flag (`SLOT_EMPTY` / `SLOT_RESERVED` / real id) and each slot carries an
 // atomic `state` that arbitrates — race-free — which single party frees the
-// thread's mmap'd stack.  This replaces the former `static mut` +
+// thread's mapping.  This replaces the former `static mut` +
 // "single-creator convention" (which was a data race for the concurrent
 // detach-vs-exit window) with real atomics.
+//
+// A slot is claimed and filled *before* its thread exists, and the thread is
+// handed the slot's address in its per-thread block, so it never has to find
+// itself by task id -- which it could not do before its creator had
+// published that id.  Until 2026-09-26 the slot was filled only after
+// `SYS_THREAD_CREATE` returned, and a thread that exited first found no slot
+// at all (`known-issues.md` → `D-PTHREAD-SLOT-PUBLISH-RACE`).
+//
+// The table grows a chunk at a time and never shrinks, so a slot's address
+// is stable for the life of the process.  It was a fixed 64 slots, and a
+// 65th thread ran untracked: its mapping leaked, and `pthread_detach` told
+// the caller it did not exist.
 
-/// Maximum number of concurrently tracked threads.
-const MAX_THREADS: usize = 64;
+/// Slots per chunk of the thread table.
+const CHUNK_SLOTS: usize = 64;
 
-/// Default user-mode stack size for new threads (64 KiB = 4 pages).
+/// Usable stack for a new thread whose attribute names no size (64 KiB =
+/// 4 pages).
 const DEFAULT_THREAD_STACK_SIZE: usize = 64 * 1024;
 
 /// `task_id` sentinel for an unused slot.
@@ -293,14 +311,15 @@ const SLOT_RESERVED: u64 = u64::MAX;
 
 /// Thread is joinable and still tracked (initial state).
 const STATE_JOINABLE: u8 = 0;
-/// Thread was detached; it will free its *own* stack when it exits.
+/// Thread was detached; it will free its *own* mapping when it exits.
 const STATE_DETACHED: u8 = 1;
-/// Thread exited while joinable and left its stack for a joiner (or for a
+/// Thread exited while joinable and left its mapping for a joiner (or for a
 /// `pthread_detach` that lost the race) to reclaim.
 const STATE_EXITED: u8 = 2;
 
 /// Per-thread metadata slot.  All fields are atomic, so the table needs no
-/// external lock.
+/// external lock -- and all-zero is an empty slot, which is what lets fresh
+/// anonymous memory serve as a new chunk.
 ///
 /// Ownership protocol (all `state` transitions are `compare_exchange`):
 ///
@@ -309,25 +328,31 @@ const STATE_EXITED: u8 = 2;
 ///   JOINABLE --pthread_exit----> EXITED      (joiner/late-detach frees it)
 /// ```
 ///
-/// Exactly one party ever unmaps a given stack:
-/// - `DETACHED` → the exiting thread frees its own stack (self-unmap).
+/// A thread created detached starts in `DETACHED`.
+///
+/// Exactly one party ever unmaps a given mapping:
+/// - `DETACHED` → the exiting thread frees its own mapping (self-unmap).
 /// - `EXITED`   → whichever of `pthread_join` / a late `pthread_detach`
-///   observes it frees the stack, but only *after* `SYS_THREAD_JOIN`
-///   confirms the thread is off that stack (so there is no use-after-free).
+///   observes it frees the mapping, but only *after* `SYS_THREAD_JOIN`
+///   confirms the thread is off it (so there is no use-after-free).
 struct ThreadSlot {
     /// Kernel task id, or `SLOT_EMPTY` / `SLOT_RESERVED`.
     task_id: AtomicU64,
-    /// Base address of the thread's mmap'd stack — also the base of the
-    /// whole mapping (see `map_size`).
-    stack_base: AtomicUsize,
-    /// Size of the *usable stack* portion in bytes, as reported by
-    /// `pthread_getattr_np`.  Smaller than `map_size`: the thread's TLS
-    /// block and TCB sit above the stack in the same mapping.
-    stack_size: AtomicUsize,
-    /// Size of the whole mapping in bytes (stack + TLS block + TCB).  This
-    /// is what gets unmapped; freeing only `stack_size` would leak the TLS
-    /// tail.
+    /// Base of the mapping this library made for the thread: guard, stack,
+    /// TLS block, TCB and per-thread block -- or, for a thread on a stack the
+    /// caller supplied (`pthread_attr_setstack`), the TLS part alone.  This
+    /// is what gets unmapped.
+    map_base: AtomicUsize,
+    /// Size of that mapping in bytes.
     map_size: AtomicUsize,
+    /// Lowest address of the thread's usable stack, as `pthread_getattr_np`
+    /// reports it.
+    stack_base: AtomicUsize,
+    /// Size of the usable stack in bytes.  Smaller than the mapping: the
+    /// guard is below it and the TLS block and TCB above.
+    stack_size: AtomicUsize,
+    /// Size of the inaccessible guard below the stack (0 for none).
+    guard_size: AtomicUsize,
     /// Lifecycle state (`STATE_*`).
     state: AtomicU8,
 }
@@ -336,12 +361,198 @@ impl ThreadSlot {
     const fn new() -> Self {
         Self {
             task_id: AtomicU64::new(SLOT_EMPTY),
+            map_base: AtomicUsize::new(0),
+            map_size: AtomicUsize::new(0),
             stack_base: AtomicUsize::new(0),
             stack_size: AtomicUsize::new(0),
-            map_size: AtomicUsize::new(0),
+            guard_size: AtomicUsize::new(0),
             state: AtomicU8::new(STATE_JOINABLE),
         }
     }
+}
+
+/// One chunk of the thread table.
+#[repr(C)]
+struct ThreadChunk {
+    slots: [ThreadSlot; CHUNK_SLOTS],
+    /// The next chunk, or null.  Set once, by [`link_chunk`].
+    next: AtomicPtr<ThreadChunk>,
+}
+
+impl ThreadChunk {
+    const fn new() -> Self {
+        Self {
+            slots: [const { ThreadSlot::new() }; CHUNK_SLOTS],
+            next: AtomicPtr::new(core::ptr::null_mut()),
+        }
+    }
+}
+
+/// The table's first chunk; later ones are mapped as threads outnumber the
+/// slots.
+static THREAD_TABLE: ThreadChunk = ThreadChunk::new();
+
+/// A new thread's record, written into its reserved slot before the thread
+/// can run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ThreadRecord {
+    map_base: usize,
+    map_size: usize,
+    stack_base: usize,
+    stack_size: usize,
+    guard_size: usize,
+    detached: bool,
+}
+
+/// The chunks from `first` on.
+fn chunks_from(first: &'static ThreadChunk) -> impl Iterator<Item = &'static ThreadChunk> {
+    core::iter::successors(Some(first), |chunk| {
+        // SAFETY: a non-null `next` was linked by `link_chunk` (Release,
+        // paired with this Acquire) after its chunk was fully in place, and
+        // chunks are never freed.
+        unsafe { chunk.next.load(Ordering::Acquire).as_ref() }
+    })
+}
+
+/// Link `fresh` after `last`: `Ok(fresh)`, or `Err` with the chunk another
+/// thread linked there first (and `fresh` is the caller's to free).
+fn link_chunk(
+    last: &'static ThreadChunk,
+    fresh: &'static ThreadChunk,
+) -> Result<&'static ThreadChunk, &'static ThreadChunk> {
+    match last.next.compare_exchange(
+        core::ptr::null_mut(),
+        core::ptr::from_ref(fresh).cast_mut(),
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => Ok(fresh),
+        // SAFETY: as in `chunks_from`.
+        Err(theirs) => Err(unsafe { &*theirs }),
+    }
+}
+
+/// Map a new chunk and link it after `last`, or return the chunk another
+/// thread linked first.  `None` if the memory cannot be had.
+fn grow_table(last: &'static ThreadChunk) -> Option<&'static ThreadChunk> {
+    let size = size_of::<ThreadChunk>();
+    let mem = crate::mman::mmap(
+        core::ptr::null_mut(),
+        size,
+        crate::mman::PROT_READ | crate::mman::PROT_WRITE,
+        crate::mman::MAP_PRIVATE | crate::mman::MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+    if mem == crate::mman::MAP_FAILED {
+        return None;
+    }
+    // SAFETY: the mapping is page-aligned, large enough, never freed once
+    // linked, and zero-filled -- and zero is an empty chunk (every slot
+    // `SLOT_EMPTY` and `STATE_JOINABLE`, `next` null).
+    let fresh = unsafe { &*mem.cast::<ThreadChunk>() };
+    match link_chunk(last, fresh) {
+        Ok(chunk) => Some(chunk),
+        Err(theirs) => {
+            // Never shared, so nothing can be using it; a failed unmap would
+            // only leave one page mapped.
+            let _ = crate::mman::munmap(mem, size);
+            Some(theirs)
+        }
+    }
+}
+
+/// Claim a free slot (`SLOT_EMPTY` → `SLOT_RESERVED`) in the table starting
+/// at `first`, calling `grow` for a new chunk when every slot is taken.
+/// `None` only when the table cannot grow.
+///
+/// A reserved slot is its claimer's alone -- [`find_slot`] never returns
+/// one -- so the claimer may fill it before publishing a task id.
+fn claim_slot_in(
+    first: &'static ThreadChunk,
+    mut grow: impl FnMut(&'static ThreadChunk) -> Option<&'static ThreadChunk>,
+) -> Option<&'static ThreadSlot> {
+    let mut chunk = first;
+    loop {
+        for slot in &chunk.slots {
+            if slot
+                .task_id
+                .compare_exchange(
+                    SLOT_EMPTY,
+                    SLOT_RESERVED,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return Some(slot);
+            }
+        }
+        // SAFETY: as in `chunks_from`.
+        chunk = match unsafe { chunk.next.load(Ordering::Acquire).as_ref() } {
+            Some(next) => next,
+            None => grow(chunk)?,
+        };
+    }
+}
+
+/// [`claim_slot_in`] the process's table.
+fn claim_slot() -> Option<&'static ThreadSlot> {
+    claim_slot_in(&THREAD_TABLE, grow_table)
+}
+
+/// Record a new thread in its reserved slot.  Nobody else reads the slot
+/// until its id is published.
+fn fill_slot(slot: &ThreadSlot, record: &ThreadRecord) {
+    slot.map_base.store(record.map_base, Ordering::Relaxed);
+    slot.map_size.store(record.map_size, Ordering::Relaxed);
+    slot.stack_base.store(record.stack_base, Ordering::Relaxed);
+    slot.stack_size.store(record.stack_size, Ordering::Relaxed);
+    slot.guard_size.store(record.guard_size, Ordering::Relaxed);
+    slot.state.store(
+        if record.detached {
+            STATE_DETACHED
+        } else {
+            STATE_JOINABLE
+        },
+        Ordering::Relaxed,
+    );
+}
+
+/// Locate the slot tracking `task_id` in the table starting at `first`.
+///
+/// The two sentinels are never a thread's id and must not match: an id of 0
+/// found an empty slot, which `pthread_detach(0)` then marked detached and
+/// reported as a success.
+fn find_slot_in(first: &'static ThreadChunk, task_id: u64) -> Option<&'static ThreadSlot> {
+    if task_id == SLOT_EMPTY || task_id == SLOT_RESERVED {
+        return None;
+    }
+    chunks_from(first)
+        .flat_map(|chunk| chunk.slots.iter())
+        .find(|slot| slot.task_id.load(Ordering::Acquire) == task_id)
+}
+
+/// [`find_slot_in`] the process's table.
+fn find_slot(task_id: u64) -> Option<&'static ThreadSlot> {
+    find_slot_in(&THREAD_TABLE, task_id)
+}
+
+/// Release a slot back to the pool.  Must be called only by the single
+/// party that owns the mapping's free (see [`ThreadSlot`] protocol).
+fn release_slot(slot: &ThreadSlot) {
+    slot.task_id.store(SLOT_EMPTY, Ordering::Release);
+}
+
+/// The calling thread's own slot, whose address its creator left in its
+/// per-thread block before it started; `None` for the initial thread.
+fn own_slot() -> Option<&'static ThreadSlot> {
+    // SAFETY: `current()` is the calling thread's block, written by another
+    // thread only before this one started.
+    let addr = unsafe { (*crate::perthread::current()).thread_slot };
+    // SAFETY: a non-zero value is the address of a slot in the table, put
+    // there by `pthread_create`, and chunks are never freed.
+    unsafe { (addr as *const ThreadSlot).as_ref() }
 }
 
 /// Read-only snapshot of a tracked thread's metadata.
@@ -353,82 +564,38 @@ impl ThreadSlot {
 struct ThreadInfo {
     stack_base: usize,
     stack_size: usize,
+    guard_size: usize,
     detached: bool,
 }
 
-/// Thread info table — lock-free, statically allocated.
-static THREAD_TABLE: [ThreadSlot; MAX_THREADS] = [const { ThreadSlot::new() }; MAX_THREADS];
-
-/// Claim a free slot for a newly created thread and publish its metadata.
-///
-/// `stack_base`/`map_size` describe the whole mapping (the unit that gets
-/// unmapped); `stack_size` is just its usable-stack prefix.
-///
-/// Returns `true` on success, `false` if the table is full.
-fn store_thread_info(
-    task_id: u64,
-    stack_base: usize,
-    stack_size: usize,
-    map_size: usize,
-    detached: bool,
-) -> bool {
-    for slot in THREAD_TABLE.iter() {
-        // Claim an empty slot atomically (EMPTY -> RESERVED).
-        if slot
-            .task_id
-            .compare_exchange(
-                SLOT_EMPTY,
-                SLOT_RESERVED,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            )
-            .is_ok()
-        {
-            slot.stack_base.store(stack_base, Ordering::Relaxed);
-            slot.stack_size.store(stack_size, Ordering::Relaxed);
-            slot.map_size.store(map_size, Ordering::Relaxed);
-            slot.state.store(
-                if detached {
-                    STATE_DETACHED
-                } else {
-                    STATE_JOINABLE
-                },
-                Ordering::Relaxed,
-            );
-            // Publish: this Release pairs with the Acquire loads in the
-            // lookup helpers so the field writes above are visible to any
-            // thread that observes the real `task_id`.
-            slot.task_id.store(task_id, Ordering::Release);
-            return true;
+#[cfg(target_os = "none")]
+impl ThreadInfo {
+    fn of(slot: &ThreadSlot) -> Self {
+        Self {
+            stack_base: slot.stack_base.load(Ordering::Relaxed),
+            stack_size: slot.stack_size.load(Ordering::Relaxed),
+            guard_size: slot.guard_size.load(Ordering::Relaxed),
+            detached: slot.state.load(Ordering::Acquire) == STATE_DETACHED,
         }
     }
-    false
 }
 
-/// Locate the (static) slot tracking `task_id`, if present.
-fn find_slot(task_id: u64) -> Option<&'static ThreadSlot> {
-    THREAD_TABLE
-        .iter()
-        .find(|slot| slot.task_id.load(Ordering::Acquire) == task_id)
-}
-
-/// Release a slot back to the pool.  Must be called only by the single
-/// party that owns the stack free (see [`ThreadSlot`] protocol).
-fn release_slot(slot: &ThreadSlot) {
-    slot.task_id.store(SLOT_EMPTY, Ordering::Release);
-}
-
-/// Look up thread info by kernel task ID without removing it.
+/// Look up a thread's metadata without removing it, for
+/// `pthread_getattr_np`.
 ///
-/// Used by `pthread_getattr_np` to report a live thread's stack bounds.
+/// The calling thread is answered from its own slot, which exists from
+/// before it ran: Rust's std asks for its thread's stack bounds as the
+/// thread starts, possibly before the creator has published the thread's
+/// id -- and a lookup by id then found nothing and reported the *main*
+/// thread's stack.
 #[cfg(target_os = "none")]
 fn find_thread_info(task_id: u64) -> Option<ThreadInfo> {
-    let slot = find_slot(task_id)?;
-    Some(ThreadInfo {
-        stack_base: slot.stack_base.load(Ordering::Relaxed),
-        stack_size: slot.stack_size.load(Ordering::Relaxed),
-        detached: slot.state.load(Ordering::Acquire) == STATE_DETACHED,
-    })
+    if task_id == pthread_self() {
+        if let Some(slot) = own_slot() {
+            return Some(ThreadInfo::of(slot));
+        }
+    }
+    find_slot(task_id).map(ThreadInfo::of)
 }
 
 // ---------------------------------------------------------------------------
@@ -563,88 +730,260 @@ pub extern "C" fn __pthread_thread_start(
 
 /// Create a new thread.
 ///
-/// Allocates one mapping holding the new thread's stack *and* its ELF TLS
-/// block + TCB, initialises the TLS block, sets up the trampoline arguments,
-/// and issues `SYS_THREAD_CREATE`.  On success, stores the new thread's
-/// kernel task ID in `*thread`.
+/// Honours the attribute: its stack size, its guard size, a stack of the
+/// caller's own (`pthread_attr_setstack`) and its detach state.  Until
+/// 2026-09-26 the attribute was ignored -- every thread got a 64 KiB stack
+/// with no guard, created joinable, whatever it asked for -- so a thread that
+/// asked for a megabyte and used it ran off the end of its stack into
+/// whatever was mapped below (`known-issues.md` →
+/// `B-D-PTHREAD-CREATE-IGNORED-ITS-ATTRIBUTE`).  Rust's std asks for 2 MiB.
 ///
-/// The TLS block is deliberately built here, in the creating thread, rather
-/// than by the child: it is the only place a failure can be reported
-/// (`EAGAIN`), and folding it into the stack mapping means the existing
-/// join/detach stack-reclaim protocol frees it too — one mapping, one owner
-/// (see [`crate::tls`] for the layout).
+/// The TLS block is built here, in the creating thread, rather than by the
+/// child: it is the only place a failure can be reported (`EAGAIN`), and
+/// keeping it in a mapping this library made means the join/detach reclaim
+/// protocol frees it too -- one mapping, one owner (see [`crate::tls`] for
+/// the layout).
+///
+/// The thread's slot is claimed and filled before the thread exists, and its
+/// address is left in the thread's per-thread block, so the thread can find
+/// its slot even if it exits before this function has published its id.
 ///
 /// Returns 0 on success, or a POSIX error number on failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_create(
     thread: *mut PthreadT,
-    _attr: *const PthreadAttrT,
+    attr: *const PthreadAttrT,
     start: extern "C" fn(*mut u8) -> *mut u8,
     arg: *mut u8,
 ) -> i32 {
-    // Reserve the thread's stack plus room for its TLS block and TCB above
-    // it.  `usize` cannot overflow here: both terms are small constants
-    // derived from DEFAULT_THREAD_STACK_SIZE and the program's PT_TLS.
-    let tls_img = crate::tls::image();
-    let map_size = DEFAULT_THREAD_STACK_SIZE.wrapping_add(tls_img.reserve() as usize);
+    let want = CreateAttr::read(attr);
+    let Some(slot) = claim_slot() else {
+        return errno::EAGAIN;
+    };
+    match launch(slot, &want, start, arg) {
+        Ok(task_id) => {
+            // Publish.  From here `pthread_join`/`pthread_detach` can find
+            // the thread, and the thread -- which waits for this store before
+            // it lets go of its slot -- may exit.
+            slot.task_id.store(task_id, Ordering::Release);
+            if !thread.is_null() {
+                // SAFETY: caller guarantees thread points to valid PthreadT.
+                unsafe {
+                    *thread = task_id;
+                }
+            }
+            0
+        }
+        Err(e) => {
+            release_slot(slot);
+            e
+        }
+    }
+}
 
-    let stack = crate::mman::mmap(
-        core::ptr::null_mut(),
+/// What `pthread_create` was asked for, read out of its attribute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CreateAttr {
+    /// Usable stack in bytes, before rounding to pages.
+    stack_size: usize,
+    /// Guard below the stack in bytes, before rounding.  Ignored for a stack
+    /// the caller supplied, as POSIX requires.
+    guard_size: usize,
+    /// Lowest address of a stack the caller supplied, if any.
+    stack_addr: Option<usize>,
+    /// Start detached.
+    detached: bool,
+}
+
+impl CreateAttr {
+    /// What a NULL attribute stands for -- the values `pthread_attr_init`
+    /// records.
+    const DEFAULT: Self = Self {
+        stack_size: DEFAULT_THREAD_STACK_SIZE,
+        guard_size: DEFAULT_GUARD_SIZE,
+        stack_addr: None,
+        detached: false,
+    };
+
+    fn read(attr: *const PthreadAttrT) -> Self {
+        if attr.is_null() {
+            return Self::DEFAULT;
+        }
+        // SAFETY: non-null, and by the caller's contract an initialised
+        // attribute object.
+        let buf = unsafe { &*attr };
+        let size = attr_read_stacksize(buf);
+        let addr = attr_read_stackaddr(buf);
+        Self {
+            stack_size: if size == 0 {
+                DEFAULT_THREAD_STACK_SIZE
+            } else {
+                size
+            },
+            guard_size: attr_read_guardsize(buf),
+            stack_addr: (addr != 0).then_some(addr),
+            detached: attr_read_detachstate(buf) == PTHREAD_CREATE_DETACHED,
+        }
+    }
+}
+
+/// The memory `pthread_create` maps for a thread, before it has an address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ThreadPlan {
+    /// Bytes to map, a whole number of pages.
+    map_size: usize,
+    /// Guard at the bottom of the mapping, a whole number of pages (0 for
+    /// none).
+    guard: usize,
+    /// Usable stack, a whole number of pages -- 0 when the caller supplied
+    /// the stack and the mapping holds only the TLS part.
+    stack: usize,
+    /// The caller's stack: its lowest address and its size.
+    user_stack: Option<(usize, usize)>,
+}
+
+/// Where a thread's pieces land once its mapping has an address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ThreadLayout {
+    /// Lowest address of the usable stack.
+    stack_base: usize,
+    /// The stack's top, 16-aligned; the trampoline's words go just below.
+    stack_top: usize,
+    /// The thread pointer.
+    tp: u64,
+}
+
+/// Size a thread's mapping; `None` when the sizes asked for overflow.
+fn plan_thread(want: &CreateAttr, img: &crate::tls::TlsImage) -> Option<ThreadPlan> {
+    let page = crate::unistd::PAGE_SIZE;
+    let tls = usize::try_from(img.reserve()).ok()?;
+    if let Some(addr) = want.stack_addr {
+        return Some(ThreadPlan {
+            map_size: tls.checked_next_multiple_of(page)?,
+            guard: 0,
+            stack: 0,
+            user_stack: Some((addr, want.stack_size)),
+        });
+    }
+    let guard = want.guard_size.checked_next_multiple_of(page)?;
+    let stack = want.stack_size.checked_next_multiple_of(page)?;
+    let map_size = guard
+        .checked_add(stack)?
+        .checked_add(tls)?
+        .checked_next_multiple_of(page)?;
+    Some(ThreadPlan {
         map_size,
+        guard,
+        stack,
+        user_stack: None,
+    })
+}
+
+impl ThreadPlan {
+    /// Lay the thread out in the mapping at `map_base`.
+    fn place(&self, map_base: usize, img: &crate::tls::TlsImage) -> ThreadLayout {
+        if let Some((addr, size)) = self.user_stack {
+            // The caller's stack as given; the TLS part fills our mapping.
+            return ThreadLayout {
+                stack_base: addr,
+                stack_top: addr.wrapping_add(size) & !0xf,
+                tp: img.thread_pointer(map_base as u64, 0),
+            };
+        }
+        let stack_base = map_base.wrapping_add(self.guard);
+        // Variant-II layout: TLS block immediately below the thread pointer,
+        // TCB at and above it, both above the stack.  The stack therefore
+        // ends where the TLS block begins — rounded *down* to 16, because the
+        // TLS block's start only inherits the segment's `p_align`, which the
+        // psABI permits to be as weak as 1.  SysV requires RSP+8 to be
+        // 16-byte aligned at a function's entry, and the trampoline pops
+        // exactly three words before its `call`, so RSP at
+        // `__pthread_thread_start` is `stack_top - 8`: an unaligned
+        // `stack_top` would misalign every SSE spill in the child.  Rounding
+        // down costs at most 15 bytes of stack and never encroaches on the
+        // TLS block above.
+        let tp = img.thread_pointer(stack_base as u64, self.stack as u64);
+        ThreadLayout {
+            stack_base,
+            stack_top: (tp.wrapping_sub(img.block_size()) as usize) & !0xf,
+            tp,
+        }
+    }
+}
+
+/// Map, prepare and start the thread whose slot is `slot`: its task id, or
+/// the error number `pthread_create` returns.  On failure nothing is left
+/// mapped; the caller releases the slot.
+fn launch(
+    slot: &'static ThreadSlot,
+    want: &CreateAttr,
+    start: extern "C" fn(*mut u8) -> *mut u8,
+    arg: *mut u8,
+) -> Result<u64, i32> {
+    let tls_img = crate::tls::image();
+    let plan = plan_thread(want, &tls_img).ok_or(errno::EAGAIN)?;
+    let mem = crate::mman::mmap(
+        core::ptr::null_mut(),
+        plan.map_size,
         crate::mman::PROT_READ | crate::mman::PROT_WRITE,
         crate::mman::MAP_PRIVATE | crate::mman::MAP_ANONYMOUS,
         -1,
         0,
     );
-
-    if stack == crate::mman::MAP_FAILED {
-        return errno::EAGAIN;
+    if mem == crate::mman::MAP_FAILED {
+        return Err(errno::EAGAIN);
     }
+    // Every failure below unmaps `mem` again.  The mapping was never shared,
+    // so an unmap that failed would only leave it mapped.
+    if plan.guard > 0 && crate::mman::mprotect(mem, plan.guard, crate::mman::PROT_NONE) != 0 {
+        let _ = crate::mman::munmap(mem, plan.map_size);
+        return Err(errno::EAGAIN);
+    }
+    let map_base = mem as usize;
+    let layout = plan.place(map_base, &tls_img);
 
-    let stack_base = stack as usize;
-    // Variant-II layout: TLS block immediately below the thread pointer,
-    // TCB at and above it, both above the stack.  The stack therefore ends
-    // where the TLS block begins — rounded *down* to 16, because the TLS
-    // block's start only inherits the segment's `p_align`, which the psABI
-    // permits to be as weak as 1.  SysV requires RSP+8 to be 16-byte aligned
-    // at a function's entry, and the trampoline pops exactly three words
-    // before its `call`, so RSP at `__pthread_thread_start` is
-    // `stack_top - 8`: an unaligned `stack_top` would misalign every SSE
-    // spill in the child.  Rounding down costs at most 15 bytes of stack and
-    // never encroaches on the TLS block above.
-    let tp = tls_img.thread_pointer(stack_base as u64, DEFAULT_THREAD_STACK_SIZE as u64);
-    let stack_top = (tp.wrapping_sub(tls_img.block_size()) as usize) & !0xf;
-    let stack_size = stack_top.wrapping_sub(stack_base);
-
-    // Initialise the child's TLS block and TCB before it can run.
-    // SAFETY: mmap succeeded, so [stack_base, stack_base + map_size) is
-    // valid; `thread_pointer`'s contract puts [tp - block_size, tp +
-    // TCB_SIZE) inside that range, and no thread uses it yet.
+    // Initialise the child's TLS block, TCB and per-thread block before it
+    // can run.
+    // SAFETY: mmap succeeded, so [map_base, map_base + map_size) is valid;
+    // `plan_thread` sized it for `thread_pointer`'s contract, which puts
+    // [tp - block_size, tp + TCB_SIZE + perthread::BLOCK_SIZE) inside it,
+    // and no thread uses it yet.
     unsafe {
-        crate::tls::init_block(tp, &tls_img);
-        // The SAME value as every other thread, deliberately: glibc copies the
-        // parent's guard into the child TCB, and a thread that used a
+        crate::tls::init_block(layout.tp, &tls_img);
+        // The SAME value as every other thread, deliberately: glibc copies
+        // the parent's guard into the child TCB, and a thread that used a
         // different one would abort a process that was never smashed the
         // moment a frame outlived the change. The parent's TLS is live here,
         // so the lookup is safe.
-        // SAFETY (covered by the enclosing block): `init_block` above
-        // established `[tp, tp + TCB_SIZE)`, and the child is not running yet.
-        crate::tls::set_stack_guard(tp, crate::crt::process_stack_guard());
+        crate::tls::set_stack_guard(layout.tp, crate::crt::process_stack_guard());
+        (*crate::perthread::block_at(layout.tp)).thread_slot = core::ptr::from_ref(slot) as usize;
     }
+    fill_slot(
+        slot,
+        &ThreadRecord {
+            map_base,
+            map_size: plan.map_size,
+            stack_base: layout.stack_base,
+            stack_size: layout.stack_top.wrapping_sub(layout.stack_base),
+            guard_size: plan.guard,
+            detached: want.detached,
+        },
+    );
 
     // Push arg, start_routine and the thread pointer onto the new stack for
     // the trampoline (see its stack-layout comment).
-    // SAFETY: mmap succeeded → [stack_base, stack_top) is valid memory.
+    // SAFETY: the three words lie just below `stack_top`, inside the stack:
+    // our own mapping, or the caller's stack, which POSIX makes the caller
+    // vouch for.
     unsafe {
-        let tp_slot = stack_top.wrapping_sub(8) as *mut u64;
-        let fn_slot = stack_top.wrapping_sub(16) as *mut u64;
-        let arg_slot = stack_top.wrapping_sub(24) as *mut u64;
-        core::ptr::write(tp_slot, tp);
+        let tp_slot = layout.stack_top.wrapping_sub(8) as *mut u64;
+        let fn_slot = layout.stack_top.wrapping_sub(16) as *mut u64;
+        let arg_slot = layout.stack_top.wrapping_sub(24) as *mut u64;
+        core::ptr::write(tp_slot, layout.tp);
         core::ptr::write(fn_slot, start as usize as u64);
         core::ptr::write(arg_slot, arg as u64);
     }
-
-    let user_rsp = stack_top.wrapping_sub(24) as u64;
+    let user_rsp = layout.stack_top.wrapping_sub(24) as u64;
 
     // Get the trampoline's address.
     #[cfg(target_os = "none")]
@@ -659,26 +998,11 @@ pub extern "C" fn pthread_create(
         user_rsp,
         u64::MAX, // default priority
     );
-
     if ret < 0 {
-        let _ = crate::mman::munmap(stack, map_size);
-        return errno::EAGAIN;
+        let _ = crate::mman::munmap(mem, plan.map_size);
+        return Err(errno::EAGAIN);
     }
-
-    let task_id = ret as u64;
-
-    // Track the thread for later cleanup (best effort — if the table
-    // is full the thread runs but its mapping leaks on join).
-    let _ = store_thread_info(task_id, stack_base, stack_size, map_size, false);
-
-    if !thread.is_null() {
-        // SAFETY: caller guarantees thread points to valid PthreadT.
-        unsafe {
-            *thread = task_id;
-        }
-    }
-
-    0
+    Ok(ret as u64)
 }
 
 /// Wait for a thread to terminate.
@@ -735,7 +1059,7 @@ pub extern "C" fn pthread_join(thread_id: PthreadT, retval: *mut *mut u8) -> i32
     // longer reads its TLS — so the unmap is safe.  Release the slot before
     // unmapping so it can be reused promptly.
     if let Some(slot) = find_slot(thread_id) {
-        let base = slot.stack_base.load(Ordering::Relaxed);
+        let base = slot.map_base.load(Ordering::Relaxed);
         let size = slot.map_size.load(Ordering::Relaxed);
         release_slot(slot);
         if base != 0 {
@@ -777,7 +1101,7 @@ pub extern "C" fn pthread_detach(thread_id: PthreadT) -> i32 {
             // Reaping only — the exit value is discarded, so pass a null
             // out-pointer rather than a scratch slot.
             let _ = syscall::syscall2(syscall::SYS_THREAD_JOIN, thread_id, 0);
-            let base = slot.stack_base.load(Ordering::Relaxed);
+            let base = slot.map_base.load(Ordering::Relaxed);
             let size = slot.map_size.load(Ordering::Relaxed);
             release_slot(slot);
             if base != 0 {
@@ -1011,7 +1335,15 @@ pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
     // arbitrates against a concurrent `pthread_detach`: exactly one party
     // ends up owning the free.
     let mut self_unmap: Option<(usize, usize)> = None;
-    if let Some(slot) = find_slot(self_tid) {
+    if let Some(slot) = own_slot() {
+        // Our creator publishes our id just after `SYS_THREAD_CREATE`
+        // returns to it.  A thread that gets here first waits for that: it
+        // must not release a slot its creator is about to write.  The wait
+        // is a few instructions of the creator's, so it is almost never
+        // entered at all.
+        while slot.task_id.load(Ordering::Acquire) == SLOT_RESERVED {
+            sched_yield();
+        }
         match slot.state.compare_exchange(
             STATE_JOINABLE,
             STATE_EXITED,
@@ -1026,7 +1358,7 @@ pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
             // Release the slot *before* unmapping (after the unmap we can
             // no longer safely touch memory).
             Err(STATE_DETACHED) => {
-                let base = slot.stack_base.load(Ordering::Relaxed);
+                let base = slot.map_base.load(Ordering::Relaxed);
                 let size = slot.map_size.load(Ordering::Relaxed);
                 release_slot(slot);
                 if base != 0 {
@@ -1324,8 +1656,12 @@ pub type PthreadKeyT = u32;
 const MAX_KEYS: usize = 64;
 
 /// Maximum number of threads that can hold TSD storage simultaneously.
-/// Matches [`MAX_THREADS`] — every tracked thread can have its own row.
-const MAX_TSD_THREADS: usize = MAX_THREADS;
+///
+/// It was the thread table's size until that table learned to grow
+/// (2026-09-26), and is now TSD's own limit: a 65th thread setting a key at
+/// once gets `ENOMEM` (`known-issues.md` →
+/// `TD-D-TSD-IS-A-GLOBAL-TABLE-KEYED-BY-TASK-ID`).
+const MAX_TSD_THREADS: usize = 64;
 
 /// POSIX `_POSIX_THREAD_DESTRUCTOR_ITERATIONS`: the number of times the
 /// destructor sweep is repeated at thread exit so that destructors which
@@ -2143,20 +2479,16 @@ pub extern "C" fn sched_yield() -> i32 {
 // Offsets 12..16 and 32..56 are reserved/unused.  These offsets are an
 // internal contract only — C callers treat the type as opaque.
 const ATTR_OFF_STACKSIZE: usize = 0;
-// Only `encode_attr` (main/created-thread fill path) writes the detach
-// field via this constant; the get/set detachstate accessors use a
-// literal offset, so on host-without-test builds this would be unused.
-#[cfg(any(target_os = "none", test))]
 const ATTR_OFF_DETACH: usize = 8;
 const ATTR_OFF_STACKADDR: usize = 16;
 const ATTR_OFF_GUARDSIZE: usize = 24;
 
-/// Default thread guard size: one 16 KiB page.
+/// Default thread guard size: one page, as in glibc and musl.
 ///
-/// Must match the kernel page/guard granularity (`FRAME_SIZE` in
-/// `kernel/src/mm`).  Only referenced when filling main-thread attributes.
-#[cfg(any(target_os = "none", test))]
-const DEFAULT_GUARD_SIZE: usize = 16 * 1024;
+/// `pthread_attr_init` records it and `pthread_create` maps it, inaccessible,
+/// below every stack it makes; the main thread's kernel guard is the same
+/// size.
+const DEFAULT_GUARD_SIZE: usize = crate::unistd::PAGE_SIZE;
 
 // Main-thread stack geometry.  These MUST stay in sync with the kernel's
 // user-stack layout in `kernel/src/proc/spawn.rs`:
@@ -2227,6 +2559,18 @@ fn encode_attr(buf: &mut PthreadAttrT, attr: StackAttr) {
     }
 }
 
+/// Read the stored stack size from an attribute buffer (0 = never set).
+fn attr_read_stacksize(buf: &PthreadAttrT) -> usize {
+    // SAFETY: reading 8 bytes at offset 0 ends at index 7 < 56.
+    unsafe { core::ptr::read_unaligned(buf.as_ptr().add(ATTR_OFF_STACKSIZE).cast::<usize>()) }
+}
+
+/// Read the stored detach state from an attribute buffer.
+fn attr_read_detachstate(buf: &PthreadAttrT) -> i32 {
+    // SAFETY: reading 4 bytes at offset 8 ends at index 11 < 56.
+    unsafe { core::ptr::read_unaligned(buf.as_ptr().add(ATTR_OFF_DETACH).cast::<i32>()) }
+}
+
 /// Read the stored stack address from an attribute buffer.
 fn attr_read_stackaddr(buf: &PthreadAttrT) -> usize {
     // SAFETY: reading 8 bytes at offset 16 ends at index 23 < 56.
@@ -2242,17 +2586,16 @@ fn attr_read_guardsize(buf: &PthreadAttrT) -> usize {
 /// Resolve a thread's stack attributes by kernel task ID.
 ///
 /// If the thread was created via `pthread_create` it is found in the
-/// thread table and its mmap'd stack bounds are returned (no guard page is
-/// installed for created threads, so `guard` is 0).  Otherwise the thread
-/// is assumed to be the main thread and the kernel main-stack geometry is
-/// reported.
+/// thread table and its stack bounds and guard are returned.  Otherwise the
+/// thread is assumed to be the main thread and the kernel main-stack
+/// geometry is reported.
 #[cfg(target_os = "none")]
 fn resolve_thread_stack_attr(task_id: u64) -> StackAttr {
     if let Some(info) = find_thread_info(task_id) {
         StackAttr {
             addr: info.stack_base,
             size: info.stack_size,
-            guard: 0,
+            guard: info.guard_size,
             detached: info.detached,
         }
     } else {
@@ -2262,7 +2605,9 @@ fn resolve_thread_stack_attr(task_id: u64) -> StackAttr {
 
 /// Initialize a thread attribute object to default values.
 ///
-/// Defaults: joinable (not detached), stack size = `DEFAULT_THREAD_STACK_SIZE`.
+/// Defaults: joinable (not detached), stack size =
+/// `DEFAULT_THREAD_STACK_SIZE`, guard = one page (`DEFAULT_GUARD_SIZE`, as
+/// glibc's `__pthread_attr_init` records `__getpagesize ()`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_attr_init(attr: *mut PthreadAttrT) -> i32 {
     if attr.is_null() {
@@ -2278,6 +2623,10 @@ pub extern "C" fn pthread_attr_init(attr: *mut PthreadAttrT) -> i32 {
     // Use write_unaligned because PthreadAttrT is a [u8; 64] with align(1).
     unsafe {
         core::ptr::write_unaligned(attr.cast::<usize>(), DEFAULT_THREAD_STACK_SIZE);
+        core::ptr::write_unaligned(
+            attr.cast::<u8>().add(ATTR_OFF_GUARDSIZE).cast::<usize>(),
+            DEFAULT_GUARD_SIZE,
+        );
     }
     0
 }
@@ -2457,7 +2806,8 @@ pub extern "C" fn pthread_attr_setstack(
 
 /// Get the guard size from a thread attribute object.
 ///
-/// Returns the recorded guard size (0 if none was set).
+/// Returns the recorded guard size: one page from `pthread_attr_init`, or
+/// whatever `pthread_attr_setguardsize` stored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_attr_getguardsize(
     attr: *const PthreadAttrT,
@@ -4632,9 +4982,16 @@ mod tests {
         assert_eq!(stored, DEFAULT_THREAD_STACK_SIZE);
         assert_eq!(stored, 64 * 1024);
 
-        // Remaining bytes should be zero.
-        for &b in &attr[8..] {
-            assert_eq!(b, 0, "attr bytes after stack size should be zeroed");
+        // The guard -- one page, as glibc records it -- and every other byte
+        // zero.
+        let guard = unsafe {
+            core::ptr::read_unaligned(attr.as_ptr().add(ATTR_OFF_GUARDSIZE).cast::<usize>())
+        };
+        assert_eq!(guard, DEFAULT_GUARD_SIZE);
+        for (i, &b) in attr.iter().enumerate().skip(8) {
+            if !(ATTR_OFF_GUARDSIZE..ATTR_OFF_GUARDSIZE + 8).contains(&i) {
+                assert_eq!(b, 0, "attr byte {i} should be zeroed");
+            }
         }
     }
 
@@ -4990,13 +5347,14 @@ mod tests {
     }
 
     #[test]
-    fn getguardsize_default_attr_is_zero() {
-        // A default-init attr records no guard; getguardsize returns 0.
+    fn getguardsize_default_attr_is_one_page() {
+        // glibc's `__pthread_attr_init` records `__getpagesize ()`; this
+        // reported 0 until 2026-09-26, when no created thread had a guard.
         let mut buf: PthreadAttrT = [0; 56];
         pthread_attr_init(&mut buf);
         let mut guard: usize = 12345;
         assert_eq!(pthread_attr_getguardsize(&buf, &mut guard), 0);
-        assert_eq!(guard, 0);
+        assert_eq!(guard, crate::unistd::PAGE_SIZE);
     }
 
     #[test]
@@ -6502,18 +6860,44 @@ mod tests {
     // slots it claims.
     // -----------------------------------------------------------------------
 
+    /// Claim, fill and publish a slot for a synthetic thread, as
+    /// `pthread_create` does.  `map_base` 0 keeps the reclaim paths from
+    /// calling the host's `munmap`.
+    fn track(tid: u64, map_base: usize, map_size: usize, detached: bool) -> &'static ThreadSlot {
+        let slot = claim_slot().expect("a free slot");
+        fill_slot(
+            slot,
+            &ThreadRecord {
+                map_base,
+                map_size,
+                stack_base: map_base,
+                stack_size: DEFAULT_THREAD_STACK_SIZE,
+                guard_size: 0,
+                detached,
+            },
+        );
+        slot.task_id.store(tid, Ordering::Release);
+        slot
+    }
+
+    /// A private table for the growth tests, so they cannot starve the
+    /// process table other tests are using.
+    fn private_table() -> &'static ThreadChunk {
+        Box::leak(Box::new(ThreadChunk::new()))
+    }
+
+    /// Grow a private table from the heap, as `grow_table` does from mmap.
+    fn grow_on_heap(last: &'static ThreadChunk) -> Option<&'static ThreadChunk> {
+        Some(link_chunk(last, private_table()).unwrap_or_else(|theirs| theirs))
+    }
+
     #[test]
     fn test_thread_slot_store_find_release() {
         let tid: u64 = 0x5100_0001;
-        assert!(store_thread_info(
-            tid,
-            0x1_0000,
-            DEFAULT_THREAD_STACK_SIZE,
-            DEFAULT_THREAD_STACK_SIZE + 0x80,
-            false
-        ));
-        let slot = find_slot(tid).expect("slot should be found after store");
-        assert_eq!(slot.stack_base.load(Ordering::Relaxed), 0x1_0000);
+        let slot = track(tid, 0x1_0000, DEFAULT_THREAD_STACK_SIZE + 0x80, false);
+        let found = find_slot(tid).expect("slot should be found after store");
+        assert!(core::ptr::eq(found, slot));
+        assert_eq!(slot.map_base.load(Ordering::Relaxed), 0x1_0000);
         assert_eq!(
             slot.stack_size.load(Ordering::Relaxed),
             DEFAULT_THREAD_STACK_SIZE
@@ -6536,16 +6920,8 @@ mod tests {
     #[test]
     fn test_detach_marks_state_detached() {
         let tid: u64 = 0x5100_0002;
-        // base = 0 so the (never-reached) reclaim path won't call munmap.
-        assert!(store_thread_info(
-            tid,
-            0,
-            DEFAULT_THREAD_STACK_SIZE,
-            DEFAULT_THREAD_STACK_SIZE,
-            false
-        ));
+        let slot = track(tid, 0, DEFAULT_THREAD_STACK_SIZE, false);
         assert_eq!(pthread_detach(tid), 0);
-        let slot = find_slot(tid).expect("detached thread stays tracked");
         assert_eq!(slot.state.load(Ordering::Acquire), STATE_DETACHED);
         // The exit path's CAS(JOINABLE -> EXITED) must now lose to DETACHED,
         // steering the exiting thread onto the self-unmap branch.
@@ -6562,51 +6938,42 @@ mod tests {
     #[test]
     fn test_double_detach_is_einval() {
         let tid: u64 = 0x5100_0003;
-        assert!(store_thread_info(
-            tid,
-            0,
-            DEFAULT_THREAD_STACK_SIZE,
-            DEFAULT_THREAD_STACK_SIZE,
-            false
-        ));
+        let slot = track(tid, 0, DEFAULT_THREAD_STACK_SIZE, false);
         assert_eq!(pthread_detach(tid), 0);
         assert_eq!(pthread_detach(tid), crate::errno::EINVAL);
-        let slot = find_slot(tid).expect("still tracked");
+        release_slot(slot);
+    }
+
+    /// A thread created detached is detached from its first instant: a
+    /// `pthread_detach` of it is a double detach, and it cannot be joined.
+    #[test]
+    fn test_created_detached_thread_refuses_detach_and_join() {
+        let tid: u64 = 0x5100_0006;
+        let slot = track(tid, 0, DEFAULT_THREAD_STACK_SIZE, true);
+        assert_eq!(slot.state.load(Ordering::Acquire), STATE_DETACHED);
+        assert_eq!(pthread_detach(tid), crate::errno::EINVAL);
+        let mut rv: *mut u8 = core::ptr::null_mut();
+        assert_eq!(pthread_join(tid, &raw mut rv), crate::errno::EINVAL);
         release_slot(slot);
     }
 
     #[test]
     fn test_join_rejects_detached_thread() {
         let tid: u64 = 0x5100_0004;
-        assert!(store_thread_info(
-            tid,
-            0,
-            DEFAULT_THREAD_STACK_SIZE,
-            DEFAULT_THREAD_STACK_SIZE,
-            false
-        ));
+        let slot = track(tid, 0, DEFAULT_THREAD_STACK_SIZE, false);
         assert_eq!(pthread_detach(tid), 0);
         // Joining a detached thread must be rejected before any syscall.
         let mut rv: *mut u8 = core::ptr::null_mut();
         assert_eq!(pthread_join(tid, &raw mut rv), crate::errno::EINVAL);
-        let slot = find_slot(tid).expect("still tracked");
         release_slot(slot);
     }
 
     #[test]
     fn test_detach_after_joinable_exit_reaps() {
         let tid: u64 = 0x5100_0005;
-        // base = 0 so detach's reclaim path skips the host munmap call.
-        assert!(store_thread_info(
-            tid,
-            0,
-            DEFAULT_THREAD_STACK_SIZE,
-            DEFAULT_THREAD_STACK_SIZE,
-            false
-        ));
+        let slot = track(tid, 0, DEFAULT_THREAD_STACK_SIZE, false);
         // Simulate the exit path winning the race: it marks the slot EXITED
-        // and leaves the stack for a reaper.
-        let slot = find_slot(tid).expect("tracked");
+        // and leaves the mapping for a reaper.
         let cas = slot.state.compare_exchange(
             STATE_JOINABLE,
             STATE_EXITED,
@@ -6620,6 +6987,224 @@ mod tests {
             find_slot(tid).is_none(),
             "detach-after-exit must release the slot"
         );
+    }
+
+    /// The sentinels are never a thread's id.  Until 2026-09-26 an id of 0
+    /// matched an empty slot, and `pthread_detach(0)` marked it detached and
+    /// answered 0.
+    #[test]
+    fn test_find_slot_never_matches_a_sentinel() {
+        let table = private_table();
+        let slot = claim_slot_in(table, |_| None).expect("an empty private table");
+        assert_eq!(slot.task_id.load(Ordering::Relaxed), SLOT_RESERVED);
+        assert!(find_slot_in(table, SLOT_RESERVED).is_none());
+        assert!(find_slot_in(table, SLOT_EMPTY).is_none());
+        assert_eq!(pthread_detach(0), crate::errno::ESRCH);
+        assert_eq!(pthread_detach(SLOT_RESERVED), crate::errno::ESRCH);
+    }
+
+    /// A zero-filled chunk -- what `grow_table` gets from mmap -- is an empty
+    /// chunk.
+    #[test]
+    fn test_a_zeroed_chunk_is_empty() {
+        // SAFETY: every field is an atomic integer or pointer, for which
+        // all-zero is a valid value.
+        let chunk: ThreadChunk = unsafe { core::mem::zeroed() };
+        for slot in &chunk.slots {
+            assert_eq!(slot.task_id.load(Ordering::Relaxed), SLOT_EMPTY);
+            assert_eq!(slot.state.load(Ordering::Relaxed), STATE_JOINABLE);
+        }
+        assert!(chunk.next.load(Ordering::Relaxed).is_null());
+    }
+
+    /// The table grows past a chunk instead of refusing the 65th thread, and
+    /// every slot keeps its address.
+    #[test]
+    fn test_the_table_grows_a_chunk_at_a_time() {
+        let table = private_table();
+        let mut claimed = Vec::new();
+        for _ in 0..CHUNK_SLOTS * 2 + 1 {
+            claimed.push(claim_slot_in(table, grow_on_heap).expect("growth"));
+        }
+        assert_eq!(chunks_from(table).count(), 3);
+        for (i, slot) in claimed.iter().enumerate() {
+            slot.task_id
+                .store(0x5200_0000 + i as u64, Ordering::Release);
+        }
+        for (i, slot) in claimed.iter().enumerate() {
+            let found = find_slot_in(table, 0x5200_0000 + i as u64).expect("tracked");
+            assert!(core::ptr::eq(found, *slot));
+        }
+        // A released slot in the first chunk is reused before the table grows
+        // again.
+        release_slot(claimed[5]);
+        let again = claim_slot_in(table, |_| None).expect("the freed slot");
+        assert!(core::ptr::eq(again, claimed[5]));
+    }
+
+    /// Two threads that both find the table full link one chunk between
+    /// them; the loser uses the winner's.
+    #[test]
+    fn test_a_lost_growth_race_uses_the_winners_chunk() {
+        let table = private_table();
+        let first = private_table();
+        assert!(link_chunk(table, first).is_ok());
+        let second = private_table();
+        let Err(lost) = link_chunk(table, second) else {
+            panic!("a second chunk linked where one already was");
+        };
+        assert!(core::ptr::eq(lost, first));
+    }
+
+    /// A NULL attribute and a freshly initialised one ask for the same
+    /// thread -- which is why `pthread_attr_init` must record the guard.
+    #[test]
+    fn test_create_attr_defaults() {
+        assert_eq!(CreateAttr::read(core::ptr::null()), CreateAttr::DEFAULT);
+        let mut buf: PthreadAttrT = [0; 56];
+        assert_eq!(pthread_attr_init(&mut buf), 0);
+        assert_eq!(CreateAttr::read(&buf), CreateAttr::DEFAULT);
+        assert_eq!(CreateAttr::DEFAULT.guard_size, crate::unistd::PAGE_SIZE);
+    }
+
+    #[test]
+    fn test_create_attr_reads_what_the_setters_stored() {
+        let mut buf: PthreadAttrT = [0; 56];
+        assert_eq!(pthread_attr_init(&mut buf), 0);
+        assert_eq!(pthread_attr_setstacksize(&mut buf, 2 << 20), 0);
+        assert_eq!(pthread_attr_setguardsize(&mut buf, 0), 0);
+        assert_eq!(
+            pthread_attr_setdetachstate(&mut buf, PTHREAD_CREATE_DETACHED),
+            0
+        );
+        assert_eq!(
+            CreateAttr::read(&buf),
+            CreateAttr {
+                stack_size: 2 << 20,
+                guard_size: 0,
+                stack_addr: None,
+                detached: true,
+            }
+        );
+        assert_eq!(
+            pthread_attr_setstack(&mut buf, 0x4000_0000 as *mut core::ffi::c_void, 1 << 20),
+            0
+        );
+        let got = CreateAttr::read(&buf);
+        assert_eq!(got.stack_addr, Some(0x4000_0000));
+        assert_eq!(got.stack_size, 1 << 20);
+    }
+
+    /// A TLS image with a block, so the layout arithmetic has something to
+    /// place.
+    const TEST_TLS: crate::tls::TlsImage = crate::tls::TlsImage {
+        init_vaddr: 0,
+        init_size: 8,
+        mem_size: 24,
+        align: 8,
+    };
+
+    /// Our own stack: guard at the bottom, then at least the stack asked for,
+    /// then the TLS part -- all inside the mapping.
+    #[test]
+    fn test_plan_places_guard_stack_and_tls_in_one_mapping() {
+        let page = crate::unistd::PAGE_SIZE;
+        let want = CreateAttr {
+            stack_size: 100_000,
+            guard_size: 1,
+            stack_addr: None,
+            detached: false,
+        };
+        let plan = plan_thread(&want, &TEST_TLS).expect("fits");
+        assert_eq!(plan.guard, page, "the guard rounds up to a page");
+        assert_eq!(plan.stack, 100_000usize.next_multiple_of(page));
+        assert_eq!(plan.map_size % page, 0);
+        let base = 0x10_0000_0000;
+        let l = plan.place(base, &TEST_TLS);
+        assert_eq!(l.stack_base, base + page);
+        assert_eq!(l.stack_top % 16, 0);
+        assert!(l.stack_top - l.stack_base >= 100_000);
+        let block = TEST_TLS.block_size() as usize;
+        assert!(l.stack_top <= l.tp as usize - block);
+        let end =
+            l.tp as usize + crate::tls::TCB_SIZE as usize + crate::perthread::BLOCK_SIZE as usize;
+        assert!(end <= base + plan.map_size);
+    }
+
+    #[test]
+    fn test_plan_without_a_guard() {
+        let want = CreateAttr {
+            guard_size: 0,
+            ..CreateAttr::DEFAULT
+        };
+        let plan = plan_thread(&want, &TEST_TLS).expect("fits");
+        assert_eq!(plan.guard, 0);
+        assert_eq!(plan.place(0x20_0000, &TEST_TLS).stack_base, 0x20_0000);
+    }
+
+    /// A caller's stack is used as given; only the TLS part is mapped, and
+    /// the guard is ignored, as POSIX requires.
+    #[test]
+    fn test_plan_on_the_callers_stack() {
+        let want = CreateAttr {
+            stack_size: 0x1_0000,
+            guard_size: 0x4000,
+            stack_addr: Some(0x7000_0008),
+            detached: false,
+        };
+        let plan = plan_thread(&want, &TEST_TLS).expect("fits");
+        assert_eq!(plan.guard, 0);
+        assert_eq!(plan.stack, 0);
+        let tls = TEST_TLS.reserve() as usize;
+        assert_eq!(
+            plan.map_size,
+            tls.next_multiple_of(crate::unistd::PAGE_SIZE)
+        );
+        let base = 0x30_0000_0000;
+        let l = plan.place(base, &TEST_TLS);
+        assert_eq!(l.stack_base, 0x7000_0008);
+        assert_eq!(l.stack_top, (0x7000_0008 + 0x1_0000) & !0xf);
+        assert!(l.tp as usize >= base && (l.tp as usize) < base + plan.map_size);
+    }
+
+    #[test]
+    fn test_plan_refuses_sizes_that_overflow() {
+        let huge = CreateAttr {
+            stack_size: usize::MAX - 10,
+            ..CreateAttr::DEFAULT
+        };
+        assert!(plan_thread(&huge, &TEST_TLS).is_none());
+        let huge_guard = CreateAttr {
+            guard_size: usize::MAX,
+            ..CreateAttr::DEFAULT
+        };
+        assert!(plan_thread(&huge_guard, &TEST_TLS).is_none());
+    }
+
+    /// On the host there is no thread to create: `pthread_create` fails
+    /// cleanly and gives its slot back.
+    #[test]
+    fn test_failed_create_leaves_no_slot_behind() {
+        extern "C" fn never(_: *mut u8) -> *mut u8 {
+            core::ptr::null_mut()
+        }
+        let mut t: PthreadT = 0;
+        let reserved_before = chunks_from(&THREAD_TABLE)
+            .flat_map(|c| c.slots.iter())
+            .filter(|s| s.task_id.load(Ordering::Relaxed) == SLOT_RESERVED)
+            .count();
+        assert_eq!(
+            pthread_create(&mut t, core::ptr::null(), never, core::ptr::null_mut()),
+            crate::errno::EAGAIN
+        );
+        assert_eq!(t, 0);
+        let reserved_after = chunks_from(&THREAD_TABLE)
+            .flat_map(|c| c.slots.iter())
+            .filter(|s| s.task_id.load(Ordering::Relaxed) == SLOT_RESERVED)
+            .count();
+        // Other tests may hold reservations of their own at this moment, but
+        // never more than before plus theirs; this call's is gone.
+        assert!(reserved_after <= reserved_before + 1);
     }
 
     // -----------------------------------------------------------------------

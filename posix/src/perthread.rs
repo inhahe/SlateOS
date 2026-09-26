@@ -149,6 +149,13 @@ pub struct PerThread {
     /// mutex lock records its owner, and a syscall there was the uncontended
     /// path's whole cost.  `fork`'s child resets it: its id is new.
     pub tid: i32,
+
+    /// Address of this thread's slot in `pthread`'s thread table, or 0 for
+    /// the initial thread.  `pthread_create` writes it into the new thread's
+    /// block before the thread starts, so the thread can reach its slot
+    /// without looking itself up by an id its creator may not have published
+    /// yet.
+    pub thread_slot: usize,
 }
 
 impl PerThread {
@@ -170,6 +177,7 @@ impl PerThread {
         cancel_type: 0,
         random: crate::random::RandomState::ZERO,
         tid: 0,
+        thread_slot: 0,
     };
 }
 
@@ -220,9 +228,17 @@ pub fn current() -> *mut PerThread {
         // module docs — this is the pre-crt / bare-metal-service case.
         return &raw mut FALLBACK;
     }
-    // The block is placed immediately above the TCB by
-    // `TlsImage::reserve`/`thread_pointer`.
-    (tp.wrapping_add(crate::tls::TCB_SIZE)) as *mut PerThread
+    block_at(tp)
+}
+
+/// The block of the thread whose thread pointer is `tp`: immediately above
+/// the TCB, where `TlsImage::reserve`/`thread_pointer` placed it.
+///
+/// `pthread_create` uses it to write into a new thread's block before the
+/// thread runs.
+#[must_use]
+pub fn block_at(tp: u64) -> *mut PerThread {
+    tp.wrapping_add(crate::tls::TCB_SIZE) as *mut PerThread
 }
 
 /// Host build: a `thread_local!` stands in for the TLS block.
@@ -282,6 +298,7 @@ mod tests {
         assert_eq!(zeroed.tm.tm_isdst, PerThread::ZERO.tm.tm_isdst);
         assert_eq!(zeroed.cancel_state, PerThread::ZERO.cancel_state);
         assert_eq!(zeroed.cancel_type, PerThread::ZERO.cancel_type);
+        assert_eq!(zeroed.thread_slot, PerThread::ZERO.thread_slot);
     }
 
     /// A fresh thread must start cancellable and deferred, which POSIX

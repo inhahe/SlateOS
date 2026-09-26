@@ -1818,6 +1818,11 @@ D's to act on once answered).
       clock-selecting waits exist, with `pthread_rwlock_timed*`; the
       attribute calls for process-shared, priority and robust mutexes exist,
       answering `ENOTSUP` for what the kernel cannot back (§1110).
+    * `pthread_create` honours its attribute -- stack size, a one-page guard
+      below every stack, a caller's stack, `PTHREAD_CREATE_DETACHED` -- and
+      its thread table grows past 64 threads; a thread's slot exists before
+      the thread does (§1111).  Ring-3 check `services/ctest-pthread`, run by
+      lane A on request.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

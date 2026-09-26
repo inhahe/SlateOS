@@ -150,9 +150,8 @@ pub(crate) use process_global;
 ///
 /// A `compare_exchange` on a per-slot `in_use` flag would make the *simple*
 /// pools safe, but not the *compound* ones.  `msgget`, `semget` and
-/// `sysv_shm::alloc_segment(key, …)` first
-/// scan for an existing entry with a matching key and only allocate if there
-/// is none; an atomic per-slot claim would still let two threads each create
+/// `shmget` first scan for an existing entry with a matching key and only
+/// allocate if there is none; an atomic per-slot claim would still let two threads each create
 /// a segment for the same key, because the lookup and the claim have to be
 /// one indivisible step, not two.  One primitive that covers both beats two
 /// primitives where the weaker one silently does not apply.  See

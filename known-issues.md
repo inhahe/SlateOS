@@ -24293,6 +24293,17 @@ Against Linux 6.6's io_uring/io_uring.c and io_uring/sqpoll.c.
 - Beside them, the finding of the pass: the three calls validated in an
   order of their own -- `B-D-IO-URING-WAS-NOT-LINUXS` (new, fixed with it).
 
+**Thirty-third pass, 2026-09-26 — `sysv_shm.rs` (2 sites), lane D.** Against
+Linux 6.6's ipc/shm.c.
+
+- **`shmctl(id, IPC_SET, NULL)`** looked the segment up first, so a bad id
+  was `EINVAL`; `ksys_shmctl` copies the buffer before anything
+  (`copy_shmid_from_user`), so it is `EFAULT` whatever the id.
+- **`shmctl(id, IPC_STAT, NULL)`** was `EFAULT` before the lookup; Linux
+  looks the segment up and checks the permission first, and faults writing.
+- Beside them, the finding of the pass: the segments were a four-slot pool
+  of 64 KiB -- `B-D-SYSV-SHM-WAS-A-STATIC-POOL` (new, fixed with it).
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24306,16 +24317,17 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-thirty-two swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`, `sched.rs`,
-`mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`, `linux_module.rs`,
-`sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs`, `sysv_sem.rs`, `linux_aio_abi.rs`,
-`linux_seccomp.rs`, `mman.rs`, `resource.rs`, `crypt.rs`, `iconv.rs` and
-`linux_io_uring.rs`. That finishes every file the sweep counted at four and at
-three, the three the recount of 2026-09-26 added among them: `pwd.rs`,
-`dirent.rs` and `signal.rs` needed nothing at their NULLs -- `pwd.rs`'s
-database did (`B-D-PWD-KNEW-ONLY-ROOT`). Next are the files at two: `fts.rs`,
-`ftw.rs`, `linux_landlock.rs`, `sys_quota.rs`, `sys_timex.rs`, `sysv_shm.rs`
-and `xattr.rs` (walked by the fourth pass).
+thirty-three swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
+`sched.rs`, `mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`,
+`linux_module.rs`, `sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs`, `sysv_sem.rs`,
+`linux_aio_abi.rs`, `linux_seccomp.rs`, `mman.rs`, `resource.rs`, `crypt.rs`,
+`iconv.rs`, `linux_io_uring.rs` and `sysv_shm.rs`. That finishes every file
+the sweep counted at four and at three, the three the recount of 2026-09-26
+added among them: `pwd.rs`, `dirent.rs` and `signal.rs` needed nothing at
+their NULLs -- `pwd.rs`'s database did (`B-D-PWD-KNEW-ONLY-ROOT`). Of the
+files at two, `sysv_shm.rs` is done; next are `fts.rs`, `ftw.rs`,
+`linux_landlock.rs`, `sys_quota.rs`, `sys_timex.rs` and `xattr.rs` (walked by
+the fourth pass).
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
@@ -169847,6 +169859,47 @@ flag's value.
 `io_uring_setup` stops where Linux would allocate the rings and answers
 `ENOSYS`; the checks Linux makes afterwards (`ATTACH_WQ`'s descriptor,
 `SQ_AFF`'s CPU) are about rings that cannot exist here.
+
+### [D] B-D-SYSV-SHM-WAS-A-STATIC-POOL — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/sysv_shm.rs` (rewritten), over the kernel's
+shared-memory regions (`SYS_SHM_CREATE`/`MAP`/`UNMAP`/`CLOSE`, now named in
+`posix/src/syscall.rs`).
+
+**In short:** System V shared memory is how some programs share a block of
+memory between their parts -- PostgreSQL, X11's shared-memory extension,
+many older Unix programs. Ours held four blocks of at most 64 KiB each, gave
+the same address to every attach, and checked no permissions, so anything
+larger or more numerous failed, and a program comparing two attach addresses
+was told they were one mapping. It is now Linux's, as the message queues and
+semaphores already were.
+
+**What was wrong, against Linux 6.6:**
+
+| | was | now |
+|---|---|---|
+| sizes, counts | four segments, 64 KiB each | `SHMMIN` 1 byte to `SHMMAX`, `SHMALL` pages in all, `SHMMNI` 4096 segments -- Linux's defaults |
+| memory | a static pool inside the library | a kernel shared-memory region per segment; every `shmat` maps it afresh, so two attaches are two addresses of the same bytes |
+| permissions | stored, never checked | `ipcperms` for `shmget`, `shmat` (read, or read and write) and `IPC_STAT`; owner or creator (or `CAP_SYS_ADMIN`) for `IPC_SET` and `IPC_RMID`; `SHM_LOCK` the owner's, or `CAP_IPC_LOCK` |
+| removal while attached | kept the key usable | `SHM_DEST` in the mode, the key made private, freed at the last detach -- the id still attaches, as on Linux |
+| `shmget` on an existing key | -- | `EEXIST`, then a larger `size` `EINVAL` before the permission's `EACCES`, as `ipcget` orders them |
+| `IPC_SET`/`IPC_STAT` with a NULL buffer | the segment looked up first | `IPC_SET` reads the buffer first; `IPC_STAT` writes it after the lookup and the permission |
+| `IPC_INFO`, `SHM_INFO`, `SHM_STAT`, `SHM_STAT_ANY` | `EINVAL` | Linux's figures and ids |
+| times, pids | 0 | `shm_atime`, `shm_dtime`, `shm_ctime`, `shm_cpid`, `shm_lpid` kept |
+
+**Still not Linux's:**
+
+- **An address the caller chooses** (`shmat(id, addr, …)` with `addr`
+  non-NULL) is `EINVAL`: `SYS_SHM_MAP` picks the address itself. Asked of
+  lane A in `requests/d-a-shm-map-at-an-address.md`.
+- **`SHM_EXEC`** is `EACCES`: the kernel never maps shared memory
+  executable.
+- **Across `fork` and between programs** a segment is not shared: the table
+  is this process's (open question D-Q3, as for the message queues and
+  semaphores), and a child's `shmat` of an inherited id is refused by the
+  kernel, which authorizes only a region's creator.
+- **`SHM_HUGETLB`** is `ENOMEM`, as on a Linux system with no huge pages set
+  aside.
 
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 

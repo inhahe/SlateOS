@@ -996,6 +996,25 @@ pub const SYS_PIPE_TRY_READ: u64 = 224;
 pub const SYS_PIPE_CLOSE: u64 = 225;
 pub const SYS_PIPE_POLL: u64 = 228;
 pub const SYS_PIPE_READABLE_BYTES: u64 = 229;
+
+// Shared-memory regions (kernel/src/syscall/number.rs 230-234), behind
+// System V shared memory (`crate::sysv_shm`).
+//   CREATE: (size) -> handle; the size is rounded up to pages, the memory
+//           committed, and the creating process authorized to map it.
+//   SIZE:   (handle) -> size in bytes.
+//   CLOSE:  (handle) -> 0; the memory lives on in every mapping of it.
+//   MAP:    (handle, SHM_MAP_READ | SHM_MAP_WRITE) -> the address of a new
+//           mapping -- a fresh one every call; never executable.
+//   UNMAP:  (addr, size) -> 0; `munmap`'s.
+pub const SYS_SHM_CREATE: u64 = 230;
+pub const SYS_SHM_SIZE: u64 = 231;
+pub const SYS_SHM_CLOSE: u64 = 232;
+pub const SYS_SHM_MAP: u64 = 233;
+pub const SYS_SHM_UNMAP: u64 = 234;
+/// `SYS_SHM_MAP`: map readable (the kernel's `MAP_READ`).
+pub const SHM_MAP_READ: u64 = 1 << 0;
+/// `SYS_SHM_MAP`: map writable (the kernel's `MAP_WRITE`).
+pub const SHM_MAP_WRITE: u64 = 1 << 1;
 // Later pipe additions live in the free extension range (657+): the original
 // 220-229 block is full (230 starts shared memory). Backs tee(2) — peek copies
 // buffered bytes without consuming, wait_readable blocks for data/EOF.

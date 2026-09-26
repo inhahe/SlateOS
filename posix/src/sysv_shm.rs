@@ -1,62 +1,63 @@
-//! System V shared memory — `<sys/shm.h>`.
+// Sizes, page counts and indices here are bounded -- a segment by `SHMMAX`,
+// the total by `SHMALL`, an index by `SHMMNI` -- and every sum is checked
+// against its bound before it is made, or undoes one an earlier sum made.
+// Clippy cannot see across the checks.
+#![allow(clippy::arithmetic_side_effects)]
+//! System V shared memory (`<sys/shm.h>`): Linux 6.6's semantics (ipc/shm.c)
+//! -- inside one process.
 //!
-//! A real (single-process) implementation of `shmget` / `shmat` /
-//! `shmdt` / `shmctl`, replacing the four ENOSYS stubs.
+//! Segments are kept in this process: a key names the same segment for every
+//! thread of the program, but another program using the key gets a segment of
+//! its own. Sharing them between programs is open question D-Q3
+//! (`open-questions.md`), as for the message queues and semaphores; the rest
+//! is Linux's:
 //!
-//! ## Design
+//! - **Memory** is the kernel's: a segment is a shared-memory region
+//!   (`SYS_SHM_CREATE`), and every `shmat` maps it afresh (`SYS_SHM_MAP`), so
+//!   two attaches are two addresses of the same bytes, as on Linux. A segment
+//!   is any size from [`SHMMIN`] to [`SHMMAX`], [`SHMALL`] pages in all, and
+//!   [`SHMMNI`] segments at most -- Linux's defaults; its memory is committed
+//!   when it is made, as all memory here is.
+//! - **Permissions** are Linux's `ipcperms` ([`crate::sysv_ipc`]): `shmget` on
+//!   an existing key asks for its flags' bits, `shmat` for read, or read and
+//!   write, and `IPC_STAT` for read; `IPC_SET` and `IPC_RMID` are the owner's
+//!   or the creator's, or need `CAP_SYS_ADMIN`.
+//! - **Removal** is Linux's: `IPC_RMID` on an attached segment marks it
+//!   (`SHM_DEST`) and makes its key private, and the memory goes when the last
+//!   attach is detached; until then its id still attaches.
+//! - **Errors come in the kernel's order.** `shmget` on an existing key judges
+//!   the size before the permission; `IPC_SET` reads its buffer before it
+//!   looks the segment up, and `IPC_STAT` writes it after.
+//! - **`IPC_INFO`, `SHM_INFO`, `SHM_STAT` and `SHM_STAT_ANY`** answer as
+//!   Linux's do, which is what `ipcs -m` needs.
 //!
-//! Each segment is backed by a fixed slot in a static [`SegmentStorage`]
-//! pool — [`MAX_SEGMENTS`] segments of [`SEGMENT_SIZE`] bytes each,
-//! 16 KiB-aligned (our page size) so `shmat` returns a properly
-//! page-aligned address.  The pool sits in BSS; unused slots cost
-//! nothing at run time on demand-paged systems.
+//! ## Not Linux's
 //!
-//! A single global spinlock ([`SHM_LOCK`]) serialises all mutations of
-//! the per-slot metadata.  The data buffer itself is *not* under the
-//! lock — that's the whole point of shared memory.
+//! - `shmat` at an address the caller chooses (`shmaddr` non-NULL) is refused
+//!   with `EINVAL`: the kernel's `SYS_SHM_MAP` picks the address itself.
+//! - `SHM_EXEC` is refused with `EACCES`: the kernel never maps shared memory
+//!   executable.
+//! - `SHM_HUGETLB` is `ENOMEM`, as on a Linux system with no huge pages set
+//!   aside -- Ubuntu's default.
+//! - `SHM_LOCK` records the lock and changes nothing else: this memory is
+//!   never paged out.
 //!
-//! Segment IDs use the same generation-tagged encoding as `sysv_sem` /
-//! `sysv_msg`: `(generation << 16) | (slot + 1)`.
+//! ## What changed on 2026-09-26
 //!
-//! ## Lifecycle
-//!
-//! Linux semantics: `shmctl(IPC_RMID)` marks the segment for deletion
-//! but **does not** free it until the last attached caller detaches.
-//! We follow that contract — `IPC_RMID` flips a `marked_for_rmid`
-//! flag, and the slot is only returned to the free pool when
-//! `nattch` drops to zero.  After `IPC_RMID`, the segment can no
-//! longer be looked up by key (so a future `shmget` with the same key
-//! always creates a new slot), but existing attached pointers stay
-//! valid for as long as any caller still holds one.
-//!
-//! ## Multiple attaches
-//!
-//! `shmat` is called once per attaching caller; classically each call
-//! returns a *different* mapping (because each process has its own
-//! address space).  In our single-process world the same backing
-//! buffer is shared by everyone, so every `shmat` call returns the
-//! same pointer and `shm_nattch` is just a reference count.  `shmdt`
-//! decrements the count.
-//!
-//! ## Limitations
-//!
-//! * Single-process only — there's no kernel-side namespace yet, so a
-//!   second process wouldn't see segments created by the first.  When
-//!   we add cross-process IPC, this layer will need rework to back
-//!   segments with kernel-managed virtual mappings.
-//! * `SHM_REMAP`, `SHM_RND`, caller-supplied `shmaddr` — accepted but
-//!   ignored (we always return our own pool address).
-//! * `SHM_RDONLY` — accepted but unenforced (we have no per-mapping
-//!   permission machinery).
-//! * `SHM_LOCK` / `SHM_UNLOCK` (in `shmctl`) — accepted as no-ops; our
-//!   memory is never swapped.
-//! * Maximum segment size is fixed at [`SEGMENT_SIZE`] (64 KiB).
-//!   Programs requesting bigger get `EINVAL`.
-//! * `shm_atime` / `shm_dtime` / `shm_ctime` / `shm_cpid` / `shm_lpid`
-//!   stay 0 — we don't have process IDs or per-segment clocks.
+//! The segments were a static pool: four of at most 64 KiB, every `shmat` of
+//! a segment returned the same address, permissions were stored and never
+//! checked, `IPC_SET` looked the segment up before reading its buffer, and
+//! `IPC_INFO`, `SHM_INFO` and `SHM_STAT` were `EINVAL`
+//! (`known-issues.md` -> `B-D-SYSV-SHM-WAS-A-STATIC-POOL`).
 
 use crate::errno;
-use core::cell::UnsafeCell;
+use crate::linux_ipc::{IPC_INFO, IpcPerm};
+use crate::objtable::Slots;
+use crate::perprocess::process_global;
+use crate::sysv_ipc::{
+    Caller, Perm, S_IRUGO, S_IWUGO, SEQ_MASK, caller, decode_id, encode_id, may_control, now_secs,
+    permits,
+};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -86,10 +87,27 @@ pub const SHM_REMAP: i32 = 0o40000;
 /// Executable mapping.
 pub const SHM_EXEC: i32 = 0o100000;
 
+/// `shmget`: back the segment with huge pages.
+pub const SHM_HUGETLB: i32 = 0o4000;
+/// `shmget`: do not reserve swap for it.
+pub const SHM_NORESERVE: i32 = 0o10000000;
+
 /// Lock pages in memory.
 pub const SHM_LOCK: i32 = 11;
 /// Unlock pages.
 pub const SHM_UNLOCK: i32 = 12;
+/// `shmctl`: the segment at an index of the table, not an id -- what `ipcs`
+/// walks. Linux-specific.
+pub const SHM_STAT: i32 = 13;
+/// `shmctl`: the totals in use. Linux-specific.
+pub const SHM_INFO: i32 = 14;
+/// `shmctl`: `SHM_STAT` without its read-permission check (Linux 4.17).
+pub const SHM_STAT_ANY: i32 = 15;
+
+/// In `shm_perm.mode`: removed while attached, freed at the last detach.
+pub const SHM_DEST: u32 = 0o1000;
+/// In `shm_perm.mode`: `SHM_LOCK`ed.
+pub const SHM_LOCKED: u32 = 0o2000;
 
 /// Segment low boundary address multiple (page size).
 ///
@@ -97,12 +115,15 @@ pub const SHM_UNLOCK: i32 = 12;
 /// multiple of this, and the number is written down once, in `unistd`.
 pub const SHMLBA: usize = crate::unistd::PAGE_SIZE;
 
-// ---------------------------------------------------------------------------
-// Pool sizing
-// ---------------------------------------------------------------------------
-
-const MAX_SEGMENTS: usize = 4;
-const SEGMENT_SIZE: usize = 65536;
+/// The smallest segment, in bytes.
+pub const SHMMIN: usize = 1;
+/// The largest segment, in bytes (Linux's `kernel.shmmax`:
+/// `ULONG_MAX - (1UL << 24)`).
+pub const SHMMAX: usize = usize::MAX - (1 << 24);
+/// The most pages of segments in all (`kernel.shmall`, the same figure).
+pub const SHMALL: usize = usize::MAX - (1 << 24);
+/// The most segments (`kernel.shmmni`).
+pub const SHMMNI: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -113,6 +134,8 @@ const SEGMENT_SIZE: usize = 65536;
 pub struct ShmidDs {
     /// Permissions, as a nested `struct ipc_perm` — see [`MsqidDs::msg_perm`]
     /// for why these are no longer flattened.
+    ///
+    /// [`MsqidDs::msg_perm`]: crate::sysv_msg::MsqidDs::msg_perm
     pub shm_perm: crate::linux_ipc::IpcPerm,
     /// Segment size in bytes.
     pub shm_segsz: usize,
@@ -132,356 +155,519 @@ pub struct ShmidDs {
     __unused: [u64; 2],
 }
 
-// ---------------------------------------------------------------------------
-// Internal data structures
-// ---------------------------------------------------------------------------
-
-/// Backing storage for a single segment.
-///
-/// On Windows COFF the maximum section alignment is 8192 bytes
-/// (`IMAGE_SCN_ALIGN_8192BYTES`), so we cannot use a static aligned
-/// directly to [`SHMLBA`] (16 KiB). Instead we allocate an extra
-/// `SHMLBA - 1` slack bytes and round the pointer up at access time
-/// in [`segment_ptr`].
-#[repr(C, align(8192))]
-struct SegmentStorage {
-    bytes: UnsafeCell<[u8; SEGMENT_SIZE + SHMLBA]>,
+/// `struct shminfo` — what `shmctl(IPC_INFO)` writes: the limits.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Shminfo {
+    /// [`SHMMAX`].
+    pub shmmax: usize,
+    /// [`SHMMIN`].
+    pub shmmin: usize,
+    /// [`SHMMNI`].
+    pub shmmni: usize,
+    /// Segments a process may attach: [`SHMMNI`], as Linux reports it.
+    pub shmseg: usize,
+    /// [`SHMALL`].
+    pub shmall: usize,
+    /// `__unused[4]`.
+    pub __unused: [usize; 4],
 }
 
-// SAFETY: callers synchronise access externally — the segment buffer is
-// shared memory by design and access discipline is the user's problem.
-// The metadata (in `Segment`) is protected by SHM_LOCK.
-unsafe impl Sync for SegmentStorage {}
+/// `struct shm_info` — what `shmctl(SHM_INFO)` writes: what is in use.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ShmInfo {
+    /// Segments that exist.
+    pub used_ids: i32,
+    /// Pages of segments that exist.
+    pub shm_tot: usize,
+    /// Of them, resident: all of them, memory here being committed.
+    pub shm_rss: usize,
+    /// Of them, swapped out: none.
+    pub shm_swp: usize,
+    /// Unused since Linux 2.4.
+    pub swap_attempts: usize,
+    /// Unused since Linux 2.4.
+    pub swap_successes: usize,
+}
 
-#[derive(Clone, Copy)]
-struct Segment {
-    in_use: bool,
-    /// Flipped by `IPC_RMID`; when nattch reaches 0 the slot is freed.
-    marked_for_rmid: bool,
-    key: i32,
-    /// Logical size requested by `shmget` (≤ SEGMENT_SIZE).
+// ---------------------------------------------------------------------------
+// The memory behind a segment
+// ---------------------------------------------------------------------------
+
+/// Where a segment's memory lives: the kernel's shared-memory regions on
+/// SlateOS. On the host, which has no such calls, a zeroed `malloc` block
+/// that every attach gets itself -- enough to test the bookkeeping.
+mod backing {
+    /// A region of `size` bytes, rounded up to pages: its handle.
+    #[cfg(target_os = "none")]
+    pub(super) fn create(size: usize) -> Result<u64, i32> {
+        let r = crate::syscall::syscall1(crate::syscall::SYS_SHM_CREATE, size as u64);
+        if r < 0 {
+            return Err(crate::errno::errno_for(r));
+        }
+        Ok(r as u64)
+    }
+
+    /// A new mapping of `handle`'s region: its address.
+    #[cfg(target_os = "none")]
+    pub(super) fn map(handle: u64, write: bool) -> Result<usize, i32> {
+        let flags = crate::syscall::SHM_MAP_READ
+            | if write {
+                crate::syscall::SHM_MAP_WRITE
+            } else {
+                0
+            };
+        let r = crate::syscall::syscall2(crate::syscall::SYS_SHM_MAP, handle, flags);
+        if r <= 0 {
+            return Err(if r == 0 {
+                crate::errno::ENOMEM
+            } else {
+                crate::errno::errno_for(r)
+            });
+        }
+        Ok(r as usize)
+    }
+
+    /// Unmap the `size` bytes at `addr`.
+    #[cfg(target_os = "none")]
+    pub(super) fn unmap(addr: usize, size: usize) {
+        // The mapping is this module's own record of one it made, so the
+        // unmap cannot be refused for a reason the caller could act on.
+        let _ = crate::syscall::syscall2(crate::syscall::SYS_SHM_UNMAP, addr as u64, size as u64);
+    }
+
+    /// Give the region back; mappings of it keep its memory until unmapped.
+    #[cfg(target_os = "none")]
+    pub(super) fn close(handle: u64) {
+        // The handle is this module's own, closed once.
+        let _ = crate::syscall::syscall1(crate::syscall::SYS_SHM_CLOSE, handle);
+    }
+
+    #[cfg(not(target_os = "none"))]
+    pub(super) fn create(size: usize) -> Result<u64, i32> {
+        // Page-aligned, as the kernel's mappings are: `shmdt` refuses any
+        // other address.
+        let p = crate::malloc::aligned_alloc(super::SHMLBA, size);
+        if p.is_null() {
+            return Err(crate::errno::ENOMEM);
+        }
+        // SAFETY: a fresh block of `size` bytes.
+        unsafe { core::ptr::write_bytes(p, 0, size) };
+        // Exposed: every attach turns the address back into a pointer.
+        Ok(p.expose_provenance() as u64)
+    }
+
+    #[cfg(not(target_os = "none"))]
+    pub(super) fn map(handle: u64, _write: bool) -> Result<usize, i32> {
+        Ok(handle as usize)
+    }
+
+    #[cfg(not(target_os = "none"))]
+    pub(super) fn unmap(_addr: usize, _size: usize) {}
+
+    #[cfg(not(target_os = "none"))]
+    pub(super) fn close(handle: u64) {
+        // SAFETY: the block `create` returned, freed once.
+        unsafe { crate::malloc::free(core::ptr::with_exposed_provenance_mut(handle as usize)) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The tables
+// ---------------------------------------------------------------------------
+
+struct Seg {
+    live: bool,
+    /// Key, the slot's reuse count, owner, creator and mode.
+    perm: Perm,
+    /// `SHM_DEST`: removed while attached; its key is private.
+    dest: bool,
+    /// `SHM_LOCKED`.
+    locked: bool,
+    /// `shm_segsz`: the size asked for.
     size: usize,
-    mode: u16,
+    /// The kernel region.
+    handle: u64,
     nattch: usize,
-    /// Bumped on every slot reuse to invalidate stale shmids.
-    generation: u32,
+    atime: i64,
+    dtime: i64,
+    ctime: i64,
+    cpid: i32,
+    lpid: i32,
 }
 
-impl Segment {
+impl Seg {
     const EMPTY: Self = Self {
-        in_use: false,
-        marked_for_rmid: false,
-        key: 0,
+        live: false,
+        perm: Perm::EMPTY,
+        dest: false,
+        locked: false,
         size: 0,
-        mode: 0,
+        handle: 0,
         nattch: 0,
-        generation: 0,
+        atime: 0,
+        dtime: 0,
+        ctime: 0,
+        cpid: 0,
+        lpid: 0,
+    };
+
+    /// `shm_perm.mode` as `IPC_STAT` reports it: the permission bits with
+    /// `SHM_DEST` and `SHM_LOCKED`.
+    fn mode(&self) -> u32 {
+        self.perm.mode
+            | if self.dest { SHM_DEST } else { 0 }
+            | if self.locked { SHM_LOCKED } else { 0 }
+    }
+}
+
+/// One `shmat`: where, how much, and of which segment.
+#[derive(Clone, Copy)]
+struct Attach {
+    live: bool,
+    addr: usize,
+    len: usize,
+    slot: usize,
+}
+
+impl Attach {
+    const EMPTY: Self = Self {
+        live: false,
+        addr: 0,
+        len: 0,
+        slot: 0,
     };
 }
 
-// ---------------------------------------------------------------------------
-// Static state
-// ---------------------------------------------------------------------------
-
-/// Serialises every scan of `SHM_META`.
-///
-/// A plain `static`, matching `SHM_META`'s plain `static mut`: the lock must
-/// have the same scope as the table it guards.  See
-/// [`crate::perprocess::PoolLock`].
-static SHM_TABLE_LOCK: crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
-static mut SHM_META: [Segment; MAX_SEGMENTS] = [const { Segment::EMPTY }; MAX_SEGMENTS];
-static SHM_STORAGE: [SegmentStorage; MAX_SEGMENTS] = [
-    SegmentStorage {
-        bytes: UnsafeCell::new([0u8; SEGMENT_SIZE + SHMLBA]),
-    },
-    SegmentStorage {
-        bytes: UnsafeCell::new([0u8; SEGMENT_SIZE + SHMLBA]),
-    },
-    SegmentStorage {
-        bytes: UnsafeCell::new([0u8; SEGMENT_SIZE + SHMLBA]),
-    },
-    SegmentStorage {
-        bytes: UnsafeCell::new([0u8; SEGMENT_SIZE + SHMLBA]),
-    },
-];
-
-/// Take `SHM_TABLE_LOCK` for the duration of a segment-table scan.
-fn lock() -> crate::perprocess::PoolGuard<'static> {
-    // SAFETY: `SHM_TABLE_LOCK` is a `static`, so it outlives the guard.
-    unsafe { crate::perprocess::lock_pool((&raw const SHM_TABLE_LOCK).cast_mut()) }
+/// The segments, this process's attaches, and the pages in use.
+struct Tables {
+    segs: Slots<Seg>,
+    attaches: Slots<Attach>,
+    pages: usize,
 }
 
-// ---------------------------------------------------------------------------
-// shmid encoding
-// ---------------------------------------------------------------------------
+process_global! {
+    /// This process's segments.
+    ///
+    /// Per-thread on the host, for test isolation: a test that counts
+    /// segments is broken by any concurrent one, and no lock fixes that.
+    fn tables() -> Tables = Tables { segs: Slots::EMPTY, attaches: Slots::EMPTY, pages: 0 };
 
-fn encode_shmid(slot: usize, generation: u32) -> i32 {
-    let s = ((slot as u32) & 0xFFFF).wrapping_add(1);
-    let g = generation & 0x7FFF;
-    ((g << 16) | s) as i32
+    /// Serialises every use of the tables, with the same scope as they have
+    /// (see [`crate::perprocess::PoolLock`]).
+    fn shm_lock() -> crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
 }
 
-fn decode_shmid(shmid: i32) -> Option<(usize, u32)> {
-    if shmid <= 0 {
-        return None;
+/// Holds the tables' lock; the tables are reached through it.
+struct Locked {
+    _guard: crate::perprocess::PoolGuard<'static>,
+    t: *mut Tables,
+}
+
+fn lock() -> Locked {
+    Locked {
+        // SAFETY: `shm_lock()` is this context's lock, valid as long as the
+        // tables it guards.
+        _guard: unsafe { crate::perprocess::lock_pool(shm_lock()) },
+        t: tables(),
     }
-    let u = shmid as u32;
-    let s = (u & 0xFFFF) as usize;
-    if s == 0 {
-        return None;
-    }
-    // `s != 0` from the early return above — subtract cannot underflow.
-    let slot = s.wrapping_sub(1);
-    if slot >= MAX_SEGMENTS {
-        return None;
-    }
-    let generation = (u >> 16) & 0x7FFF;
-    Some((slot, generation))
 }
 
-/// Pointer to the (SHMLBA-aligned) backing buffer for slot `slot`.
-///
-/// We round the raw static address up to the next [`SHMLBA`] multiple
-/// so callers always see a properly page-aligned mapping — necessary
-/// because Windows COFF caps static alignment below `SHMLBA`.
-fn segment_ptr(slot: usize) -> *mut u8 {
-    // Caller contract: `slot < MAX_SEGMENTS == SHM_STORAGE.len()`.
-    #[allow(clippy::indexing_slicing)]
-    let raw = SHM_STORAGE[slot].bytes.get().cast::<u8>() as usize;
-    // SHMLBA is a power of two — round up.
-    let aligned = raw.wrapping_add(SHMLBA - 1) & !(SHMLBA - 1);
-    aligned as *mut u8
+/// Pages a segment of `size` bytes takes.
+fn pages_of(size: usize) -> Option<usize> {
+    size.checked_add(SHMLBA - 1).map(|n| n / SHMLBA)
 }
 
-// ---------------------------------------------------------------------------
-// Helpers (all callers hold the lock)
-// ---------------------------------------------------------------------------
-
-/// SAFETY: caller holds the lock.
-unsafe fn meta_ptr() -> *mut Segment {
-    core::ptr::addr_of_mut!(SHM_META).cast::<Segment>()
-}
-
-/// SAFETY: caller holds the lock.
-unsafe fn find_by_key(key: i32) -> Option<usize> {
-    if key == IPC_PRIVATE {
-        return None;
+impl Locked {
+    fn tables(&mut self) -> &mut Tables {
+        // SAFETY: the lock is held, and `t` is this context's tables.
+        unsafe { &mut *self.t }
     }
-    let meta = unsafe { meta_ptr() };
-    let mut i: usize = 0;
-    while i < MAX_SEGMENTS {
-        let m = unsafe { meta.add(i) };
-        // Only match segments that haven't been marked for deletion.
-        if unsafe { (*m).in_use } && !unsafe { (*m).marked_for_rmid } && unsafe { (*m).key } == key
-        {
-            return Some(i);
+
+    fn seg(&mut self, slot: usize) -> Option<&mut Seg> {
+        self.tables().segs.get(slot)
+    }
+
+    /// The id naming the segment in `slot` now.
+    fn id_of(&mut self, slot: usize) -> i32 {
+        let seq = self.seg(slot).map_or(0, |s| s.perm.seq);
+        encode_id(slot, seq)
+    }
+
+    /// The slot of the live segment `shmid` names -- removed while attached
+    /// or not, as Linux's `shm_obtain_object_check` finds it.
+    fn resolve(&mut self, shmid: i32) -> Option<usize> {
+        let (slot, seq) = decode_id(shmid)?;
+        self.seg(slot)
+            .is_some_and(|s| s.live && s.perm.seq & SEQ_MASK == seq)
+            .then_some(slot)
+    }
+
+    /// The slot at table index `index`, if a segment is there (`SHM_STAT`).
+    fn at_index(&mut self, index: i32) -> Option<usize> {
+        let slot = usize::try_from(index).ok()?;
+        self.seg(slot).is_some_and(|s| s.live).then_some(slot)
+    }
+
+    /// A segment `shmget` can find by `key`: one removed while attached has
+    /// a private key, and is not found.
+    fn find_key(&mut self, key: i32) -> Option<usize> {
+        let cap = self.tables().segs.cap();
+        (0..cap).find(|&i| {
+            self.seg(i)
+                .is_some_and(|s| s.live && !s.dest && s.perm.key == key)
+        })
+    }
+
+    /// Linux's `newseg`: a segment keyed `key` of `size` bytes, with
+    /// `shmflg`'s permission bits, owned and created by `who`.
+    fn new_segment(
+        &mut self,
+        key: i32,
+        size: usize,
+        shmflg: i32,
+        who: Caller,
+    ) -> Result<usize, i32> {
+        if !(SHMMIN..=SHMMAX).contains(&size) {
+            return Err(errno::EINVAL);
         }
-        i = i.wrapping_add(1);
-    }
-    None
-}
-
-/// SAFETY: caller holds the lock.
-unsafe fn alloc_segment(key: i32, size: usize, mode: u16) -> Option<usize> {
-    let meta = unsafe { meta_ptr() };
-    let mut i: usize = 0;
-    while i < MAX_SEGMENTS {
-        let m = unsafe { meta.add(i) };
-        if !unsafe { (*m).in_use } {
-            unsafe {
-                (*m).in_use = true;
-                (*m).marked_for_rmid = false;
-                (*m).key = key;
-                (*m).size = size;
-                (*m).mode = mode;
-                (*m).nattch = 0;
-            }
-            // Zero the backing buffer so a reused slot doesn't leak
-            // stale data to the next caller.
-            // SAFETY: lock held; no live attachments since refcount is 0.
-            unsafe {
-                core::ptr::write_bytes(segment_ptr(i), 0, SEGMENT_SIZE);
-            }
-            return Some(i);
+        let pages = pages_of(size).ok_or(errno::ENOSPC)?;
+        let total = self.tables().pages.checked_add(pages);
+        if total.is_none_or(|t| t > SHMALL) {
+            return Err(errno::ENOSPC);
         }
-        i = i.wrapping_add(1);
-    }
-    None
-}
-
-/// SAFETY: caller holds the lock.
-unsafe fn resolve_shmid(shmid: i32) -> Option<usize> {
-    let (slot, gen_) = decode_shmid(shmid)?;
-    let meta = unsafe { meta_ptr() };
-    let m = unsafe { meta.add(slot) };
-    if !unsafe { (*m).in_use } {
-        return None;
-    }
-    if unsafe { (*m).generation } & 0x7FFF != gen_ {
-        return None;
-    }
-    Some(slot)
-}
-
-/// Free the slot and bump the generation counter.
-///
-/// SAFETY: caller holds the lock; `slot` must be in-use.
-unsafe fn free_segment(slot: usize) {
-    let meta = unsafe { meta_ptr() };
-    let m = unsafe { meta.add(slot) };
-    unsafe {
-        (*m).in_use = false;
-        (*m).marked_for_rmid = false;
-        (*m).key = 0;
-        (*m).size = 0;
-        (*m).nattch = 0;
-        (*m).generation = (*m).generation.wrapping_add(1);
-    }
-}
-
-/// Try to look up a slot by its attached buffer pointer.
-fn slot_for_ptr(ptr: *const u8) -> Option<usize> {
-    let mut i: usize = 0;
-    while i < MAX_SEGMENTS {
-        if ptr == segment_ptr(i).cast_const() {
-            return Some(i);
+        if shmflg & SHM_HUGETLB != 0 {
+            // No huge pages are set aside, as on a default Linux system.
+            return Err(errno::ENOMEM);
         }
-        i = i.wrapping_add(1);
+        if self.tables().segs.live() >= SHMMNI {
+            return Err(errno::ENOSPC);
+        }
+        let handle = backing::create(pages * SHMLBA)?;
+        let Some(slot) = self.tables().segs.claim(SHMMNI, || Seg::EMPTY) else {
+            backing::close(handle);
+            return Err(errno::ENOMEM);
+        };
+        let pid = crate::process::getpid();
+        let seg = self.seg(slot).ok_or(errno::ENOMEM)?;
+        let seq = seg.perm.seq;
+        *seg = Seg {
+            live: true,
+            perm: Perm::new(key, seq, shmflg, who),
+            size,
+            handle,
+            ctime: now_secs(),
+            cpid: pid,
+            ..Seg::EMPTY
+        };
+        self.tables().pages += pages;
+        Ok(slot)
     }
-    None
+
+    /// Free the segment in `slot`; its id stops resolving.
+    fn destroy(&mut self, slot: usize) {
+        let Some(seg) = self.seg(slot) else { return };
+        let (handle, size) = (seg.handle, seg.size);
+        let seq = seg.perm.seq.wrapping_add(1);
+        *seg = Seg {
+            perm: Perm { seq, ..Perm::EMPTY },
+            ..Seg::EMPTY
+        };
+        backing::close(handle);
+        let t = self.tables();
+        t.segs.release(slot);
+        t.pages -= pages_of(size).unwrap_or(0);
+    }
+
+    /// The highest index in use, or 0 if none (`ipc_get_maxidx`).
+    fn max_index(&mut self) -> i32 {
+        let cap = self.tables().segs.cap();
+        (0..cap)
+            .rev()
+            .find(|&i| self.seg(i).is_some_and(|s| s.live))
+            .and_then(|i| i32::try_from(i).ok())
+            .unwrap_or(0)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // shmget
 // ---------------------------------------------------------------------------
 
-/// `shmget` — get a shared memory identifier.
+/// `shmget` — get a shared memory segment identifier.
 ///
-/// Returns the shmid on success or -1 with errno set.
+/// Returns the shmid, or `-1` with `errno`, in Linux's `ipcget` order:
+/// `ENOENT` for a key with no segment and no `IPC_CREAT`; `EEXIST` for one
+/// with a segment and `IPC_CREAT | IPC_EXCL`; `EINVAL` when that segment is
+/// smaller than `size`, then `EACCES` when its mode refuses the bits in
+/// `shmflg`. A new segment is `EINVAL` below [`SHMMIN`] or above [`SHMMAX`],
+/// `ENOSPC` past [`SHMALL`] pages or [`SHMMNI`] segments, `ENOMEM` when its
+/// memory cannot be had.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn shmget(key: i32, size: usize, shmflg: i32) -> i32 {
-    // Linux: size > SHMMAX → EINVAL.  Our SHMMAX is SEGMENT_SIZE.
-    if size > SEGMENT_SIZE {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    let mode = (shmflg & 0o777) as u16;
-    let _g = lock();
-    if key == IPC_PRIVATE {
-        if size == 0 {
-            errno::set_errno(errno::EINVAL);
-            return -1;
-        }
-        let Some(slot) = (unsafe { alloc_segment(IPC_PRIVATE, size, mode) }) else {
-            errno::set_errno(errno::ENOSPC);
-            return -1;
-        };
-        let gen_ = unsafe {
-            let meta = meta_ptr();
-            (*meta.add(slot)).generation & 0x7FFF
-        };
-        return encode_shmid(slot, gen_);
-    }
-    if let Some(slot) = unsafe { find_by_key(key) } {
+    let who = caller();
+    let mut t = lock();
+    let result = if key == IPC_PRIVATE {
+        t.new_segment(key, size, shmflg, who)
+    } else if let Some(slot) = t.find_key(key) {
         if shmflg & IPC_CREAT != 0 && shmflg & IPC_EXCL != 0 {
-            errno::set_errno(errno::EEXIST);
-            return -1;
+            Err(errno::EEXIST)
+        } else if t.seg(slot).is_some_and(|s| s.size < size) {
+            // `shm_more_checks`, before the permission.
+            Err(errno::EINVAL)
+        } else if t
+            .seg(slot)
+            .is_some_and(|s| permits(&s.perm, who, shmflg as u32))
+        {
+            Ok(slot)
+        } else {
+            Err(errno::EACCES)
         }
-        // Linux: existing segment with size > requested → EINVAL.
-        // (POSIX permits the caller to pass size == 0 to mean "any size
-        // is fine".)
-        if size > 0 {
-            let cur = unsafe {
-                let meta = meta_ptr();
-                (*meta.add(slot)).size
-            };
-            if size > cur {
-                errno::set_errno(errno::EINVAL);
-                return -1;
+    } else if shmflg & IPC_CREAT == 0 {
+        Err(errno::ENOENT)
+    } else {
+        t.new_segment(key, size, shmflg, who)
+    };
+    match result {
+        Ok(slot) => t.id_of(slot),
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// shmat, shmdt
+// ---------------------------------------------------------------------------
+
+/// `shmat` — attach a shared memory segment.
+///
+/// Every call maps the segment afresh and returns the new address. Errors,
+/// in Linux's `do_shmat` order: `EINVAL` for a negative id, a `shmaddr` not
+/// on a `SHMLBA` boundary without `SHM_RND`, `SHM_REMAP` with no address;
+/// `EINVAL` for an id naming no segment; `EACCES` without the permission the
+/// flags ask for; `ENOMEM`. A segment removed while attached still attaches
+/// by its id, as on Linux.
+///
+/// Not Linux's (see the module docs): a non-NULL `shmaddr` that passes those
+/// checks is `EINVAL`, and `SHM_EXEC` is `EACCES`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn shmat(shmid: i32, shmaddr: *const u8, shmflg: i32) -> *mut u8 {
+    match attach(shmid, shmaddr.addr(), shmflg) {
+        Ok(addr) => core::ptr::with_exposed_provenance_mut(addr),
+        Err(e) => {
+            errno::set_errno(e);
+            // `(void *) -1`.
+            core::ptr::without_provenance_mut(usize::MAX)
+        }
+    }
+}
+
+fn attach(shmid: i32, shmaddr: usize, shmflg: i32) -> Result<usize, i32> {
+    if shmid < 0 {
+        return Err(errno::EINVAL);
+    }
+    let mut addr = shmaddr;
+    if addr != 0 {
+        if addr % SHMLBA != 0 {
+            if shmflg & SHM_RND == 0 {
+                return Err(errno::EINVAL);
+            }
+            addr -= addr % SHMLBA;
+            if addr == 0 && shmflg & SHM_REMAP != 0 {
+                return Err(errno::EINVAL);
             }
         }
-        let gen_ = unsafe {
-            let meta = meta_ptr();
-            (*meta.add(slot)).generation & 0x7FFF
+    } else if shmflg & SHM_REMAP != 0 {
+        return Err(errno::EINVAL);
+    }
+    let write = shmflg & SHM_RDONLY == 0;
+    let mut wanted = if write { S_IRUGO | S_IWUGO } else { S_IRUGO };
+    if shmflg & SHM_EXEC != 0 {
+        wanted |= 0o111;
+    }
+
+    let who = caller();
+    let mut t = lock();
+    let slot = t.resolve(shmid).ok_or(errno::EINVAL)?;
+    let seg = t.seg(slot).ok_or(errno::EINVAL)?;
+    if !permits(&seg.perm, who, wanted) {
+        return Err(errno::EACCES);
+    }
+    if shmflg & SHM_EXEC != 0 {
+        return Err(errno::EACCES);
+    }
+    if addr != 0 {
+        return Err(errno::EINVAL);
+    }
+    let (handle, len) = (seg.handle, pages_of(seg.size).unwrap_or(0) * SHMLBA);
+    let mapped = backing::map(handle, write)?;
+    let Some(a) = t.tables().attaches.claim(usize::MAX, || Attach::EMPTY) else {
+        backing::unmap(mapped, len);
+        return Err(errno::ENOMEM);
+    };
+    if let Some(rec) = t.tables().attaches.get(a) {
+        *rec = Attach {
+            live: true,
+            addr: mapped,
+            len,
+            slot,
         };
-        return encode_shmid(slot, gen_);
     }
-    if shmflg & IPC_CREAT == 0 {
-        errno::set_errno(errno::ENOENT);
-        return -1;
+    let pid = crate::process::getpid();
+    if let Some(seg) = t.seg(slot) {
+        seg.nattch += 1;
+        seg.atime = now_secs();
+        seg.lpid = pid;
     }
-    if size == 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    let Some(slot) = (unsafe { alloc_segment(key, size, mode) }) else {
-        errno::set_errno(errno::ENOSPC);
-        return -1;
-    };
-    let gen_ = unsafe {
-        let meta = meta_ptr();
-        (*meta.add(slot)).generation & 0x7FFF
-    };
-    encode_shmid(slot, gen_)
+    Ok(mapped)
 }
 
-// ---------------------------------------------------------------------------
-// shmat
-// ---------------------------------------------------------------------------
-
-/// `shmat` — attach shared memory segment.
+/// `shmdt` — detach the segment attached at `shmaddr`.
 ///
-/// Returns the segment's address on success, or `(void *)-1` with
-/// errno set on failure.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn shmat(shmid: i32, _shmaddr: *const u8, _shmflg: i32) -> *mut u8 {
-    let _g = lock();
-    let Some(slot) = (unsafe { resolve_shmid(shmid) }) else {
-        errno::set_errno(errno::EINVAL);
-        return usize::MAX as *mut u8;
-    };
-    // Disallow attaching to segments marked for deletion (Linux: still
-    // works for already-attached callers, but a new attach gets EIDRM).
-    let meta = unsafe { meta_ptr() };
-    let m = unsafe { meta.add(slot) };
-    if unsafe { (*m).marked_for_rmid } {
-        errno::set_errno(errno::EIDRM);
-        return usize::MAX as *mut u8;
-    }
-    unsafe {
-        (*m).nattch = (*m).nattch.wrapping_add(1);
-    }
-    segment_ptr(slot)
-}
-
-// ---------------------------------------------------------------------------
-// shmdt
-// ---------------------------------------------------------------------------
-
-/// `shmdt` — detach shared memory segment.
+/// `EINVAL` for an address that is not where a `shmat` attached one. A
+/// segment removed while attached is freed at its last detach.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn shmdt(shmaddr: *const u8) -> i32 {
-    if shmaddr.is_null() {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    let _g = lock();
-    let Some(slot) = slot_for_ptr(shmaddr) else {
+    let addr = shmaddr.addr();
+    let mut t = lock();
+    let cap = t.tables().attaches.cap();
+    let found = (addr % SHMLBA == 0)
+        .then(|| {
+            (0..cap).find(|&i| {
+                t.tables()
+                    .attaches
+                    .get(i)
+                    .is_some_and(|a| a.live && a.addr == addr)
+            })
+        })
+        .flatten();
+    let Some(a) = found else {
         errno::set_errno(errno::EINVAL);
         return -1;
     };
-    let meta = unsafe { meta_ptr() };
-    let m = unsafe { meta.add(slot) };
-    if !unsafe { (*m).in_use } || unsafe { (*m).nattch } == 0 {
+    let Some(rec) = t
+        .tables()
+        .attaches
+        .get(a)
+        .map(|r| core::mem::replace(r, Attach::EMPTY))
+    else {
         errno::set_errno(errno::EINVAL);
         return -1;
-    }
-    unsafe {
-        (*m).nattch = (*m).nattch.wrapping_sub(1);
-    }
-    // If marked for deletion and refcount dropped to 0, free now.
-    if unsafe { (*m).marked_for_rmid } && unsafe { (*m).nattch } == 0 {
-        unsafe { free_segment(slot) };
+    };
+    t.tables().attaches.release(a);
+    backing::unmap(rec.addr, rec.len);
+    let pid = crate::process::getpid();
+    let gone = t.seg(rec.slot).is_some_and(|seg| {
+        seg.nattch -= 1;
+        seg.dtime = now_secs();
+        seg.lpid = pid;
+        seg.dest && seg.nattch == 0
+    });
+    if gone {
+        t.destroy(rec.slot);
     }
     0
 }
@@ -491,97 +677,192 @@ pub extern "C" fn shmdt(shmaddr: *const u8) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// `shmctl` — shared memory control operations.
+///
+///   * `IPC_STAT` — the segment's state, into `buf`.
+///   * `IPC_SET` — its owner, group and permission bits, from `buf`.
+///   * `IPC_RMID` — remove it: now, or when its last attach is detached.
+///   * `SHM_LOCK`, `SHM_UNLOCK` — lock it in memory (recorded only: this
+///     memory is never paged out); the owner's or creator's, or needs
+///     `CAP_IPC_LOCK`, and `SHM_LOCK` a non-zero `RLIMIT_MEMLOCK`.
+///   * `IPC_INFO` — the limits, as a [`Shminfo`]; `SHM_INFO` — the totals, as
+///     a [`ShmInfo`]; both return the highest table index in use.
+///   * `SHM_STAT`, `SHM_STAT_ANY` — `IPC_STAT` of the segment at table index
+///     `shmid`, returning its id; `SHM_STAT_ANY` needs no permission.
+///
+/// `EINVAL` first for a negative `shmid` or `cmd`, and for an unknown `cmd`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn shmctl(shmid: i32, cmd: i32, buf: *mut ShmidDs) -> i32 {
-    let _g = lock();
-    let Some(slot) = (unsafe { resolve_shmid(shmid) }) else {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    };
-    let meta = unsafe { meta_ptr() };
-    let m = unsafe { meta.add(slot) };
-    match cmd {
-        IPC_RMID => {
-            unsafe {
-                (*m).marked_for_rmid = true;
-            }
-            // Free immediately if no current attachments.
-            if unsafe { (*m).nattch } == 0 {
-                unsafe { free_segment(slot) };
-            }
-            0
-        }
-        IPC_STAT => {
-            if buf.is_null() {
-                errno::set_errno(errno::EFAULT);
-                return -1;
-            }
-            // SAFETY: caller contract.
-            unsafe {
-                (*buf) = ShmidDs {
-                    shm_perm: crate::linux_ipc::IpcPerm {
-                        uid: 0,
-                        gid: 0,
-                        cuid: 0,
-                        cgid: 0,
-                        mode: u32::from((*m).mode),
-                        ..crate::linux_ipc::IpcPerm::default()
-                    },
-                    shm_segsz: (*m).size,
-                    shm_lpid: 0,
-                    shm_cpid: 0,
-                    shm_nattch: (*m).nattch,
-                    shm_atime: 0,
-                    shm_dtime: 0,
-                    shm_ctime: 0,
-                    __unused: [0; 2],
-                };
-            }
-            0
-        }
-        IPC_SET => {
-            if buf.is_null() {
-                errno::set_errno(errno::EFAULT);
-                return -1;
-            }
-            // SAFETY: caller contract.
-            let new_mode = unsafe { (*buf).shm_perm.mode };
-            unsafe {
-                (*m).mode = u16::try_from(new_mode & 0o7777).unwrap_or(0);
-            }
-            0
-        }
-        SHM_LOCK | SHM_UNLOCK => {
-            // Our memory never swaps; accept and no-op.
-            0
-        }
-        _ => {
-            errno::set_errno(errno::EINVAL);
+    match control(shmid, cmd, buf) {
+        Ok(n) => n,
+        Err(e) => {
+            errno::set_errno(e);
             -1
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Test-only helpers
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-fn test_reset_all() {
-    let _g = lock();
-    let meta = unsafe { meta_ptr() };
-    let mut i: usize = 0;
-    while i < MAX_SEGMENTS {
-        unsafe {
-            (*meta.add(i)).in_use = false;
-            (*meta.add(i)).marked_for_rmid = false;
-            (*meta.add(i)).key = 0;
-            (*meta.add(i)).size = 0;
-            (*meta.add(i)).nattch = 0;
-            (*meta.add(i)).generation = (*meta.add(i)).generation.wrapping_add(1);
-        }
-        i = i.wrapping_add(1);
+/// Linux's `ksys_shmctl`.
+fn control(shmid: i32, cmd: i32, buf: *mut ShmidDs) -> Result<i32, i32> {
+    if shmid < 0 || cmd < 0 {
+        return Err(errno::EINVAL);
     }
+    match cmd {
+        IPC_INFO => {
+            let max_idx = lock().max_index();
+            let info = Shminfo {
+                shmmax: SHMMAX,
+                shmmin: SHMMIN,
+                shmmni: SHMMNI,
+                shmseg: SHMMNI,
+                shmall: SHMALL,
+                __unused: [0; 4],
+            };
+            if buf.is_null() {
+                return Err(errno::EFAULT);
+            }
+            // SAFETY: for this command `buf` is the caller's `struct
+            // shminfo`, whatever its declared type.
+            unsafe { buf.cast::<Shminfo>().write_unaligned(info) };
+            Ok(max_idx)
+        }
+        SHM_INFO => {
+            let mut t = lock();
+            let max_idx = t.max_index();
+            let tab = t.tables();
+            let info = ShmInfo {
+                used_ids: i32::try_from(tab.segs.live()).unwrap_or(i32::MAX),
+                shm_tot: tab.pages,
+                shm_rss: tab.pages,
+                ..ShmInfo::default()
+            };
+            drop(t);
+            if buf.is_null() {
+                return Err(errno::EFAULT);
+            }
+            // SAFETY: for this command `buf` is the caller's `struct
+            // shm_info`, whatever its declared type.
+            unsafe { buf.cast::<ShmInfo>().write_unaligned(info) };
+            Ok(max_idx)
+        }
+        IPC_STAT | SHM_STAT | SHM_STAT_ANY => {
+            let (ds, ret) = stat(shmid, cmd)?;
+            if buf.is_null() {
+                return Err(errno::EFAULT);
+            }
+            // SAFETY: the caller's buffer is a `struct shmid_ds`.
+            unsafe { buf.write_unaligned(ds) };
+            Ok(ret)
+        }
+        IPC_SET => {
+            if buf.is_null() {
+                // `copy_shmid_from_user`, before the segment is looked up.
+                return Err(errno::EFAULT);
+            }
+            // SAFETY: the caller's buffer is a `struct shmid_ds`.
+            let ds = unsafe { buf.read_unaligned() };
+            set(shmid, &ds.shm_perm).map(|()| 0)
+        }
+        IPC_RMID => rmid(shmid).map(|()| 0),
+        SHM_LOCK | SHM_UNLOCK => lock_segment(shmid, cmd == SHM_LOCK).map(|()| 0),
+        _ => Err(errno::EINVAL),
+    }
+}
+
+/// `shmctl_stat`: the state of the segment `shmid` names -- or, for
+/// `SHM_STAT` and `SHM_STAT_ANY`, the one at index `shmid` -- and what the
+/// call returns.
+fn stat(shmid: i32, cmd: i32) -> Result<(ShmidDs, i32), i32> {
+    let who = caller();
+    let mut t = lock();
+    let slot = if cmd == IPC_STAT {
+        t.resolve(shmid)
+    } else {
+        t.at_index(shmid)
+    }
+    .ok_or(errno::EINVAL)?;
+    let seg = t.seg(slot).ok_or(errno::EINVAL)?;
+    if cmd != SHM_STAT_ANY && !permits(&seg.perm, who, S_IRUGO) {
+        return Err(errno::EACCES);
+    }
+    let ds = ShmidDs {
+        shm_perm: IpcPerm {
+            mode: seg.mode(),
+            ..seg.perm.to_ipc_perm()
+        },
+        shm_segsz: seg.size,
+        shm_atime: seg.atime,
+        shm_dtime: seg.dtime,
+        shm_ctime: seg.ctime,
+        shm_cpid: seg.cpid,
+        shm_lpid: seg.lpid,
+        shm_nattch: seg.nattch,
+        __unused: [0; 2],
+    };
+    let ret = if cmd == IPC_STAT { 0 } else { t.id_of(slot) };
+    Ok((ds, ret))
+}
+
+/// `shmctl_down` for `IPC_SET`: the owner, group and permission bits.
+fn set(shmid: i32, perm: &IpcPerm) -> Result<(), i32> {
+    let who = caller();
+    let mut t = lock();
+    let slot = t.resolve(shmid).ok_or(errno::EINVAL)?;
+    let seg = t.seg(slot).ok_or(errno::EINVAL)?;
+    if !may_control(&seg.perm, who) {
+        return Err(errno::EPERM);
+    }
+    seg.perm.update(perm.uid, perm.gid, perm.mode)?;
+    seg.ctime = now_secs();
+    Ok(())
+}
+
+/// `shmctl_down` for `IPC_RMID`, then `do_shm_rmid`: free the segment now if
+/// nothing is attached, else mark it and make its key private.
+fn rmid(shmid: i32) -> Result<(), i32> {
+    let who = caller();
+    let mut t = lock();
+    let slot = t.resolve(shmid).ok_or(errno::EINVAL)?;
+    let seg = t.seg(slot).ok_or(errno::EINVAL)?;
+    if !may_control(&seg.perm, who) {
+        return Err(errno::EPERM);
+    }
+    if seg.nattch == 0 {
+        t.destroy(slot);
+    } else {
+        seg.dest = true;
+        seg.perm.key = IPC_PRIVATE;
+    }
+    Ok(())
+}
+
+/// `shmctl_do_lock`.
+fn lock_segment(shmid: i32, lock_it: bool) -> Result<(), i32> {
+    let who = caller();
+    let mut t = lock();
+    let slot = t.resolve(shmid).ok_or(errno::EINVAL)?;
+    let seg = t.seg(slot).ok_or(errno::EINVAL)?;
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_IPC_LOCK) {
+        if who.euid != seg.perm.uid && who.euid != seg.perm.cuid {
+            return Err(errno::EPERM);
+        }
+        if lock_it && memlock_limit() == 0 {
+            return Err(errno::EPERM);
+        }
+    }
+    seg.locked = lock_it;
+    Ok(())
+}
+
+/// The soft `RLIMIT_MEMLOCK`.
+fn memlock_limit() -> u64 {
+    let mut r = crate::resource::Rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // A refusal leaves the limit reading 0, which refuses the lock -- the
+    // answer Linux gives with no limit to spend.
+    let _ = crate::resource::getrlimit(crate::resource::RLIMIT_MEMLOCK, &raw mut r);
+    r.rlim_cur
 }
 
 // ---------------------------------------------------------------------------
@@ -589,485 +870,297 @@ fn test_reset_all() {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::cast_possible_wrap
+)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    const FAIL: *mut u8 = core::ptr::without_provenance_mut(usize::MAX);
 
-    fn with_clean<F: FnOnce()>(f: F) {
-        let _g = TEST_LOCK.lock().unwrap();
-        test_reset_all();
-        f();
+    fn err<T: PartialEq + core::fmt::Debug>(got: T, fail: T, want: i32) {
+        assert_eq!(got, fail);
+        assert_eq!(errno::get_errno(), want);
     }
 
-    // -- Constants --
-
-    #[test]
-    fn test_constants() {
-        assert_eq!(IPC_CREAT, 0o1000);
-        assert_eq!(IPC_EXCL, 0o2000);
-        assert_eq!(SHM_RDONLY, 0o10000);
-        assert_eq!(SHM_LOCK, 11);
-        assert_eq!(SHM_UNLOCK, 12);
-        assert_eq!(SHMLBA, 16384);
+    fn get(key: i32, size: usize, flags: i32) -> i32 {
+        errno::set_errno(0);
+        shmget(key, size, flags)
     }
 
-    #[test]
-    fn test_shmid_ds_layout() {
-        let ds = ShmidDs {
-            shm_perm: crate::linux_ipc::IpcPerm {
-                uid: 1000,
-                gid: 1000,
-                cuid: 0,
-                cgid: 0,
-                mode: 0o666,
-                ..crate::linux_ipc::IpcPerm::default()
-            },
-            shm_segsz: 65536,
-            shm_lpid: 42,
-            shm_cpid: 1,
-            shm_nattch: 2,
-            shm_atime: 1000,
-            shm_dtime: 0,
-            shm_ctime: 500,
-            __unused: [0; 2],
-        };
-        assert_eq!(ds.shm_segsz, 65536);
-        assert_eq!(ds.shm_nattch, 2);
-        assert_eq!(ds.shm_perm.uid, 1000);
+    fn stat_of(id: i32) -> ShmidDs {
+        let mut ds: ShmidDs = unsafe { core::mem::zeroed() };
+        assert_eq!(shmctl(id, IPC_STAT, &raw mut ds), 0);
+        ds
     }
 
-    // -- shmid encoding --
-
-    #[test]
-    fn test_shmid_encode_decode_roundtrip() {
-        for slot in 0..MAX_SEGMENTS {
-            for gen_ in [0u32, 7, 0x7FFF] {
-                let id = encode_shmid(slot, gen_);
-                let (s, g) = decode_shmid(id).unwrap();
-                assert_eq!(s, slot);
-                assert_eq!(g, gen_);
-            }
-        }
-    }
-
-    #[test]
-    fn test_decode_rejects_zero_and_negative() {
-        assert!(decode_shmid(0).is_none());
-        assert!(decode_shmid(-1).is_none());
+    fn rm(id: i32) {
+        assert_eq!(shmctl(id, IPC_RMID, core::ptr::null_mut()), 0);
     }
 
     // -- shmget --
 
     #[test]
-    fn test_shmget_private_creates_new() {
-        with_clean(|| {
-            let a = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0o600);
-            let b = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0o600);
-            assert_ne!(a, -1);
-            assert_ne!(b, -1);
-            assert_ne!(a, b);
-        });
+    fn a_segment_is_any_size_linux_allows() {
+        // It was four segments of at most 64 KiB.
+        let big = get(IPC_PRIVATE, 1 << 20, 0o600);
+        assert!(big > 0, "a mebibyte");
+        assert_eq!(stat_of(big).shm_segsz, 1 << 20);
+        let ids: Vec<i32> = (0..10).map(|_| get(IPC_PRIVATE, 100, 0o600)).collect();
+        assert!(ids.iter().all(|&id| id > 0), "more than four");
+        for id in ids {
+            rm(id);
+        }
+        rm(big);
     }
 
     #[test]
-    fn test_shmget_keyed_lookup() {
-        with_clean(|| {
-            let a = shmget(0x1234, 4096, IPC_CREAT | 0o600);
-            let b = shmget(0x1234, 0, 0);
-            assert_eq!(a, b);
-        });
+    fn shmget_sizes() {
+        err(get(IPC_PRIVATE, 0, 0o600), -1, errno::EINVAL);
+        err(get(IPC_PRIVATE, SHMMAX + 1, 0o600), -1, errno::EINVAL);
+        let id = get(IPC_PRIVATE, 1, 0o600);
+        assert!(id > 0, "SHMMIN is 1");
+        rm(id);
+        err(get(IPC_PRIVATE, 16, 0o600 | SHM_HUGETLB), -1, errno::ENOMEM);
     }
 
     #[test]
-    fn test_shmget_missing_enoent() {
-        with_clean(|| {
-            errno::set_errno(0);
-            let id = shmget(0x9876, 0, 0);
-            assert_eq!(id, -1);
-            assert_eq!(errno::get_errno(), errno::ENOENT);
-        });
+    fn shmget_by_key_in_linuxs_order() {
+        let key = 0x5A11_0001;
+        err(get(key, 100, 0o600), -1, errno::ENOENT);
+        let id = get(key, 100, IPC_CREAT | 0o600);
+        assert!(id > 0);
+        assert_eq!(get(key, 100, 0), id, "found");
+        assert_eq!(get(key, 50, 0), id, "a smaller size is fine");
+        err(
+            get(key, 100, IPC_CREAT | IPC_EXCL | 0o600),
+            -1,
+            errno::EEXIST,
+        );
+        err(get(key, 200, 0), -1, errno::EINVAL);
+        rm(id);
     }
 
     #[test]
-    fn test_shmget_excl_eexist() {
-        with_clean(|| {
-            let _ = shmget(0xABCD, 4096, IPC_CREAT | 0o600);
-            errno::set_errno(0);
-            let id = shmget(0xABCD, 4096, IPC_CREAT | IPC_EXCL | 0o600);
-            assert_eq!(id, -1);
-            assert_eq!(errno::get_errno(), errno::EEXIST);
-        });
+    fn shmget_judges_the_size_before_the_permission() {
+        let key = 0x5A11_0002;
+        let id = get(key, 100, IPC_CREAT | 0o600);
+        let mut ds = stat_of(id);
+        ds.shm_perm.mode = 0o000;
+        assert_eq!(shmctl(id, IPC_SET, &raw mut ds), 0);
+        // Running as root with CAP_IPC_OWNER the permission always passes,
+        // so only the size's EINVAL is observable here, before it.
+        err(get(key, 200, 0o600), -1, errno::EINVAL);
+        rm(id);
+    }
+
+    // -- shmat, shmdt --
+
+    #[test]
+    fn attaches_share_the_bytes_and_count() {
+        let id = get(IPC_PRIVATE, 4096, 0o600);
+        let a = shmat(id, core::ptr::null(), 0);
+        assert_ne!(a, FAIL);
+        let b = shmat(id, core::ptr::null(), 0);
+        assert_ne!(b, FAIL);
+        unsafe { a.write(42) };
+        assert_eq!(unsafe { b.read() }, 42, "one segment behind both");
+        assert_eq!(stat_of(id).shm_nattch, 2);
+        assert_ne!(stat_of(id).shm_atime, 0);
+        assert_eq!(shmdt(a), 0);
+        assert_eq!(stat_of(id).shm_nattch, 1);
+        assert_eq!(shmdt(b), 0);
+        assert_eq!(stat_of(id).shm_nattch, 0);
+        assert_ne!(stat_of(id).shm_dtime, 0);
+        rm(id);
     }
 
     #[test]
-    fn test_shmget_zero_size_private_einval() {
-        with_clean(|| {
-            errno::set_errno(0);
-            let id = shmget(IPC_PRIVATE, 0, IPC_CREAT);
-            assert_eq!(id, -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        });
+    fn shmat_checks_in_linuxs_order() {
+        let id = get(IPC_PRIVATE, 100, 0o600);
+        err(shmat(-1, core::ptr::null(), 0), FAIL, errno::EINVAL);
+        err(shmat(id, 1 as *const u8, 0), FAIL, errno::EINVAL);
+        err(shmat(id, core::ptr::null(), SHM_REMAP), FAIL, errno::EINVAL);
+        err(
+            shmat(id, 1 as *const u8, SHM_RND | SHM_REMAP),
+            FAIL,
+            errno::EINVAL,
+        );
+        err(
+            shmat(0x7FFF_0001, core::ptr::null(), 0),
+            FAIL,
+            errno::EINVAL,
+        );
+        // Not Linux's: the kernel chooses the address, and never grants exec.
+        err(shmat(id, SHMLBA as *const u8, 0), FAIL, errno::EINVAL);
+        err(shmat(id, core::ptr::null(), SHM_EXEC), FAIL, errno::EACCES);
+        rm(id);
     }
 
     #[test]
-    fn test_shmget_oversized_einval() {
-        with_clean(|| {
-            errno::set_errno(0);
-            let id = shmget(IPC_PRIVATE, SEGMENT_SIZE + 1, IPC_CREAT | 0o600);
-            assert_eq!(id, -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        });
+    fn shmdt_needs_an_attach_address() {
+        err(shmdt(core::ptr::null()), -1, errno::EINVAL);
+        err(shmdt(1 as *const u8), -1, errno::EINVAL);
+        let id = get(IPC_PRIVATE, 100, 0o600);
+        let a = shmat(id, core::ptr::null(), SHM_RDONLY);
+        assert_ne!(a, FAIL);
+        assert_eq!(shmdt(a), 0);
+        err(shmdt(a), -1, errno::EINVAL);
+        rm(id);
+    }
+
+    // -- removal --
+
+    #[test]
+    fn removed_while_attached_lives_until_the_last_detach() {
+        let key = 0x5A11_0003;
+        let id = get(key, 100, IPC_CREAT | 0o600);
+        let a = shmat(id, core::ptr::null(), 0);
+        rm(id);
+        let ds = stat_of(id);
+        assert_ne!(ds.shm_perm.mode & SHM_DEST, 0, "marked");
+        assert_eq!(
+            ds.shm_perm.__ipc_perm_key, IPC_PRIVATE,
+            "its key is private"
+        );
+        err(get(key, 100, 0), -1, errno::ENOENT);
+        let b = shmat(id, core::ptr::null(), 0);
+        assert_ne!(b, FAIL, "Linux attaches a marked segment by its id");
+        assert_eq!(shmdt(a), 0);
+        assert_eq!(shmdt(b), 0);
+        let mut ds: ShmidDs = unsafe { core::mem::zeroed() };
+        err(shmctl(id, IPC_STAT, &raw mut ds), -1, errno::EINVAL);
     }
 
     #[test]
-    fn test_shmget_lookup_size_too_large_einval() {
-        with_clean(|| {
-            let _ = shmget(0x55, 4096, IPC_CREAT | 0o600);
-            errno::set_errno(0);
-            let id = shmget(0x55, 8192, 0);
-            assert_eq!(id, -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        });
-    }
-
-    #[test]
-    fn test_shmget_pool_exhaustion_enospc() {
-        with_clean(|| {
-            for _ in 0..MAX_SEGMENTS {
-                let id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0o600);
-                assert_ne!(id, -1);
-            }
-            errno::set_errno(0);
-            let id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0o600);
-            assert_eq!(id, -1);
-            assert_eq!(errno::get_errno(), errno::ENOSPC);
-        });
-    }
-
-    // -- shmat / shmdt --
-
-    #[test]
-    fn test_shmat_returns_aligned_pointer() {
-        with_clean(|| {
-            let id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0o600);
-            let p = shmat(id, core::ptr::null(), 0);
-            assert!(!p.is_null());
-            assert_ne!(p, usize::MAX as *mut u8);
-            assert_eq!(p as usize & (SHMLBA - 1), 0);
-        });
-    }
-
-    #[test]
-    fn test_shmat_then_shmdt() {
-        with_clean(|| {
-            let id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0o600);
-            let p = shmat(id, core::ptr::null(), 0);
-            assert_ne!(p, usize::MAX as *mut u8);
-            assert_eq!(shmdt(p), 0);
-        });
-    }
-
-    #[test]
-    fn test_shmat_bad_shmid_einval() {
-        with_clean(|| {
-            errno::set_errno(0);
-            let p = shmat(0xCAFE, core::ptr::null(), 0);
-            assert_eq!(p, usize::MAX as *mut u8);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        });
-    }
-
-    #[test]
-    fn test_shmat_after_rmid_when_no_attaches_eidrm_or_einval() {
-        // After IPC_RMID with nattch == 0, the slot is freed
-        // immediately, so subsequent shmat sees EINVAL (id is stale).
-        with_clean(|| {
-            let id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0o600);
-            assert_eq!(shmctl(id, IPC_RMID, core::ptr::null_mut()), 0);
-            errno::set_errno(0);
-            let p = shmat(id, core::ptr::null(), 0);
-            assert_eq!(p, usize::MAX as *mut u8);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        });
-    }
-
-    #[test]
-    fn test_shmat_pending_rmid_with_attachments_eidrm() {
-        // After IPC_RMID while an attach is live, the slot stays alive
-        // but new attaches fail with EIDRM.
-        with_clean(|| {
-            let id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0o600);
-            let p = shmat(id, core::ptr::null(), 0);
-            assert_eq!(shmctl(id, IPC_RMID, core::ptr::null_mut()), 0);
-            errno::set_errno(0);
-            let p2 = shmat(id, core::ptr::null(), 0);
-            assert_eq!(p2, usize::MAX as *mut u8);
-            assert_eq!(errno::get_errno(), errno::EIDRM);
-            // The original attach should still be detachable.
-            assert_eq!(shmdt(p), 0);
-        });
-    }
-
-    #[test]
-    fn test_shmdt_null_einval() {
-        with_clean(|| {
-            errno::set_errno(0);
-            assert_eq!(shmdt(core::ptr::null()), -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        });
-    }
-
-    #[test]
-    fn test_shmdt_unknown_ptr_einval() {
-        with_clean(|| {
-            errno::set_errno(0);
-            assert_eq!(shmdt(0xDEADBEEF as *const u8), -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        });
-    }
-
-    #[test]
-    fn test_shmdt_unattached_einval() {
-        with_clean(|| {
-            // Get a segment but never attach — shmdt should refuse.
-            let id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0o600);
-            let (slot, _) = decode_shmid(id).unwrap();
-            let p = segment_ptr(slot);
-            errno::set_errno(0);
-            assert_eq!(shmdt(p), -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        });
-    }
-
-    #[test]
-    fn test_shmat_refcount_via_stat() {
-        with_clean(|| {
-            let id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0o600);
-            let _ = shmat(id, core::ptr::null(), 0);
-            let _ = shmat(id, core::ptr::null(), 0);
-            let _ = shmat(id, core::ptr::null(), 0);
-            let mut ds = ShmidDs {
-                shm_perm: crate::linux_ipc::IpcPerm {
-                    uid: 0,
-                    gid: 0,
-                    cuid: 0,
-                    cgid: 0,
-                    mode: 0,
-                    ..crate::linux_ipc::IpcPerm::default()
-                },
-                shm_segsz: 0,
-                shm_lpid: 0,
-                shm_cpid: 0,
-                shm_nattch: 0,
-                shm_atime: 0,
-                shm_dtime: 0,
-                shm_ctime: 0,
-                __unused: [0; 2],
-            };
-            assert_eq!(shmctl(id, IPC_STAT, &raw mut ds), 0);
-            assert_eq!(ds.shm_nattch, 3);
-        });
-    }
-
-    #[test]
-    fn test_writes_to_attached_buffer_visible_on_second_attach() {
-        with_clean(|| {
-            let id = shmget(IPC_PRIVATE, 32, IPC_CREAT | 0o600);
-            let p1 = shmat(id, core::ptr::null(), 0);
-            assert_ne!(p1, usize::MAX as *mut u8);
-            unsafe {
-                core::ptr::write(p1, 0xAB);
-                core::ptr::write(p1.add(1), 0xCD);
-            }
-            let p2 = shmat(id, core::ptr::null(), 0);
-            assert_eq!(p1, p2); // single-process: same address
-            unsafe {
-                assert_eq!(core::ptr::read(p2), 0xAB);
-                assert_eq!(core::ptr::read(p2.add(1)), 0xCD);
-            }
-            assert_eq!(shmdt(p1), 0);
-            assert_eq!(shmdt(p2), 0);
-        });
+    fn a_removed_segments_id_does_not_come_back() {
+        let a = get(IPC_PRIVATE, 100, 0o600);
+        rm(a);
+        let b = get(IPC_PRIVATE, 100, 0o600);
+        assert_ne!(a, b, "the slot's reuse count moved");
+        let mut ds: ShmidDs = unsafe { core::mem::zeroed() };
+        err(shmctl(a, IPC_STAT, &raw mut ds), -1, errno::EINVAL);
+        rm(b);
     }
 
     // -- shmctl --
 
     #[test]
-    fn test_shmctl_stat_populates() {
-        with_clean(|| {
-            let id = shmget(IPC_PRIVATE, 8192, IPC_CREAT | 0o644);
-            let mut ds = ShmidDs {
-                shm_perm: crate::linux_ipc::IpcPerm {
-                    uid: 99,
-                    gid: 99,
-                    cuid: 99,
-                    cgid: 99,
-                    mode: 0,
-                    ..crate::linux_ipc::IpcPerm::default()
-                },
-                shm_segsz: 0,
-                shm_lpid: 0,
-                shm_cpid: 0,
-                shm_nattch: 0,
-                shm_atime: 0,
-                shm_dtime: 0,
-                shm_ctime: 0,
-                __unused: [0; 2],
-            };
-            assert_eq!(shmctl(id, IPC_STAT, &raw mut ds), 0);
-            assert_eq!(ds.shm_segsz, 8192);
-            assert_eq!(ds.shm_perm.mode, 0o644);
-            assert_eq!(ds.shm_nattch, 0);
-        });
+    fn ipc_set_reads_its_buffer_before_the_lookup() {
+        // THE PASS'S NULL SITE: this looked the segment up first, so a bad
+        // id with a NULL buffer was EINVAL; Linux copies first.
+        err(
+            shmctl(0x7FFF_0001, IPC_SET, core::ptr::null_mut()),
+            -1,
+            errno::EFAULT,
+        );
+        let id = get(IPC_PRIVATE, 100, 0o600);
+        err(
+            shmctl(id, IPC_STAT, core::ptr::null_mut()),
+            -1,
+            errno::EFAULT,
+        );
+        let mut ds: ShmidDs = unsafe { core::mem::zeroed() };
+        err(
+            shmctl(0x7FFF_0001, IPC_STAT, &raw mut ds),
+            -1,
+            errno::EINVAL,
+        );
+        rm(id);
     }
 
     #[test]
-    fn test_shmctl_set_updates_mode() {
-        with_clean(|| {
-            let id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0o600);
-            let mut ds = ShmidDs {
-                shm_perm: crate::linux_ipc::IpcPerm {
-                    uid: 0,
-                    gid: 0,
-                    cuid: 0,
-                    cgid: 0,
-                    mode: 0o744,
-                    ..crate::linux_ipc::IpcPerm::default()
-                },
-                shm_segsz: 0,
-                shm_lpid: 0,
-                shm_cpid: 0,
-                shm_nattch: 0,
-                shm_atime: 0,
-                shm_dtime: 0,
-                shm_ctime: 0,
-                __unused: [0; 2],
-            };
-            assert_eq!(shmctl(id, IPC_SET, &raw mut ds), 0);
-            let mut out = ds;
-            out.shm_perm.mode = 0;
-            assert_eq!(shmctl(id, IPC_STAT, &raw mut out), 0);
-            assert_eq!(out.shm_perm.mode, 0o744);
-        });
+    fn ipc_set_changes_owner_and_mode_only() {
+        let id = get(IPC_PRIVATE, 100, 0o600);
+        let mut ds = stat_of(id);
+        ds.shm_perm.mode = 0o7644;
+        ds.shm_segsz = 1;
+        assert_eq!(shmctl(id, IPC_SET, &raw mut ds), 0);
+        let now = stat_of(id);
+        assert_eq!(now.shm_perm.mode, 0o644, "the permission bits only");
+        assert_eq!(now.shm_segsz, 100);
+        ds.shm_perm.uid = u32::MAX;
+        err(shmctl(id, IPC_SET, &raw mut ds), -1, errno::EINVAL);
+        rm(id);
     }
 
     #[test]
-    fn test_shmctl_rmid_no_attach_frees_immediately() {
-        with_clean(|| {
-            let id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0o600);
-            assert_eq!(shmctl(id, IPC_RMID, core::ptr::null_mut()), 0);
-            // Slot should be freed — STAT now fails.
-            errno::set_errno(0);
-            assert_eq!(shmctl(id, IPC_STAT, core::ptr::null_mut()), -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        });
+    fn info_stat_and_the_negatives() {
+        err(
+            shmctl(-1, IPC_STAT, core::ptr::null_mut()),
+            -1,
+            errno::EINVAL,
+        );
+        err(shmctl(0, -1, core::ptr::null_mut()), -1, errno::EINVAL);
+        err(shmctl(0, 99, core::ptr::null_mut()), -1, errno::EINVAL);
+
+        let id = get(IPC_PRIVATE, 3 * SHMLBA + 1, 0o600);
+        let mut limits = Shminfo::default();
+        let top = shmctl(0, IPC_INFO, (&raw mut limits).cast());
+        assert!(top >= 0);
+        assert_eq!(
+            (limits.shmmax, limits.shmmin, limits.shmmni),
+            (SHMMAX, 1, SHMMNI)
+        );
+        let mut used = ShmInfo::default();
+        assert_eq!(shmctl(0, SHM_INFO, (&raw mut used).cast()), top);
+        assert_eq!(
+            (used.used_ids, used.shm_tot),
+            (1, 4),
+            "four pages, one segment"
+        );
+        err(
+            shmctl(0, IPC_INFO, core::ptr::null_mut()),
+            -1,
+            errno::EFAULT,
+        );
+
+        let index = (id & 0xFFFF) - 1;
+        let mut ds: ShmidDs = unsafe { core::mem::zeroed() };
+        assert_eq!(
+            shmctl(index, SHM_STAT, &raw mut ds),
+            id,
+            "SHM_STAT answers the id"
+        );
+        assert_eq!(shmctl(index, SHM_STAT_ANY, &raw mut ds), id);
+        assert_eq!(ds.shm_segsz, 3 * SHMLBA + 1);
+        rm(id);
     }
 
     #[test]
-    fn test_shmctl_rmid_with_attach_defers_free() {
-        with_clean(|| {
-            let id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0o600);
-            let p = shmat(id, core::ptr::null(), 0);
-            assert_ne!(p, usize::MAX as *mut u8);
-            // RMID should succeed but slot lives until detach.
-            assert_eq!(shmctl(id, IPC_RMID, core::ptr::null_mut()), 0);
-            // The id still resolves (slot in_use, generation unchanged).
-            let mut ds = ShmidDs {
-                shm_perm: crate::linux_ipc::IpcPerm {
-                    uid: 0,
-                    gid: 0,
-                    cuid: 0,
-                    cgid: 0,
-                    mode: 0,
-                    ..crate::linux_ipc::IpcPerm::default()
-                },
-                shm_segsz: 0,
-                shm_lpid: 0,
-                shm_cpid: 0,
-                shm_nattch: 0,
-                shm_atime: 0,
-                shm_dtime: 0,
-                shm_ctime: 0,
-                __unused: [0; 2],
-            };
-            assert_eq!(shmctl(id, IPC_STAT, &raw mut ds), 0);
-            assert_eq!(ds.shm_nattch, 1);
-            // Detach — now slot must be freed.
-            assert_eq!(shmdt(p), 0);
-            errno::set_errno(0);
-            assert_eq!(shmctl(id, IPC_STAT, &raw mut ds), -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        });
+    fn shm_lock_is_recorded() {
+        let id = get(IPC_PRIVATE, 100, 0o600);
+        assert_eq!(shmctl(id, SHM_LOCK, core::ptr::null_mut()), 0);
+        assert_ne!(stat_of(id).shm_perm.mode & SHM_LOCKED, 0);
+        assert_eq!(shmctl(id, SHM_UNLOCK, core::ptr::null_mut()), 0);
+        assert_eq!(stat_of(id).shm_perm.mode & SHM_LOCKED, 0);
+        err(
+            shmctl(0x7FFF_0001, SHM_LOCK, core::ptr::null_mut()),
+            -1,
+            errno::EINVAL,
+        );
+        rm(id);
     }
 
     #[test]
-    fn test_shmctl_rmid_then_shmget_creates_new() {
-        // After RMID, the key should be re-usable for a brand-new segment.
-        with_clean(|| {
-            let key = 0x42;
-            let id1 = shmget(key, 4096, IPC_CREAT | 0o600);
-            assert_eq!(shmctl(id1, IPC_RMID, core::ptr::null_mut()), 0);
-            let id2 = shmget(key, 4096, IPC_CREAT | 0o600);
-            assert_ne!(id2, -1);
-            assert_ne!(id1, id2);
-        });
+    fn the_totals_follow_the_segments() {
+        let a = get(IPC_PRIVATE, SHMLBA, 0o600);
+        let b = get(IPC_PRIVATE, SHMLBA + 1, 0o600);
+        let mut used = ShmInfo::default();
+        shmctl(0, SHM_INFO, (&raw mut used).cast());
+        assert_eq!((used.used_ids, used.shm_tot), (2, 3));
+        rm(a);
+        rm(b);
+        shmctl(0, SHM_INFO, (&raw mut used).cast());
+        assert_eq!((used.used_ids, used.shm_tot), (0, 0));
     }
 
     #[test]
-    fn test_shmctl_lock_unlock_noop() {
-        with_clean(|| {
-            let id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0o600);
-            assert_eq!(shmctl(id, SHM_LOCK, core::ptr::null_mut()), 0);
-            assert_eq!(shmctl(id, SHM_UNLOCK, core::ptr::null_mut()), 0);
-        });
-    }
-
-    #[test]
-    fn test_shmctl_bad_cmd_einval() {
-        with_clean(|| {
-            let id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0o600);
-            errno::set_errno(0);
-            assert_eq!(shmctl(id, 9999, core::ptr::null_mut()), -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        });
-    }
-
-    #[test]
-    fn test_shmctl_stat_null_buf_efault() {
-        with_clean(|| {
-            let id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0o600);
-            errno::set_errno(0);
-            assert_eq!(shmctl(id, IPC_STAT, core::ptr::null_mut()), -1);
-            assert_eq!(errno::get_errno(), errno::EFAULT);
-        });
-    }
-
-    #[test]
-    fn test_shmctl_bad_shmid_einval() {
-        with_clean(|| {
-            errno::set_errno(0);
-            assert_eq!(shmctl(0xDEAD, IPC_STAT, core::ptr::null_mut()), -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL);
-        });
-    }
-
-    // -- workflow --
-
-    #[test]
-    fn test_full_workflow() {
-        with_clean(|| {
-            let id = shmget(IPC_PRIVATE, 1024, IPC_CREAT | 0o600);
-            assert_ne!(id, -1);
-            let p = shmat(id, core::ptr::null(), 0);
-            assert_ne!(p, usize::MAX as *mut u8);
-            unsafe {
-                core::ptr::write(p, 0x55);
-                assert_eq!(core::ptr::read(p), 0x55);
-            }
-            assert_eq!(shmdt(p), 0);
-            assert_eq!(shmctl(id, IPC_RMID, core::ptr::null_mut()), 0);
-        });
+    fn the_structures_are_linuxs() {
+        assert_eq!(size_of::<Shminfo>(), 9 * 8);
+        assert_eq!(size_of::<ShmInfo>(), 6 * 8);
+        assert_eq!(core::mem::offset_of!(ShmInfo, shm_tot), 8);
     }
 }

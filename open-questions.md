@@ -3078,122 +3078,6 @@ anyone else's.
 
 
 
-## A-Q20 — [A] A lane may only publish work after a green test run, and lane A's has been red for 945 commits. What should a blocked lane do? — Status: OPEN
-
-**In short:** the three sessions hand work to each other by putting files in
-a shared folder, and those files only become visible once a session's work
-is merged into the main copy. Merging is only allowed after a full test run
-passes. Lane A's test run has been failing for days — on a test belonging to
-another session — so nothing lane A has written in that time has reached
-anybody, including the notes asking for help with the very thing that is
-failing.
-
-**One term, because it is unavoidable.** A *lane* is one of the three Claude
-sessions working this repository at once; each owns a separate set of
-directories and its own copy of the tree.
-
-**Second addendum, later the same day — the boot ran, and the decisive fact
-is not the one I expected.**
-
-The boot completed. The kernel reached `BOOT_OK` with 2.76 MB of serial
-output, every one of today's fixes demonstrated, and the run still failed —
-on exactly three userspace fixture rungs: `ctest-coreutils-runs` (exit 11),
-`ctest-pty` (45) and `ctest-python-repl` (8).
-
-**All three already exist on `main`.** I checked the wrong function name
-first and briefly concluded one was new, which would have made merging
-introduce a fresh failure; `origin/main` carries all three. So merging this
-lane would add a kernel fix, six repaired assertions and a standing gate to
-a tree that already has these three failures, and would introduce nothing.
-
-That is the fact this question turns on, and it is narrower than "is the
-rule too strict". The rule's stated purpose is that *a broken lane blocks
-the other two* — it exists to stop breakage being **introduced**. Here it is
-blocking a merge that introduces none, which is a different situation from
-the one the rule was written for.
-
-**What it is costing, concretely, today:** two HIGH-severity requests I
-filed against lane B were retracted this morning (their premise was
-impossible — posix execs through the native syscall and cannot reach the
-Linux-ABI path where the NULL was observed). Those retractions are
-committed and cannot reach lane B until `main` moves. Lane B may be looking
-at two live requests for a bug that does not exist.
-
-**I have not merged**, and will not decide my own exception to a rule the
-operator set. Recording the measurement so the decision is made against
-facts rather than an impression of risk.
-
-**Addendum, 2026-09-21 — two measurements that change what is being asked.**
-
-*The merge is clean.* `git merge-tree --write-tree lane-a origin/main`
-returns **0 conflicts** against a backlog of **54** commits. So the
-cost of the blocked merge is purely delivery delay; there is no accumulating
-integration risk waiting to be paid. That matters for the decision below,
-because the usual argument for a strict green-gate is that letting divergence
-grow makes the eventual merge dangerous. Here it does not.
-
-*The red boot had a single cause and it is fixed.* The failing test was
-lane A's own after all, not another lane's: `test_exec_process` asserted
-only that the process reached `Zombie`, which a crashed caller also does, so
-it reported OK for months while every native `exec` failed with -101. Once
-the assertion was tightened the boot went red *correctly*, and the root
-cause — a ring-3 trampoline leaving `rdx = 0x1B`, read by `exec` as the argv
-pointer — is fixed in the run happening as this is written.
-
-**So this question may retire itself.** If that run is green the backlog
-merges and the rule was never wrong, only expensive to be blocked behind.
-The part still worth an answer is the general one: **should a lane be able
-to publish `requests/` and shared-document changes without a green boot,
-given they cannot break a build?** Today's concrete cost was that two
-HIGH-severity requests lane A filed against lane B, and their retractions,
-sat undelivered on the same branch — so lane B could have spent a day on a
-bug that does not exist, for want of a text file that no test covers.
-
-**The measurement, not an impression.** `scripts/merge-readiness.py` reports
-lane A's last passing boot at `273905c13`, **945 commits behind HEAD**. In
-that window the rule has published nothing. Among the undelivered files is
-`requests/a-b-execl-fails-where-execv-succeeds-in-the-same-boot.md`, written
-specifically to get another lane's eyes on the failure that is causing the
-block.
-
-**Why it is self-reinforcing rather than just unlucky.** The state that
-blocks publishing is the state that produces the most mail: a session stuck
-on something it cannot fix alone writes requests. So the queue grows fastest
-exactly while the channel is shut. And it is invisible from inside — the push
-succeeds, the file exists, the outgoing-request tool lists it, and nothing
-anywhere says *nobody can see this*.
-
-**What is NOT being asked.** Not whether to relax testing before publishing
-code. `merge-readiness.py` reports that of 13 incoming commits touching 11
-files, **none is in lane A's scope**, and lane A's own gates pass — 3938
-seconds of them. The failing rungs are another lane's fixtures, already
-present on `main`, failing identically before and after.
-
-| option | *What changes:* | cost |
-|---|---|---|
-| **A. Let `requests/**` and the shared `.md` docs reach `main` without the boot gate** | a blocked lane can still ask for help; code still waits for green | the cleanest fix. These files have no compilation, no test and no runtime, so they cannot make `main` red. Someone must still resist the temptation to slip a code change alongside |
-| **B. A lane may merge when every failing rung is outside its own scope and already failing on `main`** | a lane blocked by another lane's fixture can publish | matches the rule's purpose, but needs a definition of "already failing on `main`" that cannot be gamed, and someone has to check it honestly |
-| **C. Keep the rule; rely on asking another lane to relay** | nothing changes | it works — this is how the execl finding reached lane B today — but only when the blocked lane thinks to ask. A lane that files and moves on never does, and that is the common case |
-| **D. Keep the rule unchanged and treat the block as the signal** | a red tree stops a lane entirely until fixed | defensible, and it is roughly what has happened. The cost is 945 commits and counting |
-
-**Recommendation: A, and it is narrow on purpose.** It fixes the specific
-harm — a stuck lane cannot ask for help — without touching how code is
-gated, and it needs no judgement call at merge time, which is what makes B
-risky. B is defensible as a second step once someone has written down how
-"already failing on `main`" is established.
-
-**If this is never answered:** nothing breaks and the count keeps rising.
-Lane A keeps working and keeps pushing to its own branch, so no work is
-lost. What is lost is every cross-lane message it writes, silently, with
-the sender believing it was sent — which is how a request filed on
-2026-09-16 naming the exact cause of today's failure sat unread while a
-whole session rediscovered it.
-
-**Where it bites:** `roadmap.md` → "Three-Agent Parallel Execution" (the
-`requests/` protocol and hazard 1), `CLAUDE.md` → "never merge a red tree",
-`scripts/merge-readiness.py`. Full write-up in `known-issues.md`,
-2026-09-21.
-
 ## A-Q21 — [A] Seven security modules are built but nothing uses them. Staged for later, or believed to be working? — Status: OPEN
 
 **In short:** the kernel has seven pieces of code whose job is to say
@@ -3395,6 +3279,12 @@ answered question left in the body is pure cost — and, being older, it sorts
 
 ## Resolved — lane A
 
+- A-Q20 A lane may only publish work after a green test run, and lane A's has
+  been red for days on another lane's faults. What should a blocked lane do?
+  — resolved 2026-09-26 (968), the operator leaving it to Claude: **publish,
+  under three conditions, and only then** — every red rung is another lane's
+  tracked fault, `main` already fails it for the same image, and the lane's
+  own failures are zero; each publish that relies on this says so.
 - A-Q10 Saving a file costs twice what it needs to: keep the automatic undo
   history? — resolved 2026-09-13 (936): **opt-in per directory AND off the
   save path.** History is off by default and enabled per directory; where it is

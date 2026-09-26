@@ -167935,7 +167935,7 @@ lane A's:
   on 2026-09-25 (`execve(path, argv, current_environ())`); it is not on `main`.
   The rung needs both that and lane A's grant fix, which is on `lane-a` only —
   so each lane's boot stays red on this rung until the other's fix is on
-  `main` (open question A-Q20).
+  `main` (A-Q20; resolved by §968: lane A publishes under its three conditions).
 - `Path-Z real CMake`, `cmake 01`: exit -8. CMake ran its script, then crashed
   inside `exit`: `cmsys::RegularExpression::~RegularExpression()` called with
   `this = NULL` (fault at 0x220; symbolised from `build/spike/cmake-slateos.elf`).

@@ -24361,6 +24361,23 @@ them.
   not be NULL at all, and nor could a dozen others; that is the
   thirty-ninth pass.
 
+**Thirty-eighth pass, 2026-09-26 — `xattr.rs` (2 sites), lane D.** Against
+Linux 6.6's fs/xattr.c. The fourth pass had put the path before the flags
+and the name; this one read what each of those steps does besides.
+
+- **The name** is `strncpy_from_user` into `XATTR_NAME_MAX + 1` bytes, which
+  answers more than the NULL: an empty name and one of 256 bytes or more are
+  `ERANGE`. The kernel below let the first through and called the second
+  `EINVAL`, so both are the libc's now, at the name's place in the order.
+- **A setter's value** is judged after the name -- `E2BIG` over 64 KiB, before
+  it is read, then `EFAULT` for a NULL one -- where the kernel said `EINVAL`
+  to both.
+- **A getter's or lister's buffer** is never tested by Linux; a NULL one
+  with a size was `EINVAL`, before the lookup.
+- Beside them, the finding of the pass: the edges were the kernel's, not
+  Linux's -- `B-D-XATTR-SIZES-AND-BUFFERS-WERE-NOT-LINUXS` (new; the libc's
+  half fixed with it, the kernel's requested of lane A).
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24374,16 +24391,19 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-thirty-seven swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
+thirty-eight swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
 `sched.rs`, `mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`,
 `linux_module.rs`, `sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs`, `sysv_sem.rs`,
 `linux_aio_abi.rs`, `linux_seccomp.rs`, `mman.rs`, `resource.rs`, `crypt.rs`,
 `iconv.rs`, `linux_io_uring.rs`, `sysv_shm.rs`, `sys_quota.rs`,
-`sys_timex.rs`, `linux_landlock.rs`, `fts.rs` and `ftw.rs`. That finishes
-every file the sweep counted at four and at three, the three the recount of
-2026-09-26 added among them: `pwd.rs`, `dirent.rs` and `signal.rs` needed
-nothing at their NULLs -- `pwd.rs`'s database did (`B-D-PWD-KNEW-ONLY-ROOT`).
-Of the files at two, only `xattr.rs` (walked by the fourth pass) is left.
+`sys_timex.rs`, `linux_landlock.rs`, `fts.rs`, `ftw.rs` and `xattr.rs`. That
+finishes every file the sweep counted at four, three and two, the three the
+recount of 2026-09-26 added among them: `pwd.rs`, `dirent.rs` and `signal.rs`
+needed nothing at their NULLs -- `pwd.rs`'s database did
+(`B-D-PWD-KNEW-ONLY-ROOT`). Next are the ten it counted at one:
+`linux_bpf.rs`, `linux_perf_event.rs`, `malloc.rs`, `ndbm.rs`, `pipe.rs`,
+`poll.rs`, `shadow.rs`, `uio.rs` (new, and already right), `utmpx.rs` and
+`utsname.rs`.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
@@ -170034,6 +170054,44 @@ Landlock-aware program tests for.
 
 **What would change it:** a kernel that enforces Landlock (VFS and network
 hooks, lane A's), at which point `syscall()` routes the three numbers to it.
+
+### [D] B-D-XATTR-SIZES-AND-BUFFERS-WERE-NOT-LINUXS — 2026-09-26 — FIXED 2026-09-26 (libc); kernel half requested
+
+**Where:** `posix/src/xattr.rs` -- every `*xattr` call. The kernel half is
+lane A's: `sys_fs_get_xattr`, `sys_fs_set_xattr` and `sys_fs_list_xattrs`
+(`kernel/src/syscall/handlers.rs`) and the VFS below them.
+
+**In short:** Extended attributes are small named values kept with a file --
+a comment, a security label, an access list. Tools that copy files with them
+(`cp -a`, `rsync -X`, `tar --xattrs`) read the list and every value, and
+decide from the error what to do when something does not fit. Ours answered
+the edges differently from Linux: an empty or too-long name, a too-large
+value and a NULL buffer were all "invalid argument", where Linux says "out of
+range", "too big", "bad address" -- or, for a NULL buffer, often nothing at
+all, since Linux complains about a buffer only when it has something to put
+in it.
+
+**What was wrong, against Linux 6.6 (fs/xattr.c):**
+
+| | was | Linux, and now |
+|---|---|---|
+| an empty name | handed to the filesystem | `ERANGE` -- `strncpy_from_user` copied 0 bytes |
+| a name of 256 bytes or more | `EINVAL` | `ERANGE` |
+| a setter's value over 64 KiB | `EINVAL` | `E2BIG`, before the value is read |
+| a setter's NULL value with a size | `EINVAL` | `EFAULT`, after the name and the size |
+| a getter's or lister's NULL buffer with a size | `EINVAL`, before the lookup | the lookup's error, `ERANGE` if the result does not fit, 0 if it is empty; `EFAULT` only for a result that would be copied |
+| a getter's or lister's size over 64 KiB | the buffer checked to its full stated size | 64 KiB (`XATTR_SIZE_MAX`, `XATTR_LIST_MAX`) |
+
+**Still the kernel's, and asked of lane A** (`requests/d-a-xattr-answers-only-the-filesystem-can-give.md`):
+
+- a getter's buffer that is too small is written up to its size before the
+  `ERANGE`; Linux leaves it as it was (`listxattr` already writes nothing);
+- a non-NULL buffer is checked against its stated size before the lookup,
+  so a bad one is `EFAULT` where Linux gives the lookup's answer;
+- a name in no namespace (`foo`, not `user.foo`) is stored, where Linux
+  refuses it with `EOPNOTSUPP`, and a bare prefix (`user.`) with `EINVAL`;
+- `trusted.*` is not gated on `CAP_SYS_ADMIN`, nor `user.*` kept to regular
+  files and directories, as Linux's `xattr_permission` does.
 
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 

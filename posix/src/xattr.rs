@@ -4,10 +4,23 @@
 //! These wrap the kernel xattr syscalls (`SYS_FS_GET_XATTR`,
 //! `SYS_FS_SET_XATTR`, `SYS_FS_REMOVE_XATTR`, `SYS_FS_LIST_XATTRS`), which
 //! ext4 implements via inline + external xattr blocks.  Each entry point
-//! validates its arguments (NULL path/name → EFAULT, bad/closed fd → EBADF,
-//! conflicting setxattr flags → EINVAL) and then, on bare metal, issues the
-//! corresponding syscall.  On the host build (no kernel) the syscall is
-//! skipped and the call returns a validation-only result.
+//! makes Linux's argument checks in Linux's order (fs/xattr.c): the path or
+//! descriptor, then a setter's flags, then the name -- NULL is `EFAULT`, and
+//! an empty name or one longer than [`XATTR_NAME_MAX`] is `ERANGE` -- then a
+//! setter's value, `E2BIG` over [`XATTR_SIZE_MAX`] and `EFAULT` if it is NULL.
+//! On bare metal it then issues the corresponding syscall; on the host build
+//! (no kernel) the syscall is skipped and the call returns a validation-only
+//! result.
+//!
+//! A getter's or lister's buffer is not checked at all, as Linux does not
+//! check it: Linux reads the value into a buffer of its own, of at most
+//! [`XATTR_SIZE_MAX`] (or [`XATTR_LIST_MAX`]) bytes, and faults only when it
+//! copies a non-empty result out -- so a NULL buffer with a size still gets the
+//! lookup's error, `ERANGE`, or 0 for an empty result, before `EFAULT`.  Here
+//! a NULL buffer is a length query, answered as Linux would answer it
+//! (`null_buffer_verdict`).  Until 2026-09-26 the kernel refused it up front
+//! with `EINVAL`, as it did an empty or over-long name and an over-long or
+//! NULL value (`B-D-XATTR-SIZES-AND-BUFFERS-WERE-NOT-LINUXS`).
 //!
 //! The `l*` variants correctly operate on the symlink inode itself (they set
 //! the NO_FOLLOW flag bit on the kernel xattr syscall, which resolves the
@@ -32,6 +45,13 @@ use crate::types::SsizeT;
 pub const XATTR_CREATE: i32 = 1;
 /// Replace the attribute; fail if it doesn't exist.
 pub const XATTR_REPLACE: i32 = 2;
+
+/// The longest attribute name, in bytes (`<linux/limits.h>`).
+pub const XATTR_NAME_MAX: usize = 255;
+/// The largest attribute value, in bytes (`<linux/limits.h>`).
+pub const XATTR_SIZE_MAX: usize = 65536;
+/// The largest name list `listxattr` returns, in bytes (`<linux/limits.h>`).
+pub const XATTR_LIST_MAX: usize = 65536;
 
 /// Validate the `flags` argument to the `set*xattr` family.
 ///
@@ -91,16 +111,72 @@ fn resolve_xattr_path(path: *const u8, buf: &mut [u8; crate::unistd::PATH_MAX]) 
 
 /// Validate the attribute-name argument of a `*xattr` entry point.
 ///
-/// Linux reads the name with `strncpy_from_user` (fs/xattr.c, in `getxattr`,
-/// `setxattr_copy` and `removexattr`), which faults on a NULL pointer — but
-/// only after the path has been resolved and, in the setters, after the flags
-/// have been checked.  Callers must respect that order.
+/// Linux reads the name with `strncpy_from_user` into a buffer of
+/// `XATTR_NAME_MAX + 1` bytes (fs/xattr.c, in `getxattr`, `setxattr_copy` and
+/// `removexattr`): a NULL pointer faults (`EFAULT`), and a copy of 0 bytes --
+/// an empty name -- or one that fills the buffer without reaching the NUL is
+/// `ERANGE`.  That happens only after the path has been resolved and, in the
+/// setters, after the flags have been checked; callers must respect that
+/// order.  The kernel below refused an over-long name with `EINVAL` and let an
+/// empty one through, so both are answered here.
 fn check_xattr_name(name: *const u8) -> bool {
     if name.is_null() {
         errno::set_errno(errno::EFAULT);
         return false;
     }
+    // SAFETY: `name` is a C string (the caller's contract); `strnlen` stops at
+    // its NUL or after `XATTR_NAME_MAX + 1` bytes, as `strncpy_from_user` does.
+    let len = unsafe { crate::string::strnlen(name, XATTR_NAME_MAX + 1) };
+    if len == 0 || len > XATTR_NAME_MAX {
+        errno::set_errno(errno::ERANGE);
+        return false;
+    }
     true
+}
+
+/// Validate a setter's value, after its name: Linux's `setxattr_copy` refuses
+/// a size over [`XATTR_SIZE_MAX`] with `E2BIG` before it reads the value, and
+/// then copies the value in, where a NULL one faults.  An empty value is not
+/// read, so it may be NULL.  The kernel below answered both with `EINVAL`.
+fn check_xattr_value(value: *const u8, size: usize) -> bool {
+    if size > XATTR_SIZE_MAX {
+        errno::set_errno(errno::E2BIG);
+        return false;
+    }
+    if size != 0 && value.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return false;
+    }
+    true
+}
+
+/// A getter's or lister's answer for a NULL buffer with a non-zero `size`.
+///
+/// Linux never tests the pointer: it reads the result into a kernel buffer of
+/// `min(size, max)` bytes and faults only when it copies a non-empty result
+/// out (`do_getxattr`, `listxattr` in fs/xattr.c).  So the lookup's own error
+/// comes first, then `ERANGE` for a result that does not fit -- `E2BIG` when
+/// `size` was already `max` or more, since nothing bigger can exist -- and an
+/// empty result is 0; only a result that would be copied is `EFAULT`.
+///
+/// `len` is a length query's answer: the result's length, or `None` when the
+/// lookup failed with `errno` set.
+#[cfg(any(target_os = "none", test))]
+fn null_buffer_verdict(len: Option<usize>, size: usize, max: usize) -> SsizeT {
+    let e = match len {
+        None => return -1,
+        Some(0) => return 0,
+        Some(n) if n > size.min(max) => {
+            if size >= max {
+                errno::E2BIG
+            } else {
+                errno::ERANGE
+            }
+        }
+        Some(_) => errno::EFAULT,
+    };
+    errno::set_errno(e);
+    -1
 }
 
 // ---------------------------------------------------------------------------
@@ -109,8 +185,12 @@ fn check_xattr_name(name: *const u8) -> bool {
 
 /// Issue `SYS_FS_GET_XATTR` for an already-resolved path.
 ///
-/// Returns the attribute length on success (after an ERANGE check when the
-/// caller provided a non-zero, too-small buffer) or -1 with `errno` set.
+/// As Linux's `do_getxattr` (fs/xattr.c): a `size` over [`XATTR_SIZE_MAX`] is
+/// that size, a value that does not fit is `ERANGE` (`E2BIG` when `size` was
+/// already the most there is), and a NULL `value` is a length query answered
+/// by [`null_buffer_verdict`].
+///
+/// Returns the attribute length on success or -1 with `errno` set.
 #[cfg(target_os = "none")]
 fn do_getxattr(
     path_ptr: *const u8,
@@ -120,6 +200,11 @@ fn do_getxattr(
     size: usize,
     no_follow: bool,
 ) -> SsizeT {
+    let cap = if value.is_null() {
+        0
+    } else {
+        size.min(XATTR_SIZE_MAX)
+    };
     // arg5 bit 0 = NO_FOLLOW (lgetxattr → read the link inode's own xattrs).
     let ret = crate::syscall::syscall6(
         crate::syscall::SYS_FS_GET_XATTR,
@@ -127,23 +212,35 @@ fn do_getxattr(
         path_len as u64,
         name as u64,
         value as u64,
-        size as u64,
+        cap as u64,
         u64::from(no_follow),
     );
-    if ret < 0 {
-        return errno::translate(ret) as SsizeT;
+    // The TRUE attribute length, or `None` with `errno` set.
+    let len = usize::try_from(errno::translate(ret)).ok();
+    if value.is_null() && size != 0 {
+        return null_buffer_verdict(len, size, XATTR_SIZE_MAX);
     }
-    // ret is the TRUE attribute length.  A non-zero buffer that is too small
-    // is ERANGE (the kernel copied only what fit).
-    let true_len = ret as usize;
-    if size != 0 && true_len > size {
-        errno::set_errno(errno::ERANGE);
+    let Some(true_len) = len else {
+        return -1;
+    };
+    // A non-zero buffer that is too small: the kernel copied only what fit.
+    if cap != 0 && true_len > cap {
+        errno::set_errno(if size >= XATTR_SIZE_MAX {
+            errno::E2BIG
+        } else {
+            errno::ERANGE
+        });
         return -1;
     }
-    ret as SsizeT
+    true_len as SsizeT
 }
 
 /// Issue `SYS_FS_LIST_XATTRS` for an already-resolved path.
+///
+/// As Linux's `listxattr` (fs/xattr.c): a `size` over [`XATTR_LIST_MAX`] is
+/// that size, a list that does not fit is `ERANGE` (`E2BIG` when `size` was
+/// already the most there is), and a NULL `list` is a length query answered
+/// by [`null_buffer_verdict`].
 #[cfg(target_os = "none")]
 fn do_listxattr(
     path_ptr: *const u8,
@@ -152,24 +249,38 @@ fn do_listxattr(
     size: usize,
     no_follow: bool,
 ) -> SsizeT {
+    let cap = if list.is_null() {
+        0
+    } else {
+        size.min(XATTR_LIST_MAX)
+    };
     // arg4 bit 0 = NO_FOLLOW (llistxattr → list the link inode's own xattrs).
     let ret = crate::syscall::syscall5(
         crate::syscall::SYS_FS_LIST_XATTRS,
         path_ptr as u64,
         path_len as u64,
         list as u64,
-        size as u64,
+        cap as u64,
         u64::from(no_follow),
     );
-    if ret < 0 {
-        return errno::translate(ret) as SsizeT;
+    // The list's whole length, or `None` with `errno` set.
+    let len = usize::try_from(errno::translate(ret)).ok();
+    if list.is_null() && size != 0 {
+        return null_buffer_verdict(len, size, XATTR_LIST_MAX);
     }
-    let total = ret as usize;
-    if size != 0 && total > size {
-        errno::set_errno(errno::ERANGE);
+    let Some(total) = len else {
+        return -1;
+    };
+    // The kernel writes the list only when it all fits.
+    if cap != 0 && total > cap {
+        errno::set_errno(if size >= XATTR_LIST_MAX {
+            errno::E2BIG
+        } else {
+            errno::ERANGE
+        });
         return -1;
     }
-    ret as SsizeT
+    total as SsizeT
 }
 
 /// Issue `SYS_FS_SET_XATTR` for an already-resolved path, handing the
@@ -385,6 +496,9 @@ pub extern "C" fn setxattr(
     if !check_xattr_name(name) {
         return -1;
     }
+    if !check_xattr_value(value, size) {
+        return -1;
+    }
     #[cfg(target_os = "none")]
     {
         do_setxattr(buf.as_ptr(), len, name, value, size, flags, false)
@@ -416,6 +530,9 @@ pub extern "C" fn lsetxattr(
     if !check_xattr_name(name) {
         return -1;
     }
+    if !check_xattr_value(value, size) {
+        return -1;
+    }
     #[cfg(target_os = "none")]
     {
         do_setxattr(buf.as_ptr(), len, name, value, size, flags, true)
@@ -438,7 +555,8 @@ pub extern "C" fn fsetxattr(
 ) -> i32 {
     // `SYSCALL_DEFINE5(fsetxattr)` takes the descriptor first, then calls
     // `setxattr()` → `setxattr_copy`, which checks the flags before reading the
-    // name (fs/xattr.c:598-602).  So: fd, flags, name.
+    // name, and the name before the value (fs/xattr.c:594-620).  So: fd,
+    // flags, name, value.
     if fd < 0 || crate::fdtable::get_fd(fd).is_none() {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -447,6 +565,9 @@ pub extern "C" fn fsetxattr(
         return -1;
     }
     if !check_xattr_name(name) {
+        return -1;
+    }
+    if !check_xattr_value(value, size) {
         return -1;
     }
     #[cfg(target_os = "none")]
@@ -604,7 +725,8 @@ pub extern "C" fn fremovexattr(fd: i32, name: *const u8) -> i32 {
 //
 // These run on the host build, where the kernel syscalls are not issued.
 // They exercise the argument-validation surface (NULL path/name → EFAULT,
-// bad/closed fd → EBADF, conflicting setxattr flags → EINVAL) and confirm
+// empty or over-long name → ERANGE, over-long value → E2BIG, NULL value →
+// EFAULT, bad/closed fd → EBADF, unknown setxattr flags → EINVAL) and confirm
 // that well-formed calls return the validation-only success value.
 
 #[cfg(test)]
@@ -1027,6 +1149,182 @@ mod tests {
             fgetxattr(fd, b"user.test\0".as_ptr(), core::ptr::null_mut(), 0),
             0
         );
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // -- The name: Linux's strncpy_from_user of XATTR_NAME_MAX + 1 bytes --
+
+    /// A name of `n` bytes of `a`, NUL-terminated.
+    fn name_of_len(n: usize) -> [u8; XATTR_NAME_MAX + 2] {
+        let mut b = [0u8; XATTR_NAME_MAX + 2];
+        for c in b.iter_mut().take(n) {
+            *c = b'a';
+        }
+        b
+    }
+
+    /// An empty name copies 0 bytes and a name of 256 bytes fills the buffer
+    /// without its NUL: both `ERANGE`, in every call that reads a name.  The
+    /// kernel below let the empty one through and called the long one
+    /// `EINVAL`.
+    #[test]
+    fn test_empty_and_over_long_names_are_erange() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        let p = b"/tmp/test\0".as_ptr();
+        let v = b"v".as_ptr();
+        let none = core::ptr::null_mut();
+        let long = name_of_len(XATTR_NAME_MAX + 1);
+        let calls: [(&str, &dyn Fn(*const u8) -> isize); 9] = [
+            ("getxattr", &|n| getxattr(p, n, none, 0)),
+            ("lgetxattr", &|n| lgetxattr(p, n, none, 0)),
+            ("fgetxattr", &|n| fgetxattr(fd, n, none, 0)),
+            ("setxattr", &|n| setxattr(p, n, v, 1, 0) as isize),
+            ("lsetxattr", &|n| lsetxattr(p, n, v, 1, 0) as isize),
+            ("fsetxattr", &|n| fsetxattr(fd, n, v, 1, 0) as isize),
+            ("removexattr", &|n| removexattr(p, n) as isize),
+            ("lremovexattr", &|n| lremovexattr(p, n) as isize),
+            ("fremovexattr", &|n| fremovexattr(fd, n) as isize),
+        ];
+        for name in [b"\0".as_ptr(), long.as_ptr()] {
+            for (call, f) in &calls {
+                errno::set_errno(0);
+                assert_eq!(f(name), -1, "{call}");
+                assert_eq!(errno::get_errno(), errno::ERANGE, "{call}");
+            }
+        }
+        let _ = fdtable::close_fd(fd);
+    }
+
+    /// 255 bytes is the longest name there is, and it is accepted.
+    #[test]
+    fn test_a_name_of_xattr_name_max_is_accepted() {
+        let name = name_of_len(XATTR_NAME_MAX);
+        let p = b"/tmp/test\0".as_ptr();
+        assert_eq!(getxattr(p, name.as_ptr(), core::ptr::null_mut(), 0), 0);
+        assert_eq!(setxattr(p, name.as_ptr(), b"v".as_ptr(), 1, 0), 0);
+        assert_eq!(removexattr(p, name.as_ptr()), 0);
+    }
+
+    /// The name is read after the path and after a setter's flags, so those
+    /// outrank an empty name as they outrank a NULL one.
+    #[test]
+    fn test_an_empty_name_comes_after_the_path_and_the_flags() {
+        errno::set_errno(0);
+        assert_eq!(
+            getxattr(core::ptr::null(), b"\0".as_ptr(), core::ptr::null_mut(), 0),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        errno::set_errno(0);
+        assert_eq!(
+            setxattr(b"/tmp\0".as_ptr(), b"\0".as_ptr(), b"v".as_ptr(), 1, 0x40),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // -- A setter's value: E2BIG before it is read, then EFAULT --
+
+    #[test]
+    fn test_a_setters_value_is_read_after_its_name() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        let p = b"/tmp/test\0".as_ptr();
+        let n = b"user.test\0".as_ptr();
+        // A NULL value with a size faults; the kernel below said EINVAL.
+        errno::set_errno(0);
+        assert_eq!(setxattr(p, n, core::ptr::null(), 5, 0), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        errno::set_errno(0);
+        assert_eq!(lsetxattr(p, n, core::ptr::null(), 5, 0), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        errno::set_errno(0);
+        assert_eq!(fsetxattr(fd, n, core::ptr::null(), 5, 0), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        // An empty value is not read, so it may be NULL.
+        assert_eq!(setxattr(p, n, core::ptr::null(), 0, 0), 0);
+        // Over XATTR_SIZE_MAX is E2BIG, before the value is read -- the
+        // kernel below said EINVAL.
+        for value in [core::ptr::null(), b"v".as_ptr()] {
+            errno::set_errno(0);
+            assert_eq!(setxattr(p, n, value, XATTR_SIZE_MAX + 1, 0), -1);
+            assert_eq!(errno::get_errno(), errno::E2BIG);
+            errno::set_errno(0);
+            assert_eq!(fsetxattr(fd, n, value, usize::MAX, 0), -1);
+            assert_eq!(errno::get_errno(), errno::E2BIG);
+        }
+        // And the name comes first.
+        errno::set_errno(0);
+        assert_eq!(setxattr(p, b"\0".as_ptr(), core::ptr::null(), 5, 0), -1);
+        assert_eq!(errno::get_errno(), errno::ERANGE);
+        errno::set_errno(0);
+        assert_eq!(
+            setxattr(p, core::ptr::null(), core::ptr::null(), usize::MAX, 0),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_a_value_of_xattr_size_max_is_accepted() {
+        static BIG: [u8; XATTR_SIZE_MAX] = [0; XATTR_SIZE_MAX];
+        assert_eq!(
+            setxattr(
+                b"/tmp/test\0".as_ptr(),
+                b"user.test\0".as_ptr(),
+                BIG.as_ptr(),
+                BIG.len(),
+                0
+            ),
+            0
+        );
+    }
+
+    // -- A getter's or lister's NULL buffer --
+
+    /// Linux faults on a NULL buffer only when it has a non-empty result to
+    /// copy out; everything else is answered first.
+    #[test]
+    fn test_null_buffer_verdict_is_linuxs() {
+        // The lookup's own error stands.
+        errno::set_errno(errno::ENODATA);
+        assert_eq!(null_buffer_verdict(None, 10, XATTR_SIZE_MAX), -1);
+        assert_eq!(errno::get_errno(), errno::ENODATA);
+        // An empty result is copied from nowhere to nowhere.
+        errno::set_errno(0);
+        assert_eq!(null_buffer_verdict(Some(0), 10, XATTR_SIZE_MAX), 0);
+        assert_eq!(errno::get_errno(), 0);
+        // A result that fits would be copied: EFAULT.
+        for (len, size) in [(1, 10), (10, 10), (XATTR_SIZE_MAX, usize::MAX)] {
+            errno::set_errno(0);
+            assert_eq!(null_buffer_verdict(Some(len), size, XATTR_SIZE_MAX), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT, "{len} into {size}");
+        }
+        // One that does not fit is ERANGE, or E2BIG when the size was already
+        // the most there is.
+        errno::set_errno(0);
+        assert_eq!(null_buffer_verdict(Some(11), 10, XATTR_SIZE_MAX), -1);
+        assert_eq!(errno::get_errno(), errno::ERANGE);
+        errno::set_errno(0);
+        assert_eq!(
+            null_buffer_verdict(Some(XATTR_LIST_MAX + 1), usize::MAX, XATTR_LIST_MAX),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::E2BIG);
+    }
+
+    /// On the host, where there is no kernel to ask, a NULL buffer with a
+    /// size is not refused -- the kernel below used to refuse it with EINVAL
+    /// before it looked.
+    #[test]
+    fn test_a_null_buffer_is_not_refused_up_front() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        let p = b"/tmp/test\0".as_ptr();
+        let n = b"user.test\0".as_ptr();
+        assert_eq!(getxattr(p, n, core::ptr::null_mut(), 64), 0);
+        assert_eq!(fgetxattr(fd, n, core::ptr::null_mut(), 64), 0);
+        assert_eq!(listxattr(p, core::ptr::null_mut(), 64), 0);
+        assert_eq!(flistxattr(fd, core::ptr::null_mut(), 64), 0);
         let _ = fdtable::close_fd(fd);
     }
 }

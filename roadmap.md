@@ -1897,11 +1897,13 @@ word; text inside them that says "lane C" is history.
   (which could not save at all), `jsonviewer` (likewise), `slides`,
   `stickynotes` (Ctrl+Q did not save; a failed save on close lost the notes),
   `paint` (no record of changes at all; Ctrl+N and Ctrl+O replaced the
-  picture unasked; a failed save was drawn nowhere).
-  **To do:** `whiteboard`, `diagram`, `spreadsheet` — each can write
-  something (an SVG of one page, an SVG or a JSON nothing reads, the active
-  sheet as CSV) and none can save a document it can open again; each wants
-  that format first, then the record of changes and the question. And `notes`,
+  picture unasked; a failed save was drawn nowhere), `diagram` and
+  `whiteboard` (each a file of its own at last, `.diagram` and
+  `.whiteboard`, read back whole; the whiteboard's undo could not undo a
+  deletion and acted on whichever page was showing).
+  **To do:** `spreadsheet` — it reads and writes the sheet in front as CSV
+  and cannot keep a workbook; it wants that format first, then the record of
+  changes and the question. And `notes`,
   `contacts`, `snippets`, `kanban`, which are worse: they keep nothing at all
   between runs (`known-issues.md` → `[E] Notes, contacts, snippets and
   kanban keep nothing`) and want a store kept as it changes, not a question. **One

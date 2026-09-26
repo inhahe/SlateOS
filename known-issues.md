@@ -166502,7 +166502,7 @@ JPEG decoder with the file's `JPEGTables`; then the rare codecs. Fixtures from
 the same libtiff oracle.
 
 ### [E] Document applications closed over unsaved work, and the hex editor and the JSON viewer could not save at all -- 2026-09-25
-**Status:** FIXED for the text editor, the markdown editor, the hex editor, the JSON viewer, slides and sticky notes (lane E, 2026-09-25), and paint (2026-09-25); OPEN for `whiteboard`, `diagram` and `spreadsheet`, which cannot yet save a document they can open again -- lane E's next, see the end of this entry.
+**Status:** FIXED for the text editor, the markdown editor, the hex editor, the JSON viewer, slides and sticky notes (lane E, 2026-09-25), and paint, the diagram editor and the whiteboard (2026-09-25); OPEN for `spreadsheet`, which saves only the sheet in front as CSV -- lane E's next, see the end of this entry.
 
 **In short:** closing the window of an editor threw away every unsaved change
 without a word -- the window library closed a window on any close request,
@@ -166588,15 +166588,40 @@ what an open or a save did is drawn in the status bar: it was recorded and
 drawn nowhere, so a save that failed looked like one that worked. Mutation
 table `apps/paint/mutate.py` (new, 13 rows).
 
-**Still open: three document applications that cannot save a document.**
-`whiteboard` writes the current page as SVG and cannot read one back, so a
-board's other pages can never be kept and nothing it saved can be reopened;
-`diagram` writes SVG or JSON and has "an importer that does not exist yet";
-`spreadsheet` reads and writes the active sheet as CSV, so the other sheets are
-never saved. None records unsaved changes, and each answers a close with
-`Exit`. Each wants a format it can write and read back whole, then the record
-and the question. Four more that looked like the same case are a worse one --
-see `[E] Notes, contacts, snippets and kanban keep nothing` below.
+**The diagram editor and the whiteboard, the same day.** Neither could save
+anything it could open again -- the diagram wrote an SVG, or a JSON that kept
+the shapes and dropped their colours, borders, fonts, arrowheads, layers and
+groups, for "an importer that does not exist yet"; the whiteboard wrote the
+page in front as an SVG, so a board's other pages could not be kept at all --
+and each said so in a banner across the top of the window. Each now has a
+file of its own, YAML as `apps/slides` keeps a deck (`.diagram`,
+`.whiteboard`; `slateos-diagram: 1`, `slateos-whiteboard: 1`), written through
+`safeio` and read back whole: every property, a later format refused rather
+than half-read, a file cut short refused rather than read as a smaller
+document, ids that clash refused, and a shape of an unknown kind -- or an arrow
+to a box that is not there -- left out while the rest is read, the opening
+saying how many were left out. Ctrl+S saves (asking where the first time),
+Ctrl+Shift+S saves as, Ctrl+O opens, and the old save is Ctrl+E, export, which
+is not a save: it leaves the unsaved mark.
+Each records unsaved changes and asks on `apps/unsaved` before a close or an
+Open, and the status line shows what the last save did (neither drew it).
+Also fixed in the diagram: naming a box and leaving the name as it was no
+longer counts as a change. In the whiteboard, two faults in undo, both of
+which the file made matter: **a deletion could not be undone** -- the undo
+record held only the shape's id and was made after the shape was gone, so
+undo found nothing to put back (a layer's deletion likewise) -- and **the
+history was one for the window**, replayed onto whichever page was showing,
+so undo after switching pages took a same-numbered shape off the wrong page.
+Deletions now carry what they took and where it was, and each page keeps its
+own history. Mutation tables: `apps/diagram/mutate.py`,
+`apps/whiteboard/mutate.py` (both new).
+
+**Still open: the spreadsheet** reads and writes the sheet in front as CSV, so
+the other sheets are never saved, records no unsaved changes, and answers a
+close with `Exit`. It wants a workbook file it can write and read back whole,
+then the record and the question. Four more that looked like the same case are
+a worse one -- see `[E] Notes, contacts, snippets and kanban keep nothing`
+below.
 
 **One question, not thirteen -- done the same day.** The six applications
 fixed first each drew the question by hand, beside the toolkit's own

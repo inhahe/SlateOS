@@ -54,6 +54,7 @@ use guitk::style::CornerRadii;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
+use unsaved::{Choice, Question};
 
 use std::collections::VecDeque;
 
@@ -88,6 +89,9 @@ const MAX_ZOOM: f32 = 4.0;
 const DEFAULT_ZOOM: f32 = 1.0;
 /// Maximum undo/redo steps.
 const MAX_UNDO: usize = 100;
+/// Where the status bar's note on the last save, open or export begins,
+/// clear of the counts before it.
+const STATUS_NOTE_X: f32 = 320.0;
 /// Default node width.
 const DEFAULT_NODE_W: f32 = 140.0;
 /// Default node height.
@@ -764,7 +768,9 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("= / -", "Zoom in / out"),
     ("Ctrl+0", "Back to actual size"),
     ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
-    ("Ctrl+S", "Save"),
+    ("Ctrl+S / Ctrl+Shift+S", "Save / save as a new file"),
+    ("Ctrl+O", "Open a diagram"),
+    ("Ctrl+E", "Export as SVG, or JSON"),
     ("Escape", "Back to the Select tool"),
     ("F1 / ?", "This list"),
 ];
@@ -838,8 +844,20 @@ pub struct DiagramApp {
     pub rect_select_end: Option<(f32, f32)>,
     /// Edge drawing: source node for a new edge.
     pub edge_source: Option<NodeId>,
-    /// Whether app wants to quit.
-    pub should_quit: bool,
+    /// The file this diagram was opened from or last saved to: where Ctrl+S
+    /// writes without asking. `None` for one never saved.
+    pub document_path: Option<std::path::PathBuf>,
+    /// Whether the diagram has changed since it was opened, saved or begun.
+    /// Set by [`save_undo`](Self::save_undo), which every change calls first,
+    /// and by undo and redo.
+    pub dirty: bool,
+    /// What the file picker is up for.
+    pub picker_for: PickerFor,
+    /// "Unsaved changes -- save them?", while it is asked, and what it holds
+    /// up (`apps/unsaved`).
+    question: Option<Question<Pending>>,
+    /// Set once the window may close; the next answer to the loop is `Exit`.
+    pub quit: bool,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -856,10 +874,37 @@ pub struct DiagramApp {
 /// never looked at it. This is the other half of the same discipline,
 /// found by `scripts/find-silent-incapacity.py`: a program that reaches
 /// nothing outside its own process and never says so.
-const NOTHING_KEPT_LINES: [&str; 2] = [
-    "A diagram can be saved, but not opened again.",
-    "Press Ctrl+S for an SVG you can view anywhere, or a .json that keeps the shapes -- nothing here reads either back yet.",
-];
+/// What the file picker is up for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerFor {
+    /// A diagram to open in place of this one.
+    Open,
+    /// Where to save this diagram, which then belongs to that file.
+    Save,
+    /// Where to export an SVG or a JSON: not a save, since neither is read
+    /// back.
+    Export,
+    /// Where to save a diagram with no file yet, before what the
+    /// unsaved-changes question held up goes on.
+    SaveThen(Pending),
+}
+
+/// What the unsaved-changes question is holding up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pending {
+    /// Opening another diagram in its place.
+    Open,
+    /// Closing the window.
+    Close,
+}
+
+/// The version of the diagram file this writes, and the newest it reads.
+const DIAGRAM_FORMAT: i64 = 1;
+
+/// The largest diagram file this will open. A diagram cut short would be
+/// read as a smaller diagram with no sign anything was missing, so a larger
+/// file is refused rather than read in part.
+const MAX_DIAGRAM_BYTES: usize = 32 * 1024 * 1024;
 
 impl DiagramApp {
     // ========================================================================
@@ -902,7 +947,11 @@ impl DiagramApp {
             rect_select_start: None,
             rect_select_end: None,
             edge_source: None,
-            should_quit: false,
+            document_path: None,
+            dirty: false,
+            picker_for: PickerFor::Export,
+            question: None,
+            quit: false,
         }
     }
 
@@ -926,9 +975,12 @@ impl DiagramApp {
         self.groups = snap.groups;
     }
 
+    /// Remember the diagram before a change, so it can be undone -- and note
+    /// that it has changed since it was saved. Every change calls this first.
     fn save_undo(&mut self) {
         let snap = self.snapshot();
         self.undo.save(snap);
+        self.dirty = true;
     }
 
     /// Undo the last change.
@@ -936,6 +988,8 @@ impl DiagramApp {
         let current = self.snapshot();
         if let Some(prev) = self.undo.undo(current) {
             self.restore_snapshot(prev);
+            // Undoing past a save leaves a diagram the file does not hold.
+            self.dirty = true;
         }
     }
 
@@ -944,6 +998,7 @@ impl DiagramApp {
         let current = self.snapshot();
         if let Some(next) = self.undo.redo(current) {
             self.restore_snapshot(next);
+            self.dirty = true;
         }
     }
 
@@ -1077,6 +1132,11 @@ impl DiagramApp {
     }
 
     pub fn set_node_label(&mut self, id: NodeId, label: String) {
+        // Naming a box and leaving the name as it was is no change: no undo
+        // step, and nothing to ask about when the window closes.
+        if self.find_node(id).is_some_and(|n| n.label == label) {
+            return;
+        }
         self.save_undo();
         if let Some(node) = self.find_node_mut(id) {
             node.label = label;
@@ -1200,6 +1260,9 @@ impl DiagramApp {
 
     /// Set edge label.
     pub fn set_edge_label(&mut self, id: EdgeId, label: String) {
+        if self.find_edge(id).is_some_and(|e| e.label == label) {
+            return;
+        }
         self.save_undo();
         if let Some(edge) = self.find_edge_mut(id) {
             edge.label = label;
@@ -2043,7 +2106,278 @@ impl DiagramApp {
     /// shapes for an importer that does not exist yet. What would be wrong is
     /// letting either look like a save the program could reload.
     pub fn open_save_dialog(&mut self) {
-        self.picker.open_to_write("diagram.svg");
+        self.picker_for = PickerFor::Export;
+        self.picker.open_to_write(self.file_stem() + ".svg");
+    }
+
+    /// The diagram's name: its file's, or "Untitled".
+    pub fn document_name(&self) -> String {
+        self.document_path
+            .as_deref()
+            .and_then(std::path::Path::file_name)
+            // The window bar's label only; the real name is the path.
+            .map_or_else(
+                || String::from("Untitled"),
+                |n| n.to_string_lossy().into_owned(),
+            )
+    }
+
+    /// The name offered for an export or a first save, without extension.
+    fn file_stem(&self) -> String {
+        self.document_path
+            .as_deref()
+            .and_then(std::path::Path::file_stem)
+            .map_or_else(
+                || String::from("diagram"),
+                |n| n.to_string_lossy().into_owned(),
+            )
+    }
+
+    /// The diagram as a document: every box, arrow, layer and group, with
+    /// every property the editor lets a user set.
+    ///
+    /// Not the JSON export, which keeps the shapes and drops their colours,
+    /// borders, fonts, arrowheads, layers and groups -- a save that loses them
+    /// is not a save. YAML, as `apps/slides` keeps a deck, versioned under
+    /// `slateos-diagram` so a later format is refused rather than half-read.
+    pub fn diagram_document(&self) -> yamldoc::Document {
+        let mut doc = yamldoc::Document::new();
+        doc.set_i64(&["slateos-diagram"], DIAGRAM_FORMAT);
+        let id = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+        for (i, layer) in self.layers.iter().enumerate() {
+            let k = i.saturating_add(1).to_string();
+            let at = |f: &'static str| ["layers", k.as_str(), f];
+            doc.set_i64(&at("id"), id(layer.id));
+            doc.set_str(&at("name"), &layer.name);
+            doc.set_bool(&at("visible"), layer.visible);
+            doc.set_i64(&at("order"), i64::try_from(layer.order).unwrap_or(i64::MAX));
+        }
+        for (i, node) in self.nodes.iter().enumerate() {
+            let k = i.saturating_add(1).to_string();
+            let at = |f: &'static str| ["nodes", k.as_str(), f];
+            doc.set_i64(&at("id"), id(node.id));
+            doc.set_str(&at("shape"), node.shape.label());
+            doc.set_f64(&at("x"), f64::from(node.x));
+            doc.set_f64(&at("y"), f64::from(node.y));
+            doc.set_f64(&at("width"), f64::from(node.width));
+            doc.set_f64(&at("height"), f64::from(node.height));
+            doc.set_str(&at("label"), &node.label);
+            doc.set_str(&at("fill"), &colour_hex(node.fill_color));
+            doc.set_str(&at("border"), &colour_hex(node.border_color));
+            doc.set_f64(&at("border-width"), f64::from(node.border_width));
+            doc.set_f64(&at("font-size"), f64::from(node.font_size));
+            doc.set_i64(&at("layer"), id(node.layer_id));
+            if let Some(group) = node.group_id {
+                doc.set_i64(&at("group"), id(group));
+            }
+        }
+        for (i, edge) in self.edges.iter().enumerate() {
+            let k = i.saturating_add(1).to_string();
+            let at = |f: &'static str| ["edges", k.as_str(), f];
+            doc.set_i64(&at("id"), id(edge.id));
+            doc.set_i64(&at("from"), id(edge.from_node));
+            doc.set_i64(&at("to"), id(edge.to_node));
+            doc.set_str(&at("kind"), edge.kind.label());
+            doc.set_str(&at("label"), &edge.label);
+            doc.set_str(&at("colour"), &colour_hex(edge.color));
+            doc.set_str(&at("line"), edge.line_style.label());
+            doc.set_f64(&at("width"), f64::from(edge.line_width));
+            doc.set_str(&at("start"), edge.start_arrow.label());
+            doc.set_str(&at("end"), edge.end_arrow.label());
+            doc.set_i64(&at("layer"), id(edge.layer_id));
+        }
+        for (i, group) in self.groups.iter().enumerate() {
+            let k = i.saturating_add(1).to_string();
+            let at = |f: &'static str| ["groups", k.as_str(), f];
+            doc.set_i64(&at("id"), id(group.id));
+            doc.set_str(&at("name"), &group.name);
+            let members: Vec<String> = group.member_ids.iter().map(u64::to_string).collect();
+            let members: Vec<&str> = members.iter().map(String::as_str).collect();
+            doc.set_seq(&at("members"), &members);
+        }
+        doc
+    }
+
+    /// Write the diagram to `path`, which becomes its file. What to say.
+    pub fn write_native(&mut self, path: &std::path::Path) -> String {
+        match safeio::write_str_atomically(path, &self.diagram_document().to_text()) {
+            Ok(()) => {
+                self.document_path = Some(path.to_path_buf());
+                self.dirty = false;
+                format!("Saved {}", path.display())
+            }
+            Err(err) => format!("Could not save {}: {err}", path.display()),
+        }
+    }
+
+    /// Replace the diagram with the one in `path`. What to say. A file that
+    /// is not a diagram this can read leaves this one as it was.
+    pub fn read_native(&mut self, path: &std::path::Path) -> String {
+        self.read_native_within(path, MAX_DIAGRAM_BYTES)
+    }
+
+    /// [`read_native`](Self::read_native), refusing a file over `max` bytes.
+    fn read_native_within(&mut self, path: &std::path::Path, max: usize) -> String {
+        let read = match safeio::read_to_string_capped(path, max) {
+            Ok(read) => read,
+            Err(err) => return format!("Could not open {}: {err}", path.display()),
+        };
+        if read.truncated {
+            return format!(
+                "Could not open {}: at {} bytes it is larger than the {max} this reads",
+                path.display(),
+                read.whole
+            );
+        }
+        match diagram_from_document(&yamldoc::Document::parse(&read.text)) {
+            Ok((snapshot, left_out)) => {
+                let highest = snapshot
+                    .nodes
+                    .iter()
+                    .map(|n| n.id)
+                    .chain(snapshot.edges.iter().map(|e| e.id))
+                    .chain(snapshot.layers.iter().map(|l| l.id))
+                    .chain(snapshot.groups.iter().map(|g| g.id))
+                    .max()
+                    .unwrap_or(0);
+                self.active_layer_id = snapshot.layers.first().map_or(0, |l| l.id);
+                self.restore_snapshot(snapshot);
+                // New ids go past every id the file used, so nothing added
+                // later can take the name of something already there.
+                self.id_gen = IdGen::new(highest.saturating_add(1));
+                self.undo = UndoManager::new(MAX_UNDO);
+                self.selection.clear();
+                self.editing = None;
+                self.edge_source = None;
+                self.document_path = Some(path.to_path_buf());
+                self.dirty = false;
+                // Said, not hidden: saving now would write the diagram
+                // without what was left out.
+                if left_out == 0 {
+                    format!("Opened {}", path.display())
+                } else {
+                    format!(
+                        "Opened {}, leaving out {left_out} thing(s) this version cannot read",
+                        path.display()
+                    )
+                }
+            }
+            Err(why) => format!("Could not open {}: {why}", path.display()),
+        }
+    }
+
+    /// Ctrl+S: over the diagram's own file, or ask where when it has none.
+    pub fn save(&mut self) {
+        match self.document_path.clone() {
+            Some(path) => self.last_save = Some(self.write_native(&path)),
+            None => self.ask_where_to_save(PickerFor::Save),
+        }
+    }
+
+    /// Put the save picker up, for `purpose`, beside the diagram's own file
+    /// when it has one.
+    fn ask_where_to_save(&mut self, purpose: PickerFor) {
+        let start = self
+            .document_path
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map_or_else(FilePicker::default_start, std::path::Path::to_path_buf);
+        let name = self.file_stem() + ".diagram";
+        self.picker_for = purpose;
+        self.picker.put_up(
+            guitk::dialog::FileDialog::save()
+                .with_initial_path(start)
+                .with_filename(name),
+            true,
+        );
+    }
+
+    /// The picker chose `path`: do what it was put up for.
+    fn picked(&mut self, path: &std::path::Path) {
+        let said = match self.picker_for {
+            PickerFor::Open => self.read_native(path),
+            PickerFor::Save => self.write_native(path),
+            PickerFor::Export => self.write_diagram(path),
+            PickerFor::SaveThen(pending) => {
+                let said = self.write_native(path);
+                if !self.dirty {
+                    self.go_on(pending);
+                }
+                said
+            }
+        };
+        self.last_save = Some(said);
+    }
+
+    /// Before something replaces or closes the diagram: ask about unsaved
+    /// changes, or with none go straight on.
+    pub fn unless_unsaved(&mut self, pending: Pending) {
+        if !self.dirty {
+            self.go_on(pending);
+            return;
+        }
+        let prompt = match pending {
+            Pending::Open => "Save it before opening another?",
+            Pending::Close => "Save it before closing?",
+        };
+        let name = self.document_name();
+        self.question = Some(Question::new(
+            &unsaved::message_for(&[&name]),
+            prompt,
+            pending,
+        ));
+    }
+
+    /// Do what the unsaved-changes question held up.
+    fn go_on(&mut self, pending: Pending) {
+        match pending {
+            Pending::Open => {
+                self.picker_for = PickerFor::Open;
+                self.picker.open_to_read();
+            }
+            Pending::Close => self.quit = true,
+        }
+    }
+
+    /// Answer the question put before `pending`. Save goes on only if the
+    /// save worked: a diagram that could not be written is still the only
+    /// copy.
+    fn answer(&mut self, pending: Pending, choice: Choice) {
+        match choice {
+            Choice::Cancel => {}
+            Choice::Discard => self.go_on(pending),
+            Choice::Save => match self.document_path.clone() {
+                Some(path) => {
+                    self.last_save = Some(self.write_native(&path));
+                    if !self.dirty {
+                        self.go_on(pending);
+                    }
+                }
+                None => self.ask_where_to_save(PickerFor::SaveThen(pending)),
+            },
+        }
+    }
+
+    /// The window has been asked to close: whether it may go now. If not,
+    /// the question is up.
+    fn request_close(&mut self) -> bool {
+        // A name being typed is part of the diagram.
+        if let Some((target, buf)) = self.editing.take() {
+            match target {
+                LabelTarget::Node(id) => self.set_node_label(id, buf),
+                LabelTarget::Edge(id) => self.set_edge_label(id, buf),
+            }
+        }
+        if !self.dirty {
+            return true;
+        }
+        // The question replaces whatever is up: a picker would take the keys
+        // it needs, and be drawn over it.
+        self.picker.close();
+        self.show_help = false;
+        self.unless_unsaved(Pending::Close);
+        false
     }
 
     /// Write the diagram to `path`, in the format the filename asks for.
@@ -2078,12 +2412,24 @@ impl DiagramApp {
     }
 
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The unsaved-changes question has every key and click while it is
+        // up. Each is a redraw: focus and hover move inside it.
+        if let Some(question) = self.question.as_mut()
+            && matches!(event, Event::Key(_) | Event::Mouse(_))
+        {
+            if let Some(choice) = question.handle(event) {
+                let pending = question.pending();
+                self.question = None;
+                self.answer(pending, choice);
+            }
+            return EventResult::Consumed;
+        }
         // The picker takes input first while it is up, or a keystroke meant
         // for a filename reaches the canvas -- where single letters select
         // tools and Delete removes the selected shape.
         match self.picker.handle(event, self.window_w, self.window_h) {
             Picked::Chose(path) => {
-                self.last_save = Some(self.write_diagram(&path));
+                self.picked(&path);
                 return EventResult::Consumed;
             }
             // Cancelled grouped with Handled: this caller keeps no dialog
@@ -2267,6 +2613,20 @@ impl DiagramApp {
         let ctrl = key.modifiers.ctrl;
         match key.key {
             Key::S if ctrl => {
+                if key.modifiers.shift {
+                    self.ask_where_to_save(PickerFor::Save);
+                } else {
+                    self.save();
+                }
+                EventResult::Consumed
+            }
+            Key::O if ctrl => {
+                self.unless_unsaved(Pending::Open);
+                EventResult::Consumed
+            }
+            // What Ctrl+S did before a diagram could be saved: an SVG or a
+            // JSON, neither of them read back.
+            Key::E if ctrl => {
                 self.open_save_dialog();
                 EventResult::Consumed
             }
@@ -2468,34 +2828,6 @@ impl DiagramApp {
             0.0,
             Surface::Card,
         );
-
-        // After the background, or it would be painted over.
-        for (i, line) in NOTHING_KEPT_LINES.iter().enumerate() {
-            #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
-            let ty = 1.0 + i as f32 * 11.0;
-            let avail = (self.window_w - 16.0).max(0.0);
-            if avail <= 0.0 || ty + 11.0 > self.window_h {
-                break;
-            }
-            cmds.push(RenderCommand::Text {
-                x: 8.0,
-                y: ty,
-                text: (*line).to_string(),
-                color: if i == 0 {
-                    self.palette.ink(self.palette.yellow)
-                } else {
-                    self.palette.subtext0
-                },
-                font_size: if i == 0 { 10.0 } else { 9.0 },
-                font_weight: if i == 0 {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(avail),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
 
         self.render_toolbar(&mut cmds);
         self.render_palette(&mut cmds);
@@ -3776,9 +4108,24 @@ impl DiagramApp {
             color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(self.window_w - 24.0),
+            max_width: Some((STATUS_NOTE_X - 20.0).min(self.window_w - 24.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
+
+        // What the last save, open or export did. It was recorded and drawn
+        // nowhere, so a save that failed looked like one that worked.
+        if let Some(note) = &self.last_save {
+            cmds.push(RenderCommand::Text {
+                x: STATUS_NOTE_X,
+                y: sy + 6.0,
+                text: note.clone(),
+                color: self.palette.text,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((self.window_w - 208.0 - STATUS_NOTE_X).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         // Mode indicator.
         let mode_str = match self.mode {
@@ -3866,6 +4213,276 @@ fn escape_xml(s: &str) -> String {
 /// passed every other control character through raw. RFC 8259 forbids an
 /// unescaped character below `U+0020` inside a string, so a node label
 /// containing one produced an export that no JSON parser would accept.
+/// A colour as `#RRGGBB`, or `#RRGGBBAA` when it is not opaque -- the
+/// spelling `apps/slides` writes, so the two files read alike.
+fn colour_hex(c: Color) -> String {
+    if c.a == 255 {
+        format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+    } else {
+        format!("#{:02X}{:02X}{:02X}{:02X}", c.r, c.g, c.b, c.a)
+    }
+}
+
+/// A colour read back from `#RRGGBB` or `#RRGGBBAA`.
+fn parse_colour(text: &str) -> Option<Color> {
+    let hex = text.trim().strip_prefix('#')?;
+    if !hex.is_ascii() || !(hex.len() == 6 || hex.len() == 8) {
+        return None;
+    }
+    let byte = |at: usize| {
+        hex.get(at..at.saturating_add(2))
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+    };
+    let a = if hex.len() == 8 { byte(6)? } else { 255 };
+    Some(Color::rgba(byte(0)?, byte(2)?, byte(4)?, a))
+}
+
+/// The keys under `path` that are positions, in order.
+fn positions(doc: &yamldoc::Document, path: &[&str]) -> Vec<String> {
+    let mut keys: Vec<(u64, String)> = doc
+        .keys(path)
+        .into_iter()
+        .filter_map(|k| k.parse::<u64>().ok().map(|n| (n, k)))
+        .collect();
+    keys.sort_unstable();
+    keys.into_iter().map(|(_, k)| k).collect()
+}
+
+/// The variant of `all` whose label is `text`.
+fn by_label<T: Copy>(all: &[T], label: impl Fn(T) -> &'static str, text: &str) -> Option<T> {
+    all.iter().copied().find(|v| label(*v) == text)
+}
+
+/// An id read back: a non-negative whole number.
+fn read_id(doc: &yamldoc::Document, path: &[&str]) -> Option<u64> {
+    doc.get_i64(path).and_then(|n| u64::try_from(n).ok())
+}
+
+/// A number read back as the `f32` it was written from.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "every number here was written from an f32, so it comes back within range"
+)]
+fn read_f32(doc: &yamldoc::Document, path: &[&str]) -> Option<f32> {
+    doc.get_f64(path)
+        .filter(|v| v.is_finite())
+        .map(|v| v as f32)
+}
+
+/// Take `id` for one thing in a diagram being read: every box, arrow, layer
+/// and group has an id no other has, and a file that says otherwise would be
+/// read as some other diagram.
+fn claim(seen: &mut std::collections::HashSet<u64>, id: u64) -> Result<u64, String> {
+    if seen.insert(id) {
+        Ok(id)
+    } else {
+        Err(format!("two things in it share the id {id}"))
+    }
+}
+
+/// Read a diagram written by [`DiagramApp::diagram_document`].
+///
+/// Refuses a file that is not a diagram, one from a later version, and one
+/// whose ids are not unique -- each would be read as some other diagram. A
+/// box of a shape this does not know is left out, and so is an arrow whose
+/// ends are not both in the file: the rest is still the user's diagram. A
+/// file with no layers gets one, since every box has to be on one. How many
+/// things were left out comes back with the diagram, so the user is told.
+fn diagram_from_document(doc: &yamldoc::Document) -> Result<(DiagramSnapshot, usize), String> {
+    match doc.get_i64(&["slateos-diagram"]) {
+        None => return Err(String::from("it is not a SlateOS diagram")),
+        Some(v) if v > DIAGRAM_FORMAT => {
+            return Err(format!(
+                "it is a later format ({v}) than this version reads ({DIAGRAM_FORMAT})"
+            ));
+        }
+        Some(_) => {}
+    }
+    let mut seen = std::collections::HashSet::new();
+
+    let mut left_out = 0_usize;
+    let mut layers = Vec::new();
+    for k in positions(doc, &["layers"]) {
+        let at = |f: &'static str| ["layers", k.as_str(), f];
+        let Some(id) = read_id(doc, &at("id")) else {
+            left_out = left_out.saturating_add(1);
+            continue;
+        };
+        let mut layer = Layer::new(
+            claim(&mut seen, id)?,
+            doc.get_str(&at("name"))
+                .unwrap_or_else(|| format!("Layer {id}")),
+            doc.get_i64(&at("order"))
+                .and_then(|o| usize::try_from(o).ok())
+                .unwrap_or(layers.len()),
+        );
+        layer.visible = doc.get_bool(&at("visible")).unwrap_or(true);
+        layers.push(layer);
+    }
+    if layers.is_empty() {
+        // An id past every id in the file: the boxes, arrows and groups are
+        // read after this, and one of them taking the same number would be
+        // refused as a clash the file never had.
+        let highest = ["nodes", "edges", "groups"]
+            .iter()
+            .flat_map(|section| {
+                positions(doc, &[section])
+                    .into_iter()
+                    .filter_map(|k| read_id(doc, &[section, k.as_str(), "id"]))
+            })
+            .max()
+            .unwrap_or(0);
+        let id = claim(&mut seen, highest.saturating_add(1))?;
+        layers.push(Layer::new(id, String::from("Layer 1"), 0));
+    }
+    let first_layer = layers.first().map_or(0, |l| l.id);
+    let layer_or_first = |id: Option<u64>| {
+        id.filter(|id| layers.iter().any(|l| l.id == *id))
+            .unwrap_or(first_layer)
+    };
+
+    let mut nodes = Vec::new();
+    for k in positions(doc, &["nodes"]) {
+        let at = |f: &'static str| ["nodes", k.as_str(), f];
+        let shape = doc
+            .get_str(&at("shape"))
+            .and_then(|t| by_label(NodeShape::all(), NodeShape::label, &t));
+        let (Some(id), Some(shape), Some(x), Some(y)) = (
+            read_id(doc, &at("id")),
+            shape,
+            read_f32(doc, &at("x")),
+            read_f32(doc, &at("y")),
+        ) else {
+            left_out = left_out.saturating_add(1);
+            continue;
+        };
+        let mut node = DiagramNode::new(
+            claim(&mut seen, id)?,
+            shape,
+            x,
+            y,
+            layer_or_first(read_id(doc, &at("layer"))),
+        );
+        if let Some(w) = read_f32(doc, &at("width")).filter(|w| *w > 0.0) {
+            node.width = w;
+        }
+        if let Some(h) = read_f32(doc, &at("height")).filter(|h| *h > 0.0) {
+            node.height = h;
+        }
+        node.label = doc.get_str(&at("label")).unwrap_or_default();
+        if let Some(c) = doc.get_str(&at("fill")).and_then(|t| parse_colour(&t)) {
+            node.fill_color = c;
+        }
+        if let Some(c) = doc.get_str(&at("border")).and_then(|t| parse_colour(&t)) {
+            node.border_color = c;
+        }
+        if let Some(v) = read_f32(doc, &at("border-width")).filter(|v| *v >= 0.0) {
+            node.border_width = v;
+        }
+        if let Some(v) = read_f32(doc, &at("font-size")).filter(|v| *v > 0.0) {
+            node.font_size = v;
+        }
+        node.group_id = read_id(doc, &at("group"));
+        nodes.push(node);
+    }
+
+    let mut edges = Vec::new();
+    for k in positions(doc, &["edges"]) {
+        let at = |f: &'static str| ["edges", k.as_str(), f];
+        let (Some(id), Some(from), Some(to)) = (
+            read_id(doc, &at("id")),
+            read_id(doc, &at("from")),
+            read_id(doc, &at("to")),
+        ) else {
+            left_out = left_out.saturating_add(1);
+            continue;
+        };
+        // An arrow is drawn between two boxes; without both it is nothing.
+        if !nodes.iter().any(|n| n.id == from) || !nodes.iter().any(|n| n.id == to) {
+            left_out = left_out.saturating_add(1);
+            continue;
+        }
+        let mut edge = DiagramEdge::new(
+            claim(&mut seen, id)?,
+            from,
+            to,
+            layer_or_first(read_id(doc, &at("layer"))),
+        );
+        if let Some(kind) = doc
+            .get_str(&at("kind"))
+            .and_then(|t| by_label(EdgeKind::all(), EdgeKind::label, &t))
+        {
+            edge.kind = kind;
+        }
+        edge.label = doc.get_str(&at("label")).unwrap_or_default();
+        if let Some(c) = doc.get_str(&at("colour")).and_then(|t| parse_colour(&t)) {
+            edge.color = c;
+        }
+        if let Some(line) = doc
+            .get_str(&at("line"))
+            .and_then(|t| by_label(LineStyle::all(), LineStyle::label, &t))
+        {
+            edge.line_style = line;
+        }
+        if let Some(v) = read_f32(doc, &at("width")).filter(|v| *v > 0.0) {
+            edge.line_width = v;
+        }
+        if let Some(a) = doc
+            .get_str(&at("start"))
+            .and_then(|t| by_label(ArrowHead::all(), ArrowHead::label, &t))
+        {
+            edge.start_arrow = a;
+        }
+        if let Some(a) = doc
+            .get_str(&at("end"))
+            .and_then(|t| by_label(ArrowHead::all(), ArrowHead::label, &t))
+        {
+            edge.end_arrow = a;
+        }
+        edges.push(edge);
+    }
+
+    let mut groups = Vec::new();
+    for k in positions(doc, &["groups"]) {
+        let at = |f: &'static str| ["groups", k.as_str(), f];
+        let Some(id) = read_id(doc, &at("id")) else {
+            left_out = left_out.saturating_add(1);
+            continue;
+        };
+        let members: Vec<u64> = doc
+            .get_seq(&at("members"))
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|m| m.trim().parse::<u64>().ok())
+            .filter(|m| nodes.iter().any(|n| n.id == *m))
+            .collect();
+        let mut group = Group::new(claim(&mut seen, id)?, members);
+        if let Some(name) = doc.get_str(&at("name")) {
+            group.name = name;
+        }
+        groups.push(group);
+    }
+    // A box names a group only if the group is there.
+    for node in &mut nodes {
+        if node
+            .group_id
+            .is_some_and(|g| !groups.iter().any(|group| group.id == g))
+        {
+            node.group_id = None;
+        }
+    }
+
+    Ok((
+        DiagramSnapshot {
+            nodes,
+            edges,
+            layers,
+            groups,
+        },
+        left_out,
+    ))
+}
+
 fn escape_json(s: &str) -> String {
     guitk::escape::json_string(s)
 }
@@ -3879,8 +4496,13 @@ impl App for DiagramApp {
         self.palette = *palette;
     }
 
+    /// The diagram's name, marked `*` while it has changes not saved.
     fn title(&self) -> String {
-        "Diagram".to_owned()
+        format!(
+            "{}{} — Diagram",
+            if self.dirty { "*" } else { "" },
+            self.document_name()
+        )
     }
 
     fn initial_size(&self) -> (u32, u32) {
@@ -3903,11 +4525,21 @@ impl App for DiagramApp {
         None
     }
 
+    /// Closing over unsaved changes asks first, and the window waits for the
+    /// answer: `KeepOpen` declines the close and draws the question.
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
+            return if self.request_close() {
+                Response::Exit
+            } else {
+                Response::KeepOpen
+            };
+        }
+        let result = self.handle_event(event);
+        if self.quit {
             return Response::Exit;
         }
-        match self.handle_event(event) {
+        match result {
             EventResult::Consumed => Response::Redraw,
             EventResult::Ignored => Response::Idle,
         }
@@ -3919,9 +4551,15 @@ impl App for DiagramApp {
         // for, and the first frame is drawn before any `Resize` arrives.
         self.window_w = width;
         self.window_h = height;
-        RenderTree {
+        let mut tree = RenderTree {
             commands: self.render_commands(),
+        };
+        // Over everything, the picker included: they are never up together.
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
         }
+        tree
     }
 }
 
@@ -4087,16 +4725,360 @@ mod tests {
         );
     }
 
-    /// The window says what this program cannot do.
-    ///
-    /// Nothing here is invented, so `find-reachable-fixtures.py` never looked
-    /// at this app. It came from `find-silent-incapacity.py`, which asks the
-    /// opposite question: does the crate reach anything outside its own
-    /// process, and if not, does it admit that in a string the user can read?
+    // ------------------------------------------------------------------
+    // A diagram that can be saved and opened again
+    //
+    // It could be exported -- an SVG, a JSON nothing read -- and never opened
+    // again, and the window said so in a banner. Nothing recorded unsaved
+    // changes, and the window closed over them.
+    // ------------------------------------------------------------------
+
+    /// A scratch directory of the test's own.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "slateos-diagram-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// The picker chose `path`, as it does in a window: it takes itself down,
+    /// then the choice is acted on.
+    fn choose(app: &mut DiagramApp, path: &std::path::Path) {
+        assert!(app.picker.is_open(), "nothing was asking for a file");
+        app.picker.close();
+        app.picked(path);
+    }
+
+    /// Everything a diagram holds, one line per thing, in a fixed order.
+    fn describe(app: &DiagramApp) -> String {
+        let mut out = Vec::new();
+        for l in &app.layers {
+            out.push(format!(
+                "layer {} {:?} {} {}",
+                l.id, l.name, l.visible, l.order
+            ));
+        }
+        for n in &app.nodes {
+            out.push(format!(
+                "node {} {:?} {} {} {} {} {:?} {:?} {:?} {} {} {} {:?}",
+                n.id,
+                n.shape,
+                n.x,
+                n.y,
+                n.width,
+                n.height,
+                n.label,
+                n.fill_color,
+                n.border_color,
+                n.border_width,
+                n.font_size,
+                n.layer_id,
+                n.group_id
+            ));
+        }
+        for e in &app.edges {
+            out.push(format!(
+                "edge {} {}->{} {:?} {:?} {:?} {:?} {} {:?} {:?} {}",
+                e.id,
+                e.from_node,
+                e.to_node,
+                e.kind,
+                e.label,
+                e.color,
+                e.line_style,
+                e.line_width,
+                e.start_arrow,
+                e.end_arrow,
+                e.layer_id
+            ));
+        }
+        for g in &app.groups {
+            out.push(format!("group {} {:?} {:?}", g.id, g.name, g.member_ids));
+        }
+        out.join("\n")
+    }
+
+    /// A diagram using everything a file has to keep: every property set away
+    /// from its default, a hidden second layer, and a group.
+    fn rich() -> DiagramApp {
+        let mut app = DiagramApp::new(1280.0, 800.0);
+        let a = app.add_node(NodeShape::Diamond, 40.0, 60.0);
+        let b = app.add_node(NodeShape::Cylinder, 300.0, 90.5);
+        let hidden = 90;
+        app.layers
+            .push(Layer::new(hidden, String::from("Notes: draft"), 1));
+        app.layers[1].visible = false;
+        let c = 91;
+        app.nodes
+            .push(DiagramNode::new(c, NodeShape::Cloud, -20.25, 400.0, hidden));
+        for n in &mut app.nodes {
+            n.label = format!("say \"{}\" # not a comment", n.id);
+            n.fill_color = Color::rgba(1, 2, 3, 128);
+            n.border_color = Color::rgb(250, 128, 7);
+            n.border_width = 3.5;
+            n.font_size = 17.0;
+            n.width += 11.0;
+        }
+        app.groups.push(Group::new(92, vec![a, b]));
+        app.groups[0].name = String::from("the pair");
+        for n in app.nodes.iter_mut().filter(|n| n.id == a || n.id == b) {
+            n.group_id = Some(92);
+        }
+        let mut e = DiagramEdge::new(93, a, b, app.active_layer_id);
+        e.kind = EdgeKind::Orthogonal;
+        e.label = String::from("yes: always");
+        e.color = Color::rgb(9, 8, 7);
+        e.line_style = LineStyle::Dotted;
+        e.line_width = 4.0;
+        e.start_arrow = ArrowHead::Diamond;
+        e.end_arrow = ArrowHead::Open;
+        app.edges.push(e);
+        app
+    }
+
+    /// **A diagram saved and opened again is the same diagram** -- every box,
+    /// arrow, layer and group, with every property.
     #[test]
-    fn the_window_says_what_it_cannot_do() {
-        let app = DiagramApp::new(1280.0, 800.0);
-        let texts: Vec<String> = app
+    fn a_diagram_saved_and_opened_again_is_the_same_diagram() {
+        let dir = scratch("roundtrip");
+        let path = dir.join("plan.diagram");
+        let mut app = rich();
+        let said = app.write_native(&path);
+        assert!(said.starts_with("Saved"), "{said}");
+        assert!(!app.dirty);
+
+        let mut other = DiagramApp::new(1280.0, 800.0);
+        let said = other.read_native(&path);
+        assert!(said.starts_with("Opened"), "{said}");
+        assert_eq!(describe(&other), describe(&app));
+        assert!(!other.dirty, "a diagram just opened has nothing unsaved");
+        assert_eq!(other.document_path.as_deref(), Some(path.as_path()));
+        assert_eq!(other.title(), "plan.diagram — Diagram");
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// Something added after opening takes an id of its own, never one the
+    /// file already used.
+    #[test]
+    fn new_things_do_not_take_the_ids_of_opened_ones() {
+        let dir = scratch("ids");
+        let path = dir.join("ids.diagram");
+        rich().write_native(&path);
+        let mut app = DiagramApp::new(1280.0, 800.0);
+        app.read_native(&path);
+        let highest = app.nodes.iter().map(|n| n.id).max().unwrap_or(0).max(93);
+        let added = app.add_node(NodeShape::Rectangle, 0.0, 0.0);
+        assert!(added > highest, "{added} is not past {highest}");
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// A file this cannot read as a diagram is refused, and the diagram open
+    /// stays as it was.
+    #[test]
+    fn a_file_that_is_not_a_diagram_is_refused() {
+        let dir = scratch("refused");
+        let mut app = rich();
+        let before = describe(&app);
+        let cases: [(&str, &[u8], &str); 4] = [
+            ("settings.yaml", b"fonts:\n  size: 13\n", "not a SlateOS diagram"),
+            ("later.diagram", b"slateos-diagram: 2\n", "later format"),
+            ("binary.diagram", b"\xff\xfe\x00junk", "Could not open"),
+            (
+                "twice.diagram",
+                b"slateos-diagram: 1\nnodes:\n  1:\n    id: 5\n    shape: Circle\n    x: 1\n    y: 1\n  2:\n    id: 5\n    shape: Circle\n    x: 2\n    y: 2\n",
+                "share the id 5",
+            ),
+        ];
+        for (name, bytes, why) in cases {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).expect("fixture");
+            let said = app.read_native(&path);
+            assert!(
+                said.starts_with("Could not open") && said.contains(why),
+                "{name}: {said}"
+            );
+            assert_eq!(describe(&app), before, "{name} changed the diagram");
+        }
+        let said = app.read_native(&dir.join("absent.diagram"));
+        assert!(said.starts_with("Could not open"), "{said}");
+
+        // Larger than the most this reads: refused whole, never read as the
+        // smaller diagram its first part would parse as.
+        let big = dir.join("big.diagram");
+        rich().write_native(&big);
+        let said = app.read_native_within(&big, 64);
+        assert!(said.contains("larger than the 64"), "{said}");
+        assert_eq!(
+            describe(&app),
+            before,
+            "a file cut short changed the diagram"
+        );
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// What this version does not know is left out, and the rest is read: a
+    /// box of an unknown shape, an arrow to a box that is not there, a group
+    /// member that is not there. A file with no layers gets one.
+    #[test]
+    fn what_is_not_understood_is_left_out_and_the_rest_read() {
+        let dir = scratch("partial");
+        let path = dir.join("partial.diagram");
+        std::fs::write(
+            &path,
+            concat!(
+                "slateos-diagram: 1\n",
+                "nodes:\n",
+                "  1:\n    id: 1\n    shape: Circle\n    x: 5\n    y: 6\n",
+                "  2:\n    id: 2\n    shape: Hologram\n    x: 0\n    y: 0\n",
+                "edges:\n",
+                "  1:\n    id: 3\n    from: 1\n    to: 2\n",
+                "groups:\n",
+                "  1:\n    id: 4\n    members:\n      - 1\n      - 2\n",
+            ),
+        )
+        .expect("fixture");
+        let mut app = DiagramApp::new(1280.0, 800.0);
+        let said = app.read_native(&path);
+        assert!(said.starts_with("Opened"), "{said}");
+        assert!(
+            said.contains("leaving out 2"),
+            "what was left out was not said: {said}"
+        );
+        assert_eq!(app.nodes.len(), 1, "the unknown shape was read");
+        assert!(app.edges.is_empty(), "an arrow to nothing was read");
+        assert_eq!(
+            app.groups.first().map(|g| g.member_ids.clone()),
+            Some(vec![1])
+        );
+        assert_eq!(app.layers.len(), 1, "no layer was made for the box");
+        assert_eq!(app.nodes[0].layer_id, app.layers[0].id);
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// Ctrl+S asks where the first time and saves over the diagram's own file
+    /// after; Ctrl+Shift+S always asks.
+    #[test]
+    fn ctrl_s_saves_over_the_diagrams_own_file_once_it_has_one() {
+        let dir = scratch("ctrl-s");
+        let path = dir.join("mine.diagram");
+        let mut app = DiagramApp::new(1280.0, 800.0);
+        app.add_node(NodeShape::Rectangle, 10.0, 10.0);
+        assert!(app.dirty);
+        assert!(app.title().starts_with('*'), "{}", app.title());
+        app.handle_event(&press_ctrl(Key::S));
+        assert_eq!(app.picker_for, PickerFor::Save);
+        choose(&mut app, &path);
+        assert!(!app.dirty);
+
+        app.add_node(NodeShape::Circle, 100.0, 10.0);
+        app.handle_event(&press_ctrl(Key::S));
+        assert!(!app.picker.is_open(), "a diagram with a file asked again");
+        let mut other = DiagramApp::new(1280.0, 800.0);
+        other.read_native(&path);
+        assert_eq!(other.nodes.len(), 2);
+
+        let mut shift = Modifiers::NONE;
+        shift.ctrl = true;
+        shift.shift = true;
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::S,
+            pressed: true,
+            modifiers: shift,
+            text: String::new(),
+        }));
+        assert!(app.picker.is_open() && app.picker_for == PickerFor::Save);
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// Ctrl+E exports, as Ctrl+S did before a diagram could be saved -- and an
+    /// export is not a save: nothing reads it back.
+    #[test]
+    fn an_export_is_not_a_save() {
+        let dir = scratch("export");
+        let svg = dir.join("look.svg");
+        let mut app = drawn();
+        app.handle_event(&press_ctrl(Key::E));
+        assert_eq!(app.picker_for, PickerFor::Export);
+        choose(&mut app, &svg);
+        assert!(
+            std::fs::read_to_string(&svg)
+                .expect("written")
+                .contains("<svg")
+        );
+        assert!(app.dirty, "an export cleared the unsaved mark");
+        assert_eq!(
+            app.document_path, None,
+            "an export became the diagram's file"
+        );
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// **Closing or opening over unsaved changes asks**, and each answer is
+    /// kept.
+    #[test]
+    fn closing_or_opening_over_unsaved_changes_asks() {
+        let dir = scratch("close");
+        let path = dir.join("kept.diagram");
+        let mut clean = DiagramApp::new(1280.0, 800.0);
+        assert_eq!(clean.on_event(&Event::CloseRequested), Response::Exit);
+
+        let mut app = drawn();
+        app.write_native(&path);
+        let on_disk = std::fs::read(&path).expect("saved");
+        app.add_node(NodeShape::Hexagon, 500.0, 500.0);
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        let text: String = app
+            .render(1280.0, 800.0)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            text.contains("kept.diagram has changes that are not saved."),
+            "{text}"
+        );
+
+        // A tool key goes to the question, not the canvas.
+        let mode = app.mode;
+        app.on_event(&press(Key::R));
+        assert_eq!(
+            app.mode, mode,
+            "a key reached the canvas under the question"
+        );
+
+        assert_eq!(app.on_event(&press(Key::Escape)), Response::Redraw);
+        assert_eq!(std::fs::read(&path).expect("unchanged"), on_disk);
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert_eq!(app.on_event(&press(Key::S)), Response::Exit);
+        assert_ne!(std::fs::read(&path).expect("saved again"), on_disk);
+
+        // Open over unsaved changes asks too; Don't save goes on to the picker.
+        let mut app = drawn();
+        app.handle_event(&press_ctrl(Key::O));
+        assert!(!app.picker.is_open(), "Ctrl+O opened over unsaved changes");
+        app.handle_event(&press(Key::D));
+        assert!(app.picker.is_open() && app.picker_for == PickerFor::Open);
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// What a save did is on the screen. It was recorded and drawn nowhere.
+    #[test]
+    fn the_status_bar_says_what_the_last_save_did() {
+        let dir = scratch("status");
+        let mut app = drawn();
+        let said = app.write_native(&dir.join("missing").join("x.diagram"));
+        app.last_save = Some(said);
+        let text: Vec<String> = app
             .render_commands()
             .iter()
             .filter_map(|c| match c {
@@ -4104,29 +5086,26 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for line in NOTHING_KEPT_LINES {
-            assert!(
-                texts.iter().any(|t| t == line),
-                "the window never said {line:?}"
-            );
-        }
-        // The PROPERTY, not the sentence. This used to require the words
-        // "gone when the window closes", which stayed true of the test long
-        // after it stopped being true of the program: a save door means the
-        // work is gone only if you do not save it. What has to hold is that
-        // the banner names the remedy AND the limit that remains -- a reader
-        // who believes it should know both what to do and what still cannot
-        // be done.
         assert!(
-            NOTHING_KEPT_LINES.iter().any(|l| l.contains("Ctrl+S")),
-            "the banner does not say how to keep the work",
+            text.iter().any(|t| t.starts_with("Could not save")),
+            "the failure is not shown: {text:?}"
         );
-        assert!(
-            NOTHING_KEPT_LINES
-                .iter()
-                .any(|l| l.contains("not opened again") || l.contains("reads either back")),
-            "the banner does not say the diagram cannot be reopened",
-        );
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// Naming a box and leaving the name as it was is no change.
+    #[test]
+    fn a_name_left_as_it_was_is_no_change() {
+        let dir = scratch("name");
+        let mut app = drawn();
+        app.write_native(&dir.join("n.diagram"));
+        let id = app.nodes[0].id;
+        let name = app.nodes[0].label.clone();
+        app.set_node_label(id, name);
+        assert!(!app.dirty, "an unchanged name marked the diagram");
+        app.set_node_label(id, String::from("changed"));
+        assert!(app.dirty);
+        drop(std::fs::remove_dir_all(&dir));
     }
 
     // ------------------------------------------------------------------

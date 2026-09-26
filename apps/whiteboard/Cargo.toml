@@ -12,6 +12,11 @@ oswindow = { path = "../../gui/window" }
 # The export replaces a file the user chose. `fs::write` truncates the
 # target before writing it.
 safeio = { path = "../safeio" }
+# A board's own file: YAML, as `apps/slides` keeps a deck -- the tree's format
+# for anything a person might open in an editor.
+yamldoc = { path = "../../yamldoc" }
+# "Unsaved changes -- save them?", asked the way every editor here asks it.
+unsaved = { path = "../unsaved" }
 
 [lints]
 workspace = true

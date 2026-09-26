@@ -58794,6 +58794,25 @@ test of the fixture, not of the bound.
   and an editor that opens on someone else's deck makes every new deck start
   with five deletions.
 
+- **A diagram is a YAML file named `.diagram`, a whiteboard one named
+  `.whiteboard`.** (2026-09-25, `apps/diagram/src/main.rs` ->
+  `diagram_document`, `diagram_from_document`; `apps/whiteboard/src/main.rs`
+  -> `board_document`, `board_from_document`.) The same reasoning as the
+  slide deck's `.slides` above: YAML is the tree's format for anything a
+  person might open in an editor, `yamldoc` reads and writes it faithfully,
+  and a version key (`slateos-diagram: 1`, `slateos-whiteboard: 1`) makes a
+  later format a refusal rather than a half-reading. Neither extension has a
+  file association yet (`apps/fileassoc`). What each wrote before -- an SVG,
+  or the diagram's shape-only JSON -- stays as an export, Ctrl+E. A file
+  holding a shape of a kind this version does not know is read with that
+  shape left out, as slides leaves out an unknown element; the alternative,
+  refusing the whole file as the finance ledger does (design-decisions §1202),
+  is safer against a save deleting what was not understood, and is the one to
+  switch to if the operator prefers it. Meanwhile the opening says how many
+  things it left out ("Opened ..., leaving out 2 thing(s) this version cannot
+  read"), because a save after it writes the file without them; each reader
+  counts them in `left_out`, which is also where a refusal would go.
+
 - **The JSON viewer saves the document's text, not the raw view's
   formatting.** (2026-09-25, `apps/jsonviewer/src/main.rs` ->
   `save_to_own_file`, `save_to`, `Document::regenerate_input`.) What is

@@ -613,6 +613,8 @@ dependencies = [
  "guitk",
  "oswindow",
  "safeio",
+ "unsaved",
+ "yamldoc",
 ]
 
 [[package]]
@@ -3400,6 +3402,8 @@ dependencies = [
  "guitk",
  "oswindow",
  "safeio",
+ "unsaved",
+ "yamldoc",
 ]
 
 [[package]]

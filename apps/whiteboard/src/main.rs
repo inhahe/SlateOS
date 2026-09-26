@@ -30,6 +30,7 @@ use oswindow::{Event, RenderTree};
 use std::collections::VecDeque;
 use std::process::ExitCode;
 use std::time::Duration;
+use unsaved::{Choice, Question};
 
 // ============================================================================
 // Catppuccin Mocha theme colors
@@ -554,14 +555,39 @@ impl Layer {
 #[derive(Clone, Debug)]
 pub enum Action {
     AddShape(Shape),
-    DeleteShape(ShapeId),
+    /// A shape taken off the page, and where it was in the drawing order.
+    ///
+    /// It carried only the id, and was recorded after the shape was gone, so
+    /// undoing a deletion looked for the shape to put back, found nothing,
+    /// and did nothing: a deleted shape could not be undeleted.
+    DeleteShape {
+        shape: Shape,
+        index: usize,
+    },
+    /// The reverse of a deletion: the shape put back where it was.
+    RestoreShape {
+        shape: Shape,
+        index: usize,
+    },
     MoveShape {
         shape_id: ShapeId,
         dx: f32,
         dy: f32,
     },
     AddLayer(Layer),
-    DeleteLayer(LayerId),
+    /// A layer taken away with the shapes on it, each with where it was --
+    /// what undoing it needs to put back. It carried only the layer's id.
+    DeleteLayer {
+        layer: Layer,
+        index: usize,
+        shapes: Vec<(usize, Shape)>,
+    },
+    /// The reverse of a layer's deletion.
+    RestoreLayer {
+        layer: Layer,
+        index: usize,
+        shapes: Vec<(usize, Shape)>,
+    },
     ToggleLayerVisibility(LayerId),
     ToggleLayerLock(LayerId),
     SetLayerOpacity {
@@ -589,6 +615,15 @@ pub struct Page {
     pub layers: Vec<Layer>,
     pub next_shape_id: ShapeId,
     pub next_layer_id: LayerId,
+    /// What can be undone on this page, oldest first.
+    ///
+    /// One history per page. It was one for the whole window, replayed onto
+    /// whichever page was showing: undo after switching pages took a shape
+    /// off the wrong page -- ids are per page, so another page's shape of the
+    /// same number -- and a deleted page's history went on acting on the
+    /// page that replaced it.
+    pub undo_stack: VecDeque<Action>,
+    pub redo_stack: Vec<Action>,
 }
 
 impl Page {
@@ -600,6 +635,8 @@ impl Page {
             layers: vec![first_layer],
             next_shape_id: 1,
             next_layer_id: 2,
+            undo_stack: VecDeque::new(),
+            redo_stack: Vec::new(),
         }
     }
 
@@ -749,7 +786,9 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Shift+Z", "Redo"),
     ("Ctrl+Y", "Redo"),
     ("Ctrl+A", "Select everything on the page"),
-    ("Ctrl+S", "Save the board as an SVG picture"),
+    ("Ctrl+S / Ctrl+Shift+S", "Save / save as a new file"),
+    ("Ctrl+O", "Open a board"),
+    ("Ctrl+E", "Export this page as an SVG picture"),
     ("Ctrl+L", "Show or hide the layers panel"),
     ("Arrows", "Nudge the selection"),
     ("Delete", "Delete the selection"),
@@ -769,8 +808,22 @@ pub struct WhiteboardApp {
     /// dialog of any kind: **a drawing lived exactly as long as the window
     /// did.** `export_svg` was written and tested and had no caller.
     pub picker: FilePicker,
-    /// What the last save did, shown in the status bar.
+    /// What the last save, open or export did, shown in the status bar.
     pub status_message: Option<String>,
+    /// The file this board was opened from or last saved to: where Ctrl+S
+    /// writes without asking. `None` for one never saved.
+    pub document_path: Option<std::path::PathBuf>,
+    /// Whether the board has changed since it was opened, saved or begun. Set
+    /// by `push_action`, which every change on a page comes through, by undo
+    /// and redo, and by adding or deleting a page.
+    pub dirty: bool,
+    /// What the file picker is up for.
+    pub picker_for: PickerFor,
+    /// "Unsaved changes -- save them?", while it is asked, and what it holds
+    /// up (`apps/unsaved`).
+    question: Option<Question<Pending>>,
+    /// Set once the window may close; the next answer to the loop is `Exit`.
+    pub quit: bool,
     pub win_width: f32,
     pub win_height: f32,
 
@@ -799,10 +852,6 @@ pub struct WhiteboardApp {
     pub show_help: bool,
     pub show_grid: bool,
     pub snap_to_grid: bool,
-
-    // Undo/redo
-    pub undo_stack: VecDeque<Action>,
-    pub redo_stack: Vec<Action>,
 
     // Custom RGB input state
     pub custom_r: u8,
@@ -850,10 +899,42 @@ pub struct WhiteboardApp {
 /// Both halves are stated because only one changed: writing works, reading
 /// does not exist, and a picture you cannot reopen is a different thing from
 /// a document.
-const SAVE_IS_ONE_WAY_LINES: [&str; 2] = [
-    "Ctrl+S saves this board as an SVG picture.",
-    "Nothing here opens one back, so a saved board can be viewed elsewhere but never returned to and edited.",
-];
+/// What the file picker is up for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerFor {
+    /// A board to open in place of this one.
+    Open,
+    /// Where to save this board, which then belongs to that file.
+    Save,
+    /// Where to export the page as an SVG picture: not a save, since nothing
+    /// reads one back.
+    Export,
+    /// Where to save a board with no file yet, before what the unsaved-changes
+    /// question held up goes on.
+    SaveThen(Pending),
+}
+
+/// What the unsaved-changes question is holding up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pending {
+    /// Opening another board in its place.
+    Open,
+    /// Closing the window.
+    Close,
+}
+
+/// The version of the board file this writes, and the newest it reads.
+const BOARD_FORMAT: i64 = 1;
+
+/// The largest board file this will open. A board cut short would be read as
+/// a smaller board with no sign anything was missing, so a larger file is
+/// refused rather than read in part. Generous: a freehand stroke is a point per
+/// line.
+const MAX_BOARD_BYTES: usize = 64 * 1024 * 1024;
+
+/// Where the status bar's note on the last save, open or export begins, past
+/// the page count.
+const STATUS_NOTE_X: f32 = 730.0;
 
 impl WhiteboardApp {
     pub fn new(width: f32, height: f32) -> Self {
@@ -864,6 +945,11 @@ impl WhiteboardApp {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             picker: FilePicker::default(),
             status_message: None,
+            document_path: None,
+            dirty: false,
+            picker_for: PickerFor::Export,
+            question: None,
+            quit: false,
             win_width: width,
             win_height: height,
             pages: vec![first_page],
@@ -879,8 +965,6 @@ impl WhiteboardApp {
             show_help: false,
             show_grid: true,
             snap_to_grid: false,
-            undo_stack: VecDeque::new(),
-            redo_stack: Vec::new(),
             custom_r: 205,
             custom_g: 214,
             custom_b: 244,
@@ -998,26 +1082,33 @@ impl WhiteboardApp {
     // Undo / Redo
     // ========================================================================
 
+    /// Record a change on the current page, for undo -- and note that the
+    /// board has changed since it was saved. Every change comes through here.
     pub fn push_action(&mut self, action: Action) {
-        self.redo_stack.clear();
-        if self.undo_stack.len() >= MAX_UNDO_STEPS {
-            self.undo_stack.pop_front();
+        let page = self.current_page_mut();
+        page.redo_stack.clear();
+        if page.undo_stack.len() >= MAX_UNDO_STEPS {
+            page.undo_stack.pop_front();
         }
-        self.undo_stack.push_back(action);
+        page.undo_stack.push_back(action);
+        self.dirty = true;
     }
 
     pub fn undo(&mut self) {
-        if let Some(action) = self.undo_stack.pop_back() {
+        if let Some(action) = self.current_page_mut().undo_stack.pop_back() {
             let reverse = self.reverse_action(&action);
             self.apply_action_silent(&reverse);
-            self.redo_stack.push(action);
+            self.current_page_mut().redo_stack.push(action);
+            // Undoing past a save leaves a board the file does not hold.
+            self.dirty = true;
         }
     }
 
     pub fn redo(&mut self) {
-        if let Some(action) = self.redo_stack.pop() {
+        if let Some(action) = self.current_page_mut().redo_stack.pop() {
             self.apply_action_silent(&action);
-            self.undo_stack.push_back(action);
+            self.current_page_mut().undo_stack.push_back(action);
+            self.dirty = true;
         }
     }
 
@@ -1027,12 +1118,17 @@ impl WhiteboardApp {
             Action::AddShape(shape) => {
                 self.current_page_mut().shapes.push(shape.clone());
             }
-            Action::DeleteShape(id) => {
+            Action::DeleteShape { shape, .. } => {
                 let page = self.current_page_mut();
-                if let Some(idx) = page.find_shape_index(*id) {
+                if let Some(idx) = page.find_shape_index(shape.id) {
                     page.shapes.remove(idx);
                 }
-                self.selection.shape_ids.retain(|sid| sid != id);
+                self.selection.shape_ids.retain(|sid| *sid != shape.id);
+            }
+            Action::RestoreShape { shape, index } => {
+                let page = self.current_page_mut();
+                let at = (*index).min(page.shapes.len());
+                page.shapes.insert(at, shape.clone());
             }
             Action::MoveShape { shape_id, dx, dy } => {
                 if let Some(shape) = self.current_page_mut().get_shape_mut(*shape_id) {
@@ -1042,10 +1138,24 @@ impl WhiteboardApp {
             Action::AddLayer(layer) => {
                 self.current_page_mut().layers.push(layer.clone());
             }
-            Action::DeleteLayer(id) => {
+            Action::DeleteLayer { layer, .. } => {
                 let page = self.current_page_mut();
-                page.layers.retain(|l| l.id != *id);
-                page.shapes.retain(|s| s.layer_id != *id);
+                page.layers.retain(|l| l.id != layer.id);
+                page.shapes.retain(|s| s.layer_id != layer.id);
+            }
+            Action::RestoreLayer {
+                layer,
+                index,
+                shapes,
+            } => {
+                let page = self.current_page_mut();
+                let at = (*index).min(page.layers.len());
+                page.layers.insert(at, layer.clone());
+                // In the order they were taken, so each goes back where it was.
+                for (i, shape) in shapes {
+                    let at = (*i).min(page.shapes.len());
+                    page.shapes.insert(at, shape.clone());
+                }
             }
             Action::ToggleLayerVisibility(id) => {
                 if let Some(layer) = self
@@ -1103,28 +1213,52 @@ impl WhiteboardApp {
     /// Create the reverse of an action for undo purposes.
     fn reverse_action(&self, action: &Action) -> Action {
         match action {
-            Action::AddShape(shape) => Action::DeleteShape(shape.id),
-            Action::DeleteShape(id) => {
-                if let Some(shape) = self.current_page().get_shape(*id) {
-                    Action::AddShape(shape.clone())
-                } else {
-                    // Shape already gone; deleting again is a no-op.
-                    Action::DeleteShape(*id)
-                }
-            }
+            Action::AddShape(shape) => Action::DeleteShape {
+                shape: shape.clone(),
+                index: self
+                    .current_page()
+                    .find_shape_index(shape.id)
+                    .unwrap_or(usize::MAX),
+            },
+            Action::DeleteShape { shape, index } => Action::RestoreShape {
+                shape: shape.clone(),
+                index: *index,
+            },
+            Action::RestoreShape { shape, index } => Action::DeleteShape {
+                shape: shape.clone(),
+                index: *index,
+            },
             Action::MoveShape { shape_id, dx, dy } => Action::MoveShape {
                 shape_id: *shape_id,
                 dx: -dx,
                 dy: -dy,
             },
-            Action::AddLayer(layer) => Action::DeleteLayer(layer.id),
-            Action::DeleteLayer(id) => {
-                if let Some(layer) = self.current_page().layers.iter().find(|l| l.id == *id) {
-                    Action::AddLayer(layer.clone())
-                } else {
-                    Action::DeleteLayer(*id)
-                }
-            }
+            Action::AddLayer(layer) => Action::DeleteLayer {
+                layer: layer.clone(),
+                index: self
+                    .current_page()
+                    .find_layer_index(layer.id)
+                    .unwrap_or(usize::MAX),
+                shapes: Vec::new(),
+            },
+            Action::DeleteLayer {
+                layer,
+                index,
+                shapes,
+            } => Action::RestoreLayer {
+                layer: layer.clone(),
+                index: *index,
+                shapes: shapes.clone(),
+            },
+            Action::RestoreLayer {
+                layer,
+                index,
+                shapes,
+            } => Action::DeleteLayer {
+                layer: layer.clone(),
+                index: *index,
+                shapes: shapes.clone(),
+            },
             Action::ToggleLayerVisibility(id) => Action::ToggleLayerVisibility(*id),
             Action::ToggleLayerLock(id) => Action::ToggleLayerLock(*id),
             Action::SetLayerOpacity {
@@ -1179,12 +1313,21 @@ impl WhiteboardApp {
         if ids.is_empty() {
             return;
         }
-        let mut actions = Vec::new();
-        for id in &ids {
-            if let Some(shape) = self.current_page().get_shape(*id) {
-                actions.push(Action::DeleteShape(shape.id));
-            }
-        }
+        // Each with where it was, taken last-first: undo runs a batch
+        // backwards, so the lowest position is put back first and every later
+        // one lands on the index it was recorded at.
+        let page = self.current_page();
+        let mut actions: Vec<Action> = page
+            .shapes
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| ids.contains(&s.id))
+            .map(|(index, shape)| Action::DeleteShape {
+                shape: shape.clone(),
+                index,
+            })
+            .collect();
+        actions.reverse();
         // Remove shapes from page
         let page = self.current_page_mut();
         page.shapes.retain(|s| !ids.contains(&s.id));
@@ -1234,7 +1377,24 @@ impl WhiteboardApp {
         if page.layers.len() <= 1 {
             return;
         }
-        let action = Action::DeleteLayer(layer_id);
+        let (Some(index), Some(layer)) = (
+            page.find_layer_index(layer_id),
+            page.layers.iter().find(|l| l.id == layer_id).cloned(),
+        ) else {
+            return;
+        };
+        let shapes: Vec<(usize, Shape)> = page
+            .shapes
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.layer_id == layer_id)
+            .map(|(i, s)| (i, s.clone()))
+            .collect();
+        let action = Action::DeleteLayer {
+            layer,
+            index,
+            shapes,
+        };
         page.layers.retain(|l| l.id != layer_id);
         page.shapes.retain(|s| s.layer_id != layer_id);
 
@@ -1340,6 +1500,7 @@ impl WhiteboardApp {
         let n = self.pages.len().saturating_add(1_usize);
         let name = format!("Board {}", n);
         self.pages.push(Page::new(name));
+        self.dirty = true;
         self.active_page = self.pages.len().saturating_sub(1_usize);
         self.active_layer_id = self
             .current_page()
@@ -1367,6 +1528,7 @@ impl WhiteboardApp {
             return;
         }
         self.pages.remove(index);
+        self.dirty = true;
         if self.active_page >= self.pages.len() {
             self.active_page = self.pages.len().saturating_sub(1_usize);
         }
@@ -1700,13 +1862,10 @@ impl WhiteboardApp {
                 .map(|l| l.locked)
                 .unwrap_or(false);
             if !on_locked {
-                let shape_clone = self.current_page().get_shape(id).cloned();
                 let page = self.current_page_mut();
-                if let Some(idx) = page.find_shape_index(id) {
-                    page.shapes.remove(idx);
-                }
-                if let Some(shape) = shape_clone {
-                    self.push_action(Action::DeleteShape(shape.id));
+                if let Some(index) = page.find_shape_index(id) {
+                    let shape = page.shapes.remove(index);
+                    self.push_action(Action::DeleteShape { shape, index });
                 }
             }
         }
@@ -2066,11 +2225,23 @@ impl WhiteboardApp {
 
     /// Handle one input event. Returns whether anything changed.
     pub fn handle_event(&mut self, event: &Event) -> bool {
+        // The unsaved-changes question has every key and click while it is
+        // up. Each is a redraw: focus and hover move inside it.
+        if let Some(question) = self.question.as_mut()
+            && matches!(event, Event::Key(_) | Event::Mouse(_))
+        {
+            if let Some(choice) = question.handle(event) {
+                let pending = question.pending();
+                self.question = None;
+                self.answer(pending, choice);
+            }
+            return true;
+        }
         // The picker takes input first while it is up, or a filename is drawn
         // onto the canvas behind it.
         match self.picker.handle(event, self.win_width, self.win_height) {
             Picked::Chose(path) => {
-                self.status_message = Some(self.write_svg(&path));
+                self.picked(&path);
                 return true;
             }
             Picked::Handled | Picked::Cancelled => return true,
@@ -2083,9 +2254,289 @@ impl WhiteboardApp {
         }
     }
 
-    /// Ask where to put the drawing.
+    /// Ask where to export the page, as an SVG picture.
     pub fn save_as(&mut self) {
-        self.picker.open_to_write("whiteboard.svg");
+        self.picker_for = PickerFor::Export;
+        self.picker.open_to_write(self.file_stem() + ".svg");
+    }
+
+    /// The board's name: its file's, or "Untitled".
+    pub fn document_name(&self) -> String {
+        self.document_path
+            .as_deref()
+            .and_then(std::path::Path::file_name)
+            // The window bar's label only; the real name is the path.
+            .map_or_else(
+                || String::from("Untitled"),
+                |n| n.to_string_lossy().into_owned(),
+            )
+    }
+
+    /// The name offered for an export or a first save, without extension.
+    fn file_stem(&self) -> String {
+        self.document_path
+            .as_deref()
+            .and_then(std::path::Path::file_stem)
+            .map_or_else(
+                || String::from("whiteboard"),
+                |n| n.to_string_lossy().into_owned(),
+            )
+    }
+
+    /// The board as a document: every page, its layers, and every shape on
+    /// them with its ink. YAML, as `apps/slides` keeps a deck, versioned
+    /// under `slateos-whiteboard` so a later format is refused rather than
+    /// half-read. Not the SVG, which is a picture of one page and is not read
+    /// back.
+    pub fn board_document(&self) -> yamldoc::Document {
+        let mut doc = yamldoc::Document::new();
+        doc.set_i64(&["slateos-whiteboard"], BOARD_FORMAT);
+        let id = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+        for (pi, page) in self.pages.iter().enumerate() {
+            let pk = pi.saturating_add(1).to_string();
+            let pk = pk.as_str();
+            doc.set_str(&["pages", pk, "name"], &page.name);
+            for (li, layer) in page.layers.iter().enumerate() {
+                let lk = li.saturating_add(1).to_string();
+                let at = |f: &'static str| ["pages", pk, "layers", lk.as_str(), f];
+                doc.set_i64(&at("id"), id(layer.id));
+                doc.set_str(&at("name"), &layer.name);
+                doc.set_bool(&at("visible"), layer.visible);
+                doc.set_bool(&at("locked"), layer.locked);
+                doc.set_f64(&at("opacity"), f64::from(layer.opacity));
+            }
+            for (si, shape) in page.shapes.iter().enumerate() {
+                let sk = si.saturating_add(1).to_string();
+                let at = |f: &'static str| ["pages", pk, "shapes", sk.as_str(), f];
+                doc.set_i64(&at("id"), id(shape.id));
+                doc.set_i64(&at("layer"), id(shape.layer_id));
+                doc.set_str(&at("colour"), &colour_hex(shape.stroke.color));
+                doc.set_i64(&at("thickness"), i64::from(shape.stroke.thickness));
+                doc.set_f64(&at("opacity"), f64::from(shape.stroke.opacity));
+                doc.set_str(
+                    &at("style"),
+                    match shape.stroke.style {
+                        StrokeStyle::Solid => "solid",
+                        StrokeStyle::Dashed => "dashed",
+                    },
+                );
+                let point =
+                    |doc: &mut yamldoc::Document, x: &'static str, y: &'static str, p: Point| {
+                        doc.set_f64(&at(x), f64::from(p.x));
+                        doc.set_f64(&at(y), f64::from(p.y));
+                    };
+                let rect = |doc: &mut yamldoc::Document, r: Rect| {
+                    doc.set_f64(&at("x"), f64::from(r.x));
+                    doc.set_f64(&at("y"), f64::from(r.y));
+                    doc.set_f64(&at("width"), f64::from(r.width));
+                    doc.set_f64(&at("height"), f64::from(r.height));
+                };
+                match &shape.kind {
+                    ShapeKind::Freehand { points } => {
+                        doc.set_str(&at("kind"), "freehand");
+                        let pts: Vec<String> =
+                            points.iter().map(|p| format!("{} {}", p.x, p.y)).collect();
+                        let pts: Vec<&str> = pts.iter().map(String::as_str).collect();
+                        doc.set_seq(&at("points"), &pts);
+                    }
+                    ShapeKind::Line { start, end } => {
+                        doc.set_str(&at("kind"), "line");
+                        point(&mut doc, "x1", "y1", *start);
+                        point(&mut doc, "x2", "y2", *end);
+                    }
+                    ShapeKind::Arrow { start, end } => {
+                        doc.set_str(&at("kind"), "arrow");
+                        point(&mut doc, "x1", "y1", *start);
+                        point(&mut doc, "x2", "y2", *end);
+                    }
+                    ShapeKind::Rectangle { bounds } => {
+                        doc.set_str(&at("kind"), "rectangle");
+                        rect(&mut doc, *bounds);
+                    }
+                    ShapeKind::Ellipse { bounds } => {
+                        doc.set_str(&at("kind"), "ellipse");
+                        rect(&mut doc, *bounds);
+                    }
+                    ShapeKind::TextLabel { position, content } => {
+                        doc.set_str(&at("kind"), "text");
+                        point(&mut doc, "x", "y", *position);
+                        doc.set_str(&at("text"), content);
+                    }
+                    ShapeKind::StickyNote {
+                        bounds,
+                        content,
+                        bg_color,
+                    } => {
+                        doc.set_str(&at("kind"), "note");
+                        rect(&mut doc, *bounds);
+                        doc.set_str(&at("text"), content);
+                        doc.set_str(&at("background"), &colour_hex(*bg_color));
+                    }
+                }
+            }
+        }
+        doc
+    }
+
+    /// Write the board to `path`, which becomes its file. What to say.
+    pub fn write_board(&mut self, path: &std::path::Path) -> String {
+        match safeio::write_str_atomically(path, &self.board_document().to_text()) {
+            Ok(()) => {
+                self.document_path = Some(path.to_path_buf());
+                self.dirty = false;
+                format!("Saved {}", path.display())
+            }
+            Err(err) => format!("Could not save {}: {err}", path.display()),
+        }
+    }
+
+    /// Replace the board with the one in `path`. What to say. A file that is
+    /// not a board this can read leaves this one as it was.
+    pub fn read_board(&mut self, path: &std::path::Path) -> String {
+        self.read_board_within(path, MAX_BOARD_BYTES)
+    }
+
+    /// [`read_board`](Self::read_board), refusing a file over `max` bytes.
+    fn read_board_within(&mut self, path: &std::path::Path, max: usize) -> String {
+        let read = match safeio::read_to_string_capped(path, max) {
+            Ok(read) => read,
+            Err(err) => return format!("Could not open {}: {err}", path.display()),
+        };
+        if read.truncated {
+            return format!(
+                "Could not open {}: at {} bytes it is larger than the {max} this reads",
+                path.display(),
+                read.whole
+            );
+        }
+        match board_from_document(&yamldoc::Document::parse(&read.text)) {
+            Ok((pages, left_out)) => {
+                self.pages = pages;
+                self.active_page = 0;
+                self.active_layer_id = self.current_page().layers.first().map_or(1, |l| l.id);
+                self.selection.clear();
+                self.drag = DragState::None;
+                self.document_path = Some(path.to_path_buf());
+                self.dirty = false;
+                // Said, not hidden: saving now would write the board
+                // without what was left out.
+                if left_out == 0 {
+                    format!("Opened {}", path.display())
+                } else {
+                    format!(
+                        "Opened {}, leaving out {left_out} thing(s) this version cannot read",
+                        path.display()
+                    )
+                }
+            }
+            Err(why) => format!("Could not open {}: {why}", path.display()),
+        }
+    }
+
+    /// Ctrl+S: over the board's own file, or ask where when it has none.
+    pub fn save(&mut self) {
+        match self.document_path.clone() {
+            Some(path) => self.status_message = Some(self.write_board(&path)),
+            None => self.ask_where_to_save(PickerFor::Save),
+        }
+    }
+
+    /// Put the save picker up, for `purpose`, beside the board's own file
+    /// when it has one.
+    fn ask_where_to_save(&mut self, purpose: PickerFor) {
+        let start = self
+            .document_path
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map_or_else(FilePicker::default_start, std::path::Path::to_path_buf);
+        let name = self.file_stem() + ".whiteboard";
+        self.picker_for = purpose;
+        self.picker.put_up(
+            guitk::dialog::FileDialog::save()
+                .with_initial_path(start)
+                .with_filename(name),
+            true,
+        );
+    }
+
+    /// The picker chose `path`: do what it was put up for.
+    fn picked(&mut self, path: &std::path::Path) {
+        let said = match self.picker_for {
+            PickerFor::Open => self.read_board(path),
+            PickerFor::Save => self.write_board(path),
+            PickerFor::Export => self.write_svg(path),
+            PickerFor::SaveThen(pending) => {
+                let said = self.write_board(path);
+                if !self.dirty {
+                    self.go_on(pending);
+                }
+                said
+            }
+        };
+        self.status_message = Some(said);
+    }
+
+    /// Before something replaces or closes the board: ask about unsaved
+    /// changes, or with none go straight on.
+    pub fn unless_unsaved(&mut self, pending: Pending) {
+        if !self.dirty {
+            self.go_on(pending);
+            return;
+        }
+        let prompt = match pending {
+            Pending::Open => "Save it before opening another?",
+            Pending::Close => "Save it before closing?",
+        };
+        let name = self.document_name();
+        self.question = Some(Question::new(
+            &unsaved::message_for(&[&name]),
+            prompt,
+            pending,
+        ));
+    }
+
+    /// Do what the unsaved-changes question held up.
+    fn go_on(&mut self, pending: Pending) {
+        match pending {
+            Pending::Open => {
+                self.picker_for = PickerFor::Open;
+                self.picker.open_to_read();
+            }
+            Pending::Close => self.quit = true,
+        }
+    }
+
+    /// Answer the question put before `pending`. Save goes on only if the
+    /// save worked: a board that could not be written is still the only copy.
+    fn answer(&mut self, pending: Pending, choice: Choice) {
+        match choice {
+            Choice::Cancel => {}
+            Choice::Discard => self.go_on(pending),
+            Choice::Save => match self.document_path.clone() {
+                Some(path) => {
+                    self.status_message = Some(self.write_board(&path));
+                    if !self.dirty {
+                        self.go_on(pending);
+                    }
+                }
+                None => self.ask_where_to_save(PickerFor::SaveThen(pending)),
+            },
+        }
+    }
+
+    /// The window has been asked to close: whether it may go now. If not,
+    /// the question is up.
+    fn request_close(&mut self) -> bool {
+        if !self.dirty {
+            return true;
+        }
+        // The question replaces whatever is up: a picker would take the keys
+        // it needs, and be drawn over it.
+        self.picker.close();
+        self.show_help = false;
+        self.unless_unsaved(Pending::Close);
+        false
     }
 
     /// Write the current page to `path`, and say what happened.
@@ -2205,6 +2656,20 @@ impl WhiteboardApp {
                     true
                 }
                 Key::S => {
+                    if event.modifiers.shift {
+                        self.ask_where_to_save(PickerFor::Save);
+                    } else {
+                        self.save();
+                    }
+                    true
+                }
+                Key::O => {
+                    self.unless_unsaved(Pending::Open);
+                    true
+                }
+                // What Ctrl+S did before a board could be saved: a picture of
+                // the page, which nothing reads back.
+                Key::E => {
                     self.save_as();
                     true
                 }
@@ -2337,34 +2802,6 @@ impl WhiteboardApp {
             0.0,
             Surface::Card,
         );
-
-        // After the background, or it would be painted over.
-        for (i, line) in SAVE_IS_ONE_WAY_LINES.iter().enumerate() {
-            #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
-            let ty = 1.0 + i as f32 * 11.0;
-            let avail = (self.win_width - 16.0).max(0.0);
-            if avail <= 0.0 || ty + 11.0 > self.win_height {
-                break;
-            }
-            cmds.push(RenderCommand::Text {
-                x: 8.0,
-                y: ty,
-                text: (*line).to_string(),
-                color: if i == 0 {
-                    self.palette.ink(self.palette.yellow)
-                } else {
-                    self.palette.subtext0
-                },
-                font_size: if i == 0 { 10.0 } else { 9.0 },
-                font_weight: if i == 0 {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(avail),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
 
         self.render_top_bar(&mut cmds);
         self.render_page_tabs(&mut cmds);
@@ -3406,8 +3843,8 @@ impl WhiteboardApp {
             y: y + 6.0,
             text: format!(
                 "Undo:{} Redo:{}",
-                self.undo_stack.len(),
-                self.redo_stack.len()
+                self.current_page().undo_stack.len(),
+                self.current_page().redo_stack.len()
             ),
             color: self.palette.subtext0,
             font_size: 11.0,
@@ -3431,6 +3868,21 @@ impl WhiteboardApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
+
+        // What the last save, open or export did. It was recorded and drawn
+        // nowhere, so a save that failed looked like one that worked.
+        if let Some(note) = &self.status_message {
+            cmds.push(RenderCommand::Text {
+                x: STATUS_NOTE_X,
+                y: y + 6.0,
+                text: note.clone(),
+                color: self.palette.text,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((self.win_width - STATUS_NOTE_X - 8.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
     }
 }
 
@@ -3443,11 +3895,17 @@ impl App for WhiteboardApp {
         self.palette = *palette;
     }
 
+    /// The board's file and the page being drawn on, marked `*` while the
+    /// board has changes not saved.
     fn title(&self) -> String {
-        // The board being drawn on, because that is what the window is.
         let page = self.current_page();
         let shapes = page.shapes.len();
-        format!("{} ({shapes}) - Whiteboard", page.name)
+        format!(
+            "{}{}: {} ({shapes}) - Whiteboard",
+            if self.dirty { "*" } else { "" },
+            self.document_name(),
+            page.name
+        )
     }
 
     fn initial_size(&self) -> (u32, u32) {
@@ -3473,7 +3931,15 @@ impl App for WhiteboardApp {
 
     fn on_event(&mut self, event: &Event) -> Response {
         match event {
-            Event::CloseRequested => Response::Exit,
+            // Closing over unsaved changes asks first, and the window waits
+            // for the answer: `KeepOpen` declines the close.
+            Event::CloseRequested => {
+                if self.request_close() {
+                    Response::Exit
+                } else {
+                    Response::KeepOpen
+                }
+            }
             Event::Resize { width, height } => {
                 #[allow(
                     clippy::cast_precision_loss,
@@ -3487,7 +3953,10 @@ impl App for WhiteboardApp {
                 }
             }
             other => {
-                if self.handle_event(other) {
+                let changed = self.handle_event(other);
+                if self.quit {
+                    Response::Exit
+                } else if changed {
                     Response::Redraw
                 } else {
                     Response::Idle
@@ -3502,10 +3971,230 @@ impl App for WhiteboardApp {
         // size would be laid out for the size that was asked for, and every
         // hit box in it would name the wrong rectangle.
         self.set_window_size(width, height);
-        RenderTree {
+        let mut tree = RenderTree {
             commands: self.render_commands(),
+        };
+        // Over everything, the picker included: they are never up together.
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
         }
+        tree
     }
+}
+
+/// A colour as `#RRGGBB`, or `#RRGGBBAA` when it is not opaque -- the
+/// spelling `apps/slides` writes, so the files read alike.
+fn colour_hex(c: Color) -> String {
+    if c.a == 255 {
+        format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+    } else {
+        format!("#{:02X}{:02X}{:02X}{:02X}", c.r, c.g, c.b, c.a)
+    }
+}
+
+/// A colour read back from `#RRGGBB` or `#RRGGBBAA`.
+fn parse_colour(text: &str) -> Option<Color> {
+    let hex = text.trim().strip_prefix('#')?;
+    if !hex.is_ascii() || !(hex.len() == 6 || hex.len() == 8) {
+        return None;
+    }
+    let byte = |at: usize| {
+        hex.get(at..at.saturating_add(2))
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+    };
+    let a = if hex.len() == 8 { byte(6)? } else { 255 };
+    Some(Color::rgba(byte(0)?, byte(2)?, byte(4)?, a))
+}
+
+/// The keys under `path` that are positions, in order.
+fn positions(doc: &yamldoc::Document, path: &[&str]) -> Vec<String> {
+    let mut keys: Vec<(u64, String)> = doc
+        .keys(path)
+        .into_iter()
+        .filter_map(|k| k.parse::<u64>().ok().map(|n| (n, k)))
+        .collect();
+    keys.sort_unstable();
+    keys.into_iter().map(|(_, k)| k).collect()
+}
+
+/// An id read back: a non-negative whole number.
+fn read_id(doc: &yamldoc::Document, path: &[&str]) -> Option<u64> {
+    doc.get_i64(path).and_then(|n| u64::try_from(n).ok())
+}
+
+/// A number read back as the `f32` it was written from.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "every number here was written from an f32, so it comes back within range"
+)]
+fn read_f32(doc: &yamldoc::Document, path: &[&str]) -> Option<f32> {
+    doc.get_f64(path)
+        .filter(|v| v.is_finite())
+        .map(|v| v as f32)
+}
+
+/// A point written as "x y", as a freehand stroke's points are.
+fn parse_point(text: &str) -> Option<Point> {
+    let mut parts = text.split_whitespace();
+    let x = parts
+        .next()?
+        .parse::<f32>()
+        .ok()
+        .filter(|v| v.is_finite())?;
+    let y = parts
+        .next()?
+        .parse::<f32>()
+        .ok()
+        .filter(|v| v.is_finite())?;
+    parts.next().is_none().then_some(Point::new(x, y))
+}
+
+/// Read a board written by [`WhiteboardApp::board_document`].
+///
+/// Refuses a file that is not a board, one from a later version, one with no
+/// pages, and a page whose shapes or layers share an id -- each would be read
+/// as some other board. A shape of a kind this does not know, or missing what
+/// it is drawn from, is left out: the rest is still the user's board. A page
+/// with no layers gets one, since every shape has to be on one. How many
+/// things were left out comes back with the board, so the user is told.
+fn board_from_document(doc: &yamldoc::Document) -> Result<(Vec<Page>, usize), String> {
+    match doc.get_i64(&["slateos-whiteboard"]) {
+        None => return Err(String::from("it is not a SlateOS whiteboard")),
+        Some(v) if v > BOARD_FORMAT => {
+            return Err(format!(
+                "it is a later format ({v}) than this version reads ({BOARD_FORMAT})"
+            ));
+        }
+        Some(_) => {}
+    }
+    let mut left_out = 0_usize;
+    let mut pages = Vec::new();
+    for pk in positions(doc, &["pages"]) {
+        let pk = pk.as_str();
+        let name = doc
+            .get_str(&["pages", pk, "name"])
+            .unwrap_or_else(|| format!("Board {}", pages.len().saturating_add(1)));
+        let mut page = Page::new(name);
+        page.layers.clear();
+        let mut layer_ids = std::collections::HashSet::new();
+        for lk in positions(doc, &["pages", pk, "layers"]) {
+            let at = |f: &'static str| ["pages", pk, "layers", lk.as_str(), f];
+            let Some(id) = read_id(doc, &at("id")) else {
+                left_out = left_out.saturating_add(1);
+                continue;
+            };
+            if !layer_ids.insert(id) {
+                return Err(format!("two layers on {} share the id {id}", page.name));
+            }
+            let mut layer = Layer::new(
+                id,
+                doc.get_str(&at("name"))
+                    .unwrap_or_else(|| format!("Layer {id}")),
+            );
+            layer.visible = doc.get_bool(&at("visible")).unwrap_or(true);
+            layer.locked = doc.get_bool(&at("locked")).unwrap_or(false);
+            layer.opacity = read_f32(doc, &at("opacity")).map_or(1.0, |o| o.clamp(0.0, 1.0));
+            page.layers.push(layer);
+        }
+        if page.layers.is_empty() {
+            page.layers.push(Layer::new(1, String::from("Layer 1")));
+            layer_ids.insert(1);
+        }
+        let first_layer = page.layers.first().map_or(1, |l| l.id);
+        let mut shape_ids = std::collections::HashSet::new();
+        for sk in positions(doc, &["pages", pk, "shapes"]) {
+            let at = |f: &'static str| ["pages", pk, "shapes", sk.as_str(), f];
+            let Some(id) = read_id(doc, &at("id")) else {
+                left_out = left_out.saturating_add(1);
+                continue;
+            };
+            let point = |x: &'static str, y: &'static str| {
+                Some(Point::new(read_f32(doc, &at(x))?, read_f32(doc, &at(y))?))
+            };
+            let rect = || {
+                Some(Rect::new(
+                    read_f32(doc, &at("x"))?,
+                    read_f32(doc, &at("y"))?,
+                    read_f32(doc, &at("width"))?,
+                    read_f32(doc, &at("height"))?,
+                ))
+            };
+            let text = || doc.get_str(&at("text")).unwrap_or_default();
+            let kind = match doc.get_str(&at("kind")).as_deref() {
+                Some("freehand") => {
+                    let points: Option<Vec<Point>> = doc
+                        .get_seq(&at("points"))
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|p| parse_point(p))
+                        .collect();
+                    points.map(|points| ShapeKind::Freehand { points })
+                }
+                Some("line") => point("x1", "y1")
+                    .zip(point("x2", "y2"))
+                    .map(|(start, end)| ShapeKind::Line { start, end }),
+                Some("arrow") => point("x1", "y1")
+                    .zip(point("x2", "y2"))
+                    .map(|(start, end)| ShapeKind::Arrow { start, end }),
+                Some("rectangle") => rect().map(|bounds| ShapeKind::Rectangle { bounds }),
+                Some("ellipse") => rect().map(|bounds| ShapeKind::Ellipse { bounds }),
+                Some("text") => point("x", "y").map(|position| ShapeKind::TextLabel {
+                    position,
+                    content: text(),
+                }),
+                Some("note") => rect().map(|bounds| ShapeKind::StickyNote {
+                    bounds,
+                    content: text(),
+                    bg_color: doc
+                        .get_str(&at("background"))
+                        .and_then(|t| parse_colour(&t))
+                        .unwrap_or(STICKY_COLORS[0]),
+                }),
+                _ => None,
+            };
+            let Some(kind) = kind else {
+                left_out = left_out.saturating_add(1);
+                continue;
+            };
+            if !shape_ids.insert(id) {
+                return Err(format!("two shapes on {} share the id {id}", page.name));
+            }
+            let mut stroke = StrokeProps::default();
+            if let Some(c) = doc.get_str(&at("colour")).and_then(|t| parse_colour(&t)) {
+                stroke.color = c;
+            }
+            if let Some(t) = doc
+                .get_i64(&at("thickness"))
+                .and_then(|t| u8::try_from(t).ok())
+            {
+                stroke.thickness = t;
+            }
+            if let Some(o) = read_f32(doc, &at("opacity")) {
+                stroke.opacity = o.clamp(0.0, 1.0);
+            }
+            if doc.get_str(&at("style")).as_deref() == Some("dashed") {
+                stroke.style = StrokeStyle::Dashed;
+            }
+            let layer_id = read_id(doc, &at("layer"))
+                .filter(|l| layer_ids.contains(l))
+                .unwrap_or(first_layer);
+            page.shapes.push(Shape {
+                id,
+                kind,
+                stroke,
+                layer_id,
+            });
+        }
+        // New shapes and layers go past every id the file used.
+        page.next_shape_id = shape_ids.iter().max().map_or(1, |m| m.saturating_add(1));
+        page.next_layer_id = layer_ids.iter().max().map_or(2, |m| m.saturating_add(1));
+        pages.push(page);
+    }
+    if pages.is_empty() {
+        return Err(String::from("it holds no boards"));
+    }
+    Ok((pages, left_out))
 }
 
 fn main() -> ExitCode {
@@ -3530,16 +4219,457 @@ mod tests {
 
     use super::*;
 
-    /// The window says what this program cannot do.
-    ///
-    /// Nothing here is invented, so `find-reachable-fixtures.py` never looked
-    /// at this app. It came from `find-silent-incapacity.py`, which asks the
-    /// opposite question: does the crate reach anything outside its own
-    /// process, and if not, does it admit that in a string the user can read?
+    // ---- Undo that can undo a deletion, one history per page ----
+
+    /// **A deleted shape comes back on undo**, where it was. The deletion was
+    /// recorded after the shape was gone, by id alone, so undo found nothing
+    /// to put back.
     #[test]
-    fn the_window_says_what_it_cannot_do() {
-        let app = WhiteboardApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
-        let texts: Vec<String> = app
+    fn undo_puts_a_deleted_shape_back_where_it_was() {
+        let mut app = WhiteboardApp::new(800.0, 600.0);
+        let a = app.add_shape(ShapeKind::Line {
+            start: Point::new(0.0, 0.0),
+            end: Point::new(1.0, 1.0),
+        });
+        let b = app.add_shape(ShapeKind::Rectangle {
+            bounds: Rect::new(0.0, 0.0, 5.0, 5.0),
+        });
+        let c = app.add_shape(ShapeKind::Ellipse {
+            bounds: Rect::new(9.0, 9.0, 5.0, 5.0),
+        });
+        let order = |app: &WhiteboardApp| -> Vec<ShapeId> {
+            app.current_page().shapes.iter().map(|s| s.id).collect()
+        };
+        app.selection.shape_ids = vec![a, c];
+        app.delete_selected();
+        assert_eq!(order(&app), vec![b]);
+        app.undo();
+        assert_eq!(
+            order(&app),
+            vec![a, b, c],
+            "the deletion was not undone in place"
+        );
+        app.redo();
+        assert_eq!(order(&app), vec![b]);
+        app.undo();
+        assert_eq!(order(&app), vec![a, b, c]);
+    }
+
+    /// A deleted layer comes back with its shapes, where they were.
+    #[test]
+    fn undo_puts_a_deleted_layer_back_with_its_shapes() {
+        let mut app = WhiteboardApp::new(800.0, 600.0);
+        let first = app.active_layer_id;
+        app.add_shape(ShapeKind::Line {
+            start: Point::new(0.0, 0.0),
+            end: Point::new(1.0, 1.0),
+        });
+        app.add_layer();
+        let second = app.active_layer_id;
+        let on_second = app.add_shape(ShapeKind::Rectangle {
+            bounds: Rect::new(0.0, 0.0, 5.0, 5.0),
+        });
+        app.active_layer_id = first;
+        app.add_shape(ShapeKind::Line {
+            start: Point::new(2.0, 2.0),
+            end: Point::new(3.0, 3.0),
+        });
+        let before: Vec<ShapeId> = app.current_page().shapes.iter().map(|s| s.id).collect();
+        app.delete_layer(second);
+        assert!(app.current_page().get_shape(on_second).is_none());
+        app.undo();
+        let after: Vec<ShapeId> = app.current_page().shapes.iter().map(|s| s.id).collect();
+        assert_eq!(
+            after, before,
+            "the layer's shapes did not come back in place"
+        );
+        assert!(app.current_page().layers.iter().any(|l| l.id == second));
+    }
+
+    /// Each page keeps its own history: undo on one page never touches
+    /// another. It was one history for the window, replayed onto whichever
+    /// page was showing.
+    #[test]
+    fn undo_acts_only_on_the_page_it_is_about() {
+        let mut app = WhiteboardApp::new(800.0, 600.0);
+        app.add_shape(ShapeKind::Line {
+            start: Point::new(0.0, 0.0),
+            end: Point::new(1.0, 1.0),
+        });
+        app.add_page();
+        app.add_shape(ShapeKind::Rectangle {
+            bounds: Rect::new(0.0, 0.0, 5.0, 5.0),
+        });
+        app.switch_page(0);
+        app.undo();
+        assert!(
+            app.pages[0].shapes.is_empty(),
+            "undo on the first page did nothing"
+        );
+        assert_eq!(
+            app.pages[1].shapes.len(),
+            1,
+            "undo on the first page took the second page's shape"
+        );
+        // Redo brings back the first page's line -- one history for the
+        // window would put the second page's rectangle here instead, both
+        // shapes being number 1 on their own page.
+        app.redo();
+        assert!(
+            matches!(
+                app.pages[0].shapes.as_slice(),
+                [Shape {
+                    kind: ShapeKind::Line { .. },
+                    ..
+                }]
+            ),
+            "redo on the first page brought back something else: {:?}",
+            app.pages[0].shapes
+        );
+        app.switch_page(1);
+        app.undo();
+        assert!(
+            app.pages[1].shapes.is_empty(),
+            "the second page's own undo did nothing"
+        );
+        assert_eq!(
+            app.pages[0].shapes.len(),
+            1,
+            "the second page's undo reached the first"
+        );
+        // Its redo brings back its own rectangle. The undo above cannot tell
+        // on its own: the two shapes are both number 1 on their own page, so
+        // taking the first page's history would still empty this page -- and
+        // leave the line to come back here.
+        app.redo();
+        assert!(
+            matches!(
+                app.pages[1].shapes.as_slice(),
+                [Shape {
+                    kind: ShapeKind::Rectangle { .. },
+                    ..
+                }]
+            ),
+            "redo on the second page brought back something else: {:?}",
+            app.pages[1].shapes
+        );
+        app.switch_page(0);
+        app.undo();
+        assert!(
+            app.pages[0].shapes.is_empty(),
+            "the first page's history was spent by the second page's undo"
+        );
+    }
+
+    // ---- A board that can be saved and opened again ----
+    //
+    // It could be exported as a picture of one page, which nothing read, and
+    // the window said so in a banner. Nothing recorded unsaved changes, and
+    // the window closed over them.
+
+    /// A scratch directory of the test's own.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "slateos-whiteboard-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// The picker chose `path`, as it does in a window: it takes itself down,
+    /// then the choice is acted on.
+    fn choose(app: &mut WhiteboardApp, path: &std::path::Path) {
+        assert!(app.picker.is_open(), "nothing was asking for a file");
+        app.picker.close();
+        app.picked(path);
+    }
+
+    /// Everything a board holds, in a fixed order.
+    fn describe(app: &WhiteboardApp) -> String {
+        let mut out = Vec::new();
+        for page in &app.pages {
+            out.push(format!(
+                "page {:?} next {} {}",
+                page.name, page.next_shape_id, page.next_layer_id
+            ));
+            for l in &page.layers {
+                out.push(format!(
+                    "  layer {} {:?} {} {} {}",
+                    l.id, l.name, l.visible, l.locked, l.opacity
+                ));
+            }
+            for sh in &page.shapes {
+                out.push(format!(
+                    "  shape {} {:?} {:?} {} {} {:?} {}",
+                    sh.id,
+                    sh.kind,
+                    sh.stroke.color,
+                    sh.stroke.thickness,
+                    sh.stroke.opacity,
+                    sh.stroke.style,
+                    sh.layer_id
+                ));
+            }
+        }
+        out.join("\n")
+    }
+
+    /// A board using everything a file has to keep: every kind of shape, ink
+    /// set away from its default, a second page, and a hidden, locked layer.
+    fn rich() -> WhiteboardApp {
+        let mut app = WhiteboardApp::new(800.0, 600.0);
+        app.stroke_props.color = Color::rgba(10, 20, 30, 200);
+        app.stroke_props.thickness = 7;
+        app.stroke_props.opacity = 0.5;
+        app.stroke_props.style = StrokeStyle::Dashed;
+        app.add_shape(ShapeKind::Freehand {
+            points: vec![
+                Point::new(1.5, 2.25),
+                Point::new(-3.0, 4.0),
+                Point::new(5.0, 6.0),
+            ],
+        });
+        app.add_shape(ShapeKind::Line {
+            start: Point::new(0.0, 1.0),
+            end: Point::new(2.0, 3.0),
+        });
+        app.add_shape(ShapeKind::Arrow {
+            start: Point::new(4.0, 5.0),
+            end: Point::new(6.0, 7.0),
+        });
+        app.add_layer();
+        let layer = app.active_layer_id;
+        app.add_shape(ShapeKind::Rectangle {
+            bounds: Rect::new(1.0, 2.0, 30.0, 40.0),
+        });
+        app.add_shape(ShapeKind::Ellipse {
+            bounds: Rect::new(5.0, 6.0, 7.0, 8.0),
+        });
+        app.toggle_layer_visibility(layer);
+        app.toggle_layer_lock(layer);
+        app.set_layer_opacity(layer, 0.25);
+        app.add_page();
+        app.pages[1].name = String::from("Second: \"quoted\" # page");
+        app.add_shape(ShapeKind::TextLabel {
+            position: Point::new(9.0, 10.0),
+            content: String::from("hello: world # not a comment"),
+        });
+        app.add_shape(ShapeKind::StickyNote {
+            bounds: Rect::new(11.0, 12.0, 100.0, 80.0),
+            content: String::from("line one\nline two"),
+            bg_color: Color::rgb(166, 227, 161),
+        });
+        app
+    }
+
+    /// **A board saved and opened again is the same board** -- every page,
+    /// layer and shape, with its ink.
+    #[test]
+    fn a_board_saved_and_opened_again_is_the_same_board() {
+        let dir = scratch("roundtrip");
+        let path = dir.join("plan.whiteboard");
+        let mut app = rich();
+        let said = app.write_board(&path);
+        assert!(said.starts_with("Saved"), "{said}");
+        assert!(!app.dirty);
+
+        let mut other = WhiteboardApp::new(800.0, 600.0);
+        let said = other.read_board(&path);
+        assert!(said.starts_with("Opened"), "{said}");
+        assert_eq!(describe(&other), describe(&app));
+        assert!(!other.dirty, "a board just opened has nothing unsaved");
+        assert!(
+            other.title().starts_with("plan.whiteboard: "),
+            "{}",
+            other.title()
+        );
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// A file this cannot read as a board is refused, and the board open stays
+    /// as it was.
+    #[test]
+    fn a_file_that_is_not_a_board_is_refused() {
+        let dir = scratch("refused");
+        let mut app = rich();
+        let before = describe(&app);
+        let cases: [(&str, &[u8], &str); 5] = [
+            ("settings.yaml", b"fonts:\n  size: 13\n", "not a SlateOS whiteboard"),
+            ("later.whiteboard", b"slateos-whiteboard: 2\n", "later format"),
+            ("empty.whiteboard", b"slateos-whiteboard: 1\n", "holds no boards"),
+            ("binary.whiteboard", b"\xff\xfe\x00junk", "Could not open"),
+            (
+                "twice.whiteboard",
+                b"slateos-whiteboard: 1\npages:\n  1:\n    name: P\n    shapes:\n      1:\n        id: 4\n        kind: line\n        x1: 0\n        y1: 0\n        x2: 1\n        y2: 1\n      2:\n        id: 4\n        kind: line\n        x1: 0\n        y1: 0\n        x2: 1\n        y2: 1\n",
+                "share the id 4",
+            ),
+        ];
+        for (name, bytes, why) in cases {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).expect("fixture");
+            let said = app.read_board(&path);
+            assert!(
+                said.starts_with("Could not open") && said.contains(why),
+                "{name}: {said}"
+            );
+            assert_eq!(describe(&app), before, "{name} changed the board");
+        }
+
+        // Larger than the most this reads: refused whole, never read as the
+        // smaller board its first part would parse as.
+        let big = dir.join("big.whiteboard");
+        rich().write_board(&big);
+        let said = app.read_board_within(&big, 64);
+        assert!(said.contains("larger than the 64"), "{said}");
+        assert_eq!(describe(&app), before, "a file cut short changed the board");
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// What this version does not know is left out and the rest read; a page
+    /// with no layers gets one; new shapes take ids past the file's.
+    #[test]
+    fn what_is_not_understood_is_left_out_and_the_rest_read() {
+        let dir = scratch("partial");
+        let path = dir.join("partial.whiteboard");
+        std::fs::write(
+            &path,
+            concat!(
+                "slateos-whiteboard: 1\n",
+                "pages:\n",
+                "  1:\n",
+                "    name: Only\n",
+                "    shapes:\n",
+                "      1:\n        id: 7\n        kind: hologram\n",
+                "      2:\n        id: 9\n        kind: line\n        x1: 0\n        y1: 0\n        x2: 1\n        y2: 1\n",
+                "      3:\n        id: 11\n        kind: rectangle\n        x: 1\n",
+            ),
+        )
+        .expect("fixture");
+        let mut app = WhiteboardApp::new(800.0, 600.0);
+        let said = app.read_board(&path);
+        assert!(said.starts_with("Opened"), "{said}");
+        assert!(
+            said.contains("leaving out 2"),
+            "what was left out was not said: {said}"
+        );
+        let ids: Vec<ShapeId> = app.current_page().shapes.iter().map(|s| s.id).collect();
+        assert_eq!(
+            ids,
+            vec![9],
+            "an unknown kind or a shape missing its size was read"
+        );
+        assert_eq!(app.current_page().layers.len(), 1);
+        let added = app.add_shape(ShapeKind::Line {
+            start: Point::new(0.0, 0.0),
+            end: Point::new(1.0, 1.0),
+        });
+        assert!(added > 9, "{added} took an id at or below the file's");
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// Ctrl+S asks where the first time and saves over the board's own file
+    /// after; Ctrl+E exports a picture, which is not a save.
+    #[test]
+    fn ctrl_s_saves_and_ctrl_e_exports() {
+        let dir = scratch("keys");
+        let path = dir.join("mine.whiteboard");
+        let mut app = WhiteboardApp::new(800.0, 600.0);
+        app.add_shape(ShapeKind::Line {
+            start: Point::new(0.0, 0.0),
+            end: Point::new(1.0, 1.0),
+        });
+        assert!(app.dirty && app.title().starts_with('*'), "{}", app.title());
+        app.handle_event(&press_with(Key::S, ctrl()));
+        assert_eq!(app.picker_for, PickerFor::Save);
+        choose(&mut app, &path);
+        assert!(!app.dirty);
+
+        app.add_shape(ShapeKind::Rectangle {
+            bounds: Rect::new(0.0, 0.0, 5.0, 5.0),
+        });
+        app.handle_event(&press_with(Key::S, ctrl()));
+        assert!(!app.picker.is_open(), "a board with a file asked again");
+        let mut other = WhiteboardApp::new(800.0, 600.0);
+        other.read_board(&path);
+        assert_eq!(other.current_page().shapes.len(), 2);
+
+        app.add_page();
+        assert!(app.dirty, "a new page is a change");
+        app.handle_event(&press_with(Key::E, ctrl()));
+        assert_eq!(app.picker_for, PickerFor::Export);
+        choose(&mut app, &dir.join("page.svg"));
+        assert!(app.dirty, "an export cleared the unsaved mark");
+        assert_eq!(app.document_path.as_deref(), Some(path.as_path()));
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// **Closing or opening over unsaved changes asks**, and each answer is
+    /// kept.
+    #[test]
+    fn closing_or_opening_over_unsaved_changes_asks() {
+        let dir = scratch("close");
+        let path = dir.join("kept.whiteboard");
+        let mut clean = WhiteboardApp::new(800.0, 600.0);
+        assert_eq!(clean.on_event(&Event::CloseRequested), Response::Exit);
+
+        let mut app = rich();
+        app.write_board(&path);
+        let on_disk = std::fs::read(&path).expect("saved");
+        app.add_shape(ShapeKind::Line {
+            start: Point::new(3.0, 3.0),
+            end: Point::new(4.0, 4.0),
+        });
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        let text: String = app
+            .render(800.0, 600.0)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            text.contains("kept.whiteboard has changes that are not saved."),
+            "{text}"
+        );
+
+        // A tool key goes to the question, not the canvas.
+        let tool = app.current_tool;
+        app.on_event(&typed(Key::L, 'l'));
+        assert_eq!(
+            app.current_tool, tool,
+            "a key reached the canvas under the question"
+        );
+
+        assert_eq!(app.on_event(&press(Key::Escape)), Response::Redraw);
+        assert_eq!(std::fs::read(&path).expect("unchanged"), on_disk);
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert_eq!(app.on_event(&press(Key::S)), Response::Exit);
+        assert_ne!(std::fs::read(&path).expect("saved again"), on_disk);
+
+        let mut app = rich();
+        app.handle_event(&press_with(Key::O, ctrl()));
+        assert!(!app.picker.is_open(), "Ctrl+O opened over unsaved changes");
+        app.handle_event(&press(Key::D));
+        assert!(app.picker.is_open() && app.picker_for == PickerFor::Open);
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// What a save did is on the screen. It was recorded and drawn nowhere.
+    #[test]
+    fn the_status_bar_says_what_the_last_save_did() {
+        let dir = scratch("status");
+        let mut app = rich();
+        let said = app.write_board(&dir.join("missing").join("x.whiteboard"));
+        app.status_message = Some(said);
+        let text: Vec<String> = app
             .render_commands()
             .iter()
             .filter_map(|c| match c {
@@ -3547,18 +4677,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for line in SAVE_IS_ONE_WAY_LINES {
-            assert!(
-                texts.iter().any(|t| t == line),
-                "the window never said {line:?}"
-            );
-        }
         assert!(
-            SAVE_IS_ONE_WAY_LINES
-                .iter()
-                .any(|l| l.contains("never returned to and edited")),
-            "the message states a mechanism but not its consequence",
+            text.iter().any(|t| t.starts_with("Could not save")),
+            "the failure is not shown: {text:?}"
         );
+        drop(std::fs::remove_dir_all(&dir));
     }
 
     // ---- Construction ----
@@ -4233,12 +5356,12 @@ mod tests {
             end: Point::new(10.0, 10.0),
         });
         app.undo();
-        assert!(!app.redo_stack.is_empty());
+        assert!(!app.current_page().redo_stack.is_empty());
         // New action should clear redo
         app.add_shape(ShapeKind::Rectangle {
             bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
         });
-        assert!(app.redo_stack.is_empty());
+        assert!(app.current_page().redo_stack.is_empty());
     }
 
     #[test]
@@ -4250,7 +5373,7 @@ mod tests {
                 end: Point::new(10.0, i as f32),
             });
         }
-        assert!(app.undo_stack.len() <= MAX_UNDO_STEPS);
+        assert!(app.current_page().undo_stack.len() <= MAX_UNDO_STEPS);
     }
 
     // ---- Delete selected ----
@@ -5865,11 +6988,12 @@ mod tests {
     fn the_title_names_the_page_and_counts_its_shapes() {
         let mut app = board();
         let name = app.current_page().name.clone();
-        assert_eq!(app.title(), format!("{name} (0) - Whiteboard"));
+        assert_eq!(app.title(), format!("Untitled: {name} (0) - Whiteboard"));
         app.add_shape(ShapeKind::Rectangle {
             bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
         });
-        assert_eq!(app.title(), format!("{name} (1) - Whiteboard"));
+        // The file's name, marked while the board has changes not saved.
+        assert_eq!(app.title(), format!("*Untitled: {name} (1) - Whiteboard"));
     }
 
     #[test]

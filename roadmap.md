@@ -1774,6 +1774,13 @@ D's to act on once answered).
       `epoll_wait`, the eventfd wrappers, `signalfd` and `inotify_add_watch`
       now refuse bad arguments with Linux 6.6's errno, in its order (§1107;
       the kernel's `inotify_add_watch` half is requested of lane A).
+    * `printf`, `fprintf` and `dprintf` write all of an output longer than
+      4096 bytes (they had dropped the rest, silently); `wprintf`,
+      `fwprintf`, `vwprintf` and `vfwprintf` exist; `_FORTIFY_SOURCE` covers
+      the wide copies and the multibyte conversions; an epoll entry goes
+      away when its file is closed.  The ring-3 checks are
+      `services/ctest-printf-streams` (its rung requested of lane A) and new
+      cases in `services/ctest-fortify-abort`.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

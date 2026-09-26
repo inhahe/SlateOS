@@ -168,6 +168,12 @@ va_trampoline!("sprintf", "vsprintf", "16", "rdx");
 // `snprintf`, so it takes the same `gp_offset` and the same register.
 #[cfg(target_os = "none")]
 va_trampoline!("swprintf", "vswprintf", "24", "rcx");
+// `fwprintf(stream, fmt, ...)` and `wprintf(fmt, ...)` have `fprintf`'s and
+// `printf`'s named parameters, so they take theirs.
+#[cfg(target_os = "none")]
+va_trampoline!("fwprintf", "vfwprintf", "16", "rdx");
+#[cfg(target_os = "none")]
+va_trampoline!("wprintf", "vwprintf", "8", "rsi");
 
 /// `asprintf` gets its own inline module, and therefore its own object file
 /// inside `libc.a`, because gnulib ships a replacement for it and every GNU
@@ -684,6 +690,119 @@ pub unsafe extern "C" fn vsprintf(buf: *mut u8, fmt: *const u8, ap: *mut VaList)
     _sprintf_impl(buf, fmt, &mut args)
 }
 
+/// A wide format string as the narrow engine reads it: the same text in
+/// UTF-8, in a buffer from `malloc` that the caller frees.  Sized exactly --
+/// this is the wide family's one allocation, and `dirent.rs` sets the
+/// precedent for libc internals owning a short-lived one.  `None`, with
+/// `errno` set, for a format with an unencodable character (`EILSEQ`) or no
+/// memory (`ENOMEM`).
+///
+/// # Safety
+///
+/// `fmt` must be a valid NUL-terminated wide string.
+unsafe fn narrow_wide_format(fmt: *const crate::wchar::WcharT) -> Option<*mut u8> {
+    // SAFETY: caller contract; a null destination with size 0 asks
+    // `wcstombs` only to measure.
+    let fmt_len = unsafe { crate::wchar::wcstombs(core::ptr::null_mut(), fmt, 0) };
+    if fmt_len == usize::MAX {
+        crate::errno::set_errno(crate::errno::EILSEQ);
+        return None;
+    }
+    // One name for the size, so the allocation and the conversion cannot
+    // disagree about it.
+    let fmt_cap = fmt_len.saturating_add(1);
+    let narrow_fmt = crate::malloc::malloc(fmt_cap);
+    if narrow_fmt.is_null() {
+        crate::errno::set_errno(crate::errno::ENOMEM);
+        return None;
+    }
+    // SAFETY: `narrow_fmt` has `fmt_cap` bytes, which is what `wcstombs` was
+    // just told the conversion needs.
+    unsafe { crate::wchar::wcstombs(narrow_fmt, fmt, fmt_cap) };
+    Some(narrow_fmt)
+}
+
+/// `vfwprintf(stream, fmt, ap)` — `fwprintf` with a `va_list`.
+///
+/// Built the way [`vswprintf`] is, on the narrow engine: the format is
+/// narrowed, formatted (into a buffer sized by a measuring pass, as
+/// `vasprintf` does), checked as UTF-8 and counted in wide characters, and
+/// the bytes written to the stream.  A stream holds the multibyte form of
+/// what a wide function writes, so those bytes are exactly what `fputws` of
+/// the wide result would produce.  The return value is in **wide
+/// characters**, as C says, and output that is not valid UTF-8 -- a `%s`
+/// argument with a broken sequence -- is `EILSEQ` with nothing written, as it
+/// would be when glibc converts it to a wide string.
+///
+/// Stream orientation (`fwide`) is not modelled, so mixing this with narrow
+/// output on one stream -- undefined in C -- simply interleaves the bytes.
+///
+/// # Safety
+///
+/// `stream` must be a valid `FILE *`, `fmt` a valid NUL-terminated wide
+/// string, and `ap` a valid `va_list` matching it.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn vfwprintf(
+    stream: *mut u8,
+    fmt: *const crate::wchar::WcharT,
+    ap: *mut VaList,
+) -> i32 {
+    if stream.is_null() || fmt.is_null() || ap.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    // SAFETY: `fmt` is a valid wide string (caller contract).
+    let Some(narrow_fmt) = (unsafe { narrow_wide_format(fmt) }) else {
+        return -1;
+    };
+    let mut out: *mut u8 = core::ptr::null_mut();
+    // SAFETY: `ap` is a valid `va_list` (caller contract); `_asprintf_impl`
+    // replays a copy of it for its second pass, as `vasprintf` does.
+    let bytes = unsafe { _asprintf_impl(&raw mut out, narrow_fmt, Some(*ap)) };
+    // SAFETY: `narrow_fmt` came from `malloc` and is not used again.
+    unsafe { crate::malloc::free(narrow_fmt) };
+    if bytes < 0 || out.is_null() {
+        return -1;
+    }
+    // SAFETY: `out` is the NUL-terminated string `_asprintf_impl` built; a
+    // null destination asks only for the count.
+    let wide = unsafe { crate::wchar::mbstowcs(core::ptr::null_mut(), out, 0) };
+    let result = match i32::try_from(wide) {
+        _ if wide == usize::MAX => {
+            crate::errno::set_errno(crate::errno::EILSEQ);
+            -1
+        }
+        Ok(count) => {
+            #[allow(clippy::cast_sign_loss)]
+            let len = bytes as usize;
+            let written = crate::stdio::write_stream(stream, out, len);
+            if usize::try_from(written).is_ok_and(|w| w == len) {
+                count
+            } else {
+                -1
+            }
+        }
+        Err(_) => {
+            crate::errno::set_errno(crate::errno::EOVERFLOW);
+            -1
+        }
+    };
+    // SAFETY: `out` came from `malloc` inside `_asprintf_impl`.
+    unsafe { crate::malloc::free(out) };
+    result
+}
+
+/// `vwprintf(fmt, ap)` — [`vfwprintf`] to standard output.
+///
+/// # Safety
+///
+/// As [`vfwprintf`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn vwprintf(fmt: *const crate::wchar::WcharT, ap: *mut VaList) -> i32 {
+    // SAFETY: caller contract; STDOUT_SENTINEL names standard output.
+    unsafe { vfwprintf(crate::stdio::STDOUT_SENTINEL as *mut u8, fmt, ap) }
+}
+
 /// `vswprintf(ws, n, fmt, ap)` — `swprintf` with a `va_list`.
 ///
 /// The wide-character `snprintf`. It exists because libc++'s `<locale>` calls
@@ -739,27 +858,11 @@ pub unsafe extern "C" fn vswprintf(
         return -1;
     };
 
-    // 1. Narrow the format. Sized exactly, then freed on every exit below --
-    //    this is the one allocation, and `dirent.rs` sets the precedent for
-    //    libc internals owning a short-lived one.
-    // SAFETY: `fmt` is a valid wide string (caller contract); a null
-    // destination with size 0 asks `wcstombs` only to measure.
-    let fmt_len = unsafe { crate::wchar::wcstombs(core::ptr::null_mut(), fmt, 0) };
-    if fmt_len == usize::MAX {
-        crate::errno::set_errno(crate::errno::EILSEQ);
+    // 1. Narrow the format.
+    // SAFETY: `fmt` is a valid wide string (caller contract).
+    let Some(narrow_fmt) = (unsafe { narrow_wide_format(fmt) }) else {
         return -1;
-    }
-    // One name for the size, so the allocation and the conversion cannot
-    // disagree about it.
-    let fmt_cap = fmt_len.saturating_add(1);
-    let narrow_fmt = crate::malloc::malloc(fmt_cap);
-    if narrow_fmt.is_null() {
-        crate::errno::set_errno(crate::errno::ENOMEM);
-        return -1;
-    }
-    // SAFETY: `narrow_fmt` has `fmt_cap` bytes, which is what `wcstombs` was
-    // just told the conversion needs.
-    unsafe { crate::wchar::wcstombs(narrow_fmt, fmt, fmt_cap) };
+    };
 
     // 2. Format narrow, into the caller's buffer viewed as bytes.
     let base = ws.cast::<u8>();
@@ -4369,6 +4472,40 @@ mod tests {
             vswprintf(buf.as_mut_ptr(), cap, f.as_ptr(), ap)
         });
         (from_wide(&buf), n)
+    }
+
+    /// `vfwprintf`'s refusals, which happen before anything reaches the
+    /// stream (its success path writes to a real stream, and is checked at
+    /// ring 3 by services/ctest-printf-streams).
+    #[test]
+    fn vfwprintf_refuses_before_writing() {
+        let f = wide("x=%s");
+        // A stream pointer that must never be used: every case below fails
+        // before the write.
+        let stream = core::ptr::dangling_mut::<u8>();
+        crate::errno::set_errno(0);
+        let n = with_valist(&[0], &[], |ap| unsafe {
+            vfwprintf(core::ptr::null_mut(), f.as_ptr(), ap)
+        });
+        assert_eq!((n, crate::errno::get_errno()), (-1, crate::errno::EINVAL));
+        let n = with_valist(&[0], &[], |_| unsafe {
+            vfwprintf(stream, f.as_ptr(), core::ptr::null_mut())
+        });
+        assert_eq!(n, -1);
+        // A %s argument that is not valid UTF-8: EILSEQ, nothing written.
+        let broken = b"\xC3(\0";
+        crate::errno::set_errno(0);
+        let n = with_valist(&[broken.as_ptr() as u64], &[], |ap| unsafe {
+            vfwprintf(stream, f.as_ptr(), ap)
+        });
+        assert_eq!((n, crate::errno::get_errno()), (-1, crate::errno::EILSEQ));
+        // An unencodable character in the format itself.
+        let bad_fmt = [0xD800 as crate::wchar::WcharT, 0];
+        crate::errno::set_errno(0);
+        let n = with_valist(&[], &[], |ap| unsafe {
+            vfwprintf(stream, bad_fmt.as_ptr(), ap)
+        });
+        assert_eq!((n, crate::errno::get_errno()), (-1, crate::errno::EILSEQ));
     }
 
     /// The buffer need not be zeroed. `format_core` does not terminate what it

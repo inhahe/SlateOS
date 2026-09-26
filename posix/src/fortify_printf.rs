@@ -74,6 +74,8 @@ use crate::printf::{self, VaList};
 //   __sprintf_chk  (s, flag, slen, fmt, …)    : 4 fixed → gp 32, ap in r8
 //   __snprintf_chk (s, n, flag, slen, fmt, …) : 5 fixed → gp 40, ap in r9
 //   __swprintf_chk (s, n, flag, slen, fmt, …) : 5 fixed → gp 40, ap in r9
+//   __fwprintf_chk (fp, flag, fmt, …)         : 3 fixed → gp 24, ap in rcx
+//   __wprintf_chk  (flag, fmt, …)             : 2 fixed → gp 16, ap in rdx
 //
 // The `slen`/`maxlen` bounding that distinguishes the fortified wrappers from
 // the plain ones lives in the `__v*_chk` functions below, so it is applied
@@ -97,6 +99,10 @@ va_trampoline!("__sprintf_chk", "__vsprintf_chk", "32", "r8");
 va_trampoline!("__snprintf_chk", "__vsnprintf_chk", "40", "r9");
 #[cfg(target_os = "none")]
 va_trampoline!("__swprintf_chk", "__vswprintf_chk", "40", "r9");
+#[cfg(target_os = "none")]
+va_trampoline!("__fwprintf_chk", "__vfwprintf_chk", "24", "rcx");
+#[cfg(target_os = "none")]
+va_trampoline!("__wprintf_chk", "__vwprintf_chk", "16", "rdx");
 
 // ---------------------------------------------------------------------------
 // __v*_chk variants — take a `va_list` (pointer); pure Rust, host-testable.
@@ -203,6 +209,38 @@ pub unsafe extern "C" fn __vsnprintf_chk(
     // SAFETY: as for `__vprintf_chk`.
     let mut args = unsafe { printf::Args::from_raw(ap) };
     printf::_snprintf_impl(s, bound, fmt, &mut args)
+}
+
+/// `__vfwprintf_chk(fp, flag, fmt, ap)`: [`printf::vfwprintf`].  There is no
+/// object size to check; `flag` asks glibc to refuse `%n` from a writable
+/// format, which this family does not do for the narrow calls either.
+///
+/// # Safety
+/// As [`printf::vfwprintf`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __vfwprintf_chk(
+    stream: *mut u8,
+    _flag: i32,
+    fmt: *const crate::wchar::WcharT,
+    ap: *mut VaList,
+) -> i32 {
+    // SAFETY: caller contract.
+    unsafe { printf::vfwprintf(stream, fmt, ap) }
+}
+
+/// `__vwprintf_chk(flag, fmt, ap)`: [`printf::vwprintf`], as
+/// [`__vfwprintf_chk`] is `vfwprintf`.
+///
+/// # Safety
+/// As [`printf::vwprintf`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __vwprintf_chk(
+    _flag: i32,
+    fmt: *const crate::wchar::WcharT,
+    ap: *mut VaList,
+) -> i32 {
+    // SAFETY: caller contract.
+    unsafe { printf::vwprintf(fmt, ap) }
 }
 
 /// `__vswprintf_chk(s, maxlen, flag, slen, fmt, ap)`: `vswprintf` with at

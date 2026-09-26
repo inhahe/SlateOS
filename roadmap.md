@@ -1860,6 +1860,9 @@ D's to act on once answered).
       order, `MSG_INFO`/`MSG_STAT` for `ipcs`, futex waits and `EIDRM` --
       where they were a pool of 256-byte messages that refused any receive
       buffer longer than that.
+    * `sysctl` is glibc 2.39's compat stub (the twenty-third pass): its six
+      arguments and `ENOSYS` for all of them, where it took the removed
+      system call's structure and refused shapes with errnos of its own.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

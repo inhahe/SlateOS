@@ -24035,6 +24035,22 @@ Linux 6.6's ipc/msg.c (`ksys_msgsnd`, `do_msgrcv`, `ksys_msgctl`).
   limits, permissions or waiting --
   `B-D-SYSV-MSG-LIMITS-PERMISSIONS-AND-ERROR-ORDER` (new, fixed with it).
 
+**Twenty-third pass, 2026-09-26 — `sys_sysctl.rs` (4 sites), lane D.** Against
+glibc 2.39's `sysdeps/unix/sysv/linux/sysctl.c` and Linux 6.6, which has no
+`sysctl` system call (removed in 5.5).
+
+- **All four NULLs** (`args`, the name, `oldlenp` beside a buffer, `newval`
+  beside a length) were `EFAULT`, among checks for `EINVAL`, `ENOTDIR` and
+  `E2BIG` that no kernel made in that combination -- the pre-5.5 kernel said
+  `ENOTDIR` for a bad length, not `EINVAL`. glibc keeps `sysctl` only as a
+  compat stub that answers `ENOSYS` whatever it is given, so every one of
+  them is `ENOSYS` now.
+- Beside them: `sysctl` took the removed system call's one argument, a
+  `struct __sysctl_args *`, where glibc's function takes six (`name`, `nlen`,
+  `oldval`, `oldlenp`, `newval`, `newlen`) -- a C caller's name array was
+  read as that structure. It has glibc's signature now, and `SysctlArgs` the
+  kernel's 80 bytes (`__unused[4]` was missing).
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24048,9 +24064,10 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-twenty-two swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`, `sched.rs`,
-`mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`, `linux_module.rs`
-and `sysv_msg.rs`; next are the other files at four.
+twenty-three swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
+`sched.rs`, `mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`,
+`linux_module.rs`, `sysv_msg.rs` and `sys_sysctl.rs`; next are the other
+files at four.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL

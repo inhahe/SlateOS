@@ -535,9 +535,18 @@ mod tests {
     #[test]
     fn the_capacity_is_characters() {
         let mut a = TextArea::new(14.0);
-        a.apply_key(&typed("\u{e9}\u{e9}\u{e9}"), 2, "", 5);
-        assert_eq!(a.text(), "\u{e9}\u{e9}");
-        assert!(!a.apply_key(&typed("x"), 2, "", 5).changed);
+        a.apply_key(&typed("\u{e9}\u{e9}\u{e9}\u{e9}"), 3, "", 5);
+        assert_eq!(a.text(), "\u{e9}\u{e9}\u{e9}");
+        assert!(!a.apply_key(&typed("x"), 3, "", 5).changed);
+        // Two characters in four bytes leave room for a third at three: a
+        // count of bytes would say the field was already over.
+        let mut b = TextArea::new(14.0);
+        b.apply_key(&typed("\u{e9}\u{e9}"), 3, "", 5);
+        assert!(
+            b.apply_key(&typed("x"), 3, "", 5).changed,
+            "a field of 2 characters in 4 bytes was taken as full"
+        );
+        assert_eq!(b.text(), "\u{e9}\u{e9}x");
     }
 
     /// Backspace and Delete take a whole character, and the caret stays on

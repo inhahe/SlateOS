@@ -352,6 +352,20 @@ def sweep(src, mutations, crate, timeout=240, only=None):
         if not only or any(o in name for o in only)
     ]
 
+    # A filter that names no row is a caller's mistake, not an empty sweep.
+    # Rows read from a file with CRLF endings each kept their `\r`, matched
+    # nothing, and the run reported "OK: all 0 mutation(s) caught" -- a green
+    # verdict on 39 rows of which none had run.  One unmatched name in a long
+    # list would silently drop that row the same way.
+    unmatched = [o for o in only if not any(o in name for name, *_ in mutations)]
+    if unmatched:
+        bak.unlink(missing_ok=True)
+        print(f"\n{len(unmatched)} filter(s) name no row in the table:")
+        for o in unmatched:
+            print(f"  {o!r}")
+        print("Nothing was run.  A filter that selects nothing is not a pass.")
+        return 2
+
     # Cheapest check first: one pass over a string, before a compiler is started.
     problems = check_the_table(original, selected, src.parent)
     if problems:

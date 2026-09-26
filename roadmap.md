@@ -4240,7 +4240,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] telnet: interactive terminal client (IAC command parsing, DO/DONT/WILL/WONT negotiation, NAWS, SGA/ECHO, escape commands, line/character mode)
   - [x] passwd: password management (SHA-256 hashing, /etc/shadow read/write, strength checking, lock/unlock/expire, password aging)
   - [x] bc: arbitrary-precision calculator (BigInt limbs, fixed-point decimal, variables, user functions, control flow, ibase/obase, -l math library)
-  - [x] column: columnate text formatter (fill columns/rows, table mode, custom separators, right-align, column hiding, JSON output, East Asian width)
+  - [x] column: columnate text formatter (fill columns/rows, table mode, custom separators, right-align, column hiding, JSON output, East Asian width) -- since 2026-09-26 a port of util-linux 2.39.3's `column.c` laying its tables out through `smartcols` (column moves, tree re-parenting and `--table-column` properties added to the crate for it); `scripts/column-diff.sh`: 594 cases agree, 9 more where only upstream never finishes
   - [x] pgrep/pkill: process grep/kill (regex matching, cmdline/UID/PPID/terminal filters, newest/oldest, signal sending, inverse match)
   - [x] tac/rev: reverse line/character printer (custom separators, regex split, before/after mode, Unicode reversal)
   - [x] logger: util-linux 2.39.3 port (local/RFC 3164/RFC 5424 headers, structured data, octet counting, prio-prefix, Unix/UDP/TCP delivery, `--journald`, root `--id` credentials; `/dev/log` messages become journal records while SlateOS has no Unix-domain sockets — design-decisions §1033; checked by `scripts/logger-diff.sh`)

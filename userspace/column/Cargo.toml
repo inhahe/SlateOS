@@ -2,7 +2,24 @@
 name = "column"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS columnate text formatter"
+description = "column, util-linux 2.39.3's, ported: lists in columns, or a table laid out by libsmartcols"
+
+[lints]
+workspace = true
+
 [dependencies]
-# column names its input files, taken from the command line.
+# glibc's getopt_long: GNU order, abbreviations and their ambiguities.
+getoptlong = { path = "../getoptlong" }
+# argv and input are bytes; a name in a diagnostic is escaped; mbrtowc.
 quoting = { path = "../quoting" }
+# libsmartcols: the table, and its terminal probe.
+smartcols = { path = "../smartcols" }
+# strtou32_or_err, parse_range, err_exclusive_options, isspace.
+ulstrutils = { path = "../ulstrutils" }
+# util-linux's close_stdout, and stdout buffered as glibc buffers it --
+# wide, for the list modes.
+ulclosestream = { path = "../ulclosestream" }
+# A standard descriptor column was started without stays closed.
+stdfdguard = { path = "../stdfdguard" }
+# wcwidth, for the list modes' tab stops.
+charwidth = { path = "../charwidth" }

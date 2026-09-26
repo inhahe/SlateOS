@@ -169481,7 +169481,8 @@ distinct entries, `W;`. And `flock`, now a port of util-linux's, whose
 old hand parser took an unknown option for the file to lock. And `lsmem`,
 now a port of util-linux's printing through the `smartcols` crate, whose old
 parser refused `--summ`, and whose old program invented a block size when it
-could not read one -- design-decisions §1036.)
+could not read one -- design-decisions §1036. And `prlimit` and `column`,
+likewise ported onto `getoptlong` and `smartcols`.)
 
 **The proper fix,** now possible: `getoptlong` (extracted from
 `coreutils/src/getopt.rs` on 2026-09-26) is the shared parser. Converting a
@@ -169722,12 +169723,15 @@ and `--pairs` are each program's own dialect. The library is ported now, as
 `userspace/smartcols` (design-decisions §1036), and `lsmem` prints through
 it and matches util-linux 2.39.3 at every terminal width
 (`scripts/lsmem-diff.sh`), and so does `prlimit` (`scripts/prlimit-diff.sh`:
-182 cases, plus five narrow widths at which only upstream never finishes);
-the others still do not use it.
+182 cases, plus five narrow widths at which only upstream never finishes),
+and so does `column` (`scripts/column-diff.sh`: 594 cases in all its
+modes, plus 9 at which only upstream never finishes -- a port that
+needed the column moves, re-parenting and `--table-column` properties added
+to the crate); the others still do not use it.
 
 **Where:** `userspace/lsblk`, `findmnt`, `lscpu` (its `-e`/`-p` tables),
-`lsns`, `losetup` (`--list`), `swapon` (`--show`), `column`
-(`-t`), `rfkill`, `lsirq`, `fdisk` (`-l`'s partition table).
+`lsns`, `losetup` (`--list`), `swapon` (`--show`), `rfkill`, `lsirq`,
+`fdisk` (`-l`'s partition table).
 
 **The proper fix:** port each program from util-linux 2.39.3 onto
 `smartcols`, as `lsmem` was -- the program's own logic function by function,

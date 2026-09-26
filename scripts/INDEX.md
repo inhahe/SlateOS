@@ -139,6 +139,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/clippy-sites.py` | Count and list distinct clippy warning sites. |
 | `scripts/cmake-spike/run.sh` | Cross-compile upstream CMake and link it against SlateOS's own libc.a. |
 | `scripts/cmp-diff.sh` | Differential test: our cmp against GNU diffutils' cmp. |
+| `scripts/column-diff.sh` | Differential test: our `column` against util-linux 2.39.3's. |
 | `scripts/comm-diff.sh` | Differential test: our comm against GNU comm. |
 | `scripts/comm-probe.py` | Ad-hoc measurement of GNU `comm`. Not part of the build; kept only so the |
 | `scripts/compare-short-options.py` | Compare each tool's short->long option mapping against the real program. |
@@ -432,4 +433,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_422 scripts._
+_423 scripts._

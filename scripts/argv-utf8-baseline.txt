@@ -33,7 +33,6 @@ userspace/capsh/src/main.rs:argv-as-string
 userspace/cgroup/src/main.rs:argv-as-string
 userspace/chattr/src/main.rs:argv-as-string
 userspace/chroot/src/main.rs:argv-as-string
-userspace/column/src/main.rs:argv-as-string
 userspace/coredumpctl/src/main.rs:argv-as-string
 userspace/cpio/src/main.rs:argv-as-string
 userspace/cpupower/src/main.rs:argv-as-string

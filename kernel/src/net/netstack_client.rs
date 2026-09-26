@@ -2042,7 +2042,11 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
                 writable,
                 error,
                 when,
-                if want_readable { "readable only" } else { "no events" }
+                if want_readable {
+                    "readable only"
+                } else {
+                    "no events"
+                }
             );
             return Ok(None);
         }
@@ -2171,8 +2175,12 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
     }
 
     // 3b. Its one connection taken, the listener is quiet again.
-    if listener_polls(&mut conn, LISTENER_ID, false, "after its connection was accepted")?
-        != Some(true)
+    if listener_polls(
+        &mut conn,
+        LISTENER_ID,
+        false,
+        "after its connection was accepted",
+    )? != Some(true)
     {
         conn.close()?;
         return Err(KernelError::InternalError);

@@ -170442,7 +170442,15 @@ the music player's `add_song`, `add_playlist`, `open_picked` and
 `open_path`, `add_path` and `load_playlist_entry`; `apps/mediaprobe`.
 
 ### [E] The archive manager read only ZIP, and "New" wrote a ZIP whatever the name -- 2026-09-26
-**Status:** FIXED for TAR and TAR.GZ (lane E, 2026-09-26). OPEN for TAR.BZ2 and 7z, which need decompressors this tree does not have (bzip2; LZMA/LZMA2) -- refused by name, as before.
+**Status:** FIXED for TAR and TAR.GZ (lane E, 2026-09-26). OPEN for TAR.BZ2, TAR.XZ and 7z -- refused by name, and since 2026-09-26 by their bytes when the name says TAR. Their decompressors exist, in the kernel, where no program can reach them: `requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md` asks lane A to promote them as it did `deflate` and `ziparchive`.
+
+**Also fixed 2026-09-26: the Open dialog showed only ZIP files.** Its filter
+was `*.zip` alone, written when ZIP was all the program read, so once TAR and
+TAR.GZ opened, the dialog still hid every one of them. The filter and the
+program's own name detection now read one table, `ArchiveFormat::patterns`,
+so a name the program recognises is always one the dialog shows. A `.tar.xz`
+was not recognised at all ("does not end in an archive extension I know");
+it is now named, and refused as TAR.XZ.
 
 **In short:** the archive manager opened ZIP files and nothing else: a `.tar`
 or `.tar.gz` -- the commonest archives on a Unix-like system -- was refused

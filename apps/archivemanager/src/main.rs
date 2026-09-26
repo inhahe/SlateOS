@@ -1,8 +1,8 @@
 //! Slate OS Archive Manager
 //!
 //! Graphical archive/compressed file manager supporting multiple formats:
-//! - ZIP, TAR and TAR.GZ, read and written; TAR.BZ2 and 7z recognised and
-//!   refused by name
+//! - ZIP, TAR and TAR.GZ, read and written; TAR.BZ2, TAR.XZ and 7z
+//!   recognised -- by name or by their bytes -- and refused by name
 //! - Browse archive contents in a tree view
 //! - Extract all, extract selected, extract to folder
 //! - Create a new, empty archive, then add files to it
@@ -35,8 +35,10 @@
 //! Uses the guitk library for UI rendering.
 //!
 //! Reading and writing are real for ZIP, TAR and TAR.GZ, and live in
-//! [`backend`]; TAR.BZ2 and 7z are modelled but not parsed -- each needs a
-//! decompressor this tree does not have -- and say so rather than pretending.
+//! [`backend`]; TAR.BZ2, TAR.XZ and 7z are modelled but not parsed, and say
+//! so rather than pretending. Their decompressors exist -- in the kernel,
+//! where a module of a binary crate cannot be reached by any program
+//! (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`).
 
 mod backend;
 
@@ -78,10 +80,54 @@ pub enum ArchiveFormat {
     Tar,
     TarGz,
     TarBz2,
+    TarXz,
     SevenZip,
 }
 
 impl ArchiveFormat {
+    /// The names a file in this format goes by, as dialog patterns.
+    ///
+    /// The one table both [`from_path`](Self::from_path) and the file
+    /// dialogs read, so a name the program recognises is always one the Open
+    /// dialog shows. They were two lists: the dialog's said `*.zip` and
+    /// nothing else, so after TAR and TAR.GZ were taught to open, the dialog
+    /// still hid every one of them.
+    pub fn patterns(self) -> &'static [&'static str] {
+        match self {
+            Self::Zip => &["*.zip"],
+            Self::Tar => &["*.tar"],
+            Self::TarGz => &["*.tar.gz", "*.tgz"],
+            Self::TarBz2 => &["*.tar.bz2", "*.tbz2"],
+            Self::TarXz => &["*.tar.xz", "*.txz"],
+            Self::SevenZip => &["*.7z"],
+        }
+    }
+
+    /// Whether this build can read an archive in this format. TAR.BZ2, TAR.XZ
+    /// and 7z are recognised and refused by name: their decompressors are in
+    /// the kernel, where no program can reach them yet.
+    pub fn readable(self) -> bool {
+        matches!(self, Self::Zip | Self::Tar | Self::TarGz)
+    }
+
+    /// Whether this build can write an archive in this format -- today, the
+    /// same three it reads.
+    pub fn writable(self) -> bool {
+        self.readable()
+    }
+
+    /// Every pattern of every format for which `keep` holds, for a dialog's
+    /// filter.
+    fn patterns_where(keep: impl Fn(Self) -> bool) -> Vec<&'static str> {
+        Self::all()
+            .iter()
+            .copied()
+            .filter(|f| keep(*f))
+            .flat_map(Self::patterns)
+            .copied()
+            .collect()
+    }
+
     /// File extension for this format.
     pub fn extension(self) -> &'static str {
         match self {
@@ -89,6 +135,7 @@ impl ArchiveFormat {
             Self::Tar => ".tar",
             Self::TarGz => ".tar.gz",
             Self::TarBz2 => ".tar.bz2",
+            Self::TarXz => ".tar.xz",
             Self::SevenZip => ".7z",
         }
     }
@@ -100,6 +147,7 @@ impl ArchiveFormat {
             Self::Tar => "TAR Archive",
             Self::TarGz => "TAR.GZ Archive",
             Self::TarBz2 => "TAR.BZ2 Archive",
+            Self::TarXz => "TAR.XZ Archive",
             Self::SevenZip => "7-Zip Archive",
         }
     }
@@ -119,22 +167,19 @@ impl ArchiveFormat {
         matches!(self, Self::Zip | Self::SevenZip)
     }
 
-    /// Detect format from file path by examining the extension.
+    /// Detect format from file path by examining the extension, case
+    /// ignored, through [`patterns`](Self::patterns).
     pub fn from_path(path: &Path) -> Option<Self> {
         let name = path.file_name()?.to_str()?.to_lowercase();
-        if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
-            Some(Self::TarGz)
-        } else if name.ends_with(".tar.bz2") || name.ends_with(".tbz2") {
-            Some(Self::TarBz2)
-        } else if name.ends_with(".tar") {
-            Some(Self::Tar)
-        } else if name.ends_with(".zip") {
-            Some(Self::Zip)
-        } else if name.ends_with(".7z") {
-            Some(Self::SevenZip)
-        } else {
-            None
-        }
+        // No two formats' suffixes end one another (`.tar` does not end
+        // `.tar.gz`), so the order the formats are tried in cannot matter.
+        Self::all().iter().copied().find(|format| {
+            format
+                .patterns()
+                .iter()
+                .filter_map(|p| p.strip_prefix('*'))
+                .any(|suffix| name.ends_with(suffix))
+        })
     }
 
     /// All supported formats.
@@ -144,6 +189,7 @@ impl ArchiveFormat {
             Self::Tar,
             Self::TarGz,
             Self::TarBz2,
+            Self::TarXz,
             Self::SevenZip,
         ]
     }
@@ -2827,14 +2873,22 @@ impl AppState {
     pub fn open_dialog(&mut self, purpose: DialogPurpose) {
         let start = self.last_directory.clone();
         let mut dialog = match purpose {
+            // Every name the program recognises, the ones it refuses among
+            // them: a `.tar.xz` hidden from the list reads as a file that is
+            // not there, while one chosen is told why it cannot be opened.
             DialogPurpose::OpenArchive => FileDialog::open()
-                .with_filter("Archives", &["*.zip"])
+                .with_filter("Archives", &ArchiveFormat::patterns_where(|_| true))
                 .with_initial_path(&start),
             DialogPurpose::ExtractAll | DialogPurpose::ExtractSelected => {
                 FileDialog::select_folder().with_initial_path(&start)
             }
+            // What can be written, ZIP first: a name typed without an
+            // extension is given the filter's first.
             DialogPurpose::NewArchive => FileDialog::save()
-                .with_filter("Archives", &["*.zip"])
+                .with_filter(
+                    "Archives",
+                    &ArchiveFormat::patterns_where(ArchiveFormat::writable),
+                )
                 .with_initial_path(&start)
                 .with_filename("archive.zip"),
             // No filter: anything on the disk can go *into* an archive, and a
@@ -3687,7 +3741,97 @@ mod tests {
         assert_eq!(ArchiveFormat::Tar.extension(), ".tar");
         assert_eq!(ArchiveFormat::TarGz.extension(), ".tar.gz");
         assert_eq!(ArchiveFormat::TarBz2.extension(), ".tar.bz2");
+        assert_eq!(ArchiveFormat::TarXz.extension(), ".tar.xz");
         assert_eq!(ArchiveFormat::SevenZip.extension(), ".7z");
+    }
+
+    /// Each format's own extension is one of its patterns, and names it --
+    /// so `patterns` and `extension` cannot disagree about a format.
+    #[test]
+    fn every_format_is_recognised_by_its_own_extension() {
+        for format in ArchiveFormat::all() {
+            let ext = format.extension();
+            assert!(
+                format
+                    .patterns()
+                    .iter()
+                    .any(|p| p.strip_prefix('*') == Some(ext)),
+                "{format:?}: {ext} is not among {:?}",
+                format.patterns()
+            );
+            let name = format!("Archive{}", ext.to_uppercase());
+            assert_eq!(
+                ArchiveFormat::from_path(Path::new(&name)),
+                Some(*format),
+                "{name} was not recognised"
+            );
+        }
+    }
+
+    /// **The Open dialog shows every archive the program recognises**, and
+    /// the New dialog offers what it can write. The Open dialog's filter
+    /// said `*.zip` alone, so a `.tar` or a `.tar.gz` -- both opened since
+    /// 2026-09-26 -- never appeared in it.
+    #[test]
+    fn the_dialogs_list_what_the_program_recognises_and_writes() {
+        let open = ArchiveFormat::patterns_where(|_| true);
+        for p in [
+            "*.zip",
+            "*.tar",
+            "*.tar.gz",
+            "*.tgz",
+            "*.tar.bz2",
+            "*.tar.xz",
+            "*.7z",
+        ] {
+            assert!(open.contains(&p), "the Open dialog hides {p}");
+        }
+        let new = ArchiveFormat::patterns_where(ArchiveFormat::writable);
+        assert_eq!(
+            new.first(),
+            Some(&"*.zip"),
+            "a bare name should become a ZIP"
+        );
+        assert!(new.contains(&"*.tar.gz"), "{new:?}");
+        assert!(
+            !new.contains(&"*.7z"),
+            "offered a format it cannot write: {new:?}"
+        );
+
+        // What each dialog, as the program puts it up, lists of a folder
+        // holding one file called `name`.
+        let shows = |purpose: DialogPurpose, name: &str| {
+            let mut state = AppState {
+                last_directory: std::env::temp_dir(),
+                ..AppState::default()
+            };
+            state.open_dialog(purpose);
+            let mut dialog = state.choosing.expect("a dialog").dialog;
+            dialog.set_entries(vec![guitk::dialog::DirEntry {
+                name: OsString::from(name),
+                is_dir: false,
+                size: 1,
+                modified_timestamp: 0,
+                extension: OsString::new(),
+            }]);
+            dialog.entries().len() == 1
+        };
+        let open = DialogPurpose::OpenArchive;
+        for name in ["backup.tar.gz", "backup.tar", "src.tar.xz", "bundle.7z"] {
+            assert!(shows(open, name), "the Open dialog hides {name}");
+        }
+        assert!(!shows(open, "notes.txt"), "control: the filter filters");
+        let new = DialogPurpose::NewArchive;
+        assert!(
+            shows(new, "old.tar.gz"),
+            "the New dialog hides a format it writes"
+        );
+        for name in ["old.7z", "old.tar.xz"] {
+            assert!(
+                !shows(new, name),
+                "the New dialog offers {name}, which it cannot write"
+            );
+        }
     }
 
     #[test]
@@ -3768,6 +3912,18 @@ mod tests {
     }
 
     #[test]
+    fn test_format_from_path_tar_xz() {
+        assert_eq!(
+            ArchiveFormat::from_path(Path::new("src.tar.xz")),
+            Some(ArchiveFormat::TarXz)
+        );
+        assert_eq!(
+            ArchiveFormat::from_path(Path::new("src.txz")),
+            Some(ArchiveFormat::TarXz)
+        );
+    }
+
+    #[test]
     fn test_format_from_path_7z() {
         assert_eq!(
             ArchiveFormat::from_path(Path::new("archive.7z")),
@@ -3795,8 +3951,9 @@ mod tests {
     #[test]
     fn test_format_all() {
         let all = ArchiveFormat::all();
-        assert_eq!(all.len(), 5);
+        assert_eq!(all.len(), 6);
         assert!(all.contains(&ArchiveFormat::Zip));
+        assert!(all.contains(&ArchiveFormat::TarXz));
         assert!(all.contains(&ArchiveFormat::SevenZip));
     }
 

@@ -20,9 +20,11 @@
 //! same [`MAX_ARCHIVE_BYTES`] as everything else) and rewritten whole. What
 //! the bytes are decides, not the name: a gzipped `.tar` opens as a TAR.GZ.
 //!
-//! TAR.BZ2 and 7z are named by [`ArchiveFormat`] and refused here in words
-//! rather than silently mis-parsed: `ArchiveError::NotYetReadable` says which
-//! format it was. Each needs a decompressor this tree does not have.
+//! TAR.BZ2, TAR.XZ and 7z are named by [`ArchiveFormat`] and refused here in
+//! words rather than silently mis-parsed: `ArchiveError::NotYetReadable` says
+//! which format it was -- found by name, or by the bytes when the name says
+//! TAR. Their decompressors are in the kernel, where no program can reach
+//! them (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`).
 //!
 //! # An entry name is not a path
 //!
@@ -337,7 +339,7 @@ pub fn open(path: &Path) -> Result<ArchiveModel, ArchiveError> {
             ),
         });
     };
-    if matches!(format, ArchiveFormat::TarBz2 | ArchiveFormat::SevenZip) {
+    if !format.readable() {
         return Err(ArchiveError::NotYetReadable { format });
     }
     // Ask the size before reading, so an archive too big to hold is refused by
@@ -366,16 +368,22 @@ pub fn open(path: &Path) -> Result<ArchiveModel, ArchiveError> {
     if format == ArchiveFormat::Zip {
         return parse_zip(path, bytes);
     }
-    // A TAR or a TAR.GZ, by what its bytes are rather than its name: gzip's
-    // magic, or not.
-    let mut magic = [0_u8; 2];
+    // A TAR or a TAR.GZ, by what its bytes are rather than its name -- and a
+    // TAR compressed some way this build cannot undo, named as what it is.
+    // Read as a TAR, its first block is compressed data, and "it is not a TAR
+    // archive" would be the wrong refusal: it is one, inside a wrapper.
+    let mut magic = [0_u8; 6];
     let read = bytes
         .read_at(0, &mut magic)
         .map_err(|source| ArchiveError::Io {
             path: path.to_path_buf(),
             source,
         })?;
-    if read == 2 && magic == [0x1F, 0x8B] {
+    let wrapped = compressed_as(magic.get(..read).unwrap_or_default());
+    if let Some(format) = wrapped.filter(|f| !f.readable()) {
+        return Err(ArchiveError::NotYetReadable { format });
+    }
+    if wrapped == Some(ArchiveFormat::TarGz) {
         let compressed = read_all(&bytes).map_err(|source| ArchiveError::Io {
             path: path.to_path_buf(),
             source,
@@ -386,6 +394,20 @@ pub fn open(path: &Path) -> Result<ArchiveModel, ArchiveError> {
         parse_tar(path, ArchiveBytes::Memory(tar), ArchiveFormat::TarGz, size)
     } else {
         parse_tar(path, bytes, ArchiveFormat::Tar, size)
+    }
+}
+
+/// The compressed format `head` -- a file's first bytes -- begins, by its
+/// magic number: gzip, bzip2, xz or 7z. `None` for anything else, a TAR
+/// among it.
+fn compressed_as(head: &[u8]) -> Option<ArchiveFormat> {
+    match head {
+        [0x1F, 0x8B, ..] => Some(ArchiveFormat::TarGz),
+        // "BZh" and the block size, a digit 1-9.
+        [b'B', b'Z', b'h', b'1'..=b'9', ..] => Some(ArchiveFormat::TarBz2),
+        [0xFD, b'7', b'z', b'X', b'Z', 0x00, ..] => Some(ArchiveFormat::TarXz),
+        [b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C, ..] => Some(ArchiveFormat::SevenZip),
+        _ => None,
     }
 }
 
@@ -1739,7 +1761,7 @@ pub fn create_empty(path: &Path) -> Result<(), SaveError> {
         None | Some(ArchiveFormat::Zip) => ziparchive::create(&[]),
         Some(ArchiveFormat::Tar) => empty_tar.to_vec(),
         Some(ArchiveFormat::TarGz) => deflate::gzip(&empty_tar),
-        Some(format @ (ArchiveFormat::TarBz2 | ArchiveFormat::SevenZip)) => {
+        Some(format @ (ArchiveFormat::TarBz2 | ArchiveFormat::TarXz | ArchiveFormat::SevenZip)) => {
             return Err(SaveError::Unwritable { format });
         }
     };
@@ -2467,6 +2489,61 @@ mod tests {
             }
             other => panic!("expected a refusal naming the format, got {other:?}"),
         }
+
+        // A TAR in a wrapper this build cannot undo is named as what it is,
+        // whatever the name says -- not "not a TAR", which it is, inside.
+        for (name, head, format) in [
+            (
+                "src.tar.xz",
+                &b"\xFD7zXZ\x00 then LZMA2"[..],
+                ArchiveFormat::TarXz,
+            ),
+            (
+                "xz-named-tar.tar",
+                &b"\xFD7zXZ\x00 then LZMA2"[..],
+                ArchiveFormat::TarXz,
+            ),
+            (
+                "bz-named-tgz.tgz",
+                &b"BZh91AY&SY then blocks"[..],
+                ArchiveFormat::TarBz2,
+            ),
+            (
+                "7z-named-tar.tar",
+                &b"7z\xBC\xAF\x27\x1C then headers"[..],
+                ArchiveFormat::SevenZip,
+            ),
+        ] {
+            let path = dir.join(name);
+            fs::write(&path, head).expect("write it");
+            match open(&path) {
+                Err(ArchiveError::NotYetReadable { format: said }) => {
+                    assert_eq!(said, format, "{name} was named as the wrong format");
+                }
+                other => panic!("{name}: expected {format:?} to be refused by name, got {other:?}"),
+            }
+        }
+        // A refused name is refused before a byte is read: a `.tar.bz2` whose
+        // bytes are nothing in particular is still named TAR.BZ2, not "not a
+        // TAR".
+        let named = dir.join("named-only.tar.bz2");
+        fs::write(&named, b"not really").expect("write it");
+        assert!(
+            matches!(
+                open(&named),
+                Err(ArchiveError::NotYetReadable {
+                    format: ArchiveFormat::TarBz2
+                })
+            ),
+            "a .tar.bz2 was read before being refused by its name"
+        );
+        // "BZh" with no block-size digit after it is not bzip2's magic.
+        let almost = dir.join("almost.tar");
+        fs::write(&almost, b"BZhx is text").expect("write it");
+        assert!(
+            matches!(open(&almost), Err(ArchiveError::NotTar { .. })),
+            "a file beginning \"BZh\" was taken for bzip2"
+        );
 
         let missing = dir.join("gone.zip");
         assert!(matches!(open(&missing), Err(ArchiveError::Io { .. })));
@@ -3362,6 +3439,16 @@ mod tests {
             }
             other => panic!("expected 7z to be refused, got {other:?}"),
         }
+        match create_empty(&dir.join("new.tar.xz")) {
+            Err(e @ SaveError::Unwritable { .. }) => {
+                assert!(e.to_string().contains("TAR.XZ"), "{e}");
+            }
+            other => panic!("expected TAR.XZ to be refused, got {other:?}"),
+        }
+        assert!(
+            !dir.join("new.tar.xz").exists(),
+            "a refused archive left a file behind"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

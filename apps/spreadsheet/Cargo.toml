@@ -14,6 +14,8 @@ oswindow = { path = "../../gui/window" }
 # sheet on disk as a fragment. Same reasoning as `apps/editor` and
 # `apps/notes`.
 safeio = { path = "../safeio" }
+# "Unsaved changes -- save them?", asked the way every editor here asks it.
+unsaved = { path = "../unsaved" }
 
 [lints]
 workspace = true

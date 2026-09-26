@@ -166502,7 +166502,7 @@ JPEG decoder with the file's `JPEGTables`; then the rare codecs. Fixtures from
 the same libtiff oracle.
 
 ### [E] Document applications closed over unsaved work, and the hex editor and the JSON viewer could not save at all -- 2026-09-25
-**Status:** FIXED for the text editor, the markdown editor, the hex editor, the JSON viewer, slides and sticky notes (lane E, 2026-09-25), and paint, the diagram editor and the whiteboard (2026-09-25); OPEN for `spreadsheet`, which saves only the sheet in front as CSV -- lane E's next, see the end of this entry.
+**Status:** FIXED for the text editor, the markdown editor, the hex editor, the JSON viewer, slides and sticky notes (lane E, 2026-09-25), and paint, the diagram editor, the whiteboard and the spreadsheet (2026-09-25). What remains is the entry below it: notes, contacts, snippets and kanban keep nothing at all.
 
 **In short:** closing the window of an editor threw away every unsaved change
 without a word -- the window library closed a window on any close request,
@@ -166616,12 +166616,23 @@ Deletions now carry what they took and where it was, and each page keeps its
 own history. Mutation tables: `apps/diagram/mutate.py`,
 `apps/whiteboard/mutate.py` (both new).
 
-**Still open: the spreadsheet** reads and writes the sheet in front as CSV, so
-the other sheets are never saved, records no unsaved changes, and answers a
-close with `Exit`. It wants a workbook file it can write and read back whole,
-then the record and the question. Four more that looked like the same case are
-a worse one -- see `[E] Notes, contacts, snippets and kanban keep nothing`
-below.
+**The spreadsheet, the same day.** Ctrl+S wrote the sheet in front as CSV --
+its values, with no formula, no format and no other sheet -- and Ctrl+O read a
+CSV into the sheet in front. It now keeps a workbook, `.spreadsheet`: every
+sheet, every cell as it was typed (a formula comes back a formula, and is
+worked out again), every format, width, height and frozen pane, in a
+tab-separated file read whole or not at all, a refusal naming the line
+(design-decisions §1204). Ctrl+S saves (asking where the first time), F12
+saves as (Ctrl+Shift+S was already the status bar's), Ctrl+O opens a workbook
+-- or a CSV, as a new workbook of one sheet that does not take the CSV as its
+file -- and Ctrl+E exports the sheet as CSV, which is not a save. Unsaved
+changes are recorded where every change already went, the undo manager, plus
+freezing panes, which undo does not see; the window bar shows `*`; and a close
+or an Open over them asks on `apps/unsaved`, committing a value half typed
+first. Mutation table `apps/spreadsheet/mutate.py` (new).
+
+Four more that looked like the same case are a worse one -- see `[E] Notes,
+contacts, snippets and kanban keep nothing` below.
 
 **One question, not thirteen -- done the same day.** The six applications
 fixed first each drew the question by hand, beside the toolkit's own

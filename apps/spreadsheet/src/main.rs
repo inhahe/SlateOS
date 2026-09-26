@@ -41,6 +41,7 @@ use oswindow::app::{self, App, Response};
 use std::collections::{BTreeMap, HashMap};
 use std::process::ExitCode;
 use std::time::Duration;
+use unsaved::{Choice, Question};
 
 // ============================================================================
 // Catppuccin Mocha theme colors
@@ -110,6 +111,8 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+F / Ctrl+H", "Find / find and replace"),
     ("Alt+C", "Find and replace: match case, or ignore it"),
     ("Ctrl+O / Ctrl+S", "Open / save"),
+    ("F12", "Save as a new file"),
+    ("Ctrl+E", "Export this sheet as CSV"),
     ("Ctrl+T", "Show or hide the toolbar"),
     ("Ctrl+G", "Show or hide the gridlines"),
     ("Ctrl+Shift+F", "Show or hide the formula bar"),
@@ -813,6 +816,10 @@ pub enum UndoAction {
 pub struct UndoManager {
     undo_stack: Vec<UndoAction>,
     redo_stack: Vec<UndoAction>,
+    /// Whether anything has been done, undone or redone since the workbook
+    /// was last saved or opened. Every change to a cell, a sheet or a size
+    /// comes through here, which makes this the one place to learn it.
+    pub changed: bool,
 }
 
 impl Default for UndoManager {
@@ -827,6 +834,7 @@ impl UndoManager {
         Self {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            changed: false,
         }
     }
 
@@ -837,6 +845,7 @@ impl UndoManager {
         }
         self.undo_stack.push(action);
         self.redo_stack.clear();
+        self.changed = true;
     }
 
     /// Check if undo is available.
@@ -853,6 +862,8 @@ impl UndoManager {
     pub fn pop_undo(&mut self) -> Option<UndoAction> {
         let action = self.undo_stack.pop()?;
         self.redo_stack.push(action.clone());
+        // Undoing past a save leaves a workbook the file does not hold.
+        self.changed = true;
         Some(action)
     }
 
@@ -860,6 +871,7 @@ impl UndoManager {
     pub fn pop_redo(&mut self) -> Option<UndoAction> {
         let action = self.redo_stack.pop()?;
         self.undo_stack.push(action.clone());
+        self.changed = true;
         Some(action)
     }
 
@@ -2791,23 +2803,395 @@ impl SheetBook {
 // Spreadsheet application state
 // ============================================================================
 
-/// The main spreadsheet application state.
-/// The most of a CSV file one open will read.
-///
-/// Reported when it bites: a sheet truncated mid-row is not the file the user
-/// chose, and a silent cut shows a smaller spreadsheet with nothing to say
-/// anything is missing.
-pub const MAX_CSV_BYTES: usize = 8 * 1024 * 1024;
-
 /// Leads a message about a file operation that did not happen.
 const FILE_FAILED_PREFIX: &str = "Could not";
 
+/// What the file picker is up for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerFor {
+    /// A workbook, or a CSV, to open in place of this one.
+    Open,
+    /// Where to save this workbook, which then belongs to that file.
+    Save,
+    /// Where to export the sheet in front as CSV: not a save, since a CSV
+    /// keeps one sheet's values and no formula, format or other sheet.
+    Export,
+    /// Where to save a workbook with no file yet, before what the
+    /// unsaved-changes question held up goes on.
+    SaveThen(Pending),
+}
+
+/// What the unsaved-changes question is holding up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pending {
+    /// Opening another workbook in its place.
+    Open,
+    /// Closing the window.
+    Close,
+}
+
+/// A workbook file's first word, which is also how Open tells one from a CSV.
+const WORKBOOK_MAGIC: &str = "slateos-spreadsheet";
+
+/// The version of the workbook file this writes, and the newest it reads.
+const WORKBOOK_FORMAT: u32 = 1;
+
+/// The largest workbook this will open. One cut short would be read as a
+/// smaller workbook with no sign anything was missing, so a larger file is
+/// refused rather than read in part.
+const MAX_WORKBOOK_BYTES: usize = 32 * 1024 * 1024;
+
+/// A cell's input, or a sheet's name, as it goes into a field of a workbook
+/// line: a tab, a line break or a backslash must not end the field or the
+/// line. The ledger's four escapes (design-decisions §1202).
+fn escape_field(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// A field read back, or `None` for an escape that was never written.
+fn unescape_field(text: &str) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next()? {
+                '\\' => out.push('\\'),
+                't' => out.push('\t'),
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                _ => return None,
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    Some(out)
+}
+
+/// A colour as `#RRGGBB`, or `#RRGGBBAA` when it is not opaque.
+fn colour_hex(c: Color) -> String {
+    if c.a == 255 {
+        format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+    } else {
+        format!("#{:02X}{:02X}{:02X}{:02X}", c.r, c.g, c.b, c.a)
+    }
+}
+
+/// A colour read back from `#RRGGBB` or `#RRGGBBAA`.
+fn parse_colour(text: &str) -> Option<Color> {
+    let hex = text.strip_prefix('#')?;
+    if !hex.is_ascii() || !(hex.len() == 6 || hex.len() == 8) {
+        return None;
+    }
+    let byte = |at: usize| {
+        hex.get(at..at.saturating_add(2))
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+    };
+    let a = if hex.len() == 8 { byte(6)? } else { 255 };
+    Some(Color::rgba(byte(0)?, byte(2)?, byte(4)?, a))
+}
+
+/// A cell's format as the flags that follow its input on its line: nothing
+/// for what is the default, so an ordinary cell is one short line.
+fn format_flags(format: &CellFormat) -> Vec<String> {
+    let mut flags = Vec::new();
+    if format.bold {
+        flags.push(String::from("bold"));
+    }
+    if format.italic {
+        flags.push(String::from("italic"));
+    }
+    match format.alignment {
+        Alignment::Left => {}
+        Alignment::Center => flags.push(String::from("align=center")),
+        Alignment::Right => flags.push(String::from("align=right")),
+    }
+    match format.number_format {
+        NumberFormat::General => {}
+        NumberFormat::Decimal(n) => flags.push(format!("number=decimal:{n}")),
+        NumberFormat::Percentage(n) => flags.push(format!("number=percent:{n}")),
+        NumberFormat::Currency(n) => flags.push(format!("number=currency:{n}")),
+    }
+    if let Some(c) = format.text_color {
+        flags.push(format!("text={}", colour_hex(c)));
+    }
+    if let Some(c) = format.bg_color {
+        flags.push(format!("fill={}", colour_hex(c)));
+    }
+    if format.borders.has_any() {
+        let b = &format.borders;
+        let sides: String = [(b.top, 't'), (b.bottom, 'b'), (b.left, 'l'), (b.right, 'r')]
+            .iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, c)| *c)
+            .collect();
+        flags.push(format!("border={sides}"));
+    }
+    flags
+}
+
+/// One flag read back into `format`, or why it cannot be.
+fn apply_flag(format: &mut CellFormat, flag: &str) -> Result<(), String> {
+    let (name, value) = flag.split_once('=').unwrap_or((flag, ""));
+    let places = |v: &str| {
+        v.parse::<u8>()
+            .map_err(|_| format!("`{flag}` is not a number of places"))
+    };
+    match (name, value) {
+        ("bold", "") => format.bold = true,
+        ("italic", "") => format.italic = true,
+        ("align", "center") => format.alignment = Alignment::Center,
+        ("align", "right") => format.alignment = Alignment::Right,
+        ("number", v) => {
+            let (kind, n) = v
+                .split_once(':')
+                .ok_or_else(|| format!("`{flag}` is not a number format"))?;
+            format.number_format = match kind {
+                "decimal" => NumberFormat::Decimal(places(n)?),
+                "percent" => NumberFormat::Percentage(places(n)?),
+                "currency" => NumberFormat::Currency(places(n)?),
+                _ => return Err(format!("`{flag}` is not a number format")),
+            };
+        }
+        ("text", v) => {
+            format.text_color =
+                Some(parse_colour(v).ok_or_else(|| format!("`{flag}` is not a colour"))?);
+        }
+        ("fill", v) => {
+            format.bg_color =
+                Some(parse_colour(v).ok_or_else(|| format!("`{flag}` is not a colour"))?);
+        }
+        ("border", v) if !v.is_empty() && v.chars().all(|c| "tblr".contains(c)) => {
+            format.borders.top = v.contains('t');
+            format.borders.bottom = v.contains('b');
+            format.borders.left = v.contains('l');
+            format.borders.right = v.contains('r');
+        }
+        _ => return Err(format!("`{flag}` is not a format this version reads")),
+    }
+    Ok(())
+}
+
+/// The workbook as text: a line per sheet, per changed column width and row
+/// height, and per cell -- what was typed, not what it shows, so a formula
+/// comes back a formula -- then which sheet was in front.
+///
+/// Tab-separated lines rather than YAML, for the ledger's reason
+/// (design-decisions §1202) and one of its own (§1204): a full sheet is
+/// twenty-six thousand cells, and a file a line per cell is read and written
+/// in one pass where a document looked up key by key is not.
+fn workbook_text(book: &SheetBook) -> String {
+    let mut out = format!("{WORKBOOK_MAGIC}\t{WORKBOOK_FORMAT}\n");
+    for sheet in book.iter() {
+        out.push_str(&format!("sheet\t{}\n", escape_field(&sheet.name)));
+        if sheet.frozen_rows > 0 || sheet.frozen_cols > 0 {
+            out.push_str(&format!(
+                "frozen\t{}\t{}\n",
+                sheet.frozen_rows, sheet.frozen_cols
+            ));
+        }
+        // Only what was changed: a sheet is a thousand rows, nearly all of
+        // them the height they started.
+        for (col, width) in sheet.col_widths.iter().enumerate() {
+            if (width - DEFAULT_COL_WIDTH).abs() > f32::EPSILON {
+                out.push_str(&format!("width\t{}\t{width}\n", CellAddr::col_letter(col)));
+            }
+        }
+        for (row, height) in sheet.row_heights.iter().enumerate() {
+            if (height - DEFAULT_ROW_HEIGHT).abs() > f32::EPSILON {
+                out.push_str(&format!("height\t{}\t{height}\n", CellAddr::row_label(row)));
+            }
+        }
+        for (addr, cell) in &sheet.cells {
+            out.push_str(&format!(
+                "cell\t{}\t{}",
+                addr.display(),
+                escape_field(&cell.raw_input)
+            ));
+            for flag in format_flags(&cell.format) {
+                out.push('\t');
+                out.push_str(&flag);
+            }
+            out.push('\n');
+        }
+    }
+    out.push_str(&format!(
+        "active\t{}\n",
+        book.active_index().saturating_add(1)
+    ));
+    out
+}
+
+/// Read a workbook written by [`workbook_text`], all of it or none of it.
+///
+/// A line not understood refuses the whole file, as the ledger does
+/// (design-decisions §1202): read in part and saved again, a workbook would
+/// lose whatever was not understood, without a word. The error names the line
+/// and what is wrong with it. Formulas are worked out again once everything is
+/// in, since a cell can refer to one written after it.
+fn parse_workbook(text: &str) -> Result<(Vec<Sheet>, usize), String> {
+    let mut lines = text.lines().enumerate();
+    let first = lines.next().map_or("", |(_, l)| l);
+    let mut head = first.split('\t');
+    if head.next() != Some(WORKBOOK_MAGIC) {
+        return Err(String::from("it is not a SlateOS workbook"));
+    }
+    let version = head
+        .next()
+        .and_then(|v| v.parse::<u32>().ok())
+        .ok_or_else(|| String::from("line 1 names no format"))?;
+    if version > WORKBOOK_FORMAT {
+        return Err(format!(
+            "it is a later format ({version}) than this version reads ({WORKBOOK_FORMAT})"
+        ));
+    }
+    let mut sheets: Vec<Sheet> = Vec::new();
+    let mut seen: std::collections::HashSet<CellAddr> = std::collections::HashSet::new();
+    let mut active = 1_usize;
+    for (i, line) in lines {
+        let at = i.saturating_add(1);
+        let bad = |why: String| format!("line {at}: {why}");
+        if line.is_empty() {
+            continue;
+        }
+        let mut fields = line.split('\t');
+        let kind = fields.next().unwrap_or("");
+        let mut next = |what: &str| {
+            fields
+                .next()
+                .ok_or_else(|| bad(format!("it has no {what}")))
+        };
+        match kind {
+            "sheet" => {
+                let name = unescape_field(next("name")?)
+                    .ok_or_else(|| bad(String::from("its name has a broken escape")))?;
+                sheets.push(Sheet::new(&name));
+                seen.clear();
+            }
+            "active" => {
+                active = next("sheet number")?
+                    .parse::<usize>()
+                    .map_err(|_| bad(String::from("the sheet number is not one")))?;
+            }
+            "frozen" | "width" | "height" | "cell" => {
+                let Some(sheet) = sheets.last_mut() else {
+                    return Err(bad(String::from("it comes before any sheet")));
+                };
+                match kind {
+                    "frozen" => {
+                        let rows = next("row count")?
+                            .parse::<usize>()
+                            .map_err(|_| bad(String::from("the row count is not one")))?;
+                        let cols = next("column count")?
+                            .parse::<usize>()
+                            .map_err(|_| bad(String::from("the column count is not one")))?;
+                        if rows >= MAX_ROWS || cols >= MAX_COLS {
+                            return Err(bad(String::from("more is frozen than the sheet has")));
+                        }
+                        sheet.frozen_rows = rows;
+                        sheet.frozen_cols = cols;
+                    }
+                    "width" => {
+                        let letter = next("column")?;
+                        let col = CellAddr::parse(&format!("{letter}1"))
+                            .filter(|_| letter.len() == 1)
+                            .map(|a| a.col)
+                            .ok_or_else(|| bad(format!("`{letter}` is not a column")))?;
+                        let width = next("width")?
+                            .parse::<f32>()
+                            .ok()
+                            .filter(|w| w.is_finite() && *w > 0.0)
+                            .ok_or_else(|| bad(String::from("the width is not one")))?;
+                        if let Some(slot) = sheet.col_widths.get_mut(col) {
+                            *slot = width;
+                        }
+                    }
+                    "height" => {
+                        let label = next("row")?;
+                        let row = label
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|r| (1..=MAX_ROWS).contains(r))
+                            .ok_or_else(|| bad(format!("`{label}` is not a row")))?
+                            .saturating_sub(1);
+                        let height = next("height")?
+                            .parse::<f32>()
+                            .ok()
+                            .filter(|h| h.is_finite() && *h > 0.0)
+                            .ok_or_else(|| bad(String::from("the height is not one")))?;
+                        if let Some(slot) = sheet.row_heights.get_mut(row) {
+                            *slot = height;
+                        }
+                    }
+                    _ => {
+                        let name = next("address")?;
+                        let addr = CellAddr::parse(name)
+                            .ok_or_else(|| bad(format!("`{name}` is not a cell")))?;
+                        if !seen.insert(addr) {
+                            return Err(bad(format!("{name} is written twice")));
+                        }
+                        let input = unescape_field(next("contents")?).ok_or_else(|| {
+                            bad(String::from("its contents have a broken escape"))
+                        })?;
+                        let mut format = CellFormat::default();
+                        for flag in fields.by_ref() {
+                            apply_flag(&mut format, flag).map_err(&bad)?;
+                        }
+                        sheet.set_cell_input(addr, &input);
+                        let mut cell = sheet.get_cell(addr);
+                        cell.format = format;
+                        sheet.set_cell(addr, cell);
+                    }
+                }
+            }
+            other => return Err(bad(format!("`{other}` is not a line this version reads"))),
+        }
+    }
+    if sheets.is_empty() {
+        return Err(String::from("it holds no sheets"));
+    }
+    if active == 0 || active > sheets.len() {
+        return Err(format!(
+            "sheet {active} is in front, and there are {}",
+            sheets.len()
+        ));
+    }
+    for sheet in &mut sheets {
+        recalculate_sheet(sheet);
+    }
+    Ok((sheets, active.saturating_sub(1)))
+}
+
+/// The main spreadsheet application state.
 pub struct SpreadsheetApp {
     /// The open or save picker. Holds the dialog, the saving flag and
     /// the routing eleven applications used to write out by hand.
     pub picker: FilePicker,
     /// What the last open or save did, for the status line.
     pub last_file_action: Option<String>,
+    /// The workbook file this was opened from or last saved to: where Ctrl+S
+    /// writes without asking. `None` for one never saved -- and for a CSV
+    /// opened, which is not a workbook and is not written over as one.
+    pub document_path: Option<std::path::PathBuf>,
+    /// A change the undo manager does not see: freezing or unfreezing panes.
+    layout_changed: bool,
+    /// What the file picker is up for.
+    pub picker_for: PickerFor,
+    /// "Unsaved changes -- save them?", while it is asked, and what it holds
+    /// up (`apps/unsaved`).
+    question: Option<Question<Pending>>,
+    /// Set once the window may close; the next answer to the loop is `Exit`.
+    pub quit: bool,
     /// All worksheets, and which one is active.
     pub sheets: SheetBook,
     /// Current interaction mode.
@@ -2856,6 +3240,11 @@ impl SpreadsheetApp {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             picker: FilePicker::new(),
             last_file_action: None,
+            document_path: None,
+            layout_changed: false,
+            picker_for: PickerFor::Open,
+            question: None,
+            quit: false,
             sheets: SheetBook::new(Sheet::new("Sheet1")),
             mode: InteractionMode::Normal,
             clipboard: None,
@@ -3448,6 +3837,9 @@ impl SpreadsheetApp {
             sheet.frozen_cols = col;
             sheet.frozen_rows = row;
         }
+        // Frozen panes are kept in the workbook, and nothing records them for
+        // undo, so the unsaved mark is set here.
+        self.layout_changed = true;
         self.notice = None;
         // Freezing does not change either limit, but it does change which
         // cells the current offset is showing, and `ensure_cell_visible` now
@@ -3772,10 +4164,232 @@ impl SpreadsheetApp {
     /// missing was the picker.
     pub fn open_file_dialog(&mut self, saving: bool) {
         if saving {
-            self.picker.open_to_write("sheet.csv");
+            self.picker_for = PickerFor::Export;
+            self.picker.open_to_write(self.file_stem() + ".csv");
         } else {
+            self.picker_for = PickerFor::Open;
             self.picker.open_to_read();
         }
+    }
+
+    /// Whether anything has changed since the workbook was saved or opened.
+    pub fn dirty(&self) -> bool {
+        self.undo_manager.changed || self.layout_changed
+    }
+
+    fn mark_saved(&mut self) {
+        self.undo_manager.changed = false;
+        self.layout_changed = false;
+    }
+
+    /// The workbook's name: its file's, or "Untitled".
+    pub fn document_name(&self) -> String {
+        self.document_path
+            .as_deref()
+            .and_then(std::path::Path::file_name)
+            // The window bar's label only; the real name is the path.
+            .map_or_else(
+                || String::from("Untitled"),
+                |n| n.to_string_lossy().into_owned(),
+            )
+    }
+
+    /// The name offered for an export or a first save, without extension.
+    fn file_stem(&self) -> String {
+        self.document_path
+            .as_deref()
+            .and_then(std::path::Path::file_stem)
+            .map_or_else(
+                || String::from("sheet"),
+                |n| n.to_string_lossy().into_owned(),
+            )
+    }
+
+    /// Write the workbook to `path`, which becomes its file. What to say.
+    pub fn write_workbook(&mut self, path: &std::path::Path) -> String {
+        match safeio::write_str_atomically(path, &workbook_text(&self.sheets)) {
+            Ok(()) => {
+                self.document_path = Some(path.to_path_buf());
+                self.mark_saved();
+                format!("Saved {}", path.display())
+            }
+            Err(err) => format!("{FILE_FAILED_PREFIX} save {}: {err}", path.display()),
+        }
+    }
+
+    /// Open `path` in place of this workbook -- a workbook, or a CSV as a
+    /// workbook of one sheet. What to say. A file that cannot be read whole
+    /// leaves this workbook as it was.
+    pub fn open_path(&mut self, path: &std::path::Path) -> String {
+        self.open_path_within(path, MAX_WORKBOOK_BYTES)
+    }
+
+    /// [`open_path`](Self::open_path), refusing a file over `max` bytes.
+    fn open_path_within(&mut self, path: &std::path::Path, max: usize) -> String {
+        let read = match safeio::read_to_string_capped(path, max) {
+            Ok(read) => read,
+            Err(err) => return format!("{FILE_FAILED_PREFIX} open {}: {err}", path.display()),
+        };
+        if read.truncated {
+            return format!(
+                "{FILE_FAILED_PREFIX} open {}: at {} bytes it is larger than the {max} this reads",
+                path.display(),
+                read.whole
+            );
+        }
+        if read.text.starts_with(WORKBOOK_MAGIC) {
+            return match parse_workbook(&read.text) {
+                Ok((sheets, active)) => {
+                    self.replace_book(sheets, active);
+                    self.document_path = Some(path.to_path_buf());
+                    format!("Opened {}", path.display())
+                }
+                Err(why) => format!("{FILE_FAILED_PREFIX} open {}: {why}", path.display()),
+            };
+        }
+        // Anything else is taken as CSV: the values of one sheet. It is not a
+        // workbook, so it does not become the workbook's file -- Ctrl+S asks
+        // where to keep the workbook rather than writing one over the CSV.
+        let mut sheet = Sheet::new(&self.stem_of(path));
+        sheet.import_csv(&read.text);
+        recalculate_sheet(&mut sheet);
+        self.replace_book(vec![sheet], 0);
+        self.document_path = None;
+        format!("Opened {} as a new workbook", path.display())
+    }
+
+    /// The name a sheet made from `path` is given.
+    fn stem_of(&self, path: &std::path::Path) -> String {
+        path.file_stem().map_or_else(
+            || String::from("Sheet1"),
+            |n| n.to_string_lossy().into_owned(),
+        )
+    }
+
+    /// Put `sheets` in place of the workbook, `active` in front, with nothing
+    /// to undo and nothing unsaved.
+    fn replace_book(&mut self, sheets: Vec<Sheet>, active: usize) {
+        let mut sheets = sheets.into_iter();
+        let Some(first) = sheets.next() else {
+            return;
+        };
+        let mut book = SheetBook::new(first);
+        for sheet in sheets {
+            book.push(sheet);
+        }
+        book.set_active(active);
+        self.sheets = book;
+        self.undo_manager = UndoManager::new();
+        self.mode = InteractionMode::Normal;
+        self.mark_saved();
+    }
+
+    /// Ctrl+S: over the workbook's own file, or ask where when it has none.
+    pub fn save(&mut self) {
+        match self.document_path.clone() {
+            Some(path) => self.last_file_action = Some(self.write_workbook(&path)),
+            None => self.ask_where_to_save(PickerFor::Save),
+        }
+    }
+
+    /// Put the save picker up, for `purpose`, beside the workbook's own file
+    /// when it has one.
+    fn ask_where_to_save(&mut self, purpose: PickerFor) {
+        let start = self
+            .document_path
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map_or_else(FilePicker::default_start, std::path::Path::to_path_buf);
+        let name = self.file_stem() + ".spreadsheet";
+        self.picker_for = purpose;
+        self.picker.put_up(
+            guitk::dialog::FileDialog::save()
+                .with_initial_path(start)
+                .with_filename(name),
+            true,
+        );
+    }
+
+    /// The picker chose `path`: do what it was put up for.
+    fn picked(&mut self, path: &std::path::Path) {
+        let said = match self.picker_for {
+            PickerFor::Open => self.open_path(path),
+            PickerFor::Save => self.write_workbook(path),
+            PickerFor::Export => self.write_csv(path),
+            PickerFor::SaveThen(pending) => {
+                let said = self.write_workbook(path);
+                if !self.dirty() {
+                    self.go_on(pending);
+                }
+                said
+            }
+        };
+        self.last_file_action = Some(said);
+    }
+
+    /// Before something replaces or closes the workbook: ask about unsaved
+    /// changes, or with none go straight on.
+    pub fn unless_unsaved(&mut self, pending: Pending) {
+        if !self.dirty() {
+            self.go_on(pending);
+            return;
+        }
+        let prompt = match pending {
+            Pending::Open => "Save it before opening another?",
+            Pending::Close => "Save it before closing?",
+        };
+        let name = self.document_name();
+        self.question = Some(Question::new(
+            &unsaved::message_for(&[&name]),
+            prompt,
+            pending,
+        ));
+    }
+
+    /// Do what the unsaved-changes question held up.
+    fn go_on(&mut self, pending: Pending) {
+        match pending {
+            Pending::Open => self.open_file_dialog(false),
+            Pending::Close => self.quit = true,
+        }
+    }
+
+    /// Answer the question put before `pending`. Save goes on only if the
+    /// save worked: a workbook that could not be written is still the only
+    /// copy.
+    fn answer(&mut self, pending: Pending, choice: Choice) {
+        match choice {
+            Choice::Cancel => {}
+            Choice::Discard => self.go_on(pending),
+            Choice::Save => match self.document_path.clone() {
+                Some(path) => {
+                    self.last_file_action = Some(self.write_workbook(&path));
+                    if !self.dirty() {
+                        self.go_on(pending);
+                    }
+                }
+                None => self.ask_where_to_save(PickerFor::SaveThen(pending)),
+            },
+        }
+    }
+
+    /// The window has been asked to close: whether it may go now. If not,
+    /// the question is up.
+    fn request_close(&mut self) -> bool {
+        // What is being typed into a cell is part of the workbook.
+        if matches!(self.mode, InteractionMode::Editing { .. }) {
+            self.confirm_edit();
+        }
+        if !self.dirty() {
+            return true;
+        }
+        // The question replaces whatever is up: a picker would take the keys
+        // it needs, and be drawn over it.
+        self.picker.close();
+        self.show_help = false;
+        self.unless_unsaved(Pending::Close);
+        false
     }
 
     /// Write the active sheet to `path` as CSV.
@@ -3789,43 +4403,6 @@ impl SpreadsheetApp {
         match safeio::write_str_atomically(path, &csv) {
             Ok(()) => format!("Wrote {}", path.display()),
             Err(err) => format!("{FILE_FAILED_PREFIX} write {}: {err}", path.display()),
-        }
-    }
-
-    /// Read `path` into the active sheet as CSV.
-    ///
-    /// Reports the read, not the parse. `import_csv` takes any text and fills
-    /// cells from it; a file that is not really CSV produces cells rather than
-    /// an error, and saying "could not read" about a file that was read would
-    /// point the user at the wrong thing.
-    ///
-    /// Bounded, and it says so when it cuts. A sheet truncated mid-row is not
-    /// the file the user chose, and a silent cut would show them a smaller
-    /// spreadsheet with no sign that anything was missing.
-    pub fn read_csv(&mut self, path: &std::path::Path) -> String {
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(err) => return format!("{FILE_FAILED_PREFIX} read {}: {err}", path.display()),
-        };
-        let whole = text.len();
-        let truncated = whole > MAX_CSV_BYTES;
-        let body = if truncated {
-            let mut cut = MAX_CSV_BYTES;
-            while cut > 0 && !text.is_char_boundary(cut) {
-                cut = cut.saturating_sub(1);
-            }
-            text.get(..cut).unwrap_or("").to_string()
-        } else {
-            text
-        };
-        self.sheets.active_mut().import_csv(&body);
-        if truncated {
-            format!(
-                "INCOMPLETE: only the first {MAX_CSV_BYTES} bytes were read, of {whole} in {}",
-                path.display()
-            )
-        } else {
-            format!("Opened {}", path.display())
         }
     }
 
@@ -3878,11 +4455,17 @@ impl SpreadsheetApp {
                     return EventResult::Consumed;
                 }
                 Key::S => {
-                    self.open_file_dialog(true);
+                    self.save();
                     return EventResult::Consumed;
                 }
                 Key::O => {
-                    self.open_file_dialog(false);
+                    self.unless_unsaved(Pending::Open);
+                    return EventResult::Consumed;
+                }
+                // What Ctrl+S did before a workbook could be saved: the sheet
+                // in front, as values, in a file nothing reads back whole.
+                Key::E => {
+                    self.open_file_dialog(true);
                     return EventResult::Consumed;
                 }
                 Key::B => {
@@ -3989,6 +4572,12 @@ impl SpreadsheetApp {
             }
             Key::F2 => {
                 self.begin_editing();
+                EventResult::Consumed
+            }
+            // Save as. Excel's key for it; Ctrl+Shift+S is the status bar's
+            // here, and has been since before a workbook could be saved.
+            Key::F12 => {
+                self.ask_where_to_save(PickerFor::Save);
                 EventResult::Consumed
             }
             // The shortcut list. `F1` rather than `?`, which this program has
@@ -4611,6 +5200,18 @@ impl SpreadsheetApp {
 
     /// Process a top-level event.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The unsaved-changes question has every key and click while it is
+        // up. Each is a redraw: focus and hover move inside it.
+        if let Some(question) = self.question.as_mut()
+            && matches!(event, Event::Key(_) | Event::Mouse(_))
+        {
+            if let Some(choice) = question.handle(event) {
+                let pending = question.pending();
+                self.question = None;
+                self.answer(pending, choice);
+            }
+            return EventResult::Consumed;
+        }
         // The picker takes the event first while it is up, or a keystroke
         // meant for a filename lands in a cell behind it.
         match self
@@ -4618,12 +5219,7 @@ impl SpreadsheetApp {
             .handle(event, self.window_width, self.window_height)
         {
             Picked::Chose(path) => {
-                let saving = self.picker.is_saving();
-                self.last_file_action = Some(if saving {
-                    self.write_csv(&path)
-                } else {
-                    self.read_csv(&path)
-                });
+                self.picked(&path);
                 return EventResult::Consumed;
             }
             // Cancelled grouped with Handled: this caller keeps no dialog
@@ -6355,8 +6951,13 @@ impl App for SpreadsheetApp {
         // re-reads it at every batch boundary; it did not always, and a title
         // built like this one used to freeze at whatever it said when the
         // window opened. See `App::title`.
+        //
+        // The workbook's file comes first, marked `*` while it has changes
+        // not saved.
         format!(
-            "{}!{} - Spreadsheet",
+            "{}{}: {}!{} - Spreadsheet",
+            if self.dirty() { "*" } else { "" },
+            self.document_name(),
             self.active_sheet().name,
             self.selection().active.display()
         )
@@ -6386,11 +6987,21 @@ impl App for SpreadsheetApp {
         None
     }
 
+    /// Closing over unsaved changes asks first, and the window waits for the
+    /// answer: `KeepOpen` declines the close and draws the question.
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
+            return if self.request_close() {
+                Response::Exit
+            } else {
+                Response::KeepOpen
+            };
+        }
+        let result = self.handle_event(event);
+        if self.quit {
             return Response::Exit;
         }
-        match self.handle_event(event) {
+        match result {
             EventResult::Consumed => Response::Redraw,
             EventResult::Ignored => Response::Idle,
         }
@@ -6403,9 +7014,15 @@ impl App for SpreadsheetApp {
         // this file is derived from these two numbers, so a stale pair puts the
         // grid's idea of where a cell is at odds with where it was drawn.
         self.resize_to(width, height);
-        RenderTree {
+        let mut tree = RenderTree {
             commands: self.render_commands(),
+        };
+        // Over everything, the picker included: they are never up together.
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
         }
+        tree
     }
 }
 
@@ -6566,7 +7183,7 @@ mod tests {
         assert!(said.starts_with("Wrote"), "{said}");
 
         let mut reopened = SpreadsheetApp::new(1280.0, 800.0);
-        let said = reopened.read_csv(&path);
+        let said = reopened.open_path(&path);
         assert!(said.starts_with("Opened"), "{said}");
         assert_eq!(reopened.sheets.active().export_csv(), before);
 
@@ -6583,9 +7200,378 @@ mod tests {
         let missing = std::env::temp_dir().join("slateos-sheet-door-no-such-file.csv");
         std::fs::remove_file(&missing).ok();
 
-        let said = app.read_csv(&missing);
+        let said = app.open_path(&missing);
         assert!(said.starts_with(FILE_FAILED_PREFIX), "{said}");
-        assert!(said.contains("read"), "{said}");
+        assert!(said.contains("open"), "{said}");
+    }
+
+    // ------------------------------------------------------------------
+    // A workbook that can be saved and opened again
+    //
+    // Ctrl+S wrote the sheet in front as CSV -- its values, no formula, no
+    // format, no other sheet -- and Ctrl+O read one into the sheet in front.
+    // Nothing recorded unsaved changes, and the window closed over them.
+    // ------------------------------------------------------------------
+
+    /// A scratch directory of the test's own.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "slateos-spreadsheet-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// The picker chose `path`, as it does in a window: it takes itself down,
+    /// then the choice is acted on.
+    fn choose(app: &mut SpreadsheetApp, path: &std::path::Path) {
+        assert!(app.picker.is_open(), "nothing was asking for a file");
+        app.picker.close();
+        app.picked(path);
+    }
+
+    fn addr(name: &str) -> CellAddr {
+        CellAddr::parse(name).expect("a cell address")
+    }
+
+    /// Everything a workbook holds, in a fixed order.
+    fn describe(app: &SpreadsheetApp) -> String {
+        let mut out = vec![format!("active {}", app.sheets.active_index())];
+        for sheet in app.sheets.iter() {
+            out.push(format!(
+                "sheet {:?} frozen {} {}",
+                sheet.name, sheet.frozen_rows, sheet.frozen_cols
+            ));
+            for (col, w) in sheet.col_widths.iter().enumerate() {
+                if (w - DEFAULT_COL_WIDTH).abs() > f32::EPSILON {
+                    out.push(format!("  width {col} {w}"));
+                }
+            }
+            for (row, h) in sheet.row_heights.iter().enumerate() {
+                if (h - DEFAULT_ROW_HEIGHT).abs() > f32::EPSILON {
+                    out.push(format!("  height {row} {h}"));
+                }
+            }
+            for (a, cell) in &sheet.cells {
+                out.push(format!(
+                    "  {} {:?} {:?} {:?}",
+                    a.display(),
+                    cell.raw_input,
+                    cell.value,
+                    cell.format
+                ));
+            }
+        }
+        out.join("\n")
+    }
+
+    /// A workbook using everything a file has to keep: text a tab, a line
+    /// break and a backslash could break, a formula, every kind of format, a
+    /// changed width and height, frozen panes, and a second sheet in front.
+    fn rich() -> SpreadsheetApp {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.set_cell_input(addr("A1"), "Item\twith a tab");
+        app.set_cell_input(addr("B1"), "line one\nline two \\ and a backslash");
+        app.set_cell_input(addr("A2"), "3");
+        app.set_cell_input(addr("A3"), "4.5");
+        app.set_cell_input(addr("A4"), "=SUM(A2:A3)");
+        app.set_cell_input(addr("C7"), "TRUE");
+        let sheet = app.sheets.active_mut();
+        let mut cell = sheet.get_cell(addr("A1"));
+        cell.format.bold = true;
+        cell.format.italic = true;
+        cell.format.alignment = Alignment::Right;
+        cell.format.text_color = Some(Color::rgba(10, 20, 30, 40));
+        cell.format.bg_color = Some(Color::rgb(250, 240, 230));
+        cell.format.borders = CellBorders {
+            top: true,
+            bottom: false,
+            left: true,
+            right: false,
+        };
+        sheet.set_cell(addr("A1"), cell);
+        for (name, format) in [
+            ("A2", NumberFormat::Decimal(3)),
+            ("A3", NumberFormat::Percentage(1)),
+            ("A4", NumberFormat::Currency(2)),
+        ] {
+            let mut cell = sheet.get_cell(addr(name));
+            cell.format.number_format = format;
+            cell.format.alignment = Alignment::Center;
+            sheet.set_cell(addr(name), cell);
+        }
+        // A format on a cell with nothing typed in it is kept too.
+        let mut empty = sheet.get_cell(addr("D9"));
+        empty.format.bold = true;
+        sheet.set_cell(addr("D9"), empty);
+        sheet.col_widths[2] = 150.5;
+        sheet.row_heights[4] = 40.0;
+        sheet.frozen_rows = 1;
+        sheet.frozen_cols = 2;
+        let mut second = Sheet::new("Second: \"quoted\"\tsheet");
+        second.set_cell_input(addr("Z999"), "far corner");
+        app.sheets.push(second);
+        app.sheets.set_active(1);
+        app
+    }
+
+    /// **A workbook saved and opened again is the same workbook** -- every
+    /// sheet, every cell as it was typed, every format and size -- and its
+    /// formulas are worked out again.
+    #[test]
+    fn a_workbook_saved_and_opened_again_is_the_same_workbook() {
+        let dir = scratch("roundtrip");
+        let path = dir.join("book.spreadsheet");
+        let mut app = rich();
+        let said = app.write_workbook(&path);
+        assert!(said.starts_with("Saved"), "{said}");
+        assert!(!app.dirty());
+
+        let mut other = SpreadsheetApp::new(1280.0, 800.0);
+        let said = other.open_path(&path);
+        assert!(said.starts_with("Opened"), "{said}");
+        assert_eq!(describe(&other), describe(&app));
+        assert!(
+            matches!(
+                other.sheets.get(0).map(|s| s.get_cell(addr("A4")).value),
+                Some(CellValue::Number(n)) if (n - 7.5).abs() < 1e-9
+            ),
+            "the formula was not worked out again"
+        );
+        assert!(!other.dirty(), "a workbook just opened has nothing unsaved");
+        assert_eq!(other.document_path.as_deref(), Some(path.as_path()));
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// A workbook this cannot read whole is refused -- saying which line and
+    /// why -- and the workbook open stays as it was.
+    #[test]
+    fn a_workbook_that_cannot_be_read_whole_is_refused() {
+        let dir = scratch("refused");
+        let mut app = rich();
+        let before = describe(&app);
+        let cases: [(&str, &str, &str); 9] = [
+            ("later", "slateos-spreadsheet\t2\n", "later format"),
+            (
+                "unknown",
+                "slateos-spreadsheet\t1\nsheet\tS\nchart\tpie\n",
+                "line 3",
+            ),
+            (
+                "escape",
+                "slateos-spreadsheet\t1\nsheet\tS\ncell\tA1\tbad \\q\n",
+                "broken escape",
+            ),
+            (
+                "twice",
+                "slateos-spreadsheet\t1\nsheet\tS\ncell\tA1\tx\ncell\tA1\ty\n",
+                "written twice",
+            ),
+            (
+                "orphan",
+                "slateos-spreadsheet\t1\ncell\tA1\tx\n",
+                "before any sheet",
+            ),
+            (
+                "flag",
+                "slateos-spreadsheet\t1\nsheet\tS\ncell\tA1\tx\tblink\n",
+                "not a format",
+            ),
+            (
+                "address",
+                "slateos-spreadsheet\t1\nsheet\tS\ncell\tAA1\tx\n",
+                "not a cell",
+            ),
+            ("none", "slateos-spreadsheet\t1\n", "holds no sheets"),
+            (
+                "front",
+                "slateos-spreadsheet\t1\nsheet\tS\nactive\t2\n",
+                "sheet 2 is in front",
+            ),
+        ];
+        for (name, text, why) in cases {
+            let path = dir.join(format!("{name}.spreadsheet"));
+            std::fs::write(&path, text).expect("fixture");
+            let said = app.open_path(&path);
+            assert!(
+                said.starts_with(FILE_FAILED_PREFIX) && said.contains(why),
+                "{name}: {said}"
+            );
+            assert_eq!(describe(&app), before, "{name} changed the workbook");
+        }
+        // Larger than the most this reads: refused whole.
+        let big = dir.join("big.spreadsheet");
+        rich().write_workbook(&big);
+        let said = app.open_path_within(&big, 64);
+        assert!(said.contains("larger than the 64"), "{said}");
+        assert_eq!(describe(&app), before);
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// A CSV opens as a workbook of one sheet named after it -- and is not
+    /// taken as the workbook's file, so saving asks where rather than writing
+    /// a workbook over the CSV.
+    #[test]
+    fn a_csv_opens_as_a_new_workbook_of_its_own() {
+        let dir = scratch("csv");
+        let csv = dir.join("prices.csv");
+        std::fs::write(&csv, "item,cost\nbread,2.5\n").expect("fixture");
+        let mut app = rich();
+        app.write_workbook(&dir.join("kept.spreadsheet"));
+        let said = app.open_path(&csv);
+        assert!(said.starts_with("Opened"), "{said}");
+        assert_eq!(app.sheets.len(), 1);
+        assert_eq!(app.active_sheet().name, "prices");
+        assert_eq!(app.active_sheet().get_cell(addr("B2")).raw_input, "2.5");
+        assert_eq!(app.document_path, None);
+        assert!(!app.dirty());
+        app.set_cell_input(addr("C1"), "more");
+        app.handle_event(&ctrl(Key::S));
+        assert_eq!(app.picker_for, PickerFor::Save, "it saved over the CSV");
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// Ctrl+S asks where the first time and saves in place after; F12 always
+    /// asks; Ctrl+E exports the sheet as CSV, which is not a save.
+    #[test]
+    fn ctrl_s_saves_f12_saves_as_and_ctrl_e_exports() {
+        let dir = scratch("keys");
+        let path = dir.join("mine.spreadsheet");
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.set_cell_input(addr("A1"), "1");
+        assert!(
+            app.dirty() && app.title().starts_with('*'),
+            "{}",
+            app.title()
+        );
+        app.handle_event(&ctrl(Key::S));
+        assert_eq!(app.picker_for, PickerFor::Save);
+        choose(&mut app, &path);
+        assert!(!app.dirty());
+
+        app.set_cell_input(addr("A2"), "2");
+        app.handle_event(&ctrl(Key::S));
+        assert!(!app.picker.is_open(), "a workbook with a file asked again");
+        let mut other = SpreadsheetApp::new(1280.0, 800.0);
+        other.open_path(&path);
+        assert_eq!(other.active_sheet().get_cell(addr("A2")).raw_input, "2");
+
+        app.handle_event(&key_event(Key::F12));
+        assert!(app.picker.is_open() && app.picker_for == PickerFor::Save);
+        app.picker.close();
+
+        app.set_cell_input(addr("A3"), "3");
+        app.handle_event(&ctrl(Key::E));
+        assert_eq!(app.picker_for, PickerFor::Export);
+        let csv = dir.join("out.csv");
+        choose(&mut app, &csv);
+        assert!(
+            std::fs::read_to_string(&csv)
+                .expect("exported")
+                .contains('3')
+        );
+        assert!(app.dirty(), "an export cleared the unsaved mark");
+        assert_eq!(app.document_path.as_deref(), Some(path.as_path()));
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// **Closing or opening over unsaved changes asks**, and each answer is
+    /// kept.
+    #[test]
+    fn closing_or_opening_over_unsaved_changes_asks() {
+        let dir = scratch("close");
+        let path = dir.join("kept.spreadsheet");
+        let mut clean = SpreadsheetApp::new(1280.0, 800.0);
+        assert_eq!(clean.on_event(&Event::CloseRequested), Response::Exit);
+
+        let mut app = rich();
+        app.write_workbook(&path);
+        let on_disk = std::fs::read(&path).expect("saved");
+        app.set_cell_input(addr("E5"), "new");
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        let text: String = app
+            .render(1280.0, 800.0)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            text.contains("kept.spreadsheet has changes that are not saved."),
+            "{text}"
+        );
+
+        // A letter goes to the question, not into a cell.
+        app.on_event(&Event::Key(KeyEvent {
+            key: Key::X,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::from("x"),
+        }));
+        assert_eq!(
+            app.mode,
+            InteractionMode::Normal,
+            "a key began an edit under the question"
+        );
+
+        assert_eq!(app.on_event(&key_event(Key::Escape)), Response::Redraw);
+        assert_eq!(std::fs::read(&path).expect("unchanged"), on_disk);
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert_eq!(app.on_event(&key_event(Key::S)), Response::Exit);
+        assert_ne!(std::fs::read(&path).expect("saved again"), on_disk);
+
+        let mut app = rich();
+        app.handle_event(&ctrl(Key::O));
+        assert!(!app.picker.is_open(), "Ctrl+O opened over unsaved changes");
+        app.handle_event(&key_event(Key::D));
+        assert!(app.picker.is_open() && app.picker_for == PickerFor::Open);
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// Frozen panes are kept in the workbook, so freezing them is a change.
+    #[test]
+    fn freezing_panes_is_a_change() {
+        let dir = scratch("freeze");
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.write_workbook(&dir.join("f.spreadsheet"));
+        app.handle_event(&key_event(Key::Down));
+        app.handle_event(&key_event(Key::Right));
+        app.toggle_freeze_panes();
+        assert_eq!(app.active_sheet().frozen_rows, 1, "control: it froze");
+        assert!(app.dirty(), "freezing panes did not count as a change");
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// What is being typed into a cell when the window closes is part of the
+    /// workbook: it is asked about, not dropped.
+    #[test]
+    fn a_value_being_typed_when_the_window_closes_is_asked_about() {
+        let dir = scratch("typing");
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.write_workbook(&dir.join("t.spreadsheet"));
+        for c in ['4', '2'] {
+            app.handle_event(&Event::Key(KeyEvent {
+                key: Key::Unknown(0),
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: c.to_string(),
+            }));
+        }
+        assert!(
+            matches!(app.mode, InteractionMode::Editing { .. }),
+            "control: typing began an edit"
+        );
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert_eq!(app.active_sheet().get_cell(addr("A1")).raw_input, "42");
+        drop(std::fs::remove_dir_all(&dir));
     }
 
     // ------------------------------------------------------------------
@@ -6642,13 +7628,13 @@ mod tests {
     fn the_title_names_the_selected_cell() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.seed_sample_content();
-        assert_eq!(app.title(), "Sheet1!A1 - Spreadsheet");
+        assert_eq!(app.title(), "Untitled: Sheet1!A1 - Spreadsheet");
 
         app.handle_event(&key_event(Key::Down));
         app.handle_event(&key_event(Key::Right));
         assert_eq!(
             app.title(),
-            "Sheet1!B2 - Spreadsheet",
+            "Untitled: Sheet1!B2 - Spreadsheet",
             "the title should follow the selection"
         );
     }

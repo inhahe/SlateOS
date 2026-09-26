@@ -1900,11 +1900,11 @@ word; text inside them that says "lane C" is history.
   picture unasked; a failed save was drawn nowhere), `diagram` and
   `whiteboard` (each a file of its own at last, `.diagram` and
   `.whiteboard`, read back whole; the whiteboard's undo could not undo a
-  deletion and acted on whichever page was showing).
-  **To do:** `spreadsheet` — it reads and writes the sheet in front as CSV
-  and cannot keep a workbook; it wants that format first, then the record of
-  changes and the question. And `notes`,
-  `contacts`, `snippets`, `kanban`, which are worse: they keep nothing at all
+  deletion and acted on whichever page was showing), `spreadsheet` (a
+  workbook of its own, `.spreadsheet`, where it could write only the sheet in
+  front as CSV; design-decisions §1204).
+  **To do:** `notes`,
+  `contacts`, `snippets`, `kanban`, which keep nothing at all
   between runs (`known-issues.md` → `[E] Notes, contacts, snippets and
   kanban keep nothing`) and want a store kept as it changes, not a question. **One
   question, not thirteen:** `apps/unsaved` asks the toolkit's own

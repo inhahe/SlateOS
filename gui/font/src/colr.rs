@@ -150,7 +150,7 @@ pub fn render(
         t: &tables,
         face,
         coords,
-        palette: tables.cpal.map(palette_zero).unwrap_or_default(),
+        palette: tables.cpal.and_then(Palette::zero).unwrap_or_default(),
         foreground: premultiply(unpack(foreground)),
         used_foreground: false,
         visited: 0,
@@ -540,12 +540,12 @@ impl<'a> Tables<'a> {
             6 | 7 => Node::Gradient {
                 line: child(1)?,
                 variable: format == 7,
-                gradient: Gradient::Radial {
-                    c0: point(4, 0)?,
-                    r0: uword(8, 2)?.max(0.0),
-                    c1: point(10, 3)?,
-                    r1: uword(14, 5)?.max(0.0),
-                },
+                gradient: Gradient::radial(
+                    point(4, 0)?,
+                    uword(8, 2)?.max(0.0),
+                    point(10, 3)?,
+                    uword(14, 5)?.max(0.0),
+                ),
             },
             8 | 9 => Node::Gradient {
                 line: child(1)?,
@@ -663,28 +663,45 @@ enum Node {
     },
 }
 
-/// `CPAL`'s first palette, straight RGBA from 0 to 1, as far as it can be
-/// read.
-fn palette_zero(cpal: &[u8]) -> Vec<[f32; 4]> {
-    let header = || -> Option<(usize, usize, usize)> {
+/// `CPAL`'s first palette, read an entry at a time as the glyph asks for it.
+///
+/// Not converted up front: Segoe UI Emoji's palette has 65,429 entries and a
+/// glyph uses a few dozen, so building the whole palette for every glyph drawn
+/// cost more than painting most of them.
+#[derive(Clone, Copy, Default)]
+struct Palette<'a> {
+    cpal: &'a [u8],
+    /// Where palette 0's first colour record is.
+    records: usize,
+    /// How many entries a palette has.
+    entries: usize,
+}
+
+impl<'a> Palette<'a> {
+    fn zero(cpal: &'a [u8]) -> Option<Self> {
         let entries = usize::from(u16_at(cpal, 2)?);
         if u16_at(cpal, 4)? == 0 {
             return None;
         }
         let first = usize::from(u16_at(cpal, 12)?);
-        Some((entries, u32_at(cpal, 8)?, first))
-    };
-    let Some((entries, records, first)) = header() else {
-        return Vec::new();
-    };
-    (0..entries)
-        .map_while(|i| {
-            let at = records.checked_add(first.checked_add(i)?.checked_mul(4)?)?;
-            // Stored blue, green, red, alpha.
-            let [b, g, r, a]: [u8; 4] = cpal.get(at..at.checked_add(4)?)?.try_into().ok()?;
-            Some([r, g, b, a].map(|c| f32::from(c) / 255.0))
+        let records = u32_at(cpal, 8)?.checked_add(first.checked_mul(4)?)?;
+        Some(Self {
+            cpal,
+            records,
+            entries,
         })
-        .collect()
+    }
+
+    /// Entry `index`, straight RGBA from 0 to 1; `None` past the palette.
+    fn get(&self, index: usize) -> Option<[f32; 4]> {
+        if index >= self.entries {
+            return None;
+        }
+        let at = self.records.checked_add(index.checked_mul(4)?)?;
+        // Stored blue, green, red, alpha.
+        let [b, g, r, a]: [u8; 4] = self.cpal.get(at..at.checked_add(4)?)?.try_into().ok()?;
+        Some([r, g, b, a].map(|c| f32::from(c) / 255.0))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -998,7 +1015,18 @@ impl Canvas {
 /// What a leaf of the graph paints.
 enum Fill {
     Solid(Rgba),
-    /// A gradient, `inv` taking canvas pixels back to its own space.
+    /// A linear gradient, its parameter a plane over the canvas: `t = a x +
+    /// b y + c` at canvas point `(x, y)` -- the paint's transform and the
+    /// gradient's projection folded into three numbers, so a pixel costs two
+    /// multiply-adds rather than a transform and a division.
+    Linear {
+        line: ColourLine,
+        a: f32,
+        b: f32,
+        c: f32,
+    },
+    /// A radial or sweep gradient, `inv` taking canvas pixels back to its own
+    /// space.
     Gradient {
         line: ColourLine,
         gradient: Gradient,
@@ -1012,10 +1040,56 @@ impl Fill {
         matches!(self, Self::Solid(c) if c[3] <= 0.0)
     }
 
+    /// Blend this fill over `dst`, the canvas row `y` from column `x0`, each
+    /// pixel at its coverage in `cover`.
+    ///
+    /// A row at a time because a fill's position in its own space moves by a
+    /// constant from one pixel to the next: a linear gradient's parameter by
+    /// `a`, a radial or sweep gradient's point by the inverse transform's
+    /// first column. Stepping costs two additions where transforming each
+    /// pixel cost four multiply-adds.
+    fn blend_row(&self, x0: usize, y: usize, cover: &[f32], dst: &mut [Rgba]) {
+        match self {
+            Self::Solid(colour) => {
+                for (d, &k) in dst.iter_mut().zip(cover) {
+                    if k > 0.0 {
+                        *d = over(scale_rgba(*colour, k), *d);
+                    }
+                }
+            }
+            Self::Linear { line, a, b, c } => {
+                let p = centre(x0, y);
+                let mut t = mad(*a, p.x, mad(*b, p.y, *c));
+                for (d, &k) in dst.iter_mut().zip(cover) {
+                    if k > 0.0 {
+                        *d = over(scale_rgba(line.at(t), k), *d);
+                    }
+                    t += *a;
+                }
+            }
+            Self::Gradient {
+                line,
+                gradient,
+                inv,
+            } => {
+                let mut p = inv.apply(centre(x0, y));
+                for (d, &k) in dst.iter_mut().zip(cover) {
+                    if k > 0.0 {
+                        let colour = gradient.t(p).map_or(CLEAR, |t| line.at(t));
+                        *d = over(scale_rgba(colour, k), *d);
+                    }
+                    p.x += inv.xx;
+                    p.y += inv.yx;
+                }
+            }
+        }
+    }
+
     /// The colour at canvas point `p`.
     fn at(&self, p: Point) -> Rgba {
         match self {
             Self::Solid(c) => *c,
+            Self::Linear { line, a, b, c } => line.at(mad(*a, p.x, mad(*b, p.y, *c))),
             Self::Gradient {
                 line,
                 gradient,
@@ -1025,58 +1099,166 @@ impl Fill {
     }
 }
 
+/// How finely a colour line is tabulated: this many steps across its stops'
+/// span -- the size of the gradient caches Skia long used. A black-to-white
+/// line changes by one 8-bit level a step, so taking the nearest step instead
+/// of interpolating shows nothing 8-bit colour would not; a hard edge, two
+/// stops at one offset, lands within a 256th of the span.
+///
+/// Small because the table is built for every gradient fill, and a colour
+/// emoji is hundreds of small fills: at 1024 steps the tables cost as much
+/// as the pixels they sped up.
+const LINE_STEPS: usize = 256;
+
 /// A colour line: how a gradient's parameter becomes a colour.
+///
+/// Tabulated when it is built: [`at`](Self::at) is called once a pixel, and
+/// a binary search over the stops and an interpolation there were a large
+/// part of a gradient's cost. The stops are kept only to build the table
+/// ([`Stops`]).
 struct ColourLine {
     extend: u8,
-    /// `(offset, premultiplied colour)`, sorted by offset.
-    stops: Vec<(f32, Rgba)>,
+    /// The first stop's offset.
+    first: f32,
+    /// Steps per unit of the parameter: `LINE_STEPS / (last - first)`, or 0
+    /// when every stop sits at one offset.
+    scale: f32,
+    /// `LINE_STEPS + 1` colours, evenly spaced from the first stop's offset to
+    /// the last's; or, for a line whose stops share one offset, the colours
+    /// before and after it.
+    table: Vec<Rgba>,
 }
 
 impl ColourLine {
+    /// The line through `stops`, sorted, premultiplied, with `extend` for the
+    /// parameters outside them.
+    fn new(extend: u8, stops: &Stops) -> Self {
+        let (Some(&(first, first_c)), Some(&(last, last_c))) = (stops.0.first(), stops.0.last())
+        else {
+            return Self {
+                extend,
+                first: 0.0,
+                scale: 0.0,
+                table: Vec::new(),
+            };
+        };
+        let span = last - first;
+        let tabulable = span > f32::EPSILON && span.is_finite();
+        if !tabulable {
+            return Self {
+                extend,
+                first,
+                scale: 0.0,
+                table: alloc::vec![first_c, last_c],
+            };
+        }
+        #[allow(clippy::cast_precision_loss, reason = "a small power of two, exact")]
+        let steps = LINE_STEPS as f32;
+        Self {
+            extend,
+            first,
+            scale: steps / span,
+            table: stops.sample(first, span / steps),
+        }
+    }
+
     /// The colour at gradient parameter `t`.
     fn at(&self, t: f32) -> Rgba {
-        let (Some(&(first, first_c)), Some(&(last, last_c))) =
-            (self.stops.first(), self.stops.last())
-        else {
-            return CLEAR;
-        };
         if !t.is_finite() {
             return CLEAR;
         }
-        let span = last - first;
-        let t = if span > f32::EPSILON {
-            match self.extend {
-                // REPEAT: the stops' span, again and again.
-                1 => first + (t - first).rem_euclid(span),
-                // REFLECT: forward, then back.
-                2 => {
-                    let u = (t - first).rem_euclid(2.0 * span);
-                    first + if u > span { 2.0 * span - u } else { u }
-                }
-                // PAD, and any value the specification does not define.
-                _ => t,
+        if self.scale <= 0.0 {
+            // Every stop at one offset: before it, the first colour; from it
+            // on, the last.
+            let i = usize::from(t >= self.first);
+            return self.table.get(i).copied().unwrap_or(CLEAR);
+        }
+        // How many steps along the stops' span, and wrapped for REPEAT and
+        // REFLECT -- with truncation rather than `rem_euclid`, which on this
+        // target is the C library's `fmodf`.
+        #[allow(clippy::cast_precision_loss, reason = "a small power of two, exact")]
+        let steps = LINE_STEPS as f32;
+        let u = (t - self.first) * self.scale;
+        let u = match self.extend {
+            1 => wrap(u, steps),
+            2 => {
+                let w = wrap(u, 2.0 * steps);
+                if w > steps { 2.0 * steps - w } else { w }
             }
-        } else {
-            t
+            _ => u,
         };
-        if t <= first {
-            return first_c;
-        }
-        if t >= last {
-            return last_c;
-        }
-        let i = self.stops.partition_point(|&(o, _)| o <= t);
-        let (Some(&(o0, c0)), Some(&(o1, c1))) =
-            (self.stops.get(i.saturating_sub(1)), self.stops.get(i))
-        else {
-            return last_c;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to the table first"
+        )]
+        let i = (u.clamp(0.0, steps) + 0.5) as usize;
+        self.table.get(i.min(LINE_STEPS)).copied().unwrap_or(CLEAR)
+    }
+}
+
+/// `u` wrapped into `0..period`, without `f32::rem_euclid` (a C-library call
+/// on this target): truncation finds the whole periods.
+fn wrap(u: f32, period: f32) -> f32 {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "a saturated quotient only means a wrong phase for a parameter \
+                  billions of periods out"
+    )]
+    let whole = (u / period) as i64 as f32;
+    let r = u - whole * period;
+    if r < 0.0 { r + period } else { r }
+}
+
+/// A colour line's stops, sorted by offset, premultiplied: what a
+/// [`ColourLine`] tabulates.
+struct Stops(Vec<(f32, Rgba)>);
+
+impl Stops {
+    /// The colours at `LINE_STEPS + 1` parameters, `first` and each `step`
+    /// after it: the first stop's colour before it, the last's after, and
+    /// between two stops the blend of the two -- in one walk over the stops
+    /// rather than a search per step.
+    fn sample(&self, first: f32, step: f32) -> Vec<Rgba> {
+        let mut table = Vec::with_capacity(LINE_STEPS.saturating_add(1));
+        let (Some(&(lo, lo_c)), Some(&(hi, hi_c))) = (self.0.first(), self.0.last()) else {
+            return table;
         };
-        let f = if o1 > o0 { (t - o0) / (o1 - o0) } else { 1.0 };
-        let mut out = CLEAR;
-        for ((o, a), b) in out.iter_mut().zip(c0).zip(c1) {
-            *o = mad(b - a, f, a);
+        // `seg` is the last stop at or before `t`, as `at`'s search finds it.
+        let mut seg = 0usize;
+        for k in 0..=LINE_STEPS {
+            #[allow(clippy::cast_precision_loss, reason = "at most LINE_STEPS, exact")]
+            let t = mad(step, k as f32, first);
+            if t <= lo {
+                table.push(lo_c);
+                continue;
+            }
+            if t >= hi {
+                table.push(hi_c);
+                continue;
+            }
+            while self
+                .0
+                .get(seg.saturating_add(1))
+                .is_some_and(|&(o, _)| o <= t)
+            {
+                seg = seg.saturating_add(1);
+            }
+            let (Some(&(o0, c0)), Some(&(o1, c1))) =
+                (self.0.get(seg), self.0.get(seg.saturating_add(1)))
+            else {
+                table.push(hi_c);
+                continue;
+            };
+            let f = if o1 > o0 { (t - o0) / (o1 - o0) } else { 1.0 };
+            let mut out = CLEAR;
+            for ((o, a), b) in out.iter_mut().zip(c0).zip(c1) {
+                *o = mad(b - a, f, a);
+            }
+            table.push(out);
         }
-        out
+        table
     }
 }
 
@@ -1087,12 +1269,18 @@ enum Gradient {
     /// `p3` (1): `p1` moved onto the perpendicular of `p0`-`p2` through `p0`.
     Linear { p0: Point, p3: Point },
     /// The two-point conical gradient: circle `(c0, r0)` grows into
-    /// `(c1, r1)`, and on past them as the extend mode says.
+    /// `(c1, r1)`, and on past them as the extend mode says. Built by
+    /// [`Gradient::radial`], which works out once what every pixel's equation
+    /// shares: `c1 - c0`, `r1 - r0`, the leading coefficient `a` and its
+    /// reciprocal (0 when `a` is).
     Radial {
         c0: Point,
         r0: f32,
-        c1: Point,
-        r1: f32,
+        cdx: f32,
+        cdy: f32,
+        dr: f32,
+        a: f32,
+        inv_a: f32,
     },
     /// Around `c`, counter-clockwise, from angle `start` to angle `end`
     /// (radians).
@@ -1100,6 +1288,26 @@ enum Gradient {
 }
 
 impl Gradient {
+    /// The two-point conical gradient from circle `(c0, r0)` to `(c1, r1)`.
+    fn radial(c0: Point, r0: f32, c1: Point, r1: f32) -> Self {
+        let (cdx, cdy, dr) = (c1.x - c0.x, c1.y - c0.y, r1 - r0);
+        let a = mad(cdx, cdx, mad(cdy, cdy, -(dr * dr)));
+        let inv_a = if a.abs() > f32::EPSILON {
+            a.recip()
+        } else {
+            0.0
+        };
+        Self::Radial {
+            c0,
+            r0,
+            cdx,
+            cdy,
+            dr,
+            a,
+            inv_a,
+        }
+    }
+
     fn linear(p0: Point, p1: Point, p2: Point) -> Self {
         let (nx, ny) = (p0.y - p2.y, p2.x - p0.x);
         let len2 = mad(nx, nx, ny * ny);
@@ -1123,12 +1331,18 @@ impl Gradient {
                 let len2 = mad(vx, vx, vy * vy);
                 (len2 > f32::EPSILON).then(|| mad(p.x - p0.x, vx, (p.y - p0.y) * vy) / len2)
             }
-            Self::Radial { c0, r0, c1, r1 } => {
+            Self::Radial {
+                c0,
+                r0,
+                cdx,
+                cdy,
+                dr,
+                a,
+                inv_a,
+            } => {
                 // The largest t whose circle, c0 + t (c1 - c0) with radius
                 // r0 + t (r1 - r0) >= 0, passes through p.
-                let (cdx, cdy, dr) = (c1.x - c0.x, c1.y - c0.y, r1 - r0);
                 let (px, py) = (p.x - c0.x, p.y - c0.y);
-                let a = mad(cdx, cdx, mad(cdy, cdy, -(dr * dr)));
                 let b = mad(px, cdx, mad(py, cdy, r0 * dr));
                 let c = mad(px, px, mad(py, py, -(r0 * r0)));
                 let reaches = |t: f32| mad(dr, t, r0) >= 0.0;
@@ -1144,7 +1358,7 @@ impl Gradient {
                     return None;
                 }
                 let root = disc.sqrt();
-                let (t1, t2) = ((b + root) / a, (b - root) / a);
+                let (t1, t2) = ((b + root) * inv_a, (b - root) * inv_a);
                 let (hi, lo) = if t1 >= t2 { (t1, t2) } else { (t2, t1) };
                 if reaches(hi) {
                     Some(hi)
@@ -1325,8 +1539,8 @@ struct Renderer<'a> {
     t: &'a Tables<'a>,
     face: &'a Face,
     coords: &'a Coords,
-    /// Palette 0, straight RGBA.
-    palette: Vec<[f32; 4]>,
+    /// Palette 0.
+    palette: Palette<'a>,
     /// The text colour, premultiplied.
     foreground: Rgba,
     used_foreground: bool,
@@ -1394,11 +1608,7 @@ impl Renderer<'_> {
             self.used_foreground = true;
             return scale_rgba(self.foreground, alpha);
         }
-        let [r, g, b, a] = self
-            .palette
-            .get(usize::from(index))
-            .copied()
-            .unwrap_or([0.0; 4]);
+        let [r, g, b, a] = self.palette.get(usize::from(index)).unwrap_or([0.0; 4]);
         premultiply([r, g, b, a * alpha])
     }
 
@@ -1424,7 +1634,7 @@ impl Renderer<'_> {
         // Stable, so that two stops at one offset keep their order: a hard
         // edge from the first colour to the second.
         stops.sort_by(|a, b| a.0.total_cmp(&b.0));
-        Some(ColourLine { extend, stops })
+        Some(ColourLine::new(extend, &Stops(stops)))
     }
 
     /// A solid or gradient node as a fill landing on the canvas under `m`.
@@ -1436,10 +1646,30 @@ impl Renderer<'_> {
                 variable,
                 gradient,
             } => match (m.invert(), self.colour_line(line, variable)) {
-                (Some(inv), Some(line)) => Fill::Gradient {
-                    line,
-                    gradient,
-                    inv,
+                (Some(inv), Some(line)) => match gradient {
+                    Gradient::Linear { p0, p3 } => {
+                        // t = ((p - p0) . v) / |v|^2 at p = inv(x, y), which is
+                        // affine in (x, y): its three coefficients.
+                        let (vx, vy) = (p3.x - p0.x, p3.y - p0.y);
+                        let len2 = mad(vx, vx, vy * vy);
+                        // False for a NaN as well as for no length.
+                        let has_length = len2 > f32::EPSILON;
+                        if !has_length {
+                            return Fill::Solid(CLEAR);
+                        }
+                        let (vx, vy) = (vx / len2, vy / len2);
+                        Fill::Linear {
+                            line,
+                            a: mad(vx, inv.xx, vy * inv.yx),
+                            b: mad(vx, inv.xy, vy * inv.yy),
+                            c: mad(vx, inv.dx - p0.x, vy * (inv.dy - p0.y)),
+                        }
+                    }
+                    _ => Fill::Gradient {
+                        line,
+                        gradient,
+                        inv,
+                    },
                 },
                 _ => Fill::Solid(CLEAR),
             },
@@ -1516,13 +1746,8 @@ impl Renderer<'_> {
         };
         let rows = cover.chunks_exact(region.width());
         for (y, cover) in (region.y0..region.y1).zip(rows) {
-            let Some(span) = canvas.span_mut(y, region.x0, region.x1) else {
-                continue;
-            };
-            for ((x, dst), &k) in (region.x0..).zip(span).zip(cover) {
-                if k > 0.0 {
-                    *dst = over(scale_rgba(fill.at(centre(x, y)), k), *dst);
-                }
+            if let Some(span) = canvas.span_mut(y, region.x0, region.x1) {
+                fill.blend_row(region.x0, y, cover, span);
             }
         }
     }
@@ -2281,9 +2506,14 @@ pub(crate) mod tests {
 
     #[test]
     fn a_colour_line_pads_repeats_and_reflects() {
-        let line = |extend: u8| ColourLine {
-            extend,
-            stops: vec![(0.0, [1.0, 0.0, 0.0, 1.0]), (1.0, [0.0, 0.0, 1.0, 1.0])],
+        let line = |extend: u8| {
+            ColourLine::new(
+                extend,
+                &Stops(vec![
+                    (0.0, [1.0, 0.0, 0.0, 1.0]),
+                    (1.0, [0.0, 0.0, 1.0, 1.0]),
+                ]),
+            )
         };
         let red = |c: Rgba| (c[0] * 100.0).round();
         assert_eq!(red(line(0).at(1.25)), 0.0);
@@ -2294,22 +2524,19 @@ pub(crate) mod tests {
         assert_eq!(red(line(2).at(-0.25)), 75.0);
         assert_eq!(red(line(0).at(0.5)), 50.0);
         // Two stops at one offset are a hard edge.
-        let edge = ColourLine {
-            extend: 0,
-            stops: vec![
+        let edge = ColourLine::new(
+            0,
+            &Stops(vec![
                 (0.0, [1.0, 0.0, 0.0, 1.0]),
                 (0.5, [1.0, 0.0, 0.0, 1.0]),
                 (0.5, [0.0, 0.0, 1.0, 1.0]),
                 (1.0, [0.0, 0.0, 1.0, 1.0]),
-            ],
-        };
+            ]),
+        );
         assert_eq!(edge.at(0.49)[0], 1.0);
         assert_eq!(edge.at(0.51)[2], 1.0);
         // Interpolated premultiplied: a fade to transparent does not darken.
-        let fade = ColourLine {
-            extend: 0,
-            stops: vec![(0.0, [1.0, 1.0, 1.0, 1.0]), (1.0, CLEAR)],
-        };
+        let fade = ColourLine::new(0, &Stops(vec![(0.0, [1.0, 1.0, 1.0, 1.0]), (1.0, CLEAR)]));
         let c = fade.at(0.5);
         assert_eq!(c[0], c[3]);
     }

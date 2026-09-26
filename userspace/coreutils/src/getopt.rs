@@ -86,6 +86,38 @@
 //! in a loop and the caller acts on each answer before asking for the next, so
 //! ordering falls out; a parser that validated the whole of argv before handing
 //! anything back would turn the first of those into an error.
+//!
+//! # Where option parsing stops
+//!
+//! glibc chooses one of three orderings from the option string's first byte,
+//! and [`Program::parse`] reads that byte the same way:
+//!
+//! | First byte | glibc's name | An option-shaped word after an operand |
+//! |---|---|---|
+//! | none | `PERMUTE` | is an option -- unless `POSIXLY_CORRECT` is set, when the first operand ends option parsing |
+//! | `+` | `REQUIRE_ORDER` | is an operand, always |
+//! | `-` | `RETURN_IN_ORDER` | is an option, always: `POSIXLY_CORRECT` is never consulted |
+//!
+//! The first row is the one that bites, because it is almost every GNU utility
+//! and the *environment* decides it. Measured: `POSIXLY_CORRECT=1 cat f -n`
+//! prints `f` unnumbered and then fails to open a file called `-n`, and `grep`,
+//! `sed`, `diff`, `cmp`, `strings`, `bc` and util-linux's `cal` and `more` all
+//! do the same. `join`, `pr`, `sort` and `uniq` are the `-` row -- `sort` and
+//! `uniq` then re-implement the rule by hand -- and GNU `tar` joins them through
+//! argp's `ARGP_IN_ORDER`. The variable is tested for presence, not value, so
+//! `POSIXLY_CORRECT=` counts.
+//!
+//! "Permute" is glibc's name for moving operands behind the options it returns.
+//! This parser instead yields every item where it was typed, which no caller can
+//! tell apart, since each one collects options and operands into separate
+//! places. So no prefix and `-` walk identically here until `POSIXLY_CORRECT`
+//! enters.
+//!
+//! A utility that walks argv by hand -- the `-NUM` and `+POS` families, whose
+//! obsolete words getopt cannot be told about -- asks [`posixly_correct`] and
+//! applies the same rule itself. One whose upstream is not built on glibc's
+//! getopt at all opts out with [`Parser::posixly_correct`]: GNU `ed` parses
+//! with `carg_parser`, which permutes and has never heard of the variable.
 
 use std::ffi::OsString;
 
@@ -93,6 +125,29 @@ use std::ffi::OsString;
 // style (curly under UTF-8) and belongs only to `bad_argument`; `quote_glibc`
 // is glibc's straight-marked one and belongs to every other diagnostic here.
 use crate::quote::{os_bytes, os_from_bytes, quote, quote_glibc};
+
+/// Whether `POSIXLY_CORRECT` is in the environment: presence, not value, as
+/// glibc's getopt tests it, so `POSIXLY_CORRECT=` (set to nothing) counts.
+///
+/// [`Program::parse`] asks this itself. It is public for the utilities that walk
+/// argv by hand and must stop where getopt would stop; see "Where option parsing
+/// stops" in the module docs.
+#[must_use]
+pub fn posixly_correct() -> bool {
+    std::env::var_os("POSIXLY_CORRECT").is_some()
+}
+
+/// glibc's three orderings, chosen by the option string's first byte exactly
+/// as `_getopt_initialize` chooses. See "Where option parsing stops".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Ordering {
+    /// No prefix. Options may follow operands, unless `POSIXLY_CORRECT` is set.
+    Permute,
+    /// `+`: the first operand ends option parsing.
+    RequireOrder,
+    /// `-`: options may follow operands, whatever the environment says.
+    ReturnInOrder,
+}
 
 /// What a long option does with a value, matching `getopt_long`'s three cases.
 ///
@@ -647,9 +702,12 @@ impl Program {
         longs: &'a [(&'a str, Takes)],
         aliases: &'a [(&'a str, &'a str)],
     ) -> Parser<'a> {
-        let (stop_at_operand, shorts) = match shorts.strip_prefix('+') {
-            Some(rest) => (true, rest),
-            None => (false, shorts),
+        let (ordering, shorts) = if let Some(rest) = shorts.strip_prefix('+') {
+            (Ordering::RequireOrder, rest)
+        } else if let Some(rest) = shorts.strip_prefix('-') {
+            (Ordering::ReturnInOrder, rest)
+        } else {
+            (Ordering::Permute, shorts)
         };
         Parser {
             program: self,
@@ -661,7 +719,8 @@ impl Program {
             word: 0,
             cluster: Vec::new(),
             only_operands: false,
-            stop_at_operand,
+            ordering,
+            posixly_correct: posixly_correct(),
             done: false,
         }
     }
@@ -705,7 +764,12 @@ pub struct Parser<'a> {
     /// so the remainder outlives the `next` call that started it.
     cluster: Vec<u8>,
     only_operands: bool,
-    stop_at_operand: bool,
+    /// From the option string's first byte; see "Where option parsing stops".
+    ordering: Ordering,
+    /// Whether `POSIXLY_CORRECT` counts. Read from the environment when the
+    /// walk begins, as glibc reads it; [`Parser::posixly_correct`] overrides.
+    /// Only [`Ordering::Permute`] consults it.
+    posixly_correct: bool,
     done: bool,
 }
 
@@ -759,8 +823,9 @@ impl<'a> Parser<'a> {
     }
 
     /// Whether glibc's `getopt_long` would have **stopped** by now: every word
-    /// from here on is an operand however it looks — after a `--`, or, in a
-    /// `+` table, from the first operand on.
+    /// from here on is an operand however it looks — after a `--`, or from the
+    /// first operand on in a `+` table, or in a table with no prefix while
+    /// `POSIXLY_CORRECT` is set.
     ///
     /// Only `pr` asks. Upstream parses in glibc's return-in-order mode (its
     /// option string leads with `-`), which hands each operand to the option
@@ -776,6 +841,33 @@ impl<'a> Parser<'a> {
     #[must_use]
     pub fn stopped(&self) -> bool {
         self.only_operands
+    }
+
+    /// Decide whether `POSIXLY_CORRECT` counts, instead of reading the
+    /// environment. It matters only to a table with no `+` or `-` prefix.
+    ///
+    /// Two kinds of caller need it. A utility whose upstream does not parse
+    /// with glibc's getopt says `false`: GNU `ed` uses `carg_parser`, which
+    /// permutes and never reads the variable -- measured, `POSIXLY_CORRECT=1 ed
+    /// f -s` is still silent, where a stop at `f` would have made `-s` a second
+    /// file. And a test says whichever it is testing, rather than inheriting
+    /// whatever the shell that ran `cargo test` happened to export.
+    ///
+    /// Call it before the first item is taken; the answer is consulted as each
+    /// operand arrives.
+    #[must_use]
+    pub fn posixly_correct(mut self, set: bool) -> Self {
+        self.posixly_correct = set;
+        self
+    }
+
+    /// Whether an operand here ends option parsing.
+    fn stops_at_operand(&self) -> bool {
+        match self.ordering {
+            Ordering::RequireOrder => true,
+            Ordering::Permute => self.posixly_correct,
+            Ordering::ReturnInOrder => false,
+        }
     }
 
     /// The next word of argv, consumed as some option's value.
@@ -902,7 +994,7 @@ impl<'a> Parser<'a> {
         // standard input, standard output — does so when it reads the operand,
         // not when it parses it.
         if *bytes == *b"-" || bytes.first() != Some(&b'-') {
-            if self.stop_at_operand {
+            if self.stops_at_operand() {
                 self.only_operands = true;
             }
             return Some(Ok(Opt::Operand(arg)));
@@ -1397,8 +1489,28 @@ mod tests {
 
     /// Every item, or the first error. The common shape: a caller that walks to
     /// the end without acting on anything before it.
+    ///
+    /// `POSIXLY_CORRECT` is pinned off, so a test that permutes does not start
+    /// failing when the shell running `cargo test` happens to export it.
     fn walk(args: &[OsString]) -> Result<Vec<Opt<'_>>, Error> {
-        TOUCH.parse(args, TOUCH_SHORTS, TOUCH_LONGS).collect()
+        TOUCH
+            .parse(args, TOUCH_SHORTS, TOUCH_LONGS)
+            .posixly_correct(false)
+            .collect()
+    }
+
+    /// Every item of a walk over `args` with `shorts`, `POSIXLY_CORRECT` as
+    /// given.
+    fn walk_posix<'a>(
+        args: &'a [OsString],
+        shorts: &'a str,
+        posixly_correct: bool,
+    ) -> Vec<Opt<'a>> {
+        TOUCH
+            .parse(args, shorts, TOUCH_LONGS)
+            .posixly_correct(posixly_correct)
+            .collect::<Result<_, _>>()
+            .unwrap()
     }
 
     fn short(flag: u8) -> Opt<'static> {
@@ -1586,6 +1698,77 @@ mod tests {
                 Opt::Operand(&args[3]),
                 Opt::Operand(&args[4]),
             ]
+        );
+    }
+
+    /// The table in "Where option parsing stops", row by row: an option after
+    /// an operand, with and without `POSIXLY_CORRECT`, under each prefix.
+    #[test]
+    fn posixly_correct_stops_a_plain_table_at_the_first_operand() {
+        let args = argv(&["-a", "f", "-c", "g"]);
+        let permuted = vec![
+            short(b'a'),
+            Opt::Operand(&args[1]),
+            short(b'c'),
+            Opt::Operand(&args[3]),
+        ];
+        let stopped = vec![
+            short(b'a'),
+            Opt::Operand(&args[1]),
+            Opt::Operand(&args[2]),
+            Opt::Operand(&args[3]),
+        ];
+        // No prefix: the environment decides.
+        assert_eq!(walk_posix(&args, "acd:fhmr:t:", false), permuted);
+        assert_eq!(walk_posix(&args, "acd:fhmr:t:", true), stopped);
+        // `+`: always stops.
+        assert_eq!(walk_posix(&args, "+acd:fhmr:t:", false), stopped);
+        assert_eq!(walk_posix(&args, "+acd:fhmr:t:", true), stopped);
+        // `-`: never stops, and the `-` is not an option letter.
+        assert_eq!(walk_posix(&args, "-acd:fhmr:t:", false), permuted);
+        assert_eq!(walk_posix(&args, "-acd:fhmr:t:", true), permuted);
+    }
+
+    #[test]
+    fn once_stopped_a_later_double_dash_is_an_operand() {
+        // glibc stops *at* the operand, so a `--` after it is not the end of
+        // options -- there are none left to end -- but a file called `--`.
+        let args = argv(&["f", "--", "-c"]);
+        assert_eq!(
+            walk_posix(&args, "acd:fhmr:t:", true),
+            vec![
+                Opt::Operand(&args[0]),
+                Opt::Operand(&args[1]),
+                Opt::Operand(&args[2]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_lone_dash_is_an_operand_and_stops_like_one() {
+        let args = argv(&["-", "-c"]);
+        assert_eq!(
+            walk_posix(&args, "acd:fhmr:t:", true),
+            vec![Opt::Operand(&args[0]), Opt::Operand(&args[1])]
+        );
+        let mut p = TOUCH
+            .parse(&args, TOUCH_SHORTS, TOUCH_LONGS)
+            .posixly_correct(true);
+        assert_eq!(p.next().unwrap().unwrap(), Opt::Operand(&args[0]));
+        assert!(
+            p.stopped(),
+            "`stopped` reports the POSIXLY_CORRECT stop too"
+        );
+    }
+
+    #[test]
+    fn an_option_value_is_not_an_operand_and_does_not_stop() {
+        // `-d f` is an option and its value; the value does not count as the
+        // first operand, so the `-c` after it is still an option.
+        let args = argv(&["-d", "f", "-c", "g"]);
+        assert_eq!(
+            walk_posix(&args, "acd:fhmr:t:", true),
+            vec![short_with(b'd', "f"), short(b'c'), Opt::Operand(&args[3])]
         );
     }
 

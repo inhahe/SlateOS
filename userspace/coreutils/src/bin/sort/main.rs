@@ -81,6 +81,7 @@ use std::process::ExitCode;
 
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
+use coreutils::posixver;
 use coreutils::quote::{quote, quoteaf_os, quotef_os};
 use keydef::{Blanks, KeySpec, Kind, parse_key, parse_obsolete_end, parse_obsolete_start};
 use order::Ignore;
@@ -193,7 +194,7 @@ fn main() -> ExitCode {
 
 fn run_main() -> ExitCode {
     let raw: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let cfg = match parse_args(&raw) {
+    let cfg = match parse_args(&raw, getopt::posixly_correct(), posixver::posix2_version()) {
         Ok(Some(c)) => c,
         Ok(None) => return ExitCode::SUCCESS,
         Err(e) => die_with(&e.message(), e.status),
@@ -497,14 +498,30 @@ fn fatal(message: String) -> Fatal {
 }
 
 /// Parse argv. `Ok(None)` means `--help` or `--version` has already answered.
+///
+/// `posixly_correct` and `posix2_version` are the environment's
+/// ([`getopt::posixly_correct`], [`posixver::posix2_version`]), passed in so
+/// that a test can choose them. Upstream's option string leads with `-`, so
+/// glibc's getopt never stops for `POSIXLY_CORRECT` here; `sort` applies the
+/// rule itself, with an exception getopt has no way to express. See the loop.
 #[allow(clippy::too_many_lines)]
-fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
+fn parse_args(
+    raw: &[OsString],
+    posixly_correct: bool,
+    posix2_version: i32,
+) -> Result<Option<Config>, Fatal> {
     let mut cfg = Config::default();
     // The options that are not attached to a `-k` collect here, and are then
     // either handed to the keys that named no ordering of their own or, if
     // there are no keys at all, turned into one whole-line key.
     let mut global = KeySpec::whole_line();
     let mut only_operands = false;
+    // Upstream's `traditional_usage`: whether the obsolete `+POS1 [-POS2]`
+    // key and the `-o` exception below are read. True unless
+    // `_POSIX2_VERSION` names the 2001 edition, which withdrew them -- and
+    // switched on even then by a `+POS -POS` pair, unless `POSIXLY_CORRECT`
+    // is set.
+    let mut traditional_usage = !posixver::withdraws_obsolete_forms(posix2_version);
     let mut i = 0usize;
 
     while let Some(arg) = raw.get(i) {
@@ -512,6 +529,22 @@ fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
         i = i.saturating_add(1);
 
         if only_operands {
+            cfg.files.push(arg.clone());
+            continue;
+        }
+        // Upstream's rule, in upstream's order: under `POSIXLY_CORRECT`, once a
+        // file has been named every later word is a file too -- `--` and `+1`
+        // included -- except a traditional `-o FILE` (or `-oFILE`), which the
+        // older standard let follow the files, so long as `-c` has not been
+        // given. Measured: `POSIXLY_CORRECT=1 sort f -r` fails to open `-r`,
+        // while `POSIXLY_CORRECT=1 sort f -o out` writes `out`.
+        if posixly_correct
+            && !cfg.files.is_empty()
+            && !(traditional_usage
+                && cfg.check.is_none()
+                && bytes.starts_with(b"-o")
+                && (bytes.len() > 2 || i < raw.len()))
+        {
             cfg.files.push(arg.clone());
             continue;
         }
@@ -528,24 +561,23 @@ fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
         }
         // `+POS [-POS]`: the obsolete key syntax. An argument that starts with
         // `+` but is not a position is a file, which is the only reason a file
-        // called `+x` still works.
-        if bytes.first() == Some(&b'+')
-            && let Some(mut key) = parse_obsolete_start(&bytes)
-        {
-            if let Some(next) = raw.get(i) {
-                let next_bytes = arg_bytes(next);
-                if next_bytes.first() == Some(&b'-')
-                    && next_bytes
-                        .get(1)
-                        .copied()
-                        .is_some_and(|c| c.is_ascii_digit())
-                {
-                    parse_obsolete_end(&next_bytes, &mut key).map_err(fatal)?;
+        // called `+x` still works -- and so is every `+POS` while
+        // `traditional_usage` is off, which a following `-POS` turns back on
+        // unless `POSIXLY_CORRECT` is set.
+        if bytes.first() == Some(&b'+') {
+            let minus_pos_usage = raw.get(i).is_some_and(|next| {
+                let next = arg_bytes(next);
+                next.first() == Some(&b'-') && next.get(1).is_some_and(u8::is_ascii_digit)
+            });
+            traditional_usage |= minus_pos_usage && !posixly_correct;
+            if traditional_usage && let Some(mut key) = parse_obsolete_start(&bytes) {
+                if minus_pos_usage && let Some(next) = raw.get(i) {
+                    parse_obsolete_end(&arg_bytes(next), &mut key).map_err(fatal)?;
                     i = i.saturating_add(1);
                 }
+                cfg.keys.push(key);
+                continue;
             }
-            cfg.keys.push(key);
-            continue;
         }
         if bytes.len() < 2 || bytes.first() != Some(&b'-') {
             cfg.files.push(arg.clone());
@@ -896,6 +928,97 @@ fn die_with(msg: &str, status: i32) -> ! {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// `parse_args` with `POSIXLY_CORRECT` unset and `_POSIX2_VERSION` at its
+    /// default, so no test depends on the environment `cargo test` inherited.
+    /// The tests of those two variables call `super::parse_args`.
+    fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
+        super::parse_args(raw, false, posixver::DEFAULT)
+    }
+
+    fn os_args(words: &[&str]) -> Vec<OsString> {
+        words.iter().map(OsString::from).collect()
+    }
+
+    /// Measured against GNU sort 9.4 on 2026-09-25, each row.
+    #[test]
+    fn posixly_correct_makes_every_word_after_a_file_a_file() {
+        let files = |words: &[&str], posix: bool, version: i32| -> Vec<OsString> {
+            match super::parse_args(&os_args(words), posix, version) {
+                Ok(Some(cfg)) => cfg.files,
+                _ => panic!("{words:?} should parse"),
+            }
+        };
+        let d = posixver::DEFAULT;
+        // An option after a file is a file...
+        assert_eq!(files(&["f", "-r"], true, d), os_args(&["f", "-r"]));
+        assert_eq!(files(&["f", "-r"], false, d), os_args(&["f"]));
+        // ...and so are `--` and `+POS`.
+        assert_eq!(
+            files(&["f", "--", "g"], true, d),
+            os_args(&["f", "--", "g"])
+        );
+        assert_eq!(files(&["f", "+1"], true, d), os_args(&["f", "+1"]));
+        // Before the first file, options are still options.
+        assert_eq!(files(&["-r", "f"], true, d), os_args(&["f"]));
+    }
+
+    #[test]
+    fn posixly_correct_still_reads_a_traditional_dash_o() {
+        let parsed =
+            |words: &[&str], version: i32| super::parse_args(&os_args(words), true, version);
+        let d = posixver::DEFAULT;
+        // `-o FILE` and `-oFILE` after a file are the output, not files.
+        let Ok(Some(cfg)) = parsed(&["f", "-o", "out"], d) else {
+            panic!("expected a configuration");
+        };
+        assert_eq!(cfg.files, os_args(&["f"]));
+        assert_eq!(cfg.output, Some(OsString::from("out")));
+        let Ok(Some(cfg)) = parsed(&["f", "-oout"], d) else {
+            panic!("expected a configuration");
+        };
+        assert_eq!(cfg.output, Some(OsString::from("out")));
+        // A final `-o` with nothing after it is a file.
+        let Ok(Some(cfg)) = parsed(&["f", "-o"], d) else {
+            panic!("expected a configuration");
+        };
+        assert_eq!(cfg.files, os_args(&["f", "-o"]));
+        // Not with `-c`: `-o` is then a second file, which `-c` refuses as
+        // GNU does -- `extra operand '-o' not allowed with -c`.
+        let Err(e) = parsed(&["-c", "f", "-o", "out"], d) else {
+            panic!("a second file with -c should be refused");
+        };
+        assert!(
+            e.sentence.starts_with("extra operand '-o'"),
+            "{}",
+            e.sentence
+        );
+        // And not under the 2001 edition.
+        let Ok(Some(cfg)) = parsed(&["f", "-o", "out"], 200_112) else {
+            panic!("expected a configuration");
+        };
+        assert_eq!(cfg.files, os_args(&["f", "-o", "out"]));
+    }
+
+    #[test]
+    fn the_2001_edition_makes_plus_pos_a_file_unless_a_minus_pos_follows() {
+        let parsed = |words: &[&str], posix: bool| match super::parse_args(
+            &os_args(words),
+            posix,
+            200_112,
+        ) {
+            Ok(Some(cfg)) => (cfg.keys.len(), cfg.files),
+            _ => panic!("{words:?} should parse"),
+        };
+        assert_eq!(parsed(&["+1", "f"], false), (0, os_args(&["+1", "f"])));
+        assert_eq!(parsed(&["+1", "-2", "f"], false), (1, os_args(&["f"])));
+        // `POSIXLY_CORRECT` keeps the pair from switching it back on; `+1`
+        // is then the first file, and everything after it is one too.
+        assert_eq!(
+            parsed(&["+1", "-2", "f"], true),
+            (0, os_args(&["+1", "-2", "f"]))
+        );
+    }
 
     fn cfg_of(args: &[&str]) -> Config {
         let raw: Vec<OsString> = args.iter().map(OsString::from).collect();

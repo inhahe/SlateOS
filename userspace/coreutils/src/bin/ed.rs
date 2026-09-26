@@ -325,7 +325,13 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     let mut opts = Options::default();
     let mut file: Option<OsString> = None;
 
-    for item in ED.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
+    // GNU ed parses with `carg_parser`, not glibc's getopt: it permutes, and it
+    // never reads `POSIXLY_CORRECT` -- measured, `POSIXLY_CORRECT=1 ed f -s` is
+    // still silent. So the variable is pinned off rather than read.
+    for item in ED
+        .parse(args, SHORT_OPTIONS, LONG_OPTIONS)
+        .posixly_correct(false)
+    {
         match item? {
             Opt::Short(b'h', _) | Opt::Long("help", _) => return Ok(Request::Help),
             Opt::Short(b'V', _) | Opt::Long("version", _) => return Ok(Request::Version),

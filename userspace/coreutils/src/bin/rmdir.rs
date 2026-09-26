@@ -163,7 +163,7 @@ fn main() -> ExitCode {
 
 fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    match parse_args(&args) {
+    match parse_args(&args, getopt::posixly_correct()) {
         Ok(Request::Help) => {
             print!("{}", help_text());
             ExitCode::SUCCESS
@@ -214,7 +214,11 @@ Remove the DIRECTORY(ies), if they are empty.
 ///
 /// An unknown option, a recognised option this implementation does not have, or
 /// a long option given a value it does not take.
-fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+///
+/// `posixly_correct` is [`getopt::posixly_correct`], passed in so that a test
+/// can choose it. When it is set, the first operand ends option parsing, as it
+/// does in glibc's getopt -- see "Where option parsing stops" in that module.
+fn parse_args(args: &[OsString], posixly_correct: bool) -> Result<Request, getopt::Error> {
     let mut flags = RmdirFlags::default();
     let mut dirs: Vec<OsString> = Vec::new();
     let mut only_operands = false;
@@ -233,6 +237,8 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // standard-input operand for it to mean anything else — measured,
             // GNU answers `failed to remove '-': No such file or directory`.
             dirs.push(arg.clone());
+            // Under POSIXLY_CORRECT, glibc's getopt stops at the first operand.
+            only_operands = posixly_correct;
         } else if let Some(body) = bytes.strip_prefix(b"--") {
             match parse_long(body, &bytes, &mut flags)? {
                 Some(request) => return Ok(request),
@@ -460,6 +466,30 @@ fn strip_last_component(dir: &mut Vec<u8>) -> bool {
 )]
 mod tests {
     use super::*;
+
+    /// `parse_args` with `POSIXLY_CORRECT` pinned off, so that a test putting an
+    /// option after an operand does not depend on the environment `cargo test`
+    /// inherited. The tests of the variable itself call `super::parse_args`.
+    fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+        super::parse_args(args, false)
+    }
+
+    /// Measured against GNU on 2026-09-25: `POSIXLY_CORRECT=1 rmdir d -p` takes
+    /// `-p` for a second directory, where without the variable it is an option.
+    #[test]
+    fn posixly_correct_makes_an_option_after_an_operand_an_operand() {
+        let argv: Vec<OsString> = ["d", "-p"].iter().map(OsString::from).collect();
+        let Ok(Request::Run(flags, dirs)) = super::parse_args(&argv, true) else {
+            panic!("expected a run");
+        };
+        assert!(!flags.parents);
+        assert_eq!(dirs, argv);
+        let Ok(Request::Run(flags, dirs)) = super::parse_args(&argv, false) else {
+            panic!("expected a run");
+        };
+        assert!(flags.parents);
+        assert_eq!(dirs, argv[..1]);
+    }
     use std::path::PathBuf;
 
     fn args(items: &[&str]) -> Vec<OsString> {

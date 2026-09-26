@@ -217,7 +217,7 @@ fn run_main() -> ExitCode {
     // Decided before the stream exists, because upstream's `usage` reaches
     // `atexit (close_stdout)` with nothing buffered on stdout: a usage error
     // prints its own complaint and no write error after it.
-    let request = match parse_args(&args) {
+    let request = match parse_args(&args, getopt::posixly_correct()) {
         Ok(request) => request,
         Err(e) => {
             // The message may be several lines: the deferred diagnostics are
@@ -377,7 +377,11 @@ impl Deferred {
 /// Any getopt diagnostic; `nl`'s four deferred ones, batched; and its fatal
 /// ones — a number outside its range, or a regular expression that will not
 /// compile.
-fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+///
+/// `posixly_correct` is [`getopt::posixly_correct`], passed in so that a test
+/// can choose it. When it is set, the first operand ends option parsing, as it
+/// does in glibc's getopt -- see "Where option parsing stops" in that module.
+fn parse_args(args: &[OsString], posixly_correct: bool) -> Result<Request, getopt::Error> {
     let mut options = Options::default();
     let mut deferred = Deferred::default();
     let mut files: Vec<OsString> = Vec::new();
@@ -397,6 +401,8 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
         } else if bytes == b"-" || bytes.first() != Some(&b'-') {
             // A lone `-` names standard input, which is an operand.
             files.push(arg.clone());
+            // Under POSIXLY_CORRECT, glibc's getopt stops at the first operand.
+            only_operands = posixly_correct;
         } else if bytes.starts_with(b"--") {
             if let Some(request) = long_option(&bytes, args, &mut i, &mut options, &mut deferred)? {
                 return Ok(request);
@@ -1107,6 +1113,28 @@ fn arg_bytes(a: &OsString) -> Vec<u8> {
 )]
 mod tests {
     use super::*;
+
+    /// `parse_args` with `POSIXLY_CORRECT` pinned off, so that a test putting an
+    /// option after an operand does not depend on the environment `cargo test`
+    /// inherited. The tests of the variable itself call `super::parse_args`.
+    fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+        super::parse_args(args, false)
+    }
+
+    /// Measured against GNU on 2026-09-25: `POSIXLY_CORRECT=1 nl f -ba` takes
+    /// `-ba` for a second file, where without the variable it is an option.
+    #[test]
+    fn posixly_correct_makes_an_option_after_an_operand_an_operand() {
+        let argv: Vec<OsString> = ["f", "-ba"].iter().map(OsString::from).collect();
+        let Ok(Request::Run(_, files)) = super::parse_args(&argv, true) else {
+            panic!("expected a run");
+        };
+        assert_eq!(files, argv);
+        let Ok(Request::Run(_, files)) = super::parse_args(&argv, false) else {
+            panic!("expected a run");
+        };
+        assert_eq!(files, argv[..1]);
+    }
 
     fn parse(args: &[&str]) -> Result<Options, String> {
         let owned: Vec<OsString> = args.iter().map(OsString::from).collect();

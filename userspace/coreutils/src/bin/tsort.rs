@@ -216,7 +216,7 @@ fn main() -> ExitCode {
 fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
-    let request = match parse_args(&args) {
+    let request = match parse_args(&args, getopt::posixly_correct()) {
         Ok(request) => request,
         Err(e) => {
             diag!("tsort: {}", e.message());
@@ -658,7 +658,11 @@ fn tsort(
 /// The one `getopt_long` call either returns `-1` — no options anywhere on the
 /// line — or ends the program, so the operand list is only ever reached when
 /// every argument is an operand.
-fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+///
+/// `posixly_correct` is [`getopt::posixly_correct`], passed in so that a test
+/// can choose it. When it is set, the first operand ends option parsing, as it
+/// does in glibc's getopt -- see "Where option parsing stops" in that module.
+fn parse_args(args: &[OsString], posixly_correct: bool) -> Result<Request, getopt::Error> {
     let mut operands: Vec<&OsString> = Vec::new();
     let mut only_operands = false;
     let mut at = 0usize;
@@ -676,6 +680,8 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
         } else if bytes == b"-" || bytes.first() != Some(&b'-') {
             // A lone `-` is standard input, which is an operand.
             operands.push(arg);
+            // Under POSIXLY_CORRECT, glibc's getopt stops at the first operand.
+            only_operands = posixly_correct;
         } else if let Some(body) = bytes.strip_prefix(b"--") {
             return long_option(body, &bytes);
         } else {
@@ -738,6 +744,28 @@ fn arg_bytes(arg: &OsString) -> Vec<u8> {
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    /// `parse_args` with `POSIXLY_CORRECT` pinned off, so that a test putting an
+    /// option after an operand does not depend on the environment `cargo test`
+    /// inherited. The tests of the variable itself call `super::parse_args`.
+    fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+        super::parse_args(args, false)
+    }
+
+    /// Measured against GNU on 2026-09-25: `POSIXLY_CORRECT=1 tsort - --version` takes
+    /// `--version` for an extra operand, where without the variable it is an option.
+    #[test]
+    fn posixly_correct_makes_an_option_after_an_operand_an_operand() {
+        let argv: Vec<OsString> = ["-", "--version"].iter().map(OsString::from).collect();
+        let Err(e) = super::parse_args(&argv, true) else {
+            panic!("a second operand should be refused");
+        };
+        assert!(e.sentence.starts_with("extra operand"), "{}", e.sentence);
+        assert!(matches!(
+            super::parse_args(&argv, false),
+            Ok(Request::Version)
+        ));
+    }
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()

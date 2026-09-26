@@ -63,6 +63,7 @@
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
+use coreutils::posixver;
 use coreutils::quote::{os_bytes, quote, quoteaf_os, quotef_os};
 use coreutils::stdfd;
 use std::ffi::{OsStr, OsString};
@@ -254,7 +255,7 @@ struct Env {
 impl Env {
     fn from_process() -> Self {
         Env {
-            posixly_correct: std::env::var_os("POSIXLY_CORRECT").is_some(),
+            posixly_correct: getopt::posixly_correct(),
             strict_posix2: strict_posix2(std::env::var_os("_POSIX2_VERSION").as_deref()),
         }
     }
@@ -264,55 +265,12 @@ impl Env {
 /// true when `_POSIX2_VERSION` names a standard in the half-open range
 /// \[200112, 200809), the window in which `uniq +N` was not permitted.
 ///
-/// The parse is `strtol`'s, which is looser than it looks and was measured
-/// rather than recalled: leading whitespace is skipped and a sign is allowed,
-/// but **any** trailing byte makes the whole variable fall back to the default
-/// (200809, i.e. not strict). So `_POSIX2_VERSION=' 200112'` is strict and
-/// `_POSIX2_VERSION='200112x'` is not.
+/// The parse is [`posixver`]'s, which says how loose `strtol` is: leading
+/// white space is skipped and a sign allowed, but any trailing byte makes the
+/// whole variable fall back to the default. So `_POSIX2_VERSION=' 200112'` is
+/// strict and `_POSIX2_VERSION='200112x'` is not.
 fn strict_posix2(value: Option<&OsStr>) -> bool {
-    const DEFAULT: i64 = 200_809;
-    let version = value
-        .map(os_bytes)
-        .filter(|bytes| !bytes.is_empty())
-        .and_then(|bytes| strtol(&bytes))
-        .unwrap_or(DEFAULT);
-    (200_112..200_809).contains(&version)
-}
-
-/// `strtol` with base 10 over a whole byte string, or `None` if anything is
-/// left over. Saturates rather than wrapping, matching `strtol`'s `ERANGE`
-/// behaviour of returning `LONG_MAX`/`LONG_MIN` with the tail consumed.
-fn strtol(bytes: &[u8]) -> Option<i64> {
-    let mut i = 0usize;
-    while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
-        i = i.saturating_add(1);
-    }
-    let negative = match bytes.get(i) {
-        Some(b'-') => {
-            i = i.saturating_add(1);
-            true
-        }
-        Some(b'+') => {
-            i = i.saturating_add(1);
-            false
-        }
-        _ => false,
-    };
-    let digits = bytes.get(i..)?;
-    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-    let mut value: i64 = 0;
-    for &d in digits {
-        value = value
-            .saturating_mul(10)
-            .saturating_add(i64::from(d.wrapping_sub(b'0')));
-    }
-    Some(if negative {
-        value.saturating_neg()
-    } else {
-        value
-    })
+    posixver::withdraws_obsolete_forms(posixver::posix2_version_from(value))
 }
 
 /// The funnel. A diagnostic that could not be written turns the earned

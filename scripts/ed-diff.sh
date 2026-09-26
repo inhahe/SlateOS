@@ -46,6 +46,12 @@ DIFF_NEED=timeout
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
+# Variables the program under test runs with, on both sides, and nothing else
+# does. `POSIXLY_CORRECT` changes where option parsing stops, and exported it
+# would reach this harness's own `od`, `sort` and `diff` as well. Empty unless
+# a case block sets it.
+ENVV=()
+
 pass=0; fail=0; xfail=0; xpass=0; kbug=0; kfixed=0
 
 # --- the fixture template -----------------------------------------------------
@@ -110,14 +116,14 @@ run_side() {
     case $kind in
       file)
         printf '%b' "$script" > .script
-        timeout -k 2 30 env PATH="$bindir/$side" ed "$@" < .script > "$out" 2> "$err"
+        timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" ed "$@" < .script > "$out" 2> "$err"
         ;;
       none)
-        timeout -k 2 30 env PATH="$bindir/$side" ed "$@" < /dev/null > "$out" 2> "$err"
+        timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" ed "$@" < /dev/null > "$out" 2> "$err"
         ;;
       *)
         # A real pipe, which is what makes `is_regular_file(stdin)` false.
-        printf '%b' "$script" | timeout -k 2 30 env PATH="$bindir/$side" ed "$@" > "$out" 2> "$err"
+        printf '%b' "$script" | timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" ed "$@" > "$out" 2> "$err"
         ;;
     esac
   )
@@ -1017,6 +1023,16 @@ xfail_pipe '! runs a shell command and we do not have a shell' '!echo hi\nq\n' f
 # `r`, `e`/`E`, `u`, `#`, then `h`, `H`, `P`, `W`, `x`, `y` and `z` — are all
 # implemented, and their cases have moved up into the sections above as
 # ordinary `run_pipe`s.
+
+# --- POSIXLY_CORRECT -----------------------------------------------------------
+# GNU ed parses its command line with carg_parser, not glibc's getopt, so the
+# variable that makes every getopt program stop at the first operand changes
+# nothing here: the `-s` after the file still silences the byte count.
+# Measured against GNU ed 1.20.1 on 2026-09-25.
+ENVV=(POSIXLY_CORRECT=1)
+run_pipe 'p\nq\n' f.txt -s
+ENVV=()
+run_pipe 'p\nq\n' f.txt -s
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$kbug" -gt 0 ]; then

@@ -165924,3 +165924,128 @@ Fax (scanned documents) and JPEG (photographs) are the ones in real use.
 `tif_getimage.c`'s `YCbCr` routines; `tif_fax3.c`; JPEG through this crate's
 JPEG decoder with the file's `JPEGTables`; then the rare codecs. Fixtures from
 the same libtiff oracle.
+
+## TD-B-COREUTILS-GETOPT-IGNORED-POSIXLY-CORRECT (lane B, 2026-09-25) — FIXED 2026-09-25
+
+**In short:** with `POSIXLY_CORRECT` set, every GNU program built on glibc's
+getopt stops reading options at the first file name, so `POSIXLY_CORRECT=1 cat
+f -n` prints `f` unnumbered and then fails to open a file called `-n`. None of
+ours did: the shared parser, `coreutils::getopt`, never looked at the variable,
+and neither did the seventeen utilities that walk argv by hand. `sort` -- which
+GNU keeps out of getopt's rule and gives its own -- had no rule at all.
+
+**How it surfaced.** `scripts/pinky-diff.sh`'s `POSIXLY_CORRECT=1 pinky alice
+-q`: GNU treats `-q` as a second user name. The gap was already known in one
+place -- `pwd.rs`'s docs called it "crate-wide rather than `pwd`'s" -- but it
+pointed at a `known-issues.md` line that described `uniq`, not this, so it was
+never tracked as debt of its own.
+
+**How it was closed.** glibc picks one of three orderings from the option
+string's first byte, and `Program::parse` now reads that byte the same way.
+The table and the reasoning are in `getopt.rs`, "Where option parsing stops":
+
+| prefix | ordering | `POSIXLY_CORRECT` |
+|---|---|---|
+| none | permute | stops at the first operand |
+| `+` | require order | always stops |
+| `-` | return in order | never consulted |
+
+- `pr` now passes its upstream string verbatim, leading `-` and all. `tar`
+  passes `-` too, because argp's `ARGP_IN_ORDER` builds exactly that (measured:
+  `POSIXLY_CORRECT=1 tar -tf t.tar a -v` still lists verbosely). `ed` pins the
+  variable off with `Parser::posixly_correct(false)`, because GNU ed parses with
+  `carg_parser` and never reads it.
+- The seventeen hand-walked parsers (`cat comm cut wc nl ln rmdir paste expand
+  fold unexpand tsort head tail csplit split bc`) take the variable as a
+  parameter, as `od` and `uniq` already did. Each test module shadows
+  `parse_args` with a wrapper that pins it off, so no existing test depends on
+  the environment `cargo test` inherited, and each gained a test of both
+  answers.
+- `sort` got upstream's rule: once a file has been named every word is a file,
+  except a traditional `-o FILE`, which `-c` and the 2001 edition both switch
+  off. Upstream's `traditional_usage` came with it, so `_POSIX2_VERSION=200112`
+  now makes `+POS` a file name unless a `-POS` follows it -- ours had read `+POS`
+  as a key in every edition.
+- `coreutils::posixver` is gnulib's `posix2_version`, lifted out of `uniq` so
+  that `sort` could share it. Its `strtol` now counts the vertical tab as white
+  space, which C does and `u8::is_ascii_whitespace` does not.
+
+Pinned by `POSIXLY_CORRECT` blocks in twenty-one harnesses: the seventeen above
+bar `ln` and `rmdir`, which have none, plus `sort`, `sed`, `cmp`, `grep`, `ed`
+and `tar`. Each row is the file then the option, the option then the file, a
+`--` after the file, and the variable set to the empty string, which counts.
+
+**Still to do:** `diff`, `patch` and `hostname` compare argv against exact
+spellings instead of using the shared parser at all, and are recorded apart
+(below) rather than given a fourth hand-written rule each.
+
+## B-PATCH-ORIGFILE-PATCHFILE-EXITS-0-HAVING-DONE-NOTHING (lane B, 2026-09-25) — **open**
+
+**In short:** `patch ORIGFILE PATCHFILE` -- the second commonest way to run
+`patch` -- exits 0 and changes nothing. Our parser keeps only the *last*
+operand, as the file to patch, and reads the patch from standard input, which
+in that command is whatever the terminal or the caller left there. GNU applies
+PATCHFILE to ORIGFILE.
+
+Measured in WSL against GNU patch 2.7.6:
+
+```text
+$ printf 'a\n' > o; printf 'b\n' > n; diff -u o n > p.diff
+$ cp o o2; patch o2 p.diff               # GNU: "patching file o2"; o2 now holds b; rc 0
+$ cp o o3; patch o3 p.diff </dev/null    # ours: no output; o3 still holds a; rc 0
+```
+
+**Where:** `userspace/coreutils/src/bin/patch.rs`, `parse_args` -- its final
+`else` arm is `opts.target_file = Some(arg.clone())`, so every operand
+overwrites the one before and there is no second-operand slot at all.
+
+**The fix** is the one in the next entry: upstream's command line, which has
+the slot, on the shared parser.
+
+## TD-B-DIFF-PATCH-HOSTNAME-PARSE-ARGV-BY-EXACT-MATCH (lane B, 2026-09-25) — **open**
+
+**In short:** `diff`, `patch` and `hostname` compare each argument against a
+list of exact spellings instead of going through `coreutils::getopt`, so they
+miss what every glibc-getopt program does. A long option abbreviated to a
+unique prefix is refused -- GNU `diff --unif o n` prints a unified diff, ours
+says `unrecognized option '--unif'` -- and `POSIXLY_CORRECT` changes nothing,
+where GNU `diff o n -u` says `extra operand '-u'` and net-tools `hostname x -V`
+prints its usage. `patch` has no `--` either.
+
+**The fix** is upstream's command line on `Program::parse`: diffutils'
+`shortopts` and `longopts` for `diff`, GNU patch's for `patch`, net-tools' for
+`hostname`, each in upstream's declaration order, which the ambiguity message
+makes observable. That brings abbreviations, bundling, `--` and
+`POSIXLY_CORRECT` at once, and routes the argv bytes through a parser that
+never decodes them -- the conversion this file already asks for under "The fix
+is getopt, not a hand conversion". A `POSIXLY_CORRECT` rule added to the
+existing loops would be the fourth thing each of them re-implements by hand,
+which is why the change above did not add one.
+
+## TD-B-TOUCH-REFUSES-DASH-T-AND-DASH-D (lane B, 2026-09-25) — **open**
+
+**In short:** `touch -t 202001011200 f` and `touch -d '2020-01-01 12:00' f`
+-- the two ways to give a file a chosen time rather than now -- both answer
+`option -t is not implemented by this touch` and exit 1. Build scripts, test
+fixtures and `make` workarounds use both.
+
+**Where:** `userspace/coreutils/src/bin/touch.rs`, `parse_args`: `Opt::Short(flag
+@ (b'd' | b't'), _) => return Err(unimplemented_short(flag))`. The obsolete
+`touch MMDDhhmm[YY] FILE` operand, which GNU reads only while
+`_POSIX2_VERSION` is below 200112, is left out on purpose in the module docs,
+on the reasoning that a date-shaped operand would sometimes be a date and
+sometimes a file -- which is exactly GNU's behaviour, gated by that variable.
+
+**The fix** is two gnulib ports, each a module other utilities need too:
+
+- `lib/posixtm.c` (208 lines) as `coreutils::posixtm`: `[[CC]YY]MMDDhhmm[.ss]`
+  under its syntax bits. `touch -t` is `PDS_LEADING_YEAR | PDS_CENTURY |
+  PDS_SECONDS`; the obsolete operand is `PDS_TRAILING_YEAR | PDS_PRE_2000`,
+  with upstream's `warning: 'touch %s' is obsolete; use 'touch -t …'` unless
+  `POSIXLY_CORRECT` is set; `date MMDDhhmm[[CC]YY][.ss]` is the third caller.
+  `coreutils::posixver` already answers the edition question.
+- `lib/parse-datetime.y` (2438 lines) as `coreutils::parse_datetime`, for
+  `touch -d`. `date -d` and `find -newerXt` each carry a measured subset of the
+  same language today (`date.rs`'s module docs list what it covers); one
+  transcription of the grammar would replace both, with `date-diff.sh` and
+  `find-diff.sh` checking that nothing they pass today is lost.

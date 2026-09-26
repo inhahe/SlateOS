@@ -43,6 +43,12 @@ DIFF_PROG='sed'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
+# Variables the program under test runs with, on both sides, and nothing else
+# does. `POSIXLY_CORRECT` changes where option parsing stops, and exported it
+# would reach this harness's own `od`, `sort` and `diff` as well. Empty unless
+# a case block sets it.
+ENVV=()
+
 pass=0; fail=0; xfail=0; xpass=0; kbug=0; kfixed=0
 
 fixtures=$DIFF_TMP/fixtures
@@ -78,9 +84,9 @@ printf 'a\0b\nB\0c\0'                   > nulsep.txt
 run_side() {
   local side=$1 stdin=$2 out=$3 err=$4; shift 4
   if [ "$stdin" = "-" ]; then
-    env PATH="$bindir/$side" sed "$@" </dev/null >"$out" 2>"$err"
+    env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" sed "$@" </dev/null >"$out" 2>"$err"
   else
-    env PATH="$bindir/$side" sed "$@" <"$stdin" >"$out" 2>"$err"
+    env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" sed "$@" <"$stdin" >"$out" 2>"$err"
   fi
 }
 
@@ -149,7 +155,7 @@ run_stdin() {
 # `run_case ARGS...` — file operands, nothing on standard input.
 run_case() {
   compare - "$@"
-  report "sed $*"
+  report "${ENVV[*]:+${ENVV[*]} }sed $*"
 }
 
 # `usage_case ARGS...` — a command line sed should refuse, compared on its
@@ -966,6 +972,20 @@ usage_case --version=x
 # `Report bugs to:` block, exactly as every other utility here does.
 xfail_case 'help omits the GNU bug-report block' --help
 xfail_case 'version names SlateOS' --version
+
+# --- POSIXLY_CORRECT -----------------------------------------------------------
+# glibc's getopt ends option parsing at the first operand while it is set -- to
+# anything, the empty string included -- so an option after an operand is an
+# operand, and so is a `--` after one, there being no options left for it to
+# end. Measured against GNU on 2026-09-25; `coreutils::getopt`'s module docs,
+# "Where option parsing stops".
+printf 'b\na\n' > posix.txt
+ENVV=(POSIXLY_CORRECT=1)
+run_case p posix.txt -n
+run_case -n p posix.txt
+run_case p posix.txt -- -n
+ENVV=()
+run_case p posix.txt -n
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$kbug" -gt 0 ]; then

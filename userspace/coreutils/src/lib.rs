@@ -473,6 +473,8 @@
 //! - [`ls`] — `ls`, `dir` and `vdir`: `ls.c` built three times.
 //! - [`mbswidth`] — gnulib's `mbswidth`, the columns a string occupies, for
 //!   `df`'s column widths and `pr`'s centred page header.
+//! - [`posixver`] — gnulib's `posix2_version`, the POSIX edition
+//!   `_POSIX2_VERSION` names, for `sort` and `uniq`.
 //! - [`randint`] — gnulib's `randread` and `randint`, for `shred`.
 //! - [`remove`] — what `rm` and `mv` must agree on about deleting a tree.
 //! - [`setfields`] — the `cut`-style LIST of fields, for `cut` and `numfmt
@@ -508,6 +510,7 @@ pub mod ls;
 pub mod mbswidth;
 pub mod overwrite;
 pub mod pathname;
+pub mod posixver;
 pub mod randint;
 /// How a name is rendered inside a diagnostic — now `userspace/quoting`.
 ///

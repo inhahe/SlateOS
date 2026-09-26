@@ -57,6 +57,12 @@ DIFF_GNU_SOURCE=9.4
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
+# Variables the program under test runs with, on both sides, and nothing else
+# does. `POSIXLY_CORRECT` changes where option parsing stops, and exported it
+# would reach this harness's own `od`, `sort` and `diff` as well. Empty unless
+# a case block sets it.
+ENVV=()
+
 pass=0; fail=0; xfail=0; xpass=0
 
 fixtures=$DIFF_TMP/fixtures
@@ -98,7 +104,7 @@ printf 'x\ny\nz' > nonl.txt
 # and it inherited the caller's redirected stderr along with everything else.
 run_side() {
   local side=$1 dir=$2; shift 2
-  ( cd "$dir" && diff_run env PATH="$bindir/$side" csplit "$@" )
+  ( cd "$dir" && diff_run env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" csplit "$@" )
 }
 
 # A manifest of everything the run left behind: each output file, in name
@@ -180,7 +186,7 @@ report() {
 run_case() {
   local fixture=$1; shift
   compare_argv "$fixture" in.txt "$@"
-  report "csplit $fixture $*"
+  report "${ENVV[*]:+${ENVV[*]} }csplit $fixture $*"
 }
 
 # The uncommon shape: the whole argv, for the cases that need something before
@@ -432,6 +438,20 @@ run_case empty.txt '%x%'
 # ourselves rather than about behaviour, so neither will ever become a pass.
 xfail_case 'our --help omits the GNU project ancillary block' seq20.txt --help
 xfail_case 'our --version names SlateOS' seq20.txt --version
+
+# --- POSIXLY_CORRECT -----------------------------------------------------------
+# glibc's getopt ends option parsing at the first operand while it is set -- to
+# anything, the empty string included -- so an option after an operand is an
+# operand, and so is a `--` after one, there being no options left for it to
+# end. Measured against GNU on 2026-09-25; `coreutils::getopt`'s module docs,
+# "Where option parsing stops".
+# `run_case FIXTURE ARGS` runs `csplit in.txt ARGS`, so the file is always
+# first and `-s` after the pattern is what the variable decides.
+ENVV=(POSIXLY_CORRECT=1)
+run_case seq20.txt 5 -s
+run_case seq20.txt -- 5
+ENVV=()
+run_case seq20.txt 5 -s
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"

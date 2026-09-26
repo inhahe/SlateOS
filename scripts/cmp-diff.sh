@@ -79,6 +79,12 @@ DIFF_PROG='cmp'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
+# Variables the program under test runs with, on both sides, and nothing else
+# does. `POSIXLY_CORRECT` changes where option parsing stops, and exported it
+# would reach this harness's own `od`, `sort` and `diff` as well. Empty unless
+# a case block sets it.
+ENVV=()
+
 pass=0; fail=0; xfail=0; xpass=0
 
 fixtures=$DIFF_TMP/fixtures
@@ -128,11 +134,11 @@ compare() {
   # stdout through a file, not a pipe: in `x=$(cmp | od)` the recorded status is
   # od's. See the same note in cat-diff.sh.
   if [ "$stdin" = "-" ]; then
-    timeout -k 2 60 env PATH="$bindir/ours" cmp "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-    timeout -k 2 60 env PATH="$bindir/gnu"  cmp "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+    timeout -k 2 60 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/ours" cmp "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
+    timeout -k 2 60 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/gnu"  cmp "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
   else
-    printf '%b' "$stdin" | timeout -k 2 60 env PATH="$bindir/ours" cmp "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
-    printf '%b' "$stdin" | timeout -k 2 60 env PATH="$bindir/gnu"  cmp "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
+    printf '%b' "$stdin" | timeout -k 2 60 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/ours" cmp "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
+    printf '%b' "$stdin" | timeout -k 2 60 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/gnu"  cmp "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
   fi
   # `od -An -c`, not the text: under `-l` the output is columns of octal whose
   # *width* is the thing being measured, and a comparison that collapsed runs of
@@ -169,7 +175,7 @@ report() {
   return 0
 }
 
-run_case()  { compare - "$@"; report "cmp $*"; }
+run_case()  { compare - "$@"; report "${ENVV[*]:+${ENVV[*]} }cmp $*"; }
 run_stdin() {
   local input="$1"; shift
   compare "$input" "$@"
@@ -200,8 +206,8 @@ xfail_case() {
 compare_merged() {
   local o_txt g_txt o_rc g_rc o_all g_all
   o_all=$(mktemp); g_all=$(mktemp)
-  timeout -k 2 60 env PATH="$bindir/ours" cmp "$@" </dev/null >"$o_all" 2>&1; o_rc=$?
-  timeout -k 2 60 env PATH="$bindir/gnu"  cmp "$@" </dev/null >"$g_all" 2>&1; g_rc=$?
+  timeout -k 2 60 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/ours" cmp "$@" </dev/null >"$o_all" 2>&1; o_rc=$?
+  timeout -k 2 60 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/gnu"  cmp "$@" </dev/null >"$g_all" 2>&1; g_rc=$?
   o_txt=$(od -An -c <"$o_all"); g_txt=$(od -An -c <"$g_all")
   rm -f "$o_all" "$g_all"
   if [ "$o_txt" = "$g_txt" ] && [ "$o_rc" = "$g_rc" ]; then AGREED=yes; else AGREED=no; fi
@@ -452,6 +458,19 @@ xfail_merged 'we flush stdout before the EOF note; GNU does not' -bl x1 x2
 # Not `-l a short`: `short` is a prefix of `a`, so there are no rows to order
 # the note against and the two agree. It takes a pair that both differs and
 # runs out.
+
+# --- POSIXLY_CORRECT -----------------------------------------------------------
+# glibc's getopt ends option parsing at the first operand while it is set -- to
+# anything, the empty string included -- so an option after an operand is an
+# operand, and so is a `--` after one, there being no options left for it to
+# end. Measured against GNU on 2026-09-25; `coreutils::getopt`'s module docs,
+# "Where option parsing stops".
+printf 'b\na\n' > posix.txt
+ENVV=(POSIXLY_CORRECT=1)
+run_case posix.txt posix.txt -s
+run_case -s posix.txt posix.txt
+ENVV=()
+run_case posix.txt posix.txt -s
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"

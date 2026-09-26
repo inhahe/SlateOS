@@ -75,6 +75,12 @@ DIFF_NEED=timeout
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
+# Variables the program under test runs with, on both sides, and nothing else
+# does. `POSIXLY_CORRECT` changes where option parsing stops, and exported it
+# would reach this harness's own `od`, `sort` and `diff` as well. Empty unless
+# a case block sets it.
+ENVV=()
+
 pass=0; fail=0; xfail=0; xpass=0
 
 fixtures=$DIFF_TMP/fixtures
@@ -92,7 +98,7 @@ cd "$fixtures" >/dev/null || exit 1
 # here ends that way if the SIGTERM is ignored, so it is not hypothetical.
 run_side() {
   local side=$1; shift
-  diff_run timeout -k 2 3 env PATH="$bindir/$side" tail "$@"
+  diff_run timeout -k 2 3 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" tail "$@"
 }
 
 # --- fixtures ----------------------------------------------------------------
@@ -156,7 +162,7 @@ report() {
   return 0
 }
 
-run_case()  { compare - "$@"; report "tail $*"; }
+run_case()  { compare - "$@"; report "${ENVV[*]:+${ENVV[*]} }tail $*"; }
 run_stdin() {
   local input="$1"; shift
   compare "$input" "$@"
@@ -490,6 +496,22 @@ selfsame --hel --help
 # `File::open` of a directory fails outright and the sentence was `cannot open`
 # rather than `error reading`.
 run_case -n1 .
+
+# --- POSIXLY_CORRECT -----------------------------------------------------------
+# glibc's getopt ends option parsing at the first operand while it is set -- to
+# anything, the empty string included -- so an option after an operand is an
+# operand, and so is a `--` after one, there being no options left for it to
+# end. Measured against GNU on 2026-09-25; `coreutils::getopt`'s module docs,
+# "Where option parsing stops".
+printf 'b\na\n' > posix.txt
+ENVV=(POSIXLY_CORRECT=1)
+run_case posix.txt -n1
+run_case -n1 posix.txt
+run_case posix.txt -- -n1
+ENVV=(POSIXLY_CORRECT=)
+run_case posix.txt -n1
+ENVV=()
+run_case posix.txt -n1
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ' "$xpass"

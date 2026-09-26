@@ -1227,6 +1227,17 @@ grep -l a abc >&-
 grep -o a abc >&-
 grep -r foo sub >&-
 grep a /nonexistent 2>&-
+
+# --- POSIXLY_CORRECT: the first operand ends option parsing -------------------
+# glibc's getopt stops there while the variable is set -- to anything, the empty
+# string included -- so `-n` after the file is a second file, and so is a `--`.
+# The assignment reaches grep through the function's temporary environment, as
+# the `GREP_COLORS=` rows above do.
+POSIXLY_CORRECT=1 grep a abc -n
+POSIXLY_CORRECT=1 grep -n a abc
+POSIXLY_CORRECT=1 grep a abc -- -n
+POSIXLY_CORRECT= grep a abc -n
+grep a abc -n
 CASES
 
 # --- the cases that only mean something as an ordinary user -------------------

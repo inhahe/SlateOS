@@ -140,7 +140,7 @@ fn main() -> ExitCode {
 
 fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    match parse_args(&args) {
+    match parse_args(&args, getopt::posixly_correct()) {
         Ok(Request::Help) => {
             print!("{}", help_text());
             ExitCode::SUCCESS
@@ -204,7 +204,11 @@ use one of these commands:
 ///
 /// An unknown option, a recognised option this implementation does not have, or
 /// a long option given a value it does not take.
-fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+///
+/// `posixly_correct` is [`getopt::posixly_correct`], passed in so that a test
+/// can choose it. When it is set, the first operand ends option parsing, as it
+/// does in glibc's getopt -- see "Where option parsing stops" in that module.
+fn parse_args(args: &[OsString], posixly_correct: bool) -> Result<Request, getopt::Error> {
     let mut flags = LnFlags::default();
     let mut paths: Vec<OsString> = Vec::new();
     let mut only_operands = false;
@@ -222,6 +226,8 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // A lone `-` is a file called `-`. `ln` has no standard-input
             // operand for it to mean anything else.
             paths.push(arg.clone());
+            // Under POSIXLY_CORRECT, glibc's getopt stops at the first operand.
+            only_operands = posixly_correct;
         } else if let Some(body) = bytes.strip_prefix(b"--") {
             match parse_long(body, &bytes, &mut flags)? {
                 Some(request) => return Ok(request),
@@ -518,6 +524,30 @@ fn symlink(_target: &Path, _link: &Path) -> io::Result<()> {
 )]
 mod tests {
     use super::*;
+
+    /// `parse_args` with `POSIXLY_CORRECT` pinned off, so that a test putting an
+    /// option after an operand does not depend on the environment `cargo test`
+    /// inherited. The tests of the variable itself call `super::parse_args`.
+    fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+        super::parse_args(args, false)
+    }
+
+    /// Measured against GNU on 2026-09-25: `POSIXLY_CORRECT=1 ln a b -s` takes
+    /// `-s` for a third operand, where without the variable it is an option.
+    #[test]
+    fn posixly_correct_makes_an_option_after_an_operand_an_operand() {
+        let argv: Vec<OsString> = ["a", "b", "-s"].iter().map(OsString::from).collect();
+        let Ok(Request::Run(flags, paths)) = super::parse_args(&argv, true) else {
+            panic!("expected a run");
+        };
+        assert!(!flags.symbolic);
+        assert_eq!(paths, argv);
+        let Ok(Request::Run(flags, paths)) = super::parse_args(&argv, false) else {
+            panic!("expected a run");
+        };
+        assert!(flags.symbolic);
+        assert_eq!(paths, argv[..2]);
+    }
     use std::path::PathBuf;
 
     fn args(items: &[&str]) -> Vec<OsString> {

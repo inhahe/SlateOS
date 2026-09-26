@@ -141,15 +141,20 @@ const TAR: Program = Program::new("tar", EXIT_USAGE);
 
 /// The short options this tar implements, in `getopt` notation.
 ///
-/// No leading `+`: tar **permutes**, so an option may follow an operand.
-/// Measured — `tar -tf t.tar a --verbose` applies the `--verbose` and prints a
-/// long listing, rather than treating it as a second member name.
+/// A leading `-`: an option may follow an operand, **whatever the
+/// environment says**. GNU tar parses with argp and `ARGP_IN_ORDER`, and argp
+/// builds that into a getopt string beginning `-` -- glibc's return-in-order
+/// mode, which never consults `POSIXLY_CORRECT`. Measured: `tar -tf t.tar a
+/// -v` applies the `-v` and prints a long listing, rather than treating it as
+/// a second member name, and does so under `POSIXLY_CORRECT=1` too. Without
+/// the prefix the shared parser would permute until that variable was set,
+/// and then stop.
 ///
 /// `?` is a real option letter here, not the error return: argp gives `--help`
 /// the short form `-?`, and `tar -?` prints the help and exits 0. The shared
 /// parser looks the letter up by byte and has no special case for `?`, so
 /// listing it is all that is needed.
-const SHORT_OPTIONS: &str = "cxtvpkUf:C:b:?";
+const SHORT_OPTIONS: &str = "-cxtvpkUf:C:b:?";
 
 /// Every long option GNU tar 1.35 has — all 172 — in argp's own table order.
 ///
@@ -1154,9 +1159,10 @@ fn explode_old_option(args: &[OsString]) -> Result<Vec<OsString>, getopt::Error>
 /// not a case here — tar has no such letter — and would answer "yes", which is
 /// the wrong answer for an optional value but is unreachable rather than a
 /// latent bug: a `::` letter added to [`SHORT_OPTIONS`] would fail the test
-/// that walks it.
+/// that walks it. The leading `-` is getopt's ordering mode, not a letter, and
+/// is not read as one.
 fn takes_a_value(letter: u8) -> bool {
-    let spec = SHORT_OPTIONS.as_bytes();
+    let spec = option_letters().as_bytes();
     spec.iter()
         .position(|&b| b == letter)
         .is_some_and(|i| spec.get(i + 1) == Some(&b':'))
@@ -1179,6 +1185,12 @@ fn takes_a_value(letter: u8) -> bool {
 /// facts that distinguish this tar from the one the reader has used before —
 /// ustar only, and the other names refuse rather than being ignored — because
 /// a user who does not know the second will read a refusal as a bug.
+/// [`SHORT_OPTIONS`] without its leading ordering byte: the letters and their
+/// colons, which is all the old-option path is to consult.
+fn option_letters() -> &'static str {
+    SHORT_OPTIONS.strip_prefix('-').unwrap_or(SHORT_OPTIONS)
+}
+
 fn help_text() -> String {
     "\
 Usage: tar [OPTION...] [FILE]...
@@ -6302,10 +6314,12 @@ mod tests {
         // forgotten in the old-option path. Walk the whole table so the pair
         // stays in step, and assert the shape the doc comment relies on — no
         // `::` (an optional value, which `takes_a_value` would answer wrongly)
-        // and no leading `:` or `+`/`-` mode character, which would be read as
-        // a letter here.
-        let spec = SHORT_OPTIONS.as_bytes();
+        // and exactly one mode character, the `-` of argp's `ARGP_IN_ORDER`,
+        // which `option_letters` removes so that it is never read as a letter.
+        assert_eq!(SHORT_OPTIONS.as_bytes().first(), Some(&b'-'));
+        let spec = option_letters().as_bytes();
         assert!(!matches!(spec.first(), Some(b':' | b'+' | b'-')));
+        assert!(!takes_a_value(b'-'));
         let mut expected: Vec<u8> = Vec::new();
         for (i, &c) in spec.iter().enumerate() {
             if c == b':' {

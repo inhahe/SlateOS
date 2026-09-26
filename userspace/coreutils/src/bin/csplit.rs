@@ -239,7 +239,7 @@ fn main() -> ExitCode {
 
 fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let request = match parse_args(&args) {
+    let request = match parse_args(&args, getopt::posixly_correct()) {
         Ok(r) => r,
         Err(e) => {
             diag!("csplit: {e}");
@@ -299,7 +299,11 @@ A line OFFSET is an integer optionally preceded by '+' or '-'
 /// does not ask. That matters here more than for most utilities, because
 /// `csplit`'s operands are patterns and a script that appends `--suppress-matched`
 /// after them is idiomatic.
-fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+///
+/// `posixly_correct` is [`getopt::posixly_correct`], passed in so that a test
+/// can choose it. When it is set, the first operand ends option parsing, as it
+/// does in glibc's getopt -- see "Where option parsing stops" in that module.
+fn parse_args(args: &[OsString], posixly_correct: bool) -> Result<Request, getopt::Error> {
     let mut options = Options::default();
     let mut operands: Vec<OsString> = Vec::new();
     let mut only_operands = false;
@@ -320,6 +324,8 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // pattern: `/RE/`, `%RE%`, `{N}` and a bare integer all fail the
             // leading-`-` test, and a negative line number is not a pattern.
             operands.push(arg.clone());
+            // Under POSIXLY_CORRECT, glibc's getopt stops at the first operand.
+            only_operands = posixly_correct;
         } else if bytes.starts_with(b"--") {
             if let Some(request) = long_option(&bytes, args, &mut i, &mut options)? {
                 return Ok(request);
@@ -1327,6 +1333,28 @@ fn on_repetition(repetition: u64) -> String {
 )]
 mod tests {
     use super::*;
+
+    /// `parse_args` with `POSIXLY_CORRECT` pinned off, so that a test putting an
+    /// option after an operand does not depend on the environment `cargo test`
+    /// inherited. The tests of the variable itself call `super::parse_args`.
+    fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+        super::parse_args(args, false)
+    }
+
+    /// Measured against GNU on 2026-09-25: `POSIXLY_CORRECT=1 csplit f 1 -s` takes
+    /// `-s` for a second pattern, where without the variable it is an option.
+    #[test]
+    fn posixly_correct_makes_an_option_after_an_operand_an_operand() {
+        let argv: Vec<OsString> = ["f", "1", "-s"].iter().map(OsString::from).collect();
+        let Ok(Request::Run(_, _, patterns)) = super::parse_args(&argv, true) else {
+            panic!("expected a run");
+        };
+        assert_eq!(patterns, argv[1..]);
+        let Ok(Request::Run(_, _, patterns)) = super::parse_args(&argv, false) else {
+            panic!("expected a run");
+        };
+        assert_eq!(patterns, argv[1..2]);
+    }
 
     fn os(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()

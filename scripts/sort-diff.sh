@@ -59,6 +59,12 @@ DIFF_GNU_SOURCE=9.4
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
+# Variables the program under test runs with, on both sides, and nothing else
+# does. `POSIXLY_CORRECT` changes where option parsing stops, and exported it
+# would reach this harness's own `od`, `sort` and `diff` as well. Empty unless
+# a case block sets it.
+ENVV=()
+
 # Both sides are reached through a symlink named `sort` in a directory that is
 # the whole of `PATH` for that one invocation, so `argv[0]` is the bare word on
 # both and the `sort: ` prefix on every diagnostic matches.
@@ -110,8 +116,8 @@ compare() {
   # stdout goes to a file, not through a pipe into `od`: in `x=$(sort | od)`
   # the status recorded would be od's, so every failing case would pass.
   if [ "$stdin" = "-" ]; then
-    $OURS_RUN "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-    $GNU_RUN  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+    env ${ENVV[@]+"${ENVV[@]}"} $OURS_RUN "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
+    env ${ENVV[@]+"${ENVV[@]}"} $GNU_RUN  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
   else
     printf '%b' "$stdin" | $OURS_RUN "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
     printf '%b' "$stdin" | $GNU_RUN  "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
@@ -146,7 +152,7 @@ report() {
   return 0
 }
 
-run_case()  { compare - "$@"; report "sort $*"; }
+run_case()  { compare - "$@"; report "${ENVV[*]:+${ENVV[*]} }sort $*"; }
 run_stdin() { local input="$1"; shift; compare "$input" "$@"; report "printf '$input' | sort $*"; }
 
 xfail_case() {
@@ -652,6 +658,35 @@ run_stdin 'a\nb\n' --field-separator , -k1
 # `--check` takes an *optional* value, so it never reaches for the next
 # argument: this checks, and leaves `quiet` an operand that does not exist.
 run_msg --check quiet
+
+# --- POSIXLY_CORRECT -----------------------------------------------------------
+# glibc's getopt ends option parsing at the first operand while it is set -- to
+# anything, the empty string included -- so an option after an operand is an
+# operand, and so is a `--` after one, there being no options left for it to
+# end. Measured against GNU on 2026-09-25; `coreutils::getopt`'s module docs,
+# "Where option parsing stops".
+# `sort`'s option string leads with `-`, so getopt itself never stops; sort
+# applies the rule by hand, with an exception for a traditional `-o FILE`
+# that `_POSIX2_VERSION` in the 2001 window withdraws, as it withdraws `+POS`.
+printf 'b\na\n' > posix.txt
+ENVV=(POSIXLY_CORRECT=1)
+run_case posix.txt -r
+run_case -r posix.txt
+run_case posix.txt -- -r
+run_case posix.txt +1
+run_case posix.txt -o posix.out
+run_case posix.txt -oposix.out
+run_case posix.txt -o
+run_case -c posix.txt -o posix.out
+ENVV=(POSIXLY_CORRECT=1 _POSIX2_VERSION=200112)
+run_case posix.txt -o posix.out
+run_case +1 -2 posix.txt
+ENVV=(_POSIX2_VERSION=200112)
+run_case +1 posix.txt
+run_case +1 -2 posix.txt
+ENVV=()
+run_case posix.txt -r
+run_case +1 posix.txt
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

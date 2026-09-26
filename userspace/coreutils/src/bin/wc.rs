@@ -197,7 +197,7 @@ fn run_main() -> ExitCode {
     // Decided before the stream exists, because upstream's `usage` reaches
     // `atexit (close_stdout)` with nothing buffered on stdout: a usage error
     // prints its own complaint and no write error after it.
-    let request = match parse_args(&args) {
+    let request = match parse_args(&args, getopt::posixly_correct()) {
         Ok(request) => request,
         Err(e) => {
             // The referral, when there is one, is part of the message, and only
@@ -259,7 +259,11 @@ the following order: newline, word, character, byte, maximum line length.
 /// Parse argv the way `getopt_long` does, so long options abbreviate to any
 /// unambiguous prefix: `wc --lin` counts lines and `wc --max` is the maximum
 /// line length, exactly as on any GNU system.
-fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+///
+/// `posixly_correct` is [`getopt::posixly_correct`], passed in so that a test
+/// can choose it. When it is set, the first operand ends option parsing, as it
+/// does in glibc's getopt -- see "Where option parsing stops" in that module.
+fn parse_args(args: &[OsString], posixly_correct: bool) -> Result<Request, getopt::Error> {
     let mut options = Options::default();
     let mut files: Vec<OsString> = Vec::new();
     let mut files0_from: Option<OsString> = None;
@@ -279,6 +283,8 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
         } else if bytes == b"-" || bytes.first() != Some(&b'-') {
             // A lone `-` is standard input, which is an operand, not an option.
             files.push(arg.clone());
+            // Under POSIXLY_CORRECT, glibc's getopt stops at the first operand.
+            only_operands = posixly_correct;
         } else if bytes.starts_with(b"--") {
             if let Some(request) =
                 long_option(&bytes, args, &mut i, &mut options, &mut files0_from)?
@@ -958,6 +964,28 @@ fn os_from_bytes(b: &[u8]) -> OsString {
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    /// `parse_args` with `POSIXLY_CORRECT` pinned off, so that a test putting an
+    /// option after an operand does not depend on the environment `cargo test`
+    /// inherited. The tests of the variable itself call `super::parse_args`.
+    fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+        super::parse_args(args, false)
+    }
+
+    /// Measured against GNU on 2026-09-25: `POSIXLY_CORRECT=1 wc f -l` takes
+    /// `-l` for a second file, where without the variable it is an option.
+    #[test]
+    fn posixly_correct_makes_an_option_after_an_operand_an_operand() {
+        let argv: Vec<OsString> = ["f", "-l"].iter().map(OsString::from).collect();
+        let Ok(Request::Run(_, Source::Operands(files))) = super::parse_args(&argv, true) else {
+            panic!("expected a run over operands");
+        };
+        assert_eq!(files, argv);
+        let Ok(Request::Run(_, Source::Operands(files))) = super::parse_args(&argv, false) else {
+            panic!("expected a run over operands");
+        };
+        assert_eq!(files, argv[..1]);
+    }
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()

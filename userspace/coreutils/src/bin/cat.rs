@@ -150,7 +150,7 @@ fn main() -> ExitCode {
 fn run_main() -> ExitCode {
     stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
-    let request = match parse_args(&args) {
+    let request = match parse_args(&args, getopt::posixly_correct()) {
         Ok(r) => r,
         Err(e) => {
             // The referral is part of the message, and only the first line
@@ -495,7 +495,11 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
 /// any unambiguous prefix the way every GNU utility's do — `cat --squeeze` and
 /// `cat --show-a` work, and `cat --num` is refused as ambiguous rather than
 /// silently taken for `--number`.
-fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+///
+/// `posixly_correct` is [`getopt::posixly_correct`], passed in so that a test
+/// can choose it. When it is set, the first operand ends option parsing, as it
+/// does in glibc's getopt -- see "Where option parsing stops" in that module.
+fn parse_args(args: &[OsString], posixly_correct: bool) -> Result<Request, getopt::Error> {
     let mut options = Options::default();
     let mut files: Vec<OsString> = Vec::new();
     let mut only_operands = false;
@@ -512,6 +516,8 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
         } else if bytes == b"-" || bytes.first() != Some(&b'-') {
             // A lone `-` is standard input, which is an operand, not an option.
             files.push(arg.clone());
+            // Under POSIXLY_CORRECT, glibc's getopt stops at the first operand.
+            only_operands = posixly_correct;
         } else if let Some(body) = bytes.strip_prefix(b"--") {
             // `--name=value`: split before resolving, so the name is what gets
             // matched and the whole argument is what gets echoed back when it
@@ -615,6 +621,28 @@ fn arg_bytes(a: &OsString) -> Vec<u8> {
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    /// `parse_args` with `POSIXLY_CORRECT` pinned off, so that a test putting an
+    /// option after an operand does not depend on the environment `cargo test`
+    /// inherited. The tests of the variable itself call `super::parse_args`.
+    fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+        super::parse_args(args, false)
+    }
+
+    /// Measured against GNU on 2026-09-25: `POSIXLY_CORRECT=1 cat f -n` takes
+    /// `-n` for a second file, where without the variable it is an option.
+    #[test]
+    fn posixly_correct_makes_an_option_after_an_operand_an_operand() {
+        let argv: Vec<OsString> = ["f", "-n"].iter().map(OsString::from).collect();
+        let Ok(Request::Run(_, files)) = super::parse_args(&argv, true) else {
+            panic!("expected a run");
+        };
+        assert_eq!(files, argv);
+        let Ok(Request::Run(_, files)) = super::parse_args(&argv, false) else {
+            panic!("expected a run");
+        };
+        assert_eq!(files, argv[..1]);
+    }
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()

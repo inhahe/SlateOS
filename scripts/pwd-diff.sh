@@ -290,6 +290,9 @@ ENVV="POSIXLY_CORRECT=1"; SETUP="cd \"$DIFF_TMP/link\""; run_case -L
 ENVV="POSIXLY_CORRECT="; SETUP="cd \"$DIFF_TMP/link\""; run_case
 # Set, but with a `$PWD` that is not usable: back to physical.
 ENVV="POSIXLY_CORRECT=1 PWD=$DIFF_TMP/other"; SETUP="cd \"$DIFF_TMP/link\""; run_case
+# Its other effect, getopt's: the first operand ends option parsing, so the
+# `-P` after `foo` is one more ignored operand and the answer stays logical.
+ENVV="POSIXLY_CORRECT=1"; SETUP="cd \"$DIFF_TMP/link\""; run_case foo -P
 
 # --- operands ----------------------------------------------------------------
 # Warned about once, on stderr, and then ignored; the status is still 0.

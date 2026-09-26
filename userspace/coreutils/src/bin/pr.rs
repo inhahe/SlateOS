@@ -59,15 +59,15 @@ coreutils::guard_std_fds!();
 
 const PR: Program = Program::new("pr", 1);
 
-/// Upstream's `short_options`, less its leading `-`.
+/// Upstream's `short_options`, verbatim.
 ///
-/// That `-` is glibc's return-in-order mode: every operand comes back through
-/// the option loop in argv order, which is how a `+FIRST_PAGE` operand is seen
-/// at all, and `POSIXLY_CORRECT` is ignored. [`Program::parse`] already yields
-/// operands in order and never consults `POSIXLY_CORRECT`, so the mode is what
-/// it does anyway; [`getopt::Parser::stopped`] supplies the one part of it an
-/// iterator cannot carry.
-const SHORT_OPTIONS: &str = "0123456789D:FJN:S::TW:abcde::fh:i::l:mn::o:rs::tvw:";
+/// The leading `-` is glibc's return-in-order mode: every operand comes back
+/// through the option loop in argv order, which is how a `+FIRST_PAGE` operand
+/// is seen at all, and `POSIXLY_CORRECT` is never consulted -- measured,
+/// `POSIXLY_CORRECT=1 pr f -t` still applies the `-t`. [`Program::parse`] reads
+/// the prefix the way glibc does; [`getopt::Parser::stopped`] supplies the one
+/// part of the mode an iterator cannot carry.
+const SHORT_OPTIONS: &str = "-0123456789D:FJN:S::TW:abcde::fh:i::l:mn::o:rs::tvw:";
 
 /// Upstream's `long_options`, in its order.
 const LONG_OPTIONS: &[(&str, Takes)] = &[

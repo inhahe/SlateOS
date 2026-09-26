@@ -51,6 +51,12 @@ DIFF_GNU_SOURCE=9.4
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
+# Variables the program under test runs with, on both sides, and nothing else
+# does. `POSIXLY_CORRECT` changes where option parsing stops, and exported it
+# would reach this harness's own `od`, `sort` and `diff` as well. Empty unless
+# a case block sets it.
+ENVV=()
+
 pass=0; fail=0; xfail=0; xpass=0
 
 fixtures=$DIFF_TMP/fixtures
@@ -84,9 +90,9 @@ printf 'q:r\n'                                  > w1.txt
 run_side() {
   local side=$1 stdin=$2 out=$3 err=$4; shift 4
   if [ "$stdin" = "-" ]; then
-    env PATH="$bindir/$side" cut "$@" </dev/null >"$out" 2>"$err"
+    env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" cut "$@" </dev/null >"$out" 2>"$err"
   else
-    printf '%b' "$stdin" | env PATH="$bindir/$side" cut "$@" >"$out" 2>"$err"
+    printf '%b' "$stdin" | env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" cut "$@" >"$out" 2>"$err"
   fi
 }
 
@@ -131,7 +137,7 @@ report() {
   return 0
 }
 
-run_case()  { compare - "$@"; report "cut $*"; }
+run_case()  { compare - "$@"; report "${ENVV[*]:+${ENVV[*]} }cut $*"; }
 run_stdin() {
   local input="$1"; shift
   compare "$input" "$@"
@@ -488,6 +494,22 @@ xfail_case version-names-slateos-coreutils-not-gnu-coreutils --v
 selfsame --he --help
 selfsame --v --version
 selfsame --hel --help
+
+# --- POSIXLY_CORRECT -----------------------------------------------------------
+# glibc's getopt ends option parsing at the first operand while it is set -- to
+# anything, the empty string included -- so an option after an operand is an
+# operand, and so is a `--` after one, there being no options left for it to
+# end. Measured against GNU on 2026-09-25; `coreutils::getopt`'s module docs,
+# "Where option parsing stops".
+printf 'b\na\n' > posix.txt
+ENVV=(POSIXLY_CORRECT=1)
+run_case -c1 posix.txt -z
+run_case -c1 -z posix.txt
+run_case -c1 posix.txt -- -z
+ENVV=(POSIXLY_CORRECT=)
+run_case -c1 posix.txt -z
+ENVV=()
+run_case -c1 posix.txt -z
 
 # --- summary ------------------------------------------------------------------
 printf '\n%d passed, %d differed' "$pass" "$fail"

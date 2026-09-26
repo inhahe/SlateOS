@@ -166502,7 +166502,7 @@ JPEG decoder with the file's `JPEGTables`; then the rare codecs. Fixtures from
 the same libtiff oracle.
 
 ### [E] Document applications closed over unsaved work, and the hex editor and the JSON viewer could not save at all -- 2026-09-25
-**Status:** FIXED for the text editor, the markdown editor, the hex editor, the JSON viewer, slides and sticky notes (lane E, 2026-09-25); OPEN for four more that save to a file and keep no record of unsaved changes at all -- `paint`, `whiteboard`, `diagram`, `spreadsheet` -- lane E's next, see the end of this entry.
+**Status:** FIXED for the text editor, the markdown editor, the hex editor, the JSON viewer, slides and sticky notes (lane E, 2026-09-25), and paint (2026-09-25); OPEN for `whiteboard`, `diagram` and `spreadsheet`, which cannot yet save a document they can open again -- lane E's next, see the end of this entry.
 
 **In short:** closing the window of an editor threw away every unsaved change
 without a word -- the window library closed a window on any close request,
@@ -166576,20 +166576,34 @@ toolbar -- asking again quits, so a disk that stays broken cannot make the
 window impossible to close. Mutation tables: `apps/slides/mutate.py` (eleven
 rows new or rewritten), `apps/stickynotes/mutate.py` (new, 5 rows).
 
-**Still open: four document applications with nothing to ask about.**
-`paint`, `whiteboard`, `diagram` and `spreadsheet` each open and save a file
-through the picker and answer a close with `Exit` -- and none records whether
-anything has changed since the last save, so none could ask even if it tried.
-Each needs that record first (set by every change, cleared by a save or an
-open), then the question. Four more that looked like the same case are a worse
-one -- see `[E] Notes, contacts, snippets and kanban keep nothing` below.
+**Paint, the same day.** Nothing recorded whether the picture had changed,
+so nothing could ask: the window closed over it, and Ctrl+N and Ctrl+O
+replaced it, without a word. It keeps that record now (every edit goes through
+`push_history`, which sets it; so do undo and redo, and the layer operations,
+which do not go through history), marks the window bar with `*`, and asks --
+on `apps/unsaved`, the first program to -- before a close, a New or an Open.
+Ctrl+S writes over the picture's own file once it has one (it asked where
+every time), Ctrl+Shift+S asks, and the picker starts beside the file. And
+what an open or a save did is drawn in the status bar: it was recorded and
+drawn nowhere, so a save that failed looked like one that worked. Mutation
+table `apps/paint/mutate.py` (new, 13 rows).
+
+**Still open: three document applications that cannot save a document.**
+`whiteboard` writes the current page as SVG and cannot read one back, so a
+board's other pages can never be kept and nothing it saved can be reopened;
+`diagram` writes SVG or JSON and has "an importer that does not exist yet";
+`spreadsheet` reads and writes the active sheet as CSV, so the other sheets are
+never saved. None records unsaved changes, and each answers a close with
+`Exit`. Each wants a format it can write and read back whole, then the record
+and the question. Four more that looked like the same case are a worse one --
+see `[E] Notes, contacts, snippets and kanban keep nothing` below.
 
 **One question, not thirteen.** The six applications fixed so far each drew
 the question by hand, beside the toolkit's own `guitk::modal::AlertDialog`,
 which has focus, hover, Escape, a scrim and the destructive colour for the one
 button that loses work. `apps/unsaved` (new, lane E) is that dialog asked the
 one way -- Save, Don't save, Cancel; S, D, Escape -- and the six move onto it as
-the four get theirs.
+the three get theirs.
 
 ### [E] Notes, contacts, snippets and kanban keep nothing -- 2026-09-25
 **Status:** OPEN -- lane E

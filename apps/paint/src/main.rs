@@ -32,8 +32,9 @@ use guitk::rng::{RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use unsaved::{Choice, Question};
 
 use std::collections::VecDeque;
 
@@ -1556,7 +1557,9 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+C", "Copy selection"),
     ("Ctrl+V", "Paste"),
     ("Ctrl+X", "Cut selection"),
-    ("Ctrl+S", "Save as BMP"),
+    // One row for both: the card is full, and a fortieth row pushed the last
+    // one off the bottom of the window.
+    ("Ctrl+S / Ctrl+Shift+S", "Save / save as a new file (BMP)"),
     ("Ctrl+O", "Open BMP"),
     ("Ctrl+N", "New canvas"),
     ("Ctrl++", "Zoom in"),
@@ -1592,13 +1595,53 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("F1", "This list"),
 ];
 
+/// What the file picker is up for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerFor {
+    /// A picture to open in place of this one.
+    Open,
+    /// Where to save this picture, which then belongs to that file.
+    Save,
+    /// Where to save a picture that has no file yet, before what the
+    /// unsaved-changes question held up goes on.
+    SaveThen(Pending),
+}
+
+/// What the unsaved-changes question is holding up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pending {
+    /// A new, blank canvas in place of this picture.
+    New,
+    /// Opening another picture in its place.
+    Open,
+    /// Closing the window.
+    Close,
+}
+
 pub struct PaintApp {
     /// Whether the shortcut card is up.
     pub show_help: bool,
     /// The open/save dialog, when one is up.
     pub picker: guitk::dialog::FilePicker,
+    /// What the open/save dialog is up for.
+    pub picker_for: PickerFor,
     /// What the last open or save did, drawn in the status bar.
     pub file_status: Option<String>,
+    /// The file this picture was opened from or last saved to: where Ctrl+S
+    /// writes without asking. `None` for a picture never saved.
+    pub document_path: Option<PathBuf>,
+    /// Whether the picture has changed since it was opened, saved or begun.
+    ///
+    /// There was no such record, so nothing could ask before a close, an
+    /// Open or a New threw the picture away -- and closing did, every time.
+    /// Set wherever the picture changes: [`push_history`](Self::push_history),
+    /// which every edit calls before it edits, and undo and redo.
+    pub dirty: bool,
+    /// "Unsaved changes -- save them?", while it is asked, and what it holds
+    /// up.
+    question: Option<Question<Pending>>,
+    /// Set once the window may close; the next answer to the loop is `Exit`.
+    pub quit: bool,
     /// Window width.
     pub window_width: f32,
     /// Window height.
@@ -1666,8 +1709,6 @@ pub struct PaintApp {
     /// Seeded rather than drawn from the kernel: nothing here is a secret, and
     /// a fixed start makes the tests reproducible.
     pub spray_rng: SeededRng,
-    /// Whether the app should quit.
-    pub should_quit: bool,
     /// Rounded rectangle corner radius.
     pub rounded_rect_radius: i32,
     /// Text tool font size.
@@ -1698,6 +1739,11 @@ impl PaintApp {
             show_help: false,
             picker: guitk::dialog::FilePicker::new(),
             file_status: None,
+            picker_for: PickerFor::Open,
+            document_path: None,
+            dirty: false,
+            question: None,
+            quit: false,
             theme: Palette::from_settings(&appearance::AppearanceSettings::default()),
             window_width,
             window_height,
@@ -1731,7 +1777,6 @@ impl PaintApp {
             mouse_down: false,
             moving_selection: false,
             spray_rng: SeededRng::new(0x5350_5241_5920_4341),
-            should_quit: false,
             rounded_rect_radius: 12,
             text_font_size: 16.0,
         }
@@ -1783,6 +1828,19 @@ impl PaintApp {
     /// Returns whether anything changed, which is what `App::on_event` turns
     /// into a repaint.
     pub fn handle_event(&mut self, event: &Event) -> bool {
+        // The unsaved-changes question has every key and click while it is
+        // up: a stroke landing on the picture under it would be a change made
+        // while being asked about the changes.
+        if let Some(question) = self.question.as_mut()
+            && matches!(event, Event::Key(_) | Event::Mouse(_))
+        {
+            if let Some(choice) = question.handle(event) {
+                let pending = question.pending();
+                self.question = None;
+                self.answer(pending, choice);
+            }
+            return true;
+        }
         // The file dialog is modal, so it gets first refusal on everything
         // while it is up -- see `picker_took`.
         if self.picker.is_open() && self.picker_took(event) {
@@ -1854,26 +1912,12 @@ impl PaintApp {
     /// typing a filename would also be typing tool shortcuts into the canvas
     /// behind it, and `b` in `blue.bmp` would swap to the pencil.
     fn picker_took(&mut self, event: &Event) -> bool {
-        // Read before `handle`: choosing a path takes the dialog down, so a
-        // flag read afterwards would be answering about a picker that is no
-        // longer up.
-        let saving = self.picker.is_saving();
         match self
             .picker
             .handle(event, self.window_width, self.window_height)
         {
             guitk::dialog::Picked::Chose(path) => {
-                self.file_status = Some(if saving {
-                    match self.save_bmp(&path) {
-                        Ok(()) => format!("Saved {}", path.display()),
-                        Err(e) => e,
-                    }
-                } else {
-                    match self.load_bmp(&path) {
-                        Ok(()) => format!("Opened {}", path.display()),
-                        Err(e) => e,
-                    }
-                });
+                self.picked(&path);
                 true
             }
             guitk::dialog::Picked::Handled | guitk::dialog::Picked::Cancelled => true,
@@ -2083,7 +2127,13 @@ impl PaintApp {
     // ========================================================================
 
     /// Adds a new transparent layer above the active layer.
+    ///
+    /// The layer operations do not go through `push_history` -- they cannot
+    /// be undone, a fault of their own -- so each marks the picture changed
+    /// itself. None is reachable from the window yet (the layers panel takes
+    /// no clicks); the marks are here so they are right when it does.
     pub fn add_layer(&mut self) {
+        self.dirty = true;
         let idx = self.layers.len();
         let name = format!("Layer {}", idx.saturating_add(1));
         self.layers
@@ -2105,6 +2155,7 @@ impl PaintApp {
         }
         self.layers.remove(self.active_layer);
         self.active_layer = self.active_layer.min(self.layers.len().saturating_sub(1));
+        self.dirty = true;
         true
     }
 
@@ -2114,6 +2165,7 @@ impl PaintApp {
         if above < self.layers.len() {
             self.layers.swap(self.active_layer, above);
             self.active_layer = above;
+            self.dirty = true;
             true
         } else {
             false
@@ -2130,6 +2182,7 @@ impl PaintApp {
         };
         self.layers.swap(self.active_layer, below);
         self.active_layer = below;
+        self.dirty = true;
         true
     }
 
@@ -2166,6 +2219,7 @@ impl PaintApp {
 
         self.layers.remove(self.active_layer);
         self.active_layer = below;
+        self.dirty = true;
         true
     }
 
@@ -2211,6 +2265,9 @@ impl PaintApp {
     // ========================================================================
 
     /// Takes a snapshot of the current state and pushes it to history.
+    ///
+    /// Every edit calls this before it edits, which is what makes it the
+    /// place the picture is marked as changed.
     pub fn push_history(&mut self, description: &str) {
         let snapshot = HistorySnapshot {
             layers: self.layers.clone(),
@@ -2218,9 +2275,13 @@ impl PaintApp {
             description: description.to_string(),
         };
         self.history.push(snapshot);
+        self.dirty = true;
     }
 
     /// Undoes the last action. Returns true if undo was performed.
+    ///
+    /// An undo is a change like any other: undoing past a save leaves a
+    /// picture the file does not hold.
     pub fn undo(&mut self) -> bool {
         let current = HistorySnapshot {
             layers: self.layers.clone(),
@@ -2230,6 +2291,7 @@ impl PaintApp {
         if let Some(prev) = self.history.undo(current) {
             self.layers = prev.layers;
             self.active_layer = prev.active_layer;
+            self.dirty = true;
             true
         } else {
             false
@@ -2246,6 +2308,7 @@ impl PaintApp {
         if let Some(next) = self.history.redo(current) {
             self.layers = next.layers;
             self.active_layer = next.active_layer;
+            self.dirty = true;
             true
         } else {
             false
@@ -2464,6 +2527,158 @@ impl PaintApp {
         self.active_layer = 0;
 
         Ok(())
+    }
+
+    // ========================================================================
+    // The picture's file, and asking before it is lost
+    // ========================================================================
+
+    /// The picture's name: its file's, or "Untitled".
+    pub fn document_name(&self) -> String {
+        self.document_path
+            .as_deref()
+            .and_then(Path::file_name)
+            .map_or_else(
+                || String::from("Untitled"),
+                // The window bar's label only; the real name is the path.
+                |n| n.to_string_lossy().into_owned(),
+            )
+    }
+
+    /// Open `path` in place of this picture. What to say about it.
+    fn open_file(&mut self, path: &Path) -> String {
+        match self.load_bmp(path) {
+            Ok(()) => {
+                self.document_path = Some(path.to_path_buf());
+                // The picture is the file's, as it is on disk.
+                self.dirty = false;
+                format!("Opened {}", path.display())
+            }
+            Err(e) => e,
+        }
+    }
+
+    /// Save to `path`, which becomes this picture's file. What to say.
+    fn save_file(&mut self, path: &Path) -> String {
+        match self.save_bmp(path) {
+            Ok(()) => {
+                self.document_path = Some(path.to_path_buf());
+                self.dirty = false;
+                format!("Saved {}", path.display())
+            }
+            Err(e) => e,
+        }
+    }
+
+    /// Ctrl+S: over the picture's own file, or ask where when it has none.
+    ///
+    /// It asked every time, offering `untitled.bmp` in the home directory,
+    /// so saving a picture twice meant finding it and confirming the
+    /// overwrite twice.
+    pub fn save(&mut self) {
+        match self.document_path.clone() {
+            Some(path) => self.file_status = Some(self.save_file(&path)),
+            None => self.ask_where_to_save(PickerFor::Save),
+        }
+    }
+
+    /// Put the save picker up, for `purpose`, beside the picture's own file
+    /// when it has one.
+    fn ask_where_to_save(&mut self, purpose: PickerFor) {
+        let start = self
+            .document_path
+            .as_deref()
+            .and_then(Path::parent)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map_or_else(guitk::dialog::FilePicker::default_start, Path::to_path_buf);
+        let name = self
+            .document_path
+            .as_deref()
+            .and_then(Path::file_name)
+            .map_or_else(
+                || std::ffi::OsString::from("untitled.bmp"),
+                std::ffi::OsString::from,
+            );
+        self.picker_for = purpose;
+        self.picker.put_up(
+            guitk::dialog::FileDialog::save()
+                .with_initial_path(start)
+                .with_filename(name),
+            true,
+        );
+    }
+
+    /// The picker chose `path`: do what it was put up for.
+    fn picked(&mut self, path: &Path) {
+        let said = match self.picker_for {
+            PickerFor::Open => self.open_file(path),
+            PickerFor::Save => self.save_file(path),
+            PickerFor::SaveThen(pending) => {
+                let said = self.save_file(path);
+                if !self.dirty {
+                    self.go_on(pending);
+                }
+                said
+            }
+        };
+        self.file_status = Some(said);
+    }
+
+    /// Before something replaces or closes the picture: ask about unsaved
+    /// changes, or with none go straight on.
+    pub fn unless_unsaved(&mut self, pending: Pending) {
+        if !self.dirty {
+            self.go_on(pending);
+            return;
+        }
+        let prompt = match pending {
+            Pending::New => "Save it before starting a new picture?",
+            Pending::Open => "Save it before opening another?",
+            Pending::Close => "Save it before closing?",
+        };
+        let name = self.document_name();
+        self.question = Some(Question::new(
+            &unsaved::message_for(&[&name]),
+            prompt,
+            pending,
+        ));
+    }
+
+    /// Do what the unsaved-changes question held up.
+    fn go_on(&mut self, pending: Pending) {
+        match pending {
+            Pending::New => {
+                self.new_canvas(DEFAULT_CANVAS_WIDTH, DEFAULT_CANVAS_HEIGHT);
+                self.document_path = None;
+                // A blank canvas is nothing to lose. The picture it replaced
+                // is still one undo away, and undoing marks it again.
+                self.dirty = false;
+            }
+            Pending::Open => {
+                self.picker_for = PickerFor::Open;
+                self.picker.open_to_read();
+            }
+            Pending::Close => self.quit = true,
+        }
+    }
+
+    /// Answer the unsaved-changes question put before `pending`. Save goes
+    /// on only if the save worked: a picture that could not be written is
+    /// still the only copy.
+    fn answer(&mut self, pending: Pending, choice: Choice) {
+        match choice {
+            Choice::Cancel => {}
+            Choice::Discard => self.go_on(pending),
+            Choice::Save => match self.document_path.clone() {
+                Some(path) => {
+                    self.file_status = Some(self.save_file(&path));
+                    if !self.dirty {
+                        self.go_on(pending);
+                    }
+                }
+                None => self.ask_where_to_save(PickerFor::SaveThen(pending)),
+            },
+        }
     }
 
     // ========================================================================
@@ -3970,6 +4185,32 @@ impl PaintApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
+        sx += 110.0;
+
+        // What the last open or save did. It was recorded and drawn nowhere,
+        // so a save that failed -- a full disk, a folder with no write
+        // permission -- failed in silence, and the picture looked saved.
+        if let Some(status) = &self.file_status {
+            cmds.push(RenderCommand::Line {
+                x1: sx,
+                y1: sy + 3.0,
+                x2: sx,
+                y2: sy + STATUS_BAR_HEIGHT - 3.0,
+                color: self.theme.surface0,
+                width: 1.0,
+            });
+            sx += 8.0;
+            cmds.push(RenderCommand::Text {
+                x: sx,
+                y: sy + 5.0,
+                text: status.clone(),
+                font_size: 11.0,
+                color: self.theme.text,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((self.window_width - sx - 8.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
     }
 
     /// Renders the color picker dialog (RGB sliders + hex input).
@@ -4245,7 +4486,8 @@ impl PaintApp {
                     return true;
                 }
                 'n' | 'N' => {
-                    self.new_canvas(DEFAULT_CANVAS_WIDTH, DEFAULT_CANVAS_HEIGHT);
+                    // It replaced the picture without a word.
+                    self.unless_unsaved(Pending::New);
                     return true;
                 }
                 '+' | '=' => {
@@ -4261,11 +4503,15 @@ impl PaintApp {
                     return true;
                 }
                 's' | 'S' => {
-                    self.picker.open_to_write("untitled.bmp");
+                    if shift {
+                        self.ask_where_to_save(PickerFor::Save);
+                    } else {
+                        self.save();
+                    }
                     return true;
                 }
                 'o' | 'O' => {
-                    self.picker.open_to_read();
+                    self.unless_unsaved(Pending::Open);
                     return true;
                 }
                 'f' | 'F' => {
@@ -4489,8 +4735,13 @@ impl App for PaintApp {
         self.theme = *palette;
     }
 
+    /// The picture's name, marked `*` while it has changes not saved.
     fn title(&self) -> String {
-        "Paint".to_string()
+        format!(
+            "{}{} — Paint",
+            if self.dirty { "*" } else { "" },
+            self.document_name()
+        )
     }
 
     fn initial_size(&self) -> (u32, u32) {
@@ -4498,11 +4749,25 @@ impl App for PaintApp {
         (self.window_width as u32, self.window_height as u32)
     }
 
+    /// Closing over unsaved changes asks first, and the window waits for the
+    /// answer: `KeepOpen` declines the close and draws the question.
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
+            if !self.dirty {
+                return Response::Exit;
+            }
+            // The question replaces whatever is up: a picker would take the
+            // keys it needs, and the card would be drawn over it.
+            self.picker.close();
+            self.show_help = false;
+            self.unless_unsaved(Pending::Close);
+            return Response::KeepOpen;
+        }
+        let changed = self.handle_event(event);
+        if self.quit {
             return Response::Exit;
         }
-        if self.handle_event(event) {
+        if changed {
             Response::Redraw
         } else {
             Response::Idle
@@ -4519,6 +4784,10 @@ impl App for PaintApp {
         self.window_height = height;
         let mut tree = RenderTree::new();
         tree.commands = self.render_commands();
+        // Over everything, the picker included: they are never up together.
+        if let Some(question) = self.question.as_mut() {
+            question.render(&self.theme, width, height, &mut tree);
+        }
         tree
     }
 
@@ -4553,6 +4822,221 @@ mod tests {
     )]
 
     use super::*;
+
+    // ---- The picture's file, and asking before it is lost ----
+
+    fn key(key: Key, ctrl: bool, shift: bool) -> Event {
+        let mut modifiers = guitk::event::Modifiers::NONE;
+        modifiers.ctrl = ctrl;
+        modifiers.shift = shift;
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    /// The picker chose `path`, as it does in a window: it takes itself down,
+    /// then the choice is acted on.
+    fn choose(app: &mut PaintApp, path: &Path) {
+        assert!(app.picker.is_open(), "nothing was asking for a file");
+        app.picker.close();
+        app.picked(path);
+    }
+
+    fn drawn_text(app: &mut PaintApp) -> String {
+        let (w, h) = (app.window_width, app.window_height);
+        app.render(w, h)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// A pencil dot at (`x`, `y`): a change that shows in the saved bytes,
+    /// which flipping a blank canvas would not.
+    fn dot(app: &mut PaintApp, x: i32, y: i32) {
+        app.on_canvas_press(x, y);
+        app.on_canvas_release(x, y);
+    }
+
+    /// A picture saved to `path` and then changed again.
+    fn changed_since_saving(path: &Path) -> PaintApp {
+        let mut app = PaintApp::new(800.0, 600.0);
+        dot(&mut app, 5, 5);
+        assert!(app.save_file(path).starts_with("Saved"));
+        dot(&mut app, 20, 20);
+        assert!(app.dirty, "control: the second change is unsaved");
+        app
+    }
+
+    /// An edit marks the picture, a save clears the mark, and Ctrl+S writes
+    /// over the picture's own file once it has one. It asked where every
+    /// time, and nothing recorded whether the picture had changed at all.
+    #[test]
+    fn an_edit_marks_the_picture_and_a_save_clears_it() {
+        let scratch = scratchdir::ScratchDir::new("slate_paint_dirty");
+        let path = scratch.path("drawing.bmp");
+        let mut app = PaintApp::new(800.0, 600.0);
+        assert!(!app.dirty);
+        assert_eq!(app.title(), "Untitled — Paint");
+
+        dot(&mut app, 5, 5);
+        assert!(app.dirty, "a stroke did not mark the picture");
+        assert!(app.title().starts_with('*'), "{}", app.title());
+
+        app.on_event(&key(Key::S, true, false));
+        assert!(app.picker.is_saving(), "no file yet, so it asks where");
+        choose(&mut app, &path);
+        assert!(!app.dirty);
+        assert_eq!(app.document_path.as_deref(), Some(path.as_path()));
+        assert_eq!(app.title(), "drawing.bmp — Paint");
+
+        dot(&mut app, 30, 30);
+        let before = std::fs::read(&path).expect("the first save");
+        app.on_event(&key(Key::S, true, false));
+        assert!(!app.picker.is_open(), "a picture with a file asked again");
+        assert!(!app.dirty);
+        assert_ne!(std::fs::read(&path).expect("the second save"), before);
+
+        assert!(app.undo());
+        assert!(app.dirty, "an undo past a save is a change");
+
+        app.on_event(&key(Key::S, true, true));
+        assert!(app.picker.is_saving(), "Ctrl+Shift+S always asks");
+    }
+
+    /// **Closing over unsaved changes asks, and each answer is kept.** The
+    /// window closed on any close request, and the picture with it.
+    #[test]
+    fn closing_over_unsaved_changes_asks_and_each_answer_is_kept() {
+        let scratch = scratchdir::ScratchDir::new("slate_paint_close");
+        let path = scratch.path("drawing.bmp");
+        let mut clean = PaintApp::new(800.0, 600.0);
+        assert_eq!(clean.on_event(&Event::CloseRequested), Response::Exit);
+
+        let mut app = changed_since_saving(&path);
+        let on_disk = std::fs::read(&path).expect("saved");
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert!(
+            drawn_text(&mut app).contains("drawing.bmp has changes that are not saved."),
+            "the question is not drawn"
+        );
+
+        // A tool key goes to the question, not the canvas.
+        let tool = app.current_tool;
+        app.on_event(&key(Key::E, false, false));
+        assert_eq!(
+            app.current_tool, tool,
+            "a key reached the picture under the question"
+        );
+
+        // Cancel: the window stays, and so do the changes.
+        assert_eq!(
+            app.on_event(&key(Key::Escape, false, false)),
+            Response::Redraw
+        );
+        assert!(app.dirty);
+        assert_eq!(std::fs::read(&path).expect("unchanged"), on_disk);
+
+        // Save: the file is written, and the window goes.
+        app.on_event(&Event::CloseRequested);
+        assert_eq!(app.on_event(&key(Key::S, false, false)), Response::Exit);
+        assert_ne!(std::fs::read(&path).expect("saved again"), on_disk);
+
+        // Don't save, clicked: the window goes and the file stays as it was.
+        let other = scratch.path("other.bmp");
+        let mut app = changed_since_saving(&other);
+        let kept = std::fs::read(&other).expect("saved");
+        app.on_event(&Event::CloseRequested);
+        drawn_text(&mut app);
+        let (x, y) = app
+            .question
+            .as_ref()
+            .and_then(|q| q.button_centre(Choice::Discard))
+            .expect("the question is drawn");
+        let click = Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        assert_eq!(app.on_event(&click), Response::Exit);
+        assert_eq!(std::fs::read(&other).expect("untouched"), kept);
+    }
+
+    /// A picture with no file is saved where the picker says, and then the
+    /// window goes.
+    #[test]
+    fn an_untitled_picture_is_saved_where_the_picker_says_before_closing() {
+        let scratch = scratchdir::ScratchDir::new("slate_paint_untitled");
+        let mut app = PaintApp::new(800.0, 600.0);
+        app.flip_horizontal();
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert_eq!(
+            app.on_event(&key(Key::S, false, false)),
+            Response::Redraw,
+            "no file yet: the window waits while it asks where"
+        );
+        assert_eq!(app.picker_for, PickerFor::SaveThen(Pending::Close));
+        choose(&mut app, &scratch.path("new.bmp"));
+        assert!(app.quit, "saved, so the window may go");
+        assert!(scratch.path("new.bmp").exists());
+    }
+
+    /// New and Open replaced the picture without a word; now each asks first
+    /// when there is something to lose.
+    #[test]
+    fn new_and_open_ask_before_replacing_the_picture() {
+        let mut app = PaintApp::new(800.0, 600.0);
+        app.flip_horizontal();
+        let before = app.layers.len();
+        app.add_layer();
+        assert_eq!(app.layers.len(), before + 1);
+
+        app.on_event(&key(Key::N, true, false));
+        assert!(app.question.is_some(), "Ctrl+N did not ask");
+        app.on_event(&key(Key::Escape, false, false));
+        assert_eq!(app.layers.len(), before + 1, "Cancel replaced the picture");
+
+        app.on_event(&key(Key::N, true, false));
+        app.on_event(&key(Key::D, false, false));
+        assert_eq!(app.layers.len(), 1, "Don't save did not start a new canvas");
+        assert!(!app.dirty, "a blank canvas has nothing to lose");
+
+        // With nothing to lose, no question.
+        app.on_event(&key(Key::O, true, false));
+        assert!(app.question.is_none());
+        assert!(app.picker.is_open() && !app.picker.is_saving());
+        app.picker.close();
+
+        app.flip_vertical();
+        app.on_event(&key(Key::O, true, false));
+        assert!(!app.picker.is_open(), "Ctrl+O opened over unsaved changes");
+        app.on_event(&key(Key::D, false, false));
+        assert!(app.picker.is_open() && !app.picker.is_saving());
+    }
+
+    /// What a save did is on the screen. It was recorded and drawn nowhere,
+    /// so a save that failed looked like one that worked.
+    #[test]
+    fn the_status_bar_says_what_the_last_save_did() {
+        let scratch = scratchdir::ScratchDir::new("slate_paint_status");
+        let mut app = PaintApp::new(800.0, 600.0);
+        app.flip_horizontal();
+        app.on_event(&key(Key::S, true, false));
+        choose(&mut app, &scratch.path("missing").join("drawing.bmp"));
+        assert!(app.dirty, "a failed save is not a save");
+        assert!(
+            drawn_text(&mut app).contains("Failed to save BMP"),
+            "the failure is not shown: {:?}",
+            app.file_status
+        );
+    }
 
     // ---- Save routing ----
 

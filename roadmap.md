@@ -1895,18 +1895,20 @@ word; text inside them that says "lane C" is history.
   (b82f06a11) lets a window decline a close; every application answered
   `Exit` without looking. **Done:** `markdowneditor`, `editor`, `hexeditor`
   (which could not save at all), `jsonviewer` (likewise), `slides`,
-  `stickynotes` (Ctrl+Q did not save; a failed save on close lost the notes).
-  **To do:** `paint`, `whiteboard`, `diagram`, `spreadsheet` — each opens
-  and saves a file through the picker, keeps no record of unsaved changes,
-  and answers a close with `Exit`; each needs the record first (set by every
-  change, cleared by a save or an open), then the question. And `notes`,
+  `stickynotes` (Ctrl+Q did not save; a failed save on close lost the notes),
+  `paint` (no record of changes at all; Ctrl+N and Ctrl+O replaced the
+  picture unasked; a failed save was drawn nowhere).
+  **To do:** `whiteboard`, `diagram`, `spreadsheet` — each can write
+  something (an SVG of one page, an SVG or a JSON nothing reads, the active
+  sheet as CSV) and none can save a document it can open again; each wants
+  that format first, then the record of changes and the question. And `notes`,
   `contacts`, `snippets`, `kanban`, which are worse: they keep nothing at all
   between runs (`known-issues.md` → `[E] Notes, contacts, snippets and
   kanban keep nothing`) and want a store kept as it changes, not a question. **One
   question, not thirteen:** the six written so far are hand-drawn copies of
   the toolkit's `guitk::modal::AlertDialog`, which already has focus, hover,
   Escape and a destructive colour for "Don't save"; `apps/unsaved` asks it
-  the one way, and the six move onto it as the four get theirs.
+  the one way, and the six move onto it as the three get theirs.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane

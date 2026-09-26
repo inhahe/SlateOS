@@ -14,6 +14,8 @@ oswindow = { path = "../../gui/window" }
 safeio = { path = "../safeio" }
 # `decode_bmp` reads its header fields at offsets the file itself supplies.
 byteread = { path = "../../byteread" }
+# "Unsaved changes -- save them?", asked the way every editor here asks it.
+unsaved = { path = "../unsaved" }
 
 # The same crate again with its `audit` counters on, so the tests can prove a
 # save really went through `safeio` and did not quietly regress to

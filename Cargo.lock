@@ -2007,6 +2007,10 @@ dependencies = [
  "guitk",
  "oswindow",
  "safeio",
+ "settingsfile",
+ "textfmt",
+ "tzrules",
+ "unsaved",
 ]
 
 [[package]]

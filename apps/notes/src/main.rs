@@ -16,6 +16,27 @@
 //! - Multi-panel UI: notebook sidebar, note list, editor/preview
 //! - Word count and reading time statistics
 //!
+//! # What is kept
+//!
+//! Everything: every notebook and note, with its tags, checklist, table and
+//! version history, in one file in the settings directory
+//! (`notes/library.txt`), written after every change -- there is no Save
+//! (design-decisions §1205). Until 2026-09-25 nothing was: the app held its
+//! notes in memory and forgot them when the window closed.
+//!
+//! The file is tab-separated text, a record a line (`library_text`,
+//! `parse_library`), and it is read whole or not at all: one that cannot be
+//! understood completely is left exactly as it is, nothing is written over
+//! it, and the window says so for as long as it is open -- a save after a
+//! partial read would write back only the part understood. A save that fails
+//! is said in the status bar and tried again with the next change, and a
+//! close while a save is failing asks first.
+//!
+//! When a note was made or changed is read from the clock, as milliseconds
+//! since 1970 and never earlier than a stamp already given (`stamp`): sorting
+//! by date depends on a later change having a later stamp, even when two land
+//! in the same millisecond or the clock is set back.
+//!
 //! # What the pointer reaches
 //!
 //! Until 2026-09-17 this application received no mouse event of any kind: it
@@ -64,9 +85,10 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use textfmt::tsv;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ============================================================================
 // Catppuccin Mocha theme constants
@@ -76,20 +98,33 @@ use std::collections::HashMap;
 // Layout constants
 // ============================================================================
 
-/// What the window says before anything has been written.
+/// What the editor says when there are no notes at all.
 ///
-/// The first line names the key, because until 2026-09-18 this app could not
-/// make a note at all and "No notes yet." was read as "you have not made one"
-/// -- which was not the reason. Now that it can, the empty state is where
-/// somebody is looking when they want to start, so it is where the key
-/// belongs.
+/// It names the key, because until 2026-09-18 this app could not make a note
+/// at all and "No notes yet." was read as "you have not made one" -- which was
+/// not the reason. The empty state is where somebody is looking when they
+/// want to start, so it is where the key belongs. Under it goes
+/// [`NotesApp::keeping_line`]: where what they write will be kept.
 ///
-/// The second line is the one that matters for a notes app and it is not
-/// about the fabrication: nothing here survives the window closing.
-const NOTHING_YET_LINES: [&str; 2] = [
-    "No notes yet -- Ctrl+N makes one.",
-    "Notebooks are not kept between runs, but Ctrl+S writes the selected note to a file.",
-];
+/// These lines were drawn at the top of the window until 2026-09-25, whether
+/// there were notes or not -- and before the window's background, which
+/// painted over them, so they were never seen.
+const NO_NOTES_YET: &str = "No notes yet -- Ctrl+N makes one.";
+
+/// The library file's first field, which says what the file is.
+const LIBRARY_MAGIC: &str = "slateos-notes";
+
+/// The version of the library file this writes, and the newest it reads.
+const LIBRARY_FORMAT: u32 = 1;
+
+/// The largest library this will read. One cut short would be read as a
+/// smaller library with no sign anything was missing, so a larger file is
+/// refused rather than read in part. A note keeps up to [`MAX_VERSIONS`] of
+/// its past texts, so a library is many times the size of what it shows.
+const MAX_LIBRARY_BYTES: usize = 256 * 1024 * 1024;
+
+/// Why nothing is kept, when the environment names no home directory.
+const NO_HOME: &str = "Nothing is kept: no home directory is set";
 
 /// What the status line says after a save, or after one fails.
 ///
@@ -395,7 +430,7 @@ impl TableData {
 // ============================================================================
 
 /// A snapshot of a note at a point in time.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NoteVersion {
     pub timestamp: u64,
     pub content: String,
@@ -407,7 +442,7 @@ pub struct NoteVersion {
 // ============================================================================
 
 /// A single note.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Note {
     pub id: NoteId,
     pub title: String,
@@ -451,7 +486,7 @@ impl Note {
             let snapshot = NoteVersion {
                 timestamp: self.modified_at,
                 content: self.content.clone(),
-                summary: format!("Edited at {}", self.modified_at),
+                summary: format!("Edited at {}", when(self.modified_at)),
             };
             self.versions.push(snapshot);
             if self.versions.len() > MAX_VERSIONS {
@@ -469,7 +504,7 @@ impl Note {
             let snapshot = NoteVersion {
                 timestamp: self.modified_at,
                 content: self.content.clone(),
-                summary: format!("Before restore at {timestamp}"),
+                summary: format!("Before restore at {}", when(timestamp)),
             };
             self.versions.push(snapshot);
             if self.versions.len() > MAX_VERSIONS {
@@ -1154,7 +1189,7 @@ fn render_spans_to_html(spans: &[MdSpan]) -> String {
 // ============================================================================
 
 /// A notebook that contains notes and can be nested.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Notebook {
     pub id: NotebookId,
     pub name: String,
@@ -1437,7 +1472,8 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Shift+N", "New notebook"),
     ("Ctrl+F", "Search the notes"),
     ("/", "Search, without the Ctrl"),
-    ("Ctrl+S", "Save to a file"),
+    ("Ctrl+S", "Save now -- everything is saved as you go"),
+    ("Ctrl+E", "Export the selected note as Markdown"),
     ("S", "Change the sort order"),
     ("P", "Pin the selected note"),
     ("V", "Mark the selected note a favourite"),
@@ -1466,7 +1502,7 @@ pub struct NotesApp {
     /// The open or save picker. Holds the dialog, the saving flag and
     /// the routing eleven applications used to write out by hand.
     pub picker: FilePicker,
-    /// What the last save attempt did, for the status line.
+    /// What the last export, or Ctrl+S, did -- for the line under the toolbar.
     pub last_save: Option<String>,
     /// The note menu, while it is open. Rebuilt on each opening, because its
     /// rows are the notebooks and those change underneath it.
@@ -1478,7 +1514,28 @@ pub struct NotesApp {
     pub window_height: f32,
     note_id_gen: IdGen,
     notebook_id_gen: IdGen,
-    timestamp_counter: u64,
+    /// The last stamp [`stamp`](Self::stamp) gave, so the next is later.
+    ///
+    /// It was a counter from 1000, which is what "Modified:" showed; it did
+    /// not matter while nothing outlived the window, and would have once
+    /// something did -- a note made after a restart would have been stamped
+    /// earlier than every note kept from before it.
+    last_stamp: u64,
+    /// Whether changes are kept. Off in `new`, so no test can write the
+    /// user's library; `from_settings`, which `main` uses, turns it on, and a
+    /// library that cannot be read turns it off again.
+    persist: bool,
+    /// Whether the library has changed since it was last written.
+    unsaved: bool,
+    /// Why the library is not being kept, drawn for as long as it is true: it
+    /// could not be read (and so is left exactly as it is), there is nowhere
+    /// to keep it, or the last save failed.
+    store_error: Option<String>,
+    /// The question asked when the window is closed while a save is failing.
+    question: Option<unsaved::Question<Pending>>,
+    /// Set when the question has been answered with leave, so the event loop
+    /// can let the window go.
+    quit: bool,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -1517,14 +1574,156 @@ impl NotesApp {
             window_height: 800.0,
             note_id_gen: IdGen::new(1),
             notebook_id_gen: IdGen::new(1),
-            timestamp_counter: 1000,
+            last_stamp: 0,
+            persist: false,
+            unsaved: false,
+            store_error: None,
+            question: None,
+            quit: false,
         }
     }
 
-    /// Advance the internal timestamp counter and return the new value.
-    fn tick(&mut self) -> u64 {
-        self.timestamp_counter = self.timestamp_counter.saturating_add(1);
-        self.timestamp_counter
+    /// The window's notes: the library kept last time, and every change kept
+    /// from here on.
+    pub fn from_settings() -> Self {
+        let mut app = Self::new();
+        match library_path() {
+            Some(path) => {
+                app.persist = true;
+                app.load_library(&path);
+            }
+            // Nowhere to keep anything, and never will be while this window
+            // is open: said once, and not asked about again at every close.
+            None => app.store_error = Some(String::from(NO_HOME)),
+        }
+        app
+    }
+
+    /// Read the library at `path`; with none there yet, this is a first run.
+    ///
+    /// One that cannot be read whole is left exactly as it is: nothing is
+    /// saved over it, and the window says so for as long as it is open. A
+    /// save would write back only what was understood.
+    fn load_library(&mut self, path: &std::path::Path) {
+        self.load_library_within(path, MAX_LIBRARY_BYTES);
+    }
+
+    /// [`load_library`](Self::load_library) with the size limit given, so a
+    /// test can reach the limit without writing a quarter of a gigabyte.
+    fn load_library_within(&mut self, path: &std::path::Path, max_bytes: usize) {
+        let refused = |why: String| {
+            format!(
+                "{} was not read ({why}), so nothing is saved over it",
+                path.display()
+            )
+        };
+        let read = match safeio::read_to_string_capped(path, max_bytes) {
+            Ok(read) => read,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+            Err(err) => {
+                self.persist = false;
+                self.store_error = Some(refused(err.to_string()));
+                return;
+            }
+        };
+        if read.truncated {
+            self.persist = false;
+            self.store_error = Some(refused(format!(
+                "it is larger than {} MiB",
+                max_bytes / (1024 * 1024)
+            )));
+            return;
+        }
+        match parse_library(&read.text) {
+            Ok(library) => self.take_library(library),
+            Err(why) => {
+                self.persist = false;
+                self.store_error = Some(refused(why));
+            }
+        }
+    }
+
+    /// Make `library` this window's notes.
+    fn take_library(&mut self, library: Library) {
+        self.note_id_gen = IdGen::new(next_id_after(library.notes.iter().map(|n| n.id)));
+        self.notebook_id_gen = IdGen::new(next_id_after(library.notebooks.iter().map(|nb| nb.id)));
+        // Every stamp in the file, so that a change made now is later than
+        // all of them even if the clock has since been set back.
+        let stamps = library.notes.iter().flat_map(|n| {
+            [n.created_at, n.modified_at]
+                .into_iter()
+                .chain(n.versions.iter().map(|v| v.timestamp))
+        });
+        self.last_stamp = stamps.fold(self.last_stamp, u64::max);
+        self.notebooks = library.notebooks;
+        self.notes = library.notes;
+        self.selected_notebook = None;
+        self.selected_note = None;
+        self.reanchor_selection();
+    }
+
+    /// Note that the library has changed since it was last written. Every
+    /// change to a notebook or a note is followed by this; the event that
+    /// made it writes the library before the next one arrives
+    /// ([`handle_event`](Self::handle_event)).
+    fn after_change(&mut self) {
+        self.unsaved = true;
+    }
+
+    /// Write the library, if it has changed and this window keeps anything.
+    ///
+    /// A failure is kept in [`store_error`](Self::store_error), drawn in the
+    /// status bar, and the library stays unsaved, so the next change -- or
+    /// Ctrl+S, or the close question's Save -- tries again.
+    pub fn keep(&mut self) {
+        if !self.unsaved || !self.persist {
+            return;
+        }
+        let Some(path) = library_path() else {
+            self.store_error = Some(String::from(NO_HOME));
+            return;
+        };
+        let text = library_text(&self.notebooks, &self.notes);
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| safeio::write_str_atomically(&path, &text));
+        match written {
+            Ok(()) => {
+                self.unsaved = false;
+                self.store_error = None;
+            }
+            Err(err) => {
+                self.store_error = Some(format!("Not saved to {}: {err}", path.display()));
+            }
+        }
+    }
+
+    /// Where what is written goes -- or why it goes nowhere -- for the empty
+    /// window and for Ctrl+S.
+    fn keeping_line(&self) -> String {
+        if let Some(error) = &self.store_error {
+            return error.clone();
+        }
+        // Asked first, so a window that keeps nothing never reads where the
+        // settings are: a test's window does not, and must not see another
+        // test's scratch directory.
+        if !self.persist {
+            return String::from("Nothing written here is kept.");
+        }
+        library_path().map_or_else(
+            || String::from(NO_HOME),
+            |path| format!("What you write is kept in {}.", path.display()),
+        )
+    }
+
+    /// A stamp for a change made now: the clock's reading in milliseconds
+    /// since 1970 -- but always later than every stamp already given, so a
+    /// later change sorts later even within one millisecond, or after the
+    /// clock has been set back.
+    fn stamp(&mut self) -> u64 {
+        self.last_stamp = clock_ms().max(self.last_stamp.saturating_add(1));
+        self.last_stamp
     }
 
     // -----------------------------------------------------------------------
@@ -1535,6 +1734,7 @@ impl NotesApp {
     pub fn create_notebook(&mut self, name: &str) -> NotebookId {
         let id = self.notebook_id_gen.next_id();
         self.notebooks.push(Notebook::new(id, name));
+        self.after_change();
         id
     }
 
@@ -1543,6 +1743,7 @@ impl NotesApp {
         let id = self.notebook_id_gen.next_id();
         self.notebooks
             .push(Notebook::with_parent(id, name, parent_id));
+        self.after_change();
         id
     }
 
@@ -1574,12 +1775,14 @@ impl NotesApp {
 
     /// Rename a notebook.
     pub fn rename_notebook(&mut self, id: NotebookId, new_name: &str) -> bool {
-        if let Some(nb) = self.find_notebook_mut(id) {
+        let Some(nb) = self.find_notebook_mut(id) else {
+            return false;
+        };
+        if nb.name != new_name {
             nb.name = new_name.to_owned();
-            true
-        } else {
-            false
+            self.after_change();
         }
+        true
     }
 
     /// Delete a notebook and all its notes (and child notebooks recursively).
@@ -1608,6 +1811,7 @@ impl NotesApp {
         {
             self.selected_notebook = None;
         }
+        self.after_change();
         true
     }
 
@@ -1618,11 +1822,12 @@ impl NotesApp {
     /// Create a new note in the given notebook.
     pub fn create_note(&mut self, title: &str, notebook_id: NotebookId) -> NoteId {
         let id = self.note_id_gen.next_id();
-        let ts = self.tick();
+        let ts = self.stamp();
         let mut note = Note::new(id, title, notebook_id);
         note.created_at = ts;
         note.modified_at = ts;
         self.notes.push(note);
+        self.after_change();
         id
     }
 
@@ -1633,7 +1838,7 @@ impl NotesApp {
         notebook_id: NotebookId,
     ) -> NoteId {
         let id = self.note_id_gen.next_id();
-        let ts = self.tick();
+        let ts = self.stamp();
         let mut note = Note::new(id, template.label(), notebook_id);
         note.kind = template.kind();
         note.content = template.content().to_owned();
@@ -1646,6 +1851,7 @@ impl NotesApp {
             note.add_checklist_item("Task 3");
         }
         self.notes.push(note);
+        self.after_change();
         id
     }
 
@@ -1956,12 +2162,17 @@ impl NotesApp {
     /// `Note::restore_version` has existed, tested, with no caller: the panel
     /// listed versions and nothing could act on one.
     pub fn restore_selected_version(&mut self, version_idx: usize) -> bool {
-        let timestamp = self.tick();
+        let timestamp = self.stamp();
         let Some(id) = self.selected_note else {
             return false;
         };
-        self.find_note_mut(id)
-            .is_some_and(|note| note.restore_version(version_idx, timestamp))
+        let restored = self
+            .find_note_mut(id)
+            .is_some_and(|note| note.restore_version(version_idx, timestamp));
+        if restored {
+            self.after_change();
+        }
+        restored
     }
 
     pub fn find_note(&self, id: NoteId) -> Option<&Note> {
@@ -1980,26 +2191,41 @@ impl NotesApp {
     }
 
     /// Update a note's content.
+    ///
+    /// The same text again is no change: leaving the writing mode commits
+    /// the body whether or not anything was typed, and each commit used to
+    /// put a copy of the unchanged text in the history and move the note to
+    /// the top of the list.
     pub fn update_note_content(&mut self, id: NoteId, new_content: &str) -> bool {
-        let ts = self.tick();
+        let Some(note) = self.find_note(id) else {
+            return false;
+        };
+        if note.content == new_content {
+            return true;
+        }
+        let ts = self.stamp();
         if let Some(note) = self.find_note_mut(id) {
             note.set_content(new_content, ts);
-            true
-        } else {
-            false
         }
+        self.after_change();
+        true
     }
 
     /// Update a note's title.
     pub fn update_note_title(&mut self, id: NoteId, new_title: &str) -> bool {
-        let ts = self.tick();
+        let Some(note) = self.find_note(id) else {
+            return false;
+        };
+        if note.title == new_title {
+            return true;
+        }
+        let ts = self.stamp();
         if let Some(note) = self.find_note_mut(id) {
             note.title = new_title.to_owned();
             note.modified_at = ts;
-            true
-        } else {
-            false
         }
+        self.after_change();
+        true
     }
 
     /// Delete a note by ID.
@@ -2007,8 +2233,11 @@ impl NotesApp {
         let len_before = self.notes.len();
         self.notes.retain(|n| n.id != id);
         let deleted = self.notes.len() < len_before;
-        if deleted && self.selected_note == Some(id) {
-            self.selected_note = None;
+        if deleted {
+            self.after_change();
+            if self.selected_note == Some(id) {
+                self.selected_note = None;
+            }
         }
         deleted
     }
@@ -2018,12 +2247,14 @@ impl NotesApp {
         if !self.notebooks.iter().any(|nb| nb.id == new_notebook_id) {
             return false;
         }
-        if let Some(note) = self.find_note_mut(note_id) {
+        let Some(note) = self.find_note_mut(note_id) else {
+            return false;
+        };
+        if note.notebook_id != new_notebook_id {
             note.notebook_id = new_notebook_id;
-            true
-        } else {
-            false
+            self.after_change();
         }
+        true
     }
 
     // -----------------------------------------------------------------------
@@ -2032,21 +2263,25 @@ impl NotesApp {
 
     /// Add a tag to a note.
     pub fn add_tag_to_note(&mut self, note_id: NoteId, tag: &str) -> bool {
-        if let Some(note) = self.find_note_mut(note_id) {
+        let Some(note) = self.find_note_mut(note_id) else {
+            return false;
+        };
+        if !note.has_tag(tag) {
             note.add_tag(tag);
-            true
-        } else {
-            false
+            self.after_change();
         }
+        true
     }
 
     /// Remove a tag from a note.
     pub fn remove_tag_from_note(&mut self, note_id: NoteId, tag: &str) -> bool {
-        if let Some(note) = self.find_note_mut(note_id) {
-            note.remove_tag(tag)
-        } else {
-            false
+        let removed = self
+            .find_note_mut(note_id)
+            .is_some_and(|note| note.remove_tag(tag));
+        if removed {
+            self.after_change();
         }
+        removed
     }
 
     /// Get all unique tags across all notes.
@@ -2337,8 +2572,39 @@ impl NotesApp {
     // Events
     // -----------------------------------------------------------------------
 
-    /// Route a compositor event into the app.
+    /// Route a compositor event into the app, then keep whatever it changed.
+    ///
+    /// The library is written here, once per event, rather than by each
+    /// method that changes it: one keystroke can make a notebook and a note
+    /// in it, and the library is every note the user has, so it is written
+    /// once for the two.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        let error_before = self.store_error.clone();
+        let result = self.route_event(event);
+        self.keep();
+        if self.store_error == error_before {
+            result
+        } else {
+            // A save that failed, or one that worked after failing, changes
+            // what the status bar says even if the event itself drew nothing.
+            EventResult::Consumed
+        }
+    }
+
+    /// What an event does, before the library is kept.
+    fn route_event(&mut self, event: &Event) -> EventResult {
+        // The close question takes every key and click while it is up: a
+        // keystroke that reached a note under it would be a change made while
+        // being asked about the changes.
+        if let Some(question) = self.question.as_mut()
+            && matches!(event, Event::Key(_) | Event::Mouse(_))
+        {
+            if let Some(choice) = question.handle(event) {
+                self.question = None;
+                self.answer(choice);
+            }
+            return EventResult::Consumed;
+        }
         // The picker takes the event first while it is up, or a keystroke
         // meant for a filename lands in the note behind it.
         match self
@@ -2346,7 +2612,7 @@ impl NotesApp {
             .handle(event, self.window_width, self.window_height)
         {
             Picked::Chose(path) => {
-                self.last_save = Some(self.save_selected_note(&path));
+                self.last_save = Some(self.export_selected_note(&path));
                 return EventResult::Consumed;
             }
             // Cancelled grouped with Handled: this caller keeps no dialog
@@ -2373,17 +2639,57 @@ impl NotesApp {
         }
     }
 
-    /// Apply a key press.
+    /// Whether the window may close now.
     ///
-    /// The app had no input handling at all before it was wired to the
-    /// compositor: every notebook, note, tag filter and sort order it can show
-    /// was reachable only by a caller invoking the method directly.
-    /// Put the save picker up, named after the selected note.
+    /// What is being written in a note is part of it, so it is committed and
+    /// kept first -- it used to be dropped with the window. The window stays,
+    /// and asks, only when the library has changes a save is failing to
+    /// write: closing then loses them. A library that was refused on reading
+    /// is not asked about, since nothing written in this window was ever
+    /// going to be kept and the window has said so all along.
+    pub fn request_close(&mut self) -> bool {
+        if let Some(TextEntry::NoteBody(id, body)) = self.text_entry.clone() {
+            self.text_entry = None;
+            self.update_note_content(id, &body);
+        }
+        self.keep();
+        if !(self.persist && self.unsaved) {
+            return true;
+        }
+        // The question replaces whatever is up: a picker or a menu would
+        // take the keys it needs, and be drawn over it.
+        self.picker.close();
+        self.note_menu = None;
+        self.show_help = false;
+        let detail = self.store_error.clone().unwrap_or_default();
+        self.question = Some(unsaved::Question::new(
+            "Your latest changes to your notes are not saved.",
+            &format!("{detail} -- try saving again before closing?"),
+            Pending::Close,
+        ));
+        false
+    }
+
+    /// Act on the close question's answer.
+    fn answer(&mut self, choice: unsaved::Choice) {
+        match choice {
+            // Leave only if the save now works; if it fails again the error
+            // is on screen and the window stays, which is what Save asked for.
+            unsaved::Choice::Save => {
+                self.keep();
+                self.quit = !self.unsaved;
+            }
+            unsaved::Choice::Discard => self.quit = true,
+            unsaved::Choice::Cancel => {}
+        }
+    }
+
+    /// Put the export picker up, named after the selected note.
     ///
     /// Refuses when nothing is selected, and says so: a picker that opens with
     /// nothing to write would ask the user to choose a filename for a file
     /// that is never created.
-    pub fn open_save_dialog(&mut self) {
+    pub fn open_export_dialog(&mut self) {
         let Some(note) = self.selected_note.and_then(|id| self.find_note(id)) else {
             self.last_save = Some(String::from("Select a note first -- nothing to write"));
             return;
@@ -2396,15 +2702,14 @@ impl NotesApp {
     ///
     /// Through [`safeio::write_str_atomically`], not `fs::write`: `fs::write`
     /// truncates the target *before* writing, so an interrupted save leaves a
-    /// fragment or an empty file. Once a note has been exported that file may
-    /// be the user's only copy, which is the same reasoning `apps/editor`
-    /// gives for the same choice.
+    /// fragment or an empty file, and an exported note may be the copy the
+    /// user takes elsewhere.
     ///
-    /// Markdown because a note is text and the title is its heading. No format
-    /// was designed for this: designing one would mean deciding how a notebook
-    /// tree is represented, and that is a larger question than "write this
-    /// note down", which is what the user asked for.
-    pub fn save_selected_note(&mut self, path: &std::path::Path) -> String {
+    /// Markdown because a note is text and the title is its heading, and
+    /// because it is for other programs: the library (`library_text`) is this
+    /// one's own. An export is not a save -- every change is kept as it is
+    /// made -- so this was Ctrl+S until the library existed, and is Ctrl+E.
+    pub fn export_selected_note(&mut self, path: &std::path::Path) -> String {
         let Some(note) = self.selected_note.and_then(|id| self.find_note(id)) else {
             return String::from("Select a note first -- nothing to write");
         };
@@ -2493,6 +2798,11 @@ impl NotesApp {
         EventResult::Ignored
     }
 
+    /// Apply a key press.
+    ///
+    /// The app had no input handling at all before it was wired to the
+    /// compositor: every notebook, note, tag filter and sort order it can show
+    /// was reachable only by a caller invoking the method directly.
     pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
         if !key.pressed {
             return EventResult::Ignored;
@@ -2557,8 +2867,17 @@ impl NotesApp {
                 self.text_entry = Some(TextEntry::Search);
                 EventResult::Consumed
             }
+            // Everything is kept as it changes, so there is nothing for Ctrl+S
+            // to save -- but it is the key people press to make sure, and the
+            // one to press to try again after a save failed. It says where the
+            // notes are, or why they are not being kept.
             Key::S if ctrl => {
-                self.open_save_dialog();
+                self.keep();
+                self.last_save = Some(self.keeping_line());
+                EventResult::Consumed
+            }
+            Key::E if ctrl => {
+                self.open_export_dialog();
                 EventResult::Consumed
             }
             Key::S => {
@@ -2596,7 +2915,11 @@ impl NotesApp {
     /// note a user ever tries to make would have nowhere to go, and refusing
     /// it would be indistinguishable from the defect this replaces.
     fn notebook_for_new_note(&mut self) -> NotebookId {
-        if let Some(id) = self.selected_notebook {
+        // Only one that is there: a note in a notebook the library does not
+        // have would make the library a file that cannot be read back.
+        if let Some(id) = self.selected_notebook
+            && self.find_notebook(id).is_some()
+        {
             return id;
         }
         if let Some(nb) = self.notebooks.first() {
@@ -2772,6 +3095,7 @@ impl NotesApp {
             return EventResult::Ignored;
         };
         f(note);
+        self.after_change();
         // Pinning changes the order and favouriting can change the set, so the
         // selection may no longer be where it was.
         self.reanchor_selection();
@@ -2839,28 +3163,6 @@ impl NotesApp {
     /// Renders the full application frame, returning drawing commands.
     pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
-        // After the background, or it would be painted over.
-        for (i, line) in NOTHING_YET_LINES.iter().enumerate() {
-            cmds.push(RenderCommand::Text {
-                x: 8.0,
-                #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
-                y: 2.0 + i as f32 * 12.0,
-                text: (*line).to_string(),
-                color: if i == 0 {
-                    self.palette.ink(self.palette.yellow)
-                } else {
-                    self.palette.subtext0
-                },
-                font_size: if i == 0 { 11.0 } else { 9.0 },
-                font_weight: if i == 0 {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(width - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
 
         // Full window background.
         cmds.push(RenderCommand::FillRect {
@@ -3155,6 +3457,24 @@ impl NotesApp {
             width: 1.0,
         });
 
+        // Why the notes are not being kept, in place of the counts, for as
+        // long as it is true: it is the one thing on this line that decides
+        // whether closing the window loses something.
+        if let Some(error) = &self.store_error {
+            cmds.push(RenderCommand::Text {
+                x: 12.0,
+                y: bar_y + 6.0,
+                text: error.clone(),
+                color: self.palette.ink(self.palette.red),
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((width - 140.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+            self.render_sort_indicator(cmds, width, bar_y);
+            return;
+        }
+
         // Note count
         let count_text = format!(
             "{} notebooks, {} notes",
@@ -3195,7 +3515,11 @@ impl NotesApp {
             });
         }
 
-        // Sort order indicator
+        self.render_sort_indicator(cmds, width, bar_y);
+    }
+
+    /// The sort order, at the status bar's right end.
+    fn render_sort_indicator(&self, cmds: &mut Vec<RenderCommand>, width: f32, bar_y: f32) {
         cmds.push(RenderCommand::Text {
             x: width - 120.0,
             y: bar_y + 6.0,
@@ -3636,6 +3960,41 @@ impl NotesApp {
 
         let note = if let Some(n) = self.selected_note.and_then(|id| self.find_note(id)) {
             n
+        } else if self.notes.is_empty() {
+            // The empty window: how to start, and where what is written goes.
+            let lines = [
+                (
+                    NO_NOTES_YET.to_owned(),
+                    self.palette.ink(self.palette.yellow),
+                    15.0,
+                    FontWeightHint::Bold,
+                ),
+                (
+                    self.keeping_line(),
+                    if self.store_error.is_some() {
+                        self.palette.ink(self.palette.red)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    12.0,
+                    FontWeightHint::Regular,
+                ),
+            ];
+            let mut line_y = y + height / 2.0 - 24.0;
+            for (text, color, font_size, font_weight) in lines {
+                cmds.push(RenderCommand::Text {
+                    x: x + 24.0,
+                    y: line_y,
+                    text,
+                    color,
+                    font_size,
+                    font_weight,
+                    max_width: Some((width - 48.0).max(0.0)),
+                    overflow: TextOverflow::Ellipsis,
+                });
+                line_y += 26.0;
+            }
+            return;
         } else {
             // Empty state message
             cmds.push(RenderCommand::Text {
@@ -3685,7 +4044,7 @@ impl NotesApp {
             "{} | {} | Modified: {}",
             note.kind.label(),
             nb_name,
-            note.modified_at
+            when(note.modified_at)
         );
         cmds.push(RenderCommand::Text {
             x: x + EDITOR_PADDING,
@@ -4169,7 +4528,7 @@ impl NotesApp {
             let Some(ver) = note.versions.get(i) else {
                 continue;
             };
-            let label = format!("v{} ({})", i.saturating_add(1), ver.timestamp);
+            let label = format!("v{}  {}", i.saturating_add(1), when(ver.timestamp));
             cmds.push(RenderCommand::Text {
                 x: x + 8.0,
                 y: vy,
@@ -4240,19 +4599,30 @@ impl App for NotesApp {
     /// No clock.
     ///
     /// Nothing here ages: a note changes when it is edited and the list
-    /// reorders when the sort order does. The timestamps are a counter this app
-    /// advances itself on each edit, not a reading of any clock, so there is
-    /// nothing a tick could re-read. `known-issues.md` lesson 47's question
-    /// asked and answered the other way.
+    /// reorders when the sort order does. A change is stamped from the clock
+    /// when it is made and shown as a date and time, not as "a minute ago", so
+    /// there is nothing a tick could re-read. `known-issues.md` lesson 47's
+    /// question asked and answered the other way.
     fn tick_interval(&self) -> Option<Duration> {
         None
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
+            let close = self.request_close();
+            // What the close committed and kept -- or failed to -- is drawn
+            // under the question, so the window is redrawn when it stays.
+            return if close {
+                Response::Exit
+            } else {
+                Response::KeepOpen
+            };
+        }
+        let result = self.handle_event(event);
+        if self.quit {
             return Response::Exit;
         }
-        match self.handle_event(event) {
+        match result {
             EventResult::Consumed => Response::Redraw,
             EventResult::Ignored => Response::Idle,
         }
@@ -4264,18 +4634,395 @@ impl App for NotesApp {
         // for, and the first frame is drawn before any `Resize` arrives.
         self.window_width = width;
         self.window_height = height;
-        RenderTree {
+        let mut tree = RenderTree {
             commands: self.render_commands(width, height),
+        };
+        // Over everything, the picker included: they are never up together.
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
         }
+        tree
     }
 }
 
 fn main() -> ExitCode {
-    let mut notes = NotesApp::new();
-    // Until there is a store on disk this is what there is to show. It is
-    // seeded here rather than in `new` so that the moment a store exists, this
-    // is the one call that changes.
+    let mut notes = NotesApp::from_settings();
     app::launch("notes", &mut notes)
+}
+
+// ============================================================================
+// The library file
+// ============================================================================
+
+/// What the close question is holding up. Only the close: nothing else in
+/// this app can lose the library's changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pending {
+    /// The window, asked to close while a save is failing.
+    Close,
+}
+
+/// Where the library is kept, or `None` when the environment names no home
+/// directory -- an early-boot or stripped service environment, where there is
+/// no user to have notes.
+fn library_path() -> Option<std::path::PathBuf> {
+    settingsfile::config_dir().map(|dir| dir.join("notes").join("library.txt"))
+}
+
+/// The first number after `ids`, for the next thing made: past every one
+/// read, so nothing made later takes the number of something kept.
+fn next_id_after(ids: impl Iterator<Item = u64>) -> u64 {
+    ids.max().map_or(1, |highest| highest.saturating_add(1))
+}
+
+/// Everything a library holds.
+#[derive(Debug, Default)]
+struct Library {
+    notebooks: Vec<Notebook>,
+    notes: Vec<Note>,
+}
+
+/// Milliseconds since 1970 by the clock; 0 if it reads earlier than that.
+fn clock_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// A stamp as the user reads it -- `2026-09-25 14:03` -- in the zone the rest
+/// of the desktop uses. That is UTC until the system has a zone of its own
+/// (`TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`); `apps/habits` and `apps/finance`
+/// read their "today" the same way, so all three move together.
+fn when(stamp_ms: u64) -> String {
+    let secs = i64::try_from(stamp_ms / 1_000).unwrap_or(i64::MAX);
+    let zone = tzrules::Tz::utc();
+    let local = secs.saturating_add(i64::from(zone.lookup(secs).gmtoff));
+    let (year, month, day) = tzrules::civil_from_days(local.div_euclid(86_400));
+    let into_day = local.rem_euclid(86_400);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}",
+        into_day / 3_600,
+        into_day % 3_600 / 60
+    )
+}
+
+/// How a note's kind is written in the library.
+fn kind_key(kind: &NoteKind) -> &'static str {
+    match kind {
+        NoteKind::PlainText => "plain",
+        NoteKind::Markdown => "markdown",
+        NoteKind::Checklist => "checklist",
+        NoteKind::Table => "table",
+    }
+}
+
+/// A note's kind as read, or `None` for one this version does not know.
+fn kind_from_key(key: &str) -> Option<NoteKind> {
+    match key {
+        "plain" => Some(NoteKind::PlainText),
+        "markdown" => Some(NoteKind::Markdown),
+        "checklist" => Some(NoteKind::Checklist),
+        "table" => Some(NoteKind::Table),
+        _ => None,
+    }
+}
+
+/// A yes-or-no as written.
+fn flag(on: bool) -> &'static str {
+    if on { "1" } else { "0" }
+}
+
+/// A yes-or-no as read, or `None` for anything [`flag`] never writes.
+fn read_flag(field: &str) -> Option<bool> {
+    match field {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Fields as written: each escaped, a tab before each.
+fn push_fields(out: &mut String, fields: &[String]) {
+    for field in fields {
+        out.push('\t');
+        out.push_str(&tsv::escape(field));
+    }
+}
+
+/// The library as text: a first line naming the format, then a line per
+/// notebook, then each note followed by the lines that belong to it -- its
+/// tags, checklist items, table and past versions -- in that order.
+///
+/// ```text
+/// slateos-notes  1
+/// notebook  <id>  <parent id, or nothing>  <expanded 1|0>  <name>
+/// note      <id>  <notebook id>  <plain|markdown|checklist|table>
+///           <pinned 1|0>  <favourite 1|0>  <created>  <modified>  <title>  <text>
+/// tag       <tag>
+/// item      <checked 1|0>  <text>
+/// table     <heading>...
+/// row       <cell>...
+/// version   <stamp>  <summary>  <text>
+/// ```
+///
+/// Fields are separated by tabs and escaped with `textfmt::tsv`; stamps are
+/// milliseconds since 1970. A line that belongs to a note belongs to the note
+/// line above it.
+fn library_text(notebooks: &[Notebook], notes: &[Note]) -> String {
+    let mut out = format!("{LIBRARY_MAGIC}\t{LIBRARY_FORMAT}\n");
+    for nb in notebooks {
+        out.push_str(&format!(
+            "notebook\t{}\t{}\t{}\t{}\n",
+            nb.id,
+            nb.parent_id.map_or_else(String::new, |p| p.to_string()),
+            flag(nb.expanded),
+            tsv::escape(&nb.name)
+        ));
+    }
+    for note in notes {
+        out.push_str(&format!(
+            "note\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            note.id,
+            note.notebook_id,
+            kind_key(&note.kind),
+            flag(note.pinned),
+            flag(note.favorited),
+            note.created_at,
+            note.modified_at,
+            tsv::escape(&note.title),
+            tsv::escape(&note.content)
+        ));
+        for tag in &note.tags {
+            out.push_str(&format!("tag\t{}\n", tsv::escape(tag)));
+        }
+        for item in &note.checklist {
+            out.push_str(&format!(
+                "item\t{}\t{}\n",
+                flag(item.checked),
+                tsv::escape(&item.text)
+            ));
+        }
+        if let Some(table) = &note.table {
+            out.push_str("table");
+            push_fields(&mut out, &table.headers);
+            out.push('\n');
+            for row in &table.rows {
+                out.push_str("row");
+                push_fields(&mut out, row);
+                out.push('\n');
+            }
+        }
+        for version in &note.versions {
+            out.push_str(&format!(
+                "version\t{}\t{}\t{}\n",
+                version.timestamp,
+                tsv::escape(&version.summary),
+                tsv::escape(&version.content)
+            ));
+        }
+    }
+    out
+}
+
+/// A library read from its text, or why it cannot be -- naming the line.
+///
+/// All or nothing: a library with one line not understood is refused whole.
+/// Reading the rest would look kinder and is the dangerous choice, because
+/// the next change writes the library back and would write only what was
+/// read, deleting the line not understood (the finance ledger's rule,
+/// design-decisions §1202). So is one that names a notebook or a note it
+/// does not have, holds two things with one number, or puts a notebook
+/// inside itself.
+fn parse_library(text: &str) -> Result<Library, String> {
+    let mut lines = text.lines().enumerate();
+    let first = lines.next().map_or("", |(_, line)| line);
+    let head: Vec<&str> = first.split('\t').collect();
+    let version = match head.as_slice() {
+        [LIBRARY_MAGIC, version] => version
+            .parse::<u32>()
+            .map_err(|_| String::from("line 1 names no format"))?,
+        _ => return Err(String::from("it is not a SlateOS notes library")),
+    };
+    if version > LIBRARY_FORMAT {
+        return Err(format!(
+            "it is a later format ({version}) than this version reads ({LIBRARY_FORMAT})"
+        ));
+    }
+    if version < LIBRARY_FORMAT {
+        return Err(format!("format {version} is not one this program wrote"));
+    }
+
+    let mut library = Library::default();
+    let mut notebook_ids = HashSet::new();
+    let mut note_ids = HashSet::new();
+    // Each notebook's and note's line, to name it if what it points at is
+    // missing -- which is only known once every line has been read.
+    let mut notebook_lines = Vec::new();
+    let mut note_lines = Vec::new();
+    for (i, line) in lines {
+        let at = i.saturating_add(1);
+        if line.is_empty() {
+            continue;
+        }
+        let bad = |why: &str| format!("line {at}: {why}");
+        let text = |field: &str| {
+            tsv::unescape(field)
+                .ok_or_else(|| bad("a text holds an escape this program never writes"))
+        };
+        let number = |field: &str, what: &str| {
+            field
+                .parse::<u64>()
+                .map_err(|_| bad(&format!("{what} is not a number")))
+        };
+        let yes_no =
+            |field: &str| read_flag(field).ok_or_else(|| bad("a yes-or-no is neither 1 nor 0"));
+        let fields: Vec<&str> = line.split('\t').collect();
+        match fields.as_slice() {
+            ["notebook", id, parent, expanded, name] => {
+                let id = number(id, "a notebook's number")?;
+                if !notebook_ids.insert(id) {
+                    return Err(bad("two notebooks have one number"));
+                }
+                library.notebooks.push(Notebook {
+                    id,
+                    parent_id: if parent.is_empty() {
+                        None
+                    } else {
+                        Some(number(parent, "a notebook's parent")?)
+                    },
+                    expanded: yes_no(expanded)?,
+                    name: text(name)?,
+                });
+                notebook_lines.push(at);
+            }
+            [
+                "note",
+                id,
+                notebook,
+                kind,
+                pinned,
+                favourite,
+                created,
+                modified,
+                title,
+                content,
+            ] => {
+                let id = number(id, "a note's number")?;
+                if !note_ids.insert(id) {
+                    return Err(bad("two notes have one number"));
+                }
+                let mut note = Note::new(id, &text(title)?, number(notebook, "a note's notebook")?);
+                note.kind = kind_from_key(kind)
+                    .ok_or_else(|| bad("a note is of a kind this version does not know"))?;
+                note.pinned = yes_no(pinned)?;
+                note.favorited = yes_no(favourite)?;
+                note.created_at = number(created, "when a note was made")?;
+                note.modified_at = number(modified, "when a note was changed")?;
+                note.content = text(content)?;
+                library.notes.push(note);
+                note_lines.push(at);
+            }
+            ["tag", tag] => {
+                let tag = text(tag)?;
+                library
+                    .notes
+                    .last_mut()
+                    .ok_or_else(|| bad("a tag comes before any note"))?
+                    .tags
+                    .push(tag);
+            }
+            ["item", checked, item] => {
+                let item = ChecklistItem {
+                    text: text(item)?,
+                    checked: yes_no(checked)?,
+                };
+                library
+                    .notes
+                    .last_mut()
+                    .ok_or_else(|| bad("a checklist item comes before any note"))?
+                    .checklist
+                    .push(item);
+            }
+            ["table", headers @ ..] => {
+                let headers = headers
+                    .iter()
+                    .map(|&h| text(h))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let note = library
+                    .notes
+                    .last_mut()
+                    .ok_or_else(|| bad("a table comes before any note"))?;
+                if note.table.is_some() {
+                    return Err(bad("a note has two tables"));
+                }
+                note.table = Some(TableData::new(headers));
+            }
+            ["row", cells @ ..] => {
+                let cells = cells
+                    .iter()
+                    .map(|&c| text(c))
+                    .collect::<Result<Vec<_>, _>>()?;
+                library
+                    .notes
+                    .last_mut()
+                    .and_then(|note| note.table.as_mut())
+                    .ok_or_else(|| bad("a table row comes before its table"))?
+                    .add_row(cells);
+            }
+            ["version", stamp, summary, content] => {
+                let version = NoteVersion {
+                    timestamp: number(stamp, "when a version was kept")?,
+                    summary: text(summary)?,
+                    content: text(content)?,
+                };
+                library
+                    .notes
+                    .last_mut()
+                    .ok_or_else(|| bad("a past version comes before any note"))?
+                    .versions
+                    .push(version);
+            }
+            _ => {
+                return Err(bad(
+                    "it is not a line this version reads, or has the wrong number of fields",
+                ));
+            }
+        }
+    }
+
+    // What a notebook or a note points at, now that everything is read.
+    let parents: HashMap<NotebookId, Option<NotebookId>> = library
+        .notebooks
+        .iter()
+        .map(|nb| (nb.id, nb.parent_id))
+        .collect();
+    for (nb, at) in library.notebooks.iter().zip(&notebook_lines) {
+        // Up the chain of parents: every one there, and never this notebook
+        // again -- nor longer than there are notebooks, which only a loop
+        // that does not pass through this one could make it.
+        let mut parent = nb.parent_id;
+        let mut steps = 0_usize;
+        while let Some(up) = parent {
+            if up == nb.id || steps > library.notebooks.len() {
+                return Err(format!("line {at}: a notebook is inside itself"));
+            }
+            parent = *parents.get(&up).ok_or_else(|| {
+                format!("line {at}: a notebook is inside one the library does not have")
+            })?;
+            steps = steps.saturating_add(1);
+        }
+    }
+    for (note, at) in library.notes.iter().zip(&note_lines) {
+        if !notebook_ids.contains(&note.notebook_id) {
+            return Err(format!(
+                "line {at}: a note is in a notebook the library does not have"
+            ));
+        }
+    }
+    Ok(library)
 }
 
 // ============================================================================
@@ -4670,19 +5417,17 @@ mod tests {
 
     use super::*;
 
-    /// Ctrl+S writes the selected note, and says where.
+    /// Ctrl+E exports the selected note as Markdown, and says where.
     ///
-    /// The first real door in this app. Notebooks still are not kept between
-    /// runs -- that needs a format for the tree, which is a larger question
-    /// than "write this note down" -- but a note is text and a title is a
-    /// heading, so Markdown needs no format designed for it.
+    /// It was Ctrl+S, and was the first real door in this app: until the
+    /// library existed it was the only way anything left the process. A note
+    /// is text and a title is a heading, so Markdown needs no format designed
+    /// for it -- and it is for other programs, which the library is not.
     ///
     /// Through `safeio::write_str_atomically`, not `fs::write`: `fs::write`
     /// truncates before writing, so an interrupted save leaves a fragment.
-    /// Once a note has been exported that file may be the user's only copy,
-    /// which is the reasoning `apps/editor` gives for the same choice.
     #[test]
-    fn ctrl_s_writes_the_selected_note_as_markdown() {
+    fn ctrl_e_exports_the_selected_note_as_markdown() {
         let dir = std::env::temp_dir().join("slateos-notes-save-test");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("note.md");
@@ -4693,7 +5438,9 @@ mod tests {
         app.update_note_content(id, "one\ntwo");
         app.selected_note = Some(id);
 
-        let said = app.save_selected_note(&path);
+        app.handle_key(&key_of(Key::E, Modifiers::ctrl()));
+        assert!(app.picker.is_open(), "Ctrl+E put no picker up");
+        let said = app.export_selected_note(&path);
         assert!(said.starts_with("Wrote"), "{said}");
 
         let body = std::fs::read_to_string(&path).expect("the note was written");
@@ -4706,10 +5453,10 @@ mod tests {
     /// A picker that opens with nothing to write asks the user to choose a
     /// filename for a file that is never created.
     #[test]
-    fn saving_with_no_selection_refuses_and_says_why() {
+    fn exporting_with_no_selection_refuses_and_says_why() {
         let mut app = NotesApp::new();
         app.selected_note = None;
-        app.open_save_dialog();
+        app.open_export_dialog();
         assert!(
             !app.picker.is_open(),
             "a picker opened with nothing to write"
@@ -6427,6 +7174,696 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // The library
+    //
+    // Nothing was kept: the app held every note in memory and forgot them
+    // when the window closed. The only way out was exporting one note at a
+    // time.
+    // ------------------------------------------------------------------
+
+    /// Every string drawn in a frame.
+    fn texts(app: &NotesApp) -> Vec<String> {
+        app.render_commands(1280.0, 800.0)
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ctrl(k: Key) -> Event {
+        Event::Key(key_of(k, Modifiers::ctrl()))
+    }
+
+    fn type_str(app: &mut NotesApp, text: &str) {
+        for c in text.chars() {
+            app.handle_event(&typed(c));
+        }
+    }
+
+    /// Text a note is full of and a line-based file mangles.
+    const AWKWARD: [&str; 9] = [
+        "plain",
+        "tab\there",
+        "new\nline",
+        "cr\rhere",
+        "back\\slash",
+        "\\n written out",
+        "caf\u{e9} \u{1F4DD}",
+        "",
+        "ends in \\",
+    ];
+
+    /// A library with one of everything the file has to carry.
+    fn full_library() -> NotesApp {
+        let mut app = NotesApp::new();
+        let home = app.create_notebook("Home");
+        let inner = app.create_child_notebook(AWKWARD[1], home);
+        let deeper = app.create_child_notebook(AWKWARD[2], inner);
+        app.find_notebook_mut(inner).unwrap().expanded = false;
+        let other = app.create_notebook(AWKWARD[8]);
+
+        for (i, awkward) in AWKWARD.iter().enumerate() {
+            let notebook = [home, inner, deeper, other][i % 4];
+            let id = app.create_note(awkward, notebook);
+            app.update_note_content(id, &format!("first {awkward}"));
+            app.update_note_content(id, awkward);
+            app.add_tag_to_note(id, awkward);
+            app.add_tag_to_note(id, "shared");
+            let note = app.find_note_mut(id).unwrap();
+            note.kind = [
+                NoteKind::PlainText,
+                NoteKind::Markdown,
+                NoteKind::Checklist,
+                NoteKind::Table,
+            ][i % 4]
+                .clone();
+            note.pinned = i % 2 == 0;
+            note.favorited = i % 3 == 0;
+            note.checklist.push(ChecklistItem::new(awkward));
+            note.checklist.push(ChecklistItem::checked("done"));
+        }
+        // Tables: the ordinary kind, one with an empty heading and a short
+        // row, and one with no headings at all -- not the same as no table.
+        let ids: Vec<NoteId> = app.notes.iter().map(|n| n.id).collect();
+        let mut table = TableData::new(vec![AWKWARD[1].to_owned(), "b".to_owned()]);
+        table.add_row(vec![AWKWARD[2].to_owned(), AWKWARD[8].to_owned()]);
+        table.add_row(vec![String::new()]);
+        app.find_note_mut(ids[0]).unwrap().table = Some(table);
+        app.find_note_mut(ids[1]).unwrap().table = Some(TableData::new(vec![String::new()]));
+        app.find_note_mut(ids[2]).unwrap().table = Some(TableData::new(Vec::new()));
+        app.selected_note = Some(ids[3]);
+        assert!(app.restore_selected_version(0));
+        app
+    }
+
+    #[test]
+    fn a_library_written_and_read_again_is_the_same_library() {
+        let app = full_library();
+        let text = library_text(&app.notebooks, &app.notes);
+        let back = parse_library(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+        assert_eq!(back.notebooks, app.notebooks);
+        assert_eq!(back.notes, app.notes);
+    }
+
+    #[test]
+    fn no_text_breaks_a_line_of_the_library() {
+        let app = full_library();
+        let text = library_text(&app.notebooks, &app.notes);
+        let expected: usize = 1
+            + app.notebooks.len()
+            + app
+                .notes
+                .iter()
+                .map(|n| {
+                    1 + n.tags.len()
+                        + n.checklist.len()
+                        + n.table.as_ref().map_or(0, |t| 1 + t.rows.len())
+                        + n.versions.len()
+                })
+                .sum::<usize>();
+        assert_eq!(text.lines().count(), expected, "a field broke a line");
+        // And every record is one of the kinds the reader knows.
+        for line in text.lines().skip(1) {
+            let kind = line.split('\t').next().unwrap();
+            assert!(
+                ["notebook", "note", "tag", "item", "table", "row", "version"].contains(&kind),
+                "{line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_library_that_cannot_be_read_whole_is_refused_and_says_where() {
+        let head = "slateos-notes\t1";
+        let book = "notebook\t1\t\t1\tHome";
+        let note = "note\t1\t1\tplain\t0\t0\t5\t6\tTitle\tText";
+        let cases: [(String, &str); 20] = [
+            (String::new(), "not a SlateOS notes library"),
+            (String::from("slateos-notes"), "not a SlateOS notes library"),
+            (String::from("slateos-notes\t2"), "a later format (2)"),
+            (String::from("slateos-notes\tone"), "line 1 names no format"),
+            (String::from("slateos-notes\t0"), "format 0"),
+            (
+                format!("{head}\n{book}\nnotebook\t1\t\t1\tAgain"),
+                "line 3: two notebooks have one number",
+            ),
+            (
+                format!("{head}\nnotebook\t1\t7\t1\tLost"),
+                "line 2: a notebook is inside one the library does not have",
+            ),
+            (
+                format!("{head}\nnotebook\t1\t1\t1\tSelf"),
+                "line 2: a notebook is inside itself",
+            ),
+            (
+                format!("{head}\nnotebook\t1\t2\t1\tA\nnotebook\t2\t1\t1\tB"),
+                "line 2: a notebook is inside itself",
+            ),
+            (
+                format!("{head}\n{book}\nnote\t1\t9\tplain\t0\t0\t5\t6\tT\tC"),
+                "line 3: a note is in a notebook the library does not have",
+            ),
+            (
+                format!("{head}\n{book}\n{note}\n{note}"),
+                "line 4: two notes have one number",
+            ),
+            (
+                format!("{head}\n{book}\nnote\t1\t1\tsketch\t0\t0\t5\t6\tT\tC"),
+                "line 3: a note is of a kind this version does not know",
+            ),
+            (
+                format!("{head}\n{book}\nnote\t1\t1\tplain\t2\t0\t5\t6\tT\tC"),
+                "line 3: a yes-or-no is neither 1 nor 0",
+            ),
+            (
+                format!("{head}\n{book}\nnote\t1\t1\tplain\t0\t0\t5\t6\tT\\q\tC"),
+                "line 3: a text holds an escape this program never writes",
+            ),
+            (
+                format!("{head}\n{book}\nnote\tx\t1\tplain\t0\t0\t5\t6\tT\tC"),
+                "line 3: a note's number is not a number",
+            ),
+            (
+                format!("{head}\n{book}\ntag\tfirst"),
+                "line 3: a tag comes before any note",
+            ),
+            (
+                format!("{head}\n{book}\n{note}\nrow\ta"),
+                "line 4: a table row comes before its table",
+            ),
+            (
+                format!("{head}\n{book}\n{note}\ntable\ta\ntable\tb"),
+                "line 5: a note has two tables",
+            ),
+            (
+                format!("{head}\n{book}\nsketch\t1"),
+                "line 3: it is not a line this version reads",
+            ),
+            (
+                format!("{head}\n{book}\nnote\t1\t1\tplain"),
+                "line 3: it is not a line this version reads",
+            ),
+        ];
+        for (text, want) in &cases {
+            match parse_library(text) {
+                Ok(_) => panic!("read {text:?}"),
+                Err(why) => assert!(why.contains(want), "{text:?}: said {why:?}, not {want:?}"),
+            }
+        }
+        // The controls: the pieces above make a library that reads.
+        let good = format!("{head}\n{book}\n{note}\ntable\ta\nrow\tb\ntag\tt\n");
+        let read = parse_library(&good).unwrap();
+        assert_eq!(read.notes.len(), 1);
+        assert_eq!(read.notes[0].tags, ["t"]);
+    }
+
+    #[test]
+    fn what_is_written_is_there_next_time() {
+        settingsfile::testing::with_scratch_config("notes-kept", |_| {
+            let mut app = NotesApp::from_settings();
+            assert!(app.store_error.is_none(), "{:?}", app.store_error);
+            let keeping = app.keeping_line();
+            assert!(
+                keeping.starts_with("What you write is kept in "),
+                "{keeping}"
+            );
+            assert!(
+                texts(&app).contains(&keeping),
+                "the empty window does not say where notes are kept"
+            );
+            assert!(texts(&app).iter().any(|t| t == NO_NOTES_YET));
+
+            app.handle_event(&ctrl(Key::N));
+            type_str(&mut app, "Groceries");
+            app.handle_event(&press(Key::Enter));
+            app.handle_event(&press(Key::Enter));
+            type_str(&mut app, "eggs");
+            app.handle_event(&press(Key::Enter));
+            type_str(&mut app, "caf\u{e9}\ttea");
+            app.handle_event(&press(Key::Escape));
+            app.handle_event(&press(Key::P));
+            // Written by the keys themselves, with no save asked for.
+            assert_eq!(
+                NotesApp::from_settings().notes,
+                app.notes,
+                "what the keys did is not on disk"
+            );
+            let id = app.selected_note.unwrap();
+            app.add_tag_to_note(id, "shopping");
+            app.keep();
+            assert!(!app.unsaved, "{:?}", app.store_error);
+            assert!(!texts(&app).iter().any(|t| t == NO_NOTES_YET));
+
+            let mut again = NotesApp::from_settings();
+            assert!(again.store_error.is_none(), "{:?}", again.store_error);
+            assert_eq!(again.notebooks, app.notebooks);
+            assert_eq!(again.notes, app.notes);
+            let note = &again.notes[0];
+            assert_eq!(note.content, "eggs\ncaf\u{e9}\ttea");
+            assert!(note.pinned);
+            assert_eq!(note.tags, ["shopping"]);
+            assert_eq!(
+                again.selected_note,
+                Some(id),
+                "the kept note is not selected"
+            );
+
+            let notebook = again.notes[0].notebook_id;
+            let fresh = again.create_note("Next", notebook);
+            assert_ne!(fresh, id, "a new note took a kept one's number");
+            let fresh_book = again.create_notebook("Next");
+            assert_ne!(
+                fresh_book, notebook,
+                "a new notebook took a kept one's number"
+            );
+        });
+    }
+
+    #[test]
+    fn deleting_is_kept_too() {
+        settingsfile::testing::with_scratch_config("notes-deleted", |_| {
+            let mut app = NotesApp::from_settings();
+            let book = app.create_notebook("Home");
+            let kept = app.create_note("Kept", book);
+            let gone = app.create_note("Gone", book);
+            app.keep();
+            assert!(app.delete_note(gone));
+            app.keep();
+            let again = NotesApp::from_settings();
+            let ids: Vec<NoteId> = again.notes.iter().map(|n| n.id).collect();
+            assert_eq!(ids, [kept]);
+        });
+    }
+
+    #[test]
+    fn a_window_made_by_new_keeps_nothing() {
+        settingsfile::testing::with_scratch_config("notes-quiet", |dir| {
+            let mut app = NotesApp::new();
+            app.handle_event(&ctrl(Key::N));
+            type_str(&mut app, "Scratch");
+            app.handle_event(&press(Key::Enter));
+            assert_eq!(app.notes.len(), 1);
+            assert!(
+                !dir.join("slateos").join("notes").exists(),
+                "a window made by new() wrote the user's library"
+            );
+            assert_eq!(app.keeping_line(), "Nothing written here is kept.");
+        });
+    }
+
+    #[test]
+    fn a_library_that_cannot_be_read_is_left_as_it_is() {
+        settingsfile::testing::with_scratch_config("notes-broken", |_| {
+            let path = library_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let broken =
+                "slateos-notes\t1\nnotebook\t1\t\t1\tHome\nnote\t1\t1\tsketch\t0\t0\t5\t6\tT\tC\n";
+            std::fs::write(&path, broken).unwrap();
+            let mut app = NotesApp::from_settings();
+            let error = app
+                .store_error
+                .clone()
+                .expect("an unreadable library was taken without a word");
+            assert!(error.contains("line 3"), "{error}");
+            assert!(texts(&app).contains(&error), "the refusal is not on screen");
+            assert!(
+                app.notes.is_empty(),
+                "half a library was taken for the whole"
+            );
+
+            app.handle_event(&ctrl(Key::N));
+            type_str(&mut app, "New");
+            app.handle_event(&press(Key::Enter));
+            assert_eq!(app.notes.len(), 1);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                broken,
+                "the unreadable library was saved over"
+            );
+            // Nothing written here was ever going to be kept, and the window
+            // has said so all along: closing does not ask.
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::Exit
+            ));
+        });
+    }
+
+    #[test]
+    fn a_library_too_big_to_read_whole_is_refused() {
+        settingsfile::testing::with_scratch_config("notes-big", |_| {
+            let mut source = NotesApp::new();
+            let book = source.create_notebook("Home");
+            source.create_note(&"x".repeat(400), book);
+            let text = library_text(&source.notebooks, &source.notes);
+            let path = library_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &text).unwrap();
+
+            let mut app = NotesApp::new();
+            app.persist = true;
+            app.load_library_within(&path, text.len() - 1);
+            let error = app.store_error.clone().expect("a cut-short read was taken");
+            assert!(error.contains("larger than"), "{error}");
+            assert!(!app.persist, "a library read in part would be saved over");
+            assert!(app.notes.is_empty());
+
+            let mut whole = NotesApp::new();
+            whole.persist = true;
+            whole.load_library_within(&path, text.len());
+            assert!(whole.store_error.is_none(), "{:?}", whole.store_error);
+            assert_eq!(whole.notes, source.notes, "control: the whole file reads");
+        });
+    }
+
+    #[test]
+    fn a_save_that_fails_says_so_and_the_next_change_tries_again() {
+        settingsfile::testing::with_scratch_config("notes-refused", |_| {
+            let mut app = NotesApp::from_settings();
+            let path = library_path().unwrap();
+            // A directory where the file goes, so the write cannot land.
+            std::fs::create_dir_all(&path).unwrap();
+            app.handle_event(&ctrl(Key::N));
+            type_str(&mut app, "First");
+            assert_eq!(app.handle_event(&press(Key::Enter)), EventResult::Consumed);
+            let error = app.store_error.clone().expect("a failed save said nothing");
+            assert!(error.starts_with("Not saved to "), "{error}");
+            assert!(texts(&app).contains(&error), "the failure is not on screen");
+            assert!(app.unsaved);
+
+            std::fs::remove_dir(&path).unwrap();
+            app.handle_event(&press(Key::P));
+            assert!(app.store_error.is_none(), "{:?}", app.store_error);
+            assert!(!app.unsaved);
+            let again = NotesApp::from_settings();
+            assert_eq!(again.notes, app.notes, "the retry did not write it all");
+        });
+    }
+
+    #[test]
+    fn closing_while_writing_keeps_what_was_written() {
+        settingsfile::testing::with_scratch_config("notes-close", |_| {
+            let mut app = NotesApp::from_settings();
+            app.handle_event(&ctrl(Key::N));
+            type_str(&mut app, "Draft");
+            app.handle_event(&press(Key::Enter));
+            app.handle_event(&press(Key::Enter));
+            type_str(&mut app, "half a thought");
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::Exit
+            ));
+            let again = NotesApp::from_settings();
+            assert_eq!(again.notes[0].content, "half a thought");
+        });
+    }
+
+    #[test]
+    fn closing_while_a_save_fails_asks_first() {
+        settingsfile::testing::with_scratch_config("notes-ask", |_| {
+            let mut app = NotesApp::from_settings();
+            let path = library_path().unwrap();
+            std::fs::create_dir_all(&path).unwrap();
+            app.handle_event(&ctrl(Key::N));
+            type_str(&mut app, "Unkept");
+            app.handle_event(&press(Key::Enter));
+            assert!(app.unsaved);
+
+            // Asked, and a key under the question reaches nothing.
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            let asked = app.question.as_ref().expect("no question");
+            assert!(asked.message().contains("not saved"), "{}", asked.message());
+            let notes = app.notes.clone();
+            app.on_event(&ctrl(Key::N));
+            assert!(
+                app.text_entry.is_none(),
+                "a key reached the window under the question"
+            );
+            assert_eq!(app.notes, notes);
+
+            // Cancel: the window stays, still unsaved.
+            app.on_event(&press(Key::Escape));
+            assert!(app.question.is_none());
+            assert!(!app.quit);
+
+            // Save, while the save still fails: the window stays.
+            app.on_event(&Event::CloseRequested);
+            assert!(matches!(app.on_event(&press(Key::S)), Response::Redraw));
+            assert!(!app.quit, "the window left while its save was failing");
+
+            // Save, once it can -- put right while the question is up: the
+            // window goes, and the note was written.
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            std::fs::remove_dir(&path).unwrap();
+            assert!(matches!(app.on_event(&press(Key::S)), Response::Exit));
+            assert_eq!(NotesApp::from_settings().notes, app.notes);
+        });
+    }
+
+    #[test]
+    fn closing_over_a_failing_save_can_leave_without_it() {
+        settingsfile::testing::with_scratch_config("notes-discard", |_| {
+            let mut app = NotesApp::from_settings();
+            std::fs::create_dir_all(library_path().unwrap()).unwrap();
+            app.create_notebook("Lost");
+            app.handle_event(&press(Key::Tab));
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            assert!(matches!(app.on_event(&press(Key::D)), Response::Exit));
+        });
+    }
+
+    #[test]
+    fn leaving_a_note_as_it_was_is_no_change() {
+        let mut app = NotesApp::new();
+        let book = app.create_notebook("Home");
+        let id = app.create_note("Same", book);
+        app.update_note_content(id, "text");
+        app.selected_note = Some(id);
+        app.unsaved = false;
+        let before = app.find_note(id).unwrap().clone();
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(
+            app.find_note(id).unwrap(),
+            &before,
+            "an unchanged body changed the note"
+        );
+        assert!(!app.unsaved, "an unchanged body counted as a change");
+        assert!(app.update_note_title(id, "Same"));
+        assert!(!app.unsaved, "an unchanged title counted as a change");
+        assert!(app.move_note(id, book));
+        assert!(!app.unsaved, "a move to where it was counted as a change");
+        assert!(app.rename_notebook(book, "Home"));
+        assert!(
+            !app.unsaved,
+            "a rename to the same name counted as a change"
+        );
+    }
+
+    #[test]
+    fn every_change_is_marked_for_keeping() {
+        type Change = fn(&mut NotesApp, NotebookId, NoteId) -> bool;
+        let changes: [(&str, Change); 11] = [
+            ("a new notebook", |a, _, _| {
+                a.create_notebook("B");
+                true
+            }),
+            ("a new child notebook", |a, b, _| {
+                a.create_child_notebook("C", b);
+                true
+            }),
+            ("a rename", |a, b, _| a.rename_notebook(b, "Renamed")),
+            ("a deleted notebook", |a, b, _| a.delete_notebook(b)),
+            ("a new note", |a, b, _| {
+                a.create_note("N", b);
+                true
+            }),
+            ("a new note from a template", |a, b, _| {
+                a.create_note_from_template(NoteTemplate::TodoList, b);
+                true
+            }),
+            ("new text", |a, _, n| a.update_note_content(n, "changed")),
+            ("a new title", |a, _, n| a.update_note_title(n, "Changed")),
+            ("a deleted note", |a, _, n| a.delete_note(n)),
+            ("a tag", |a, _, n| a.add_tag_to_note(n, "new")),
+            ("a tag taken off", |a, _, n| {
+                a.remove_tag_from_note(n, "old")
+            }),
+        ];
+        for (what, change) in changes {
+            let mut app = NotesApp::new();
+            let book = app.create_notebook("A");
+            let note = app.create_note("Note", book);
+            app.update_note_content(note, "text");
+            app.add_tag_to_note(note, "old");
+            app.unsaved = false;
+            assert!(change(&mut app, book, note), "{what} did not happen");
+            assert!(app.unsaved, "{what} was not marked to be kept");
+        }
+        // Through the keys: pinning, favouriting, a moved note, a restored
+        // version.
+        let mut app = NotesApp::new();
+        let book = app.create_notebook("A");
+        let other = app.create_notebook("B");
+        let note = app.create_note("Note", book);
+        app.update_note_content(note, "one");
+        app.update_note_content(note, "two");
+        app.selected_note = Some(note);
+        type Act = Box<dyn Fn(&mut NotesApp)>;
+        let acts: Vec<(&str, Act)> = vec![
+            (
+                "a pin",
+                Box::new(|a| {
+                    a.handle_key(&key_of(Key::P, Modifiers::NONE));
+                }),
+            ),
+            (
+                "a favourite",
+                Box::new(|a| {
+                    a.handle_key(&key_of(Key::V, Modifiers::NONE));
+                }),
+            ),
+            (
+                "a move",
+                Box::new(move |a| assert!(a.move_note(note, other))),
+            ),
+            (
+                "a restored version",
+                Box::new(|a| assert!(a.restore_selected_version(0))),
+            ),
+        ];
+        for (what, act) in acts {
+            app.unsaved = false;
+            act(&mut app);
+            assert!(app.unsaved, "{what} was not marked to be kept");
+        }
+    }
+
+    #[test]
+    fn ctrl_s_says_where_the_notes_are_kept() {
+        settingsfile::testing::with_scratch_config("notes-ctrl-s", |_| {
+            let mut app = NotesApp::from_settings();
+            app.create_notebook("Home");
+            app.handle_event(&ctrl(Key::S));
+            assert!(!app.unsaved, "Ctrl+S kept nothing");
+            let said = app.last_save.clone().expect("Ctrl+S said nothing");
+            assert!(said.starts_with("What you write is kept in "), "{said}");
+            assert!(library_path().unwrap().is_file());
+        });
+        let mut app = NotesApp::new();
+        app.handle_event(&ctrl(Key::S));
+        assert_eq!(
+            app.last_save.as_deref(),
+            Some("Nothing written here is kept.")
+        );
+    }
+
+    #[test]
+    fn the_empty_window_says_how_to_start_and_nothing_else_does() {
+        let mut app = NotesApp::new();
+        let shown = texts(&app);
+        assert!(shown.iter().any(|t| t == NO_NOTES_YET), "{shown:?}");
+        assert!(shown.iter().any(|t| t == "Nothing written here is kept."));
+        let book = app.create_notebook("Home");
+        app.create_note("One", book);
+        app.selected_note = None;
+        let shown = texts(&app);
+        assert!(
+            !shown.iter().any(|t| t == NO_NOTES_YET),
+            "the empty-window line is drawn over notes"
+        );
+        assert!(shown.iter().any(|t| t.starts_with("Select a note")));
+    }
+
+    #[test]
+    fn a_change_made_now_is_later_than_every_kept_one() {
+        let late = 4_000_000_000_000_u64;
+        let text = format!(
+            "slateos-notes\t1\nnotebook\t1\t\t1\tHome\nnote\t1\t1\tplain\t0\t0\t5\t{late}\tT\tC\nversion\t{}\ts\tc\n",
+            late + 7
+        );
+        let mut app = NotesApp::new();
+        app.take_library(parse_library(&text).unwrap());
+        let id = app.create_note("Now", 1);
+        let made = app.find_note(id).unwrap().created_at;
+        assert!(
+            made > late + 7,
+            "a new note was stamped {made}, before a kept one"
+        );
+        app.sort_order = SortOrder::DateModified;
+        assert_eq!(
+            app.visible_notes().first(),
+            Some(&id),
+            "the newest note does not sort first"
+        );
+    }
+
+    #[test]
+    fn stamps_are_the_clocks_and_always_later() {
+        let mut app = NotesApp::new();
+        let before = clock_ms();
+        let first = app.stamp();
+        let second = app.stamp();
+        assert!(
+            first >= before,
+            "{first} is earlier than the clock's {before}"
+        );
+        assert!(second > first, "{second} is not later than {first}");
+
+        let book = app.create_notebook("Home");
+        let id = app.create_note("Now", book);
+        let made = app.find_note(id).unwrap().created_at;
+        assert!(made > second, "{made} is not later than {second}");
+        app.selected_note = Some(id);
+        let modified = format!("Modified: {}", when(made));
+        let shown = texts(&app);
+        assert!(
+            shown.iter().any(|t| t.contains(&modified)),
+            "{modified:?} is not drawn: {shown:?}"
+        );
+    }
+
+    #[test]
+    fn a_stamp_reads_as_a_date_and_a_time() {
+        assert_eq!(when(0), "1970-01-01 00:00");
+        assert_eq!(when(1_000_000_000_000), "2001-09-09 01:46");
+        assert_eq!(when(951_782_400_000), "2000-02-29 00:00");
+        assert_eq!(when(951_868_799_000), "2000-02-29 23:59");
+        assert_eq!(when(1_790_000_000_000), "2026-09-21 14:13");
+    }
+
+    #[test]
+    fn a_new_note_goes_in_a_notebook_the_library_has() {
+        let mut app = NotesApp::new();
+        app.selected_notebook = Some(99);
+        app.handle_event(&ctrl(Key::N));
+        type_str(&mut app, "Somewhere");
+        app.handle_event(&press(Key::Enter));
+        let note = &app.notes[0];
+        assert!(
+            app.find_notebook(note.notebook_id).is_some(),
+            "a note went into notebook {}, which is not there",
+            note.notebook_id
+        );
+        let text = library_text(&app.notebooks, &app.notes);
+        assert!(
+            parse_library(&text).is_ok(),
+            "the library cannot be read back"
         );
     }
 }

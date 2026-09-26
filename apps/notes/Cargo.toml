@@ -12,12 +12,33 @@ guitk = { path = "../../gui/toolkit" }
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
 
-# Ctrl+S writes through `safeio::write_str_atomically` rather than `fs::write`.
-# `fs::write` truncates the target before writing it, so a save interrupted
-# part-way leaves the note on disk as a fragment or as nothing -- and once a
-# note has been exported, that file may be the user's only copy. Same reasoning
-# as `apps/editor`, which is where this pattern comes from.
+# The library and every export are written through
+# `safeio::write_str_atomically` rather than `fs::write`. `fs::write` truncates
+# the target before writing it, so a save interrupted part-way leaves the file
+# as a fragment or as nothing -- and the library is every note the user has.
+# Same reasoning as `apps/editor`, which is where this pattern comes from.
 safeio = { path = "../safeio" }
+
+# The library is kept in the user's settings directory
+# (`settingsfile::config_dir`), as the finance ledger and the habit tracker keep
+# theirs.
+settingsfile = { path = "../../gui/settingsfile" }
+
+# The library's text fields are escaped with `textfmt::tsv`, the record files'
+# four escapes, which the finance ledger and the spreadsheet's workbook share.
+textfmt = { path = "../../textfmt" }
+
+# When a note was written, in the zone the rest of the desktop uses.
+tzrules = { path = "../../tzrules" }
+
+# "Your notes could not be saved -- close anyway?", asked the way every editor
+# here asks it.
+unsaved = { path = "../unsaved" }
+
+[dev-dependencies]
+# `with_scratch_config`, so the tests that keep a library keep it in a scratch
+# directory and never in the developer's own.
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
 
 [lints]
 workspace = true

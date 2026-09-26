@@ -166655,7 +166655,7 @@ buttons; it is the next candidate for the same treatment, not a reason to
 have left this one hand-drawn.
 
 ### [E] Notes, contacts, snippets and kanban keep nothing -- 2026-09-25
-**Status:** OPEN -- lane E
+**Status:** FIXED for notes (lane E, 2026-09-25); OPEN for contacts, snippets and kanban -- lane E's next.
 
 **In short:** the notes app, the address book, the snippet library and the
 kanban boards each hold everything the user puts in them in memory only. There
@@ -166681,6 +166681,30 @@ or `settingsfile` -- as it changes, with a failed write said on screen and the
 record kept marked unsaved so the next change tries again. The exports stay as
 exports. See `todo.txt` -> Lane E -> "The habit tracker keeps its record in the
 settings directory" for why the settings directory rather than a data one.
+
+**Notes, the same day.** The library is `notes/library.txt` in the settings
+directory: every notebook and note with its tags, checklist, table, pins and
+version history, tab-separated with `textfmt::tsv`'s escapes, rewritten after
+every event that changed it and read whole or not at all (design-decisions
+§1205). A failed save is drawn in red in the status bar and retried by the next
+change or Ctrl+S; a close while it fails asks on `apps/unsaved`; a note being
+written when the window closes is committed and kept, where it was dropped.
+Ctrl+S, which was the Markdown export, now says where the notes are kept, and
+the export is Ctrl+E. Also fixed on the way:
+- **The empty window's text was never seen.** "No notes yet -- Ctrl+N makes
+  one." and the line under it were drawn at the top of every frame, notes or
+  not, and *before* the window's background, which painted over them. They are
+  drawn in the editor, and only when there are no notes; the second line now
+  says where notes are kept, or why they are not.
+- **Timestamps were a counter** from 1000, shown as "Modified: 1004" and
+  "v3 (1003)", and restarting at 1000 would have stamped every note made after
+  a restart earlier than every kept one. They are the clock's, never earlier
+  than a stamp already given, shown as `2026-09-25 14:03`.
+- **Leaving a note unchanged changed it.** Escape out of the writing mode
+  committed the body whether or not anything was typed, putting a copy of the
+  same text in the history and moving the note to the top of the list; now
+  the same text, title, notebook or name is no change.
+Mutation table `apps/notes/mutate.py` (new).
 
 ### [E] The JSON viewer's text input cannot be reached -- 2026-09-25
 **Status:** OPEN -- lane E

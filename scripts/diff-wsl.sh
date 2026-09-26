@@ -140,7 +140,7 @@
 # | name | |
 # |---|---|
 # | `root`       | the repository root |
-# | `target_dir` | the shared Linux target directory |
+# | `target_dir` | this worktree's Linux target directory (see "4. the subject") |
 # | `OURS`       | our binary, absolute (a single `DIFF_BINS`, or a single `DIFF_EXAMPLES` and no `DIFF_BINS`) |
 # | `gnu_real`   | the reference binary, absolute (single `DIFF_BINS`, unless `DIFF_NO_REF`) |
 # | `gnu_dir`    | the built reference's `src` directory, or empty without `DIFF_GNU_SOURCE` |
@@ -898,7 +898,20 @@ if [ -z "${DIFF_NO_REF:-}" ]; then
 fi
 
 # --- 4. the subject -----------------------------------------------------------
-target_dir=$HOME/.cache/slateos-diff-target
+# One cache PER WORKTREE, never one for all of them. Cargo names a workspace
+# member's artifacts by a hash of its path RELATIVE to the workspace root, and
+# records its sources relative to that root too, so `os-lane-b` and
+# `os-lane-d` build `userspace/localtime` into the very same files -- and
+# freshness is by mtime. A worktree whose own `localtime` was last edited at
+# 10:00 therefore takes another worktree's build of ITS older `localtime`,
+# made at 14:00, as fresh, and compiles against the other tree's source. On
+# 2026-09-26 that failed lane B's push hook with `no StructTm in the root`
+# against a tree that has one; the unlucky shape is a harness certifying a
+# binary built from someone else's source. It is also the explanation the
+# 2026-08-24 note below goes looking for. Keyed by the root's own path, so two
+# checkouts can never share one; `coreutils-check.sh` computes the same key,
+# so the push gate and the harnesses of one worktree share its cache.
+target_dir=$HOME/.cache/slateos-diff-target/$(basename "$root")-$(printf '%s' "$root" | sha256sum | cut -c1-12)
 
 # The path of one of the binaries built above.
 diff_ours() {

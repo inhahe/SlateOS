@@ -146188,7 +146188,17 @@ sweep polishing the wrong one.
 
 ## TD-C-NOTHING-CONNECTS-A-LAUNCHER-ENTRY-TO-THE-WINDOWS-IT-OPENS
 
-**Date:** 2026-09-14. **Lane:** C.
+**Date:** 2026-09-14. **Lane:** C. **FIXED 2026-09-26**, by the first of the
+three options below rather than the recommended third: the installed programs'
+desktop entries now exist (`gui/desktopentry`), and a window's `app_id` is
+matched against an entry's file name, its `StartupWMClass` or its program's
+file name (`DesktopShell::program_for_app_id`); a window's button draws its
+program's picture from it. **The merge this entry calls "the ordinary behaviour
+of every desktop" is not this desktop's**: `design.txt` puts every launched
+program to the right of the pins, and the Aero reference's pinned button starts
+a new copy there, so a pinned program and its open window keep two buttons by
+design (design-decisions §885). The compositor route stays open for programs
+that declare nothing.
 
 **In short:** the desktop cannot tell that the window in front of you belongs to
 the program you started. It knows the program by the file it ran, and it knows

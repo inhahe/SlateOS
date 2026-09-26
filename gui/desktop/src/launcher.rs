@@ -194,6 +194,10 @@ pub struct AppEntry {
     pub terminal: bool,
     /// The desktop file ID it was read from; `None` for the shell's own.
     pub desktop_id: Option<String>,
+    /// The window class its windows will declare (`StartupWMClass`), when
+    /// its entry says: one of the ways a window is known to be this program's
+    /// (`DesktopShell::program_for_app_id`).
+    pub wm_class: Option<String>,
 }
 
 /// The folders of the start menu's applications tree.
@@ -226,6 +230,7 @@ impl AppEntry {
             actions: app.actions,
             terminal: app.terminal,
             desktop_id: Some(app.id),
+            wm_class: app.startup_wm_class,
         })
     }
 

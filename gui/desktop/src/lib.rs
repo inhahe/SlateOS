@@ -927,6 +927,14 @@ impl Hit {
     }
 }
 
+/// The file name of `path` as text, when it has one that is: how a program
+/// named by its path is matched against the name its windows declare.
+fn file_name_str(path: &str) -> Option<&str> {
+    Path::new(path)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+}
+
 /// One row of the start menu's list.
 #[derive(Clone, Copy, Debug)]
 pub enum StartRow<'a> {
@@ -2727,13 +2735,12 @@ impl DesktopShell {
     /// Every button the taskbar shows, pinned applications first.
     ///
     /// Pinned first and always shown, rather than merged with a window of the
-    /// same program. Merging needs a name both ends agree on, and there is
-    /// none: a window carries the `app_id` its program declares, while a
-    /// pinned entry carries the executable path the launcher knows it by, and
-    /// nothing in the tree maps one to the other. Showing both is honest --
-    /// the pinned button is a *launcher*, and it keeps meaning that while the
-    /// program runs -- and it is what a quick-launch strip has always done.
-    /// Merging is a refinement for the day an application identity exists.
+    /// same program -- which the desktop could now do, since a window's
+    /// declared name finds its program (`program_for_app_id`), and which it
+    /// does not by design: `design.txt` puts "all launched applications ... to
+    /// the right of" the pins, and the Aero reference's pinned button starts a
+    /// new copy there (design-decisions §885). The pinned button is a
+    /// *launcher*, and it keeps meaning that while the program runs.
     #[must_use]
     pub fn taskbar_slots(&self) -> Vec<TaskbarSlot> {
         let mut slots: Vec<TaskbarSlot> = (0..self.taskbar.pinned_apps().len())
@@ -2752,6 +2759,9 @@ impl DesktopShell {
     /// order (see `button_order`) rather than the stacking order. Stable: the
     /// buttons stay put when a window is raised, and move only when the user
     /// drags one.
+    ///
+    /// A pinned program's window among them: a pinned button starts its
+    /// program and stands for none of its windows (design-decisions §885).
     #[must_use]
     pub fn taskbar_button_windows(&self) -> Vec<&ManagedWindow> {
         let mut windows = self.taskbar_windows();
@@ -2884,6 +2894,45 @@ impl DesktopShell {
             .collect();
         self.start_menu_scroll = self.start_menu_scroll.min(self.start_menu_max_scroll());
         self.start_selected = None;
+    }
+
+    /// The program a window belongs to, by the `app_id` it declares: the
+    /// program whose desktop entry file is named for it
+    /// (`org.example.Sketch.desktop` for `org.example.Sketch`, the Wayland
+    /// convention), whose entry gives it as `StartupWMClass`, or whose program
+    /// file is called it (SlateOS's own programs declare their crate's name,
+    /// `terminal` for `/usr/bin/terminal`). Case is not significant.
+    ///
+    /// `None` for a window that names no program, or one nothing here knows.
+    /// This is the application identity `known-issues.md`
+    /// `TD-C-NOTHING-CONNECTS-A-LAUNCHER-ENTRY-TO-THE-WINDOWS-IT-OPENS` found
+    /// missing: the freedesktop answer, which works for any program that says
+    /// what it is and for none that does not. What a window's button draws
+    /// comes from it (design-decisions §885).
+    #[must_use]
+    pub fn program_for_app_id(&self, app_id: &str) -> Option<&AppEntry> {
+        if app_id.is_empty() {
+            return None;
+        }
+        let same = |name: &str| name.eq_ignore_ascii_case(app_id);
+        self.apps
+            .iter()
+            .find(|app| {
+                app.desktop_id
+                    .as_deref()
+                    .and_then(|id| id.strip_suffix(".desktop"))
+                    .is_some_and(same)
+            })
+            .or_else(|| {
+                self.apps
+                    .iter()
+                    .find(|app| app.wm_class.as_deref().is_some_and(same))
+            })
+            .or_else(|| {
+                self.apps
+                    .iter()
+                    .find(|app| file_name_str(&app.executable_path).is_some_and(same))
+            })
     }
 
     /// How to start the program known by `exec` -- a pin's, a start menu
@@ -6518,18 +6567,25 @@ impl DesktopShell {
         // Over *slots*, not windows: a pinned application has a button whether
         // or not it is running, and it stands to the left of the windows.
         let windows = self.taskbar_windows();
+        let icon_px = self.icon_px(TASKBAR_ICON);
         for (index, slot) in self.taskbar_slots().iter().enumerate() {
             let button = self.taskbar_button_rect(index);
 
-            let (label, bg) = match *slot {
+            // What the button says, its colour, and its program's picture.
+            let (label, bg, image_id) = match *slot {
                 TaskbarSlot::Pinned(pin) => {
                     let Some(app) = self.taskbar.pinned_apps().get(pin) else {
                         continue;
                     };
+                    let program = self
+                        .apps
+                        .iter()
+                        .find(|a| a.executable_path == app.exec_path);
+                    let image_id = self.picture_of(program, icon_px, self.theme.taskbar_fg);
                     // Never the focused colour: a pinned button is a way to
                     // *start* the program, so drawing it as though it were the
                     // window in front would say something untrue about it.
-                    (app.display_name.as_str(), self.theme.taskbar_bg)
+                    (app.display_name.as_str(), self.theme.taskbar_bg, image_id)
                 }
                 TaskbarSlot::Window(id) => {
                     let Some(window) = windows.iter().find(|w| w.id == id) else {
@@ -6540,11 +6596,23 @@ impl DesktopShell {
                     } else {
                         self.theme.taskbar_bg
                     };
-                    (window.title.as_str(), bg)
+                    let program = self.program_for_app_id(&window.app_id);
+                    let image_id = self.picture_of(program, icon_px, self.theme.taskbar_fg);
+                    (window.title.as_str(), bg, image_id)
                 }
             };
 
             fill_round(&mut tree, button, bg, radii);
+            #[allow(clippy::cast_precision_loss)]
+            let side = icon_px as f32;
+            let inset = self.scale(8.0);
+            tree.push(guitk::render::RenderCommand::Image {
+                x: button.x + inset,
+                y: button.y + (button.h - side).max(0.0) / 2.0,
+                width: side,
+                height: side,
+                image_id,
+            });
 
             // Window title, fitted to what the button can hold — by the
             // renderer, which is the only thing that knows how wide the title
@@ -6562,11 +6630,11 @@ impl DesktopShell {
             // and a window called "Save changes to report.docx?" reading as
             // "Save changes to rep" is a different sentence.
             let title_size = self.font_size(TextRole::Caption);
-            let inset = self.scale(8.0);
+            let text_x = button.x + inset + side + self.scale(6.0);
             tree.text_in(
-                button.x + inset,
+                text_x,
                 button.y + inset,
-                (button.w - inset - inset).max(0.0),
+                (button.x + button.w - inset - text_x).max(0.0),
                 label,
                 self.theme.taskbar_fg,
                 title_size,
@@ -7119,6 +7187,15 @@ impl DesktopShell {
                 self.icon_registry
                     .icon_or(icon.clone(), launcher::GENERIC_PROGRAM_ICON, px, color)
             }
+            None => self.icon(launcher::GENERIC_PROGRAM_ICON, px, color),
+        }
+    }
+
+    /// The image id of `program`'s picture, `px` square in `color` -- or the
+    /// generic program's, when the desktop does not know which program it is.
+    fn picture_of(&self, program: Option<&AppEntry>, px: u32, color: Color) -> u64 {
+        match program {
+            Some(entry) => self.program_icon(entry, px, color),
             None => self.icon(launcher::GENERIC_PROGRAM_ICON, px, color),
         }
     }
@@ -8006,6 +8083,8 @@ impl DesktopShell {
             }
             return ShellAction::Consumed;
         }
+        // Running or not: a pinned button starts another copy, and the
+        // running ones have their own buttons (design-decisions §885).
         exec.map_or(ShellAction::Consumed, |exec| {
             ShellAction::Launch(self.launch_for(&exec))
         })
@@ -17646,6 +17725,130 @@ mod taskbar_pin_tests {
             assert!(
                 shell.taskbar_slots().is_empty(),
                 "the button outlived the pin"
+            );
+        });
+    }
+
+    // ---- a window is known as its program's; a pin stays a launcher ----
+
+    /// A window of `app_id`, titled `title`.
+    fn window_of(id: u64, app_id: &str, title: &str) -> WindowInfo {
+        let mut window = WindowInfo::new(id, id, title.to_string());
+        window.app_id = app_id.to_string();
+        window
+    }
+
+    /// **A pinned program's window has its own button, right of the pins,
+    /// and the pin still starts another copy** -- `design.txt`: "can pin apps
+    /// to taskbar on the left, all launched applications go to the right of
+    /// those"; the Aero reference: "Clicking a pinned app launches a new
+    /// running instance on the right". Every other desktop folds the window
+    /// into its pin; this one is specified not to (design-decisions §885).
+    #[test]
+    fn a_pinned_programs_window_has_its_own_button_and_the_pin_still_launches() {
+        use super::WindowId;
+        with_scratch_config("shell-pin-apart", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![window_of(1, "terminal", "~ : bash")],
+            ));
+            assert_eq!(
+                shell
+                    .program_for_app_id("terminal")
+                    .map(|a| a.executable_path.as_str()),
+                Some(super::launcher::TERMINAL),
+                "the premise: the window is known as the pinned program's"
+            );
+            assert_eq!(
+                shell.taskbar_slots(),
+                vec![TaskbarSlot::Pinned(0), TaskbarSlot::Window(WindowId(1))]
+            );
+            let (x, y) = button_centre(&shell, 0);
+            shell.handle_mouse(&at(x, y, MouseEventKind::Press(MouseButton::Left)));
+            assert_eq!(
+                shell.handle_mouse(&at(x, y, MouseEventKind::Release(MouseButton::Left))),
+                ShellAction::Launch(shell.launch_for(super::launcher::TERMINAL))
+            );
+        });
+    }
+
+    /// **A window is known as its program's by the entry's file name or its
+    /// window class**, as well as by the program's file name.
+    #[test]
+    fn a_window_is_known_by_its_entrys_name_or_class() {
+        let mut shell = shell();
+        let entry = |text: &str, id: &str| {
+            let parsed = desktopentry::DesktopEntry::parse(text.as_bytes()).expect("parses");
+            let app = desktopentry::App::from_entry(&parsed, id, None).expect("valid");
+            super::launcher::AppEntry::from_desktop(app).expect("startable")
+        };
+        shell.set_installed_apps(vec![
+            entry(
+                "[Desktop Entry]\nType=Application\nName=Sketchpad\nExec=/opt/sketch/run\n",
+                "org.example.Sketch.desktop",
+            ),
+            entry(
+                "[Desktop Entry]\nType=Application\nName=Paint\nExec=/opt/paint/run\nStartupWMClass=PaintStudio\n",
+                "paint.desktop",
+            ),
+        ]);
+        let named = |app_id: &str| shell.program_for_app_id(app_id).map(|a| a.name.clone());
+        assert_eq!(named("org.example.Sketch").as_deref(), Some("Sketchpad"));
+        assert_eq!(named("ORG.EXAMPLE.SKETCH").as_deref(), Some("Sketchpad"));
+        assert_eq!(named("PaintStudio").as_deref(), Some("Paint"));
+        assert_eq!(named("terminal").as_deref(), Some("Terminal"));
+        assert_eq!(named(""), None);
+        assert_eq!(named("nothing-at-all"), None);
+    }
+
+    /// **Every button draws its program's picture**: a pin its program's, a
+    /// window the picture of the program it says it is, and a window that
+    /// names no program the generic one.
+    #[test]
+    fn every_button_draws_its_programs_picture() {
+        use guitk::render::RenderCommand;
+        with_scratch_config("shell-button-pictures", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![
+                    window_of(1, "terminal", "~ : bash"),
+                    window_of(2, "", "untitled"),
+                ],
+            ));
+            let tree = shell.render_taskbar();
+            // The picture drawn inside each button, in the buttons' order.
+            let pictures: Vec<String> = (0..shell.taskbar_slots().len())
+                .map(|index| {
+                    let button = shell.taskbar_button_rect(index);
+                    let inside = |x: f32, y: f32| {
+                        x >= button.x
+                            && x < button.x + button.w
+                            && y >= button.y
+                            && y < button.y + button.h
+                    };
+                    tree.commands
+                        .iter()
+                        .find_map(|c| match c {
+                            RenderCommand::Image { x, y, image_id, .. } if inside(*x, *y) => {
+                                shell.icon_request(*image_id)
+                            }
+                            _ => None,
+                        })
+                        .map(|r| r.name.into_owned())
+                        .unwrap_or_default()
+                })
+                .collect();
+            assert_eq!(
+                pictures,
+                vec![
+                    "utilities-terminal".to_owned(),
+                    "utilities-terminal".to_owned(),
+                    super::launcher::GENERIC_PROGRAM_ICON.to_owned(),
+                ]
             );
         });
     }

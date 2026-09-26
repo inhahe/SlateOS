@@ -1850,6 +1850,13 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **Every taskbar button draws its program's picture** -- done
+  2026-09-26 (`design-decisions.md` §885). A window's declared name is matched
+  against the installed programs' desktop entries, so a window's button draws
+  its program's icon, a pinned button its program's, and a window that names
+  no program the generic one. A pinned program's open window keeps a button of
+  its own, right of the pins, as `design.txt` and the Aero reference specify.
+
 - `[C]` **Text falls back to other fonts, and the UI font is Open Sans** --
   done 2026-09-26 (`design-decisions.md` §883). A character the UI font
   lacked was a box. The toolkit now draws it from the first of a chosen list

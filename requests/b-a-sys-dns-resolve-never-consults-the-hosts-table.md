@@ -1,6 +1,7 @@
 # B → A: `localhost` is resolved by asking a DNS server
 
-**Status:** OPEN · **Filed:** 2026-09-14 by lane B ·
+**Status:** ⏳ partial — part 1 landed 2026-09-21 by lane A (`SYS_DNS_RESOLVE` consults the hosts table first); part 2 is declined for now and still open, with the shape it needs, in `requests/a-b-dns-resolve-now-consults-the-hosts-table.md`. (Stamped 2026-09-24.)
+**Filed:** 2026-09-14 by lane B ·
 **Affects:** `kernel/src/net/dns.rs`, `kernel/src/syscall/handlers.rs`,
 `kernel/src/fs/nameservice.rs` — yours; `posix/src/socket.rs` — mine
 

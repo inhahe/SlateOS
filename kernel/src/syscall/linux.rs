@@ -1287,7 +1287,7 @@ pub mod restart_block {
 
 /// Resolve a restart sentinel at the **no-handler** return-to-user checkpoint.
 ///
-/// Called from [`crate::syscall::entry::syscall_handler_inner`] after
+/// Called from `crate::syscall::entry::syscall_handler_inner` after
 /// `deliver_pending_signal` returned `false` (no userspace handler frame was
 /// built — either nothing was deliverable, or every pending signal was ignored
 /// or had a non-fatal default).
@@ -2860,10 +2860,24 @@ fn linux_execve(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     let ptr = frame.arg0;
     let rc = linux_execve_inner(frame);
     if rc < 0 {
+        let _task = crate::sched::current_task_id();
+        let _pid = crate::proc::thread::owner_process(_task);
         crate::serial_println!(
             "[exec] linux_execve ENTERED and failed early: filename_ptr={:#x} errno={}",
             ptr,
             -rc
+        );
+        // Name the caller. This line was read as evidence about a C fixture's
+        // execl on 2026-09-16, and two requests were filed against another
+        // lane on that reading. posix execs through the NATIVE syscall and
+        // cannot reach here at all, so the attribution was impossible -- but
+        // nothing in the output contradicted it, because the output never
+        // said who called. Now it does.
+        crate::serial_println!(
+            "[exec]   caller: task={} pid={:?} name={:?} (Linux ABI; native execs do not reach here)",
+            _task,
+            _pid,
+            _pid.and_then(crate::proc::pcb::name)
         );
     }
     rc
@@ -4232,7 +4246,10 @@ fn dispatch_memfd_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_read(buf, len_usize) {
         return linux_err(linux_errno_for(e));
     }
-    let mut kbuf = alloc::vec![0u8; len_usize];
+    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(len_usize) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
     // SAFETY: validate_user_read confirmed [buf, +len) is readable;
     // copy_from_user re-checks under SMAP.
     let r = unsafe { crate::mm::user::copy_from_user(buf, kbuf.as_mut_ptr(), len_usize) };
@@ -4265,7 +4282,10 @@ fn dispatch_memfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_write(buf, cap_usize) {
         return linux_err(linux_errno_for(e));
     }
-    let mut kbuf = alloc::vec![0u8; cap_usize];
+    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(cap_usize) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
     let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
     let n = match crate::ipc::memfd::read(h, &mut kbuf) {
         Ok(v) => v,
@@ -4494,7 +4514,10 @@ fn dispatch_signalfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         };
 
         // Build the records for as many masked-pending signals as we can drain.
-        let mut out = alloc::vec![0u8; total_bytes];
+        let mut out = match crate::mm::user::alloc_zeroed_vec(total_bytes) {
+            Ok(v) => v,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        };
         let mut produced = 0usize;
         while produced < max_records {
             let Some(sig) = crate::proc::signal::take_pending_in_mask(caller, mask) else {
@@ -5354,7 +5377,7 @@ fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
                 cmd,
                 fcntl_cmd::F_OFD_GETLK | fcntl_cmd::F_OFD_SETLK | fcntl_cmd::F_OFD_SETLKW,
             );
-            fcntl_flock_apply(arg, entry, is_getlk, is_ofd)
+            fcntl_flock_apply(pid, arg, entry, is_getlk, is_ofd)
         }
         // Linux `kernel/fcntl.c` returns -EINVAL (not -ENOSYS) for
         // unknown `cmd` values.  Match the reference behaviour so
@@ -5363,6 +5386,137 @@ fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
         // doesn't recognise the command (e.g. an older one).
         _ => linux_err(errno::EINVAL),
     }
+}
+
+/// Map a lock request onto `reclock`'s owner space.
+fn flock_owner(pid: u64, raw_handle: u64, is_ofd: bool) -> u64 {
+    // The encoding lives in `reclock`, which owns the owner space. This
+    // function only decides WHICH kind of owner the request has.
+    if is_ofd {
+        crate::fs::reclock::ofd_owner(raw_handle)
+    } else {
+        crate::fs::reclock::posix_owner(pid)
+    }
+}
+
+/// Resolve a `struct flock`'s `(l_whence, l_start, l_len)` into an absolute
+/// half-open byte range.
+///
+/// Split out so it can be tested without a process, a descriptor or a file --
+/// and because two of its cases are easy to get silently wrong on a path that
+/// decides who may write to what:
+///
+/// * `l_len == 0` means **to end of file**, not an empty range. It is passed
+///   through as 0, which `RecordLock::end` already reads as `u64::MAX`.
+/// * a **negative** `l_len` describes the range *below* the anchor:
+///   `[l_start + l_len, l_start)`. Treating it as an empty or forward range
+///   locks bytes the caller never named, which is worse than refusing.
+fn flock_range(
+    whence: i32,
+    l_start: i64,
+    l_len: i64,
+    cur_offset: u64,
+    file_size: u64,
+) -> Result<(u64, u64), i32> {
+    const SEEK_SET: i32 = 0;
+    const SEEK_CUR: i32 = 1;
+    const SEEK_END: i32 = 2;
+
+    let base: i64 = match whence {
+        SEEK_SET => 0,
+        SEEK_CUR => i64::try_from(cur_offset).map_err(|_| errno::EINVAL)?,
+        SEEK_END => i64::try_from(file_size).map_err(|_| errno::EINVAL)?,
+        _ => return Err(errno::EINVAL),
+    };
+    let anchor = base.checked_add(l_start).ok_or(errno::EINVAL)?;
+
+    let (start, len) = if l_len < 0 {
+        // POSIX: the range is [anchor + l_len, anchor).
+        let s = anchor.checked_add(l_len).ok_or(errno::EINVAL)?;
+        let n = l_len.checked_neg().ok_or(errno::EINVAL)?;
+        (s, n)
+    } else {
+        // The END of the range must be representable too. The negative branch
+        // above gets this free from its own `checked_add`; this branch did not
+        // check at all, so `l_start = i64::MAX, l_len = 1` returned a range
+        // whose end does not exist -- a lock that looks one byte wide and is
+        // not. Found by hand-checking the self-test's own cases against this
+        // function before the boot reached them.
+        anchor.checked_add(l_len).ok_or(errno::EINVAL)?;
+        (anchor, l_len)
+    };
+
+    // A range starting before byte zero is EINVAL, not a clamp: clamping would
+    // silently widen the lock.
+    if start < 0 {
+        return Err(errno::EINVAL);
+    }
+    let start_u = u64::try_from(start).map_err(|_| errno::EINVAL)?;
+    let len_u = u64::try_from(len).map_err(|_| errno::EINVAL)?;
+    Ok((start_u, len_u))
+}
+
+/// Exercise [`flock_range`] over the cases POSIX defines and the ones that
+/// would quietly lock the wrong bytes.
+pub fn self_test_flock_range() -> crate::error::KernelResult<()> {
+    crate::serial_println!("[flock-range] Running range-resolution self-test...");
+
+    // One case: whence, l_start, l_len, the descriptor's offset, the file
+    // size, and the absolute range it must resolve to. Named because
+    // `clippy::type_complexity` is deny-level here, and because the field
+    // order IS the meaning of the table -- a reader should not have to count
+    // commas to find which `i64` is the length.
+    type Case = (i32, i64, i64, u64, u64, (u64, u64));
+    let ok_cases: [Case; 7] = [
+        // SEEK_SET, plain forward range.
+        (0, 100, 50, 999, 999, (100, 50)),
+        // len 0 is to-EOF, preserved as 0 for RecordLock::end to read.
+        (0, 100, 0, 999, 999, (100, 0)),
+        // SEEK_CUR uses the descriptor's offset as the base.
+        (1, 10, 5, 200, 999, (210, 5)),
+        // SEEK_END uses the file size.
+        (2, 0, 10, 0, 500, (500, 10)),
+        // SEEK_END with a negative start: the last 10 bytes.
+        (2, -10, 10, 0, 500, (490, 10)),
+        // A NEGATIVE length: the range BELOW the anchor.
+        (0, 100, -40, 0, 999, (60, 40)),
+        // Negative length against a SEEK_CUR base.
+        (1, 100, -100, 50, 999, (50, 100)),
+    ];
+    for (w, st, ln, cur, size, want) in ok_cases {
+        match flock_range(w, st, ln, cur, size) {
+            Ok(got) if got == want => {}
+            other => {
+                crate::serial_println!(
+                    "[flock-range]   FAIL: (whence {}, start {}, len {}) gave {:?}, wanted Ok({:?})",
+                    w,
+                    st,
+                    ln,
+                    other,
+                    want
+                );
+                return Err(crate::error::KernelError::InternalError);
+            }
+        }
+    }
+
+    // (whence, l_start, l_len, cur, size, what)
+    let err_cases: [(i32, i64, i64, u64, u64, &str); 5] = [
+        (7, 0, 1, 0, 0, "unknown whence"),
+        (0, -1, 1, 0, 0, "range starts before byte zero"),
+        (0, 10, -100, 0, 0, "negative length reaches below zero"),
+        (0, i64::MAX, 1, 0, 0, "anchor + len overflows i64"),
+        (1, i64::MAX, 1, 8, 0, "SEEK_CUR base + start overflows i64"),
+    ];
+    for (w, st, ln, cur, size, what) in err_cases {
+        if let Ok(got) = flock_range(w, st, ln, cur, size) {
+            crate::serial_println!("[flock-range]   FAIL: {} was accepted as {:?}", what, got);
+            return Err(crate::error::KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[flock-range] Self-test passed (12 cases).");
+    Ok(())
 }
 
 /// Apply a POSIX advisory record lock (`F_SETLK` / `F_SETLKW` /
@@ -5374,16 +5528,18 @@ fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
 /// sharing yet), so no holder can conflict with the caller.  The
 /// honest answer for "is there a conflict?" is "no":
 ///
-///   * `F_SETLK` / `F_SETLKW`: validate the `struct flock`
-///     contents, then return 0 ("granted").  `F_SETLKW` is identical
-///     to `F_SETLK` because there is no contention to wait for.
-///     Releases (`l_type == F_UNLCK`) also return 0 — releasing a
-///     lock that was never installed is a no-op, matching Linux.
-///   * `F_GETLK` / `F_OFD_GETLK`: validate the `struct flock`,
-///     overwrite `l_type` with `F_UNLCK`, zero `l_pid`, and return
-///     0.  Linux's contract: "the lock that would prevent us from
-///     acquiring `l_type` at `[l_start, l_start + l_len)` is …" —
-///     `F_UNLCK` means "no conflict, you'd get the lock".
+///   * `F_SETLK`: resolve the range, then ask `fs::reclock` to take it.
+///     A conflicting lock held by another owner answers `EAGAIN`.
+///   * `F_SETLKW`: the same. It SHOULD block and does not -- there is no
+///     wait-queue hook for a lock table, which is why `sys_flock` also
+///     returns `EWOULDBLOCK` for every conflict. One hook fixes both.
+///   * Releases (`l_type == F_UNLCK`) go to `reclock::unlock`, which
+///     treats releasing a lock that was never held as a no-op.
+///   * `F_GETLK` / `F_OFD_GETLK`: a LOOKUP, not a claim. Reports the
+///     conflicting holder's type, range and pid, or `F_UNLCK` when there
+///     is none. `l_pid` is -1 for an OFD holder, which has no pid.
+///     This previously wrote `F_UNLCK` unconditionally, which asserts
+///     something about the world rather than answering.
 ///
 /// fd kind gate:
 ///   * `HandleKind::File` — accepted (regular files are lockable).
@@ -5400,6 +5556,7 @@ fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
 ///   off 24: i32 l_pid
 ///   off 28: 4 bytes trailing padding
 fn fcntl_flock_apply(
+    pid: u64,
     flock_ptr: u64,
     entry: crate::proc::linux_fd::FdEntry,
     is_getlk: bool,
@@ -5453,10 +5610,10 @@ fn fcntl_flock_apply(
     // per-range tracking).  Validate they're well-formed integers
     // (any bit pattern is legal at the ABI level — Linux clamps
     // pathological ranges later in conflict detection).
-    let _l_start = i64::from_le_bytes([
+    let l_start = i64::from_le_bytes([
         buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
     ]);
-    let _l_len = i64::from_le_bytes([
+    let l_len = i64::from_le_bytes([
         buf[16], buf[17], buf[18], buf[19], buf[20], buf[21], buf[22], buf[23],
     ]);
     let l_pid = i32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
@@ -5479,15 +5636,63 @@ fn fcntl_flock_apply(
     if is_ofd && l_pid != 0 {
         return linux_err(errno::EINVAL);
     }
+
+    // The range, resolved against the descriptor rather than assumed. The
+    // parse above used to drop `_l_start` / `_l_len` on the floor, which is
+    // where the always-grant stub actually lived.
+    let path = entry_path_for_handle(entry.raw_handle);
+    // `Current(0)` reads the offset without moving it: asking a question
+    // about a lock must not seek the caller's descriptor as a side effect.
+    let cur_offset =
+        crate::fs::handle::seek(entry.raw_handle, crate::fs::handle::SeekFrom::Current(0))
+            .unwrap_or(0);
+    let file_size = crate::fs::Vfs::metadata(path.as_path())
+        .map(|m| m.size)
+        .unwrap_or(0);
+    let (lock_start, lock_len) = match flock_range(l_whence, l_start, l_len, cur_offset, file_size)
+    {
+        Ok(r) => r,
+        Err(e) => return linux_err(e),
+    };
+    let owner = flock_owner(pid, entry.raw_handle, is_ofd);
+    let want_type = if l_type == fcntl_cmd::lease_type::F_RDLCK {
+        crate::fs::reclock::RecordLockType::Read
+    } else {
+        crate::fs::reclock::RecordLockType::Write
+    };
     if is_getlk {
         // Report "no conflict": overwrite l_type with F_UNLCK and
         // zero l_pid.  Other fields (l_whence / l_start / l_len) are
         // unchanged per Linux semantics — the kernel only writes
         // l_type and l_pid (and clears l_start/l_len on Linux but
         // many libcs don't rely on it; we preserve the input).
-        let unlck = fcntl_cmd::lease_type::F_UNLCK as i16;
-        buf[0..2].copy_from_slice(&unlck.to_le_bytes());
-        buf[24..28].copy_from_slice(&0i32.to_le_bytes());
+        // A LOOKUP, not a claim. This used to write F_UNLCK unconditionally,
+        // which is an assertion about the world rather than an answer.
+        match crate::fs::reclock::query(path.as_path(), owner, lock_start, lock_len, want_type) {
+            None => {
+                let unlck = fcntl_cmd::lease_type::F_UNLCK as i16;
+                buf[0..2].copy_from_slice(&unlck.to_le_bytes());
+                buf[24..28].copy_from_slice(&0i32.to_le_bytes());
+            }
+            Some(holder) => {
+                let ty = if holder.lock_type == crate::fs::reclock::RecordLockType::Read {
+                    fcntl_cmd::lease_type::F_RDLCK as i16
+                } else {
+                    fcntl_cmd::lease_type::F_WRLCK as i16
+                };
+                buf[0..2].copy_from_slice(&ty.to_le_bytes());
+                // POSIX: l_pid is -1 when the holder is an OFD lock, since
+                // an open file description has no pid to report.
+                let rep_pid = if crate::fs::reclock::owner_is_ofd(holder.owner) {
+                    -1i32
+                } else {
+                    i32::try_from(holder.owner).unwrap_or(-1)
+                };
+                buf[24..28].copy_from_slice(&rep_pid.to_le_bytes());
+                buf[8..16].copy_from_slice(&(holder.start as i64).to_le_bytes());
+                buf[16..24].copy_from_slice(&(holder.len as i64).to_le_bytes());
+            }
+        }
         // SAFETY: validate_user_write confirmed [flock_ptr, +32) is
         // a writable user range.
         if let Err(e) =
@@ -5496,8 +5701,28 @@ fn fcntl_flock_apply(
             return linux_err(linux_errno_for(e));
         }
     }
-    // SETLK / SETLKW / GETLK / SETLK(F_UNLCK) all succeed: 0.
-    SyscallResult::ok(0)
+    // GETLK has already answered above.
+    if is_getlk {
+        return SyscallResult::ok(0);
+    }
+    if l_type == fcntl_cmd::lease_type::F_UNLCK {
+        return match crate::fs::reclock::unlock(path.as_path(), owner, lock_start, lock_len) {
+            Ok(()) => SyscallResult::ok(0),
+            Err(e) => linux_err(linux_errno_for(e)),
+        };
+    }
+    match crate::fs::reclock::set(path.as_path(), owner, lock_start, lock_len, want_type) {
+        Ok(()) => SyscallResult::ok(0),
+        // F_SETLKW should BLOCK here. It cannot: there is no wait-queue hook
+        // for a lock table, which is the same reason `sys_flock` returns
+        // EWOULDBLOCK for every conflict regardless of LOCK_NB. Answering
+        // EAGAIN matches the neighbouring syscall instead of inventing a
+        // second, differently-wrong behaviour -- and when the hook lands both
+        // are fixed in one place. `sched::block_current` already exists, so
+        // the hook is the missing piece, not the primitive.
+        Err(crate::error::KernelError::WouldBlock) => linux_err(errno::EAGAIN),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `lseek(fd, offset, whence)` — only meaningful for `File` handles.
@@ -6755,7 +6980,7 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 ///   2. Clear the range — unmap any present 4 KiB subpages and split/remove
 ///      the covering VMAs — exactly as Linux silently replaces a MAP_FIXED
 ///      range.
-///   3. Register a *demand-paged* 4 KiB-granular [`VmaKind::Anonymous`] VMA.
+///   3. Register a *demand-paged* 4 KiB-granular [`crate::mm::vma::VmaKind::Anonymous`] VMA.
 ///      The per-subpage fault resolver zero-fills it on touch and shares the
 ///      straddled 16 KiB frame with the adjacent file-backed data segment.
 fn linux_anon_mmap_fixed(pid: u64, addr: u64, length: u64, prot: u64) -> SyscallResult {
@@ -7658,7 +7883,7 @@ fn brk_ceiling(brk_start: u64) -> u64 {
 ///   *unchanged* current break rather than an errno — `glibc`'s `__sbrk`
 ///   detects "the break did not move" and reports `ENOMEM` itself.
 ///
-/// The heap is a single demand-paged [`VmaKind::Brk`] VMA spanning
+/// The heap is a single demand-paged [`crate::mm::vma::VmaKind::Brk`] VMA spanning
 /// `[brk_start, round_up(brk_current))`.  Growth extends that VMA and
 /// charges `RLIMIT_AS` for the added virtual span (physical frames are
 /// allocated lazily on first touch); shrinkage unmaps + frees any
@@ -8914,6 +9139,22 @@ pub mod ioctl_cmd {
     pub const FIONCLEX: u32 = 0x5450;
     /// `FIOCLEX` — set the `FD_CLOEXEC` flag on `fd`.  Equivalent to
     /// `fcntl(fd, F_SETFD, FD_CLOEXEC)`.  Takes no argument.
+    /// `BLKDISCARD` -- tell the device the byte range `{ start, length }` no
+    /// longer holds useful data (TRIM/UNMAP). Argument is a pointer to
+    /// `[u64; 2]`. Destroys data, so the fd must be open for writing.
+    pub const BLKDISCARD: u32 = 0x1277;
+
+    /// `BLKSECDISCARD` -- as `BLKDISCARD`, but the device must guarantee the
+    /// data is UNRECOVERABLE. Always refused here: no `BlockDevice` method
+    /// promises that, and answering with an ordinary discard would be a
+    /// security claim nothing backs.
+    pub const BLKSECDISCARD: u32 = 0x127D;
+
+    /// `BLKZEROOUT` -- write zeros over the range. Refused: userspace does
+    /// this with ordinary writes already, and emulating it here would make the
+    /// ioctl claim device support that does not exist.
+    pub const BLKZEROOUT: u32 = 0x127F;
+
     pub const FIOCLEX: u32 = 0x5451;
     /// `FIONBIO` — toggle `O_NONBLOCK` on `fd`.  `arg` is a pointer
     /// to an `int`: non-zero sets `O_NONBLOCK`, zero clears it.
@@ -8933,9 +9174,14 @@ pub mod ioctl_cmd {
     /// `TCSETSW` — like `TCSETS` but wait for queued output to drain
     /// first.  We have no output queue, so it behaves as `TCSETS`.
     pub const TCSETSW: u32 = 0x5403;
-    /// `TCSETSF` — like `TCSETSW` but also flush pending input.  We have
-    /// no kernel-side input queue yet, so it behaves as `TCSETS`.
+    /// `TCSETSF` — like `TCSETSW` but also flush pending input: the
+    /// terminal's input queue and the line being edited
+    /// (`crate::tty::flush_input`).
     pub const TCSETSF: u32 = 0x5404;
+    /// `TCFLSH` — discard unread input and/or unsent output, `arg` being the
+    /// queue selector itself (`TCIFLUSH` 0, `TCOFLUSH` 1, `TCIOFLUSH` 2), not
+    /// a pointer. `tcflush(3)` issues this.
+    pub const TCFLSH: u32 = 0x540B;
     /// `TIOCGWINSZ` — read the terminal window size into `*arg`
     /// (`struct winsize`).
     pub const TIOCGWINSZ: u32 = 0x5413;
@@ -8967,8 +9213,8 @@ pub mod ioctl_cmd {
 /// The caller (`sys_ioctl`) has already verified the fd is a `Console`-kind
 /// handle.  `arg` is the userspace pointer to the `struct termios`
 /// (`TCGETS`/`TCSETS*`) or `struct winsize` (`TIOCGWINSZ`/`TIOCSWINSZ`).
-/// `TCSETSW`/`TCSETSF` behave as `TCSETS` because we have no kernel-side
-/// output/input queue to drain or flush yet.
+/// `TCSETSW` behaves as `TCSETS` because there is no kernel-side output queue
+/// to drain; `TCSETSF` additionally discards unread input.
 ///
 /// `pid` is the calling process, and it decides *both* halves of the answer:
 ///
@@ -9013,6 +9259,26 @@ fn console_terminal_ioctl(
             // Shared with the native `SYS_TTY_SET_TERMIOS`, so the SIGTTOU
             // job-control rule is written once rather than once per ABI.
             match super::handlers::tty_set_termios_from_user(tty_id, arg) {
+                super::handlers::TtyCtlOutcome::Done => {
+                    // `tcsetattr(TCSAFLUSH)`: discard what was typed ahead,
+                    // which is what a password prompt uses it for. After the
+                    // set rather than before, so a request refused for a bad
+                    // pointer or by job control flushes nothing; the end state
+                    // is the same, since a change of mode only moves unread
+                    // input around inside the queue that is being emptied.
+                    if request == ioctl_cmd::TCSETSF {
+                        tty::flush_input(tty_id);
+                    }
+                    SyscallResult::ok(0)
+                }
+                super::handlers::TtyCtlOutcome::Restart(r) => r,
+                super::handlers::TtyCtlOutcome::Fail(e) => linux_err(linux_errno_for(e)),
+            }
+        }
+        ioctl_cmd::TCFLSH => {
+            // Shared with the native `SYS_TTY_FLUSH`: one policy (SIGTTOU for
+            // a background caller, then the selector) for both ABIs.
+            match super::handlers::tty_flush(tty_id, arg) {
                 super::handlers::TtyCtlOutcome::Done => SyscallResult::ok(0),
                 super::handlers::TtyCtlOutcome::Restart(r) => r,
                 super::handlers::TtyCtlOutcome::Fail(e) => linux_err(linux_errno_for(e)),
@@ -9173,6 +9439,223 @@ fn console_terminal_ioctl(
 /// with driver routing, this stub becomes a per-fd dispatch table
 /// that asks the driver "do you handle this request?" and only falls
 /// back to ENOTTY if nobody does.
+/// Convert a byte range to an LBA range, or say why it cannot be converted.
+///
+/// Split out from [`block_discard_ioctl`] because it is the only part of a
+/// data-destroying ioctl that can be tested without a process and a file
+/// descriptor -- and it is the part where a mistake destroys the WRONG
+/// sectors rather than merely failing. `blkdev::self_test_discard` already
+/// covers the layer below (discarded sectors read zero, neighbours untouched,
+/// out-of-range refused); this covers the arithmetic above it.
+///
+/// `Ok(None)` means a zero-length request: it asks for nothing and gets it.
+/// Returning an error there would make a caller looping over an empty extent
+/// report failure for a correct program.
+fn discard_range_to_lba(
+    start: u64,
+    len: u64,
+    sector_size: u32,
+    sector_count: u64,
+) -> Result<Option<(u64, u64)>, i32> {
+    if len == 0 {
+        return Ok(None);
+    }
+    let ss = u64::from(sector_size);
+    if ss == 0 {
+        return Err(errno::ENODEV);
+    }
+    // Alignment at both ends. The device frees whole sectors, so an unaligned
+    // request would discard more than was asked for.
+    if !start.is_multiple_of(ss) || !len.is_multiple_of(ss) {
+        return Err(errno::EINVAL);
+    }
+    // Checked throughout: `arithmetic_side_effects` is active in this crate,
+    // and an overflowing start+len is precisely how a range check is bypassed
+    // -- it wraps to a small end that compares as in-bounds.
+    let (Some(end), Some(capacity)) = (start.checked_add(len), sector_count.checked_mul(ss)) else {
+        return Err(errno::EINVAL);
+    };
+    if end > capacity {
+        return Err(errno::EINVAL);
+    }
+    Ok(Some((start / ss, len / ss)))
+}
+
+/// Exercise [`discard_range_to_lba`] over every outcome it can produce.
+///
+/// Runs on the bare-metal target, where `#[cfg(test)]` does not, so the
+/// arithmetic behind a data-destroying ioctl is checked on every boot.
+pub fn self_test_blk_discard_range() -> crate::error::KernelResult<()> {
+    crate::serial_println!("[blkdiscard] Running discard-range self-test...");
+
+    // 64 sectors of 512 B = 32 KiB.
+    const SS: u32 = 512;
+    const NS: u64 = 64;
+
+    // One case: start byte, length, and the LBA range it must produce
+    // (`None` = a zero-length request, which is a successful no-op).
+    type Case = (u64, u64, Option<(u64, u64)>);
+    let ok_cases: [Case; 4] = [
+        // Whole device.
+        (0, 32768, Some((0, 64))),
+        // One sector in the middle.
+        (1024, 512, Some((2, 1))),
+        // The last sector exactly -- the boundary an off-by-one would take.
+        (32256, 512, Some((63, 1))),
+        // Zero length is a no-op, not an error.
+        (0, 0, None),
+    ];
+    for (start, len, want) in ok_cases {
+        match discard_range_to_lba(start, len, SS, NS) {
+            Ok(got) if got == want => {}
+            other => {
+                crate::serial_println!(
+                    "[blkdiscard]   FAIL: ({}, {}) gave {:?}, wanted Ok({:?})",
+                    start,
+                    len,
+                    other,
+                    want
+                );
+                return Err(crate::error::KernelError::InternalError);
+            }
+        }
+    }
+
+    // (start, len, sector_size, expected errno, what it is)
+    let err_cases: [(u64, u64, u32, i32, &str); 6] = [
+        (1, 512, SS, errno::EINVAL, "unaligned start"),
+        (0, 513, SS, errno::EINVAL, "unaligned length"),
+        (0, 33280, SS, errno::EINVAL, "one sector past the end"),
+        (32768, 512, SS, errno::EINVAL, "starts at the end"),
+        // The overflow case: start+len wraps to 0, which would compare as
+        // in-bounds against any capacity if the addition were unchecked.
+        (
+            u64::MAX - 511,
+            512,
+            SS,
+            errno::EINVAL,
+            "start+len overflows u64",
+        ),
+        (0, 512, 0, errno::ENODEV, "zero sector size"),
+    ];
+    for (start, len, ss, want, what) in err_cases {
+        match discard_range_to_lba(start, len, ss, NS) {
+            Err(got) if got == want => {}
+            other => {
+                crate::serial_println!(
+                    "[blkdiscard]   FAIL: {} gave {:?}, wanted Err({})",
+                    what,
+                    other,
+                    want
+                );
+                return Err(crate::error::KernelError::InternalError);
+            }
+        }
+    }
+
+    crate::serial_println!("[blkdiscard] Self-test passed (10 cases).");
+    Ok(())
+}
+
+/// `BLKDISCARD`, `BLKSECDISCARD` and `BLKZEROOUT`.
+///
+/// All three take a pointer to `[u64; 2]` = `{ start_byte, length_bytes }`
+/// and return 0 or `-errno`.
+///
+/// Validation order follows Linux: the descriptor is checked before the
+/// argument, and the argument before the device is asked to do anything, so a
+/// caller with a bad fd never learns whether the range was valid, and a caller
+/// with a bad range never destroys a prefix of it.
+// `pid` is `u64`, not `ProcessId`: `ProcessId` is a type alias in `proc::pcb`
+// and is not in scope at this file's top level, while `caller_pid()` -- the
+// only caller's source for it -- already returns `Option<u64>`.
+fn block_discard_ioctl(pid: u64, fd: i32, request: u32, arg: u64) -> SyscallResult {
+    let Some(entry) = pcb::linux_fd_lookup(pid, fd) else {
+        return linux_err(errno::EBADF);
+    };
+
+    // This destroys data, so a read-only descriptor may not ask for it. Linux
+    // answers EBADF rather than EACCES: the complaint is about the
+    // descriptor's mode, not the file's permissions.
+    let acc = entry.status_flags & crate::proc::linux_fd::O_ACCMODE;
+    if acc != crate::proc::linux_fd::O_WRONLY && acc != crate::proc::linux_fd::O_RDWR {
+        return linux_err(errno::EBADF);
+    }
+
+    // Resolve the descriptor to a registered block device. Paths are bytes
+    // here and are never forced through UTF-8, so the prefix strip is a byte
+    // comparison; only the short device name is converted, and a name that is
+    // not UTF-8 cannot match a registered one anyway.
+    let path = entry_path_for_handle(entry.raw_handle);
+    let Some(rel) = path.as_path().as_bytes().strip_prefix(b"/dev/") else {
+        return linux_err(errno::ENOTTY);
+    };
+    let Ok(name) = core::str::from_utf8(rel) else {
+        return linux_err(errno::ENOTTY);
+    };
+    // Not a registered block device -> ENOTTY, what Linux says for an ioctl
+    // that does not apply to this kind of file. This is the case that used to
+    // be indistinguishable from "supported, but not on this device", which is
+    // the whole complaint in requests/b-a-blkdiscard-needs-blkdiscard-*.
+    let Some(info) = crate::blkdev::info(name) else {
+        return linux_err(errno::ENOTTY);
+    };
+
+    if arg == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(arg, 16) {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut range = [0u64; 2];
+    // SAFETY: `validate_user_read(arg, 16)` succeeded immediately above, and
+    // `range` is 16 bytes of kernel stack that outlives the copy.
+    if let Err(e) =
+        unsafe { crate::mm::user::copy_from_user(arg, range.as_mut_ptr().cast::<u8>(), 16) }
+    {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // All the arithmetic lives in one tested function. See
+    // `self_test_blk_discard_range`.
+    let lba_range =
+        match discard_range_to_lba(range[0], range[1], info.sector_size, info.sector_count) {
+            Ok(r) => r,
+            Err(e) => return linux_err(e),
+        };
+    let Some((start_lba, count)) = lba_range else {
+        // Zero length: nothing asked, nothing done, success.
+        return SyscallResult::ok(0);
+    };
+
+    if info.read_only {
+        return linux_err(errno::EPERM);
+    }
+
+    match request {
+        // Refused even where the plain discard works. BLKSECDISCARD promises
+        // the data cannot be recovered and no `BlockDevice` method promises
+        // that, so answering it with an ordinary discard would be a security
+        // claim nothing backs. BLKZEROOUT is refused rather than emulated with
+        // writes because a write dirties the very blocks a discard frees --
+        // userspace already zeroes with ordinary writes, which is the honest
+        // place for it.
+        ioctl_cmd::BLKSECDISCARD | ioctl_cmd::BLKZEROOUT => linux_err(errno::EOPNOTSUPP),
+        ioctl_cmd::BLKDISCARD => {
+            if crate::blkdev::supports_discard(name) != Some(true) {
+                return linux_err(errno::EOPNOTSUPP);
+            }
+            match crate::blkdev::discard(name, start_lba, count) {
+                Some(Ok(())) => SyscallResult::ok(0),
+                Some(Err(e)) => linux_err(linux_errno_for(e)),
+                // The device was unregistered between `info` and here.
+                None => linux_err(errno::ENODEV),
+            }
+        }
+        _ => linux_err(errno::ENOTTY),
+    }
+}
+
 fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
@@ -9206,6 +9689,7 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
         | ioctl_cmd::TCSETS
         | ioctl_cmd::TCSETSW
         | ioctl_cmd::TCSETSF
+        | ioctl_cmd::TCFLSH
         | ioctl_cmd::TIOCGWINSZ
         | ioctl_cmd::TIOCSWINSZ
         | ioctl_cmd::TIOCGPGRP
@@ -9272,6 +9756,9 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
                 Ok(()) => SyscallResult::ok(0),
                 Err(e) => linux_err(linux_errno_for(e)),
             }
+        }
+        ioctl_cmd::BLKDISCARD | ioctl_cmd::BLKSECDISCARD | ioctl_cmd::BLKZEROOUT => {
+            block_discard_ioctl(pid, fd, request, args.arg2)
         }
         _ => {
             // Device-specific ioctls: route by handle kind.  An ALSA PCM
@@ -12226,7 +12713,7 @@ fn linux_vma_overlap_bytes(pid: u64, start: u64, end: u64) -> u64 {
 /// is allocated zeroed, the corresponding file bytes are read into it
 /// (`read_at`), and it is mapped at `prot`-derived permissions.  Bytes past
 /// EOF stay zero, matching Linux's page-tail zero-fill.  A [`Vma`] of kind
-/// [`VmaKind::Fixed`] ("already fully backed") is registered so
+/// [`crate::mm::vma::VmaKind::Fixed`] ("already fully backed") is registered so
 /// `/proc/<pid>/maps` reflects the mapping and the fault resolver treats a
 /// fault in the range as a bug.
 ///
@@ -25181,7 +25668,10 @@ fn sys_vmsplice(args: &SyscallArgs) -> SyscallResult {
     // MAX_RW_COUNT.  Mapping faults on the segment payloads surface later, at
     // copy time, exactly like every other user-copy in the kernel.
     let caller_pml4 = crate::mm::page_table::cr3_to_pml4(crate::mm::page_table::read_cr3());
-    let mut iov_raw = alloc::vec![0u8; iov_bytes];
+    let mut iov_raw = match crate::mm::user::alloc_zeroed_vec(iov_bytes) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
     if let Err(e) = crate::mm::user::copy_from_user_as(caller_pml4, args.arg1, &mut iov_raw) {
         return linux_err(linux_errno_for(e));
     }
@@ -26974,7 +27464,7 @@ fn sys_userfaultfd(args: &SyscallArgs) -> SyscallResult {
 /// Allocates a fresh `HandleKind::MemFd` slot in the caller's Linux fd
 /// table backed by an in-kernel anonymous in-memory file managed by
 /// [`crate::ipc::memfd`].  Linux gives the inode the conventional
-/// "memfd:<name>" path label and `S_IFREG | 0o777` mode bits; we follow
+/// "`memfd:<name>`" path label and `S_IFREG | 0o777` mode bits; we follow
 /// suit (see `fill_stat_for_fd`).
 ///
 /// Flags:
@@ -30868,7 +31358,7 @@ fn empty_set_wait(timeout_ms_signed: i64) -> SyscallResult {
 /// its current entry, which is the behaviour the pre-existing per-scan lookup
 /// already had and which this change deliberately does not alter.
 fn poll_core(fds_ptr: u64, nfds: u64, timeout_ms_signed: i64) -> SyscallResult {
-    use alloc::{vec, vec::Vec};
+    use alloc::vec::Vec;
 
     // Quick path: no fds, just a timed (or infinite) sleep.
     if nfds == 0 {
@@ -30878,11 +31368,19 @@ fn poll_core(fds_ptr: u64, nfds: u64, timeout_ms_signed: i64) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let nfds_usize = nfds as usize;
     let len = nfds_usize.saturating_mul(8);
-    let mut buf: Vec<u8> = vec![0; len];
+    let mut buf = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
 
     // Read the pollfd array in once.  We re-compute revents from this
     // local copy on every loop iteration so the user-visible writes
     // happen at most once at the end.
+    // SAFETY: `copy_from_user` requires `kernel_dst` to be a valid
+    // writable kernel buffer of at least `len` bytes. `buf` is exactly
+    // `len` bytes, allocated immediately above. The USER range needs no
+    // guarantee from us: copy_from_user validates it and returns
+    // InvalidAddress rather than faulting.
     let r = unsafe { crate::mm::user::copy_from_user(fds_ptr, buf.as_mut_ptr(), len) };
     if let Err(e) = r {
         return linux_err(linux_errno_for(e));
@@ -30968,6 +31466,9 @@ fn poll_core(fds_ptr: u64, nfds: u64, timeout_ms_signed: i64) -> SyscallResult {
 
     // Written back once, on both the ready and the timed-out path: a caller that
     // got 0 still needs the cleared revents the last scan left in `buf`.
+    // SAFETY: `copy_to_user` requires `kernel_src` to be readable for
+    // `len` bytes. `buf` is the same `len`-byte allocation filled above,
+    // still owned and still in scope. The user range is validated inside.
     let w = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), fds_ptr, len) };
     if let Err(e) = w {
         return linux_err(linux_errno_for(e));
@@ -31134,7 +31635,7 @@ fn select_core(
     len: usize,
     timeout_ms_signed: i64,
 ) -> SyscallResult {
-    use alloc::{vec, vec::Vec};
+    use alloc::vec::Vec;
 
     // Quick path: no fds, just a timed (or infinite) sleep.
     if nfds == 0 || len == 0 {
@@ -31143,9 +31644,18 @@ fn select_core(
 
     // Snapshot the three input fd_sets.  Each is `len` bytes.  An
     // input pointer that is NULL is treated as the all-zero set.
-    let mut rd: Vec<u8> = vec![0; len];
-    let mut wr: Vec<u8> = vec![0; len];
-    let mut ex: Vec<u8> = vec![0; len];
+    let mut rd = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let mut wr = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let mut ex = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
 
     for (ptr, dst) in [
         (readfds_ptr, &mut rd),
@@ -31153,6 +31663,9 @@ fn select_core(
         (exceptfds_ptr, &mut ex),
     ] {
         if ptr != 0 {
+            // SAFETY: `dst` is one of `rd`/`wr`/`ex`, each exactly `len` bytes,
+            // so the kernel destination is writable for `len`. `ptr` is
+            // user-supplied and validated inside the call.
             let r = unsafe { crate::mm::user::copy_from_user(ptr, dst.as_mut_ptr(), len) };
             if let Err(e) = r {
                 return linux_err(linux_errno_for(e));
@@ -31163,9 +31676,18 @@ fn select_core(
     // Output fd_sets — Linux semantics: only bits for ready fds are
     // set; all other bits are zero.  Start from all-zero and OR in
     // the ready bits.
-    let mut rd_out: Vec<u8> = vec![0; len];
-    let mut wr_out: Vec<u8> = vec![0; len];
-    let mut ex_out: Vec<u8> = vec![0; len];
+    let mut rd_out = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let mut wr_out = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let mut ex_out = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
 
     let pid = caller_pid();
     #[allow(clippy::cast_sign_loss)]
@@ -31342,6 +31864,9 @@ fn select_core(
         (exceptfds_ptr, &ex_out),
     ] {
         if ptr != 0 {
+            // SAFETY: `src` is one of the `_out` buffers, each `len` bytes and
+            // fully initialised by the scan above, so it is readable for `len`.
+            // `ptr` is user-supplied and validated inside the call.
             let w = unsafe { crate::mm::user::copy_to_user(src.as_ptr(), ptr, len) };
             if let Err(e) = w {
                 return linux_err(linux_errno_for(e));
@@ -31376,6 +31901,10 @@ fn sys_select(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
         let mut tv = [0u8; 16];
+        // SAFETY: `tv` is a `[u8; 16]` on this frame, so the kernel
+        // destination is writable for exactly the 16 bytes requested.
+        // `args.arg4` was range-checked by `validate_user_write` directly
+        // above, and copy_from_user checks it again rather than trusting us.
         let r = unsafe { crate::mm::user::copy_from_user(args.arg4, tv.as_mut_ptr(), 16) };
         if let Err(e) = r {
             return linux_err(linux_errno_for(e));
@@ -31805,7 +32334,7 @@ fn epoll_wait_core(
     timeout_ms_signed: i64,
 ) -> SyscallResult {
     use crate::proc::linux_fd::HandleKind;
-    use alloc::{vec, vec::Vec};
+    use alloc::vec::Vec;
 
     let caller = match caller_pid() {
         Some(p) => p,
@@ -31824,8 +32353,6 @@ fn epoll_wait_core(
 
     #[allow(clippy::cast_sign_loss)]
     let max = maxevents as usize;
-    // Output buffer: up to `maxevents` packed 12-byte epoll_event records.
-    let mut out: Vec<u8> = vec![0u8; max.saturating_mul(12)];
 
     // The caller's deadline is absolute from here, so the rebuild loop below
     // cannot extend the wait by restarting it: each pass gets only what is left.
@@ -31846,6 +32373,21 @@ fn epoll_wait_core(
             return SyscallResult::ok(0);
         };
         let interest = crate::ipc::epoll::interest_list(ep_handle).unwrap_or_default();
+
+        // Output buffer: packed 12-byte epoll_event records, one per ready
+        // fd — so no more than the interest set holds, however large
+        // `maxevents` is. Sized by `maxevents` alone, it let one call commit
+        // up to EP_MAX_EVENTS * 12 bytes of zeroed kernel memory for as long
+        // as it waited: harmless-looking while the kernel refused any single
+        // allocation over 16 MiB, but kernel heap allocations above that are
+        // now mapped from vmalloc (design-decisions.md §959), so it reached
+        // 1 GiB. Allocated per pass, and a pass only repeats when the
+        // interest set changed.
+        let cap = max.min(interest.len());
+        let mut out = match crate::mm::user::alloc_zeroed_vec(cap.saturating_mul(12)) {
+            Ok(v) => v,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        };
 
         // Resolve the interest set to the waiter sets it can be parked on, plus
         // the instance's own interest-set-change notification so an epoll_ctl
@@ -31879,7 +32421,7 @@ fn epoll_wait_core(
             }
             count = 0;
             for &(fd, events, data) in &interest {
-                if count >= max {
+                if count >= cap {
                     break;
                 }
                 // A registered fd that has since been closed is simply not
@@ -31900,7 +32442,7 @@ fn epoll_wait_core(
                 // events field (u32): zero-extend the 16-bit revents.
                 let ev_bytes = u32::from(revents).to_ne_bytes();
                 let data_bytes = data.to_ne_bytes();
-                // `get_mut` on the whole 12-byte record: `count < max` is
+                // `get_mut` on the whole 12-byte record: `count < cap` is
                 // guaranteed by the break above, so this cannot miss, and a
                 // bounds-checked write is the honest answer if it ever could.
                 let Some(record) = out_buf.get_mut(off..off.saturating_add(12)) else {
@@ -33609,7 +34151,10 @@ fn sys_get_mempolicy(args: &SyscallArgs) -> SyscallResult {
         let aligned = m.wrapping_add(63) & !63u64;
         let copy = aligned.div_ceil(8) as usize;
         if copy > 0 {
-            let mut buf = alloc::vec![0u8; copy];
+            let mut buf = match crate::mm::user::alloc_zeroed_vec(copy) {
+                Ok(v) => v,
+                Err(e) => return linux_err(linux_errno_for(e)),
+            };
             if set_bit0 {
                 if let Some(first) = buf.first_mut() {
                     *first = 1;
@@ -37220,6 +37765,7 @@ fn validate_sockaddr_in(addr_ptr: u64, addr_len: i32) -> Result<(), SyscallResul
 /// So the userspace-observable matrix for accept / accept4 / recvfrom
 /// is:
 ///
+/// ```text
 ///     | (addr_ptr,    addrlen_ptr) | Linux  | Pre-batch | Now    |
 ///     |----------------------------|--------|-----------|--------|
 ///     | (NULL,        NULL)        | Ok     | Ok        | Ok     |
@@ -37229,6 +37775,7 @@ fn validate_sockaddr_in(addr_ptr: u64, addr_len: i32) -> Result<(), SyscallResul
 ///
 ///     (a) The valid `addrlen_ptr` is never read; Linux doesn't see
 ///         it.
+/// ```
 ///
 /// Pre-batch we collapsed both "half-NULL" cases to -EINVAL,
 /// hijacking Linux's -EFAULT for `(valid_sa, NULL_ulen)` and
@@ -39580,7 +40127,10 @@ fn socket_recvmsg(entry: FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     let peek = (flags & msgflags::MSG_PEEK) != 0;
     // Single receive into staging (skip the daemon round-trip entirely for a
     // zero-length receive buffer).
-    let mut kbuf = alloc::vec![0u8; cap_total];
+    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(cap_total) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
     let n = if cap_total == 0 {
         0
     } else {
@@ -42547,7 +43097,10 @@ fn pread_file_to_user(handle: u64, offset: u64, buf: u64, len: usize) -> Result<
         return Ok(0);
     }
     crate::mm::user::validate_user_write(buf, len).map_err(linux_errno_for)?;
-    let mut kbuf = alloc::vec![0u8; len];
+    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return Err(linux_errno_for(e)),
+    };
     let n = crate::fs::handle::read_at(handle, offset, &mut kbuf).map_err(linux_errno_for)?;
     if n > 0 {
         // SAFETY: validate_user_write succeeded for `len ≥ n` bytes
@@ -42585,7 +43138,10 @@ fn pwrite_file_from_user(handle: u64, offset: u64, buf: u64, len: usize) -> Resu
         return Ok(0);
     }
     crate::mm::user::validate_user_read(buf, len).map_err(linux_errno_for)?;
-    let mut kbuf = alloc::vec![0u8; len];
+    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return Err(linux_errno_for(e)),
+    };
     // SAFETY: validate_user_read succeeded; copy_from_user uses STAC/CLAC.
     let r = unsafe { crate::mm::user::copy_from_user(buf, kbuf.as_mut_ptr(), len) };
     r.map_err(linux_errno_for)?;
@@ -42604,7 +43160,10 @@ fn pread_memfd_to_user(handle: u64, offset: u64, buf: u64, len: usize) -> Result
         return Ok(0);
     }
     crate::mm::user::validate_user_write(buf, len).map_err(linux_errno_for)?;
-    let mut kbuf = alloc::vec![0u8; len];
+    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return Err(linux_errno_for(e)),
+    };
     let n = crate::ipc::memfd::read_at(
         crate::ipc::memfd::MemFdHandle::from_raw(handle),
         offset,
@@ -42645,7 +43204,10 @@ fn pwrite_memfd_from_user(handle: u64, offset: u64, buf: u64, len: usize) -> Res
         return Ok(0);
     }
     crate::mm::user::validate_user_read(buf, len).map_err(linux_errno_for)?;
-    let mut kbuf = alloc::vec![0u8; len];
+    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return Err(linux_errno_for(e)),
+    };
     // SAFETY: validate_user_read succeeded; copy_from_user uses STAC/CLAC.
     let r = unsafe { crate::mm::user::copy_from_user(buf, kbuf.as_mut_ptr(), len) };
     r.map_err(linux_errno_for)?;
@@ -42682,7 +43244,7 @@ fn pwrite_memfd_from_user(handle: u64, offset: u64, buf: u64, len: usize) -> Res
 ///   - Otherwise, return `Ok(min(len, rlim_cur - offset))`, allowing
 ///     a partial write up to the limit.
 ///
-/// The truncate paths use [`rlimit_fsize_check_size`] instead because
+/// The truncate paths use [`rlimit_fsize_check_size_for_caller`] instead because
 /// they're asserting an exact new file size, not writing bytes.
 fn rlimit_fsize_clip_for_caller(offset: u64, len: u64) -> Result<u64, i32> {
     let Some(pid) = caller_pid() else {
@@ -43529,7 +44091,11 @@ fn sys_getdents64(args: &SyscallArgs) -> SyscallResult {
     //   u64 d_ino + s64 d_off + u16 d_reclen + u8 d_type
     // followed by NUL-terminated name, padded to 8-byte alignment.
     const HDR: usize = 19;
-    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(buf_cap);
+    let mut out = match crate::mm::user::alloc_zeroed_vec(buf_cap) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    out.clear();
     let mut written: usize = 0;
     let mut consumed: usize = 0;
 
@@ -80648,6 +81214,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     #[inline(never)]
     fn self_test_fcntl_record_locks() -> crate::error::KernelResult<()> {
+        // A synthetic caller for these rungs. Every one of them drives a gate
+        // that answers before the owner is consulted (lockable kind, EFAULT,
+        // argument validation), so the pid is immaterial -- but it is named
+        // rather than a bare 0 repeated at eleven call sites.
+        const SELFTEST_PID: u64 = 0;
         use crate::serial_println;
         // Batch 113: fcntl(F_GETLK / F_SETLK / F_SETLKW) and OFD
         // variants — single-process advisory record locks.  No other
@@ -80706,23 +81277,36 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // per-file state in this kernel).
             let file_entry = FdEntry::file(0xDEAD_BEEF, oflags::O_RDWR);
             let console_entry = FdEntry::console(oflags::O_RDONLY);
+
             let pipe_entry = FdEntry::pipe(0, oflags::O_RDONLY);
 
             // Lockable-kind gate: Console / Pipe -> EBADF.
             let flock_zero = [0u8; 32];
-            let r = fcntl_flock_apply(flock_zero.as_ptr() as u64, console_entry, false, false);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock_zero.as_ptr() as u64,
+                console_entry,
+                false,
+                false,
+            );
             if r.value != -i64::from(errno::EBADF) {
                 serial_println!("[syscall/linux]   FAIL: F_SETLK on Console not EBADF");
                 return Err(KernelError::InternalError);
             }
-            let r = fcntl_flock_apply(flock_zero.as_ptr() as u64, pipe_entry, false, false);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock_zero.as_ptr() as u64,
+                pipe_entry,
+                false,
+                false,
+            );
             if r.value != -i64::from(errno::EBADF) {
                 serial_println!("[syscall/linux]   FAIL: F_SETLK on Pipe not EBADF");
                 return Err(KernelError::InternalError);
             }
 
             // NULL flock_ptr on a File kind -> EFAULT.
-            let r = fcntl_flock_apply(0, file_entry, false, false);
+            let r = fcntl_flock_apply(SELFTEST_PID, 0, file_entry, false, false);
             if r.value != -i64::from(errno::EFAULT) {
                 serial_println!("[syscall/linux]   FAIL: F_SETLK(NULL) not EFAULT");
                 return Err(KernelError::InternalError);
@@ -80736,7 +81320,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             flock[8..16].copy_from_slice(&0i64.to_le_bytes());
             flock[16..24].copy_from_slice(&100i64.to_le_bytes());
             flock[24..28].copy_from_slice(&0i32.to_le_bytes());
-            let r = fcntl_flock_apply(flock.as_mut_ptr() as u64, file_entry, false, false);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock.as_mut_ptr() as u64,
+                file_entry,
+                false,
+                false,
+            );
             if r.value != 0 {
                 serial_println!(
                     "[syscall/linux]   FAIL: F_SETLK F_WRLCK -> {} (expected 0)",
@@ -80748,7 +81338,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // Bogus l_type (3) -> EINVAL.
             let mut flock = [0u8; 32];
             flock[0..2].copy_from_slice(&3i16.to_le_bytes());
-            let r = fcntl_flock_apply(flock.as_mut_ptr() as u64, file_entry, false, false);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock.as_mut_ptr() as u64,
+                file_entry,
+                false,
+                false,
+            );
             if r.value != -i64::from(errno::EINVAL) {
                 serial_println!("[syscall/linux]   FAIL: F_SETLK bad l_type not EINVAL");
                 return Err(KernelError::InternalError);
@@ -80758,7 +81354,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             let mut flock = [0u8; 32];
             flock[0..2].copy_from_slice(&0i16.to_le_bytes());
             flock[2..4].copy_from_slice(&3i16.to_le_bytes());
-            let r = fcntl_flock_apply(flock.as_mut_ptr() as u64, file_entry, false, false);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock.as_mut_ptr() as u64,
+                file_entry,
+                false,
+                false,
+            );
             if r.value != -i64::from(errno::EINVAL) {
                 serial_println!("[syscall/linux]   FAIL: F_SETLK bad l_whence not EINVAL");
                 return Err(KernelError::InternalError);
@@ -80768,14 +81370,26 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             let mut flock = [0u8; 32];
             flock[0..2].copy_from_slice(&0i16.to_le_bytes());
             flock[24..28].copy_from_slice(&42i32.to_le_bytes());
-            let r = fcntl_flock_apply(flock.as_mut_ptr() as u64, file_entry, false, true);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock.as_mut_ptr() as u64,
+                file_entry,
+                false,
+                true,
+            );
             if r.value != -i64::from(errno::EINVAL) {
                 serial_println!("[syscall/linux]   FAIL: F_OFD_SETLK l_pid!=0 not EINVAL");
                 return Err(KernelError::InternalError);
             }
 
             // POSIX (non-OFD) ignores l_pid on input -> success.
-            let r = fcntl_flock_apply(flock.as_mut_ptr() as u64, file_entry, false, false);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock.as_mut_ptr() as u64,
+                file_entry,
+                false,
+                false,
+            );
             if r.value != 0 {
                 serial_println!("[syscall/linux]   FAIL: F_SETLK with l_pid!=0 (POSIX) not 0");
                 return Err(KernelError::InternalError);
@@ -80788,7 +81402,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             flock[8..16].copy_from_slice(&0i64.to_le_bytes());
             flock[16..24].copy_from_slice(&500i64.to_le_bytes());
             flock[24..28].copy_from_slice(&1234i32.to_le_bytes());
-            let r = fcntl_flock_apply(flock.as_mut_ptr() as u64, file_entry, true, false);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock.as_mut_ptr() as u64,
+                file_entry,
+                true,
+                false,
+            );
             if r.value != 0 {
                 serial_println!(
                     "[syscall/linux]   FAIL: F_GETLK -> {} (expected 0)",
@@ -80831,7 +81451,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // (no-op release matches Linux semantics).
             let mut flock = [0u8; 32];
             flock[0..2].copy_from_slice(&(fcntl_cmd::lease_type::F_UNLCK as i16).to_le_bytes());
-            let r = fcntl_flock_apply(flock.as_mut_ptr() as u64, file_entry, false, false);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock.as_mut_ptr() as u64,
+                file_entry,
+                false,
+                false,
+            );
             if r.value != 0 {
                 serial_println!(
                     "[syscall/linux]   FAIL: F_SETLK F_UNLCK -> {} (expected 0)",
@@ -80844,7 +81470,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // F_GETLK: writes back F_UNLCK.
             let mut flock = [0u8; 32];
             flock[0..2].copy_from_slice(&(fcntl_cmd::lease_type::F_RDLCK as i16).to_le_bytes());
-            let r = fcntl_flock_apply(flock.as_mut_ptr() as u64, file_entry, true, true);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock.as_mut_ptr() as u64,
+                file_entry,
+                true,
+                true,
+            );
             if r.value != 0 {
                 serial_println!(
                     "[syscall/linux]   FAIL: F_OFD_GETLK -> {} (expected 0)",
@@ -80858,6 +81490,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
         }
+        // Release what these rungs actually took. Before this change
+        // `F_SETLK` granted without recording anything, so there was nothing
+        // to clean up; now there is, and a self-test that leaves locks in a
+        // global table makes `/proc` report holders that do not exist -- the
+        // failure `reclock`'s own module doc warns about.
+        crate::fs::reclock::release_all(flock_owner(SELFTEST_PID, 0xDEAD_BEEF, false));
+        crate::fs::reclock::release_all(flock_owner(SELFTEST_PID, 0xDEAD_BEEF, true));
+
         Ok(())
     }
 

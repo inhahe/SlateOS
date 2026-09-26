@@ -13877,7 +13877,117 @@ is the worst possible place to discover that your code can fault, and only a
 boot test finds it — this would have shipped clean under a "it compiles and
 clippy is quiet" standard.
 
-### [REOPENED as WATCH 2026-08-25 — the PML4 cause is fixed and stays fixed; the *signature* recurred on a different rung] B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang after the last thread of a just-reaped process exits — one cause (a freed PML4 still live in CR3) found and fixed in `0ecd5ff03`; a second, still-unidentified cause produced the same silence on 2026-08-25 — 2026-07-15
+### [FIXED 2026-09-25 as WATCH — the second cause is found and fixed: a stale run-queue entry resumed the exiting task in place, and `task_exit` halted with interrupts off; no RIP was ever captured, so it stays watched] B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang after the last thread of a just-reaped process exits — the first cause (a freed PML4 still live in CR3) fixed in `0ecd5ff03`; the second (stale run-queue entries) fixed 2026-09-25 — 2026-07-15
+
+**[A] SECOND CAUSE FOUND AND FIXED 2026-09-25 — the exiting task's own
+leftover run-queue entry.** Fixed in the commit that adds
+`sched::test_stale_run_queue_entries`; design-decisions.md §964.
+
+*In short:* the scheduler's run queues hold bare task numbers, and several
+places that take a task *off* a queue looked for it only at the priority
+level they expected, not where it actually was. When they missed, the entry
+stayed behind. If that task later exited, its own leftover entry was the next
+thing picked: the scheduler "resumed" the dying task instead of switching
+away, and the exit path -- which assumed that could never happen -- halted
+the CPU with interrupts disabled. On the one-CPU boot machine that is the
+whole machine stopping without a word, which is this entry's signature.
+Removal now finds a task wherever it is, the scheduler refuses to run any
+task that cannot run, and the exit path no longer halts even if it is
+resumed.
+
+**The mechanism, end to end.**
+
+1. `PriorityRoundRobin::dequeue(id, priority)` scanned only level `priority`,
+   and every caller passed `task.effective_priority()`. A queued task is not
+   always at that level. The anti-starvation booster (`check_starvation`)
+   moves a `Ready` task to level 0 without changing any field
+   `effective_priority()` reads -- and on a loaded single-vCPU TCG guest a
+   user process waits the 2 s threshold routinely. A timer tick
+   (`tick_burst`) can also clear `interactive` on a task that is queued
+   while still on the CPU (woken between marking itself parked and
+   switching away), moving its computed level by `INTERACTIVE_BOOST`. The
+   booster had been given `dequeue_any` for its own case; nothing else had.
+2. So these removals could miss, silently -- no caller checked the result:
+   `kill_task` of a `Ready` task, `mark_suspended` of one,
+   `park_if_suspended`'s undo of a resume that beat the park, and the
+   remove-then-requeue moves in `set_priority`, `boost_priority`,
+   `set_inherited_priority` and `set_cpu_affinity`. The results: a dead or
+   suspended task still queued, or a live task queued twice -- and once one
+   copy is dispatched, a *running* task holding an entry.
+3. `schedule_inner` trusted every entry. What the pick returned was marked
+   `Running` and switched to -- a killed task came back to life -- and an
+   entry for the current task resumed it in place *whatever its state*.
+4. `task_exit` marks the task `Dead` and calls
+   `schedule_inner(false, Uncounted)`. With the exiting task's own entry at
+   the head of the queue, the pick returned the task itself, the
+   `picked_id == current_id` arm set it `Running` and **returned**, and
+   `task_exit` fell into `cpu::halt_loop()` -- `loop { cli; hlt }`. The same
+   end is reached if another task's pick switches *into* the dead task
+   later: its `schedule_inner` returns into `task_exit` just the same.
+
+Every property of the recurrences that the first cause could no longer
+explain matches: the last line is `[sched] Task N exiting`, `task_exit`'s own
+print, immediately before the pick; nothing follows it, because the halt is
+silent by construction; the BSP stops taking timer interrupts, because of the
+`cli` -- the 2026-08-25 narrowing's missing breadcrumbs; no lock is spinning,
+so no stall detector fires; it is intermittent and history-dependent, needing
+a missed removal earlier in the boot for the very task that later exits; and
+it is not specific to fork+exec -- three different rungs, each ending in a
+user thread's exit.
+
+**Status: WATCH, not proven by a RIP.** None was ever captured. What is
+proven: the missed removal, the trusted pick and the silent halt are each
+read directly from the code, and the regression test below reaches the halt
+deterministically on the pre-fix code (a task exiting with its own entry at
+the head of the queue). Close the watch after a clean run of boots with no
+`stale run-queue entry` report and no recurrence.
+
+**The fix** (`kernel/src/sched`):
+
+- **Removal is by id.** `PriorityRoundRobin::dequeue` removes every entry for
+  the task at every level, and `PerCpuScheduler::dequeue` sweeps every
+  online CPU's queue, not only `last_cpu`'s. `dequeue_any` is folded in.
+- **The pick checks what it picked.** `pick_runnable_locked`, for the main
+  switch and the idle fallback alike, drops and reports an entry for a task
+  that is `Dead`, `Blocked`, `Suspended`, gone from the table, or `Running`
+  on another CPU, and resumes the current task in place only if it is
+  `Ready` or `Running` (`classify_pick`). On SMP it also hands a task still
+  executing on another CPU back to that CPU (`running_elsewhere`, from
+  `CURRENT_TASK_IDS`/`PREV_TASK_IDS`) instead of dispatching it twice, and
+  re-homes a stolen task its affinity forbids here.
+- **Death purges.** `kill_task` and `task_exit` remove every entry of the
+  task under the guard that publishes it `Dead`, and report one found for a
+  task that should have had none.
+- **No silent halt.** `task_exit` is `-> !` and loops: resumed after exiting,
+  it prints `*** BUG: task N was resumed after it exited`, re-marks the task
+  `Dead` and switches away, idling with interrupts on when nothing is
+  runnable. `DEAD_TASKS_RESUMED` counts it.
+- The booster boosts under the guard that chose each task (on SMP the
+  released guard let a just-dispatched task be re-queued), and
+  `unthrottle_expired`/`set_cpu_quota` remove before re-queueing, so a
+  throttled task that was woken is not queued twice.
+- The idle fallback resumes a woken current task in place instead of
+  "switching" it to itself, which handed `switch_context` an aliasing
+  `&mut` and `&` to one saved context.
+
+**Regression test:** `sched::test_stale_run_queue_entries`, a boot self-test
+run right after `test_kill_and_reap`. Boosted-then-killed leaves no entry and
+never runs; boosted-then-re-prioritised leaves exactly one; planted entries
+for a `Dead` and a never-admitted `Blocked` task are never dispatched, and
+`classify_pick` refuses both as the current task; a task that exits with its
+own planted entry at the head of the queue reaches `Dead`, runs once and is
+never resumed. On the pre-fix code the last case halts the boot silently --
+this entry's signature, on demand.
+
+**If it recurs:** a stale entry is now reported instead of swallowed. Look
+for `[sched] *** BUG: stale run-queue entry for task N (state S) found by
+SITE` in the serial log: the site and the state name the removal that
+missed. `*** BUG: task N was resumed after it exited` means a dead task was
+dispatched in spite of the pick's check. Neither appears in a healthy boot --
+the self-test's planted entries are counted but not printed.
+
+---
+
 
 **Occurrence 2026-09-15 (lane A), on a DIFFERENT test with the same
 signature.** `spawn-test-dash-statpath` -- a real dash running
@@ -79720,6 +79830,10 @@ allocation at 2^10 × 16 KiB = **16 MiB**. 19.2 MiB rounds to order 11 and is
 refused on arithmetic, not on availability — the frame allocator had 2.9 GiB
 free at the moment of the panic. **Any future change here that reintroduces a
 single multi-megabyte allocation must respect that 16 MiB ceiling.**
+*(2026-09-25: the ceiling is gone -- heap allocations above 16 MiB are mapped
+from vmalloc, design-decisions.md §959 -- so such a request would now succeed.
+The lesson that survives is the other one: size buffers from a count, not a
+guess.)*
 
 **The fix** removes the copy rather than resizing it. `name_offset` now indexes
 the kernel ELF's own `.strtab`, borrowed in place, so name data costs nothing.
@@ -149613,7 +149727,9 @@ outcome from a source change -- "a document this run validates was edited while
 it ran" is a different fact from "the kernel changed", and only the second makes
 the boot's verdict meaningless.
 
-## TD-A-THE-HEAD-OF-LINE-WITNESS-CANNOT-RED-THE-BOOT (lane A, 2026-09-14)
+## TD-A-THE-HEAD-OF-LINE-WITNESS-CANNOT-RED-THE-BOOT (lane A, 2026-09-14) -- **FIXED 2026-09-25**
+
+**Status:** FIXED (stamped 2026-09-25) -- `proc::spawn::run_persistent_netstack` now routes the witness's `Err` through `selftest::dispatch_debug("net::socket head-of-line", Severity::Diagnostic, ..)`, which prints the `self-test failed` marker the harness fails a run on, exactly as proposed below. Whether the witness *runs* rather than declines is a separate question its `Ok(None)` arm answers on every boot.
 
 **In short:** the concurrency witness written today for `D-NETSOCK-SYNC` -- the
 second witness 932 requires -- reports a failure into a channel nothing reads.
@@ -153054,6 +153170,7 @@ boot. What it needs is I/O pressure, which is a load question, not a fixture
 one.
 
 ## A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED (lane A, 2026-09-16) — **Status: OPEN**, instrumented, hypothesis not yet confirmed
+**Status:** SUPERSEDED 2026-09-24 (lane A). The section below headed "RESOLVED: the child is never scheduled; nothing is wrong with the pty" is **wrong**: a `^C` written to a pty master was only ever classified by a *reader*, and `ctest-pty`'s child never reads after announcing readiness, so no signal could be raised. Root cause and fix: `A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER` at the end of this file. The drop-with-no-foreground-group branch this entry is named for is real, still prints, and is not a bug (Linux drops the signal too).
 
 **In short:** a `^C` typed at a terminal that has no registered foreground process group is thrown away, and the reader that consumed it is then told to *restart*. The byte is gone, no signal was sent, and nothing will ever arrive -- so the read spins forever. Until 2026-09-16 that left no trace anywhere: the drop was a bare `return`.
 
@@ -153573,6 +153690,7 @@ a measurement than any case where the resemblance was weak, because a weak
 resemblance is easy to resist.
 
 ## A-WRITING-TO-A-PTY-MASTER-FAILS-FOR-THE-PYTHON-REPL-FIXTURE (lane A, 2026-09-16) — **Status: OPEN**, one observation
+**Status:** ROOT-CAUSED 2026-09-24. The exit 2 below became exit 8 once lane B split it out, and 8 is this rung spawning the fixture with **no capability at all** (and no `PYTHONHOME`): libc's exec starts with `SYS_FS_STAT`, which needs (File, METADATA). See `A-TWO-RUNGS-COULD-NOT-EXEC-FOR-WANT-OF-METADATA` at the end of this file.
 
 `ctest-python-repl` exited **2**: writing the expression to the master failed. **This was predicted to be 3** ("no output at all", i.e. the same forkpty fault as `ctest-pty`) and the prediction was wrong -- which is the useful part, because 2 means `forkpty` SUCCEEDED and the master write failed. `ctest-pty`'s own master write returned 1 in the same boot, so two fixtures disagree about whether a master write works and the difference between them is what to look at next.
 
@@ -159975,10 +160093,20 @@ sealed, and a write succeeds. An unenforced *irrevocable* restriction is
 worse than no restriction, because the word invites reliance.
 
 **And its `/proc` output makes the gap unreadable.** `sealing::stats()`
-reports a `denied` count, which can only ever be 0 because nothing checks a
-seal to deny anything. "0 denied" reads as *nobody has tried* rather than
-*nothing is enforced* -- dd-942 in the one place a reader would look to find
-out. Same shape as `binfmt`'s `stats()` returning zeros for an uninitialised
+reports a `denied` count that reads 0 on any ordinary boot, so "0 denied"
+looks like *nobody has tried* rather than *nothing in the write path asks*
+-- dd-942 in the one place a reader would look to find out.
+
+*(Corrected 2026-09-21: this said the count "can only ever be 0 because
+nothing checks a seal to deny anything", and that is false. `DENIED_OPS`
+IS incremented, in `check_seals` at lines 216 and 269 -- but `check_seals`
+has exactly one caller outside its module, `kshell`, a command a human
+types. So the counter is live and reachable, just not from anything that
+writes a file. `secpolicy` carried the same overstatement of mine and is
+corrected too. Found by trying to MEASURE the class rather than trusting my
+own prose: a scan for atomic counters in `fs/` that are loaded but never
+incremented returned zero candidates, which contradicted what I had
+published twice. The scan was right.)* Same shape as `binfmt`'s `stats()` returning zeros for an uninitialised
 table, and as the lock-context corpus reading `clean` over a population of
 its own fixtures.
 
@@ -164874,6 +165002,2625 @@ such handoff is the `..Default::default()` and destructuring-assignment case:
 nothing catches those, so it is a limit with no count and no delegate, which
 by the rule above is the weakest kind. It is not fixed; it has stopped being
 described as covered.
+### [A] A guard written to protect the operator's files reported them safe while unable to see them, and a `head` killed the push it was watching -- 2026-09-21
+**Status:** FIXED 2026-09-21 (both defects; main merged at b8607ee03 with the operator's three files intact)
+
+**In short:** the script that exists to stop a merge from committing the
+operator's unsaved work could not read their directory at all, and said it
+was clean. Separately, trimming a command's output to twelve lines did not
+just hide the rest -- it killed the command, so a merge that looked like it
+had run had not.
+
+**Defect one: the guard's verdict did not depend on the guard working.**
+
+```sh
+G="git -C $OS_TREE"      # OS_TREE is "E:/visual studio projects/os"
+$G status --porcelain | while read -r code path; do ... done > "$BEFORE"
+if [ -s "$BEFORE" ]; then ... else echo "integration tree clean"; fi
+```
+
+`$G` word-splits on the spaces, so every call was `git -C E:/visual` and
+failed with *"fatal: cannot change to 'E:/visual'"*. The loop then read
+nothing, `$BEFORE` was empty, and the `else` branch printed **integration
+tree clean** -- over a directory holding three uncommitted operator files,
+one of them the project's only copy of its `LICENSE`.
+
+An empty result and an unreadable tree are the same shape to a `while`
+loop, and the script chose the reassuring reading. This is the
+unconditional-label defect *inside the guard*, about the thing the guard
+guards -- and it had never run before today, so nothing had disagreed with
+it.
+
+Fixed with a function (`g() { git -C "$OS_TREE" "$@"; }`) so quoting
+survives, and by reading the status into a variable first so a non-zero rc
+aborts instead of falling through to "clean".
+
+**Defect two, and it is not a reporting problem: `head -12` killed the
+push.** The first invocation was piped through `head -12` to keep the
+transcript short. `head` exits after twelve lines, closing the pipe, and the
+script took SIGPIPE **in the middle of `git push origin main`**. The local
+merge had already happened, so afterwards:
+
+| ref | value |
+|---|---|
+| `os` tree HEAD | `b8607ee03` -- merged |
+| `origin/main` | `8e298978c` -- **not moved** |
+
+which reads exactly like "the push failed" and was in fact "the observer
+killed the subject". Lane C's *the filter kept the wrong end* has a sharper
+form here: **the filter terminated the thing it was filtering.** A truncation
+on a pipeline is not a read-only operation, and every `| head` I have written
+over a long-running command today was a loaded gun that happened not to fire.
+
+The tell was available and I nearly missed it: the merge had *fast-forwarded
+locally* while the remote had not moved. Only a push that started and did not
+finish produces that pair.
+
+**What this cost and did not cost.** Nothing: the second run completed, main
+is at `b8607ee03`, and the operator's `README.md`, `LICENSE` and
+`open-questions-answers.txt` are byte-identical and still uncommitted,
+verified by hash before and after. But defect one would have cost the
+operator's licence file the first time a conflict forced a `git add`, and it
+would have done so while printing a line saying it had checked.
+
+### [A] No program larger than 16 MiB can be started at all, and it is a hard limit rather than the fragmentation I reported -- 2026-09-21
+**Status:** FIXED 2026-09-25 (design-decisions.md §959) -- heap allocations over 16 MiB are mapped from vmalloc; the cmake rung now runs instead of skipping. A-Q19 resolved and removed from `open-questions.md`.
+
+**In short:** the kernel cannot start any program bigger than 16 megabytes.
+Not *usually* cannot, not *when memory is busy* -- cannot, every time, by
+construction. I reported this yesterday as a fragmentation problem that
+might come and go. It does not come and go.
+
+**The chain, each link verified rather than inferred:**
+
+| step | fact |
+|---|---|
+| starting a program | `spawn_process(elf_data: &[u8], ...)` takes the **whole ELF as one contiguous slice** |
+| getting that slice | `Vfs::read_file` -> a `Vec<u8>` -> the kernel heap |
+| a big heap request | `heap.rs` `large_alloc` -> `frame::alloc_order(order)` |
+| the order | `large_order` rounds the frame count **up to the next power of two** |
+| the ceiling | `frame.rs` `alloc_inner`: `if order > MAX_ORDER { return Err(InvalidArgument) }`, and `const MAX_ORDER: usize = 10` |
+
+2^10 frames x 16 KiB = **16 MiB**. A request above that is refused
+*before* the free lists are consulted, so free memory is irrelevant: the
+boot that died had 2.7 GB free.
+
+And the rounding moves the real boundary lower than it looks. A binary of
+8 MiB + 1 byte rounds to 1024 frames and demands the **entire 16 MiB
+maximum block**. So the practical ladder is: under 8 MiB is comfortable,
+8-16 MiB needs the largest block the allocator can ever produce, and above
+16 MiB is impossible.
+
+**Three things I wrote yesterday are wrong, and the same mistake produced
+all three.**
+
+| I wrote | actually |
+|---|---|
+| *"python312.zip is 20,498,464 bytes, the same order, and reads fine every boot"* | it is **never read into kernel memory**. `SRC_ZIP` appears in `pathz_missing` -- an existence check -- and CPython reads it itself from ring 3 |
+| *"whether a 2048-frame block exists depends on fragmentation"* | order 11 is rejected by a bounds check before any free list is examined |
+| *"the failure is nondeterministic, which is the worst kind of panic"* | it is perfectly deterministic |
+
+Every one came from the same move: I compared **file sizes** and concluded
+something about **allocation behaviour**, without checking whether the file
+I was comparing against is ever allocated. The zip was my control, and my
+control was not in the experiment.
+
+**What it means beyond cmake.** This is not a property of the cmake rung; it
+is a property of the OS. Any port that produces a binary over 16 MiB cannot
+be started, and the failure arrives as a kernel allocation abort rather than
+as a diagnosable refusal. `cmake-slateos.elf` at 22,526,200 bytes is simply
+the first thing to cross it. The other four spikes are 1.8-10.5 MB and fit.
+
+**The fix is one of three, and none is small.**
+
+| option | cost |
+|---|---|
+| raise `MAX_ORDER` to 11 or 12 | touches the core frame allocator; a 32 MiB contiguous reserve is a large standing demand on a 5 GiB machine, and the free-list array and every order walk grow with it |
+| stop requiring contiguity in `spawn_process` | the honest fix. The ELF is parsed and its segments copied into the new address space; it does not need to be one slice to do that. Touches the loader, which every process start goes through |
+| document it as a supported limit | free, and what this entry does for now |
+
+Not attempting the first two on the strength of one blocked self-test.
+
+*(Corrected within the hour: this said the limit "was unrecorded before
+today". It was not. `frame.rs` exports `BUDDY_MAX_ORDER` and its doc reads
+"Order N = 2^N frames. Order 10 = 1024 frames = 16 MiB" -- the number has
+been there, correct, in the allocator's public diagnostics section. What was
+missing is the CONSEQUENCE: nothing connected "the largest single allocation
+is 16 MiB" to "therefore no executable above 16 MiB can start", and the two
+facts sit in different files with no reference between them. A reader of
+`spawn_process` has no reason to visit the allocator's diagnostics
+constants, and a reader of that constant is thinking about fragmentation
+histograms, not the ELF loader.
+
+That is a different defect from an undocumented limit and a more
+interesting one: **the fact was present and its implication was not
+derivable from where it sat.** Fixed by connecting them -- `spawn_process`
+now carries a `# Size ceiling` section naming the limit and citing
+`BUDDY_MAX_ORDER`, so the implication is visible at the place it is met
+rather than in the file that happens to own the number.)*
+
+
+**Fixed, 2026-09-25 -- by an option the table above did not have.** None of
+the three: the kernel heap now sends any allocation whose buddy order would
+exceed `BUDDY_MAX_ORDER` to vmalloc, which builds it from single frames and
+maps them contiguously in kernel virtual memory. `spawn_process` still takes
+one slice; the slice just no longer has to be physically contiguous, which it
+never needed to be. Allocations the buddy allocator can serve are untouched.
+
+Making vmalloc fit to carry the heap took more than the routing. It had one
+caller (its own self-test), and four defects that one caller could not see:
+mappings created a top-level page-table entry only in whichever address space
+was loaded, were charged to that process's memory use, were never flushed from
+the TLB when freed, and raced on intermediate-table creation. All four are
+fixed and each has a self-test that fails on the old code; §959 has the
+detail. The loader rewrite (stream segments from the file instead of holding
+it) remains the better memory profile and is now an optimisation, not a
+prerequisite.
+
+### [A] A checker narrowed its own scope by delegating to a tool nobody runs -- 296 unresolved doc links remain in the kernel -- 2026-09-21
+**Status:** PARTLY FIXED (112 defects fixed and a gate added; 296 unresolved links remain behind a ratchet, and the cross-lane half is requested from lane B)
+
+**In short:** the kernel's documentation contains about 6,000 cross-references
+to other functions. Nothing had ever checked that any of them point at
+anything. 430 problems had built up, including 64 that make the documentation
+tool silently *delete* the sentence it is in.
+
+**The interesting part is not the count, it is how the hole was argued into
+existence.** `scripts/check-doc-links.py` is a careful, well-reasoned tool. It
+gates exactly one class -- a link naming something that exists nowhere -- and
+its docstring says plainly why one class is enough:
+
+> The other three do not need one: rustdoc reports them the moment anyone
+> runs `cargo doc`.
+
+That is a correct argument resting on a premise nobody checked. **Every
+mention of `cargo doc` in this repository is inside that docstring.** Nothing
+has ever run it. The narrow scope was justified by a backstop that does not
+exist, and three classes of defect accumulated in the gap between the
+delegation and its target.
+
+This is worth naming as its own shape, because it is not the same as a
+missing check and not the same as a wrong one: **a check that is correctly
+scoped, and whose correctness depends on a second check that was never
+built.** Neither tool is wrong on its own. The defect lives in the handoff,
+which is exactly the place no single tool's tests can see. dd-953 collects
+ways a check reports something true about the wrong thing; this is a check
+reporting something true about the right thing while something else it named
+goes unmeasured.
+
+**There is a second, independent reason the kernel was uncovered.** The
+checker's `ROOTS` are lane B's trees, with a `--roots` flag added so other
+lanes can point it at their own -- lane C did this for `gui/` and `apps/`.
+Lane A never did. And when I tried, it refused:
+
+    refusing to report a verdict -- a whole-tree scan saw only 1 crate(s),
+    below the floor of 5
+           inspected: 1 crate(s), 807 file(s), 146494 doc line(s),
+                      6078 link(s), 5845 judged
+
+The floor exists so an empty scan cannot read as a clean one, which is right.
+But it counts **crates**, and crate count is a proxy for "did this scan see
+anything" that has stopped being one: the same refusal reports 6,078 links in
+the breath where it calls the scan too small to judge. Lane A's whole tree is
+one crate, so no `--roots` argument can ever clear it. Requested from lane B
+in `requests/a-b-your-doc-link-gate-refuses-a-verdict-on-a-single-crate-
+root.md` with three possible fixes.
+
+**Measured, first rustdoc run in the project's history (94s):**
+
+| class | count | what it does to a reader |
+|---|---|---|
+| unclosed HTML tag | 64 | **deletes text.** Markdown reads `Vec<u8>` in prose as a tag and can swallow what follows |
+| unresolved link | 344 | renders as literal bracketed text |
+| redundant explicit link target | 8 | cosmetic |
+| both a function and a crate/macro | 7 | ambiguous, resolves arbitrarily |
+| links to a private item | 3 | a public doc pointing somewhere unreachable |
+
+**Fixed (112):** 64 unclosed tags; 20 `KernelError::X` links in the two files
+lacking the import; 14 that named the right module but a private item, so the
+path could never resolve; 14 naming functions that no longer exist at all.
+That last group is lane B's own headline class -- nine renamed-away names,
+every successor confirmed from git rather than guessed.
+
+**Two of those nine could not be fixed by substituting the new name**, and
+this is the part worth carrying forward. `awk_pattern_eval` became
+`awk_compile_pattern`, whose signature takes no record -- and the sentence
+pointing at it read *"which is what lets awk_validate_program ask with a dummy
+record"*, describing a technique that had been **deleted**, not renamed.
+Substituting would have turned a dead link into a live falsehood, which is
+worse than the dead link. Same for `awk_compare`, cited as where a shape once
+drifted: pointing it at today's `awk_parse_cmp` would attribute an old defect
+to current code. **A finding in this class is actionable without being
+mechanical,** and a sweep that assumes rename-and-move-on degrades the docs
+while clearing the gate.
+
+**Remaining (296 unresolved links), and why they are not simply fixed.** Most
+are prose that merely looks like link syntax -- `argv[0]`, `buf[i]`, `[path]`
+-- which rustdoc cannot tell from a real link. A sample classified by whether
+the target names any definition in the crate splits about half and half, but
+that test is itself unreliable in both directions: `path`, `link` and `reset`
+are common English words that happen to also be identifiers, and a genuinely
+renamed function looks exactly like prose. They need reading, not a script.
+
+**Gate added** (`check_kernel_docs` in `scripts/boot-test.sh`): unclosed tags
+ceiling 0 and it means zero, unresolved links ratcheted at 296. Both counts
+print every run so silence and success do not look alike. Verified by making
+it fail, not only by watching it pass -- an injected `Vec<injected>` is caught
+and located, and a ceiling one below actual exits 1.
+
+### [A] Any process could panic the kernel with one `poll` call, and I found it only because a SAFETY-comment audit made me read the line above -- 2026-09-21
+**Status:** FIXED in `a234eabc8` (7 sites); needs a boot. The measurement lesson below is the part worth keeping
+
+**In short:** `poll()` and `select()` copy the caller's list of file
+descriptors into a kernel buffer whose size the caller chooses. The kernel
+allocated that buffer in a way that *crashes the whole machine* if the
+allocation fails, instead of returning an error. Any ordinary program could
+do it deliberately, with about 17 megabytes of memory and one system call.
+
+**The chain, each link read rather than inferred:**
+
+| step | fact |
+|---|---|
+| the size | `nfds` is a `u64` straight off the syscall; `len = nfds * 8` |
+| the mitigation that exists | both callers require `validate_user_write(ptr, len)` to pass, so the attacker must genuinely have that much mapped |
+| the allocation | `vec![0; len]` -- and `vec!` **aborts** on failure |
+| what abort means here | `handle_alloc_error`, which in a kernel is a panic. This tree already says so in three places, e.g. `fs/sevenz.rs:214` |
+| why 17 MB is enough | `large_alloc` returns null as soon as `frame::alloc_order` refuses, and it refuses any order above `MAX_ORDER = 10`. The kernel side fails at **16 MiB**, not at machine memory |
+
+So `nfds = 2_097_153` gives `len = 16_777_224`, which rounds to order 11 and
+is refused with 2.7 GB free. `select` is worse: **six** such allocations,
+not the three I first counted -- `rd`/`wr`/`ex` and the three `_out` copies.
+
+**This is the 16 MiB ceiling composing with something else.** On its own the
+ceiling blocks large programs from starting, which is an inconvenience filed
+as A-Q19. Combined with a bounce buffer sized by the caller it becomes a
+one-syscall denial of service, because it lowers the memory an attacker needs
+from gigabytes to megabytes. Neither entry could have predicted that alone.
+
+*(2026-09-25: the ceiling is gone (§959). The sites fixed here allocate
+fallibly, so none of them can abort; what changes is that a caller-sized
+buffer can now reach 1 GiB instead of stopping at 16 MiB. `epoll_wait`, the
+one whose size was entirely the caller's choice, now sizes by its interest
+set; the rest are tracked in `A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC`.)*
+
+**How it was found, which is the uncomfortable part.** Not by looking for
+security bugs. I was auditing `// SAFETY:` comments, reached
+`copy_from_user`, and had to read the line above the `unsafe` block to state
+the invariant. That line was the `vec!`. An audit of documentation found a
+remote-ish DoS because the documentation rule forces you to read the code
+next to the thing you are documenting.
+
+---
+
+#### The measurement lesson: a passing control licenses only the failure it simulates
+
+The audit that led here reported **318 unsafe blocks missing a SAFETY
+comment, 14.4%**. The true number is **8, 0.36%**. The sequence was
+318 -> 24 -> 21 -> 8, and each cut came from a different flaw in my own
+instrument:
+
+| reported | the flaw |
+|---|---|
+| 318 | the scan only looked at the line *immediately* above. `madt.rs` has `// SAFETY: entry is at least 8 bytes.` governing a group of reads, separated from the first by one **safe** statement |
+| 24 | it counted `unsafe {` inside ```` ```ignore ```` examples in `//!` doc comments -- not code |
+| 21 | it claimed to search "the enclosing function" but capped at 40 lines. `pt_walk.rs:175` carries a comment covering reads **48 lines** below it |
+
+**I ran a control before publishing 318, and that is what makes this worth
+recording.** My scan could not see a SAFETY note written as the first line
+*inside* a block, so I checked: it found 4. The number barely moved, and I
+concluded the instrument was sound -- I even wrote down "the 318 are
+absences, not variations."
+
+The control tested placement **after** the block. Every real failure was
+placement **before but separated**. A control only covers the axis it
+varies, and a passing one is far more persuasive than no control at all:
+**it licenses exactly the failure it simulates, and the confidence it
+produces is general.** That asymmetry is the defect, not the regex.
+
+The cheap version of the right control: plant the defect. Had I inserted a
+SAFETY comment two lines up with a statement between, the scan would have
+reported it missing and I would have known in thirty seconds. Lane C reached
+the same place from the other side the same hour -- their survey's zero
+rested on one planted defect that varied one axis, and varying a second
+(a field held singly vs. in a `Vec`) turned a silent case into a reported
+one.
+
+**Every count I produced today shrank when examined**: 47 qualifiable doc
+links became 11, 64 demotable became 2, 9 unbounded allocations became 3,
+318 missing SAFETY comments became 8. The habit that caught all four was the
+same and it is not sophisticated: read the scan's own output before
+believing its total.
+
+### [A] `mm/user.rs`'s safe wrappers are used 7-40 times in one syscall file and zero times in the other -- 2026-09-21
+**Status:** FIXED for this class -- all 46 `vec![0` in `linux.rs` classified, the 12 user-sized ones converted, plus 7 hand-rolled blocks folded into the same helper. OPEN for the four other wrappers that still have zero uses there
+
+**In short:** the kernel has a set of helper functions whose whole job is to
+copy data safely between a program and the kernel. One of the two files that
+handles system calls uses them constantly. The other has never used a single
+one, and writes the unsafe version by hand every time. That is where today's
+one-syscall crash came from.
+
+**Measured.** Every `pub fn` in `mm/user.rs`, counted in both syscall files:
+
+| helper | `handlers.rs` | `linux.rs` |
+|---|---|---|
+| `read_user_vec` | 40 | **0** |
+| `with_user_out_buf` | 15 | **0** |
+| `write_user_items` | 11 | **0** |
+| `alloc_zeroed_vec` | 10 | **0** |
+| `read_user_items` | 7 | **0** |
+
+*(Counting caveat, stated because it decides what the table is worth: these
+are substring counts, so the positives are inflated -- `copy_from_user`
+matches inside `copy_from_user_as`. A **zero** cannot be inflated, so the
+column carrying the finding is the reliable one.)*
+
+**And the contrast is qualitative, not just a count.** `handlers.rs` shows
+one hit for `vec![0` -- inside a comment, explaining why it is not used:
+
+> Read into a kernel buffer, then copy out. Besides keeping raw user
+> pointers out of the VFS, this makes the staging allocation fallible --
+> `vec![0u8; buf_cap]` would abort the kernel on a large failed read.
+
+followed by a call to `with_user_out_buf`. So that file has **zero**
+aborting allocations and an author who understood the hazard well enough to
+write it down at the call site. The sibling file has 46 and had never met
+the idea. This is not a style difference or a tidiness gap: the same
+knowledge, in the same crate, one directory apart, present on one side of a
+file boundary and absent on the other.
+
+**Why it matters rather than being a style difference.** `alloc_zeroed_vec`'s
+own doc names the exact defect that shipped:
+
+> `vec![0u8; n]` and `Vec::from(slice)` are *infallible* allocations: on
+> exhaustion they call the allocation-error handler, which in a kernel means
+> the whole system goes down. Since `n` here is usually derived from a
+> syscall argument, that turns an OOM into a userspace-triggerable panic.
+
+That paragraph has been sitting in `mm/user.rs` the whole time, one directory
+from `syscall/linux.rs`, which contains **46** `vec![0` and had **zero** uses
+of the helper. The knowledge did not cross a file boundary. `poll`, `select`,
+`memfd`, `pread` and `getdents64` all live on the wrong side of it.
+
+**This is a third shape of the same family recorded today.** The others were
+a delegation to a tool nobody runs, and a cross-reference that was never
+written. This one is a remedy that exists, is documented with its own threat
+model, is used ten times -- and stops at a file boundary. None is a missing
+check; all three are **knowledge that exists somewhere it cannot be seen from
+where it is needed.**
+
+**What was done.** All 46 `vec![0` sites in `linux.rs` were classified, so
+this converts the class rather than a sample:
+
+| class | count | verdict |
+|---|---|---|
+| literal size | 5 | safe |
+| named constant | 10 | safe |
+| variable, clamped at its `let` | 9 | safe, mostly `.min(4096)` |
+| self-test, sized by `PAYLOAD.len()` | 9 | kernel constants, not user input |
+| bounded by an `if` earlier in the function | 1 | `get_nodes_uma`, capped at `NODE_BITS_CAP` |
+| **user-sized** | **12** | converted |
+
+**Converted is not the same as exploitable, and the entry should not blur
+them.** The conversion is right for all 12 -- the helper costs nothing and
+removes an abort path from an allocation whose size is not a compile-time
+constant. But only some are reachable. `sys_vmsplice` caps `nr_segs` at
+UIO_MAXIOV = 1024, so its buffer cannot exceed 16 KB; `sys_setgroups` caps
+at NGROUPS_MAX = 65536 and `sys_futex_waitv` at FUTEX_WAITV_MAX = 128.
+Those are bounds that genuinely help.
+
+The demonstrably reachable ones are those whose ONLY gate is
+`validate_user_write`, which bounds the request to what the caller has
+mapped -- and therefore permits ~17 MB, which is all it takes:
+`dispatch_memfd_write`, `dispatch_memfd_read`, `pread_file_to_user`,
+`pread_memfd_to_user`, `sys_getdents64`, `epoll_wait_core`, and the
+`poll`/`select` pair already fixed.
+
+Plus the 7 blocks I had hand-rolled an hour earlier for poll/select --
+themselves a reimplementation of this helper -- folded into it. That is 19
+helper call sites in a file that had none, from two populations that must
+not share a denominator: 12 of the 46 `vec!`, and 7 that were no longer
+`vec!` at all. (I wrote a table conflating them first; the applier's own
+assertion is what caught it.)
+
+**`epoll_wait_core` is the one worth remembering.** Its caller looks
+careful: it rejects `maxevents > EP_MAX_EVENTS` and then validates the
+user range. But `EP_MAX_EVENTS` is `i32::MAX / 12`, so `maxevents * 12`
+reaches 2.1 GB, and crossing the kernel's 16 MiB allocation ceiling needs
+only `maxevents = 1_398_102`. **A bound that exists is not the same as a
+bound that helps** -- "is it validated?" was the wrong question and
+"what does the bound permit?" was the right one. Any audit that greps
+for the presence of a check passes this site.
+
+**What was NOT done, and why it is not laziness.** `read_user_vec` is the
+purpose-built replacement for the `validate_user_read` + `vec!` +
+`copy_from_user` dance that `linux.rs` performs at least 17 times, and
+adopting it would close the class rather than the instances. But it takes a
+`max` that is a **hard limit, not a truncation** -- its doc explains that
+silently clamping a path turns `/very/long/path/to/a.txt` into a *different,
+shorter path that may well exist*, so an over-long argument would operate on
+the wrong file instead of being rejected. That makes it right for path-like
+reads and wrong for `write()`, which legitimately handles large sizes:
+imposing a `max` there would break large writes in the name of fixing a
+panic. So each site needs a decision about what its natural bound is, or
+whether it has one. **Actionable is not mechanical** -- the same conclusion
+the renamed-doc-links reached this morning from the other direction.
+
+**The remaining work, in the order it is worth doing:**
+
+| step | why |
+|---|---|
+| ~~review the other `vec![0`~~ | done: 46 classified, 12 converted |
+| adopt `read_user_vec` at the 10 sites that already have a bound | measured below; the `max` it wants is already in the code |
+| the four wrappers still at zero | `with_user_out_buf`, `write_user_items`, `read_user_items` each encode a check `linux.rs` currently repeats by hand |
+
+**The `read_user_vec` opportunity, measured -- and the first measurement
+was keyed on the wrong axis.** Its shape is `validate_user_read(p, n)`
+followed by `copy_from_user(p, ...)`, and `linux.rs` performs exactly that
+**15** times. I first grouped them by whether a bound was already present
+and concluded ten could adopt it immediately. Then I opened one:
+
+```rust
+const FLOCK_SIZE: usize = 32;
+let mut buf = [0u8; FLOCK_SIZE];   // a STACK array
+```
+
+`read_user_vec` returns a `Vec`. Adopting it there would add a **heap
+allocation for a 32-byte read** -- strictly worse than what is there. The
+axis that decides adoption is not bounded-vs-unbounded, it is
+heap-vs-stack, and a fixed-size read on the stack has no allocation
+hazard to fix.
+
+| group | n | verdict |
+|---|---|---|
+| stack array, fixed size | 4 | leave alone; adoption would be a regression |
+| heap, with a bound already enforced | 6 | adopt -- `.min(4096)` x3, `RING_CAP` x2, `NODE_BITS_CAP` |
+| heap, no bound | 3 | needs a decision: `dispatch_memfd_write`, `pwrite_file_from_user`, `pwrite_memfd_from_user` |
+| unclear | 2 | `sys_setitimer`, `socket_sendmsg` |
+
+So the immediately-actionable set is 6, not 10, and the three that need a
+decision are all `write()`-shaped -- which may legitimately have no
+natural bound at all.
+
+**A gate is the wrong instrument here and worth saying so.** A rule of the
+form "no `vec!` in syscall code" would fire on the 34 that are fine and get
+switched off. What would actually have caught this is the question that found
+it: *for each safe wrapper, which callers that should use it do not?* That is
+a survey, not a gate, and it wants running when a wrapper is added rather
+than on every build.
+
+### [A] `flock()` is keyed by path, so two hardlinks to one file can both hold an exclusive lock -- 2026-09-21
+**Status:** OPEN (found while designing byte-range record locking, which will key on `FileId` from the start)
+
+**In short:** a program can ask the kernel to lock a file so no one else
+touches it. The kernel remembers the lock under the *name* used, not the
+file itself. A file can have two names, so two programs using different
+names for the same file are both told they hold an exclusive lock.
+
+**Measured, not inferred:**
+
+| fact | where |
+|---|---|
+| the table is keyed by path | `vfs.rs` `flock_resolved`: `table.iter().position(|e| e.path.as_path() == path)` |
+| the entry stores a path, not an id | `struct PathLockEntry { path: PathBuf, locks: Vec<FileLock> }` |
+| a second name is reachable | `Vfs::link` exists, with ext4 and memfs backends |
+| an inode identity exists and is unused here | `FileId` = `(fs_id, ino)`, never reused, already keying the page cache |
+
+Linux's `flock()` is per-**inode** -- it attaches to the open file
+description, which refers to the inode -- so two hardlinks conflict there
+and do not here. That is a divergence, not a design choice: nothing in the
+code says path-keying was intended, and `FileId` was sitting right there.
+
+**Severity is low and the reason is worth stating**, because it is the same
+reason the seal table's identical defect is low: advisory locks only bind
+programs that ask. Nothing in this tree asks yet. The cost is latent -- it
+becomes real the first time two cooperating processes rely on it, which is
+exactly when it will be hardest to see.
+
+**This is the third path-keyed security-ish table found this week**, after
+`fs/sealing.rs` (seals keyed by `PathBuf`, no canonicalisation) and the
+`immutable.rs` flag set. The shape repeats because a path is the argument
+you already have and an inode id is one lookup away. Worth a rule rather
+than three separate fixes: **a table that answers "may this be modified?"
+must key on the thing being modified, and a name is not that thing.**
+
+**Fix:** key on `FileId`, resolved once at lock time. `funlock_all(owner)`
+and the `handle::close` release path both work unchanged -- they iterate
+by owner, not by key. The new byte-range record-lock table (the ask in
+`requests/b-a-advisory-record-locking-is-a-stub-that-always-succeeds.md`)
+will key on `FileId` from the start, so this is the older table catching up
+rather than a new convention.
+
+### [A] Three ring-3 self-tests have red-flagged every boot for days, and the guard that exists to prevent exactly this is green -- 2026-09-21
+**Status:** ALL THREE ROOT-CAUSED 2026-09-24, in the kernel and in lane A's own rungs: `ctest-coreutils-runs` (11) and `ctest-python-repl` (8) were spawned without (File, METADATA), which libc's exec needs to stat the binary (`A-TWO-RUNGS-COULD-NOT-EXEC-FOR-WANT-OF-METADATA`); `ctest-pty` (45) was the line discipline running only inside a reader (`A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER`). Fixes committed; the boot that shows them green is pending. The text below, including its correction, predates this.
+Correction at the end of this entry, written within the hour. The binary is
+on the image. The failure is a kernel-side exec, which is lane A's
+
+**In short:** every boot fails three tests. The reason is that one small
+program is missing from the disk image the tests run against. There is a
+check whose whole job is to catch a stale or wrong image, and it passes --
+because the list it checks against does not include that program.
+
+**The failure, from the serial log rather than from inference:**
+
+```
+[cu] COULD NOT EXEC /mnt/bin/true -- it is not on the image, or is not executable.
+[cu] This is NOT a finding about the Rust userland. Check that
+[cu] create-ext4-rootfs.sh actually staged the manifest binaries.
+[spawn]   FAIL: ctest-coreutils-runs (ring 3) exit code was Some(11), expected 42
+```
+
+Three tests fail together and the first is the one that matters: *our own
+userland runs at all*, then *pty ^C signal delivery*, then *CPython REPL
+over a pty*. The harness comment beside the first says why they are one
+finding and not three -- if `/bin/true` cannot exec, the rungs below it are
+exercising the same broken path from further away, and passing would be
+worse than failing because it would look like evidence.
+
+**Why nothing caught it, which is the part worth keeping.**
+`boot-test.sh` has a guard built for precisely this, and its own comment
+states the failure mode:
+
+> The result is not a missing warning, it is a FALSE GREEN: the Path-Z
+> rungs run, they pass, and what they exercised was last week's binary.
+
+It ran and said: `ok rootfs.ext4 (85 staged artifacts match the tree, every
+fixture recipe has one)`. Both halves true. `rootfs.ext4.manifest` has **93
+entries and zero mention of `bin/true`** -- its header says it covers "the
+ctest/fastpy ELFs, the ported binaries, and CPython's stdlib zip". The
+coreutils binaries the rungs *exec* are not in that population.
+
+So the guard answers **"do the staged fixtures match the tree?"** and the
+failing test needs **"is `/bin/true` on the image?"**. A guard written to
+prevent a false green has one of its own, one level down, and for the same
+reason: a verdict is only as good as its corpus, and the corpus is
+invisible in the output (dd-942).
+
+**It is not simple staleness, which is what makes it interesting.** The
+image is *newer* than the binary: `rootfs.ext4` was packed 2026-09-18
+03:44, `target/x86_64-slateos/release/true` was built 2026-09-16 04:11.
+The binary existed, the image was made afterwards, and it still is not
+there. So the staging step did not silently lag -- it did not stage it.
+
+**Why it has survived days.** `boot-test.sh` does not build the image; it
+is a separate manual `wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh`.
+So the only feedback is a boot that goes red 600 seconds in with
+`InternalError`, and the diagnostic that names the real cause is 6 lines
+above it in a 2.7 MB serial log. Everything upstream is green.
+
+**Fix, in two halves that belong to different lanes:**
+
+| half | owner | what |
+|---|---|---|
+| stage the binaries | lane B | `create-ext4-rootfs.sh` / `ctest-fixtures.py` -- either stage them or say why they are absent |
+| widen the corpus | lane A | the guard should assert the image contains what the rungs will **exec**, not only what the fixture recipes **produce**. Those are different lists and only one of them is checked |
+
+The second half is the durable one: even after the image is rebuilt, the
+same gap lets the next missing binary through to a 600-second failure.
+
+#### CORRECTION, same day: the binary is there, and this is mine
+
+I verified the image with `debugfs` instead of believing the test's own
+error message, and the first half of the entry above is false:
+
+```
+    109  100755 (1)  1000  1000  796064  18-Sep-2026 03:44 true
+```
+
+`/bin/true` is present in `rootfs.ext4`, mode 0755, **796064 bytes -- the
+same size as `target/x86_64-slateos/release/true`**, in a `/bin` holding
+114 entries. The image is correct and lane B staged it correctly.
+
+**How I got it wrong.** The fixture prints:
+
+> `COULD NOT EXEC /mnt/bin/true -- it is not on the image, or is not
+> executable.`
+
+That is a **disjunction, and a guess** -- the fixture cannot see why exec
+failed, so it names the two likely causes. I took the first branch and
+wrote it up as a finding, including a confident story about manifest
+corpora. The manifest observation stands on its own (it really does not
+cover `/bin/true`), but it was not the cause of anything, and presenting it
+as the explanation made a true fact into a false diagnosis.
+
+**What the serial log actually shows**, six lines the entry above quoted
+without reading:
+
+```
+[ext4] Mounted vdb at /mnt                      <- the mount worked
+[cu] true (exec, run, exit 0 -- ...)
+[cow] Cloned address space: parent=... -> child=...   <- the fork worked
+[sched] Spawned task 153 (priority 16, cpu 0)
+[thread] Process 184 has no threads left - now zombie <- died immediately
+[cu] COULD NOT EXEC /mnt/bin/true ...
+```
+
+Mount succeeded, fork succeeded, the child was spawned and exited without
+running the program. So this is an **exec failure in the kernel** on a
+present, executable, correctly sized ELF -- `kernel/**`, lane A, mine. Not
+a staging gap and not lane B's to fix.
+
+**The lesson is the one I have been writing all day, pointed at me.** The
+fixture's message was true about what it could observe (exec returned an
+error) and a guess about why. I read the guess as the finding. dd-953 calls
+this a check reporting something true about the wrong thing; here the check
+was honest and explicitly offered two branches, and I collapsed them.
+
+**Three ring-3 tests fail together and they are one finding**, exactly as
+the harness comment beside them says: if `/bin/true` cannot exec, the pty
+and CPython rungs below are exercising the same broken path from further
+away. Fixing the exec should clear all three.
+
+#### SECOND rediscovery: lane A filed this too, on 2026-09-16, with better evidence
+
+`requests/a-b-ctest-pty-races-its-own-child-the-pty-is-fine.md`. Same day
+as the execl one, same lane, same dropbox. Everything below this heading I
+derived today was already there, and the prior note has a fact I never
+reached:
+
+> The parent writes `\003` **immediately after `forkpty` returns, before the
+> child has run at all**. `cur=173` is the parent. The scheduler boosts the
+> starved child twice and the parent still burns its 2,000,000-iteration
+> `waitpid` spin first, returns 45, and exits.
+
+It was measured with kernel probes on **both master-write paths and all
+three slave-read paths**, and its conclusion is stronger than mine: not
+"the budgets are equal so it is a photo finish" but *"nothing is wrong
+with the pty -- the `^C` reaches the input ring and the child is never
+scheduled to read it"*.
+
+That also sharpens the open question. The fixture's own comment says the
+readiness byte exists so *"the parent's 0x03 can never arrive before there
+is something to catch it -- this is the whole synchronisation of the
+test"*. If the parent is writing before the child has run, that
+synchronisation is not holding, which is a more specific defect than equal
+spin budgets and is still lane B's file.
+
+**Two rediscoveries in one session, both from `requests/a-*.md`.** 149
+outgoing requests filed by lane A, and I have never searched them. The
+rule I am writing down, because "remember to look" is not one: **before
+investigating any failing rung, grep `requests/a-*.md` for its name.** It
+costs one command and it would have saved two investigations today.
+
+What I add to the prior note rather than repeat: the two fixtures that
+fail by `execl` are the only two `execl` callers in the tree, and
+`ctest-pty` -- the third failing rung -- does not exec at all, so the
+harness's "these three are one finding" grouping is wrong in a way that
+will make an `execl` fix look incomplete.
+
+#### `ctest-pty`: exit 45 is masking exit 47, and the cause is equal spin budgets
+
+No probe needed -- it is arithmetic. `SPIN` is 2,000,000 and **both sides
+use it**:
+
+```c
+child:   for (long i = 0; i < SPIN; i++) { if (got_sigint) _exit(77); sched_yield(); }
+         _exit(78);                      /* handler never ran */
+parent:  for (long i = 0; i < SPIN && w <= 0; i++) { waitpid(WNOHANG); sched_yield(); }
+         if (w != kid) return 45;
+```
+
+If the `SIGINT` never arrives, the child must burn all 2,000,000
+iterations before it can report 78. The parent is yielding in lockstep, so
+it burns its own 2,000,000 over the same wall-clock and gives up at
+essentially the same instant. **The parent cannot outlast the child by
+construction**, so the child's verdict is unreachable whenever the signal
+does not arrive.
+
+That is why the scheduler's anti-starvation boost appears: it is not the
+cause, it is the scheduler doing its job on a pair of tasks that are
+yielding at each other two million times.
+
+**So 45 is standing in for 47, and 47 is the one that matters.** The
+fixture's own table calls it *"THE INTERESTING ONE -- the line discipline
+did not turn 0x03 into a SIGINT that crossed into the child"*, and it is
+kernel-owned. Every run so far has reported the race instead of the
+verdict.
+
+**There is an irony worth recording**, because it is the same defect one
+turn of the screw along. That exit table was rewritten precisely to stop
+47 meaning four things at once -- the comment says so: *"47 meant 'the ^C
+did not become a SIGINT' and also 'isatty said no' and also 'signal()
+refused' ... and no run could tell which"*. The ambiguity was fixed and
+the reachability was not, so the disambiguated code cannot be reached.
+**A code that cannot fire is as uninformative as one that means four
+things.**
+
+**The ask is one constant**, and it is lane B's file: give the parent a
+larger budget than the child (`SPIN * 2`, or make the child's loop shorter).
+Then a missing SIGINT reports 47 and lands in lane A's court with a real
+diagnosis instead of a race.
+
+#### `ctest-pty`: the yield chain is correct end to end, so the starvation is elsewhere
+
+Walked it rather than assuming, because "yield does not really yield" is
+the obvious first theory and it is wrong here:
+
+| step | what it does |
+|---|---|
+| `posix::sched_yield()` | `syscall1(SYS_SLEEP, 0)` -- note: **not** `SYS_YIELD` |
+| `sys_sleep(0)` | *"Zero sleep -> just yield"*, calls `sched::yield_now()` |
+| `yield_now()` | counts a voluntary switch, reports an RCU quiescent state, `schedule_inner(true, Voluntary)` |
+| `schedule_inner(requeue=true)` | `PER_CPU_SCHED.enqueue(current_id, prio, cpu)` -- back of its priority level |
+
+The `SYS_SLEEP(0)` spelling is surprising when `SYS_YIELD` exists two
+constants away, but it is not a defect: it lands on the same `yield_now()`.
+
+**So the remaining question is a real scheduler one.** Both sides spin with
+`sched_yield()` -- the parent on `waitpid(WNOHANG)`, the child waiting for
+its `SIGINT` handler to fire -- and the parent exhausted `SPIN` first. If
+yielding rotates correctly, why did the scheduler have to rescue the child
+with `Anti-starvation: ... boosted 1 task to priority 0: [174(p16)]`?
+
+The exit order says the child never finished on its own:
+
+```
+[thread] Process 204 has no threads left - now zombie   <- the PARENT gave up
+[pty] master closed: SIGHUP+SIGCONT to group 205
+[signal] Process 205 continued
+[thread] Process 205 has no threads left - now zombie   <- the child, killed by the HUP
+```
+
+Two readings remain and they belong to different lanes. Either the fixture
+races itself -- both sides spin the same `SPIN` and the parent must outlast
+the child plus signal latency, which is lane B's to size -- or a task that
+yields every iteration is still starving a same-priority peer, which is
+lane A's. **Not guessing between them**: the next probe is a count of
+voluntary switches per task across the rung, which `VOLUNTARY_SWITCHES`
+already maintains per CPU and nothing currently reports.
+
+#### The three failures are at least TWO findings, not one
+
+`main.rs` frames them as one: *if `/bin/true` cannot exec, none of the
+rungs below is testing what its name says.* That is sound reasoning about
+`ctest-coreutils-runs` being a precondition, and it is wrong about the
+third rung, which never execs anything.
+
+| rung | exit | mechanism |
+|---|---|---|
+| `ctest-coreutils-runs` | 11 | `execl` of `/mnt/bin/true` failed |
+| `ctest-python-repl` | 8 | `execl` of `/bin/python3` failed |
+| `ctest-pty` | **45** | `waitpid(kid, &status, WNOHANG)` never returned the child's pid within `SPIN` |
+
+Exactly two C fixtures in the tree call `execl`, and they are the first
+two. **None calls `execv`.** `ctest-pty` does not exec at all: its child
+`forkpty`s, checks `isatty`, installs a `SIGINT` handler and spins.
+
+**And its failure is a starvation, not a fault.** The kernel log shows the
+child DID finish -- `Process 205 has no threads left - now zombie` -- and
+three lines earlier:
+
+```
+[sched] Anti-starvation: cur=173 boosted 1 task to priority 0: [174(p16)]
+```
+
+The scheduler had to boost the child out of starvation, and the parent's
+`WNOHANG` + `sched_yield()` spin ran out of `SPIN` before the child got
+far enough. The fixture's own comment predicts this shape: *"WNOHANG means
+the child must run to exit, and it cannot while this loop owns the
+quantum."* `sched_yield()` is the mitigation and it was not sufficient.
+
+**Why this matters more than a third bug.** Someone fixing `execl` will
+expect all three rungs to clear, because the harness says they are one
+finding. Two will clear. The third will not, and the natural reading of
+that is *"the `execl` fix is incomplete"* -- sending the next round back
+into the exec path it just left. A wrong grouping costs more than a
+missing one.
+
+`ctest-pty`'s half is **lane A's**: `sched_yield`, the anti-starvation
+boost and the quantum are kernel, not fixture. The `execl` half is lane
+B's. They are unrelated and should be worked separately.
+
+#### ROUND 7: lane A diagnosed this on 2026-09-16, and that diagnosis is ALSO misattributed
+
+Lane C found `requests/a-b-libc-execl-passes-a-null-path-to-execve.md` --
+filed by **lane A**, on `origin/main`, in my own tree since 2026-09-16. It
+contains the discriminator I rebuilt today, the named mechanism
+(`va_trampoline!`, `posix/src/spawn.rs:2204`) I never reached, and the
+conclusion: *no C program on this system can exec by the list form*.
+
+**Six rounds today rediscovered my own five-day-old work, more slowly, with
+a wrong published diagnosis on the way.** The artefact holding the answer
+was my own dropbox.
+
+**And then the older diagnosis turned out to rest on a misattribution.**
+Lane C flagged a tension they could not resolve: `execl_body` has opened
+with `if path.is_null() { set_errno(EFAULT); return -1; }` since
+2026-08-21, three weeks before the probe saw a NULL reach `linux_execve`.
+If the trampoline lost `%rdi`, that guard would have caught it.
+
+It resolves by reading, and cost one command. The probe line
+
+```
+[exec] linux_execve ENTERED and failed early: filename_ptr=0x0 errno=14
+```
+
+sits at line **557** of today's log, between `[syscall/linux] ... : OK`
+lines, 2,500 lines before the fixture runs. It is a **kernel self-test**
+deliberately passing NULL to check EFAULT -- `linux.rs:54128` is "execve
+user-marshalling NULL handling", `:86053` does exactly this for
+`execveat`. And **no `[exec]` probe fires anywhere near the fixture's
+failure at all.**
+
+So the 2026-09-16 note took a self-test's intentional NULL as evidence
+about `ctest-coreutils-runs`. The observation was true; the subject was
+wrong. That is dd-953's first costume -- a check reporting something true
+about the wrong thing -- and it has now cost two investigations.
+
+**What survives and what does not:**
+
+| claim | status |
+|---|---|
+| vector form execs, list form does not | **survives** -- independently confirmed today by fastpy `forkexec` |
+| `execl` is `execv` plus a `va_list` walk | **survives** -- read directly in `execl_body` |
+| the NULL arrives at the syscall | **withdrawn** -- that probe hit belongs to a self-test |
+| `va_trampoline` loses `%rdi` | **unsupported**, not disproved. It may still be right; the evidence cited for it was not evidence |
+| the `execl_body` null guard should have caught it | **resolved** -- there was nothing to catch |
+
+**Round 7's direction changes.** `ctest-coreutils-runs` is native-ABI, so
+it never enters `linux_execve`; it goes through `SYS_PROCESS_EXEC`, which
+had **no failure logging at all** until `391232edb` today. Both prior
+diagnoses were reading the Linux-ABI door while the fixture used the
+native one. The boot running now is the first that can say what the native
+path actually returns.
+
+**The lesson, and it is not "search harder".** I did search: I read the
+fixture, the kernel exec paths, `posix::execve`, `load_elf`, and the
+serial log. I did not read `requests/`, because I had classified it as
+*incoming asks to triage* rather than *what lane A already knows*. A
+dropbox is a record of findings as much as a queue of work, and mine
+contained the answer under a filename that states it outright.
+
+#### NARROWED by lane C, and one correction to how I framed the correlation
+
+**`execl` has no exec path of its own.** `posix/src/spawn.rs` `execl_body`
+ends:
+
+```rust
+let ret = match mode {
+    ExecLMode::Direct => execv(path, argv),
+    ExecLMode::SearchPath => execvp(path, argv),
+    ExecLMode::WithEnv => execve(path, argv, envp),
+```
+
+So `execl` **is** `execv` plus a `va_list` walk, and everything below that
+call is shared with the arm that works. That kills the second of my two
+remaining candidates outright: it cannot be anything about `true` or
+`python3` that `cat` lacks, because that would all be below `execv` and
+identical. **What is left is the walk, or what the walk produces.**
+
+**And a correction to my own framing.** I wrote that two of two `execl`
+callers fail while the `execv` caller succeeds. True, but it implies a
+control I did not have: there is **no C `execv`, `execvp` or `execlp`
+anywhere in `services/`** -- three `execl` call sites in two files, and
+nothing else. The only `execv` in evidence is fastpy's, a different
+language and runtime. So the sample contained no C-side control, and
+"every C `execl` fails, no C `execv` is tried" is not a correlation, it is
+a description of a sample with one arm.
+
+The delegation is what rescues the conclusion, and it is stronger than the
+correlation was: since `execl` calls `execv`, and an `execv` demonstrably
+works in the same boot, the difference is provably above that call.
+
+**The specific thing to read first**, from lane C: pass 1 walks a *copy* of
+the `VaList` and the comment carries the load-bearing assumption -- "the
+cursors are per-copy, while the register save and overflow areas they index
+are only ever read." If any cursor lives behind a pointer the copy shares,
+pass 1 consumes what pass 2 re-reads and `argv` comes out wrong: an exec
+that fails with the exec path blameless. `EXECL_STACK_ARGV` is 64 and both
+failing sites pass one or two arguments, so the heap branch is not
+involved.
+
+#### The `execl` correlation, with every confounder checked off
+
+`debugfs` on the image, so this is the bytes and not the manifest:
+
+| binary | inode | mode | size | call path | result |
+|---|---|---|---|---|---|
+| `cat` | 19 | 0755 | 2,710,648 | fastpy `os.execv` | **OK** |
+| `true` | 109 | 0755 | 796,064 | C `execl` | fails (exit 11) |
+| `python3` | 81 | 0755 | 10,468,016 | C `execl` | fails (exit 8) |
+
+Same directory, same mode, all staged, sizes spanning 13x. Both fixtures
+`#define BIN "/mnt/bin/"`, so the `/bin/python3` in exit 8's description is
+stale prose from before the path fix, not the path used -- checked, because
+if it had still been `/bin` the second data point would have collapsed and
+the correlation with it.
+
+Two of two `execl` callers fail; the one `execv` caller succeeds; no C
+fixture in the tree uses `execv`. That is as clean as this gets without
+changing lane B's code.
+
+#### ROUND 6: a passing control in the SAME boot kills every structural theory
+
+The evidence was in the serial log the whole time, 557 lines below the
+failure. From the same boot:
+
+> `[spawn]   fastpy-on-SlateOS 'forkexec' (ring 3: os.fork cloned the
+> process, the child os.execv'd 'cat' over PATH ["/mnt/bin"], and the
+> parent os.waitpid'd + os.WEXITSTATUS-decoded the child's exit): OK`
+
+A ring-3 process forked, and **the child exec'd a binary out of
+`/mnt/bin`** -- the same directory as `/mnt/bin/true` -- and it passed.
+That one line kills, simultaneously:
+
+| theory | why it is dead |
+|---|---|
+| the binary is not staged | `cat` is staged and runs, from the same dir |
+| the path is wrong | the same `/mnt/bin` prefix works |
+| a forked child cannot exec | this child did |
+| a forked child cannot read ext4 | it read `cat` to exec it |
+| capabilities do not survive fork | and `Spawned child inherits parent capabilities: OK` is its own rung |
+| the native exec syscall is broken | fastpy is native-ABI and uses it |
+
+**What differs between the arm that works and the arm that fails** is not
+structural at all. It is the call form:
+
+| | working | failing |
+|---|---|---|
+| caller | fastpy `os.execv` | C fixture `execl(path, path, (char *)0)` |
+| posix entry | `execv` -- argv already an array | `execl_body` -- variadic, walks a `VaList` |
+| target | `/mnt/bin/cat` | `/mnt/bin/true` |
+
+So the remaining hypotheses are two, both in userspace: the **variadic**
+`execl` path specifically, or something about the `true` binary that `cat`
+does not have. Both live in lane B's tree (`posix/src/spawn.rs`, the
+fixture), which is why this entry stops at the localisation.
+
+**The method note, because five rounds is a lot.** Rounds 1-5 each
+proposed a structural cause, and each cost a boot to disprove. The control
+that disproves all six at once was already sitting in the first serial log
+any of them produced -- it just was not looked for, because nobody asked
+*"does anything in this boot already do the thing I think is broken?"*
+That question is free and should come before any theory that costs 90
+minutes. dd-954 says a control licenses only the axis it varies; the
+corollary is that **a passing control you did not write is still a
+control**, and a long log usually contains one.
+
+#### The control that cleared the capability theory varied four axes at once
+
+Round 4 dropped the capability theory on a measured comparison:
+`ctest-keylayout`, holding `(File, READ)`, opened and read `/proc/keylayout`
+from ring 3 while this fixture, holding nothing, could not open
+`/mnt/bin/true`. `(File, READ | EXECUTE)` was then granted here and the
+rung still fails.
+
+Reading `run_one` in the fixture shows why that comparison proves less than
+it appears to. It `fork()`s, and **only the child** calls `execl`. The
+parent never touches `/mnt/bin/true` at all. So the two arms differ in four
+ways and share one:
+
+| | failing case | the control |
+|---|---|---|
+| process | `ctest-coreutils-runs` | `ctest-keylayout` |
+| file | `/mnt/bin/true` | `/proc/keylayout` |
+| filesystem | ext4, a mounted image | procfs, synthesised in kernel |
+| who reads it | a **forked child** | the parent itself |
+| capability | `(File, READ)` | `(File, READ)` |
+
+Only the last row is held constant, and it is the one the comparison was
+used to reason about. That is dd-954's asymmetry in a debugging session
+rather than a scan: **a control licenses only the axis it varies**, and
+this one varied four while being read as evidence about the fifth.
+
+It does not make the capability conclusion wrong. It makes it unsupported,
+which is a different and more useful thing to know after four rounds.
+
+**The hypothesis it suggests, stated so it can be killed cheaply:** a
+forked child may not be able to read an **ext4** file at all -- because of
+the fork, or because of ext4, or both -- and nothing in the four rounds so
+far distinguishes those from a capability problem.
+
+**The test that settles it is one I own.** A kernel self-test in
+`spawn.rs` that forks and has the child read a known ext4 file, with no
+exec anywhere in it, separates fork-vs-parent and ext4-vs-procfs in one
+boot. `posix/src/spawn.rs` and the fixture are lane B's; that self-test is
+not, so it can be written without a handoff.
+
+**What `load_elf` actually does in the child**, from reading
+`posix/src/spawn.rs` rather than assuming: `SYS_FS_STAT` on the path, then
+`mmap` of the file size (796 KB here), then open and read. Any of those
+three failing returns -1 with errno set and **never issues
+`SYS_PROCESS_EXEC`** -- which is exactly the silence round 5 observed.
+Worth noting separately: `execve`'s frame declares `[0u8; PATH_MAX]` plus
+two `[0u8; 128 * 1024]` packing buffers, so it needs ~260 KiB of stack on
+entry. That is a fifth candidate and it is not capability-shaped either.
+
+#### Round 5's discriminator answered, and it eliminates the whole exec theory
+
+`linux_exec_common` already wraps the exec path and prints
+`[exec] execve(...) FAILED -> errno N` on every negative return. It was
+added in `fec0ab339` precisely because *"the fixture can only report THAT
+exec failed; the kernel knows the errno and had never been asked"*.
+
+**It did not fire.** Establishing that took checking the instrument first:
+
+| check | result |
+|---|---|
+| wrapper present at booted commit `37ff910f2` | yes |
+| early probe present too | yes |
+| do they work? | yes -- line 557 logs `linux_execve ENTERED and failed early: filename_ptr=0x0 errno=14`, and lines 3563+ log successful execs |
+| any `[exec]` line at the failure (~3126) | **none** |
+
+So the child process **never entered `execve`**. Every theory about exec --
+wrong path, missing file, missing capability, ELF rejection, the 16 MiB
+ceiling -- is eliminated at once, because none of them can be reached
+without the syscall being made.
+
+What the log establishes, and nothing more:
+
+```
+[cu] true (exec, run, exit 0 -- ...)          fixture announces the attempt
+[cow] Cloned address space: parent -> child   fork() SUCCEEDED
+[sched] Spawned task 153 (priority 16, cpu 0)
+[thread] Spawned thread (task 153) in process 184
+[thread] Process 184 has no threads left - now zombie
+[sched] Task 153 exiting
+```
+
+No fault, no exception, no exec. The child was created and exited. **The
+fault is between `fork()` returning in the child and the child issuing
+`execve`** -- which is a handful of instructions in the fixture's libc.
+
+**The process lesson, which cost me this whole session.** That wrapper's
+doc comment lists the three theories already tried and disproved: *not
+staged; wrong path; no capability*. I spent this session re-running the
+first one -- rebuilding the argument that the binary was missing, writing
+it up, pushing it, and having to retract it. The comment naming my theory
+as already-dead was inside the function I eventually read, and I read it
+**last**. Reading the code that owns the failure before theorising about
+it is not a refinement of method, it is the method.
+
+**Next probe belongs at the fork boundary, not the exec one.** A diagnostic
+on the child's first return from `fork_process_clone` would say whether the
+child ever ran userspace instructions at all. Do not spend another boot on
+an exec theory: the instrument has already ruled that family out.
+
+**Still true from the original entry:** `rootfs.ext4.manifest` has 93
+entries and none for `/bin/true`, so the image guard's corpus genuinely
+excludes the binaries the rungs exec. That is worth widening on its own
+merits -- it just is not what broke this boot.
+
+### [A] A lane's outbound mail is gated on its own build health, so a stuck lane cannot ask for help -- 2026-09-21
+**Status:** OPEN (structural, in `roadmap.md`'s three-lane protocol; found by lane C, confirmed here at 36 undelivered commits)
+
+**In short:** when one of the three parallel sessions gets stuck, the way
+it asks the others for help stops working -- *because* it is stuck. The
+messages pile up unsent exactly when they are most needed.
+
+**How it happens, in three rules that are each individually right:**
+
+| rule | where |
+|---|---|
+| cross-lane asks go in `requests/`, which is a file on a branch | roadmap.md, three-lane protocol |
+| a lane's files are invisible to other lanes until merged to `main` | roadmap.md hazard 1, which cost `a-b-init-conflates-...` a day |
+| merge to `main` only after a green boot | CLAUDE.md, "never merge a red tree" |
+
+Compose them and the delivery of a lane's mail is **coupled to the health
+of its build**. Lane A's green gate is a ~90 minute boot that has been red
+for six rounds on `ctest-coreutils-runs` -- a fixture lane A does not own.
+Measured today: **36 commits on `origin/lane-a` and not on `origin/main`**,
+including `requests/a-b-execl-fails-where-execv-succeeds-in-the-same-
+boot.md`, filed specifically to get another lane's eyes on the thing
+keeping the tree red.
+
+**The shape is worth naming because it is self-reinforcing.** The state
+that blocks delivery is the state that generates the most mail: a lane
+stuck on something it cannot fix alone files requests. So the queue grows
+fastest precisely while the channel is shut, and every day red is another
+day of accumulation.
+
+It is also invisible from inside. `git push origin lane-a` succeeds, the
+request file exists, `open-requests.py --outgoing` lists it. Nothing says
+*nobody can see this*. I filed that request and considered it sent; it
+reached lane B only because I separately asked lane C to relay, and lane C
+noticed the merge gap while doing so.
+
+**Three responses, in increasing order of commitment:**
+
+| option | cost |
+|---|---|
+| ask a green lane to relay | works, but only if you think to ask -- and a lane that files-and-moves-on never does |
+| cherry-pick the `requests/` file alone onto `main` | a document cannot make `main` red, and it merges none of the other commits. Sidesteps the rule's *purpose* while touching its *letter* |
+| decouple: let `requests/**` reach `main` without the boot gate | the real fix, and a protocol change, so it is the operator's |
+
+**The second option is safe for a reason worth stating**: `requests/**`
+and the shared `.md` documents are not built by anything. The boot gate
+exists to stop unverified *code* reaching a trunk three lanes build from.
+A request file has no compilation, no test and no runtime.
+
+**Measured magnitude, from `scripts/merge-readiness.py`** -- which exists for
+a related question and answers this one as a side effect:
+
+> CAUTION: your last passing boot ran at `273905c13`, which is **945
+> commit(s) behind HEAD**.
+
+945 commits since lane A last had a green boot. That is the size of the
+window in which the merge-when-green rule has delivered nothing, and it is
+a better argument than any reasoning about the rule: whatever the policy is
+meant to protect, it has spent 945 commits not protecting it while also not
+delivering.
+
+The same tool settles the other half in lane A's favour: `origin/main` is
+13 commits ahead touching 11 files, and **no incoming file is in lane A's
+scope**. So a completed run still speaks for this subsystem -- the code it
+asserted behaviour about is byte-identical after the merge. Two shared
+`scripts/` files changed, which it says are *"cheap to settle: re-run the
+gates, not the boot test."*
+
+**That narrows the open question usefully.** It is not "may lane A merge
+untested code" -- nothing incoming touches lane A, and the gates pass. It
+is: *may a lane merge when the only red rungs are another lane's fixtures,
+already present on `main`, failing identically before and after?* Posed
+that way it is answerable, and the answer might still be no.
+
+**Recorded rather than acted on unilaterally**, because it is a rule in
+`roadmap.md` governing all three lanes and changing it is not lane A's to
+decide. Promoted to `open-questions.md` if it survives one more day red.
+
+### [A] ROOT CAUSE: `SYS_PROCESS_EXEC` cannot read the caller's ELF, and its own self-test reports OK because a crashed process is a zombie -- 2026-09-21
+**Status:** FIXED (stamped 2026-09-25) -- both halves are in: `SYS_PROCESS_EXEC` reads the caller's ELF (the 2026-09-25 boot logs `[exec] Process 131 exec successful`), and `test_exec_process` now also asserts the target's exit code is `Some(0)`, so a crashed exec can no longer pass as a zombie. The ring-3 exit-11/8 failures this entry blamed on it turned out to have their own cause (a missing METADATA right in the rungs; see `A-TWO-RUNGS-COULD-NOT-EXEC-FOR-WANT-OF-METADATA`)
+
+**In short:** the kernel's native "replace this program with another one"
+call is broken -- it cannot read the new program's bytes out of the calling
+program's memory. The test that exists to prove this feature works has been
+reporting success the whole time, because the only thing it checks is that
+the process ended, and a process that crashes has also ended.
+
+**The evidence, from the boot of 2026-09-21, in six consecutive lines:**
+
+```
+[spawn] Created process 131 ("spawn-test-exec")
+[spawn]   Exec test: mapped 136 bytes of target ELF at 0x5000000000
+[exec] NATIVE exec FAILED -> -101 (elf_len=136)
+[exception] Killing task 96 - General Protection Fault (#GP) at 0x4000000016
+[thread] Process 131 has no threads left - now zombie
+[spawn]   Exec (replace process image): OK
+```
+
+`-101` is `KernelError::InvalidAddress`. The caller mapped 136 bytes at
+`0x5000000000` and passed that address; the kernel could not read it. The
+caller then fell off the end of its own code into unmapped memory and took
+a `#GP`. Four lines later the rung says **OK**.
+
+**Why it says OK.** `test_exec_process` asserts exactly one thing:
+
+```rust
+let state = pcb::state(result.pid);
+if state != Some(pcb::ProcessState::Zombie) { ... FAIL }
+```
+
+A successful exec ends with the new image calling `exit(0)` -> zombie. A
+failed exec ends with the caller crashing -> **also zombie**. The assertion
+cannot tell the feature working from the feature failing, and for as long
+as it has existed it has been reporting the second as the first.
+
+**This is the root cause of `ctest-coreutils-runs` exit 11**, and of
+`ctest-python-repl` exit 8. `posix::execve` reads the target ELF into its
+own memory and calls `SYS_PROCESS_EXEC` with that buffer. The kernel
+returns `InvalidAddress`, `execve` returns -1, the child `_exit(127)`s, and
+the fixture prints *"COULD NOT EXEC ... it is not on the image, or is not
+executable"* -- a guess, and the wrong branch of it, which is what seven
+rounds chased.
+
+**It also explains the vector-vs-list discriminator**, which lane C and I
+both treated as evidence about `execl`. fastpy's `os.execv` works because
+fastpy is a Linux-ABI binary and goes through `linux_execve`; the C
+fixtures are native-ABI and go through `SYS_PROCESS_EXEC`. **The split was
+never `execl` versus `execv` -- it was native versus Linux ABI**, and the
+two happened to line up exactly with the call form in the sample we had.
+That makes the `va_trampoline` lead almost certainly a red herring, and it
+was already marked unsupported rather than disproved.
+
+**Found by instrumentation added the same morning** (`391232edb`), which
+existed only because the Linux-ABI path had a failure probe and its native
+sibling had none. The probe's first run found this in its first minute.
+
+**Two fixes, and the second is not optional:**
+
+| what | why |
+|---|---|
+| make `SYS_PROCESS_EXEC` read the caller's buffer | the actual defect. Likely the copy-in from user memory before the old address space is torn down |
+| make `test_exec_process` assert the exec HAPPENED | asserting `Zombie` is asserting "something ended". The target ELF calls `exit(0)`, so assert the **exit code**, or that no `#GP` was taken, or both |
+
+Without the second, the same fix could regress and the rung would go on
+saying OK.
+
+### [A] `netdiag`'s DNS lookup is simulated and cannot fail, so the tool a person runs to diagnose name resolution always says it works -- 2026-09-21
+**Status:** HALF DONE (stamped 2026-09-25) -- the honest half is in: `ping`, `traceroute` and `dns_lookup` in `kernel/src/fs/netdiag.rs` return `NotSupported` instead of inventing answers. Real lookups through `fs::nameservice`, and a writer for `connectivity`, are still open
+
+**In short:** the kernel has a network-diagnostics tool with a `dns_lookup`
+command. It does not look anything up. It returns `127.0.0.1` for the name
+`localhost` because that string is hardcoded in it, and invents an address
+for everything else. Someone typing it to find out why a name will not
+resolve is told the name resolves.
+
+**Measured:** `kernel/src/fs/netdiag.rs` `dns_lookup`:
+
+```rust
+    let resolved = if name == "localhost" {
+        String::from("127.0.0.1")
+    } else {
+        // Simulate resolved address.
+```
+
+It never calls `fs::nameservice::resolve` or `net::dns::resolve`. Reachable
+from `kshell.rs:81476`, i.e. a command a human types; `procfs` touches only
+`stats()`.
+
+**Two things follow, and the second is the sharper one.**
+
+1. The hardcoded `localhost -> 127.0.0.1` **duplicates the hosts table**,
+   which holds exactly that mapping. So the tool agrees with the real
+   resolver by coincidence of two constants, and would keep agreeing after
+   someone edited the hosts file.
+2. **It cannot fail.** A diagnostic whose purpose is to report a failure has
+   no path that reports one. `[5/10] DNS lookup: OK` in every boot log is a
+   test of the simulation.
+
+**Related, same file:** `[2/10] ping localhost: OK` is `ping("127.0.0.1", 4)`.
+The name is in the message and never in the call -- which is how this
+morning's `sys_dns_resolve` hosts-table fix nearly shipped unexercised
+behind a log line that appears to cover it.
+
+**The fix, and why it is not one line.** Point `dns_lookup` at
+`fs::nameservice::resolve` first and `net::dns::resolve` on `NotFound` --
+the order `nameservice` already declares. But that changes what the module
+self-test means, and the self-test must change with it:
+
+| rung | today | after |
+|---|---|---|
+| `[3/10] ping remote` | `ping("example.com")`, asserts latency 25000 | a real lookup of `example.com` has no DNS server in QEMU; must expect failure or skip |
+| `[5/10] DNS lookup` | asserts success on a simulation | assert `localhost` -> 127.0.0.1 from the **table**, and that an unknown name FAILS |
+
+That second row is the point of doing it at all: the rung has to gain a
+failing case, because a diagnostic that cannot report failure is the defect,
+not the missing lookup.
+
+**Why it is recorded rather than done now:** 22 changes are queued and
+unverified behind a running boot, and this one alters a self-test's
+expectations -- the exact kind of change that turns one red boot into an
+ambiguous one. It is the first thing to pick up once the batch is green.
+
+### [A] Seven security-shaped kernel modules are reachable only from `kshell`, so nothing in the system enforces with any of them -- 2026-09-21
+**Status:** OPEN -- **observation, not a bug report.** No single module is broken; the layer is unconnected. Extends the path-keyed entry above, which turns out to be a symptom of this.
+
+**In short:** the kernel contains a set of modules that decide whether
+something is allowed -- seals, security policy, per-path capabilities, file
+locks, disk-encryption unlock, authentication. All are implemented and
+tested, and several report statistics into `/proc`. Not one of them is
+consulted by any code that actually does the thing it would be guarding.
+The only way to reach them is to type a command into the kernel shell.
+
+**Measured, one grep per row: callers outside the module's own file.**
+
+| module | entry point | reached from |
+|---|---|---|
+| `fs/sealing.rs` | `check_seals` | `kshell` only |
+| `fs/secpolicy.rs` | `check_access` | `kshell` only |
+| `fs/capsettings.rs` | `check_access(uid, path)` | `kshell` only |
+| `fs/diskencrypt.rs` | `unlock_volume(id, _passphrase)` | `kshell` only |
+| `fs/authbroker.rs` | `authenticate(principal, method)` | `kshell` only |
+| `fs/reclock.rs` | record locks | a self-test, and `release_all` on process exit. **Nothing acquires** |
+| `fs/vfs.rs` | `flock_resolved` | reachable, but nothing in-tree takes an advisory lock |
+
+**Note the signature in row 4.** `unlock_volume(id: u32, _passphrase: &str)`
+-- the parameter is underscore-prefixed, so the passphrase is not merely
+simulated, it is structurally unused. The comment says
+*"Simulated passphrase check (in real implementation, derive key and
+verify)"*. That is honest, and it is one `pub fn` away from a caller who
+would reasonably assume it checks.
+
+**Why this is one entry and not seven.** Every one of these modules was
+filed -- by me, this week -- as low severity *because nothing relies on it
+yet*. Written seven times, that reads as seven small risks. Written once, it
+reads as what it is: **a security layer that is built and not wired in**,
+whose individual defects (path-keying, simulated checks, counters that can
+only read zero) are all held harmless by the same single fact. The first
+commit that connects any one of them removes that protection for that
+module only, and it will be a commit about wiring, so its diff will not
+mention the defect it activates.
+
+**The `/proc` consequence, already recorded for two of these (dd-942).** A
+reader who sees `denied: 0` concludes *nothing was denied*. The truth is
+*nothing asked*. That reading is available today for `sealing` and
+`secpolicy`; the others export statistics of the same shape.
+
+**What I am NOT claiming.** That any of this is a bug. A layer built ahead
+of its callers is a legitimate way to build an OS, and the comments are
+candid about what is simulated. The claim is narrower and worth making:
+**the project does not currently have a place where that staging is
+written down**, so each module reads as finished when looked at alone, and
+I have now twice re-derived "oh, nothing calls this" from scratch while
+assessing severity.
+
+**Suggested next step, for the operator rather than for me:** decide whether
+this layer is staged-for-later or believed-to-be-live. Those need different
+things -- a tracking list in the first case, wiring work in the second --
+and it is not a call I should make by reading greps.
+
+### [A] The path-keyed table class is five, not three -- and every one of them is low-severity for the same single reason -- 2026-09-21
+**Status:** OPEN (no code change; this corrects the scope and the severity reasoning of the entries above)
+
+**In short:** several kernel tables that decide whether something may be
+touched remember the file by *name* instead of by the file itself, so a
+second name for the same file slips past them. Three were known. There are
+five. More importantly, the reason all five were filed as low severity is
+not five separate reasons -- it is one, and it can stop being true in a
+single commit that looks unrelated.
+
+**Two more instances, same shape:**
+
+| table | key | what it answers |
+|---|---|---|
+| `fs/reclock.rs` | `RecordLock { path: String }` | byte-range record locks |
+| `fs/capsettings.rs` | `PathRequirement { path: String }` | `check_access(uid, path)` -- may this user reach this path |
+
+`capsettings` is the one to watch: the others are *advisory* locks, which
+only bind programs that cooperate, but this one is shaped like a permission
+check. A hard link would walk past it.
+
+**The single fact holding all five up.** Each entry says its severity is low
+because nothing relies on the table yet. That is the *same* observation five
+times, and it is measurable rather than assumed:
+
+| table | only callers outside its own module |
+|---|---|
+| `capsettings::check_access` | `kshell.rs` -- a command a human types. **No enforcement path.** |
+| `reclock` | `main.rs` self-test, and `pcb.rs` `release_all(pid)` on exit. **Nothing acquires.** |
+| `sealing::check_seals` | `kshell` (recorded earlier today) |
+| `secpolicy::check_access` | `kshell` (recorded earlier today) |
+| `vfs::flock_resolved` | reachable, but nothing in-tree takes advisory locks |
+
+So the mitigation is not "these are minor bugs". It is **"no enforcement
+path consults any of them"** -- one condition, shared. The first commit that
+wires *any* of these into a real check makes that table's defect live, and
+that commit will be about wiring, not about keying, so nothing in its diff
+will mention the bug it activates.
+
+**The proposed rule does not mechanize, and here is the measurement.** The
+flock entry suggests a standing rule instead of three fixes. I tried to
+build it. `kernel/src` has **80** path-comparison lookup sites across **25**
+files, and most are correct: `devfs`, `cgroupfs`, `index`, `fontmgr` are
+namespaces, where the name *is* the thing being identified. Filtering to
+files that also mention a permission error narrows 25 to 8, which is better
+but still mostly noise. The distinguishing feature is *what question the
+table answers*, and no regex sees that.
+
+Recorded so the next person does not rediscover it: this class wants five
+individual fixes keyed on `FileId`, plus a note on each table, not a gate.
+Compare the ring-3 register gate written the same day, which *was* worth
+building -- there the good sites scored 6 of 6 and the bad one 0 of 6, with
+nothing in between. A rule is worth mechanizing when the population
+separates cleanly, and this one does not.
+
+### [A] Six spawn self-tests asserted that a process DIED in order to prove it LIVED -- swept and closed -- 2026-09-21
+**Status:** FIXED (all six). Recorded for the shape, and to stop the next person re-running my scan and reading 16 as 16 defects.
+
+**In short:** a group of kernel self-tests checked only that a test program
+had finished, and concluded from that it had done its job. But a program
+that crashes has also finished. So each of these tests printed a confident
+success line for the one failure it was written to catch.
+
+| test | claimed | why `Zombie` could not show it |
+|---|---|---|
+| Test 4 faulting process | a null write faulted and the kernel survived | if the fault never fired, the program reaches `SYS_EXIT(0)` -- also a zombie |
+| Test 5 stack growth | growth past the initial allocation worked | if it failed, an unresolvable `#PF` kills it -- also a zombie |
+| Test 6 exec | the image was replaced | a crashed caller is a zombie. **This one was live**: every exec was failing with -101 and the test was green |
+| Test 6b exec-failure control | the failure probe fired | asserted termination, never that the probe logged |
+| Test 8 SEH exit | the handler ran | its own doc says *"Without SEH, the page fault would kill the process"* -- four lines above *"becomes a zombie -- confirming the handler ran"* |
+| Test 8b SEH resume | execution resumed past `ud2` | dying on the `ud2` is what happens if SEH does nothing |
+
+**The class is generational, which is the useful part.** It is not scattered
+at random: it is exactly the original numbered `Test 4..8` core spawn tests.
+Everything written later -- `self_test_fastpy_slateos_forkexec` (which
+discriminates exit codes 100/102/110/111 with a distinct message each),
+`self_test_linux_execveat`, the tcc and make_cc harnesses, the minishell
+suite -- already checks exit codes. So the convention improved and the first
+generation was never revisited. That is worth knowing because it predicts
+where else to look: the oldest tests in any file, not a uniform sample.
+
+**The scan that found it has a high false-positive rate, and the number
+moves with its window.** Do not re-run it and act on the count:
+
+| window around the `Zombie` assertion | flagged |
+|---|---|
+| +-12 lines | 23 |
+| +-20 lines | 17 |
+| +-30 lines | 16 |
+
+Of ~16 flagged, only **6** were real. The rest check the exit code somewhere
+the regex cannot follow: `self_test_linux_execveat` tests
+`exit_nf != Some(EXEC_FAIL)` thirteen lines down; the minishell suite passes
+its code to a `diag(ec1)` helper, so the string `exit_code` never appears
+near the assertion at all. A grep for `exit_code` cannot see a check made
+through a variable or a function, and I twice concluded a test was broken
+before reading it.
+
+**The rule that would have prevented all six:** a test must assert an
+outcome that its failure mode cannot also produce. "The process ended" is
+almost never that, because ending is what both success and every crash have
+in common. Where the expected value is known, assert it exactly; where it
+is not -- Test 4's kill code is set by no constant this tree names -- assert
+the negation of success rather than inventing a value.
+
+### [A] A freshly spawned process enters ring 3 with undefined registers; `rdx` holds 0x1B, which is the seven-round `exec` bug -- 2026-09-21
+**Status:** ROOT CAUSE CONFIRMED by disassembly (fix written, gate written). Supersedes the fragmentation/address-validation theories below.
+
+**In short:** when the kernel starts a new program it jumps into it without
+clearing the CPU's scratch registers, so the program begins with leftover
+kernel values in them. One of those leftovers, 27, was then read by the
+kernel as the address of a program's argument list, which is why starting a
+program via `exec` had been failing with a meaningless address error for
+seven rounds of investigation.
+
+**The proof is a disassembly of the exact binary that produced the failure**
+(`target/x86_64-unknown-none/release/kernel`, built 12:25:42, whose 12:31
+serial log holds the `-101`). The end of `userspace_entry_trampoline`:
+
+```
+  movl  $0x1b,  %edx        ; rdx = 0x1B  = USER_DS selector
+  movl  $0x202, %esi        ; rsi = 0x202 = RFLAGS
+  movl  $0x23,  %edi        ; rdi = 0x23  = USER_CS selector
+  pushq %rdx / %rax / %rsi / %rdi / %rcx    ; the five IRETQ words
+  iretq                     ; <-- nothing cleared, nothing restored
+```
+
+**The chain, now with no inferred link left in it:**
+
+| step | fact |
+|---|---|
+| 1 | the trampoline loads `0x1B` into `edx` to push as SS, and never clears it |
+| 2 | so a fresh process's first instruction runs with `rdx = 0x1B` |
+| 3 | `test_exec_process`'s stub sets `rax`, `rdi`, `rsi` -- **not** `rdx` |
+| 4 | `sys_process_exec_with_frame_inner`: `argv_len = if arg2 == 0 { 0 } else { arg3 }`; `arg2` **is** `rdx` = `0x1B`, nonzero |
+| 5 | so it calls `read_user_vec(0x1B, arg3, ARGV_MAX)` -- address **27** |
+| 6 | 27 is in the unmapped first page -> `InvalidAddress` -> **-101** |
+
+Everything observed now has a cause. `elf_len=136` was always right, the
+range check on `arg0` always passed, `0x50_0000_0000` was always far below
+`USER_SPACE_END = 2^47`, and the mapping was always present -- because **the
+ELF was never the problem**. The failing read was of `argv`, an argument the
+error code never mentions and the caller never set.
+
+**A claim of mine from earlier today, retracted.** I wrote that the leak
+handed ring 3 *"a kernel heap pointer in `rdi`"*, reasoning that `info_raw`
+arrives in `rdi` per the SysV ABI and that nothing overwrites it. The
+disassembly shows `rdi` **is** overwritten -- with `0x23`. The class was
+right and the register was wrong, and I had asserted the register.
+
+The leak is real but it is somewhere else. At the `iretq`:
+
+| register | value at ring-3 entry | severity |
+|---|---|---|
+| `rbp` | **a kernel stack address** -- `pushq %rbp; movq %rsp, %rbp` with no `leave` before the `iretq` | the actual leak: defeats kernel-stack address randomisation |
+| `rdx`, `rsi`, `rdi` | `0x1B`, `0x202`, `0x23` | harmless as data, but see the chain above -- `rdx` is what broke `exec` |
+| `rax`, `rcx` | the process's own `rsp` and entry point | harmless, it knows both |
+| `rbx`, `r8`-`r15` | untouched by this function: whatever the scheduler left | unaudited, and unauditable without fixing it |
+
+So the security finding stands and its specifics changed. That is the third
+time today that reading the artefact beat reasoning from a convention, and
+the second time I published the reasoning first.
+
+**The FPU surface is already clean, which is the strongest evidence this
+was an oversight rather than a decision.** I checked the obvious sibling
+leak -- x87/SSE state, where `xmm` registers are 128 bits wide and
+optimised `memcpy` runs through them, so kernel bytes could ride out in
+them. It is handled: every task-construction site in `sched/task.rs`
+(962, 1048, 1202) assigns `FpuState::new_default_boxed()`, and
+`sched/fpu.rs` exists largely to make that allocation cheap. So the
+kernel already takes deliberate care to hand a new task clean floating-
+point state, and handed it dirty general-purpose registers beside it.
+
+**A third consequence, latent rather than live.** System V x86-64 says
+`rdx` at process entry holds a function pointer to register with
+`atexit`, or zero. `0x1B` is neither. It does no harm *today* only
+because our `__libc_start_main` names that parameter `_rtld_fini` and
+never calls it -- verified: the identifier appears in the signature and
+nowhere in the body. A **conforming** runtime, such as a real glibc or
+musl binary ported in later, calls `(*rtld_fini)()` on exit and would
+jump to address 27. So the safety of this is currently resting on a
+parameter staying unused, which is not a property anyone is maintaining
+on purpose.
+
+That also settles the VALUE, not just the need: zero is not merely *a*
+defined setting for `rdx`, it is the one the ABI specifies for "no
+function to register".
+
+**The fix, and why zero is not a matter of taste.** All four ring-3 entries
+define this boundary as their semantics demand: `fork.rs` and
+`thread_clone.rs` **restore** the saved set, because a child inherits;
+`sys_process_exec_with_frame_inner` **zeroes** `arg0..arg5`, `rbx`, `rbp`,
+`r12..r15`, because a new image inherits nothing. Fresh spawn is the fourth
+new-image case and the only one defining nothing. So zeroing is what the
+sibling path with identical semantics already does 60 lines away -- I had
+reached for Linux's `start_thread` as the precedent and needn't have.
+
+**Standing gate:** `scripts/check-ring3-entry-regs.py` requires every
+`iretq`/`sysretq` reaching ring 3 to define all six syscall-argument
+registers. Measured before writing it: the six correct sites define 6 of 6,
+`spawn.rs` defined 0 of 6, and nothing sits in between, so the rule needs no
+threshold. Run against the tree it named `spawn.rs:2954` and nothing else.
+
+### [A] A missing `int3` made the exec bug look nondeterministic: same address, different exception each boot -- 2026-09-21
+**Status:** RESOLVED by the same batch that fixed the exec bug (the int3 is now emitted). Recorded because the *symptom* was actively misleading.
+
+**In short:** when the exec syscall failed, the test program ran off the end
+of its own code into whatever bytes followed. Those bytes were never set, so
+the crash they produced differed from build to build -- the same bug
+reporting a different fault each time, which reads like an intermittent
+problem rather than a constant one.
+
+**The alignment, which is exact:**
+
+| fact | value |
+|---|---|
+| where the caller died | `rip = 0x4000000016` = stub base **+ 22** |
+| length of the stub | 22 bytes (`B8`+5, `48 BF`+10, `BE`+5, `0F 05`+2) |
+| what `build_exec_test_elf`'s doc promised at +22 | `int3 ; unreachable -- exec does not return on success` |
+| what it emitted there | nothing. No `0xCC` anywhere in the builder |
+| what `emit-int3.py` now writes | `buf[c + 22] = 0xCC;` |
+
+**Why it mattered beyond tidiness.** Across investigations the same failure
+presented as **#GP (13)** on one build and **#NM (7)** on another, at the
+*same* address. Neither is what running past the end of a function should
+produce in any principled way -- they are whatever the uninitialised padding
+happened to decode as. A reader comparing two logs sees one address and two
+exception numbers, and the natural inference is that the fault is
+intermittent and therefore timing- or memory-dependent. It was neither: the
+exec failure underneath was perfectly deterministic (`rdx = 0x1B` every
+time), and only the *epitaph* varied.
+
+With the `int3` present, a failed exec now traps as **#BP (3)** at a known
+offset, every time. The failure becomes one signal instead of a family of
+them.
+
+**The general shape, which is worth more than this instance:** a doc comment
+promising a trap that the code does not emit is not a documentation defect.
+It is a *diagnostic* defect, and it degrades exactly when you need the
+diagnosis -- the trap is unreachable on the success path, so its absence is
+invisible until something fails, at which point it converts a clean halt
+into a random one. `build_exec_test_elf` carried that promise long enough
+for the bug to be investigated six times underneath it.
+
+### [A] Swept for syscalls that consult a module nothing initialises: exactly one existed, and I had just written it -- 2026-09-21
+**Status:** CLOSED (one instance, fixed in `7572d82e4`; sweep found no others)
+
+**In short:** several kernel modules refuse to work until something calls
+their `init_defaults()`. For most of them the only thing that ever does is a
+`/proc` read or a shell command, which happen late in boot. If a *syscall*
+reaches such a module before then, it gets a flat refusal. I created one of
+these this morning without noticing, so I checked whether there were others.
+There were not.
+
+**The instance.** `sys_dns_resolve` began consulting `fs::nameservice`, whose
+`with_state` returns `NotSupported` when the table is unset. Its
+`init_defaults` is called from `procfs.rs` (a `/proc/nameservice` read, at
+`main.rs:4427`) and `kshell.rs`. The new hosts-table self-test runs from
+`self_test_fs` at `main.rs:1697` -- earlier. So the lookup would have got
+`NotSupported`, fallen through to DNS, and sent `localhost` to the wire:
+**the exact bug the change was written to fix, one layer down.**
+
+**The sweep, narrowed twice because the first two numbers were not the
+defect:**
+
+| question | answer |
+|---|---|
+| modules with an `init_defaults()` | 312 |
+| ...whose only callers are `procfs`/`kshell`/themselves | 283 |
+| ...**and** that a syscall handler actually consults | **1** |
+| ...that survives reading the match | **0** |
+
+283 is not a bug count. Most of those modules are consulted *only* from
+`/proc` and `kshell` as well, which is the separate problem filed as A-Q21 --
+counting them here would have been the same over-reporting I corrected three
+times today. The single survivor was `fdtable`, and it is a false positive:
+the one reference under `kernel/src/syscall/` is inside a comment
+(`// fdtable::MAX_FDS`), and `MAX_FDS` is a constant that needs no state.
+
+**Why the negative result is worth writing down.** "No other syscall has
+this problem" is the kind of claim that is usually an assumption. Here it is
+a measurement, and the measurement is cheap to repeat: modules with
+`init_defaults`, intersected with modules named under `kernel/src/syscall/`,
+minus those a syscall path initialises itself. Anyone adding a syscall that
+reaches a stateful module should re-run it, or simply follow
+`sys_hostname_set`, `sys_domainname_set` and `sys_keylayout_set`, which all
+open by calling their module's `init_defaults` for exactly this reason.
+
+### [A] Addendum: three of `netdiag`'s diagnostics invent their answers, not just `dns_lookup` -- 2026-09-21
+**Status:** HALF DONE (stamped 2026-09-25) -- the three inventing functions now refuse with `NotSupported`; see the entry above for what is still open
+
+**In short:** I reported this afternoon that one command in the network
+diagnostics tool invents its answer. Reading the rest: the ping command
+invents its answer too, and it does so by looking at the *spelling* of the
+address you typed.
+
+**`ping` decides latency from the hostname string.** No packet leaves:
+
+| host looks like | reported latency |
+|---|---|
+| `127.*` or `localhost` | 50 us |
+| `192.168.*` or `10.*` | 1500 us |
+| anything else | 25000 us |
+
+So `ping 10.0.0.99` on a network with no such host reports 1.5 ms and
+success, because the string starts with `10.`. A diagnostic that answers
+from the shape of its input cannot report the one condition it exists to
+detect.
+
+**The exact scope, after correcting my own first count.** I initially said
+all four diagnostics fabricate. `connectivity_check` does not: it returns
+`state.connectivity`, a stored field, and rung 7 of the self-test proves
+it by setting `NoInternet` and reading it back. The `simulate` marker I
+counted was in `set_connectivity`'s doc comment, not in the getter — the
+sixth time today a textual marker stood in for the code and answered
+wrongly.
+
+| function | what it does |
+|---|---|
+| `ping` | latency from the spelling of the host. **Invents** |
+| `traceroute` | a fixed four-hop list regardless of destination. **Invents** |
+| `dns_lookup` | hardcoded for `localhost`, invented otherwise. **Invents** |
+| `connectivity_check` | returns a stored field faithfully. **Does not invent** — but nothing in the tree ever updates that field from reality |
+
+The fourth wants a different remedy from the other three: not a refusal,
+but a writer. It is not lying about what it measured; it is reporting a
+measurement nobody takes.
+
+**Its self-tests assert the fabricated constants.** `[2/10] ping localhost`
+checks `r.latency_us == 50`; `[3/10] ping remote` checks `25000`. Those
+rungs are green on every boot and would stay green if the network stack were
+deleted -- they test the lookup table, which is the same defect as the six
+`Zombie`-only tests swept from `spawn.rs` today, in a different costume.
+
+**The fix, and it is the one I told another lane to make.** Two hours before
+writing this I answered `b-a-sbctl-needs-a-userspace-door-to-fs-secureboot`,
+where `sbctl` reports creating secure-boot keys it never writes, with: *it
+could say "not supported on this build" today and stop actively
+misinforming, and that is worth doing before the door lands rather than
+after.* `netdiag` is mine and is the same defect. The honest half is
+identical and cheap: **return `NotSupported` instead of a number**, and let
+the self-test assert the refusal.
+
+That is strictly better than the current state even though it makes the
+tool do less, because the current state is not "a tool that does little" --
+it is a tool that answers confidently and wrongly, on the screen someone
+opens *because* they already suspect the network is broken.
+
+**Deferred, with the same trigger as before:** the queued batches are
+a running verification boot. This one changes self-test expectations, which
+is exactly the kind of change that turns one red boot into an ambiguous one,
+so it waits for a green base rather than riding along.
+
+### [A] The `FileId` keying fix is designed, and its fallback is correct rather than a compromise -- 2026-09-21
+**Status:** DESIGNED, not written (needs a compiler and a green base). Resolves the open design question in the path-keyed entries above.
+
+**In short:** five kernel tables remember a file by its name instead of by
+the file, so two names for one file get two answers. The fix is to key on
+the filesystem identity instead. The question that was open: what to do on
+a filesystem that has no such identity. It turns out not to be a problem.
+
+**The mechanism fits without a new resolution step.** `flock_resolved`
+already holds an *already-resolved* path, and
+`Vfs::file_identity_resolved(path) -> KernelResult<Option<FileId>>` takes
+exactly that. So no re-resolution, and no second TOCTOU window opened by
+the fix. `FileId` is `{ fs_id: u64, ino: u64 }`.
+
+**Why the `None` case is safe, which is the part that was unclear.**
+`file_identity_resolved` returns `Ok(None)` when `ino == 0`, documented as
+*filesystem has no stable per-object identity ... lets the caller degrade*.
+Degrading means falling back to the name -- which sounds like
+reintroducing the bug. Measured which filesystems take that path:
+
+| filesystem | sets `ino: 0` | has hard links |
+|---|---|---|
+| `ext4` | 0 of 15 sites | yes |
+| `memfs` | 0 of 16 | yes |
+| `fat` | 1 of 3 | no (FAT has no link count) |
+| `devfs` | 5 of 5 | no |
+| `procfs` | 30 of 31 | no |
+| `sysfs` | 58 of 58 | no |
+
+So every filesystem that can have two names for one file has a stable
+inode, and every filesystem without one cannot have two names for one
+file. **The fallback is not a weaker path taken reluctantly -- on the
+filesystems that take it, a name IS the identity.** That closes the
+question the earlier entries left open.
+
+**Two call shapes, and each table needs the right one.** Only `flock`
+already holds a resolved path; `sealing`, `capsettings` and `reclock` take
+a raw one straight from `kshell` and do no resolution at all (measured: 0
+references to `resolve_follow` or `file_identity` between them). So:
+
+| site | call |
+|---|---|
+| `vfs::flock_resolved` | `file_identity_resolved(path)` -- path already resolved, adds no new lookup |
+| `sealing`, `capsettings`, `reclock` | `Vfs::file_identity(path)`, which does `resolve_follow` then the same thing |
+
+Resolving at *each* operation is correct rather than a cost: if a symlink
+is repointed between sealing a file and checking the seal, the identity
+SHOULD differ -- that is the whole reason for keying on the file. Caching
+one identity at seal time would recreate the original bug with an extra
+step.
+
+**What to write:** key each of the five on `FileId` where
+`file_identity_resolved` yields one, and on the resolved path where it
+yields `None`, with a comment at each site giving the reason above so the
+fallback is not later read as laziness. `funlock_all(owner)` and
+`handle::close` need no change: they iterate by owner, not by key.
+
+### [A] BLKDISCARD/BLKSECDISCARD/BLKZEROOUT: scoped, and one of the three must refuse -- 2026-09-21
+**Status:** SCOPED, not written. Lane B asked in `requests/b-a-blkdiscard-needs-blkdiscard-or-it-stays-a-zero-fill.md`.
+
+**In short:** the `blkdiscard` tool used to print that it had destroyed a disk
+and destroy nothing. Lane B made it real where it could and made the rest
+**refuse**, naming the kernel call it needs. That call is mine.
+
+**There is a real discard path to dispatch to.** `blkdev.rs` defines
+`supports_discard()` and `discard(start_sector, count)` on the `BlockDevice`
+trait, so this is not a case of returning `EOPNOTSUPP` and calling it honest.
+
+**The three are not one change, and that is the point:**
+
+| ioctl | plan |
+|---|---|
+| `BLKDISCARD` (0x1277) | real: check `supports_discard()`, bytes to sectors, call `discard` |
+| `BLKZEROOUT` (0x127F) | real, but a *different* operation: write zeros. Must not share the discard arm |
+| `BLKSECDISCARD` (0x127D) | **must refuse** with `EOPNOTSUPP`. No device here offers a secure-erase guarantee, and a secure discard that is silently an ordinary discard is the exact defect lane B refused to ship |
+
+Lane B put the reasoning best: a discard *tells the device the blocks are
+free*, whereas writing zeros dirties every block, spends flash endurance, and
+leaves the drive with **more** live data than before. The three differ in
+kind, so mapping them onto one implementation would be the same lie one layer
+down.
+
+**The unsolved step, and it is where a bug would live.** `sys_ioctl` receives
+an fd; `blkdev::with_device(name, ...)` looks devices up by **name**. So the
+arm needs fd -> path -> device name, and `/dev/sda1` must not silently discard
+`/dev/sda`. A partition-vs-whole-disk confusion in a discard arm destroys the
+wrong extent, so that mapping wants writing deliberately rather than as a
+one-liner inside the ioctl.
+
+**Argument shape, from lane B so it is not ambiguous:** all three take a
+pointer to `[u64; 2]` = `{ start_byte, length_bytes }`, returning 0 or `-errno`.
+
+### [A] exit 11 narrowed: the exec syscall is never reached, so the bug is upstream of exec -- 2026-09-21
+**Status:** ROOT-CAUSED 2026-09-24 — the rung, not libc and not exec. `load_elf` begins with `SYS_FS_STAT`, gated on (File, METADATA), and the rung granted READ|EXECUTE only, so the stat was refused and the syscall this entry was waiting for never had a chance. Fix and record: `A-TWO-RUNGS-COULD-NOT-EXEC-FOR-WANT-OF-METADATA` at the end of this file.
+
+**In short:** a test program reports it could not run `/mnt/bin/true`. The
+message blames the file. The file is fine, the disk is mounted, the
+permissions are granted, and the kernel call that would run it is never even
+made. Whatever fails, fails before that.
+
+**Eliminated, each by reading this boot's log rather than by reasoning:**
+
+| candidate | evidence it is not the cause |
+|---|---|
+| the file is missing | `debugfs`: inode 109, mode 0755, 796,064 bytes. The message's *or is not executable* half is false too |
+| `/mnt` is not mounted | `[vfs] Mounted ext4 filesystem at '/mnt' (rw)` |
+| the exec syscall fails | **no `[exec] NATIVE exec FAILED` line accompanies the failure**, and none for `linux_execve` either. posix reads the ELF *before* calling `SYS_PROCESS_EXEC`, so the syscall was never reached |
+| no capability to open it | the rung grants `(File, 0, READ|EXECUTE)`; the comment beside it records this theory as already tested and dropped |
+| something about `/mnt/bin` | **fastpy execs from that exact directory and passes** -- three rungs resolve `cat` over `PATH ["/mnt/bin"]`, one of them `fork`+`execv` in the child |
+
+**So the failure is inside posix's read-the-ELF-then-exec sequence, before
+the syscall.** That is a much smaller region than *exec is broken*, which is
+where this bug has sat while being misattributed twice -- first to a missing
+file, then to `execl` losing its path. Both guesses came from the fixture's
+own error text.
+
+**The probe earned its place by proving a NEGATIVE.** `log-exec-argv-regs`
+was added to say *why* a native exec failed. Its value here was the absence
+of its own output: no line means the syscall was never entered, which
+converts a whole class of theories into a fact. A probe that only speaks on
+failure is still informative when silent, provided you know it would have
+spoken.
+
+**What is needed next, and it is small.** posix's `execv` returns -1 without
+saying which step failed -- open, fstat, mmap, read, or the syscall. One
+diagnostic naming the failing step would finish this. Filed at lane B as
+`requests/a-b-execv-should-say-which-step-failed.md`.
+
+### [A] ctest-pty exit 45 is a scheduling question, not necessarily a budget one -- 2026-09-21
+**Status:** RESOLVED 2026-09-24 — neither scheduling nor budget. The `^C` was never turned into a `SIGINT` at all, because the kernel only looked for it when the child read the terminal, and the child never reads. See `A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER` at the end of this file.
+
+**In short:** a test waits for its child to finish by asking repeatedly, up
+to a fixed number of tries, yielding the processor between asks. It runs out
+of tries. The tempting fix is more tries. That is only right if the child was
+going to run eventually.
+
+**What exit 45 actually is.** `services/ctest-pty/main.c:489` -- the
+`waitpid(kid, &status, WNOHANG)` loop completed `SPIN` iterations without the
+child being reaped. The fixture's own comment states the dependency it is
+resting on: *WNOHANG means the child must run to exit, and it cannot while
+this loop owns the quantum.*
+
+So the rung passes only if `sched_yield()` hands the CPU to the child.
+
+**`sched_yield` is not a no-op, which was the first thing worth ruling out.**
+`sys_sched_yield` -> `sched::yield_now()` -> `schedule_inner(true,
+SwitchKind::Voluntary)`, which reports an RCU quiescent state and
+**re-enqueues** the caller (`PER_CPU_SCHED.enqueue(current_id, prio, cpu)`).
+It is a real voluntary reschedule.
+
+**What is therefore still open, stated as a question rather than a theory:**
+whether the child is *picked* after the parent re-enqueues. That depends on
+the per-priority queue discipline and on CPU placement -- the queues are
+per-CPU, so a child enqueued on a CPU that is not scheduling would starve
+regardless of how many times the parent yields. I have not established
+either, and will not guess: the last two diagnoses of this fixture family
+were guesses from an error message and both were wrong.
+
+**Why this matters more than the rung.** If the child can starve, raising
+`SPIN` makes the test pass by spinning longer against a fairness bug --
+converting a reproducible failure into an intermittent one, which is strictly
+worse. If the child cannot starve, `SPIN` is simply too small and raising it
+is correct and boring. Those need different work and the log cannot tell them
+apart.
+
+**Next step:** instrument the pick, not the budget. A one-line count of how
+many times the parent yielded while the child stayed un-picked separates the
+two cases in a single boot.
+
+### [A] Correction: `capsettings` is not a path-keyed table, it is a path-PATTERN policy -- 2026-09-21
+**Status:** CORRECTION to my own entries above. `capsettings` must NOT be converted to `FileId` keying; doing so would have been a wrong fix I was one step from making.
+
+**In short:** I listed five kernel tables that remember a file by name and
+should remember it by identity instead. One of them does not belong on that
+list. It does not store files at all -- it stores rules about *where* files
+are, and a rule like *everything under /etc* has no file to identify.
+
+**What it actually does.** `PathRequirement.path` is a pattern, and
+`matching_requirements` has three branches:
+
+| branch | match |
+|---|---|
+| `r.path.ends_with('*')` | prefix match on the stem |
+| `r.recursive` | prefix match, whole subtree |
+| otherwise | exact string compare |
+
+The first two cannot be inode-keyed even in principle: a prefix describes a
+set that does not exist yet. Converting this table to `FileId` would have
+required either dropping the wildcard and recursive forms, or a hybrid where
+some rows key on an inode and some on a string -- which is worse than either,
+because a reader could no longer tell which a given row does.
+
+**This is a design difference, not a defect.** Path-pattern access control is
+a real family -- it is what AppArmor does, and it is path-based on purpose.
+Inode-and-label schemes like SELinux are the other family. This module is the
+first kind, and my entries treated it as a broken instance of the second.
+
+**What remains true, narrowly.** The third branch, exact compare, does have
+the hard-link gap: a rule naming one path is not consulted for a second name
+for the same file. That is worth knowing and is NOT worth fixing by keying
+the table, because the fix would break the two branches that matter more. If
+it is ever worth closing, the shape is a separate exact-match-by-identity
+list, not a change to this one.
+
+**How I nearly got it wrong.** I classified five tables by grepping for a
+`path: String` field and a comparison against it. `capsettings` has both. It
+took reading fifteen lines of `matching_requirements` to see that the
+comparison is one of three branches and the other two are prefix matches.
+The grep was accurate and the conclusion it supported was not -- the seventh
+time today a textual signal stood in for reading the code.
+
+### [A] Renaming a file silently drops its immutable protection, and the self-test that covers it calls the fixup nothing else calls -- 2026-09-21
+**Status:** OPEN. Worse than the hard-link gap I filed for this table, and independent of the FileId fix.
+
+**In short:** a file can be marked immutable so writes, deletes and renames
+are refused. The table remembers the file by name. There is a function whose
+job is to move the entry when a file is renamed, it works, it is tested --
+and nothing in the filesystem calls it. So renaming a protected file leaves
+the protection attached to a name nothing uses, and the file becomes
+writable.
+
+**The three facts, each measured:**
+
+| fact | evidence |
+|---|---|
+| the fixup exists and is correct | `immutable::rename_path(old, new)` at `immutable.rs:347` moves the flag entry |
+| it is tested | the module self-test calls it at `:497` and `:536`, including a non-UTF-8 name, and asserts the move |
+| **nothing else calls it** | `grep -rn 'immutable::rename_path'` across `kernel/src` returns only the definition and those two test calls |
+
+So the protection is lost on every rename, and the test reports the opposite.
+
+**Why this is the sharpest instance of today's shape.** The other cases in
+this family are quiet: a counter that can only read zero, a module reachable
+only from `kshell`. Here the test does not merely fail to catch the defect --
+it **calls the missing link directly**, so it exercises the one path
+production does not take. A reader seeing `immutable::self_test ... OK` has
+been told that renames preserve flags. They do not.
+
+**The fix is to delete the fixup, not to wire it up.** Keying the table on
+`FileId` -- the change already made to `flock`, `sealing` and `reclock` today
+-- makes `rename_path` unnecessary: an inode survives a rename, so the entry
+follows the file with no compensation at all. Wiring the fixup into the VFS
+rename path would work and would be the worse repair: it leaves a table that
+needs a correction on every operation that moves a name, and the next such
+operation (link, mount-move) needs another.
+
+**Two things make that conversion bigger than the other three**, which is why
+it is filed rather than done in the same pass:
+
+* `list_flagged() -> Vec<(PathBuf, FlagBits)>` puts the key type in a public
+  signature, with callers in `procfs.rs:5604` and `kshell.rs:112681`.
+* the table is a `BTreeMap<PathBuf, FlagBits>` across 14 access points, so the
+  key becomes an enum (`Id(FileId) | Path(PathBuf)`) needing an `Ord` derive.
+
+**Until then the honest interim** is a one-line note on `rename_path` saying
+no caller exists and flags do not survive a rename -- so the next reader of
+that function is not misled by its own test the way I nearly was.
+
+### [A] BLKDISCARD: the fd-to-device step is solved, and partitions fail closed -- 2026-09-21
+**Status:** DESIGN COMPLETE, implementation deliberately not started. Supersedes the open step in the BLKDISCARD scoping entry above.
+
+**The step I filed as unsolved is solved, and needed no new code.** `sys_ioctl`
+receives an fd; `blkdev::with_device` looks up by name. The chain between them
+already exists, spread across three modules:
+
+```
+  fd  -> pcb::linux_fd_lookup(pid, fd)   -> FdEntry
+      -> FdEntry.raw_handle
+      -> fs::handle::handle_path(handle) -> PathBuf
+      -> strip the `/dev/` prefix        -> short name
+      -> blkdev::with_device(name, ...)
+```
+
+**The safety property holds by construction, which is the part worth
+recording.** I flagged that `/dev/sda1` must not silently discard `/dev/sda`,
+because a partition-vs-whole-disk confusion in a discard arm destroys the
+wrong extent. `blkdev::register` takes short whole-device names (`"sda"`,
+`"vda"`), so a lookup of `"sda1"` simply **fails** and the ioctl returns an
+error. Failing closed is the correct default for a destructive operation, and
+it needs no special handling -- only a comment saying why the obvious future
+improvement, stripping a trailing partition digit to be helpful, would be
+catastrophic.
+
+**One byte-handling note for whoever writes it.** Paths are bytes, not UTF-8
+(CLAUDE.md: never force UTF-8 on filesystem paths). Strip `/dev/` from the
+path's bytes, then convert only the remainder, and treat a non-UTF-8
+remainder as no-match rather than an error worth reporting -- it cannot name a
+registered device either way.
+
+**Why it is not implemented here.** This is a data-destroying syscall, and
+today's session has a measured error rate on mechanical edits: thirteen escape
+collapses, five assertions written over text the replacement itself supplied,
+two entry points missed until the compiler objected, and a grep that
+under-counted call sites by two. Every one was caught -- by a compiler or an
+assertion, on code whose worst case is a red boot. The worst case for a
+wrongly-keyed discard arm is a destroyed extent, and no gate in this tree
+would catch it.
+
+The design above is complete enough that writing it is mechanical: three
+constants, one fd-to-name helper, three match arms, one of which
+(`BLKSECDISCARD`) must refuse. That is a better first task for a fresh session
+than a last one for a long session.
+
+### [A] Six fs metadata tables key on the path string, so metadata does not follow a hard-linked file -- and the ACL one is pre-positioned to become a permission bypass -- 2026-09-21
+**Status:** OPEN (5 of 8 converted: flock, sealing, record locks, immutable flags, ACLs. Remaining: `fcomment`, `queryable`, `tags`. `integrity` reclassified as correctly path-keyed; `history` undecided)
+
+**In short:** the kernel stores several kinds of per-file information -- ACLs,
+comments, tags, version history, integrity hashes -- in side tables looked up
+by the file's *name* rather than by the file itself. A file can have two names
+(a hard link). Under the second name, none of that information is found. For
+comments and tags that is a wrong answer; for ACLs it would be a way to walk
+past a permission rule, if ACLs could be set from a program. They cannot, yet.
+
+**How this was found, because the route matters.** I converted four tables
+(flock, sealing, record locks, immutable flags) to key on
+`FileId { fs_id, ino }` and wrote a boot gate for them. Only afterwards did I
+look at how many such tables exist. Four was the number I happened to be
+holding, not a measured population -- the same defect as dd-956, which I wrote
+two days ago specifically about measuring a population before building a gate
+for it. The tell was `immutable::rename_path`: a fixup that exists to drag a
+path key along behind a rename. A grep for it found **three** copies, in
+`immutable`, `fcomment` and `queryable`, each called only from its own
+self-tests. One fixup is a quirk; three identical ones are a class.
+
+**The measured population.** Every `BTreeMap<PathBuf, _>` under `kernel/src/fs`,
+classified by whether the data describes the *file* or the *name*:
+
+| module | keyed data | verdict |
+|---|---|---|
+| `acl` | POSIX ACLs | **should follow the inode** -- POSIX stores ACLs in the inode's xattrs, so path keying is a semantic deviation, not just a miss |
+| `fcomment` | a comment on the file | should follow the inode |
+| `history` | version history of the contents | **undecided** -- a real tradeoff, not a miss; see below |
+| `integrity` | a content hash baseline | **correctly path-keyed -- I had this wrong, see below** |
+| `queryable` | indexed attributes | should follow the inode |
+| `tags` | user tags | should follow the inode |
+| `dirsync`, `overlay`, `rundialog`, `undelete`, `usage` | comparisons between trees, overlay whiteouts, typed strings, records of deleted *names*, usage per directory | correctly name-keyed; an inode key would be wrong |
+| `memfs`, `path` | a filesystem's own directory structure; path utilities | name-keyed by definition |
+| `cap::file_tags` | capability-group tags | correctly **path**-keyed: `effective_tags` walks every ancestor, so a file's tags depend on where it lives. Inode keying would break inheritance |
+
+So the population is 8 tables that hold per-file data and should follow the
+inode, of which 5 are now converted (`acl` joined them today) and 3 are not,
+plus 8 that are right as they are and 1 undecided.
+
+**A correction, made before writing any code for it.** I first listed
+`integrity` as needing conversion. It does not, and converting it would have
+destroyed what it does. `verify_file` looks a baseline up by path, reads the
+content *currently at that path*, and compares. The threat it detects is a file
+being **replaced** -- and a replacement is a different inode. Key it by inode
+and `baseline.get(id)` misses, so a swapped `/etc/passwd` reports "no baseline"
+instead of `Modified`; worse, `VerifyStatus::Missing` becomes unreachable, since
+a file that no longer exists has no inode to look up. Path is not a weaker key
+here, it is the correct one. Tripwire and AIDE monitor paths for the same
+reason.
+
+The generalisation I had been using -- "per-file metadata should follow the
+file" -- was too coarse, and it took reading `verify_file` to see it. The
+sharper question is: **should this data survive the file at that path being
+replaced?** Yes means path (integrity monitoring). No means inode (an ACL, a
+comment, a tag -- none of which should transfer to a stranger's file that
+happens to land at the same name).
+
+`history` is left undecided on purpose. Version history could reasonably be
+either: keyed by inode a rename keeps its history, which is what Dropbox and
+macOS versions do; keyed by path you get the history of a location, which is
+what a user watching one config file may expect. That is a genuine tradeoff
+with a user-visible answer, so it is not mine to settle silently -- it wants an
+`open-questions.md` entry before any code moves.
+
+**A claim I nearly published, and the check that stopped it.** Having
+established that `acl::check_access` is called from `vfs::path_access_verdict`,
+which is called from `check_path_access`, which `handle.rs` calls on every open
+for Read/Write/Metadata, I was about to file this as a **live permission
+bypass**: set a restrictive ACL, hard-link the file elsewhere, open the link,
+and `acls.get(path)` returns `None`, which means *allow* ("No ACL, defer to
+traditional permissions"). Every link in that chain is real and I verified each
+one.
+
+It is still not a bypass, because of the link I had not checked: **there is no
+ACL syscall.** `set_acl` has exactly two callers outside its module -- `kshell`
+and one self-test -- and `grep` for `SYS_*ACL` or `setxattr` in
+`syscall/number.rs` returns nothing. `path_access_verdict` guards the ACL call
+with `if super::acl::count() != 0`, and in any boot where no human typed a
+kshell command, that count is 0 and `check_acl` is never reached. No program
+can create the precondition.
+
+This is the third time in this codebase I have mistaken *on the live code path*
+for *reachable by an attacker* -- `sealing` and `secpolicy` were the first two,
+where I published "can only ever be 0" about counters that kshell moves. The
+proxy is seductive because the call graph is genuine; what is missing is an
+actor who can enter it (dd-953).
+
+**Why it is still worth fixing, and fixing first.** The defect is
+*pre-positioned*. The day someone adds `SYS_ACL_SET` -- a normal, unremarkable
+roadmap item -- the bypass becomes live, and nothing in the tree would flag it,
+because the new syscall would look correct in isolation and the table it writes
+to has always been keyed this way. A latent hole that arms itself when an
+unrelated feature lands is worse than a loud one.
+
+**The fix** is the pattern already applied to the other four: derive
+`Option<FileId>` once, above the lock (holding a module global across a VFS call
+inverts filesystem-lock -> module-state and can wedge two CPUs -- 9 such sites
+were introduced and caught by `check-vfs-under-lock.py` earlier today), match on
+`(path, id)`, and fall back to the path when identity is unresolvable so a
+not-yet-created file still works. `immutable.rs`'s `flag_key` is the reference:
+one key-construction point, `FlagKey::Id | FlagKey::Path`. Each converted table
+also needs a rung that hard-links a real file, since the pre-existing rungs used
+synthetic paths that resolve to nothing and so passed identically before and
+after conversion.
+
+**A search-shaped mistake worth naming, found the same day.** Scoping the
+BLKDISCARD work I ran
+`grep -r 'fn discard' kernel/src/drivers kernel/src/block` and got nothing,
+and reported "no discard/TRIM/unmap support anywhere". **Neither directory
+exists.** `grep` over a non-existent path prints nothing and returns quietly,
+and I read that silence as a measurement. The truth is the opposite of what I
+published: `kernel/src/blkdev.rs` has had `supports_discard()` and `discard()`
+on the `BlockDevice` trait all along, and **1 of the 4 implementors
+(`RamBlockDevice`) overrides both**, so discard is genuinely available on one
+backend and the design that follows is not "refuse everything" but "ask the
+device".
+
+The tell is that an empty result and an empty *search space* are printed
+identically. Same family as reading exit 0 as a warning count, and as
+`tail -25` of an 18,060-line report: in each case the evidence could not have
+contained the finding, and nothing in the output said so. The cheap guard is to
+make the search prove its own scope -- `ls -d` the paths first, or grep for a
+term that MUST hit and check that it does.
+**The three remaining are NOT the same mechanical change, measured 2026-09-21.**
+This entry said "the fix is the pattern already applied to the other four".
+That is true of one of them and misleading about the other two, which is worth
+correcting because it is what the next session would act on:
+
+| module | table(s) | difficulty |
+|---|---|---|
+| `queryable` | `path_index: BTreeMap<PathBuf, usize>` into `files: Vec<FileAttrs>` | **mechanical.** The index is a lookup; the records live in the Vec. Re-key the index and the rest follows |
+| `fcomment` | `comments: BTreeMap<PathBuf, String>` | **not mechanical -- measured 2026-09-22.** 18 table accesses, but **28 compiler-reported sites** once the value becomes a tuple, because the comment IS the value: every `get`/`get_mut`/iteration changes shape. `search`/`list`/`remove_under` filter by path *prefix*, so the path must stay as data, and `remove_under` must collect KEYS rather than paths |
+| `tags` | `by_path: BTreeMap<PathBuf, BTreeSet<String>>` **and** `by_tag: BTreeMap<String, BTreeSet<PathBuf>>` | **a design question, not a conversion.** Two indices over the same relation |
+
+**`queryable` is done (2026-09-22); `fcomment` was attempted and reverted.** The
+conversion compiled down to 28 sites of restructuring rather than a swap, and it
+was attempted at a point where no boot could verify it -- WSL is down on this
+host, which fails gate 50's main run. Reverted rather than landed blind: the
+table is reachable only from `kshell`, so the value of landing it unverified is
+low and the cost of debugging 28 unverified sites later is not. The measurement
+is the artifact; the next session starts with a correct estimate instead of my
+wrong one.
+
+**Why `tags` is different.** Re-key `by_path` by identity and `by_tag` still
+holds paths. Then one file with two names has *one* entry in `by_path` and
+*two* in `by_tag`, so "which files carry tag X" and "which tags does this file
+carry" stop being inverses of each other. Three ways out, none free:
+
+| option | cost |
+|---|---|
+| key `by_tag` by `FileId` too, resolve to a path only for display | consistent, but "list files tagged X" must resolve N identities back to names, and a file deleted since tagging has no name to resolve to |
+| keep `by_tag` by path and accept the asymmetry | cheap, and it reintroduces exactly the bug being fixed on the reverse lookup |
+| store the path as data beside the id in both indices | the `immutable.rs` shape applied twice; duplicated paths must not drift apart |
+
+I have not picked one. It needs an entry of its own rather than being folded
+into a conversion that looks mechanical from the outside -- and the reason I
+know is that I was about to stage it as a 10-site edit, `tags` having the fewest
+call sites of the three. Fewest sites, most design.
+**Correction to the line below: the three `rename_path` fixups become
+CONDITIONAL, not dead.** An inode survives a rename, so identity keying makes
+them unnecessary *for files that have a stable inode*. The path fallback exists
+precisely for files that do not, and on those a rename still moves the key. So
+each one should keep its body and gain a doc line saying it is now reached only
+on the fallback path -- deleting them would silently drop metadata on any
+filesystem without stable inodes. (`queryable`'s is at line 820; converting it
+needs a key derived above the lock in 6 of its 8 index-touching functions --
+`set_attr`, `get_attr`, `remove_attr`, `list_attrs`, `clear_attrs`,
+`rename_path` -- while `stats` and `clear_all` only call `.len()`/`.clear()` and
+need none.)
+
+**Then delete the three `rename_path` fixups**, which identity keying makes
+unnecessary: an inode survives a rename, so there is nothing left to fix up.
+
+### [A] "cargo clippy clean" is a completion criterion the kernel has never met -- 18,060 warning lines -- and I have been reporting exit 0 as if it were - 2026-09-21
+**Status:** RETRACTED the same day -- the headline claim is false. The enforced
+criterion IS met and IS gated on every boot; see the correction at the end.
+
+**In short:** the project's own definition of a finished task includes "cargo
+clippy clean". The kernel currently emits **18,060** clippy warning lines. It
+exits 0, because the lints in question are `warn` and not `deny`, so any script
+or agent checking the exit status concludes the tree is clean. I did exactly
+that twice today, in two commit messages.
+
+**How the miscount happened, because it is a reusable mistake.** I ran
+`cargo clippy | tail -25`, saw exit 0, and wrote "clippy clean". Two separate
+errors stacked:
+
+| error | detail |
+|---|---|
+| exit code read as a warning count | these lints are `warn`, so 18,060 warnings and 0 warnings produce the same status. The exit code is a **proxy** for cleanliness and I never checked what it stood for (dd-953) |
+| the output was thrown away before being read | `tail -25` kept 27 lines of a 18,060-line report, and **not one of them mentioned any file I had changed**. I reported a verdict on evidence that could not have contained it |
+
+**What is actually true about today's changes,** measured by re-running with
+`--message-format=short`, keeping the whole report, and locating each warning
+against the line ranges I wrote:
+
+| file | warning lines | mine? |
+|---|---|---|
+| `fs/acl.rs` | 5 | no -- all five (516, 625, 636, 647, 667) fall between my key code at 231-255 and my rung at 983-1045 |
+| `fs/vfs.rs` | 63 | no |
+| `fs/sealing.rs` | 8 | no |
+| `fs/immutable.rs` | 1 | no |
+| `fs/reclock.rs` | 0 | -- |
+
+So the defensible claim is **"adds no new clippy warnings"**, which is what I
+should have written. "Clippy clean" was false about the tree and unsupported
+about my changes.
+
+**The project-level problem, which is the reason this is an entry and not just
+a retraction.** `CLAUDE.md` -> "When You Finish a Task" lists `cargo clippy`
+clean as item 1. No task can have met it for a long time. A criterion that is
+never satisfied is not a criterion -- it trains everyone to substitute the exit
+code, which is precisely what I did. Two honest ways out, and it is not my call
+which:
+
+| option | effect |
+|---|---|
+| Treat the count as a ratchet: record 18,060 as a baseline and gate on it not rising | cheap, enforceable this week, and catches exactly the regression that matters. Does not pretend the tree is clean |
+| Actually drive it to zero | most of the 18,060 are `indexing_slicing` and `arithmetic_side_effects`, which `CLAUDE.md` deliberately sets to `warn` because kernel code indexes constantly. Reaching zero means either a very large refactor or per-site allows, and the allows would bury the real findings |
+
+---
+
+**CORRECTION, same day. The headline of this entry is wrong, and the
+recommendation below it is built on the false premise.**
+
+I wrote that "cargo clippy clean" is a criterion the kernel has never met. It
+is met, it is precise, and `boot-test.sh` gates it on every run. `Cargo.toml`
+sets:
+
+| lint group | level |
+|---|---|
+| `clippy::all` | **deny** |
+| `clippy::pedantic` | warn |
+
+So `cargo clippy -p kernel` exiting 0 means **zero `clippy::all` violations** --
+not "warnings were tolerated". The gate's own comment makes the point I missed:
+*"the exit status is an exact question with no judgement in it."* It exists
+because eight deny-level errors once accumulated unnoticed, since a crate can
+declare `deny` and still drift.
+
+The 18,060 lines are `pedantic` and restriction lints -- `indexing_slicing`,
+`arithmetic_side_effects` -- which `CLAUDE.md` **deliberately** sets to `warn`,
+with a stated reason: kernel code indexes constantly. Counting them and calling
+the result an unmet standard measured something real against a standard nobody
+set.
+
+**So the ratchet recommendation is withdrawn.** A ratchet on a number that is
+deliberately unbounded would convert a considered decision into an obstacle,
+and it would have looked principled.
+
+**What survives, because one half of the original entry was right.** I reported
+"clippy clean" from a run piped through `tail -25`, so the 27 lines I read did
+not mention a single file I had changed. The verdict happened to be true and my
+evidence could not have shown it either way. That error is unaffected by this
+correction: the fix is to keep the whole report and locate each warning against
+the lines you wrote, which is what produced the per-file table above.
+
+The instructive part is the shape. I found a real number (18,060), attached it
+to a plausible standard ("clippy clean"), and did not check what the project
+actually enforces -- which was written down in two places, `Cargo.toml` and the
+gate's own header. A measurement compared against an assumed threshold is a
+different error from a wrong measurement, and harder to notice, because the
+number is right.
+Recommendation: the ratchet, because the number's only current use is to hide
+new warnings among old ones. Not implemented -- a gate on a number I measured
+once, on one target, is a gate I have not shown to be stable, and dd-956 says
+measure the population before building the gate.
+
+### [A] `F_SETLK` grants every exclusive record lock, and the reason it gives for that has expired -- 2026-09-21
+**Status:** PARTLY FIXED 2026-09-21 -- POSIX locks now real and released on exit;
+**OFD locks have no release path** (see the addendum at the end of this entry)
+
+**In short:** a program can ask the kernel for exclusive use of part of a file
+-- the mechanism databases use to stop two copies of themselves writing the
+same page. The kernel says yes to everyone. Two programs both asking for
+exclusive use of the same bytes are both told they have it.
+
+**This is not news; the interesting part is the justification.** Lane B filed
+it on 2026-09-13 (`requests/b-a-advisory-record-locking-is-a-stub-that-always-
+succeeds.md`) about their libc side. The kernel side carries a written reason
+for granting unconditionally, at `syscall/linux.rs:895`:
+
+> *In our kernel only one process can hold a Linux fd table at a time (no
+> cross-process visibility yet), so no other holder can conflict. `F_SETLK` /
+> `F_SETLKW` always grant; `F_GETLK` always reports `F_UNLCK`.*
+
+If that were true the behaviour would be correct -- there would be no second
+holder to conflict with. **It is not true.** `pcb::linux_fd_install_stdio` is
+documented as *"called exactly once, immediately after `set_abi_mode` flips the
+process to Linux ABI in `spawn_process` / `exec_process`"* -- that is once **per
+process**, and the assignment at `pcb.rs:6855` is unguarded. Nothing anywhere
+limits the number of processes holding one; the only mention of the invariant in
+the entire tree is the comment asserting it. So every Linux-ABI process has its
+own fd table, and two of them can hold the same exclusive lock.
+
+**What I have and have not shown.** I have shown the *justification* is false,
+by reading the assignment site and finding no guard. I have **not** shown a
+program is currently corrupted by it -- that needs two Linux processes actually
+contending for one range, and I have not demonstrated that happens today. The
+distinction matters and I have got it wrong three times in one day (`sealing`,
+`secpolicy`, and `acl`, where a genuine call path had no actor who could enter
+it). So: the reasoning is void, the mechanism is wrong, the exploitation is
+unmeasured. What makes it worth fixing regardless is that the comment names
+**sqlite WAL locking and Postgres backend startup** as things that "proceed
+without modification" -- those are precisely the callers for which proceeding
+is the failure, because they proceed into a second writer.
+
+**The fix is a wiring job, not a design job, and the part that should exist
+already does.** `kernel/src/fs/reclock.rs` is a complete POSIX record-lock
+table: byte ranges, owners, read/write lock types, conflict detection, `set` /
+`unlock` / `query` / `list`, its own self-test, and since today identity keying
+so a lock taken under one name is seen under a hard link. It has **zero callers
+outside its own module** -- I checked, because a module nothing calls is how
+this kind of gap usually looks. `fcntl_flock_apply` at `linux.rs:5391` is the
+function that should call it.
+
+Two things to get right when wiring it:
+
+| issue | detail |
+|---|---|
+| the owner identity | POSIX locks are owned by a *process*, OFD locks by an *open file description*. `fcntl_flock_apply` already knows which it is (`is_ofd`), and `reclock::set` takes an `owner: u64`, so both map cleanly -- but they must not share an owner space, or an OFD lock and a POSIX lock from one process would wrongly conflict |
+| `reclock` takes paths as `&str` | `set(path: &str, ...)`. Paths here are bytes and may legally contain any byte except `/` and NUL, so a `&str` API cannot express every lockable file (CLAUDE.md item 7). Unreachable today because nothing calls it; wiring it to a syscall is exactly what makes it reachable, so the signature should change to `impl AsRef<Path>` in the same change rather than after |
+
+**`F_SETLKW` resolved by precedent, not by invention.** POSIX says `F_SETLKW`
+*blocks* until the lock is available, and nothing here can block on a lock
+table. That looked like a fork needing the operator until I read what `flock(2)`
+already does in this tree: `sys_flock` returns `EWOULDBLOCK` for every conflict,
+strips `LOCK_NB` without honouring it, and **says so in its own doc** -- *"real
+Linux blocks (sleeps) on a contended lock when `LOCK_NB` is absent. Our IPC
+layer doesn't yet expose a wait queue hook for the VFS lock table, so we return
+EWOULDBLOCK for every conflict."*
+
+So `F_SETLKW` should return `EAGAIN` on conflict, carry the same stated
+limitation, and name the same missing wait-queue hook. That is consistent with
+the neighbouring syscall rather than a second, differently-wrong answer -- and
+when the hook lands, both are fixed in one place. `sched::block_current` exists
+(`linux.rs:4581`), so the hook is the missing piece, not the primitive.
+
+**The implementation, in the order it has to happen:**
+
+| step | detail |
+|---|---|
+| 1. `reclock` path API | `&str` -> `impl AsRef<Path>` **before** it is reachable, not after |
+| 2. resolve `l_whence` | `SEEK_SET` is `l_start`; `SEEK_CUR` needs the descriptor's offset; `SEEK_END` needs the file size. The handler currently parses the range into `_l_start` / `_l_len` -- underscore-prefixed, deliberately discarded -- so this is where the stub actually lives |
+| 3. `l_len` edge cases | `0` means *to EOF*, and a **negative** length means the range *below* `l_start`. Both are legal POSIX and both are easy to get silently wrong on a data-integrity path |
+| 4. owner mapping | POSIX -> pid; OFD -> `entry.raw_handle`. Separate owner spaces, or one process's POSIX and OFD locks would conflict with each other |
+| 5. `F_GETLK` | `reclock::query`, writing the holder's `l_type` and `l_pid` back |
+| 6. `F_UNLCK` | `reclock::unlock` |
+**Addendum, 2026-09-21 -- wired, and the gap I made doing it.** `F_SETLK`,
+`F_GETLK` and `F_UNLCK` now go through `reclock`. `F_GETLK` is a lookup rather
+than an unconditional `F_UNLCK` claim. POSIX locks are released on process exit
+at `pcb.rs:6406`, which a previous session had already wired.
+
+**OFD locks are not released by anything.** POSIX locks are owner-keyed by pid,
+so the exit path clears them. OFD locks belong to an *open file description*, so
+I key them by handle with bit 63 set -- and nothing clears that key. A holder
+that dies wedges the range until reboot, which is precisely the property lane B
+called "the part that makes them safe".
+
+Latent, not live: `F_OFD_SETLK` can only reach the kernel through
+`posix/src/fcntl_ops.rs`, which is still a stub, so no OFD lock can exist yet.
+It goes live the moment lane B wires it, which is why they were told the order
+rather than left to find it (`requests/a-b-record-locks-are-real-now-*`).
+
+**The fix, in the right place:** `fs::handle::close()` already releases advisory
+locks on the *final* close of an open file description --
+`funlock_resolved(p, handle)` at `handle.rs:660`, after the `OPEN_FILES` guard
+is dropped. An OFD record lock ends at exactly that moment and for exactly that
+reason, so the release belongs on the next line. The owner encoding should move
+into `reclock` as a `release_ofd(handle)` function first: the tag bit is
+currently a fact `linux.rs` knows and `handle.rs` would have to agree about by
+hand, and an owner space belongs to the module that owns it.
+**F_GETLK** needs the same treatment: it currently reports `F_UNLCK`
+unconditionally, which is a *claim about the world* rather than a lookup, and
+`reclock::query` is the lookup it should do.
+
+### [A] Five boots in one day, each killed by one of my own defects -- three a local check would have caught in under five minutes, and one caused BY running those checks during the boot -- 2026-09-21
+**Status:** OPEN as a workflow note. No code fix; the remedy is an order of operations.
+
+**In short:** a full boot test is ~2 hours and cannot be shortened -- there is no
+flag to skip the gates or the 35-script test suite, by design. On 2026-09-21 I
+started five of them. Four died on a defect of mine, and each defect was
+cheaper to find than the boot was to run.
+
+| boot | killed by | what would have caught it | cost of that |
+|---|---|---|---|
+| 1 | `check-selftest-skips`: 6 findings, all mine -- rungs skipping on `.is_err()` of the code under test | `python scripts/check-selftest-skips.py` | ~40 s |
+| 2 | `script-index`: I added `selftest-boot-gate-identity.py` and never indexed it | `python scripts/gen-script-index.py` | instant, and it prints the fix |
+| 3 | clippy gate: 4 `clippy::all` errors in code written after my last clippy run | `cargo clippy -p kernel` | ~4 min |
+| 4 | a dispatch rung asserting `PermissionDenied` where kernel context can only answer `NoSuchProcess` | reading the two rungs either side of mine, which say so about themselves | ~1 min |
+
+**The order of operations that would have saved ~6 hours:**
+
+1. `cargo check`, then **`cargo clippy -p kernel`** -- not after the boot, and
+   not once per session. Boot 3 died because my earlier clippy runs were clean
+   and I carried that verdict onto code that did not exist when they ran.
+2. Run the check scripts **for the areas touched**. They are individually
+   runnable and most cost under a minute. A new script means
+   `gen-script-index.py`; a new self-test means `check-selftest-skips.py` and
+   `check-tested-but-uncalled.py`.
+3. For a new **self-test assertion**, read the neighbouring rungs first. Boot 4's
+   defect was an expectation that cannot hold in kernel context, and the rungs
+   immediately above it announce the correct pattern in their own output.
+
+**What is NOT the fix.** A wrapper script running "the cheap gates" before a
+boot would duplicate `boot-test.sh`'s gate list, and `check-gates-are-wired`
+exists precisely to stop a second list drifting from the first. Nor should the
+clippy gate move earlier in `boot-test.sh`: all three lanes boot through that
+file, and reordering shared machinery to compensate for a step one lane skipped
+is the band-aid `CLAUDE.md` warns about.
+
+**RETRACTION, written an hour later: boot 5 was not my concurrent load, and
+the paragraph below is wrong.** Boot 6 failed at the same gate with **nothing
+running alongside it**. The real cause, found by reading
+`scripts/bashprobe.py`:
+
+> `WSL = ["wsl", "-d", "Ubuntu", "--", "bash", "-s"]`
+
+The probe does not use the MSYS `bash` on PATH -- it drives **WSL** bash and
+feeds the script on stdin. "bash exited 0, stdout empty" is WSL answering with
+nothing, which happens when the distro is idling down or starting up, and
+`boot-test.sh` itself uses WSL elsewhere (the rootfs build). That fits the
+evidence my load theory did not: boots 1-4 cleared this gate, 5 and 6 died at
+it, and the *failing case differed* between them (`$'a
+b'` then `$'\$'`) --
+input-independent, which a real disagreement would not be.
+
+**Every test I ran to confirm the load theory could not have refuted it.** I ran
+the checker by hand and it passed, four times, and concluded "quiet machine, so
+it was load". But my hand-runs used MSYS bash for the *main* mode, and the gate
+that fails is the `--self-test` (`boot-test.sh:5686`, the one invocation WITHOUT
+`--may-skip`). Three separate mismatches between what I tested and what fails:
+wrong flag, wrong bash, and a condition I never varied.
+
+**RETRACTED, and the retraction is the instructive part.** The paragraph below
+says the harness's `_bash_oracle_selftest_died` handler is wrong to claim *"a
+self-test needs no bash"*. **The handler is right and I was wrong.** Measured
+directly while WSL was returning `Catastrophic failure`:
+
+| invocation | exit | meaning |
+|---|---|---|
+| `check-shellquote-vs-bash.py --self-test` | **0**, 82/82 pass | genuinely needs no bash |
+| `check-shellquote-vs-bash.py` (main) | **1**, UTF-16 `Catastrophic failure` | needs WSL, and WSL was down |
+
+So boots 5 and 6 died on the **main** run via `_bash_oracle_disagreed`, not on
+the self-test. I had inferred the self-test was at fault because `bashprobe`
+appeared in the traceback, without checking which of the two invocations
+produced it -- and then "corrected" a true sentence into a false one, in this
+file and in a request to lane B.
+
+I also staged an applier to rewrite that handler's wording. It has been deleted
+unapplied. Had it landed, a correct warning would now read as two causes when
+it has one.
+
+**What IS true, and is the part worth keeping:** `--may-skip` on the main run
+does not help, because a skip requires the checker to exit **2**
+(`bashprobe`'s own convention for `NoBash`). A *broken* WSL -- present but
+answering garbage -- raises `ProbeError` and exits **1**, which is a finding,
+not a skip. Absent WSL skips; sick WSL fails the build. That distinction is
+exactly what the lane B request asks for, and that ask stands.
+
+**Superseded paragraph:**
+
+**One more thing the harness believes that is no longer true.** Its dedicated
+handler, `_bash_oracle_selftest_died`, says: *"This is not a WSL problem and
+skipping it would be wrong: a self-test needs no bash."* The self-test now
+reaches `bashprobe` and does need WSL, so the reasoning that makes this gate
+mandatory no longer holds -- a WSL hiccup is currently a hard stop on every
+boot this lane attempts.
+
+**WSL was healthy when checked** (3/3 direct calls, plus `bash -s` on stdin), so
+this is intermittent rather than broken, and a retry is a legitimate response
+while the real fix is decided.
+
+**Superseded paragraph, kept because the retraction is the point:**
+
+**A fifth boot, and this one I killed directly.** Boot 5 died at gate 50 on
+`check-shellquote-vs-bash`: *"THE WORD PROBE IS BROKEN -- every result below
+would be a lie"*, on the line `$'a
+b'`. Re-run on a quiet machine: **0
+failures, exit 0.**
+
+I was running six gate scripts concurrently with the boot -- to verify a change
+I wanted to fold into it, in order to *save* a boot -- and the probe could not
+spawn `bash` under that load. So the rule from the table above needs its other
+half:
+
+> Run the cheap checks **before** a boot. Run **nothing** during one.
+
+**It also includes `git commit`, which I learned by killing boot 7 with the very
+commit that recorded the rule below.** Boot 7 started at 01:27. I committed at
+01:35 and again at 02:07. It died reporting *"2 tooling test suite(s) failed:
+test-boot-test.py, test-checkers-honour-head.py"* -- and those two are precisely
+the suites that reason about **git HEAD**:
+
+| suite | a rung it carries |
+|---|---|
+| `test-boot-test.py` | *"a **staged** source edit is dirty too (the diff is against HEAD, not the index)"* |
+| `test-checkers-honour-head.py` | HEAD-relative by name; 898 s, 36% of the suite |
+
+They build fixtures and compare the working tree against HEAD. Move HEAD
+underneath them and their expectations are measuring a tree that no longer
+exists. Both pass standalone -- I re-ran `test-boot-test.py` immediately after
+and got exit 0 -- which is the same misleading signal as gate 50: **the thing
+only fails when something else is happening, so reproducing it alone proves
+nothing.**
+
+So the rule is not "do not run heavy things during a boot". It is:
+
+> **During a boot, change nothing and run nothing.** Not source, not tracked
+> documents, not HEAD. A boot reads the tree it is testing for two hours, and
+> three separate gates check that tree against HEAD.
+
+The markdown edits felt safe because they are not compiled. Compilation was
+never the mechanism -- `git` was. I had even reasoned explicitly that "markdown
+edits are safe (not compiled)" and committed on that basis, twice.
+
+**And that includes `git push`, which is not obvious.** A push feels like a git
+operation, not a consumer of anything a boot needs. But `scripts/hooks/pre-push`
+mentions `wsl` **15 times**, so pushing while a boot is running puts two
+processes on the same WSL distro -- and an empty WSL answer is what surfaces as
+`ProbeError` at gate 50 and refuses the build. With 20 commits unpushed and a
+boot 85 gates in, the arithmetic still favours waiting: the commits are on disk
+and only a machine failure loses them, while a push that kills the boot costs two
+hours for certain.
+
+The probe's message is worth knowing too, because it cost me the diagnosis
+before it cost me the boot. It reports a `None` result as *"bash itself
+rejected the line"* and says a framing failure would have raised `ProbeError`
+instead -- but a `bash` that cannot fork looks exactly like a `bash` that
+refused the syntax. I went to lane B's `$'\c'` request first, which was
+already DONE and had nothing to do with it. **A probe that cannot distinguish
+"the subject said no" from "the subject never ran" reports the wrong cause
+with full confidence** -- the same defect class as reading exit 0 as a warning
+count, one layer down in someone else's tool.
+
+**The one thing worth measuring next time.** Every one of the four was found by
+a gate that already existed. None was a gap in coverage -- they were gaps in
+*when I chose to run* the coverage. That is a scheduling defect, not a testing
+one, and it has the cheapest possible fix.
+
+### [A] `ctest-pty` HANGS where it used to fail with exit 45, and my record-locking change is not the cause -- 2026-09-22
+**Status:** ROOT-CAUSED 2026-09-24 — the record-locking change was indeed not the cause. The hang is the same two 2,000,000-iteration spins as exit 45, run on a debug kernel, where they outlast the 2400 s boot budget; both spins exist only because no `SIGINT` was ever raised. Fix: `A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER` at the end of this file.
+
+**In short:** a userspace test that used to fail now hangs instead, which turns
+a red boot into an incomplete one. That is worse, because a red-but-complete run
+still verifies everything else, while this one stops the kernel before roughly
+half its self-tests have run.
+
+**What happened.** Boot 8 reached QEMU, ran `ctest-pty`, wrote VINTR (Ctrl-C)
+to the pty master, and then produced 12 KB in 20 minutes before timing out:
+*"BOOT_OK not found within 2400s"*. The previous green boot had this rung FAIL
+with exit 45 and still reach `BOOT_OK` with 2.76 MB of serial (A-Q20).
+
+**The cost is not the failure, it is the position.** The rungs downstream of it
+never ran: `sealing`, `reclock`, `immutable` and `acl`'s Test 12 -- four of the
+five file-identity rungs this lane spent the day building. `flock`'s rung and
+both range self-tests are upstream and did report OK.
+
+**Why my changes are probably not the cause.** I had a specific reason to
+suspect them: I had just wired `fcntl(F_SETLK)` to real locking and added
+`reclock::release_ofd` to `fs::handle::close`, which every close now runs. So I
+checked what the fixture actually calls:
+
+| call | count | reaches my changes? |
+|---|---|---|
+| `fcntl(fd, F_SETFL, O_NONBLOCK)` | 3 | **no** -- `F_SETFL` takes a different `fcntl` arm; the only `F_*` constant in the file is `F_SETFL`, and there is no `F_SETLK`/`F_GETLK` anywhere in it |
+| `close` | 3 | yes, via `release_ofd` -- but that takes `reclock`'s `TABLE` briefly on an **empty** table, and nothing on the pty path holds that lock, so no cycle |
+| `ioctl` | 1 | no -- the new arms match only `BLKDISCARD`/`BLKSECDISCARD`/`BLKZEROOUT` |
+| `waitpid`, `signal`, `tcsetattr` | 15 | untouched by this lane today |
+
+**So the likeliest explanation is the rung's known timing sensitivity.** Exit 45
+was diagnosed as `waitpid(WNOHANG)` SPIN exhaustion, and a test that fails on a
+spin budget is exactly the kind that hangs instead under different timing. What
+changed the timing is not established -- `release_ofd` does add one lock
+acquire/release to every final close, which is a real if small perturbation.
+
+**Not proven, and I should be explicit about that.** Inspection cannot rule out
+a timing interaction, and the discriminating experiment -- boot with
+`release_ofd` reverted -- has not run. It costs a full boot, and boots are
+currently blocked by WSL being down on this host.
+
+### [A] BLOCKED: WSL is down on this host, so every lane-A boot fails at gate 50 -- 2026-09-22
+**Status:** RESOLVED 2026-09-24 — WSL answers again (`wsl -d Ubuntu -- bash -s` returned `5.2.21(1)-release`); nothing in the tree changed. The request about telling a quiet WSL from a broken checker still stands on its own merits.
+
+**In short:** the boot test asks a real bash, running inside WSL, whether the
+kernel's shell-quoting rules match bash's. WSL on this machine now answers
+*"Catastrophic failure"* to everything, so that gate cannot reach a verdict and
+the build is refused. No boot can complete until WSL works again.
+
+```
+$ wsl -d Ubuntu -- echo ok
+Catastrophic failure
+```
+
+Checked four times over ~1.5 hours; it is not recovering on its own. Distros
+registered: `Ubuntu`, `docker-desktop`.
+
+**What is and is not affected:**
+
+| | state |
+|---|---|
+| `cargo check`, `cargo clippy`, the Python gates | unaffected -- all pass |
+| `git push` | unaffected -- the hook's WSL gates decline cleanly |
+| `check-shellquote-vs-bash.py --self-test` | unaffected, 82/82 -- it needs no bash |
+| the same checker's **main** run | **fails**, exit 1, and `_bash_oracle_disagreed` refuses the build |
+
+**Three ways out, none of which I took, and why:**
+
+| option | why not |
+|---|---|
+| `wsl --shutdown` or `--terminate Ubuntu` | a blanket restart of a runtime **all three lanes share**, and `CLAUDE.md` forbids blanket action on a shared runtime. If another lane is mid-`create-ext4-rootfs.sh` it could corrupt their image |
+| patch `scripts/bashprobe.py` to exit 2 (skip) when WSL answers nothing | **outside lane A's write scope** -- `which-lane.py` gives me `kernel/**`, `bench/**`, the toolchain json and `scripts/boot-test.sh` only. Filed as `requests/a-b-bashprobe-cannot-tell-a-quiet-wsl-from-a-broken-checker.md` instead |
+| pre-check WSL in `boot-test.sh` (mine) and skip the bash-oracle gates when it is unavailable | defensible -- `--may-skip` already means "this gate may decline when its oracle is absent", and a broken WSL is an absent oracle. But it changes boot behaviour for **all three lanes**, unilaterally, to unblock one. That is an operator call |
+
+**What the operator can do:** repair WSL (a `wsl --shutdown` from a human who
+knows no lane is mid-build usually suffices), or tell me the third option above
+is acceptable and I will implement it in `boot-test.sh` behind a loud notice.
+
+**State of the work this blocks.** Six of eight per-file metadata tables are
+converted and committed; `flock`'s identity rung, both range self-tests, the
+brightness ordering fix and the DNS hosts table are **verified by boot**. Four
+identity rungs -- `sealing`, `reclock`, `immutable`, `acl` -- are written, wired,
+and have never executed, because they sit downstream of the `ctest-pty` hang
+recorded above and that boot never reached them.
 
 ## `TD-C-MARKDOWNEDITOR-NAMES-ITS-KEYS-IN-A-FIELD-NOTHING-READS` -- **FIXED 2026-09-21** (lane C)
 
@@ -164993,6 +167740,357 @@ name, they read identically at the call site, and only one of them answers
 "is this row on the card". This is the same distinction `names_the_key` makes
 in `scripts/key-survey.py`, written to fix this exact defect in the survey --
 by the same hand that then wrote it into thirty-eight tests.
+
+### [A] `A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER` — `^C` typed into a pty could not interrupt a program that was not reading -- 2026-09-24
+**Status:** FIXED 2026-09-24 in the kernel (lane A); awaiting the boot that shows `ctest-pty` pass.
+
+**In short:** pressing Ctrl-C in a terminal window is how you stop the program
+running in it. On SlateOS that only worked if the program happened to be
+*reading from the terminal* at the time — and a program you want to stop is
+almost never doing that; it is busy. The kernel only looked for the Ctrl-C when
+the program next read its input. It now acts on it the moment it is typed, as
+every Unix does.
+
+**The mechanism.** The line discipline — the code that turns `0x03` into
+`SIGINT`, echoes what you type and assembles lines — ran inside `tty::read`,
+i.e. inside the *slave's reader*. `pty::master_write` only put the byte in a
+ring. So a `^C` sat in that ring until somebody read the slave, and nothing
+else ever looked at it.
+
+`ctest-pty`'s child installs its handler, writes its readiness byte, and then
+spins on `got_sigint` with `sched_yield()` — it never reads again, which is
+precisely the situation `^C` exists for. The byte was never classified, no
+signal was raised, and both processes spun their 2,000,000 iterations: the
+parent's `waitpid` budget ran out first (exit **45**), and under a debug kernel
+the same two spins outlast the 2400 s boot budget (the **hang** of 2026-09-22).
+
+The module's own documentation already stated the requirement —
+*"`^C` must be acted on when it is typed, not when somebody next calls `read`.
+A line discipline running inside a reader only runs while a reader is in it, so
+a program in a compute loop would be uninterruptible"* — and the code did not
+implement it.
+
+**Why eleven rounds of probes did not find it.** Every probe sat on a path the
+`^C` takes *through a reader*, so the question they could answer was "which read
+path consumes it". When none fired, the 2026-09-16 resolution read the absence
+of a read as a scheduling fault ("the child is never scheduled; nothing is wrong
+with the pty") and sent the fix to lane B's fixture. The "positive control" it
+cited — the kernel's pty self-test driving `master_write` → `slave_read` →
+`decided signal 2` — was no control for this: it performs the read the fixture
+never performs. **A control that shares the subject's hidden assumption cannot
+test it.** The question that finds the bug is not "which reader consumes the
+byte" but "why does a reader have to exist at all".
+
+**The fix — the discipline runs on arrival** (`kernel/src/tty/mod.rs`,
+`kernel/src/tty/pty.rs`, `kernel/src/syscall/handlers.rs`):
+
+- `tty::receive` processes one byte as it arrives: input translation, then
+  `ISIG`, then canonical editing (`feed`) or the raw queue, plus echo. There is
+  now **one** `ISIG` classifier; there were three (one in the canonical editor,
+  two in the raw read paths), which is why the investigation had to instrument
+  "all three sites".
+- Finished bytes go into a per-device `InputQueue` (Linux's `read_buf` +
+  `read_flags`): complete lines marked with their ends, `^D` as an end-of-file
+  mark that is never delivered. Reads take from it through one waiting
+  primitive (`wait_for`) and one policy per mode.
+- `pty::master_write` runs `receive` for every byte it is given and returns
+  `MasterWrite { written, signals }`; `SYS_PTY_MASTER_WRITE`/`_TRY_WRITE`
+  deliver the signals to the foreground group before returning.
+
+**Behaviour that changes with it — all of it Linux's behaviour:**
+
+| | before | now |
+|---|---|---|
+| `^C` to a busy program | nothing, ever | `SIGINT` at once |
+| echo of typed-ahead text | when the program next reads | as it is typed |
+| `^C` flush | the line being edited | that line **and** complete lines not yet read |
+| `FIONREAD` / poll on a canonical slave | an upper bound (a half-typed line counted) | exact (complete lines only) |
+| a line typed to `MAX_CANON` | its `\n` could be lost | the last slot is kept for the terminator |
+| `VEOL` / `VEOL2` | not recognised | end a line |
+| a control character set to 0 | matched the NUL byte (`stty intr undef` made NUL a `^C`) | disabled |
+| `ICRNL`/`INLCR`/`IGNCR` in raw mode | not applied | applied (they are input flags) |
+| `TCSETSF` (Linux ABI) | same as `TCSETS` | also flushes unread input |
+| `ICANON` switched with input unread | undefined | carried across, as `n_tty_set_termios` does |
+
+**Not changed:** the console. See the next entry.
+
+**Still owed:** the native ABI has no `tcflush`/`TCSAFLUSH` (todo.txt, "native
+tcflush"); `VWERASE`, `VREPRINT` and `VLNEXT` are still unimplemented, as
+before.
+
+### [A] `A-CONSOLE-CTRL-C-IS-ONLY-SEEN-BY-A-READER` — `^C` on the physical console still only reaches a program that is reading -- 2026-09-24
+**Status:** OPEN (lane A). Designed below; not implemented.
+
+**In short:** the entry above fixed Ctrl-C for terminal windows (ptys). The
+physical keyboard-and-screen console has the same defect and was deliberately
+left alone: a program running on the text console cannot be interrupted with
+Ctrl-C unless it is reading its input at the time.
+
+**Why it was not fixed with the pty.** A pty's input arrives through one door,
+the master's write. The console's arrives in the keyboard IRQ, into a ring
+that **three** consumers read directly: the terminal line discipline, the
+kernel shell (`kshell.rs` — Ctrl-C exits its find mode, which needs byte 0x03
+as *data*), and `SYS_CONSOLE_READ_CHAR`. Classifying `^C` at IRQ time would
+take the byte away from the other two. So the console receives a keystroke
+when a terminal reader pulls it off the ring (every key already typed is
+received, oldest first, before the reader decides anything), which keeps the
+order of type-ahead right but cannot help a program that is not reading.
+
+**The proper fix, as designed.** Receive at arrival *while a user session owns
+the console*: the IRQ path already defers work to the workqueue (echo does, in
+`keyboard::queue_echo`); a second deferred item would drain the ring into the
+console device through `tty::receive` whenever the console has a foreground
+process group — the state in which a `^C` has somebody to signal — and leave
+the ring raw otherwise, which is the kernel shell's state. What has to be
+settled first is who owns keystrokes when both a session and the kernel shell
+are live, since today they simply race for each key.
+
+### [A] `A-TWO-RUNGS-COULD-NOT-EXEC-FOR-WANT-OF-METADATA` — `ctest-coreutils-runs` (11) and `ctest-python-repl` (8) were spawned unable to stat -- 2026-09-24
+**Status:** FIXED 2026-09-24 (lane A, `kernel/src/proc/spawn.rs`) — the exec now succeeds, as the addendum below shows, and `ctest-coreutils-runs` stays red on two link-level faults filed for lanes B and D.
+
+**In short:** two tests start a program that then starts another program. The
+second start failed every time, and weeks of investigation looked for the
+reason in the disk image, the C library and the kernel's program loader. The
+reason was in the tests themselves: they launched their program without the
+permission needed to look up a file's size — the first thing the C library
+does when asked to run a file.
+
+**The mechanism.** `posix/src/spawn.rs::load_elf` sizes its buffer with
+`SYS_FS_STAT` before it reads anything, and native `sys_fs_stat` requires
+(File, METADATA). `self_test_coreutils_runs` granted (File, READ|EXECUTE) and
+`self_test_ctest_python_repl` granted nothing at all, so in both the forked
+child's `execl` returned -1 with EACCES and the child took `_exit(127)`. That
+is why the 2026-09-21 entry could establish that "the exec syscall is never
+reached" and go no further: nothing upstream of it printed, because a refused
+stat is not an event anyone logs.
+
+**It had been written down already.** `self_test_cpython_on_slateos_libc`
+records the identical trap in its own capability comment — *"native
+sys_fs_stat is gated on METADATA"*, learned from the same failure in the
+`make` rung — and the two rungs that repeated it were written from sketches
+that predate that note. A rung that runs a program is really describing a
+*session*, and the grant should be written as one: what does a program that
+execs, stats and reads need? The REPL rung also lacked `PYTHONHOME`, which the
+CPython rung calls MANDATORY; it now passes the same environment.
+
+**The general point, for the next rung.** Three faults in a row produced the
+same exit code 11 here (the image, the `/bin` vs `/mnt/bin` path, then this),
+and each fix was verified by the code *stopping* after the first cause — so
+the next cause looked like a failure to fix the previous one. The legend for
+11 now names all three.
+
+**Addendum, same day — the grant was the gate, and behind it are two more.**
+With METADATA granted, a direct QEMU boot exec'd `/mnt/bin/true`
+successfully, and `true` died at its first instructions: a page fault reading
+address 0x36, in `posix::tls::image`. Two faults, both in how `coreutils` is
+linked, neither in lane A's tree:
+
+1. `userspace/coreutils/linker.ld` (and `oils`, `shell`) put the ELF header
+   outside the only `PT_LOAD`, so lld leaves `__ehdr_start` at 0 and
+   `tls::image` reads `e_phentsize` from address 0x36.
+2. `coreutils`' binaries carry `EI_OSABI = GNU` (LLVM tags objects GNU when they
+   use a GNU extension; the slateos target is an LLVM linux-musl triple), so
+   the kernel ran them with the Linux syscall table, and the native
+   `SYS_SET_FS_BASE` (528) just before the fault was refused.
+
+Lane A's half of (2) landed the same day: the explicit SlateOS native marker of
+design-decisions §33 (`EI_OSABI = 255`, or a `"SlateOS"` / `NT_SLATEOS_ABI`
+note) now outranks every Linux signal in `detect_linux_abi`. Emitting the
+marker, and mapping the header, are lanes D's and B's:
+`requests/a-bd-coreutils-cannot-start-two-link-faults.md`. Measured scope:
+`true`, `false`, `echo`, `basename` have both faults; `kill`, `logger`, `cat`,
+`ls` and `python3` have neither.
+
+**Second addendum — `ctest-python-repl` now starts the interpreter, and the
+environment is what is missing.** With its grant fixed the rung's exec
+succeeds and CPython starts, then exits **4** ("output appeared but the answer
+never did"). The log shows why: the fixture was spawned with three
+environment variables and its child's exec stored **none**
+(`[exec] Stored 4 argv, 0 envp entries`). posix's `execv` is
+`execve(path, argv, NULL)` — its own doc says it inherits the environment —
+and `execvp`, `execl` and `execlp` all reach it, so `PYTHONHOME` never arrives
+and the interpreter cannot find its library. Lane D's code:
+`requests/a-d-execv-execvp-execl-execlp-start-the-new-program-with-no-environment.md`.
+
+So all three of lane A's long-red ring-3 rungs now have their kernel-side
+causes fixed: `ctest-pty` passes; `ctest-coreutils-runs` waits on the link
+faults (B, D); `ctest-python-repl` waits on `execv` (D).
+
+**Third addendum (2026-09-26) — the integration boot of `3fd70ae1d`.** Three
+rungs red, one of them lane A's own, and then a kernel panic that was also
+lane A's:
+
+- The panic: `kshell::self_test` rung 21 asserted `syshealth` exits 0, and
+  `syshealth` correctly reported a real fault — lockdep had caught an AB/BA
+  inversion in the VFS: `flock`/`funlock`/`lock_query` resolved the file's
+  identity (locking the mounted filesystem) while holding `LOCK_TABLE`, and
+  procfs's `/proc/locks` takes `LOCK_TABLE` under the procfs lock. The
+  assertion turned the report into a panic, and every self-test after it —
+  the network checks among them — never ran. Both fixed in the next change:
+  the identity is resolved before the table is taken (as `reclock.rs`
+  already did), and rung 21 now asserts that each checker's status matches
+  its printed verdict, failing the self-test at the end, not panicking, when
+  the kernel is unhealthy.
+
+- `ctest-python-repl`: exit 4, as above. Lane D fixed `execv` on its branch
+  on 2026-09-25 (`execve(path, argv, current_environ())`); it is not on `main`.
+  The rung needs both that and lane A's grant fix, which is on `lane-a` only —
+  so each lane's boot stays red on this rung until the other's fix is on
+  `main` (A-Q20; resolved by §968: lane A publishes under its three conditions).
+- `Path-Z real CMake`, `cmake 01`: exit -8. CMake ran its script, then crashed
+  inside `exit`: `cmsys::RegularExpression::~RegularExpression()` called with
+  `this = NULL` (fault at 0x220; symbolised from `build/spike/cmake-slateos.elf`).
+  libc's `__cxa_atexit` is a stub that drops the object pointer, so every C++
+  static destructor runs on a null `this`; its 32-entry table is also far too
+  small for CMake. Lane D's code:
+  `requests/a-d-cxa-atexit-drops-the-object-so-static-destructors-run-on-null.md`.
+- `SYS_PROCESS_SPAWN_EX2 argument-ABI`: probe 0x18. Lane A's own: §960 added
+  `cwd_ptr`/`cwd_len` to `SpawnEx2Args` (128 → 144 bytes) and the ring-3
+  probe program still aimed "the unknown tail" at byte 128 — now `cwd_ptr`, a
+  known field, so accepted. Fixed in the next change: the tail probes moved to
+  144/152, and five probes (0x21-0x25) now cover the `cwd` fields' own rules.
+
+### [A] A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC: 21 syscalls copy a whole user buffer into one kernel allocation, and that allocation can now be 1 GiB -- 2026-09-25
+**Status:** OPEN (tech debt; `epoll_wait` fixed in the same change as §959, the rest listed below)
+
+**In short:** some system calls copy everything a program passes them into a
+kernel buffer of the same size before doing anything with it — a 100 MB
+`write` makes a 100 MB kernel copy. Until today the kernel could not make any
+single allocation above 16 MB, so these calls failed on big buffers. They now
+succeed, because large kernel allocations are mapped from vmalloc
+(design-decisions.md §959). Nothing breaks, but one program can now make the
+kernel hold up to 1 GiB (the vmalloc region's size) for the length of one call,
+and several such calls at once can fill the region, after which other large
+kernel allocations fail with `OutOfMemory` until they finish.
+
+**Why it is bounded rather than an open hole.** Every one of these sites
+reads its source with `copy_from_user` (through `read_user_vec`), so the caller
+must actually have that much readable memory mapped — and memory here is
+committed by default. The amplification is 1:1, not the 1:100 of the 16 MiB
+case the 2026-09-21 `poll` entry describes. It is a resource problem, not a
+crash: every site allocates fallibly and returns `ENOMEM`.
+
+**The sites** — each copies `len` bytes taken straight from the syscall
+arguments, with no cap before the copy (`read_user_vec(ptr, len, usize::MAX)`
+or `alloc_zeroed_vec(len)`), line numbers as of 2026-09-25:
+
+| where | calls |
+|---|---|
+| `syscall/handlers.rs` | `sys_channel_send`, `_send_timeout`, `_send_blocking`, `_send_caps` (1483, 1674, 1705, 1746); `sys_pipe_write`, `_try_write`, `_write_timeout` (2228, 2286, 2403); `sys_socketpair_send`, `_try_send`, `_send_timeout` (2497, 2542, 2598); `pty_master_write_common` (6031); `sys_fs_write_file`, `sys_fs_write`, `sys_fs_append` (9225, 10530, 12216); `sys_tcp_send`, `sys_udp_send` (12670, 12992); the three ELF-image spawns (3334, 3448, 8486) |
+| `syscall/linux.rs` | `dispatch_memfd_write`, `dispatch_memfd_read` (4249, 4285) |
+
+A channel message, a pipe write or a datagram has a natural size far below
+this. `sys_fs_write_file` argues in a comment, correctly, that its copy is
+proportional to memory the caller has already committed; what changed is only
+that "proportional" now runs to 1 GiB where the allocator used to stop it at
+16 MiB.
+
+**Fixed alongside:** `epoll_wait` allocated `maxevents * 12` bytes up front, and
+`maxevents` may be up to `EP_MAX_EVENTS` (`INT_MAX / 12`) whatever the set
+holds, so one call on a three-fd epoll set could commit 1 GiB. It now sizes the
+buffer by `min(maxevents, interest set)` — one record per registered fd is the
+most a pass can produce.
+
+**The proper fix** is Linux's: data syscalls stream in bounded chunks (a
+page-cache-sized bounce buffer, or copying straight into the destination),
+and never hold a kernel copy proportional to the request. The ELF-image
+spawns are the exception that genuinely wants the whole image, and they are
+the reason §959 exists; they should be bounded by a per-process limit rather
+than by the allocator.
+
+### [A] `A-PER-FILE-STATE-OUTLIVED-ITS-FILE` — a deleted file's ACL, flags, seals and search attributes passed to the next file given its inode number -- 2026-09-25
+
+**Status:** FIXED on lane-a 2026-09-25 (`fs::perfile`), awaiting a boot. What
+remains open is listed at the end.
+
+**In short:** four kernel tables remember things about files -- an ACL (who
+may open it), `chattr`-style flags, seals, and the searchable attributes of
+`fs::queryable`. Since 2026-09-21 they have filed each entry under the file's
+identity (its filesystem plus inode number) rather than its name, so that two
+names for one file share one entry. Nothing ever removed an entry when its
+file was deleted. On ext4 the next file created is given the deleted file's
+inode number, so that new file silently picked up the old one's ACL, flags,
+seals and attributes -- including an ACL granting some other user access it
+was never meant to have.
+
+**Demonstrated, not inferred.** A host harness (the four modules and
+`fs::perfile` compiled for the host, with a stub filesystem that reuses inode
+numbers lowest-first, as ext4 does): plant state on `/tmp/hz-a`, delete it,
+create `/tmp/hz-d`. The new file got `FileId { fs_id: 9, ino: 2 }`, the same
+identity. With the fix it carries nothing; with the lifecycle events switched
+off -- the code before the fix -- `acl`, `immutable`, `sealing` and
+`queryable` all report it carrying the deleted file's entry.
+
+**Why no boot saw it.** `/tmp` is memfs, which counts inode numbers up and
+never reuses one; every identity rung runs there. The rootfs is ext4.
+
+**Where the premise came from.** Lane C's
+`TD-C-A-LIMIT-NEEDS-A-COUNT-AND-A-DELEGATION-NEEDS-A-WITNESS` table says
+"`FileId` = `(fs_id, ino)`, never reused". Only the `fs_id` half is never
+reused; the `FileId` docs never claimed more (they now say so outright). The
+identity conversions of 2026-09-21 (dd-954 onward) were right to key on
+identity. What they missed is that an identity has a lifetime.
+
+**Severity.** Low today and pre-positioned, the same reasoning `acl.rs` gives
+for its own keying fix: only a `kshell` command can create an ACL, seal or
+flag entry, nothing in the VFS consults the flags or seals yet, and queryable
+attributes are set only by callers of its API. Each of those is a future
+syscall, and each would have armed this.
+
+**The fix.** The VFS now reports the events that change what an identity
+means, and each table registered in `fs::perfile::TABLES` handles them:
+
+| event | sent from | table's response |
+|---|---|---|
+| last name removed (`nlinks <= 1`, or a directory) | `remove`, `rmdir`, `unlink_at_pinned`, and the name a replacing rename displaces | drop the entry |
+| renamed | `rename`, `rename_noreplace`, `rename_at_pinned` | move the stored name (and a path key) at or under the old name |
+| exchanged | `rename_exchange`, `rename_at_pinned(EXCHANGE)` | swap them |
+| unmounted | `unmount` | drop every entry on that `fs_id` |
+
+The identity is read with `lmetadata`, under the same filesystem lock as the
+removal: removing a symlink must not end its target's state, and after the
+removal the number may already be someone else's. Removing one of two hard
+links ends nothing. A rename onto the moving file's own name (same path, or
+two names of one inode) displaces nothing. Rationale for ending state at the
+last name rather than the last close: design-decisions.md §962.
+
+**Fixed alongside:**
+
+- `queryable`'s value index was updated under whichever name each call used,
+  so an attribute changed or removed through a second hard link left the old
+  value indexed against the first name. Every index update now uses the
+  record's own name, as `create_index` always did.
+- `immutable::rename_path` and `queryable::rename_path` derived keys by
+  looking names up, which is wrong at any moment (before a rename the new name
+  holds nothing, after it the old name does). Both now rewrite stored names.
+- `sealing::remove_on_delete` had no callers and compared names only; it now
+  goes through the same identity-aware path.
+- `acl.rs`'s module docs said ACLs were stored in the `system.posix_acl_access`
+  xattr with the table as a cache. Nothing ever did that; the docs now say
+  "in memory only".
+
+**Verified by:** `fs::perfile::self_test` (six rungs through the real VFS on
+`/tmp`: last name, replacing rename, rename, directory rename, exchange,
+unmount), run by the boot after `queryable-attrs`. On the host it passes with
+memfs-style and ext4-style numbering, and fails without the events.
+
+**Still open:**
+
+- *The reported name can go stale.* Each entry keeps the name it was set
+  through, moved by later renames. If that name is removed while the file
+  lives on under another hard link, `/proc` listings and query results show
+  the removed name until the file goes. Nothing maps an identity back to its
+  surviving names.
+- *A rename scans every table.* It is nothing when the tables are empty, which
+  is nearly always, and a few milliseconds at the 65,536 entries `queryable`
+  and `immutable` allow. An ordered index by stored name would make it a range
+  lookup if that ever matters.
+- *The long-term home is the inode.* Linux keeps ACLs in the
+  `system.posix_acl_access` xattr and the flags in the inode, so they end with
+  it by construction and survive a reboot, which these in-memory tables do
+  not. The VFS has working xattrs (ext4's included). Moving the tables there
+  is a larger change, with on-disk format consequences, and would retire most
+  of `fs::perfile`.
 
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 
@@ -165272,6 +168370,43 @@ since it takes bytes differently), its `in_buffer_file_pos_log`, and its
 file position through every read. No writer's file reaches any of them, and
 20,000 fuzzed files found none.
 
+### [A] Four loopback network self-tests fail into a WARNING that no boot counts -- 2026-09-26
+
+**Status:** OPEN — lane A's; to be converted after the next boot that reaches them (trigger below).
+
+**In short:** four of the boot's network self-tests run entirely inside the
+machine, over the network daemon's software loopback, so an error from any of
+them is a real bug rather than a network hiccup. Each still ends in a
+`WARNING:` line, and the boot test does not count a `WARNING:` as a failure --
+so a regression in any of them would pass the boot, printed where nobody
+looks.
+
+**Where.** `kernel/src/proc/spawn.rs`, `run_persistent_netstack`: the `Err`
+arms of `net::socket::self_test_server` (the object-layer server socket),
+`netstack_client::self_test_connect6`, `self_test_udp6_loopback` and
+`self_test_udp_connect`. `scripts/boot-test.sh` reds a run only on
+`self-test failed` (`check_selftest_failures`).
+
+**Why they were not converted with listen/accept (2026-09-26).** The
+listen/accept check was converted in the change that fixed lane F's
+listener-`poll` bug, because that change is what it tests. These four have
+not been seen to run lately: `run_persistent_netstack` is the last thing
+before `BOOT_OK`, and no serial log on this machine from the last four days
+(lanes A, C, D, E) gets that far -- every one of those boots was starved or
+stuck earlier. Converting them blind would put four unseen results in the way
+of the integration boot that carries the scheduler fix; the boot that reaches
+them shows whether each passes first.
+
+**The proper fix.** Each `Err` arm prints a `FAIL:` line and calls
+`crate::selftest::dispatch_debug(<name>, Severity::Diagnostic, Err(e))`, as
+the head-of-line witness and listen/accept now do. The head-of-line comment's
+distinction -- "a warning is right for a parity check that can be defeated by
+the environment (no lease, no IPv6 peer)" -- is already honoured by their
+`Ok(None)` skip arms; an `Err` from a loopback check is not environmental.
+
+**Trigger.** The first boot whose serial log contains
+`[spawn]   persistent netstack listen/accept:`. If any of the four printed a
+`WARNING: ... error` there, that is a bug to fix before converting it.
 ### [F] A PNG decodes at about twice Pillow's cost, and inflating it is nearly all of that -- 2026-09-26
 
 **Status:** OPEN — the part left is not lane F's code: waiting on lanes A and B

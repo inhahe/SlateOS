@@ -9739,7 +9739,7 @@ fn cmd_clear() {
 ///
 /// Usage:
 ///   color                   — show current scheme and list available schemes
-///   color <name>            — apply a built-in scheme
+///   color `<name>`            — apply a built-in scheme
 ///   color fg RRGGBB         — set default foreground (hex RGB)
 ///   color bg RRGGBB         — set default background (hex RGB)
 #[allow(clippy::arithmetic_side_effects)]
@@ -10449,6 +10449,11 @@ fn interpret_echo_escapes(s: &str) -> String {
 /// On any assertion failure.
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
+
+    // Set by rung 21 when `syshealth` or `invariant` reports a real fault
+    // somewhere else in the kernel: the rungs after it still run, and the
+    // self-test fails at the end instead of panicking where it stood. See 21.
+    let mut kernel_health_fault = false;
 
     serial_println!("  kshell::self_test 1: echo -e escapes (ASCII)");
     assert_eq!(interpret_echo_escapes("a\\nb"), "a\nb");
@@ -11598,12 +11603,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // success. These are the commands that end up in boot scripts and health
     // checks -- the one place where the status is the only thing read.
     //
-    // The failing side cannot be exercised from a healthy kernel: `syshealth`
-    // only says ISSUES DETECTED when the heap really is corrupt. That is
-    // exactly why the bug survived so long, so what is asserted here is the
-    // passing side (a checker that passes must still report 0 -- otherwise a
-    // blanket `set_exit(1)` would "fix" the bug and break every caller) plus
-    // the failure this rung *can* force: a category that checks nothing.
+    // What is asserted is that the status IS the verdict, in both directions:
+    // a checker whose report says it passed exits 0 (so a blanket
+    // `set_exit(1)` cannot "fix" the bug and break every caller), and one
+    // whose report says it failed exits 1. The failing side cannot be forced
+    // from here -- `syshealth` only fails when something really is wrong --
+    // so the rung also forces the failure it *can*: a category that checks
+    // nothing.
+    //
+    // WHETHER THE KERNEL IS HEALTHY IS NOT THIS RUNG'S SUBJECT, and it used to
+    // be asserted as if it were: `assert_eq!(last_exit(), 0)` turned a real
+    // fault found by `syshealth` into a kernel panic here. On the 2026-09-26
+    // integration boot that fault was a genuine lock-order inversion in the
+    // VFS (`flock` resolved a file under `LOCK_TABLE`, the reverse of
+    // `/proc/locks`), `syshealth` reported it correctly -- 6/7, exit 1 -- and
+    // the panic then threw away every self-test after this one, the network
+    // checks among them. An unhealthy kernel now fails this self-test at the
+    // end, after every rung has run and reported.
     {
         let out = capture_command("syshealth");
         assert_output_starts_with(
@@ -11618,7 +11634,20 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // boot. The checker already printed the answer; capturing it into a
         // buffer is what threw it away.
         dump_if_failed("syshealth", &out);
-        assert_eq!(last_exit(), 0, "a checker that passed reports success");
+        let healthy = output_contains(&out, b"System: ALL CHECKS PASSED");
+        assert_eq!(
+            last_exit(),
+            u8::from(!healthy),
+            "`syshealth`'s status is its verdict"
+        );
+        if !healthy {
+            serial_println!(
+                "  !! `syshealth` found a real fault (its report is above). It \
+                 fails this self-test at the end, not here: the rungs after \
+                 this one still run."
+            );
+            kernel_health_fault = true;
+        }
 
         let out = capture_command("invariant");
         assert_output_starts_with(
@@ -11627,7 +11656,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             b"=== Kernel Invariant Check ",
         );
         dump_if_failed("invariant", &out);
-        assert_eq!(last_exit(), 0, "all invariants hold on a healthy kernel");
+        let holds = output_contains(&out, b" invariants PASSED");
+        assert_eq!(
+            last_exit(),
+            u8::from(!holds),
+            "`invariant`'s status is its verdict"
+        );
+        if !holds {
+            serial_println!(
+                "  !! `invariant` found a violated invariant (its report is \
+                 above). It fails this self-test at the end, not here."
+            );
+            kernel_health_fault = true;
+        }
 
         // A misspelled category checks nothing, and nothing checked is not a
         // clean bill of health.
@@ -23566,6 +23607,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
+    if kernel_health_fault {
+        serial_println!(
+            "  kshell::self_test FAILED: every rung ran, and rung 21's health \
+             checkers found a real fault elsewhere in the kernel (reported there)"
+        );
+        return Err(crate::error::KernelError::InternalError);
+    }
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -25024,7 +25072,7 @@ fn cmd_blkread(args: &str) {
     }
 }
 
-/// Parse blkread args: either "<sector>" or "<device> <sector>".
+/// Parse blkread args: either "`<sector>`" or "`<device>` `<sector>`".
 ///
 /// Returns `None` having already said why, so the caller has nothing left to
 /// decide. The previous signature returned `(device, Option<u64>)` and folded
@@ -31890,10 +31938,10 @@ fn cmd_encrypt(args: &str) {
 /// `fsearch` — advanced file search with compound queries.
 ///
 /// Subcommands:
-///   fsearch name <pattern> [path]   — search by name substring
-///   fsearch glob <pattern> [path]   — search by glob pattern
-///   fsearch ext <ext> [path]        — search by file extension
-///   fsearch size <min> [max] [path] — search by size range
+///   fsearch name `<pattern>` [path]   — search by name substring
+///   fsearch glob `<pattern>` [path]   — search by glob pattern
+///   fsearch ext `<ext>` [path]        — search by file extension
+///   fsearch size `<min>` [max] [path] — search by size range
 ///   fsearch type <file|dir> [path]  — search by entry type
 ///   fsearch query [path]            — interactive compound query
 ///   fsearch stats                   — show search statistics
@@ -32134,12 +32182,12 @@ fn cmd_fsearch(args: &str) {
 /// `tag` — file tagging system for BFS-style metadata queries.
 ///
 /// Subcommands:
-///   tag add <path> <tag>           — add a tag to a file
-///   tag rm <path> <tag>            — remove a tag from a file
-///   tag get <path>                 — list tags on a file
-///   tag set <path> <tag1,tag2,...> — set all tags on a file
-///   tag clear <path>               — remove all tags from a file
-///   tag search <tag> [path]        — find files with a tag
+///   tag add `<path>` `<tag>`           — add a tag to a file
+///   tag rm `<path>` `<tag>`            — remove a tag from a file
+///   tag get `<path>`                 — list tags on a file
+///   tag set `<path>` <tag1,tag2,...> — set all tags on a file
+///   tag clear `<path>`               — remove all tags from a file
+///   tag search `<tag>` [path]        — find files with a tag
 ///   tag find <tag1,tag2> [path]    — find files with ALL tags
 ///   tag list                       — list all known tags
 ///   tag index [path]               — build/rebuild tag index
@@ -32511,11 +32559,11 @@ fn cmd_fshealth(_args: &str) {
 /// `fswatch` — create and read filesystem watches.
 ///
 /// Subcommands:
-///   fswatch <path>                 — create watch and drain events
-///   fswatch create <path> [mask]   — create a watch (returns ID)
-///   fswatch read <id> [count]      — read events from a watch
-///   fswatch close <id>             — close a watch
-///   fswatch pending <id>           — show pending event count
+///   fswatch `<path>`                 — create watch and drain events
+///   fswatch create `<path>` [mask]   — create a watch (returns ID)
+///   fswatch read `<id>` [count]      — read events from a watch
+///   fswatch close `<id>`             — close a watch
+///   fswatch pending `<id>`           — show pending event count
 fn cmd_fswatch(args: &str) {
     use crate::fs::notify;
 
@@ -49389,7 +49437,7 @@ enum Toggle {
 /// This is [`optional_num`]'s defect, in the shape that hides it best. Those
 /// arms were written as
 ///
-/// ```ignore
+/// ```text
 /// match parts.get(1).copied().unwrap_or("") {
 ///     "on" | "true" => { set(true); … }
 ///     "off" | "false" => { set(false); … }
@@ -100091,7 +100139,7 @@ fn cmd_groupmgr(args: &str) {
 
 /// Parse a group type, or `None` if the word names no type.
 ///
-/// Returns `Option` rather than falling back to [`GroupType::User`]. The
+/// Returns `Option` rather than falling back to [`crate::fs::groupmgr::GroupType::User`]. The
 /// fallback made every unrecognised word mean "user", which is not a neutral
 /// reading: `system` and `service` are the two that carry meaning, so a typo in
 /// either was silently answered with the least of the three. The caller decides
@@ -117111,8 +117159,8 @@ fn cmd_ping6(args: &str) {
 /// `udp6` — send and receive UDP datagrams over IPv6.
 ///
 /// Usage:
-///   udp6 send <ipv6-addr> <port> <message>   — send a UDP datagram
-///   udp6 listen <port> [timeout_ms]           — listen for datagrams
+///   udp6 send `<ipv6-addr>` `<port>` `<message>`   — send a UDP datagram
+///   udp6 listen `<port>` `[timeout_ms]`           — listen for datagrams
 fn cmd_udp6(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
@@ -122542,18 +122590,18 @@ pub fn cli_resource_parser_self_test() -> crate::error::KernelResult<()> {
 /// memory can drive SlateOS containers with familiar verbs. Each Docker
 /// subcommand is rewritten to the equivalent native command and dispatched:
 ///
-///   docker run <image-dir> [flags...]   → oci run <image-dir> [flags...]
-///   docker create <image-dir> [flags..] → oci create <image-dir> [flags...]
+///   docker run `<image-dir>` [flags...]   → oci run `<image-dir>` [flags...]
+///   docker create `<image-dir>` [flags..] → oci create `<image-dir>` [flags...]
 ///   docker ps [-a]                       → container list (all states)
-///   docker start <id>                    → container start <id>
-///   docker stop <id>                     → container stop <id>
-///   docker rm <id>                       → container delete <id>
-///   docker inspect <id>                  → container info <id>
-///   docker exec <id> <command...>        → container exec <id> <command...>
+///   docker start `<id>`                    → container start `<id>`
+///   docker stop `<id>`                     → container stop `<id>`
+///   docker rm `<id>`                       → container delete `<id>`
+///   docker inspect `<id>`                  → container info `<id>`
+///   docker exec `<id>` <command...>        → container exec `<id>` <command...>
 ///   docker images                        → oci images (list the named store)
-///   docker tag <dir|ref> <ref>           → oci tag (import a dir or re-tag)
-///   docker rmi <ref>                      → oci rmi (remove a store tag)
-///   docker commit <id> <name:tag>        → author a new image from a
+///   docker tag <dir|ref> `<ref>`           → oci tag (import a dir or re-tag)
+///   docker rmi `<ref>`                      → oci rmi (remove a store tag)
+///   docker commit `<id>` <name:tag>        → author a new image from a
 ///                                          container's changes, tag it in the store
 ///
 /// `docker ps` lists every container regardless of state (SlateOS has no
@@ -124214,9 +124262,9 @@ fn oci_run(parts: &[&str]) {
 /// `oci` — OCI container image management.
 ///
 /// Subcommands:
-///   oci inspect <dir>   — parse and display OCI image metadata
-///   oci layers <dir>    — list image layers with digests
-///   oci verify <dir>    — verify all blob digests
+///   oci inspect `<dir>`   — parse and display OCI image metadata
+///   oci layers `<dir>`    — list image layers with digests
+///   oci verify `<dir>`    — verify all blob digests
 ///   oci test            — run self-tests
 fn cmd_oci(args: &str) {
     use crate::oci;
@@ -134277,7 +134325,7 @@ fn cmd_kobjects(args: &str) {
 ///   selftest         — run all tests
 ///   selftest list    — list available test suites
 ///   selftest mm      — run only memory subsystem tests
-///   selftest <name>  — run a specific named test
+///   selftest `<name>`  — run a specific named test
 fn cmd_selftest(args: &str) {
     use crate::selftest;
 
@@ -134613,10 +134661,10 @@ fn cmd_rip_sample(args: &str) {
 /// `watch` — software memory watchpoints.
 ///
 /// Usage:
-///   watch add <addr> [label]  — add watchpoint on kernel address
+///   watch add `<addr>` [label]  — add watchpoint on kernel address
 ///   watch list                — show active watchpoints
 ///   watch poll                — check for changes
-///   watch del <slot>          — remove watchpoint
+///   watch del `<slot>`          — remove watchpoint
 ///   watch events              — show recent change events
 ///   watch clear               — remove all watchpoints
 fn cmd_watchpoint(args: &str) {
@@ -135122,9 +135170,9 @@ fn cmd_syscall_prof(args: &str) {
 ///
 /// Usage:
 ///   faultinject              — show current injection status
-///   faultinject fail <N>     — arm: fail next N allocations
-///   faultinject after <N>    — arm: fail after N successful allocs
-///   faultinject prob <N>     — arm: fail every Nth allocation
+///   faultinject fail `<N>`     — arm: fail next N allocations
+///   faultinject after `<N>`    — arm: fail after N successful allocs
+///   faultinject prob `<N>`     — arm: fail every Nth allocation
 ///   faultinject off          — disarm all injection
 fn cmd_fault_inject(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
@@ -142110,7 +142158,7 @@ fn split_lines(text: &[u8]) -> Vec<&[u8]> {
 /// it, which defeats the entire point of the command doing the padding.
 ///
 /// It is a deliberate mirror of the console's own byte→cell rule
-/// ([`crate::console::putchar_normal`] plus its UTF-8 accumulator), because the
+/// (`crate::console::putchar_normal` plus its UTF-8 accumulator), because the
 /// only width that aligns a table is the width the thing is actually drawn at.
 /// The three rules, in the console's order:
 ///
@@ -143592,12 +143640,12 @@ impl AwkPattern {
 
 /// The statements this shell's `awk` can run.
 ///
-/// The enum exists so that [`awk_exec_action`] and [`awk_validate_program`]
+/// The enum exists so that [`awk_exec_action`] and [`awk_compile_program`]
 /// cannot disagree about what is supported: both go through
 /// [`awk_classify_stmt`], and adding a variant is the only way to widen the
 /// set. A separate `is_supported` predicate beside the executor's `match` arms
 /// would be a second copy of the same list, which is the shape that drifted in
-/// [`awk_compare`].
+/// `awk_compare`, since replaced by [`awk_parse_cmp`].
 enum AwkStmt<'a> {
     /// `print` / `print $0` — the whole record, byte for byte.
     PrintRecord,
@@ -143607,7 +143655,7 @@ enum AwkStmt<'a> {
 
 /// Recognise one awk statement, or `None` if this shell cannot run it.
 ///
-/// `None` is a refusal, not a no-op: [`awk_validate_program`] turns it into
+/// `None` is a refusal, not a no-op: [`awk_compile_program`] turns it into
 /// `awk: unsupported statement: '…'` and exit 2 before any rule runs. See
 /// design-decisions §294 for why the whole program is refused rather than the
 /// recognised parts being run.
@@ -143630,7 +143678,7 @@ fn awk_classify_stmt(stmt: &str) -> Option<AwkStmt<'_>> {
 /// because `$0` and the fields are now bytes: a record that is not valid UTF-8
 /// is printed as it was read instead of being replaced or dropped.
 ///
-/// Every statement here has already been accepted by [`awk_validate_program`],
+/// Every statement here has already been accepted by [`awk_compile_program`],
 /// so the unrecognised arms are unreachable for any program that gets this far.
 /// They are still written as skips rather than panics: a panic in the kernel
 /// shell takes the kernel with it, and an escape from the validator should cost
@@ -143761,8 +143809,10 @@ fn awk_compile_program(
 /// Evaluate a print expression, expanding $N, NR, NF, and string literals.
 ///
 /// `None` if any argument is an expression this shell cannot evaluate. Like
-/// [`awk_pattern_eval`], whether the answer is `Some` depends on `expr` alone,
-/// which is what lets [`awk_validate_program`] ask with a dummy record.
+/// [`awk_compile_pattern`], whether the answer is `Some` depends on `expr`
+/// alone, which is what lets [`awk_compile_program`] settle the question
+/// before any input is read — it no longer asks with a dummy record, because
+/// the compiled pattern is what runs.
 ///
 /// The arguments are joined with a single space, which is `OFS`'s default and
 /// the only value this shell supports; assigning `OFS` is an unsupported
@@ -144332,7 +144382,7 @@ fn bench_memcpy() {
 /// Usage:
 ///   report              — full diagnostic report (all sections)
 ///   report summary      — one-line health summary
-///   report <section>    — single section (memory, sched, ipc, obj, cap, migrate, invar)
+///   report `<section>`    — single section (memory, sched, ipc, obj, cap, migrate, invar)
 fn cmd_diag_report(args: &str) {
     use crate::kdiag;
 
@@ -144713,9 +144763,9 @@ fn cmd_fairness() {
 /// Subcommands:
 ///   new [name]        — create a new session
 ///   list              — list all sessions
-///   switch <id>       — switch to session (alias: attach)
-///   kill <id>         — destroy a session
-///   rename <id> name  — rename a session
+///   switch `<id>`       — switch to session (alias: attach)
+///   kill `<id>`         — destroy a session
+///   rename `<id>` name  — rename a session
 ///   (no args)         — show current session info
 fn cmd_tsession(args: &str) {
     use crate::termsession;

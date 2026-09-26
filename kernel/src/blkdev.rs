@@ -481,7 +481,7 @@ impl RamBlockDevice {
     /// Exists because until 2026-08-26 nothing in the tree could set
     /// `read_only`, which made it a field with exactly one reachable value and
     /// left three branches on it — [`BlockDevice::write_sector`]'s refusal,
-    /// [`BlockDevice::is_writable`], and `fs::devfs`'s
+    /// [`BlockDevice::supports_discard`], and `fs::devfs`'s
     /// [`KernelError::ReadOnlyFilesystem`] — as code no test could enter. A
     /// write-protected stick (the physical switch, or a device the driver
     /// probed as read-only) is an ordinary thing for a disk imager to be

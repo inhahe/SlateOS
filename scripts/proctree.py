@@ -51,6 +51,33 @@ from pathlib import Path, PurePosixPath
 
 IS_WINDOWS = sys.platform.startswith("win")
 
+
+@dataclass
+class Accounting:
+    """What a tree's processes cost, over its whole life so far: CPU seconds
+    in user and kernel mode, and how many processes it ran -- the exited
+    ones counted in full. See `job_accounting`."""
+
+    user_s: float
+    kernel_s: float
+    processes: int
+
+    @property
+    def cpu_s(self) -> float:
+        return self.user_s + self.kernel_s
+
+    def summary(self) -> str:
+        """One phrase for a log line, in hours once that reads better."""
+        def span(sec: float) -> str:
+            # One decimal below ten seconds: a short run that did real work
+            # must not read "0 s", which says it cost nothing.
+            if sec >= 3600:
+                return f"{sec / 3600:.2f} h"
+            return f"{sec:.0f} s" if sec >= 10 else f"{sec:.1f} s"
+        return (f"CPU {span(self.cpu_s)} (user {span(self.user_s)}, kernel "
+                f"{span(self.kernel_s)}) across {self.processes} process(es)")
+
+
 # How long to wait for the capture threads once the tree is dead. Their pipes'
 # write ends are all closed by then, so this is a guard against the impossible
 # rather than a real budget.
@@ -132,6 +159,43 @@ if IS_WINDOWS:
         # proc._handle is the process HANDLE on Windows.
         return bool(_k32.AssignProcessToJobObject(job, int(proc._handle)))
 
+    JobObjectBasicAccountingInformation = 1
+
+    class _JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("TotalUserTime", wintypes.LARGE_INTEGER),
+            ("TotalKernelTime", wintypes.LARGE_INTEGER),
+            ("ThisPeriodTotalUserTime", wintypes.LARGE_INTEGER),
+            ("ThisPeriodTotalKernelTime", wintypes.LARGE_INTEGER),
+            ("TotalPageFaultCount", wintypes.DWORD),
+            ("TotalProcesses", wintypes.DWORD),
+            ("ActiveProcesses", wintypes.DWORD),
+            ("TotalTerminatedProcesses", wintypes.DWORD),
+        ]
+
+    def job_accounting(job) -> Accounting | None:
+        """What the job's processes have cost so far, exited ones included --
+        which is the point: a boot test's CPU is mostly thousands of processes
+        that live for a fraction of a second, and no sampler taken from outside
+        sees them, while the job has counted every one. None when there is no
+        job or the query fails."""
+        if not job:
+            return None
+        info = _JOBOBJECT_BASIC_ACCOUNTING_INFORMATION()
+        if not _k32.QueryInformationJobObject(
+            job,
+            JobObjectBasicAccountingInformation,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+            None,
+        ):
+            return None
+        return Accounting(
+            user_s=info.TotalUserTime / 1e7,
+            kernel_s=info.TotalKernelTime / 1e7,
+            processes=info.TotalProcesses,
+        )
+
     def close_job(job) -> None:
         if job:
             _k32.CloseHandle(job)
@@ -184,6 +248,12 @@ else:
 
     def assign_to_job(job, proc) -> bool:
         return True  # child already leads its own group (start_new_session)
+
+    def job_accounting(job) -> Accounting | None:
+        # A process group keeps no totals. `getrusage(RUSAGE_CHILDREN)` would
+        # count only descendants somebody waited for, and this runner's other
+        # children too -- a number that looks like the tree's and is not.
+        return None
 
     def close_job(job) -> None:
         return None
@@ -373,6 +443,12 @@ class Tree:
         """Terminate the whole tree. Safe to call more than once."""
         terminate_tree(self.job, self.proc)
         self.job = None
+
+    def accounting(self) -> Accounting | None:
+        """What the tree has cost so far (see `job_accounting`); None once the
+        job is closed -- after `kill` or the end of the `with` block -- or where
+        there is no job to ask (POSIX, or a job that could not be created)."""
+        return job_accounting(self.job)
 
     def __enter__(self) -> "Tree":
         return self

@@ -594,6 +594,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // Test 4: STAC/CLAC don't fault — only when SMAP hardware is present.
     // STAC/CLAC require CPUID SMAP support; they #UD on CPUs without it.
     if s.hw_smap {
+        // SAFETY: STAC and CLAC raise #UD on a CPU without CPUID.SMAP, and
+        // this arm is entered only when `s.hw_smap` reported the feature
+        // present. The pair is balanced, so AC is left clear exactly as it
+        // was found and no user access is enabled past this block.
         unsafe {
             stac();
             clac();
@@ -601,12 +605,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!("[smep_smap]   STAC/CLAC pair: OK (no fault)");
 
         // Test 5: with_user_access closure executes and returns value.
+        // SAFETY: `with_user_access` requires the closure to touch only
+        // range-checked user memory. This closure touches none at all -- it
+        // returns a constant -- so the requirement holds vacuously. The call
+        // exists to prove the wrapper runs its body and propagates the value,
+        // not to read anything across the boundary.
         let result = unsafe { with_user_access(|| 42u64) };
         assert_eq!(result, 42);
         serial_println!("[smep_smap]   with_user_access: OK");
 
         // Test 6: Access count incremented correctly.
         let count_before = USER_ACCESS_COUNT.load(Ordering::Relaxed);
+        // SAFETY: as at the STAC/CLAC pair above -- reached only under
+        // `s.hw_smap`, and balanced, so AC ends clear.
         unsafe {
             stac();
             clac();

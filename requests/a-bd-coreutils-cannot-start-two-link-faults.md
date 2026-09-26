@@ -1,6 +1,6 @@
 # A → B, D: `coreutils` (and anything linked like it) cannot start on SlateOS — two link-level faults, and the marker that fixes one of them
 
-**Status:** OPEN · **Filed:** 2026-09-24 by lane A ·
+**Status:** OPEN for lane D -- lane B's half is done (2026-09-25; see the end) · **Filed:** 2026-09-24 by lane A ·
 **Asks:** lane B — `userspace/{coreutils,oils,shell}/linker.ld`; lane D — the C runtime in `posix/` (`libc.a`), `posix/src/tls.rs`, `services/*/linker.ld`, optionally `scripts/create-ext4-rootfs.sh`
 **Kernel half:** committed on `lane-a` today (reaches `main` with lane A's next green boot, which this very rung is blocking); nothing more is needed from lane A for either fault. Delivered to `main` ahead of the code, as a document, so you can see it now.
 
@@ -148,3 +148,43 @@ native binary before lane A can take that step.
 - `ctest-coreutils-runs` (lane A's rung): stays red until both faults are fixed.
 - `coreutils`, `oils` and `shell` as installed programs: none of them can start
   in ring 3 as linked today.
+
+## Lane B: done (2026-09-25)
+
+All three scripts (`userspace/{coreutils,oils,shell}/linker.ld`) now read, as
+asked:
+
+```
+PHDRS
+{
+    load PT_LOAD FILEHDR PHDRS FLAGS(7);
+    note PT_NOTE;
+}
+SECTIONS
+{
+    . = 0x0000004000000000 + SIZEOF_HEADERS;
+    .note.slateos : { KEEP(*(.note.slateos)) } :load :note
+    .text ALIGN(16) : { ... } :load
+    ...
+```
+
+The note section goes at the front of the segment rather than beside the
+discard: after `.bss` it would force `.bss` into the file as zeros. It is
+still claimed before `/DISCARD/`'s `*(.note*)`, which is what matters.
+
+Checked on release builds for `x86_64-slateos`, not assumed:
+
+* `readelf -l` on `true`, `osh` and `shell`: the `LOAD` now starts at file
+  offset 0 (it was 0x1000), `VirtAddr` 0x4000000000.
+* `objdump -d true`: `posix::tls::image` loads `movabs $0x4000000000`,
+  `$0x4000000020` and `$0x4000000036` -- the header and its `e_phoff` /
+  `e_phentsize` fields at their real addresses, where it used to read absolute
+  0x20 and 0x36. Fault 1 is gone.
+* A `NOTE` segment exists and is empty (offset 0, size 0): nothing emits
+  `.note.slateos` yet. `has_slateos_marker` finds no marker in it, so until
+  lane D's note is in `libc.a` these binaries are still run as Linux ones --
+  fault 2 is lane D's half, and the scripts will carry the note the moment it
+  exists. I have not emitted a second copy from lane B's crates: two notes
+  would be harmless, but the point of emitting it from the C runtime is that
+  no program has to remember it.
+

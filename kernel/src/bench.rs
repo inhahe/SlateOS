@@ -5297,7 +5297,7 @@ fn bench_ipc_pipe() -> KernelResult<()> {
 /// the overhead of creating a channel pair and brokering the connection.
 /// # Errors
 ///
-/// Propagates a registry failure, or [`KernelError::WouldBlock`] if a
+/// Propagates a registry failure, or [`crate::error::KernelError::WouldBlock`] if a
 /// connection that was just made is not pending on the listener. The service
 /// is unregistered on every path, including those.
 fn bench_service_connect() -> KernelResult<()> {
@@ -5943,10 +5943,11 @@ fn bench_page_fault() -> KernelResult<()> {
 
     let pml4 = page_table::cr3_to_pml4(page_table::read_cr3());
 
-    // Pick a kernel-space virtual address range that's not in use.
-    // Use a high address in the kernel reserved range.
-    // Must be 16 KiB aligned for map_frame.
-    let bench_virt_base: u64 = 0xFFFF_CB00_0000_0000;
+    // A kernel-space range reserved for this benchmark (kvspace::BENCH),
+    // 16 KiB aligned for map_frame. It has to be a registered region: the
+    // kernel half's top-level page-table entries are all created at boot and
+    // then frozen, so an unregistered address would be refused.
+    let bench_virt_base: u64 = crate::mm::kvspace::BENCH.start;
     let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
 
     // Measure only the demand-fault path: alloc_zeroed + map + local TLB flush.
@@ -7637,7 +7638,7 @@ const READDIR_MOUNT_ENTRIES: usize = 8;
 /// [`bench_vfs_readdir_breakdown`]'s cost model predicts for a 21-entry listing
 /// and what listing `/` actually costs, on a boot where `/` and `/tmp` are
 /// *both* `fs/memfs.rs`, so it is not a filesystem-type difference. About a
-/// third of it is attributed by inspection: [`Vfs::finish_listing`] calls
+/// third of it is attributed by inspection: [`crate::fs::vfs::Vfs::finish_listing`] calls
 /// `submount_root_ino` once per mount point, which is a full stat
 /// (`vfs_stat_breakdown_resolved` = 1928 ns), and five of those is 9.6us.
 ///

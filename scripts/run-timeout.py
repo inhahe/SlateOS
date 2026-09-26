@@ -39,6 +39,15 @@ While the child runs, the runner prints a heartbeat line every
 `--poll` seconds ("[run-timeout] still running, Ns elapsed") so a long
 build never looks like a silent hang, and it reports a clear final status.
 
+On Windows the final status also says what the run cost -- the CPU time of
+every process the tree ever ran, and how many there were -- read from the Job
+Object's own accounting, which counts processes that lived for milliseconds
+as well as the long ones. Nothing sampled from outside can: on 2026-09-26 a
+census of this host at 100% CPU could attribute only half of it to any
+process it saw, because the other half was the lanes' scripts starting and
+finishing thousands of processes between two snapshots. With this line, each
+boot test and test run reports its own share instead.
+
 **Do not pipe this into `tail`, `head`, `grep` or anything else when you are
 backgrounding it.** Those buffer, so nothing reaches the output file until the
 command *finishes* -- which turns the heartbeat into exactly the silence it
@@ -77,6 +86,14 @@ IS_WINDOWS = proctree.IS_WINDOWS
 
 def _log(msg: str) -> None:
     print(f"[run-timeout] {msg}", flush=True)
+
+
+def _cost(tree: "proctree.Tree") -> str:
+    """`; <what the tree cost>` for the final status line, or nothing where
+    there is no job to ask. Read before the job closes -- the totals go with
+    the handle, and closing it is also the kill."""
+    acct = tree.accounting()
+    return f"; {acct.summary()}" if acct is not None else ""
 
 
 def main(argv: list[str]) -> int:
@@ -134,7 +151,7 @@ def main(argv: list[str]) -> int:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     stop_heartbeat.set()
-                    _log(f"TIMEOUT after {timeout:g}s -- killing process tree")
+                    _log(f"TIMEOUT after {timeout:g}s -- killing process tree{_cost(tree)}")
                     tree.kill()
                     try:
                         tree.proc.wait(timeout=10)
@@ -148,11 +165,11 @@ def main(argv: list[str]) -> int:
                 stop_heartbeat.set()
                 elapsed = time.monotonic() - start
                 status = "PASS" if code == 0 else f"FAIL (exit {code})"
-                _log(f"child exited: {status}, {elapsed:.0f}s elapsed")
+                _log(f"child exited: {status}, {elapsed:.0f}s elapsed{_cost(tree)}")
                 return code
         except KeyboardInterrupt:
             stop_heartbeat.set()
-            _log("interrupted -- killing process tree")
+            _log(f"interrupted -- killing process tree{_cost(tree)}")
             tree.kill()
             return EXIT_INTERRUPT
 

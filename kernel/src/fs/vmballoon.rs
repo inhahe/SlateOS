@@ -80,7 +80,7 @@ where
 /// driver, so seeding it with invented inflate/deflate activity would be
 /// fabricated procfs data. The balloon driver advertises its capacity
 /// through [`configure`] when it attaches, and the counters advance only
-/// through real [`inflate`] / [`deflate`] / [`record_oom`] /
+/// through real [`inflate`] / [`fn@deflate`] / [`record_oom`] /
 /// [`record_free_hint`] calls.
 ///
 /// (Previously this seeded a fictional balloon — 100k current/target

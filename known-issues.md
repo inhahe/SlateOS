@@ -139688,7 +139688,18 @@ should install as something that does not promise partitioning, the way
 `login-cli` and `loginmgr` were separated in 4182acf8d after two programs both
 answered to `login`.
 
-## B-CROND-AND-ATD-NEVER-RUN-A-JOB (lane B, 2026-09-10) — open, and labelled
+## B-CROND-AND-ATD-NEVER-RUN-A-JOB (lane B, 2026-09-10) — lane B's part fixed; shipping it is lane D's
+
+**Status 2026-09-26:** everything lane B can do is done. There is one `crond`
+now (`userspace/crond`, the survivor of three; `userspace/cron`, the
+simulated one, is deleted), and it loads `/etc/crontab`, `/etc/cron.d` and
+every user's spool, `/var/spool/cron/crontabs/<user>` -- not only root's, as
+the "Still open" list below says. `atd` drains the at spool. **What remains is
+that neither reaches a user:** `scripts/rootfs-bin-manifest.txt` names no
+`crond`, `crontab`, `at` or `atd`, and nothing starts `crond` at boot --
+`services/init` is what starts services. Both are lane D's (the rootfs recipe
+and `services/**`); ask there when the manifest requests of 2026-09-25/26 have
+been taken, since a daemon also needs its start-up and not only its binary.
 
 **CORRECTED 2026-09-10, the same day it was written: the headline claim is
 false.** "Nothing on this system ever wakes up and executes what was scheduled"

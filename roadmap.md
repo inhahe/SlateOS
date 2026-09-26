@@ -1859,6 +1859,13 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **The tile under the pointer lights up** -- done 2026-09-26
+  (`design-decisions.md` §1400). The reference's `aero-task:hover`: the
+  accent's glass with a glow of it, drawn over whatever state the tile was in.
+  A pinned tile is otherwise only its picture, so this is what says it is a
+  button; the bar is redrawn when the light moves, through the path tooltips
+  now take (`take_hover_changed`).
+
 - `[C]` **A window's tile offers its program's menu** -- done 2026-09-26. A
   right-click on a window's tile offered nothing: pinning needs a program, and
   nothing knew which program a window was. Now that a window is known as its

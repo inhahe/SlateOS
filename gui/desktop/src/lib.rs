@@ -346,6 +346,18 @@ const TASKBAR_TILE_EDGE_IN_FRONT: u8 = 140;
 const TASKBAR_TILE_HIGHLIGHT: u8 = 97;
 /// The same highlight on the window in front's tile: the reference's 0.65.
 const TASKBAR_TILE_HIGHLIGHT_IN_FRONT: u8 = 166;
+/// A lit tile's fill, in the theme's accent: the reference's
+/// `aero-task:hover` gradient, `rgba(204, 234, 255, 0.46)` falling to 0.18.
+const TASKBAR_TILE_LIT: u8 = 80;
+/// A lit tile's edge, in white: the reference's 0.6.
+const TASKBAR_TILE_EDGE_LIT: u8 = 153;
+/// A lit tile's top highlight, in white: the reference's 0.7.
+const TASKBAR_TILE_HIGHLIGHT_LIT: u8 = 179;
+/// The glow around a lit tile, in the accent: the reference's
+/// `0 0 11px rgba(140, 206, 255, 0.5)`.
+const TASKBAR_TILE_GLOW: u8 = 128;
+/// How far a lit tile's glow reaches: the reference's 11.
+const TASKBAR_TILE_GLOW_BLUR: f32 = 11.0;
 /// Narrowest the system tray gets, however little is in it.
 ///
 /// The tray's real width is *measured* — see
@@ -1523,9 +1535,14 @@ pub struct DesktopShell {
     /// Keyed, so that sliding along the row replaces the tooltip rather than
     /// leaving the first icon's name under the fourth icon's glyph.
     tooltip: Option<(TooltipKey, guitk::menu::Tooltip)>,
-    /// Whether the tooltip has come, gone or begun waiting to appear since the
-    /// session last asked -- see [`take_tooltip_changed`](Self::take_tooltip_changed).
-    tooltip_changed: bool,
+    /// Whether what the pointer rests on has changed since the session last
+    /// asked -- a tooltip came, went or began waiting to appear, or another
+    /// tile lit up -- see [`take_hover_changed`](Self::take_hover_changed).
+    hover_changed: bool,
+    /// The taskbar tile under the pointer, drawn lit as the reference's
+    /// `aero-task:hover` is. Found by [`hit_test`](Self::hit_test), so the tile
+    /// that lights is the tile a click would reach.
+    hover_tile: Option<TaskbarSlot>,
     /// The popup listing icons the bar had no room for, and which icons
     /// those were when it opened.
     ///
@@ -2223,7 +2240,8 @@ impl DesktopShell {
             button_order: Vec::new(),
             window_press: None,
             tooltip: None,
-            tooltip_changed: false,
+            hover_changed: false,
+            hover_tile: None,
             alt_tab_active: false,
             alt_tab_index: 0,
             overview: overview::OverviewState::new(),
@@ -4480,7 +4498,20 @@ impl DesktopShell {
     /// the same row would be two chances to disagree, and the disagreement
     /// would read as the wrong name on the right icon.
     fn hover_taskbar(&mut self, x: f32, y: f32) {
-        let over = match self.hit_test(x, y) {
+        let hit = self.hit_test(x, y);
+        // The tile under the pointer lights up. A pointer that leaves the bar
+        // for a program's window is told so by a `Leave` at where it went,
+        // which is off every tile, so the light goes out with it.
+        let tile = match hit {
+            Hit::TaskbarPinned(pin) => Some(TaskbarSlot::Pinned(pin)),
+            Hit::TaskbarButton(id) => Some(TaskbarSlot::Window(id)),
+            _ => None,
+        };
+        if tile != self.hover_tile {
+            self.hover_tile = tile;
+            self.hover_changed = true;
+        }
+        let over = match hit {
             Hit::TrayIcon(index) => self.ordered_tray_icons().get(index).and_then(|icon| {
                 // A program that registered no tooltip has given the shell
                 // nothing to say. An empty bubble is worse than none.
@@ -4512,7 +4543,7 @@ impl DesktopShell {
         match over {
             None => {
                 if self.tooltip.take().is_some() {
-                    self.tooltip_changed = true;
+                    self.hover_changed = true;
                 }
             }
             Some((key, text)) => {
@@ -4525,7 +4556,7 @@ impl DesktopShell {
                 let mut tip = guitk::menu::Tooltip::new(&text);
                 tip.start_hover(x, y, self.osd_clock_ms, self.viewport());
                 self.tooltip = Some((key, tip));
-                self.tooltip_changed = true;
+                self.hover_changed = true;
             }
         }
     }
@@ -4542,16 +4573,17 @@ impl DesktopShell {
             .and_then(|(_, tip)| tip.due_in(self.osd_clock_ms))
     }
 
-    /// Whether the tooltip has come, gone or begun waiting to appear since
-    /// this was last asked -- clearing the answer.
+    /// Whether what the pointer rests on has changed since this was last
+    /// asked -- a tooltip came, went or began waiting to appear, or another
+    /// tile lit up -- clearing the answer.
     ///
-    /// For the session, which repaints the surface the tooltip is drawn on
-    /// only when told something changed, and must wake for a waiting one's
-    /// delay. Neither happened until 2026-09-26: a tray icon's name appeared
+    /// For the session, which repaints the bar and the surface the tooltip is
+    /// drawn on only when told something changed, and must wake for a waiting
+    /// tooltip's delay. Neither happened until 2026-09-26: a tray icon's name appeared
     /// only if something else on the desktop happened to draw after the delay,
     /// and stayed up, after the pointer left, until something did again.
-    pub fn take_tooltip_changed(&mut self) -> bool {
-        core::mem::take(&mut self.tooltip_changed)
+    pub fn take_hover_changed(&mut self) -> bool {
+        core::mem::take(&mut self.hover_changed)
     }
 
     /// Whether `icon` is the one currently under a drag.
@@ -6900,13 +6932,25 @@ impl DesktopShell {
                     // -- so nothing on it may look like a window's, running or
                     // in front; its name is its tooltip.
                     let image_id = self.picture_of(program, pin_px, self.theme.taskbar_fg);
+                    if self.hover_tile == Some(*slot) {
+                        self.draw_lit_tile(&mut tree, tile, radii);
+                    }
                     image_centred(&mut tree, tile, pin_side, image_id);
                 }
                 TaskbarSlot::Window(id) => {
                     let Some(window) = windows.iter().find(|w| w.id == id) else {
                         continue;
                     };
-                    self.draw_window_tile(&mut tree, tile, radii, Some(id) == self.focused_window);
+                    if self.hover_tile == Some(*slot) {
+                        self.draw_lit_tile(&mut tree, tile, radii);
+                    } else {
+                        self.draw_window_tile(
+                            &mut tree,
+                            tile,
+                            radii,
+                            Some(id) == self.focused_window,
+                        );
+                    }
                     let program = self.program_for_app_id(&window.app_id);
                     let image_id = self.picture_of(program, window_px, self.theme.taskbar_fg);
                     let picture_x = tile.x + self.scale(TASKBAR_TILE_PAD_START);
@@ -7540,6 +7584,53 @@ impl DesktopShell {
                 TASKBAR_TILE_HIGHLIGHT,
             )
         };
+        self.draw_tile_glass(tree, tile, radii, body, edge, highlight);
+    }
+
+    /// A lit tile -- the one under the pointer, pinned or a window's: the
+    /// reference's `aero-task:hover`, which is drawn over every other state
+    /// the tile has, as its stylesheet orders it. The accent's glass with a
+    /// glow of it around, a bright edge and a bright highlight along the top.
+    fn draw_lit_tile(&self, tree: &mut RenderTree, tile: Rect, radii: CornerRadii) {
+        let accent = self.theme.accent_color;
+        tree.box_shadow(
+            tile.x,
+            tile.y,
+            tile.w,
+            tile.h,
+            Shadow {
+                offset_x: 0.0,
+                offset_y: 0.0,
+                blur: self.scale(TASKBAR_TILE_GLOW_BLUR),
+                spread: 0.0,
+                color: with_alpha(accent, TASKBAR_TILE_GLOW),
+            },
+            radii,
+        );
+        self.draw_tile_glass(
+            tree,
+            tile,
+            radii,
+            with_alpha(accent, TASKBAR_TILE_LIT),
+            TASKBAR_TILE_EDGE_LIT,
+            TASKBAR_TILE_HIGHLIGHT_LIT,
+        );
+    }
+
+    /// The glass every drawn tile is made of: `body`, brighter across its top
+    /// half, a highlight along its top at `highlight`, and an edge at `edge`.
+    ///
+    /// The reference fills with gradients the renderer does not draw; two
+    /// fills, one over the upper half, are the same glass in two steps.
+    fn draw_tile_glass(
+        &self,
+        tree: &mut RenderTree,
+        tile: Rect,
+        radii: CornerRadii,
+        body: Color,
+        edge: u8,
+        highlight: u8,
+    ) {
         fill_round(tree, tile, body, radii);
         fill_round(
             tree,
@@ -10623,7 +10714,7 @@ impl DesktopShell {
         if let Some((_, tip)) = self.tooltip.as_mut() {
             let was = tip.is_visible();
             tip.tick(self.osd_clock_ms);
-            self.tooltip_changed |= tip.is_visible() != was;
+            self.hover_changed |= tip.is_visible() != was;
         }
     }
 
@@ -18865,6 +18956,73 @@ mod taskbar_pin_tests {
         });
     }
 
+    // ---- the tile under the pointer ----
+
+    /// Whether `tile` is drawn lit: the glow the reference's `:hover` casts,
+    /// which nothing else on the bar casts.
+    fn lit(shell: &DesktopShell, tile: super::Rect) -> bool {
+        shell.render_taskbar().commands.iter().any(|c| {
+            matches!(c, guitk::render::RenderCommand::BoxShadow { x, y, width, height, .. }
+                if (*x, *y, *width, *height) == (tile.x, tile.y, tile.w, tile.h))
+        })
+    }
+
+    /// **The tile under the pointer lights up** -- a pin, which is otherwise
+    /// only its picture, or a window's, over whatever state it was in -- and
+    /// goes out when the pointer moves on. Each change is reported, so the
+    /// session redraws the bar for it.
+    #[test]
+    fn the_tile_under_the_pointer_lights_up() {
+        with_scratch_config("shell-tile-hover", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            let mut front = window_of(1, "", "one");
+            front.focused = true;
+            shell.apply_window_list(&WindowList::new(0, vec![front]));
+            let layout = shell.taskbar_layout();
+            let centre = |t: super::Rect| (t.x + t.w / 2.0, t.y + t.h / 2.0);
+            assert!(
+                !lit(&shell, layout[0]) && !lit(&shell, layout[1]),
+                "lit at rest"
+            );
+            // Cleared, so the answer below is this move's and not the pin's.
+            shell.take_hover_changed();
+
+            let (x, y) = centre(layout[0]);
+            shell.handle_mouse(&at(x, y, MouseEventKind::Move));
+            assert!(
+                shell.take_hover_changed(),
+                "the pin lit and nobody was told"
+            );
+            assert!(
+                lit(&shell, layout[0]),
+                "the pin under the pointer is not lit"
+            );
+            assert!(!lit(&shell, layout[1]));
+
+            let (x, y) = centre(layout[1]);
+            shell.handle_mouse(&at(x, y, MouseEventKind::Move));
+            assert!(
+                !lit(&shell, layout[0]),
+                "the pin stayed lit behind the pointer"
+            );
+            assert!(
+                lit(&shell, layout[1]),
+                "the window in front is not lit under the pointer"
+            );
+
+            shell.handle_mouse(&at(40.0, 40.0, MouseEventKind::Move));
+            assert!(
+                shell.take_hover_changed(),
+                "the light went out and nobody was told"
+            );
+            assert!(
+                !lit(&shell, layout[0]) && !lit(&shell, layout[1]),
+                "lit after the pointer left"
+            );
+        });
+    }
+
     /// Rest the pointer on `rect`'s middle, and let the tooltip's delay pass.
     fn rest_on(shell: &mut DesktopShell, rect: super::Rect) {
         shell.handle_mouse(&at(
@@ -18916,7 +19074,7 @@ mod taskbar_pin_tests {
         with_scratch_config("shell-tile-tooltip-due", |_root| {
             let mut shell = shell();
             shell.pin_app(super::launcher::TERMINAL, "Terminal");
-            assert!(!shell.take_tooltip_changed());
+            assert!(!shell.take_hover_changed());
             assert_eq!(shell.tooltip_due_in(), None);
 
             let pin = shell.taskbar_layout()[0];
@@ -18926,10 +19084,10 @@ mod taskbar_pin_tests {
                 MouseEventKind::Move,
             ));
             assert!(
-                shell.take_tooltip_changed(),
+                shell.take_hover_changed(),
                 "a tooltip began waiting and nobody was told"
             );
-            assert!(!shell.take_tooltip_changed(), "asking clears the answer");
+            assert!(!shell.take_hover_changed(), "asking clears the answer");
             let due = shell
                 .tooltip_due_in()
                 .expect("a waiting tooltip has no deadline");
@@ -18938,14 +19096,14 @@ mod taskbar_pin_tests {
             // A motion within the same tile is not a change.
             shell.handle_mouse(&at(pin.x + 2.0, pin.y + pin.h / 2.0, MouseEventKind::Move));
             assert!(
-                !shell.take_tooltip_changed(),
+                !shell.take_hover_changed(),
                 "moving within the tile restarted it"
             );
 
             shell.advance_osd(due);
             assert!(shell.render_tooltip().is_some(), "due, and not shown");
             assert!(
-                shell.take_tooltip_changed(),
+                shell.take_hover_changed(),
                 "it appeared and nobody was told to draw it"
             );
             assert_eq!(
@@ -18957,7 +19115,7 @@ mod taskbar_pin_tests {
             shell.handle_mouse(&at(40.0, 40.0, MouseEventKind::Move));
             assert!(shell.render_tooltip().is_none());
             assert!(
-                shell.take_tooltip_changed(),
+                shell.take_hover_changed(),
                 "it went and nobody was told to take it off the screen"
             );
         });

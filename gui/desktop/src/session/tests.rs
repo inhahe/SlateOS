@@ -588,6 +588,39 @@ fn right_clicking_a_pinned_tile_draws_its_menu() {
     });
 }
 
+/// **The bar is redrawn when a tile lights up under the pointer.** A window
+/// with no title, so no tooltip comes with it: the light alone is what has to
+/// reach the screen.
+#[test]
+fn the_bar_is_redrawn_when_a_tile_lights_up() {
+    let (mut session, desktop, _turn) = session();
+    let panel = session.panel();
+    session
+        .shell_mut()
+        .apply_window_list(&guiremote::window_list::WindowList::new(
+            0,
+            vec![WindowInfo::new(1, 1, String::new())],
+        ));
+    session.pump().expect("pump");
+    let tile = session.shell().taskbar_button_rect(0);
+    let frames = frames_on(&desktop, panel.window());
+
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        panel.window(),
+        guitk::event::Event::Mouse(guitk::event::MouseEvent {
+            x: tile.x + tile.w / 2.0 - panel.origin.0,
+            y: tile.y + tile.h / 2.0 - panel.origin.1,
+            kind: MouseEventKind::Move,
+        }),
+    )]);
+    session.pump().expect("pump");
+
+    assert!(
+        frames_on(&desktop, panel.window()) > frames,
+        "the tile lit up in the model and the bar was not redrawn"
+    );
+}
+
 /// **The bar's own menu is put on the screen** -- the part list the
 /// surface is mapped from has it, which is the whole of what a menu needs to
 /// be seen (see `right_clicking_a_pinned_tile_draws_its_menu`).

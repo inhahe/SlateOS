@@ -3000,7 +3000,7 @@ impl<T: Transport> ShellSession<T> {
         self.shell.advance_osd(elapsed_ms);
         // A tooltip whose delay this frame ended is on the overlay surface
         // only once that is drawn again.
-        if self.shell.take_tooltip_changed() {
+        if self.shell.take_hover_changed() {
             self.dirty = true;
         }
         // The stepped rectangles are deliberately not used here. A window's
@@ -3155,13 +3155,14 @@ impl<T: Transport> ShellSession<T> {
         self.autohide_pointer(event);
         let action = self.shell.handle_mouse(event);
         self.act(action)?;
-        // A tooltip came, went or began waiting to appear. The surface it is
-        // drawn on is repainted only when the session is dirty, and its delay
-        // is a deadline nothing else wakes the loop for -- so, until this, a
-        // tray icon's name appeared only if something else happened to draw.
+        // A tooltip came, went or began waiting to appear, or another tile lit
+        // up. What they are drawn on is repainted only when the session is
+        // dirty, and a tooltip's delay is a deadline nothing else wakes the
+        // loop for -- so, until this, a tray icon's name appeared only if
+        // something else happened to draw.
         // Not while something is moving: the frame loop is awake and re-arms
         // each frame, and re-arming here would shorten the frame in flight.
-        if self.shell.take_tooltip_changed() {
+        if self.shell.take_hover_changed() {
             self.dirty = true;
             if !self.anything_moving() {
                 self.arm_next_frame();

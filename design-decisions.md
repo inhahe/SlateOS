@@ -80418,8 +80418,11 @@ input path.
 
 ### What is not done here
 
-- **Hover and pressed states** -- the reference's `:hover` and `:active`: nothing
-  redraws the bar as the pointer crosses it.
+- ~~**Hover and pressed states**~~ -- the hover done the same day: the tile under
+  the pointer lights in the accent's glass with a glow of it, over whatever
+  state it was in, as the reference's stylesheet orders it; the bar is redrawn
+  when the light moves. The reference gives its tiles no `:active` state (only
+  the start orb has one), so there is no pressed one to add.
 - ~~**The option to hide windows' titles**~~ -- done the same day, §1401.
 - **A window asking for attention** -- the reference's amber `is-alert`: a window
   cannot yet say it wants attention; that is a field in the window list, lane

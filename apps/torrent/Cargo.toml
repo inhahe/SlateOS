@@ -17,5 +17,10 @@ oswindow = { path = "../../gui/window" }
 # that is not UTF-8.
 safeio = { path = "../safeio" }
 
+# SHA-1, which BitTorrent specifies for the info hash and for every piece:
+# the tree's one implementation, checked against the FIPS vectors, rather
+# than a copy of it here.
+sha1 = { path = "../../sha1" }
+
 [lints]
 workspace = true

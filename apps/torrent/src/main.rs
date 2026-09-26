@@ -112,20 +112,66 @@ impl BencodeValue {
 /// Bencode parser
 pub struct BencodeParser;
 
+/// How deep lists and dictionaries may nest. Nothing in BitTorrent nests more
+/// than a handful deep; the bound is what keeps eight megabytes of `l` -- from
+/// a file, a tracker or a peer -- from recursing until the stack runs out.
+const MAX_BENCODE_DEPTH: usize = 64;
+
 impl BencodeParser {
-    /// Parse a bencode value from bytes
+    /// Parse a bencode value from bytes, returning it and how many bytes it
+    /// took.
     pub fn parse(data: &[u8]) -> Result<(BencodeValue, usize), String> {
+        Self::parse_at(data, 0)
+    }
+
+    fn parse_at(data: &[u8], depth: usize) -> Result<(BencodeValue, usize), String> {
         if data.is_empty() {
             return Err("empty input".to_string());
+        }
+        if depth > MAX_BENCODE_DEPTH {
+            return Err(format!("nested more than {MAX_BENCODE_DEPTH} deep"));
         }
 
         match data.first() {
             Some(b'i') => Self::parse_integer(data),
-            Some(b'l') => Self::parse_list(data),
-            Some(b'd') => Self::parse_dict(data),
+            Some(b'l') => Self::parse_list(data, depth),
+            Some(b'd') => Self::parse_dict(data, depth),
             Some(b'0'..=b'9') => Self::parse_bytes(data),
             Some(c) => Err(format!("unexpected byte: {c}")),
             None => Err("unexpected end of input".to_string()),
+        }
+    }
+
+    /// Where the value under `key` in the dictionary that `data` starts with
+    /// lies, as a range of `data`: the bytes as they are in the file.
+    ///
+    /// An info hash is the SHA-1 of the `info` dictionary's own bytes.
+    /// Re-encoding the parsed value gives the same bytes only when the file
+    /// was written canonically -- keys sorted, integers without leading zeros
+    /// -- and a torrent that was not would be given an info hash no tracker
+    /// and no peer has heard of.
+    pub fn dict_value_span(
+        data: &[u8],
+        key: &str,
+    ) -> Result<Option<std::ops::Range<usize>>, String> {
+        if data.first() != Some(&b'd') {
+            return Err("not a dictionary".to_string());
+        }
+        let mut pos = 1_usize;
+        loop {
+            match data.get(pos) {
+                None => return Err("unterminated dict".to_string()),
+                Some(b'e') => return Ok(None),
+                Some(_) => {}
+            }
+            let (found, key_len) = Self::parse_at(data.get(pos..).unwrap_or_default(), 1)?;
+            let at = pos.saturating_add(key_len);
+            let (_, value_len) = Self::parse_at(data.get(at..).unwrap_or_default(), 1)?;
+            let end = at.saturating_add(value_len);
+            if found.as_bytes() == Some(key.as_bytes()) {
+                return Ok(Some(at..end));
+            }
+            pos = end;
         }
     }
 
@@ -163,7 +209,7 @@ impl BencodeParser {
         Ok((BencodeValue::Bytes(bytes), end))
     }
 
-    fn parse_list(data: &[u8]) -> Result<(BencodeValue, usize), String> {
+    fn parse_list(data: &[u8], depth: usize) -> Result<(BencodeValue, usize), String> {
         // l<values>e
         let mut items = Vec::new();
         let mut pos = 1; // skip 'l'
@@ -174,13 +220,14 @@ impl BencodeParser {
             if data.get(pos) == Some(&b'e') {
                 return Ok((BencodeValue::List(items), pos.saturating_add(1)));
             }
-            let (val, consumed) = Self::parse(data.get(pos..).unwrap_or_default())?;
+            let (val, consumed) =
+                Self::parse_at(data.get(pos..).unwrap_or_default(), depth.saturating_add(1))?;
             items.push(val);
             pos = pos.saturating_add(consumed);
         }
     }
 
-    fn parse_dict(data: &[u8]) -> Result<(BencodeValue, usize), String> {
+    fn parse_dict(data: &[u8], depth: usize) -> Result<(BencodeValue, usize), String> {
         // d<key><value>...e
         let mut map = BTreeMap::new();
         let mut pos = 1; // skip 'd'
@@ -192,7 +239,8 @@ impl BencodeParser {
                 return Ok((BencodeValue::Dict(map), pos.saturating_add(1)));
             }
             // Key must be a byte string
-            let (key_val, key_consumed) = Self::parse(data.get(pos..).unwrap_or_default())?;
+            let (key_val, key_consumed) =
+                Self::parse_at(data.get(pos..).unwrap_or_default(), depth.saturating_add(1))?;
             let key = match key_val {
                 BencodeValue::Bytes(b) => {
                     String::from_utf8(b).map_err(|e| format!("dict key not UTF-8: {e}"))?
@@ -200,7 +248,8 @@ impl BencodeParser {
                 _ => return Err("dict key must be a byte string".to_string()),
             };
             pos = pos.saturating_add(key_consumed);
-            let (val, val_consumed) = Self::parse(data.get(pos..).unwrap_or_default())?;
+            let (val, val_consumed) =
+                Self::parse_at(data.get(pos..).unwrap_or_default(), depth.saturating_add(1))?;
             map.insert(key, val);
             pos = pos.saturating_add(val_consumed);
         }
@@ -244,166 +293,6 @@ fn bencode_encode_into(val: &BencodeValue, out: &mut Vec<u8>) {
             }
             out.push(b'e');
         }
-    }
-}
-
-// ─── SHA-1 ───────────────────────────────────────────────────────────
-
-/// Minimal SHA-1 implementation for info hash computation
-pub struct Sha1 {
-    h: [u32; 5],
-    buffer: [u8; 64],
-    buf_len: usize,
-    total_len: u64,
-}
-
-impl Default for Sha1 {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Sha1 {
-    const H0: [u32; 5] = [
-        0x6745_2301,
-        0xEFCD_AB89,
-        0x98BA_DCFE,
-        0x1032_5476,
-        0xC3D2_E1F0,
-    ];
-
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            h: Self::H0,
-            buffer: [0u8; 64],
-            buf_len: 0,
-            total_len: 0,
-        }
-    }
-
-    pub fn update(&mut self, data: &[u8]) {
-        let mut offset = 0;
-        self.total_len = self.total_len.wrapping_add(data.len() as u64);
-
-        // Fill buffer first
-        if self.buf_len > 0 {
-            let space = 64usize.saturating_sub(self.buf_len);
-            let copy_len = space.min(data.len());
-            if let (Some(dst), Some(src)) = (
-                self.buffer
-                    .get_mut(self.buf_len..self.buf_len.saturating_add(copy_len)),
-                data.get(..copy_len),
-            ) {
-                dst.copy_from_slice(src);
-            }
-            self.buf_len = self.buf_len.saturating_add(copy_len);
-            offset = copy_len;
-
-            if self.buf_len == 64 {
-                let block = self.buffer;
-                self.process_block(&block);
-                self.buf_len = 0;
-            }
-        }
-
-        // Process full blocks
-        while offset.saturating_add(64) <= data.len() {
-            let mut block = [0u8; 64];
-            if let Some(src) = data.get(offset..offset.saturating_add(64)) {
-                block.copy_from_slice(src);
-            }
-            self.process_block(&block);
-            offset = offset.saturating_add(64);
-        }
-
-        // Buffer remainder
-        let remaining = data.len().saturating_sub(offset);
-        if remaining > 0 {
-            if let (Some(dst), Some(src)) = (self.buffer.get_mut(..remaining), data.get(offset..)) {
-                dst.copy_from_slice(src);
-            }
-            self.buf_len = remaining;
-        }
-    }
-
-    fn process_block(&mut self, block: &[u8; 64]) {
-        let mut w = [0u32; 80];
-        for i in 0..16usize {
-            let base = i.saturating_mul(4);
-            w[i] = u32::from_be_bytes([
-                block.get(base).copied().unwrap_or(0),
-                block.get(base.saturating_add(1)).copied().unwrap_or(0),
-                block.get(base.saturating_add(2)).copied().unwrap_or(0),
-                block.get(base.saturating_add(3)).copied().unwrap_or(0),
-            ]);
-        }
-        for i in 16..80 {
-            w[i] = (w[i.saturating_sub(3)]
-                ^ w[i.saturating_sub(8)]
-                ^ w[i.saturating_sub(14)]
-                ^ w[i.saturating_sub(16)])
-            .rotate_left(1);
-        }
-
-        let [mut a, mut b, mut c, mut d, mut e] = self.h;
-
-        for i in 0..80 {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999u32),
-                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1u32),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDCu32),
-                _ => (b ^ c ^ d, 0xCA62_C1D6u32),
-            };
-
-            let temp = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(w[i]);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = temp;
-        }
-
-        self.h[0] = self.h[0].wrapping_add(a);
-        self.h[1] = self.h[1].wrapping_add(b);
-        self.h[2] = self.h[2].wrapping_add(c);
-        self.h[3] = self.h[3].wrapping_add(d);
-        self.h[4] = self.h[4].wrapping_add(e);
-    }
-
-    #[must_use]
-    pub fn finalize(mut self) -> [u8; 20] {
-        let bit_len = self.total_len.wrapping_mul(8);
-
-        // Padding
-        self.update(&[0x80]);
-        while self.buf_len != 56 {
-            self.update(&[0x00]);
-        }
-        self.update(&bit_len.to_be_bytes());
-
-        let mut result = [0u8; 20];
-        for (i, &h) in self.h.iter().enumerate() {
-            let bytes = h.to_be_bytes();
-            let base = i.saturating_mul(4);
-            if let Some(dst) = result.get_mut(base..base.saturating_add(4)) {
-                dst.copy_from_slice(&bytes);
-            }
-        }
-        result
-    }
-
-    /// Compute SHA-1 of data in one call
-    #[must_use]
-    pub fn digest(data: &[u8]) -> [u8; 20] {
-        let mut sha = Self::new();
-        sha.update(data);
-        sha.finalize()
     }
 }
 
@@ -465,16 +354,76 @@ pub fn url_encode_bytes(data: &[u8]) -> String {
 /// A file within a torrent
 #[derive(Debug, Clone)]
 pub struct TorrentFile {
+    /// The path as the window shows it: the parts joined by `/`, with any
+    /// byte that is not UTF-8 written `\xNN`. Never used to name a file.
     pub path: String,
+    /// The path as the torrent gives it, a part at a time, each its own
+    /// bytes: what a file on disk is named from. Every part has been checked
+    /// by [`checked_part`], so none can climb out of the download's folder.
+    pub parts: Vec<Vec<u8>>,
     pub length: u64,
     pub md5sum: Option<String>,
 }
+
+impl TorrentFile {
+    /// A file at `path` (parts separated by `/`) of `length` bytes.
+    #[must_use]
+    pub fn named(path: &str, length: u64) -> Self {
+        Self {
+            path: path.to_string(),
+            parts: path.split('/').map(|p| p.as_bytes().to_vec()).collect(),
+            length,
+            md5sum: None,
+        }
+    }
+}
+
+/// `bytes` as the window shows them: text, with any byte that is not UTF-8
+/// written `\xNN`, so two names that differ only there still differ.
+#[must_use]
+pub fn shown_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len());
+    for chunk in bytes.utf8_chunks() {
+        out.push_str(chunk.valid());
+        for byte in chunk.invalid() {
+            // Writing to a String cannot fail.
+            let _ = write!(out, "\\x{byte:02X}");
+        }
+    }
+    out
+}
+
+/// `part`, if it can name a file or folder inside the download's folder:
+/// not empty, not `.` or `..`, and holding no `/` and no NUL.
+///
+/// A torrent is a stranger's file. One whose path held `..`, or a part with
+/// a `/` in it, would have its bytes written wherever it pointed; this is the
+/// check that makes the parts safe to join below the save folder.
+pub fn checked_part(part: &[u8]) -> Result<&[u8], String> {
+    if part.is_empty() || part == b"." || part == b".." || part.contains(&b'/') || part.contains(&0)
+    {
+        return Err(format!(
+            "the torrent names a file outside its folder: \"{}\"",
+            shown_bytes(part)
+        ));
+    }
+    Ok(part)
+}
+
+/// The most a piece may hold. Pieces are held whole while they are fetched
+/// and checked, one a peer; real torrents use 16 KiB to 16 MiB.
+pub const MAX_PIECE_LENGTH: u64 = 32 * 1024 * 1024;
 
 /// Torrent metadata parsed from .torrent file
 #[derive(Debug, Clone)]
 pub struct TorrentMetainfo {
     pub info_hash: [u8; 20],
+    /// As the window shows it; see [`TorrentFile::path`].
     pub name: String,
+    /// As the torrent gives it: the single file's name, or the folder the
+    /// files go in. Checked by [`checked_part`].
+    pub name_bytes: Vec<u8>,
     pub piece_length: u64,
     pub pieces: Vec<[u8; 20]>,
     pub files: Vec<TorrentFile>,
@@ -526,20 +475,33 @@ impl TorrentMetainfo {
         let info = dict.get("info").ok_or("missing 'info' dict")?;
         let info_dict = info.as_dict().ok_or("info must be a dict")?;
 
-        // Compute info hash from the bencoded info dict
-        let info_bytes = bencode_encode(info);
-        let info_hash = Sha1::digest(&info_bytes);
+        // The info hash, over the info dictionary's bytes as the file has
+        // them -- see `BencodeParser::dict_value_span`.
+        let span = BencodeParser::dict_value_span(data, "info")?.ok_or("missing 'info' dict")?;
+        let info_hash = sha1::sha1(data.get(span).unwrap_or_default());
 
-        let name = info_dict
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or("missing torrent name")?
-            .to_string();
+        let name_bytes = checked_part(
+            info_dict
+                .get("name")
+                .and_then(BencodeValue::as_bytes)
+                .ok_or("missing torrent name")?,
+        )?
+        .to_vec();
+        let name = shown_bytes(&name_bytes);
 
         let piece_length = info_dict
             .get("piece length")
             .and_then(BencodeValue::as_int)
-            .ok_or("missing piece length")? as u64;
+            .ok_or("missing piece length")?;
+        let piece_length = u64::try_from(piece_length)
+            .ok()
+            .filter(|&n| n > 0)
+            .ok_or(format!("a piece length of {piece_length} bytes"))?;
+        if piece_length > MAX_PIECE_LENGTH {
+            return Err(format!(
+                "pieces of {piece_length} bytes are more than this client holds ({MAX_PIECE_LENGTH})"
+            ));
+        }
 
         let pieces_bytes = info_dict
             .get("pieces")
@@ -561,55 +523,83 @@ impl TorrentMetainfo {
 
         let is_private = info_dict.get("private").and_then(BencodeValue::as_int) == Some(1);
 
+        let length_of = |v: Option<&BencodeValue>| -> Result<u64, String> {
+            let n = v
+                .and_then(BencodeValue::as_int)
+                .ok_or("a file without a length")?;
+            u64::try_from(n).map_err(|_| format!("a file of {n} bytes"))
+        };
         // Single file or multi-file?
         let files = if let Some(files_list) = info_dict.get("files").and_then(|v| v.as_list()) {
-            // Multi-file torrent
+            // Multi-file torrent: every entry must be a file with a length
+            // and a path. One skipped would shift every byte after it into
+            // the wrong file.
             files_list
                 .iter()
-                .filter_map(|f| {
-                    let fd = f.as_dict()?;
-                    let length = fd.get("length")?.as_int()? as u64;
-                    let path_parts: Vec<&str> = fd
-                        .get("path")?
-                        .as_list()?
+                .map(|f| {
+                    let fd = f.as_dict().ok_or("a file entry that is not a dictionary")?;
+                    let length = length_of(fd.get("length"))?;
+                    let parts = fd
+                        .get("path")
+                        .and_then(BencodeValue::as_list)
+                        .ok_or("a file without a path")?
                         .iter()
-                        .filter_map(|p| p.as_str())
-                        .collect();
-                    let path = if path_parts.is_empty() {
-                        "unknown".to_string()
-                    } else {
-                        path_parts.join("/")
-                    };
+                        .map(|p| {
+                            p.as_bytes()
+                                .ok_or_else(|| "a path part that is not a string".to_string())
+                                .and_then(checked_part)
+                                .map(<[u8]>::to_vec)
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    if parts.is_empty() {
+                        return Err("a file with an empty path".to_string());
+                    }
+                    let path = parts
+                        .iter()
+                        .map(|p| shown_bytes(p))
+                        .collect::<Vec<_>>()
+                        .join("/");
                     let md5sum = fd.get("md5sum").and_then(|v| v.as_str()).map(String::from);
-                    Some(TorrentFile {
+                    Ok(TorrentFile {
                         path,
+                        parts,
                         length,
                         md5sum,
                     })
                 })
-                .collect()
+                .collect::<Result<Vec<_>, String>>()?
         } else {
             // Single file torrent
-            let length = info_dict
-                .get("length")
-                .and_then(BencodeValue::as_int)
-                .ok_or("missing file length")? as u64;
+            let length = length_of(info_dict.get("length"))?;
             let md5sum = info_dict
                 .get("md5sum")
                 .and_then(|v| v.as_str())
                 .map(String::from);
             vec![TorrentFile {
                 path: name.clone(),
+                parts: vec![name_bytes.clone()],
                 length,
                 md5sum,
             }]
         };
 
-        let total_size: u64 = files.iter().map(|f| f.length).sum();
+        let total_size = files
+            .iter()
+            .try_fold(0_u64, |sum, f| sum.checked_add(f.length))
+            .ok_or("the files add up to more bytes than can be counted")?;
+        // One hash a piece, and exactly as many pieces as the files fill.
+        let wanted = total_size.div_ceil(piece_length);
+        if u64::try_from(pieces.len()).ok() != Some(wanted) {
+            return Err(format!(
+                "{} piece hashes for {total_size} bytes in pieces of {piece_length}, which is {wanted}",
+                pieces.len()
+            ));
+        }
 
         Ok(Self {
             info_hash,
             name,
+            name_bytes,
             piece_length,
             pieces,
             files,
@@ -5106,15 +5096,12 @@ fn create_sample_torrent(name: &str, size: u64, piece_len: u64, announce: &str) 
         .collect();
 
     TorrentMetainfo {
-        info_hash: Sha1::digest(name.as_bytes()),
+        info_hash: sha1::sha1(name.as_bytes()),
         name: name.to_string(),
+        name_bytes: name.as_bytes().to_vec(),
         piece_length: piece_len,
         pieces,
-        files: vec![TorrentFile {
-            path: format!("{name}.iso"),
-            length: size,
-            md5sum: None,
-        }],
+        files: vec![TorrentFile::named(&format!("{name}.iso"), size)],
         total_size: size,
         announce: announce.to_string(),
         announce_list: Vec::new(),
@@ -6034,34 +6021,6 @@ about anything -- it drew {} text command(s)",
         assert_eq!(inner.get("key").unwrap().as_int(), Some(42));
     }
 
-    // SHA-1 tests
-    #[test]
-    fn test_sha1_empty() {
-        let hash = Sha1::digest(b"");
-        assert_eq!(
-            hex_encode(&hash),
-            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
-        );
-    }
-
-    #[test]
-    fn test_sha1_abc() {
-        let hash = Sha1::digest(b"abc");
-        assert_eq!(
-            hex_encode(&hash),
-            "a9993e364706816aba3e25717850c26c9cd0d89d"
-        );
-    }
-
-    #[test]
-    fn test_sha1_long() {
-        let hash = Sha1::digest(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
-        assert_eq!(
-            hex_encode(&hash),
-            "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
-        );
-    }
-
     // Hex encoding tests
     #[test]
     fn test_hex_encode() {
@@ -6559,18 +6518,12 @@ about anything -- it drew {} text command(s)",
         let mut meta =
             create_sample_torrent("Shouty", 4096, 256, "http://tracker.example.com/announce");
         meta.files = vec![
-            TorrentFile {
-                path: "Some Show/Season 1/Episode 01 - A Very Long Episode Title Indeed \
-                       That Will Certainly Not Fit In The Column.mkv"
-                    .to_string(),
-                length: 4096,
-                md5sum: None,
-            },
-            TorrentFile {
-                path: "readme.txt".to_string(),
-                length: 12,
-                md5sum: None,
-            },
+            TorrentFile::named(
+                "Some Show/Season 1/Episode 01 - A Very Long Episode Title Indeed \
+                       That Will Certainly Not Fit In The Column.mkv",
+                4096,
+            ),
+            TorrentFile::named("readme.txt", 12),
         ];
         let id = app.add_torrent(meta, None);
         app.selected_torrent = Some(id);
@@ -7243,16 +7196,8 @@ about anything -- it drew {} text command(s)",
         let mut app = TorrentApp::new();
         let mut meta = create_sample_torrent("Pair", 400, 100, "udp://t.example/");
         meta.files = vec![
-            TorrentFile {
-                path: "first.bin".to_string(),
-                length: 250,
-                md5sum: None,
-            },
-            TorrentFile {
-                path: "second.bin".to_string(),
-                length: 150,
-                md5sum: None,
-            },
+            TorrentFile::named("first.bin", 250),
+            TorrentFile::named("second.bin", 150),
         ];
         let id = app.add_torrent(meta, None);
         app.selected_torrent = Some(id);
@@ -7323,5 +7268,186 @@ about anything -- it drew {} text command(s)",
         let (mut app, _) = chosen();
         probe::key(&mut app, &probe::press(Key::Enter));
         assert_eq!(app.active_tab, Tab::Details);
+    }
+
+    // ------------------------------------------------------------------
+    // A .torrent read as it is: its own bytes hashed, its paths checked
+    // ------------------------------------------------------------------
+
+    /// A whole `.torrent` around `info`, which is written as given.
+    fn raw_torrent(info: &[u8]) -> Vec<u8> {
+        [
+            b"d8:announce20:http://t.example/ann4:info".as_slice(),
+            info,
+            b"e",
+        ]
+        .concat()
+    }
+
+    /// A multi-file torrent in folder `dir` whose `files` list is `files`,
+    /// with one piece's hash -- right for up to 16 KiB of files.
+    fn multi(files: &[u8]) -> Result<TorrentMetainfo, String> {
+        let info = [
+            b"d5:files".as_slice(),
+            files,
+            b"4:name3:dir12:piece lengthi16384e6:pieces20:",
+            &[7; 20],
+            b"e",
+        ]
+        .concat();
+        TorrentMetainfo::from_bencode(&raw_torrent(&info))
+    }
+
+    /// A single-file torrent: `name`, `length` bytes, pieces of
+    /// `piece_length`, with `hashes` piece hashes.
+    fn single(
+        name: &[u8],
+        length: i64,
+        piece_length: i64,
+        hashes: usize,
+    ) -> Result<TorrentMetainfo, String> {
+        let info = [
+            format!("d6:lengthi{length}e4:name{}:", name.len()).as_bytes(),
+            name,
+            format!("12:piece lengthi{piece_length}e6:pieces{}:", hashes * 20).as_bytes(),
+            &vec![7; hashes * 20],
+            b"e",
+        ]
+        .concat();
+        TorrentMetainfo::from_bencode(&raw_torrent(&info))
+    }
+
+    /// **The info hash is taken over the info dictionary's own bytes.** One
+    /// written with its keys out of order -- legal to read, not canonical --
+    /// hashed as re-encoded would be a torrent no tracker or peer knows.
+    #[test]
+    fn the_info_hash_is_over_the_files_own_bytes() {
+        let info = [
+            b"d4:name4:test6:lengthi5e12:piece lengthi16384e6:pieces20:".as_slice(),
+            &[7; 20],
+            b"e",
+        ]
+        .concat();
+        let meta = TorrentMetainfo::from_bencode(&raw_torrent(&info)).unwrap();
+        assert_eq!(meta.info_hash, sha1::sha1(&info));
+        let (value, _) = BencodeParser::parse(&info).unwrap();
+        assert_ne!(
+            meta.info_hash,
+            sha1::sha1(&bencode_encode(&value)),
+            "re-encoding sorted the keys, so this test proves nothing"
+        );
+    }
+
+    /// A path that would climb out of the download's folder, or a part that
+    /// could not be one name, is refused -- the whole torrent, not the file.
+    #[test]
+    fn a_path_that_leaves_the_folder_is_refused() {
+        for (files, what) in [
+            (b"ld6:lengthi5e4:pathl2:..1:xeee".as_slice(), ".."),
+            (b"ld6:lengthi5e4:pathl1:.eee", "."),
+            (b"ld6:lengthi5e4:pathl0:eee", "an empty part"),
+            (b"ld6:lengthi5e4:pathl3:a/beee", "a slash"),
+            (b"ld6:lengthi5e4:pathl3:a\0beee", "a NUL"),
+        ] {
+            let err = multi(files).expect_err(what);
+            assert!(err.contains("outside its folder"), "{what}: {err}");
+        }
+        let err = single(b"..", 5, 16384, 1).expect_err("a name of ..");
+        assert!(err.contains("outside its folder"), "{err}");
+        let ok = multi(b"ld6:lengthi5e4:pathl1:a1:beee").unwrap();
+        assert_eq!(ok.files[0].parts, vec![b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(ok.files[0].path, "a/b");
+    }
+
+    /// A file entry without a length, or with a negative one, is an error:
+    /// skipped, it would shift every byte after it into the wrong file.
+    #[test]
+    fn a_file_without_a_length_is_an_error_not_a_gap() {
+        assert!(
+            multi(b"ld4:pathl1:aeee")
+                .unwrap_err()
+                .contains("without a length")
+        );
+        assert!(multi(b"ld6:lengthi-1e4:pathl1:aeee").is_err());
+        assert!(
+            multi(b"ld6:lengthi5eee")
+                .unwrap_err()
+                .contains("without a path")
+        );
+        assert!(
+            multi(b"ld6:lengthi5e4:pathleee")
+                .unwrap_err()
+                .contains("empty path")
+        );
+        assert!(single(b"a", -5, 16384, 1).is_err());
+    }
+
+    /// One hash a piece, and as many pieces as the files fill; a piece
+    /// length that is not a size, or past what this client holds, is refused.
+    #[test]
+    fn the_pieces_must_fit_the_files() {
+        assert!(single(b"a", 5, 16384, 1).is_ok());
+        assert!(
+            single(b"a", 5, 16384, 2)
+                .unwrap_err()
+                .contains("which is 1")
+        );
+        assert!(
+            single(b"a", 16385, 16384, 1)
+                .unwrap_err()
+                .contains("which is 2")
+        );
+        assert!(
+            single(b"a", 0, 16384, 0).is_ok(),
+            "an empty file has no pieces"
+        );
+        assert!(single(b"a", 5, 0, 1).is_err());
+        assert!(single(b"a", 5, -16384, 1).is_err());
+        let huge = i64::try_from(MAX_PIECE_LENGTH).unwrap() * 2;
+        assert!(
+            single(b"a", 5, huge, 1)
+                .unwrap_err()
+                .contains("more than this client holds")
+        );
+    }
+
+    /// A name that is not UTF-8 is kept as its bytes, and shown with them.
+    #[test]
+    fn a_name_that_is_not_utf8_is_kept_as_its_bytes() {
+        let meta = single(b"caf\xe9", 5, 16384, 1).unwrap();
+        assert_eq!(meta.name_bytes, b"caf\xe9");
+        assert_eq!(meta.name, "caf\\xE9");
+        assert_eq!(meta.files[0].parts, vec![b"caf\xe9".to_vec()]);
+    }
+
+    /// Nesting past the bound is an error, not a stack overflow.
+    #[test]
+    fn deep_nesting_is_refused_not_a_crash() {
+        let err = BencodeParser::parse(&vec![b'l'; 100_000]).unwrap_err();
+        assert!(err.contains("nested"), "{err}");
+        // As deep as the bound allows still reads.
+        let fine = [vec![b'l'; 60], vec![b'e'; 60]].concat();
+        assert!(BencodeParser::parse(&fine).is_ok());
+    }
+
+    /// The span of a dictionary's value is its bytes as written.
+    #[test]
+    fn a_dictionary_values_span_is_its_bytes() {
+        let data = b"d1:ai1e4:infod1:bi2ee1:zi3ee";
+        let span = BencodeParser::dict_value_span(data, "info")
+            .unwrap()
+            .unwrap();
+        assert_eq!(&data[span], b"d1:bi2ee");
+        assert_eq!(BencodeParser::dict_value_span(data, "nope").unwrap(), None);
+        assert!(BencodeParser::dict_value_span(b"li1ee", "info").is_err());
+        assert!(BencodeParser::dict_value_span(b"d1:a", "info").is_err());
+    }
+
+    /// Bytes shown as text: what is not UTF-8 is written `\xNN`.
+    #[test]
+    fn bytes_are_shown_as_they_are() {
+        assert_eq!(shown_bytes(b"plain"), "plain");
+        assert_eq!(shown_bytes("caf\u{e9}".as_bytes()), "caf\u{e9}");
+        assert_eq!(shown_bytes(b"a\xffb\xfe"), "a\\xFFb\\xFE");
     }
 }

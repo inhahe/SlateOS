@@ -3216,6 +3216,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "safeio",
+ "sha1",
  "textline",
 ]
 

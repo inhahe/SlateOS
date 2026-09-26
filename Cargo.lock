@@ -493,6 +493,7 @@ name = "crond"
 version = "0.1.0"
 dependencies = [
  "cronspool",
+ "libcsyslog",
  "scratchdir",
 ]
 
@@ -1458,6 +1459,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "libcsyslog"
+version = "0.1.0"
+
+[[package]]
 name = "libservicebus"
 version = "0.1.0"
 
@@ -2047,6 +2052,7 @@ dependencies = [
 name = "ntpd"
 version = "0.1.0"
 dependencies = [
+ "libcsyslog",
  "optionalfile",
 ]
 

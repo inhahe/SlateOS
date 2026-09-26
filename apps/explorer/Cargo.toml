@@ -41,6 +41,11 @@ imagecodec = { path = "../../gui/imagecodec" }
 # `ziparchive::parse_at`, without reading the rest.
 ziparchive = { path = "../../ziparchive" }
 
+# An audio file's length, bitrate, sample rate and tags, for the audio
+# columns -- the readers the music player uses, from its headers and tags
+# without decoding a sample.
+audiotags = { path = "../audiotags" }
+
 # The window, the event loop, and the hook that gets thumbnail pixels to the
 # compositor. Without it `main` was a scripted print-only demo: the explorer
 # could lay out a frame but had nowhere to put it and no way to be clicked.

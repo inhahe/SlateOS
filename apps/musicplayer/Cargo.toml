@@ -19,6 +19,10 @@ oswindow = { path = "../../gui/window" }
 # wrote it.
 safeio = { path = "../safeio" }
 
+# What an audio file is and says -- its length, rate and tags -- shared with
+# the explorer's audio columns.
+audiotags = { path = "../audiotags" }
+
 [dev-dependencies]
 # `appearance::palette_check`.
 appearance = { path = "../../gui/appearance", features = ["testing"] }

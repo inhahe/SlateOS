@@ -101,6 +101,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "audiotags"
+version = "0.1.0"
+
+[[package]]
 name = "audit"
 version = "0.1.0"
 dependencies = [
@@ -813,6 +817,7 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "associations",
+ "audiotags",
  "byteread",
  "guitk",
  "imagecodec",
@@ -1904,6 +1909,7 @@ name = "musicplayer"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "audiotags",
  "guitk",
  "oswindow",
  "safeio",

@@ -166112,7 +166112,7 @@ what the last save did were drawn at the foot of the window, over the list's
 last row; they have lines in the strip under the header now.
 
 ### [E] The explorer's file-type columns showed the same invented values for every file -- 2026-09-25
-**Status:** FIXED for pictures, source files and zip archives (lane E, 2026-09-25); OPEN for audio files, a picture's colour depth, and tar, gzip, 7z and rar archives -- lane E's.
+**Status:** FIXED for pictures, source files and zip archives (lane E, 2026-09-25) and for audio files (lane E, 2026-09-26); OPEN for a picture's colour depth, and tar, gzip, 7z and rar archives -- lane E's.
 
 **In short:** the file explorer's detail view can show extra columns for
 pictures (size, colour depth, shape), songs (length, bitrate, artist...),
@@ -166134,26 +166134,38 @@ files inside, their compressed size, and the share that saves. Each provider
 keeps what it read per file while the file's size and time are unchanged
 (`FactCache`), because a provider is asked for every visible row every frame.
 
+**Fixed, 2026-09-26: audio.** The readers were inside `apps/musicplayer`'s
+binary, where nothing else could reach them; they are the crate
+`apps/audiotags` now, which both use, and the move finished them. They had
+decoded an ISO-8859-1 ID3 frame as UTF-8 (a title with an "e acute" in a
+Latin-1 tag was dropped whole) and kept the NUL a text frame may end in;
+computed a FLAC's bit depth as `hi | (lo + 1)` (a 32-bit FLAC read as 16); and
+read no MP3's length or bitrate, no Ogg file, no FLAC's own tags, no WAV's
+`LIST`/`INFO` and no ID3v1 tag. `audiotags` reads MP3 (the first frame header
+confirmed by the next; a Xing/Info or VBRI header for a VBR file; ID3v2.2 to
+2.4, unsynchronisation, every text encoding; ID3v1 behind it filling what v2
+does not say), FLAC (STREAMINFO and its Vorbis comments, and a FLAC behind an
+ID3 tag), Ogg Vorbis and Opus (the first packets and the last page's granule,
+Opus at 48 kHz less its pre-skip) and WAV (`fmt `, `data`, `LIST`/`INFO`),
+bounded throughout. The six audio columns read from it through the same
+`FactCache`; the bitrate and sample rate are a `ColumnValue::Measure`, which
+sorts by the count ("96 kbps" before "320 kbps", which as text it was not).
+
+The move turned up that the **player never called its own readers**: every
+track it listed showed its file name, "Unknown Artist" and 0:00, whatever the
+file said. A playlist's tracks read their files now, and a relative M3U entry
+is taken from the playlist's folder, as M3U means it (it was taken from the
+player's working directory).
+
 **Still open, and blank rather than guessed:**
-- **Audio** -- nothing in `apps/explorer` reads an audio file. The readers
-  exist (`parse_id3v2`, `parse_flac_header`, `parse_wav_header`) inside
-  `apps/musicplayer`'s binary, where nothing else can reach them. The proper
-  fix is to move them into a crate both use, then fill the six audio columns
-  from it. They are not finished readers, and the move is the time to finish
-  them: `decode_id3_text` decodes an ISO-8859-1 frame as UTF-8, so a title
-  with an "e acute" in a Latin-1 tag is dropped whole, and it keeps the NUL a
-  text frame may end in; `parse_flac_header` computes the bit depth as
-  `hi | (lo + 1)` rather than `(hi | lo) + 1`, so a 32-bit FLAC reads as 16;
-  and nothing reads an MP3's length or bitrate (MPEG frame headers, a Xing or
-  VBRI header), an Ogg file at all, or a FLAC's own tags (its Vorbis comment
-  block -- FLAC does not use ID3).
 - **Colour depth** -- `imagecodec` does not report a picture's bit depth; a
   header-only `info` beside `dimensions` would be lane F's.
 - **Tar, gzip, 7z, rar** -- `apps/explorer` reads no archive but zip.
 
 **Where.** `apps/explorer/src/columns.rs`: `ImageColumns`, `AudioColumns`,
 `CodeColumns`, `ArchiveColumns`, `FactCache`, `image_size`, `line_count`,
-`zip_facts`.
+`zip_facts`, `audio_facts`. `apps/audiotags`. `apps/musicplayer/src/main.rs`:
+`Track::read_facts`, `PlayerState::load_m3u_from`.
 
 ### [E] The torrent client transfers nothing: it has no tracker or peer transport -- 2026-09-25
 **Status:** OPEN -- `apps/torrent/src/main.rs`; nothing blocks it but the

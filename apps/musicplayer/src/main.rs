@@ -94,416 +94,16 @@ const SEEK_SECONDS: f32 = 5.0;
 const VISUALIZATION_BARS: usize = 32;
 
 // ============================================================================
-// Audio Format Detection
+// Audio files
 // ============================================================================
 
-/// Supported audio formats.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AudioFormat {
-    Wav,
-    Mp3,
-    Flac,
-    Ogg,
-    Unknown,
-}
-
-impl AudioFormat {
-    /// Detect audio format from the first bytes of a file.
-    pub fn detect(data: &[u8]) -> Self {
-        if data.len() < 12 {
-            return Self::Unknown;
-        }
-
-        // WAV: RIFF....WAVE
-        if data.get(..4) == Some(b"RIFF") && data.get(8..12) == Some(b"WAVE") {
-            return Self::Wav;
-        }
-
-        // FLAC: starts with "fLaC"
-        if data.get(..4) == Some(b"fLaC") {
-            return Self::Flac;
-        }
-
-        // OGG: starts with "OggS"
-        if data.get(..4) == Some(b"OggS") {
-            return Self::Ogg;
-        }
-
-        // MP3: ID3 tag or frame sync bytes
-        if data.get(..3) == Some(b"ID3") {
-            return Self::Mp3;
-        }
-        // Frame sync: first 11 bits set (0xFF followed by 0xE0+)
-        if data.first() == Some(&0xFF)
-            && let Some(&b) = data.get(1)
-            && b & 0xE0 == 0xE0
-        {
-            return Self::Mp3;
-        }
-
-        Self::Unknown
-    }
-
-    /// Human-readable format name.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Wav => "WAV",
-            Self::Mp3 => "MP3",
-            Self::Flac => "FLAC",
-            Self::Ogg => "OGG",
-            Self::Unknown => "Unknown",
-        }
-    }
-}
-
-// ============================================================================
-// WAV Header Parsing
-// ============================================================================
-
-/// Parsed WAV file information.
-#[derive(Clone, Debug)]
-pub struct WavInfo {
-    pub sample_rate: u32,
-    pub channels: u16,
-    pub bits_per_sample: u16,
-    pub duration_secs: f32,
-}
-
-/// Parse WAV RIFF header and fmt chunk.
-pub fn parse_wav_header(data: &[u8]) -> Option<WavInfo> {
-    if data.len() < 44 {
-        return None;
-    }
-    // Verify RIFF/WAVE
-    if data.get(..4) != Some(b"RIFF") || data.get(8..12) != Some(b"WAVE") {
-        return None;
-    }
-
-    // Find fmt chunk
-    let mut offset: usize = 12;
-    let mut sample_rate = 0u32;
-    let mut channels = 0u16;
-    let mut bits_per_sample = 0u16;
-    let mut data_size = 0u32;
-    let mut found_fmt = false;
-
-    // Every offset below is `checked_add`, and that is not a lint formality:
-    // this reads a file the user was handed, and `chunk_size` is four bytes out
-    // of it. The advance at the bottom of the loop used to be
-    // `offset += 8 + chunk_size as usize`, which on a crafted size wraps
-    // `offset` back to a small number — and a small offset passes the loop
-    // guard, so the parser reads the same chunks again forever. A media player
-    // that hangs on a malformed file is the cheapest denial of service there
-    // is, and it needs no privileges to deliver: it is an email attachment.
-    let byte = |i: usize| -> Option<u8> { data.get(i).copied() };
-    while offset.checked_add(8).is_some_and(|end| end <= data.len()) {
-        let chunk_id = data.get(offset..offset.checked_add(4)?)?;
-        let chunk_size = u32::from_le_bytes([
-            byte(offset.checked_add(4)?)?,
-            byte(offset.checked_add(5)?)?,
-            byte(offset.checked_add(6)?)?,
-            byte(offset.checked_add(7)?)?,
-        ]);
-
-        if chunk_id == b"fmt " && chunk_size >= 16 {
-            let fmt_start = offset.checked_add(8)?;
-            channels = u16::from_le_bytes([
-                byte(fmt_start.checked_add(2)?)?,
-                byte(fmt_start.checked_add(3)?)?,
-            ]);
-            sample_rate = u32::from_le_bytes([
-                byte(fmt_start.checked_add(4)?)?,
-                byte(fmt_start.checked_add(5)?)?,
-                byte(fmt_start.checked_add(6)?)?,
-                byte(fmt_start.checked_add(7)?)?,
-            ]);
-            bits_per_sample = u16::from_le_bytes([
-                byte(fmt_start.checked_add(14)?)?,
-                byte(fmt_start.checked_add(15)?)?,
-            ]);
-            found_fmt = true;
-        } else if chunk_id == b"data" {
-            data_size = chunk_size;
-        }
-
-        // A chunk that would carry the cursor past the end of `usize` ends the
-        // parse rather than wrapping it. `None` and not `break`, because a
-        // size that large means the file is lying about its own structure and
-        // whatever was read before it is not to be trusted either.
-        offset = offset.checked_add(8)?.checked_add(chunk_size as usize)?;
-        // Chunks are word-aligned.
-        if !offset.is_multiple_of(2) {
-            offset = offset.checked_add(1)?;
-        }
-    }
-
-    if !found_fmt || sample_rate == 0 || channels == 0 || bits_per_sample == 0 {
-        return None;
-    }
-
-    let bytes_per_sample = u32::from(bits_per_sample) / 8;
-    // `checked_div` rather than a `> 0` test two lines up: the guard and the
-    // division are then the same expression, which is what stops them drifting
-    // apart. Both operands come out of the file.
-    let total_samples = data_size
-        .checked_div(bytes_per_sample.saturating_mul(u32::from(channels)))
-        .unwrap_or(0);
-    let duration_secs = if sample_rate > 0 {
-        total_samples as f32 / sample_rate as f32
-    } else {
-        0.0
-    };
-
-    Some(WavInfo {
-        sample_rate,
-        channels,
-        bits_per_sample,
-        duration_secs,
-    })
-}
-
-// ============================================================================
-// FLAC Header Parsing
-// ============================================================================
-
-/// Parsed FLAC STREAMINFO.
-#[derive(Clone, Debug)]
-pub struct FlacInfo {
-    pub sample_rate: u32,
-    pub channels: u8,
-    pub bits_per_sample: u8,
-    pub total_samples: u64,
-    pub duration_secs: f32,
-}
-
-/// Parse FLAC STREAMINFO metadata block.
-pub fn parse_flac_header(data: &[u8]) -> Option<FlacInfo> {
-    // "fLaC" + STREAMINFO block (minimum 42 bytes)
-    if data.len() < 42 || data.get(..4) != Some(b"fLaC") {
-        return None;
-    }
-
-    // First metadata block header at offset 4
-    // byte 4: last-block flag (1 bit) + block type (7 bits) — STREAMINFO = 0
-    let block_type = data.get(4)? & 0x7F;
-    if block_type != 0 {
-        return None; // First block must be STREAMINFO
-    }
-
-    // Block size: 3 bytes at offset 5
-    let block_size =
-        ((*data.get(5)? as u32) << 16) | ((*data.get(6)? as u32) << 8) | (*data.get(7)? as u32);
-    // STREAMINFO starts at offset 8. `checked_add` and `get` rather than `+`
-    // and `[a..b]`: `block_size` is three bytes out of the file, and a length
-    // check standing two statements away from the slice it licenses is a
-    // guarantee that stops holding the moment someone moves either one.
-    let si_end = 8usize.checked_add(block_size as usize)?;
-    if block_size < 34 || data.len() < si_end {
-        return None;
-    }
-    let si = data.get(8..si_end)?;
-    if si.len() < 34 {
-        return None;
-    }
-
-    // Bytes 10-13 + bits: sample rate (20 bits), channels (3 bits), bps (5 bits), total samples (36 bits)
-    // Offset within STREAMINFO: bytes 10..17
-    let sr_hi = (*si.get(10)? as u32) << 12;
-    let sr_mid = (*si.get(11)? as u32) << 4;
-    let sr_lo = (*si.get(12)? as u32) >> 4;
-    let sample_rate = sr_hi | sr_mid | sr_lo;
-
-    let channels = ((*si.get(12)? >> 1) & 0x07).saturating_add(1);
-    let bps_hi = (*si.get(12)? & 0x01) << 4;
-    let bps_lo = *si.get(13)? >> 4;
-    let bits_per_sample = bps_hi | bps_lo.saturating_add(1);
-
-    let total_hi = ((*si.get(13)? & 0x0F) as u64) << 32;
-    let total_lo = ((*si.get(14)? as u64) << 24)
-        | ((*si.get(15)? as u64) << 16)
-        | ((*si.get(16)? as u64) << 8)
-        | (*si.get(17)? as u64);
-    let total_samples = total_hi | total_lo;
-
-    let duration_secs = if sample_rate > 0 {
-        total_samples as f32 / sample_rate as f32
-    } else {
-        0.0
-    };
-
-    Some(FlacInfo {
-        sample_rate,
-        channels,
-        bits_per_sample,
-        total_samples,
-        duration_secs,
-    })
-}
-
-// ============================================================================
-// ID3v2 Tag Parsing (MP3)
-// ============================================================================
-
-/// Parsed ID3v2 metadata.
-#[derive(Clone, Debug, Default)]
-pub struct Id3Tags {
-    pub title: Option<String>,
-    pub artist: Option<String>,
-    pub album: Option<String>,
-    pub year: Option<String>,
-    pub genre: Option<String>,
-    pub track: Option<u32>,
-}
-
-/// Parse ID3v2 tags from MP3 file data.
-pub fn parse_id3v2(data: &[u8]) -> Option<Id3Tags> {
-    if data.len() < 10 || data.get(..3) != Some(b"ID3") {
-        return None;
-    }
-
-    let version_major = *data.get(3)?;
-    // ID3v2 size: 4 bytes synchsafe integer (7 bits per byte)
-    let size = synchsafe_u32(data.get(6..10)?)?;
-    let header_end = 10usize.checked_add(size as usize)?;
-
-    if data.len() < header_end {
-        return None;
-    }
-
-    let mut tags = Id3Tags::default();
-    let mut pos: usize = 10;
-
-    // Skip extended header if present (ID3v2.3+)
-    let flags = *data.get(5)?;
-    if version_major >= 3 && flags & 0x40 != 0 {
-        if pos.checked_add(4)? > header_end {
-            return Some(tags);
-        }
-        let ext_size = u32::from_be_bytes([
-            *data.get(pos)?,
-            *data.get(pos.checked_add(1)?)?,
-            *data.get(pos.checked_add(2)?)?,
-            *data.get(pos.checked_add(3)?)?,
-        ]) as usize;
-        // `ext_size` is a full 32-bit field out of the file. Unchecked, the
-        // advance wraps `pos` back to a small number, and a small `pos` passes
-        // the loop guard below — so the parser walks the same frames forever.
-        pos = pos.checked_add(4)?.checked_add(ext_size)?;
-    }
-
-    while pos.checked_add(10).is_some_and(|end| end <= header_end) {
-        let frame_id = data.get(pos..pos.checked_add(4)?)?;
-        if frame_id.first() == Some(&0) {
-            break; // Padding
-        }
-
-        let frame_size = if version_major >= 4 {
-            synchsafe_u32(data.get(pos.checked_add(4)?..pos.checked_add(8)?)?)? as usize
-        } else {
-            u32::from_be_bytes([
-                *data.get(pos.checked_add(4)?)?,
-                *data.get(pos.checked_add(5)?)?,
-                *data.get(pos.checked_add(6)?)?,
-                *data.get(pos.checked_add(7)?)?,
-            ]) as usize
-        };
-
-        let frame_data_start = pos.checked_add(10)?;
-        // Checked before the comparison below, not after: a sum that has
-        // already wrapped compares as *smaller* than `header_end`, so the
-        // bounds check would wave through a frame that runs off the end.
-        let frame_data_end = frame_data_start.checked_add(frame_size)?;
-
-        if frame_data_end > header_end || frame_size == 0 {
-            break;
-        }
-
-        let frame_content = data.get(frame_data_start..frame_data_end)?;
-
-        match frame_id {
-            b"TIT2" => tags.title = decode_id3_text(frame_content),
-            b"TPE1" => tags.artist = decode_id3_text(frame_content),
-            b"TALB" => tags.album = decode_id3_text(frame_content),
-            b"TDRC" | b"TYER" => tags.year = decode_id3_text(frame_content),
-            b"TCON" => tags.genre = decode_id3_text(frame_content),
-            b"TRCK" => {
-                if let Some(s) = decode_id3_text(frame_content) {
-                    // Track can be "3" or "3/12"
-                    let num_part = s.split('/').next().unwrap_or(&s);
-                    tags.track = num_part.parse().ok();
-                }
-            }
-            _ => {}
-        }
-
-        pos = frame_data_end;
-    }
-
-    Some(tags)
-}
-
-/// Decode synchsafe integer (4 bytes, 7 bits each).
-fn synchsafe_u32(bytes: &[u8]) -> Option<u32> {
-    if bytes.len() < 4 {
-        return None;
-    }
-    Some(
-        ((*bytes.first()? as u32) << 21)
-            | ((*bytes.get(1)? as u32) << 14)
-            | ((*bytes.get(2)? as u32) << 7)
-            | (*bytes.get(3)? as u32),
-    )
-}
-
-/// Decode ID3v2 text frame content.
-fn decode_id3_text(data: &[u8]) -> Option<String> {
-    if data.is_empty() {
-        return None;
-    }
-    let encoding = *data.first()?;
-    let text_bytes = data.get(1..)?;
-    match encoding {
-        0 | 3 => {
-            // ISO-8859-1 or UTF-8
-            String::from_utf8(text_bytes.to_vec()).ok()
-        }
-        1 | 2 => {
-            // UTF-16 (LE or BE with possible BOM)
-            if text_bytes.len() < 2 {
-                return None;
-            }
-            let (start, le) = if text_bytes.get(..2) == Some(&[0xFF, 0xFE]) {
-                (2, true)
-            } else if text_bytes.get(..2) == Some(&[0xFE, 0xFF]) {
-                (2, false)
-            } else {
-                (0, encoding == 2) // encoding 2 = UTF-16BE
-            };
-            let pairs = text_bytes.get(start..)?;
-            let u16_vec: Vec<u16> = pairs
-                .chunks_exact(2)
-                // `chunks_exact(2)` guarantees both bytes, but the guarantee
-                // is in the iterator's name rather than in this expression, so
-                // it is spelled out: a chunk that somehow had one byte reads as
-                // a NUL, which `take_while` then treats as end-of-string.
-                .map(|chunk| {
-                    let (a, b) = (
-                        chunk.first().copied().unwrap_or(0),
-                        chunk.get(1).copied().unwrap_or(0),
-                    );
-                    if le {
-                        u16::from_le_bytes([a, b])
-                    } else {
-                        u16::from_be_bytes([a, b])
-                    }
-                })
-                .take_while(|&c| c != 0)
-                .collect();
-            String::from_utf16(&u16_vec).ok()
-        }
-        _ => None,
-    }
-}
+// What a file is and says about itself is `apps/audiotags`'s: the readers were
+// this binary's own -- WAV, FLAC and ID3v2 -- where nothing else could reach
+// them, unfinished (Latin-1 tags read as UTF-8, a 32-bit FLAC read as 16, no
+// MP3 length, no Ogg, no FLAC tags), and never called: every track showed its
+// file name, "Unknown Artist" and 0:00. They moved, and were finished on the
+// way; the explorer's audio columns read from the same crate.
+pub use audiotags::AudioFormat;
 
 // ============================================================================
 // Track and Playlist Data Structures
@@ -569,42 +169,49 @@ impl Track {
         }
     }
 
-    /// Update track metadata from file header data.
-    pub fn update_from_data(&mut self, data: &[u8]) {
-        self.format = AudioFormat::detect(data);
+    /// Read what the file says about itself -- its tags, its length, its
+    /// format -- onto the track. A file that cannot be read keeps what the
+    /// track has: its name as its title.
+    pub fn read_facts(&mut self) {
+        if let Ok((info, tags)) = audiotags::read_path(&self.path) {
+            self.apply_facts(&info, tags);
+        }
+    }
 
-        match self.format {
-            AudioFormat::Wav => {
-                if let Some(info) = parse_wav_header(data) {
-                    self.duration_secs = info.duration_secs;
-                }
+    /// Take `info` and `tags` onto the track: each field a tag gives, the
+    /// length and the format.
+    pub fn apply_facts(&mut self, info: &audiotags::AudioInfo, tags: audiotags::Tags) {
+        self.format = info.format;
+        if let Some(secs) = info.duration_secs {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a track's length in seconds is far inside f32's range"
+            )]
+            {
+                self.duration_secs = secs as f32;
             }
-            AudioFormat::Mp3 => {
-                if let Some(tags) = parse_id3v2(data) {
-                    if let Some(title) = tags.title {
-                        self.title = title;
-                    }
-                    if let Some(artist) = tags.artist {
-                        self.artist = artist;
-                    }
-                    if let Some(album) = tags.album {
-                        self.album = album;
-                    }
-                    if let Some(year) = tags.year {
-                        self.year = year;
-                    }
-                    if let Some(genre_val) = tags.genre {
-                        self.genre = genre_val;
-                    }
-                    self.track_number = tags.track;
-                }
+        }
+        let take = |field: &mut String, value: Option<String>| {
+            if let Some(v) = value {
+                *field = v;
             }
-            AudioFormat::Flac => {
-                if let Some(info) = parse_flac_header(data) {
-                    self.duration_secs = info.duration_secs;
-                }
-            }
-            AudioFormat::Ogg | AudioFormat::Unknown => {}
+        };
+        take(&mut self.title, tags.title);
+        take(&mut self.artist, tags.artist);
+        take(&mut self.album, tags.album);
+        take(&mut self.year, tags.year);
+        take(&mut self.genre, tags.genre);
+        if tags.track.is_some() {
+            self.track_number = tags.track;
+        }
+    }
+
+    /// [`read_facts`](Self::read_facts), from the file's bytes rather than
+    /// its path: for tests, which make a file in memory.
+    #[cfg(test)]
+    pub fn update_from_data(&mut self, data: &[u8]) {
+        if let Ok((info, tags)) = audiotags::read(&mut std::io::Cursor::new(data)) {
+            self.apply_facts(&info, tags);
         }
     }
 
@@ -1345,13 +952,30 @@ impl PlayerState {
     /// makes an unsanitised [`Self::export_m3u`] a real injection vector
     /// rather than a cosmetic problem.
     pub fn load_m3u(&mut self, content: &str) {
+        self.load_m3u_from(content, None);
+    }
+
+    /// [`load_m3u`](Self::load_m3u), a relative entry taken from `folder` --
+    /// the playlist's own, as M3U means it -- and each track's tags and
+    /// length read from its file.
+    pub fn load_m3u_from(&mut self, content: &str, folder: Option<&std::path::Path>) {
         self.clear_playlist();
         for line in content.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            let track = Track::from_path(PathBuf::from(trimmed));
+            let entry = PathBuf::from(trimmed);
+            // Only an entry with no root is the list's folder's: `/music/x.mp3`
+            // is where it says on any system, including a host whose absolute
+            // paths also need a drive (there it is still not relative to the
+            // list, and joining would put it on the list's drive).
+            let path = match folder {
+                Some(dir) if entry.is_relative() && !entry.has_root() => dir.join(entry),
+                _ => entry,
+            };
+            let mut track = Track::from_path(path);
+            track.read_facts();
             self.playlist.push(track);
         }
     }
@@ -2341,7 +1965,7 @@ pub fn open_playlist(state: &mut PlayerState, path: &std::path::Path) -> String 
             // and saying "loaded 40 tracks" about a file holding 900 is
             // telling the user something false.
             let note = read.note(MAX_M3U_BYTES);
-            state.load_m3u(&read.text);
+            state.load_m3u_from(&read.text, path.parent());
             format!(
                 "{note}Opened {} track(s) from {}",
                 state.playlist.len(),
@@ -4004,31 +3628,51 @@ mod tests {
     }
 
     #[test]
-    fn test_wav_header_parsing() {
-        // Minimal valid WAV: 44100 Hz, 2 channels, 16 bits. 1 second of audio is
-        // 44100 * 2 channels * 2 bytes = 176400 bytes of PCM data.
-        let mut data = vec![0u8; 44];
-        data[0..4].copy_from_slice(b"RIFF");
-        data[4..8].copy_from_slice(&(36 + 176400u32).to_le_bytes());
-        data[8..12].copy_from_slice(b"WAVE");
-        // fmt chunk
-        data[12..16].copy_from_slice(b"fmt ");
-        data[16..20].copy_from_slice(&16u32.to_le_bytes()); // chunk size
-        data[20..22].copy_from_slice(&1u16.to_le_bytes()); // PCM
-        data[22..24].copy_from_slice(&2u16.to_le_bytes()); // channels
-        data[24..28].copy_from_slice(&44100u32.to_le_bytes()); // sample rate
-        data[28..32].copy_from_slice(&176400u32.to_le_bytes()); // byte rate
-        data[32..34].copy_from_slice(&4u16.to_le_bytes()); // block align
-        data[34..36].copy_from_slice(&16u16.to_le_bytes()); // bits per sample
-        // data chunk
-        data[36..40].copy_from_slice(b"data");
-        data[40..44].copy_from_slice(&176400u32.to_le_bytes());
+    fn a_track_takes_its_length_from_a_wav_header() {
+        let data = audiotags::testing::wav(44_100, 2, 16, 1, &[(b"INAM", "One Second")]);
+        let mut track = Track::from_path(PathBuf::from("one.wav"));
+        track.update_from_data(&data);
+        assert_eq!(track.format, AudioFormat::Wav);
+        assert_eq!(
+            track.title, "One Second",
+            "the file's own title was not taken"
+        );
+        assert!(
+            (track.duration_secs - 1.0).abs() < 0.01,
+            "{}",
+            track.duration_secs
+        );
+    }
 
-        let info = parse_wav_header(&data).expect("Should parse valid WAV header");
-        assert_eq!(info.sample_rate, 44100);
-        assert_eq!(info.channels, 2);
-        assert_eq!(info.bits_per_sample, 16);
-        assert!((info.duration_secs - 1.0).abs() < 0.01);
+    /// A playlist's tracks read their files: the tags and the length, not the
+    /// file name and 0:00 -- with a relative entry found beside the list.
+    #[test]
+    fn a_playlist_reads_what_its_files_say() {
+        let dir = mp_scratch("tags");
+        // Forty frames at 26.1 ms each: a second and a bit.
+        let file = audiotags::testing::mp3(40, &[(b"TIT2", "Caf\u{e9}"), (b"TPE1", "The Band")]);
+        std::fs::write(dir.join("song.mp3"), &file).unwrap();
+        let list = dir.join("list.m3u");
+        std::fs::write(&list, "#EXTM3U\nsong.mp3\n").unwrap();
+
+        let mut state = PlayerState::new();
+        let said = open_playlist(&mut state, &list);
+        assert!(said.contains("Opened 1 track"), "{said}");
+        let track = &state.playlist[0];
+        assert_eq!(
+            track.path,
+            dir.join("song.mp3"),
+            "a relative entry was not taken from the list's folder"
+        );
+        assert_eq!(track.title, "Caf\u{e9}");
+        assert_eq!(track.artist, "The Band");
+        assert_eq!(track.format, AudioFormat::Mp3);
+        assert!(
+            track.duration_secs > 1.0,
+            "the length was not read: {}",
+            track.duration_secs
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -4492,13 +4136,6 @@ mod tests {
     }
 
     #[test]
-    fn test_synchsafe_u32() {
-        assert_eq!(synchsafe_u32(&[0x00, 0x00, 0x02, 0x01]), Some(257));
-        assert_eq!(synchsafe_u32(&[0x00, 0x00, 0x00, 0x7F]), Some(127));
-        assert_eq!(synchsafe_u32(&[0x00, 0x00, 0x01, 0x00]), Some(128));
-    }
-
-    #[test]
     fn test_filtered_library_empty_query() {
         let mut state = PlayerState::new();
         state.add_track(Track::from_path(PathBuf::from("/a.mp3")));
@@ -4598,104 +4235,6 @@ mod tests {
     }
 
     // ---- Malformed input ----
-
-    /// A WAV whose chunk size is enormous ends the parse instead of looping.
-    ///
-    /// The advance used to be `offset += 8 + chunk_size as usize`, and
-    /// `chunk_size` is four bytes out of the file. A size near `usize::MAX`
-    /// wraps `offset` back to a small number, a small offset passes the loop
-    /// guard, and the parser walks the same chunks forever. A media player that
-    /// hangs on a malformed file is the cheapest denial of service there is,
-    /// and it arrives as an email attachment.
-    ///
-    /// This test would not fail on the old code — it would *never finish*,
-    /// which is the point.
-    #[test]
-    fn a_wav_with_an_absurd_chunk_size_does_not_loop_forever() {
-        let mut data = Vec::new();
-        data.extend_from_slice(b"RIFF");
-        data.extend_from_slice(&0u32.to_le_bytes());
-        data.extend_from_slice(b"WAVE");
-        // A chunk claiming the whole address space.
-        data.extend_from_slice(b"fmt ");
-        data.extend_from_slice(&u32::MAX.to_le_bytes());
-        data.resize(64, 0);
-
-        // Returns rather than hangs. What it returns is not the claim —
-        // `None` is the honest answer for a file that lies about its shape.
-        assert!(parse_wav_header(&data).is_none());
-    }
-
-    /// An ID3 extended header claiming a huge size ends the parse.
-    ///
-    /// Same shape as the WAV case, in a different parser: `pos += 4 + ext_size`
-    /// with `ext_size` a full 32-bit field, wrapping `pos` back below the frame
-    /// loop's guard.
-    #[test]
-    fn an_id3_extended_header_with_an_absurd_size_does_not_loop_forever() {
-        let mut data = Vec::new();
-        data.extend_from_slice(b"ID3");
-        data.push(4); // version major 4
-        data.push(0); // version minor
-        data.push(0x40); // extended-header flag
-        // Synchsafe size covering the rest.
-        data.extend_from_slice(&[0, 0, 0x01, 0x00]);
-        data.extend_from_slice(&u32::MAX.to_be_bytes()); // ext_size
-        data.resize(200, 0);
-
-        let _ = parse_id3v2(&data);
-    }
-
-    /// A FLAC block size larger than the data is refused, not sliced.
-    #[test]
-    fn a_flac_block_bigger_than_the_file_is_refused() {
-        let mut data = Vec::new();
-        data.extend_from_slice(b"fLaC");
-        data.push(0); // STREAMINFO
-        data.extend_from_slice(&[0xFF, 0xFF, 0xFF]); // block size ~16MB
-        data.resize(64, 0);
-        assert!(parse_flac_header(&data).is_none());
-    }
-
-    /// Every truncation of a plausible header is refused rather than panicking.
-    ///
-    /// A sweep rather than a sample: the parsers read a dozen fixed offsets
-    /// each, and a missed bound shows up only at the length that reaches it.
-    #[test]
-    fn no_prefix_of_a_header_panics_any_parser() {
-        let mut wav = Vec::new();
-        wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&36u32.to_le_bytes());
-        wav.extend_from_slice(b"WAVEfmt ");
-        wav.extend_from_slice(&16u32.to_le_bytes());
-        wav.extend_from_slice(&[1, 0, 2, 0]);
-        wav.extend_from_slice(&44_100u32.to_le_bytes());
-        wav.resize(80, 0);
-
-        let mut id3 = Vec::new();
-        id3.extend_from_slice(b"ID3");
-        id3.extend_from_slice(&[4, 0, 0, 0, 0, 0x01, 0x00]);
-        id3.extend_from_slice(b"TIT2");
-        id3.extend_from_slice(&8u32.to_be_bytes());
-        id3.extend_from_slice(&[0, 0]);
-        id3.extend_from_slice(b"Title");
-        id3.resize(200, 0);
-
-        let mut flac = Vec::new();
-        flac.extend_from_slice(b"fLaC");
-        flac.push(0);
-        flac.extend_from_slice(&[0, 0, 34]);
-        flac.resize(64, 0);
-
-        for source in [&wav, &id3, &flac] {
-            for len in 0..source.len() {
-                let prefix = source.get(..len).unwrap_or(&[]);
-                let _ = parse_wav_header(prefix);
-                let _ = parse_id3v2(prefix);
-                let _ = parse_flac_header(prefix);
-            }
-        }
-    }
 
     /// The warning lines are where they can be seen: nothing drawn after a
     /// line fills the point it is drawn at. The sweep that added them drew

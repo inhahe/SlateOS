@@ -35,9 +35,9 @@
 //! every archive 0 files. A column a user turned on showed the same numbers
 //! for every row. A cell now holds what was read from the file, or nothing:
 //! pictures are measured by `imagecodec`, source files counted, zip archives
-//! read through `ziparchive`. What nothing here reads yet -- a picture's
-//! colour depth, anything in an audio file, the inside of a tar, 7z or rar --
-//! is blank rather than a guess (known-issues.md,
+//! read through `ziparchive`, audio files through `audiotags`. What nothing
+//! here reads yet -- a picture's colour depth, the inside of a tar, 7z or rar
+//! -- is blank rather than a guess (known-issues.md,
 //! `[E] The explorer's file-type columns showed the same invented values for
 //! every file`).
 //!
@@ -241,8 +241,21 @@ pub enum ColumnValue {
     Duration(u64),
     /// Fraction 0.0..1.0 formatted as "85%".
     Percentage(f32),
+    /// A count of a unit, formatted by the unit -- "320 kbps", "44.1 kHz" --
+    /// and sorted by the count, where the same words as text would put
+    /// "96 kbps" after "320 kbps".
+    Measure(u64, Unit),
     /// No value for this cell.
     Empty,
+}
+
+/// What a [`ColumnValue::Measure`] counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Unit {
+    /// Kilobits a second: a bitrate.
+    Kbps,
+    /// Hertz, shown in kilohertz: a sample rate.
+    Hz,
 }
 
 impl ColumnValue {
@@ -255,6 +268,8 @@ impl ColumnValue {
             Self::DateTime(epoch) => format_datetime(*epoch),
             Self::Duration(secs) => format_duration(*secs),
             Self::Percentage(frac) => format_percentage(*frac),
+            Self::Measure(n, Unit::Kbps) => format!("{} kbps", format_count(*n)),
+            Self::Measure(n, Unit::Hz) => format_hz(*n),
             Self::Empty => String::new(),
         }
     }
@@ -271,6 +286,7 @@ impl ColumnValue {
             Self::DateTime(_) => 3,
             Self::Duration(_) => 4,
             Self::Percentage(_) => 5,
+            Self::Measure(..) => 6,
             Self::Empty => 255,
         }
     }
@@ -317,6 +333,9 @@ impl Ord for ColumnValue {
             (Self::DateTime(a), Self::DateTime(b)) => a.cmp(b),
             (Self::Duration(a), Self::Duration(b)) => a.cmp(b),
             (Self::Percentage(a), Self::Percentage(b)) => a.total_cmp(b),
+            // One column holds one unit; the unit first keeps the order total
+            // if two ever meet.
+            (Self::Measure(a, ua), Self::Measure(b, ub)) => ua.cmp(ub).then_with(|| a.cmp(b)),
             (Self::Empty, Self::Empty) => Ordering::Equal,
             _ => self.kind_rank().cmp(&other.kind_rank()),
         }
@@ -1031,14 +1050,42 @@ impl ColumnProvider for AudioColumns {
         COLS.get_or_init(AudioColumns::make_defs)
     }
 
-    /// Nothing, for now: this crate reads no audio file. Every cell was
-    /// invented -- 3:42, 320 kbps, 44.1 kHz, "Unknown Artist" for every song
-    /// -- and the title was the file name cut at its *first* dot. The readers
-    /// exist, in `apps/musicplayer`'s binary where nothing else can reach
-    /// them; the columns come back when they are a crate both can use.
+    /// What `audiotags` reads from the file's headers and tags -- the
+    /// readers the music player uses: how long it plays, its bitrate and
+    /// sample rate, and the artist, album and title its tags give. A cell the
+    /// file does not say is blank. Every cell was invented until 2026-09-26
+    /// -- 3:42, 320 kbps, 44.1 kHz, "Unknown Artist" for every song -- and
+    /// the title was the file name cut at its *first* dot.
+    ///
+    /// The length is whole seconds, cut rather than rounded: the player
+    /// counts a track's length the same way, and the two should not
+    /// disagree about one file.
     fn value(&self, path: &str, column_id: ColumnId) -> ColumnValue {
-        let _ = (path, column_id);
-        ColumnValue::Empty
+        static FACTS: OnceLock<FactCache<Option<AudioFacts>>> = OnceLock::new();
+        let Some((info, tags)) = FACTS
+            .get_or_init(FactCache::new)
+            .get(path, audio_facts)
+            .flatten()
+        else {
+            return ColumnValue::Empty;
+        };
+        let text = |field: Option<String>| field.map_or(ColumnValue::Empty, ColumnValue::Text);
+        match column_id {
+            ColumnId::DURATION => info
+                .duration_secs
+                .and_then(whole_seconds)
+                .map_or(ColumnValue::Empty, ColumnValue::Duration),
+            ColumnId::BITRATE => info.bitrate_kbps.map_or(ColumnValue::Empty, |kbps| {
+                ColumnValue::Measure(u64::from(kbps), Unit::Kbps)
+            }),
+            ColumnId::SAMPLE_RATE => info.sample_rate.map_or(ColumnValue::Empty, |hz| {
+                ColumnValue::Measure(u64::from(hz), Unit::Hz)
+            }),
+            ColumnId::ARTIST => text(tags.artist),
+            ColumnId::ALBUM => text(tags.album),
+            ColumnId::TITLE => text(tags.title),
+            _ => ColumnValue::Empty,
+        }
     }
 
     fn supported_extensions(&self) -> &[&str] {
@@ -1322,6 +1369,29 @@ fn image_size(path: &str) -> Option<(u32, u32)> {
         }
         Err(_) => None,
     }
+}
+
+/// What an audio file says about itself: how it plays, and its tags.
+type AudioFacts = (audiotags::AudioInfo, audiotags::Tags);
+
+/// The file's facts, or `None` when it cannot be read. A file that cannot be
+/// opened is a row whose audio cells are blank -- the same as one whose
+/// headers say nothing -- and the list shows the file either way, so there
+/// is nothing a cell could usefully say about why.
+fn audio_facts(path: &str) -> Option<AudioFacts> {
+    audiotags::read_path(std::path::Path::new(path)).ok()
+}
+
+/// `secs` as whole seconds, cut: `None` for a length that is not a number
+/// of seconds at all.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "cut to whole seconds on purpose; checked finite and non-negative, and `as` saturates"
+)]
+fn whole_seconds(secs: f64) -> Option<u64> {
+    // `as` is total on any f64 (NaN is 0), so casting before the check is sound.
+    (secs.is_finite() && secs >= 0.0).then_some(secs as u64)
 }
 
 /// `w:h` in lowest terms when those are small -- `16:9`, `4:3`, `1:1` --
@@ -1645,9 +1715,10 @@ pub fn render_column_values_from(
                 (ColumnId::NAME, Some(c)) => c,
                 _ => match value {
                     ColumnValue::Empty => c.cell_dim,
-                    ColumnValue::Size(_) | ColumnValue::Number(_) | ColumnValue::Percentage(_) => {
-                        c.cell_dim
-                    }
+                    ColumnValue::Size(_)
+                    | ColumnValue::Number(_)
+                    | ColumnValue::Percentage(_)
+                    | ColumnValue::Measure(..) => c.cell_dim,
                     _ => c.cell_text,
                 },
             };
@@ -1774,6 +1845,30 @@ fn format_number(n: i64) -> String {
         result.push('-');
     }
     result.chars().rev().collect()
+}
+
+/// An unsigned count with thousands separators, as [`format_number`].
+fn format_count(n: u64) -> String {
+    i64::try_from(n).map_or_else(|_| n.to_string(), format_number)
+}
+
+/// Hertz as kilohertz, exactly: 44100 is "44.1 kHz", 8000 "8 kHz", 11025
+/// "11.025 kHz". Below a kilohertz, hertz.
+fn format_hz(hz: u64) -> String {
+    if hz < 1000 {
+        return format!("{hz} Hz");
+    }
+    let (whole, part) = (hz / 1000, hz % 1000);
+    if part == 0 {
+        format!("{} kHz", format_count(whole))
+    } else {
+        let digits = format!("{part:03}");
+        format!(
+            "{}.{} kHz",
+            format_count(whole),
+            digits.trim_end_matches('0')
+        )
+    }
 }
 
 /// Format a Unix-epoch timestamp as "YYYY-MM-DD HH:MM", in UTC.
@@ -2988,21 +3083,165 @@ mod tests {
         );
     }
 
+    const AUDIO_COLUMNS: [ColumnId; 6] = [
+        ColumnId::DURATION,
+        ColumnId::BITRATE,
+        ColumnId::SAMPLE_RATE,
+        ColumnId::ARTIST,
+        ColumnId::ALBUM,
+        ColumnId::TITLE,
+    ];
+
+    /// An audio file's cells are what its headers and tags say: every one
+    /// was invented -- 3:42, 320 kbps, "Unknown Artist" -- for every song.
     #[test]
-    fn nothing_is_invented_for_an_audio_file() {
+    fn an_audio_file_shows_what_it_says_about_itself() {
         let dir = Scratch::new("audio");
-        let song = dir.file("my.song.mp3", b"ID3");
         let mgr = ColumnManager::with_defaults();
-        for id in [
-            ColumnId::DURATION,
-            ColumnId::BITRATE,
-            ColumnId::SAMPLE_RATE,
-            ColumnId::ARTIST,
-            ColumnId::ALBUM,
-            ColumnId::TITLE,
-        ] {
-            assert_eq!(mgr.get_value(&song, id), ColumnValue::Empty, "{id:?}");
+        let song = dir.file(
+            "my.song.mp3",
+            &audiotags::testing::mp3(
+                2303,
+                &[
+                    (b"TIT2", "Caf\u{e9} Song"),
+                    (b"TPE1", "The Band"),
+                    (b"TALB", "Songs"),
+                ],
+            ),
+        );
+        // 2303 frames of 417 bytes at 128 kbps: 60.02 seconds.
+        assert_eq!(
+            mgr.get_value(&song, ColumnId::DURATION),
+            ColumnValue::Duration(60)
+        );
+        assert_eq!(
+            mgr.get_value(&song, ColumnId::BITRATE),
+            ColumnValue::Measure(128, Unit::Kbps)
+        );
+        assert_eq!(
+            mgr.get_value(&song, ColumnId::SAMPLE_RATE),
+            ColumnValue::Measure(44_100, Unit::Hz)
+        );
+        assert_eq!(mgr.get_value(&song, ColumnId::ARTIST), text("The Band"));
+        assert_eq!(mgr.get_value(&song, ColumnId::ALBUM), text("Songs"));
+        assert_eq!(
+            mgr.get_value(&song, ColumnId::TITLE),
+            text("Caf\u{e9} Song"),
+            "the title is the tag's, not the name cut at its first dot"
+        );
+
+        let wav = dir.file(
+            "take.wav",
+            &audiotags::testing::wav(48_000, 2, 16, 2, &[(b"INAM", "Take Two")]),
+        );
+        assert_eq!(
+            mgr.get_value(&wav, ColumnId::DURATION),
+            ColumnValue::Duration(2)
+        );
+        assert_eq!(
+            mgr.get_value(&wav, ColumnId::BITRATE),
+            ColumnValue::Measure(1536, Unit::Kbps)
+        );
+        assert_eq!(
+            mgr.get_value(&wav, ColumnId::SAMPLE_RATE),
+            ColumnValue::Measure(48_000, Unit::Hz)
+        );
+        assert_eq!(mgr.get_value(&wav, ColumnId::TITLE), text("Take Two"));
+        // What the file does not say is blank, not a guess.
+        assert_eq!(mgr.get_value(&wav, ColumnId::ARTIST), ColumnValue::Empty);
+        assert_eq!(mgr.get_value(&wav, ColumnId::ALBUM), ColumnValue::Empty);
+    }
+
+    /// A length is cut to whole seconds, as the player counts it: a file of
+    /// 2.9 seconds is 0:02 in both.
+    #[test]
+    fn an_audio_files_length_is_cut_to_whole_seconds() {
+        let dir = Scratch::new("audio-cut");
+        let mgr = ColumnManager::with_defaults();
+        // 111 frames: 2.89 seconds, which rounding would make 3.
+        let song = dir.file("short.mp3", &audiotags::testing::mp3(111, &[]));
+        assert_eq!(
+            mgr.get_value(&song, ColumnId::DURATION),
+            ColumnValue::Duration(2)
+        );
+        assert_eq!(whole_seconds(2.999), Some(2));
+        assert_eq!(whole_seconds(0.0), Some(0));
+        assert_eq!(whole_seconds(-1.0), None);
+        assert_eq!(whole_seconds(f64::NAN), None);
+        assert_eq!(whole_seconds(f64::INFINITY), None);
+    }
+
+    #[test]
+    fn nothing_is_invented_for_a_file_that_is_not_audio() {
+        let dir = Scratch::new("audio-not");
+        let mgr = ColumnManager::with_defaults();
+        let fake = dir.file("fake.mp3", b"ID3");
+        let words = dir.file("words.flac", b"these are words, not a FLAC stream");
+        let gone = dir
+            .0
+            .join("gone.ogg")
+            .to_str()
+            .expect("a text path")
+            .to_owned();
+        for path in [&fake, &words, &gone] {
+            for id in AUDIO_COLUMNS {
+                assert_eq!(mgr.get_value(path, id), ColumnValue::Empty, "{path} {id:?}");
+            }
         }
+    }
+
+    #[test]
+    fn a_changed_audio_file_is_read_again() {
+        let dir = Scratch::new("audio-changed");
+        let mgr = ColumnManager::with_defaults();
+        let path = dir.file(
+            "song.mp3",
+            &audiotags::testing::mp3(10, &[(b"TIT2", "Before")]),
+        );
+        assert_eq!(mgr.get_value(&path, ColumnId::TITLE), text("Before"));
+        dir.file(
+            "song.mp3",
+            &audiotags::testing::mp3(20, &[(b"TIT2", "After, retagged")]),
+        );
+        assert_eq!(
+            mgr.get_value(&path, ColumnId::TITLE),
+            text("After, retagged"),
+            "the tags of the file that was there before were shown"
+        );
+    }
+
+    #[test]
+    fn a_measure_reads_in_its_unit_and_sorts_by_its_count() {
+        assert_eq!(ColumnValue::Measure(320, Unit::Kbps).display(), "320 kbps");
+        assert_eq!(
+            ColumnValue::Measure(1536, Unit::Kbps).display(),
+            "1,536 kbps"
+        );
+        assert_eq!(ColumnValue::Measure(44_100, Unit::Hz).display(), "44.1 kHz");
+        assert_eq!(ColumnValue::Measure(48_000, Unit::Hz).display(), "48 kHz");
+        assert_eq!(
+            ColumnValue::Measure(22_050, Unit::Hz).display(),
+            "22.05 kHz"
+        );
+        assert_eq!(
+            ColumnValue::Measure(11_025, Unit::Hz).display(),
+            "11.025 kHz"
+        );
+        assert_eq!(ColumnValue::Measure(500, Unit::Hz).display(), "500 Hz");
+        assert_eq!(ColumnValue::Measure(1000, Unit::Hz).display(), "1 kHz");
+        // As text, "96 kbps" sorts after "320 kbps"; as a count it is less.
+        assert!(ColumnValue::Measure(96, Unit::Kbps) < ColumnValue::Measure(320, Unit::Kbps));
+        assert!(ColumnValue::Measure(8_000, Unit::Hz) < ColumnValue::Measure(44_100, Unit::Hz));
+        assert_eq!(
+            ColumnValue::Measure(128, Unit::Kbps),
+            ColumnValue::Measure(128, Unit::Kbps)
+        );
+        assert_ne!(
+            ColumnValue::Measure(128, Unit::Kbps),
+            ColumnValue::Measure(128, Unit::Hz)
+        );
+        // A blank cell sorts after every value, as in every other column.
+        assert!(ColumnValue::Measure(u64::MAX, Unit::Hz) < ColumnValue::Empty);
     }
 
     #[test]

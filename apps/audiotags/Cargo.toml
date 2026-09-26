@@ -1,0 +1,10 @@
+[package]
+name = "audiotags"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS audio file facts for applications: length, rate, bitrate and tags, read from headers without decoding."
+
+[dependencies]
+
+[lints]
+workspace = true

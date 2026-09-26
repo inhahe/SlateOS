@@ -1946,6 +1946,17 @@ word; text inside them that says "lane C" is history.
   it up. Tested against dict.org's own replies, recorded; no test reaches
   the network.
 
+- `[x]` `[E]` **The speed test measures the connection** — 2026-09-26. It
+  invented its figures until 2026-09-15 and showed none since. Now: the
+  round trip as timed TCP connections, then download and upload over
+  several connections for the configured time, against public test servers
+  published for this (Tele2, Hetzner, Linode, Vultr, thinkbroadband) --
+  the invented `*.speedtest.slateos.net` list is gone. A server with no
+  upload address gives "not measured", never zero; "packet loss" became
+  "failed probes", which is what an application can count
+  (design-decisions §1215). Tested end to end against a loopback HTTP
+  server.
+
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane
 C's standing note before the split). **Baseline, 2026-09-24:** every `apps/*`

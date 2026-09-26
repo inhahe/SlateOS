@@ -3168,12 +3168,14 @@ place, saying in the window which service it asks, and letting the user turn
 it off. It is the option under which the app is useful; the user's own
 action (adding a place) is what starts any sending.
 
-**A related decision already made, which your answer may overrule:** the
+**Related decisions already made, which your answer may overrule:** the
 dictionary now looks up words its built-in list lacks at dict.org, when the
-reader asks (design-decisions §1214, decided by Claude). A looked-up word
-reveals less than a location, but it is the same kind of choice. If you would
-rather no program contacted a third party by default, say so here and both
-change.
+reader asks (design-decisions §1214), and the speed test measures against
+public test servers when Start is pressed (§1215) -- both decided by Claude,
+both contacting a third party only on the user's action. A looked-up word
+reveals less than a location, and a speed test nothing of the user's, but it
+is the same kind of choice. If you would rather no program contacted a third
+party by default, say so here and all three change.
 
 ### If never answered
 

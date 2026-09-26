@@ -165120,7 +165120,7 @@ workaround is in place; `a_listener_the_platform_cannot_vouch_for_is_asked_every
 holds the workaround's two halves. The kernel side is visible directly: `poll`
 a listening socket with a connection pending and `revents` comes back 0.
 
-### [F] A JPEG thumbnail is not the picture libjpeg makes at that scale, and sits half a source pixel off -- 2026-09-25 -- **fixed 2026-09-25**
+### [F] A JPEG thumbnail is not the picture libjpeg makes at that scale, and sits half a source pixel off -- 2026-09-25 -- **FIXED 2026-09-25**
 
 **Status:** ✅ FIXED 2026-09-25 (lane F) — design-decisions §1307. The reduced
 transforms now average as libjpeg-turbo's do, and each component is
@@ -165168,7 +165168,7 @@ either way.
 **How to see it.** Decode a JPEG with `decode_scaled` at a bound that picks half
 scale, and compare it with `simplejpeg.decode_jpeg(data, min_factor=2)`.
 
-### [F] Gate 5 (GNU option tables) is non-deterministic when WSL is sick: a fast WSL failure passes the push unjudged, a hang fails it -- 2026-09-25 -- **fixed 2026-09-25 by lane A, 54e1c8743**
+### [F] Gate 5 (GNU option tables) is non-deterministic when WSL is sick: a fast WSL failure passes the push unjudged, a hang fails it -- 2026-09-25 -- **FIXED 2026-09-25 by lane A, 54e1c8743**
 
 **Status:** FIXED -- lane A's 54e1c8743: every probe's shell prints a marker first, and no marker, a timeout or a runner that will not start all make the checker exit 3 ("could not run, and why"), which pre-push tallies as a loud skip; the boot's bash-oracle gate declines the same way (d62c2e790). The original report follows.
 
@@ -165263,7 +165263,7 @@ have the disc's colour at partial alpha.
 **How to see it.** Thumbnail a GIF or PNG with an opaque coloured shape on a
 transparent background over a light background: the shape has a dark rim.
 
-### [F] Lossless WebP decodes at half libwebp's speed -- 2026-09-25 -- **fixed 2026-09-25**
+### [F] Lossless WebP decodes at half libwebp's speed -- 2026-09-25 -- **FIXED 2026-09-25**
 
 **Status:** FIXED — it now takes fewer cycles than libwebp: 0.39 billion for
 the 2000x1500 picture against libwebp's 0.46 (it was 0.63), measured in the
@@ -165343,7 +165343,7 @@ against a snapshot copy, interleaved, the minimum of N runs in thread
 cycles), and libwebp's cycles from Pillow's `load()` measured the same way
 with `QueryThreadCycleTime`.
 
-### [F] A lossless alpha plane cut off mid-symbol can differ from libwebp in its last pixel -- 2026-09-25 -- **fixed 2026-09-25**
+### [F] A lossless alpha plane cut off mid-symbol can differ from libwebp in its last pixel -- 2026-09-25 -- **FIXED 2026-09-25**
 
 **Status:** FIXED — `Bits` in `webp/lossless.rs` is now a port of libwebp's `VP8LBitReader`, called where `vp8l_dec.c` calls it, and the byte-per-pixel alpha loop is libwebp's `DecodeAlphaData`; `tests/data/webp_lossy_alpha_corrupt_tail.webp` is the file that showed it. The original report follows.
 
@@ -165514,3 +165514,44 @@ how much of each libjpeg has taken (which needs libjpeg-turbo's fast path,
 since it takes bytes differently), its `in_buffer_file_pos_log`, and its
 file position through every read. No writer's file reaches any of them, and
 20,000 fuzzed files found none.
+
+### [F] A PNG decodes at about twice Pillow's cost, and inflating it is nearly all of that -- 2026-09-26
+
+**Status:** OPEN — the part left is not lane F's code: waiting on lanes A and B
+(`requests/f-ab-inflate-decodes-a-bit-at-a-time-five-times-slower-than-zlib-ng.md`).
+
+**In short:** opening a big PNG costs about twice what Pillow (libpng-class C)
+spends on it. A 2000x1500 photograph: 0.88 billion cycles of the decoding
+thread against Pillow's 0.41. Until 2026-09-26 it was 1.1 to 1.26; this
+lane's own half — unfiltering the rows and turning them into pixels — now
+costs about 0.1 where Pillow's costs 0.26, so what is left is the inflate: the
+shared `deflate` crate's takes 0.78 where zlib-ng takes 0.15. The pixels are
+right; only the speed is behind.
+
+**Where.** `deflate/src/lib.rs`, `HuffmanTable::decode`, which reads one bit
+at a time in the manner of zlib's `puff.c` (a reference decoder, written to be
+read). A root leaf crate no lane owns (`open-questions.md` A-Q11), with lane
+B's streaming rewrite of the same code in flight (`454a9bfb5` on `lane-b`),
+hence the request rather than an edit.
+
+**Done here** (2026-09-26, pixels held to the snapshot before it on 6,000
+random PNGs of every layout, full size and scaled, and to the Pillow
+fixtures):
+1. Rows unfiltered by one instance of each filter per pixel size (the six
+   PNG has), the pixel an array the compiler keeps in registers; Paeth in
+   libpng's branch-free form, held to the RFC's on all 2^24 inputs by a test.
+2. Rows converted to pixels a row at a time by a converter chosen once from
+   the header (palette and transparency folded in beforehand), not a
+   colour-type dispatch and two bounds checks per sample per pixel.
+3. The orientation lookup no longer checksums the first `IDAT` it stops at —
+   every decode asks for the orientation, and a file written as one `IDAT`
+   was checksummed twice.
+4. The chunk CRC is the `crc32` crate's, not a private copy of its table.
+
+**The proper fix, the rest:** table-driven Huffman decoding in `deflate`, as
+the request lays out; then the CRC (byte-at-a-time: 0.033 of the 0.1 left
+here), which is the `crc32` crate's to speed up.
+
+**How to see it.** `target/perfbench` against a snapshot (thread cycles, the
+minimum of N), Pillow's `Image.open(...).load()` measured the same way, and
+`target/inflatebench` for the inflate alone.

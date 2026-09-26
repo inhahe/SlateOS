@@ -25,6 +25,23 @@
 //! Output is written into a byte buffer the caller then writes out, so a
 //! failed write is the caller's to report, as `close_stdout` reports it.
 //!
+//! # Where it is not upstream's
+//!
+//! A width is never reduced past zero. Upstream's widths are `size_t`, and
+//! on a terminal narrow enough a reduction can pass zero and wrap to a width
+//! in the quintillions -- `prlimit` on a 10-column terminal prints spaces
+//! until it is killed. Here the reduction stops at zero: the column
+//! vanishes, and the table fits. (Where upstream's unsigned arithmetic wraps
+//! and comes back -- enlarging a column past its widest cell and back -- it
+//! is kept, and the result is the same.)
+//! And a character wider than its whole column is dropped from a wrapped
+//! cell, where upstream keeps it pending and prints empty lines for ever.
+//! And when every column is at its minimum and the table still does not
+//! fit, the reduction stops after its last stage and the table prints as
+//! wide as it is, where upstream's reduction loop never ends (see
+//! `reduce_column`). All three are cases in which upstream never finishes;
+//! nothing that finishes differs.
+//!
 //! # What is not ported yet
 //!
 //! Each is refused or absent rather than approximated, and each is what a
@@ -586,18 +603,33 @@ impl Table {
         self.columns.len()
     }
 
-    /// `scols_print_table`: the table, and a final newline unless it is
-    /// JSON or had nothing to print.
+    /// `scols_print_table`, into `out`: the table, and a final newline unless
+    /// it is JSON, had nothing to print, or failed.
     ///
     /// # Errors
     ///
-    /// The table has no columns.
-    pub fn print(&mut self) -> Result<Vec<u8>, Error> {
-        let mut out = Vec::new();
-        let empty = self.do_print(&mut out)?;
+    /// The table has no columns (nothing is printed); or a wrapped cell's
+    /// column was left no width, which ends the print where it is -- what
+    /// was printed before stays in `out`, as upstream's stays on its stream,
+    /// and a program that ignores the error (as `lsmem` and `prlimit`
+    /// upstream do) writes it all the same.
+    pub fn print_into(&mut self, out: &mut Vec<u8>) -> Result<(), Error> {
+        let empty = self.do_print(out)?;
         if !empty && !self.is_json() {
             out.push(b'\n');
         }
+        Ok(())
+    }
+
+    /// [`Table::print_into`] a new buffer. On an error the partial output
+    /// is lost; a program that must write it uses `print_into`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Table::print_into`].
+    pub fn print(&mut self) -> Result<Vec<u8>, Error> {
+        let mut out = Vec::new();
+        self.print_into(&mut out)?;
         Ok(out)
     }
 

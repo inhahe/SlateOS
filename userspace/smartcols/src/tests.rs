@@ -154,3 +154,36 @@ fn maxout_and_minout_exclude_each_other() {
     tb.enable_minout(true).unwrap();
     assert_eq!(tb.enable_maxout(true), Err(Error::Invalid));
 }
+
+#[test]
+fn every_terminal_width_finishes_printing() {
+    // Upstream never finishes at some of these widths: its reductions wrap
+    // a size_t to a width in the quintillions, or run out of stages with the
+    // table still too wide and loop. Here every one ends, with the table as
+    // wide as the columns' minimums allow.
+    for width in 0..40 {
+        let mut tb = Table::new();
+        tb.set_utf8(true);
+        tb.set_termforce(TermForce::Always);
+        tb.set_termwidth(width);
+        let a = tb.new_column(b"WRAPPED", 0.3, FL_WRAP);
+        let b = tb.new_column(b"TRUNCATED", 0.1, FL_TRUNC);
+        let c = tb.new_column(b"PLAIN", 0.0, 0);
+        for _ in 0..3 {
+            let ln = tb.new_line(None).unwrap();
+            tb.line_set_data(ln, a, b"abcdefghijklmnopqrstuvwxyz")
+                .unwrap();
+            tb.line_set_data(ln, b, b"0123456789").unwrap();
+            tb.line_set_data(ln, c, b"x").unwrap();
+        }
+        let mut out = Vec::new();
+        tb.print_into(&mut out).unwrap();
+        assert!(
+            out.ends_with(
+                b"
+"
+            ),
+            "width {width}"
+        );
+    }
+}

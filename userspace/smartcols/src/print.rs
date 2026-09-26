@@ -247,13 +247,24 @@ impl Table {
     }
 
     /// `print_pending_data`: the next piece of a wrapped cell.
-    fn print_pending_data(&mut self, out: &mut Vec<u8>, cl: usize, ln: Option<LineId>) {
+    ///
+    /// # Errors
+    ///
+    /// The column has no width left to print it in: upstream's `-EINVAL`,
+    /// which ends the print. (Returning without it would leave the data
+    /// pending, and the caller's loop printing empty lines for ever.)
+    fn print_pending_data(
+        &mut self,
+        out: &mut Vec<u8>,
+        cl: usize,
+        ln: Option<LineId>,
+    ) -> Result<(), crate::Error> {
         let Some(mut data) = self.columns.get(cl).and_then(|c| c.pending.clone()) else {
-            return;
+            return Ok(());
         };
         let width = self.columns.get(cl).map_or(0, |c| c.width);
         if width == 0 {
-            return;
+            return Err(crate::Error::Invalid);
         }
         let mut len = width;
         let bytes = mbs::mbs_truncate(&mut data, &mut len, self.utf8);
@@ -270,6 +281,7 @@ impl Table {
         if self.finish_cell(out, cl, ln, len, width, is_last) && !is_last {
             out.extend_from_slice(&self.colsep());
         }
+        Ok(())
     }
 
     /// `print_json_data`.
@@ -404,7 +416,16 @@ impl Table {
     }
 
     /// `print_line`, with the extra lines of wrapped cells.
-    fn print_line(&mut self, out: &mut Vec<u8>, ln: LineId, buf: &mut Buf) {
+    ///
+    /// # Errors
+    ///
+    /// A wrapped cell's column has no width (`print_pending_data`).
+    fn print_line(
+        &mut self,
+        out: &mut Vec<u8>,
+        ln: LineId,
+        buf: &mut Buf,
+    ) -> Result<(), crate::Error> {
         let mut pending = false;
         for cl in 0..self.columns.len() {
             if self.columns.get(cl).is_some_and(crate::Column::is_hidden) {
@@ -428,7 +449,7 @@ impl Table {
                     continue;
                 }
                 if col.pending.is_some() {
-                    self.print_pending_data(out, cl, Some(ln));
+                    self.print_pending_data(out, cl, Some(ln))?;
                     if self.columns.get(cl).is_some_and(|c| c.pending.is_some()) {
                         pending = true;
                     }
@@ -437,6 +458,7 @@ impl Table {
                 }
             }
         }
+        Ok(())
     }
 
     /// `__scols_print_title`.
@@ -513,8 +535,10 @@ impl Table {
         !self.header_repeat || self.header_next <= self.termlines_used
     }
 
-    /// `__scols_print_table` / `__scols_print_range` over every line.
-    fn print_lines(&mut self, out: &mut Vec<u8>, buf: &mut Buf) {
+    /// `__scols_print_table` / `__scols_print_range` over every line; a line
+    /// that fails still gets its closing (`fput_line_close`), and ends the
+    /// range.
+    fn print_lines(&mut self, out: &mut Vec<u8>, buf: &mut Buf) -> Result<(), crate::Error> {
         let n = self.lines.len();
         for i in 0..n {
             let last = i.saturating_add(1) == n;
@@ -522,17 +546,19 @@ impl Table {
             if self.is_json() {
                 self.json.open(out, None, Kind::Object);
             }
-            self.print_line(out, ln, buf);
+            let rc = self.print_line(out, ln, buf);
             if self.is_json() {
                 self.json.close(out, Kind::Object);
             } else if !last && !self.no_linesep {
                 out.extend_from_slice(&self.linesep());
                 self.termlines_used = self.termlines_used.saturating_add(1);
             }
+            rc?;
             if !last && self.want_repeat_header() {
                 self.print_header(out, buf);
             }
         }
+        Ok(())
     }
 
     fn is_tree_root(&self, ln: LineId) -> bool {
@@ -573,12 +599,18 @@ impl Table {
         true
     }
 
-    /// `print_tree_line`, the walk's callback.
-    fn print_tree_line(&mut self, out: &mut Vec<u8>, ln: LineId, buf: &mut Buf) {
+    /// `print_tree_line`, the walk's callback. A line that fails ends the
+    /// walk there, before its closing, as upstream's returns at once.
+    fn print_tree_line(
+        &mut self,
+        out: &mut Vec<u8>,
+        ln: LineId,
+        buf: &mut Buf,
+    ) -> Result<(), crate::Error> {
         if self.is_json() {
             self.json.open(out, None, Kind::Object);
         }
-        self.print_line(out, ln, buf);
+        self.print_line(out, ln, buf)?;
         if self.has_children(Some(ln)) {
             if self.is_json() {
                 self.json.open(out, Some(b"children"), Kind::Array);
@@ -607,22 +639,30 @@ impl Table {
             out.extend_from_slice(&self.linesep());
             self.termlines_used = self.termlines_used.saturating_add(1);
         }
+        Ok(())
     }
 
-    /// `walk_line`: a line, then its children in order.
-    fn walk_line(&mut self, out: &mut Vec<u8>, ln: LineId, buf: &mut Buf) {
-        self.print_tree_line(out, ln, buf);
+    /// `walk_line`: a line, then its children in order; the first failure
+    /// ends the walk.
+    fn walk_line(
+        &mut self,
+        out: &mut Vec<u8>,
+        ln: LineId,
+        buf: &mut Buf,
+    ) -> Result<(), crate::Error> {
+        self.print_tree_line(out, ln, buf)?;
         let children = self
             .line(ln)
             .map(|l| l.children.clone())
             .unwrap_or_default();
         for child in children {
-            self.walk_line(out, child, buf);
+            self.walk_line(out, child, buf)?;
         }
+        Ok(())
     }
 
     /// `__scols_print_tree`: `scols_walk_tree` with `print_tree_line`.
-    fn print_tree(&mut self, out: &mut Vec<u8>, buf: &mut Buf) {
+    fn print_tree(&mut self, out: &mut Vec<u8>, buf: &mut Buf) -> Result<(), crate::Error> {
         self.walk_last_tree_root = None;
         self.walk_last_done = false;
         // The last root, in table order.
@@ -644,9 +684,13 @@ impl Table {
             if self.walk_last_tree_root == Some(ln) {
                 self.walk_last_done = true;
             }
-            self.walk_line(out, ln, buf);
+            if let Err(e) = self.walk_line(out, ln, buf) {
+                self.walk_last_done = false;
+                return Err(e);
+            }
         }
         self.walk_last_done = false;
+        Ok(())
     }
 
     /// `__scols_initialize_printing`.
@@ -687,6 +731,12 @@ impl Table {
     }
 
     /// `do_print_table`: whether there was nothing to print.
+    ///
+    /// # Errors
+    ///
+    /// No columns; or a line that could not be printed, which ends the table
+    /// -- the JSON brackets are still closed, and what came before it stays
+    /// in `out`, as upstream's stays on its stream.
     pub(crate) fn do_print(&mut self, out: &mut Vec<u8>) -> Result<bool, crate::Error> {
         if self.columns.is_empty() {
             return Err(crate::Error::Invalid);
@@ -714,16 +764,42 @@ impl Table {
             self.print_title(out);
         }
         self.print_header(out, &mut buf);
-        if self.is_tree() {
-            self.print_tree(out, &mut buf);
+        let printed = if self.is_tree() {
+            self.print_tree(out, &mut buf)
         } else {
-            self.print_lines(out, &mut buf);
-        }
+            self.print_lines(out, &mut buf)
+        };
         if self.is_json() {
             self.json.close(out, Kind::Array);
             self.json.close(out, Kind::Object);
         }
         self.cleanup_printing();
-        Ok(false)
+        printed.map(|()| false)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use crate::{FL_WRAP, Table, TermForce};
+
+    /// Upstream's `print_pending_data` answers `-EINVAL` for a column with
+    /// no width, and the print stops; carrying on would leave the data
+    /// pending and the caller printing empty lines for ever. The width
+    /// calculation never leaves a wrapped column at zero (it hides a column
+    /// it reduces to nothing), so this is set up by hand.
+    #[test]
+    fn a_wrapped_cell_with_no_width_to_go_into_is_an_error() {
+        let mut tb = Table::new();
+        tb.set_termforce(TermForce::Never);
+        tb.new_column(b"A", 0.0, FL_WRAP);
+        tb.columns[0].width = 0;
+        tb.columns[0].pending = Some(b"abc".to_vec());
+        let mut out = Vec::new();
+        assert_eq!(
+            tb.print_pending_data(&mut out, 0, None),
+            Err(crate::Error::Invalid)
+        );
+        assert!(out.is_empty());
     }
 }

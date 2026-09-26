@@ -188,6 +188,17 @@ impl Table {
         nth: usize,
     ) -> Result<(), ()> {
         let termwidth = self.termwidth;
+        // "No more stages" -- asked first, where upstream asks it last. Its
+        // early returns come before the stage switch, so when every column
+        // is hidden or already at its minimum and the table still does not
+        // fit, no call ever reaches the switch, `stage` climbs, and upstream
+        // never finishes. Asking first ends the reduction there instead, and
+        // the table prints as wide as it is; in every case upstream finishes,
+        // the answer is the same, since the columns it visits before the one
+        // that reaches its `default:` change nothing.
+        if stage > 6 {
+            return Err(());
+        }
         let Some(col) = self.columns.get(cl) else {
             return Ok(());
         };

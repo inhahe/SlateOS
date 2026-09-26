@@ -999,11 +999,11 @@ fn run(argv: &[OsString], short: &[u8], out: &mut Out) -> u8 {
         for blk in &l.blocks {
             add_scols_line(&l, &mut tb, &cols, blk);
         }
-        // `scols_print_table`'s status is not looked at: it fails only for a
-        // table without columns, and this one has at least one.
-        if let Ok(text) = tb.print() {
-            out.write(&text);
-        }
+        // `scols_print_table`'s status is not looked at, as upstream does
+        // not look at it: what it printed before any failure is written.
+        let mut text = Vec::new();
+        let _ = tb.print_into(&mut text);
+        out.write(&text);
         if l.want_summary {
             out.write(b"\n");
         }

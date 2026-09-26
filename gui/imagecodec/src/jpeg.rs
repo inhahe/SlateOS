@@ -25,6 +25,8 @@
 //!   thumbnails, and block smoothing (`jdcoefct.c`).
 //! - [`idct`]: the accurate integer transform and the reduced ones
 //!   (`jidctint.c`, `jidctred.c`).
+//! - [`lossless`]: lossless JPEG -- its Huffman decoder, its predictors and
+//!   the buffers between them (`jdlhuff.c`, `jdlossls.c`, `jddiffct.c`).
 //! - [`upsample`], [`color`]: bringing chroma to full size and converting it
 //!   (`jdsample.c`, `jdcolor.c`).
 //! - [`decompress`]: the decompression object and its control flow
@@ -36,12 +38,19 @@
 //!
 //! The crate's entry points, and the few decisions libjpeg leaves to its
 //! caller, taken as Chrome takes them: which colour space to ask for (RGB for
-//! greyscale, RGB and YCbCr files; CMYK for CMYK and YCCK ones, converted to
-//! RGB by Chrome's formula for the inverted CMYK Adobe writes; anything else
+//! RGB and YCbCr files; CMYK for CMYK and YCCK ones, converted to RGB by
+//! Chrome's formula for the inverted CMYK Adobe writes; anything else
 //! refused), a limit of 100 scans, and EXIF orientation read as Chrome reads
 //! it. What follows the last row of the picture -- libjpeg's
 //! `jpeg_finish_decompress` -- is not read: a picture whose every row decoded
 //! is shown, whatever is after it.
+//!
+//! One choice is not Chrome's. A greyscale file is decoded as greyscale and
+//! made RGB here, as GNOME's image loader and Pillow do it, where Chrome asks
+//! libjpeg for RGB: the pixels are the same for every lossy file, but libjpeg
+//! converts nothing in a lossless one, so Chrome cannot show a lossless
+//! greyscale JPEG -- the commonest kind, from medical and scientific imaging
+//! -- and they can.
 //!
 //! # Where this and libjpeg-turbo can differ
 //!
@@ -49,9 +58,10 @@
 //! inverse DCT in 16-bit lanes and its C code in 64-bit integers, and on the
 //! rare damaged file whose coefficients overflow 16 bits the two produce
 //! different garbage. This follows the C code, which is the reference and is
-//! the same on every machine. Lossless JPEG (`SOF3`), which libjpeg-turbo 3
-//! also reads, is refused for now. And [`Limits`] can refuse a file libjpeg
-//! would try to allocate for.
+//! the same on every machine. Lossless JPEG is decoded as libjpeg-turbo 3
+//! decodes it through the same 8-bit interface, samples of 2 to 8 bits; wider
+//! ones, and arithmetic-coded ones, it refuses, and so does this. And
+//! [`Limits`] can refuse a file libjpeg would try to allocate for.
 
 use alloc::vec::Vec;
 
@@ -65,6 +75,7 @@ mod decompress;
 mod error;
 mod huffman;
 mod idct;
+mod lossless;
 mod marker;
 mod source;
 mod tables;
@@ -168,26 +179,23 @@ fn decode_at(bytes: &[u8], limits: Limits, block: usize) -> ImageResult<Image> {
             limit: limits.max_pixels,
         });
     }
-    // Chrome's choice of output: RGB where libjpeg can make it, CMYK (and its
-    // own conversion) for the four-component spaces, and nothing else.
-    let cmyk = match jpeg.jpeg_color_space() {
-        ColorSpace::Grayscale | ColorSpace::Rgb | ColorSpace::YCbCr => false,
-        ColorSpace::Cmyk | ColorSpace::Ycck => true,
+    // Chrome's choice of output -- RGB where libjpeg can make it, CMYK (and
+    // its own conversion) for the four-component spaces, and nothing else --
+    // except that greyscale is asked for as greyscale and made RGB here, as
+    // GNOME's loader and Pillow do: the same pixels, and the only way a
+    // lossless greyscale file, which libjpeg will not convert, decodes.
+    let space = jpeg.jpeg_color_space();
+    let out = match space {
+        ColorSpace::Grayscale => ColorSpace::Grayscale,
+        ColorSpace::Rgb | ColorSpace::YCbCr => ColorSpace::Rgb,
+        ColorSpace::Cmyk | ColorSpace::Ycck => ColorSpace::Cmyk,
         ColorSpace::Unknown => {
             return Err(ImageError::Unsupported(
                 "a JPEG of two, or five or more, components",
             ));
         }
     };
-    let space = jpeg.jpeg_color_space();
-    jpeg.set_color_spaces(
-        space,
-        if cmyk {
-            ColorSpace::Cmyk
-        } else {
-            ColorSpace::Rgb
-        },
-    );
+    jpeg.set_color_spaces(space, out);
     jpeg.set_block_size(block);
     jpeg.set_max_scans(MAX_SCANS);
     jpeg.start(&limits, None)?;
@@ -195,13 +203,18 @@ fn decode_at(bytes: &[u8], limits: Limits, block: usize) -> ImageResult<Image> {
     let mut pixels = Vec::with_capacity(width.saturating_mul(height));
     for _ in 0..height {
         let row = jpeg.read_row()?;
-        if cmyk {
+        if out == ColorSpace::Cmyk {
             pixels.extend(row.chunks_exact(4).map(|p| {
                 if let [c, m, y, k] = *p {
                     inverted_cmyk(c, m, y, k)
                 } else {
                     0xFF00_0000
                 }
+            }));
+        } else if out == ColorSpace::Grayscale {
+            pixels.extend(row.iter().map(|&g| {
+                let g = u32::from(g);
+                0xFF00_0000 | (g << 16) | (g << 8) | g
             }));
         } else {
             pixels.extend(row.chunks_exact(3).map(|p| {
@@ -267,7 +280,9 @@ fn stored_dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
 /// preview of a 4000x5333 photograph is reconstructed at 500x667 and never
 /// allocates the picture whole -- and a progressive one keeps only those
 /// coefficients of each block. The caller's exact box is then fitted by
-/// averaging what remains, which is at most a 2x reduction.
+/// averaging what remains, which is at most a 2x reduction. A lossless JPEG
+/// has no transform to scale in, and libjpeg decodes it whole whatever was
+/// asked; its thumbnail is averaged down from that.
 ///
 /// **Measured**, release build, a 4000x5333 photograph (6.8 MB, 4:2:0): a
 /// 128-pixel thumbnail in about 0.18 s and the whole picture in about 0.76 s;

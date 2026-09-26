@@ -19,6 +19,7 @@
 //! meets a marker back to the path transcribed here and redoes it, so it
 //! computes the same thing and is not reproduced.
 
+use super::coef::Coefficients;
 use super::error::{Error, jerr};
 use super::marker::{Header, Input, read_restart_marker};
 use super::tables::{HuffSpec, Tables, natural};
@@ -562,12 +563,6 @@ impl Progressive {
         }
     }
 
-    fn table(&self, number: u8) -> Option<&Derived> {
-        self.tables
-            .get(usize::from(number))
-            .and_then(Option::as_ref)
-    }
-
     /// One MCU into `blocks`, which hold the coefficients so far.
     pub(super) fn decode_mcu(
         &mut self,
@@ -581,14 +576,45 @@ impl Progressive {
         }
         match self.pass {
             Pass::DcFirst => self.dc_first(input, header, blocks)?,
-            Pass::AcFirst => self.ac_first(input, header, blocks),
             Pass::DcRefine => self.dc_refine(input, header, blocks),
-            Pass::AcRefine => self.ac_refine(input, header, blocks),
+            Pass::AcFirst | Pass::AcRefine => {
+                if let Some(block) = blocks.first_mut() {
+                    self.ac(input, header, block);
+                }
+            }
         }
         if interval != 0 {
             self.restarts_to_go = self.restarts_to_go.wrapping_sub(1);
         }
         Ok(())
+    }
+
+    /// One MCU of an AC scan -- one block, of one component -- decoded into
+    /// `block` wherever it lies: [`Self::decode_mcu`] for the scans the
+    /// coefficient store decodes in place.
+    pub(super) fn decode_ac<B: Coefficients>(
+        &mut self,
+        input: &mut Input<'_>,
+        header: &Header,
+        block: &mut B,
+    ) {
+        let interval = header.restart_interval;
+        if interval != 0 && self.restarts_to_go == 0 {
+            self.restart(input, interval);
+        }
+        self.ac(input, header, block);
+        if interval != 0 {
+            self.restarts_to_go = self.restarts_to_go.wrapping_sub(1);
+        }
+    }
+
+    /// The AC pass this scan is.
+    fn ac<B: Coefficients>(&mut self, input: &mut Input<'_>, header: &Header, block: &mut B) {
+        match self.pass {
+            Pass::AcFirst => self.ac_first(input, header, block),
+            Pass::AcRefine => self.ac_refine(input, header, block),
+            Pass::DcFirst | Pass::DcRefine => {}
+        }
     }
 
     /// `decode_mcu_DC_first`.
@@ -633,7 +659,7 @@ impl Progressive {
     }
 
     /// `decode_mcu_AC_first`.
-    fn ac_first(&mut self, input: &mut Input<'_>, header: &Header, blocks: &mut [[i16; 64]]) {
+    fn ac_first<B: Coefficients>(&mut self, input: &mut Input<'_>, header: &Header, block: &mut B) {
         if self.bits.insufficient {
             return;
         }
@@ -644,24 +670,27 @@ impl Progressive {
         let scan = &header.scan;
         let ci = scan.comps.first().copied().unwrap_or(0);
         let number = header.components.get(ci).map_or(0, |c| c.ac_tbl_no);
-        let Some(table) = self.table(number).cloned() else {
-            return;
-        };
-        let Some(block) = blocks.first_mut() else {
+        // Borrowed from its field rather than through a method on `self`, so
+        // the bit reader can be borrowed beside it: a table is a kilobyte,
+        // and copying it for every block of every AC scan cost a large
+        // progressive photograph gigabytes of copying.
+        let Some(table) = self
+            .tables
+            .get(usize::from(number))
+            .and_then(Option::as_ref)
+        else {
             return;
         };
         let mut k = usize::from(scan.ss);
         let se = usize::from(scan.se);
         while k <= se {
-            let symbol = self.bits.decode(input, &table);
+            let symbol = self.bits.decode(input, table);
             let run = symbol >> 4;
             let size = symbol & 15;
             if size != 0 {
                 k = k.saturating_add(run as usize);
                 let r = self.bits.get(input, size);
-                if let Some(cell) = block.get_mut(natural(k)) {
-                    *cell = left_shift(extend(r, size), scan.al);
-                }
+                block.set(natural(k), left_shift(extend(r, size), scan.al));
             } else if run == 15 {
                 k = k.saturating_add(15);
             } else {
@@ -689,7 +718,12 @@ impl Progressive {
     }
 
     /// `decode_mcu_AC_refine`.
-    fn ac_refine(&mut self, input: &mut Input<'_>, header: &Header, blocks: &mut [[i16; 64]]) {
+    fn ac_refine<B: Coefficients>(
+        &mut self,
+        input: &mut Input<'_>,
+        header: &Header,
+        block: &mut B,
+    ) {
         if self.bits.insufficient {
             return;
         }
@@ -698,10 +732,12 @@ impl Progressive {
         let m1 = -1i32 << scan.al;
         let ci = scan.comps.first().copied().unwrap_or(0);
         let number = header.components.get(ci).map_or(0, |c| c.ac_tbl_no);
-        let Some(table) = self.table(number).cloned() else {
-            return;
-        };
-        let Some(block) = blocks.first_mut() else {
+        // Borrowed from its field, beside the bit reader, as in `ac_first`.
+        let Some(table) = self
+            .tables
+            .get(usize::from(number))
+            .and_then(Option::as_ref)
+        else {
             return;
         };
         let se = usize::from(scan.se);
@@ -709,7 +745,7 @@ impl Progressive {
         let mut eobrun = self.eobrun;
         if eobrun == 0 {
             while k <= se {
-                let symbol = self.bits.decode(input, &table);
+                let symbol = self.bits.decode(input, table);
                 let mut run = symbol >> 4;
                 let size = symbol & 15;
                 let mut value = 0i32;
@@ -730,7 +766,7 @@ impl Progressive {
                 // ones, appending a correction bit to each nonzero one.
                 loop {
                     let at = natural(k);
-                    let coefficient = block.get(at).copied().unwrap_or(0);
+                    let coefficient = block.at(at);
                     if coefficient != 0 {
                         if self.bits.get(input, 1) != 0 {
                             refine(block, at, p1, m1);
@@ -747,9 +783,7 @@ impl Progressive {
                     }
                 }
                 if value != 0 {
-                    if let Some(cell) = block.get_mut(natural(k)) {
-                        *cell = value as i16;
-                    }
+                    block.set(natural(k), value as i16);
                 }
                 k = k.saturating_add(1);
             }
@@ -757,7 +791,7 @@ impl Progressive {
         if eobrun > 0 {
             while k <= se {
                 let at = natural(k);
-                if block.get(at).copied().unwrap_or(0) != 0 && self.bits.get(input, 1) != 0 {
+                if block.at(at) != 0 && self.bits.get(input, 1) != 0 {
                     refine(block, at, p1, m1);
                 }
                 k = k.saturating_add(1);
@@ -770,16 +804,16 @@ impl Progressive {
 
 /// A correction bit for an already-nonzero coefficient: increase its
 /// magnitude by `p1`, unless that bit is already set.
-fn refine(block: &mut [i16; 64], at: usize, p1: i32, m1: i32) {
-    if let Some(cell) = block.get_mut(at) {
-        let value = i32::from(*cell);
-        if value & p1 == 0 {
-            *cell = if value >= 0 {
-                cell.wrapping_add(p1 as i16)
-            } else {
-                cell.wrapping_add(m1 as i16)
-            };
-        }
+fn refine<B: Coefficients>(block: &mut B, at: usize, p1: i32, m1: i32) {
+    let cell = block.at(at);
+    let value = i32::from(cell);
+    if value & p1 == 0 {
+        let refined = if value >= 0 {
+            cell.wrapping_add(p1 as i16)
+        } else {
+            cell.wrapping_add(m1 as i16)
+        };
+        block.set(at, refined);
     }
 }
 

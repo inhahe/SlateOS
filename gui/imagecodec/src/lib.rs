@@ -68,12 +68,12 @@
 //!
 //! JPEG, as libjpeg-turbo -- the decoder in the browsers, in GNOME's image
 //! viewer and in Pillow -- decodes it, because the decoder is a port of
-//! libjpeg-turbo's: baseline, extended, progressive and arithmetic-coded,
-//! every sampling layout, greyscale, YCbCr, RGB, CMYK and YCCK, damaged files
-//! included, to exactly libjpeg-turbo's pixels, and a thumbnail by its own
-//! reduced-size decoding. The choices libjpeg leaves to its caller are made as
-//! Chrome makes them. Lossless and 12-bit JPEG are refused by name. See
-//! [`jpeg`].
+//! libjpeg-turbo's: baseline, extended, progressive, arithmetic-coded and
+//! lossless, every sampling layout, greyscale, YCbCr, RGB, CMYK and YCCK,
+//! damaged files included, to exactly libjpeg-turbo's pixels, and a thumbnail
+//! by its own reduced-size decoding. The choices libjpeg leaves to its caller
+//! are made as Chrome makes them, but for greyscale. 12-bit JPEG is refused by
+//! name. See [`jpeg`].
 //!
 //! GIF (87a and 89a), animations included: [`decode`] gives the first frame,
 //! which is what a thumbnail or a still viewer shows, and [`gif::Animation`]
@@ -104,8 +104,8 @@
 //! TIFF, the first page, as libtiff's RGBA reader -- the one image viewers
 //! on free desktops use -- converts it: grey, palette, RGB, CMYK, `YCbCr`
 //! and CIE L*a*b* samples of every depth it takes, strips or tiles, planes
-//! together or apart, uncompressed or PackBits, LZW, Deflate, CCITT fax or
-//! JPEG. See [`tiff`].
+//! together or apart, uncompressed or PackBits, LZW, Deflate, CCITT fax,
+//! JPEG, NeXT or ThunderScan. See [`tiff`].
 //!
 //! **EXIF orientation is applied**, as Chrome applies it: a JPEG's or PNG's
 //! EXIF saying the picture is on its side turns it, so [`decode`],

@@ -19,17 +19,24 @@
 //! [`Store`]s when the decode starts, as `jpeg_start_decompress` does, and
 //! reconstructed a row at a time from there, with block smoothing where
 //! libjpeg would smooth.
+//!
+//! A lossless image ([`lossless`]) goes the same way with samples in place of
+//! coefficients: a single-scan one is decoded an iMCU row at a time into the
+//! planes, a multi-scan one into planes kept whole, as libjpeg keeps a
+//! whole-image sample array -- and reading a row of it that no scan wrote
+//! fails, as libjpeg's reading of an undefined row of that array does.
 
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use super::arith::Arith;
-use super::coef::{self, SAVED, Smoothing, Store};
+use super::coef::{self, Coefficients, SAVED, Smoothing, Store};
 use super::color::{self, ColorSpace, Ycc};
 use super::error::{Error, jerr};
 use super::huffman::{Pass, Progression, Progressive, Sequential};
 use super::idct::{self, Target};
+use super::lossless::{self, Controller, Position};
 use super::marker::{self, Header, Input, Reached};
 use super::tables::Tables;
 use super::upsample::{Rows, Samples, Shape};
@@ -49,13 +56,32 @@ enum Entropy {
     Sequential(Box<Sequential>),
     Progressive(Box<Progressive>),
     Arith(Box<Arith>),
+    /// A lossless scan's, which decodes a whole row of MCUs at a time
+    /// ([`lossless::decompress_row`]) rather than one MCU.
+    Lossless(Box<lossless::Entropy>),
 }
 
 impl Entropy {
+    /// One MCU of a progressive AC scan into `block`, wherever it lies.
+    fn decode_ac<B: Coefficients>(
+        &mut self,
+        input: &mut Input<'_>,
+        header: &Header,
+        block: &mut B,
+    ) {
+        match self {
+            Self::Progressive(d) => d.decode_ac(input, header, block),
+            Self::Arith(d) => d.decode_ac(input, header, block),
+            // Never asked: only progressive scans have AC passes.
+            Self::Sequential(_) | Self::Lossless(_) => {}
+        }
+    }
+
     fn insufficient(&self) -> bool {
         match self {
             Self::Sequential(d) => d.bits.insufficient,
             Self::Progressive(d) => d.bits.insufficient,
+            Self::Lossless(d) => d.bits.insufficient,
             Self::Arith(_) => false,
         }
     }
@@ -76,6 +102,8 @@ impl Entropy {
                 d.decode_mcu(input, header, blocks);
                 Ok(())
             }
+            // Never asked: a lossless scan has no blocks.
+            Self::Lossless(_) => Ok(()),
         }
     }
 }
@@ -128,6 +156,12 @@ pub(crate) struct Decompress<'d, 't> {
     /// Per component, the progression status latched for smoothing: as it is,
     /// and as it was before the last scan.
     smoothing: Option<Vec<([i32; SAVED], [i32; SAVED])>>,
+    /// A lossless image's difference buffers and predictor state.
+    lossless: Option<Controller>,
+    /// For each component of a multi-scan lossless image, how many rows of
+    /// its plane some scan has written: the whole-image array's
+    /// `first_undef_row`.
+    defined_rows: Vec<usize>,
     ycc: Option<Ycc>,
     out_row: Vec<u8>,
 }
@@ -167,6 +201,8 @@ impl<'d, 't> Decompress<'d, 't> {
             output_imcu_row: 0,
             output_scanline: 0,
             smoothing: None,
+            lossless: None,
+            defined_rows: Vec::new(),
             ycc: None,
             out_row: Vec::new(),
         }
@@ -389,22 +425,25 @@ impl<'d, 't> Decompress<'d, 't> {
         limits: &Limits,
         rows_wanted: Option<usize>,
     ) -> Result<(), Error> {
-        if self.header.lossless {
-            return Err(Error::Unsupported("JPEG: lossless (SOF3, SOF11)"));
-        }
         self.calc_output_dimensions();
         self.select_color()?;
         let fancy = self.min_dct > 1;
         self.select_upsampling(fancy)?;
-        if self.header.precision != 8 {
-            // A 12-bit image passes libjpeg's start and fails at the first
-            // 8-bit scanline read; either way it does not decode.
+        if self.header.lossless && self.header.arith {
+            return Err(jerr::ARITH_NOTIMPL);
+        }
+        // The 8-bit interface takes lossy samples of 8 bits and lossless ones
+        // of at most 8. Wider ones pass libjpeg's start and fail at the first
+        // scanline read; either way they do not decode.
+        let precision = self.header.precision;
+        if precision > 8 || (!self.header.lossless && precision != 8) {
             return Err(jerr::BAD_PRECISION);
         }
         if self.header.progressive {
             self.progression = Some(Progression::new(self.header.components.len()));
         }
-        if !self.header.arith && !self.header.progressive {
+        // `std_huff_tables`, which only the sequential Huffman decoder installs.
+        if !self.header.arith && !self.header.progressive && !self.header.lossless {
             self.tables.default_huffman();
         }
         self.allocate(limits, rows_wanted)?;
@@ -438,6 +477,13 @@ impl<'d, 't> Decompress<'d, 't> {
         reason = "frame geometry: dimensions are at most 65500 (initial_setup refuses more), sampling factors at most 4 and block sizes at most 8, so every product here is far below usize::MAX"
     )]
     fn calc_output_dimensions(&mut self) {
+        if self.header.lossless {
+            // Never scaled (`master_selection` sets 1/1 whatever was asked):
+            // each sample is its own data unit, as `initial_setup` sized them.
+            self.output_width = self.header.width;
+            self.output_height = self.header.height;
+            return;
+        }
         let min = self.block_size;
         self.min_dct = min;
         let (width, height) = (self.header.width, self.header.height);
@@ -475,7 +521,13 @@ impl<'d, 't> Decompress<'d, 't> {
             return Err(jerr::BAD_J_COLORSPACE);
         }
         use ColorSpace as C;
+        // No conversion that loses anything is done for a lossless image:
+        // each output space takes only itself.
+        let lossless = self.header.lossless;
         let supported = match self.out_color_space {
+            C::Grayscale | C::Rgb | C::Cmyk if lossless => {
+                self.out_color_space == self.jpeg_color_space
+            }
             C::Grayscale => matches!(self.jpeg_color_space, C::Grayscale | C::YCbCr),
             C::Rgb => matches!(self.jpeg_color_space, C::YCbCr | C::Grayscale | C::Rgb),
             C::Cmyk => matches!(self.jpeg_color_space, C::Ycck | C::Cmyk),
@@ -532,21 +584,29 @@ impl<'d, 't> Decompress<'d, 't> {
         reason = "frame geometry: dimensions are at most 65500, sampling factors at most 4 and block sizes at most 8, so every product here is far below usize::MAX"
     )]
     fn allocate(&mut self, limits: &Limits, rows_wanted: Option<usize>) -> Result<(), Error> {
+        // A multi-scan lossless image's samples are kept whole in its planes,
+        // as libjpeg keeps them in a whole-image array; its coefficients are
+        // what a lossy one keeps whole.
+        let lossless = self.header.lossless;
+        let whole_planes = lossless && self.has_multiple_scans;
         let imcu_rows = match rows_wanted {
-            Some(rows) => div_up(rows, self.max_v * self.min_dct)
+            Some(rows) if !whole_planes => div_up(rows, self.max_v * self.min_dct)
                 .saturating_add(1)
                 .min(self.total_imcu_rows),
-            None => self.total_imcu_rows,
+            _ => self.total_imcu_rows,
         };
         let mut bytes = 0u64;
         for (component, plane) in self.header.components.iter().zip(&self.planes) {
             let rows = (imcu_rows * component.v * component.dct_scaled_size).min(plane.shape.rows);
             bytes = bytes.saturating_add((rows as u64).saturating_mul(plane.shape.stride as u64));
-            if self.has_multiple_scans {
+            if self.has_multiple_scans && !lossless {
                 let blocks = component.width_in_blocks.next_multiple_of(component.h)
                     * component.height_in_blocks.next_multiple_of(component.v);
                 bytes = bytes.saturating_add(Store::bytes(blocks, component.dct_scaled_size));
             }
+        }
+        if lossless {
+            bytes = bytes.saturating_add(Controller::bytes(&self.header.components));
         }
         let limit = limits.max_decompressed_bytes as u64;
         if bytes > limit {
@@ -556,7 +616,10 @@ impl<'d, 't> Decompress<'d, 't> {
             });
         }
         self.stores.clear();
-        if self.has_multiple_scans {
+        if lossless {
+            self.lossless = Some(Controller::new(&self.header.components));
+            self.defined_rows = vec![0; self.header.components.len()];
+        } else if self.has_multiple_scans {
             for component in &self.header.components {
                 self.stores.push(Store::new(
                     component.width_in_blocks.next_multiple_of(component.h),
@@ -571,6 +634,19 @@ impl<'d, 't> Decompress<'d, 't> {
     /// `start_input_pass`: set up for the scan whose header was just read.
     fn start_input_pass(&mut self) -> Result<(), Error> {
         self.per_scan_setup()?;
+        if self.header.lossless {
+            // The lossless decoder's `start_pass`, then the difference
+            // controller's; no quantisation tables are latched.
+            let entropy = lossless::Entropy::start(&self.header, self.tables, &self.membership)?;
+            if let Some(controller) = self.lossless.as_mut() {
+                controller.start_input_pass(&self.header, self.mcus_per_row)?;
+            }
+            self.entropy = Some(Entropy::Lossless(Box::new(entropy)));
+            self.input_imcu_row = 0;
+            self.start_imcu_row();
+            self.reading_markers = false;
+            return Ok(());
+        }
         self.latch_quant_tables()?;
         let entropy = if self.header.arith {
             let pass = if self.header.progressive {
@@ -642,7 +718,9 @@ impl<'d, 't> Decompress<'d, 't> {
             if !(1..=4).contains(&scan.count) {
                 return Err(jerr::COMPONENT_COUNT);
             }
-            self.mcus_per_row = div_up(self.header.width, self.max_h * 8);
+            // A lossless image's data unit is one sample, a lossy one's a block.
+            let unit = if self.header.lossless { 1 } else { 8 };
+            self.mcus_per_row = div_up(self.header.width, self.max_h * unit);
             for (position, &ci) in scan.components().iter().enumerate() {
                 let component = self
                     .header
@@ -719,7 +797,76 @@ impl<'d, 't> Decompress<'d, 't> {
         reason = "frame geometry: dimensions are at most 65500, sampling factors at most 4 and block sizes at most 8, so every product here is far below usize::MAX"
     )]
     fn consume_data(&mut self) -> Result<(), Error> {
+        if self.header.lossless {
+            let row = self.input_imcu_row;
+            self.lossless_row();
+            // The rows of the whole-image array this scan has now written.
+            for &ci in self.header.scan.components() {
+                if let (Some(component), Some(defined)) = (
+                    self.header.components.get(ci),
+                    self.defined_rows.get_mut(ci),
+                ) {
+                    *defined = (*defined).max((row + 1) * component.v);
+                }
+            }
+            return Ok(());
+        }
         let scan = self.header.scan;
+        if self.header.progressive && scan.ss != 0 {
+            self.consume_ac_row();
+        } else {
+            self.consume_mcu_row()?;
+        }
+        self.input_imcu_row += 1;
+        if self.input_imcu_row < self.total_imcu_rows {
+            self.start_imcu_row();
+        } else {
+            self.reading_markers = true;
+        }
+        Ok(())
+    }
+
+    /// A row of MCUs of a progressive AC scan -- one component, one block an
+    /// MCU (`Pass::of` refuses any other) -- decoded in place in the store,
+    /// as libjpeg decodes into its coefficient array.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "frame geometry: dimensions are at most 65500 and sampling factors at most 4"
+    )]
+    fn consume_ac_row(&mut self) {
+        let scan = self.header.scan;
+        let ci = scan.comps.first().copied().unwrap_or(0);
+        let v = self.header.components.get(ci).map_or(1, |c| c.v);
+        for yoffset in 0..self.mcu_rows_per_imcu_row {
+            let by = self.input_imcu_row * v + yoffset;
+            for bx in 0..self.mcus_per_row {
+                let Some(entropy) = self.entropy.as_mut() else {
+                    return;
+                };
+                if !entropy.insufficient() {
+                    self.last_good_imcu_row = self.input_imcu_row;
+                }
+                if let Some(store) = self.stores.get_mut(ci) {
+                    let mut block = store.block(bx, by);
+                    entropy.decode_ac(&mut self.input, &self.header, &mut block);
+                } else {
+                    let mut scratch = [0i16; 64];
+                    entropy.decode_ac(&mut self.input, &self.header, &mut scratch);
+                }
+            }
+        }
+    }
+
+    /// A row of MCUs of any other multi-scan scan: its blocks copied out of
+    /// the stores, decoded, and put back -- the DC alone for a progressive DC
+    /// scan, which touches nothing else.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "frame geometry: dimensions are at most 65500, sampling factors at most 4 and block sizes at most 8, so every product here is far below usize::MAX"
+    )]
+    fn consume_mcu_row(&mut self) -> Result<(), Error> {
+        let scan = self.header.scan;
+        let dc_only = self.header.progressive;
         let mut blocks = [[0i16; 64]; 10];
         let mut places = [(0usize, 0usize, 0usize); 10];
         for yoffset in 0..self.mcu_rows_per_imcu_row {
@@ -740,7 +887,11 @@ impl<'d, 't> Decompress<'d, 't> {
                             if let (Some(block), Some(place)) =
                                 (blocks.get_mut(count), places.get_mut(count))
                             {
-                                *block = store.load(bx, by);
+                                if dc_only {
+                                    store.load_dc(bx, by, block);
+                                } else {
+                                    *block = store.load(bx, by);
+                                }
                                 *place = (ci, bx, by);
                             }
                             count += 1;
@@ -758,16 +909,14 @@ impl<'d, 't> Decompress<'d, 't> {
                 entropy.decode_mcu(&mut self.input, &self.header, mcu)?;
                 for (block, &(ci, bx, by)) in blocks.iter().zip(&places).take(count) {
                     if let Some(store) = self.stores.get_mut(ci) {
-                        store.save(bx, by, block);
+                        if dc_only {
+                            store.save_dc(bx, by, block);
+                        } else {
+                            store.save(bx, by, block);
+                        }
                     }
                 }
             }
-        }
-        self.input_imcu_row += 1;
-        if self.input_imcu_row < self.total_imcu_rows {
-            self.start_imcu_row();
-        } else {
-            self.reading_markers = true;
         }
         Ok(())
     }
@@ -779,6 +928,11 @@ impl<'d, 't> Decompress<'d, 't> {
         reason = "frame geometry: dimensions are at most 65500, sampling factors at most 4 and block sizes at most 8, so every product here is far below usize::MAX"
     )]
     fn decompress_onepass(&mut self) -> Result<(), Error> {
+        if self.header.lossless {
+            self.lossless_row();
+            self.output_imcu_row += 1;
+            return Ok(());
+        }
         let scan = self.header.scan;
         let last_imcu_row = self.total_imcu_rows.saturating_sub(1);
         let last_mcu_col = self.mcus_per_row.saturating_sub(1);
@@ -860,8 +1014,21 @@ impl<'d, 't> Decompress<'d, 't> {
         clippy::arithmetic_side_effects,
         reason = "frame geometry: dimensions are at most 65500, sampling factors at most 4 and block sizes at most 8, so every product here is far below usize::MAX"
     )]
-    fn decompress_data(&mut self) {
+    fn decompress_data(&mut self) -> Result<(), Error> {
         let row = self.output_imcu_row;
+        if self.header.lossless {
+            // `output_data`: the samples are in the planes already, but every
+            // component's rows for this iMCU row must have been written by a
+            // scan -- libjpeg's whole-image array is not zeroed, and reading
+            // a row of it never written is an error.
+            for (component, &defined) in self.header.components.iter().zip(&self.defined_rows) {
+                if defined < (row + 1) * component.v {
+                    return Err(jerr::BAD_VIRTUAL_ACCESS);
+                }
+            }
+            self.output_imcu_row += 1;
+            return Ok(());
+        }
         let last_imcu_row = self.total_imcu_rows.saturating_sub(1);
         for (ci, (component, plane)) in self
             .header
@@ -925,6 +1092,41 @@ impl<'d, 't> Decompress<'d, 't> {
             }
         }
         self.output_imcu_row += 1;
+        Ok(())
+    }
+
+    /// Decode and undifference one iMCU row of a lossless scan into the
+    /// planes, and move the input side on: `jddiffct.c`'s
+    /// `decompress_data`.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "iMCU row counts, at most 65500"
+    )]
+    fn lossless_row(&mut self) {
+        let at = Position {
+            imcu_row: self.input_imcu_row,
+            last: self.input_imcu_row + 1 >= self.total_imcu_rows,
+            mcus_per_row: self.mcus_per_row,
+            mcu_rows: self.mcu_rows_per_imcu_row,
+        };
+        if let (Some(Entropy::Lossless(entropy)), Some(controller)) =
+            (self.entropy.as_mut(), self.lossless.as_mut())
+        {
+            lossless::decompress_row(
+                &mut self.input,
+                &self.header,
+                entropy,
+                controller,
+                &at,
+                &mut self.planes,
+            );
+        }
+        self.input_imcu_row += 1;
+        if self.input_imcu_row < self.total_imcu_rows {
+            self.start_imcu_row();
+        } else {
+            self.reading_markers = true;
+        }
     }
 
     /// `smoothing_ok`, with the latches it takes.
@@ -988,7 +1190,7 @@ impl<'d, 't> Decompress<'d, 't> {
         let needed = (y / per_imcu + 1).min(self.total_imcu_rows.saturating_sub(1));
         while self.output_imcu_row <= needed && self.output_imcu_row < self.total_imcu_rows {
             if self.has_multiple_scans {
-                self.decompress_data();
+                self.decompress_data()?;
             } else {
                 self.decompress_onepass()?;
             }

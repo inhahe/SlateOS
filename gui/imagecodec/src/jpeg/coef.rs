@@ -31,6 +31,99 @@ use super::idct::{self, Target};
 /// asked of it.
 const PLACEHOLDER: i16 = 0x4000;
 
+/// A block's coefficients as the entropy decoders read and write them, by
+/// natural-order position: a block of its own (`[i16; 64]`), or one of a
+/// [`Store`]'s in place ([`StoredBlock`]).
+pub(super) trait Coefficients {
+    /// The coefficient at `position`.
+    fn at(&self, position: usize) -> i16;
+    /// Make the coefficient at `position` `value`.
+    fn set(&mut self, position: usize, value: i16);
+}
+
+impl Coefficients for [i16; 64] {
+    fn at(&self, position: usize) -> i16 {
+        self.get(position).copied().unwrap_or(0)
+    }
+
+    fn set(&mut self, position: usize, value: i16) {
+        if let Some(cell) = self.get_mut(position) {
+            *cell = value;
+        }
+    }
+}
+
+/// One block of a [`Store`], read and written where it lies -- as libjpeg's
+/// decoders work on its coefficient array through pointers into it. A
+/// progressive AC pass decodes into one of these, so a coefficient costs
+/// something only when the scan decodes it: copying each block out and
+/// back, as this port first did, cost a thumbnail of a large progressive
+/// photograph more than its decoding.
+pub(super) struct StoredBlock<'s> {
+    store: &'s mut Store,
+    /// The block's index, or `None` for one outside the store, which reads
+    /// as zeros and keeps nothing.
+    index: Option<usize>,
+}
+
+impl Coefficients for StoredBlock<'_> {
+    /// The kept value, or for a coefficient that is not kept, the placeholder
+    /// if it is nonzero -- what [`Store::load`] gives.
+    fn at(&self, position: usize) -> i16 {
+        let Some(index) = self.index else {
+            return 0;
+        };
+        let store = &*self.store;
+        match store.slot.get(position).copied() {
+            Some(slot) if slot != u8::MAX => store
+                .values
+                .get(
+                    index
+                        .saturating_mul(store.kept)
+                        .saturating_add(usize::from(slot)),
+                )
+                .copied()
+                .unwrap_or(0),
+            Some(_) => {
+                let mask = store.masks.get(index).copied().unwrap_or(0);
+                if (mask >> position) & 1 != 0 {
+                    PLACEHOLDER
+                } else {
+                    0
+                }
+            }
+            None => 0,
+        }
+    }
+
+    fn set(&mut self, position: usize, value: i16) {
+        let Some(index) = self.index else {
+            return;
+        };
+        if position >= 64 {
+            return;
+        }
+        let store = &mut *self.store;
+        if let Some(mask) = store.masks.get_mut(index) {
+            if value == 0 {
+                *mask &= !(1u64 << position);
+            } else {
+                *mask |= 1u64 << position;
+            }
+        }
+        if let Some(&slot) = store.slot.get(position) {
+            if slot != u8::MAX {
+                let at = index
+                    .saturating_mul(store.kept)
+                    .saturating_add(usize::from(slot));
+                if let Some(cell) = store.values.get_mut(at) {
+                    *cell = value;
+                }
+            }
+        }
+    }
+}
+
 /// A component's coefficients for the whole image.
 #[derive(Debug, Clone)]
 pub(super) struct Store {
@@ -92,8 +185,15 @@ impl Store {
         let Some(index) = self.index(bx, by) else {
             return block;
         };
-        let mask = self.masks.get(index).copied().unwrap_or(0);
         let base = index.saturating_mul(self.kept);
+        // At full size every coefficient is kept, in natural order: a copy.
+        if self.kept == 64 {
+            if let Some(values) = self.values.get(base..base.saturating_add(64)) {
+                block.copy_from_slice(values);
+            }
+            return block;
+        }
+        let mask = self.masks.get(index).copied().unwrap_or(0);
         for (position, (cell, &slot)) in block.iter_mut().zip(&self.slot).enumerate() {
             *cell = if slot == u8::MAX {
                 if mask & (1u64 << position) != 0 {
@@ -111,7 +211,30 @@ impl Store {
         block
     }
 
-    /// Store block `(bx, by)` back.
+    /// Block `(bx, by)` in place: see [`StoredBlock`].
+    pub(super) fn block(&mut self, bx: usize, by: usize) -> StoredBlock<'_> {
+        let index = self.index(bx, by);
+        StoredBlock { store: self, index }
+    }
+
+    /// Block `(bx, by)`'s DC into `block[0]`, the only coefficient a DC scan
+    /// reads or writes; the rest of `block` is left as it is.
+    pub(super) fn load_dc(&self, bx: usize, by: usize, block: &mut [i16; 64]) {
+        let dc = self.index(bx, by).map_or(0, |index| {
+            self.values
+                .get(index.saturating_mul(self.kept))
+                .copied()
+                .unwrap_or(0)
+        });
+        block[0] = dc;
+    }
+
+    /// Block `(bx, by)`'s DC back from `block[0]`.
+    pub(super) fn save_dc(&mut self, bx: usize, by: usize, block: &[i16; 64]) {
+        self.block(bx, by).set(0, block[0]);
+    }
+
+    /// Store block `(bx, by)` back, whole.
     pub(super) fn save(&mut self, bx: usize, by: usize, block: &[i16; 64]) {
         let Some(index) = self.index(bx, by) else {
             return;
@@ -485,6 +608,24 @@ mod tests {
         }
         store.save(1, 1, &block);
         assert_eq!(store.load(1, 1), block);
+        // In place, it reads as `load` gives it, and writes as `save` keeps it.
+        let full = store.load(1, 1);
+        {
+            let mut place = store.block(1, 1);
+            for position in 0..64 {
+                assert_eq!(place.at(position), full[position], "position {position}");
+            }
+            place.set(5, 0);
+            place.set(6, -9);
+        }
+        let mut changed = full;
+        changed[5] = 0;
+        changed[6] = -9;
+        assert_eq!(store.load(1, 1), changed);
+        let mut dc = [7i16; 64];
+        store.load_dc(1, 1, &mut dc);
+        assert_eq!(dc[0], changed[0]);
+        assert_eq!(dc[1], 7, "a DC load leaves the rest alone");
         assert_eq!(store.dc(1, 1), -30);
         assert_eq!(store.load(0, 0), [0; 64]);
     }
@@ -501,6 +642,18 @@ mod tests {
         assert_eq!((back[0], back[1]), (5, -3));
         assert_eq!(back[2], PLACEHOLDER);
         assert_eq!(back[4], 0);
+        // In place: the same reading, and a coefficient that is not kept
+        // keeps only whether it is nonzero.
+        {
+            let mut place = store.block(0, 0);
+            assert_eq!((place.at(0), place.at(1)), (5, -3));
+            assert_eq!(place.at(2), PLACEHOLDER);
+            assert_eq!(place.at(4), 0);
+            place.set(4, 7);
+            assert_eq!(place.at(4), PLACEHOLDER);
+            place.set(2, 0);
+            assert_eq!(place.at(2), 0);
+        }
         assert!(Store::bytes(1, 2) < Store::bytes(1, 8));
         assert_eq!(Store::bytes(1, 1), 10);
     }

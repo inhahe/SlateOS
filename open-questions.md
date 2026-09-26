@@ -2892,6 +2892,69 @@ earn their bytes" as a real question and correctly declines to answer it — but
 named it there rather than here, so it has never been in front of you.
 
 
+## B-Q22 — [B] `kill PID` should ask a program to stop. One of our two `kill`s ends it on the spot instead. Which design do we keep? — Status: OPEN (raised 2026-09-25)
+
+**In short:** two different programs are both called `kill`, and which one the
+system ends up with depends on which one the build happened to link last. One
+sends Unix-style signals, which works today. The other was written to send a
+"please shut down" message to a system service -- which is what the design
+notes prefer -- but that service was never built, so the message always fails
+and the program then ends the target immediately, giving it no chance to save
+anything. So with that one, the ordinary `kill 1234` behaves like the
+last-resort `kill -9 1234`. Which approach should the single `kill` we keep
+use?
+
+**The two programs.**
+
+| | `userspace/kill` (the "native" one) | `coreutils`' `kill` |
+|---|---|---|
+| How it stops a program | a message to `org.slateos.ProcessManager`, then a forced kill when that fails | a signal (Unix's numbered "please stop" notification) through the kernel's `SYS_SIGNAL_SEND`, the same path every program's own `kill()` call uses |
+| Does its delivery work today? | **No**: nothing anywhere provides that service, so every plain `kill PID` falls through to the forced kill | Yes; a program that asked to be told can clean up first |
+| The command line scripts use (`kill -s TERM PID`, `kill -l`) | not understood: `-s` is read as a signal called `s` | yes, measured against procps (the Linux `kill`) |
+| Extras | `killall NAME`, `-w` (wait for it to exit), `--timeout` | none |
+
+The system image installs `kill`, and `killall` as another name for it -- which
+works only if the build picked `userspace/kill`.
+
+**The design note.** `design.txt`: *"should signals just be done through
+[IPC]... ai agrees that shutdown should be done through ipc rather than linux
+signals"*. So the native program follows the design's preference; it just has
+nothing on the other end.
+
+| Option | *What changes:* |
+|---|---|
+| **A.** One `kill`, signals through the kernel | `kill PID` asks politely and `kill -9` forces, as on Linux; scripts' `kill -s TERM` and `kill -l` work; `killall` becomes its own small program. |
+| **B.** One `kill`, the shutdown-message design, built for real | Same command line as A, but a program is asked to stop by a message it must know how to receive; this needs the service written and a message every program understands, and programs that ignore it are forced after a timeout. |
+| **C.** Leave both | `kill PID` means either "ask" or "force", depending on the build order. |
+
+- **A** is small (the signal half exists and passes its tests; the work is
+  merging the extras across and deleting the other crate) and matches what
+  every program ported from elsewhere already expects: bash, Python and the
+  POSIX layer all stop programs through that same kernel call.
+- **B** is the design note's direction, but it is a new system protocol, not a
+  `kill` change: a service to write, a message format, and every program taught
+  to answer it. Until then a message-based `kill` has no one to deliver to.
+  Nothing about A prevents B later -- the kernel's signal delivery is itself a
+  message the kernel carries, and a future shutdown protocol could sit behind
+  the same command line.
+
+**If never answered:** not safe, quietly. Whenever the build links
+`userspace/kill` last, every `kill PID` on the system ends programs without
+letting them clean up; whenever it links the other, `killall` stops working.
+Nothing reports either.
+
+**Claude's recommendation:** **A** now, with **B** recorded as its own future
+project if you want shutdown to become a message protocol. It fixes the
+forced-kill behaviour and the build-order lottery immediately and forecloses
+nothing.
+
+**Where it bites:** `userspace/kill/src/main.rs` (`ipc_graceful_terminate`,
+and its fallback to `SYS_PROCESS_KILL`); `userspace/coreutils/src/bin/kill.rs`;
+`scripts/rootfs-bin-manifest.txt` (`kill`, `killall = kill`);
+`scripts/check-bin-collisions.py`'s one remaining baseline entry;
+`known-issues.md` → `TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-KILL`.
+
+
 ## A-Q16 — [A] Two kinds of lock in the kernel; one skips the deadlock checker, for a reason that turns out not to be true. Which way should that be settled? — Status: OPEN
 
 **In short:** the kernel has a cheap lock and an expensive lock. The

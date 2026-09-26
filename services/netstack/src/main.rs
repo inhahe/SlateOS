@@ -3140,18 +3140,31 @@ impl Listener {
         }
     }
 
+    /// Whether a backlog connection is one `OP_ACCEPT` may hand out: its handshake
+    /// completed and it did not fail. The one predicate behind both
+    /// [`take_established`](Self::take_established) and
+    /// [`has_established`](Self::has_established), so `poll` can never report a
+    /// connection that `accept` would then refuse, or miss one it would take.
+    fn acceptable(c: &TcpConn) -> bool {
+        c.established && !c.connect_failed
+    }
+
     /// Remove and return the first *established* backlog connection (ready to be
     /// handed to the caller by `OP_ACCEPT`), or `None` if none is ready yet.
     fn take_established(&mut self) -> Option<TcpConn> {
         for slot in &mut self.backlog {
-            if slot
-                .as_ref()
-                .is_some_and(|c| c.established && !c.connect_failed)
-            {
+            if slot.as_ref().is_some_and(Self::acceptable) {
                 return slot.take();
             }
         }
         None
+    }
+
+    /// Whether [`take_established`](Self::take_established) would return a
+    /// connection now, without taking it: what makes a listener readable to
+    /// `poll`/`select`/`epoll` (`POLLIN` means "accept will not block").
+    fn has_established(&self) -> bool {
+        self.backlog.iter().flatten().any(Self::acceptable)
     }
 
     /// Gracefully close every backlog connection (listener teardown).
@@ -3539,9 +3552,10 @@ fn ring_tcp_process(
                 ring_tcp_recv(ring, conns, listeners, sqe.conn_id, me, next_hop_mac, &sqe)
             }
             netipc::ring::OP_POLL => {
-                // First try TCP; `-1` means no such connection, so fall through to a
-                // bound UDP datagram socket. A UDP socket is always writable (a
-                // datagram send never blocks) and readable when a datagram is queued.
+                // First try TCP -- a connection or a listener; `-1` means neither, so
+                // fall through to a bound UDP datagram socket. A UDP socket is always
+                // writable (a datagram send never blocks) and readable when a
+                // datagram is queued.
                 let tcp = ring_tcp_poll(conns, listeners, sqe.conn_id, me, next_hop_mac);
                 if tcp >= 0 {
                     tcp
@@ -4051,6 +4065,16 @@ fn ring_tcp_recv(
 /// Each poll also advances the handshake's retransmit/timeout driver
 /// ([`poll_connect`](TcpConn::poll_connect)) so a lost SYN is resent and an
 /// unanswered handshake eventually fails rather than hanging forever.
+///
+/// `target_id` may also name a **listener** (listener ids and connection ids
+/// are separate session-local spaces, and the kernel's `poll_ready` sends the
+/// listener's id for a listening socket). A listener is readable when a
+/// connection has completed its handshake and waits in the backlog -- exactly
+/// when `OP_ACCEPT` would dequeue one -- and never writable. Until 2026-09-26
+/// this function looked only in `conns`, so a listener answered `-1`, which the
+/// kernel reads as "not connected" and reports as no events at all: no
+/// `poll`/`select`/`epoll` caller was ever woken by an incoming connection
+/// (lane F's `requests/f-a-poll-never-reports-a-connection-waiting-on-a-listening-socket.md`).
 fn ring_tcp_poll(
     conns: &mut RingConns,
     listeners: &mut Listeners,
@@ -4059,7 +4083,21 @@ fn ring_tcp_poll(
     next_hop_mac: &[u8; 6],
 ) -> i32 {
     if conns.get_mut(target_id).is_none() {
-        return -1; // no such connection
+        if listeners.get_mut(target_id).is_none() {
+            return -1; // neither a connection nor a listener
+        }
+        // Route arrived frames first, as `ring_tcp_accept` does before it
+        // dequeues: a handshake whose final ACK is waiting completes here, so
+        // poll and accept judge the same backlog.
+        ring_pump(conns, listeners, me, next_hop_mac);
+        return if listeners
+            .get_mut(target_id)
+            .is_some_and(|l| l.has_established())
+        {
+            netipc::ring::POLL_READABLE
+        } else {
+            0
+        };
     }
     // Non-destructive: route any arrived frames into their owners (this completes a
     // pending handshake via `ingest_seg` if the SYN-ACK has arrived), then peek.

@@ -4985,20 +4985,37 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
     // There is no external server to accept from under slirp, so this drives the
     // daemon's in-process software loopback — a connection to our own me.ip is
     // diverted to a listener in the same session. A single non-blocking connect
-    // completes the handshake for both ends; accept then dequeues the passive
-    // connection and a bidirectional data exchange proves it is a real socket.
+    // completes the handshake for both ends; the listener must then poll
+    // readable (and quiet before and after), accept dequeues the passive
+    // connection, and a bidirectional data exchange proves it is a real socket.
     match crate::net::netstack_client::self_test_listen_accept() {
         Ok(Some(())) => serial_println!(
-            "[spawn]   persistent netstack listen/accept: server socket accepted a loopback \
-             connection and echoed data both ways — server-socket parity proven over the daemon"
+            "[spawn]   persistent netstack listen/accept: the listener polled readable for a \
+             waiting loopback connection and quiet either side of it, accept took it, and \
+             data echoed both ways — server-socket parity proven over the daemon"
         ),
         Ok(None) => serial_println!(
             "[spawn]   persistent netstack listen/accept: no IPv4 lease — check skipped"
         ),
-        Err(e) => serial_println!(
-            "[spawn]   WARNING: persistent netstack listen/accept error ({:?})",
-            e
-        ),
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: persistent netstack listen/accept ({:?}) — the reason is on \
+                 the line above",
+                e
+            );
+            // Fails the run, which the line above cannot: boot-test.sh reds a
+            // run on `self-test failed`, never on a bare `FAIL:` or `WARNING:`
+            // (see the head-of-line witness below). This check used to end in a
+            // WARNING alone, so a regression here was a line nothing read. It is
+            // loopback inside one daemon session -- no upstream, no variance --
+            // so an error is a real break. Diagnostic, not Integrity: the checks
+            // after it still run.
+            crate::selftest::dispatch_debug(
+                "persistent netstack listen/accept",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
     }
 
     // Object-layer server-socket parity (Q23 Option A): drive the

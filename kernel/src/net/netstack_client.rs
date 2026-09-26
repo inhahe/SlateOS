@@ -2011,6 +2011,44 @@ pub fn self_test_nonblock_send(ip: &[u8; 4], port: u16) -> KernelResult<Option<(
 /// Propagates control-protocol faults from the client; reports a failed
 /// listen/connect/accept over loopback, or a data mismatch, as an error.
 pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
+    /// Poll listener `id` and judge the answer against what a listener may say:
+    /// readable when a connection waits, otherwise nothing -- never writable,
+    /// never in error, and never "no such id". `Some(true)`: the answer is
+    /// `want_readable`'s. `Some(false)`: merely quiet while readable was wanted
+    /// (poll again). `None`: wrong outright, and already reported.
+    fn listener_polls(
+        conn: &mut NetstackConn,
+        id: u32,
+        want_readable: bool,
+        when: &str,
+    ) -> KernelResult<Option<bool>> {
+        let (readable, writable, error) = match conn.poll_on(id) {
+            Ok(bits) => bits,
+            Err(KernelError::NotConnected) => {
+                crate::serial_println!(
+                    "[netstack-client]   OP_POLL does not know listener {} ({}) — poll on a listening socket can never report a connection",
+                    id,
+                    when
+                );
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+        if writable || error || (readable && !want_readable) {
+            crate::serial_println!(
+                "[netstack-client]   listener {} polled readable={} writable={} error={} {} — want {}",
+                id,
+                readable,
+                writable,
+                error,
+                when,
+                if want_readable { "readable only" } else { "no events" }
+            );
+            return Ok(None);
+        }
+        Ok(Some(readable == want_readable))
+    }
+
     /// Session-local listener id (distinct from any connection id).
     const LISTENER_ID: u32 = 100;
     /// Id under which the accepted server-side connection is installed.
@@ -2038,6 +2076,17 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
             PORT,
             listen_res
         );
+        return Err(KernelError::InternalError);
+    }
+
+    // 1b. An idle listener polls as no events -- and as *that*, not as an id the
+    //     daemon does not know. Until 2026-09-26 the daemon's OP_POLL looked only
+    //     at connections and answered `-1` for every listener, which reads as
+    //     "not connected", so no poll/select/epoll caller was ever woken by an
+    //     incoming connection (lane F's requests/f-a-poll-never-reports-a-
+    //     connection-waiting-on-a-listening-socket.md).
+    if listener_polls(&mut conn, LISTENER_ID, false, "before any connection")? != Some(true) {
+        conn.close()?;
         return Err(KernelError::InternalError);
     }
 
@@ -2079,30 +2128,53 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
         }
     }
 
-    // 3. Accept the passive connection queued in the backlog. Each accept pumps
-    //    once, so retry a few times in case the final ACK needs another pump.
-    let mut peer = [0u8; 6];
-    let mut accepted = false;
+    // 2b. The completed connection now waits in the backlog, so the listener must
+    //     poll readable: POLLIN on a listening socket means "accept will not
+    //     block". Each poll pumps once, so a final ACK still in flight gets a
+    //     few chances to land.
+    let mut listener_readable = false;
     for _ in 0..16u32 {
-        let ares = conn.accept(LISTENER_ID, ACCEPTED_ID, &mut peer)?;
-        if ares == 0 {
-            accepted = true;
-            break;
-        }
-        if ares != netipc::ring::ERR_WOULD_BLOCK {
-            conn.close()?;
-            crate::serial_println!(
-                "[netstack-client]   accept failed (result {}) — server-socket parity broken",
-                ares
-            );
-            return Err(KernelError::InternalError);
+        match listener_polls(&mut conn, LISTENER_ID, true, "once a connection completed")? {
+            Some(true) => {
+                listener_readable = true;
+                break;
+            }
+            Some(false) => {}
+            None => {
+                conn.close()?;
+                return Err(KernelError::InternalError);
+            }
         }
     }
-    if !accepted {
+    if !listener_readable {
         conn.close()?;
         crate::serial_println!(
-            "[netstack-client]   accept never dequeued the loopback connection — server-socket parity broken"
+            "[netstack-client]   a loopback connection completed but its listener never polled readable — a server waiting in poll/select/epoll would sleep through it"
         );
+        return Err(KernelError::InternalError);
+    }
+
+    // 3. Accept the passive connection queued in the backlog. Once, not in a
+    //    retry loop: the listener has just polled readable, and the daemon
+    //    answers poll and accept from one predicate (`Listener::acceptable`), so
+    //    the first accept must succeed. A retry would hide exactly the
+    //    disagreement that shared predicate exists to prevent.
+    let mut peer = [0u8; 6];
+    let ares = conn.accept(LISTENER_ID, ACCEPTED_ID, &mut peer)?;
+    if ares != 0 {
+        conn.close()?;
+        crate::serial_println!(
+            "[netstack-client]   the listener polled readable but accept returned {} — poll and accept disagree",
+            ares
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 3b. Its one connection taken, the listener is quiet again.
+    if listener_polls(&mut conn, LISTENER_ID, false, "after its connection was accepted")?
+        != Some(true)
+    {
+        conn.close()?;
         return Err(KernelError::InternalError);
     }
 
@@ -2199,7 +2271,7 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
 
     conn.close()?;
     crate::serial_println!(
-        "[netstack-client]   listen/accept + bidirectional data + shutdown over loopback ok — server-socket parity ok"
+        "[netstack-client]   listen/poll/accept + bidirectional data + shutdown over loopback ok — server-socket parity ok"
     );
     Ok(Some(()))
 }

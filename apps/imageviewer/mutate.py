@@ -218,7 +218,7 @@ MUTATIONS = [
     (
         "a picture is decoded here even with a loader",
         "            Some(loader) => loader.ask((path, view)),",
-        "            Some(_) => Err((path, view)),",
+        "            Some(_) => Err::<offloop::Ticket, _>((path, view)),",
         [OFF_LOOP],
     ),
     (

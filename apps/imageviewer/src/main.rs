@@ -4124,11 +4124,14 @@ the picture at once, which reads as D advancing the slideshow"
         };
         t.zoom_in();
         assert_eq!(t.zoom, 1.0, "stepped past actual size");
+        assert_eq!(t.fit, Fit::Free, "a zoom in is the user's");
         t.zoom_in();
         assert_eq!(t.zoom, ZOOM_FACTOR);
         t.zoom = 1.1;
+        t.fit = Fit::Shrink;
         t.zoom_out();
         assert_eq!(t.zoom, 1.0);
+        assert_eq!(t.fit, Fit::Free, "a zoom out is the user's");
         t.zoom = 2.0;
         t.zoom_out();
         assert_eq!(t.zoom, 2.0 / ZOOM_FACTOR);
@@ -4207,6 +4210,9 @@ the picture at once, which reads as D advancing the slideshow"
             state.transform.zoom, zoomed,
             "the user's zoom was taken back"
         );
+        // From a fit, so that it is actual size that makes the zoom the
+        // user's, and nothing before it.
+        assert!(state.handle_event(&ctrl(Key::Num0)));
         assert!(state.handle_event(&ctrl(Key::Num1)));
         App::render(&mut state, 500.0, 768.0);
         assert_eq!(state.transform.zoom, 1.0, "actual size was fitted away");

@@ -450,6 +450,10 @@ pub fn zoneinfo_path(name: &[u8], dir: &Path) -> Option<PathBuf> {
 
 /// A path from bytes: exact on Unix, where a path is bytes.
 #[cfg(unix)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the host twin refuses bytes that are not UTF-8; one signature serves both"
+)]
 fn bytes_path(name: &[u8]) -> Option<PathBuf> {
     Some(PathBuf::from(
         <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(name),

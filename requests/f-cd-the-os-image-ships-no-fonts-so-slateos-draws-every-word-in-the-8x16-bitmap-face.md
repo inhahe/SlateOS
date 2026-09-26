@@ -102,3 +102,31 @@ pinned URL and checking the hash keeps 11.5 MB of binaries out of git.
 Nothing breaks and nothing gets worse: text stays in the 8x16 bitmap face on
 the OS, as it is today. Everything above the bitmap face stays invisible on
 the system it was built for.
+
+## Follow-up, 2026-09-26: lane F's half has landed
+
+Face fallback is in `osfont` (design-decisions §1320). For lane C's item 2:
+
+```rust
+// osfont::system
+impl FontCache {
+    /// Draw whatever an installed face has no glyph for from `faces`, in order.
+    pub fn set_fallbacks(&mut self, faces: Vec<Arc<Face>>);
+    pub fn fallbacks(&self) -> &[Arc<Face>];
+}
+impl SystemFont {
+    pub fn with_fallbacks(self, faces: &[Arc<Face>], axes: &[([u8; 4], f32)]) -> Self;
+}
+```
+
+So `install_fallback_faces(cache)` is: resolve the list against `FontDb`,
+parse each face once, and `cache.set_fallbacks(faces)`. Order matters -- the
+first face that has a cluster draws it -- and a colour (emoji) face may sit
+anywhere in the list: fallback tries it first for a cluster asking for emoji
+and last otherwise, so `["Noto Sans", "Noto Color Emoji", ...]` is right as
+written. The toolkit's cache and the compositor's must get the same list;
+the compositor's call to it is lane F's to add once it exists.
+
+Colour glyphs (`COLR`) are next in lane F; until then an emoji face with
+outlines (Segoe UI Emoji) draws its emoji in monochrome, and one without
+(Noto Color Emoji's COLRv1 build) draws nothing for them.

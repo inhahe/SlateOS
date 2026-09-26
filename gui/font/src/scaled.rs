@@ -679,18 +679,6 @@ impl ScaledFont {
     /// correct and is not free.
     #[must_use]
     pub fn shape_with(&self, text: &str, lang: Option<Lang>, base: Base) -> ShapedRun {
-        // Six passes, because each one needs all of the previous one's
-        // output. Bidi settles which characters are mirrored and where the
-        // direction boundaries are, and it reads the string as typed;
-        // normalization settles *which characters there are* and so must
-        // finish before any of them is looked up in `cmap`; `GSUB` decides
-        // which glyphs there are, and cannot run while characters are still
-        // arriving; kerning applies to the glyphs that *survive* substitution,
-        // so `fi` must be kerned as the single glyph it became, not as the `f`
-        // and `i` it was; reordering needs the finished glyphs; and a mark's
-        // placement is measured from a pen that both kerning and reordering
-        // are still moving.
-        let space = self.glyph_id(' ');
         // A level per byte of `text`, indexed by the byte offset a character
         // starts at — which is what a glyph's cluster is, whatever
         // substitution did to the glyph count. Empty for text that needs no
@@ -704,6 +692,37 @@ impl ScaledFont {
             let _t = Timer::start(Phase::ByteLevels);
             byte_levels(text, base)
         };
+        self.shape_leveled(text, lang, levels)
+    }
+
+    /// [`shape_with`](Self::shape_with) with the bidi levels already
+    /// resolved: one per byte of `text`, as [`byte_levels`] makes them, or
+    /// empty for text with no right-to-left in it at all.
+    ///
+    /// For a caller shaping one stretch of a paragraph on its own:
+    /// [`SystemFont`](crate::system::SystemFont)'s face fallback shapes each
+    /// face's stretch of a line separately, and a stretch's levels are its
+    /// paragraph's -- resolved over the whole line, where the first strong
+    /// character and every neutral's neighbours are -- not the ones the
+    /// stretch would resolve to alone.
+    pub(crate) fn shape_leveled(
+        &self,
+        text: &str,
+        lang: Option<Lang>,
+        levels: Vec<Level>,
+    ) -> ShapedRun {
+        // Six passes, because each one needs all of the previous one's
+        // output. Bidi settles which characters are mirrored and where the
+        // direction boundaries are, and it reads the string as typed;
+        // normalization settles *which characters there are* and so must
+        // finish before any of them is looked up in `cmap`; `GSUB` decides
+        // which glyphs there are, and cannot run while characters are still
+        // arriving; kerning applies to the glyphs that *survive* substitution,
+        // so `fi` must be kerned as the single glyph it became, not as the `f`
+        // and `i` it was; reordering needs the finished glyphs; and a mark's
+        // placement is measured from a pen that both kerning and reordering
+        // are still moving.
+        let space = self.glyph_id(' ');
         let mut pieces = {
             let _t = Timer::start(Phase::Norm);
             norm::pieces(text, |ch| self.face.glyph_index(ch).is_some())
@@ -1994,7 +2013,7 @@ impl ScaledFont {
 /// take the paragraph's direction rather than the word's. Taking the fast path
 /// there would silently ignore the base the caller just asked for, which is
 /// the one thing this function must not do.
-fn byte_levels(text: &str, base: Base) -> Vec<Level> {
+pub(crate) fn byte_levels(text: &str, base: Base) -> Vec<Level> {
     if base != Base::Rtl && bidi::is_trivially_ltr(text) {
         return Vec::new();
     }

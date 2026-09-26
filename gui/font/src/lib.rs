@@ -45,6 +45,7 @@ mod context;
 pub mod deadkey;
 mod device;
 mod digest;
+mod emoji_tables;
 mod fallback;
 #[cfg(test)]
 mod fixture;
@@ -56,6 +57,7 @@ mod indic;
 mod indic_machine;
 mod indic_shape;
 mod indic_tables;
+mod itemize;
 mod joining;
 mod joining_tables;
 mod kern;

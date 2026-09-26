@@ -82,18 +82,30 @@ impl GlyphKey {
         Self(u32::from(gid))
     }
 
+    /// A glyph id in face `face` of a font that draws with several: 0 is
+    /// the font's own face and 1 on its fallback faces, in order (see
+    /// [`SystemFont`](crate::system::SystemFont)). Face 0 is the same key as
+    /// [`outline`](Self::outline), so a font with one face never sees the
+    /// difference.
+    pub(crate) fn in_face(face: u8, gid: u16) -> Self {
+        Self((u32::from(face) << 16) | u32::from(gid))
+    }
+
+    /// Which face of a font drawing with several this glyph is in; see
+    /// [`in_face`](Self::in_face).
+    pub(crate) fn face(self) -> u8 {
+        (self.0 >> 16) as u8
+    }
+
     /// A character in the built-in bitmap face, which has no glyph ids.
     pub(crate) fn bitmap(ch: char) -> Self {
         Self(ch as u32)
     }
 
-    /// The outline glyph id this key holds.
-    ///
-    /// Zero (`.notdef`) if the value does not fit, which can only happen if a
-    /// key from a bitmap font is handed to an outline font — a font mix-up,
-    /// for which drawing the missing-glyph box is the right answer.
+    /// The outline glyph id this key holds, in whichever face
+    /// [`face`](Self::face) names.
     pub(crate) fn gid(self) -> u16 {
-        u16::try_from(self.0).unwrap_or(0)
+        (self.0 & 0xFFFF) as u16
     }
 
     /// The character this key holds, or the replacement character if the

@@ -1263,6 +1263,7 @@ dependencies = [
  "offloop",
  "oswindow",
  "quoting",
+ "recyclebin",
  "safeio",
  "scratchdir",
 ]

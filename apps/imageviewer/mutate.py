@@ -69,6 +69,10 @@ OFF = "with_animation_off_the_first_frame_stays"
 TURNED = "a_turned_animation_plays_turned"
 WEBP = "an_animated_webp_plays_its_count"
 NEXT = "the_next_picture_stops_the_last_ones_animation"
+DELETE = "delete_moves_the_picture_to_the_bin_and_shows_the_next"
+UNDELETE = "ctrl_z_puts_a_deleted_picture_back"
+LAST = "deleting_the_last_picture_leaves_the_viewer_empty"
+STAYS = "a_picture_that_cannot_be_binned_stays_and_says_why"
 
 MUTATIONS = [
     # -- the layout ---------------------------------------------------------
@@ -528,6 +532,61 @@ MUTATIONS = [
         "            (false && !self.animation_paused).then(|| self.frame_left_ms.max(10));",
         # Not PAUSE: a paused animation asks for no tick either way.
         [PLAYS],
+    ),
+    # -- Delete and Ctrl+Z ----------------------------------------------------
+    (
+        "Delete does nothing",
+        "            ViewerAction::DeleteImage => self.delete_current(),",
+        "            ViewerAction::DeleteImage => {}",
+        [DELETE],
+    ),
+    (
+        "a deleted picture stays listed",
+        "                    self.entries.remove(at);\n",
+        "",
+        [DELETE],
+    ),
+    (
+        "the next picture is not shown after a delete",
+        "                } else {\n                    self.load_current_entry();\n                }",
+        "                }",
+        [DELETE],
+    ),
+    (
+        "deleting the last picture leaves it up",
+        "                if self.entries.is_empty() {\n                    self.show_nothing();",
+        "                if false {\n                    self.show_nothing();",
+        [LAST],
+    ),
+    (
+        "Ctrl+Z puts nothing back",
+        "            Key::Z if ctrl => {\n                self.undo_delete();",
+        "            Key::Z if ctrl => {",
+        [UNDELETE],
+    ),
+    (
+        "the picture put back is not shown",
+        "                let _ = self.open_file(&restored);",
+        "                let _ = &restored;",
+        [UNDELETE],
+    ),
+    (
+        "a failed delete says nothing",
+        "                self.notice = Some(format!(\"Could not move {name} to the recycle bin: {e}\"));",
+        "                let _ = e;",
+        [STAYS],
+    ),
+    (
+        "a notice is never shown",
+        "            state\n                .notice\n                .clone()\n                .unwrap_or_else(|| state.image_info.filename.clone())",
+        "            state.image_info.filename.clone()",
+        [DELETE, STAYS],
+    ),
+    (
+        "a notice outlives the next picture",
+        "        self.wanted = Some((path.clone(), view));\n        self.notice = None;",
+        "        self.wanted = Some((path.clone(), view));",
+        [DELETE],
     ),
     (
         "a chosen picture is not opened",

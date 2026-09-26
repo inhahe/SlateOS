@@ -39,6 +39,10 @@ exif = { path = "../exif" }
 # through photographs never freezes the window on a large one.
 offloop = { path = "../offloop" }
 
+# Delete moves a picture to the recycle bin -- the file manager's own, so it
+# is listed and restored there.
+recyclebin = { path = "../recyclebin" }
+
 # The window and its event loop. `oswindow::app` is the strap every application
 # shares -- connect, open one window, run until it closes -- and it is also the
 # only route by which decoded pixels reach the compositor, since a `RenderTree`

@@ -78,7 +78,8 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("F5", "Start or stop the slideshow"),
     ("Space", "Pause or resume the slideshow, or the animation"),
     ("F11", "Full screen"),
-    ("Delete", "Delete this image"),
+    ("Delete", "Move this picture to the recycle bin"),
+    ("Ctrl+Z", "Put back the picture last moved there"),
     ("Escape", "Leave full screen or the slideshow"),
     ("F1 / ?", "This list"),
 ];
@@ -725,6 +726,16 @@ pub struct ViewerState {
     /// off (`AppearanceSettings::animations_enabled`), when a picture shows
     /// its first frame only, as lane F's request asks.
     animations: bool,
+
+    /// The recycle bin Delete moves pictures to: the file manager's, so a
+    /// picture deleted here is listed and restored there.
+    recycle: recyclebin::RecycleBin,
+    /// The picture Delete moved last -- its bin entry and where it was --
+    /// for Ctrl+Z to put back.
+    last_recycled: Option<(String, PathBuf)>,
+    /// What the last Delete or Ctrl+Z did, on the status bar until the next
+    /// picture is asked for.
+    notice: Option<String>,
 }
 
 /// What asking for a picture came to.
@@ -832,7 +843,77 @@ impl ViewerState {
             frame_left_ms: 0,
             animation_paused: false,
             animations: true,
+            recycle: recyclebin::RecycleBin::default_location(),
+            last_recycled: None,
+            notice: None,
         }
+    }
+
+    /// Move the picture on screen to the recycle bin and show the next one
+    /// in its directory, or none.
+    ///
+    /// It was a comment -- "would move to trash via OS recycle bin
+    /// integration" -- under a key the shortcut list advertised. A Delete
+    /// that did nothing looked like one that had worked until the file turned
+    /// up again.
+    fn delete_current(&mut self) {
+        let Some((path, _)) = self.shown.clone() else {
+            return;
+        };
+        let name = shown_file_name(&path).unwrap_or_else(|| shown_path(&path));
+        match self.recycle.recycle(&path) {
+            Ok(id) => {
+                self.last_recycled = Some((id, path.clone()));
+                let at = self.entries.iter().position(|e| e.path == path);
+                if let Some(at) = at {
+                    self.entries.remove(at);
+                    self.current_index = at.min(self.entries.len().saturating_sub(1));
+                }
+                if self.entries.is_empty() {
+                    self.show_nothing();
+                } else {
+                    self.load_current_entry();
+                }
+                self.notice = Some(format!(
+                    "Moved {name} to the recycle bin -- Ctrl+Z puts it back"
+                ));
+            }
+            Err(e) => {
+                self.notice = Some(format!("Could not move {name} to the recycle bin: {e}"));
+            }
+        }
+    }
+
+    /// Put back the picture Delete moved last, and show it.
+    fn undo_delete(&mut self) {
+        let Some((id, path)) = self.last_recycled.take() else {
+            return;
+        };
+        let name = shown_file_name(&path).unwrap_or_else(|| shown_path(&path));
+        match self.recycle.restore(&id) {
+            Ok(restored) => {
+                let _ = self.open_file(&restored);
+                self.notice = Some(format!("Put {name} back"));
+            }
+            Err(e) => {
+                self.notice = Some(format!("Could not put {name} back: {e}"));
+            }
+        }
+    }
+
+    /// No picture at all: the last one in a directory was deleted.
+    fn show_nothing(&mut self) {
+        if self.current_image.take().is_some() {
+            self.pending_images.clear();
+            self.pending_images
+                .push(oswindow::app::ImageChange::Drop(VIEWER_IMAGE_ID));
+        }
+        self.player = None;
+        self.shown = None;
+        self.wanted = None;
+        self.image_info = ImageInfo::default();
+        self.load_error = None;
+        self.transform.reset();
     }
 
     /// Move the animation on by `elapsed_ms`: show each frame whose time has
@@ -1091,6 +1172,7 @@ impl ViewerState {
     /// when there is one, here when there is not.
     fn request(&mut self, path: PathBuf, view: View) -> Opened {
         self.wanted = Some((path.clone(), view));
+        self.notice = None;
         let asked = match self.loader.as_mut() {
             Some(loader) => loader.ask((path, view)),
             None => Err((path, view)),
@@ -1384,9 +1466,7 @@ impl ViewerState {
             }
             ViewerAction::FirstImage => self.first_image(),
             ViewerAction::LastImage => self.last_image(),
-            ViewerAction::DeleteImage => {
-                // Would move to trash via OS recycle bin integration
-            }
+            ViewerAction::DeleteImage => self.delete_current(),
         }
     }
 
@@ -1524,6 +1604,10 @@ impl ViewerState {
             // Delete
             Key::Delete => {
                 self.execute_action(ViewerAction::DeleteImage);
+                true
+            }
+            Key::Z if ctrl => {
+                self.undo_delete();
                 true
             }
 
@@ -2239,7 +2323,12 @@ fn render_status_bar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
     // one that is coming, so a key pressed on a large photograph visibly did
     // something.
     let name = state.loading().map_or_else(
-        || state.image_info.filename.clone(),
+        || {
+            state
+                .notice
+                .clone()
+                .unwrap_or_else(|| state.image_info.filename.clone())
+        },
         |path| {
             format!(
                 "Opening {}",
@@ -5024,6 +5113,109 @@ the picture at once, which reads as D advancing the slideshow"
         }
         assert_eq!(shown, [0xFF00_FF00, 0xFFFF_0000, 0xFF00_FF00], "{shown:x?}");
         assert!(state.player.is_none(), "it played past its count");
+    }
+
+    /// A viewer on the second of three pictures, whose recycle bin is in
+    /// the scratch directory (never the user's).
+    fn on_b_with_a_bin(guard: &ScratchDir) -> ViewerState {
+        let dir = guard.dir();
+        for (name, w) in [("a.png", 3), ("b.png", 5), ("c.png", 7)] {
+            std::fs::write(dir.join(name), png_bytes(w, 2)).expect("write");
+        }
+        let mut state = ViewerState::new(1024.0, 768.0);
+        state.recycle =
+            recyclebin::RecycleBin::new(dir.join(".bin"), std::time::Duration::from_mins(1));
+        assert_eq!(state.open_file(&dir.join("b.png")), Opened::Shown);
+        state
+    }
+
+    /// **Delete moves the picture to the recycle bin and shows the next.**
+    /// It was a comment under a key the shortcut list advertised.
+    #[test]
+    fn delete_moves_the_picture_to_the_bin_and_shows_the_next() {
+        let guard = scratch("delete");
+        let dir = guard.dir().to_path_buf();
+        let mut state = on_b_with_a_bin(&guard);
+        assert!(state.handle_event(&Event::Key(plain(Key::Delete))));
+        assert!(!dir.join("b.png").exists(), "the picture is still there");
+        let binned = state.recycle.list().expect("list the bin");
+        assert_eq!(binned.len(), 1);
+        assert_eq!(
+            binned[0].original_path.as_deref(),
+            Some(dir.join("b.png").as_path())
+        );
+        assert_eq!(state.image_info.filename, "c.png", "the next picture");
+        let names: Vec<&str> = state.entries.iter().map(|e| e.filename.as_str()).collect();
+        assert_eq!(names, ["a.png", "c.png"]);
+        let said = collect_text(&render(&state));
+        assert!(
+            said.iter()
+                .any(|t| t.contains("Moved b.png to the recycle bin")),
+            "{said:?}"
+        );
+        // The next picture asked for takes the notice down.
+        state.next_image();
+        assert!(
+            state.notice.is_none(),
+            "the notice outlived the next picture"
+        );
+    }
+
+    /// Ctrl+Z puts the deleted picture back, and shows it.
+    #[test]
+    fn ctrl_z_puts_a_deleted_picture_back() {
+        let guard = scratch("undelete");
+        let dir = guard.dir().to_path_buf();
+        let mut state = on_b_with_a_bin(&guard);
+        assert!(state.handle_event(&Event::Key(plain(Key::Delete))));
+        assert!(state.handle_event(&ctrl(Key::Z)));
+        assert!(dir.join("b.png").exists(), "not put back");
+        assert_eq!(state.image_info.filename, "b.png");
+        assert_eq!(state.entries.len(), 3);
+        assert!(state.recycle.list().expect("list").is_empty());
+        // Nothing more to put back.
+        assert!(state.handle_event(&ctrl(Key::Z)));
+        assert_eq!(state.image_info.filename, "b.png");
+    }
+
+    /// Deleting the only picture leaves the viewer empty, not showing it.
+    #[test]
+    fn deleting_the_last_picture_leaves_the_viewer_empty() {
+        let guard = scratch("delete-last");
+        let dir = guard.dir();
+        std::fs::write(dir.join("only.png"), png_bytes(2, 2)).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        state.recycle =
+            recyclebin::RecycleBin::new(dir.join(".bin"), std::time::Duration::from_mins(1));
+        assert_eq!(state.open_file(&dir.join("only.png")), Opened::Shown);
+        state.pending_images.clear();
+        assert!(state.handle_event(&Event::Key(plain(Key::Delete))));
+        assert!(state.current_image.is_none());
+        assert!(state.entries.is_empty());
+        assert_eq!(queued(&state), [("down", VIEWER_IMAGE_ID, 0, 0, 0)]);
+    }
+
+    /// A picture that cannot be moved to the bin stays, and the viewer says
+    /// why.
+    #[test]
+    fn a_picture_that_cannot_be_binned_stays_and_says_why() {
+        let guard = scratch("delete-fails");
+        let dir = guard.dir().to_path_buf();
+        let mut state = on_b_with_a_bin(&guard);
+        // A bin whose folder cannot be made: its parent is a file.
+        std::fs::write(dir.join("blocker"), b"a file").expect("write");
+        state.recycle = recyclebin::RecycleBin::new(
+            dir.join("blocker").join("bin"),
+            std::time::Duration::from_mins(1),
+        );
+        assert!(state.handle_event(&Event::Key(plain(Key::Delete))));
+        assert!(dir.join("b.png").exists());
+        assert_eq!(state.image_info.filename, "b.png");
+        let said = collect_text(&render(&state));
+        assert!(
+            said.iter().any(|t| t.contains("Could not move b.png")),
+            "{said:?}"
+        );
     }
 
     /// A still GIF, and a PNG, are not animations.

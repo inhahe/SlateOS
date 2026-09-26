@@ -252,6 +252,15 @@ fn every_visible_row_launches_the_program_named_on_it() {
         let shown = match shell.start_menu_rows().get(row).copied() {
             Some(crate::StartRow::Program { entry, .. }) => Ok(entry.executable_path.clone()),
             Some(crate::StartRow::Folder { folder, open }) => Err((folder, open)),
+            // A heading: a press on it does nothing at all.
+            Some(crate::StartRow::Section(_)) => {
+                assert_eq!(
+                    choose_at(&mut shell, rect),
+                    ShellAction::Consumed,
+                    "row {row}: a heading"
+                );
+                continue;
+            }
             None => panic!("row {row} is empty in a menu longer than the screen"),
         };
         match shown {

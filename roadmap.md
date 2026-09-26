@@ -1859,6 +1859,13 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **The start menu is in sections, with "Recently used"** -- done
+  2026-09-26 (`design-decisions.md` §1402). "Pinned", "Recently used" and
+  "All apps", each under a heading, as the Aero reference lists them. The
+  eight programs most recently started -- by any part of the desktop, not only
+  the menu -- newest first, remembered in `startmenu.yaml` across logins. The
+  keyboard passes the headings over.
+
 - `[C]` **The tile under the pointer lights up** -- done 2026-09-26
   (`design-decisions.md` §1400). The reference's `aero-task:hover`: the
   accent's glass with a glow of it, drawn over whatever state the tile was in.

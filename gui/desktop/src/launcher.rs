@@ -290,6 +290,22 @@ impl AppEntry {
     }
 }
 
+/// The program `launch` starts: its own -- or, for a program started in a
+/// terminal as [`AppEntry::launch`] wraps one (`terminal -e program ...`), the
+/// one inside. The inverse of that wrapping, kept beside it so the two cannot
+/// drift: a start menu that credited every terminal program to the terminal
+/// would list "Terminal" as the one recently used program.
+#[must_use]
+pub fn program_started(launch: &crate::hotkeys::Launch) -> &std::ffi::OsStr {
+    if launch.program.as_os_str() == TERMINAL
+        && launch.args.first().is_some_and(|flag| flag == "-e")
+        && let Some(inner) = launch.args.get(1)
+    {
+        return inner;
+    }
+    launch.program.as_os_str()
+}
+
 // ============================================================================
 // Launch history
 // ============================================================================

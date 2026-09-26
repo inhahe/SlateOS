@@ -621,6 +621,39 @@ fn the_bar_is_redrawn_when_a_tile_lights_up() {
     );
 }
 
+/// **What the desktop starts is remembered as recently used**, whichever
+/// part of it asked -- here a pinned tile, not the start menu -- and written
+/// down for the next login.
+#[test]
+fn a_program_started_from_its_pin_is_recently_used() {
+    settingsfile::testing::with_scratch_config("session-recently-used", |_root| {
+        let (mut session, desktop, _turn) = session();
+        session
+            .shell_mut()
+            .pin_app(crate::launcher::TERMINAL, "Terminal");
+        session.pump().expect("pump");
+        let tile = session.shell().taskbar_button_rect(0);
+        let (x, y) = (tile.x + tile.w / 2.0, tile.y + tile.h / 2.0);
+
+        press_at(&desktop, session.panel(), x, y);
+        release_at(&desktop, session.panel(), x, y);
+        session.pump().expect("pump");
+
+        assert_eq!(
+            session.shell().start_recent(),
+            [crate::launcher::TERMINAL],
+            "the program the pin started is not recently used"
+        );
+        let mut restarted = DesktopShell::new(1920, 1080);
+        restarted.load_start_menu();
+        assert_eq!(
+            restarted.start_recent(),
+            [crate::launcher::TERMINAL],
+            "remembered in this session and not written down"
+        );
+    });
+}
+
 /// **The bar's own menu is put on the screen** -- the part list the
 /// surface is mapped from has it, which is the whole of what a menu needs to
 /// be seen (see `right_clicking_a_pinned_tile_draws_its_menu`).

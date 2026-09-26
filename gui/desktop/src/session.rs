@@ -571,7 +571,7 @@ impl<T: Transport> ShellSession<T> {
         // a key got their binding written to `shortcuts.yaml` and thrown away
         // at the next start.
         shell.load_pinned();
-        shell.load_start_pins();
+        shell.load_start_menu();
         shell.load_shortcuts();
         shell.populate_icons();
         let bar = shell.taskbar_rect();
@@ -1048,6 +1048,9 @@ impl<T: Transport> ShellSession<T> {
                 // this is what that means.
                 continue;
             }
+            // Whichever part of the desktop asked for it: "Recently used"
+            // lists what was started, not what was started from the menu.
+            self.shell.note_started(&launch);
             self.launches.push(launch);
         }
     }
@@ -1974,10 +1977,11 @@ impl<T: Transport> ShellSession<T> {
         if self.shell.take_icons_dirty() {
             self.save_icon_layout();
         }
-        // And the start menu's pins, dropped there or chosen from a menu.
-        if self.shell.take_start_pins_dirty() {
-            let saved = self.shell.save_start_pins();
-            self.report_save("The start menu's pinned programs", saved);
+        // And the start menu's pins, dropped there or chosen from a menu, and
+        // the programs recently used, which every launch above may have moved.
+        if self.shell.take_start_menu_dirty() {
+            let saved = self.shell.save_start_menu();
+            self.report_save("The start menu's pinned and recently used programs", saved);
         }
 
         // The shell writes `appearance.yaml` itself for the quick toggles --

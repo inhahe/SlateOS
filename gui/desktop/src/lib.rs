@@ -478,6 +478,12 @@ const START_MENU_LEFT_WIDTH: f32 = 312.0;
 /// Space above the first application row.
 const START_MENU_TOP_PADDING: f32 = 8.0;
 const START_MENU_ROW_HEIGHT: f32 = 36.0;
+/// How many recently used programs the start menu lists: the reference's
+/// eight.
+const START_RECENT_MAX: usize = 8;
+/// How strongly a section's heading is drawn: the menu's text colour at this
+/// alpha, dimmer than the rows it heads, as the reference's is.
+const START_SECTION_ALPHA: u8 = 170;
 /// A program's picture on its start menu row, in logical pixels.
 const START_ROW_ICON: f32 = 20.0;
 /// Where a row's picture starts, from the column's left edge.
@@ -1087,6 +1093,29 @@ fn file_name_str(path: &str) -> Option<&str> {
         .and_then(std::ffi::OsStr::to_str)
 }
 
+/// A section of the start menu's list, as the Aero reference divides it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartSection {
+    /// The programs the user pinned to the top.
+    Pinned,
+    /// The programs most recently started, most recent first.
+    Recent,
+    /// Every installed program, in the applications tree.
+    All,
+}
+
+impl StartSection {
+    /// The section's heading, as the reference words it.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pinned => "Pinned",
+            Self::Recent => "Recently used",
+            Self::All => "All apps",
+        }
+    }
+}
+
 /// One row of the start menu's list.
 #[derive(Clone, Copy, Debug)]
 pub enum StartRow<'a> {
@@ -1105,6 +1134,9 @@ pub enum StartRow<'a> {
         /// Whether its programs are listed under it.
         open: bool,
     },
+    /// A section's heading: not a thing to start or open, and passed over by
+    /// the keyboard.
+    Section(StartSection),
 }
 
 /// What the shell wants its host — the compositor's event loop — to do about a
@@ -1600,9 +1632,13 @@ pub struct DesktopShell {
     start_pins: Vec<AppEntry>,
     /// Whether [`start_pins`](Self::start_pins) changed since it was last
     /// written. The session writes it -- see
-    /// [`take_start_pins_dirty`](Self::take_start_pins_dirty) -- so that a
+    /// [`take_start_menu_dirty`](Self::take_start_menu_dirty) -- so that a
     /// write that fails can be reported rather than printed and forgotten.
-    start_pins_dirty: bool,
+    start_menu_dirty: bool,
+    /// The programs most recently started, most recent first, by executable
+    /// path: the start menu's "Recently used" section. At most
+    /// [`START_RECENT_MAX`]; saved with the pins in `startmenu.yaml`.
+    start_recent: Vec<String>,
     /// Where the pointer is in a drag that carries a program, for the label
     /// that follows it.
     carry_at: (f32, f32),
@@ -2232,7 +2268,8 @@ impl DesktopShell {
             pin_drag_off_bar: false,
             start_drag: None,
             start_pins: Vec::new(),
-            start_pins_dirty: false,
+            start_menu_dirty: false,
+            start_recent: Vec::new(),
             start_query: TextInput::new(),
             start_selected: None,
             start_closed_folders: std::collections::BTreeSet::new(),
@@ -3441,15 +3478,18 @@ impl DesktopShell {
             .into_iter()
             .filter_map(|row| match row {
                 StartRow::Program { entry, .. } => Some(entry),
-                StartRow::Folder { .. } => None,
+                StartRow::Folder { .. } | StartRow::Section(_) => None,
             })
             .collect()
     }
 
-    /// The rows of the start menu's list, top to bottom: the pinned
-    /// programs, then the applications tree -- a row per folder that has
-    /// programs in it, each followed by its programs when it is open. While
-    /// something is typed, what the search finds instead, and no folders.
+    /// The rows of the start menu's list, top to bottom, in the Aero
+    /// reference's sections: the pinned programs, the recently used ones,
+    /// then the applications tree -- a row per folder that has programs in
+    /// it, each followed by its programs when it is open. A section with
+    /// nothing in it has no heading, and "All apps" is headed only when
+    /// another section stands above it. While something is typed, what the
+    /// search finds instead, and no folders or headings.
     ///
     /// A program is in the folder its entry's first main category names
     /// (`desktopentry::menu::Category::of`), and appears there even when it
@@ -3468,13 +3508,35 @@ impl DesktopShell {
         }
         let pins = self.start_pins.len().min(found.len());
         let (pinned, listed) = found.split_at(pins);
-        let mut rows: Vec<StartRow<'_>> = pinned
+        // Recently used, as the list knows each program -- one no longer
+        // installed is not listed, though it is remembered until pushed out.
+        let recent: Vec<&AppEntry> = self
+            .start_recent
             .iter()
-            .map(|entry| StartRow::Program {
-                entry,
-                in_folder: false,
+            .filter_map(|exec| {
+                listed
+                    .iter()
+                    .copied()
+                    .find(|entry| entry.executable_path == *exec)
             })
             .collect();
+        let mut rows: Vec<StartRow<'_>> = Vec::new();
+        for (section, entries) in [
+            (StartSection::Pinned, pinned),
+            (StartSection::Recent, recent.as_slice()),
+        ] {
+            if entries.is_empty() {
+                continue;
+            }
+            rows.push(StartRow::Section(section));
+            rows.extend(entries.iter().map(|entry| StartRow::Program {
+                entry,
+                in_folder: false,
+            }));
+        }
+        if !rows.is_empty() {
+            rows.push(StartRow::Section(StartSection::All));
+        }
         for folder in launcher::Folder::ALL {
             let mut members: Vec<&AppEntry> = listed
                 .iter()
@@ -3589,6 +3651,17 @@ impl DesktopShell {
         }
     }
 
+    /// Which pinned program the start menu's `row` is, if it is one: the
+    /// pins follow their "Pinned" heading, which is row 0 whenever there are
+    /// pins to list.
+    fn start_row_pin(&self, row: usize) -> Option<usize> {
+        let pins = self.start_pins_listed();
+        if pins == 0 {
+            return None;
+        }
+        row.checked_sub(1).filter(|pin| *pin < pins)
+    }
+
     /// The start menu's search field, in the space above the rows.
     #[must_use]
     pub fn start_search_rect(&self) -> Rect {
@@ -3687,7 +3760,7 @@ impl DesktopShell {
             // The list is a row shorter, and a menu scrolled to its end
             // would otherwise show a blank row past it.
             self.start_menu_scroll = self.start_menu_scroll.min(self.start_menu_max_scroll());
-            self.start_pins_dirty = true;
+            self.start_menu_dirty = true;
         }
     }
 
@@ -3717,7 +3790,7 @@ impl DesktopShell {
         .min(self.start_pins.len());
         self.start_pins.insert(to, entry);
         if from != Some(to) {
-            self.start_pins_dirty = true;
+            self.start_menu_dirty = true;
         }
         to.saturating_add(1)
     }
@@ -3745,9 +3818,20 @@ impl DesktopShell {
             })
     }
 
-    /// Read the programs pinned to the start menu back from `startmenu.yaml`.
-    pub fn load_start_pins(&mut self) {
+    /// Read the programs pinned to the start menu, and the ones recently
+    /// used, back from `startmenu.yaml`.
+    pub fn load_start_menu(&mut self) {
         let doc = config::load(START_MENU_CONFIG_NAME);
+        if let Some(execs) = doc.get_seq(&["recent"]) {
+            for exec in execs {
+                if !exec.is_empty()
+                    && !self.start_recent.contains(&exec)
+                    && self.start_recent.len() < START_RECENT_MAX
+                {
+                    self.start_recent.push(exec);
+                }
+            }
+        }
         let Some(execs) = doc.get_seq(&["pinned"]) else {
             return;
         };
@@ -3760,17 +3844,53 @@ impl DesktopShell {
         }
     }
 
-    /// Whether the start menu's pins need writing, clearing the flag.
-    pub fn take_start_pins_dirty(&mut self) -> bool {
-        core::mem::take(&mut self.start_pins_dirty)
+    /// Note that `launch` is being started: the program it starts goes to the
+    /// top of the start menu's "Recently used", when it is one of the
+    /// installed programs -- a program the menu lists.
+    ///
+    /// Called by the session for every launch, whichever part of the desktop
+    /// asked for it, so a program started from its pin, its desktop shortcut,
+    /// a jump list or the Run box counts as much as one started from the
+    /// menu. A program started in a terminal is credited to itself, not to
+    /// the terminal ([`launcher::program_started`]).
+    pub fn note_started(&mut self, launch: &hotkeys::Launch) {
+        let program = launcher::program_started(launch);
+        let Some(exec) = self
+            .apps
+            .iter()
+            .find(|app| std::ffi::OsStr::new(&app.executable_path) == program)
+            .map(|app| app.executable_path.clone())
+        else {
+            return;
+        };
+        if self.start_recent.first() == Some(&exec) {
+            return;
+        }
+        self.start_recent.retain(|recent| *recent != exec);
+        self.start_recent.insert(0, exec);
+        self.start_recent.truncate(START_RECENT_MAX);
+        self.start_menu_dirty = true;
     }
 
-    /// Write the programs pinned to the start menu to `startmenu.yaml`.
+    /// The programs most recently started, most recent first, by path.
+    #[must_use]
+    pub fn start_recent(&self) -> &[String] {
+        &self.start_recent
+    }
+
+    /// Whether the start menu's pins or recent programs need writing,
+    /// clearing the flag.
+    pub fn take_start_menu_dirty(&mut self) -> bool {
+        core::mem::take(&mut self.start_menu_dirty)
+    }
+
+    /// Write the programs pinned to the start menu, and the ones recently
+    /// used, to `startmenu.yaml`.
     ///
     /// # Errors
     ///
-    /// The write's own error. The pins still apply to this session.
-    pub fn save_start_pins(&self) -> std::io::Result<()> {
+    /// The write's own error. Both still apply to this session.
+    pub fn save_start_menu(&self) -> std::io::Result<()> {
         let mut doc = config::load(START_MENU_CONFIG_NAME);
         let execs: Vec<&str> = self
             .start_pins
@@ -3778,6 +3898,8 @@ impl DesktopShell {
             .map(|entry| entry.executable_path.as_str())
             .collect();
         doc.set_seq(&["pinned"], &execs);
+        let recent: Vec<&str> = self.start_recent.iter().map(String::as_str).collect();
+        doc.set_seq(&["recent"], &recent);
         config::store(START_MENU_CONFIG_NAME, &doc)
     }
 
@@ -3788,14 +3910,14 @@ impl DesktopShell {
     fn start_pin_insert_boundary(&self, x: f32, y: f32) -> usize {
         let pins = self.start_pins_listed();
         if let Hit::StartMenuEntry(index) = self.hit_test(x, y)
-            && index < pins
+            && let Some(pin) = self.start_row_pin(index)
             && let Some(row) = index.checked_sub(self.start_menu_scroll)
         {
             let rect = self.start_menu_row_rect(row);
             return if y < rect.y + rect.h / 2.0 {
-                index
+                pin
             } else {
-                index.saturating_add(1)
+                pin.saturating_add(1)
             };
         }
         pins
@@ -4916,7 +5038,8 @@ impl DesktopShell {
                     // A folder is not carried anywhere: the press opens or
                     // closes it, as a tree's node does.
                     Some(StartRow::Folder { folder, .. }) => self.toggle_start_folder(folder),
-                    None => {}
+                    // A heading is only a heading.
+                    Some(StartRow::Section(_)) | None => {}
                 }
                 ShellAction::Consumed
             }
@@ -6089,22 +6212,50 @@ impl DesktopShell {
     /// Move the keyboard's row one step, keeping it on screen. From no row,
     /// Down goes to the first and Up to the last.
     fn move_start_selection(&mut self, down: bool) {
-        let count = self.start_menu_rows().len();
-        let Some(last) = count.checked_sub(1) else {
+        // Which rows are headings, read out of the rows -- which borrow the
+        // shell -- before the selection moves.
+        let headings: Vec<bool> = self
+            .start_menu_rows()
+            .iter()
+            .map(|row| matches!(row, StartRow::Section(_)))
+            .collect();
+        // Headings are passed over: there is nothing on one to start.
+        let selectable: Vec<usize> = headings
+            .iter()
+            .enumerate()
+            .filter(|(_, heading)| !**heading)
+            .map(|(index, _)| index)
+            .collect();
+        let (Some(&first), Some(&last)) = (selectable.first(), selectable.last()) else {
             return;
         };
         let next = match (self.start_selected, down) {
-            (None, true) => 0,
+            (None, true) => first,
             (None, false) => last,
-            (Some(row), true) => row.saturating_add(1).min(last),
-            (Some(row), false) => row.saturating_sub(1),
+            (Some(row), true) => selectable
+                .iter()
+                .copied()
+                .find(|&at| at > row)
+                .unwrap_or(last),
+            (Some(row), false) => selectable
+                .iter()
+                .rev()
+                .copied()
+                .find(|&at| at < row)
+                .unwrap_or(first),
         };
         self.start_selected = Some(next);
-        let rows = self.start_menu_visible_rows().max(1);
-        if next < self.start_menu_scroll {
-            self.start_menu_scroll = next;
-        } else if next >= self.start_menu_scroll.saturating_add(rows) {
-            self.start_menu_scroll = next.saturating_add(1).saturating_sub(rows);
+        // Keep it on screen -- and, at the top of a section, its heading too,
+        // so the row is read with the name of the list it is in.
+        let top = match next.checked_sub(1) {
+            Some(above) if headings.get(above).copied().unwrap_or(false) => above,
+            _ => next,
+        };
+        let visible = self.start_menu_visible_rows().max(1);
+        if top < self.start_menu_scroll {
+            self.start_menu_scroll = top;
+        } else if next >= self.start_menu_scroll.saturating_add(visible) {
+            self.start_menu_scroll = next.saturating_add(1).saturating_sub(visible);
         }
     }
 
@@ -7326,10 +7477,11 @@ impl DesktopShell {
                 );
             }
             self.render_start_row(&mut tree, rect, item);
-            // A line along the top of the first row after the pins, so the
-            // user's own choices read as a group apart from the launcher's
-            // list -- which may name the same programs again below.
-            if index == self.start_pins_listed() && index > 0 {
+            // A line along the top of every heading but the first, so the
+            // sections read as groups -- the user's own choices apart from what
+            // they used last and from the launcher's list, which may name the
+            // same programs again.
+            if matches!(item, StartRow::Section(_)) && index > 0 {
                 let inset = self.scale(16.0);
                 tree.push(guitk::render::RenderCommand::FillRect {
                     x: rect.x + inset,
@@ -7483,9 +7635,26 @@ impl DesktopShell {
         }
     }
 
+    /// A section's heading, in `rect`: its name, small and dimmer than the
+    /// rows it heads, set low in its row so it reads with them -- the
+    /// reference's padding is 9 above it and 5 below.
+    fn render_start_heading(&self, tree: &mut RenderTree, rect: Rect, section: StartSection) {
+        let size = self.font_size(TextRole::Caption);
+        let x = rect.x + self.scale(16.0);
+        tree.text_in_weighted(
+            x,
+            rect.y + (rect.h - size - self.scale(5.0)).max(0.0),
+            (rect.x + rect.w - x).max(0.0),
+            section.label(),
+            with_alpha(self.theme.start_menu_fg, START_SECTION_ALPHA),
+            size,
+            guitk::render::FontWeightHint::Bold,
+        );
+    }
+
     /// One row of the start menu's list, in `rect`: a program's picture and
-    /// name -- set in when it is inside a folder -- or a folder's chevron,
-    /// picture and name.
+    /// name -- set in when it is inside a folder -- a folder's chevron,
+    /// picture and name, or a section's heading.
     fn render_start_row(&self, tree: &mut RenderTree, rect: Rect, item: StartRow<'_>) {
         let fg = self.theme.start_menu_fg;
         let size = self.font_size(TextRole::Item);
@@ -7495,6 +7664,11 @@ impl DesktopShell {
         let icon_y = rect.y + (rect.h - side).max(0.0) / 2.0;
         let text_y = rect.y + (rect.h - size).max(0.0) / 2.0;
         let (icon_x, image_id, name) = match item {
+            // No picture and no name of a thing to start: a heading of its own.
+            StartRow::Section(section) => {
+                self.render_start_heading(tree, rect, section);
+                return;
+            }
             StartRow::Program { entry, in_folder } => {
                 let indent = if in_folder {
                     self.scale(START_FOLDER_INDENT)
@@ -8749,7 +8923,7 @@ impl DesktopShell {
             // Only the pinned rows take a drop: the rest of the list is the
             // launcher's, in the launcher's order, and not the user's to
             // arrange.
-            Hit::StartMenuEntry(index) if index < self.start_pins_listed() => {
+            Hit::StartMenuEntry(index) if self.start_row_pin(index).is_some() => {
                 Some(CarryTarget::StartMenu)
             }
             Hit::Desktop if self.window_at(x, y).is_none() => Some(CarryTarget::Desktop),
@@ -21224,7 +21398,7 @@ mod carry_tests {
 ///
 /// Only the tests that also pin to the *taskbar* need a scratch configuration
 /// directory: the start menu's pins are written by the session
-/// (`take_start_pins_dirty`), never by the shell, and the one test that writes
+/// (`take_start_menu_dirty`), never by the shell, and the one test that writes
 /// them itself asks for one.
 #[cfg(test)]
 mod start_pin_tests {
@@ -21367,8 +21541,8 @@ mod start_pin_tests {
         assert_eq!(after[0], before[3]);
         assert_eq!(after[1..], before[..]);
         assert!(shell.is_pinned_to_start(&before[3]));
-        assert!(shell.take_start_pins_dirty(), "a pin nobody will save");
-        assert!(!shell.take_start_pins_dirty(), "the flag outlived the save");
+        assert!(shell.take_start_menu_dirty(), "a pin nobody will save");
+        assert!(!shell.take_start_menu_dirty(), "the flag outlived the save");
     }
 
     /// Pinning twice leaves one pin; unpinning takes it off, and unpinning
@@ -21380,15 +21554,15 @@ mod start_pin_tests {
         shell.pin_to_start(&before[1]);
         shell.pin_to_start(&before[1]);
         assert_eq!(pins(&shell), [before[1].clone()]);
-        let _ = shell.take_start_pins_dirty();
+        let _ = shell.take_start_menu_dirty();
 
         shell.unpin_from_start(&before[1]);
         assert!(pins(&shell).is_empty());
         assert_eq!(execs(&shell), before);
-        assert!(shell.take_start_pins_dirty());
+        assert!(shell.take_start_menu_dirty());
 
         shell.unpin_from_start(&before[1]);
-        assert!(!shell.take_start_pins_dirty(), "nothing changed");
+        assert!(!shell.take_start_menu_dirty(), "nothing changed");
     }
 
     /// A program the launcher has never heard of can be pinned by its path,
@@ -21439,8 +21613,9 @@ mod start_pin_tests {
         );
     }
 
-    /// A line sets the pins apart from the launcher's list, at the top of the
-    /// first row after them -- and there is no line with nothing pinned.
+    /// A line sets the sections apart, at the top of every heading but the
+    /// first -- and with nothing pinned or used, there are no headings and no
+    /// line.
     #[test]
     fn a_line_sets_the_pins_apart_from_the_list() {
         let mut shell = shell();
@@ -21460,7 +21635,8 @@ mod start_pin_tests {
         let first = execs(&shell)[0].clone();
         shell.pin_to_start(&first);
         shell.pin_to_start(UNKNOWN);
-        assert_eq!(line_at(&shell), [shell.start_menu_row_rect(2).y]);
+        // "Pinned", the two pins, then the "All apps" heading the line is on.
+        assert_eq!(line_at(&shell), [shell.start_menu_row_rect(3).y]);
     }
 
     /// Written by the session and read back at the next login, names and all.
@@ -21471,15 +21647,15 @@ mod start_pin_tests {
             let known = execs(&shell)[2].clone();
             shell.pin_to_start(&known);
             shell.pin_to_start(UNKNOWN);
-            shell.save_start_pins().unwrap();
+            shell.save_start_menu().unwrap();
 
             let mut restarted = DesktopShell::new(1920, 1080);
             assert!(restarted.start_pins().is_empty(), "read before loading");
-            restarted.load_start_pins();
+            restarted.load_start_menu();
             assert_eq!(pins(&restarted), [known, UNKNOWN.to_string()]);
             assert_eq!(restarted.start_pins()[1].name, "frobnicate");
             assert!(
-                !restarted.take_start_pins_dirty(),
+                !restarted.take_start_menu_dirty(),
                 "loading is not a change"
             );
         });
@@ -21563,7 +21739,7 @@ mod start_pin_tests {
         let list = execs(&shell);
         shell.pin_to_start(&list[5]);
         shell.pin_to_start(&list[6]);
-        let _ = shell.take_start_pins_dirty();
+        let _ = shell.take_start_menu_dirty();
         shell.toggle_start_menu();
 
         // Row 2 is the first of the launcher's list.
@@ -21575,7 +21751,7 @@ mod start_pin_tests {
             [list[5].clone(), list[0].clone(), list[6].clone()]
         );
         assert!(shell.start_menu_open, "the menu closed under the user");
-        assert!(shell.take_start_pins_dirty());
+        assert!(shell.take_start_menu_dirty());
     }
 
     /// A pinned row dragged along the pins moves.
@@ -21596,14 +21772,14 @@ mod start_pin_tests {
         );
 
         // Onto its own upper half, nowhere: it is where it already is.
-        let _ = shell.take_start_pins_dirty();
+        let _ = shell.take_start_menu_dirty();
         let (from, to) = (row_centre(&shell, 2), row_half(&shell, 2, false));
         carry(&mut shell, from, (to.0 + 40.0, to.1));
         assert_eq!(
             pins(&shell),
             [list[6].clone(), list[7].clone(), list[5].clone()]
         );
-        assert!(!shell.take_start_pins_dirty(), "a no-op drop was saved");
+        assert!(!shell.take_start_menu_dirty(), "a no-op drop was saved");
     }
 
     /// Into the gap between two other pins: the one case where taking the
@@ -21635,13 +21811,13 @@ mod start_pin_tests {
         let mut shell = shell();
         let list = execs(&shell);
         shell.pin_to_start(&list[5]);
-        let _ = shell.take_start_pins_dirty();
+        let _ = shell.take_start_menu_dirty();
         shell.toggle_start_menu();
 
         let (from, to) = (row_centre(&shell, 2), row_centre(&shell, 4));
         assert_eq!(carry(&mut shell, from, to), ShellAction::Consumed);
         assert_eq!(pins(&shell), [list[5].clone()]);
-        assert!(!shell.take_start_pins_dirty());
+        assert!(!shell.take_start_menu_dirty());
         assert!(shell.start_menu_open);
     }
 
@@ -21900,6 +22076,7 @@ mod start_search_tests {
                 crate::StartRow::Program { entry, in_folder } => {
                     format!("{}{}", if *in_folder { "  " } else { "" }, entry.name)
                 }
+                crate::StartRow::Section(section) => format!("# {}", section.label()),
             })
             .collect()
     }
@@ -21915,7 +22092,9 @@ mod start_search_tests {
         assert_eq!(
             tree(&shell),
             [
+                "# Pinned",
                 "Terminal",
+                "# All apps",
                 "[Accessories]",
                 "  Calculator",
                 "  File Explorer",
@@ -21933,6 +22112,175 @@ mod start_search_tests {
                 "  Terminal",
             ]
         );
+    }
+
+    // ---- the recently used section ----
+
+    /// **What was started heads "Recently used"**, most recent first, once
+    /// each and at most eight -- between the pins and the tree, as the Aero
+    /// reference lists it.
+    #[test]
+    fn what_was_started_heads_recently_used() {
+        let mut shell = shell();
+        shell.pin_to_start(super::launcher::TERMINAL);
+        let execs: Vec<String> = shell
+            .start_menu_entries()
+            .iter()
+            .map(|entry| entry.executable_path.clone())
+            .collect();
+        shell.note_started(&crate::hotkeys::Launch::program("/usr/bin/calculator"));
+        shell.note_started(&crate::hotkeys::Launch::program(super::launcher::TERMINAL));
+        assert_eq!(
+            shell.start_recent(),
+            [super::launcher::TERMINAL, "/usr/bin/calculator"],
+            "the newest is not first"
+        );
+        shell.note_started(&crate::hotkeys::Launch::program("/usr/bin/calculator"));
+        assert_eq!(
+            shell.start_recent(),
+            ["/usr/bin/calculator", super::launcher::TERMINAL],
+            "most recent first, and once each"
+        );
+        let rows = tree(&shell);
+        assert_eq!(
+            rows[..6],
+            [
+                "# Pinned",
+                "Terminal",
+                "# Recently used",
+                "Calculator",
+                "Terminal",
+                "# All apps"
+            ],
+            "{rows:?}"
+        );
+
+        for exec in &execs {
+            shell.note_started(&crate::hotkeys::Launch::program(exec.as_str()));
+        }
+        assert!(shell.start_recent().len() <= super::START_RECENT_MAX);
+    }
+
+    /// **Only an installed program is remembered** -- a command typed into
+    /// the Run box, a power action -- and one started in a terminal is
+    /// credited to itself, not to the terminal it runs in.
+    #[test]
+    fn only_installed_programs_are_remembered_and_in_their_own_name() {
+        let mut shell = shell();
+        shell.note_started(&crate::hotkeys::Launch::program("/usr/bin/no-such-program"));
+        assert!(
+            shell.start_recent().is_empty(),
+            "{:?}",
+            shell.start_recent()
+        );
+
+        let entry = desktopentry::DesktopEntry::parse(
+            b"[Desktop Entry]\nType=Application\nName=Top\nExec=htop\nTerminal=true\n",
+        )
+        .expect("parses");
+        let app = desktopentry::App::from_entry(&entry, "htop.desktop", None).expect("valid");
+        let top = super::launcher::AppEntry::from_desktop(app).expect("startable");
+        let launch = top.launch();
+        assert_eq!(
+            launch.program,
+            std::path::PathBuf::from(super::launcher::TERMINAL),
+            "the premise: it starts in a terminal"
+        );
+        shell.set_installed_apps(vec![top]);
+        shell.note_started(&launch);
+        assert_eq!(shell.start_recent(), ["htop"], "credited to the terminal");
+    }
+
+    /// **The keyboard passes the headings over**, and keeps a section's
+    /// heading on screen when it reaches the section's first row.
+    #[test]
+    fn the_keyboard_passes_headings_over() {
+        // Open already: this module's `shell` opens the menu.
+        let mut shell = shell();
+        shell.pin_to_start(super::launcher::TERMINAL);
+        drop(shell.handle_hotkey(&press(Key::Down)));
+        assert_eq!(shell.start_selected, Some(1), "Down went to the heading");
+        drop(shell.handle_hotkey(&press(Key::Down)));
+        assert_eq!(
+            shell.start_selected,
+            Some(3),
+            "Down stopped on the \"All apps\" heading"
+        );
+        drop(shell.handle_hotkey(&press(Key::Up)));
+        drop(shell.handle_hotkey(&press(Key::Up)));
+        assert_eq!(
+            shell.start_selected,
+            Some(1),
+            "Up went past the first program"
+        );
+        assert_eq!(
+            shell.start_menu_scroll, 0,
+            "the first heading was scrolled away"
+        );
+    }
+
+    /// **Starting the program already at the top changes nothing**, and so
+    /// writes nothing -- the one started all day is not saved all day.
+    #[test]
+    fn starting_the_top_program_again_changes_nothing() {
+        let mut shell = shell();
+        let launch = crate::hotkeys::Launch::program(super::launcher::TERMINAL);
+        shell.note_started(&launch);
+        assert!(shell.take_start_menu_dirty());
+        shell.note_started(&launch);
+        assert!(!shell.take_start_menu_dirty(), "rewritten for no change");
+    }
+
+    /// **With nothing pinned or used there are no headings** -- "All apps"
+    /// alone would head nothing but the whole menu.
+    #[test]
+    fn with_nothing_pinned_or_used_there_are_no_headings() {
+        let shell = shell();
+        assert!(
+            !tree(&shell).iter().any(|row| row.starts_with('#')),
+            "{:?}",
+            tree(&shell)
+        );
+    }
+
+    /// **Up to a section's first row brings its heading into view**, so the
+    /// row is read with the name of the list it is in.
+    #[test]
+    fn up_to_a_sections_first_row_shows_its_heading() {
+        let mut shell = shell();
+        shell.pin_to_start(super::launcher::TERMINAL);
+        let rows = tree(&shell);
+        let heading = rows
+            .iter()
+            .position(|row| row == "# All apps")
+            .expect("the tree is headed");
+        // Scrolled so the heading is just off the top, on the row below it.
+        shell.start_menu_scroll = heading + 1;
+        shell.start_selected = Some(heading + 2);
+        drop(shell.handle_hotkey(&press(Key::Up)));
+        assert_eq!(shell.start_selected, Some(heading + 1));
+        assert_eq!(
+            shell.start_menu_scroll, heading,
+            "the heading stayed off the top of the list"
+        );
+    }
+
+    /// **"Recently used" survives a restart**, with the pins.
+    #[test]
+    fn recently_used_survives_a_restart() {
+        settingsfile::testing::with_scratch_config("start-recent-restart", |_root| {
+            let mut shell = shell();
+            shell.note_started(&crate::hotkeys::Launch::program(super::launcher::TERMINAL));
+            assert!(
+                shell.take_start_menu_dirty(),
+                "remembered and nobody told to save it"
+            );
+            shell.save_start_menu().expect("saved");
+
+            let mut restarted = DesktopShell::new(1920, 1080);
+            restarted.load_start_menu();
+            assert_eq!(restarted.start_recent(), [super::launcher::TERMINAL]);
+        });
     }
 
     /// **A folder's row closes it and opens it again**, by pointer: its

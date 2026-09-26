@@ -340,7 +340,9 @@ const LONG_ALIASES: &[(&str, &str)] = &[("silent", "quiet")];
 enum Request {
     Help,
     Version,
-    Run(Options),
+    /// Boxed: `Options` is a couple of hundred bytes and the other two
+    /// variants carry nothing.
+    Run(Box<Options>),
 }
 
 /// The two lines upstream's `usage (stderr, 2)` prints after a diagnostic:
@@ -490,7 +492,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, String> {
             quote::quotef(&quote::os_bytes(&extra))
         )));
     }
-    Ok(Request::Run(opts))
+    Ok(Request::Run(Box::new(opts)))
 }
 
 /// Strip NUM leading path components from a file path.
@@ -1526,7 +1528,7 @@ fn main() {
     // answered `patch --bogus --help` with the help where GNU reports the bad
     // option first; now `parse_args` returns them in getopt's order.
     let opts = match parse_args(&args) {
-        Ok(Request::Run(o)) => o,
+        Ok(Request::Run(o)) => *o,
         Ok(Request::Help) => print_and_exit(&help_text()),
         Ok(Request::Version) => print_and_exit(&version_text()),
         Err(e) => {
@@ -2392,7 +2394,7 @@ mod tests {
     /// assertions on `Options` fields read as they did.
     fn parse_args(args: &[OsString]) -> Result<Options, String> {
         match super::parse_args(args)? {
-            Request::Run(o) => Ok(o),
+            Request::Run(o) => Ok(*o),
             other => Err(format!("{other:?}")),
         }
     }

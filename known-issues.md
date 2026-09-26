@@ -147243,7 +147243,14 @@ still cannot do the thing.
 the second socket is a window-killer; then a client library beside the service
 (`gui/clipboard` gains a `lib.rs`, the binary keeps `main.rs`); then the four
 consumers move onto it and `clipboard_viewer`'s claim about integrating becomes
-true. The emoji picker is the smallest possible first consumer and a good
+true.
+
+**A route that needs neither, proposed 2026-09-26:** carry the clipboard over
+the compositor connection every window already has -- `SetClipboard` and
+`GetClipboard` requests beside the window verbs, the compositor holding the
+selection and handing it to the `gui/clipboard` service for history -- as
+Wayland and X do. No second socket, so A-Q15 stops being in the way. It is
+lane F's protocol: `requests/c-f-carry-the-clipboard-over-the-compositor-connection.md`. The emoji picker is the smallest possible first consumer and a good
 acceptance test: one string, one direction, and you can see whether it worked
 by pasting.
 

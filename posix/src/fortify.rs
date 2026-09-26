@@ -28,6 +28,9 @@
 //! | `__read_chk` `__pread_chk` `__pread64_chk` `__fread_chk` `__fgets_chk` | read at most `objsize` | a short read is part of every one of these calls' contracts, so callers already handle it |
 //! | `__getcwd_chk` `__readlink_chk` `__readlinkat_chk` | ask with at most `objsize` | `ERANGE` and truncation are, again, answers these functions already give |
 //! | `__fdelt_chk` (`FD_SET` and friends) | abort, as glibc | there is no smaller call: the bit is inside the `fd_set` or it is not |
+//! | `__explicit_bzero_chk`, `__poll_chk`, `__ppoll_chk` | abort, as glibc | a partial wipe is a secret left behind; `poll` on fewer descriptors ignores the rest |
+//! | `__recv_chk` `__recvfrom_chk` `__gethostname_chk` `__getlogin_r_chk` `__ttyname_r_chk` `__ptsname_r_chk` `__confstr_chk` `__getgroups_chk` | ask with at most `objsize` | a short receive, a truncated name, `ERANGE`/`EINVAL`: answers each call already gives |
+//! | `__open_2` `__open64_2` `__openat_2` `__openat64_2` | abort, as glibc, when the flags need a mode | not a size check: `open(path, O_CREAT)` with no mode would create the file with whatever was in a register |
 //!
 //! The rule is: **clamp when the smaller operation is still a correct call of
 //! the function -- a result its callers must already handle -- and abort when
@@ -38,6 +41,18 @@
 /// The message glibc prints before aborting, since 2.34.
 const OVERFLOW_MESSAGE: &[u8] = b"*** buffer overflow detected ***: terminated\n";
 
+/// glibc's message for `open` with flags that need a mode and none given.
+const OPEN_MESSAGE: &[u8] =
+    b"*** invalid open call: O_CREAT or O_TMPFILE without mode ***: terminated\n";
+
+/// glibc's `__fortify_fail`: write `message` -- already in glibc's
+/// `*** ... ***: terminated` form -- to standard error, and abort.
+fn fortify_fail(message: &[u8]) -> ! {
+    // There is no one to report a failed write to: the process is ending.
+    let _ = crate::file::write(2, message.as_ptr(), message.len());
+    crate::unistd::abort()
+}
+
 /// glibc's `__chk_fail`: a fortified call's operation did not fit its object.
 ///
 /// Writes glibc's message to standard error and aborts. It never returns: the
@@ -46,9 +61,7 @@ const OVERFLOW_MESSAGE: &[u8] = b"*** buffer overflow detected ***: terminated\n
 /// it is exported.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __chk_fail() -> ! {
-    // There is no one to report a failed write to: the process is ending.
-    let _ = crate::file::write(2, OVERFLOW_MESSAGE.as_ptr(), OVERFLOW_MESSAGE.len());
-    crate::unistd::abort()
+    fortify_fail(OVERFLOW_MESSAGE)
 }
 
 /// Does an operation on `len` bytes fit an object of `objsize` bytes?
@@ -133,6 +146,208 @@ fn fd_set_word(d: i64) -> Option<i64> {
     }
 }
 
+// -- `open` without the mode its flags need ------------------------------------
+
+/// Do `oflag` need `open`'s third argument? glibc's `__OPEN_NEEDS_MODE`:
+/// `O_CREAT`, or all of `O_TMPFILE`'s own bit (`O_TMPFILE` also carries
+/// `O_DIRECTORY`, which on its own needs no mode).
+const fn open_needs_mode(oflag: i32) -> bool {
+    const TMPFILE_BIT: i32 = crate::fcntl::O_TMPFILE & !crate::fcntl::O_DIRECTORY;
+    oflag & crate::fcntl::O_CREAT != 0 || oflag & TMPFILE_BIT == TMPFILE_BIT
+}
+
+/// `__open_2(path, oflag)` -- what a fortified `open` with two arguments
+/// becomes. Such a call cannot pass a mode, so flags that need one abort, as
+/// in glibc: the file would otherwise be created with whatever permission bits
+/// happened to be in the register the third argument travels in.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __open_2(path: *const u8, oflag: i32) -> i32 {
+    if open_needs_mode(oflag) {
+        fortify_fail(OPEN_MESSAGE);
+    }
+    crate::file::open(path, oflag, 0)
+}
+
+/// `__open64_2`: [`__open_2`]; `off_t` is 64 bits here either way.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __open64_2(path: *const u8, oflag: i32) -> i32 {
+    __open_2(path, oflag)
+}
+
+/// `__openat_2(dirfd, path, oflag)`: [`__open_2`] for `openat`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __openat_2(dirfd: i32, path: *const u8, oflag: i32) -> i32 {
+    if open_needs_mode(oflag) {
+        fortify_fail(OPEN_MESSAGE);
+    }
+    crate::file::openat(dirfd, path, oflag, 0)
+}
+
+/// `__openat64_2`: [`__openat_2`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __openat64_2(dirfd: i32, path: *const u8, oflag: i32) -> i32 {
+    __openat_2(dirfd, path, oflag)
+}
+
+// -- calls that abort ---------------------------------------------------------------
+
+/// `__explicit_bzero_chk(dst, len, dstlen)`: aborts when `len > dstlen`. A
+/// wipe cut short would leave the secret it exists to erase.
+///
+/// # Safety
+///
+/// As `explicit_bzero`: `dst` must be valid for `len` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __explicit_bzero_chk(dst: *mut u8, len: usize, dstlen: usize) {
+    if !fits(len, dstlen) {
+        __chk_fail();
+    }
+    // SAFETY: forwarded from this function's contract.
+    unsafe { crate::string::explicit_bzero(dst, len) }
+}
+
+/// Does an array of `nfds` `struct pollfd` fit `fdslen` bytes?
+fn pollfds_fit(nfds: u64, fdslen: usize) -> bool {
+    let each = core::mem::size_of::<crate::poll::Pollfd>();
+    usize::try_from(nfds)
+        .ok()
+        .and_then(|n| n.checked_mul(each))
+        .is_some_and(|bytes| fits(bytes, fdslen))
+}
+
+/// `__poll_chk(fds, nfds, timeout, fdslen)`: aborts when `nfds` entries do not
+/// fit `fdslen` bytes. Clamping would poll fewer descriptors than the caller
+/// is waiting on, and report nothing about the rest.
+///
+/// # Safety
+///
+/// As `poll`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __poll_chk(
+    fds: *mut crate::poll::Pollfd,
+    nfds: u64,
+    timeout: i32,
+    fdslen: usize,
+) -> i32 {
+    if !pollfds_fit(nfds, fdslen) {
+        __chk_fail();
+    }
+    // SAFETY: forwarded from this function's contract.
+    unsafe { crate::poll::poll(fds, nfds, timeout) }
+}
+
+/// `__ppoll_chk`: [`__poll_chk`] for `ppoll`.
+///
+/// # Safety
+///
+/// As `ppoll`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __ppoll_chk(
+    fds: *mut crate::poll::Pollfd,
+    nfds: u64,
+    timeout: *const crate::stat::Timespec,
+    sigmask: *const u64,
+    fdslen: usize,
+) -> i32 {
+    if !pollfds_fit(nfds, fdslen) {
+        __chk_fail();
+    }
+    // SAFETY: forwarded from this function's contract.
+    unsafe { crate::poll::ppoll(fds, nfds, timeout, sigmask) }
+}
+
+// -- calls that clamp -------------------------------------------------------------
+
+/// `__recv_chk(fd, buf, n, buflen, flags)`: receives at most `buflen` bytes. A
+/// short receive is part of `recv`'s contract.
+///
+/// # Safety
+///
+/// As `recv`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __recv_chk(
+    fd: i32,
+    buf: *mut u8,
+    n: usize,
+    buflen: usize,
+    flags: i32,
+) -> isize {
+    // SAFETY: forwarded; the length only shrinks.
+    unsafe { crate::socket::recv(fd, buf, n.min(buflen), flags) }
+}
+
+/// `__recvfrom_chk(fd, buf, n, buflen, flags, addr, addrlen)`: receives at
+/// most `buflen` bytes, as [`__recv_chk`].
+///
+/// # Safety
+///
+/// As `recvfrom`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __recvfrom_chk(
+    fd: i32,
+    buf: *mut u8,
+    n: usize,
+    buflen: usize,
+    flags: i32,
+    addr: *mut crate::socket::Sockaddr,
+    addrlen: *mut crate::socket::SocklenT,
+) -> isize {
+    // SAFETY: forwarded; the length only shrinks.
+    unsafe { crate::socket::recvfrom(fd, buf, n.min(buflen), flags, addr, addrlen) }
+}
+
+/// `__gethostname_chk(buf, len, buflen)`: asks with at most `buflen` bytes;
+/// a name that does not fit is truncated, as POSIX allows `gethostname` to do.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __gethostname_chk(buf: *mut u8, len: usize, buflen: usize) -> i32 {
+    crate::unistd::gethostname(buf, len.min(buflen))
+}
+
+/// `__getlogin_r_chk(buf, buflen, nreal)`: asks with at most `nreal`, the
+/// object's real size; a name that does not fit is `ERANGE`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __getlogin_r_chk(buf: *mut u8, buflen: usize, nreal: usize) -> i32 {
+    crate::pwd::getlogin_r(buf, buflen.min(nreal))
+}
+
+/// `__ttyname_r_chk(fd, buf, buflen, nreal)`: asks with at most `nreal`; a
+/// name that does not fit is `ERANGE`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __ttyname_r_chk(fd: i32, buf: *mut u8, buflen: usize, nreal: usize) -> i32 {
+    crate::ioctl::ttyname_r(fd, buf, buflen.min(nreal))
+}
+
+/// `__ptsname_r_chk(fd, buf, buflen, nreal)`: asks with at most `nreal`; a
+/// name that does not fit is `ERANGE`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __ptsname_r_chk(fd: i32, buf: *mut u8, buflen: usize, nreal: usize) -> i32 {
+    crate::ioctl::ptsname_r(fd, buf, buflen.min(nreal))
+}
+
+/// `__confstr_chk(name, buf, len, buflen)`: asks with at most `buflen`;
+/// `confstr` truncates and still returns the length it needed.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __confstr_chk(name: i32, buf: *mut u8, len: usize, buflen: usize) -> usize {
+    crate::unistd::confstr(name, buf, len.min(buflen))
+}
+
+/// `__getgroups_chk(size, list, listlen)`: asks for at most as many groups as
+/// `listlen` bytes hold; `getgroups` then answers `EINVAL` if there are more,
+/// as it would for any small array.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __getgroups_chk(size: i32, list: *mut crate::types::GidT, listlen: usize) -> i32 {
+    // `size_of::<GidT>()` is 4, so the division cannot fail.
+    let room = listlen
+        .checked_div(core::mem::size_of::<crate::types::GidT>())
+        .unwrap_or(0);
+    let size = if size < 0 {
+        size
+    } else {
+        size.min(i32::try_from(room).unwrap_or(i32::MAX))
+    };
+    crate::unistd::getgroups(size, list)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +416,56 @@ mod tests {
         // In range, the entry point is the helper.
         assert_eq!(__fdelt_chk(200), 3);
         assert_eq!(__fdelt_warn(1000), 15);
+    }
+
+    #[test]
+    fn open_needs_a_mode_for_create_and_tmpfile_only() {
+        use crate::fcntl::{O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, O_TMPFILE, O_TRUNC, O_WRONLY};
+        assert!(open_needs_mode(O_CREAT | O_WRONLY));
+        assert!(open_needs_mode(O_TMPFILE | O_RDWR));
+        assert!(!open_needs_mode(O_RDONLY));
+        assert!(!open_needs_mode(O_WRONLY | O_TRUNC));
+        assert!(
+            !open_needs_mode(O_DIRECTORY),
+            "O_TMPFILE's other half alone"
+        );
+    }
+
+    #[test]
+    fn pollfds_fit_counts_whole_entries() {
+        let each = core::mem::size_of::<crate::poll::Pollfd>();
+        assert!(pollfds_fit(2, 2 * each));
+        assert!(!pollfds_fit(3, 2 * each));
+        assert!(pollfds_fit(0, 0));
+        assert!(pollfds_fit(u64::from(u32::MAX), usize::MAX), "unknown size");
+        assert!(
+            !pollfds_fit(u64::MAX, usize::MAX - 1),
+            "the product must not wrap"
+        );
+    }
+
+    /// The clamping entry points pass the smaller length through: a name that
+    /// does not fit its object comes back as the call's own answer for a small
+    /// buffer, never as a write past it.
+    #[test]
+    fn the_clamping_calls_never_write_past_the_object() {
+        let mut buf = [0xeeu8; 4];
+        // Claims 64 bytes; the object is 3, so at most 3 are written.
+        let _ = __gethostname_chk(buf.as_mut_ptr(), 64, 3);
+        assert_eq!(buf[3], 0xee, "gethostname");
+        buf = [0xee; 4];
+        let _ = __confstr_chk(crate::unistd::_CS_PATH, buf.as_mut_ptr(), 64, 3);
+        assert_eq!(buf[3], 0xee, "confstr");
+        // confstr still reports how long the value wanted to be.
+        assert!(__confstr_chk(crate::unistd::_CS_PATH, buf.as_mut_ptr(), 64, 3) > 3);
+    }
+
+    #[test]
+    fn the_open_message_is_glibcs() {
+        assert_eq!(
+            OPEN_MESSAGE,
+            b"*** invalid open call: O_CREAT or O_TMPFILE without mode ***: terminated\n"
+        );
     }
 
     #[test]

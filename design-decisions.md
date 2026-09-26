@@ -36970,6 +36970,9 @@ callers must already handle; abort when it is not.
 | `__read_chk`, `__pread_chk`, `__pread64_chk`, `__fread_chk`, `__fgets_chk` | clamp to the object | a short read is part of each call's contract |
 | the printf family | truncate | `snprintf` truncation is its contract, and the return value still reports the full length |
 | `__getcwd_chk`, `__readlink_chk`, `__readlinkat_chk` | clamp | `ERANGE` and truncation are answers these calls already give |
+| `__recv_chk`, `__recvfrom_chk`, `__gethostname_chk`, `__getlogin_r_chk`, `__ttyname_r_chk`, `__ptsname_r_chk`, `__confstr_chk`, `__getgroups_chk` (added the same day) | clamp | a short receive, a truncated name, `ERANGE`/`EINVAL`: each call's own answer for a small buffer |
+| `__fdelt_chk`, `__explicit_bzero_chk`, `__poll_chk`, `__ppoll_chk` (added the same day) | abort | no smaller call is correct: the bit is inside the `fd_set` or it is not; a partial wipe leaves the secret; `poll` on fewer descriptors ignores the rest |
+| the `__open_2` family (added the same day) | abort when the flags need a mode | not a size check: `O_CREAT` through the two-argument form would create the file with whatever was in the register |
 
 Either way nothing writes past the object. The rule decides whether the
 program can carry on *correctly* afterwards.

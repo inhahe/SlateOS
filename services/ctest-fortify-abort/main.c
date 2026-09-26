@@ -37,8 +37,16 @@
  *   95    __fdelt_chk(1024) did not abort its child with 134
  *   96    __fdelt_chk(1024)'s stderr was not glibc's message
  *   97    the __fdelt_chk child's pipe or fork failed
+ *   98/99 __explicit_bzero_chk one byte past its object: did not abort with
+ *         134 / wrong message
+ *   100/101 __poll_chk, two entries in a one-entry object: the same
+ *   102/103 __open_2 with O_CREAT (no mode): did not abort with 134 / not
+ *         glibc's "invalid open call" message
+ *   104   one of the last three children's pipe or fork failed
  */
 
+#include <fcntl.h>
+#include <poll.h>
 #include <stddef.h>
 #include <string.h>
 #include <sys/types.h>
@@ -57,6 +65,9 @@ extern char *__strcat_chk(char *dst, const char *src, size_t dstlen);
 extern char *__strncat_chk(char *dst, const char *src, size_t n, size_t dstlen);
 extern ssize_t __read_chk(int fd, void *buf, size_t n, size_t buflen);
 extern long __fdelt_chk(long d);
+extern void __explicit_bzero_chk(void *dst, size_t len, size_t dstlen);
+extern int __poll_chk(struct pollfd *fds, nfds_t nfds, int timeout, size_t fdslen);
+extern int __open_2(const char *path, int oflag);
 
 #define OBJ 8            /* every destination object is 8 bytes... */
 #define GUARD 0x5a       /* ...followed by one guard byte */
@@ -64,6 +75,8 @@ extern long __fdelt_chk(long d);
 #define NCALLS 10
 
 static const char MESSAGE[] = "*** buffer overflow detected ***: terminated\n";
+static const char OPEN_MESSAGE[] =
+    "*** invalid open call: O_CREAT or O_TMPFILE without mode ***: terminated\n";
 
 static void emit(const char *s)
 {
@@ -141,10 +154,11 @@ static size_t drain(int fd, char *out, size_t cap)
 }
 
 /* What a child that was meant to abort did: 0 if it exited with 134 having
- * written exactly glibc's message to stderr, 1 if it ended any other way, 2 if
- * it aborted but said something else, 3 if the pipe or fork failed. Case i is
- * `call(i, ...)` overflowing by one byte; case -1 is `__fdelt_chk(1024)`. */
-static int child_aborts(int i)
+ * written exactly `expect` to stderr, 1 if it ended any other way, 2 if it
+ * aborted but said something else, 3 if the pipe or fork failed. Case i >= 0
+ * is `call(i, ...)` overflowing by one byte; the negative cases are the calls
+ * that are not copies (see the switch). */
+static int child_aborts(int i, const char *expect)
 {
     int fds[2];
     if (pipe(fds) != 0) {
@@ -157,12 +171,29 @@ static int child_aborts(int i)
     if (pid == 0) {
         close(fds[0]);
         dup2(fds[1], 2);
-        if (i < 0) {
+        char buf[OBJ + 1];
+        memset(buf, 0, sizeof buf);
+        struct pollfd pfds[2];
+        memset(pfds, 0, sizeof pfds);
+        switch (i) {
+        case -1:
             (void)__fdelt_chk(1024);
-        } else {
-            char buf[OBJ + 1];
-            memset(buf, 0, sizeof buf);
+            break;
+        case -2:
+            /* A wipe one byte longer than its object. */
+            __explicit_bzero_chk(buf, OBJ + 1, OBJ);
+            break;
+        case -3:
+            /* Two entries claimed, one entry's worth of object. */
+            (void)__poll_chk(pfds, 2, 0, sizeof pfds[0]);
+            break;
+        case -4:
+            /* O_CREAT through the two-argument form: no mode to create with. */
+            (void)__open_2("/tmp/fortify-abort-never-created", O_CREAT | O_WRONLY);
+            break;
+        default:
             call(i, buf, OBJ + 1, OBJ);
+            break;
         }
         /* Reached only if the check is missing. */
         _exit(0);
@@ -176,7 +207,7 @@ static int child_aborts(int i)
     if (got != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 134) {
         return 1;
     }
-    if (strcmp(err, MESSAGE) != 0) {
+    if (strcmp(err, expect) != 0) {
         return 2;
     }
     return 0;
@@ -185,7 +216,7 @@ static int child_aborts(int i)
 /* An overflowing call must abort the child, having said so on stderr. */
 static int overflow_dies(int i)
 {
-    switch (child_aborts(i)) {
+    switch (child_aborts(i, MESSAGE)) {
     case 0:
         return 0;
     case 1:
@@ -204,7 +235,7 @@ static int fdelt_checks(void)
     if (__fdelt_chk(1023) != 15) {
         return 94;
     }
-    switch (child_aborts(-1)) {
+    switch (child_aborts(-1, MESSAGE)) {
     case 0:
         return 0;
     case 1:
@@ -214,6 +245,34 @@ static int fdelt_checks(void)
     default:
         return 97;
     }
+}
+
+/* The calls that abort without being copies: a wipe, a poll and an open. Each
+ * gets two codes, (base) did not abort with 134 and (base + 1) wrong message. */
+static int other_aborts(void)
+{
+    static const struct {
+        int which;
+        const char *expect;
+        int base;
+    } cases[] = {
+        {-2, MESSAGE, 98},       /* __explicit_bzero_chk */
+        {-3, MESSAGE, 100},      /* __poll_chk */
+        {-4, OPEN_MESSAGE, 102}, /* __open_2 with O_CREAT */
+    };
+    for (size_t k = 0; k < sizeof cases / sizeof cases[0]; k++) {
+        int rc = child_aborts(cases[k].which, cases[k].expect);
+        if (rc == 1) {
+            return cases[k].base;
+        }
+        if (rc == 2) {
+            return cases[k].base + 1;
+        }
+        if (rc != 0) {
+            return 104;
+        }
+    }
+    return 0;
 }
 
 static int read_clamps(void)
@@ -274,6 +333,11 @@ int main(void)
     if (rc != 0) {
         return rc;
     }
-    emit("[fz] ok (10 copies and one FD_SET refused, read clamped)\n");
+    emit("[fz] a wipe, a poll and a two-argument O_CREAT open (each child must abort)\n");
+    rc = other_aborts();
+    if (rc != 0) {
+        return rc;
+    }
+    emit("[fz] ok (10 copies, FD_SET, a wipe, a poll and an open refused; read clamped)\n");
     return 42;
 }

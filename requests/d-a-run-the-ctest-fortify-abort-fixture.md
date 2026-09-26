@@ -39,6 +39,11 @@ rung that runs it. Unlike the cwd one, it needs no kernel change.
    every fortified program using `select` calls. It must give word 15 for
    fd 1023. For fd 1024, which is past the 1024-bit `fd_set`, it must abort a
    child the same way the copies do.
+5. **Three more that abort**, each in its own child: `__explicit_bzero_chk`
+   one byte past its object, `__poll_chk` claiming two entries in a
+   one-entry object, and `__open_2` with `O_CREAT`, a two-argument open that
+   would create a file with no mode. `__open_2`'s message is glibc's `***
+   invalid open call: O_CREAT or O_TMPFILE without mode ***: terminated`.
 
 It prints `[fz] …` progress lines to stdout.
 
@@ -49,9 +54,9 @@ Shaped like `self_test_cfortify`:
 - `pathz_test_elf("ctest-fortify-abort", "ctest-fortify-abort")`.
 - No capability grants. It opens no files: pipes, `fork`, `dup2`, `waitpid`.
 - `EXPECTED = 42`.
-- A budget for eleven fork + abort + wait round trips; the fixture never spins.
+- A budget for fourteen fork + abort + wait round trips; the fixture never spins.
   Note that each child's `abort()` prints `Aborted` on the console, so the
-  serial log will show eleven of those. That is expected, not a failure.
+  serial log will show fourteen of those. That is expected, not a failure.
 
 **The legend** (also at the top of `main.c`, if you would rather point there):
 
@@ -66,5 +71,8 @@ Shaped like `self_test_cfortify`:
   lost the unread bytes.
 - `94`–`97` `__fdelt_chk`: wrong index for 1023; fd 1024 did not abort with
   134; wrong message; pipe/fork failed.
+- `98`/`99` `__explicit_bzero_chk`, `100`/`101` `__poll_chk`, `102`/`103`
+  `__open_2`: did not abort with 134 / wrong message. `104`: one of those
+  three children's pipe or fork failed.
 
 I have not touched `kernel/**`.

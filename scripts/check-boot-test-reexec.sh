@@ -57,16 +57,35 @@ _wait_for_signal() {
     done
 }
 
-payload='echo "PHASE-1"
-: > "$SIGNAL"
-sleep 2
-echo "PHASE-2"
-'
+# And the payload waits for the editor's word that the edit has landed, not
+# for a clock.  It used to `sleep 2` between its two lines and bet that the
+# editor -- woken by the signal above, polling every tenth of a second, then
+# rewriting a file -- would finish inside those two seconds.  Under load it
+# did not: lane C's boot test of c3c1984bc was refused on 2026-09-26 with the
+# control "INCONCLUSIVE" (PHASE-1, PHASE-2, no CLOBBERED), because the edit
+# landed after bash had already read the second line -- while the machine was
+# compiling seven crates beside the gate.  The first clock was fixed above; this
+# was the second, and the same lie: a verdict about the guard that was really
+# about the scheduler.  Bounded like the signal, so an editor that never writes
+# ends the wait instead of hanging the gate -- and then the control is
+# INCONCLUSIVE, which is the honest answer.
+#
+# Both texts are built from one `wait_line` so that they stay byte-identical up
+# to the line the edit replaces: bash resumes reading at the byte offset where
+# the wait line ended, and that offset must fall on the start of the edited
+# line in the rewritten file.
+EDITED="$tmp/edited"
+export EDITED
+wait_line='n=0; while [ ! -e "$EDITED" ] && [ "$n" -lt 600 ]; do sleep 0.1; n=$((n + 1)); done'
+payload="$(printf 'echo "PHASE-1"\n: > "$SIGNAL"\n%s\necho "PHASE-2"' "$wait_line")
+"
+clobbered="$(printf '#!/usr/bin/env bash\necho "PHASE-1"\n: > "$SIGNAL"\n%s\necho "CLOBBERED"' "$wait_line")
+"
 
 # --- Control: no preamble.  A mid-run edit must be seen. --------------------
 printf '#!/usr/bin/env bash\n%s' "$payload" > "$tmp/control.sh"
 chmod +x "$tmp/control.sh"
-( _wait_for_signal; printf '#!/usr/bin/env bash\necho "PHASE-1"\n: > "$SIGNAL"\nsleep 2\necho "CLOBBERED"\n' > "$tmp/control.sh" ) &
+( _wait_for_signal; printf '%s' "$clobbered" > "$tmp/control.sh"; : > "$EDITED" ) &
 control_out="$(bash "$tmp/control.sh" 2>&1)"
 wait
 
@@ -87,15 +106,16 @@ fi
     printf '%s' "$payload"
 } > "$tmp/guarded.sh"
 chmod +x "$tmp/guarded.sh"
-# Clear the control run's signal BEFORE arming this editor, not after.
-rm -f "$SIGNAL"
+# Clear the control run's signal and word BEFORE arming this editor, not after.
+rm -f "$SIGNAL" "$EDITED"
 # The editor also records what the private temp directory holds at that
 # moment, when the guarded script is running from its snapshot: the proof that
 # the snapshot was made there, without which the leak check at the end would
 # pass for a preamble that ignored TMPDIR and littered the shared directory.
 ( _wait_for_signal
   find "$trial_tmp" -maxdepth 1 -name 'boot-test-snapshot.*' > "$tmp/seen"
-  printf '#!/usr/bin/env bash\necho "PHASE-1"\n: > "$SIGNAL"\nsleep 2\necho "CLOBBERED"\n' > "$tmp/guarded.sh" ) &
+  printf '%s' "$clobbered" > "$tmp/guarded.sh"
+  : > "$EDITED" ) &
 # The preamble is lifted as a *block*, and a block does not bring its
 # prerequisites with it: `BOOT_TEST_START_EPOCH` is set at the top of
 # boot-test.sh, well above the `if`, and the preamble forwards it to the

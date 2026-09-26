@@ -51,12 +51,13 @@ than silently believing there are no bands.
 | §500–§599 | **lane C** | closed early at §579 — 20 numbers unused | interleaved with A's §600s |
 | §600–§699 | **lane A** | closed early at §679 — 20 numbers unused | interleaved with C's §500s |
 | §700–§799 | **lane B** | closed early at §779 — 20 numbers unused | interleaved before C's §800s |
-| §800–§899 | **lane C** | **open** | immediately after §579; C's own run ascends |
+| §800–§899 | **lane C** | closed early at §885 — 14 numbers unused | immediately after §579; C's own run ascends |
 | §900–§999 | **lane A** | **open** | immediately after §679; A's own run ascends |
 | §1000–§1099 | **lane B** | **open** | the tail — B alone still appends at EOF |
 | §1100–§1199 | **lane D** | **open** | immediately after §360, the end of lane B's first band; D's own run ascends from there |
 | §1200–§1299 | **lane E** | **open** | immediately after §498, the end of lane C's first band; E's own run ascends from there |
 | §1300–§1399 | **lane F** | **open** | immediately after §127, the end of the single-agent history; F's own run ascends from there |
+| §1400–§1499 | **lane C** | **open** | immediately after §885; C's own run ascends |
 
 Bands 200–499 are closed but **not free**: every number in them is spent, and
 spent numbers are never reissued (see §217–§220 and §626 below). A new entry
@@ -232,6 +233,19 @@ adding these: the gate reads the status words anywhere in the row, so a region
 column that mentions a "closed" band beside an "**open**" status makes the row
 contradict itself and fails the gate; and an anchor must carry the section
 sign, so prose such as "after C's 500s" is deliberately not read as one.
+
+**Lane C closed §800–§899 early, at §885, and opened §1400–§1499 (2026-09-26),**
+on the gate's 80% warning, as each lane before it did; 14 numbers go unspent.
+§1400 sits immediately after §885, so lane C's region of this file does not move,
+and no other lane's insertion point moves either. Nobody had claimed §1400–§1499
+-- checked on every lane's branch, pushed or not, before taking it -- so this
+needs no request, only the notice in
+`requests/c-abdef-lane-c-closed-800-899-at-885-and-opened-1400-1499.md`.
+Grandfathering is what closing a band means, so the same commit adds lane C's
+§800–§885 to the baseline -- by hand, not with `--update-baseline`, which would
+also grandfather the other five lanes' live entries and exempt them from the
+`**Lane:**` check. Every one of the 86 declares `**Lane:** C`, verified before
+baselining.
 
 **The gate landed 2026-08-29: `scripts/check-design-decisions-bands.py`,** run
 by `scripts/boot-test.sh` before it builds anything. It requires each *new*

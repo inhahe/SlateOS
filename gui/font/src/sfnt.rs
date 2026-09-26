@@ -130,6 +130,14 @@ impl core::error::Error for SfntError {}
 /// references glyph B which references glyph A.
 pub const MAX_COMPOSITE_DEPTH: u8 = 8;
 
+/// How many code points [`Face::for_each_unicode_mapping`] visits at most.
+///
+/// Four times the largest real `cmap` seen on the development host (a CJK
+/// face mapping some 65,000 characters, most of them twice over through its
+/// compatibility blocks), so no real face is cut short, while a table whose
+/// groups claim all of Unicode many times over costs a bounded walk.
+pub(crate) const MAX_CMAP_WALK: usize = 1 << 18;
+
 // ---------------------------------------------------------------------------
 // Big-endian primitive reads, all bounds-checked
 // ---------------------------------------------------------------------------
@@ -434,6 +442,184 @@ impl Outline {
     }
 }
 
+/// What one stored point of a glyph is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Tag {
+    /// On the outline.
+    On,
+    /// A quadratic's control point, as `glyf` stores them: two in a row imply
+    /// an on-curve point midway between them.
+    Conic,
+    /// One of a cubic's two control points, as CFF draws them.
+    Cubic,
+}
+
+/// A glyph as the font stores it: its points in order, each tagged, split
+/// into contours.
+///
+/// This is FreeType's `FT_Outline`, and it exists for the one reader that
+/// needs the designer's points rather than a path: the auto-hinter
+/// ([`crate::hint`]), which classifies every point as a corner, a curve's
+/// control or a point along a straight run. An [`Outline`] has already made a
+/// TrueType contour's implied on-curve midpoints explicit, and a hinter
+/// reading those as real points would see a corner at every one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct TaggedOutline {
+    /// The points, in font units -- or in pixels, once hinted.
+    pub(crate) points: Vec<Point>,
+    /// What each point is; as long as `points`.
+    pub(crate) tags: Vec<Tag>,
+    /// One past each contour's last point, ascending.
+    pub(crate) ends: Vec<usize>,
+}
+
+impl TaggedOutline {
+    /// Append one simple glyph's points as contours.
+    fn push_glyph(&mut self, glyph: &SimpleGlyph) {
+        let base = self.points.len();
+        self.points.extend(glyph.points.iter().map(|p| p.p));
+        self.tags.extend(
+            glyph
+                .points
+                .iter()
+                .map(|p| if p.on_curve { Tag::On } else { Tag::Conic }),
+        );
+        self.ends
+            .extend(glyph.ends.iter().map(|&end| base.saturating_add(end)));
+    }
+
+    /// Append `other`, transformed by `t` -- a composite's component.
+    fn extend_transformed(&mut self, other: &Self, t: &Transform) {
+        let base = self.points.len();
+        self.points.extend(other.points.iter().map(|&p| t.apply(p)));
+        self.tags.extend_from_slice(&other.tags);
+        self.ends
+            .extend(other.ends.iter().map(|&end| base.saturating_add(end)));
+    }
+
+    /// Move every point right by `dx`: [`Outline::translate_x`]'s twin.
+    fn translate_x(&mut self, dx: f32) {
+        for p in &mut self.points {
+            p.x += dx;
+        }
+    }
+
+    /// The points of a path of lines and cubics, as CFF outlines come.
+    ///
+    /// A contour's closing point is dropped when it lands back on the first,
+    /// which is what FreeType's CFF loader does (`ps_builder_close_contour`):
+    /// the hinter then sees one corner there rather than two coincident ones.
+    pub(crate) fn from_path(path: &Outline) -> Self {
+        let mut out = Self::default();
+        let mut start = 0usize;
+        let close = |out: &mut Self, start: usize| {
+            let n = out.points.len();
+            if n > start.saturating_add(1)
+                && out.tags.last() == Some(&Tag::On)
+                && out.points.last() == out.points.get(start)
+            {
+                out.points.pop();
+                out.tags.pop();
+            }
+            if out.points.len() > start {
+                out.ends.push(out.points.len());
+            }
+        };
+        for cmd in &path.commands {
+            match *cmd {
+                PathCmd::MoveTo(p) => {
+                    close(&mut out, start);
+                    start = out.points.len();
+                    out.points.push(p);
+                    out.tags.push(Tag::On);
+                }
+                PathCmd::LineTo(p) => {
+                    out.points.push(p);
+                    out.tags.push(Tag::On);
+                }
+                PathCmd::QuadTo(c, p) => {
+                    out.points.extend([c, p]);
+                    out.tags.extend([Tag::Conic, Tag::On]);
+                }
+                PathCmd::CurveTo(c1, c2, p) => {
+                    out.points.extend([c1, c2, p]);
+                    out.tags.extend([Tag::Cubic, Tag::Cubic, Tag::On]);
+                }
+                PathCmd::Close => {
+                    close(&mut out, start);
+                    start = out.points.len();
+                }
+            }
+        }
+        close(&mut out, start);
+        out
+    }
+
+    /// The path these points draw.
+    ///
+    /// A contour of on-curve and quadratic points is walked exactly as
+    /// [`emit_contour`] walks a `glyf` contour, so a glyph read as points and
+    /// turned back into a path draws exactly what [`Face::outline_at`] draws.
+    /// A contour with cubic points is a CFF one: it starts at its first point,
+    /// which is on the curve, and closes back to it.
+    pub(crate) fn to_path(&self) -> Outline {
+        let mut out = Outline::default();
+        let mut start = 0usize;
+        for &end in &self.ends {
+            let (Some(points), Some(tags)) =
+                (self.points.get(start..end), self.tags.get(start..end))
+            else {
+                break;
+            };
+            start = end;
+            if tags.contains(&Tag::Cubic) {
+                emit_cubic_contour(points, tags, &mut out);
+            } else {
+                let contour: Vec<GlyphPoint> = points
+                    .iter()
+                    .zip(tags)
+                    .map(|(&p, &t)| GlyphPoint {
+                        p,
+                        on_curve: t == Tag::On,
+                    })
+                    .collect();
+                emit_contour(&contour, &mut out);
+            }
+        }
+        out
+    }
+}
+
+/// One CFF contour's points back into path commands: lines between on-curve
+/// points, a cubic for every two control points, and the closing segment
+/// back to the first point that [`TaggedOutline::from_path`] folded away.
+fn emit_cubic_contour(points: &[Point], tags: &[Tag], out: &mut Outline) {
+    let Some(&first) = points.first() else {
+        return;
+    };
+    out.commands.push(PathCmd::MoveTo(first));
+    let mut pending: Vec<Point> = Vec::with_capacity(2);
+    for (&p, &tag) in points.iter().zip(tags).skip(1) {
+        match tag {
+            Tag::Cubic | Tag::Conic => pending.push(p),
+            Tag::On => {
+                out.commands.push(match pending.as_slice() {
+                    [c1, c2] => PathCmd::CurveTo(*c1, *c2, p),
+                    [c] => PathCmd::QuadTo(*c, p),
+                    _ => PathCmd::LineTo(p),
+                });
+                pending.clear();
+            }
+        }
+    }
+    out.commands.push(match pending.as_slice() {
+        [c1, c2] => PathCmd::CurveTo(*c1, *c2, first),
+        [c] => PathCmd::QuadTo(*c, first),
+        _ => PathCmd::LineTo(first),
+    });
+    out.commands.push(PathCmd::Close);
+}
+
 // ---------------------------------------------------------------------------
 // The face
 // ---------------------------------------------------------------------------
@@ -562,6 +748,11 @@ pub struct Face {
     /// `hb_ot_layout_table_select_script` reads the ScriptList and nothing
     /// else, and so does this.
     gsub_scripts: Vec<[u8; 4]>,
+    /// Where the `GSUB` table is, for the one reader that needs more of it than
+    /// [`substitutions`](Self::substitutions) keeps: the auto-hinter, which asks
+    /// which glyphs a script's features can produce -- every feature, not only
+    /// the default-on ones the shaper applies. See [`Face::gsub_outputs`].
+    gsub: Option<Span>,
     /// The axes this face can vary along, from `fvar`, with `avar`'s correction
     /// folded in. `None` for the 549 of this host's 556 faces that are not
     /// variable, and also for a variable face whose `fvar` is unreadable — a
@@ -969,6 +1160,7 @@ impl Face {
             has_positioning: gpos.is_some(),
             gpos_scripts,
             gsub_scripts,
+            gsub,
             variation_axes,
             gvar,
             hvar,
@@ -1326,6 +1518,159 @@ impl Face {
             return self.lookup(sub, 0xF000_u32.checked_add(cp)?);
         }
         None
+    }
+
+    /// Call `f` with every code point the Unicode `cmap` maps, and its glyph.
+    ///
+    /// For the auto-hinter, which sorts a face's glyphs by script the way
+    /// FreeType does: by walking the characters that reach them. The order is
+    /// the subtable's own, and a glyph two characters share is reported twice.
+    ///
+    /// A face whose only table is a symbol one reports nothing -- it has no
+    /// Unicode mapping, which is what FreeType finds too when it asks for one.
+    /// Code points past U+2FFFF are skipped, since no script the hinter knows
+    /// has any there, and the whole walk is capped at [`MAX_CMAP_WALK`]
+    /// mappings: a format-12 table can declare a group spanning all of Unicode,
+    /// many times over, and walking it must not cost what that declares.
+    pub(crate) fn for_each_unicode_mapping(&self, mut f: impl FnMut(u32, u16)) {
+        let Some(sub) = self.cmap.filter(|sub| !sub.symbol) else {
+            return;
+        };
+        let mut budget = MAX_CMAP_WALK;
+        let mut emit = |cp: u32, gid: u16| {
+            if gid != 0 && gid < self.num_glyphs {
+                f(cp, gid);
+            }
+        };
+        match sub.format {
+            0 => {
+                for cp in 0u32..=0xFF {
+                    if let Some(gid) = self.cmap_format0(sub.off, cp) {
+                        emit(cp, gid);
+                    }
+                }
+            }
+            4 => self.walk_format4(sub.off, &mut budget, &mut emit),
+            12 => self.walk_format12(sub.off, &mut budget, &mut emit),
+            _ => {}
+        }
+    }
+
+    /// [`for_each_unicode_mapping`](Self::for_each_unicode_mapping) over a
+    /// format-4 table: every segment's code points, each resolved as
+    /// [`cmap_format4`](Self::cmap_format4) resolves it.
+    fn walk_format4(&self, off: usize, budget: &mut usize, emit: &mut impl FnMut(u32, u16)) {
+        use crate::gsub::spend;
+        let Some(seg_count_x2) = off.checked_add(6).and_then(|o| u16_at(&self.data, o)) else {
+            return;
+        };
+        let seg_count = usize::from(seg_count_x2 / 2);
+        let Some(end_codes) = off.checked_add(14) else {
+            return;
+        };
+        let Some(start_codes) = end_codes
+            .checked_add(usize::from(seg_count_x2))
+            .and_then(|o| o.checked_add(2))
+        else {
+            return;
+        };
+        for seg in 0..seg_count {
+            let Some(at) = seg.checked_mul(2) else {
+                return;
+            };
+            let (Some(start), Some(end)) = (
+                start_codes
+                    .checked_add(at)
+                    .and_then(|o| u16_at(&self.data, o)),
+                end_codes
+                    .checked_add(at)
+                    .and_then(|o| u16_at(&self.data, o)),
+            ) else {
+                return;
+            };
+            for cp in u32::from(start)..=u32::from(end) {
+                if !spend(budget) {
+                    return;
+                }
+                if let Some(gid) = self.cmap_format4(off, cp) {
+                    emit(cp, gid);
+                }
+            }
+        }
+    }
+
+    /// [`for_each_unicode_mapping`](Self::for_each_unicode_mapping) over a
+    /// format-12 table: every group's code points up to U+2FFFF.
+    fn walk_format12(&self, off: usize, budget: &mut usize, emit: &mut impl FnMut(u32, u16)) {
+        use crate::gsub::spend;
+        let Some(num_groups) = off
+            .checked_add(12)
+            .and_then(|o| u32_at(&self.data, o))
+            .and_then(|n| usize::try_from(n).ok())
+        else {
+            return;
+        };
+        let Some(groups) = off.checked_add(16) else {
+            return;
+        };
+        for i in 0..num_groups {
+            let Some(rec) = i.checked_mul(12).and_then(|d| groups.checked_add(d)) else {
+                return;
+            };
+            let (Some(start), Some(end), Some(start_gid)) = (
+                u32_at(&self.data, rec),
+                rec.checked_add(4).and_then(|o| u32_at(&self.data, o)),
+                rec.checked_add(8).and_then(|o| u32_at(&self.data, o)),
+            ) else {
+                return;
+            };
+            for cp in start..=end.min(0x2_FFFF) {
+                if !spend(budget) {
+                    return;
+                }
+                let gid = cp
+                    .checked_sub(start)
+                    .and_then(|d| start_gid.checked_add(d))
+                    .and_then(|g| u16::try_from(g).ok());
+                if let Some(gid) = gid {
+                    emit(cp, gid);
+                }
+            }
+        }
+    }
+
+    /// Every glyph the `GSUB` lookups of `scripts` can produce, sorted and
+    /// deduplicated: the output side of every lookup that any feature of any
+    /// language of those scripts reaches, nested lookups included.
+    ///
+    /// HarfBuzz's `hb_ot_layout_collect_lookups` followed by
+    /// `hb_ot_layout_lookup_collect_glyphs`, which is how FreeType's
+    /// auto-hinter finds the glyphs no character maps to -- ligatures,
+    /// contextual forms -- and files them under the script whose features
+    /// make them. Empty for a face with no `GSUB`.
+    pub(crate) fn gsub_outputs(&self, scripts: &[[u8; 4]]) -> Vec<u16> {
+        let Some(span) = self.gsub else {
+            return Vec::new();
+        };
+        let Some(list) = otl::lookup_list(&self.data, span.off) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut visited = Vec::new();
+        let mut budget = crate::gsub::MAX_OUTPUT_WALK;
+        for index in otl::script_lookups(&self.data, span.off, scripts) {
+            crate::gsub::lookup_outputs(
+                &self.data,
+                list,
+                index,
+                &mut out,
+                &mut visited,
+                &mut budget,
+            );
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     /// The glyph a base character draws as when `selector` follows it, or
@@ -2288,6 +2633,117 @@ impl Face {
         // that looks like bad kerning.
         out.translate_x(self.glyf_shift(gid) - phantom);
         Ok(out)
+    }
+
+    /// A glyph's stored points at a variable-font instance, tagged on- or
+    /// off-curve: the form the auto-hinter reads. See [`TaggedOutline`].
+    ///
+    /// Placed exactly where [`outline_at`](Self::outline_at) places the path --
+    /// the same side-bearing shift, the same `gvar` deltas, the same composite
+    /// transforms -- so that [`TaggedOutline::to_path`] on the result draws
+    /// the same glyph. A CFF glyph's points are its path's, with each
+    /// contour's closing point folded into its first.
+    ///
+    /// # Errors
+    ///
+    /// As [`outline_at`](Self::outline_at).
+    pub(crate) fn tagged_outline_at(
+        &self,
+        gid: u16,
+        coords: &var::Coords,
+    ) -> Result<TaggedOutline, SfntError> {
+        match &self.outlines {
+            Outlines::Glyf { .. } => {
+                let gvar = self.gvar.as_ref().filter(|_| !coords.is_default());
+                let mut out = TaggedOutline::default();
+                let phantom = self.tagged_into(gvar, gid, coords.as_slice(), &mut out, 0)?;
+                out.translate_x(self.glyf_shift(gid) - phantom);
+                Ok(out)
+            }
+            Outlines::Cff(_) | Outlines::Pictures => self
+                .outline_at(gid, coords)
+                .map(|path| TaggedOutline::from_path(&path)),
+        }
+    }
+
+    /// [`outline_into_at`](Self::outline_into_at) for points: one glyph's
+    /// tagged points, varied by `gvar` when there is one, returning the left
+    /// phantom point's horizontal delta.
+    fn tagged_into(
+        &self,
+        gvar: Option<&gvar::Gvar>,
+        gid: u16,
+        coords: &[i16],
+        out: &mut TaggedOutline,
+        depth: u8,
+    ) -> Result<f32, SfntError> {
+        if depth > MAX_COMPOSITE_DEPTH {
+            return Err(SfntError::CompositeTooDeep);
+        }
+        let Some(span) = self.glyph_span(gid)? else {
+            return Ok(0.0);
+        };
+        let end = span.off.checked_add(span.len).ok_or(SfntError::TooShort)?;
+        let g = self
+            .data
+            .get(span.off..end)
+            .ok_or(SfntError::MalformedTable("glyf"))?;
+        let num_contours = i16_at(g, 0).ok_or(SfntError::MalformedTable("glyf"))?;
+        let body = g.get(10..).ok_or(SfntError::MalformedTable("glyf"))?;
+        if num_contours >= 0 {
+            let n = usize::try_from(num_contours).map_err(|_| SfntError::MalformedTable("glyf"))?;
+            let Some(mut glyph) = read_simple_glyph(body, n)? else {
+                return Ok(0.0);
+            };
+            let mut phantom = 0.0;
+            if let Some(gvar) = gvar
+                && let Some(deltas) =
+                    gvar.deltas(&self.data, gid, coords, &glyph.points, &glyph.ends)
+            {
+                for (pt, &(dx, dy)) in glyph.points.iter_mut().zip(deltas.iter()) {
+                    pt.p.x += dx;
+                    pt.p.y += dy;
+                }
+                phantom = deltas.get(glyph.points.len()).map_or(0.0, |&(dx, _)| dx);
+            }
+            out.push_glyph(&glyph);
+            Ok(phantom)
+        } else {
+            let mut components = read_components(body)?;
+            let mut phantom = 0.0;
+            if let Some(gvar) = gvar {
+                // As in `outline_into_at`: one variation point per component,
+                // and only an offset-placed component may move.
+                let placements: Vec<GlyphPoint> = components
+                    .iter()
+                    .map(|c| GlyphPoint {
+                        p: Point::new(c.xform.e, c.xform.f),
+                        on_curve: true,
+                    })
+                    .collect();
+                if let Some(deltas) = gvar.deltas(&self.data, gid, coords, &placements, &[]) {
+                    for (c, &(dx, dy)) in components.iter_mut().zip(deltas.iter()) {
+                        if c.offset_placed {
+                            c.xform.e += dx;
+                            c.xform.f += dy;
+                        }
+                    }
+                    phantom = deltas.get(components.len()).map_or(0.0, |&(dx, _)| dx);
+                }
+            }
+            for c in components {
+                let mut child = TaggedOutline::default();
+                self.tagged_into(
+                    gvar,
+                    c.gid,
+                    coords,
+                    &mut child,
+                    depth.checked_add(1).ok_or(SfntError::CompositeTooDeep)?,
+                )?;
+                out.extend_transformed(&child, &c.xform);
+            }
+            Ok(phantom)
+        }
     }
 
     /// Build one glyph at `coords`, returning the horizontal delta of its left
@@ -4157,6 +4613,111 @@ pub(crate) mod tests {
                 PathCmd::Close,
             ]
         );
+    }
+
+    #[test]
+    fn a_glyphs_stored_points_draw_the_path_its_outline_does() {
+        let f = face();
+        for gid in 0..f.num_glyphs() {
+            let tagged = f.tagged_outline_at(gid, &var::Coords::default()).unwrap();
+            assert_eq!(
+                tagged.to_path().commands,
+                f.outline(gid).unwrap().commands,
+                "glyph {gid}"
+            );
+        }
+        // And at a varied instance, where the composite's offset moves too.
+        let v = variable_face();
+        let at = at_weight(&v, 700.0);
+        for gid in 0..v.num_glyphs() {
+            let tagged = v.tagged_outline_at(gid, &at).unwrap();
+            assert_eq!(
+                tagged.to_path().commands,
+                v.outline_at(gid, &at).unwrap().commands,
+                "glyph {gid}"
+            );
+        }
+    }
+
+    #[test]
+    fn stored_points_are_the_designers_without_implied_midpoints() {
+        let f = face();
+        let t = f.tagged_outline_at(2, &var::Coords::default()).unwrap();
+        assert_eq!(
+            t.points,
+            [
+                Point::new(0.0, 0.0),
+                Point::new(50.0, 200.0),
+                Point::new(100.0, 0.0)
+            ]
+        );
+        assert_eq!(t.tags, [Tag::On, Tag::Conic, Tag::On]);
+        assert_eq!(t.ends, [3]);
+    }
+
+    #[test]
+    fn a_cff_paths_closing_point_folds_into_its_first() {
+        let p = Point::new;
+        let path = Outline {
+            commands: vec![
+                PathCmd::MoveTo(p(0.0, 0.0)),
+                PathCmd::LineTo(p(0.0, 100.0)),
+                PathCmd::CurveTo(p(20.0, 120.0), p(80.0, 120.0), p(100.0, 100.0)),
+                PathCmd::LineTo(p(100.0, 0.0)),
+                PathCmd::LineTo(p(0.0, 0.0)),
+                PathCmd::Close,
+                PathCmd::MoveTo(p(10.0, 10.0)),
+                PathCmd::LineTo(p(20.0, 10.0)),
+                PathCmd::LineTo(p(20.0, 20.0)),
+                PathCmd::Close,
+            ],
+        };
+        let t = TaggedOutline::from_path(&path);
+        assert_eq!(t.ends, [6, 9]);
+        assert_eq!(
+            t.tags,
+            [
+                Tag::On,
+                Tag::On,
+                Tag::Cubic,
+                Tag::Cubic,
+                Tag::On,
+                Tag::On,
+                Tag::On,
+                Tag::On,
+                Tag::On
+            ]
+        );
+        // Back to a path, each contour closing to its first point again.
+        let back = t.to_path();
+        assert_eq!(
+            back.commands,
+            vec![
+                PathCmd::MoveTo(p(0.0, 0.0)),
+                PathCmd::LineTo(p(0.0, 100.0)),
+                PathCmd::CurveTo(p(20.0, 120.0), p(80.0, 120.0), p(100.0, 100.0)),
+                PathCmd::LineTo(p(100.0, 0.0)),
+                PathCmd::LineTo(p(0.0, 0.0)),
+                PathCmd::Close,
+                PathCmd::MoveTo(p(10.0, 10.0)),
+                PathCmd::LineTo(p(20.0, 10.0)),
+                PathCmd::LineTo(p(20.0, 20.0)),
+                PathCmd::LineTo(p(10.0, 10.0)),
+                PathCmd::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn every_unicode_mapping_is_the_one_glyph_index_reports() {
+        let f = face();
+        let mut seen = Vec::new();
+        f.for_each_unicode_mapping(|cp, gid| seen.push((cp, gid)));
+        assert!(!seen.is_empty());
+        for (cp, gid) in seen {
+            let ch = char::from_u32(cp).unwrap();
+            assert_eq!(f.glyph_index(ch), Some(gid), "U+{cp:04X}");
+        }
     }
 
     #[test]

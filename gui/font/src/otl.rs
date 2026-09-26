@@ -745,6 +745,79 @@ pub(crate) fn chosen_from(names: &[[u8; 4]], script: Option<ScriptTags>) -> Opti
     fallback_chain(script).find(|want| names.binary_search(want).is_ok())
 }
 
+/// Every lookup that any feature of any language system of `scripts` reaches,
+/// ascending and deduplicated.
+///
+/// HarfBuzz's `hb_ot_layout_collect_lookups` with every language and every
+/// feature -- the required feature included -- which is how FreeType's
+/// auto-hinter asks which lookups belong to a script. Not a shaping question,
+/// so none of [`select`]'s fallback applies: a script the table does not name
+/// contributes nothing. Feature variations are not followed.
+pub(crate) fn script_lookups(data: &[u8], base: usize, scripts: &[[u8; 4]]) -> Vec<u16> {
+    let Some(list) = script_list(data, base) else {
+        return Vec::new();
+    };
+    let Some(feature_list) = base
+        .checked_add(6)
+        .and_then(|o| u16_at(data, o))
+        .and_then(|o| base.checked_add(usize::from(o)))
+    else {
+        return Vec::new();
+    };
+    let mut features: Vec<u16> = Vec::new();
+    for tag in scripts {
+        let Some(table) = find_script(data, list, tag) else {
+            continue;
+        };
+        let default = u16_at(data, table)
+            .filter(|&off| off != 0)
+            .and_then(|off| table.checked_add(usize::from(off)));
+        features.extend(feature_indices(data, default));
+        let count = table
+            .checked_add(2)
+            .and_then(|o| u16_at(data, o))
+            .unwrap_or(0);
+        for i in 0..usize::from(count) {
+            let lang_sys = i
+                .checked_mul(6)
+                .and_then(|d| table.checked_add(4)?.checked_add(d)?.checked_add(4))
+                .and_then(|o| u16_at(data, o))
+                .and_then(|off| table.checked_add(usize::from(off)));
+            features.extend(feature_indices(data, lang_sys));
+        }
+    }
+    features.sort_unstable();
+    features.dedup();
+    let feature_count = u16_at(data, feature_list).unwrap_or(0);
+    let mut lookups = Vec::new();
+    for index in features.into_iter().filter(|&i| i < feature_count) {
+        let Some(feature) = usize::from(index)
+            .checked_mul(6)
+            .and_then(|d| feature_list.checked_add(2)?.checked_add(d)?.checked_add(4))
+            .and_then(|o| u16_at(data, o))
+            .and_then(|off| feature_list.checked_add(usize::from(off)))
+        else {
+            continue;
+        };
+        let count = feature
+            .checked_add(2)
+            .and_then(|o| u16_at(data, o))
+            .unwrap_or(0);
+        for j in 0..usize::from(count) {
+            if let Some(lookup) = j
+                .checked_mul(2)
+                .and_then(|d| feature.checked_add(4)?.checked_add(d))
+                .and_then(|o| u16_at(data, o))
+            {
+                lookups.push(lookup);
+            }
+        }
+    }
+    lookups.sort_unstable();
+    lookups.dedup();
+    lookups
+}
+
 /// Every script tag the table's ScriptList registers, in file order.
 pub(crate) fn script_tags(data: &[u8], base: usize) -> Option<Vec<[u8; 4]>> {
     let script_list = script_list(data, base)?;

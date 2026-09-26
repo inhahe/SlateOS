@@ -1581,6 +1581,7 @@ mod tests {
         let lcd = Rendering {
             smoothing: true,
             subpixel: Subpixel::Rgb,
+            hinting: false,
         };
         let mut cache = FontCache::new();
         let face = Arc::new(Face::parse(build_test_font()).unwrap());
@@ -1642,6 +1643,7 @@ mod tests {
         let lcd = draw(Rendering {
             smoothing: true,
             subpixel: Subpixel::Rgb,
+            hinting: false,
         });
         assert!(coloured(&lcd) > 0, "no colour fringe at all");
         let grey = draw(Rendering::default());

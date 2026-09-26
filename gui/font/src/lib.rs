@@ -35,6 +35,13 @@
 //! *discovery* — walking a directory, reading a file — belongs to the caller,
 //! which knows whether it is talking to a host filesystem or to the SlateOS
 //! VFS. This crate takes bytes and gives back glyphs.
+//!
+//! # Third-party code
+//!
+//! Portions of this software are copyright © 2023 The FreeType Project
+//! (www.freetype.org). All rights reserved. The auto-hinter (`hint`) is a
+//! port of FreeType's, used under the FreeType License; `licenses/README.md`
+//! lists what derives from where, and `licenses/FTL.TXT` is the licence.
 
 extern crate alloc;
 
@@ -55,6 +62,7 @@ mod gpos;
 pub mod gsub;
 mod gvar;
 mod hangul;
+mod hint;
 mod indic;
 mod indic_machine;
 mod indic_shape;

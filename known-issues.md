@@ -165383,9 +165383,17 @@ it; `target/colr_compare.py` compares with Edge.
 
 ### [F] Text is never hinted: the `hinting` font setting changes nothing -- 2026-09-26
 
-**Status:** OPEN — lane F's.
+**Status: FIXED 2026-09-26** (lane F) — the setting now switches on a port of
+FreeType 2.13.2's auto-hinter in its light mode (`gui/font/src/hint/`,
+design-decisions §1325), which the compositor turns on from the settings. It
+agrees with FreeType point for point on every Latin, Greek, Cyrillic, Arabic,
+Hebrew, Armenian and Devanagari glyph of six fonts checked at eleven sizes
+(`gui/font/tools/hint_oracle.py`), bar the gaps filed below: ideographs and
+the fallback style are left unhinted, feature-reached glyphs use their script's
+default zones, and composites with borrowed metrics sit a hair off
+horizontally (which is not a hinting bug).
 
-**In short:** the appearance settings have a "hinting" switch, on by default,
+**In short (as filed):** the appearance settings have a "hinting" switch, on by default,
 and nothing reads it: glyph outlines are rasterized exactly as designed, never
 nudged onto the pixel grid. At small sizes that leaves stems and horizontal
 bars straddling two pixels, so text looks softer than it does in programs that
@@ -165409,3 +165417,99 @@ settings and says why not this one).
 
 **How to see it.** `target/fontcheck modes` draws a line in each rendering
 mode; compare a small size against the same text in Chrome.
+
+### [F] Ideographs, and glyphs no script claims, are drawn unhinted -- 2026-09-26
+
+**Status:** OPEN — lane F's.
+
+**In short:** hinting (fitting text to the pixel grid) now works for nearly
+every script, but not for Chinese, Japanese and Korean characters, nor for the
+odd glyph in any font that no character reaches directly. Those are drawn
+exactly as they were before hinting existed: correct, a little softer at small
+sizes than the rest.
+
+**Why.** The hinter is a port of FreeType's auto-hinter (design-decisions
+§1325), and FreeType hints those glyphs with a second algorithm, its *CJK
+writing system* (`src/autofit/afcjk.c`), which is not ported. FreeType files
+every glyph no script claims under the same CJK style, so a Latin font's
+`.notdef` and its unreachable components go that way too. Four scripts
+FreeType puts in its Indic writing system (Limbu, Oriya, Syloti Nagri,
+Tibetan) are in the same position: FreeType's Indic system is a stub that
+borrows the CJK code.
+
+**Where.** `gui/font/src/hint/mod.rs` (`System::Cjk`, `System::Indic`: no
+metrics are made for them, so `Hinter::hint` returns `None`).
+
+**The proper fix.** Port `afcjk.c`'s vertical, light-mode path the way
+`latin.rs` ports `aflatin.c`: its blue zones (`af_cjk_metrics_init_blues`,
+top and bottom of the ideographs in `AF_BLUE_STRING_CJK_TOP`/`_BOTTOM`, whose
+`|` separates the "fill" letters from the others), its edge hinting
+(`af_cjk_hint_edges`) and its own `align_edge_points`; the point passes in
+`glyph.rs` are shared. Then extend `hint_oracle.py`'s check to a CJK font
+(`C:\Windows\Fonts\msgothic.ttc`, Malgun Gothic) and the fallback style.
+
+**How to see it.** `python gui/font/tools/hint_oracle.py <font>` reports these
+glyphs under "unhinted here".
+
+### [F] Superscripts, subscripts and small capitals are hinted with their script's ordinary zones -- 2026-09-26
+
+**Status:** OPEN — lane F's.
+
+**In short:** a superscript ² or a small capital is aligned to the heights of
+its script's ordinary letters (or, for ² and ₂, of the modifier letters), where
+FreeType aligns it to heights measured from the font's own superscripts and
+small capitals. The difference is a pixel here and there on those glyphs only;
+everything else is unaffected.
+
+**Why.** FreeType built with HarfBuzz -- as every desktop's is -- gives each
+script *feature styles* besides its default one: small capitals (`smcp`,
+`c2sc`), petite capitals (`pcap`, `c2cp`), superscripts (`sups`), subscripts
+(`subs`), scientific inferiors (`sinf`), ordinals (`ordn`) and titling
+(`titl`). Each claims the glyphs its OpenType feature produces, before the
+default styles see them, and measures its zones from its reference letters
+*with the feature applied*. The port has only the default styles.
+
+**Where.** `gui/font/tools/gen_autofit_tables.py` (keeps only
+`AF_COVERAGE_DEFAULT` styles), `gui/font/src/hint/mod.rs` (`FaceHints::new`'s
+coverage).
+
+**The proper fix.**
+1. Generate the feature styles (the `META_STYLE_LATIN` expansions for Latin,
+   Greek and Cyrillic) with their feature tags from `afcover.h`, in FreeType's
+   order.
+2. In coverage, before the default styles' `GSUB` pass: for each feature
+   style, the output glyphs of its script's lookups for that feature
+   (`Face::gsub_outputs` restricted to one feature tag), minus the glyphs its
+   `GPOS` lookups for the feature take as input, and only if the feature
+   substitutes at least one of the style's reference letters
+   (`hb_ot_layout_lookup_would_substitute`).
+3. In measuring the zones, shape each reference cluster with the feature on,
+   and skip a cluster the feature leaves unchanged -- which needs the shaper
+   to take an extra feature.
+
+**How to see it.** `hint_oracle.py` on Noto Sans: the ~330 differing glyphs are
+all small capitals and other feature forms (unmapped glyphs in `cyrl_dflt`)
+and the super- and subscript digits (`latp_dflt`, `latb_dflt`).
+
+### [F] A composite glyph that borrows a component's metrics sits a few units off FreeType horizontally -- 2026-09-26
+
+**Status:** OPEN — lane F's.
+
+**In short:** some accented letters built from two glyphs (`î` in Arial, `Ç`,
+`Å` in Times) are drawn a fraction of a pixel to one side of where FreeType
+draws them -- 10 font units for Arial's `î`, 0.06 px at 13 px. Hinted or not;
+this is where the outline is placed, not how it is fitted.
+
+**Why (suspected).** A composite's horizontal placement comes from its
+phantom points, and `Face::glyf_shift` takes them from the composite's own
+`hmtx` bearing and `xMin`. A component flagged `USE_MY_METRICS` makes the
+composite borrow *that component's* metrics instead, which FreeType honours
+(`TT_Process_Composite_Glyph`) and this crate does not read at all. The glyphs
+that differ are the ones built that way; confirm by dumping their component
+flags.
+
+**Where.** `gui/font/src/sfnt.rs`: `read_components` (does not keep the
+flag), `glyf_shift`, and the phantom-point handling in `outline_into_at`.
+
+**How to see it.** `python gui/font/tools/hint_oracle.py C:\Windows\Fonts\arial.ttf
+--gids 100,118`: every y agrees, every x is off by the same amount.

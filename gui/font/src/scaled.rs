@@ -37,6 +37,7 @@ use crate::fallback::{self, Extents};
 use crate::gpos::{Adjust, Run};
 use crate::gsub::SubGlyph;
 use crate::hangul;
+use crate::hint::{FaceHints, Glyphs, Hinter};
 use crate::indic::Char;
 use crate::indic_shape::{Script, continues_word};
 use crate::joining::{self, Form};
@@ -139,9 +140,15 @@ pub struct ScaledFont {
     /// static font.
     coords: var::Coords,
     /// How glyphs are turned into pixels: anti-aliased or not, subpixel or
-    /// grey. A property of the font rather than of each draw because every
-    /// cached glyph was rasterized under it.
+    /// grey, hinted or not. A property of the font rather than of each draw
+    /// because every cached glyph was rasterized under it.
     rendering: Rendering,
+    /// The auto-hinter fitted to this size, while hinting is on: every
+    /// glyph's script and each script's alignment zones, measured from the
+    /// face's own letters. Rebuilt when the instance changes, since the zones
+    /// move with the axes. `None` for a face the hinter cannot read (no
+    /// Unicode `cmap`), which is then drawn unhinted.
+    hinter: Option<Hinter>,
     metrics: FontMetrics,
     /// Keyed by glyph id, not character: two characters that map to the same
     /// glyph (and there are many — the space-like codepoints, the various
@@ -312,6 +319,7 @@ impl ScaledFont {
             scale,
             coords,
             rendering: Rendering::default(),
+            hinter: None,
             metrics,
             cache: BTreeMap::new(),
             order: Vec::new(),
@@ -344,6 +352,7 @@ impl ScaledFont {
         self.coords = coords;
         self.clear_cache();
         self.metrics = Self::derive_metrics(&self.face, self.scale, &self.coords);
+        self.refit_hinter();
     }
 
     /// How this font's glyphs are rasterized.
@@ -363,6 +372,78 @@ impl ScaledFont {
         self.rendering = rendering;
         self.cache.clear();
         self.order.clear();
+        self.refit_hinter();
+    }
+
+    /// Measure the face for hinting again, at the current instance, if
+    /// hinting is on.
+    fn refit_hinter(&mut self) {
+        let hinter = if self.rendering.hinting {
+            let shape = |cluster: &str| self.reference_glyphs(cluster);
+            Hinter::new(
+                FaceHints::new(&self.face, &self.coords, &shape),
+                self.px_per_em,
+            )
+        } else {
+            None
+        };
+        self.hinter = hinter;
+    }
+
+    /// Where the auto-hinter puts `gid`'s stored points at this size, in
+    /// pixels (y up, origin on the baseline), each with whether it lies on the
+    /// curve -- or `None` when the glyph is drawn unhinted: hinting is off,
+    /// its script is not one the hinter hints, or it has no outline.
+    ///
+    /// **For diagnostics only.** Drawing never needs it; it is the half of the
+    /// check against FreeType's auto-hinter (`tools/hint_oracle.py`) that this
+    /// crate answers, and FreeType answers in stored points, not paths.
+    #[must_use]
+    pub fn hinted_points(&self, gid: u16) -> Option<Vec<(f32, f32, bool)>> {
+        let points = self
+            .hinter
+            .as_ref()?
+            .hint_points(&self.face, &self.coords, gid)?;
+        Some(
+            points
+                .points
+                .iter()
+                .zip(&points.tags)
+                .map(|(p, &t)| (p.x, p.y, t == crate::sfnt::Tag::On))
+                .collect(),
+        )
+    }
+
+    /// Which of FreeType's auto-hinter styles `gid` was sorted into -- its
+    /// name, `latn_dflt`, `hani_dflt` -- and whether it is a non-base glyph,
+    /// never snapped to a zone. `None` while hinting is off. **For
+    /// diagnostics only**, as [`hinted_points`](Self::hinted_points) is.
+    #[must_use]
+    pub fn hint_style(&self, gid: u16) -> Option<(&'static str, bool)> {
+        self.hinter.as_ref()?.style_of_glyph(gid)
+    }
+
+    /// What one cluster of the hinter's reference letters shapes to: each
+    /// glyph and its vertical offset in font units.
+    ///
+    /// Shaped exactly as text is, so that a reference letter is measured in
+    /// the form the face draws it -- FreeType's auto-hinter has HarfBuzz shape
+    /// its reference letters for the same reason. A glyph from anywhere but
+    /// this face (the built-in bitmap face) is left out.
+    fn reference_glyphs(&self, cluster: &str) -> Glyphs {
+        self.shape(cluster)
+            .glyphs()
+            .iter()
+            .filter(|g| g.key.face() == 0)
+            .map(|g| {
+                // Pixels back to font units: the offsets are whole units
+                // scaled, so the rounding recovers them.
+                let units = (g.offset.1 / self.scale).round();
+                #[allow(clippy::cast_possible_truncation, reason = "a GPOS offset fits i32")]
+                let units = if units.is_finite() { units as i32 } else { 0 };
+                (g.key.gid(), units)
+            })
+            .collect()
     }
 
     /// Move to the instance named by `(tag, value)` pairs, leaving axes the
@@ -651,7 +732,6 @@ impl ScaledFont {
     }
 
     fn rasterize_glyph(&self, gid: u16) -> Result<Glyph, ScaledFontError> {
-        let outline = self.face.outline_at(gid, &self.coords)?;
         // The advance varies through `HVAR`, not through `gvar`'s phantom
         // points. Both know the number; letting two tables be the source of
         // truth for one value is how a face ends up drawn at one width and
@@ -662,7 +742,22 @@ impl ScaledFont {
         // advance, or every following glyph on the line shifts left. Draw
         // nothing, keep the space — exactly what a blank glyph does.
         // (`InvalidScale` cannot occur at all here; `new` validated it.)
-        let mask = rasterize_with(&outline, self.scale, self.rendering).unwrap_or_default();
+        //
+        // A hinted glyph comes back in pixels already. One the hinter leaves
+        // alone -- hinting off, a script it does not hint, a glyph it will not
+        // take on -- is drawn from its outline as the designer placed it.
+        let hinted = self
+            .hinter
+            .as_ref()
+            .and_then(|h| h.hint(&self.face, &self.coords, gid));
+        let mask = match hinted {
+            Some(pixels) => rasterize_with(&pixels, 1.0, self.rendering),
+            None => {
+                let outline = self.face.outline_at(gid, &self.coords)?;
+                rasterize_with(&outline, self.scale, self.rendering)
+            }
+        }
+        .unwrap_or_default();
         Ok(Glyph { mask, advance })
     }
 

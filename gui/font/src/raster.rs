@@ -833,6 +833,13 @@ pub struct Rendering {
     /// Subpixel rendering and the panel's subpixel order. Ignored with
     /// `smoothing` off: there is no partial pixel to split.
     pub subpixel: Subpixel,
+    /// Light hinting: outlines nudged vertically onto the pixel grid, so
+    /// that the tops, baselines and strokes of small text are crisp rather
+    /// than smeared across two rows -- FreeType's auto-hinter in its light
+    /// mode, ported (design-decisions §1325). Applied by
+    /// [`ScaledFont`](crate::scaled::ScaledFont), which knows the face;
+    /// [`rasterize_with`] takes the outline as it is given.
+    pub hinting: bool,
 }
 
 impl Default for Rendering {
@@ -840,6 +847,7 @@ impl Default for Rendering {
         Self {
             smoothing: true,
             subpixel: Subpixel::None,
+            hinting: false,
         }
     }
 }
@@ -1397,6 +1405,7 @@ mod tests {
         Rendering {
             smoothing: true,
             subpixel: order,
+            hinting: false,
         }
     }
 
@@ -1463,6 +1472,7 @@ mod tests {
         let off = Rendering {
             smoothing: false,
             subpixel: Subpixel::Rgb,
+            hinting: false,
         };
         let m = rasterize_with(&shape, 1.0, off).unwrap();
         assert!(m.lcd.is_none(), "no subpixels without anti-aliasing");

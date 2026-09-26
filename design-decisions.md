@@ -11897,13 +11897,91 @@ smoothing off draws every pixel fully on or off.
 | A lighter or no filter | sharper | visible fringes (FreeType's "light" filter exists for that choice) |
 | Subpixel in the toolkit's own text too | apps drawing their own buffers get it | they cannot know what is under a translucent window; the compositor can |
 
-**Not done:** `hinting` (fitting outlines to the pixel grid) has nothing to
-act on -- there is no hinter -- and is filed in `known-issues.md` ("Text is
-never hinted"). Subpixel *positioning* (placing glyphs at fractions of a
-pixel) is a separate change.
+**Not done:** `hinting` (fitting outlines to the pixel grid) had nothing to
+act on when this was written -- there was no hinter. It has one now: §1325.
+Subpixel *positioning* (placing glyphs at fractions of a pixel) is a separate
+change.
 
 **How to reverse.** `Rendering::default()` is grey; a cache never given a mode
 draws as before.
+
+## 1325. The `hinting` font setting runs a port of FreeType's auto-hinter, light mode, checked against FreeType point for point
+
+**Date:** 2026-09-26
+**Lane:** F
+**Decided by:** Claude (autonomous) -- within §86c, which left "a
+vertical-only autohinter" as the deferred-not-rejected alternative to a
+TrueType bytecode interpreter.
+
+**In short:** with hinting on (the setting's default), small text is now
+fitted to the pixel grid the way Linux desktops fit it: every glyph's
+horizontal lines -- baseline, x-height, cap height, the bars of an `e` or an
+`H` -- are moved up or down so they land cleanly on pixel rows, while nothing
+moves sideways and no stroke changes thickness. The code is a translation of
+FreeType's own auto-hinter rather than a new design, so it makes the same
+choices FreeType does, and a tool compares the two glyph by glyph.
+
+**Decision.**
+
+* **A port, not a reimplementation.** `gui/font/src/hint/` is FreeType
+  2.13.2's `autofit` module translated function by function: `glyph.rs` from
+  `afhints.c`, `latin.rs` from `aflatin.c`, its fixed-point arithmetic kept
+  to the bit (`fixed.rs`), its script tables generated from its sources
+  (`tools/gen_autofit_tables.py`). A first attempt was an original
+  hinter in FreeType's spirit; it matched FreeType's glyph *bounds* but not
+  its interiors -- it rounded stems to whole pixels, which light mode never
+  does -- and there was no way to tell which of its hundreds of small choices
+  were wrong. Hinting is a chain of rounding decisions: the only way to get
+  FreeType's look is to make FreeType's decisions.
+* **Light mode only, vertical only.** Stems keep their designed width, thin
+  ones are centred on a pixel row, and the horizontal axis is untouched, so
+  advances and kerning are exactly the unhinted ones (fontconfig's
+  `hintslight`, most Linux desktops' default). The same for grey, LCD and
+  smoothing-off rendering.
+* **Every script FreeType's Latin writing system serves** -- most of them:
+  Latin, Greek, Cyrillic, Arabic, Hebrew, Armenian, the Brahmic scripts, Thai
+  and some fifty more, each measured from its own reference letters. Each
+  glyph is given a script as FreeType gives it one (by `cmap`, then by the
+  `GSUB` lookups that produce it), and the reference letters are shaped by
+  this crate's shaper, as FreeType has HarfBuzz shape them.
+* **Checked against FreeType.** `tools/hint_oracle.py` runs FreeType (from
+  `freetype-py`) and this crate over every glyph of a face at eleven sizes
+  and compares every hinted point. On Noto Sans, Open Sans, JetBrains Mono,
+  Segoe UI, Arial and Times New Roman every glyph of the ported styles agrees
+  exactly, bar the gaps below. A generated fixture
+  (`tools/gen_hint_fixture.py`: a synthetic face as TrueType and CFF, with
+  FreeType's answers at eighteen sizes) keeps that in `cargo test`.
+* **Robust before faithful.** Every index goes through `get` and a failure
+  abandons the glyph to be drawn unhinted, coordinates beyond `i16` and
+  absurd sizes are refused at the door (which is what makes the unchecked
+  fixed-point arithmetic provably safe), and every walk of font data is
+  budgeted. A bug in the port costs a glyph its hinting, never the compositor.
+* **Licensing.** FreeType's licence (FTL) permits this with a credit line; the
+  licence and the credit are in `gui/font/licenses/`, and every ported file
+  carries FreeType's copyright notice.
+
+**Not done** (each filed in `known-issues.md`): FreeType's CJK writing system
+(ideographs, and the fallback style unclaimed glyphs go to, are drawn
+unhinted); its feature styles (superscripts and small capitals use their
+script's ordinary zones); stem darkening (off by default in FreeType too).
+The oracle also turned up a difference that is not hinting's: composites that
+borrow a component's metrics are placed a few units off FreeType
+horizontally, hinted or not. The face-level analysis -- scripts and zones,
+3-9 ms on large fonts -- is repeated for each size of a face; sharing it is an
+optimisation for later.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| An original light hinter | smaller, no licence | tried: different text from FreeType's, no oracle to find out why |
+| TrueType bytecode interpreter | the designer's own hints | §86c: runs attacker-supplied programs; nothing for CFF or unhinted fonts |
+| DirectWrite-style (Windows) | the other big reference | not documented to the level a port needs; no oracle to check against |
+| No hinting | nothing to maintain | soft small text on ordinary monitors, the setting a lie |
+
+**How to reverse.** The setting off draws exactly as before; `Rendering`'s
+`hinting` defaults to off for any caller that does not ask. Removing the
+module is removing `ScaledFont`'s `hinter` field.
 
 ## §200 — The B-KNULLJUMP hunt runs the *uninstrumented* kernel first (E), and escalates to the optimized KASAN build (A) only if that fails to settle it
 

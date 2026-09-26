@@ -2002,6 +2002,287 @@ fn apply_nested(
     span.max(1)
 }
 
+// ---------------------------------------------------------------------------
+// What a lookup can produce
+// ---------------------------------------------------------------------------
+
+/// `GSUB` lookup type for reverse chaining single substitution, which the
+/// shaper does not apply but whose outputs are glyphs all the same.
+const LOOKUP_REVERSE_CHAIN: u16 = 8;
+
+/// The lookup types [`lookup_outputs`] reads: every substitution there is.
+const OUTPUT_KINDS: &[u16] = &[
+    LOOKUP_SINGLE,
+    LOOKUP_MULTIPLE,
+    LOOKUP_ALTERNATE,
+    LOOKUP_LIGATURE,
+    LOOKUP_CONTEXT,
+    LOOKUP_CHAIN_CONTEXT,
+    LOOKUP_REVERSE_CHAIN,
+];
+
+/// A ceiling on the records one face's [`lookup_outputs`] walk reads, across
+/// every lookup it is asked about.
+///
+/// A real face's substitutions are a few thousand records; the largest seen on
+/// the development host, a CJK face with every `vert` and `locl` form, is
+/// under 60,000. A hostile face can declare millions, and the walk runs when a
+/// font is opened, so it stops here -- which costs the auto-hinter the script
+/// of a few glyphs and nothing else.
+pub(crate) const MAX_OUTPUT_WALK: usize = 1 << 20;
+
+/// Append to `out` every glyph lookup `index` can put into a run, following
+/// the lookups its contextual subtables invoke.
+///
+/// HarfBuzz's `hb_ot_layout_lookup_collect_glyphs` with only the output set
+/// asked for, which is what FreeType's auto-hinter uses it for. `visited`
+/// (kept sorted) holds the lookups already walked, so a lookup named from many
+/// places, or from itself, is read once; a caller walking several lookups
+/// passes the same one each time. Iterative rather than recursive, since a
+/// font may chain nested lookups as deep as it likes.
+pub(crate) fn lookup_outputs(
+    data: &[u8],
+    lookup_list: usize,
+    index: u16,
+    out: &mut Vec<u16>,
+    visited: &mut Vec<u16>,
+    budget: &mut usize,
+) {
+    let mut pending = alloc::vec![index];
+    let mut nested = Vec::new();
+    while let Some(index) = pending.pop() {
+        let Err(at) = visited.binary_search(&index) else {
+            continue;
+        };
+        visited.insert(at, index);
+        let mut subtables = MAX_SUBTABLES;
+        let Some(lookup) = lookup_at(
+            data,
+            lookup_list,
+            index,
+            OUTPUT_KINDS,
+            LOOKUP_EXTENSION,
+            &mut subtables,
+        ) else {
+            continue;
+        };
+        for sub in &lookup.subtables {
+            if !spend(budget) {
+                return;
+            }
+            // `None` is a truncated subtable, which keeps what was read before
+            // the cut: the glyphs it did list are the font's own answer.
+            let _ = subtable_outputs(data, lookup.kind, sub.at, out, &mut nested, budget);
+            pending.append(&mut nested);
+        }
+    }
+}
+
+/// One subtable's contribution to [`lookup_outputs`]: the glyphs it
+/// substitutes in, appended to `out`, and the lookups it invokes, appended
+/// to `nested`.
+fn subtable_outputs(
+    data: &[u8],
+    kind: u16,
+    sub: usize,
+    out: &mut Vec<u16>,
+    nested: &mut Vec<u16>,
+    budget: &mut usize,
+) -> Option<()> {
+    let at = |o: usize| sub.checked_add(o);
+    let offset = |o: usize| sub.checked_add(usize::from(u16_at(data, at(o)?)?));
+    let format = u16_at(data, sub)?;
+    match (kind, format) {
+        (LOOKUP_SINGLE, 1) => {
+            let delta = u16_at(data, at(4)?)?;
+            let mut covered = Vec::new();
+            coverage_glyphs(data, offset(2)?, &mut covered, budget);
+            out.extend(covered.iter().map(|g| g.wrapping_add(delta)));
+        }
+        (LOOKUP_SINGLE, 2) => glyph_array(data, at(4)?, out, budget)?,
+        (LOOKUP_MULTIPLE | LOOKUP_ALTERNATE, 1) => {
+            // A list of offsets to glyph arrays: sequences or alternate sets.
+            for set in offsets(data, sub, at(4)?, budget)? {
+                glyph_array(data, set, out, budget)?;
+            }
+        }
+        (LOOKUP_LIGATURE, 1) => {
+            for set in offsets(data, sub, at(4)?, budget)? {
+                for lig in offsets(data, set, set, budget)? {
+                    out.push(u16_at(data, lig)?);
+                }
+            }
+        }
+        (LOOKUP_CONTEXT, 1 | 2) => {
+            // Rule sets, each a list of rules: glyphCount, lookupCount, the
+            // input after the first glyph, then the lookup records.
+            let sets_at = if format == 1 { 4 } else { 6 };
+            for set in offsets(data, sub, at(sets_at)?, budget)? {
+                for rule in offsets(data, set, set, budget)? {
+                    let input = usize::from(u16_at(data, rule)?.saturating_sub(1));
+                    let count = u16_at(data, rule.checked_add(2)?)?;
+                    let records = rule.checked_add(4)?.checked_add(input.checked_mul(2)?)?;
+                    push_records(data, records, count, nested);
+                }
+            }
+        }
+        (LOOKUP_CONTEXT, 3) => {
+            let glyphs = usize::from(u16_at(data, at(2)?)?);
+            let count = u16_at(data, at(4)?)?;
+            let records = at(6)?.checked_add(glyphs.checked_mul(2)?)?;
+            push_records(data, records, count, nested);
+        }
+        (LOOKUP_CHAIN_CONTEXT, 1 | 2) => {
+            let sets_at = if format == 1 { 4 } else { 10 };
+            for set in offsets(data, sub, at(sets_at)?, budget)? {
+                for rule in offsets(data, set, set, budget)? {
+                    // backtrack, input (less its first glyph), lookahead: each
+                    // a count and that many glyphs or classes.
+                    let back = usize::from(u16_at(data, rule)?);
+                    let input_at = rule.checked_add(2)?.checked_add(back.checked_mul(2)?)?;
+                    let input = usize::from(u16_at(data, input_at)?.saturating_sub(1));
+                    let ahead_at = input_at
+                        .checked_add(2)?
+                        .checked_add(input.checked_mul(2)?)?;
+                    let ahead = usize::from(u16_at(data, ahead_at)?);
+                    let count_at = ahead_at
+                        .checked_add(2)?
+                        .checked_add(ahead.checked_mul(2)?)?;
+                    let count = u16_at(data, count_at)?;
+                    push_records(data, count_at.checked_add(2)?, count, nested);
+                }
+            }
+        }
+        (LOOKUP_CHAIN_CONTEXT, 3) => {
+            let back = usize::from(u16_at(data, at(2)?)?);
+            let input_at = at(4)?.checked_add(back.checked_mul(2)?)?;
+            let input = usize::from(u16_at(data, input_at)?);
+            let ahead_at = input_at
+                .checked_add(2)?
+                .checked_add(input.checked_mul(2)?)?;
+            let ahead = usize::from(u16_at(data, ahead_at)?);
+            let count_at = ahead_at
+                .checked_add(2)?
+                .checked_add(ahead.checked_mul(2)?)?;
+            let count = u16_at(data, count_at)?;
+            push_records(data, count_at.checked_add(2)?, count, nested);
+        }
+        (LOOKUP_REVERSE_CHAIN, 1) => {
+            let back = usize::from(u16_at(data, at(4)?)?);
+            let ahead_at = at(6)?.checked_add(back.checked_mul(2)?)?;
+            let ahead = usize::from(u16_at(data, ahead_at)?);
+            let glyphs_at = ahead_at
+                .checked_add(2)?
+                .checked_add(ahead.checked_mul(2)?)?;
+            glyph_array(data, glyphs_at, out, budget)?;
+        }
+        _ => {}
+    }
+    Some(())
+}
+
+/// Take one unit of a walk's budget: `false` once it is spent.
+pub(crate) fn spend(budget: &mut usize) -> bool {
+    match budget.checked_sub(1) {
+        Some(left) => {
+            *budget = left;
+            true
+        }
+        None => false,
+    }
+}
+
+/// The lookups a list of `SequenceLookupRecord`s names.
+fn push_records(data: &[u8], at: usize, count: u16, nested: &mut Vec<u16>) {
+    let mut records = Vec::new();
+    read_records(data, at, usize::from(count), &mut records);
+    nested.extend(records.iter().map(|r| r.lookup));
+}
+
+/// A count at `at` and that many glyph ids after it, appended to `out`.
+fn glyph_array(data: &[u8], at: usize, out: &mut Vec<u16>, budget: &mut usize) -> Option<()> {
+    let count = usize::from(u16_at(data, at)?);
+    for i in 0..count {
+        if !spend(budget) {
+            return None;
+        }
+        out.push(u16_at(
+            data,
+            at.checked_add(2)?.checked_add(i.checked_mul(2)?)?,
+        )?);
+    }
+    Some(())
+}
+
+/// A count at `count_at` and that many 16-bit offsets after it, each measured
+/// from `base`: the tables they point at.
+fn offsets(data: &[u8], base: usize, count_at: usize, budget: &mut usize) -> Option<Vec<usize>> {
+    let count = usize::from(u16_at(data, count_at)?);
+    let mut out = Vec::with_capacity(count.min(1024));
+    for i in 0..count {
+        if !spend(budget) {
+            break;
+        }
+        let off = u16_at(
+            data,
+            count_at.checked_add(2)?.checked_add(i.checked_mul(2)?)?,
+        )?;
+        // A null offset is an empty set (class-based rule sets use them).
+        if off != 0 {
+            out.push(base.checked_add(usize::from(off))?);
+        }
+    }
+    Some(out)
+}
+
+/// Every glyph a Coverage table lists, appended to `out`.
+fn coverage_glyphs(data: &[u8], table: usize, out: &mut Vec<u16>, budget: &mut usize) {
+    let (Some(format), Some(count)) = (
+        u16_at(data, table),
+        table.checked_add(2).and_then(|o| u16_at(data, o)),
+    ) else {
+        return;
+    };
+    for i in 0..usize::from(count) {
+        if !spend(budget) {
+            return;
+        }
+        match format {
+            1 => {
+                let Some(g) = i
+                    .checked_mul(2)
+                    .and_then(|d| table.checked_add(4)?.checked_add(d))
+                    .and_then(|o| u16_at(data, o))
+                else {
+                    return;
+                };
+                out.push(g);
+            }
+            2 => {
+                let Some(rec) = i
+                    .checked_mul(6)
+                    .and_then(|d| table.checked_add(4)?.checked_add(d))
+                else {
+                    return;
+                };
+                let (Some(first), Some(last)) = (
+                    u16_at(data, rec),
+                    rec.checked_add(2).and_then(|o| u16_at(data, o)),
+                ) else {
+                    return;
+                };
+                for g in first..=last {
+                    if !spend(budget) {
+                        return;
+                    }
+                    out.push(g);
+                }
+            }
+            _ => return,
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -2471,6 +2752,67 @@ mod tests {
         let subs =
             Substitutions::parse(&data, Some(span(0, data.len())), None).expect("liga must parse");
         (data, subs)
+    }
+
+    /// What [`lookup_outputs`] finds for lookup `index` of `data`, sorted.
+    fn outputs(data: &[u8], index: u16) -> Vec<u16> {
+        let list = lookup_list(data, 0).unwrap();
+        let (mut out, mut visited, mut budget) = (Vec::new(), Vec::new(), MAX_OUTPUT_WALK);
+        lookup_outputs(data, list, index, &mut out, &mut visited, &mut budget);
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    #[test]
+    fn a_lookups_outputs_are_the_glyphs_it_substitutes_in() {
+        let delta = gsub_table(b"test", LOOKUP_SINGLE, &single_delta(&[5, 6], 10));
+        assert_eq!(outputs(&delta, 0), [15, 16]);
+        let list = gsub_table(b"test", LOOKUP_SINGLE, &single_list(&[5, 6], &[31, 30]));
+        assert_eq!(outputs(&list, 0), [30, 31]);
+        let multiple = gsub_table(b"test", LOOKUP_MULTIPLE, &multiple(&[5], &[&[41, 40]]));
+        assert_eq!(outputs(&multiple, 0), [40, 41]);
+        let alternate = gsub_table(
+            b"test",
+            LOOKUP_ALTERNATE,
+            &alternate(&[5], &[&[52, 50, 51]]),
+        );
+        assert_eq!(outputs(&alternate, 0), [50, 51, 52]);
+        let (ligatures, _) = fi_font();
+        assert_eq!(outputs(&ligatures, 0), [20, 21, 22]);
+    }
+
+    #[test]
+    fn a_contextual_lookup_outputs_what_the_lookups_it_invokes_do() {
+        // Lookup 0 invokes lookup 1 at its only position; lookup 1 adds 10.
+        let data = gsub_lookups(&[
+            (b"calt", LOOKUP_CONTEXT, context3(&[&[5]], &[(0, 1)])),
+            (b"test", LOOKUP_SINGLE, single_delta(&[5], 10)),
+        ]);
+        assert_eq!(outputs(&data, 0), [15]);
+    }
+
+    #[test]
+    fn a_lookup_that_invokes_itself_is_walked_once() {
+        let data = gsub_lookups(&[(b"calt", LOOKUP_CONTEXT, context3(&[&[5]], &[(0, 0)]))]);
+        assert!(outputs(&data, 0).is_empty());
+    }
+
+    #[test]
+    fn a_scripts_lookups_are_those_any_of_its_features_reach() {
+        let data = gsub_scripts(
+            &[(b"latn", b"liga"), (b"cyrl", b"smcp")],
+            LOOKUP_SINGLE,
+            &[&single_delta(&[5], 10)],
+        );
+        assert_eq!(crate::otl::script_lookups(&data, 0, &[*b"latn"]), [0]);
+        assert_eq!(
+            crate::otl::script_lookups(&data, 0, &[*b"cyrl", *b"latn"]),
+            [0]
+        );
+        // A script the table does not name reaches nothing: no fallback to
+        // `DFLT`, which is a shaping rule and not a question of coverage.
+        assert!(crate::otl::script_lookups(&data, 0, &[*b"grek"]).is_empty());
     }
 
     #[test]

@@ -4036,9 +4036,8 @@ impl TranslateStack {
 // Text rendering
 // ---------------------------------------------------------------------------
 
-/// How glyphs are rasterized, from the appearance settings: `smoothing` and
-/// the subpixel order. (`hinting` has nothing to act on yet: see
-/// known-issues.md, "Text is never hinted".)
+/// How glyphs are rasterized, from the appearance settings: `smoothing`, the
+/// subpixel order and `hinting`.
 fn font_rendering(settings: &AppearanceSettings) -> osfont::raster::Rendering {
     use osfont::raster::Subpixel;
     osfont::raster::Rendering {
@@ -4050,6 +4049,7 @@ fn font_rendering(settings: &AppearanceSettings) -> osfont::raster::Rendering {
             appearance::SubpixelMode::VRgb => Subpixel::VRgb,
             appearance::SubpixelMode::VBgr => Subpixel::VBgr,
         },
+        hinting: settings.fonts.hinting,
     }
 }
 
@@ -11984,6 +11984,7 @@ mod tests {
             Rendering {
                 smoothing: true,
                 subpixel: Subpixel::Rgb,
+                hinting: true,
             }
         );
         let mut settings = AppearanceSettings::default();
@@ -12001,6 +12002,7 @@ mod tests {
             Rendering {
                 smoothing: false,
                 subpixel: Subpixel::None,
+                hinting: true,
             }
         );
     }

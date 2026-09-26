@@ -368,17 +368,22 @@ fn execute_iocb(iocb: &Iocb) -> IoEvent {
             };
         }
     };
-    let sync_after = match plan_rw_flags(raw_flags, is_write_opcode(iocb.aio_lio_opcode)) {
-        Ok(s) => s,
-        Err(e) => {
-            errno::set_errno(e);
-            return IoEvent {
-                data: iocb.aio_data,
-                obj: core::ptr::from_ref::<Iocb>(iocb) as u64,
-                res: -i64::from(e),
-                res2: 0,
-            };
+    // The shared policy, with the answers this executor gave RWF_NOWAIT and
+    // RWF_APPEND before the policy had them: EAGAIN and EINVAL.
+    let refused = |e: i32| {
+        errno::set_errno(e);
+        IoEvent {
+            data: iocb.aio_data,
+            obj: core::ptr::from_ref::<Iocb>(iocb) as u64,
+            res: -i64::from(e),
+            res2: 0,
         }
+    };
+    let sync_after = match plan_rw_flags(raw_flags, is_write_opcode(iocb.aio_lio_opcode), true) {
+        Ok(p) if p.nowait => return refused(errno::EAGAIN),
+        Ok(p) if p.append => return refused(errno::EINVAL),
+        Ok(p) => p.sync,
+        Err(e) => return refused(e),
     };
 
     let res: i64 = match iocb.aio_lio_opcode {

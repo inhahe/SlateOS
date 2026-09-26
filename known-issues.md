@@ -165997,7 +165997,7 @@ and `tar`. Each row is the file then the option, the option then the file, a
 spellings instead of using the shared parser at all, and are recorded apart
 (below) rather than given a fourth hand-written rule each.
 
-## B-PATCH-ORIGFILE-PATCHFILE-EXITS-0-HAVING-DONE-NOTHING (lane B, 2026-09-25) — **open**
+## B-PATCH-ORIGFILE-PATCHFILE-EXITS-0-HAVING-DONE-NOTHING (lane B, 2026-09-25) — FIXED 2026-09-25
 
 **In short:** `patch ORIGFILE PATCHFILE` -- the second commonest way to run
 `patch` -- exits 0 and changes nothing. Our parser keeps only the *last*
@@ -166017,10 +166017,32 @@ $ cp o o3; patch o3 p.diff </dev/null    # ours: no output; o3 still holds a; rc
 `else` arm is `opts.target_file = Some(arg.clone())`, so every operand
 overwrites the one before and there is no second-operand slot at all.
 
-**The fix** is the one in the next entry: upstream's command line, which has
-the slot, on the shared parser.
+**How it was closed (2026-09-25).** `patch`'s command line is upstream's, on
+the shared parser: GNU patch 2.7.6's `shortopts` and `longopts` in declaration
+order (`--merge` included, as the build measured has `ENABLE_MERGE`), and
+`get_some_switches`' operand rule -- `ORIGFILE`, then `PATCHFILE`, which
+overrides `-i`, then `extra operand` at status 2. `--help` and `--version`/`-v`
+are answered where getopt meets them rather than found by scanning all of argv
+first, so `patch --bogus --help` reports the bad option, as GNU does. Numbers go
+through upstream's `numeric_string`, so `-F x` is `fuzz factor x is not a
+number` rather than this build's `invalid fuzz factor`, and `-p -1` is `strip
+count -1 is negative`. The options GNU has and this build does not (`-B`, `-D`,
+`-e`, `-g`, `-t`, `-T`, `-V`, `-x`, `-Y`, `-z`, `--merge`, `--posix`,
+`--quoting-style`, `--reject-format`, `--read-only`, `--follow-symlinks`,
+`--binary`, `--backup-if-mismatch`) are refused by name instead of as invalid.
+Upstream's CVS 1.9 hack that reads `-b SUFFIX ORIGFILE PATCHFILE` as `-b -z
+SUFFIX` is not reproduced: it is a spelling of `-z`.
 
-## TD-B-DIFF-PATCH-HOSTNAME-PARSE-ARGV-BY-EXACT-MATCH (lane B, 2026-09-25) — **open**
+Pinned by `scripts/patch-diff.sh`'s command-line block -- `patch ORIGFILE
+PATCHFILE` with and without `--dry-run`, the second operand over `-i`, a third,
+`--dry`, `-sp1`, `--st=1`, `--s`, `--`, the three number refusals, `--bogus
+--help`, and `POSIXLY_CORRECT` -- at 113 passed, 0 differed. One row differs on
+purpose: GNU's `numeric_string` tests for overflow after the multiply has
+already overflowed an `int`, the compiler deletes the test, and GNU patches
+with a wrapped `-F 99999999999`; ours refuses it as `too large`, as upstream's
+source says.
+
+## TD-B-DIFF-PATCH-HOSTNAME-PARSE-ARGV-BY-EXACT-MATCH (lane B, 2026-09-25) — FIXED 2026-09-25
 
 **In short:** `diff`, `patch` and `hostname` compare each argument against a
 list of exact spellings instead of going through `coreutils::getopt`, so they
@@ -166039,6 +166061,31 @@ never decodes them -- the conversion this file already asks for under "The fix
 is getopt, not a hand conversion". A `POSIXLY_CORRECT` rule added to the
 existing loops would be the fourth thing each of them re-implements by hand,
 which is why the change above did not add one.
+
+**How it was closed (2026-09-25).** All three are on `Program::parse` with
+upstream's tables in declaration order, and each refuses by name the options
+upstream has and it does not, instead of calling them invalid.
+
+- **`diff`**, diffutils 3.10's table and `main`: two different output styles
+  are `conflicting output style options` (the ladder kept the last); repeated
+  context lengths keep the largest, and `-u`/`-c` ask for three; the obsolete
+  `-NUM` digits accumulate across words (`-1 -2` is twelve) and reconcile with
+  `-C`/`-U` by upstream's rule; `--color` takes `never`, `always` or `auto`
+  exactly and colours a terminal under `auto`; `-d`, `-h`, `-H`,
+  `--horizon-lines`, `--inhibit-hunk-merge` and `--binary` are accepted, since
+  this build already has their effect. The ladder's own `--no-color`, which
+  diffutils never had, is gone. The missing-operand error names the last word
+  after getopt's permutation, so `diff x -u` is `after 'x'`. An `-I` pattern
+  that does not compile says glibc's sentence for it rather than one fixed
+  phrase, and no longer goes through `from_utf8_lossy`. `diff-diff.sh`: 200
+  passed, 0 differed.
+- **`patch`**: see the entry above. 113 passed, 0 differed.
+- **`hostname`**, net-tools 3.23's table: `-?` is help, `--long` is `-f`,
+  `--yp` and `--nis` are `-y`, abbreviations resolve. `hostname-diff.sh` went
+  from 21 passed / 39 differed to 26 / 34: the five abbreviation rows. What is
+  left red is the environment (addresses, `-a`/`-A`, which need resolution this
+  system cannot yet answer) and net-tools' way of refusing -- usage on stdout
+  and exit 255 -- which this `hostname` does not copy.
 
 ## TD-B-TOUCH-REFUSES-DASH-T-AND-DASH-D (lane B, 2026-09-25) — **open** for `-d`; `-t` fixed 2026-09-25
 

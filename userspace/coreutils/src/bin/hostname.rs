@@ -47,6 +47,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use coreutils::errmsg::strerror;
+use coreutils::getopt::{Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quote, quote_os};
 
 /// Live kernel host name. Written by `sysctl kernel.hostname` and by us.
@@ -135,191 +136,98 @@ enum Action {
     Version,
 }
 
-/// Bytes back to an `OsString` without going through UTF-8.
-///
-/// Exact on `cfg(unix)`, which includes our own target — `x86_64-slateos.json`
-/// declares `"target-family": ["unix"]`. On the Windows development host the
-/// round trip is lossy, because `OsString` there is UTF-16 and there is no
-/// byte constructor. That only affects host test runs, and no test relies on a
-/// non-UTF-8 byte surviving the trip.
-#[cfg(unix)]
-fn os_from_bytes(b: &[u8]) -> OsString {
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-    OsStr::from_bytes(b).to_os_string()
-}
-
-#[cfg(not(unix))]
-fn os_from_bytes(b: &[u8]) -> OsString {
-    OsString::from(String::from_utf8_lossy(b).into_owned())
-}
-
 // ============================================================================
 // Command line
 // ============================================================================
 
-/// Parse the arguments after `argv[0]`.
+/// `hostname`'s name, and the status of a command line it will not run.
+const HOSTNAME: Program = Program::new("hostname", 1);
+
+/// net-tools `hostname` 3.23's option string, verbatim. The `?` is a real
+/// option there -- help, as `-h` is -- which is how `hostname -?` prints the
+/// usage.
+const SHORT_OPTIONS: &str = "aAdfbF:h?iIsVy";
+
+/// net-tools `hostname` 3.23's `long_options`, **in declaration order**, which
+/// the ambiguity message makes observable.
+const LONG_OPTIONS: &[(&str, Takes)] = &[
+    ("domain", Takes::Nothing),
+    ("boot", Takes::Nothing),
+    ("file", Takes::Required),
+    ("fqdn", Takes::Nothing),
+    ("all-fqdns", Takes::Nothing),
+    ("help", Takes::Nothing),
+    ("long", Takes::Nothing),
+    ("short", Takes::Nothing),
+    ("version", Takes::Nothing),
+    ("alias", Takes::Nothing),
+    ("ip-address", Takes::Nothing),
+    ("all-ip-addresses", Takes::Nothing),
+    ("nis", Takes::Nothing),
+    ("yp", Takes::Nothing),
+];
+
+/// Spellings upstream gives one option: `--long` is `-f`, `--yp` is `-y`.
+const LONG_ALIASES: &[(&str, &str)] = &[("long", "fqdn"), ("yp", "nis")];
+
+/// An option net-tools has and this `hostname` does not: `-a` and `-A`, which
+/// read the aliases and every FQDN out of name resolution this system cannot
+/// yet answer (`known-issues.md` has the resolver's side of that).
+fn unimplemented(item: &Opt<'_>) -> String {
+    let named = match item {
+        Opt::Short(flag, _) => format!("-{}", char::from(*flag)),
+        Opt::Long(name, _) => format!("'--{name}'"),
+        Opt::Operand(_) => "an operand".to_string(),
+    };
+    format!(
+        "option {named} is not implemented by this hostname\nTry 'hostname --help' for more information."
+    )
+}
+
+/// Parse the arguments after `argv[0]`: upstream's `getopt_long` loop, on the
+/// shared parser.
 ///
-/// Short options bundle (`-sf` is `-s -f`), and for the display options the
-/// last one wins — GNU's `hostname` assigns to one variable in its `getopt`
-/// loop and acts on it afterwards, so that is the behaviour scripts see.
-/// `-h` and `-V` are answered where they appear, as they are in GNU.
-///
-/// `--` ends the options, which the standalone `userspace/hostname` cannot do:
-/// without it there is no way to set a name beginning with a hyphen, and more
-/// importantly no way to be *sure* an argument from a variable is treated as a
-/// name rather than as an option.
+/// So long options abbreviate to a unique prefix (`--sh`, `--dom`), short
+/// ones bundle (`-sf` is `-s -f`), `--` ends the options -- the only way to be
+/// sure a name taken from a variable is not read as one -- and
+/// `POSIXLY_CORRECT` stops them at the first operand. For the display options
+/// the last one wins, as upstream assigns them to one variable and acts on it
+/// afterwards. `-h`, `-?` and `-V` are answered where they appear.
 fn parse_args(args: &[OsString]) -> Result<Action, String> {
     let mut query: Option<Query> = None;
     let mut boot = false;
     let mut file: Option<OsString> = None;
-    let mut name: Option<OsString> = None;
-    let mut end_of_options = false;
+    let mut operands: Vec<OsString> = Vec::new();
 
-    let mut i = 0;
-    while i < args.len() {
-        let Some(arg) = args.get(i) else { break };
-        let bytes = os_bytes(arg);
-
-        // An operand: the name to set. `-` alone is an operand too, matching
-        // every other utility; only a hyphen with something after it is an
-        // option.
-        if end_of_options || bytes.first() != Some(&b'-') || bytes.len() == 1 {
-            if let Some(first) = &name {
-                return Err(format!(
-                    "too many arguments: already given {}, then {}",
-                    quote_os(first),
-                    quote_os(arg)
-                ));
-            }
-            name = Some(arg.clone());
-            i = i.saturating_add(1);
-            continue;
-        }
-
-        if bytes.starts_with(b"--") {
-            if bytes.len() == 2 {
-                end_of_options = true;
-                i = i.saturating_add(1);
-                continue;
-            }
-            let long = bytes.get(2..).unwrap_or_default();
-            match parse_long(long, args, i, &mut query, &mut boot, &mut file)? {
-                Long::Answered(action) => return Ok(action),
-                Long::Consumed(next) => i = next,
-            }
-            continue;
-        }
-
-        let body = bytes.get(1..).unwrap_or_default();
-        match parse_shorts(body, args, i, &mut query, &mut boot, &mut file)? {
-            Long::Answered(action) => return Ok(action),
-            Long::Consumed(next) => i = next,
+    for item in HOSTNAME.parse_aliased(args, SHORT_OPTIONS, LONG_OPTIONS, LONG_ALIASES) {
+        let item = item.map_err(|e| e.message())?;
+        match item {
+            // An operand: the name to set. `-` alone is one, as everywhere.
+            Opt::Operand(word) => operands.push(word.clone()),
+            Opt::Short(b'h' | b'?', _) | Opt::Long("help", _) => return Ok(Action::Help),
+            Opt::Short(b'V', _) | Opt::Long("version", _) => return Ok(Action::Version),
+            Opt::Short(b's', _) | Opt::Long("short", _) => query = Some(Query::Short),
+            Opt::Short(b'f', _) | Opt::Long("fqdn" | "long", _) => query = Some(Query::Fqdn),
+            Opt::Short(b'd', _) | Opt::Long("domain", _) => query = Some(Query::Domain),
+            Opt::Short(b'y', _) | Opt::Long("nis" | "yp", _) => query = Some(Query::NisDomain),
+            Opt::Short(b'i', _) | Opt::Long("ip-address", _) => query = Some(Query::Ip),
+            Opt::Short(b'I', _) | Opt::Long("all-ip-addresses", _) => query = Some(Query::AllIp),
+            Opt::Short(b'b', _) | Opt::Long("boot", _) => boot = true,
+            Opt::Short(b'F', value) | Opt::Long("file", value) => file = value,
+            other => return Err(unimplemented(&other)),
         }
     }
 
+    let mut rest = operands.into_iter();
+    let name = rest.next();
+    if let (Some(first), Some(extra)) = (&name, rest.next()) {
+        return Err(format!(
+            "too many arguments: already given {}, then {}",
+            quote_os(first),
+            quote_os(&extra)
+        ));
+    }
     resolve(query, boot, file, name)
-}
-
-/// The outcome of reading one option: either the whole command line is already
-/// answered, or parsing continues at the returned index.
-enum Long {
-    Answered(Action),
-    Consumed(usize),
-}
-
-/// Read one `--long` option.
-fn parse_long(
-    long: &[u8],
-    args: &[OsString],
-    i: usize,
-    query: &mut Option<Query>,
-    boot: &mut bool,
-    file: &mut Option<OsString>,
-) -> Result<Long, String> {
-    // `--file=PATH` carries its argument; every other long option does not.
-    if let Some(path) = long.strip_prefix(b"file=") {
-        *file = Some(os_from_bytes(path));
-        return Ok(Long::Consumed(i.saturating_add(1)));
-    }
-
-    match long {
-        b"help" => return Ok(Long::Answered(Action::Help)),
-        b"version" => return Ok(Long::Answered(Action::Version)),
-        b"short" => *query = Some(Query::Short),
-        b"fqdn" | b"long" => *query = Some(Query::Fqdn),
-        b"domain" => *query = Some(Query::Domain),
-        b"yp" | b"nis" => *query = Some(Query::NisDomain),
-        b"ip-address" => *query = Some(Query::Ip),
-        b"all-ip-addresses" => *query = Some(Query::AllIp),
-        b"boot" => *boot = true,
-        b"file" => {
-            let next = i.saturating_add(1);
-            let Some(path) = args.get(next) else {
-                return Err("option '--file' requires an argument".to_string());
-            };
-            *file = Some(path.clone());
-            return Ok(Long::Consumed(next.saturating_add(1)));
-        }
-        _ => {
-            let mut whole = b"--".to_vec();
-            whole.extend_from_slice(long);
-            return Err(format!(
-                "unrecognized option {}\nTry 'hostname --help' for more information.",
-                quote(&whole)
-            ));
-        }
-    }
-    Ok(Long::Consumed(i.saturating_add(1)))
-}
-
-/// Read a bundle of short options, e.g. the `sf` of `-sf`.
-fn parse_shorts(
-    body: &[u8],
-    args: &[OsString],
-    i: usize,
-    query: &mut Option<Query>,
-    boot: &mut bool,
-    file: &mut Option<OsString>,
-) -> Result<Long, String> {
-    let mut j = 0;
-    while j < body.len() {
-        let Some(&c) = body.get(j) else { break };
-        match c {
-            b'h' => return Ok(Long::Answered(Action::Help)),
-            b'V' => return Ok(Long::Answered(Action::Version)),
-            b's' => *query = Some(Query::Short),
-            b'f' => *query = Some(Query::Fqdn),
-            b'd' => *query = Some(Query::Domain),
-            b'y' => *query = Some(Query::NisDomain),
-            b'i' => *query = Some(Query::Ip),
-            b'I' => *query = Some(Query::AllIp),
-            b'b' => *boot = true,
-            b'F' => {
-                // `-Fpath` carries the rest of the bundle; a bare `-F` takes
-                // the next argument.
-                let rest = body.get(j.saturating_add(1)..).unwrap_or_default();
-                if rest.is_empty() {
-                    let next = i.saturating_add(1);
-                    let Some(path) = args.get(next) else {
-                        return Err("option requires an argument -- 'F'".to_string());
-                    };
-                    *file = Some(path.clone());
-                    return Ok(Long::Consumed(next.saturating_add(1)));
-                }
-                *file = Some(os_from_bytes(rest));
-                return Ok(Long::Consumed(i.saturating_add(1)));
-            }
-            _ => {
-                return Err(format!(
-                    "invalid option -- {}\nTry 'hostname --help' for more information.",
-                    quote(&[c])
-                ));
-            }
-        }
-        j = j.saturating_add(1);
-    }
-    Ok(Long::Consumed(i.saturating_add(1)))
 }
 
 /// Turn the accumulated flags into one action, rejecting the combinations that

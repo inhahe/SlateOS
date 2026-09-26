@@ -6,9 +6,9 @@
 # retyped, so the property can be tested in two seconds instead of ninety
 # minutes and cannot drift away from the thing it claims to test.
 #
-# Safe to run while a real boot test is in flight: the leak check below
-# compares the snapshots present before and after, so another run's live
-# snapshot is not mistaken for one this check leaked.
+# Safe to run while a real boot test is in flight: the guarded run makes its
+# snapshot in a temp directory of its own, so another run's live snapshot is
+# never counted as one this check leaked -- see the note at `trial_tmp`.
 #
 # The control matters as much as the test: without the preamble the same edit
 # must visibly corrupt the run, otherwise the test proves nothing about bash's
@@ -18,10 +18,19 @@ set -uo pipefail
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-# Snapshots already in flight belong to somebody else's boot test.  Recorded
-# before anything runs, so the leak check at the end asks "did *we* leave one"
-# rather than "is there one", which would fail whenever a real run overlapped.
-snapshots_before="$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'boot-test-snapshot.*' 2>/dev/null | wc -l)"
+# The guarded run is given a temp directory of its own, and the leak check at
+# the end looks there and nowhere else.  The preamble takes its snapshot with
+# `mktemp -t`, which honours TMPDIR.
+#
+# This used to count the snapshots in the *shared* temp directory before and
+# after, and call any increase a leak.  That is right until another boot test
+# starts in between -- six lanes run them -- and its live snapshot appears
+# mid-check: lane C's boot test of 02bc887ba was refused on 2026-09-25 with
+# "1 snapshot(s) left behind", and the snapshot was a boot test another
+# session had started while this check ran.  Counting a directory nobody else
+# writes to cannot be raced.
+trial_tmp="$tmp/snapshots"
+mkdir -p "$trial_tmp"
 
 # The payload both variants run: announce, sleep long enough for the editor to
 # land, then announce again.  The second line is the one an edit can corrupt,
@@ -80,7 +89,13 @@ fi
 chmod +x "$tmp/guarded.sh"
 # Clear the control run's signal BEFORE arming this editor, not after.
 rm -f "$SIGNAL"
-( _wait_for_signal; printf '#!/usr/bin/env bash\necho "PHASE-1"\n: > "$SIGNAL"\nsleep 2\necho "CLOBBERED"\n' > "$tmp/guarded.sh" ) &
+# The editor also records what the private temp directory holds at that
+# moment, when the guarded script is running from its snapshot: the proof that
+# the snapshot was made there, without which the leak check at the end would
+# pass for a preamble that ignored TMPDIR and littered the shared directory.
+( _wait_for_signal
+  find "$trial_tmp" -maxdepth 1 -name 'boot-test-snapshot.*' > "$tmp/seen"
+  printf '#!/usr/bin/env bash\necho "PHASE-1"\n: > "$SIGNAL"\nsleep 2\necho "CLOBBERED"\n' > "$tmp/guarded.sh" ) &
 # The preamble is lifted as a *block*, and a block does not bring its
 # prerequisites with it: `BOOT_TEST_START_EPOCH` is set at the top of
 # boot-test.sh, well above the `if`, and the preamble forwards it to the
@@ -107,7 +122,7 @@ rm -f "$SIGNAL"
 #
 # So: the gate was inert in the one context it was wired into.  Cleared here
 # rather than at the call site, so the checker is correct however it is run.
-guarded_out="$(env -u BOOT_TEST_REEXEC BOOT_TEST_START_EPOCH="$(date +%s)" bash "$tmp/guarded.sh" 2>&1)"
+guarded_out="$(env -u BOOT_TEST_REEXEC TMPDIR="$trial_tmp" BOOT_TEST_START_EPOCH="$(date +%s)" bash "$tmp/guarded.sh" 2>&1)"
 wait
 
 fails=0
@@ -155,16 +170,20 @@ fi
 
 # --- The snapshot must not be left behind. ----------------------------------
 echo
-snapshots_after="$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'boot-test-snapshot.*' 2>/dev/null | wc -l)"
-leaked=$((snapshots_after - snapshots_before))
-if [ "$leaked" -le 0 ]; then
-    echo "ok   no snapshot left in ${TMPDIR:-/tmp} -- the EXIT trap fired"
-    if [ "$snapshots_before" -gt 0 ]; then
-        echo "     ($snapshots_before belonging to another run were ignored)"
-    fi
-else
+made="$(wc -l < "$tmp/seen" 2>/dev/null || echo 0)"
+leaked="$(find "$trial_tmp" -maxdepth 1 -name 'boot-test-snapshot.*' 2>/dev/null | wc -l)"
+if [ "$made" -eq 0 ]; then
+    echo "FAIL the guarded run made no snapshot in the temp directory it was"
+    echo "     given, so whether it leaves one behind cannot be told from here."
+    echo "     The preamble must take its snapshot with 'mktemp -t', which"
+    echo "     honours TMPDIR; a snapshot written anywhere else is invisible."
+    fails=$((fails + 1))
+elif [ "$leaked" -gt 0 ]; then
     echo "FAIL $leaked snapshot(s) left behind; the trap did not fire"
     fails=$((fails + 1))
+else
+    echo "ok   the snapshot was made in its own temp directory and removed --"
+    echo "     the EXIT trap fired"
 fi
 
 echo

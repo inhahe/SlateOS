@@ -724,10 +724,12 @@ impl GrubUpdateRunner {
                 return Ok(());
             }
 
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            // A diagnostic, decoded where it is written: what a failing
+            // tool printed is read by a person, and lines stay lines.
             return Err(GrubError::UpdateFailed(format!(
                 "{program} exited with {}: {}",
-                output.status, stderr
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
             )));
         }
 

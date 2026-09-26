@@ -1168,7 +1168,9 @@ pub fn parse_iso_directory(data: &[u8], depth: u32) -> Vec<IsoEntry> {
         let skip = matches!(raw_name, [0x00] | [0x01]);
 
         if !skip && !raw_name.is_empty() {
-            let name = String::from_utf8_lossy(raw_name)
+            // Shown as its bytes: printable text as it is, anything else
+            // as escapes, so two names differing only there stay two.
+            let name = quoting::escape_unprintable(raw_name)
                 .trim_end_matches(";1")
                 .trim_end_matches('.')
                 .to_string();
@@ -2720,10 +2722,14 @@ impl DiskImagerApp {
         let Some(drive) = self.selected_drive() else {
             return false;
         };
-        // Lossy at the boundary where the name becomes a sentence the user
+        // Shown by its bytes where the name becomes a sentence the user
         // reads; the path itself is never reconstructed from it.
         self.confirm_dialog = Some(write_confirmation(
-            &image_display_name(&image.path).to_string_lossy(),
+            &quoting::escape_unprintable(
+                image_display_name(&image.path)
+                    .as_os_str()
+                    .as_encoded_bytes(),
+            ),
             &drive.name,
             drive.size_bytes,
         ));
@@ -4078,8 +4084,9 @@ impl DiskImagerApp {
         rt.push(RenderCommand::Text {
             x: tx,
             y: ty,
-            // Lossy only here, one step before the glyphs are measured.
-            text: filename.to_string_lossy().into_owned(),
+            // Its bytes, one step before the glyphs are measured: a byte
+            // that is not text is drawn as an escape, not as U+FFFD.
+            text: quoting::escape_unprintable(filename.as_os_str().as_encoded_bytes()),
             color: self.palette.text,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
@@ -4525,10 +4532,10 @@ pub fn format_bytes(bytes: u64) -> String {
 /// NUL. It also compared `path.len()` (bytes) against a budget of "characters",
 /// so it cut accented paths that already fitted.
 pub fn truncate_path(path: &Path, max_width: f32, size: f32) -> String {
-    // Lossy, and deliberately so: this is the last step before the glyphs are
-    // measured, and a byte that is not text has no glyph. The replacement
-    // character is what the user should see for one.
-    let text = path.to_string_lossy();
+    // The last step before the glyphs are measured: a byte that is not text
+    // has no glyph, so it is drawn as an escape -- which, unlike U+FFFD, tells
+    // two such paths apart.
+    let text = quoting::escape_unprintable(path.as_os_str().as_encoded_bytes());
     text::elide_start(&text, max_width, "...", size, FontWeightHint::Regular)
 }
 
@@ -4570,9 +4577,19 @@ fn extract_iso_string(data: &[u8], offset: usize, max_len: usize) -> String {
     let Some(slice) = data.get(offset..end) else {
         return String::new();
     };
-    String::from_utf8_lossy(slice)
-        .trim_matches(|c: char| c.is_whitespace() || c == '\0')
-        .to_string()
+    // Trimmed of padding first, then shown by its bytes: an ISO label is
+    // meant to be plain ASCII, and one that is not shows what it holds.
+    let trimmed = slice
+        .iter()
+        .position(|&b| !(b == 0 || b.is_ascii_whitespace()))
+        .map_or(&[][..], |start| {
+            let end = slice
+                .iter()
+                .rposition(|&b| !(b == 0 || b.is_ascii_whitespace()))
+                .map_or(start, |e| e.saturating_add(1));
+            slice.get(start..end).unwrap_or_default()
+        });
+    quoting::escape_unprintable(trimmed)
 }
 
 /// Extract ISO 9660 datetime (17 bytes, ASCII digits) at `offset`.
@@ -4602,7 +4619,7 @@ fn extract_iso_datetime(data: &[u8], offset: usize) -> String {
     }
     // Every byte is an ASCII digit, so the string is one byte per character and
     // each index below is a character boundary.
-    let s = String::from_utf8_lossy(digits);
+    let s: String = digits.iter().copied().map(char::from).collect();
     let field = |a: usize, b: usize| s.get(a..b).unwrap_or_default();
     format!(
         "{}-{}-{} {}:{}:{}",
@@ -4825,6 +4842,19 @@ mod tests {
     ///
     /// Found by following `scripts/find-echoed-settings.py`, which reported
     /// `block_size` as read only into output -- true, and an understatement.
+    /// An ISO label is trimmed of its padding and shown by its bytes: a
+    /// byte that is not printable text is an escape, not U+FFFD.
+    #[test]
+    fn an_iso_label_is_trimmed_and_shown_by_its_bytes() {
+        assert_eq!(
+            extract_iso_string(b"  UBUNTU 24.04  ", 0, 16),
+            "UBUNTU 24.04"
+        );
+        assert_eq!(extract_iso_string(b"LABEL\xff\0\0\0", 0, 9), r"LABEL\377");
+        assert_eq!(extract_iso_string(b"\0\0  \0", 0, 5), "");
+        assert_eq!(extract_iso_string(b"AB", 5, 4), "", "past the end");
+    }
+
     #[test]
     fn the_block_size_shown_is_the_block_size_used() {
         let mut app = app_with_many_drives();

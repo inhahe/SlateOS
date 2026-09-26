@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Disk Imager / ISO Tool — create, write, browse, and verify disk images"
 [dependencies]
+# A name, or a disc's label, that is not text is shown by its bytes, as
+# escapes -- the tree's one renderer for untrusted text -- never lossily.
+quoting = { path = "../../userspace/quoting" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }

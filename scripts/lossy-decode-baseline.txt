@@ -16,11 +16,6 @@
 #
 # roots: gui apps
 
-apps/diskimager/src/main.rs:VALUE:6
-apps/installer/src/grub.rs:VALUE:1
-apps/screenrecorder/src/main.rs:VALUE:2
-apps/settings/src/main.rs:VALUE:1
-apps/sysmonitor/src/main.rs:VALUE:4
 gui/compositor/src/present/drm/sys.rs:VALUE:1
 gui/compositor/src/present/evdev.rs:VALUE:1
 gui/compositor/src/present/evdev/sys.rs:VALUE:1

@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Settings — centralized system configuration UI"
 [dependencies]
+# Text from outside -- a name, a path, what the kernel reports -- shown by its
+# bytes, as escapes where it is not printable text, never lossily.
+quoting = { path = "../../userspace/quoting" }
 
 # The one model of which program opens which kind of file. This page reports
 # what is set; `apps/fileassoc` writes it and `apps/explorer` obeys it, and all

@@ -4603,11 +4603,11 @@ impl SettingsState {
             // was.
             let branched = snap.parent.is_some();
             let title = format!("{} (#{})", snap.name, snap.id);
-            // Lossy *only here*, and deliberately: this is the label under the
-            // row, and a path that cannot be spelled in UTF-8 still has to be
-            // shown somehow. `SnapshotRow::path` keeps the bytes for anything
-            // that acts on it.
-            let path = String::from_utf8_lossy(&snap.path).into_owned();
+            // Shown by its bytes, *only here*: this is the label under the
+            // row, and a path that cannot be spelled in UTF-8 is drawn with
+            // escapes, which tell two such paths apart where U+FFFD did not.
+            // `SnapshotRow::path` keeps the bytes for anything that acts on it.
+            let path = quoting::escape_unprintable(&snap.path);
             let size = snapshots::format_size(snap.bytes);
             let files = format!("{} files", snap.files);
             s.draw(move |tree, x, y| {

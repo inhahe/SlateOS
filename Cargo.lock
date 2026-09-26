@@ -685,6 +685,7 @@ dependencies = [
  "guitk",
  "md5",
  "oswindow",
+ "quoting",
  "scratchdir",
  "sha1",
  "sha2",
@@ -2619,6 +2620,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "quoting",
 ]
 
 [[package]]
@@ -2685,6 +2687,7 @@ dependencies = [
  "loginusers",
  "notifsettings",
  "oswindow",
+ "quoting",
  "settingsfile",
  "yamldoc",
 ]
@@ -3051,6 +3054,7 @@ dependencies = [
  "libcall",
  "oswindow",
  "procinfo",
+ "quoting",
 ]
 
 [[package]]

@@ -705,7 +705,9 @@ impl SysMonitorState {
             let started_secs = stat.starttime_ticks / procinfo::TICKS_PER_SEC;
             out.push(ProcessInfo {
                 pid: u32::try_from(stat.pid).unwrap_or(u32::MAX),
-                name: String::from_utf8_lossy(&stat.comm).into_owned(),
+                // A process names itself with any bytes it likes; shown
+                // as they are, escapes for what is not printable text.
+                name: quoting::escape_unprintable(&stat.comm),
                 status: Self::status_from_proc(stat.state),
                 // Left at zero deliberately: a percentage needs two samples of
                 // the counter and this is one. Inventing a number here is the
@@ -745,16 +747,16 @@ impl SysMonitorState {
         if let Ok(Some(cpu)) = fs.cpu()
             && let Some(model) = cpu.model
         {
-            self.system_info.cpu_model = String::from_utf8_lossy(&model).into_owned();
+            self.system_info.cpu_model = quoting::escape_unprintable(&model);
         }
         if let Ok(Some(name)) = fs.hostname() {
-            self.system_info.hostname = String::from_utf8_lossy(&name).trim().to_string();
+            self.system_info.hostname = quoting::escape_unprintable(name.trim_ascii());
         }
         if let Ok(Some(version)) = fs.version() {
             // `/proc/version` is one long sentence; the kernel release is its
             // third word. Taking the whole line would fill a field the layout
             // gives twenty characters to.
-            let text = String::from_utf8_lossy(&version).into_owned();
+            let text = quoting::escape_unprintable(&version);
             if let Some(release) = text.split_whitespace().nth(2) {
                 self.system_info.kernel_version = release.to_string();
             }

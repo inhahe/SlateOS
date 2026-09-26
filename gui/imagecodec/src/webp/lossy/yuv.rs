@@ -16,6 +16,7 @@
 //!   (libwebp's `src/dsp/yuv.h`): Y' from 16 to 235 and chroma centred on
 //!   128, with libwebp's own constants and rounding.
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 /// `(v * coeff) >> 8`: libwebp's `MultHi`, an emulation of the SIMD
@@ -69,12 +70,11 @@ pub(super) struct Plane<'a> {
 }
 
 impl Plane<'_> {
-    fn at(&self, x: usize, y: usize) -> u32 {
-        y.checked_mul(self.stride)
-            .and_then(|row| row.checked_add(x))
-            .and_then(|i| self.samples.get(i))
-            .copied()
-            .map_or(0, u32::from)
+    /// Row `y`'s first `len` samples, or as many as there are.
+    fn row(&self, y: usize, len: usize) -> &[u8] {
+        let start = y.saturating_mul(self.stride);
+        let end = start.saturating_add(len).min(self.samples.len());
+        self.samples.get(start..end).unwrap_or_default()
     }
 }
 
@@ -99,8 +99,22 @@ const fn neighbours(i: usize, n: usize) -> (usize, usize) {
     (near, far)
 }
 
+/// One output row's chroma, vertically: `3 * near + far` for each chroma
+/// column, from the chroma rows nearest the output row and next nearest.
+fn blend_rows(near: &[u8], far: &[u8], out: &mut [u16]) {
+    for ((t, &n), &f) in out.iter_mut().zip(near).zip(far) {
+        // At most 4 * 255.
+        *t = u16::from(n).wrapping_mul(3).wrapping_add(u16::from(f));
+    }
+}
+
 /// Convert a frame's planes to `0xAARRGGBB`, with alpha from `alpha` (one byte
 /// per pixel, `width` a row) or opaque.
+///
+/// A row at a time: each chroma column is blended down once for the row
+/// (`3 * near + far`), and each output pixel then blends two of those across
+/// (`(3 * near + far + 8) >> 4`) -- the one-step filter exactly, as
+/// `3 * (3a + c) + (3b + d) = 9a + 3b + 3c + d`.
 #[allow(
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation,
@@ -113,25 +127,51 @@ pub(super) fn to_argb(
     alpha: Option<&[u8]>,
 ) -> Vec<u32> {
     let (width, height) = (y.width, y.height);
-    let mut out = Vec::with_capacity(width.saturating_mul(height));
-    let columns: Vec<(usize, usize)> = (0..width).map(|x| neighbours(x, width)).collect();
-    for row in 0..height {
+    let mut out = vec![0u32; width.saturating_mul(height)];
+    let chroma_width = width.div_ceil(2);
+    let mut tu = vec![0u16; chroma_width];
+    let mut tv = vec![0u16; chroma_width];
+    let last = chroma_width.saturating_sub(1);
+    for (row, dest) in out.chunks_exact_mut(width.max(1)).enumerate().take(height) {
         let (near_row, far_row) = neighbours(row, height);
-        for (x, &(near, far)) in columns.iter().enumerate() {
-            let chroma = |plane: &Plane<'_>| -> u8 {
-                let sum = 9 * plane.at(near, near_row)
-                    + 3 * plane.at(far, near_row)
-                    + 3 * plane.at(near, far_row)
-                    + plane.at(far, far_row)
-                    + 8;
-                (sum >> 4) as u8
-            };
-            let luma = y.at(x, row) as u8;
-            let a = alpha
-                .and_then(|a| a.get(row * width + x))
-                .copied()
-                .unwrap_or(0xFF);
-            out.push((u32::from(a) << 24) | rgb(luma, chroma(u), chroma(v)));
+        blend_rows(
+            u.row(near_row, chroma_width),
+            u.row(far_row, chroma_width),
+            &mut tu,
+        );
+        blend_rows(
+            v.row(near_row, chroma_width),
+            v.row(far_row, chroma_width),
+            &mut tv,
+        );
+        let luma = y.row(row, width);
+        let alpha_row = alpha.and_then(|a| a.get(row * width..(row + 1) * width));
+        let across =
+            |near: u16, far: u16| -> u8 { ((u32::from(near) * 3 + u32::from(far) + 8) >> 4) as u8 };
+        // Two output pixels to a chroma column: the even one leans left, the
+        // odd one right, each clamped at the row's ends (`neighbours`).
+        for (k, pair) in dest.chunks_mut(2).enumerate() {
+            let at = |t: &[u16], i: usize| t.get(i).copied().unwrap_or(0);
+            let (un, ul, ur) = (
+                at(&tu, k),
+                at(&tu, k.saturating_sub(1)),
+                at(&tu, (k + 1).min(last)),
+            );
+            let (vn, vl, vr) = (
+                at(&tv, k),
+                at(&tv, k.saturating_sub(1)),
+                at(&tv, (k + 1).min(last)),
+            );
+            let chroma = [
+                (across(un, ul), across(vn, vl)),
+                (across(un, ur), across(vn, vr)),
+            ];
+            for (i, (pixel, (cu, cv))) in pair.iter_mut().zip(chroma).enumerate() {
+                let x = 2 * k + i;
+                let a = alpha_row.and_then(|a| a.get(x)).copied().unwrap_or(0xFF);
+                let l = luma.get(x).copied().unwrap_or(0);
+                *pixel = (u32::from(a) << 24) | rgb(l, cu, cv);
+            }
         }
     }
     out

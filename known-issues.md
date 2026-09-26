@@ -165290,34 +165290,45 @@ lossless screenshots and artwork.
 
 ### [F] Lossy WebP decodes at about half libwebp's speed -- 2026-09-25
 
-**Status:** OPEN — lane F's; tech debt, not a bug.
+**Status:** OPEN — lane F's; tech debt, not a bug. Partly paid: the three
+steps below are done, and the gap is now about a third rather than a half.
 
-**In short:** a large lossy WebP -- the common kind, a photograph -- takes
-about twice as long to open here as in a browser: 181 ms for a 2000x1500
-picture against libwebp's 97, 1.5 s for 4000x5333 against 0.86. The pixels
-are libwebp's to the bit; only the speed is behind. Lossy animations inherit
-it: 6.0 ms a frame at 480x270 against libwebp's 3.0 (design-decisions.md
-§1313) -- well inside real time, but the same factor of two.
+**In short:** a large lossy WebP -- the common kind, a photograph -- took
+about twice as long to open here as in a browser. Measured in the decoding
+thread's CPU cycles (wall time is useless on a machine shared with QEMU and
+five other sessions), it now takes 3.93 billion cycles for a 4000x5333
+picture against libwebp's 2.99 (it was 5.03), and 0.40 for 2000x1500 against
+0.30 (was 0.57). The pixels are libwebp's to the bit, corrupt files
+included; only the speed is behind. Lossy animations inherit it.
 
-**Where.** `gui/imagecodec/src/webp/lossy/` -- the conversion to RGB
-(`yuv.rs`), the loop filter (`filter.rs`), the token loop (`lossy.rs`).
+**Where.** `gui/imagecodec/src/webp/lossy/`. The time now splits roughly:
+coefficient tokens 36%, loop filter 25%, conversion to RGB 21%, prediction
+and inverse transform 18%.
 
-**The proper fix,** each measurable on its own against
-`examples/time_decode.rs`, and each held to the fixtures and to a rerun of
-the corrupt-file comparison in design-decisions.md §1312:
-1. Convert a row at a time: upsample each pair of chroma rows once into a
-   row buffer, instead of reading four chroma samples per pixel per channel
-   through bounds-checked lookups.
-2. Filter sixteen samples at a time: load the eight rows (or, for a vertical
-   edge, the transposed columns) across an edge into arrays and filter them
-   lane-wise, which the compiler vectorises, instead of one segment at a time
-   through `Segment::get`.
-3. Keep the token loop's probability rows in a flat, pre-banded table per
-   block type, as libwebp's `bands_ptr` does, so each coefficient costs one
-   indexed load rather than three `get`s.
+**Done** (each measured on its own, each held to the fixtures and to 5,856
+corrupted and truncated files decoded exactly as libwebp decodes them):
+1. The conversion a row at a time: each chroma column blended down once per
+   row, each pixel then two lookups in a row buffer (was four bounds-checked
+   lookups per channel per pixel).
+2. The loop filter an edge at a time: sixteen segments' taps loaded as eight
+   rows of 16-bit lanes and filtered lane-wise with selects instead of
+   branches, which SSE2 can do (32-bit lanes were slower than the scalar
+   code: SSE2 has no 32-bit min, max or abs).
+3. The token loop's probabilities banded by position, one lookup a
+   coefficient (libwebp's `bands_ptr`), and the boolean decoder's refill one
+   eight-byte load.
 
-**How to see it.** `cargo run --release -p imagecodec --example time_decode --
-<lossy.webp>`, against Pillow's `Image.open(...).load()` on the same file.
+**The proper fix, the rest:** libwebp's remaining edge is SIMD it writes by
+hand -- its SSE2 inverse transform and predictors, its SSE2 conversion
+(eight pixels at a time, 16-bit multiply-high), its 16-byte-wide filter.
+The Rust equivalents are the same shapes the filter now has: fixed-size
+16-bit lane arrays the compiler can vectorise, first for the conversion,
+then the inverse transform.
+
+**How to see it.** `target/perfbench` (a scratch harness: the working crate
+against a snapshot copy, interleaved, the minimum of N runs in thread
+cycles), and libwebp's cycles from Pillow's `load()` measured the same way
+with `QueryThreadCycleTime`.
 
 ### [F] A lossless alpha plane cut off mid-symbol can differ from libwebp in its last pixel -- 2026-09-25 -- **fixed 2026-09-25**
 

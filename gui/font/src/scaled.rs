@@ -181,7 +181,8 @@ pub struct ScaledFont {
     /// makes the instance free to change: the file is parsed once and only the
     /// glyph cache is invalidated.
     ///
-    /// Empty for a face with no axes, which [`Coords::is_default`] reports as
+    /// Empty for a face with no axes, which
+    /// [`Coords::is_default`](crate::var::Coords::is_default) reports as
     /// the default instance, so nothing downstream needs to special-case a
     /// static font.
     coords: var::Coords,

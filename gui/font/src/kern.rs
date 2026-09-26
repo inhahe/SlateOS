@@ -52,7 +52,7 @@
 //! step over the accent by itself, so the caller says what stood between the
 //! pair and this decides, per lookup, whether that lookup's flag would have
 //! let it see past — which is the same question
-//! [`Skipper`](crate::skip::Skipper) answers for `GSUB`. That is why the
+//! [`Skipper`] answers for `GSUB`. That is why the
 //! subtables are grouped by lookup here rather than flattened: the flag
 //! belongs to the lookup, and two lookups reached by the same feature may
 //! disagree about it.

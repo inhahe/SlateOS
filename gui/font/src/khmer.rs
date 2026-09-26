@@ -18,7 +18,7 @@
 //!   once — and does it *before any lookup has run at all*, which is the
 //!   single most surprising fact about this shaper. See [`shape`].
 //! * **The vowel's position is in its category.** Indic asks the table for a
-//!   matra's [`Position`](crate::indic::Position); the Khmer grammar has no
+//!   matra's [`Position`]; the Khmer grammar has no
 //!   position axis and names four distinct vowel categories instead. The
 //!   generator folds one into the other, so nothing here reads a position.
 //!
@@ -78,7 +78,7 @@ impl Syllable {
     ///
     /// The numbering is HarfBuzz's `khmer_syllable_type_t`, so that a value
     /// read out of one of its traces means the same thing here. See
-    /// [`syllabic`](crate::syllabic) for why a syllable is remembered as a
+    /// [`syllabic`] for why a syllable is remembered as a
     /// stamp on each glyph rather than as a range.
     #[must_use]
     pub(crate) fn code(self) -> u8 {
@@ -97,7 +97,7 @@ impl Syllable {
     /// unstamped glyph would read back as a syllable to reorder rather than as
     /// one to leave alone. Nothing here relies on a lenient default: the
     /// ranges [`syllables`] produces tile the run exactly, so
-    /// [`syllabic::stamp`](crate::syllabic::stamp) writes every glyph, and the
+    /// [`syllabic::stamp`] writes every glyph, and the
     /// serial in the high nibble is never zero, so a zero byte cannot be
     /// mistaken for a stamped one either.
     #[must_use]

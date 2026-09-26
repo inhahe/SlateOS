@@ -1577,7 +1577,7 @@ impl Face {
     /// Face fallback asks, to decide which face a character that could be
     /// drawn either way comes from: `☺` is in plenty of text faces and in the
     /// emoji face too, and which one draws it depends on whether the text asks
-    /// for its emoji form. See [`itemize`](crate::itemize).
+    /// for its emoji form. See `itemize.rs`.
     #[must_use]
     pub fn has_colour_glyphs(&self) -> bool {
         self.colr.is_some() || self.has_bitmap_glyphs()
@@ -2467,7 +2467,7 @@ impl Face {
     /// Thai private-use fallback, which runs exactly when the answer is *not*
     /// `thai` — including for a face with no `GSUB` at all, which is why that
     /// caller cannot use `shapes_as_default`. See
-    /// [`otl::chosen_from`](crate::otl::chosen_from).
+    /// [`otl::chosen_from`].
     #[must_use]
     pub(crate) fn gsub_chosen_script(&self, script: Option<ScriptTags>) -> Option<[u8; 4]> {
         otl::chosen_from(&self.gsub_scripts, script)

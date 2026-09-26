@@ -117,6 +117,24 @@ pub const SYS_GETRANDOM: u64 = 318;
 /// instead of timing out.
 pub const SYS_FUTEX: u64 = 202;
 
+/// Linux `__NR_io_setup`.
+pub const SYS_IO_SETUP: u64 = 206;
+
+/// Linux `__NR_io_destroy`.
+pub const SYS_IO_DESTROY: u64 = 207;
+
+/// Linux `__NR_io_getevents`.
+pub const SYS_IO_GETEVENTS: u64 = 208;
+
+/// Linux `__NR_io_submit`.
+pub const SYS_IO_SUBMIT: u64 = 209;
+
+/// Linux `__NR_io_cancel`.
+pub const SYS_IO_CANCEL: u64 = 210;
+
+/// Linux `__NR_io_pgetevents`.
+pub const SYS_IO_PGETEVENTS: u64 = 333;
+
 /// Linux `__NR_pidfd_send_signal`.
 pub const SYS_PIDFD_SEND_SIGNAL: u64 = 424;
 
@@ -191,6 +209,47 @@ fn trunc_u32(v: SyscallArg) -> u32 {
     v as u32
 }
 
+/// Reinterpret an argument register as an unsigned 64-bit word (an
+/// `aio_context_t`).
+#[inline]
+#[allow(clippy::cast_sign_loss)]
+fn word_u64(v: SyscallArg) -> u64 {
+    v as u64
+}
+
+/// Reinterpret an argument register as C's `long` on the target: 64 bits.
+#[inline]
+#[allow(clippy::cast_possible_truncation)]
+fn long_i64(v: SyscallArg) -> i64 {
+    v as i64
+}
+
+/// A status the call answered as a `Result`: 0, or -1 with `errno` set.
+#[inline]
+fn ret_status(r: Result<(), i32>) -> SyscallArg {
+    match r {
+        Ok(()) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
+
+/// A count the call answered as a `Result`: the count, or -1 with `errno`
+/// set.
+#[inline]
+fn ret_count(r: Result<i64, i32>) -> SyscallArg {
+    match r {
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(n) => n as SyscallArg,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
+
 /// Widen a 32-bit signed result (the 0/-1 status most of the table
 /// returns, or a pid) to the register width.
 #[inline]
@@ -251,6 +310,8 @@ fn ret_u32(v: u32) -> SyscallArg {
 /// | 102/104/107/108 `get{u,g,eu,eg}id` | [`crate::unistd`] | |
 /// | 110 `getppid` | [`crate::process::getppid`] | |
 /// | 186 `gettid` | [`crate::process::gettid`] | CPython's `os.gettid` |
+/// | 202 `futex` | [`crate::linux_futex::futex`] | all six arguments |
+/// | 206-210, 333 `io_setup` … `io_pgetevents` | [`crate::linux_aio_abi`] | libaio's calls; glibc wraps none (§1114) |
 /// | 318 `getrandom` | [`crate::unistd::getrandom`] | CPython's `bootstrap_hash` |
 /// | 424 `pidfd_send_signal` | [`crate::process::pidfd_send_signal`] | |
 /// | 434 `pidfd_open` | [`crate::process::pidfd_open`] | CPython's `_Py_pidfd_open` |
@@ -319,6 +380,51 @@ pub extern "C" fn syscall(
                 trunc_u32(a6),
             ) as SyscallArg
         }
+        // Kernel AIO.  glibc wraps none of these, so C reaches them only
+        // this way -- libaio included -- and each takes the arguments its
+        // number defines, which is `syscall()`'s contract with its caller.
+        // SAFETY (the five `unsafe` blocks below): that contract -- every
+        // pointer is NULL or the caller's, as the call it names requires.
+        SYS_IO_SETUP => ret_status(unsafe {
+            crate::linux_aio_abi::sys_io_setup(trunc_u32(a1), ptr_arg(a2).cast::<u64>())
+        }),
+        SYS_IO_DESTROY => ret_status(crate::linux_aio_abi::sys_io_destroy(word_u64(a1))),
+        SYS_IO_SUBMIT => ret_count(unsafe {
+            crate::linux_aio_abi::sys_io_submit(
+                word_u64(a1),
+                long_i64(a2),
+                ptr_arg(a3)
+                    .cast_const()
+                    .cast::<*mut crate::linux_aio_abi::Iocb>(),
+            )
+        }),
+        SYS_IO_CANCEL => ret_status(unsafe {
+            crate::linux_aio_abi::sys_io_cancel(
+                word_u64(a1),
+                ptr_arg(a2).cast::<crate::linux_aio_abi::Iocb>(),
+            )
+        }),
+        SYS_IO_GETEVENTS => ret_count(unsafe {
+            crate::linux_aio_abi::sys_io_getevents(
+                word_u64(a1),
+                long_i64(a2),
+                long_i64(a3),
+                ptr_arg(a4).cast::<crate::linux_aio_abi::IoEvent>(),
+                ptr_arg(a5).cast_const().cast::<crate::stat::Timespec>(),
+            )
+        }),
+        SYS_IO_PGETEVENTS => ret_count(unsafe {
+            crate::linux_aio_abi::sys_io_pgetevents(
+                word_u64(a1),
+                long_i64(a2),
+                long_i64(a3),
+                ptr_arg(a4).cast::<crate::linux_aio_abi::IoEvent>(),
+                ptr_arg(a5).cast_const().cast::<crate::stat::Timespec>(),
+                ptr_arg(a6)
+                    .cast_const()
+                    .cast::<crate::linux_aio_abi::AioSigset>(),
+            )
+        }),
         SYS_PIDFD_OPEN => ret_i32(crate::process::pidfd_open(trunc_i32(a1), trunc_u32(a2))),
         SYS_PIDFD_SEND_SIGNAL => ret_i32(crate::process::pidfd_send_signal(
             trunc_i32(a1),
@@ -399,6 +505,13 @@ mod tests {
             SYS_GETPPID,
             SYS_GETTID,
             SYS_GETRANDOM,
+            SYS_FUTEX,
+            SYS_IO_SETUP,
+            SYS_IO_DESTROY,
+            SYS_IO_GETEVENTS,
+            SYS_IO_SUBMIT,
+            SYS_IO_CANCEL,
+            SYS_IO_PGETEVENTS,
             SYS_PIDFD_SEND_SIGNAL,
             SYS_PIDFD_OPEN,
         ];
@@ -407,6 +520,71 @@ mod tests {
                 assert_ne!(vals[i], vals[j], "SYS_ constants must be distinct");
             }
         }
+    }
+
+    /// The kernel-AIO numbers, pinned against syscall_64.tbl.
+    #[test]
+    fn test_aio_numbers_are_linux_numbers() {
+        assert_eq!(
+            [
+                SYS_IO_SETUP,
+                SYS_IO_DESTROY,
+                SYS_IO_GETEVENTS,
+                SYS_IO_SUBMIT,
+                SYS_IO_CANCEL,
+                SYS_IO_PGETEVENTS,
+            ],
+            [206, 207, 208, 209, 210, 333]
+        );
+    }
+
+    fn call(n: u64, args: [SyscallArg; 6]) -> SyscallArg {
+        let [a1, a2, a3, a4, a5, a6] = args;
+        syscall(
+            SyscallArg::try_from(n).expect("test number fits"),
+            a1,
+            a2,
+            a3,
+            a4,
+            a5,
+            a6,
+        )
+    }
+
+    /// libaio's life cycle, by number: a context made, used, and ended, with
+    /// syscall()'s -1 and errno for the refusals.
+    #[test]
+    fn test_aio_by_number() {
+        let mut ctx: u64 = 0;
+        let ctxp = (&raw mut ctx).addr() as SyscallArg;
+        assert_eq!(call(SYS_IO_SETUP, [8, ctxp, 0, 0, 0, 0]), 0);
+        assert_ne!(ctx, 0);
+        let id = ctx as SyscallArg;
+        // Nothing submitted, a zero timeout: 0 events.
+        let zero = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let mut evs = [crate::linux_aio_abi::IoEvent::zeroed(); 2];
+        let evp = evs.as_mut_ptr().addr() as SyscallArg;
+        let tsp = (&raw const zero).addr() as SyscallArg;
+        assert_eq!(call(SYS_IO_GETEVENTS, [id, 1, 2, evp, tsp, 0]), 0);
+        assert_eq!(call(SYS_IO_PGETEVENTS, [id, 1, 2, evp, tsp, 0]), 0);
+        assert_eq!(call(SYS_IO_SUBMIT, [id, 0, 0, 0, 0, 0]), 0);
+        // The refusals.
+        errno::set_errno(0);
+        assert_eq!(call(SYS_IO_SUBMIT, [id, 1, 0, 0, 0, 0]), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        errno::set_errno(0);
+        assert_eq!(call(SYS_IO_CANCEL, [id, 0, 0, 0, 0, 0]), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        errno::set_errno(0);
+        assert_eq!(call(SYS_IO_SETUP, [8, ctxp, 0, 0, 0, 0]), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL, "*ctxp is not 0");
+        assert_eq!(call(SYS_IO_DESTROY, [id, 0, 0, 0, 0, 0]), 0);
+        errno::set_errno(0);
+        assert_eq!(call(SYS_IO_DESTROY, [id, 0, 0, 0, 0, 0]), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     /// An unmapped number must be ENOSYS, not a wild dispatch.  1000 is

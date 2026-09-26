@@ -24193,6 +24193,20 @@ glibc 2.39's `__semctl64`.
   C's fourth never arrived, and `semtimedop`'s timeout was read as a date --
   `B-D-SYSV-SEM-SEMCTL-TIMEOUT-AND-LIMITS` (new, fixed with it).
 
+**Twenty-sixth pass, 2026-09-26 — `linux_aio_abi.rs` (3 sites), lane D.**
+Against Linux 6.6's fs/aio.c.
+
+- **`io_submit`** refused a NULL iocb pointer with `EINVAL`; `io_submit_one`'s
+  `copy_from_user` makes it `EFAULT`. A NULL `iocbpp` was already `EFAULT`,
+  and stays so, after the context.
+- **`io_setup`**'s NULL `ctxp` was right (`get_user`, first) -- and nothing
+  after it was: the limits, the context's id, and how much it holds.
+- **`io_getevents`**' NULL `events` was fixed by the eleventh pass.
+- Beside them, the finding of the pass: nothing Linux refuses at submission
+  was refused at submission here, `io_getevents` did not wait, and a context
+  id was a slot number libaio dereferences -- `B-D-AIO-WAS-NOT-LINUXS` (new,
+  fixed with it).
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24206,13 +24220,13 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-twenty-five swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
+twenty-six swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
 `sched.rs`, `mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`,
-`linux_module.rs`, `sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs` and
-`sysv_sem.rs`. That finishes the files at four: `pwd.rs`, `dirent.rs` and
-`signal.rs` needed nothing at their NULLs -- `pwd.rs`'s database did
-(`B-D-PWD-KNEW-ONLY-ROOT`). Next are the files at three:
-`linux_aio_abi.rs`, `linux_seccomp.rs`, `mman.rs` and `resource.rs`.
+`linux_module.rs`, `sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs`, `sysv_sem.rs`
+and `linux_aio_abi.rs`. That finishes the files at four: `pwd.rs`,
+`dirent.rs` and `signal.rs` needed nothing at their NULLs -- `pwd.rs`'s
+database did (`B-D-PWD-KNEW-ONLY-ROOT`). Next are the other files at three:
+`linux_seccomp.rs`, `mman.rs` and `resource.rs`.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
@@ -169523,6 +169537,81 @@ access mode reliably -- so a zero-length vector on a descriptor open the
 other way is 0 here where Linux says `EBADF`. `RWF_NOWAIT` is the `EAGAIN` of
 a transfer not attempted: correct for a caller that falls back, and a busy
 loop for one that polls and then insists on `RWF_NOWAIT` (none known).
+
+### [D] B-D-AIO-WAS-NOT-LINUXS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/linux_aio_abi.rs`; the `syscall()` routes in
+`posix/src/sys_syscall.rs`.
+
+**What it was.** Linux's kernel asynchronous I/O -- `io_setup`, `io_submit`,
+`io_getevents` and the rest -- as a pool of eight contexts of at most 256
+events, whose ids were the numbers 1 to 8. libaio's `io_getevents` reads the
+ring header at the id's address, so any libaio program would have faulted at
+address 1. Every refusal Linux makes when a request is submitted -- a bad
+descriptor, an unknown command, a bad flag, a bad buffer -- came back later
+as a completion event instead, with `io_submit` reporting success;
+`io_getevents` ignored its timeout and answered `EAGAIN` where Linux waits;
+a request blocked in its transfer (a read of an empty pipe) held a spin lock
+every other AIO call spun on; `io_cancel` and `io_pgetevents` did not exist;
+and the four functions were exported under libaio's names with `syscall()`'s
+return convention, which libaio's callers do not expect -- while
+`syscall(SYS_io_setup, ...)`, the way C actually reaches them, said `ENOSYS`.
+
+**Fix.** Linux 6.6's fs/aio.c inside one process: a context is a ring laid
+out as Linux's `struct aio_ring` and its id is the ring's address; requests
+are accounted as `reqs_available` accounts them, including events the caller
+reaps by moving `head` itself; `__io_submit_one`'s checks in its order, each
+refusal synchronous; `io_getevents` waits on a futex, with a relative
+monotonic timeout, and is woken by another thread's `io_submit` or by
+`io_destroy`, which in turn waits for the calls still inside the context;
+`io_cancel` and `io_pgetevents`; and the six numbers routed through
+`syscall()`, with the names no longer exported (design-decisions §1114).
+
+**What remains.** `IOCB_CMD_POLL` is refused (`B-D-AIO-HAS-NO-POLL`); the
+transfer is still the ordinary calls, so a file's `pread` moves its shared
+position meanwhile (`B-D-PREAD-MOVES-THE-SHARED-FILE-POSITION`); and the
+ring-3 check of the whole path is `services/ctest-aio`.
+
+### [D] B-D-AIO-HAS-NO-POLL — 2026-09-26 — OPEN
+
+**Where:** `posix/src/linux_aio_abi.rs`, `prepare`.
+
+**What it is.** `IOCB_CMD_POLL` (Linux 4.18) asks for a completion when a
+descriptor becomes ready. It is refused with `EINVAL` -- fs/aio.c's own
+answer, "same as no support for IOCB_CMD_POLL", which is what a program
+probing for it (ScyllaDB's reactor does) takes as "use epoll instead". A poll
+that is ready at once could complete at once; one that is not has to be
+completed later, while the program may be in no call of ours at all -- it
+may be waiting on the eventfd it asked to be signalled, or reaping the ring
+itself -- so only something running beside the program can complete it.
+
+**The proper fix.** A helper thread, started on the first pending poll: it
+waits (`poll`) on every pending request's descriptor plus a wake-up eventfd,
+and completes the ready ones into their rings, signalling their eventfds and
+waking `io_getevents` as a completion does now. `io_cancel` then has
+something to find -- a cancelled poll completes with `res` 0 and
+`io_cancel` answers `EINPROGRESS` -- and `io_destroy` cancels its context's
+polls before it waits. glibc runs its POSIX AIO the same way. Trigger: a port
+that submits `IOCB_CMD_POLL` and has no fallback.
+
+### [D] B-D-PREAD-MOVES-THE-SHARED-FILE-POSITION — 2026-09-26 — OPEN
+
+**Where:** `posix/src/file.rs`: `pread`, `pwrite`, and `at_position` under
+`preadv`, `pwritev`, `preadv2` and `pwritev2` -- and so kernel AIO's reads
+and writes of files.
+
+**What it is.** The kernel has no positional read or write, so these save
+the descriptor's position, seek, transfer and seek back. For the length of
+the call the shared position is wrong: another thread reading, writing or
+`lseek`ing the same descriptor meanwhile uses the moved position, and a
+second `pread` on it at the same moment can put the first one's position
+back under it. Linux's `pread` never touches the position.
+
+**The proper fix.** Positional transfers in the kernel's file interface --
+its VFS already reads and writes at an offset (`read_at`/`write_at`, which
+`copy_file_range` uses, and the Linux-ABI `pread64` reaches) -- exposed as
+native syscalls, and `pread` built on them: lane A's, asked for in
+`requests/d-a-positional-file-read-and-write.md`.
 
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 

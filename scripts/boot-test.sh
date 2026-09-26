@@ -8408,6 +8408,21 @@ if [ "$NO_BUILD" -eq 0 ]; then
             echo "  this row is marked src_changed_during_run." >&2
         fi
     fi
+    # The ring-3 services the kernel embeds with `include_bytes!` first.  They
+    # sit outside the workspace, so the build below never rebuilds them, and a
+    # worktree used to boot whatever binary it had last built by hand: on
+    # 2026-09-26 lane A's netstack dated from 7 September.  A service fix
+    # published to main reached no lane's boot until that lane rebuilt, and a
+    # self-test written against the fix would red every lane that had not.
+    # Cargo no-ops a current service in seconds.  A service that no longer
+    # builds stops the run: booting the old binary instead would test code
+    # that is not in the tree.
+    echo "=== Building the embedded services (cargo no-ops the current ones) ==="
+    if ! bash "$SCRIPT_DIR/bootstrap-worktree.sh" --services; then
+        echo "ERROR: an embedded service did not build (above).  The kernel would" >&2
+        echo "       embed a binary that is not the one in this tree." >&2
+        exit 1
+    fi
     echo "=== Building kernel ==="
     # Timed, and recorded in bench/boot-history.jsonl alongside the QEMU window.
     #

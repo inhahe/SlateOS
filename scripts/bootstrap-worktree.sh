@@ -60,6 +60,8 @@
 #
 #     ./scripts/bootstrap-worktree.sh              # everything
 #     ./scripts/bootstrap-worktree.sh netstack     # build just one service
+#     ./scripts/bootstrap-worktree.sh --services   # build every embedded service,
+#                                                  # and provision nothing else
 #     ./scripts/bootstrap-worktree.sh --check      # report what is missing
 #     ./scripts/bootstrap-worktree.sh --check --need=limine,rootfs
 #                                                  # ...only these classes
@@ -296,6 +298,21 @@ provision_sysroot() {
 
 check_only=0
 
+# `--services`: rebuild every service the kernel embeds, and nothing else --
+# no limine, no rootfs, no sysroot. What `scripts/boot-test.sh` runs before
+# every kernel build.
+#
+# WHY BOOT-TEST NEEDS IT. The services live outside the kernel workspace (see
+# the header), so the kernel build never rebuilds them: `include_bytes!` embeds
+# whatever binary the worktree last built, however old. On 2026-09-26 lane A's
+# netstack binary dated from 7 September, a netproto change behind its source,
+# and each of the six lanes boots its own copy -- so a service fix published to
+# main reached no lane's boot until that lane happened to rebuild by hand, and a
+# self-test written against the fix would red every lane that had not. Cargo
+# no-ops a current service in seconds, so asking every boot costs little and
+# makes "the embedded daemon is the daemon in the tree" true by construction.
+services_only=0
+
 # Which classes of prerequisite `--check` reports on.  All three by default.
 #
 # This exists because "missing" and "missing *and needed*" are different
@@ -316,6 +333,7 @@ _need_given=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --check) check_only=1; shift ;;
+        --services) services_only=1; shift ;;
         --need=*)
             # The first --need clears the defaults; further ones add to it.
             if [ "$_need_given" -eq 0 ]; then
@@ -340,7 +358,7 @@ while [ $# -gt 0 ]; do
         --) shift; break ;;
         -*)
             echo "error: unknown option '$1'" >&2
-            echo "usage: bootstrap-worktree.sh [--check [--need=<classes>]] [service...]" >&2
+            echo "usage: bootstrap-worktree.sh [--check [--need=<classes>]] [--services] [service...]" >&2
             exit 2
             ;;
         *) break ;;
@@ -350,6 +368,14 @@ done
 if [ "$_need_given" -eq 1 ] && [ "$check_only" -eq 0 ]; then
     echo "error: --need only applies to --check; provisioning always does" >&2
     echo "       everything, or the services you name." >&2
+    exit 2
+fi
+
+# `--services` means all of them and only them: with --check it would be a
+# second spelling of `--check --need=services`, and with names a contradiction.
+if [ "$services_only" -eq 1 ] && { [ "$check_only" -eq 1 ] || [ $# -gt 0 ]; }; then
+    echo "error: --services builds every embedded service and nothing else;" >&2
+    echo "       it takes no --check and no service names." >&2
     exit 2
 fi
 
@@ -436,8 +462,9 @@ fi
 failed=()
 
 # The bootloader is only needed when provisioning the whole worktree; a
-# targeted rebuild of one service should not reach for the network.
-if [ $# -eq 0 ]; then
+# targeted rebuild of one service -- or of all of them, `--services` -- should
+# not reach for the network.
+if [ $# -eq 0 ] && [ "$services_only" -eq 0 ]; then
     provision_limine || failed+=("limine")
     provision_rootfs || failed+=("rootfs.ext4")
     provision_sysroot || failed+=("sysroot")
@@ -478,7 +505,7 @@ if [ ${#failed[@]} -gt 0 ]; then
 fi
 
 echo ""
-if [ $# -eq 0 ]; then
+if [ $# -eq 0 ] && [ "$services_only" -eq 0 ]; then
     echo "Worktree provisioned. 'cargo build -p kernel' and"
     echo "'./scripts/boot-test.sh' should now both succeed."
 else

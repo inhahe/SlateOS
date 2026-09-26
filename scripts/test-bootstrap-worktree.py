@@ -345,6 +345,67 @@ def test_named_subset_checks_only_that_service(tmp):
     check("the unasked-for service is not reported", "hello" not in out, out)
 
 
+def _stub_cargo(tmp: str) -> tuple[str, str]:
+    """A `cargo` that records where it was run and with what, and builds
+    nothing. Returns (directory to put first on PATH, its log)."""
+    bindir = os.path.join(tmp, "stub-bin")
+    os.makedirs(bindir, exist_ok=True)
+    log = os.path.join(tmp, "stub-cargo.log")
+    with open(os.path.join(bindir, "cargo"), "w", encoding="utf-8",
+              newline="\n") as fh:
+        fh.write('#!/usr/bin/env bash\n'
+                 'printf "%s|%s\\n" "$(basename "$PWD")" "$*" >> "$STUB_CARGO_LOG"\n')
+    os.chmod(os.path.join(bindir, "cargo"), 0o755)
+    return bindir, log
+
+
+def test_services_builds_every_embedded_service_and_nothing_else(tmp):
+    """`--services` is what boot-test.sh runs before every kernel build: each
+    embedded service, and no limine, rootfs or sysroot -- which here are all
+    absent, so provisioning any of them would be seen (and would reach for the
+    network)."""
+    root = make_tree(tmp, "services-only", ["init", "netstack"], limine=False,
+                     rootfs=None)
+    bindir, log = _stub_cargo(tmp)
+    env = dict(os.environ)
+    env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+    env["STUB_CARGO_LOG"] = log
+    proc = subprocess.run(
+        [BASH, os.path.join(root, "scripts", "bootstrap-worktree.sh"),
+         "--services"],
+        cwd=root, capture_output=True, text=True, env=env,
+    )
+    out = proc.stdout + proc.stderr
+    check("--services exits 0 when every service builds", proc.returncode == OK,
+          "got %d\n%s" % (proc.returncode, out))
+    calls = []
+    if os.path.exists(log):
+        with open(log, encoding="utf-8") as fh:
+            calls = sorted(line.strip() for line in fh if line.strip())
+    check("--services runs `cargo build --release` once in each embedded "
+          "service's directory", calls == ["init|build --release",
+                                           "netstack|build --release"],
+          "calls: %r\n%s" % (calls, out))
+    check("--services provisions no limine",
+          not os.path.exists(os.path.join(root, "limine")), out)
+    check("--services provisions no rootfs",
+          not os.path.exists(os.path.join(root, "rootfs.ext4")), out)
+    check("--services does not build the sysroot", "sysroot" not in out, out)
+
+
+def test_services_takes_neither_names_nor_check(tmp):
+    root = make_tree(tmp, "services-misuse", ["init"])
+    for extra in (["init"], ["--check"]):
+        proc = subprocess.run(
+            [BASH, os.path.join(root, "scripts", "bootstrap-worktree.sh"),
+             "--services", *extra],
+            cwd=root, capture_output=True, text=True,
+        )
+        out = proc.stdout + proc.stderr
+        check("--services %s exits 2" % extra[0], proc.returncode == USAGE,
+              "got %d\n%s" % (proc.returncode, out))
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="bootstrap-test-")
     print("bootstrap-worktree.sh tests (scratch: %s)" % tmp)
@@ -362,6 +423,8 @@ def main() -> int:
         test_need_scopes_the_question_to_what_a_run_uses,
         test_need_rejects_an_unknown_class,
         test_need_without_check_is_refused,
+        test_services_builds_every_embedded_service_and_nothing_else,
+        test_services_takes_neither_names_nor_check,
     )
     try:
         for test in tests:

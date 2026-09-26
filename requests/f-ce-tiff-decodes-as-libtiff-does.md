@@ -12,7 +12,7 @@ CIE L*a*b* pictures of every depth libtiff's viewer path takes, in strips or til
 PackBits, LZW, Deflate, CCITT fax (scanned documents) or JPEG (photographs
 and colour scans), turned by the `Orientation` tag. The picture is
 exactly what a libtiff-based viewer shows. A few rare TIFFs are refused by
-name -- `ImageError::Unsupported` -- old-style JPEG and four vendor
+name -- `ImageError::Unsupported` -- old-style JPEG and two vendor
 codecs. Anything that decodes
 through `imagecodec` needs no change; the few places that sniff formats
 themselves do.

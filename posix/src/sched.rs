@@ -511,14 +511,31 @@ pub extern "C" fn sched_getaffinity(pid: i32, cpusetsize: usize, mask: *mut CpuS
 ///      against `cpus_allowed` returns false).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const CpuSetT) -> i32 {
-    if mask.is_null() {
-        // Linux: copy_from_user with bad user pointer → -EFAULT.
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    if cpusetsize < core::mem::size_of::<CpuSetT>() {
-        errno::set_errno(errno::EINVAL);
-        return -1;
+    // `get_user_cpu_mask` (kernel/sched/core.c): the kernel's mask is
+    // cleared, then `min(len, cpumask_size())` bytes are copied in -- so a
+    // short mask is zero-extended, not refused, and a NULL one faults only if
+    // a byte is copied.  Until 2026-09-26 a mask shorter than the whole
+    // `cpu_set_t` was EINVAL, "because our stub does not zero-pad", and
+    // Linux's `cpumask_size()` is only as large as the machine's CPUs need:
+    // `sizeof (unsigned long)` is a size Linux programs pass.
+    let mut local = CpuSetT {
+        bits: [0; CPU_SETSIZE_BITS / 64],
+    };
+    let copy = cpusetsize.min(core::mem::size_of::<CpuSetT>());
+    if copy > 0 {
+        if mask.is_null() {
+            errno::set_errno(errno::EFAULT);
+            return -1;
+        }
+        // SAFETY: the caller's contract makes `mask` readable for
+        // `cpusetsize >= copy` bytes, and `local` holds a whole `CpuSetT`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                mask.cast::<u8>(),
+                (&raw mut local).cast::<u8>(),
+                copy,
+            );
+        }
     }
     if pid < 0 {
         // Linux: find_process_by_pid(negative) → NULL → -ESRCH.
@@ -527,22 +544,12 @@ pub extern "C" fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const Cp
     }
 
     let ncpus = online_cpu_count().min(CPU_SETSIZE_BITS);
-
-    // SAFETY: mask is non-null and large enough.
-    let any_valid = unsafe {
-        let mut found = false;
-        let mut cpu: usize = 0;
-        while cpu < ncpus {
-            let word = cpu / 64;
-            let bit = cpu % 64;
-            if (*mask).bits[word] & (1u64 << bit) != 0 {
-                found = true;
-                break;
-            }
-            cpu = cpu.wrapping_add(1);
-        }
-        found
-    };
+    let any_valid = (0..ncpus).any(|cpu| {
+        local
+            .bits
+            .get(cpu / 64)
+            .is_some_and(|word| word & (1u64 << (cpu % 64)) != 0)
+    });
 
     if !any_valid {
         errno::set_errno(errno::EINVAL);
@@ -1006,12 +1013,28 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
+    /// A short mask is zero-extended, as `get_user_cpu_mask` does: one byte
+    /// holding CPU 0 is a valid mask.  This was EINVAL until 2026-09-26.
     #[test]
-    fn test_sched_setaffinity_too_small_einval() {
+    fn test_sched_setaffinity_short_mask_is_zero_extended() {
         let cpuset = CpuSetT { bits: [1; 16] };
         let ret = sched_setaffinity(0, 1, &raw const cpuset);
-        assert_eq!(ret, -1);
+        assert_eq!(ret, 0);
+        // Eight bytes -- sizeof (unsigned long), a size Linux programs pass.
+        assert_eq!(sched_setaffinity(0, 8, &raw const cpuset), 0);
+    }
+
+    /// With nothing to copy the pointer is never read: a NULL mask of
+    /// length 0 is an empty mask, EINVAL for our own pid and ESRCH for a
+    /// bad one -- never EFAULT.
+    #[test]
+    fn test_sched_setaffinity_zero_length_null_mask() {
+        errno::set_errno(0);
+        assert_eq!(sched_setaffinity(0, 0, core::ptr::null()), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+        errno::set_errno(0);
+        assert_eq!(sched_setaffinity(-1, 0, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
     }
 
     #[test]
@@ -2084,8 +2107,7 @@ mod tests {
 
     #[test]
     fn test_setaffinity_phase118_null_mask_wins_over_small_size() {
-        // (mask=NULL, cpusetsize=1): Linux copy_from_user fails before
-        // any len-related logic kicks in → EFAULT.
+        // (mask=NULL, cpusetsize=1): one byte is copied, and faults.
         errno::set_errno(0);
         let ret = sched_setaffinity(0, 1, core::ptr::null());
         assert_eq!(ret, -1);
@@ -2093,14 +2115,15 @@ mod tests {
     }
 
     #[test]
-    fn test_setaffinity_phase118_size_wins_over_negative_pid() {
-        // (mask valid, cpusetsize=1, pid=-1): in our strict stub the
-        // size check fires before the pid lookup → EINVAL.
+    fn test_setaffinity_phase118_short_size_is_not_an_error() {
+        // (mask valid, cpusetsize=1, pid=-1): the short mask is
+        // zero-extended, so the pid decides → ESRCH.  This asserted the
+        // "strict stub"'s EINVAL until 2026-09-26.
         let cpuset = CpuSetT { bits: [1; 16] };
         errno::set_errno(0);
         let ret = sched_setaffinity(-1, 1, &raw const cpuset);
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
     }
 
     #[test]

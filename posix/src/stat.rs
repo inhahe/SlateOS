@@ -340,12 +340,32 @@ pub extern "C" fn S_ISSOCK(mode: u32) -> i32 {
 /// them.
 #[must_use]
 pub fn mknod_type_valid(mode: u32) -> bool {
+    may_mknod(mode).is_ok()
+}
+
+/// Linux's `may_mknod` (fs/namei.c:4006), the first thing `do_mknodat`
+/// does -- before the path is resolved: a regular file, a device, a FIFO or
+/// a socket may be made, and so may type 0, which "translates to S_IFREG";
+/// a directory is EPERM; anything else is EINVAL.
+///
+/// Until 2026-09-26 type 0 was refused with EINVAL and a directory was
+/// EINVAL, both under comments saying Linux does so; neither is what
+/// `may_mknod` says.
+pub fn may_mknod(mode: u32) -> Result<(), i32> {
     let t = mode & crate::fcntl::S_IFMT;
-    t == crate::fcntl::S_IFREG
+    if t == crate::fcntl::S_IFDIR {
+        Err(crate::errno::EPERM)
+    } else if t == 0
+        || t == crate::fcntl::S_IFREG
         || t == crate::fcntl::S_IFCHR
         || t == crate::fcntl::S_IFBLK
         || t == crate::fcntl::S_IFIFO
         || t == crate::fcntl::S_IFSOCK
+    {
+        Ok(())
+    } else {
+        Err(crate::errno::EINVAL)
+    }
 }
 
 /// Create a special or ordinary file.
@@ -376,6 +396,12 @@ pub fn mknod_type_valid(mode: u32) -> bool {
 /// - `ENOTDIR`/`ENOENT`: a path component is wrong.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mknod(pathname: *const u8, mode: u32, _dev: u64) -> i32 {
+    // `do_mknodat` (fs/namei.c:4023) runs `may_mknod` first; `getname`'s
+    // EFAULT/ENOENT only surface after, from `filename_create`.
+    if let Err(e) = may_mknod(mode) {
+        crate::errno::set_errno(e);
+        return -1;
+    }
     if pathname.is_null() {
         crate::errno::set_errno(crate::errno::EFAULT);
         return -1;
@@ -383,10 +409,6 @@ pub extern "C" fn mknod(pathname: *const u8, mode: u32, _dev: u64) -> i32 {
     // SAFETY: pathname non-NULL; read one byte to detect empty string.
     if unsafe { *pathname } == 0 {
         crate::errno::set_errno(crate::errno::ENOENT);
-        return -1;
-    }
-    if !mknod_type_valid(mode) {
-        crate::errno::set_errno(crate::errno::EINVAL);
         return -1;
     }
     // Phase 188: CAP_MKNOD gate fires only for character and block
@@ -408,10 +430,11 @@ pub extern "C" fn mknod(pathname: *const u8, mode: u32, _dev: u64) -> i32 {
 /// Returns -1 with `ENOSYS` after argument-domain validation, matching
 /// `mknod` for path/mode and adding directory-fd checks.
 ///
-/// Validation order:
-/// 1. `pathname == NULL` → `EFAULT`.
-/// 2. `pathname` empty → `ENOENT`.
-/// 3. `mode & S_IFMT` invalid → `EINVAL`.
+/// Validation order is `do_mknodat`'s (fs/namei.c:4023):
+/// 1. [`may_mknod`]: a directory → `EPERM`, another invalid type → `EINVAL`
+///    -- before the path is looked at.
+/// 2. `pathname == NULL` → `EFAULT`.
+/// 3. `pathname` empty → `ENOENT`.
 /// 4. `dirfd != AT_FDCWD` and `dirfd < 0` → `EBADF`.
 /// 5. `dirfd != AT_FDCWD` and not an open fd → `EBADF`.
 /// 6. (Phase 188) `mode & S_IFMT` is `S_IFCHR` or `S_IFBLK` and the
@@ -420,6 +443,10 @@ pub extern "C" fn mknod(pathname: *const u8, mode: u32, _dev: u64) -> i32 {
 /// 7. All validated → `ENOSYS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mknodat(dirfd: i32, pathname: *const u8, mode: u32, _dev: u64) -> i32 {
+    if let Err(e) = may_mknod(mode) {
+        crate::errno::set_errno(e);
+        return -1;
+    }
     if pathname.is_null() {
         crate::errno::set_errno(crate::errno::EFAULT);
         return -1;
@@ -427,10 +454,6 @@ pub extern "C" fn mknodat(dirfd: i32, pathname: *const u8, mode: u32, _dev: u64)
     // SAFETY: pathname non-NULL.
     if unsafe { *pathname } == 0 {
         crate::errno::set_errno(crate::errno::ENOENT);
-        return -1;
-    }
-    if !mknod_type_valid(mode) {
-        crate::errno::set_errno(crate::errno::EINVAL);
         return -1;
     }
     if dirfd != crate::file::AT_FDCWD {
@@ -1315,8 +1338,10 @@ mod tests {
 
     #[test]
     fn test_mknod_type_valid_rejects_dir() {
-        // Directories are created via mkdir(2), not mknod.
+        // Directories are created via mkdir(2), not mknod -- and the refusal
+        // is EPERM (fs/namei.c:4017), not EINVAL.
         assert!(!mknod_type_valid(S_IFDIR | 0o755));
+        assert_eq!(may_mknod(S_IFDIR | 0o755), Err(crate::errno::EPERM));
     }
 
     #[test]
@@ -1326,10 +1351,11 @@ mod tests {
     }
 
     #[test]
-    fn test_mknod_type_valid_rejects_zero() {
-        // mode=0 has no type bits — Linux's do_mknodat rejects this.
-        assert!(!mknod_type_valid(0));
-        assert!(!mknod_type_valid(0o644));
+    fn test_mknod_type_valid_accepts_zero() {
+        // Type 0 "translates to S_IFREG" (fs/namei.c:4014).  This test
+        // asserted the opposite until 2026-09-26, citing do_mknodat.
+        assert!(mknod_type_valid(0));
+        assert!(mknod_type_valid(0o644));
     }
 
     // --- mknod: per-error-class ---
@@ -1349,17 +1375,18 @@ mod tests {
     }
 
     #[test]
-    fn test_mknod_bad_type_einval() {
+    fn test_mknod_directory_type_eperm() {
         crate::errno::set_errno(0);
         assert_eq!(mknod(b"/tmp/x\0".as_ptr(), S_IFDIR | 0o755, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
     }
 
     #[test]
-    fn test_mknod_no_type_bits_einval() {
+    fn test_mknod_no_type_bits_is_a_regular_file() {
+        // Past `may_mknod`, so the stub's ENOSYS -- not EINVAL.
         crate::errno::set_errno(0);
         assert_eq!(mknod(b"/tmp/x\0".as_ptr(), 0o644, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]
@@ -1379,19 +1406,23 @@ mod tests {
     // --- mknod: ordering ---
 
     #[test]
-    fn test_mknod_null_beats_bad_type() {
-        // NULL path checked before mode validation.
+    fn test_mknod_bad_type_beats_null_path() {
+        // `may_mknod` runs before `getname`'s error surfaces
+        // (fs/namei.c:4032 then :4036).  These two tests asserted the
+        // reverse until 2026-09-26.
         crate::errno::set_errno(0);
         assert_eq!(mknod(core::ptr::null(), S_IFDIR | 0o755, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        crate::errno::set_errno(0);
+        assert_eq!(mknod(core::ptr::null(), S_IFLNK | 0o777, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
-    fn test_mknod_empty_beats_bad_type() {
-        // Empty path checked before mode validation.
+    fn test_mknod_bad_type_beats_empty_path() {
         crate::errno::set_errno(0);
         assert_eq!(mknod(b"\0".as_ptr(), S_IFDIR | 0o755, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
     }
 
     // --- mknodat: per-error-class ---
@@ -1417,10 +1448,18 @@ mod tests {
     }
 
     #[test]
-    fn test_mknodat_bad_type_einval() {
+    fn test_mknodat_bad_type() {
+        // A directory is EPERM and a symlink EINVAL (`may_mknod`); the
+        // first was EINVAL until 2026-09-26.
         crate::errno::set_errno(0);
         assert_eq!(
             mknodat(crate::file::AT_FDCWD, b"n\0".as_ptr(), S_IFDIR | 0o755, 0),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        crate::errno::set_errno(0);
+        assert_eq!(
+            mknodat(crate::file::AT_FDCWD, b"n\0".as_ptr(), S_IFLNK | 0o777, 0),
             -1,
         );
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -1454,18 +1493,18 @@ mod tests {
     // --- mknodat: ordering ---
 
     #[test]
-    fn test_mknodat_null_beats_bad_type() {
-        // NULL path is checked first, before mode and dirfd.
+    fn test_mknodat_bad_type_beats_null_path() {
+        // `may_mknod` first, as in mknod.
         crate::errno::set_errno(0);
         assert_eq!(mknodat(-1, core::ptr::null(), S_IFDIR | 0, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
     }
 
     #[test]
-    fn test_mknodat_empty_beats_bad_type() {
+    fn test_mknodat_bad_type_beats_empty_path() {
         crate::errno::set_errno(0);
         assert_eq!(mknodat(-1, b"\0".as_ptr(), S_IFDIR | 0, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
     }
 
     #[test]
@@ -1473,7 +1512,14 @@ mod tests {
         // Mode validation comes before dirfd validation.
         crate::errno::set_errno(0);
         assert_eq!(mknodat(-1, b"n\0".as_ptr(), S_IFDIR | 0o755, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+    }
+
+    #[test]
+    fn test_mknodat_null_path_with_a_valid_type_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(mknodat(-1, core::ptr::null(), S_IFIFO | 0o644, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     // --- mkfifo: per-error-class ---
@@ -1624,23 +1670,24 @@ mod tests {
     // --- Real-world buggy callers ---
 
     #[test]
-    fn test_buggy_mknod_perms_only() {
-        // Common bug: passing 0o644 to mknod expecting it to create a
-        // regular file.  POSIX permits this (mode==0 → regular file in
-        // some implementations) but Linux's do_mknodat is strict and
-        // returns EINVAL.  We match Linux.
+    fn test_mknod_perms_only_makes_a_regular_file() {
+        // Passing 0o644 to mknod to create a regular file is *correct* on
+        // Linux: type 0 "translates to S_IFREG" (fs/namei.c:4014).  This
+        // test used to call it a bug that "Linux's do_mknodat is strict"
+        // about; it is not.  Past `may_mknod`, it reaches the stub.
         crate::errno::set_errno(0);
         assert_eq!(mknod(b"/tmp/x\0".as_ptr(), 0o644, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]
     fn test_buggy_mknod_directory_type() {
         // Buggy caller tries to create a directory via mknod.  Must use
-        // mkdir(2).  Linux rejects with EINVAL.
+        // mkdir(2).  Linux refuses with EPERM (fs/namei.c:4017), which
+        // this asserted as EINVAL until 2026-09-26.
         crate::errno::set_errno(0);
         assert_eq!(mknod(b"/tmp/d\0".as_ptr(), S_IFDIR | 0o755, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
     }
 
     #[test]
@@ -1861,14 +1908,15 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
         }
 
-        /// EINVAL (bad type, e.g. S_IFDIR) beats EPERM.  Type
-        /// validation runs before `vfs_mknod` is even called.
+        /// EINVAL (bad type, e.g. S_IFLNK) beats EPERM.  Type
+        /// validation (`may_mknod`) runs before `vfs_mknod` is even
+        /// called.  (S_IFDIR, which this used, is itself EPERM there.)
         #[test]
         fn test_mknod_phase188_einval_beats_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_mknod();
             crate::errno::set_errno(0);
-            assert_eq!(mknod(b"/tmp/d\0".as_ptr(), S_IFDIR | 0o755, 0), -1,);
+            assert_eq!(mknod(b"/tmp/d\0".as_ptr(), S_IFLNK | 0o777, 0), -1,);
             assert_eq!(
                 crate::errno::get_errno(),
                 crate::errno::EINVAL,
@@ -2020,8 +2068,8 @@ mod tests {
         // -- Sentinel --------------------------------------------------------
 
         /// With CAP_MKNOD held, all existing terminals still fire:
-        /// EFAULT, ENOENT, EINVAL, ENOSYS.  Confirms the gate is
-        /// gated, not unconditional.
+        /// EFAULT, ENOENT, EINVAL, EPERM for a directory, ENOSYS.
+        /// Confirms the gate is gated, not unconditional.
         #[test]
         fn test_mknod_phase188_with_cap_existing_terminals_unchanged() {
             let _g = CapGuard::snapshot();
@@ -2036,8 +2084,12 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
             // EINVAL.
             crate::errno::set_errno(0);
-            assert_eq!(mknod(b"/tmp/d\0".as_ptr(), S_IFDIR | 0o755, 0), -1,);
+            assert_eq!(mknod(b"/tmp/d\0".as_ptr(), S_IFLNK | 0o777, 0), -1,);
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+            // EPERM for a directory, whatever the capabilities.
+            crate::errno::set_errno(0);
+            assert_eq!(mknod(b"/tmp/d\0".as_ptr(), S_IFDIR | 0o755, 0), -1,);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
             // ENOSYS for CHR with cap.
             crate::errno::set_errno(0);
             assert_eq!(mknod(b"/dev/n\0".as_ptr(), S_IFCHR | 0o666, 0), -1,);

@@ -23731,6 +23731,81 @@ performs in one. Nine for nine across four passes. One refinement: `umount`'s
 comment was *true of an older kernel*. Before trusting a cited order, check
 which kernel it describes.
 
+**Eleventh pass, 2026-09-26 — a seeded sample of twenty from the tail, lane D.**
+The tenth pass proposed retiring this entry by sampling: classify twenty of the
+tail's sites at random and close the entry if they came back clean. They did
+not. Twelve of the twenty were wrong — nearly all in their *order* — and
+functions beside five of them were wrong too. (The sample is reproducible: the
+sites are every non-comment `is_null()` line in `posix/src` with `EFAULT` in
+the next four lines, outside test modules and the seven files walked by passes
+three to ten, sorted; then `random.seed(20260926); random.sample(sites, 20)`.)
+
+Sampled and wrong:
+
+- **`aio_fsync`** tested `aiocbp` before `op`, and let a closed descriptor
+  through to the asynchronous status; glibc tests `op`, then asks
+  `fcntl(F_GETFL)` (rt/aio_fsync.c) — under a comment calling the reverse
+  "Linux's libaio/glibc convention".
+- **`scandir`** refused a NULL `namelist` before opening the directory, walked
+  the directory twice (calling the filter twice per entry), and stored an
+  empty allocation for no entries. glibc's `__scandir_tail` opens first, walks
+  once, and stores NULL; `scandirat` had the same order.
+- **`getdents64`** refused a zero count and a NULL buffer before a closed
+  descriptor. fs/readdir.c looks the descriptor up first and judges the count
+  and the buffer per entry, so at the end of a directory the answer is 0
+  whatever they are; a NULL buffer is now probed rather than refused. Legacy
+  `getdents`, beside it, had the same order and answered `ENOSYS` to every valid
+  call, "because the legacy record's inode field is 32 bits" — true only of
+  32-bit architectures. It writes `struct linux_dirent` now (§1108).
+- **`ftw`** refused `nopenfd < 1` with `EINVAL`; glibc's `ftw_startup` makes it
+  1. That stays until `B-D-FTW-STOPS-AT-NOPENFD-DEEP` (new, below) is fixed,
+  because today a budget of one descriptor is also a depth of one.
+- **`io_getevents`** refused a NULL `events` before looking for events; fs/aio.c
+  faults only in the copy, so with nothing to deliver the answer is 0, and a
+  fault leaves the event queued.
+- **`landlock_create_ruleset`** read flags 0 with a NULL `attr` as a malformed
+  probe (`EINVAL`). Flags 0 is the create form, whose NULL `attr` is
+  `copy_min_struct_from_user`'s `EFAULT`, before the size — the comment said
+  the reverse.
+- **`posix_memalign`** refused a NULL `memptr` before the alignment; glibc tests
+  the alignment (`EINVAL`), allocates, and only then writes.
+- **`mq_getattr`/`mq_setattr`**: a NULL `attr` was `EFAULT`. glibc's
+  `mq_getattr` is `mq_setattr (mqdes, NULL, attr)`, and ipc/mqueue.c treats
+  either NULL as "not asked". `mq_setattr` also accepted flags other than
+  `O_NONBLOCK`.
+- **`mq_timedsend`/`mq_timedreceive`** refused a NULL timeout. It is no
+  timeout: glibc's own `mq_send` is `mq_timedsend` with NULL.
+- **`sched_setaffinity`** refused a mask shorter than 128 bytes with `EINVAL`
+  ("our stub does not zero-pad"), and a NULL mask of length 0 with `EFAULT`.
+  `get_user_cpu_mask` zero-extends a short mask — `sizeof (unsigned long)` is
+  a size Linux programs pass — and copies nothing for length 0.
+- **`mknod`** refused type 0 with `EINVAL`, which Linux makes a regular file,
+  and a directory with `EINVAL` rather than `EPERM` — both after the path,
+  where `may_mknod` runs first; its tests called Linux "strict" about type 0.
+  `mknodat`, beside it, the same.
+- **`fattach`** validated its arguments; glibc 2.39's is `ENOSYS` whatever they
+  are (posix/streams-compat.c). So are `fdetach`, `putmsg`, `putpmsg`,
+  `getmsg` and `getpmsg`, which had the same invented validation — added by an
+  earlier phase to give "probing callers meaningful feedback", which did the
+  opposite: a probe with placeholder arguments was told `EBADF`, not the
+  `ENOSYS` it tests for (§1108). `isastream` called a closed descriptor "not a
+  stream"; glibc says `EBADF`.
+
+Sampled and right: `setkey`'s `EFAULT` (crypt.rs: the §303 substitute, with no
+upstream to check against since glibc 2.39 dropped `setkey`); `TIOCSPGRP`
+(ioctl.rs: `ENOTTY` before the `get_user`, as `tiocspgrp`); `perf_event_open`
+(`perf_copy_attr`'s order); `SECCOMP_GET_ACTION_AVAIL`; `getpwuid_r` (the §303
+substitute — upstream's answer depends on the NSS backend); the NULL pointers of
+`clock_adjtime`, `clock_gettime` and `timer_create`. Beside those last three,
+though: `clock_adjtime(CLOCK_TAI)` adjusted the real-time clock, where 6.6's
+`clock_tai` has no `clock_adj` and the answer is `EOPNOTSUPP`; and `timer_create`
+armed `CLOCK_MONOTONIC_RAW` and the two `_COARSE` clocks, which can be read but
+not armed (`EOPNOTSUPP`), and reported a full timer table after the event and
+pointer checks it precedes.
+
+**So sampling cannot retire this entry.** With twelve of twenty wrong, the
+tail is presumptively wrong, not presumptively right, and gets a full sweep.
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -23740,13 +23815,13 @@ fixed its nine ordering bugs, and settled the pointer sites wholesale —
 NPTL has no NULL checks at all, so there is no upstream errno to look up and
 `EFAULT` is the adopted substitute. Do not re-open it by grep count. The same
 goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
-`epoll.rs`, walked by passes five to ten. What is left is a long tail — on
-2026-09-25, `time.rs`, `semaphore.rs`, `sched.rs`, `ioctl.rs` and `dirent.rs`
-at eight sites each (the last two partly walked by the second pass),
-`mqueue.rs` and `crypt.rs` at seven, `aio.rs` at six, and about forty files at
-five or fewer — which argues for retiring this entry by sampling rather than by
-another file-at-a-time sweep: classify a random twenty of the tail, and close
-the entry if they come back clean, reopening per function thereafter.
+`epoll.rs`, walked by passes five to ten. What is left is a long tail, and
+the eleventh pass showed it cannot be retired by sampling: it needs the
+file-at-a-time sweep. On 2026-09-26 the sampling script counts 128 sites in 39
+files — about a dozen of them classified by that pass — led by `ioctl.rs`,
+`semaphore.rs` and `time.rs` at eight each, `aio.rs` and `sched.rs` at six,
+`mqueue.rs` and `resolv.rs` at five, and twelve files at four; sweep them in
+that order.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
@@ -23756,8 +23831,9 @@ habit — test at each per-kind copy — and it has to be done arm by arm, becau
 several arms (eventfd, timerfd, inotify) dereference the buffer themselves
 (design-decisions §1107, point 2).
 
-Five habits carry forward, one per pass that produced one. From the tenth
-pass: **the NULL test belongs where the copy is, not where `access_ok` is**,
+Six habits carry forward, one per pass that produced one. From the
+eleventh pass: **port an upstream stub as a stub** — validation in front of its
+`ENOSYS` changes the one answer its callers test for. From the tenth pass: **the NULL test belongs where the copy is, not where `access_ok` is**,
 because on x86-64 `access_ok` admits NULL. From `socket.rs`:
 **do not generalise a rule from one sibling call to the next** — `bind` and
 `connect` order `ENOTSOCK` oppositely, and `sendmsg` and `sendto` order
@@ -165451,6 +165527,33 @@ identity, as upstream's `epitem` is `(file, fd)`. In `close()`, once the
 handle has no descriptor left (`fdtable::is_handle_referenced`), purge every
 entry naming it from every instance. A `dup` then keeps the entry alive as it
 does upstream, and the `EPOLL_CTL_DEL` deviation can go.
+
+### [D] B-D-FTW-STOPS-AT-NOPENFD-DEEP — 2026-09-26 — OPEN
+
+**Where:** `posix/src/ftw.rs` — `ftw`, `nftw` (the `Walker`).
+
+**In short:** `ftw(root, fn, n)` and `nftw` visit only the top `n` levels of a
+tree, and never more than 32: a directory deeper than that is reported as
+unreadable (`FTW_DNR`, `errno` `ENOMEM`) and nothing inside it is visited.
+glibc walks the whole tree whatever `n` is; `n` only limits how many
+directories it holds open at once. A program passing a small `n` — `ftw(dir,
+fn, 1)` is common, 20 traditional — silently misses files, and a traversal
+that omits files is worse than one that fails.
+
+**Repro:** a tree `a/b/c/f`; `ftw("a", cb, 1)` reports `a` as `FTW_D` and
+`a/b` as `FTW_DNR`; `c` and `f` are never seen.
+
+**Why.** The walker holds one directory stream open per level, so the
+descriptor budget is also a depth budget (`depth_limit`, capped by
+`MAX_DEPTH`). Found by the NULL-pointer audit's eleventh pass.
+
+**Proper fix.** glibc's (io/ftw.c, `open_dir_stream`): when a new level needs a
+stream and `n` are open, read the rest of the oldest open stream's entries into
+memory, close it, and serve that level from memory when the walk returns to it.
+Then no depth cap is needed but `PATH_MAX`'s, and `nopenfd < 1` becomes 1, as
+glibc's `ftw_startup` makes it, instead of `EINVAL`. Symlink cycles without
+`FTW_PHYS` then need glibc's other half, the set of directories already walked
+(`find_object`), since `MAX_DEPTH` is what stops them today.
 
 ### [D] B-D-PRINTF-DROPPED-EVERYTHING-PAST-4096-BYTES — 2026-09-26 — FIXED
 

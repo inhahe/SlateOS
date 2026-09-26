@@ -286,23 +286,23 @@ pub extern "C" fn landlock_create_ruleset(
         return -1;
     }
 
-    // Linux's order (matching `copy_min_struct_from_user` then the
-    // explicit page-size check): `size < min` is EINVAL, oversized is
-    // E2BIG, then dereferencing a bad pointer is EFAULT.  Critically
-    // `size == 0` is EINVAL *before* the NULL-attr EFAULT — a buggy
-    // caller that passes `(NULL, 0, 0)` should be steered toward
-    // "your size is wrong" rather than "your pointer is wrong",
-    // because the right fix is to fill in the size.
+    // Linux's order is `copy_min_struct_from_user`'s
+    // (security/landlock/syscalls.c:47): a NULL `src` is EFAULT *first*
+    // (:53), then `size < min` is EINVAL (:59), then oversized is E2BIG
+    // (:61).  Until 2026-09-26 the NULL test came last here, under a
+    // comment claiming this very function's order and arguing that a
+    // caller passing `(NULL, 0, 0)` "should be steered toward 'your size is
+    // wrong'".  The kernel does not steer; it says EFAULT.
+    if attr.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
     if size < MIN_RULESET_ATTR_SIZE {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
     if size > MAX_RULESET_ATTR_SIZE {
         errno::set_errno(errno::E2BIG);
-        return -1;
-    }
-    if attr.is_null() {
-        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -570,13 +570,16 @@ mod tests {
         assert_eq!(errno::get_errno(), 0);
     }
 
+    /// Flags 0 is not the probe but the create form, whose NULL `attr` is
+    /// `copy_min_struct_from_user`'s EFAULT -- tested before the size
+    /// (security/landlock/syscalls.c).  This asserted EINVAL until
+    /// 2026-09-26, reading flags 0 as a malformed probe.
     #[test]
-    fn test_create_ruleset_probe_bad_flags_einval() {
-        // attr=NULL, size=0, but flags != LANDLOCK_CREATE_RULESET_VERSION.
+    fn test_create_ruleset_zero_flags_is_the_create_form() {
         clear_errno();
         let v = landlock_create_ruleset(core::ptr::null(), 0, 0);
         assert_eq!(v, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
@@ -1027,35 +1030,43 @@ mod tests {
     #[test]
     fn test_phase133_zero_size_with_null_attr_returns_einval_not_efault() {
         // BEFORE Phase 133: `attr=NULL, size=0, flags=0` returned
-        // EFAULT (NULL attr was checked first).
-        //
-        // AFTER Phase 133: matches Linux's
-        // `copy_min_struct_from_user` order — `size < min` is checked
-        // first, so this is EINVAL.  The right caller fix is to set
-        // size, not to allocate a struct.
+        // EFAULT: `copy_min_struct_from_user` tests `!src` before the size
+        // (security/landlock/syscalls.c:53).  Phase 133 reversed this, on a
+        // misreading of that function; it asserted EINVAL until 2026-09-26.
         clear_errno();
         let v = landlock_create_ruleset(core::ptr::null(), 0, 0);
         assert_eq!(v, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
-    fn test_phase133_undersized_with_null_attr_returns_einval_not_efault() {
-        // Same ordering rule: size=4 (< min=16) wins over NULL-attr.
+    fn test_phase133_undersized_with_null_attr_returns_efault() {
+        // Same rule: the NULL attr (:53) outranks size=4 (< min, :59).
         clear_errno();
         let v = landlock_create_ruleset(core::ptr::null(), 4, 0);
         assert_eq!(v, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
-    fn test_phase133_oversized_with_null_attr_returns_e2big_not_efault() {
-        // E2BIG wins over EFAULT too — `size > MAX` is a check on a
-        // value the caller controls, so the diagnostic should point
-        // at it before the pointer dereference would fault.
+    fn test_phase133_oversized_with_null_attr_returns_efault() {
+        // And it outranks E2BIG (:61).  This test's predecessor argued that
+        // the size "should" be diagnosed first; the kernel does otherwise.
         clear_errno();
         let v = landlock_create_ruleset(core::ptr::null(), 1_000_000, 0);
         assert_eq!(v, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_create_ruleset_sizes_with_a_real_attr() {
+        // With a pointer, the size tests decide.
+        let attr: LandlockRulesetAttr = unsafe { core::mem::zeroed() };
+        clear_errno();
+        assert_eq!(landlock_create_ruleset(&raw const attr, 4, 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        clear_errno();
+        assert_eq!(landlock_create_ruleset(&raw const attr, 1_000_000, 0), -1);
         assert_eq!(errno::get_errno(), errno::E2BIG);
     }
 

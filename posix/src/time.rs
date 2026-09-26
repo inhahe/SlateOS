@@ -2622,11 +2622,20 @@ mod timer_store {
 ///
 /// 1. `copy_from_user(&event, timer_event_spec, sizeof(event))` if
 ///    `timer_event_spec` non-null → `EFAULT` (user copy fail)
-/// 2. `posix_clocks[which_clock]` unavailable → `EINVAL`
-/// 3. `event->sigev_notify` unrecognised → `EINVAL`
-/// 4. `posix_timer_add(new_timer)` allocates the timer slot.
-/// 5. `copy_to_user(created_timer_id, ...)` → `EFAULT` (which
+/// 2. `clockid_to_kclock(which_clock)` unknown → `EINVAL` (:452)
+/// 3. the clock has no `timer_create` → `EOPNOTSUPP` (:454):
+///    `CLOCK_MONOTONIC_RAW` and the two `_COARSE` clocks, which can be
+///    read but not armed
+/// 4. `alloc_posix_timer`/`posix_timer_add` allocate the timer → `EAGAIN`
+///    when there is no room (:458, :467)
+/// 5. `good_sigevent(event)` → `EINVAL` for an unrecognised
+///    `sigev_notify` (:480-483)
+/// 6. `copy_to_user(created_timer_id, ...)` → `EFAULT` (which
 ///    destroys the just-allocated timer before returning).
+///
+/// Steps 3 and 4 were missing and misplaced until 2026-09-26: the
+/// unarmable clocks were armed, and a full table was reported last, after
+/// the event and pointer checks it precedes.
 ///
 /// **Phase 147**: pre-Phase-147 we returned `EINVAL` when `timerid`
 /// was NULL.  Linux's NULL-`timerid` path goes through
@@ -2651,7 +2660,26 @@ pub extern "C" fn timer_create(
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // Step 3: sigev_notify validation → EINVAL.  A null sevp is
+    // Step 3: a clock with no `timer_create` → EOPNOTSUPP.
+    if matches!(
+        clockid,
+        CLOCK_MONOTONIC_RAW | CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE
+    ) {
+        errno::set_errno(errno::EOPNOTSUPP);
+        return -1;
+    }
+    // Step 4: room for the timer → EAGAIN, before the event and the
+    // pointer are looked at.  The slot is claimed at the end.
+    // SAFETY: the pointer is non-null, aligned, and points at storage
+    // reachable only from this thread (see `timer_store`); the borrow ends
+    // with this statement.
+    let has_room = unsafe { timer_store::timers().as_ref() }
+        .is_some_and(|table| table.iter().any(Option::is_none));
+    if !has_room {
+        errno::set_errno(errno::EAGAIN);
+        return -1;
+    }
+    // Step 5: sigev_notify validation → EINVAL.  A null sevp is
     // treated as SIGEV_SIGNAL with SIGALRM, per POSIX.
     if !sevp.is_null() {
         // SAFETY: caller asserts sevp points to a valid Sigevent.  We
@@ -2663,7 +2691,7 @@ pub extern "C" fn timer_create(
             return -1;
         }
     }
-    // Step 5: NULL `timerid` → EFAULT.  Linux's `copy_to_user` would
+    // Step 6: NULL `timerid` → EFAULT.  Linux's `copy_to_user` would
     // segfault on a NULL destination and return EFAULT.  Phase 147
     // fix: pre-Phase-147 we returned EINVAL here.
     if timerid.is_null() {
@@ -2671,7 +2699,7 @@ pub extern "C" fn timer_create(
         return -1;
     }
 
-    // Step 4: allocate a slot.  Find a free entry.
+    // Step 4, completed: claim the free slot found above.
     // SAFETY: the pointer is non-null, aligned, and points at storage
     // reachable only from this thread (see `timer_store`); no other
     // reference to the table is live across this borrow.
@@ -5715,6 +5743,23 @@ mod tests {
         let _ = super::host_itimer::swap(0, 0);
     }
 
+    /// `do_timer_create` refuses a clock that can be read but not armed
+    /// with EOPNOTSUPP (kernel/time/posix-timers.c:454); an unknown clock
+    /// is still EINVAL.
+    #[test]
+    fn test_timer_create_unarmable_clocks_eopnotsupp() {
+        for clock in [CLOCK_MONOTONIC_RAW, CLOCK_REALTIME_COARSE, CLOCK_MONOTONIC_COARSE] {
+            let mut id: TimerT = 0;
+            crate::errno::set_errno(0);
+            assert_eq!(timer_create(clock, core::ptr::null(), &raw mut id), -1, "clock {clock}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP, "clock {clock}");
+        }
+        let mut id: TimerT = 0;
+        crate::errno::set_errno(0);
+        assert_eq!(timer_create(999, core::ptr::null(), &raw mut id), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
     #[test]
     fn test_timer_create_basic() {
         reset_timers();
@@ -6599,8 +6644,11 @@ mod tests {
         assert_eq!(id, 999, "no slot should be allocated on EINVAL");
     }
 
-    /// Every clock the rest of the API recognises is also accepted by
-    /// `timer_create`.
+    /// Every clock the rest of the API recognises and that can be armed is
+    /// accepted by `timer_create`.  The three that can only be read --
+    /// `CLOCK_MONOTONIC_RAW` and the two `_COARSE` clocks -- were listed
+    /// here too until 2026-09-26; they are EOPNOTSUPP (see
+    /// `test_timer_create_unarmable_clocks_eopnotsupp`).
     #[test]
     fn test_timer_create_accepts_all_valid_clocks() {
         for clk in [
@@ -6608,9 +6656,6 @@ mod tests {
             CLOCK_MONOTONIC,
             CLOCK_PROCESS_CPUTIME_ID,
             CLOCK_THREAD_CPUTIME_ID,
-            CLOCK_MONOTONIC_RAW,
-            CLOCK_REALTIME_COARSE,
-            CLOCK_MONOTONIC_COARSE,
             CLOCK_BOOTTIME,
         ] {
             reset_timers();

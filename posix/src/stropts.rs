@@ -8,20 +8,23 @@
 //!
 //! # Status of these calls
 //!
-//! Linux has never supported STREAMS — glibc's `stropts.h` stubs all
-//! return ENOSYS. Solaris up to Solaris 11 supported them fully; AIX
-//! supports a subset. Modern Linux software almost never uses
-//! `putmsg`/`getmsg`/`putpmsg`/`getpmsg` — the few legacy programs that
-//! still do are typically Solaris ports being rebuilt for Linux, where
-//! the build system gates the STREAMS code path on a runtime probe
-//! that catches ENOSYS and disables STREAMS support.
+//! Linux has never supported STREAMS, and glibc's calls are stubs --
+//! compat symbols in glibc 2.39's posix/streams-compat.c, since 2.30
+//! removed `<stropts.h>` from the API.  `putmsg`, `putpmsg`, `getmsg`,
+//! `getpmsg`, `fattach` and `fdetach` set ENOSYS and return -1 whatever
+//! their arguments; `isastream` is 0 for an open descriptor and -1 with
+//! EBADF (from `fcntl (fd, F_GETFD)`) for one that is not.  This OS will not
+//! implement STREAMS either -- it has Channel IPC, io_uring and sockets --
+//! so these calls are glibc's, exactly.
 //!
-//! Our position matches Linux glibc: STREAMS will never be implemented
-//! in this OS (the design uses Channel IPC + io_uring + sockets, not
-//! the STREAMS module-push model). The validators here exist to give
-//! probing callers meaningful EBADF/EFAULT/EINVAL feedback on malformed
-//! inputs, and a clean ENOSYS otherwise, so their existing fallback
-//! paths fire correctly.
+//! Until 2026-09-26 the six validated their arguments first -- EBADF for a
+//! negative descriptor, EFAULT for a NULL pointer, ENOENT for an empty path,
+//! EINVAL for flags and bands -- "so probing callers' fallback paths fire".
+//! They did the opposite.  A program that probes for STREAMS with
+//! placeholder arguments, such as `putmsg (-1, NULL, NULL, 0)`, is looking
+//! for ENOSYS, and was told EBADF instead: that the call exists and only
+//! its descriptor was wrong.  `isastream` had the reverse fault, calling a
+//! closed descriptor "not a stream" where glibc says EBADF.
 
 use crate::errno;
 
@@ -145,219 +148,87 @@ pub const MOREDATA: i32 = 2;
 pub const MORECTL_MOREDATA: i32 = 3;
 
 // ---------------------------------------------------------------------------
-// Limits
-// ---------------------------------------------------------------------------
-
-/// Maximum priority band number (POSIX `_POSIX_STREAM_MAX` and Solaris
-/// `STRMSGSZ` agree on 255 as the upper bound).
-pub const STREAM_BAND_MAX: i32 = 255;
-
-/// Mask of valid putmsg flag bits. POSIX defines only `RS_HIPRI`.
-pub const PUTMSG_FLAGS_VALID: i32 = RS_HIPRI;
-
-/// Mask of valid putpmsg flag bits. POSIX defines `MSG_HIPRI` and
-/// `MSG_BAND`. (Note `RS_HIPRI` and `MSG_HIPRI` share value `0x01` —
-/// they're aliases for the same priority bit in different contexts.)
-pub const PUTPMSG_FLAGS_VALID: i32 = MSG_HIPRI | MSG_BAND;
-
-/// Mask of valid getpmsg flag bits.
-pub const GETPMSG_FLAGS_VALID: i32 = MSG_HIPRI | MSG_ANY | MSG_BAND;
-
-// ---------------------------------------------------------------------------
 // Functions
 // ---------------------------------------------------------------------------
 
-/// Put a message onto a stream.
+/// Put a message onto a stream: ENOSYS, whatever the arguments.
 ///
-/// POSIX `putmsg(fd, ctlptr, dataptr, flags)` sends a message
-/// (control and/or data parts) down the stream attached to `fd`.
-/// `ctlptr` and `dataptr` each point to a `struct strbuf` (or NULL
-/// to indicate "no control/data part").
-///
-/// Linux semantics: STREAMS is not implemented, so a real Linux
-/// glibc returns ENOSYS for every call. We validate the obvious bad
-/// cases first:
-/// - `fd < 0` → EBADF.
-/// - Both `ctlptr == NULL && dataptr == NULL` → EINVAL (POSIX requires
-///   at least one part to be present).
-/// - `flags & ~PUTMSG_FLAGS_VALID != 0` → EINVAL.
-/// - All other inputs → ENOSYS (STREAMS not supported).
+/// glibc's is `__set_errno (ENOSYS); return -1;` (posix/streams-compat.c);
+/// see the module docs for why nothing is validated first.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn putmsg(fd: i32, ctlptr: *const u8, dataptr: *const u8, flags: i32) -> i32 {
-    if fd < 0 {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    }
-    if ctlptr.is_null() && dataptr.is_null() {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if flags & !PUTMSG_FLAGS_VALID != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
+pub extern "C" fn putmsg(_fd: i32, _ctlptr: *const u8, _dataptr: *const u8, _flags: i32) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
 }
 
-/// Put a priority-band message onto a stream.
-///
-/// Like `putmsg`, plus an explicit `band` (0–255, normal=0). Linux
-/// semantics + our additions:
-/// - `fd < 0` → EBADF.
-/// - Both ctlptr and dataptr NULL → EINVAL.
-/// - `band < 0` or `band > STREAM_BAND_MAX (255)` → EINVAL.
-/// - `flags & ~PUTPMSG_FLAGS_VALID != 0` → EINVAL.
-/// - `MSG_HIPRI` set with nonzero band → EINVAL (high-priority messages
-///   live in their own out-of-band path, not a priority band).
-/// - All other inputs → ENOSYS.
+/// Put a priority-band message onto a stream: ENOSYS, whatever the
+/// arguments, as glibc's (posix/streams-compat.c).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn putpmsg(
-    fd: i32,
-    ctlptr: *const u8,
-    dataptr: *const u8,
-    band: i32,
-    flags: i32,
+    _fd: i32,
+    _ctlptr: *const u8,
+    _dataptr: *const u8,
+    _band: i32,
+    _flags: i32,
 ) -> i32 {
-    if fd < 0 {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    }
-    if ctlptr.is_null() && dataptr.is_null() {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if !(0..=STREAM_BAND_MAX).contains(&band) {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if flags & !PUTPMSG_FLAGS_VALID != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if (flags & MSG_HIPRI) != 0 && band != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
     errno::set_errno(errno::ENOSYS);
     -1
 }
 
-/// Get a message from a stream.
-///
-/// - `fd < 0` → EBADF.
-/// - `flagsp == NULL` → EFAULT (the caller passes flags in/out by
-///   pointer — without a real address we can't read or write the
-///   request).
-/// - All other inputs → ENOSYS.
+/// Get a message from a stream: ENOSYS, whatever the arguments, as
+/// glibc's (posix/streams-compat.c).  Nothing is read or written through
+/// the pointers.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getmsg(fd: i32, _ctlptr: *mut u8, _dataptr: *mut u8, flagsp: *mut i32) -> i32 {
-    if fd < 0 {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    }
-    if flagsp.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
+pub extern "C" fn getmsg(_fd: i32, _ctlptr: *mut u8, _dataptr: *mut u8, _flagsp: *mut i32) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
 }
 
-/// Get a priority-band message from a stream.
-///
-/// - `fd < 0` → EBADF.
-/// - `bandp == NULL` or `flagsp == NULL` → EFAULT.
-/// - `*flagsp & ~GETPMSG_FLAGS_VALID != 0` → EINVAL (caller is asking
-///   for an unknown flag combination).
-/// - All other inputs → ENOSYS.
+/// Get a priority-band message from a stream: ENOSYS, whatever the
+/// arguments, as glibc's (posix/streams-compat.c).  Nothing is read or
+/// written through the pointers.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getpmsg(
-    fd: i32,
+    _fd: i32,
     _ctlptr: *mut u8,
     _dataptr: *mut u8,
-    bandp: *mut i32,
-    flagsp: *mut i32,
+    _bandp: *mut i32,
+    _flagsp: *mut i32,
 ) -> i32 {
-    if fd < 0 {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    }
-    if bandp.is_null() || flagsp.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    // SAFETY: We've verified flagsp is non-null. Use read_unaligned to
-    // tolerate any alignment; the value is just an i32 the caller put
-    // in.
-    let flag_in = unsafe { core::ptr::read_unaligned(flagsp) };
-    if flag_in & !GETPMSG_FLAGS_VALID != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
     errno::set_errno(errno::ENOSYS);
     -1
 }
 
-/// Test if a file descriptor is associated with a STREAMS device.
+/// Is `fd` a STREAMS device?  0 -- no -- for an open descriptor, and -1
+/// with EBADF for one that is not open.
 ///
-/// Returns 0 (not a STREAMS device — STREAMS not supported) for any
-/// non-negative fd. For `fd < 0`, returns -1 with EBADF (matches
-/// POSIX's "the function shall fail" clause).
+/// glibc's is `if (__fcntl (fildes, F_GETFD) < 0) return -1; return 0;`
+/// (posix/streams-compat.c), so *any* descriptor that is not open is EBADF,
+/// and an `O_PATH` one, which `F_GETFD` accepts, is 0.  Until 2026-09-26
+/// only a negative descriptor was EBADF.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn isastream(fd: i32) -> i32 {
-    if fd < 0 {
+    if crate::fdtable::get_fd(fd).is_none() {
         errno::set_errno(errno::EBADF);
         return -1;
     }
     0
 }
 
-/// Attach a STREAMS-based file descriptor to an object in the
-/// filesystem name space.
-///
-/// - `fd < 0` → EBADF.
-/// - `path == NULL` → EFAULT.
-/// - `*path == 0` (empty string) → ENOENT.
-/// - All other inputs → ENOSYS.
+/// Attach a STREAMS-based file descriptor to an object in the filesystem
+/// name space: ENOSYS, whatever the arguments, as glibc's
+/// (posix/streams-compat.c).  Until 2026-09-26 a probe such as
+/// `fattach (-1, "")` was told EBADF.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fattach(fd: i32, path: *const u8) -> i32 {
-    if fd < 0 {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    }
-    if path.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    // SAFETY: path is non-null; reading the first byte is safe for any
-    // caller-supplied C string (even a one-byte NUL).
-    let first = unsafe { core::ptr::read(path) };
-    if first == 0 {
-        errno::set_errno(errno::ENOENT);
-        return -1;
-    }
+pub extern "C" fn fattach(_fd: i32, _path: *const u8) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
 }
 
-/// Detach a STREAMS-based file descriptor from the filesystem.
-///
-/// - `path == NULL` → EFAULT.
-/// - `*path == 0` (empty string) → ENOENT.
-/// - All other inputs → ENOSYS.
+/// Detach a STREAMS-based file descriptor from a filesystem name: ENOSYS,
+/// whatever the argument, as glibc's (posix/streams-compat.c).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fdetach(path: *const u8) -> i32 {
-    if path.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    // SAFETY: see fattach.
-    let first = unsafe { core::ptr::read(path) };
-    if first == 0 {
-        errno::set_errno(errno::ENOENT);
-        return -1;
-    }
+pub extern "C" fn fdetach(_path: *const u8) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -412,484 +283,142 @@ mod tests {
         assert_ne!(RMSGN, RMSGD);
     }
 
-    #[test]
-    fn test_stream_band_max() {
-        assert_eq!(STREAM_BAND_MAX, 255);
-    }
-
-    #[test]
-    fn test_valid_flag_masks() {
-        assert_eq!(PUTMSG_FLAGS_VALID, RS_HIPRI);
-        assert_eq!(PUTPMSG_FLAGS_VALID, MSG_HIPRI | MSG_BAND);
-        assert_eq!(GETPMSG_FLAGS_VALID, MSG_HIPRI | MSG_ANY | MSG_BAND);
-    }
-
     // -----------------------------------------------------------------------
-    // putmsg
+    // The six stubs: ENOSYS, whatever the arguments
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn test_putmsg_negative_fd_ebadf() {
-        let dummy = [0u8; 8];
+    /// Run `call` with errno preset to something else and check that it
+    /// failed with ENOSYS -- set, not merely left over.
+    fn expect_enosys(what: &str, call: impl FnOnce() -> i32) {
         errno::set_errno(errno::EBADF);
-        let r = putmsg(-1, dummy.as_ptr(), core::ptr::null(), 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
+        assert_eq!(call(), -1, "{what}");
+        assert_eq!(errno::get_errno(), errno::ENOSYS, "{what}");
+    }
+
+    /// Every shape that had its own EBADF or EINVAL until 2026-09-26 is
+    /// ENOSYS now, as in glibc -- above all the placeholder probe.
+    #[test]
+    fn test_putmsg_is_enosys_whatever_the_arguments() {
+        let part = [0u8; 8];
+        let (p, null) = (part.as_ptr(), core::ptr::null());
+        expect_enosys("well formed", || putmsg(5, p, p, 0));
+        expect_enosys("a probe's placeholders", || putmsg(-1, null, null, 0));
+        expect_enosys("negative fd", || putmsg(-1, p, null, 0));
+        expect_enosys("INT_MIN fd", || putmsg(i32::MIN, p, null, 0));
+        expect_enosys("no part at all", || putmsg(5, null, null, 0));
+        expect_enosys("unknown flag", || putmsg(5, p, null, 0x40));
+        expect_enosys("high priority", || putmsg(5, null, p, RS_HIPRI));
     }
 
     #[test]
-    fn test_putmsg_int_min_fd_ebadf() {
-        let dummy = [0u8; 8];
-        errno::set_errno(errno::EBADF);
-        let r = putmsg(i32::MIN, dummy.as_ptr(), core::ptr::null(), 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
+    fn test_putpmsg_is_enosys_whatever_the_arguments() {
+        let part = [0u8; 8];
+        let (p, null) = (part.as_ptr(), core::ptr::null());
+        expect_enosys("well formed", || putpmsg(5, p, null, 3, MSG_BAND));
+        expect_enosys("negative fd", || putpmsg(-1, p, null, 0, MSG_BAND));
+        expect_enosys("no part at all", || putpmsg(5, null, null, 0, MSG_BAND));
+        expect_enosys("negative band", || putpmsg(5, p, null, -1, MSG_BAND));
+        expect_enosys("band 256", || putpmsg(5, p, null, 256, MSG_BAND));
+        expect_enosys("unknown flag", || putpmsg(5, p, null, 0, 0x40));
+        expect_enosys("high priority with a band", || putpmsg(5, p, null, 1, MSG_HIPRI));
     }
 
     #[test]
-    fn test_putmsg_both_null_einval() {
-        errno::set_errno(errno::EBADF);
-        let r = putmsg(0, core::ptr::null(), core::ptr::null(), 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_putmsg_unknown_flag_einval() {
-        let dummy = [0u8; 8];
-        errno::set_errno(errno::EBADF);
-        let r = putmsg(0, dummy.as_ptr(), core::ptr::null(), 0x2);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_putmsg_valid_reaches_enosys() {
-        let dummy = [0u8; 8];
-        errno::set_errno(errno::EBADF);
-        let r = putmsg(3, dummy.as_ptr(), core::ptr::null(), 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_putmsg_hipri_reaches_enosys() {
-        let dummy = [0u8; 8];
-        errno::set_errno(errno::EBADF);
-        let r = putmsg(3, dummy.as_ptr(), core::ptr::null(), RS_HIPRI);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_putmsg_data_only_reaches_enosys() {
-        let dummy = [0u8; 8];
-        errno::set_errno(errno::EBADF);
-        let r = putmsg(3, core::ptr::null(), dummy.as_ptr(), 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    // -----------------------------------------------------------------------
-    // putpmsg
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_putpmsg_negative_fd_ebadf() {
-        let dummy = [0u8; 8];
-        errno::set_errno(errno::EBADF);
-        let r = putpmsg(-1, dummy.as_ptr(), core::ptr::null(), 0, 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
-    }
-
-    #[test]
-    fn test_putpmsg_both_null_einval() {
-        errno::set_errno(errno::EBADF);
-        let r = putpmsg(0, core::ptr::null(), core::ptr::null(), 0, 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_putpmsg_negative_band_einval() {
-        let dummy = [0u8; 8];
-        errno::set_errno(errno::EBADF);
-        let r = putpmsg(0, dummy.as_ptr(), core::ptr::null(), -1, 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_putpmsg_huge_band_einval() {
-        let dummy = [0u8; 8];
-        errno::set_errno(errno::EBADF);
-        let r = putpmsg(0, dummy.as_ptr(), core::ptr::null(), 256, 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_putpmsg_band_at_max_ok() {
-        let dummy = [0u8; 8];
-        errno::set_errno(errno::EBADF);
-        let r = putpmsg(0, dummy.as_ptr(), core::ptr::null(), 255, 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_putpmsg_unknown_flag_einval() {
-        let dummy = [0u8; 8];
-        errno::set_errno(errno::EBADF);
-        let r = putpmsg(0, dummy.as_ptr(), core::ptr::null(), 0, 0x100);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_putpmsg_hipri_with_band_einval() {
-        // HIPRI is out-of-band — it can't be set on a priority band.
-        let dummy = [0u8; 8];
-        errno::set_errno(errno::EBADF);
-        let r = putpmsg(0, dummy.as_ptr(), core::ptr::null(), 1, MSG_HIPRI);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_putpmsg_hipri_with_zero_band_ok() {
-        // HIPRI on band 0 is allowed; the validator falls through to ENOSYS.
-        let dummy = [0u8; 8];
-        errno::set_errno(errno::EBADF);
-        let r = putpmsg(0, dummy.as_ptr(), core::ptr::null(), 0, MSG_HIPRI);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_putpmsg_msg_band_reaches_enosys() {
-        let dummy = [0u8; 8];
-        errno::set_errno(errno::EBADF);
-        let r = putpmsg(0, dummy.as_ptr(), core::ptr::null(), 1, MSG_BAND);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    // -----------------------------------------------------------------------
-    // getmsg
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_getmsg_negative_fd_ebadf() {
+    fn test_getmsg_is_enosys_whatever_the_arguments() {
+        let null = core::ptr::null_mut();
         let mut flags: i32 = 0;
-        errno::set_errno(errno::EBADF);
-        let r = getmsg(
-            -1,
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            &raw mut flags,
-        );
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
+        expect_enosys("well formed", || getmsg(5, null, null, &raw mut flags));
+        expect_enosys("negative fd", || getmsg(-1, null, null, &raw mut flags));
+        expect_enosys("NULL flagsp", || getmsg(5, null, null, core::ptr::null_mut()));
+        assert_eq!(flags, 0, "nothing is written through flagsp");
     }
 
     #[test]
-    fn test_getmsg_null_flagsp_efault() {
-        errno::set_errno(errno::EBADF);
-        let r = getmsg(
-            0,
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-        );
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
-    }
-
-    #[test]
-    fn test_getmsg_valid_reaches_enosys() {
-        let mut flags: i32 = 0;
-        errno::set_errno(errno::EBADF);
-        let r = getmsg(
-            0,
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            &raw mut flags,
-        );
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    // -----------------------------------------------------------------------
-    // getpmsg
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_getpmsg_negative_fd_ebadf() {
-        let mut band: i32 = 0;
-        let mut flags: i32 = 0;
-        errno::set_errno(errno::EBADF);
-        let r = getpmsg(
-            -1,
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            &raw mut band,
-            &raw mut flags,
-        );
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
-    }
-
-    #[test]
-    fn test_getpmsg_null_bandp_efault() {
-        let mut flags: i32 = 0;
-        errno::set_errno(errno::EBADF);
-        let r = getpmsg(
-            0,
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            &raw mut flags,
-        );
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
-    }
-
-    #[test]
-    fn test_getpmsg_null_flagsp_efault() {
-        let mut band: i32 = 0;
-        errno::set_errno(errno::EBADF);
-        let r = getpmsg(
-            0,
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            &raw mut band,
-            core::ptr::null_mut(),
-        );
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
-    }
-
-    #[test]
-    fn test_getpmsg_unknown_flag_einval() {
-        let mut band: i32 = 0;
-        let mut flags: i32 = 0x80; // outside GETPMSG_FLAGS_VALID
-        errno::set_errno(errno::EBADF);
-        let r = getpmsg(
-            0,
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            &raw mut band,
-            &raw mut flags,
-        );
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
-    }
-
-    #[test]
-    fn test_getpmsg_msg_any_reaches_enosys() {
-        let mut band: i32 = 0;
+    fn test_getpmsg_is_enosys_whatever_the_arguments() {
+        let null = core::ptr::null_mut();
+        let mut band: i32 = 7;
         let mut flags: i32 = MSG_ANY;
-        errno::set_errno(errno::EBADF);
-        let r = getpmsg(
-            0,
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            &raw mut band,
-            &raw mut flags,
-        );
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        expect_enosys("well formed", || getpmsg(5, null, null, &raw mut band, &raw mut flags));
+        expect_enosys("negative fd", || getpmsg(-1, null, null, &raw mut band, &raw mut flags));
+        expect_enosys("NULL bandp", || getpmsg(5, null, null, core::ptr::null_mut(), &raw mut flags));
+        expect_enosys("NULL flagsp", || getpmsg(5, null, null, &raw mut band, core::ptr::null_mut()));
+        let mut unknown: i32 = 0x80;
+        expect_enosys("unknown flag", || getpmsg(5, null, null, &raw mut band, &raw mut unknown));
+        assert_eq!((band, flags, unknown), (7, MSG_ANY, 0x80), "nothing is written");
+    }
+
+    #[test]
+    fn test_fattach_and_fdetach_are_enosys_whatever_the_arguments() {
+        let path = b"/var/run/streams/svc\0".as_ptr();
+        let (empty, null) = (b"\0".as_ptr(), core::ptr::null());
+        expect_enosys("fattach, well formed", || fattach(5, path));
+        expect_enosys("fattach, negative fd", || fattach(-1, path));
+        expect_enosys("fattach, NULL path", || fattach(5, null));
+        expect_enosys("fattach, empty path", || fattach(5, empty));
+        expect_enosys("fattach, a probe's placeholders", || fattach(-1, empty));
+        expect_enosys("fdetach, well formed", || fdetach(path));
+        expect_enosys("fdetach, NULL path", || fdetach(null));
+        expect_enosys("fdetach, empty path", || fdetach(empty));
     }
 
     // -----------------------------------------------------------------------
     // isastream
     // -----------------------------------------------------------------------
 
+    /// An open descriptor is not a STREAMS device: 0, and errno untouched.
     #[test]
-    fn test_isastream_negative_fd_ebadf() {
-        errno::set_errno(errno::EBADF);
-        let r = isastream(-1);
-        assert_eq!(r, -1);
+    fn test_isastream_open_descriptor_is_zero() {
+        let fd = crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 0x57AE)
+            .expect("a free descriptor");
+        errno::set_errno(0);
+        assert_eq!(isastream(fd), 0);
+        assert_eq!(errno::get_errno(), 0);
+        let _ = crate::fdtable::close_fd(fd);
+        assert_eq!(isastream(fd), -1, "closed again");
         assert_eq!(errno::get_errno(), errno::EBADF);
     }
 
+    /// Any descriptor that is not open is EBADF -- not only a negative one.
+    /// 999 was "not a stream" until 2026-09-26.
     #[test]
-    fn test_isastream_int_min_ebadf() {
-        errno::set_errno(errno::EBADF);
-        let r = isastream(i32::MIN);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
-    }
-
-    #[test]
-    fn test_isastream_valid_fd_returns_zero() {
-        // Any non-negative fd: not a STREAMS device, return 0 cleanly.
-        assert_eq!(isastream(0), 0);
-        assert_eq!(isastream(999), 0);
+    fn test_isastream_descriptor_not_open_ebadf() {
+        for fd in [-1, i32::MIN, 999] {
+            errno::set_errno(0);
+            assert_eq!(isastream(fd), -1, "fd {fd}");
+            assert_eq!(errno::get_errno(), errno::EBADF, "fd {fd}");
+        }
     }
 
     // -----------------------------------------------------------------------
-    // fattach
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_fattach_negative_fd_ebadf() {
-        let path = b"/tmp/foo\0";
-        errno::set_errno(errno::EBADF);
-        let r = fattach(-1, path.as_ptr());
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
-    }
-
-    #[test]
-    fn test_fattach_null_path_efault() {
-        errno::set_errno(errno::EBADF);
-        let r = fattach(0, core::ptr::null());
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
-    }
-
-    #[test]
-    fn test_fattach_empty_path_enoent() {
-        let empty = b"\0";
-        errno::set_errno(errno::EBADF);
-        let r = fattach(0, empty.as_ptr());
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOENT);
-    }
-
-    #[test]
-    fn test_fattach_valid_reaches_enosys() {
-        let path = b"/var/run/streams/svc\0";
-        errno::set_errno(errno::EBADF);
-        let r = fattach(0, path.as_ptr());
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    // -----------------------------------------------------------------------
-    // fdetach
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_fdetach_null_path_efault() {
-        errno::set_errno(errno::EBADF);
-        let r = fdetach(core::ptr::null());
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
-    }
-
-    #[test]
-    fn test_fdetach_empty_path_enoent() {
-        let empty = b"\0";
-        errno::set_errno(errno::EBADF);
-        let r = fdetach(empty.as_ptr());
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOENT);
-    }
-
-    #[test]
-    fn test_fdetach_valid_reaches_enosys() {
-        let path = b"/var/run/streams/svc\0";
-        errno::set_errno(errno::EBADF);
-        let r = fdetach(path.as_ptr());
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    // -----------------------------------------------------------------------
-    // Real-world workflow tests
+    // Callers
     // -----------------------------------------------------------------------
 
     #[test]
     fn test_solaris_port_streams_probe_workflow() {
-        // A Solaris-to-Linux port of a network daemon (TLI/XTI users,
-        // Sybase netlibrary, NetManage's PC-NFS server) calls
-        // putmsg(fd, &ctl, &data, 0) at startup to send a T_OPT_DATA_REQ
-        // message. On ENOSYS, the port's autoconf-generated fallback
-        // disables the STREAMS code path and reverts to plain sockets.
+        // A Solaris-to-Linux port of a network daemon (TLI/XTI users)
+        // calls putmsg(fd, &ctl, &data, 0) at startup; on ENOSYS its
+        // fallback disables the STREAMS code path and uses sockets.
         let ctl_buf = [0u8; 32];
         let data_buf = [0u8; 256];
-        errno::set_errno(errno::EBADF);
-        let r = putmsg(5, ctl_buf.as_ptr(), data_buf.as_ptr(), 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        expect_enosys("putmsg", || putmsg(5, ctl_buf.as_ptr(), data_buf.as_ptr(), 0));
     }
 
     #[test]
-    fn test_aix_tli_compat_workflow() {
-        // AIX's TLI library calls getpmsg(fd, &ctl, &data, &band, &flag)
-        // to read T_DATA_IND messages. Probe with flag = MSG_ANY to ask
-        // "give me whatever is queued." On ENOSYS, the AIX-compat layer
-        // disables TLI and falls back to BSD sockets.
+    fn test_tli_compat_getpmsg_workflow() {
+        // A TLI compatibility layer reads T_DATA_IND messages with
+        // getpmsg(fd, &ctl, &data, &band, &flag), flag = MSG_ANY; on ENOSYS
+        // it falls back to BSD sockets.
         let mut band: i32 = 0;
         let mut flag: i32 = MSG_ANY;
-        errno::set_errno(errno::EBADF);
-        let r = getpmsg(
-            7,
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            &raw mut band,
-            &raw mut flag,
-        );
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_isastream_probe_in_libc_init_workflow() {
-        // glibc's `ttyname(3)` historically called `isastream(fd)` as a
-        // pre-flight on the controlling terminal fd. Linux glibc just
-        // returns 0 here; we match. Negative fd from a not-yet-opened
-        // tty -> EBADF surfaces a real error to the caller.
-        assert_eq!(isastream(2), 0); // stderr in the test process
-        errno::set_errno(errno::EBADF);
-        let r = isastream(-1);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
+        let null = core::ptr::null_mut();
+        expect_enosys("getpmsg", || getpmsg(7, null, null, &raw mut band, &raw mut flag));
     }
 
     #[test]
     fn test_fattach_streams_pipe_mount_workflow() {
-        // Solaris-style "mount a pipe at a path" via fattach. A
-        // /var/run/streams/foo path used by autofs's old streams-mount
-        // helper. On ENOSYS the helper falls back to UNIX-domain socket
-        // bind at the same path.
+        // Solaris-style "mount a pipe at a path" via fattach; on ENOSYS the
+        // caller binds a UNIX-domain socket at the path instead.
         let path = b"/var/run/streams/autofs\0";
-        errno::set_errno(errno::EBADF);
-        let r = fattach(5, path.as_ptr());
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    // -----------------------------------------------------------------------
-    // errno-preserved-on-validation-success regression tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_putmsg_errno_set_to_enosys_on_validation_success() {
-        let dummy = [0u8; 1];
-        errno::set_errno(errno::EBADF);
-        let r = putmsg(0, dummy.as_ptr(), core::ptr::null(), 0);
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_getpmsg_errno_set_to_enosys_on_validation_success() {
-        let mut band: i32 = 0;
-        let mut flags: i32 = 0;
-        errno::set_errno(errno::EBADF);
-        let r = getpmsg(
-            0,
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            &raw mut band,
-            &raw mut flags,
-        );
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        expect_enosys("fattach", || fattach(5, path.as_ptr()));
     }
 }

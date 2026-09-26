@@ -628,27 +628,35 @@ pub extern "C" fn aio_suspend(
 /// arithmetic typo) get a deterministic error instead of silent
 /// success.
 ///
-/// Validation order (matches Linux's `libaio`/glibc convention of
-/// checking the obvious pointer/descriptor errors before the
-/// flag-domain check):
+/// Validation order is glibc 2.39's (rt/aio_fsync.c):
 ///
-/// 1. `aiocbp` NULL → `EFAULT`.
-/// 2. `aiocbp->aio_fildes < 0` → `EBADF`.
-/// 3. `op` not `O_SYNC` and not `O_DSYNC` → `EINVAL`.
+/// 1. `op` not `O_SYNC` and not `O_DSYNC` → `EINVAL` — tested first, before
+///    `aiocbp` is touched.
+/// 2. `aiocbp` NULL → `EFAULT`.  glibc has no such test; it reads
+///    `aiocbp->aio_fildes` next and faults, and `EFAULT` is this libc's
+///    substitute for that fault (design-decisions.md §303), in its place.
+/// 3. `aio_fildes` not open → `EBADF`: glibc asks
+///    `fcntl(aio_fildes, F_GETFL)`, so any descriptor that is not open is
+///    refused synchronously, not only a negative one.
+///
+/// Until 2026-09-26 the order was the reverse, under a comment calling it
+/// "Linux's libaio/glibc convention", and only a negative descriptor was
+/// `EBADF`: a closed one was accepted, and its failure deferred to the
+/// asynchronous status.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn aio_fsync(op: i32, aiocbp: *mut Aiocb) -> i32 {
+    if op != crate::fcntl::O_SYNC && op != crate::fcntl::O_DSYNC {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     if aiocbp.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: aiocbp is non-null by check above; caller's contract.
     let fd = unsafe { (*aiocbp).aio_fildes };
-    if fd < 0 {
+    if crate::fdtable::get_fd(fd).is_none() {
         errno::set_errno(errno::EBADF);
-        return -1;
-    }
-    if op != crate::fcntl::O_SYNC && op != crate::fcntl::O_DSYNC {
-        errno::set_errno(errno::EINVAL);
         return -1;
     }
     let ret = crate::file::fsync(fd);
@@ -907,10 +915,13 @@ mod tests {
 
     // -- aio_fsync: validation --
 
+    /// A valid `op` and a NULL `aiocbp`: EFAULT, where glibc would fault.
+    /// (This passed op 0 until 2026-09-26, which glibc refuses as EINVAL
+    /// before it looks at the pointer.)
     #[test]
     fn test_aio_fsync_null_efault() {
         errno::set_errno(0);
-        assert_eq!(aio_fsync(0, core::ptr::null_mut()), -1);
+        assert_eq!(aio_fsync(crate::fcntl::O_SYNC, core::ptr::null_mut()), -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
@@ -919,7 +930,19 @@ mod tests {
         let mut cb: Aiocb = unsafe { core::mem::zeroed() };
         cb.aio_fildes = -1;
         errno::set_errno(0);
-        assert_eq!(aio_fsync(0, &raw mut cb), -1);
+        assert_eq!(aio_fsync(crate::fcntl::O_SYNC, &raw mut cb), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    /// glibc's test is `fcntl(fd, F_GETFL)`: a descriptor that is not open
+    /// is EBADF however it is numbered.
+    #[test]
+    fn test_aio_fsync_closed_fd_ebadf() {
+        let mut cb: Aiocb = unsafe { core::mem::zeroed() };
+        cb.aio_fildes = 250;
+        assert!(crate::fdtable::get_fd(250).is_none());
+        errno::set_errno(0);
+        assert_eq!(aio_fsync(crate::fcntl::O_DSYNC, &raw mut cb), -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
     }
 
@@ -989,27 +1012,25 @@ mod tests {
         assert_ne!(crate::fcntl::O_SYNC, crate::fcntl::O_DSYNC);
     }
 
-    /// Validation order: NULL aiocbp wins over an invalid `op` — the
-    /// errno is EFAULT (bad pointer), not EINVAL.
+    /// Validation order: an invalid `op` wins over a NULL aiocbp — glibc
+    /// tests `op` before it reads the structure (rt/aio_fsync.c).  This
+    /// asserted the reverse until 2026-09-26, reasoning that checking `op`
+    /// first "would crash"; it does not, because `op` is not in the struct.
     #[test]
-    fn test_aio_fsync_null_aiocbp_short_circuits_op_check() {
-        // If we mistakenly checked op before aiocbp, a null pointer
-        // dereference would crash; reaching this test running at all
-        // proves the null check is first.
+    fn test_aio_fsync_invalid_op_wins_over_null_aiocbp() {
         errno::set_errno(0);
         assert_eq!(aio_fsync(i32::MIN, core::ptr::null_mut()), -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
-    /// Validation order: a negative fd wins over an invalid `op`,
-    /// reporting `EBADF` (not `EINVAL`).
+    /// Validation order: an invalid `op` wins over a bad descriptor too.
     #[test]
-    fn test_aio_fsync_bad_fd_wins_over_invalid_op() {
+    fn test_aio_fsync_invalid_op_wins_over_bad_fd() {
         let mut cb: Aiocb = unsafe { core::mem::zeroed() };
         cb.aio_fildes = -42;
         errno::set_errno(0);
         assert_eq!(aio_fsync(99, &raw mut cb), -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     /// Buggy caller passes an invalid op, observes EINVAL, retries
@@ -1228,12 +1249,14 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
-    /// aio_fsync: EFAULT (NULL pointer) beats EINVAL (bad op).
+    /// aio_fsync: EINVAL (bad op) beats EFAULT (NULL pointer) -- glibc
+    /// tests `op` before it touches `aiocbp` (rt/aio_fsync.c).  This
+    /// asserted the reverse until 2026-09-26.
     #[test]
-    fn test_phase213_aio_fsync_efault_beats_einval() {
+    fn test_phase213_aio_fsync_einval_beats_efault() {
         errno::set_errno(0);
         assert_eq!(aio_fsync(0xBAD, core::ptr::null_mut()), -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     /// aio_suspend: NULL list → EFAULT even when nent > 0.

@@ -582,7 +582,9 @@ pub extern "C" fn io_submit(ctx_id: u64, nr: i64, iocbpp: *mut *mut Iocb) -> i64
 /// Errors:
 /// - `EINVAL` if `ctx_id` is invalid, `min_nr < 0`, `nr < 0`, or
 ///   `min_nr > nr`.
-/// - `EFAULT` if `events` is null with `nr > 0`.
+/// - `EFAULT` if `events` is null and an event is to be copied into it;
+///   the event stays queued.  With none to deliver a NULL `events` is
+///   never touched and the answer is 0 -- Linux faults only in the copy.
 /// - `EAGAIN` if fewer than `min_nr` events are queued (would block
 ///   waiting for more, but since we don't have a real async path, we
 ///   surface this synchronously).
@@ -605,10 +607,6 @@ pub extern "C" fn io_getevents(
     if nr == 0 {
         return 0;
     }
-    if events.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
 
     let _g = lock_aio();
     // SAFETY: serialized by AIO_LOCK.
@@ -630,6 +628,14 @@ pub extern "C" fn io_getevents(
     }
 
     let want = (nr as usize).min(ctx.count);
+    // A NULL `events` faults only when an event is copied into it
+    // (`aio_read_events_ring`'s `copy_to_user`, fs/aio.c): with nothing to
+    // deliver the answer is 0, and a fault leaves the events queued.  It
+    // was EFAULT before anything was looked at until 2026-09-26.
+    if want > 0 && events.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
     for i in 0..want {
         let src_idx = (ctx.head + i) % MAX_EVENTS_PER_CTX;
         // SAFETY: events is non-null and the caller asserts it can hold
@@ -1039,16 +1045,45 @@ mod tests {
         assert_eq!(io_destroy(ctx), 0);
     }
 
+    /// A NULL `events` with nothing to deliver is 0: upstream faults only in
+    /// the copy.  (This asserted EFAULT until 2026-09-26.)
     #[test]
-    fn test_io_getevents_null_events_efault() {
+    fn test_io_getevents_null_events_with_nothing_queued() {
         let mut ctx: u64 = 0;
         assert_eq!(io_setup(4, &mut ctx as *mut u64), 0);
+        errno::set_errno(0);
+        assert_eq!(
+            io_getevents(ctx, 0, 1, core::ptr::null_mut(), core::ptr::null_mut()),
+            0
+        );
+        assert_eq!(errno::get_errno(), 0);
+        assert_eq!(io_destroy(ctx), 0);
+    }
+
+    /// With an event to deliver, a NULL `events` faults -- and the event is
+    /// still there for the next call, as `aio_read_events_ring` leaves the
+    /// ring's head where it was when its copy fails.
+    #[test]
+    fn test_io_getevents_null_events_with_an_event_queued() {
+        let mut ctx: u64 = 0;
+        assert_eq!(io_setup(4, &mut ctx as *mut u64), 0);
+        let mut iocb = Iocb::zeroed();
+        iocb.aio_lio_opcode = IOCB_CMD_NOOP;
+        iocb.aio_data = 0x5EED;
+        let mut iocb_ptr: *mut Iocb = &mut iocb as *mut Iocb;
+        assert_eq!(io_submit(ctx, 1, &mut iocb_ptr), 1);
         errno::set_errno(0);
         assert_eq!(
             io_getevents(ctx, 0, 1, core::ptr::null_mut(), core::ptr::null_mut()),
             -1
         );
         assert_eq!(errno::get_errno(), errno::EFAULT);
+        let mut ev = IoEvent::zeroed();
+        assert_eq!(
+            io_getevents(ctx, 1, 1, &mut ev as *mut IoEvent, core::ptr::null_mut()),
+            1
+        );
+        assert_eq!(ev.data, 0x5EED);
         assert_eq!(io_destroy(ctx), 0);
     }
 

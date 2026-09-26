@@ -808,9 +808,12 @@ fn aligned_block(alignment: usize, size: usize) -> *mut u8 {
 /// `memptr` must be NULL or valid for one pointer-sized write.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_memalign(memptr: *mut *mut u8, alignment: usize, size: usize) -> i32 {
-    if memptr.is_null() {
-        return crate::errno::EFAULT;
-    }
+    // glibc's order (malloc/malloc.c, `__posix_memalign`): the alignment,
+    // then the allocation, and only then the write through `memptr`, which
+    // it does not check.  A NULL `memptr` is `EFAULT` here, this libc's
+    // substitute for that write's fault (design-decisions.md §303), in its
+    // place: after an `EINVAL` or `ENOMEM` that would have come first.
+    // Until 2026-09-26 the NULL test came first.
     if alignment < core::mem::size_of::<usize>() || !alignment.is_power_of_two() {
         return crate::errno::EINVAL;
     }
@@ -819,6 +822,12 @@ pub extern "C" fn posix_memalign(memptr: *mut *mut u8, alignment: usize, size: u
     crate::errno::set_errno(saved);
     if ptr.is_null() {
         return crate::errno::ENOMEM;
+    }
+    if memptr.is_null() {
+        // SAFETY: `ptr` is the block `aligned_block` just returned, which
+        // nothing else has seen.
+        unsafe { free(ptr) };
+        return crate::errno::EFAULT;
     }
     // SAFETY: `memptr` was checked non-null and is writable (the caller's
     // contract).
@@ -1098,6 +1107,11 @@ mod tests {
         assert_eq!(
             posix_memalign(core::ptr::null_mut(), 16, 100),
             crate::errno::EFAULT
+        );
+        // glibc tests the alignment before it ever writes through memptr.
+        assert_eq!(
+            posix_memalign(core::ptr::null_mut(), 3, 100),
+            crate::errno::EINVAL
         );
         for bad in [0usize, 1, 2, 3, 4, 6, 12, 24] {
             let mut p: *mut u8 = 0x1234 as *mut u8;

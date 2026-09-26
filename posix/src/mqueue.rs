@@ -700,6 +700,12 @@ pub extern "C" fn mq_timedsend(
     msg_prio: u32,
     abs_timeout: *const Timespec,
 ) -> i32 {
+    // A NULL timeout is no timeout (ipc/mqueue.c: `if (u_abs_timeout)`
+    // guards `prepare_timeout`); glibc's own `mq_send` is this call with
+    // NULL.  It was EFAULT here until 2026-09-26.
+    if abs_timeout.is_null() {
+        return send_common(mqdes, msg_ptr, msg_len, msg_prio, None);
+    }
     let Ok(deadline) = deadline_from_timespec(abs_timeout) else {
         return -1;
     };
@@ -828,6 +834,10 @@ pub extern "C" fn mq_timedreceive(
     msg_prio: *mut u32,
     abs_timeout: *const Timespec,
 ) -> isize {
+    // A NULL timeout is no timeout, as for `mq_timedsend`.
+    if abs_timeout.is_null() {
+        return recv_common(mqdes, msg_ptr, msg_len, msg_prio, None);
+    }
     let Ok(deadline) = deadline_from_timespec(abs_timeout) else {
         return -1;
     };
@@ -841,15 +851,19 @@ pub extern "C" fn mq_timedreceive(
 /// Get the current attributes of a message queue.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mq_getattr(mqdes: MqdT, attr: *mut MqAttr) -> i32 {
-    if attr.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
+    // glibc's `mq_getattr` is `mq_setattr (mqdes, NULL, mqstat)`
+    // (sysdeps/unix/sysv/linux/mq_getattr.c), and `mq_getsetattr` copies
+    // out only when the pointer is non-NULL (ipc/mqueue.c).  So a NULL
+    // `attr` is not an error: the descriptor is still checked, and nothing
+    // is written.  It was EFAULT here until 2026-09-26.
     let _g = lock();
     // SAFETY: Lock held.
     let Some((_didx, qidx, nonblock)) = (unsafe { resolve(mqdes) }) else {
         return -1;
     };
+    if attr.is_null() {
+        return 0;
+    }
     let q = unsafe { queues_ptr().add(qidx) };
     // SAFETY: attr non-null.
     unsafe {
@@ -872,8 +886,15 @@ pub extern "C" fn mq_getattr(mqdes: MqdT, attr: *mut MqAttr) -> i32 {
 /// attributes are written there.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mq_setattr(mqdes: MqdT, newattr: *const MqAttr, oldattr: *mut MqAttr) -> i32 {
-    if newattr.is_null() {
-        errno::set_errno(errno::EFAULT);
+    // Linux's `mq_getsetattr` (ipc/mqueue.c): a NULL new attribute is not an
+    // error -- the call just reads -- and glibc's `mq_setattr` is the bare
+    // syscall.  A present one may set no flag but `O_NONBLOCK` (EINVAL,
+    // before the descriptor is looked up).  Until 2026-09-26 a NULL
+    // `newattr` was EFAULT here, and other flag bits were accepted.
+    // SAFETY: caller contract -- `newattr` is NULL or readable.
+    let new_flags = (!newattr.is_null()).then(|| unsafe { (*newattr).mq_flags });
+    if new_flags.is_some_and(|flags| flags & !i64::from(crate::fcntl::O_NONBLOCK) != 0) {
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
     let _g = lock();
@@ -895,12 +916,12 @@ pub extern "C" fn mq_setattr(mqdes: MqdT, newattr: *const MqAttr, oldattr: *mut 
             (*oldattr).mq_curmsgs = (*q).cur_msgs as i64;
         }
     }
-    // SAFETY: newattr non-null.
-    let flags = unsafe { (*newattr).mq_flags };
-    let nonblock_new = (flags & i64::from(crate::fcntl::O_NONBLOCK)) != 0;
-    let d = unsafe { descs_ptr().add(didx) };
-    unsafe {
-        (*d).nonblock = nonblock_new;
+    if let Some(flags) = new_flags {
+        let nonblock_new = (flags & i64::from(crate::fcntl::O_NONBLOCK)) != 0;
+        let d = unsafe { descs_ptr().add(didx) };
+        unsafe {
+            (*d).nonblock = nonblock_new;
+        }
     }
     0
 }
@@ -1465,23 +1486,61 @@ mod tests {
         assert_eq!(mq_close(fd), 0);
     }
 
+    /// A NULL new attribute makes `mq_setattr` a read (ipc/mqueue.c's
+    /// `mq_getsetattr`): `oldattr` is filled and nothing changes.  It was
+    /// EFAULT until 2026-09-26.
     #[test]
-    fn test_setattr_null_new_efault() {
+    fn test_setattr_null_new_just_reads() {
         let fd = open_default(b"/qse\0", O_NONBLOCK);
         assert!(fd > 0);
-        let r = mq_setattr(fd, core::ptr::null(), core::ptr::null_mut());
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        let mut old: MqAttr = unsafe { core::mem::zeroed() };
+        assert_eq!(mq_setattr(fd, core::ptr::null(), &raw mut old), 0);
+        assert_eq!(old.mq_flags, i64::from(crate::fcntl::O_NONBLOCK));
+        assert_eq!(mq_setattr(fd, core::ptr::null(), core::ptr::null_mut()), 0);
         assert_eq!(mq_close(fd), 0);
     }
 
+    /// Only `O_NONBLOCK` may be set; anything else is EINVAL, before the
+    /// descriptor is even looked up.
     #[test]
-    fn test_getattr_null_attr_efault() {
+    fn test_setattr_other_flags_einval() {
+        let bad = MqAttr {
+            mq_flags: 0x40,
+            mq_maxmsg: 0,
+            mq_msgsize: 0,
+            mq_curmsgs: 0,
+            _pad: [0; 4],
+        };
+        errno::set_errno(0);
+        assert_eq!(mq_setattr(-1, &raw const bad, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// glibc's `mq_getattr` is `mq_setattr (mqdes, NULL, attr)`: a NULL
+    /// `attr` checks the descriptor and writes nothing.  It was EFAULT until
+    /// 2026-09-26.
+    #[test]
+    fn test_getattr_null_attr_is_not_an_error() {
         let fd = open_default(b"/qge\0", O_NONBLOCK);
         assert!(fd > 0);
-        let r = mq_getattr(fd, core::ptr::null_mut());
-        assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(mq_getattr(fd, core::ptr::null_mut()), 0);
+        assert_eq!(mq_close(fd), 0);
+        errno::set_errno(0);
+        assert_eq!(mq_getattr(fd, core::ptr::null_mut()), -1, "closed: EBADF");
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    /// A NULL timeout is no timeout: `mq_timedsend(…, NULL)` is `mq_send`,
+    /// and `mq_timedreceive(…, NULL)` is `mq_receive`.
+    #[test]
+    fn test_timed_calls_with_null_timeout_are_untimed() {
+        let fd = open_default(b"/qnt\0", O_NONBLOCK);
+        assert!(fd > 0);
+        assert_eq!(mq_timedsend(fd, b"x".as_ptr(), 1, 0, core::ptr::null()), 0);
+        let mut buf = [0u8; 64];
+        let r = mq_timedreceive(fd, buf.as_mut_ptr(), buf.len(), core::ptr::null_mut(), core::ptr::null());
+        assert_eq!(r, 1);
+        assert_eq!(buf[0], b'x');
         assert_eq!(mq_close(fd), 0);
     }
 
@@ -1575,8 +1634,11 @@ mod tests {
         assert_eq!(mq_close(fd), 0);
     }
 
+    /// A NULL timeout is no timeout, so an empty non-blocking queue answers
+    /// as `mq_receive` would: EAGAIN.  This asserted EFAULT until
+    /// 2026-09-26.
     #[test]
-    fn test_timedreceive_null_timespec_efault() {
+    fn test_timedreceive_null_timespec_is_untimed() {
         let fd = open_default(b"/qtnull\0", O_NONBLOCK);
         assert!(fd > 0);
         let mut buf = [0u8; 64];
@@ -1588,7 +1650,7 @@ mod tests {
             core::ptr::null(),
         );
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EAGAIN);
         assert_eq!(mq_close(fd), 0);
     }
 

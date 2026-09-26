@@ -535,10 +535,12 @@ pub extern "C" fn ntp_adjtime(tx: *mut Timex) -> i32 {
 //         return kc->clock_adj(id, t);
 //     }
 //
-// Only `CLOCK_REALTIME` and `CLOCK_TAI` have a `clock_adj` callback.
-// Every other standard clock (MONOTONIC, BOOTTIME, the CPU-time
-// clocks, the COARSE variants, the ALARM variants) is recognised but
-// returns `EOPNOTSUPP`.  Pre-Phase-163 we lumped MONOTONIC in with
+// Of the standard clocks only `CLOCK_REALTIME` has a `clock_adj`
+// callback (kernel/time/posix-timers.c:1434; the other one in the tree is
+// the dynamic POSIX clocks', posix-clock.c:316).  Every other standard
+// clock -- TAI included -- is recognised but returns `EOPNOTSUPP`.  Phase
+// 163 counted `CLOCK_TAI` as adjustable; 6.6's `clock_tai` (:1480) has no
+// `clock_adj`, and it was corrected on 2026-09-26.  Pre-Phase-163 we lumped MONOTONIC in with
 // REALTIME and rejected everything else with `EINVAL` — both
 // divergent.
 //
@@ -565,9 +567,9 @@ const CLOCK_TAI_ID: i32 = 11;
 
 /// Per-clock adjtimex (`clock_adjtime(2)`).
 ///
-/// Linux dispatches by clock id: `CLOCK_REALTIME` and `CLOCK_TAI`
-/// forward to `do_adjtimex`; every other *known* standard clock
-/// returns `EOPNOTSUPP`; unknown clock ids return `EINVAL`.  A null
+/// Linux dispatches by clock id: `CLOCK_REALTIME` forwards to
+/// `do_adjtimex`; every other *known* standard clock, `CLOCK_TAI` among
+/// them, returns `EOPNOTSUPP`; unknown clock ids return `EINVAL`.  A null
 /// `tx` always returns `EFAULT`, even when the clock id is also
 /// invalid — matching `SYSCALL_DEFINE2`'s `copy_from_user`-first
 /// ordering.
@@ -581,13 +583,12 @@ pub extern "C" fn clock_adjtime(clk_id: i32, tx: *mut Timex) -> i32 {
     }
 
     match clk_id {
-        // Adjustable clocks — forward to the shared NTP state.  TAI
-        // shares the same discipline; the +/-leap offset would be
-        // applied to reads, but we don't yet expose a wall clock.
-        CLOCK_REALTIME_ID | CLOCK_TAI_ID => adjtimex(tx),
+        // The one adjustable standard clock — forward to the NTP state.
+        CLOCK_REALTIME_ID => adjtimex(tx),
 
         // Known clocks that don't support `clock_adj` in Linux.
-        CLOCK_MONOTONIC_ID
+        CLOCK_TAI_ID
+        | CLOCK_MONOTONIC_ID
         | CLOCK_PROCESS_CPUTIME_ID_ID
         | CLOCK_THREAD_CPUTIME_ID_ID
         | CLOCK_MONOTONIC_RAW_ID
@@ -1437,8 +1438,9 @@ mod tests {
     //
     // Linux's `do_clock_adjtime` walks a per-clock `k_clock` table:
     // unknown id → EINVAL, known id without `clock_adj` → EOPNOTSUPP,
-    // known id with `clock_adj` → forward.  Only CLOCK_REALTIME and
-    // CLOCK_TAI implement `clock_adj`.  Additionally, the syscall
+    // known id with `clock_adj` → forward.  Of the standard clocks only
+    // CLOCK_REALTIME implements `clock_adj` (see the note above
+    // `clock_adjtime`; Phase 163 counted TAI too).  Additionally, the syscall
     // entry runs `copy_from_user` *before* `do_clock_adjtime`, so a
     // null `tx` returns EFAULT even when the clock id is also bogus.
     //
@@ -1449,7 +1451,9 @@ mod tests {
     //     known-but-unsupported clocks (BOOTTIME, CPU-time, COARSE,
     //     ALARM variants), which Linux gives EOPNOTSUPP.
     //   * `clk_id == 11` (CLOCK_TAI) returned EINVAL — wrong; Linux
-    //     supports adjtime on TAI.
+    //     knows the clock but has no `clock_adj` for it: EOPNOTSUPP.
+    //     (Phase 163 made it adjustable instead, which was wrong the
+    //     other way; corrected 2026-09-26.)
     //   * Ordering: `clock_adjtime(99, NULL)` returned EINVAL — wrong;
     //     Linux returns EFAULT because copy_from_user fires first.
 
@@ -1527,18 +1531,19 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EOPNOTSUPP);
     }
 
-    // ---- CLOCK_TAI accepted ----
+    // ---- CLOCK_TAI: known, not adjustable ----
 
     #[test]
-    fn test_clock_adjtime_phase163_tai_forwards_to_adjtimex() {
-        // CLOCK_TAI (id 11) is one of only two clocks whose
-        // `clock_adj` callback Linux populates.  Pre-fix we returned
-        // EINVAL for id=11; post-fix it must succeed.
+    fn test_clock_adjtime_tai_eopnotsupp() {
+        // 6.6's `clock_tai` (kernel/time/posix-timers.c:1480) has no
+        // `clock_adj`, so `do_clock_adjtime` says EOPNOTSUPP.  Phase 163
+        // asserted it forwarded to adjtimex, as "one of only two clocks
+        // whose clock_adj callback Linux populates"; it is not.
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         let ret = clock_adjtime(11, &mut tx);
-        // Boot default has STA_UNSYNC → TIME_ERROR (not -1).
-        assert_eq!(ret, TIME_ERROR);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EOPNOTSUPP);
     }
 
     // ---- Unknown clock id → EINVAL ----
@@ -1607,16 +1612,14 @@ mod tests {
 
     #[test]
     fn test_clock_adjtime_phase163_chrony_capability_probe_workflow() {
-        // chrony probes for adjustable clocks at startup: it tries
-        // CLOCK_REALTIME, CLOCK_TAI, then falls back if either
-        // returns EOPNOTSUPP.  Pre-fix we returned EINVAL on TAI,
-        // confusing the probe.  Post-fix both succeed.
-        // REALTIME — supported.
+        // A probe for adjustable clocks: REALTIME is, TAI answers
+        // EOPNOTSUPP — the answer a probe falls back on, as on Linux.
         let mut tx = Timex::zeroed();
         assert_ne!(clock_adjtime(0, &mut tx), -1, "REALTIME must be adjustable");
-        // TAI — supported.
         let mut tx2 = Timex::zeroed();
-        assert_ne!(clock_adjtime(11, &mut tx2), -1, "TAI must be adjustable");
+        errno::set_errno(0);
+        assert_eq!(clock_adjtime(11, &mut tx2), -1);
+        assert_eq!(errno::get_errno(), errno::EOPNOTSUPP, "TAI has no clock_adj");
     }
 
     #[test]
@@ -1692,30 +1695,35 @@ mod tests {
     }
 
     #[test]
-    fn test_clock_adjtime_tai_no_longer_einval_phase163() {
-        // Sentinel: pre-Phase-163, CLOCK_TAI was wrongly rejected
-        // with EINVAL.  Post-fix it forwards to adjtimex.
+    fn test_clock_adjtime_tai_is_not_einval() {
+        // Sentinel: TAI is a *known* clock, so EOPNOTSUPP, never the
+        // unknown-clock EINVAL it was before Phase 163.
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
-        let ret = clock_adjtime(11, &mut tx);
-        // Returns a TIME_* code (TIME_ERROR by default), NOT -1.
-        assert_ne!(ret, -1, "post-Phase-163: TAI must succeed");
-        // errno must be preserved (POSIX success contract).
-        assert_eq!(errno::get_errno(), 0);
+        assert_eq!(clock_adjtime(11, &mut tx), -1);
+        assert_eq!(errno::get_errno(), errno::EOPNOTSUPP);
     }
 
     // ---- Cross-checks ----
 
     #[test]
-    fn test_clock_adjtime_phase163_tai_propagates_tick_validation() {
-        // The Phase-161 tick validation applies via TAI too — proves
-        // TAI really does forward to the same code path.
+    fn test_clock_adjtime_tai_refuses_before_validating_tx() {
+        // `do_clock_adjtime` returns EOPNOTSUPP for a clock without
+        // `clock_adj` before `tx` is looked at, so a bad tick through TAI
+        // is EOPNOTSUPP, not the tick validation's EINVAL.  (Phase 163's
+        // version of this test asserted EINVAL, to prove TAI forwarded.)
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK;
         tx.tick = 0;
-        let ret = clock_adjtime(11, &mut tx);
-        assert_eq!(ret, -1);
+        assert_eq!(clock_adjtime(11, &mut tx), -1);
+        assert_eq!(errno::get_errno(), errno::EOPNOTSUPP);
+        // Through REALTIME the tick validation does run.
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK;
+        tx.tick = 0;
+        assert_eq!(clock_adjtime(0, &mut tx), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
@@ -2074,7 +2082,7 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
-        // -- clock_adjtime forwarding (REALTIME/TAI inherit the gate) ----
+        // -- clock_adjtime forwarding (REALTIME inherits the gate) ----
 
         /// clock_adjtime(CLOCK_REALTIME, write) without cap → EPERM via
         /// the adjtimex forward.
@@ -2089,16 +2097,19 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
-        /// clock_adjtime(CLOCK_TAI, write) without cap → EPERM.
+        /// clock_adjtime(CLOCK_TAI, write) without cap → EOPNOTSUPP, as for
+        /// any clock with no `clock_adj`: the dispatch refuses before the
+        /// cap probe.  (This asserted EPERM, via a TAI forward, until
+        /// 2026-09-26.)
         #[test]
-        fn test_clock_adjtime_phase173_tai_write_no_cap_eperm() {
+        fn test_clock_adjtime_phase173_tai_write_no_cap_eopnotsupp() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
             let mut tx = Timex::zeroed();
             tx.modes = ADJ_OFFSET;
             errno::set_errno(0);
             assert_eq!(clock_adjtime(11 /* CLOCK_TAI */, &mut tx), -1);
-            assert_eq!(errno::get_errno(), errno::EPERM);
+            assert_eq!(errno::get_errno(), errno::EOPNOTSUPP);
         }
 
         /// clock_adjtime on a non-adjustable clock returns EOPNOTSUPP

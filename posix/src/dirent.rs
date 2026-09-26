@@ -206,7 +206,7 @@ pub(crate) fn kernel_type_to_dt(kernel_type: u8) -> u8 {
         // deserves an answer rather than falling into the catch-all.
         //
         // Translating it is deliberately all we do: `readdir` and
-        // `fill_dirent64_batch` do *not* filter type 2 out.  A second filter
+        // `fill_dirent_batch` do *not* filter type 2 out.  A second filter
         // in libc would not add a defence, it would add a place for the
         // kernel's to fail invisibly — a regression in `drop_volume_labels`
         // would fail lane A's `fat::mkfs_self_test` loudly while every real
@@ -747,124 +747,133 @@ pub extern "C" fn scandir(
     filter: Option<extern "C" fn(*const Dirent) -> i32>,
     compar: Option<extern "C" fn(*const *const Dirent, *const *const Dirent) -> i32>,
 ) -> i32 {
-    if dirname.is_null() || namelist.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
+    // glibc 2.39: `__scandir` is `__scandir_tail (__opendir (dir), …)`
+    // (dirent/scandir.c), so the directory is opened first -- a NULL or
+    // missing `dirname` is `opendir`'s EFAULT or ENOENT -- and the tail
+    // below is dirent/scandir-tail-common.c.
+    scandir_tail(opendir(dirname), namelist, filter, compar)
+}
 
-    // Open the directory.
-    let dirp = opendir(dirname);
+/// glibc's `__scandir_tail` (dirent/scandir-tail-common.c), for a stream
+/// the caller opened: one pass over the directory calling `filter` once per
+/// entry, an array grown by doubling from 10, the sort, and then the write
+/// through `namelist`.
+///
+/// glibc does not check `namelist`; that write is where a NULL one faults.
+/// This libc answers EFAULT there instead (design-decisions.md §303),
+/// having freed what it built -- so the directory is read and `filter` runs
+/// first, as upstream.  No entries at all stores NULL, as upstream does.
+///
+/// Until 2026-09-26 `scandir` refused a NULL `namelist` before opening the
+/// directory, so `scandir("/missing", NULL, …)` said EFAULT where glibc says
+/// ENOENT; it walked the directory twice, calling `filter` twice per entry;
+/// and it stored an empty allocation rather than NULL for no entries.
+#[allow(clippy::cast_ptr_alignment)]
+fn scandir_tail(
+    dirp: *mut Dir,
+    namelist: *mut *mut *mut Dirent,
+    filter: Option<extern "C" fn(*const Dirent) -> i32>,
+    compar: Option<extern "C" fn(*const *const Dirent, *const *const Dirent) -> i32>,
+) -> i32 {
     if dirp.is_null() {
-        return -1; // errno already set by opendir.
+        return -1; // errno set by the open.
     }
+    let save = errno::get_errno();
+    errno::set_errno(0);
 
-    // First pass: count matching entries.  Two-pass approach avoids
-    // over-allocating when a filter rejects many entries.
-    let mut count: usize = 0;
+    let mut v: *mut *mut Dirent = core::ptr::null_mut();
+    let mut vsize: usize = 0;
+    let mut cnt: usize = 0;
+    let mut failed = false;
     loop {
         let entry = readdir(dirp);
         if entry.is_null() {
             break;
         }
-        if filter.is_none_or(|f| f(entry) != 0) {
-            count = count.wrapping_add(1);
+        if let Some(select) = filter {
+            let selected = select(entry);
+            // The filter may have set errno on success; the test below needs
+            // it zero again, as glibc's comment says.
+            errno::set_errno(0);
+            if selected == 0 {
+                continue;
+            }
         }
-    }
-
-    if count == 0 {
-        closedir(dirp);
-        // Allocate an empty array (POSIX allows returning 0 with a non-null
-        // but empty namelist).
-        let arr = crate::malloc::malloc(core::mem::size_of::<*mut Dirent>());
-        if arr.is_null() {
+        if cnt == vsize {
+            let grown = if vsize == 0 { 10 } else { vsize.saturating_mul(2) };
+            let bytes = grown.checked_mul(core::mem::size_of::<*mut Dirent>());
+            // SAFETY: `v` is NULL or this function's own allocation.
+            let new = bytes.map_or(core::ptr::null_mut(), |b| unsafe {
+                crate::malloc::realloc(v.cast::<u8>(), b)
+            });
+            if new.is_null() {
+                errno::set_errno(errno::ENOMEM);
+                failed = true;
+                break;
+            }
+            v = new.cast::<*mut Dirent>();
+            vsize = grown;
+        }
+        let dup = crate::malloc::malloc(core::mem::size_of::<Dirent>());
+        if dup.is_null() {
             errno::set_errno(errno::ENOMEM);
-            return -1;
+            failed = true;
+            break;
         }
-        // SAFETY: arr is page-aligned (mmap), so align ≥ 8.
+        // SAFETY: `entry` is the stream's current `Dirent`, `dup` holds one,
+        // and `cnt < vsize` slots are allocated in `v`.
         unsafe {
-            *namelist = arr.cast::<*mut Dirent>();
+            core::ptr::copy_nonoverlapping(entry.cast::<u8>(), dup, core::mem::size_of::<Dirent>());
+            *v.add(cnt) = dup.cast::<Dirent>();
         }
-        return 0;
+        cnt = cnt.wrapping_add(1);
+        errno::set_errno(0);
     }
-
-    // Allocate the output array.
-    let arr_size = count.wrapping_mul(core::mem::size_of::<*mut Dirent>());
-    let arr = crate::malloc::malloc(arr_size);
-    if arr.is_null() {
+    // A readdir error leaves errno set, as in glibc's `if (errno == 0)`.
+    failed = failed || errno::get_errno() != 0;
+    let result = i32::try_from(cnt).ok();
+    if failed || result.is_none() || namelist.is_null() {
+        let err = if failed {
+            errno::get_errno()
+        } else if result.is_none() {
+            errno::EOVERFLOW
+        } else {
+            errno::EFAULT
+        };
+        // SAFETY: `v` holds `cnt` entries this function allocated.
+        unsafe { free_scandir_vector(v, cnt) };
         closedir(dirp);
-        errno::set_errno(errno::ENOMEM);
+        errno::set_errno(err);
         return -1;
     }
-    // SAFETY: arr is page-aligned (mmap), align ≥ 8.
-    let arr_typed = arr.cast::<*mut Dirent>();
-
-    // Second pass: collect matching entries into the array.
-    //
-    // The cursor is reset directly rather than with `rewinddir`, which now
-    // re-reads the directory.  The two passes must walk the *same* snapshot:
-    // the array was sized from the first pass's count, so a second pass over
-    // a directory that gained entries would have to drop the surplus, and one
-    // over a directory that lost entries would return a short array whose
-    // length disagrees with what the caller was told.
-    // SAFETY: `dirp` is a live stream this function opened.
-    unsafe {
-        (*dirp).pos = 0;
-    }
-    let mut idx: usize = 0;
-    loop {
-        let entry = readdir(dirp);
-        if entry.is_null() {
-            break;
-        }
-        if filter.is_none_or(|f| f(entry) != 0) && idx < count {
-            let dup = crate::malloc::malloc(core::mem::size_of::<Dirent>());
-            if dup.is_null() {
-                // OOM: free everything allocated so far then bail.
-                let mut j: usize = 0;
-                while j < idx {
-                    // SAFETY: valid pointers written at indices < idx.
-                    unsafe {
-                        crate::malloc::free((*arr_typed.add(j)).cast::<u8>());
-                    }
-                    j = j.wrapping_add(1);
-                }
-                // SAFETY: arr allocated by malloc above.
-                unsafe {
-                    crate::malloc::free(arr);
-                }
-                closedir(dirp);
-                errno::set_errno(errno::ENOMEM);
-                return -1;
-            }
-            // SAFETY: entry → dir.current (valid Dirent); dup has correct size.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    entry.cast::<u8>(),
-                    dup,
-                    core::mem::size_of::<Dirent>(),
-                );
-                // SAFETY: arr_typed is page-aligned; idx < count.
-                *arr_typed.add(idx) = dup.cast::<Dirent>();
-            }
-            idx = idx.wrapping_add(1);
-        }
-    }
-
     closedir(dirp);
-
-    // Sort if a comparator was provided.
-    if let Some(cmp) = compar {
-        // SAFETY: arr is page-aligned; idx entries have been written.
-        unsafe {
-            scandir_sort(arr, idx, cmp);
-        }
+    if let Some(cmp) = compar
+        && cnt > 1
+    {
+        // SAFETY: `v` holds `cnt` entries.
+        unsafe { scandir_sort(v.cast::<u8>(), cnt, cmp) };
     }
+    // SAFETY: `namelist` is non-null and writable (the caller's contract).
+    unsafe { *namelist = v };
+    errno::set_errno(save);
+    result.unwrap_or(0)
+}
 
-    // SAFETY: arr is page-aligned (align ≥ 8).
-    unsafe {
-        *namelist = arr_typed;
+/// Free a vector `scandir_tail` built: each entry, then the array.
+///
+/// # Safety
+///
+/// `v` must be NULL or an allocation holding `cnt` entries from `malloc`.
+unsafe fn free_scandir_vector(v: *mut *mut Dirent, cnt: usize) {
+    if v.is_null() {
+        return;
     }
-    idx as i32
+    for j in 0..cnt {
+        // SAFETY: caller contract; `j < cnt`.
+        unsafe { crate::malloc::free((*v.add(j)).cast::<u8>()) };
+    }
+    // SAFETY: caller contract.
+    unsafe { crate::malloc::free(v.cast::<u8>()) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1364,7 +1373,40 @@ fn emit_linux_dirent64(
     Some(reclen)
 }
 
-/// Translate packed 664 records into `linux_dirent64`s, filling `out`.
+/// Header size of a legacy `struct linux_dirent` on x86-64: `d_ino` and
+/// `d_off` (`unsigned long`, 8 bytes each) and `d_reclen` (2).
+const LINUX_DIRENT_HEADER: usize = 18;
+
+/// Emit one legacy `struct linux_dirent` into `out`, as fs/readdir.c's
+/// `filldir` lays it out on x86-64: `d_ino`, `d_off`, `d_reclen`, the name
+/// and its NUL, and `d_type` in the record's *last* byte, the record being
+/// `ALIGN(18 + namlen + 2, 8)` bytes.
+///
+/// Returns `Some(reclen)`, or `None` if `out` is too small for the record.
+fn emit_linux_dirent(out: &mut [u8], ino: u64, off: i64, dtype: u8, name: &[u8]) -> Option<usize> {
+    let name_end = LINUX_DIRENT_HEADER.checked_add(name.len())?;
+    let reclen = name_end.checked_add(2)?.checked_next_multiple_of(8)?;
+    let reclen_u16 = u16::try_from(reclen).ok()?;
+    let slot = out.get_mut(..reclen)?;
+    slot.fill(0);
+    slot.get_mut(0..8)?.copy_from_slice(&ino.to_le_bytes());
+    slot.get_mut(8..16)?.copy_from_slice(&off.to_le_bytes());
+    slot.get_mut(16..18)?.copy_from_slice(&reclen_u16.to_le_bytes());
+    slot.get_mut(LINUX_DIRENT_HEADER..name_end)?.copy_from_slice(name);
+    *slot.last_mut()? = dtype;
+    Some(reclen)
+}
+
+/// The record a `getdents`-family call writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DirentRecord {
+    /// `struct linux_dirent64`, for `getdents64`.
+    Linux64,
+    /// The legacy `struct linux_dirent`, for `getdents`.
+    Legacy,
+}
+
+/// Translate packed 664 records into `record`s, filling `out`.
 ///
 /// `pos` is the byte offset into `records` to resume from; the return is
 /// `(bytes written, byte offset to resume from next time)`.  Emission stops
@@ -1381,7 +1423,12 @@ fn emit_linux_dirent64(
 /// A pure function over two byte slices, so the batching boundary — the
 /// case where `out` fills mid-listing — is testable on the host, where the
 /// syscall that produces these records answers `ENOSYS`.
-fn fill_dirent64_batch(records: &[u8], pos: usize, out: &mut [u8]) -> (usize, usize) {
+fn fill_dirent_batch(
+    records: &[u8],
+    pos: usize,
+    out: &mut [u8],
+    record: DirentRecord,
+) -> (usize, usize) {
     let mut cursor = pos;
     let mut written: usize = 0;
     loop {
@@ -1412,13 +1459,12 @@ fn fill_dirent64_batch(records: &[u8], pos: usize, out: &mut [u8]) -> (usize, us
         let Ok(off) = i64::try_from(next) else {
             break;
         };
-        let Some(reclen) = emit_linux_dirent64(
-            remaining,
-            entry.ino,
-            off,
-            kernel_type_to_dt(entry.kernel_type),
-            entry.name,
-        ) else {
+        let dtype = kernel_type_to_dt(entry.kernel_type);
+        let emitted = match record {
+            DirentRecord::Linux64 => emit_linux_dirent64(remaining, entry.ino, off, dtype, entry.name),
+            DirentRecord::Legacy => emit_linux_dirent(remaining, entry.ino, off, dtype, entry.name),
+        };
+        let Some(reclen) = emitted else {
             // Out of room in the caller's buffer; leave `cursor` on this
             // record so the next call retries it.
             break;
@@ -1429,18 +1475,28 @@ fn fill_dirent64_batch(records: &[u8], pos: usize, out: &mut [u8]) -> (usize, us
     (written, cursor)
 }
 
-/// Emit the next batch of entries for `fd` out of its cached snapshot.
+/// Emit the next batch of entries for `fd` out of its cached snapshot, as
+/// `record`s.
 ///
 /// Returns `None` when no snapshot exists for `fd`, which is the caller's
-/// signal to take one.  Otherwise the value is what `getdents64` should
-/// return: bytes written, `0` at end-of-directory (the slot is released and
+/// signal to take one.  Otherwise the value is what `getdents64` (or
+/// `getdents`) should return: bytes written, `0` at end-of-directory (the slot is released and
 /// its buffer freed), or `-1` with errno set when the caller's buffer cannot
 /// hold even the next record.
 ///
 /// # Safety
 ///
 /// `dirp` must be writable for `count` bytes.
-unsafe fn drain_getdents_cache(fd: i32, dirp: *mut u8, count: usize) -> Option<i64> {
+/// Room for one `linux_dirent64` record, the largest being 280 bytes
+/// (a 255-byte name, its NUL and the 19-byte header, aligned to 8).
+const GETDENTS_PROBE: usize = 512;
+
+unsafe fn drain_getdents_cache(
+    fd: i32,
+    dirp: *mut u8,
+    count: usize,
+    record: DirentRecord,
+) -> Option<i64> {
     let mut release: *mut u8 = core::ptr::null_mut();
     let result = {
         // SAFETY: `GETDENTS_POOL_LOCK` is a `static`, so it outlives the guard.
@@ -1469,10 +1525,25 @@ unsafe fn drain_getdents_cache(fd: i32, dirp: *mut u8, count: usize) -> Option<i
                 } else {
                     core::slice::from_raw_parts((*slot).buf, (*slot).len)
                 };
-                // SAFETY (inner): the caller guarantees `dirp` is writable for
-                // `count` bytes, and `dirp` was null-checked before we ran.
-                let out = core::slice::from_raw_parts_mut(dirp, count);
-                let (written, next) = fill_dirent64_batch(records, (*slot).pos, out);
+                // A NULL `dirp` is filled into a probe instead: one entry's
+                // worth of room (a record is at most 280 bytes) is enough to
+                // learn whether the next entry fits `count`, which is all
+                // `filldir64` asks before it writes -- and faults.
+                let mut probe = [0u8; GETDENTS_PROBE];
+                let out: &mut [u8] = if dirp.is_null() {
+                    probe.get_mut(..count.min(GETDENTS_PROBE)).unwrap_or(&mut [])
+                } else {
+                    // SAFETY (inner): the caller guarantees a non-NULL
+                    // `dirp` is writable for `count` bytes.
+                    core::slice::from_raw_parts_mut(dirp, count)
+                };
+                let (written, next) = fill_dirent_batch(records, (*slot).pos, out, record);
+                if dirp.is_null() && written > 0 {
+                    // The entry fits, so `filldir64` would write it and
+                    // fault: EFAULT, with the position left where it was.
+                    crate::errno::set_errno(crate::errno::EFAULT);
+                    return Some(-1);
+                }
                 (*slot).pos = next;
                 if written > 0 {
                     // `written <= count`, so this only fails for a buffer
@@ -1528,37 +1599,40 @@ unsafe fn drain_getdents_cache(fd: i32, dirp: *mut u8, count: usize) -> Option<i
 ///
 /// # Errors
 ///
-/// - `EBADF`  — `fd` is negative or not a valid open fd.
-/// - `EFAULT` — `dirp` is null and `count` is non-zero.
-/// - `EINVAL` — `count` is zero or too small to hold any single entry.
+/// - `EBADF`  — `fd` is not an open descriptor, or is `O_PATH`, whatever
+///   `dirp` and `count` are.
 /// - `ENOTDIR` — `fd` does not refer to a directory.
+/// - `EINVAL` — entries remain and `count` is too small for the next one
+///   (so a `count` of zero is `EINVAL` except at the end).
+/// - `EFAULT` — `dirp` is null and the next entry fits `count`.
 /// - `ENFILE` — the per-fd snapshot cache pool is exhausted.
+///
+/// At the end of the directory the answer is 0, whatever `dirp` and `count`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getdents64(fd: i32, dirp: *mut u8, count: usize) -> i64 {
-    if fd < 0 {
+    getdents_common(fd, dirp, count, DirentRecord::Linux64)
+}
+
+/// `getdents64` and `getdents`, which differ only in the record they write.
+fn getdents_common(fd: i32, dirp: *mut u8, count: usize, record: DirentRecord) -> i64 {
+    // Linux 6.6's order (fs/readdir.c): `fdget_pos(fd)` first (:401) -- any
+    // descriptor that is not open, or is `O_PATH`, is EBADF, whatever
+    // `count` and `dirp` are -- then `iterate_dir` (ENOTDIR), and only as
+    // `filldir64` writes an entry does `count` (EINVAL, :359-360) or `dirp`
+    // (EFAULT, :367 and :386) come into it.  At the end of the directory the
+    // answer is 0, even for `count == 0` or a NULL `dirp`.  Until 2026-09-26
+    // a zero count and a NULL buffer were refused before a closed
+    // descriptor was.
+    if crate::fdtable::get_fd(fd).is_none_or(|entry| crate::file::is_path_fd_entry(&entry)) {
         crate::errno::set_errno(crate::errno::EBADF);
-        return -1;
-    }
-    if count == 0 {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-    if dirp.is_null() {
-        crate::errno::set_errno(crate::errno::EFAULT);
         return -1;
     }
 
     // An iteration already in progress is served from its snapshot.
-    // SAFETY: `dirp` is non-null and, per this function's contract, writable
-    // for `count` bytes.
-    if let Some(ret) = unsafe { drain_getdents_cache(fd, dirp, count) } {
+    // SAFETY: `dirp` is NULL or, per this function's contract, writable for
+    // `count` bytes; the drain never writes through a NULL one.
+    if let Some(ret) = unsafe { drain_getdents_cache(fd, dirp, count, record) } {
         return ret;
-    }
-
-    // First call for this fd: take the snapshot through the descriptor.
-    if crate::fdtable::get_fd(fd).is_none() {
-        crate::errno::set_errno(crate::errno::EBADF);
-        return -1;
     }
     let Some(handle) = crate::file::pinned_base(fd) else {
         // No kernel handle behind this fd, so it cannot be a directory the
@@ -1580,51 +1654,30 @@ pub extern "C" fn getdents64(fd: i32, dirp: *mut u8, count: usize) -> i64 {
     // can only be another thread draining the same fd to end-of-directory in
     // between — where this call would have ended up too, so report EOF.
     // SAFETY: as above.
-    unsafe { drain_getdents_cache(fd, dirp, count) }.unwrap_or(0)
+    unsafe { drain_getdents_cache(fd, dirp, count, record) }.unwrap_or(0)
 }
 
-/// Read directory entries via the legacy Linux `getdents` syscall.
+/// Read directory entries as the legacy Linux `getdents` syscall writes
+/// them on x86-64: `struct linux_dirent`.
 ///
-/// The legacy `struct linux_dirent` has a 32-bit inode field which
-/// cannot represent our 64-bit inodes safely, so we never actually
-/// produce records here — the function returns `ENOSYS` on valid
-/// calls and callers should switch to `getdents64` or libc's
-/// `readdir()`.  glibc and musl do not export a wrapper for either
-/// raw syscall, so portable code already uses one of those.
+/// The entries are `getdents64`'s, in a different record: `d_ino` and
+/// `d_off` are `unsigned long` -- 64 bits here, so every inode fits and
+/// fs/readdir.c's `EOVERFLOW` cannot arise -- and `d_type` is not a header
+/// field but the record's last byte, after the name's NUL.  Both calls drain
+/// the same per-descriptor snapshot, so they may be mixed on one descriptor
+/// as they share its position on Linux, and both validate as fs/readdir.c
+/// does: the descriptor first, then per entry (see `getdents64`'s errors).
 ///
-/// However, an unimplemented sentinel is not a license to skip
-/// argument-domain validation.  A buggy caller — for example a
-/// language runtime that bypasses libc — passing a closed fd or a
-/// NULL buffer must see the same errno values Linux would produce,
-/// so the failure is diagnosed correctly even though the underlying
-/// directory walk is not performed.  Validation order matches
-/// `getdents64` above and Linux's `fs/readdir.c::sys_getdents`:
+/// Until 2026-09-26 this answered ENOSYS to every valid call, because "the
+/// legacy `struct linux_dirent` has a 32-bit inode field" -- true of 32-bit
+/// architectures, not of this one -- and it refused a zero count and a NULL
+/// buffer before it looked at the descriptor.
 ///
-/// 1. `fd < 0`                   -> `EBADF`
-/// 2. `count == 0`               -> `EINVAL`
-/// 3. `dirp.is_null()`           -> `EFAULT`
-/// 4. `fd` not in fdtable        -> `EBADF`
-/// 5. all valid                  -> `ENOSYS`
+/// glibc exports no `getdents`; musl and bionic export one that is
+/// `getdents64` into their `struct dirent`.  This one is the syscall's.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getdents(fd: i32, dirp: *mut u8, count: usize) -> i64 {
-    if fd < 0 {
-        crate::errno::set_errno(crate::errno::EBADF);
-        return -1;
-    }
-    if count == 0 {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-    if dirp.is_null() {
-        crate::errno::set_errno(crate::errno::EFAULT);
-        return -1;
-    }
-    if crate::fdtable::get_fd(fd).is_none() {
-        crate::errno::set_errno(crate::errno::EBADF);
-        return -1;
-    }
-    crate::errno::set_errno(crate::errno::ENOSYS);
-    -1
+    getdents_common(fd, dirp, count, DirentRecord::Legacy)
 }
 
 // ---------------------------------------------------------------------------
@@ -1646,7 +1699,12 @@ pub extern "C" fn scandirat(
     filter: Option<extern "C" fn(*const Dirent) -> i32>,
     compar: Option<extern "C" fn(*const *const Dirent, *const *const Dirent) -> i32>,
 ) -> i32 {
-    if dirname.is_null() || namelist.is_null() {
+    // glibc's `scandirat` is `__scandir_tail (__opendirat (dfd, dir), …)`:
+    // the name is `openat`'s to judge first -- NULL is `getname`'s EFAULT,
+    // ahead of the descriptor -- and `namelist` is the tail's, at the end
+    // (see `scandir_tail`).  Until 2026-09-26 a NULL `namelist` was refused
+    // here, before the name was even resolved.
+    if dirname.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
@@ -1886,7 +1944,7 @@ mod tests {
         let mut records = [0u8; 128];
         let n = packed_record(&mut records, KERNEL_TYPE_FILE, b"a", 1, 4242);
         let mut out = [0u8; 128];
-        let (written, next) = fill_dirent64_batch(&records[..n], 0, &mut out);
+        let (written, next) = fill_dirent_batch(&records[..n], 0, &mut out, DirentRecord::Linux64);
         assert!(written > 0);
         assert_eq!(next, n);
         let ino = u64::from_le_bytes(out[0..8].try_into().expect("8 bytes"));
@@ -1906,7 +1964,7 @@ mod tests {
         let mut records = [0u8; 128];
         let n = packed_record(&mut records, KERNEL_TYPE_FILE, b"proc-ish", 0, 0);
         let mut out = [0u8; 128];
-        let (written, _) = fill_dirent64_batch(&records[..n], 0, &mut out);
+        let (written, _) = fill_dirent_batch(&records[..n], 0, &mut out, DirentRecord::Linux64);
         assert!(written > 0);
         assert_eq!(
             u64::from_le_bytes(out[0..8].try_into().expect("8 bytes")),
@@ -1927,7 +1985,7 @@ mod tests {
         let one = 19 + 5 + 1usize;
         let one_padded = (one + 7) & !7usize;
         let mut out = [0u8; 256];
-        let (written, next) = fill_dirent64_batch(&records[..n], 0, &mut out[..one_padded]);
+        let (written, next) = fill_dirent_batch(&records[..n], 0, &mut out[..one_padded], DirentRecord::Linux64);
         assert_eq!(written, one_padded);
         assert_eq!(
             u64::from_le_bytes(out[0..8].try_into().expect("8 bytes")),
@@ -1936,7 +1994,7 @@ mod tests {
 
         // Resuming from `next` yields the second entry and nothing else.
         let mut out2 = [0u8; 256];
-        let (written2, next2) = fill_dirent64_batch(&records[..n], next, &mut out2);
+        let (written2, next2) = fill_dirent_batch(&records[..n], next, &mut out2, DirentRecord::Linux64);
         assert!(written2 > 0);
         assert_eq!(next2, n);
         assert_eq!(
@@ -1945,7 +2003,7 @@ mod tests {
         );
 
         // And a third call at end-of-listing writes nothing.
-        let (written3, next3) = fill_dirent64_batch(&records[..n], next2, &mut out2);
+        let (written3, next3) = fill_dirent_batch(&records[..n], next2, &mut out2, DirentRecord::Linux64);
         assert_eq!(written3, 0);
         assert_eq!(next3, n);
     }
@@ -1959,7 +2017,7 @@ mod tests {
         let mut n = packed_record(&mut records, KERNEL_TYPE_FILE, b"", 0, 2);
         n += packed_record(&mut records[n..], KERNEL_TYPE_FILE, b"real", 0, 3);
         let mut out = [0u8; 256];
-        let (written, next) = fill_dirent64_batch(&records[..n], 0, &mut out);
+        let (written, next) = fill_dirent_batch(&records[..n], 0, &mut out, DirentRecord::Linux64);
         assert!(written > 0);
         assert_eq!(next, n);
         assert_eq!(
@@ -1986,7 +2044,7 @@ mod tests {
         let mut records = [0u8; 128];
         let n = packed_record(&mut records, KERNEL_TYPE_VOLLABEL, b"MYDISK", 0, 1);
         let mut out = [0u8; 128];
-        let (written, next) = fill_dirent64_batch(&records[..n], 0, &mut out);
+        let (written, next) = fill_dirent_batch(&records[..n], 0, &mut out, DirentRecord::Linux64);
         assert!(written > 0, "the label must not be filtered out");
         assert_eq!(next, n);
         assert_eq!(out[18], DT_UNKNOWN);
@@ -2002,7 +2060,7 @@ mod tests {
         let n = packed_record(&mut records, KERNEL_TYPE_FILE, b"ok", 0, 5);
         let truncated = n - 1;
         let mut out = [0u8; 128];
-        let (written, next) = fill_dirent64_batch(&records[..truncated], 0, &mut out);
+        let (written, next) = fill_dirent_batch(&records[..truncated], 0, &mut out, DirentRecord::Linux64);
         assert_eq!(written, 0);
         assert_eq!(next, truncated);
     }
@@ -2367,11 +2425,16 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
+    /// The directory is opened before `namelist` is used (glibc's
+    /// `__scandir_tail (__opendir (dir), …)`), so a directory that cannot be
+    /// opened reports that, not the NULL `namelist`.  Until 2026-09-26 this
+    /// asserted EFAULT, the NULL test having come first.
     #[test]
     fn test_scandir_null_namelist() {
-        let ret = scandir(b"/tmp\0".as_ptr(), core::ptr::null_mut(), None, None);
+        errno::set_errno(0);
+        let ret = scandir(b"/nonexistent-scandir\0".as_ptr(), core::ptr::null_mut(), None, None);
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_ne!(errno::get_errno(), errno::EFAULT, "the open's error, not the NULL namelist");
     }
 
     // -- fdopendir error handling --
@@ -2463,30 +2526,58 @@ mod tests {
 
     // -- getdents / getdents64 stubs --
 
-    #[test]
-    fn test_getdents64_null_buf_returns_efault() {
-        // getdents64 is now implemented; a null buffer with non-zero
-        // count must report EFAULT before touching the cache.
-        crate::errno::set_errno(0);
-        assert_eq!(getdents64(3, core::ptr::null_mut(), 4096), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    /// Descriptor `fd`, with a one-entry directory snapshot (a file "a",
+    /// inode 7), for exercising the verdicts `filldir64` and `filldir` give
+    /// per entry.  Each test passes a number no other test uses -- 233 to
+    /// 237 -- because the snapshot pool is process-wide, and keyed by number.
+    fn dir_fd_with_one_entry(fd: i32) -> i32 {
+        let _ = crate::fdtable::install_fd(fd, crate::fdtable::HandleKind::File, 0xD1D1);
+        let mut rec = [0u8; 64];
+        let n = packed_record(&mut rec, KERNEL_TYPE_FILE, b"a", 1, 7);
+        let buf = crate::malloc::malloc(n);
+        assert!(!buf.is_null());
+        // SAFETY: `buf` holds `n` bytes.
+        unsafe { core::ptr::copy_nonoverlapping(rec.as_ptr(), buf, n) };
+        assert!(install_getdents_cache(fd, buf, n));
+        fd
     }
 
+    /// Linux 6.6's order (fs/readdir.c): the descriptor first, then, per
+    /// entry, a count too small (EINVAL) and a buffer that faults (EFAULT),
+    /// and at the end 0 whatever the count and buffer.  The three tests this
+    /// replaces passed fd 3 -- not open on the host -- so under upstream's
+    /// order all of them would have been EBADF: they only ever tested that
+    /// the count and NULL checks came first, which was the bug.
     #[test]
-    fn test_getdents_still_enosys() {
-        // Phase 67: getdents (legacy 32-bit-ino variant) is still
-        // unimplemented, but now validates arguments first.  NULL dirp
-        // with non-zero count now produces EFAULT (matching Linux),
-        // not ENOSYS — this test was previously checking the pre-
-        // validator behaviour.  Updated to call with valid args that
-        // reach the ENOSYS sentinel (negative fd would short-circuit
-        // with EBADF; use AT_FDCWD-style sentinel value of -100 is
-        // also negative, so we have to use a real open fd).  Since
-        // we cannot easily open a fd in this test, we assert the new
-        // EFAULT semantics directly to keep regression coverage.
+    fn test_getdents64_per_entry_verdicts_in_upstreams_order() {
+        let fd = dir_fd_with_one_entry(233);
+        let mut buf = [0u8; 256];
+        // count 0 with an entry left: it does not fit (:359-360).
         crate::errno::set_errno(0);
-        assert_eq!(getdents(3, core::ptr::null_mut(), 4096), -1);
+        assert_eq!(getdents64(fd, buf.as_mut_ptr(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        // A NULL buffer with room claimed: the write faults (:367, :386),
+        // and the entry is not consumed.
+        crate::errno::set_errno(0);
+        assert_eq!(getdents64(fd, core::ptr::null_mut(), 256), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        // A real buffer receives it.
+        assert!(getdents64(fd, buf.as_mut_ptr(), buf.len()) > 0);
+        // At the end, 0 -- even for a NULL buffer and a zero count.
+        crate::errno::set_errno(0);
+        assert_eq!(getdents64(fd, core::ptr::null_mut(), 0), 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+        let _ = crate::fdtable::close_fd(fd);
+    }
+
+    /// The descriptor outranks the count and the buffer (fs/readdir.c:401).
+    #[test]
+    fn test_getdents64_bad_fd_outranks_count_and_buffer() {
+        for (dirp, count) in [(core::ptr::null_mut(), 0usize), (core::ptr::null_mut(), 4096)] {
+            crate::errno::set_errno(0);
+            assert_eq!(getdents64(9999, dirp, count), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+        }
     }
 
     #[test]
@@ -2525,16 +2616,17 @@ mod tests {
 
     #[test]
     fn test_scandirat_null_namelist() {
+        // As for `scandir`: the directory is opened first.
         crate::errno::set_errno(0);
         let ret = scandirat(
             crate::file::AT_FDCWD,
-            b"/tmp\0".as_ptr(),
+            b"/nonexistent-scandirat\0".as_ptr(),
             core::ptr::null_mut(),
             None,
             None,
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_ne!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
@@ -2554,21 +2646,6 @@ mod tests {
     // -- getdents / getdents64 --
 
     #[test]
-    fn test_getdents_returns_enosys() {
-        // Phase 67: fd 3 is not an open fd in the test environment, so
-        // the new validator now reports EBADF before reaching the
-        // ENOSYS sentinel.  Test updated to verify EBADF for this
-        // closed-fd case.  A separate test below
-        // (`test_getdents_valid_args_reach_enosys`) covers the actual
-        // ENOSYS path with a real open fd.
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 256];
-        let ret = getdents(3, buf.as_mut_ptr(), buf.len());
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
-    }
-
-    #[test]
     fn test_getdents64_negative_fd_ebadf() {
         crate::errno::set_errno(0);
         let mut buf = [0u8; 256];
@@ -2577,22 +2654,6 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
-    #[test]
-    fn test_getdents64_zero_count_einval() {
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 256];
-        let ret = getdents64(3, buf.as_mut_ptr(), 0);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    #[test]
-    fn test_getdents64_null_buf_efault() {
-        crate::errno::set_errno(0);
-        let ret = getdents64(3, core::ptr::null_mut(), 256);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
-    }
 
     #[test]
     fn test_getdents64_invalid_fd_ebadf() {
@@ -2657,7 +2718,7 @@ mod tests {
         let mut records = [0u8; 128];
         let n = packed_record(&mut records, KERNEL_TYPE_DIR, b"foo", 0, 9);
         let mut out = [0u8; 128];
-        let (written, _) = fill_dirent64_batch(&records[..n], 0, &mut out);
+        let (written, _) = fill_dirent_batch(&records[..n], 0, &mut out, DirentRecord::Linux64);
         assert!(written > 0);
         assert_eq!(out[18], DT_DIR);
         assert_ne!(out[18], KERNEL_TYPE_DIR);
@@ -2695,11 +2756,8 @@ mod tests {
     // Phase 67 — getdents argument-domain validators
     // -----------------------------------------------------------------
     //
-    // The legacy `getdents` stub remains policy-driven (returns ENOSYS
-    // on valid calls because the 32-bit-ino record format can't
-    // represent our 64-bit inodes safely).  But invalid calls must
-    // produce the same errno values Linux would, so a buggy caller is
-    // not misled by ENOSYS into thinking the function never exists.
+    // The legacy `getdents` writes `struct linux_dirent` records from the
+    // same snapshot as `getdents64`, and validates in the same order.
 
     // --- per-error-class ---
 
@@ -2722,21 +2780,56 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
+    /// A count too small for the next entry is EINVAL -- the legacy record
+    /// for a one-byte name is 24 bytes -- and a NULL buffer the entry would
+    /// fit is EFAULT; neither consumes the entry.  At the end both are 0.
     #[test]
-    fn test_getdents_zero_count_einval() {
+    fn test_getdents_per_entry_verdicts_in_upstreams_order() {
+        let fd = dir_fd_with_one_entry(234);
+        let mut buf = [0u8; 64];
+        for count in [0, 23] {
+            crate::errno::set_errno(0);
+            assert_eq!(getdents(fd, buf.as_mut_ptr(), count), -1, "count {count}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL, "count {count}");
+        }
         crate::errno::set_errno(0);
-        let mut buf = [0u8; 256];
-        let ret = getdents(3, buf.as_mut_ptr(), 0);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(getdents(fd, core::ptr::null_mut(), 256), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(getdents(fd, buf.as_mut_ptr(), 24), 24, "exactly room");
+        crate::errno::set_errno(0);
+        assert_eq!(getdents(fd, core::ptr::null_mut(), 0), 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+        let _ = crate::fdtable::close_fd(fd);
     }
 
+    /// The legacy record, byte by byte: `d_ino`, `d_off` (the next entry's
+    /// cookie), `d_reclen`, the name and its NUL, zero padding, and `d_type`
+    /// in the last byte -- where `getdents64` puts it at byte 18.
     #[test]
-    fn test_getdents_null_buf_efault() {
-        crate::errno::set_errno(0);
-        let ret = getdents(3, core::ptr::null_mut(), 256);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    fn test_getdents_writes_the_legacy_record() {
+        let fd = dir_fd_with_one_entry(235);
+        let packed = packed_record(&mut [0u8; 64], KERNEL_TYPE_FILE, b"a", 1, 7);
+        let mut buf = [0xAAu8; 64];
+        assert_eq!(getdents(fd, buf.as_mut_ptr(), buf.len()), 24);
+        assert_eq!(buf[0..8], 7u64.to_le_bytes(), "d_ino");
+        assert_eq!(buf[8..16], (packed as u64).to_le_bytes(), "d_off");
+        assert_eq!(buf[16..18], 24u16.to_le_bytes(), "d_reclen");
+        assert_eq!(&buf[18..23], b"a\0\0\0\0", "name, NUL, padding");
+        assert_eq!(buf[23], kernel_type_to_dt(KERNEL_TYPE_FILE), "d_type");
+        assert_eq!(buf[24], 0xAA, "nothing past the record");
+        assert_eq!(getdents(fd, buf.as_mut_ptr(), buf.len()), 0, "end of directory");
+        let _ = crate::fdtable::close_fd(fd);
+    }
+
+    /// The two calls share one position, as they share `f_pos` on Linux.
+    #[test]
+    fn test_getdents_and_getdents64_share_a_position() {
+        let fd = dir_fd_with_one_entry(236);
+        let mut buf = [0u8; 64];
+        assert_eq!(getdents64(fd, buf.as_mut_ptr(), buf.len()), 24);
+        assert_eq!(buf[18], kernel_type_to_dt(KERNEL_TYPE_FILE), "getdents64's d_type");
+        assert_eq!(getdents(fd, buf.as_mut_ptr(), buf.len()), 0, "already read");
+        let _ = crate::fdtable::close_fd(fd);
     }
 
     #[test]
@@ -2751,12 +2844,9 @@ mod tests {
     }
 
     #[test]
-    fn test_getdents_valid_args_reach_enosys() {
-        // Open a real fd via pipe() and pass it to getdents.  The fd
-        // is not a directory, but getdents's stub does not check kind
-        // — it only verifies the fd is open, then returns ENOSYS.
-        // A future refinement (when kind tracking lands for directories)
-        // would refine non-directory fds to ENOTDIR.
+    fn test_getdents_non_directory_enotdir() {
+        // A pipe is open but not a directory: `iterate_dir`'s ENOTDIR.  It
+        // was ENOSYS, the answer to every valid call, until 2026-09-26.
         let mut pf = [-1i32; 2];
         let r = crate::pipe::pipe(pf.as_mut_ptr());
         assert_eq!(r, 0, "pipe() must succeed to set up test");
@@ -2764,7 +2854,7 @@ mod tests {
         let mut buf = [0u8; 256];
         let ret = getdents(pf[0], buf.as_mut_ptr(), buf.len());
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTDIR);
         // Clean up pipe fds.
         let _ = crate::fdtable::close_fd(pf[0]);
         let _ = crate::fdtable::close_fd(pf[1]);
@@ -2774,7 +2864,7 @@ mod tests {
 
     #[test]
     fn test_getdents_negative_fd_beats_zero_count() {
-        // fd<0 check fires before count==0 check.
+        // The descriptor is looked up before the count matters.
         crate::errno::set_errno(0);
         let ret = getdents(-1, core::ptr::null_mut(), 0);
         assert_eq!(ret, -1);
@@ -2790,32 +2880,25 @@ mod tests {
     }
 
     #[test]
-    fn test_getdents_zero_count_beats_null_buf() {
-        // count==0 check fires before NULL-buf check.
-        crate::errno::set_errno(0);
-        let ret = getdents(3, core::ptr::null_mut(), 0);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    #[test]
-    fn test_getdents_null_buf_beats_closed_fd() {
-        // NULL-buf check (with non-zero count) fires before the
-        // fdtable lookup, so a closed fd plus NULL buf produces EFAULT,
-        // not EBADF.
-        crate::errno::set_errno(0);
-        let ret = getdents(9999, core::ptr::null_mut(), 256);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    fn test_getdents_closed_fd_beats_null_buf_and_zero_count() {
+        // `fdget_pos` comes first (fs/readdir.c): a closed fd is EBADF
+        // whatever the buffer and count.  A NULL buffer outranked it until
+        // 2026-09-26.
+        for count in [0, 256] {
+            crate::errno::set_errno(0);
+            let ret = getdents(9999, core::ptr::null_mut(), count);
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+        }
     }
 
     // --- ordering parity with getdents64 ---
 
     #[test]
     fn test_getdents_and_getdents64_share_validation_order() {
-        // Both validators check fd<0 first, then count==0, then NULL
-        // buf, then fdtable.  This test pins that parity so a future
-        // refactor doesn't diverge them silently.
+        // Both look the descriptor up first, as Linux's getdents and
+        // getdents64 both begin with `fdget_pos`.  This test pins that
+        // parity so a future refactor doesn't diverge them silently.
         crate::errno::set_errno(0);
         let r1 = getdents(-1, core::ptr::null_mut(), 0);
         let e1 = crate::errno::get_errno();
@@ -2832,20 +2915,29 @@ mod tests {
 
     #[test]
     fn test_workflow_legacy_program_calling_raw_getdents() {
-        // A 32-bit-era program (or test harness emulating one) calls
-        // the raw getdents syscall directly with a valid open fd.
-        // Modern kernels would happily return records; we return
-        // ENOSYS because we don't support the 32-bit-ino layout, but
-        // the call must not be confused with "fd was bad".
-        let mut pf = [-1i32; 2];
-        assert_eq!(crate::pipe::pipe(pf.as_mut_ptr()), 0);
-        crate::errno::set_errno(0);
+        // A program written for the legacy syscall reads a directory until
+        // getdents returns 0, walking records by `d_reclen` and reading each
+        // `d_type` from the record's last byte.
+        let fd = dir_fd_with_one_entry(237);
         let mut buf = [0u8; 1024];
-        let ret = getdents(pf[0], buf.as_mut_ptr(), buf.len());
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-        let _ = crate::fdtable::close_fd(pf[0]);
-        let _ = crate::fdtable::close_fd(pf[1]);
+        let mut names = 0;
+        loop {
+            let n = getdents(fd, buf.as_mut_ptr(), buf.len());
+            assert!(n >= 0, "errno {}", crate::errno::get_errno());
+            if n == 0 {
+                break;
+            }
+            let mut at = 0usize;
+            while at < n as usize {
+                let reclen = usize::from(u16::from_le_bytes([buf[at + 16], buf[at + 17]]));
+                assert_eq!(buf[at + 18], b'a');
+                assert_eq!(buf[at + reclen - 1], kernel_type_to_dt(KERNEL_TYPE_FILE));
+                names += 1;
+                at += reclen;
+            }
+        }
+        assert_eq!(names, 1);
+        let _ = crate::fdtable::close_fd(fd);
     }
 
     // --- buggy callers ---
@@ -2865,22 +2957,25 @@ mod tests {
 
     #[test]
     fn test_buggy_caller_zero_size_buffer() {
-        // A caller miscomputes the buffer size as 0.  Linux returns
-        // EINVAL; we must too.
+        // A caller miscomputes the buffer size as 0.  Linux returns EINVAL
+        // while an entry remains -- and 0 at the end -- once the descriptor
+        // is known good; a zero count on a closed one is EBADF.
         crate::errno::set_errno(0);
         let mut buf = [0u8; 256];
         let ret = getdents(3, buf.as_mut_ptr(), 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF, "fd 3 is not open here");
     }
 
     #[test]
     fn test_buggy_caller_uninitialised_buffer_pointer() {
-        // A caller forgets to allocate the buffer and passes NULL.
-        // Linux returns EFAULT; we must too.
+        // A caller forgets to allocate the buffer and passes NULL.  With a
+        // descriptor that is not open, Linux says EBADF before it looks at
+        // the buffer; `test_getdents_per_entry_verdicts_in_upstreams_order`
+        // has the EFAULT for an open directory.
         crate::errno::set_errno(0);
         let ret = getdents(3, core::ptr::null_mut(), 4096);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 }

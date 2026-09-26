@@ -1679,8 +1679,8 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
 #### Taskbar
 - [x] Pinned apps on left, running apps on right, divider between sections — 2026-09-25: a wider gap and a divider line between the two, only while both have buttons (`DesktopShell::taskbar_divider_rect`).
 - [x] Drag to reorder in both sections — 2026-09-25: pins by dragging along the pinned row; running programs' buttons along theirs, in an order the shell keeps (`button_order`) rather than the stacking order, so a raised window's button stays put.
-- [ ] Optional app name alongside icon
-- [ ] Aero-style blurry transparency (taskbar and/or window titlebars)
+- [ ] Optional app name alongside icon — *2026-09-25: the taskbar's buttons show the name and no icon, the reverse of this item: an icon needs an icon source, which is `Tier 1 — Icon Theme` below.*
+- [x] Aero-style blurry transparency (taskbar and/or window titlebars) — *verified 2026-09-25: the shell's taskbar surface asks for `BlurKind::Taskbar`, its menus `Menu` and its notifications `Notification`, and the compositor blurs behind each and behind title bars (`BlurKind::TitleBar`); how much shows through is the appearance setting's transparency level. In software for now: `TD-C-BLUR-IS-SOFTWARE-ONLY`.*
 
 #### System Tray
 - [ ] System tray icons: clock, wifi, volume, battery, emoji input, keyboard layout, network drives, GPU usage, date/time
@@ -1720,8 +1720,8 @@ Gated for programs by `power.reload` (§1.5), which is deliberately not implied 
 `power.reboot` — the caller picks the image._
 
 #### Other Desktop Features
-- [ ] Notification pane (per-app disable option)
-- [ ] Widget support
+- [x] Notification pane (per-app disable option) — *verified 2026-09-25: the pane's settings view lists each program that has notified, with a switch that files it as Silent or back as Normal (`NotificationPane`, `AppSettingKind::Enabled`); the shell writes the rule to `notifications.yaml` (`apply_app_notification_setting`) and its filter obeys it from then on.*
+- [-] Widget support — *verified 2026-09-25: the desktop's right-click menu adds a clock, a calendar or a system monitor; widgets move and are removed, and the layout is saved and restored (`widgets.yaml`). `WidgetKind` defines five more -- weather, notes, RSS, music, photo frame -- that nothing offers.*
 - [x] Ctrl+R run dialog (completion dropdown, recent commands) — bound to **Super+R**, not Ctrl+R: a desktop shortcut is a global grab and Ctrl+R is taken by every application with a reload command (design-decisions.md §568). Wired to the shell 2026-08-26. Browse opens a file chooser since 2026-09-03 (`TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO`, FIXED; this line said "still inert" until 2026-09-25). **Takes arguments and opens folders and documents since 2026-09-25**, as Windows' Run box does: a whole line that is an existing absolute path is opened by the desktop's rules, and anything else is split into a program and its arguments by POSIX shell quoting (design-decisions.md §870). It used to take the whole line as one program's name.
 - [ ] Context menu extension API:
   - [ ] Programs must request capability to add items

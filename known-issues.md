@@ -63325,7 +63325,9 @@ survives, not what went.
 
 ---
 
-## TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING
+## TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING -- FIXED (found so on 2026-09-25)
+
+**Status:** resolved by the input settings work, and the heading never said so. `gui/desktop/src/mouse_settings.rs` is gone; the model is `gui/inputsettings` (`input.yaml`), and the compositor applies its double-click time through `Compositor::reload_input` -> `set_input_settings` -> `set_double_click_ms` on a `ReloadInput` request -- the second verb this entry leaned toward. Found while triaging open lane C entries; the body below is the entry as written.
 
 **In short:** Settings has a mouse panel with sliders for double-click speed,
 pointer speed and so on. Moving them changes a number in a file and nothing

@@ -7885,26 +7885,6 @@ Remaining net improvements (diminishing returns):
   test runner or a separate host-testable crate that extracts pure
   logic functions.
 
-- (DONE 2026-05-29) crypt() real SHA-256/SHA-512 hashing: replaced the
-  insecure "$0$<key>" stub (which stored passwords in cleartext with a
-  marker prefix — any program hashing a password was effectively storing
-  the plaintext) with proper SHA-crypt ($5$ / $6$) per Ulrich Drepper's
-  spec.  New self-contained SHA-2 cores in posix/src/sha2.rs (no heap, no
-  external crate; works on target_os="none"), verified against NIST FIPS
-  180-4 vectors.  crypt.rs now parses "rounds=N$", clamps to [1000,
-  999999999], truncates salt to 16 bytes, and emits the crypt-base64
-  encoding.  Verified against the canonical Drepper $5$/$6$ test vectors.
-  Sequences P and S are fed incrementally (add_repeated) so no unbounded
-  stack/heap buffer is needed regardless of password length.
-  FOLLOW-UP (DONE 2026-05-29): MD5 crypt ($1$) now implemented too —
-  Poul-Henning Kamp's md5crypt, new MD5 core in posix/src/md5.rs (RFC
-  1321 vectors), verified against OpenSSL 3.5 `passwd -1`.  crypt() now
-  dispatches $1$/$5$/$6$.  Only legacy DES (2-char salt) remains
-  unimplemented; it returns NULL + EINVAL rather than a fake result.
-  Implement DES crypt only if a ported program must verify ancient
-  DES-format /etc/shadow entries (low priority; DES crypt is obsolete
-  and insecure).
-
 - (DONE 2026-05-30) CRITICAL stat() ABI translation bug fixed.  The kernel's
   SYS_FS_STAT/SYS_FS_LSTAT/SYS_FS_FSTAT write a compact 16-byte FsStatResult
   (size u64 @0, entry_type u8 @8, nlinks u32 @12), NOT a POSIX struct stat.
@@ -58802,3 +58782,18 @@ is already waiting, not whether the setter exists.
   refresh, measured from the last frame shown (`Server::next_wake`,
   design-decisions §1302). A fixed vblank-aligned grid would not drift, but the
   kernel sends no flip event to align to; revisit when it does.
+
+## Lane D — POSIX, libc & toolchain
+
+- **crypt: libxcrypt's other methods** (posix/src/crypt.rs).  Only $1$, $5$
+  and $6$ hash; every other setting gets the failure token "*0" with EINVAL,
+  as libxcrypt answers for a method it lacks.  Ubuntu 24.04's libxcrypt has,
+  probed 2026-09-26: traditional DES (two-character salt), BSDi DES ("_"),
+  bcrypt ($2b$), scrypt ($7$), yescrypt ($y$), gost-yescrypt ($gy$),
+  sha1crypt ($sha1$), SunMD5 ($md5$) and NT ($3$), and real DES behind
+  encrypt/setkey (compat symbols there; ours answer ENOSYS).  yescrypt comes
+  first: it is Ubuntu's default for new passwords, so an /etc/shadow brought
+  from Ubuntu does not verify here.  Port from libxcrypt 4.4.36 (source in
+  D:\refsrc\libxcrypt-4.4.36), per design-decisions.md §539: primitives
+  ported, not written.  (Replaces the DES follow-up of the 2026-05-29
+  crypt entry, deleted as done.)

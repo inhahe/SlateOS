@@ -24250,6 +24250,20 @@ glibc 2.39's getrlimit64.c/setrlimit64.c and Linux 6.6's `prlimit64`.
   written last, only if nothing before it failed.
 - **`getrusage(who, NULL)`** -- right: `who` first, then the copy.
 
+**Thirtieth pass, 2026-09-26 — `crypt.rs` (4 sites), lane D.** Against
+libxcrypt 4.4.36 -- glibc 2.39 has no `crypt` -- as Ubuntu 24.04 builds it,
+failure tokens on, and probed there.
+
+- **`crypt(NULL, s)`, `crypt(k, NULL)`, `crypt_r(NULL, s, d)`,
+  `crypt_r(k, NULL, d)`** were NULL with `EFAULT`; libxcrypt returns its
+  failure token, `"*0"`, with `EINVAL`.
+- **`crypt_r(k, s, NULL)`** stays NULL, now documented as the substitute for
+  the fault libxcrypt takes writing its token there; it is `EFAULT`.
+- **`encrypt(NULL, …)`, `setkey(NULL)`** keep `EFAULT` for the same reason.
+- Beside them, the finding of the pass: every failure was NULL where
+  libxcrypt returns the token, and three of libxcrypt's refusals were missing
+  -- `B-D-CRYPT-FAILED-WITH-NULL` (new, fixed with it).
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24263,16 +24277,16 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-twenty-nine swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
-`sched.rs`, `mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`,
-`linux_module.rs`, `sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs`, `sysv_sem.rs`,
-`linux_aio_abi.rs`, `linux_seccomp.rs`, `mman.rs` and `resource.rs`. That
-finishes the files the sweep had counted at four and at three: `pwd.rs`,
-`dirent.rs` and `signal.rs` needed nothing at their NULLs -- `pwd.rs`'s
-database did (`B-D-PWD-KNEW-ONLY-ROOT`). A recount by the eleventh pass's
-rule on 2026-09-26 finds three it had not listed: `crypt.rs` at four (one of
-its sites sampled by that pass) and `iconv.rs` and `linux_io_uring.rs` at
-three. They are next, then the files at two.
+thirty swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`, `sched.rs`,
+`mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`, `linux_module.rs`,
+`sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs`, `sysv_sem.rs`, `linux_aio_abi.rs`,
+`linux_seccomp.rs`, `mman.rs`, `resource.rs` and `crypt.rs`. That finishes the
+files the sweep had counted at four and at three: `pwd.rs`, `dirent.rs` and
+`signal.rs` needed nothing at their NULLs -- `pwd.rs`'s database did
+(`B-D-PWD-KNEW-ONLY-ROOT`). A recount by the eleventh pass's rule on
+2026-09-26 found three it had not listed: `crypt.rs` at four, done by the
+thirtieth pass, and `iconv.rs` and `linux_io_uring.rs` at three. Those two
+are next, then the files at two.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
@@ -169711,6 +169725,38 @@ the caller's buffer.
 **Fix.** `getrlimit` and `setrlimit` are `prlimit` with the other pointer
 NULL, as glibc's are; `prlimit` reads the new limit first and writes the old
 one last, only on success.
+
+### [D] B-D-CRYPT-FAILED-WITH-NULL — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/crypt.rs` -- `crypt`, `crypt_r`, `encrypt`, and the
+safe API's `hash_into`/`verify` through `compute_into`.
+
+**In short:** when a password cannot be hashed, the `crypt` that Linux
+systems ship (libxcrypt, since glibc dropped its own) still returns a string,
+`"*0"`, that can never match a stored password, and sets `errno` to say why.
+Ours returned NULL instead, so a program written for Linux that compares the
+result directly -- common in login code -- would crash where Linux refuses
+the login. It also accepted a few inputs libxcrypt refuses.
+
+**What was wrong, against libxcrypt 4.4.36 as Ubuntu 24.04 builds it (probed
+there):**
+
+| | was | now |
+|---|---|---|
+| any failure | NULL | the failure token, `"*0"` (`"*1"` if the setting begins `"*0"`), written into the buffer before anything is checked |
+| NULL passphrase or setting | `EFAULT` | `EINVAL` |
+| a passphrase of 512 bytes or more | hashed | `ERANGE` |
+| a setting with a space, a control or non-ASCII byte, or `! * : ; \` | hashed, with that byte in the salt -- a `:` would have split an `/etc/shadow` line | `EINVAL` |
+| `encrypt(block, 2)` | `EINVAL` | `ENOSYS`, the stub's answer (libxcrypt reads any non-zero flag as "decrypt") |
+
+The safe Rust API refuses what `crypt` refuses, so a C program and
+`passwd`/`login` cannot disagree about one `/etc/shadow` entry.
+
+**Still missing, and tracked in `todo.txt`:** libxcrypt's other methods --
+traditional and BSDi DES, bcrypt (`$2b$`), scrypt (`$7$`), yescrypt (`$y$`,
+Ubuntu's default for new passwords), and the rest -- and real DES behind
+`encrypt`/`setkey`, which Ubuntu's libxcrypt provides. Their settings get the
+token and `EINVAL`, never a made-up hash.
 
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 

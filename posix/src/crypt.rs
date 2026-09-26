@@ -20,15 +20,36 @@
 //! existing `$1$` entries in legacy `/etc/shadow` files — never use it
 //! for new passwords.
 //!
+//! ## Failure: the failure token, as libxcrypt answers
+//!
+//! glibc 2.39 no longer has a `crypt`; Linux distributions ship libxcrypt,
+//! and Ubuntu 24.04's (libcrypt1 4.4.36) is built with *failure tokens*: a
+//! `crypt` or `crypt_r` that fails still returns a string -- `"*0"`, or
+//! `"*1"` when the setting itself begins `"*0"` -- with `errno` saying why.
+//! A token can never equal a stored hash, so a program that compares the
+//! result without checking it for NULL refuses the login instead of
+//! crashing.  This module answers the same way, and refuses what libxcrypt
+//! refuses, in its order (`do_crypt` in lib/crypt.c):
+//!
+//! | case | errno |
+//! |---|---|
+//! | the passphrase or the setting is NULL | `EINVAL` |
+//! | the passphrase is 512 bytes or longer | `ERANGE` |
+//! | the setting has a space, a control or non-ASCII byte, or one of `! * : ; \` | `EINVAL` |
+//! | the setting names no method this module implements | `EINVAL` |
+//!
+//! Until 2026-09-26 a NULL argument was `EFAULT` and every failure returned
+//! NULL, which a program ported from Linux does not expect.
+//!
 //! ## Unsupported methods
 //!
-//! Legacy DES (two-character salt) crypt is **not** implemented.  Rather
-//! than fabricate an insecure result, `crypt()` fails with `EINVAL` for
-//! any setting it does not recognise — matching modern glibc/libxcrypt
-//! behaviour.  (See `todo.txt` for the DES follow-up.)
+//! Legacy DES (two-character salt), BSDi DES, bcrypt, scrypt, yescrypt and
+//! libxcrypt's other methods are **not** implemented: their settings fail
+//! with the token and `EINVAL`, never with a fabricated hash.  (See
+//! `todo.txt` for the DES follow-up.)
 //!
 //! `encrypt`/`setkey` (raw DES block cipher) remain unimplemented and
-//! return `ENOSYS` after argument validation.
+//! answer `ENOSYS`.
 
 #![allow(clippy::arithmetic_side_effects)] // Bounded counters / modular round arithmetic.
 #![allow(clippy::indexing_slicing)] // Fixed-size digest arrays indexed by compile-time constants.
@@ -46,6 +67,10 @@ const CRYPT_OUTPUT_LEN: usize = 128;
 
 /// Static buffer for `crypt()` results (non-reentrant, per POSIX).
 static mut CRYPT_BUF: [u8; CRYPT_OUTPUT_LEN] = [0u8; CRYPT_OUTPUT_LEN];
+
+/// libxcrypt's `CRYPT_MAX_PASSPHRASE_SIZE`: a passphrase of this many bytes
+/// or more is refused with `ERANGE`.
+const CRYPT_MAX_PASSPHRASE_SIZE: usize = 512;
 
 /// The crypt base-64 alphabet (note: NOT standard base64 — `.` and `/`
 /// lead, and the digit/letter order differs).
@@ -439,6 +464,44 @@ fn compute_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> bool {
     md5_crypt(key, setting, out) || sha_crypt(key, setting, out)
 }
 
+/// libxcrypt's `check_badsalt_chars`: a setting may hold only printable ASCII
+/// other than space and the five characters `passwd(5)` and `shadow(5)` use
+/// as delimiters and markers (`! * : ; \`).
+fn has_bad_setting_chars(setting: &[u8]) -> bool {
+    setting
+        .iter()
+        .any(|&b| b <= 0x20 || b >= 0x7f || b"!*:;\\".contains(&b))
+}
+
+/// libxcrypt's `make_failure_token`, NUL included: `"*0"`, or `"*1"` when
+/// the setting begins `"*0"` -- so a token fed back as a setting never
+/// reproduces itself.
+fn failure_token(setting: Option<&[u8]>) -> [u8; 3] {
+    match setting {
+        Some([b'*', b'0', ..]) => *b"*1\0",
+        _ => *b"*0\0",
+    }
+}
+
+/// libxcrypt's `do_crypt` after its NULL test: the passphrase's length, the
+/// setting's characters, the method, then the hash -- the `errno` of the
+/// first that fails.
+fn do_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> Result<(), i32> {
+    if key.len() >= CRYPT_MAX_PASSPHRASE_SIZE {
+        return Err(errno::ERANGE);
+    }
+    if has_bad_setting_chars(setting) {
+        return Err(errno::EINVAL);
+    }
+    if !compute_crypt(key, setting, out) {
+        return Err(errno::EINVAL);
+    }
+    if out.overflow {
+        return Err(errno::ERANGE);
+    }
+    Ok(())
+}
+
 /// View a NUL-terminated C string as a byte slice (excluding the NUL).
 ///
 /// # Safety
@@ -458,93 +521,73 @@ unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
 /// `crypt` — one-way password hashing.
 ///
 /// Supports `$1$` (MD5), `$5$` (SHA-256), and `$6$` (SHA-512) settings;
-/// the SHA methods accept an optional `rounds=N$`.  Returns a pointer to
-/// a static buffer (overwritten by each call), or null on error:
-///
-/// * `EFAULT` — `key` or `salt` is null.
-/// * `EINVAL` — `salt` does not select a supported method.
-/// * `ERANGE` — the formatted result would exceed the output buffer.
+/// the SHA methods accept an optional `rounds=N$`.  Returns a pointer to a
+/// static buffer, overwritten by each call: the hash, or on failure
+/// libxcrypt's failure token (`"*0"`, or `"*1"`) with `errno` set -- see the
+/// module docs for when.  `crypt_r` into that buffer, as libxcrypt's is.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn crypt(key: *const u8, salt: *const u8) -> *mut u8 {
-    if key.is_null() || salt.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return core::ptr::null_mut();
-    }
-
-    // SAFETY: both pointers are non-null (checked) and, per the C
-    // contract, NUL-terminated.
-    let key_s = unsafe { cstr_slice(key) };
-    let salt_s = unsafe { cstr_slice(salt) };
-
-    let mut out = OutBuf::new();
-    if !compute_crypt(key_s, salt_s, &mut out) {
-        errno::set_errno(errno::EINVAL);
-        return core::ptr::null_mut();
-    }
-    if out.overflow {
-        errno::set_errno(errno::ERANGE);
-        return core::ptr::null_mut();
-    }
-
-    // SAFETY: single static buffer; per-POSIX crypt() is non-reentrant.
-    unsafe {
-        let buf = core::ptr::addr_of_mut!(CRYPT_BUF);
-        let buf_ptr = (*buf).as_mut_ptr();
-        core::ptr::copy_nonoverlapping(out.buf.as_ptr(), buf_ptr, out.len);
-        buf_ptr
-    }
+    // The one static buffer, as POSIX makes `crypt` non-reentrant; `crypt_r`
+    // writes at most `CRYPT_OUTPUT_LEN` bytes into it.
+    crypt_r(key, salt, (&raw mut CRYPT_BUF).cast::<u8>())
 }
 
 /// `crypt_r` — reentrant `crypt`.
 ///
-/// Identical to [`crypt`] but writes the result into the caller-provided
-/// `data` buffer (which must be at least [`CRYPT_OUTPUT_LEN`] bytes) and
-/// returns `data` on success.
+/// As [`crypt`], but the result goes into the caller's `data` (a
+/// `struct crypt_data`, whose `output` comes first; at least
+/// [`CRYPT_OUTPUT_LEN`] bytes are written), and `data` is returned: the hash,
+/// or the failure token with `errno` set.  The token is written before
+/// anything is checked, as libxcrypt's `make_failure_token` is, so every
+/// failure leaves it.
+///
+/// A NULL `data` returns NULL with `EFAULT`: libxcrypt faults writing the
+/// token there, and a crash is the one answer this function cannot give.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn crypt_r(key: *const u8, salt: *const u8, data: *mut u8) -> *mut u8 {
-    if key.is_null() || salt.is_null() || data.is_null() {
+    if data.is_null() {
         errno::set_errno(errno::EFAULT);
         return core::ptr::null_mut();
     }
+    // SAFETY: `salt` is NULL or, per the C contract, NUL-terminated.
+    let setting = (!salt.is_null()).then(|| unsafe { cstr_slice(salt) });
+    let token = failure_token(setting);
+    // SAFETY: the caller's `data` holds at least `CRYPT_OUTPUT_LEN` bytes.
+    unsafe { core::ptr::copy_nonoverlapping(token.as_ptr(), data, token.len()) };
 
-    // SAFETY: pointers are non-null (checked) and NUL-terminated.
+    let Some(setting) = setting else {
+        errno::set_errno(errno::EINVAL);
+        return data;
+    };
+    if key.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return data;
+    }
+    // SAFETY: non-NULL (checked) and, per the C contract, NUL-terminated.
     let key_s = unsafe { cstr_slice(key) };
-    let salt_s = unsafe { cstr_slice(salt) };
 
     let mut out = OutBuf::new();
-    if !compute_crypt(key_s, salt_s, &mut out) {
-        errno::set_errno(errno::EINVAL);
-        return core::ptr::null_mut();
+    if let Err(e) = do_crypt(key_s, setting, &mut out) {
+        errno::set_errno(e);
+        return data;
     }
-    if out.overflow {
-        errno::set_errno(errno::ERANGE);
-        return core::ptr::null_mut();
-    }
-
-    // SAFETY: caller guarantees `data` is valid for CRYPT_OUTPUT_LEN
-    // bytes; we never write more than `out.len` (<= CRYPT_OUTPUT_LEN).
-    unsafe {
-        core::ptr::copy_nonoverlapping(out.buf.as_ptr(), data, out.len);
-    }
+    // SAFETY: `data` holds at least `CRYPT_OUTPUT_LEN` bytes, and `out.len`
+    // is at most that.
+    unsafe { core::ptr::copy_nonoverlapping(out.buf.as_ptr(), data, out.len) };
     data
 }
 
 /// `encrypt` — encrypt/decrypt a 64-bit block using DES.
 ///
-/// Stub: DES is not implemented.  Validates arguments per POSIX, then
-/// reports `ENOSYS`:
-///
-/// * `EFAULT` — `block` is NULL.
-/// * `EINVAL` — `edflag` is not 0 (encrypt) or 1 (decrypt).
-/// * `ENOSYS` — validated, but no DES backend.
+/// Stub: DES is not implemented, so the answer is `ENOSYS`, POSIX's one
+/// error for this function.  libxcrypt treats any non-zero `edflag` as
+/// "decrypt" and refuses none, so neither does this (it said `EINVAL` for
+/// one other than 0 or 1 until 2026-09-26).  A NULL `block` is `EFAULT`,
+/// where libxcrypt would fault reading it.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn encrypt(block: *mut u8, edflag: i32) {
+pub extern "C" fn encrypt(block: *mut u8, _edflag: i32) {
     if block.is_null() {
         errno::set_errno(errno::EFAULT);
-        return;
-    }
-    if edflag != 0 && edflag != 1 {
-        errno::set_errno(errno::EINVAL);
         return;
     }
     errno::set_errno(errno::ENOSYS);
@@ -552,8 +595,8 @@ pub extern "C" fn encrypt(block: *mut u8, edflag: i32) {
 
 /// `setkey` — set the DES encryption key.
 ///
-/// Stub: DES is not implemented.  Validates `key` (NULL → `EFAULT`) then
-/// reports `ENOSYS`.
+/// Stub: DES is not implemented, so the answer is `ENOSYS`.  A NULL `key` is
+/// `EFAULT`, where libxcrypt would fault reading it.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setkey(key: *const u8) {
     if key.is_null() {
@@ -667,9 +710,10 @@ fn is_b64(b: u8) -> bool {
 /// result into `out` *without* its NUL terminator, returning its length.
 fn compute_into(key: &[u8], setting: &[u8], out: &mut HashBuf) -> Option<usize> {
     let mut ob = OutBuf::new();
-    if !compute_crypt(key, setting, &mut ob) || ob.overflow {
-        return None;
-    }
+    // `do_crypt`, so the Rust API refuses exactly what `crypt` refuses: a
+    // stored entry this could verify and a C program could not would make
+    // the two logins disagree about the same `/etc/shadow`.
+    do_crypt(key, setting, &mut ob).ok()?;
     // `compute_crypt` NUL-terminates for the C API's benefit; the Rust API
     // reports a length instead, so the terminator is dropped here rather
     // than left for every caller to remember to strip.
@@ -688,9 +732,10 @@ fn compute_into(key: &[u8], setting: &[u8], out: &mut HashBuf) -> Option<usize> 
 /// `setting` may be a bare `"$6$<salt>$"` (see [`setting_into`]) or a whole
 /// stored hash, since the salt is read up to the first `$` either way.
 ///
-/// Returns `None` if `setting` selects no method we implement, if the result
-/// would not fit, or if the result is not valid UTF-8 — which can only
-/// happen when `setting` carries a non-ASCII salt, and which anything about
+/// Returns `None` if `crypt` would fail -- `setting` selects no method we
+/// implement or holds a character `crypt` refuses, or `key` is 512 bytes or
+/// longer -- if the result would not fit, or if the result is not valid
+/// UTF-8, which the character check now rules out and which anything about
 /// to write `/etc/shadow` wants rejected rather than stored.  Use [`verify`]
 /// to check an existing entry; it works on bytes and so is unaffected.
 pub fn hash_into<'o>(key: &[u8], setting: &[u8], out: &'o mut HashBuf) -> Option<&'o str> {
@@ -878,14 +923,24 @@ mod tests {
     /// parallel runner would trample each other.
     static CRYPT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Helper: call `crypt` and return the result as an owned `String`.
+    /// Helper: call `crypt` and return the result as an owned `String`, or
+    /// `None` for a failure -- the token, with `errno` set.
     fn crypt_str(key: &[u8], salt: &[u8]) -> Option<std::string::String> {
         let r = crypt(key.as_ptr(), salt.as_ptr());
-        if r.is_null() {
-            return None;
-        }
+        assert!(!r.is_null(), "crypt returns its buffer, the token included");
         let s = unsafe { core::ffi::CStr::from_ptr(r.cast()) };
-        Some(s.to_string_lossy().into_owned())
+        let s = s.to_string_lossy().into_owned();
+        (!s.starts_with('*')).then_some(s)
+    }
+
+    /// `crypt(key, salt)`'s result and `errno`, NULL arguments allowed.
+    fn crypt_raw(key: *const u8, salt: *const u8) -> (std::string::String, i32) {
+        crate::errno::set_errno(0);
+        let r = crypt(key, salt);
+        let e = crate::errno::get_errno();
+        assert!(!r.is_null());
+        let s = unsafe { core::ffi::CStr::from_ptr(r.cast()) };
+        (s.to_string_lossy().into_owned(), e)
     }
 
     // -----------------------------------------------------------------------
@@ -979,33 +1034,75 @@ mod tests {
     // Error paths
     // -----------------------------------------------------------------------
 
+    // What Ubuntu 24.04's libxcrypt answers, probed there on 2026-09-26:
+    // `crypt(NULL, "$6$salt$")` and `crypt("pw", NULL)` are "*0" with EINVAL.
+
     #[test]
-    fn null_key_efault() {
+    fn null_key_is_the_token_and_einval() {
         let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        crate::errno::set_errno(0);
-        let r = crypt(core::ptr::null(), b"$6$salt\0".as_ptr());
-        assert!(r.is_null());
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        let got = crypt_raw(core::ptr::null(), b"$6$salt\0".as_ptr());
+        assert_eq!(got, ("*0".into(), crate::errno::EINVAL));
     }
 
     #[test]
-    fn null_salt_efault() {
+    fn null_salt_is_the_token_and_einval() {
         let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        crate::errno::set_errno(0);
-        let r = crypt(b"key\0".as_ptr(), core::ptr::null());
-        assert!(r.is_null());
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        let got = crypt_raw(b"key\0".as_ptr(), core::ptr::null());
+        assert_eq!(got, ("*0".into(), crate::errno::EINVAL));
     }
 
     #[test]
-    fn unsupported_method_einval() {
-        // Legacy DES (2-char salt) and unknown markers are rejected,
-        // never silently turned into a fake hash.
+    fn unsupported_method_is_the_token_and_einval() {
+        // Legacy DES (2-char salt) and unknown markers are rejected, never
+        // silently turned into a fake hash.
         let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        crate::errno::set_errno(0);
-        let r = crypt(b"password\0".as_ptr(), b"ab\0".as_ptr());
-        assert!(r.is_null());
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let got = crypt_raw(b"password\0".as_ptr(), b"ab\0".as_ptr());
+        assert_eq!(got, ("*0".into(), crate::errno::EINVAL));
+    }
+
+    #[test]
+    fn a_token_as_the_setting_gives_the_other_token() {
+        // So a failure fed back in as a setting cannot reproduce itself.
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let got = crypt_raw(b"pw\0".as_ptr(), b"*0\0".as_ptr());
+        assert_eq!(got, ("*1".into(), crate::errno::EINVAL));
+        let got = crypt_raw(b"pw\0".as_ptr(), b"*1\0".as_ptr());
+        assert_eq!(got, ("*0".into(), crate::errno::EINVAL));
+    }
+
+    #[test]
+    fn a_setting_with_a_delimiter_or_a_space_is_refused() {
+        // Ubuntu: "$6$a b$" and "$6$a:b$" are "*0" with EINVAL.  They used to
+        // hash, with the space or colon in the salt -- an entry that would
+        // have split a line of /etc/shadow.
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for setting in [
+            &b"$6$a b$\0"[..],
+            b"$6$a:b$\0",
+            b"$6$a;b$\0",
+            b"$6$a!b$\0",
+            b"$6$a*b$\0",
+            b"$6$a\\b$\0",
+            b"$6$a\tb$\0",
+            b"$6$a\x7fb$\0",
+            b"$6$a\xc3\xa9b$\0",
+        ] {
+            let got = crypt_raw(b"pw\0".as_ptr(), setting.as_ptr());
+            assert_eq!(got, ("*0".into(), crate::errno::EINVAL), "{setting:?}");
+        }
+    }
+
+    #[test]
+    fn a_passphrase_of_512_bytes_is_erange() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut key = [b'a'; 513];
+        key[511] = 0;
+        let (h, e) = crypt_raw(key.as_ptr(), b"$6$salt$\0".as_ptr());
+        assert!(h.starts_with("$6$salt$"), "511 bytes hash: {h} (errno {e})");
+        key[511] = b'a';
+        key[512] = 0;
+        let got = crypt_raw(key.as_ptr(), b"$6$salt$\0".as_ptr());
+        assert_eq!(got, ("*0".into(), crate::errno::ERANGE));
     }
 
     // -----------------------------------------------------------------------
@@ -1098,6 +1195,7 @@ mod tests {
 
     #[test]
     fn crypt_r_null_data_efault() {
+        // libxcrypt faults writing its token through a NULL `data`.
         crate::errno::set_errno(0);
         let r = crypt_r(
             b"key\0".as_ptr(),
@@ -1109,12 +1207,23 @@ mod tests {
     }
 
     #[test]
-    fn crypt_r_unsupported_einval() {
-        let mut buf = [0u8; CRYPT_OUTPUT_LEN];
-        crate::errno::set_errno(0);
-        let r = crypt_r(b"key\0".as_ptr(), b"ab\0".as_ptr(), buf.as_mut_ptr());
-        assert!(r.is_null());
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    fn crypt_r_failures_leave_the_token_in_data() {
+        for (key, salt, want) in [
+            (b"key\0".as_ptr(), b"ab\0".as_ptr(), crate::errno::EINVAL),
+            (
+                core::ptr::null(),
+                b"$6$salt\0".as_ptr(),
+                crate::errno::EINVAL,
+            ),
+            (b"key\0".as_ptr(), core::ptr::null(), crate::errno::EINVAL),
+        ] {
+            let mut buf = [0xAAu8; CRYPT_OUTPUT_LEN];
+            crate::errno::set_errno(0);
+            let r = crypt_r(key, salt, buf.as_mut_ptr());
+            assert_eq!(r, buf.as_mut_ptr(), "data is returned");
+            assert_eq!(&buf[..3], b"*0\0");
+            assert_eq!(crate::errno::get_errno(), want);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1224,11 +1333,15 @@ mod tests {
     }
 
     #[test]
-    fn encrypt_bad_edflag_einval() {
-        crate::errno::set_errno(0);
-        let mut block = [0u8; 64];
-        encrypt(block.as_mut_ptr(), 2);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    fn encrypt_any_edflag_is_accepted() {
+        // libxcrypt reads a non-zero edflag as "decrypt" and refuses none,
+        // so the answer is the stub's ENOSYS, not EINVAL.
+        for edflag in [2, 7, -1] {
+            crate::errno::set_errno(0);
+            let mut block = [0u8; 64];
+            encrypt(block.as_mut_ptr(), edflag);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS, "{edflag}");
+        }
     }
 
     #[test]
@@ -1280,6 +1393,21 @@ mod tests {
         assert_eq!(hash_into(b"pw", b"$sha256$0123456789abcdef", &mut b), None);
         assert_eq!(hash_into(b"pw", b"plain", &mut b), None);
         assert_eq!(hash_into(b"pw", b"", &mut b), None);
+    }
+
+    #[test]
+    fn hash_into_refuses_what_crypt_refuses() {
+        let mut b = buf();
+        assert_eq!(hash_into(b"pw", b"$6$a:b$", &mut b), None, "a delimiter");
+        assert_eq!(
+            hash_into(&[b'a'; 512], b"$6$salt$", &mut b),
+            None,
+            "512 bytes"
+        );
+        assert!(
+            hash_into(&[b'a'; 511], b"$6$salt$", &mut b).is_some(),
+            "511 bytes"
+        );
     }
 
     /// Verification is defined by re-running crypt on the stored entry, so

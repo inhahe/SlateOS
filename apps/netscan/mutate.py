@@ -42,7 +42,6 @@ F5 = "test_app_key_f5_starts_scan"
 WOL = "wake_on_lan_sends_the_magic_packet"
 # whois.rs
 FIELDS = "a_record_is_read_whichever_registry_wrote_it"
-OUTSIDE = "nothing_is_filled_in_from_outside_the_record"
 REFER = "iana_is_asked_and_its_referral_followed"
 LATIN1 = "a_reply_in_latin1_loses_nothing"
 PORTS = "a_server_names_its_port_or_is_on_43"
@@ -146,12 +145,6 @@ WHOIS = [
         "        Some(server) if server != iana => {",
         "        Some(server) if false => {",
         [REFER],
-    ),
-    (
-        "a comment line is read as a field",
-        "            if line.starts_with(['%', '#']) {",
-        "            if false {",
-        [OUTSIDE],
     ),
     (
         "a Latin-1 reply is decoded lossily",

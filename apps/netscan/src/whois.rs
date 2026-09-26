@@ -132,14 +132,15 @@ pub fn referral(reply: &str) -> Option<String> {
     field(reply, &["refer"]).map(str::to_owned)
 }
 
-/// The first value of any of `keys` in `reply`, keys compared without case,
-/// comment lines (`%`, `#`) skipped.
+/// The first value of any of `keys` in `reply`, keys compared without case.
+///
+/// A registry's comment line (`% ...`, `# ...`) is never read as a field, and
+/// needs no rule to say so: its marker stays part of what precedes the colon,
+/// so `% country: XX` has the name `% country`, which is no key. (There was
+/// such a rule; the mutation sweep showed it could never change an answer.)
 fn field<'a>(reply: &'a str, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|key| {
         reply.lines().find_map(|line| {
-            if line.starts_with(['%', '#']) {
-                return None;
-            }
             let (name, value) = line.split_once(':')?;
             let value = value.trim();
             (name.trim().eq_ignore_ascii_case(key) && !value.is_empty()).then_some(value)

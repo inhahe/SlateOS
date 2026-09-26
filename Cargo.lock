@@ -2064,6 +2064,9 @@ dependencies = [
 [[package]]
 name = "osfont"
 version = "0.1.0"
+dependencies = [
+ "imagecodec",
+]
 
 [[package]]
 name = "oswindow"

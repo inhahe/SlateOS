@@ -608,8 +608,21 @@ pub struct Face {
     colr: Option<Span>,
     /// The `CPAL` table: the palettes `COLR`'s colours index.
     cpal: Option<Span>,
-    /// Whether the face carries colour *bitmaps* (`CBDT` or `sbix`).
-    bitmap_colour: bool,
+    /// `CBLC` and `CBDT`, Google's colour bitmaps: the index of each strike's
+    /// glyphs, and their pictures. Both or neither.
+    cbdt: Option<(Span, Span)>,
+    /// `sbix`, Apple's colour bitmaps.
+    sbix: Option<Span>,
+}
+
+/// A face's colour bitmap tables, as bytes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BitmapTables<'a> {
+    /// `CBLC` (the index of each strike's glyphs) and `CBDT` (their
+    /// pictures), which come together or not at all.
+    pub(crate) cbdt: Option<(&'a [u8], &'a [u8])>,
+    /// `sbix`.
+    pub(crate) sbix: Option<&'a [u8]>,
 }
 
 /// Where a face sits within its family — the axes a font picker selects on.
@@ -679,6 +692,12 @@ enum Outlines {
     /// larger of the two variants and every `Face` would otherwise carry its
     /// size.
     Cff(alloc::boxed::Box<crate::cff::Cff>),
+    /// None: a face whose glyphs are all pictures, colour bitmaps in
+    /// `CBDT` or `sbix` -- Noto Color Emoji's bitmap build has no `glyf`.
+    /// Every glyph's outline is empty, and [`bitmap`](crate::bitmap) draws
+    /// them. Accepted only from a face that has such pictures; a face with
+    /// neither outlines nor pictures is still refused.
+    Pictures,
 }
 
 impl Face {
@@ -718,7 +737,9 @@ impl Face {
         let mut has_cff2 = false;
         let mut colr = None;
         let mut cpal = None;
-        let mut bitmap_colour = false;
+        let mut cblc = None;
+        let mut cbdt = None;
+        let mut sbix = None;
 
         for i in 0..usize::from(num_tables) {
             let rec = records
@@ -761,11 +782,11 @@ impl Face {
                 b"CFF2" => has_cff2 = true,
                 b"COLR" => colr = Some(span),
                 b"CPAL" => cpal = Some(span),
-                // Colour bitmaps: Google's `CBDT` and Apple's `sbix`. Noted
-                // rather than kept, since nothing here draws them yet; what
-                // face fallback needs is only to know the face is a colour
-                // face (see `has_colour_glyphs`).
-                b"CBDT" | b"sbix" => bitmap_colour = true,
+                // Colour bitmaps: Google's `CBLC` + `CBDT` and Apple's `sbix`,
+                // drawn by `bitmap`.
+                b"CBLC" => cblc = Some(span),
+                b"CBDT" => cbdt = Some(span),
+                b"sbix" => sbix = Some(span),
                 _ => {}
             }
         }
@@ -813,6 +834,8 @@ impl Face {
             // operators, an item-variation store. Running it as CFF would
             // misread it rather than fail.
             return Err(SfntError::CffUnsupported("CFF2 table"));
+        } else if (cblc.is_some() && cbdt.is_some()) || sbix.is_some() {
+            Outlines::Pictures
         } else {
             return Err(SfntError::MissingTable("glyf"));
         };
@@ -953,7 +976,8 @@ impl Face {
             gdef_store,
             colr,
             cpal,
-            bitmap_colour,
+            cbdt: cblc.zip(cbdt),
+            sbix,
             data,
         })
     }
@@ -1170,7 +1194,25 @@ impl Face {
     /// for its emoji form. See [`itemize`](crate::itemize).
     #[must_use]
     pub fn has_colour_glyphs(&self) -> bool {
-        self.colr.is_some() || self.bitmap_colour
+        self.colr.is_some() || self.has_bitmap_glyphs()
+    }
+
+    /// Whether the face has colour *bitmaps*: `CBLC` with `CBDT`, or `sbix`.
+    #[must_use]
+    pub fn has_bitmap_glyphs(&self) -> bool {
+        self.cbdt.is_some() || self.sbix.is_some()
+    }
+
+    /// The bytes of the colour bitmap tables, for [`bitmap`](crate::bitmap)
+    /// to read.
+    pub(crate) fn bitmap_tables(&self) -> BitmapTables<'_> {
+        let table = |span: Span| self.data.get(span.off..span.off.checked_add(span.len)?);
+        BitmapTables {
+            cbdt: self
+                .cbdt
+                .and_then(|(index, data)| Some((table(index)?, table(data)?))),
+            sbix: self.sbix.and_then(table),
+        }
     }
 
     /// The bytes of `COLR`, and of `CPAL` if the face has one, for
@@ -1991,8 +2033,10 @@ impl Face {
             x_max: 0.0,
             y_max: 0.0,
         };
-        if let Outlines::Cff(_) = &self.outlines {
-            return Some(self.outline(gid).ok()?.bbox().unwrap_or(EMPTY));
+        match &self.outlines {
+            Outlines::Cff(_) => return Some(self.outline(gid).ok()?.bbox().unwrap_or(EMPTY)),
+            Outlines::Pictures => return (gid < self.num_glyphs).then_some(EMPTY),
+            Outlines::Glyf { .. } => {}
         }
         let Some(span) = self.glyph_span(gid).ok()? else {
             return Some(EMPTY);
@@ -2183,6 +2227,14 @@ impl Face {
     /// self-inconsistent, [`SfntError::CompositeTooDeep`] when composite
     /// components nest past [`MAX_COMPOSITE_DEPTH`].
     pub fn outline(&self, gid: u16) -> Result<Outline, SfntError> {
+        if let Outlines::Pictures = &self.outlines {
+            // A face of pictures: every glyph it has is outline-less.
+            return if gid < self.num_glyphs {
+                Ok(Outline::default())
+            } else {
+                Err(SfntError::GlyphOutOfRange)
+            };
+        }
         if let Outlines::Cff(cff) = &self.outlines {
             // A CFF face's glyph count lives in the CharStrings INDEX as well
             // as in `maxp`. `maxp` is what every other part of this module
@@ -3669,7 +3721,17 @@ pub(crate) mod tests {
     /// for a colour glyph test that needs outlines whose every coordinate it
     /// knows.
     pub(crate) fn build_test_font_with(extra: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
+        build_test_font_without(&[], extra)
+    }
+
+    /// The fixture without the tables tagged in `drop`, and with `extra` --
+    /// a face of colour bitmaps with no `glyf`, say.
+    pub(crate) fn build_test_font_without(
+        drop: &[[u8; 4]],
+        extra: Vec<([u8; 4], Vec<u8>)>,
+    ) -> Vec<u8> {
         let mut tables = build_test_tables(TRUE_LSB_3);
+        tables.retain(|(tag, _)| !drop.contains(tag));
         tables.extend(extra);
         assemble(&tables)
     }

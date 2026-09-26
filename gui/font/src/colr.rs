@@ -835,16 +835,18 @@ fn centre(x: usize, y: usize) -> Point {
 // ---------------------------------------------------------------------------
 
 /// Premultiplied RGBA, each from 0 to 1.
-type Rgba = [f32; 4];
+pub(crate) type Rgba = [f32; 4];
 
 const CLEAR: Rgba = [0.0; 4];
 
-fn unpack(argb: u32) -> Rgba {
+/// Straight `0xAARRGGBB` as straight RGBA from 0 to 1.
+pub(crate) fn unpack(argb: u32) -> Rgba {
     let [a, r, g, b] = argb.to_be_bytes();
     [r, g, b, a].map(|c| f32::from(c) / 255.0)
 }
 
-fn premultiply([r, g, b, a]: Rgba) -> Rgba {
+/// Straight RGBA to premultiplied.
+pub(crate) fn premultiply([r, g, b, a]: Rgba) -> Rgba {
     [r * a, g * a, b * a, a]
 }
 
@@ -854,7 +856,7 @@ fn scale_rgba(c: Rgba, k: f32) -> Rgba {
 
 /// Premultiplied `0xAARRGGBB`, each channel rounded and kept no brighter
 /// than its alpha.
-fn pack(c: Rgba) -> u32 {
+pub(crate) fn pack(c: Rgba) -> u32 {
     let a = c[3].clamp(0.0, 1.0);
     #[allow(
         clippy::cast_possible_truncation,

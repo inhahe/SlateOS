@@ -40,6 +40,7 @@ extern crate alloc;
 
 pub mod bidi;
 mod bidi_tables;
+pub mod bitmap;
 pub mod cff;
 pub mod colr;
 mod context;

@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 
 use crate::FontMetrics;
 use crate::bidi::{self, Base, Level};
+use crate::bitmap;
 use crate::colr::{self, ColourImage};
 use crate::device::Corrections;
 use crate::fallback::{self, Extents};
@@ -561,12 +562,15 @@ impl ScaledFont {
         Some(&self.glyph(key.gid()).ok()?.mask)
     }
 
-    /// Glyph `gid` in colour, if the face paints it in colour -- an emoji
-    /// from a face with a `COLR` table -- drawn with `foreground`
-    /// (`0xAARRGGBB`) as the text colour. `None` for a glyph the face draws
-    /// as an outline, which [`glyph`](Self::glyph) then draws in the text
-    /// colour; and for a colour glyph too big to paint
+    /// Glyph `gid` in colour, if the face has it in colour -- an emoji from
+    /// a face with a `COLR` recipe for it, or a `CBDT` or `sbix` picture --
+    /// drawn with `foreground` (`0xAARRGGBB`) as the text colour. `None` for a
+    /// glyph the face draws as an outline, which [`glyph`](Self::glyph) then
+    /// draws in the text colour; and for a colour glyph too big to paint
     /// ([`colr::MAX_COLOUR_PIXELS`]), which the outline stands in for.
+    ///
+    /// A recipe is preferred to a picture where a face has both: it is drawn
+    /// at the size asked for, where a picture is resampled from its strike's.
     ///
     /// A colour glyph that paints nothing is an empty image, not `None`: the
     /// glyph is drawn, and it is blank.
@@ -575,14 +579,27 @@ impl ScaledFont {
     /// again when asked for in another; one that did not -- most emoji -- is
     /// drawn once for every colour of text.
     pub fn colour_glyph(&mut self, gid: u16, foreground: u32) -> Option<&ColourImage> {
-        self.face.colour_tables()?;
+        let (recipes, pictures) = (
+            self.face.colour_tables().is_some(),
+            self.face.has_bitmap_glyphs(),
+        );
+        if !recipes && !pictures {
+            return None;
+        }
         let stale = self.colour.get(&gid).is_none_or(|c| {
             c.image
                 .as_ref()
                 .is_some_and(|i| i.uses_foreground && c.foreground != foreground)
         });
         if stale {
-            let image = colr::render(&self.face, gid, self.scale, &self.coords, foreground);
+            let image = recipes
+                .then(|| colr::render(&self.face, gid, self.scale, &self.coords, foreground))
+                .flatten()
+                .or_else(|| {
+                    pictures
+                        .then(|| bitmap::render(&self.face, gid, self.px_per_em))
+                        .flatten()
+                });
             self.insert_colour(gid, Colour { image, foreground });
         }
         self.colour.get(&gid)?.image.as_ref()

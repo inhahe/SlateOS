@@ -167120,7 +167120,17 @@ Escape returns to the formatted view. `guitk` has no multi-line editor to lend
 (`textedit` is single-line), so the editing stays in this crate.
 
 ### [E] Thumbnails are still generated on the thread that draws -- 2026-09-26
-**Status:** OPEN -- `apps/explorer/src/main.rs` (`pump_thumbnails` ->
+**Status:** FIXED (lane E, 2026-09-26) -- both grids make their thumbnails on
+`offloop::Queue` (new the same day): the request is every card the view
+shows that has no thumbnail, replacing whatever of the last set is not yet
+started; each thumbnail is filed as it arrives, in `App::on_wake`, which asks
+for a frame. The window's generator, with its disk cache, moves to the
+worker when the waker arrives; without one (tests, a worker that will not
+start) the old per-frame budget still does the work. Tests
+`thumbnails_are_made_off_the_window` (explorer) and
+`the_grids_thumbnails_are_made_off_the_window` (photomanager); both mutation
+tables, `apps/explorer/mutate.py` (new) and `apps/photomanager/mutate.py`,
+catch every row. Was: `apps/explorer/src/main.rs` (`pump_thumbnails` ->
 `self.thumb_gen.process_batch(batch)`), `apps/photomanager/src/main.rs`
 (`sync_thumbnails` -> `process_batch(Self::THUMB_BATCH)`).
 

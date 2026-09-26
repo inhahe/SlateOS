@@ -830,6 +830,7 @@ dependencies = [
  "guitk",
  "imagecodec",
  "mediaprobe",
+ "offloop",
  "oswindow",
  "pathcodec",
  "quoting",

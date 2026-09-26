@@ -59,10 +59,10 @@ per frame, and a worker would remove it.
 only for the newest request, so a slow photograph paged past cannot land on
 top of the next). Each keeps a synchronous path for when no waker is given
 (before the window exists; tests), and is tested end to end through
-`offloop::channel_waker`. The explorer's (and the photo manager's) grid
-thumbnails are not moved yet: that is a different shape -- every visible
-card, results one by one -- and is `known-issues.md` -> `[E] Thumbnails are
-still generated on the thread that draws`.
+`offloop::channel_waker`. **Later the same day, the thumbnails too:** the
+file manager's and the photo manager's grids make theirs on
+`offloop::Queue` -- every visible card, results one by one -- so all three
+call sites in the table above are off the thread that draws.
 
 ## For lane C
 

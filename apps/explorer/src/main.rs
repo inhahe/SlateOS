@@ -329,6 +329,21 @@ const SIDEBAR_ITEMS: [(&str, &str); 5] = [
     ("/usr", "/usr"),
 ];
 
+/// The worker that makes thumbnails off the window's thread: asked with every
+/// entry the view draws a thumbnail for, answering with each one as it is made.
+type ThumbWorker = offloop::Queue<ThumbnailRequest, Option<(ThumbnailRequest, Thumbnail)>>;
+
+/// Make one thumbnail with `generator` -- from its disk cache when it has
+/// one there, else from the file.
+fn make_thumbnail(
+    generator: &mut ThumbnailGenerator,
+    request: ThumbnailRequest,
+) -> Option<(ThumbnailRequest, Thumbnail)> {
+    generator.push(request);
+    generator.process_batch(1);
+    generator.take_completed().pop()
+}
+
 /// How many thumbnails [`ExplorerState::pump_thumbnails`] generates per call
 /// when the caller does not say.
 ///
@@ -866,8 +881,17 @@ pub struct ExplorerState {
     /// are the same fact.)
     pub thumbs: ThumbnailCache,
     /// Pending thumbnail work, drained a few entries at a time by
-    /// [`Self::pump_thumbnails`].
+    /// [`Self::pump_thumbnails`] -- until the window hands over a way to be
+    /// woken, when it moves to `thumb_worker`, disk cache and all.
     pub thumb_gen: ThumbnailGenerator,
+    /// The worker that makes the thumbnails off the window's thread.
+    ///
+    /// They were made a few per tick on the thread that draws, and a camera's
+    /// JPEG costs about a third of a second even at thumbnail size, so a
+    /// folder of photographs made the window stall tick after tick until the
+    /// last was done (`known-issues.md` -> `[E] Thumbnails are still generated
+    /// on the thread that draws`).
+    thumb_worker: Option<ThumbWorker>,
     /// Size and colours new thumbnails are generated at.
     pub thumb_config: ThumbConfig,
     /// Which labels the icon view draws under each thumbnail.
@@ -967,6 +991,7 @@ impl ExplorerState {
                 config
             },
             pending_uploads: Vec::new(),
+            thumb_worker: None,
             uploaded: HashSet::new(),
             dropzone: DropZoneManager::new(start_path.to_path_buf()),
             drag: None,
@@ -1425,22 +1450,48 @@ impl ExplorerState {
     /// and size, so a hit is a hit on *this* version of the file, and a miss
     /// after an edit is automatic.
     pub fn queue_thumbnails(&mut self) {
+        let wanted = self.thumbnail_requests();
+        // The worker's set replaces what is left of the last -- the folder
+        // navigated away from -- and an empty set cancels it.
+        let wanted = match self.thumb_worker.as_mut() {
+            Some(worker) => match worker.replace(wanted) {
+                Ok(()) => return,
+                // The worker is gone (only a panic does that, and only a
+                // test's build survives one): make them here, a few a tick.
+                Err(wanted) => {
+                    self.thumb_worker = None;
+                    wanted
+                }
+            },
+            None => wanted,
+        };
         self.thumb_gen.cancel_all();
+        for request in wanted {
+            self.thumb_gen.push(request);
+        }
+    }
+
+    /// A request for every entry the current view draws a thumbnail for and
+    /// the cache has none of.
+    fn thumbnail_requests(&self) -> Vec<ThumbnailRequest> {
         if !self.view_wants_thumbnails() {
-            return;
+            return Vec::new();
         }
-        for entry in &self.entries {
-            let mtime = mtime_secs(entry.modified);
-            if self.thumbs.peek(&entry.path, mtime, entry.size).is_some() {
-                continue;
-            }
-            self.thumb_gen.push(ThumbnailRequest {
-                path: entry.path.clone(),
-                mtime,
-                size: entry.size,
-                config: self.thumb_config.clone(),
-            });
-        }
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                let mtime = mtime_secs(entry.modified);
+                self.thumbs
+                    .peek(&entry.path, mtime, entry.size)
+                    .is_none()
+                    .then(|| ThumbnailRequest {
+                        path: entry.path.clone(),
+                        mtime,
+                        size: entry.size,
+                        config: self.thumb_config.clone(),
+                    })
+            })
+            .collect()
     }
 
     /// Generate up to `batch` queued thumbnails and file the results.
@@ -1456,11 +1507,35 @@ impl ExplorerState {
     pub fn pump_thumbnails(&mut self, batch: usize) -> usize {
         let generated = self.thumb_gen.process_batch(batch);
         for (req, thumb) in self.thumb_gen.take_completed() {
-            let id = thumbs::image_id(&req.path, req.mtime, req.size);
-            self.pending_uploads.push((id, thumb.clone()));
-            self.thumbs.insert(&req.path, req.mtime, req.size, thumb);
+            self.file_thumbnail(req, thumb);
         }
-        generated
+        generated.saturating_add(self.collect_thumbnails())
+    }
+
+    /// File every thumbnail the worker has made since the last call, and say
+    /// how many there were.
+    fn collect_thumbnails(&mut self) -> usize {
+        let made: Vec<_> = self
+            .thumb_worker
+            .as_mut()
+            .map(offloop::Queue::take)
+            .unwrap_or_default()
+            .into_iter()
+            .flatten()
+            .collect();
+        let count = made.len();
+        for (req, thumb) in made {
+            self.file_thumbnail(req, thumb);
+        }
+        count
+    }
+
+    /// File one made thumbnail: into the cache the renderer reads, and the
+    /// list the host hands to the compositor.
+    fn file_thumbnail(&mut self, req: ThumbnailRequest, thumb: Thumbnail) {
+        let id = thumbs::image_id(&req.path, req.mtime, req.size);
+        self.pending_uploads.push((id, thumb.clone()));
+        self.thumbs.insert(&req.path, req.mtime, req.size, thumb);
     }
 
     /// [`Self::pump_thumbnails`] at the default per-frame budget.
@@ -4913,6 +4988,35 @@ impl oswindow::app::App for ExplorerState {
 
     fn initial_size(&self) -> (u32, u32) {
         (self.window_width, self.window_height)
+    }
+
+    /// Thumbnails are made off the loop's thread, and the loop woken as each
+    /// one is ready.
+    fn wants_waker(&self) -> bool {
+        true
+    }
+
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        // The generator goes to the worker with the disk cache it was given;
+        // an empty one is left here, which is what a worker that fails to
+        // start falls back on -- slower, never wrong.
+        let mut generator = std::mem::take(&mut self.thumb_gen);
+        self.thumb_worker = offloop::Queue::start("explorer-thumbs", waker, move |request| {
+            make_thumbnail(&mut generator, request)
+        })
+        .ok();
+        // Whatever the generator had queued went with it; ask again, of the
+        // worker (or, if it did not start, of the generator left here).
+        self.queue_thumbnails();
+    }
+
+    /// Thumbnails the worker has made: file them, and draw them.
+    fn on_wake(&mut self) -> oswindow::app::Response {
+        if self.collect_thumbnails() > 0 {
+            oswindow::app::Response::Redraw
+        } else {
+            oswindow::app::Response::Idle
+        }
     }
 
     /// A clock only while thumbnails remain to be generated.
@@ -9395,6 +9499,43 @@ mod tests {
             3,
             "acknowledged uploads finally draw"
         );
+    }
+
+    /// **Thumbnails are made off the window's thread**, every entry the view
+    /// draws one for, each filed as it arrives -- and drawn once uploaded,
+    /// exactly as on the window's own ticks. They were made a few a tick on
+    /// the thread that draws.
+    #[test]
+    fn thumbnails_are_made_off_the_window() {
+        use oswindow::app::App;
+        let scratch = dir_of("thumbs_off_window", &["a.txt", "b.txt", "c.txt"]);
+        let mut state = state_at(scratch.dir());
+        assert!(state.wants_waker());
+        let (waker, heard) = offloop::channel_waker();
+        state.attach_waker(waker);
+        assert!(state.thumb_worker.is_some(), "no worker was started");
+        state.set_view_mode(ViewMode::Icons);
+        assert_eq!(
+            state.thumb_gen.pending_count(),
+            0,
+            "the window's ticks were left to make them"
+        );
+        let mut uploads = Vec::new();
+        let mut redraws: usize = 0;
+        while uploads.len() < 3 {
+            heard
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the worker never woke the window");
+            if state.on_wake() == oswindow::app::Response::Redraw {
+                redraws = redraws.saturating_add(1);
+            }
+            uploads.extend(state.take_pending_uploads());
+        }
+        assert!(redraws > 0, "thumbnails arrived and no frame was asked for");
+        for (id, _) in &uploads {
+            state.mark_uploaded(*id);
+        }
+        assert_eq!(image_ids(&state.render()).len(), 3);
     }
 
     /// The reverse edge. A host that reclaims memory by unregistering an image

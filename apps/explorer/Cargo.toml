@@ -67,6 +67,10 @@ oswindow = { path = "../../gui/window" }
 # machinery. The call sites did not move: `use thumbs::{...}` resolves to the
 # crate exactly as it resolved to the module.
 thumbs = { path = "../../gui/thumbs" }
+# Thumbnails are made off the window's thread and handed back through the
+# waker the window gives it, so a folder of photographs never stalls the
+# window.
+offloop = { path = "../offloop" }
 
 [dev-dependencies]
 # Gzipped fixtures for the archive columns' tests.

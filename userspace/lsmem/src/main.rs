@@ -359,42 +359,17 @@ fn option_to_longopt(c: i32) -> Option<&'static str> {
         .map(|&(name, _)| name)
 }
 
-/// `err_exclusive_options(c, longopts, excl, status)`: refuse `c` when
-/// another option of a group it belongs to came first. The message names
-/// the whole group, and no referral follows it.
+/// `err_exclusive_options(c, longopts, excl, status)` (`ulstrutils`'s):
+/// refuse `c` when another option of a group it belongs to came first. The
+/// message names the whole group, and no referral follows it.
 fn err_exclusive_options(c: i32, status: &mut [i32; 2], short: &[u8]) -> Result<(), u8> {
-    for (group, st) in EXCL.iter().zip(status.iter_mut()) {
-        if group.first().is_some_and(|&first| first > c) {
-            break;
+    match ulstrutils::err_exclusive_options(c, &EXCL, status, option_to_longopt, short) {
+        Some(msg) => {
+            to_stderr(&msg);
+            Err(1)
         }
-        for &op in group.iter() {
-            if op > c {
-                break;
-            }
-            if op != c {
-                continue;
-            }
-            if *st == 0 {
-                *st = c;
-            } else if *st != c {
-                let mut msg = format!("{}: mutually exclusive arguments:", shown(short));
-                for &member in group.iter() {
-                    if let Some(name) = option_to_longopt(member) {
-                        msg.push_str(&format!(" --{name}"));
-                    } else if let Ok(b) = u8::try_from(member)
-                        && b.is_ascii_graphic()
-                    {
-                        msg.push_str(&format!(" -{}", char::from(b)));
-                    }
-                }
-                msg.push('\n');
-                to_stderr(&msg);
-                return Err(1);
-            }
-            break;
-        }
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// `column_name_to_id(name, namesz)`: a column by its name, in any case.

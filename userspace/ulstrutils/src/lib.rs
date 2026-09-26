@@ -22,8 +22,22 @@
 //! list), and [`isdigit_string`]. So does glibc's [`strverscmp`], the order
 //! `scandir(..., versionsort)` gives the sysfs directories util-linux reads.
 //!
+//! And the parsers util-linux's table programs lean on: glibc's [`strtod`]
+//! (with its `errno`, which libsmartcols' `width=` property reads),
+//! [`ul_optstr_next`] (a `name=value,...` options string, as column
+//! properties are given) and [`parse_range`] (`N-M`), and `optutils.h`'s
+//! [`err_exclusive_options`].
+//!
 //! Pure functions over bytes; no I/O. Callers wrap the messages in their own
 //! error types, because each program reports through its own diagnostic path.
+
+mod optstr;
+mod optutils;
+mod strtod;
+
+pub use optstr::{OptstrInvalid, OptstrItem, parse_range, ul_optstr_next};
+pub use optutils::err_exclusive_options;
+pub use strtod::{Strtod, strtod};
 
 use quoting::escaped_in_quotes_os;
 use std::ffi::OsStr;

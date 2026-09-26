@@ -168442,7 +168442,7 @@ recipe had staged everything else.
    with.
 
 ### [E] Every document application closes over unsaved work, and the event loop will not let one ask -- 2026-09-25
-**Status:** FIXED for the text editor, the markdown editor, the hex editor and the JSON viewer (lane E, 2026-09-25), on lane F's `Response::KeepOpen` (b82f06a11); OPEN for `apps/slides` and, in a narrower form, `apps/stickynotes` -- see `[E] Document applications closed over unsaved work, and the hex editor and the JSON viewer could not save at all` below
+**Status:** FIXED (lane E, 2026-09-25/26), on lane F's `Response::KeepOpen` (b82f06a11): the text editor, the markdown editor, the hex editor and the JSON viewer first, then slides, sticky notes, paint, the diagram editor, the whiteboard and the spreadsheet -- see `[E] Document applications closed over unsaved work, and the hex editor and the JSON viewer could not save at all` below -- and notes, contacts, kanban and snippets, which kept nothing at all (`[E] Notes, contacts, snippets and kanban keep nothing`). This status said OPEN for slides and sticky notes after both were fixed.
 
 **In short:** click a window's X and every change since the last save is gone,
 without a question, in the text editor, the markdown editor, the hex editor and

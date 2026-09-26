@@ -18,6 +18,14 @@
 //! has a "fast" path used when plenty of input remains; it hands any MCU that
 //! meets a marker back to the path transcribed here and redoes it, so it
 //! computes the same thing and is not reproduced.
+//!
+//! What is done here for speed leaves that path's every step where it was:
+//! a fill takes the bytes the loop would take one at a time at once when
+//! none of them is `0xFF` (`bulk_fill`), and the sequential decoder keeps the
+//! buffer in locals for an MCU (`Window`), as libjpeg's `BITREAD_STATE_VARS`
+//! do. Each fill still happens when libjpeg's does and ends where it ends, so
+//! the input position -- which a source that fails when its data runs out,
+//! old-style JPEG in TIFF, makes visible -- is libjpeg's at every step.
 
 use super::coef::Coefficients;
 use super::error::{Error, jerr};
@@ -152,7 +160,21 @@ impl Bits {
 
     /// `jpeg_fill_bit_buffer`: load at least `nbits`, stuffing zeros past a
     /// marker.
+    ///
+    /// The bytes libjpeg's loop takes one at a time -- as many as bring the
+    /// buffer to 57 bits or more, which from `left` bits is exactly
+    /// `(64 - left) / 8` of them -- are taken at once when they are all
+    /// data: none of them `0xFF`, the one byte that can begin a marker or a
+    /// stuffed `FF 00`. The buffer and the input position come out as the
+    /// loop leaves them, so nothing downstream can tell; anything else --
+    /// an `FF`, the last eight bytes of the input, a marker already met --
+    /// goes through the loop.
+    #[inline(never)]
     fn fill(&mut self, input: &mut Input<'_>, nbits: i32) {
+        if let Some(window) = bulk_fill(self.window(), input) {
+            self.keep(window);
+            return;
+        }
         if input.unread_marker == 0 {
             while self.left < MIN_GET_BITS {
                 let mut c = input.src.byte();
@@ -179,6 +201,47 @@ impl Bits {
         }
     }
 
+    /// The buffer and its count, to be worked on in locals.
+    #[inline(always)]
+    const fn window(&self) -> Window {
+        Window {
+            buffer: self.buffer,
+            left: self.left,
+        }
+    }
+
+    /// Take back a window worked on in locals.
+    #[inline(always)]
+    const fn keep(&mut self, window: Window) {
+        self.buffer = window.buffer;
+        self.left = window.left;
+    }
+
+    /// [`Self::fill`] for a window held in locals, out of line: the part a
+    /// decoder's inner loop reaches only at a `0xFF`, near the end of the
+    /// input, or past a marker.
+    #[inline(never)]
+    fn refill(&mut self, window: Window, input: &mut Input<'_>, nbits: i32) -> Window {
+        self.keep(window);
+        self.fill(input, nbits);
+        self.window()
+    }
+
+    /// [`Self::slow_decode`] for a window held in locals.
+    #[cold]
+    #[inline(never)]
+    fn slow_decode_window(
+        &mut self,
+        window: Window,
+        input: &mut Input<'_>,
+        table: &Derived,
+        min_bits: i32,
+    ) -> (Window, i32) {
+        self.keep(window);
+        let symbol = self.slow_decode(input, table, min_bits);
+        (self.window(), symbol)
+    }
+
     /// The `no_more_bytes` half of `jpeg_fill_bit_buffer`.
     fn stuff(&mut self, input: &mut Input<'_>, nbits: i32) {
         if nbits > self.left {
@@ -194,24 +257,29 @@ impl Bits {
     }
 
     /// `CHECK_BIT_BUFFER` then `GET_BITS`: the next `n` bits (at most 16).
+    ///
+    /// After the check `left` is at least `n` -- a fill brings it to 57 or
+    /// more, a marker's zero bits to 57 -- so the shifts below are by 0 to
+    /// 63, and `wrapping_shr` is the plain shift.
+    #[inline(always)]
     pub(super) fn get(&mut self, input: &mut Input<'_>, n: i32) -> i32 {
         if self.left < n {
             self.fill(input, n);
         }
         self.left = self.left.wrapping_sub(n);
-        let shift = self.left.clamp(0, 63) as u32;
-        let mask = (1u64 << n.clamp(0, 32)).wrapping_sub(1);
-        ((self.buffer >> shift) & mask) as i32
+        let mask = 1u64.wrapping_shl(n as u32).wrapping_sub(1);
+        (self.buffer.wrapping_shr(self.left as u32) & mask) as i32
     }
 
     /// `HUFF_DECODE`: one symbol.
+    #[inline(always)]
     pub(super) fn decode(&mut self, input: &mut Input<'_>, table: &Derived) -> i32 {
         let mut nb = 1;
         if self.left < 8 {
             self.fill(input, 0);
         }
         if self.left >= 8 {
-            let look = ((self.buffer >> self.left.wrapping_sub(8).clamp(0, 63)) & 0xFF) as usize;
+            let look = (self.buffer.wrapping_shr(self.left.wrapping_sub(8) as u32) & 0xFF) as usize;
             let entry = table.lookup.get(look).copied().unwrap_or(9 << 8);
             nb = i32::from(entry >> 8);
             if nb <= 8 {
@@ -223,6 +291,8 @@ impl Bits {
     }
 
     /// `jpeg_huff_decode`: a code at least `min_bits` long, a bit at a time.
+    #[cold]
+    #[inline(never)]
     fn slow_decode(&mut self, input: &mut Input<'_>, table: &Derived, min_bits: i32) -> i32 {
         let mut l = min_bits;
         let mut code = i64::from(self.get(input, l));
@@ -243,16 +313,131 @@ impl Bits {
     }
 }
 
+/// The bit buffer as a decoder's inner loop holds it -- in locals, so in
+/// registers: libjpeg's `BITREAD_STATE_VARS`, which exist for the same
+/// reason. [`Bits`] is where it lives between MCUs, and what the rare work
+/// done out of line (a fill that meets an `0xFF`, a code longer than eight
+/// bits) is handed. The methods are [`Bits`]'s, with the same fills at the
+/// same moments, so the two read the same bytes when.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Window {
+    buffer: u64,
+    left: i32,
+}
+
+impl Window {
+    /// A fill, for `nbits`: in place if the bytes are all data, otherwise
+    /// by way of [`Bits::refill`].
+    #[inline(always)]
+    fn fill(&mut self, bits: &mut Bits, input: &mut Input<'_>, nbits: i32) {
+        if let Some(window) = bulk_fill(*self, input) {
+            *self = window;
+        } else {
+            *self = bits.refill(*self, input, nbits);
+        }
+    }
+
+    /// [`Bits::get`].
+    #[inline(always)]
+    pub(super) fn get(&mut self, bits: &mut Bits, input: &mut Input<'_>, n: i32) -> i32 {
+        if self.left < n {
+            self.fill(bits, input, n);
+        }
+        self.left = self.left.wrapping_sub(n);
+        let mask = 1u64.wrapping_shl(n as u32).wrapping_sub(1);
+        (self.buffer.wrapping_shr(self.left as u32) & mask) as i32
+    }
+
+    /// [`Bits::decode`].
+    #[inline(always)]
+    pub(super) fn decode(
+        &mut self,
+        bits: &mut Bits,
+        input: &mut Input<'_>,
+        table: &Derived,
+    ) -> i32 {
+        let mut nb = 1;
+        if self.left < 8 {
+            self.fill(bits, input, 0);
+        }
+        if self.left >= 8 {
+            let look = (self.buffer.wrapping_shr(self.left.wrapping_sub(8) as u32) & 0xFF) as usize;
+            let entry = table.lookup.get(look).copied().unwrap_or(9 << 8);
+            nb = i32::from(entry >> 8);
+            if nb <= 8 {
+                self.left = self.left.wrapping_sub(nb);
+                return i32::from(entry & 0xFF);
+            }
+        }
+        let (window, symbol) = bits.slow_decode_window(*self, input, table, nb);
+        *self = window;
+        symbol
+    }
+}
+
+/// The part of `jpeg_fill_bit_buffer` that can be done at once: the bytes
+/// its loop would take one at a time -- as many as bring the buffer to 57
+/// bits or more, which from `left` bits is exactly `(64 - left) / 8` of them
+/// -- taken together when they are all data, none of them `0xFF`, the one
+/// byte that can begin a marker or a stuffed `FF 00`. `None`, having taken
+/// nothing, where the loop is needed: an `FF`, the last eight bytes of the
+/// input, or a marker already met.
+#[inline(always)]
+fn bulk_fill(window: Window, input: &mut Input<'_>) -> Option<Window> {
+    if input.unread_marker != 0 {
+        return None;
+    }
+    let word = input.src.peek8()?;
+    // `left` is below 57 here (a fill is only asked for when a read needs
+    // more than it holds, at most 16 bits), so this is 6, 7 or 8.
+    let take = (64u32.saturating_sub(window.left.clamp(0, 64) as u32)) / 8;
+    let bytes = if take >= 8 {
+        word
+    } else {
+        word >> 64u32.wrapping_sub(take.wrapping_mul(8))
+    };
+    if has_ff_byte(bytes, take) {
+        return None;
+    }
+    input.src.advance(take as usize);
+    Some(Window {
+        buffer: if take >= 8 {
+            bytes
+        } else {
+            (window.buffer << take.wrapping_mul(8)) | bytes
+        },
+        left: window.left.wrapping_add(take.wrapping_mul(8) as i32),
+    })
+}
+
+/// Whether any of the low `count` bytes of `word` is `0xFF`: the classic
+/// test for a zero byte, on the complement. The bytes above `count` are zero
+/// in `word`, so `0xFF` in its complement, and never count.
+#[inline]
+const fn has_ff_byte(word: u64, count: u32) -> bool {
+    let flipped = !word;
+    let found = flipped.wrapping_sub(0x0101_0101_0101_0101) & !flipped & 0x8080_8080_8080_8080;
+    // Only the low `count` bytes are the ones being taken.
+    let keep = if count >= 8 {
+        u64::MAX
+    } else {
+        (1u64 << count.wrapping_mul(8)).wrapping_sub(1)
+    };
+    found & keep != 0
+}
+
 /// `HUFF_EXTEND`: the `s`-bit value `x` as a signed difference (1 <= s <= 16).
+///
+/// libjpeg-turbo's branch-free form: the sign of `x - 2^(s-1)` selects
+/// whether `1 - 2^s` is added. Which way it goes is as unpredictable as the
+/// picture, so a branch here would be mispredicted about half the time.
+#[inline]
 pub(super) const fn extend(x: i32, s: i32) -> i32 {
     if s <= 0 || s > 16 {
         return x;
     }
-    if x < (1 << (s.wrapping_sub(1))) {
-        x.wrapping_add((-1i32 << s).wrapping_add(1))
-    } else {
-        x
-    }
+    let below = x.wrapping_sub(1 << (s.wrapping_sub(1))) >> 31;
+    x.wrapping_add(below & (-1i32 << s).wrapping_add(1))
 }
 
 /// The derived tables a scan's blocks use, and the per-scan state libjpeg
@@ -261,9 +446,10 @@ pub(super) const fn extend(x: i32, s: i32) -> i32 {
 pub(super) struct Sequential {
     dc: [Option<Derived>; 4],
     ac: [Option<Derived>; 4],
-    /// For each block of the MCU: its component's position in the scan, and
-    /// whether its AC coefficients are wanted (not at an eighth scale).
-    blocks: [(usize, bool); 10],
+    /// For each block of the MCU: its component's position in the scan,
+    /// whether its AC coefficients are wanted (not at an eighth scale), and
+    /// its component's DC and AC table numbers.
+    blocks: [Block; 10],
     blocks_in_mcu: usize,
     last_dc: [i32; 4],
     restarts_to_go: u32,
@@ -296,11 +482,18 @@ impl Sequential {
                 *slot = Some(derived);
             }
         }
-        let mut blocks = [(0usize, false); 10];
+        let mut blocks = [Block::default(); 10];
         for (slot, &position) in blocks.iter_mut().zip(membership) {
             let ci = scan.comps.get(position).copied().unwrap_or(0);
-            let scaled = header.components.get(ci).map_or(8, |c| c.dct_scaled_size);
-            *slot = (position, scaled > 1);
+            let component = header.components.get(ci);
+            let scaled = component.map_or(8, |c| c.dct_scaled_size);
+            let (dc_no, ac_no) = component.map_or((0, 0), |c| (c.dc_tbl_no, c.ac_tbl_no));
+            *slot = Block {
+                position,
+                ac_wanted: scaled > 1,
+                dc: usize::from(dc_no),
+                ac: usize::from(ac_no),
+            };
         }
         Ok(Self {
             dc,
@@ -337,65 +530,90 @@ impl Sequential {
             self.restart(input, interval);
         }
         if !self.bits.insufficient {
-            let scan = &header.scan;
-            for (&(position, ac_wanted), block) in self
+            let bits = &mut self.bits;
+            let mut w = bits.window();
+            for (member, block) in self
                 .blocks
                 .iter()
                 .zip(blocks.iter_mut())
                 .take(self.blocks_in_mcu)
             {
-                let ci = scan.comps.get(position).copied().unwrap_or(0);
-                let (dc_no, ac_no) = header
-                    .components
-                    .get(ci)
-                    .map_or((0, 0), |c| (c.dc_tbl_no, c.ac_tbl_no));
-                let (Some(Some(dc)), Some(Some(ac))) = (
-                    self.dc.get(usize::from(dc_no)),
-                    self.ac.get(usize::from(ac_no)),
-                ) else {
+                let (Some(Some(dc)), Some(Some(ac))) =
+                    (self.dc.get(member.dc), self.ac.get(member.ac))
+                else {
                     continue;
                 };
                 // F.2.2.1: the DC difference.
-                let mut s = self.bits.decode(input, dc);
+                let mut s = w.decode(bits, input, dc);
                 if s != 0 {
-                    let r = self.bits.get(input, s);
+                    let r = w.get(bits, input, s);
                     s = extend(r, s);
                 }
-                if let Some(last) = self.last_dc.get_mut(position) {
+                if let Some(last) = self.last_dc.get_mut(member.position) {
                     s = s.wrapping_add(*last);
                     *last = s;
                 }
                 block[0] = s as i16;
                 // F.2.2.2: the AC coefficients.
                 let mut k = 1usize;
-                while k < 64 {
-                    let symbol = self.bits.decode(input, ac);
-                    let run = (symbol >> 4) as usize;
-                    let size = symbol & 15;
-                    if size != 0 {
-                        k = k.saturating_add(run);
-                        if ac_wanted {
-                            let r = self.bits.get(input, size);
-                            if let Some(cell) = block.get_mut(natural(k)) {
+                if member.ac_wanted {
+                    while k < 64 {
+                        let symbol = w.decode(bits, input, ac);
+                        let run = (symbol >> 4) as usize;
+                        let size = symbol & 15;
+                        if size != 0 {
+                            k = k.wrapping_add(run);
+                            let r = w.get(bits, input, size);
+                            // `natural` is below 64 for any `k`; the mask
+                            // says so where the compiler can see it.
+                            if let Some(cell) = block.get_mut(natural(k) & 63) {
                                 *cell = extend(r, size) as i16;
                             }
                         } else {
-                            self.bits.get(input, size);
+                            if run != 15 {
+                                break;
+                            }
+                            k = k.wrapping_add(15);
                         }
-                    } else {
-                        if run != 15 {
-                            break;
-                        }
-                        k = k.saturating_add(15);
+                        k = k.wrapping_add(1);
                     }
-                    k = k.saturating_add(1);
+                } else {
+                    while k < 64 {
+                        let symbol = w.decode(bits, input, ac);
+                        let run = (symbol >> 4) as usize;
+                        let size = symbol & 15;
+                        if size != 0 {
+                            k = k.wrapping_add(run);
+                            w.get(bits, input, size);
+                        } else {
+                            if run != 15 {
+                                break;
+                            }
+                            k = k.wrapping_add(15);
+                        }
+                        k = k.wrapping_add(1);
+                    }
                 }
             }
+            bits.keep(w);
         }
         if interval != 0 {
             self.restarts_to_go = self.restarts_to_go.wrapping_sub(1);
         }
     }
+}
+
+/// One block of a sequential scan's MCU, as [`Sequential::decode_mcu`] needs
+/// it: worked out when the scan starts rather than looked up per block.
+#[derive(Debug, Clone, Copy, Default)]
+struct Block {
+    /// Its component's position in the scan, which keys the DC predictor.
+    position: usize,
+    /// Whether its AC coefficients are kept (not at an eighth scale).
+    ac_wanted: bool,
+    /// Its component's DC and AC table numbers.
+    dc: usize,
+    ac: usize,
 }
 
 /// Which of the four progressive decoders a scan uses.

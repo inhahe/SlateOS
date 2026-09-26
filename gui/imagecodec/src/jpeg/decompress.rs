@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 
 use super::arith::Arith;
 use super::coef::{self, Coefficients, SAVED, Smoothing, Store};
-use super::color::{self, ColorSpace, Ycc};
+use super::color::{self, ColorSpace};
 use super::error::{Error, jerr};
 use super::huffman::{Pass, Progression, Progressive, Sequential};
 use super::idct::{self, Target};
@@ -201,7 +201,6 @@ pub(crate) struct Decompress<'d, 't> {
     /// its plane some scan has written: the whole-image array's
     /// `first_undef_row`.
     defined_rows: Vec<usize>,
-    ycc: Option<Ycc>,
     out_row: Vec<u8>,
     /// `raw_data_out`: no upsampling and no colour conversion.
     raw: bool,
@@ -244,7 +243,6 @@ impl<'d, 't> Decompress<'d, 't> {
             smoothing: None,
             lossless: None,
             defined_rows: Vec::new(),
-            ycc: None,
             out_row: Vec::new(),
             raw: false,
         }
@@ -287,7 +285,6 @@ impl<'d, 't> Decompress<'d, 't> {
             smoothing: None,
             lossless: None,
             defined_rows: Vec::new(),
-            ycc: None,
             out_row: Vec::new(),
             raw: false,
         }
@@ -669,12 +666,6 @@ impl<'d, 't> Decompress<'d, 't> {
             return Err(jerr::CONVERSION_NOTIMPL);
         }
         self.out_components = self.out_color_space.components().unwrap_or(n);
-        if matches!(
-            (self.jpeg_color_space, self.out_color_space),
-            (C::YCbCr, C::Rgb) | (C::Ycck, C::Cmyk)
-        ) {
-            self.ycc = Some(Ycc::new());
-        }
         Ok(())
     }
 
@@ -1328,6 +1319,75 @@ impl<'d, 't> Decompress<'d, 't> {
         useful.then_some(latches)
     }
 
+    /// Reconstruct as many iMCU rows as libjpeg's main controller has read
+    /// by the time it hands out row `y`: the one the row is in, and -- when
+    /// a plane is filtered down, so needs the rows either side -- the next
+    /// one too once the row is in the iMCU row's last row group (`max_v`
+    /// rows). A source that fails when its data runs out (old-style JPEG in
+    /// TIFF) fails on the same row as libjpeg's only if the reading is no
+    /// earlier than libjpeg's.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "frame geometry: dimensions are at most 65500, sampling factors at most 4 and block sizes at most 8, so every product here is far below usize::MAX"
+    )]
+    fn catch_up(&mut self, y: usize) -> Result<(), Error> {
+        let per_imcu = (self.max_v * self.min_dct).max(1);
+        let imcu = y / per_imcu;
+        let last_group = y % per_imcu >= self.min_dct.saturating_sub(1) * self.max_v;
+        let context = last_group && self.rows.iter().any(Rows::needs_context);
+        let needed = (imcu + usize::from(context)).min(self.total_imcu_rows.saturating_sub(1));
+        while self.output_imcu_row <= needed && self.output_imcu_row < self.total_imcu_rows {
+            if self.has_multiple_scans {
+                self.decompress_data()?;
+            } else {
+                self.decompress_onepass()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Self::read_row`] into opaque `0xAARRGGBB` pixels, `out.len()` of
+    /// them: the colour conversion writes the pixels itself rather than a
+    /// row of samples to be packed afterwards. Red, green and blue for an
+    /// RGB output; grey in all three for a greyscale one; and for a CMYK one
+    /// Chrome's reading of Adobe's inverted CMYK ([`color::cmyk_argb`]).
+    /// `false` once every row has been read (`JWRN_TOO_MUCH_DATA`).
+    pub(crate) fn read_row_argb(&mut self, out: &mut [u32]) -> Result<bool, Error> {
+        let y = self.output_scanline;
+        if y >= self.output_height {
+            self.input.warn();
+            return Ok(false);
+        }
+        self.catch_up(y)?;
+        let mut lines: [&[u8]; 10] = [&[]; 10];
+        for ((line, rows), plane) in lines.iter_mut().zip(self.rows.iter_mut()).zip(&self.planes) {
+            *line = rows.row(plane, y);
+        }
+        let n = self.planes.len().min(10);
+        let lines = lines.get(..n).unwrap_or_default();
+        use ColorSpace as C;
+        match (self.jpeg_color_space, self.out_color_space, lines) {
+            (C::YCbCr, C::Rgb, [y, cb, cr]) => {
+                color::ycc_argb(y, cb, cr, out);
+            }
+            (_, C::Rgb, [r, g, b]) => color::rgb_argb(r, g, b, out),
+            (_, C::Rgb | C::Grayscale, [y, ..]) => color::gray_argb(y, out),
+            (C::Ycck, C::Cmyk, [y, cb, cr, k]) => {
+                let cmyk = &mut self.out_row;
+                color::ycck_cmyk(y, cb, cr, k, cmyk);
+                color::cmyk_argb(cmyk, out);
+            }
+            (_, _, lines) => {
+                let cmyk = &mut self.out_row;
+                color::interleave(lines, cmyk);
+                color::cmyk_argb(cmyk, out);
+            }
+        }
+        self.output_scanline = self.output_scanline.saturating_add(1);
+        self.source_check()?;
+        Ok(true)
+    }
+
     /// `jpeg_read_scanlines` for one row: the next output row, with
     /// `output_components` samples a pixel. Empty once every row has been
     /// read (`JWRN_TOO_MUCH_DATA`).
@@ -1341,25 +1401,7 @@ impl<'d, 't> Decompress<'d, 't> {
             self.input.warn();
             return Ok(&[]);
         }
-        // The iMCU rows libjpeg's main controller has read by the time it
-        // hands out row `y`: the one the row is in, and -- when a plane is
-        // filtered down, so needs the rows either side -- the next one too
-        // once the row is in the iMCU row's last row group (`max_v` rows).
-        // A source that fails when its data runs out (old-style JPEG in TIFF)
-        // fails on the same row as libjpeg's only if the reading is no
-        // earlier than libjpeg's.
-        let per_imcu = (self.max_v * self.min_dct).max(1);
-        let imcu = y / per_imcu;
-        let last_group = y % per_imcu >= self.min_dct.saturating_sub(1) * self.max_v;
-        let context = last_group && self.rows.iter().any(Rows::needs_context);
-        let needed = (imcu + usize::from(context)).min(self.total_imcu_rows.saturating_sub(1));
-        while self.output_imcu_row <= needed && self.output_imcu_row < self.total_imcu_rows {
-            if self.has_multiple_scans {
-                self.decompress_data()?;
-            } else {
-                self.decompress_onepass()?;
-            }
-        }
+        self.catch_up(y)?;
         let mut lines: [&[u8]; 10] = [&[]; 10];
         for ((line, rows), plane) in lines.iter_mut().zip(self.rows.iter_mut()).zip(&self.planes) {
             *line = rows.row(plane, y);
@@ -1369,16 +1411,8 @@ impl<'d, 't> Decompress<'d, 't> {
         let out = &mut self.out_row;
         use ColorSpace as C;
         match (self.jpeg_color_space, self.out_color_space, lines) {
-            (C::YCbCr, C::Rgb, [y, cb, cr]) => {
-                if let Some(ycc) = self.ycc.as_ref() {
-                    color::ycc_rgb(ycc, y, cb, cr, out);
-                }
-            }
-            (C::Ycck, C::Cmyk, [y, cb, cr, k]) => {
-                if let Some(ycc) = self.ycc.as_ref() {
-                    color::ycck_cmyk(ycc, y, cb, cr, k, out);
-                }
-            }
+            (C::YCbCr, C::Rgb, [y, cb, cr]) => color::ycc_rgb(y, cb, cr, out),
+            (C::Ycck, C::Cmyk, [y, cb, cr, k]) => color::ycck_cmyk(y, cb, cr, k, out),
             (C::Grayscale, C::Rgb, [y]) => color::gray_rgb(y, out),
             (C::YCbCr | C::Grayscale, C::Grayscale, [y, ..]) => color::interleave(&[y], out),
             (_, _, lines) => color::interleave(lines, out),

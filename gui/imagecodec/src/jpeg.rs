@@ -63,8 +63,6 @@
 //! ones, and arithmetic-coded ones, it refuses, and so does this. And
 //! [`Limits`] can refuse a file libjpeg would try to allocate for.
 
-use alloc::vec::Vec;
-
 use crate::orientation::Orientation;
 use crate::{Image, ImageError, ImageResult, Limits};
 
@@ -200,47 +198,15 @@ fn decode_at(bytes: &[u8], limits: Limits, block: usize) -> ImageResult<Image> {
     jpeg.set_max_scans(MAX_SCANS);
     jpeg.start(&limits, None)?;
     let (width, height) = (jpeg.output_width(), jpeg.output_height());
-    let mut pixels = Vec::with_capacity(width.saturating_mul(height));
-    for _ in 0..height {
-        let row = jpeg.read_row()?;
-        if out == ColorSpace::Cmyk {
-            pixels.extend(row.chunks_exact(4).map(|p| {
-                if let [c, m, y, k] = *p {
-                    inverted_cmyk(c, m, y, k)
-                } else {
-                    0xFF00_0000
-                }
-            }));
-        } else if out == ColorSpace::Grayscale {
-            pixels.extend(row.iter().map(|&g| {
-                let g = u32::from(g);
-                0xFF00_0000 | (g << 16) | (g << 8) | g
-            }));
-        } else {
-            pixels.extend(row.chunks_exact(3).map(|p| {
-                if let [r, g, b] = *p {
-                    0xFF00_0000 | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
-                } else {
-                    0xFF00_0000
-                }
-            }));
-        }
+    let mut pixels = alloc::vec![0u32; width.saturating_mul(height)];
+    for row in pixels.chunks_exact_mut(width.max(1)) {
+        jpeg.read_row_argb(row)?;
     }
     Ok(Image {
         width: u32::try_from(width).map_err(|_| ImageError::Malformed("an impossible width"))?,
         height: u32::try_from(height).map_err(|_| ImageError::Malformed("an impossible height"))?,
         pixels,
     })
-}
-
-/// Chrome's CMYK to RGB (`SetPixel<JCS_CMYK>`): the samples are the inverted
-/// CMYK Adobe applications write, so each channel is `sample * k / 255`,
-/// truncated.
-fn inverted_cmyk(c: u8, m: u8, y: u8, k: u8) -> u32 {
-    let k = u32::from(k);
-    // A byte times a byte, divided by a constant: no overflow, no zero.
-    let channel = |v: u8| u32::from(v).wrapping_mul(k) / 255;
-    0xFF00_0000 | (channel(c) << 16) | (channel(m) << 8) | channel(y)
 }
 
 /// The picture's size as shown -- turned by its EXIF orientation -- without
@@ -598,13 +564,5 @@ mod tests {
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn inverted_cmyk_is_scaled_by_k() {
-        assert_eq!(inverted_cmyk(255, 255, 255, 255), 0xFFFF_FFFF);
-        assert_eq!(inverted_cmyk(255, 128, 0, 0), 0xFF00_0000);
-        // 200 * 100 / 255 = 78.4, truncated.
-        assert_eq!(inverted_cmyk(200, 100, 50, 100), 0xFF4E_2713);
     }
 }

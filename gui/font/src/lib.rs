@@ -63,6 +63,7 @@ mod gpos;
 pub mod gsub;
 mod gvar;
 mod hangul;
+mod hbcalc;
 mod hint;
 mod indic;
 mod indic_machine;
@@ -100,6 +101,8 @@ mod universal;
 mod universal_machine;
 mod universal_tables;
 pub mod var;
+#[cfg(test)]
+mod var_fixture;
 mod varstore;
 mod would;
 

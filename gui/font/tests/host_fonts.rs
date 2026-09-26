@@ -3063,9 +3063,9 @@ fn installed_variable_fonts_normalize_named_instances() {
                 &[9973, 0],       // 21.0434, 400
                 &[9973, 9885],    // 21.0434, 600
                 &[9973, 16384],   // 21.0434, 700
-                &[13534, 0],      // 24.6303, 400
-                &[13534, 9885],   // 24.6303, 600
-                &[13534, 16384],  // 24.6303, 700
+                &[13535, 0],      // 24.6303, 400
+                &[13535, 9885],   // 24.6303, 600
+                &[13535, 16384],  // 24.6303, 700
                 &[16384, 0],      // 27.5, 400
                 &[16384, 9885],   // 27.5, 600
                 &[16384, 16384],  // 27.5, 700
@@ -3087,9 +3087,9 @@ fn installed_variable_fonts_normalize_named_instances() {
                 &[9973, 0],       // 21.0434, 400
                 &[9973, 9885],    // 21.0434, 600
                 &[9973, 16384],   // 21.0434, 700
-                &[13534, 0],      // 24.6303, 400
-                &[13534, 9885],   // 24.6303, 600
-                &[13534, 16384],  // 24.6303, 700
+                &[13535, 0],      // 24.6303, 400
+                &[13535, 9885],   // 24.6303, 600
+                &[13535, 16384],  // 24.6303, 700
                 &[16384, 0],      // 27.5, 400
                 &[16384, 9885],   // 27.5, 600
                 &[16384, 16384],  // 27.5, 700
@@ -4672,11 +4672,11 @@ fn installed_variable_fonts_vary_their_advances() {
                 &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136], // 400, 100
                 &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136], // 600, 100
                 &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136], // 700, 100
-                &[1228, 982, 986, 1038, 1297, 661, 1268, 964],    // 300, 87.5
-                &[1228, 982, 986, 1038, 1297, 661, 1268, 964],    // 350, 87.5
-                &[1228, 982, 986, 1038, 1297, 661, 1268, 964],    // 400, 87.5
-                &[1228, 982, 986, 1038, 1297, 661, 1268, 964],    // 600, 87.5
-                &[1228, 982, 986, 1038, 1297, 661, 1268, 964],    // 700, 87.5
+                &[1228, 982, 987, 1038, 1297, 661, 1268, 964],    // 300, 87.5
+                &[1228, 982, 987, 1038, 1297, 661, 1268, 964],    // 350, 87.5
+                &[1228, 982, 987, 1038, 1297, 661, 1268, 964],    // 400, 87.5
+                &[1228, 982, 987, 1038, 1297, 661, 1268, 964],    // 600, 87.5
+                &[1228, 982, 987, 1038, 1297, 661, 1268, 964],    // 700, 87.5
                 &[988, 802, 834, 868, 1130, 566, 1094, 792],      // 300, 75
                 &[988, 802, 834, 868, 1130, 566, 1094, 792],      // 350, 75
                 &[988, 802, 834, 868, 1130, 566, 1094, 792],      // 400, 75
@@ -4974,14 +4974,19 @@ fn a_variation_index_kern_follows_the_instance() {
     // The stored values are -41, -27, -42 and -15; the store adds -9, -3, -18
     // and -5 at the top of the axis. Weight 550 is exactly half way up Reem
     // Kufi's 400..700 axis and its one region peaks at the top, so every delta
-    // is halved and then rounded half away from zero: -9 -> -5 rather than -4,
-    // -3 -> -2 rather than -1, -5 -> -3 rather than -2. Truncating, or rounding
-    // half to even, disagrees with three of these four middle entries.
+    // is halved and then rounded as HarfBuzz rounds, a half *up*: -4.5 -> -4,
+    // -1.5 -> -1, -2.5 -> -2 (`crate::hbcalc`). These are HarfBuzz 14.3.0's
+    // own kerns (uharfbuzz, one unit per font unit). Until 2026-09-26 this
+    // test expected -46, -29 and -18, from rounding half away from zero -- a
+    // misreading of HarfBuzz's `roundf` that the crate shared. Rounding half
+    // to even disagrees on the second pair; truncating would agree on all
+    // three halves here, which are negative, which is why the rule itself is
+    // pinned by `varstore`'s unit tests with a positive half.
     let expected: &[(u16, u16, [f32; 3])] = &[
-        (2, 30, [-41.0, -46.0, -50.0]),    // A / C
-        (2, 62, [-27.0, -29.0, -30.0]),    // A / G
+        (2, 30, [-41.0, -45.0, -50.0]),    // A / C
+        (2, 62, [-27.0, -28.0, -30.0]),    // A / G
         (2, 69, [-42.0, -51.0, -60.0]),    // A / Hbar
-        (374, 196, [-15.0, -18.0, -20.0]), // w / a
+        (374, 196, [-15.0, -17.0, -20.0]), // w / a
     ];
 
     let mut files = Vec::new();

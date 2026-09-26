@@ -154,6 +154,17 @@ fn assemble(tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
     out
 }
 
+/// A normalized position as FreeType puts it, 16.16 -- the reading the
+/// auto-hinter's points are varied by, beside the `F2Dot14` one
+/// [`Coords::as_slice`](crate::var::Coords::as_slice) gives (see
+/// [`crate::var`]). For `examples/var_dump.rs`, which `tools/var_oracle.py`
+/// checks against FreeType itself; the crate keeps the accessor private,
+/// since no caller should be choosing between the two.
+#[must_use]
+pub fn freetype_coords(coords: &crate::var::Coords) -> &[i32] {
+    coords.fixed()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

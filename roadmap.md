@@ -2200,12 +2200,15 @@ lane C's `guitk`.
   Vello itself waits on `[A]`'s GPU driver.
   **Variable fonts are done** (§448, §449, §450, §451): all four steps
   `TD-FONT-DOES-NOT-READ-VARIATION-STORES` mandates have
-  landed: `gui/font/src/var.rs` reads `fvar`/`avar` and turns "weight 600" into
-  the normalized coordinates the format works in — bit for bit what HarfBuzz
-  computes, which means `avar`'s segment map **rounds half away from zero**;
-  it was written truncating, on the mistaken belief that HarfBuzz truncates
-  there too (it truncates in `Device::get_delta`, but the segment map goes
-  through `roundf`), and `777a040ff` fixed it. Bit-for-bit matters because this
+  landed: `gui/font/src/var.rs` reads `fvar`/`avar` (version 2 included) and
+  turns "weight 600" into the normalized coordinates the format works in —
+  bit for bit what HarfBuzz 14.3.0 computes, and beside it what FreeType
+  2.13.2 computes for the hinter (§1326). HarfBuzz rounds to 16.16 before
+  `F2Dot14`, maps `avar` in `float`, and its `roundf` is its own, sending a
+  half *up*; this was written truncating, then rounded half away from zero
+  (`777a040ff`), and followed HarfBuzz 14.3.0 only from 2026-09-26 — each
+  earlier version agreeing with HarfBuzz except on the instances it rounded
+  differently, one in eight of them. Bit-for-bit matters because this
   crate is checked against HarfBuzz everywhere else and a one-unit
   disagreement here would come back as an
   unattributable sub-pixel difference in a *shape*; `gui/font/src/gvar.rs`
@@ -2231,9 +2234,11 @@ lane C's `guitk`.
   ascender/descender/line-gap. Cap-height and x-height are *not* read from
   `MVAR` even though 4 faces carry them: they stay measured off the varied
   outline, which is what the non-variable path does and is ground truth.
-  Cross-checked against an independently-written oracle
-  (`tools/varstore_oracle.py`) over every named instance of every host face: 7
-  faces read through `HVAR`, 5 varying; 4 through `MVAR`, all varying. The
+  Cross-checked over every named instance of every host face, against
+  HarfBuzz's own advances and corrections (`tools/varstore_oracle.py`, which
+  asked an independently-written Python reader until 2026-09-26 — one that
+  shared the old rounding and hid it): 7 faces read through `HVAR`, 5
+  varying; 4 through `MVAR`, all varying. The
   three paths no installed font reaches — a null advance map meaning the
   *implicit* map, `LONG_WORDS` doubling both column widths, and a degenerate
   region scoring 1.0 (0 of 199 region axes here are degenerate) — are covered
@@ -2251,8 +2256,9 @@ lane C's `guitk`.
   from the `glyf` header, which describes the *default* instance only, so a
   heavy instance put its accents where the light glyph's ink had been
   (`1f542b478`, `Face::glyph_bbox_at`). Pinned on the host by
-  `a_variation_index_kern_follows_the_instance`, whose four expected kerns were
-  computed from the font's own bytes rather than snapshotted from our output.
+  `a_variation_index_kern_follows_the_instance`, whose four expected kerns are
+  HarfBuzz 14.3.0's own (computed by hand from the font's bytes until
+  2026-09-26, three of them rounded the wrong way).
   The lesson §451 records: the HarfBuzz sweep had been green over 556 faces the
   whole time, because it only ever asked about the **default** instance — a
   differential test proves only the questions it asks. Still out of scope:

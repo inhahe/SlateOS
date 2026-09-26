@@ -2091,9 +2091,8 @@ impl ScaledFont {
             let rtl = levels
                 .get(glyph.cluster)
                 .is_some_and(|l| !l.is_multiple_of(2));
-            let origin = self.face.glyph_bbox_at(gid, &self.coords).map(|b| {
-                let mut origin =
-                    Extents::new(num(b.x_min), num(b.y_min), num(b.x_max), num(b.y_max));
+            let origin = self.face.glyph_extents_at(gid, &self.coords).map(|e| {
+                let mut origin = Extents::from_harfbuzz(e);
                 // Horizontal placement measures against the *cell*, not the
                 // ink: a letter with no ink at all still has a width to centre
                 // an accent in, and a letter whose ink overhangs its cell
@@ -2170,8 +2169,8 @@ impl ScaledFont {
                 let gid = glyphs.get(i).map_or(0, |glyph| glyph.key.gid());
                 let mark = self
                     .face
-                    .glyph_bbox_at(gid, &self.coords)
-                    .map(|b| Extents::new(num(b.x_min), num(b.y_min), num(b.x_max), num(b.y_max)));
+                    .glyph_extents_at(gid, &self.coords)
+                    .map(Extents::from_harfbuzz);
                 let Some(mark) = mark else {
                     // No box to measure, so no placement — but the mark still
                     // travelled with the pen it can no longer pay for, and
@@ -2415,20 +2414,6 @@ fn pens(glyphs: &[ShapedGlyph], visual: &[u32]) -> Vec<f32> {
         }
     }
     out
-}
-
-/// A font-unit measurement as the integer it always was.
-///
-/// [`BBox`](crate::sfnt::BBox) carries `f32` because an outline's box is
-/// computed from `f32` points, but a `glyf` face's stated box is four `i16`s,
-/// so nothing is lost on the faces this is used for. A CFF face's box really
-/// is fractional; truncating it toward zero is the same rounding `glyf` did in
-/// the file.
-fn num(v: f32) -> i32 {
-    #[allow(clippy::cast_possible_truncation)]
-    {
-        v as i32
-    }
 }
 
 /// Whether `ch` is a Unicode variation selector.

@@ -339,7 +339,21 @@ pub(crate) struct Extents {
 }
 
 impl Extents {
-    /// The box around `x_min .. x_max` by `y_min .. y_max`.
+    /// The box [`Face::glyph_extents_at`](crate::sfnt::Face::glyph_extents_at)
+    /// reports: left edge, top edge, width and height, already rounded as
+    /// HarfBuzz rounds them.
+    pub(crate) fn from_harfbuzz([x_bearing, y_bearing, width, height]: [i32; 4]) -> Self {
+        Self {
+            x_bearing,
+            y_bearing,
+            width,
+            height,
+        }
+    }
+
+    /// The box around `x_min .. x_max` by `y_min .. y_max`: how the tests
+    /// below state a glyph's box, in the four edges a font does.
+    #[cfg(test)]
     pub(crate) fn new(x_min: i32, y_min: i32, x_max: i32, y_max: i32) -> Self {
         Self {
             x_bearing: x_min,

@@ -154,6 +154,18 @@ pub(crate) fn i16_at(d: &[u8], off: usize) -> Option<i16> {
     Some(i16::from_be_bytes(b))
 }
 
+/// A whole number of font units as an `f32`: exact, since a coordinate is
+/// far below 2^24.
+fn whole_f32(v: i32) -> f32 {
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a font-unit coordinate is far below 2^24, where f32 is exact"
+    )]
+    {
+        v as f32
+    }
+}
+
 /// A three-byte big-endian code point, which is how `cmap` format 14 spells
 /// one — the only place in the format that does.
 fn u24_at(d: &[u8], off: usize) -> Option<u32> {
@@ -2730,6 +2742,85 @@ impl Face {
             y_max: 0.0,
         };
         Some(self.outline_at(gid, coords).ok()?.bbox().unwrap_or(EMPTY))
+    }
+
+    /// The glyph's ink box as HarfBuzz reports it at `coords`
+    /// (`hb_font_get_glyph_extents`, at one unit per font unit): left edge,
+    /// top edge, width rightwards and height downwards, in whole font units.
+    ///
+    /// [`glyph_bbox_at`](Self::glyph_bbox_at) is the box; this is the box as
+    /// HarfBuzz rounds it, which depends on where the box came from:
+    ///
+    /// * a `glyf` glyph read without deltas reports the box its header
+    ///   states, in whole units already;
+    /// * a `glyf` glyph at a varied instance reports the box around its
+    ///   varied points, which are not whole: the left and top edges rounded,
+    ///   then the width and height from the rounded edges, each by
+    ///   HarfBuzz's own `roundf` ([`crate::hbcalc`]) -- and a box with no
+    ///   area in either direction is no box at all
+    ///   (`contour_bounds_t::get_extents`);
+    /// * a CFF glyph reports the box around its path, rounded the same way
+    ///   (in `double`, as HarfBuzz's charstring numbers are), with each
+    ///   direction found empty on its own (`cff1::accelerator_t::get_extents`).
+    ///
+    /// The fallback mark placement ([`crate::fallback`]) stacks marks by
+    /// these. Until 2026-09-26 the varied box was cut to whole units instead,
+    /// which put a mark on a varied glyph a unit or two off HarfBuzz's.
+    #[must_use]
+    pub(crate) fn glyph_extents_at(&self, gid: u16, coords: &var::Coords) -> Option<[i32; 4]> {
+        use crate::hbcalc::roundf_i32;
+        let b = self.glyph_bbox_at(gid, coords)?;
+        let varied = !coords.is_default()
+            && self.gvar.is_some()
+            && matches!(self.outlines, Outlines::Glyf { .. });
+        if varied {
+            if b.x_min >= b.x_max || b.y_min >= b.y_max {
+                return Some([0; 4]);
+            }
+            let x_bearing = roundf_i32(b.x_min);
+            let y_bearing = roundf_i32(b.y_max);
+            return Some([
+                x_bearing,
+                y_bearing,
+                roundf_i32(b.x_max - whole_f32(x_bearing)),
+                roundf_i32(b.y_min - whole_f32(y_bearing)),
+            ]);
+        }
+        if matches!(self.outlines, Outlines::Cff(_)) {
+            // HarfBuzz's `roundf` on a `double`: `floor(x + 0.5)`.
+            let round = |v: f64| {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "a font-unit coordinate, far inside i32; `as` \
+                              saturates what no glyph reaches"
+                )]
+                {
+                    (v + 0.5).floor() as i32
+                }
+            };
+            let (x_bearing, width) = if b.x_min >= b.x_max {
+                (0, 0)
+            } else {
+                let x = round(f64::from(b.x_min));
+                (x, round(f64::from(b.x_max) - f64::from(x)))
+            };
+            let (y_bearing, height) = if b.y_min >= b.y_max {
+                (0, 0)
+            } else {
+                let y = round(f64::from(b.y_max));
+                (y, round(f64::from(b.y_min) - f64::from(y)))
+            };
+            return Some([x_bearing, y_bearing, width, height]);
+        }
+        // A stated box, or a picture's empty one: whole units already.
+        let [x_min, y_min, x_max, y_max] =
+            [b.x_min, b.y_min, b.x_max, b.y_max].map(crate::hbcalc::roundf_i32);
+        Some([
+            x_min,
+            y_max,
+            x_max.saturating_sub(x_min),
+            y_min.saturating_sub(y_max),
+        ])
     }
 
     /// How far a `glyf` glyph's ink has to move right for it to start at the

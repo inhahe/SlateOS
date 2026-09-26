@@ -416,5 +416,47 @@ else
   broken=$((broken + 1))
 fi
 
+# --- standard descriptors that cannot be written -------------------------------------
+# util-linux's close_stdout decides the status from them. A warning logger
+# prints and then carries on from -- `-f` with a message, an unknown
+# `--rfc5424` word, a bad `--socket-errors` -- makes it 1 when stderr could
+# not take it, where it is otherwise 0. `-s`'s copy of the message is
+# `writev`, not stdio, so its failure changes nothing. And `-h` into a closed
+# stdout is forgiven, into /dev/full a write error. The redirection is
+# applied by the shell that execs logger, since the harness's own `diff_run`
+# needs descriptor 2.
+run_redir() {
+  local side=$1 how=$2; shift 2
+  diff_run env LC_ALL=C.UTF-8 PATH="$bindir/$side:$PATH" timeout -k 2 20 \
+    bash -c "exec logger \"\$@\" $how </dev/null" logger "$@"
+}
+redir_case() {
+  local how=$1 o_rc g_rc; shift
+  run_redir ours "$how" "$@" >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"; o_rc=$?
+  run_redir gnu "$how" "$@" >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"; g_rc=$?
+  if [ "$o_rc" = 124 ] || [ "$g_rc" = 124 ]; then
+    AGREED=broken
+  elif cmp -s "$DIFF_TMP/o.out" "$DIFF_TMP/g.out" && [ "$o_rc" = "$g_rc" ] \
+     && [ "$(normalize < "$DIFF_TMP/o.err")" = "$(normalize < "$DIFF_TMP/g.err")" ]; then
+    AGREED=yes
+  else
+    AGREED=no
+  fi
+  REPORT=$(printf '  ours (rc=%s): out %q err %q\n  gnu  (rc=%s): out %q err %q' \
+    "$o_rc" "$(head -c 300 "$DIFF_TMP/o.out")" "$(cat "$DIFF_TMP/o.err")" \
+    "$g_rc" "$(head -c 300 "$DIFF_TMP/g.out")" "$(cat "$DIFF_TMP/g.err")")
+  report "logger $(printf '%q ' "$@")$how"
+}
+for how in '>&-' '>/dev/full' '2>&-' '2>/dev/full'; do
+  redir_case "$how" -h
+  redir_case "$how" -V
+  redir_case "$how" --bogus
+  redir_case "$how" --no-act -f /dev/null hello
+  redir_case "$how" --no-act --rfc5424=bogus hello
+  redir_case "$how" --no-act --socket-errors=maybe hello
+  redir_case "$how" --no-act -s hello
+  redir_case "$how" --no-act -s -f /dev/null hello
+done
+
 echo "logger-diff: $pass passed ($xfail of them expected differences), $fail failed, $broken broken"
 [ "$fail" -eq 0 ] && [ "$broken" -eq 0 ]

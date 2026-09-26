@@ -20,6 +20,14 @@ ulstrutils = { path = "../ulstrutils" }
 # socket failures, on every host.
 errmsg = { path = "../errmsg" }
 
+# util-linux's close_stdout: -V and -h judged as upstream judges them, and a
+# diagnostic that could not be written counted against the exit status.
+ulclosestream = { path = "../ulclosestream" }
+
+# A standard descriptor the process was started without stays closed, rather
+# than the runtime's /dev/null.
+stdfdguard = { path = "../stdfdguard" }
+
 # A socket path, file name or argv word in a diagnostic is escaped, not
 # pasted, so it cannot forge a line (design-decisions §370). Pure
 # formatting, no I/O, so §768-exempt.

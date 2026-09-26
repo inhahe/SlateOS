@@ -166617,7 +166617,7 @@ functions, colours) are added when a program needs them; `lsblk`,
 also on TD-B-STANDALONE-PORTS-MATCH-LONG-OPTIONS-WHOLE's list, and the two
 are one job per program.
 
-## TD-B-UTIL-LINUX-PORTS-WRITE-THROUGH-RUST-STDIO (lane B, 2026-09-26) — **open**
+## TD-B-UTIL-LINUX-PORTS-WRITE-THROUGH-RUST-STDIO (lane B, 2026-09-26) — ✅ FIXED 2026-09-26 (lane B)
 
 **In short:** util-linux programs end with `close_stdout`, which decides the
 exit status from what happened to standard output and standard error --
@@ -166645,3 +166645,12 @@ and `stdfdguard::restore()` first in `main`; stdout through
 `getopt`); diagnostics through `ulclosestream::warnx`/`warn`/`stderr_write`;
 and cases for `>&-`, `>/dev/full`, `2>&-` and `2>/dev/full`, with small and
 large output, in each program's harness.
+
+**Fixed** as described, in all four: `lsmem` (348 cases), `getopt` (151, 44
+of them these), `flock` (114, 36 -- including the command inheriting a
+closed stdout, which with the lock file on descriptor 1 is upstream's), and
+`logger` (170, 32 -- including `-s`, whose copy to stderr is `writev` and
+not stdio, so its failure is no lost diagnostic: `ulclosestream::stderr_raw`).
+Two refinements came out of the measuring: glibc sizes stdout's buffer at
+the first write (8192 on a closed descriptor, `st_blksize` otherwise), and
+upstream lsmem's held `/sys` descriptor is what descriptor 1 is by then.

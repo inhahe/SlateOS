@@ -1552,6 +1552,8 @@ dependencies = [
  "journalrec",
  "localtime",
  "quoting",
+ "stdfdguard",
+ "ulclosestream",
  "ulstrutils",
 ]
 

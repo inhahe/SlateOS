@@ -47,9 +47,10 @@ use localtime::Zone;
 use quoting::{escape_unprintable, escaped_in_quotes, escaped_in_quotes_os, os_bytes};
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
+use ulclosestream::Stdout;
 
 use deliver::{ALL_TYPES, Conn, OpenError, PATH_DEVLOG, Parts, TYPE_TCP, TYPE_UDP};
 use frame::{Header, NILVALUE, TimeVal};
@@ -123,12 +124,11 @@ struct Exit(u8);
 
 /// Print `logger: MSG` to stderr -- `warnx`, and the printing half of `errx`.
 ///
-/// A diagnostic that cannot be written has nowhere else to go; upstream's
-/// `warnx` ignores the failure the same way.
+/// A diagnostic that cannot be written has nowhere else to go, but it is
+/// not forgotten: `close_stdout` makes the exit status 1 for it, as upstream's
+/// does -- a `send message failed` into a closed stderr is status 1, not 0.
 fn diag(msg: &str) {
-    let line = format!("logger: {msg}\n");
-    // Nothing useful can be done if stderr itself is gone.
-    let _ = io::stderr().lock().write_all(line.as_bytes());
+    ulclosestream::warnx(b"logger", msg);
 }
 
 /// `errx(EXIT_FAILURE, ...)`.
@@ -181,16 +181,26 @@ enum SocketErrors {
     Auto,
 }
 
+stdfdguard::guard_std_fds!();
+
 fn main() -> ExitCode {
+    // Before anything touches standard I/O: a descriptor the process was
+    // started without is closed again, as upstream would find it.
+    stdfdguard::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    match run(&args) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(Exit(code)) => ExitCode::from(code),
-    }
+    // `logger.c` leaves `CLOSE_EXIT_CODE` at `EXIT_FAILURE`.
+    let mut stdout = Stdout::new(1);
+    let status = match run(&args, &mut stdout) {
+        Ok(()) => 0,
+        Err(Exit(code)) => code,
+    };
+    // `close_stdout`, which upstream registers with `atexit`: every way out
+    // passes it.
+    ExitCode::from(stdout.close(status, b"logger"))
 }
 
 /// `main()`.
-fn run(args: &[OsString]) -> Result<(), Exit> {
+fn run(args: &[OsString], stdout: &mut Stdout) -> Result<(), Exit> {
     let mut ctl = Ctl {
         conn: Conn::None,
         pri: DEFAULT_PRI,
@@ -372,8 +382,8 @@ fn run(args: &[OsString]) -> Result<(), Exit> {
                     }
                 }
             }
-            "version" => return print_and_close(VERSION),
-            "help" => return print_and_close(HELP),
+            "version" => return print_and_close(stdout, VERSION),
+            "help" => return print_and_close(stdout, HELP),
             _ => {}
         }
     }
@@ -485,15 +495,11 @@ fn sd_booted() -> bool {
     std::fs::symlink_metadata("/run/systemd/system/").is_ok()
 }
 
-/// `-V` and `-h`, then `close_stdout_atexit`: a stdout that could not take
-/// the text is `write error`, exit 1 (a closed pipe excepted).
-fn print_and_close(text: &str) -> Result<(), Exit> {
-    let mut out = io::stdout().lock();
-    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
-        Ok(()) => Err(Exit(0)),
-        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Err(Exit(0)),
-        Err(e) => Err(die(&format!("write error: {}", errmsg::strerror(&e)))),
-    }
+/// `-V` and `-h`: the text into stdout, and exit 0 -- through `main`'s
+/// `close_stdout`, which judges whether it could be written.
+fn print_and_close(stdout: &mut Stdout, text: &str) -> Result<(), Exit> {
+    stdout.write(text.as_bytes());
+    Err(Exit(0))
 }
 
 /// `logger_open`.
@@ -697,8 +703,9 @@ fn write_output(ctl: &mut Ctl, msg: &[u8]) -> Result<(), Exit> {
         }
     }
     if ctl.stderr_printout {
-        // `ignore_result(writev(STDERR_FILENO, ...))`, as upstream.
-        let _ = io::stderr().lock().write_all(&f.stderr);
+        // `ignore_result(writev(STDERR_FILENO, ...))`, as upstream: not
+        // stdio, so a failure here is no lost diagnostic.
+        let _ = ulclosestream::stderr_raw(&f.stderr);
     }
     Ok(())
 }
@@ -779,10 +786,11 @@ fn journald_entry(ctl: &Ctl, source: Input) -> Result<(), Exit> {
         journald_record(&lines).and_then(|r| deliver::append_record(&r))
     };
     if ctl.stderr_printout {
-        let mut err = io::stderr().lock();
         for line in &lines {
-            // `fprintf(stderr, ...)`, unchecked upstream.
-            let _ = err.write_all(line).and_then(|()| err.write_all(b"\n"));
+            // `fprintf(stderr, ...)`, unchecked upstream -- but stdio, so a
+            // failure is a lost diagnostic at `close_stdout`.
+            ulclosestream::stderr_write(line);
+            ulclosestream::stderr_write(b"\n");
         }
     }
     written.map_err(|_| die("journald entry could not be written"))
@@ -835,6 +843,11 @@ mod tests {
         words.iter().map(OsString::from).collect()
     }
 
+    /// `run` over `words`, with a stdout nothing is printed to.
+    fn ran(words: &[&str]) -> Result<(), Exit> {
+        run(&args(words), &mut Stdout::new(1))
+    }
+
     /// Upstream pastes these; so does the port, until a byte could forge a
     /// line or is not text.
     #[test]
@@ -882,16 +895,16 @@ mod tests {
 
     #[test]
     fn option_errors_end_the_run_with_status_1() {
-        assert_eq!(run(&args(&["-Q", "x"])), Err(Exit(1)));
-        assert_eq!(run(&args(&["--id=abc", "x"])), Err(Exit(1)));
-        assert_eq!(run(&args(&["--id==5", "x"])), Err(Exit(1)));
-        assert_eq!(run(&args(&["-S", "1.9", "x"])), Err(Exit(1)));
-        assert_eq!(run(&args(&["--msgid", "a b", "x"])), Err(Exit(1)));
-        assert_eq!(run(&args(&["--sd-id", "bad", "x"])), Err(Exit(1)));
-        assert_eq!(run(&args(&["--sd-param", "x=\"y\"", "x"])), Err(Exit(1)));
-        assert_eq!(run(&args(&["-p", "nosuch.x", "x"])), Err(Exit(1)));
+        assert_eq!(ran(&["-Q", "x"]), Err(Exit(1)));
+        assert_eq!(ran(&["--id=abc", "x"]), Err(Exit(1)));
+        assert_eq!(ran(&["--id==5", "x"]), Err(Exit(1)));
+        assert_eq!(ran(&["-S", "1.9", "x"]), Err(Exit(1)));
+        assert_eq!(ran(&["--msgid", "a b", "x"]), Err(Exit(1)));
+        assert_eq!(ran(&["--sd-id", "bad", "x"]), Err(Exit(1)));
+        assert_eq!(ran(&["--sd-param", "x=\"y\"", "x"]), Err(Exit(1)));
+        assert_eq!(ran(&["-p", "nosuch.x", "x"]), Err(Exit(1)));
         // Ambiguous: `--priority` and `--prio-prefix`.
-        assert_eq!(run(&args(&["--pri", "user.err", "x"])), Err(Exit(1)));
+        assert_eq!(ran(&["--pri", "user.err", "x"]), Err(Exit(1)));
     }
 
     #[test]

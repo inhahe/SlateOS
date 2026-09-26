@@ -9,5 +9,9 @@ appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 
+# What a video file holds -- its container, length and tracks -- read from
+# its headers. There is no decoder, so this is what opening a file can do.
+mediaprobe = { path = "../mediaprobe" }
+
 [lints]
 workspace = true

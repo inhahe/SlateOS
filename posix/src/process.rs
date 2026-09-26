@@ -3565,22 +3565,6 @@ pub const PROCESS_VM_UIO_MAXIOV: u64 = 1024;
 /// the `iov_len` values … overflows a `ssize_t`" does not describe the code.
 pub const PROCESS_VM_SSIZE_MAX: u64 = i64::MAX as u64;
 
-/// Linux's `MAX_RW_COUNT` (include/linux/fs.h:2399), `INT_MAX & PAGE_MASK`
-/// with Linux's 4 KiB page: the most one read or write transfers.  Only
-/// `import_ubuf`'s truncation uses it here.
-const LINUX_MAX_RW_COUNT: usize = 0x7FFF_F000;
-
-/// `access_ok` on x86-64 (arch/x86/include/asm/uaccess_64.h:85-93) for a
-/// run-time size: the range must not wrap and must end in the user half,
-/// which `valid_user_address` (:57) tests as `(long)(x) >= 0`.
-///
-/// It admits NULL.  A NULL buffer is caught where it is dereferenced, not
-/// here.
-fn access_ok_x86_64(base: usize, len: usize) -> bool {
-    let (end, wrapped) = base.overflowing_add(len);
-    !wrapped && end.cast_signed() >= 0
-}
-
 /// Which vector of the pair [`process_vm_vector_bytes`] is reading.
 ///
 /// Only the local one is range-checked: it names the caller's memory, which
@@ -3592,30 +3576,26 @@ enum PvmSide {
     Remote,
 }
 
-/// One vector's share of `process_vm_rw`: `iovec_from_user`
-/// (lib/iov_iter.c:1397) and the per-segment test inside
-/// `copy_iovec_from_user` (:1365), in that order, then — for the local
-/// vector — the `access_ok` that `import_iovec` adds.
+/// One vector's share of `process_vm_rw` (mm/process_vm_access.c): the
+/// local one through `import_iovec`, the remote one through
+/// `iovec_from_user` -- see [`crate::uio`] for their verdicts.
 ///
-/// Returns the vector's byte count, or the errno upstream refuses it with:
+/// Returns the vector's byte count, or the errno upstream refuses it with.
+/// Two things differ between the sides, both upstream's:
 ///
-/// ```text
-///   count == 0             -> an empty vector, 0 bytes (:1409) -- iov unread
-///   count > UIO_MAXIOV     -> EINVAL (:1411)
-///   iov == NULL            -> EFAULT (the copy)
-///   iov_len > SSIZE_MAX    -> EINVAL (:1380), any one segment
-///   local, !access_ok      -> EFAULT (:1484), segment by segment
-/// ```
+/// - The local count is `import_iovec`'s `unsigned nr_segs`, so the high
+///   half of `liovcnt` is dropped: `1 << 32` segments is none at all.  The
+///   remote count is `iovec_from_user`'s `unsigned long`, whole.
+/// - Only the local vector is range-checked: it names the caller's memory,
+///   which `import_iovec` passes through `access_ok`, while the remote one is
+///   addresses in *another* process.
 ///
-/// The local range test has upstream's two shapes.  One segment goes
-/// through `__import_iovec_ubuf` (:1435) → `import_ubuf` (:1550), which caps
-/// the length at `MAX_RW_COUNT` *before* `access_ok`; several go through
-/// the loop at :1481, which tests each segment's full length and caps only
-/// afterwards.  So one segment of `SSIZE_MAX` bytes is accepted and two are
-/// not.
+/// The remote count is saturated rather than capped at `MAX_RW_COUNT`: the
+/// only question asked of it is whether it is zero.
 ///
-/// The count is saturated rather than capped at `MAX_RW_COUNT`: the only
-/// question asked of it is whether it is zero.
+/// Until 2026-09-26 this carried its own copy of the checks, which judged
+/// the local count at 64 bits -- `EINVAL` for `1 << 32` segments -- and read
+/// an array in the kernel half rather than refuse it.
 ///
 /// # Safety
 ///
@@ -3626,41 +3606,23 @@ unsafe fn process_vm_vector_bytes(
     count: u64,
     side: PvmSide,
 ) -> Result<u64, i32> {
-    if count == 0 {
-        return Ok(0);
-    }
-    if count > PROCESS_VM_UIO_MAXIOV {
-        return Err(errno::EINVAL);
-    }
-    if iov.is_null() {
-        return Err(errno::EFAULT);
-    }
-    // `count <= UIO_MAXIOV` from here, so it fits a usize.
-    let n = count as usize;
-    // SAFETY: caller contract -- `iov` covers `count` entries.
-    let segs = unsafe { core::slice::from_raw_parts(iov, n) };
-    // `copy_iovec_from_user` reads every segment before anything else
-    // looks at one, so a bad length anywhere outranks a bad range anywhere.
-    if segs
-        .iter()
-        .any(|seg| seg.iov_len as u64 > PROCESS_VM_SSIZE_MAX)
-    {
-        return Err(errno::EINVAL);
-    }
-    if side == PvmSide::Local {
-        let in_range =
-            |seg: &crate::file::Iovec, len: usize| access_ok_x86_64(seg.iov_base as usize, len);
-        let all_in_range = match segs {
-            [one] => in_range(one, one.iov_len.min(LINUX_MAX_RW_COUNT)),
-            _ => segs.iter().all(|seg| in_range(seg, seg.iov_len)),
-        };
-        if !all_in_range {
-            return Err(errno::EFAULT);
+    match side {
+        PvmSide::Local => {
+            // The C call's conversion to `unsigned`, deliberately.
+            #[allow(clippy::cast_possible_truncation)]
+            let nr_segs = count as u32;
+            // SAFETY: the caller's contract, for a count no larger.
+            let bytes = unsafe { crate::uio::import_iovec(iov, nr_segs) }?;
+            Ok(bytes as u64)
+        }
+        PvmSide::Remote => {
+            // SAFETY: the caller's contract.
+            let segs = unsafe { crate::uio::iovec_from_user(iov, count) }?;
+            Ok(segs
+                .iter()
+                .fold(0u64, |total, seg| total.saturating_add(seg.iov_len as u64)))
         }
     }
-    Ok(segs
-        .iter()
-        .fold(0u64, |total, seg| total.saturating_add(seg.iov_len as u64)))
 }
 
 /// Shared validator for both `process_vm_readv` and `process_vm_writev`.
@@ -10984,18 +10946,41 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
-    /// `access_ok` admits NULL: it is a range test, and `valid_user_address`
-    /// is a sign test on the end (arch/x86/include/asm/uaccess_64.h:57,85).
+    /// The local count is `import_iovec`'s `unsigned`: `1 << 32` segments
+    /// is none, so upstream returns before it reads the remote vector or
+    /// looks the pid up -- here, the `ENOSYS` every early return reports.
+    /// It was `EINVAL` until 2026-09-26, the count judged at 64 bits.
     #[test]
-    fn test_access_ok_x86_64_matches_upstream() {
-        assert!(
-            access_ok_x86_64(0, 4096),
-            "NULL is in range; it faults on use"
-        );
-        assert!(access_ok_x86_64(0x1000, i64::MAX as usize - 0x1000));
-        assert!(!access_ok_x86_64(0x1000, i64::MAX as usize - 0xFFF));
-        assert!(!access_ok_x86_64(usize::MAX, 2), "a wrapping range");
-        assert!(!access_ok_x86_64(1 << 63, 0), "a kernel-half start");
+    fn test_process_vm_readv_local_count_is_32_bits() {
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(0, core::ptr::null(), 1 << 32, core::ptr::null(), 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        // One more is one segment, read from a NULL array: EFAULT.
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(0, core::ptr::null(), (1 << 32) + 1, core::ptr::null(), 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// The remote count is `iovec_from_user`'s `unsigned long`, whole.
+    #[test]
+    fn test_process_vm_readv_remote_count_is_64_bits() {
+        let local = [pvm_iov(0x1000, 4096)];
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(1, local.as_ptr(), 1, core::ptr::null(), 1 << 32, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// An array in the kernel half is refused, not read.
+    #[test]
+    fn test_process_vm_readv_kernel_half_array_efault() {
+        let kernel = (1usize << 63) as *const crate::file::Iovec;
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(1, kernel, 2, core::ptr::null(), 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]

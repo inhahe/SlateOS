@@ -67,14 +67,15 @@ const MAX_ROWS: usize = 999;
 /// outside this program, which is the `apps/ebook` case rather than the
 /// `apps/kanban` one. What it needed was a label and the warning below.
 ///
-/// The second line used to read "this app has no filesystem access", which was
-/// true when written and false from the moment Ctrl+S opened a save dialog.
-/// See `apps/calendar`'s NO_EVENTS_LINES for the reasoning; found by
-/// `scripts/find-stale-admissions.py`, which exists because of it.
-const EXAMPLE_SHEET_LINES: [&str; 2] = [
-    "Example sheet -- replace it with your own.",
-    "Nothing is saved automatically -- press Ctrl+S to write a CSV file, or anything you write here is gone when the window closes.",
-];
+/// On the status line, and only while the sheet is the example, untouched.
+///
+/// It was two lines at the top of the window, drawn before the window's
+/// background -- which covered them -- on every sheet, the user's own too. The
+/// second said Ctrl+S wrote a CSV and that work was gone when the window
+/// closed; both stopped being true when the spreadsheet kept workbooks and
+/// asked before losing one (design-decisions §1204).
+const EXAMPLE_SHEET_NOTE: &str =
+    "Example sheet -- replace it with your own; Ctrl+S saves your work as a workbook.";
 
 const DEFAULT_COL_WIDTH: f32 = 100.0;
 const DEFAULT_ROW_HEIGHT: f32 = 24.0;
@@ -123,6 +124,9 @@ const SHORTCUTS: &[(&str, &str)] = &[
 const FORMULA_BAR_HEIGHT: f32 = 28.0;
 const SHEET_TAB_HEIGHT: f32 = 28.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
+/// Where on the status bar the example sheet's note starts, past the mode and
+/// the selected range.
+const EXAMPLE_NOTE_X: f32 = 170.0;
 const FONT_SIZE: f32 = 13.0;
 const SMALL_FONT: f32 = 11.0;
 const HEADER_FONT: f32 = 12.0;
@@ -5234,29 +5238,6 @@ impl SpreadsheetApp {
     /// nothing about it, which has happened in this tree before.
     pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::with_capacity(2000);
-        // After the background, or it would be painted over.
-        for (i, line) in EXAMPLE_SHEET_LINES.iter().enumerate() {
-            cmds.push(RenderCommand::Text {
-                x: 8.0,
-                #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
-                y: 2.0 + i as f32 * 12.0,
-                text: (*line).to_string(),
-                color: if i == 0 {
-                    self.palette.ink(self.palette.yellow)
-                } else {
-                    self.palette.subtext0
-                },
-                font_size: if i == 0 { 11.0 } else { 9.0 },
-                font_weight: if i == 0 {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(self.window_width - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
         // Background
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
@@ -6502,6 +6483,30 @@ impl SpreadsheetApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
+
+        // Between the range and the figures on the right, while the sheet is
+        // the example nobody has touched.
+        if self.is_untouched_example() {
+            let room = (self.window_width - 400.0 - EXAMPLE_NOTE_X - 10.0).max(0.0);
+            if room > 0.0 {
+                cmds.push(RenderCommand::Text {
+                    x: EXAMPLE_NOTE_X,
+                    y: y + 5.0,
+                    text: EXAMPLE_SHEET_NOTE.to_owned(),
+                    font_size: SMALL_FONT,
+                    color: self.palette.ink(self.palette.yellow),
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(room),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
+    }
+
+    /// Whether the workbook is the example it opens on, untouched: no file of
+    /// its own and no change made.
+    fn is_untouched_example(&self) -> bool {
+        self.document_path.is_none() && !self.dirty()
     }
 
     /// Render scrollbars.
@@ -11735,6 +11740,48 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+
+    /// The example sheet says it is one, where it can be seen, and only while
+    /// it is. The two lines it replaced were drawn before the window's
+    /// background, on every sheet, and said Ctrl+S wrote a CSV.
+    #[test]
+    fn the_example_sheet_says_so_where_it_can_be_seen() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        let commands = app.render_commands();
+        let (at, x, y) = commands
+            .iter()
+            .enumerate()
+            .find_map(|(i, c)| match c {
+                RenderCommand::Text { text, x, y, .. } if text == EXAMPLE_SHEET_NOTE => {
+                    Some((i, *x, *y))
+                }
+                _ => None,
+            })
+            .expect("the example sheet does not say it is one");
+        let covered = commands.iter().skip(at + 1).any(|c| {
+            matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
+                if x >= *rx && x < rx + width && y >= *ry && y < ry + height)
+        });
+        assert!(!covered, "the example sheet's note is painted over");
+        assert!(!EXAMPLE_SHEET_NOTE.contains("CSV"));
+
+        // Changed, it is the user's sheet, and the note goes.
+        app.handle_event(&Event::Key(key(Key::Unknown(0), Some('7'))));
+        app.handle_event(&Event::Key(key(Key::Enter, None)));
+        assert!(app.dirty(), "control: the edit was made");
+        let texts: Vec<String> = app
+            .render_commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !texts.iter().any(|t| t == EXAMPLE_SHEET_NOTE),
+            "the note stays on a sheet that is no longer the example"
         );
     }
 }

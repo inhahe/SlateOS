@@ -16,6 +16,9 @@ oswindow = { path = "../../gui/window" }
 safeio = { path = "../safeio" }
 # "Unsaved changes -- save them?", asked the way every editor here asks it.
 unsaved = { path = "../unsaved" }
+# A workbook's text fields are escaped with `textfmt::tsv`, the record files'
+# four escapes, which the finance ledger and the notes library share.
+textfmt = { path = "../../textfmt" }
 
 [lints]
 workspace = true

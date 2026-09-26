@@ -21,6 +21,10 @@ tzrules = { path = "../../tzrules" }
 safeio = { path = "../safeio" }
 settingsfile = { path = "../../gui/settingsfile" }
 
+# The ledger's text fields are escaped with `textfmt::tsv`, the record files'
+# four escapes, which the spreadsheet's workbook and the notes library share.
+textfmt = { path = "../../textfmt" }
+
 [dev-dependencies]
 # `with_scratch_config`, so the tests that keep a ledger keep it in a scratch
 # directory and never in the developer's own.

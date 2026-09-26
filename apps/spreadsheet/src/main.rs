@@ -41,6 +41,7 @@ use oswindow::app::{self, App, Response};
 use std::collections::{BTreeMap, HashMap};
 use std::process::ExitCode;
 use std::time::Duration;
+use textfmt::tsv;
 use unsaved::{Choice, Question};
 
 // ============================================================================
@@ -2841,43 +2842,6 @@ const WORKBOOK_FORMAT: u32 = 1;
 /// refused rather than read in part.
 const MAX_WORKBOOK_BYTES: usize = 32 * 1024 * 1024;
 
-/// A cell's input, or a sheet's name, as it goes into a field of a workbook
-/// line: a tab, a line break or a backslash must not end the field or the
-/// line. The ledger's four escapes (design-decisions §1202).
-fn escape_field(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '\t' => out.push_str("\\t"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-/// A field read back, or `None` for an escape that was never written.
-fn unescape_field(text: &str) -> Option<String> {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next()? {
-                '\\' => out.push('\\'),
-                't' => out.push('\t'),
-                'n' => out.push('\n'),
-                'r' => out.push('\r'),
-                _ => return None,
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    Some(out)
-}
-
 /// A colour as `#RRGGBB`, or `#RRGGBBAA` when it is not opaque.
 fn colour_hex(c: Color) -> String {
     if c.a == 255 {
@@ -2993,7 +2957,7 @@ fn apply_flag(format: &mut CellFormat, flag: &str) -> Result<(), String> {
 fn workbook_text(book: &SheetBook) -> String {
     let mut out = format!("{WORKBOOK_MAGIC}\t{WORKBOOK_FORMAT}\n");
     for sheet in book.iter() {
-        out.push_str(&format!("sheet\t{}\n", escape_field(&sheet.name)));
+        out.push_str(&format!("sheet\t{}\n", tsv::escape(&sheet.name)));
         if sheet.frozen_rows > 0 || sheet.frozen_cols > 0 {
             out.push_str(&format!(
                 "frozen\t{}\t{}\n",
@@ -3016,7 +2980,7 @@ fn workbook_text(book: &SheetBook) -> String {
             out.push_str(&format!(
                 "cell\t{}\t{}",
                 addr.display(),
-                escape_field(&cell.raw_input)
+                tsv::escape(&cell.raw_input)
             ));
             for flag in format_flags(&cell.format) {
                 out.push('\t');
@@ -3073,7 +3037,7 @@ fn parse_workbook(text: &str) -> Result<(Vec<Sheet>, usize), String> {
         };
         match kind {
             "sheet" => {
-                let name = unescape_field(next("name")?)
+                let name = tsv::unescape(next("name")?)
                     .ok_or_else(|| bad(String::from("its name has a broken escape")))?;
                 sheets.push(Sheet::new(&name));
                 seen.clear();
@@ -3140,7 +3104,7 @@ fn parse_workbook(text: &str) -> Result<(Vec<Sheet>, usize), String> {
                         if !seen.insert(addr) {
                             return Err(bad(format!("{name} is written twice")));
                         }
-                        let input = unescape_field(next("contents")?).ok_or_else(|| {
+                        let input = tsv::unescape(next("contents")?).ok_or_else(|| {
                             bad(String::from("its contents have a broken escape"))
                         })?;
                         let mut format = CellFormat::default();

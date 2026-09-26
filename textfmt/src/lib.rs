@@ -37,6 +37,7 @@
 //! | HTML, XML or another markup document | [`escape`] |
 //! | JSON | [`escape::json_string`] |
 //! | one line of a `key = value` config file | [`kv`] |
+//! | one field of a program's own record file, read back whole | [`tsv`] |
 //! | a report a person reads, with no parser | [`fold`] |
 //!
 //! The last row is the odd one out, and the difference is worth stating
@@ -61,3 +62,4 @@ pub mod duration;
 pub mod escape;
 pub mod fold;
 pub mod kv;
+pub mod tsv;

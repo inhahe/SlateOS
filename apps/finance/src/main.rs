@@ -32,6 +32,7 @@ use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use textfmt::tsv;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 
@@ -4210,43 +4211,6 @@ struct Ledger {
     transactions: Vec<Transaction>,
 }
 
-/// A text field as written: a backslash, tab, newline or carriage return is
-/// escaped, so no field can split a line or a record, and every string comes
-/// back as it went.
-fn escape_field(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\t' => out.push_str("\\t"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
-/// A text field as read, or `None` for an escape `escape_field` never writes.
-fn unescape_field(text: &str) -> Option<String> {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        out.push(match chars.next()? {
-            '\\' => '\\',
-            't' => '\t',
-            'n' => '\n',
-            'r' => '\r',
-            _ => return None,
-        });
-    }
-    Some(out)
-}
-
 /// The ledger as text: the header, then a line per account, budget and
 /// transaction, its fields separated by tabs. Money is in whole cents and a
 /// date is `YYYY-MM-DD`, so nothing is rounded on the way through.
@@ -4259,7 +4223,7 @@ fn ledger_text(accounts: &[Account], budgets: &[Budget], transactions: &[Transac
             a.id,
             a.account_type.key(),
             a.initial_balance,
-            escape_field(&a.name)
+            tsv::escape(&a.name)
         ));
     }
     for b in budgets {
@@ -4278,8 +4242,8 @@ fn ledger_text(accounts: &[Account], budgets: &[Budget], transactions: &[Transac
             t.category.key(),
             t.account_id,
             if t.recurring { "y" } else { "n" },
-            escape_field(&t.description),
-            escape_field(&t.notes)
+            tsv::escape(&t.description),
+            tsv::escape(&t.notes)
         ));
     }
     out
@@ -4334,7 +4298,7 @@ fn parse_ledger(text: &str) -> Result<Ledger, String> {
                     initial_balance: opening
                         .parse()
                         .map_err(|_| bad("an opening balance is not a whole number of cents"))?,
-                    name: unescape_field(name)
+                    name: tsv::unescape(name)
                         .ok_or_else(|| bad("a name holds an unknown escape"))?,
                 });
             }
@@ -4388,9 +4352,9 @@ fn parse_ledger(text: &str) -> Result<Ledger, String> {
                         "n" => false,
                         _ => return Err(bad("recurring is neither y nor n")),
                     },
-                    description: unescape_field(description)
+                    description: tsv::unescape(description)
                         .ok_or_else(|| bad("a description holds an unknown escape"))?,
-                    notes: unescape_field(notes)
+                    notes: tsv::unescape(notes)
                         .ok_or_else(|| bad("a note holds an unknown escape"))?,
                 });
                 tx_lines.push(n);

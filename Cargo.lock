@@ -872,6 +872,7 @@ dependencies = [
  "oswindow",
  "safeio",
  "settingsfile",
+ "textfmt",
  "tzrules",
 ]
 
@@ -2782,6 +2783,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "safeio",
+ "textfmt",
  "unsaved",
 ]
 

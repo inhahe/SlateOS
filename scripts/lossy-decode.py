@@ -324,6 +324,29 @@ IGNORE = (
      "|n| n.to_string_lossy().into_owned(),",
      "the tab's label and the window title; the export's name and every "
      "path use `LogFile::source`, which is exact"),
+    #
+    # A document's name drawn in the window bar (`document_name`), 2026-09-25.
+    # The document's path is kept as a `PathBuf`; every open and save uses it,
+    # and the name a save is offered under is the file's own bytes
+    # (`offered_name`, an `OsString`), never this rendering.
+    ("apps/diagram/src/main.rs",
+     "|n| n.to_string_lossy().into_owned(),",
+     "the window bar's label; `document_path` is what is opened and saved"),
+    ("apps/whiteboard/src/main.rs",
+     "|n| n.to_string_lossy().into_owned(),",
+     "the window bar's label; `document_path` is what is opened and saved"),
+    ("apps/paint/src/main.rs",
+     "|n| n.to_string_lossy().into_owned(),",
+     "the window bar's label; `document_path` is what is opened and saved"),
+    ("apps/spreadsheet/src/main.rs",
+     "|n| n.to_string_lossy().into_owned(),",
+     "the window bar's label, and the name of a sheet made from a CSV -- a "
+     "sheet's name is text the workbook keeps, and the CSV is read through "
+     "its own path"),
+    ("apps/jsonviewer/src/main.rs",
+     "doc.title = name.to_string_lossy().into_owned();",
+     "the tab's label after a save; `doc.path`, set beside it, is what is "
+     "saved to and opened"),
 
     ("stat", "from_utf8_lossy(TERSE_FILE)",
      "TERSE_FILE is a const format string in this file; ASCII by construction"),

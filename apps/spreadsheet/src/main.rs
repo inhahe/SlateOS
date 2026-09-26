@@ -4129,7 +4129,7 @@ impl SpreadsheetApp {
     pub fn open_file_dialog(&mut self, saving: bool) {
         if saving {
             self.picker_for = PickerFor::Export;
-            self.picker.open_to_write(self.file_stem() + ".csv");
+            self.picker.open_to_write(self.offered_name(".csv"));
         } else {
             self.picker_for = PickerFor::Open;
             self.picker.open_to_read();
@@ -4158,15 +4158,21 @@ impl SpreadsheetApp {
             )
     }
 
-    /// The name offered for an export or a first save, without extension.
-    fn file_stem(&self) -> String {
-        self.document_path
+    /// The name offered for an export or a first save, with `extension`:
+    /// the file's own bytes, not a decoding of them. A name that is not UTF-8
+    /// decoded and offered back would save to a different file -- one with
+    /// U+FFFD where the bytes were -- beside the one the user opened.
+    fn offered_name(&self, extension: &str) -> std::ffi::OsString {
+        let mut name = self
+            .document_path
             .as_deref()
             .and_then(std::path::Path::file_stem)
             .map_or_else(
-                || String::from("sheet"),
-                |n| n.to_string_lossy().into_owned(),
-            )
+                || std::ffi::OsString::from("sheet"),
+                std::ffi::OsString::from,
+            );
+        name.push(extension);
+        name
     }
 
     /// Write the workbook to `path`, which becomes its file. What to say.
@@ -4265,7 +4271,7 @@ impl SpreadsheetApp {
             .and_then(std::path::Path::parent)
             .filter(|dir| !dir.as_os_str().is_empty())
             .map_or_else(FilePicker::default_start, std::path::Path::to_path_buf);
-        let name = self.file_stem() + ".spreadsheet";
+        let name = self.offered_name(".spreadsheet");
         self.picker_for = purpose;
         self.picker.put_up(
             guitk::dialog::FileDialog::save()
@@ -7398,6 +7404,41 @@ mod tests {
         app.handle_event(&ctrl(Key::S));
         assert_eq!(app.picker_for, PickerFor::Save, "it saved over the CSV");
         drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// A file name that is not text: "a" and a byte -- on Windows, a lone
+    /// UTF-16 surrogate -- that decodes to nothing.
+    fn not_text_stem() -> std::ffi::OsString {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[0x61, 0xD800])
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            std::ffi::OsStr::from_bytes(b"a\xff").to_os_string()
+        }
+    }
+
+    /// The name a save or an export is offered under is the file's own. It
+    /// was decoded, so a name that is not text came back with U+FFFD in it,
+    /// and saving under it made a second file beside the one opened.
+    #[test]
+    fn a_name_that_is_not_text_is_offered_as_itself() {
+        let stem = not_text_stem();
+        assert!(
+            stem.to_str().is_none(),
+            "control: the name is text after all"
+        );
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        let mut file = stem.clone();
+        file.push(".spreadsheet");
+        app.document_path = Some(std::env::temp_dir().join(&file));
+        let mut want = stem;
+        want.push(".svg");
+        assert_eq!(app.offered_name(".svg"), want);
+        assert_eq!(app.offered_name(".spreadsheet"), file);
     }
 
     /// Ctrl+S asks where the first time and saves in place after; F12 always

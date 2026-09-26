@@ -1009,7 +1009,10 @@ impl OperationExecutor {
             return;
         }
 
-        self.progress.current_file = action.src.to_string_lossy().to_string();
+        self.progress.current_file = action
+            .src
+            .file_name()
+            .map_or_else(|| action.src.display().to_string(), crate::shown_name);
 
         let result = match operation {
             FileOperation::Copy | FileOperation::Move => {
@@ -1811,10 +1814,9 @@ impl RecycleEntry {
     #[must_use]
     pub fn display_name(&self) -> String {
         match &self.original_path {
-            Some(path) => path.file_name().map_or_else(
-                || path.display().to_string(),
-                |n| n.to_string_lossy().into_owned(),
-            ),
+            Some(path) => path
+                .file_name()
+                .map_or_else(|| path.display().to_string(), crate::shown_name),
             None => "Unknown item (damaged entry)".to_string(),
         }
     }
@@ -2021,7 +2023,12 @@ impl RecycleBin {
             if !dir_entry.path().is_dir() {
                 continue;
             }
-            let id = dir_entry.file_name().to_string_lossy().to_string();
+            // Every folder this bin makes is named in text (`make_id`); one
+            // that is not was not made by it, and reading it by a decoded
+            // name would reach a different folder.
+            let Some(id) = dir_entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
             // An entry whose metadata will not parse is *listed* rather than
             // skipped. Failing the whole listing would make one corrupt
             // `meta.txt` hide every other recycled file; skipping it hid the
@@ -2112,10 +2119,25 @@ impl RecycleBin {
     /// together is an ordinary multi-select. Uniqueness is enforced by
     /// [`Self::create_entry_dir`], which asks the filesystem.
     fn make_id(&self, path: &Path, ts: u128) -> String {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        // The file's name, kept readable for someone browsing the bin by
+        // hand: letters, digits, `.`, `-` and `_` as they are, anything else
+        // -- a byte that is not text, a character some system reads as a
+        // separator -- as `_`. The original name itself is in `meta.txt`.
+        let name: String = path.file_name().map_or_else(
+            || "unknown".to_string(),
+            |n| {
+                n.as_encoded_bytes()
+                    .iter()
+                    .map(|&b| {
+                        if b.is_ascii_alphanumeric() || b"._-".contains(&b) {
+                            char::from(b)
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect()
+            },
+        );
         // Simple hash to keep directory names manageable.
         let hash = ts ^ (name.len() as u128).wrapping_mul(0x517cc1b727220a95);
         format!("{name}_{hash:016x}")
@@ -4395,5 +4417,24 @@ mod tests {
             OperationExecutor::temp_name(&b),
             "two distinct names share one scratch name, so a copy can land holding the wrong file"
         );
+    }
+
+    /// A recycled file's folder in the bin is named in plain characters: a
+    /// byte that is not text, or a character some system takes for a
+    /// separator, becomes `_`. The name itself is kept in `meta.txt`.
+    #[test]
+    fn a_recycle_bin_folder_is_named_in_plain_characters() {
+        let bin = RecycleBin::new(
+            std::env::temp_dir().join("slateos-unused-bin"),
+            Duration::from_secs(1),
+        );
+        let id = bin.make_id(Path::new("/docs/caf\u{e9} notes.txt"), 7);
+        assert!(id.starts_with("caf___notes.txt_"), "{id}");
+        assert!(
+            id.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)),
+            "{id}"
+        );
+        assert!(bin.make_id(Path::new("/"), 7).starts_with("unknown_"));
     }
 }

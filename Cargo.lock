@@ -827,6 +827,7 @@ dependencies = [
  "mediaprobe",
  "oswindow",
  "pathcodec",
+ "quoting",
  "scratchdir",
  "settingsfile",
  "tararchive",
@@ -2501,6 +2502,7 @@ dependencies = [
  "ere",
  "guitk",
  "oswindow",
+ "quoting",
 ]
 
 [[package]]

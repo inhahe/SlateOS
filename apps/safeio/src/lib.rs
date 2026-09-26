@@ -440,17 +440,22 @@ pub fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
 /// an existing file. Deriving a name and trusting it to be free is how a
 /// second saver ends up writing into the first's temporary.
 fn create_temp_in(dir: &Path, target: &Path) -> io::Result<(fs::File, PathBuf)> {
-    let stem = target.file_name().map_or_else(
-        || "unnamed".to_string(),
-        |n| n.to_string_lossy().to_string(),
-    );
+    // The target's own name, as bytes -- not decoded, so a name that is not
+    // text still names its temporary after itself rather than after a row of
+    // replacement characters.
+    let stem = target
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("unnamed"));
     let pid = std::process::id();
 
     for _ in 0..MAX_TEMP_ATTEMPTS {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         // Leading dot so the temporary is hidden, and a suffix that cannot be
         // mistaken for a document if one is ever left behind by a hard kill.
-        let tmp_path = dir.join(format!(".{stem}.slate-save-{pid}-{n}"));
+        let mut name = std::ffi::OsString::from(".");
+        name.push(stem);
+        name.push(format!(".slate-save-{pid}-{n}"));
+        let tmp_path = dir.join(name);
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -853,6 +858,30 @@ mod tests {
     /// immediately and the directory is gone before the test's first line.
     fn temp_dir(label: &str) -> ScratchDir {
         ScratchDir::new(&format!("safeio_test_{label}"))
+    }
+
+    /// A file whose name is not text is saved under that name, and its
+    /// temporary -- named from the same bytes, not a decoded copy of them --
+    /// is gone afterwards.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_text_is_saved_as_it_is() {
+        use std::os::unix::ffi::OsStrExt;
+        let scratch = temp_dir("bytes");
+        let dir = scratch.dir().to_path_buf();
+        let path = dir.join(std::ffi::OsStr::from_bytes(b"caf\xe9.txt"));
+        write_atomically(&path, b"contents").expect("save");
+        assert_eq!(std::fs::read(&path).expect("read back"), b"contents");
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .expect("list")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from(std::ffi::OsStr::from_bytes(
+                b"caf\xe9.txt"
+            ))]
+        );
     }
 
     #[test]

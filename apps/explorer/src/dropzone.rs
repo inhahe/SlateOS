@@ -643,14 +643,10 @@ fn operation_label(operation: DropOperation, zone: &DropZone) -> String {
     let target = match zone {
         DropZone::CurrentDirectory => "current folder".to_string(),
         DropZone::Folder { path, .. } | DropZone::Sidebar { path, .. } => {
-            // Show just the last component for brevity. This is the one place
-            // a lossy rendering is right rather than wrong: the string is drawn
-            // for a human and never used to reach the file, so an undecodable
-            // byte should become U+FFFD on screen instead of hiding the label.
-            path.file_name()
-                .unwrap_or(path.as_os_str())
-                .to_string_lossy()
-                .to_string()
+            // Show just the last component for brevity, as its bytes when it
+            // is not text: drawn for a human, and a byte shown as an escape
+            // tells two such folders apart where U+FFFD made them one.
+            crate::shown_name(path.file_name().unwrap_or(path.as_os_str()))
         }
         DropZone::None => return String::new(),
     };

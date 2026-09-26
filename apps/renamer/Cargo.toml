@@ -16,5 +16,9 @@ oswindow = { path = "../../gui/window" }
 # share, so a pattern that works at the prompt works here.
 ere = { path = "../../userspace/ere" }
 
+# A name that is not text is shown by its bytes (escapes), so two such names
+# never look the same; the tree's one renderer for an untrusted name.
+quoting = { path = "../../userspace/quoting" }
+
 [lints]
 workspace = true

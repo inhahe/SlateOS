@@ -64,8 +64,23 @@ use thumbs::{
 };
 
 use std::collections::{HashSet, VecDeque};
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// A file name as the window shows it: the name itself when it is text, and
+/// its bytes as escapes (`quoting::escape_unprintable`) when it is not.
+///
+/// Never a lossy decode, which showed two names that differ only in a byte
+/// that is not text as the same row of replacement characters -- and, handed
+/// to the rename box, renamed the file to that row when it was accepted
+/// unchanged.
+fn shown_name(name: &OsStr) -> String {
+    name.to_str().map_or_else(
+        || quoting::escape_unprintable(name.as_encoded_bytes()),
+        str::to_owned,
+    )
+}
 use std::time::SystemTime;
 
 // ============================================================================
@@ -593,6 +608,10 @@ enum Modal {
         /// path is the stable identifier, and it is looked up when the dialog
         /// answers.
         target: PathBuf,
+        /// What the box began with, when the name is not text: the name's
+        /// escapes, which are not the name, so an answer equal to them is no
+        /// change rather than a new name.
+        not_text: Option<String>,
     },
 }
 
@@ -1064,7 +1083,7 @@ impl ExplorerState {
     /// another there. `None` when the path has no final component, which is
     /// the root, and the root is never a row in its own listing.
     fn entry_for(path: PathBuf) -> Option<FileEntry> {
-        let name = path.file_name()?.to_string_lossy().to_string();
+        let name = shown_name(path.file_name()?);
         let meta = fs::metadata(&path).ok();
         let is_dir = meta.as_ref().is_some_and(std::fs::Metadata::is_dir);
         let size = meta.as_ref().map_or(0, std::fs::Metadata::len);
@@ -1073,11 +1092,9 @@ impl ExplorerState {
         let file_type = if is_dir {
             FileType::Directory
         } else {
-            let ext = path
-                .extension()
-                .map(|e| e.to_string_lossy().to_string())
-                .unwrap_or_default();
-            FileType::from_extension(&ext)
+            // An extension that is not text is no type this listing knows.
+            let ext = path.extension().and_then(OsStr::to_str).unwrap_or_default();
+            FileType::from_extension(ext)
         };
 
         Some(FileEntry {
@@ -1612,8 +1629,10 @@ impl ExplorerState {
                 SortBy::Size => a.size.cmp(&b.size),
                 SortBy::Modified => a.modified.cmp(&b.modified),
                 SortBy::Type => {
-                    let ext_a = a.path.extension().map(|e| e.to_string_lossy().to_string());
-                    let ext_b = b.path.extension().map(|e| e.to_string_lossy().to_string());
+                    // By the extensions' own bytes: two that differ only
+                    // in a byte that is not text are still two.
+                    let ext_a = a.path.extension().map(OsStr::as_encoded_bytes);
+                    let ext_b = b.path.extension().map(OsStr::as_encoded_bytes);
                     ext_a.cmp(&ext_b)
                 }
                 // Unreachable: handled above, before the folders-first rule
@@ -2025,10 +2044,7 @@ impl ExplorerState {
     ) -> String {
         use std::fmt::Write as _;
 
-        let current = Path::new(&progress.current_file)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let current = progress.current_file.clone();
         let mut line = format!("{verb} {} of {total_files}", progress.completed_files);
         if !current.is_empty() {
             line.push_str(" — ");
@@ -5408,10 +5424,10 @@ impl ExplorerState {
         let mut selected = self.entries.iter().filter(|e| e.selected);
         let first = selected.next()?;
         let rest = selected.count();
-        let name = first.path.file_name().map_or_else(
-            || first.path.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
+        let name = first
+            .path
+            .file_name()
+            .map_or_else(|| first.path.display().to_string(), shown_name);
         Some((rest.saturating_add(1), name))
     }
 
@@ -5464,14 +5480,24 @@ impl ExplorerState {
             return false;
         };
         let target = entry.path.clone();
-        let current = target
+        let current = target.file_name().map_or_else(String::new, shown_name);
+        // A name that is not text starts the box as its escapes; accepted as
+        // it stands, that text is not the name, and renaming to it would
+        // rename the file. So it is remembered, and answering with it
+        // unchanged renames nothing.
+        let not_text = target
             .file_name()
-            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            .is_some_and(|n| n.to_str().is_none())
+            .then(|| current.clone());
 
         let mut dialog =
             InputDialog::prompt("Rename", "New name:", &current).with_initial_text(&current);
         dialog.show();
-        self.modal = Some(Modal::Rename { dialog, target });
+        self.modal = Some(Modal::Rename {
+            dialog,
+            target,
+            not_text,
+        });
         true
     }
 
@@ -5545,7 +5571,14 @@ impl ExplorerState {
                 }
                 _ => self.status_message = "Search cancelled".to_string(),
             },
-            Some(Modal::Rename { target, .. }) => match answer {
+            Some(Modal::Rename {
+                target, not_text, ..
+            }) => match answer {
+                DialogResult::Text(name) if not_text.as_deref() == Some(name.as_str()) => {
+                    self.report(Outcome::ok(format!(
+                        "Not renamed: {name} was left as it was"
+                    )));
+                }
                 DialogResult::Text(name) => self.rename_path(&target, &name),
                 _ => self.status_message = "Rename cancelled".to_string(),
             },
@@ -5774,7 +5807,7 @@ mod tests {
             copied_bytes: 400_000,
             total_files: 9,
             completed_files: 3,
-            current_file: "/home/u/photos/holiday.png".to_string(),
+            current_file: "holiday.png".to_string(),
             elapsed_secs: 4.0,
             eta_secs: secs,
             bytes_per_sec: 100_000,
@@ -10608,12 +10641,87 @@ mod tests {
         send(&mut state, &key(Key::F2));
 
         match state.modal.as_ref() {
-            Some(Modal::Rename { dialog, target }) => {
+            Some(Modal::Rename {
+                dialog,
+                target,
+                not_text,
+            }) => {
                 assert_eq!(dialog.input_text(), "notes.txt", "prefilled, not empty");
                 assert_eq!(target, &root.join("notes.txt"));
+                assert_eq!(not_text, &None, "a name that is text is edited as it is");
             }
             _ => panic!("F2 must open a rename box"),
         }
+    }
+
+    /// A name that is not text is shown by its bytes, escaped, and two such
+    /// names never look the same; a name that is text is shown as it is.
+    #[test]
+    fn a_name_that_is_not_text_is_shown_by_its_bytes() {
+        assert_eq!(shown_name(OsStr::new("notes.txt")), "notes.txt");
+        #[cfg(windows)]
+        let (a, b) = {
+            use std::os::windows::ffi::OsStringExt;
+            // Unpaired surrogates: names Windows holds that have no UTF-8.
+            (
+                std::ffi::OsString::from_wide(&[0x0066, 0xD800]),
+                std::ffi::OsString::from_wide(&[0x0066, 0xD801]),
+            )
+        };
+        #[cfg(not(windows))]
+        let (a, b) = {
+            use std::os::unix::ffi::OsStringExt;
+            (
+                std::ffi::OsString::from_vec(vec![b'f', 0xFE]),
+                std::ffi::OsString::from_vec(vec![b'f', 0xFF]),
+            )
+        };
+        let (shown_a, shown_b) = (shown_name(&a), shown_name(&b));
+        assert!(!shown_a.contains('\u{FFFD}'), "{shown_a:?}");
+        assert!(
+            shown_a.starts_with('f') && shown_a.contains('\\'),
+            "{shown_a:?}"
+        );
+        assert_ne!(shown_a, shown_b, "two names became one");
+    }
+
+    /// A rename box opened on a name that is not text begins with the name's
+    /// escapes; answered with them unchanged, it renames nothing -- they are
+    /// not the name, and renaming to them would rename the file.
+    #[test]
+    fn a_rename_answered_unchanged_on_a_non_text_name_renames_nothing() {
+        let scratch = temp_dir("rename_not_text");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("stands-in.txt"), "keep me");
+        let mut state = state_at(&root);
+        // The host cannot hold a name that is not text, so a text-named file
+        // stands in, with the box told its escapes are "stands-in.txt".
+        let modal = Modal::Rename {
+            dialog: InputDialog::prompt("Rename", "New name:", "stands-in.txt"),
+            target: root.join("stands-in.txt"),
+            not_text: Some(String::from("stands-in.txt")),
+        };
+        state.apply_modal_answer(
+            Some(modal),
+            DialogResult::Text(String::from("stands-in.txt")),
+        );
+        assert!(root.join("stands-in.txt").exists(), "the file was renamed");
+        assert!(
+            state.status_message.contains("Not renamed"),
+            "{}",
+            state.status_message
+        );
+        // Any other answer is a new name, as ever.
+        let modal = Modal::Rename {
+            dialog: InputDialog::prompt("Rename", "New name:", "stands-in.txt"),
+            target: root.join("stands-in.txt"),
+            not_text: Some(String::from("stands-in.txt")),
+        };
+        state.apply_modal_answer(Some(modal), DialogResult::Text(String::from("renamed.txt")));
+        assert!(
+            root.join("renamed.txt").exists(),
+            "a new name was not taken"
+        );
     }
 
     #[test]

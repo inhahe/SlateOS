@@ -440,8 +440,15 @@ impl FileEntry {
 
     /// From a name as the filesystem gave it.
     fn from_os_name(raw: &OsStr, size: u64, modified_ms: u64) -> Self {
+        // A name that is text is the name, and the rules work on it. One that
+        // is not cannot be renamed here (the rules are text rules), and is
+        // *shown* by its bytes: a lossy decode showed two such names as the
+        // same row of replacement characters.
         let renameable = raw.to_str().is_some();
-        let name = raw.to_string_lossy().into_owned();
+        let name = raw.to_str().map_or_else(
+            || quoting::escape_unprintable(raw.as_encoded_bytes()),
+            str::to_owned,
+        );
         // An extension is what follows the *last* dot, and only when there is
         // something before that dot. `rsplit('.').next()` does not say that:
         // the `len() < name.len()` guard it was paired with rejects a dotless
@@ -5954,10 +5961,13 @@ mod tests {
             entry.raw_name, raw,
             "the key must stay the bytes the filesystem gave"
         );
+        // Shown by its bytes: the undecodable part as escapes, not as the
+        // replacement character every such name would share.
+        let shown = &entry.original_name;
+        assert!(!shown.contains('\u{FFFD}'), "shown lossily: {shown:?}");
         assert!(
-            entry.original_name.contains('\u{FFFD}'),
-            "the display name should be the lossy one: {:?}",
-            entry.original_name
+            shown.starts_with('f') && shown.ends_with('t') && shown.contains('\\'),
+            "the bytes are not shown: {shown:?}"
         );
     }
 

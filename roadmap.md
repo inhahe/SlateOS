@@ -1855,6 +1855,11 @@ D's to act on once answered).
       pass): `finit_module` refuses a descriptor it could not read the module
       from, and `delete_module` no longer refuses names and flags Linux
       accepts.
+    * System V message queues are Linux's (the twenty-second pass): 8192-byte
+      messages, 16384-byte queues, 32000 of them, its permissions and error
+      order, `MSG_INFO`/`MSG_STAT` for `ipcs`, futex waits and `EIDRM` --
+      where they were a pool of 256-byte messages that refused any receive
+      buffer longer than that.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

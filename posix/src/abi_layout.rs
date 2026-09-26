@@ -825,6 +825,21 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
+        crate::sysv_msg::Msginfo,
+        "struct msginfo",
+        "sys/msg.h",
+        msgpool,
+        msgmap,
+        msgmax,
+        msgmnb,
+        msgmni,
+        msgssz,
+        msgtql,
+        msgseg
+    );
+    abi!(
+        out,
+        hdrs,
         crate::sysv_shm::ShmidDs,
         "struct shmid_ds",
         "sys/shm.h",

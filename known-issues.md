@@ -24019,6 +24019,22 @@ come before that.
   (`ENOENT` when no module has it) and reads the flags only for a module it
   finds in use. The four checks are gone.
 
+**Twenty-second pass, 2026-09-26 — `sysv_msg.rs` (4 sites), lane D.** Against
+Linux 6.6's ipc/msg.c (`ksys_msgsnd`, `do_msgrcv`, `ksys_msgctl`).
+
+- **`msgsnd`**'s NULL (`EFAULT`, first: `get_user` of the type) was right.
+- **`msgrcv`** refused a NULL buffer before the id and the queue. Linux
+  reaches the buffer only when it writes the message out: a bad id is
+  `EINVAL`, an empty queue with `IPC_NOWAIT` is `ENOMSG`, and with a message
+  there the call takes it and then fails with `EFAULT`. `MSG_COPY` alone
+  reads the buffer first (`prepare_copy`).
+- **`msgctl(IPC_SET)`** looked the queue up before its buffer; Linux copies
+  the buffer in first, so a NULL one is `EFAULT` whatever the id.
+  `IPC_STAT`'s order (the queue, then `EFAULT`) was right.
+- Beside them, the module was a small static pool with none of Linux's
+  limits, permissions or waiting --
+  `B-D-SYSV-MSG-LIMITS-PERMISSIONS-AND-ERROR-ORDER` (new, fixed with it).
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24032,9 +24048,9 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-twenty-one swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`, `sched.rs`,
-`mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs` and
-`linux_module.rs`; next are the other files at four.
+twenty-two swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`, `sched.rs`,
+`mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`, `linux_module.rs`
+and `sysv_msg.rs`; next are the other files at four.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
@@ -165895,6 +165911,36 @@ Host tests cover the attribute reading, the layout arithmetic, the table's
 growth and the sentinels; `services/ctest-pthread` checks it all in ring 3,
 once lane A runs it (`requests/d-a-run-the-ctest-pthread-fixture.md`).
 Design choices in `design-decisions.md` §1111.
+
+### [D] B-D-SYSV-MSG-LIMITS-PERMISSIONS-AND-ERROR-ORDER — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/sysv_msg.rs`.
+
+**What it was.** System V message queues were a static pool: 8 queues, 32
+messages each, 256 bytes a message, 8192 bytes a queue. `msgsnd` refused a
+message over 256 bytes, where Linux takes 8192, and `msgrcv` refused any
+*buffer* over 256 bytes with `EINVAL` -- so the ordinary receive into a
+`char mtext[8192]` failed however small the message. A blocked call spun on
+the CPU without yielding. Permissions were stored and never checked;
+`IPC_SET` clamped `msg_qbytes` silently where Linux refuses it without
+`CAP_SYS_RESOURCE`, and let any caller change the owner; the timestamps and
+pids `IPC_STAT` reports were always 0; and `IPC_INFO`, `MSG_INFO` and
+`MSG_STAT` -- what `ipcs -q` reads -- were `EINVAL`. A NULL buffer was
+`EFAULT` before the id, the queue or the message had been looked at, and
+`IPC_SET` looked the queue up before reading its buffer.
+
+**Fix.** Linux 6.6's ipc/msg.c, inside one process: its limits (8192-byte
+messages; 16384-byte queues, holding as many messages as bytes; 32000
+queues), each message allocated at its size; `ipcperms`, and the owner test
+for `IPC_SET` and `IPC_RMID`; the error orders of `ksys_msgsnd`,
+`do_msgrcv` and `ksys_msgctl`; `IPC_INFO`, `MSG_INFO`, `MSG_STAT` and
+`MSG_STAT_ANY`; the timestamps and pids; futex waits; and `EIDRM` for a call
+blocked on a queue that is removed.
+
+**What remains.** The queues are one process's, as the POSIX queues are
+(D-Q3). The blocking paths are tested on the host with the waiting step
+played by the test; no ring-3 fixture has yet run two threads against one
+queue.
 
 ### [D] B-D-RES-QUERY-WAS-ENOSYS — 2026-09-26 — FIXED 2026-09-26
 

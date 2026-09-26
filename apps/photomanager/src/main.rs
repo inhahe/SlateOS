@@ -597,7 +597,7 @@ pub fn parse_exif_from_bytes(data: &[u8]) -> ExifData {
     };
 
     // Parse IFD entries
-    parse_ifd_entries(data, ifd0_offset, tiff_start, little_endian, &mut exif);
+    parse_ifd_entries(data, ifd0_offset, tiff_start, little_endian, &mut exif, 0);
 
     exif
 }
@@ -634,13 +634,24 @@ fn read_ascii_string(data: &[u8], offset: usize, count: usize) -> Option<String>
     String::from_utf8(trimmed).ok()
 }
 
-/// Parse IFD entries for EXIF tags.
+/// How deep the directories are followed: IFD0 is depth 0, and the Exif and
+/// GPS directories it points to are depth 1.
+///
+/// The standard puts those pointers in IFD0 only, so a pointer found any
+/// deeper is not followed. It was followed at any depth, and a file whose
+/// Exif pointer pointed back at its own directory recursed until the stack
+/// ran out: importing one such JPEG crashed the photo manager.
+const MAX_IFD_DEPTH: u8 = 1;
+
+/// Parse IFD entries for EXIF tags. `depth` is 0 for IFD0; see
+/// [`MAX_IFD_DEPTH`].
 fn parse_ifd_entries(
     data: &[u8],
     ifd_offset: usize,
     tiff_start: usize,
     le: bool,
     exif: &mut ExifData,
+    depth: u8,
 ) {
     let entry_count = match read_u16(data, ifd_offset, le) {
         Some(c) => c as usize,
@@ -712,8 +723,8 @@ fn parse_ifd_entries(
                     exif.copyright = Some(s);
                 }
             }
-            // ExifIFD pointer — recurse into the Exif sub-IFD
-            0x8769 => {
+            // ExifIFD pointer — recurse into the Exif sub-IFD, from IFD0 only
+            0x8769 if depth < MAX_IFD_DEPTH => {
                 if let Some(sub_offset) = read_u32(data, value_offset_raw, le) {
                     parse_ifd_entries(
                         data,
@@ -721,11 +732,12 @@ fn parse_ifd_entries(
                         tiff_start,
                         le,
                         exif,
+                        depth.saturating_add(1),
                     );
                 }
             }
-            // GPS IFD pointer
-            0x8825 => {
+            // GPS IFD pointer, from IFD0 only
+            0x8825 if depth < MAX_IFD_DEPTH => {
                 if let Some(sub_offset) = read_u32(data, value_offset_raw, le) {
                     parse_gps_ifd(
                         data,
@@ -5394,6 +5406,34 @@ mod tests {
         let summary = exif.exposure_summary();
         assert!(summary.contains("f/2.8"));
         assert!(summary.contains("ISO 400"));
+    }
+
+    /// **An Exif pointer back at its own directory is not followed round.**
+    /// It recursed until the stack ran out, so importing such a JPEG crashed
+    /// the photo manager. The tags are still read, once.
+    #[test]
+    fn an_exif_directory_pointing_at_itself_is_read_once() {
+        let mut tiff: Vec<u8> = b"II".to_vec();
+        tiff.extend_from_slice(&42u16.to_le_bytes());
+        tiff.extend_from_slice(&8u32.to_le_bytes());
+        // IFD0 at 8: two entries, then no next directory; the text after it.
+        let text_at: u32 = 8 + 2 + 2 * 12 + 4;
+        tiff.extend_from_slice(&2u16.to_le_bytes());
+        for (tag, kind, count, value) in [
+            (0x010F_u16, 2_u16, 6_u32, text_at),
+            (0x8769, 4, 1, 8), // the Exif directory: IFD0 itself
+        ] {
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&kind.to_le_bytes());
+            tiff.extend_from_slice(&count.to_le_bytes());
+            tiff.extend_from_slice(&value.to_le_bytes());
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        tiff.extend_from_slice(b"Canon\0");
+        let mut data = b"Exif\0\0".to_vec();
+        data.extend_from_slice(&tiff);
+        let exif = parse_exif_from_bytes(&data);
+        assert_eq!(exif.camera_make.as_deref(), Some("Canon"));
     }
 
     #[test]

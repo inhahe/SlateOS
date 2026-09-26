@@ -16,7 +16,6 @@
 use std::env;
 use std::fmt;
 use std::fs;
-use std::io::Write;
 use std::net::UdpSocket;
 use std::path::Path;
 use std::process;
@@ -1068,8 +1067,23 @@ struct NtpdateOpts {
     timeout_secs: u64,
     debug: bool,
     use_unpriv_port: bool,
+    /// `-s`: every message goes to syslog(3) instead of stdout and stderr --
+    /// results at `LOG_NOTICE`, failures at `LOG_ERR`, under the identity
+    /// [`open_syslog`] gives the process.
     use_syslog: bool,
     force_step: bool,
+}
+
+/// `openlog(personality, LOG_PID, LOG_DAEMON)`, for `-s`: what ntpdate itself
+/// calls, `LOG_DAEMON` being its choice where the C library has no `LOG_NTP`
+/// (glibc does not). The messages then go wherever the libc sends syslog --
+/// `/dev/log` under glibc; see `libcsyslog`'s docs for SlateOS.
+fn open_syslog(personality: &str) {
+    libcsyslog::openlog(
+        personality.as_bytes(),
+        libcsyslog::LOG_PID,
+        libcsyslog::LOG_DAEMON,
+    );
 }
 
 fn run_ntpdate(opts: &NtpdateOpts) -> Result<(), String> {
@@ -1099,8 +1113,11 @@ fn run_ntpdate(opts: &NtpdateOpts) -> Result<(), String> {
         );
 
         if samples.is_empty() {
-            if !opts.use_syslog {
-                eprintln!("ntpdate: no response from {server}");
+            let msg = format!("no response from {server}");
+            if opts.use_syslog {
+                libcsyslog::syslog(libcsyslog::LOG_ERR, msg.as_bytes());
+            } else {
+                eprintln!("ntpdate: {msg}");
             }
             continue;
         }
@@ -1125,11 +1142,7 @@ fn run_ntpdate(opts: &NtpdateOpts) -> Result<(), String> {
 
     let output = |msg: &str| {
         if opts.use_syslog {
-            // Write to syslog via /dev/log or /var/log/syslog.
-            let _ = fs::OpenOptions::new()
-                .append(true)
-                .open("/dev/log")
-                .and_then(|mut f| writeln!(f, "ntpdate: {msg}"));
+            libcsyslog::syslog(libcsyslog::LOG_NOTICE, msg.as_bytes());
         } else {
             println!("{msg}");
         }
@@ -1545,6 +1558,16 @@ fn main() {
 
     let result = match personality {
         "ntpdate" | "sntp" => match parse_ntpdate_args(&args) {
+            Ok(opts) if opts.use_syslog => {
+                open_syslog(personality);
+                // With `-s` the failure is logged like everything else, and
+                // the exit status still says it happened.
+                if let Err(e) = run_ntpdate(&opts) {
+                    libcsyslog::syslog(libcsyslog::LOG_ERR, e.as_bytes());
+                    process::exit(1);
+                }
+                Ok(())
+            }
             Ok(opts) => run_ntpdate(&opts),
             Err(e) => {
                 eprintln!("{personality}: {e}");

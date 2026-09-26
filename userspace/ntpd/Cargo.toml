@@ -7,6 +7,8 @@ description = "SlateOS ntpd/ntpdate - NTP time synchronization"
 # Reading a file whose absence is normal but whose unreadability is not;
 # see that crate's docs for the four programs that each wrote it wrong.
 optionalfile = { path = "../../optionalfile" }
+# `ntpdate -s` logs through the C library's syslog(3), as ntpdate does.
+libcsyslog = { path = "../libcsyslog" }
 
 [lints]
 workspace = true

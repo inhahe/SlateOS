@@ -348,6 +348,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/sum-diff.sh` | sum-diff.sh — compare our `sum` against GNU's, inside WSL. |
 | `scripts/symbolize.py` | Turn the raw addresses in a kernel panic into `symbol+offset`. |
 | `scripts/sync-diff.sh` | sync-diff.sh — compare our `sync` against the real GNU one, inside WSL. |
+| `scripts/syslog-client-check.sh` | What `libcsyslog`'s callers actually send to the system log, end to end. |
 | `scripts/tail-diff.sh` | Differential test: our tail against GNU tail. |
 | `scripts/tar-diff.sh` | Differential test: our tar against GNU tar. |
 | `scripts/tee-diff.sh` | Differential test: our tee against GNU coreutils' tee. |
@@ -420,4 +421,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_410 scripts._
+_411 scripts._

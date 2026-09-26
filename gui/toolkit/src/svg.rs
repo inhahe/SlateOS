@@ -2959,7 +2959,13 @@ impl SvgRenderer {
                 }
             }
             for (col, &cov) in (first_col..).zip(&coverage) {
-                let alpha = (cov.min(1.0) * f32::from(color.a)).round() as u8;
+                // `+ 0.5` and truncate, not `.round()`: on the x86-64
+                // baseline `round` is a call into libm (`roundf`), not an
+                // instruction, and this runs once per pixel -- lane F measured
+                // the same call at most of a per-pixel pass's cost
+                // (design-decisions §1323). Coverage is never negative, so the
+                // two agree, and `as` saturates past 255.
+                let alpha = (cov.min(1.0) * f32::from(color.a) + 0.5) as u8;
                 if alpha > 0 {
                     self.blend_pixel(col, row, Color::rgba(color.r, color.g, color.b, alpha));
                 }

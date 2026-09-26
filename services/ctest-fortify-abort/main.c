@@ -43,15 +43,32 @@
  *   102/103 __open_2 with O_CREAT (no mode): did not abort with 134 / not
  *         glibc's "invalid open call" message
  *   104   one of the last three children's pipe or fork failed
+ *   106/107 __wmemcpy_chk one wide character past its object: did not abort
+ *         with 134 / wrong message
+ *   108/109 __wcscpy_chk, four characters and a terminator into four: the same
+ *   110/111 __wcrtomb_chk, U+20AC (three bytes) into two: the same
+ *   112/113 __mbstowcs_chk, five characters asked into four: the same
+ *   114/115 __wctomb_chk with three bytes, under MB_CUR_MAX (4): the same
+ *   116   one of those five children's pipe or fork failed
+ *   117   an in-bounds wide call misbehaved: __wmemcpy_chk at its object's
+ *         size, or __wcrtomb_chk encoding U+20AC into exactly three bytes
+ *   118   __fgetws_chk did not clamp a line to its object: "abcdef\n" read
+ *         with 3 wide characters of room must come back as "ab", then "cd"
+ *   119   __swprintf_chk wrote output that fits (3 characters in a 4-character
+ *         object) wrongly
+ *   120   __swprintf_chk did not answer -1 for output that does not fit its
+ *         object, or wrote past it
  */
 
 #include <fcntl.h>
 #include <poll.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <wchar.h>
 
 extern void *__memcpy_chk(void *dst, const void *src, size_t n, size_t dstlen);
 extern void *__memmove_chk(void *dst, const void *src, size_t n, size_t dstlen);
@@ -68,6 +85,14 @@ extern long __fdelt_chk(long d);
 extern void __explicit_bzero_chk(void *dst, size_t len, size_t dstlen);
 extern int __poll_chk(struct pollfd *fds, nfds_t nfds, int timeout, size_t fdslen);
 extern int __open_2(const char *path, int oflag);
+extern wchar_t *__wmemcpy_chk(wchar_t *s1, const wchar_t *s2, size_t n, size_t ns1);
+extern wchar_t *__wcscpy_chk(wchar_t *dest, const wchar_t *src, size_t n);
+extern size_t __wcrtomb_chk(char *s, wchar_t wc, mbstate_t *ps, size_t buflen);
+extern size_t __mbstowcs_chk(wchar_t *dst, const char *src, size_t len, size_t dstlen);
+extern int __wctomb_chk(char *s, wchar_t wc, size_t buflen);
+extern wchar_t *__fgetws_chk(wchar_t *buf, size_t size, int n, FILE *fp);
+extern int __swprintf_chk(wchar_t *s, size_t maxlen, int flag, size_t slen,
+                          const wchar_t *format, ...);
 
 #define OBJ 8            /* every destination object is 8 bytes... */
 #define GUARD 0x5a       /* ...followed by one guard byte */
@@ -175,6 +200,8 @@ static int child_aborts(int i, const char *expect)
         memset(buf, 0, sizeof buf);
         struct pollfd pfds[2];
         memset(pfds, 0, sizeof pfds);
+        wchar_t wbuf[4];
+        char mb[4];
         switch (i) {
         case -1:
             (void)__fdelt_chk(1024);
@@ -190,6 +217,27 @@ static int child_aborts(int i, const char *expect)
         case -4:
             /* O_CREAT through the two-argument form: no mode to create with. */
             (void)__open_2("/tmp/fortify-abort-never-created", O_CREAT | O_WRONLY);
+            break;
+        case -5:
+            /* Five wide characters into a four-character object. */
+            (void)__wmemcpy_chk(wbuf, L"ABCDE", 5, 4);
+            break;
+        case -6:
+            /* Four characters and a terminator into four. */
+            (void)__wcscpy_chk(wbuf, L"ABCD", 4);
+            break;
+        case -7:
+            /* U+20AC is three bytes of UTF-8; two are offered. */
+            (void)__wcrtomb_chk(mb, 0x20AC, NULL, 2);
+            break;
+        case -8:
+            /* Up to five wide characters asked for, room for four. */
+            (void)__mbstowcs_chk(wbuf, "hello", 5, 4);
+            break;
+        case -9:
+            /* glibc's conservative test: under MB_CUR_MAX, whatever the
+             * character -- even one that would fit. */
+            (void)__wctomb_chk(mb, L'A', 3);
             break;
         default:
             call(i, buf, OBJ + 1, OBJ);
@@ -275,6 +323,97 @@ static int other_aborts(void)
     return 0;
 }
 
+/* The wide-character and multibyte calls that abort: the copies, and the
+ * conversions, which are treated as copies (design-decisions.md §1105). */
+static int wide_aborts(void)
+{
+    for (int k = 0; k < 5; k++) {
+        int which = -5 - k;
+        int base = 106 + 2 * k;
+        int rc = child_aborts(which, MESSAGE);
+        if (rc == 1) {
+            return base;
+        }
+        if (rc == 2) {
+            return base + 1;
+        }
+        if (rc != 0) {
+            return 116;
+        }
+    }
+    return 0;
+}
+
+/* The wide calls that fit must work: a copy at its object's size, and an
+ * encoding that fills its buffer exactly. */
+static int wide_in_bounds(void)
+{
+    wchar_t w[5];
+    w[4] = 0x5a5a;
+    (void)__wmemcpy_chk(w, L"WXYZ", 4, 4);
+    if (w[0] != L'W' || w[3] != L'Z' || w[4] != 0x5a5a) {
+        return 117;
+    }
+    char mb[4] = {0, 0, 0, (char)GUARD};
+    if (__wcrtomb_chk(mb, 0x20AC, NULL, 3) != 3 || (unsigned char)mb[0] != 0xE2
+        || (unsigned char)mb[1] != 0x82 || (unsigned char)mb[2] != 0xAC
+        || (unsigned char)mb[3] != GUARD) {
+        return 117;
+    }
+    return 0;
+}
+
+/* __fgetws_chk clamps as __fgets_chk does: a line longer than the object comes
+ * back in pieces that each fit it. */
+static int fgetws_clamps(void)
+{
+    int fds[2];
+    if (pipe(fds) != 0) {
+        return 118;
+    }
+    ssize_t w = write(fds[1], "abcdef\n", 7);
+    (void)w;
+    close(fds[1]);
+    FILE *fp = fdopen(fds[0], "r");
+    if (fp == NULL) {
+        close(fds[0]);
+        return 118;
+    }
+    wchar_t buf[4];
+    buf[3] = 0x5a5a;
+    /* n says 100, the object says 3: at most two characters and a NUL. */
+    if (__fgetws_chk(buf, 3, 100, fp) != buf || wcscmp(buf, L"ab") != 0 || buf[3] != 0x5a5a) {
+        fclose(fp);
+        return 118;
+    }
+    if (__fgetws_chk(buf, 3, 100, fp) != buf || wcscmp(buf, L"cd") != 0) {
+        fclose(fp);
+        return 118;
+    }
+    fclose(fp);
+    return 0;
+}
+
+/* __swprintf_chk clamps to its object: output that fits is written, output
+ * that does not is swprintf's own -1, with nothing past the object. */
+static int swprintf_clamps(void)
+{
+    wchar_t buf[6];
+    for (int k = 0; k < 6; k++) {
+        buf[k] = 0x5a5a;
+    }
+    if (__swprintf_chk(buf, 64, 1, 4, L"n=%d", 7) != 3 || wcscmp(buf, L"n=7") != 0) {
+        return 119;
+    }
+    for (int k = 0; k < 6; k++) {
+        buf[k] = 0x5a5a;
+    }
+    if (__swprintf_chk(buf, 64, 1, 4, L"n=%d", 42) != -1 || buf[4] != 0x5a5a || buf[5] != 0x5a5a) {
+        return 120;
+    }
+    return 0;
+}
+
 static int read_clamps(void)
 {
     int fds[2];
@@ -338,6 +477,25 @@ int main(void)
     if (rc != 0) {
         return rc;
     }
-    emit("[fz] ok (10 copies, FD_SET, a wipe, a poll and an open refused; read clamped)\n");
+    emit("[fz] wide copies and conversions (each child must abort), and in bounds\n");
+    rc = wide_aborts();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = wide_in_bounds();
+    if (rc != 0) {
+        return rc;
+    }
+    emit("[fz] __fgetws_chk and __swprintf_chk clamp\n");
+    rc = fgetws_clamps();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = swprintf_clamps();
+    if (rc != 0) {
+        return rc;
+    }
+    emit("[fz] ok (10 copies, FD_SET, a wipe, a poll, an open and 5 wide calls refused; "
+         "read, fgetws and swprintf clamped)\n");
     return 42;
 }

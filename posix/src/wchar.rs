@@ -2669,6 +2669,531 @@ mod gnu_wmempcpy {
 }
 pub use gnu_wmempcpy::wmempcpy;
 
+/// Own archive member — gnulib replaces `wcpcpy`.  See [`gnu_wmempcpy`] for
+/// why a function gnulib may define itself must not share a member.
+mod gnu_wcpcpy {
+    use super::*;
+
+    /// Copy a wide string, returning a pointer to the terminator written.
+    ///
+    /// POSIX.1-2008 `wcpcpy`: the wide twin of `stpcpy`.
+    ///
+    /// # Safety
+    ///
+    /// `src` must be a NUL-terminated wide string and `dst` writable for
+    /// `wcslen(src) + 1` wide characters; the two must not overlap.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn wcpcpy(dst: *mut WcharT, src: *const WcharT) -> *mut WcharT {
+        let mut i: usize = 0;
+        loop {
+            // SAFETY: caller contract -- `src` is readable to its NUL and
+            // `dst` writable for as many wide characters.
+            let c = unsafe { *src.add(i) };
+            // SAFETY: as above.
+            unsafe { *dst.add(i) = c };
+            if c == 0 {
+                // SAFETY: `i` is within the string just written.
+                return unsafe { dst.add(i) };
+            }
+            i = i.wrapping_add(1);
+        }
+    }
+}
+pub use gnu_wcpcpy::wcpcpy;
+
+/// Own archive member — gnulib replaces `wcpncpy`.  See [`gnu_wmempcpy`].
+mod gnu_wcpncpy {
+    use super::*;
+
+    /// Copy at most `n` wide characters, padding with NULs to `n`, and return
+    /// a pointer to the first NUL written — or `dst + n` if none was.
+    ///
+    /// POSIX.1-2008 `wcpncpy`: the wide twin of `stpncpy`.
+    ///
+    /// # Safety
+    ///
+    /// `dst` must be writable for `n` wide characters and `src` readable for
+    /// `n` of them or up to its NUL, whichever comes first.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn wcpncpy(
+        dst: *mut WcharT,
+        src: *const WcharT,
+        n: usize,
+    ) -> *mut WcharT {
+        let mut end = n;
+        let mut i: usize = 0;
+        while i < n {
+            let c = if end == n {
+                // SAFETY: caller contract -- `src` is readable up to its NUL
+                // or `n` characters, and no NUL has been read yet.
+                unsafe { *src.add(i) }
+            } else {
+                0
+            };
+            if c == 0 && end == n {
+                end = i;
+            }
+            // SAFETY: `i < n` and `dst` is writable for `n` characters.
+            unsafe { *dst.add(i) = c };
+            i = i.wrapping_add(1);
+        }
+        // SAFETY: `end <= n`, so this is within, or one past, `dst`.
+        unsafe { dst.add(end) }
+    }
+}
+pub use gnu_wcpncpy::wcpncpy;
+
+// ---------------------------------------------------------------------------
+// `_FORTIFY_SOURCE`: the wide-character and multibyte entry points
+//
+// glibc's wchar2.h passes these the destination's size *in wide characters*
+// (`__glibc_objsize (s) / sizeof (wchar_t)`) for a `wchar_t` destination, and
+// in bytes for a `char` one -- so each size below is in its destination's own
+// unit, and `(size_t)-1`, "unknown", still fits everything.
+//
+// Every one of them aborts, as glibc's do (glibc 2.39 debug/*_chk.c), except
+// `__fgetws_chk`, which clamps as `__fgets_chk` does -- design-decisions.md
+// §1105 -- the rule, and the rows of its table for these, which say why a
+// conversion is treated as a copy.
+// ---------------------------------------------------------------------------
+
+/// The length of the wide string at `s`, reading at most `max` characters.
+///
+/// # Safety
+///
+/// `s` must be readable up to its first NUL or `max` wide characters,
+/// whichever comes first.
+unsafe fn wcsnlen_bounded(s: *const WcharT, max: usize) -> usize {
+    let mut i: usize = 0;
+    // SAFETY: caller contract; `i < max` at every read.
+    while i < max && unsafe { *s.add(i) } != 0 {
+        i = i.wrapping_add(1);
+    }
+    i
+}
+
+/// [`crate::fortify::concatenation_fits`] for wide strings: the string
+/// already in `dest` (found without reading past `objsize` characters of it),
+/// plus `append` characters and a terminator, within `objsize`.  `false` when
+/// `dest` has no terminator inside the object, where glibc's loop aborts too.
+///
+/// # Safety
+///
+/// `dest` must be readable up to its first NUL or `objsize` wide characters.
+unsafe fn wide_concatenation_fits(dest: *const WcharT, append: usize, objsize: usize) -> bool {
+    // SAFETY: this function's contract.
+    let have = unsafe { wcsnlen_bounded(dest, objsize) };
+    if have >= objsize {
+        return false;
+    }
+    have.checked_add(append)
+        .is_some_and(|total| crate::fortify::fits_with_terminator(total, objsize))
+}
+
+/// `__wmemcpy_chk` — fortified `wmemcpy`; aborts when `n > ns1`
+/// (debug/wmemcpy_chk.c).
+///
+/// # Safety
+///
+/// As `wmemcpy`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __wmemcpy_chk(
+    s1: *mut WcharT,
+    s2: *const WcharT,
+    n: usize,
+    ns1: usize,
+) -> *mut WcharT {
+    if !crate::fortify::fits(n, ns1) {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: caller contract, and the copy fits the object.
+    unsafe { wmemcpy(s1, s2, n) }
+}
+
+/// `__wmemmove_chk` — fortified `wmemmove`; aborts when `n > ns1`.
+///
+/// # Safety
+///
+/// As `wmemmove`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __wmemmove_chk(
+    s1: *mut WcharT,
+    s2: *const WcharT,
+    n: usize,
+    ns1: usize,
+) -> *mut WcharT {
+    if !crate::fortify::fits(n, ns1) {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: caller contract, and the move fits the object.
+    unsafe { wmemmove(s1, s2, n) }
+}
+
+/// `__wmempcpy_chk` — fortified `wmempcpy`; aborts when `n > ns1`.
+///
+/// # Safety
+///
+/// As `wmempcpy`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __wmempcpy_chk(
+    s1: *mut WcharT,
+    s2: *const WcharT,
+    n: usize,
+    ns1: usize,
+) -> *mut WcharT {
+    if !crate::fortify::fits(n, ns1) {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: caller contract, and the copy fits the object.
+    unsafe { wmempcpy(s1, s2, n) }
+}
+
+/// `__wmemset_chk` — fortified `wmemset`; aborts when `n > dstlen`.
+///
+/// # Safety
+///
+/// As `wmemset`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __wmemset_chk(
+    s: *mut WcharT,
+    c: WcharT,
+    n: usize,
+    dstlen: usize,
+) -> *mut WcharT {
+    if !crate::fortify::fits(n, dstlen) {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: caller contract, and the fill fits the object.
+    unsafe { wmemset(s, c, n) }
+}
+
+/// `__wcscpy_chk` — fortified `wcscpy`; aborts when `src` and its
+/// terminator do not fit `n` wide characters.
+///
+/// # Safety
+///
+/// As `wcscpy`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __wcscpy_chk(
+    dest: *mut WcharT,
+    src: *const WcharT,
+    n: usize,
+) -> *mut WcharT {
+    // SAFETY: `src` is a NUL-terminated wide string (caller contract).
+    if !crate::fortify::fits_with_terminator(unsafe { wcslen(src) }, n) {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: caller contract, and the copy fits the object.
+    unsafe { wcscpy(dest, src) }
+}
+
+/// `__wcpcpy_chk` — fortified [`wcpcpy`]; aborts as [`__wcscpy_chk`] does.
+///
+/// # Safety
+///
+/// As [`wcpcpy`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __wcpcpy_chk(
+    dest: *mut WcharT,
+    src: *const WcharT,
+    destlen: usize,
+) -> *mut WcharT {
+    // SAFETY: `src` is a NUL-terminated wide string (caller contract).
+    if !crate::fortify::fits_with_terminator(unsafe { wcslen(src) }, destlen) {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: caller contract, and the copy fits the object.
+    unsafe { wcpcpy(dest, src) }
+}
+
+/// `__wcsncpy_chk` — fortified `wcsncpy`; aborts when `n > destlen`, since
+/// `wcsncpy` writes exactly `n` wide characters.
+///
+/// # Safety
+///
+/// As `wcsncpy`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __wcsncpy_chk(
+    dest: *mut WcharT,
+    src: *const WcharT,
+    n: usize,
+    destlen: usize,
+) -> *mut WcharT {
+    if !crate::fortify::fits(n, destlen) {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: caller contract, and the copy fits the object.
+    unsafe { wcsncpy(dest, src, n) }
+}
+
+/// `__wcpncpy_chk` — fortified [`wcpncpy`]; aborts when `n > destlen`.
+///
+/// # Safety
+///
+/// As [`wcpncpy`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __wcpncpy_chk(
+    dest: *mut WcharT,
+    src: *const WcharT,
+    n: usize,
+    destlen: usize,
+) -> *mut WcharT {
+    if !crate::fortify::fits(n, destlen) {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: caller contract, and the copy fits the object.
+    unsafe { wcpncpy(dest, src, n) }
+}
+
+/// `__wcscat_chk` — fortified `wcscat`; aborts when the string already in
+/// `dest`, `src` and a terminator do not fit `destlen`.
+///
+/// # Safety
+///
+/// As `wcscat`; `dest` must be readable up to its NUL or `destlen` wide
+/// characters.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __wcscat_chk(
+    dest: *mut WcharT,
+    src: *const WcharT,
+    destlen: usize,
+) -> *mut WcharT {
+    // SAFETY: caller contract for both strings.
+    if !unsafe { wide_concatenation_fits(dest, wcslen(src), destlen) } {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: caller contract, and the concatenation fits the object.
+    unsafe { wcscat(dest, src) }
+}
+
+/// `__wcsncat_chk` — fortified `wcsncat`; aborts when the string already in
+/// `dest`, at most `n` characters of `src` and a terminator do not fit
+/// `destlen`.
+///
+/// # Safety
+///
+/// As `wcsncat`; `dest` must be readable up to its NUL or `destlen` wide
+/// characters.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __wcsncat_chk(
+    dest: *mut WcharT,
+    src: *const WcharT,
+    n: usize,
+    destlen: usize,
+) -> *mut WcharT {
+    // SAFETY: caller contract for both strings; `src` is read at most `n`.
+    if !unsafe { wide_concatenation_fits(dest, wcsnlen_bounded(src, n), destlen) } {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: caller contract, and the concatenation fits the object.
+    unsafe { wcsncat(dest, src, n) }
+}
+
+/// `__wcrtomb_chk` — fortified `wcrtomb`.
+///
+/// glibc 2.39's is `__wcrtomb_internal (s, wchar, ps, buflen)`
+/// (wcsmbs/wcrtomb.c:38): it converts into a buffer of its own and aborts only
+/// if the *encoding* is longer than `buflen` (:105), so a four-byte buffer is
+/// enough for an ASCII character and a two-byte one is not enough for `€`.
+/// An unencodable character is still `EILSEQ`, whatever the buffer.
+///
+/// # Safety
+///
+/// As `wcrtomb`; `s`, when non-NULL, must be writable for `buflen` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __wcrtomb_chk(
+    s: *mut u8,
+    wc: WcharT,
+    ps: *mut MbstateT,
+    buflen: usize,
+) -> usize {
+    if s.is_null() {
+        // The reset form writes nothing the caller sized.
+        // SAFETY: caller contract.
+        return unsafe { wcrtomb(s, wc, ps) };
+    }
+    let mut local = [0u8; MB_CUR_MAX];
+    // SAFETY: `local` holds MB_CUR_MAX bytes, all `wcrtomb` ever writes.
+    let written = unsafe { wcrtomb(local.as_mut_ptr(), wc, ps) };
+    if written == usize::MAX {
+        return written; // EILSEQ, set by wcrtomb.
+    }
+    if !crate::fortify::fits(written, buflen) {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: `written <= buflen`, and `s` is writable for `buflen` bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(local.as_ptr(), s, written);
+    }
+    written
+}
+
+/// `__wctomb_chk` — fortified `wctomb`.
+///
+/// Unlike `__wcrtomb_chk`, glibc's keeps the conservative test
+/// (debug/wctomb_chk.c): the buffer must hold `MB_CUR_MAX` bytes, whatever the
+/// character, or it aborts.  This libc's `MB_CUR_MAX` is 4 (UTF-8).
+///
+/// # Safety
+///
+/// As `wctomb`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __wctomb_chk(s: *mut u8, wc: WcharT, buflen: usize) -> i32 {
+    if !crate::fortify::fits(MB_CUR_MAX, buflen) {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: caller contract, and `s` holds MB_CUR_MAX bytes.
+    unsafe { wctomb(s, wc) }
+}
+
+/// `__mbstowcs_chk` — fortified `mbstowcs`; aborts when `len > dstlen`
+/// (debug/mbstowcs_chk.c).  `dstlen` is in wide characters.
+///
+/// # Safety
+///
+/// As `mbstowcs`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __mbstowcs_chk(
+    dst: *mut WcharT,
+    src: *const u8,
+    len: usize,
+    dstlen: usize,
+) -> usize {
+    if !crate::fortify::fits(len, dstlen) {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: caller contract, and at most `len <= dstlen` are written.
+    unsafe { mbstowcs(dst, src, len) }
+}
+
+/// `__mbsrtowcs_chk` — fortified `mbsrtowcs`; aborts when `len > dstlen`.
+///
+/// # Safety
+///
+/// As `mbsrtowcs`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __mbsrtowcs_chk(
+    dst: *mut WcharT,
+    src: *mut *const u8,
+    len: usize,
+    ps: *mut MbstateT,
+    dstlen: usize,
+) -> usize {
+    if !crate::fortify::fits(len, dstlen) {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: caller contract, and at most `len <= dstlen` are written.
+    unsafe { mbsrtowcs(dst, src, len, ps) }
+}
+
+/// `__mbsnrtowcs_chk` — fortified `mbsnrtowcs`; aborts when `len > dstlen`.
+///
+/// # Safety
+///
+/// As `mbsnrtowcs`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __mbsnrtowcs_chk(
+    dst: *mut WcharT,
+    src: *mut *const u8,
+    nmc: usize,
+    len: usize,
+    ps: *mut MbstateT,
+    dstlen: usize,
+) -> usize {
+    if !crate::fortify::fits(len, dstlen) {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: caller contract, and at most `len <= dstlen` are written.
+    unsafe { mbsnrtowcs(dst, src, nmc, len, ps) }
+}
+
+/// `__wcstombs_chk` — fortified `wcstombs`; aborts when `len > dstlen`
+/// (debug/wcstombs_chk.c).  `dstlen` is in bytes.
+///
+/// # Safety
+///
+/// As `wcstombs`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __wcstombs_chk(
+    dst: *mut u8,
+    src: *const WcharT,
+    len: usize,
+    dstlen: usize,
+) -> usize {
+    if !crate::fortify::fits(len, dstlen) {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: caller contract, and at most `len <= dstlen` bytes are written.
+    unsafe { wcstombs(dst, src, len) }
+}
+
+/// `__wcsrtombs_chk` — fortified `wcsrtombs`; aborts when `len > dstlen`.
+///
+/// # Safety
+///
+/// As `wcsrtombs`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __wcsrtombs_chk(
+    dst: *mut u8,
+    src: *mut *const WcharT,
+    len: usize,
+    ps: *mut MbstateT,
+    dstlen: usize,
+) -> usize {
+    if !crate::fortify::fits(len, dstlen) {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: caller contract, and at most `len <= dstlen` bytes are written.
+    unsafe { wcsrtombs(dst, src, len, ps) }
+}
+
+/// `__wcsnrtombs_chk` — fortified `wcsnrtombs`; aborts when `len > dstlen`.
+///
+/// # Safety
+///
+/// As `wcsnrtombs`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __wcsnrtombs_chk(
+    dst: *mut u8,
+    src: *mut *const WcharT,
+    nwc: usize,
+    len: usize,
+    ps: *mut MbstateT,
+    dstlen: usize,
+) -> usize {
+    if !crate::fortify::fits(len, dstlen) {
+        crate::fortify::__chk_fail();
+    }
+    // SAFETY: caller contract, and at most `len <= dstlen` bytes are written.
+    unsafe { wcsnrtombs(dst, src, nwc, len, ps) }
+}
+
+/// `__fgetws_chk` — fortified `fgetws`, clamped as `__fgets_chk` is: it reads
+/// with at most `size` wide characters of room, so a line longer than the
+/// object comes back in pieces instead of overflowing it.  A short read is
+/// part of `fgetws`'s contract already.  (glibc aborts instead, once the line
+/// has filled the object -- debug/fgetws_chk.c; the clamp is §1105's rule.)
+///
+/// # Safety
+///
+/// As `fgetws`; `buf` must be writable for `size` wide characters.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __fgetws_chk(
+    buf: *mut WcharT,
+    size: usize,
+    n: i32,
+    stream: *mut u8,
+) -> *mut WcharT {
+    if n <= 0 || size == 0 {
+        return core::ptr::null_mut();
+    }
+    // `n > 0`, so the cast is exact; `min` keeps the result within `i32`.
+    let bound = (n as usize).min(size);
+    // SAFETY: caller contract, and `fgetws` writes at most `bound <= size`
+    // wide characters (its line and the terminator).
+    unsafe { fgetws(buf, i32::try_from(bound).unwrap_or(n), stream) }
+}
+
 // ---------------------------------------------------------------------------
 // Wide strftime
 // ---------------------------------------------------------------------------
@@ -2890,6 +3415,209 @@ pub extern "C" fn towupper_l(wc: WcharT, _loc: crate::locale::LocaleT) -> WcharT
 mod tests {
 
     use super::*;
+
+    // -- wcpcpy / wcpncpy -------------------------------------------------
+
+    fn w(s: &str) -> std::vec::Vec<WcharT> {
+        s.chars()
+            .map(|c| c as WcharT)
+            .chain(core::iter::once(0))
+            .collect()
+    }
+
+    #[test]
+    fn test_wcpcpy_returns_the_terminator() {
+        let src = w("héllo");
+        let mut dst = [7 as WcharT; 8];
+        let end = unsafe { wcpcpy(dst.as_mut_ptr(), src.as_ptr()) };
+        assert_eq!(&dst[..6], &src[..]);
+        assert_eq!(end, dst.as_mut_ptr().wrapping_add(5));
+        assert_eq!(dst[6], 7, "nothing past the terminator is written");
+    }
+
+    #[test]
+    fn test_wcpncpy_pads_and_returns_the_first_nul() {
+        let src = w("ab");
+        let mut dst = [7 as WcharT; 6];
+        let end = unsafe { wcpncpy(dst.as_mut_ptr(), src.as_ptr(), 5) };
+        assert_eq!(&dst[..5], &['a' as WcharT, 'b' as WcharT, 0, 0, 0]);
+        assert_eq!(dst[5], 7, "exactly n are written");
+        assert_eq!(end, dst.as_mut_ptr().wrapping_add(2));
+    }
+
+    #[test]
+    fn test_wcpncpy_without_room_for_a_nul_returns_dst_plus_n() {
+        let src = w("abcdef");
+        let mut dst = [0 as WcharT; 3];
+        let end = unsafe { wcpncpy(dst.as_mut_ptr(), src.as_ptr(), 3) };
+        assert_eq!(dst, ['a' as WcharT, 'b' as WcharT, 'c' as WcharT]);
+        assert_eq!(end, dst.as_mut_ptr().wrapping_add(3));
+    }
+
+    // -- _FORTIFY_SOURCE wide entry points: the in-bounds paths ------------
+    //
+    // An overflow aborts the process, which a host test cannot survive; the
+    // aborting half is exercised at ring 3 by services/ctest-fortify-abort.
+
+    #[test]
+    fn test_wide_copy_chk_delegates_at_the_boundary() {
+        let src = w("abc"); // 4 with the terminator
+        let mut dst = [0 as WcharT; 4];
+        unsafe {
+            assert_eq!(
+                __wmemcpy_chk(dst.as_mut_ptr(), src.as_ptr(), 4, 4),
+                dst.as_mut_ptr()
+            );
+            assert_eq!(&dst[..], &src[..]);
+            __wmemset_chk(dst.as_mut_ptr(), 'z' as WcharT, 4, 4);
+            assert_eq!(dst, ['z' as WcharT; 4]);
+            __wmemmove_chk(dst.as_mut_ptr(), src.as_ptr(), 4, 4);
+            assert_eq!(&dst[..], &src[..]);
+            let end = __wmempcpy_chk(dst.as_mut_ptr(), src.as_ptr(), 2, 4);
+            assert_eq!(end, dst.as_mut_ptr().wrapping_add(2));
+            // wcscpy: three characters and the terminator fill exactly four.
+            __wcscpy_chk(dst.as_mut_ptr(), src.as_ptr(), 4);
+            assert_eq!(&dst[..], &src[..]);
+            let end = __wcpcpy_chk(dst.as_mut_ptr(), src.as_ptr(), 4);
+            assert_eq!(end, dst.as_mut_ptr().wrapping_add(3));
+            __wcsncpy_chk(dst.as_mut_ptr(), src.as_ptr(), 4, 4);
+            assert_eq!(&dst[..], &src[..]);
+            let end = __wcpncpy_chk(dst.as_mut_ptr(), src.as_ptr(), 4, 4);
+            assert_eq!(end, dst.as_mut_ptr().wrapping_add(3));
+        }
+    }
+
+    #[test]
+    fn test_wide_concatenation_fits() {
+        let mut dst = [0 as WcharT; 6];
+        dst[0] = 'a' as WcharT; // "a"
+        unsafe {
+            assert!(
+                wide_concatenation_fits(dst.as_ptr(), 4, 6),
+                "a + 4 + NUL is 6"
+            );
+            assert!(!wide_concatenation_fits(dst.as_ptr(), 5, 6));
+            assert!(
+                !wide_concatenation_fits(dst.as_ptr(), usize::MAX, 6),
+                "no overflow"
+            );
+            let full = ['x' as WcharT; 6]; // no terminator inside the object
+            assert!(!wide_concatenation_fits(full.as_ptr(), 0, 6));
+            let bcd = w("bcd");
+            let ret = __wcscat_chk(dst.as_mut_ptr(), bcd.as_ptr(), 6);
+            assert_eq!(ret, dst.as_mut_ptr());
+            assert_eq!(
+                &dst[..5],
+                &[
+                    'a' as WcharT,
+                    'b' as WcharT,
+                    'c' as WcharT,
+                    'd' as WcharT,
+                    0
+                ]
+            );
+            // wcsncat counts at most n of src: "abcd" + "e" + NUL is 6.
+            let efg = w("efg");
+            __wcsncat_chk(dst.as_mut_ptr(), efg.as_ptr(), 1, 6);
+            assert_eq!(dst[4], 'e' as WcharT);
+            assert_eq!(dst[5], 0);
+        }
+    }
+
+    #[test]
+    fn test_wcrtomb_chk_checks_the_encoding_not_mb_cur_max() {
+        let mut out = [0u8; 4];
+        unsafe {
+            // 'A' is one byte: a one-byte buffer is enough.
+            assert_eq!(
+                __wcrtomb_chk(out.as_mut_ptr(), 'A' as WcharT, core::ptr::null_mut(), 1),
+                1
+            );
+            assert_eq!(out[0], b'A');
+            // U+20AC is three bytes, and three bytes of room fit it exactly.
+            assert_eq!(
+                __wcrtomb_chk(out.as_mut_ptr(), 0x20AC, core::ptr::null_mut(), 3),
+                3
+            );
+            assert_eq!(&out[..3], "€".as_bytes());
+            // An unencodable character is EILSEQ, not an abort, however small
+            // the buffer.
+            crate::errno::set_errno(0);
+            assert_eq!(
+                __wcrtomb_chk(out.as_mut_ptr(), 0xD800, core::ptr::null_mut(), 1),
+                usize::MAX
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EILSEQ);
+        }
+    }
+
+    #[test]
+    fn test_wctomb_chk_with_mb_cur_max_of_room() {
+        let mut out = [0u8; MB_CUR_MAX];
+        let n = unsafe { __wctomb_chk(out.as_mut_ptr(), 0x20AC, MB_CUR_MAX) };
+        assert_eq!(n, 3);
+        assert_eq!(&out[..3], "€".as_bytes());
+    }
+
+    #[test]
+    fn test_conversion_chk_delegates_at_the_boundary() {
+        let mb = "héllo\0".as_bytes();
+        let mut wide = [0 as WcharT; 5];
+        unsafe {
+            // Five characters into five slots: fits, and stops without a NUL.
+            assert_eq!(__mbstowcs_chk(wide.as_mut_ptr(), mb.as_ptr(), 5, 5), 5);
+            assert_eq!(wide[1], 'é' as WcharT);
+            let mut src = mb.as_ptr();
+            assert_eq!(
+                __mbsrtowcs_chk(wide.as_mut_ptr(), &raw mut src, 5, core::ptr::null_mut(), 5),
+                5
+            );
+            // Two bytes of input hold 'h' and half of 'é': one character.
+            let mut src = mb.as_ptr();
+            assert_eq!(
+                __mbsnrtowcs_chk(
+                    wide.as_mut_ptr(),
+                    &raw mut src,
+                    2,
+                    5,
+                    core::ptr::null_mut(),
+                    5
+                ),
+                1
+            );
+            let back = w("hé");
+            let mut out = [0u8; 3];
+            assert_eq!(__wcstombs_chk(out.as_mut_ptr(), back.as_ptr(), 3, 3), 3);
+            assert_eq!(&out, "hé".as_bytes());
+            let mut ws = back.as_ptr();
+            assert_eq!(
+                __wcsrtombs_chk(out.as_mut_ptr(), &raw mut ws, 3, core::ptr::null_mut(), 3),
+                3
+            );
+            let mut ws = back.as_ptr();
+            assert_eq!(
+                __wcsnrtombs_chk(
+                    out.as_mut_ptr(),
+                    &raw mut ws,
+                    1,
+                    3,
+                    core::ptr::null_mut(),
+                    3
+                ),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn test_fgetws_chk_early_returns() {
+        let mut buf = [0 as WcharT; 4];
+        unsafe {
+            assert!(__fgetws_chk(buf.as_mut_ptr(), 4, 0, core::ptr::null_mut()).is_null());
+            assert!(__fgetws_chk(buf.as_mut_ptr(), 4, -1, core::ptr::null_mut()).is_null());
+            assert!(__fgetws_chk(buf.as_mut_ptr(), 0, 8, core::ptr::null_mut()).is_null());
+        }
+    }
 
     // -- POSIX 2008 locale-parameterised classification --
 

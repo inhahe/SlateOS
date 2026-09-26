@@ -20,8 +20,9 @@ in a forked child whose stderr is a pipe, and the parent checks how it died.
 
 ## It waits, boundedly
 
-The parent blocks in `waitpid` on each of ten children, each of which makes
-one call and then aborts -- or exits at once, if the check is missing. The one
+The parent blocks in `waitpid` on each of its children -- nineteen since the
+wide-character cases were added -- each of which makes one call and then
+aborts, or exits at once if the check is missing. The one
 read of its own is of a pipe whose writer is already closed. The kernel rung's
 yield budget bounds the whole.
 

@@ -32,6 +32,10 @@
 //! | `__recv_chk` `__recvfrom_chk` `__gethostname_chk` `__getlogin_r_chk` `__ttyname_r_chk` `__ptsname_r_chk` `__confstr_chk` `__getgroups_chk` | ask with at most `objsize` | a short receive, a truncated name, `ERANGE`/`EINVAL`: answers each call already gives |
 //! | `__open_2` `__open64_2` `__openat_2` `__openat64_2` | abort, as glibc, when the flags need a mode | not a size check: `open(path, O_CREAT)` with no mode would create the file with whatever was in a register |
 //!
+//! | the wide copies (`__wmemcpy_chk` … `__wcsncat_chk`, `wchar.rs`) | abort, as glibc | as the narrow copies |
+//! | the multibyte conversions (`__mbstowcs_chk`, `__wcstombs_chk` and their `r`/`nr` forms, `__wcrtomb_chk`, `__wctomb_chk`, `wchar.rs`) | abort, as glibc | the caller tests the length it asked for to detect truncation, so a clamp would hide a cut-short conversion |
+//! | `__fgetws_chk` (`wchar.rs`), `__vswprintf_chk`/`__swprintf_chk` (`fortify_printf.rs`) | clamp | as `__fgets_chk` and the narrow printf family |
+//!
 //! The rule is: **clamp when the smaller operation is still a correct call of
 //! the function -- a result its callers must already handle -- and abort when
 //! it would not be.** Clamping never writes past the object either way; the

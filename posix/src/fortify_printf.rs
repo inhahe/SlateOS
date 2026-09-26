@@ -73,6 +73,7 @@ use crate::printf::{self, VaList};
 //   __asprintf_chk (&p, flag, fmt, …)         : 3 fixed → gp 24, ap in rcx
 //   __sprintf_chk  (s, flag, slen, fmt, …)    : 4 fixed → gp 32, ap in r8
 //   __snprintf_chk (s, n, flag, slen, fmt, …) : 5 fixed → gp 40, ap in r9
+//   __swprintf_chk (s, n, flag, slen, fmt, …) : 5 fixed → gp 40, ap in r9
 //
 // The `slen`/`maxlen` bounding that distinguishes the fortified wrappers from
 // the plain ones lives in the `__v*_chk` functions below, so it is applied
@@ -94,6 +95,8 @@ va_trampoline!("__asprintf_chk", "__vasprintf_chk", "24", "rcx");
 va_trampoline!("__sprintf_chk", "__vsprintf_chk", "32", "r8");
 #[cfg(target_os = "none")]
 va_trampoline!("__snprintf_chk", "__vsnprintf_chk", "40", "r9");
+#[cfg(target_os = "none")]
+va_trampoline!("__swprintf_chk", "__vswprintf_chk", "40", "r9");
 
 // ---------------------------------------------------------------------------
 // __v*_chk variants — take a `va_list` (pointer); pure Rust, host-testable.
@@ -202,6 +205,30 @@ pub unsafe extern "C" fn __vsnprintf_chk(
     printf::_snprintf_impl(s, bound, fmt, &mut args)
 }
 
+/// `__vswprintf_chk(s, maxlen, flag, slen, fmt, ap)`: `vswprintf` with at
+/// most `min(maxlen, slen)` wide characters of room, as [`__vsnprintf_chk`]
+/// bounds `vsnprintf`.  Where that is less room than the output needs,
+/// `vswprintf`'s own answer follows -- -1, which a `swprintf` caller must
+/// already handle -- and nothing is written past the object.  (glibc aborts
+/// when `slen < maxlen`, debug/vswprintf_chk.c; the clamp is
+/// design-decisions.md §1105's rule, as for the narrow family.)
+///
+/// # Safety
+/// As [`__vprintf_chk`]; `s` must point to at least `min(maxlen, slen)`
+/// writable wide characters.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __vswprintf_chk(
+    s: *mut crate::wchar::WcharT,
+    maxlen: usize,
+    _flag: i32,
+    slen: usize,
+    fmt: *const crate::wchar::WcharT,
+    ap: *mut VaList,
+) -> i32 {
+    // SAFETY: as for `__vprintf_chk`; the bound keeps the write inside `s`.
+    unsafe { printf::vswprintf(s, maxlen.min(slen), fmt, ap) }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -231,6 +258,39 @@ mod tests {
     fn cstr(buf: &[u8]) -> &[u8] {
         let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
         &buf[..end]
+    }
+
+    /// `__vswprintf_chk` writes at most `min(maxlen, slen)` wide characters:
+    /// output that fits is written whole, and output that does not is
+    /// vswprintf's -1, with nothing past the object.
+    #[test]
+    fn vswprintf_chk_bounds_by_the_object() {
+        use crate::wchar::WcharT;
+        let fmt: std::vec::Vec<WcharT> = "n=%d".chars().map(|c| c as WcharT).chain([0]).collect();
+        let mut buf = [0x55 as WcharT; 8];
+        let n = with_valist(&[42], |va| unsafe {
+            __vswprintf_chk(buf.as_mut_ptr(), 64, 1, 5, fmt.as_ptr(), va)
+        });
+        assert_eq!(n, 4);
+        assert_eq!(
+            &buf[..5],
+            &[
+                'n' as WcharT,
+                '=' as WcharT,
+                '4' as WcharT,
+                '2' as WcharT,
+                0
+            ]
+        );
+        let mut small = [0x55 as WcharT; 8];
+        let n = with_valist(&[12345], |va| unsafe {
+            __vswprintf_chk(small.as_mut_ptr(), 64, 1, 4, fmt.as_ptr(), va)
+        });
+        assert_eq!(n, -1, "does not fit the four-character object");
+        assert!(
+            small[4..].iter().all(|&c| c == 0x55),
+            "nothing past the object"
+        );
     }
 
     #[test]

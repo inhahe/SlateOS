@@ -790,10 +790,17 @@ pub unsafe extern "C" fn vswprintf(
         // recovered. `swprintf` says negative rather than a length.
         return -1;
     }
+    // `format_core` does not terminate what it writes -- `_snprintf_impl`
+    // does that for the narrow family -- so terminate it here, before step 3
+    // reads it as a string. Until 2026-09-26 this was missing and step 3 read
+    // on into whatever the caller's buffer held: a zeroed buffer hid it, an
+    // uninitialised one (the usual kind) made `swprintf` miscount or fail.
+    // SAFETY: `byte_len < capacity`, the buffer's size in bytes.
+    unsafe { *base.add(byte_len) = 0 };
 
     // 3. How many wide characters is that?
-    // SAFETY: `base` now holds a null-terminated narrow string that
-    // `format_core` wrote; a null destination asks only for the count.
+    // SAFETY: `base` now holds the null-terminated narrow string just
+    // written; a null destination asks only for the count.
     let wide_len = unsafe { crate::wchar::mbstowcs(core::ptr::null_mut(), base, 0) };
     if wide_len == usize::MAX {
         crate::errno::set_errno(crate::errno::EILSEQ);
@@ -4218,6 +4225,23 @@ mod tests {
             vswprintf(buf.as_mut_ptr(), cap, f.as_ptr(), ap)
         });
         (from_wide(&buf), n)
+    }
+
+    /// The buffer need not be zeroed. `format_core` does not terminate what it
+    /// writes, and vswprintf used to read the formatted bytes as a string
+    /// without terminating them, so every test here -- all on `vec![0; ..]`
+    /// buffers -- passed while a caller's uninitialised buffer failed.
+    #[test]
+    fn vswprintf_does_not_rely_on_a_zeroed_buffer() {
+        let f = wide("n=%d");
+        for cap in [5usize, 6, 64] {
+            let mut buf = vec![0x5555 as crate::wchar::WcharT; 64];
+            let n = with_valist(&[42], &[], |ap| unsafe {
+                vswprintf(buf.as_mut_ptr(), cap, f.as_ptr(), ap)
+            });
+            assert_eq!(n, 4, "cap {cap}");
+            assert_eq!(from_wide(&buf), "n=42", "cap {cap}");
+        }
     }
 
     #[test]

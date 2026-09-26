@@ -44,6 +44,15 @@ rung that runs it. Unlike the cwd one, it needs no kernel change.
    one-entry object, and `__open_2` with `O_CREAT`, a two-argument open that
    would create a file with no mode. `__open_2`'s message is glibc's `***
    invalid open call: O_CREAT or O_TMPFILE without mode ***: terminated`.
+6. **The wide-character calls** (added 2026-09-26): five that must abort, each
+   in its own child — `__wmemcpy_chk` one wide character past its object,
+   `__wcscpy_chk` with no room for the terminator, `__wcrtomb_chk` asked to
+   put the three bytes of `€` into two, `__mbstowcs_chk` asked for five
+   characters into four, and `__wctomb_chk` with fewer than `MB_CUR_MAX`
+   bytes — then two in-bounds calls, and two clamps: `__fgetws_chk` reading
+   `abcdef` through a three-character object as `ab`, then `cd`, and
+   `__swprintf_chk` writing output that fits and answering -1 for output that
+   does not.
 
 It prints `[fz] …` progress lines to stdout.
 
@@ -54,9 +63,9 @@ Shaped like `self_test_cfortify`:
 - `pathz_test_elf("ctest-fortify-abort", "ctest-fortify-abort")`.
 - No capability grants. It opens no files: pipes, `fork`, `dup2`, `waitpid`.
 - `EXPECTED = 42`.
-- A budget for fourteen fork + abort + wait round trips; the fixture never spins.
+- A budget for nineteen fork + abort + wait round trips; the fixture never spins.
   Note that each child's `abort()` prints `Aborted` on the console, so the
-  serial log will show fourteen of those. That is expected, not a failure.
+  serial log will show nineteen of those. That is expected, not a failure.
 
 **The legend** (also at the top of `main.c`, if you would rather point there):
 
@@ -74,5 +83,12 @@ Shaped like `self_test_cfortify`:
 - `98`/`99` `__explicit_bzero_chk`, `100`/`101` `__poll_chk`, `102`/`103`
   `__open_2`: did not abort with 134 / wrong message. `104`: one of those
   three children's pipe or fork failed.
+- `106`/`107` `__wmemcpy_chk`, `108`/`109` `__wcscpy_chk`, `110`/`111`
+  `__wcrtomb_chk`, `112`/`113` `__mbstowcs_chk`, `114`/`115` `__wctomb_chk`:
+  did not abort with 134 / wrong message. `116`: one of those five children's
+  pipe or fork failed. `117`: an in-bounds wide call misbehaved. `118`:
+  `__fgetws_chk` did not clamp. `119`/`120`: `__swprintf_chk` wrote output
+  that fits wrongly / did not answer -1 for output that does not, or wrote
+  past its object.
 
 I have not touched `kernel/**`.

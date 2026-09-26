@@ -254,6 +254,9 @@ REPLACEABLE = frozenset(
         # This is the one the coreutils spike caught (5 binaries, 1 duplicate)
         # and the reason CHECK 3 exists -- see the note above CHECK 3.
         "wmempcpy",
+        # added with them 2026-09-26 (lane D): gnulib's wcpcpy/wcpncpy
+        # modules supply these where the libc lacks them, as this one did
+        "wcpcpy", "wcpncpy",
         # stdio-ish
         "getline", "getdelim", "fseeko", "ftello", "vasprintf", "asprintf",
         # stdio_ext.h: gnulib's freadahead/freadptr/fpending/fpurge/fseterr

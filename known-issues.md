@@ -166230,9 +166230,16 @@ The window wakes on a tick today; with a connection thread per peer it wants
 `requests/e-f-wake-an-application-for-its-own-descriptor.md` to stop polling.
 
 ### [E] The screenshot tool's first save can replace a file that took its name a moment earlier -- 2026-09-25
-**Status:** OPEN -- `apps/screenshot/src/main.rs` (`unused_save_path`,
-`write_bmp`). Small, and unreachable in the shipped binary until the
-compositor offers a framebuffer read (`CANNOT_CAPTURE`).
+**Status:** FIXED 2026-09-26 -- `apps/screenshot/src/main.rs`
+(`write_new_file`, `write_first_free`, `save_names`). A new capture now claims
+each name with `safeio::write_new_atomically`, in the same step as it writes
+it: a name taken since the look is passed over like one seen taken, and when
+all 9,999 names are taken the save fails with "every name up to … is in use"
+instead of replacing the first. Saving a capture again over its own file keeps
+`write_atomically`. A folder that cannot be written fails at the first name
+with its own reason. Five tests; `apps/screenshot/mutate.py` (15 rows) covers
+the save path. Still unreachable in the shipped binary until the compositor
+offers a framebuffer read (`CANNOT_CAPTURE`).
 
 **In short:** a new screenshot picks a file name nothing holds, then writes it
 with `safeio::write_atomically`, which replaces whatever is at the name. A file

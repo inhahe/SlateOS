@@ -413,69 +413,107 @@ impl core::fmt::Display for SaveError {
 /// with neither the new image nor the one they already had. A screenshot is
 /// large enough — a 4K capture is ~33 MB — that a short write is a realistic
 /// failure rather than a theoretical one.
+///
+/// This *replaces* whatever is at `path`, which is right for saving a capture
+/// again over the file it already made. A new capture is saved by
+/// [`write_new_bmp`], which never replaces anything.
 pub fn write_bmp(path: &Path, width: u32, height: u32, pixels: &[u32]) -> Result<(), BmpError> {
-    let expected = (width as usize).saturating_mul(height as usize);
-    if pixels.len() != expected {
-        return Err(BmpError::PixelCountMismatch {
-            expected,
-            actual: pixels.len(),
-        });
-    }
-
-    let row_bytes = width
-        .checked_mul(BMP_BYTES_PER_PIXEL)
-        .ok_or(BmpError::DimensionOverflow)?;
-    let pixel_data_size = row_bytes
-        .checked_mul(height)
-        .ok_or(BmpError::DimensionOverflow)?;
-    let header_size = BMP_FILE_HEADER_SIZE + BMP_INFO_HEADER_SIZE;
-    let file_size = header_size
-        .checked_add(pixel_data_size)
-        .ok_or(BmpError::DimensionOverflow)?;
-
-    let data = encode_bmp_bytes(
-        width,
-        height,
-        pixels,
-        file_size,
-        header_size,
-        pixel_data_size,
-    );
+    let data = encode_bmp(width, height, pixels)?;
     safeio::write_atomically(path, &data)?;
     Ok(())
 }
 
-/// A path in `dir` for `filename` that no file already occupies.
+/// [`write_bmp`] for a new capture: written as a new file under `filename` in
+/// `dir`, or under the first free name after it (see [`write_new_file`]),
+/// never over a file already there. Returns the name it took.
+fn write_new_bmp(
+    dir: &Path,
+    filename: &str,
+    width: u32,
+    height: u32,
+    pixels: &[u32],
+) -> Result<PathBuf, BmpError> {
+    let data = encode_bmp(width, height, pixels)?;
+    Ok(write_new_file(dir, filename, &data)?)
+}
+
+/// How many names a new capture tries: its own, then `(2)` to `(9999)`.
+const SAVE_NAME_TRIES: u32 = 10_000;
+
+/// The names a new capture called `filename` may take in `dir`, in the order
+/// they are tried: the name itself, then `stem (2).ext`, `stem (3).ext` and on.
 ///
-/// Every save target is chosen through this, because
+/// A new capture needs more than its own name because
 /// [`Capture::default_filename`] is derived from the capture's timestamp and
 /// so is *not* unique: two captures taken in the same second produce the same
 /// name, and `Capture::new`'s placeholder timestamp makes every capture
-/// produce the same name. Writing to the name as given therefore destroys the
-/// earlier screenshot and reports "saved" for both.
+/// produce the same name.
 ///
 /// The suffix goes before the extension (`screenshot_… (2).bmp`) so the file
-/// stays a `.bmp` to anything that dispatches on extension.
-fn unused_save_path(dir: &Path, filename: &str) -> PathBuf {
-    let candidate = dir.join(filename);
-    if !candidate.exists() {
-        return candidate;
-    }
+/// stays a `.bmp` to anything that dispatches on extension. Bounded, so that
+/// a folder in which every name reads as taken cannot hold a save forever.
+fn save_names(dir: &Path, filename: &str) -> impl Iterator<Item = PathBuf> {
     let (stem, ext) = match filename.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
-        _ => (filename, String::new()),
+        Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), format!(".{ext}")),
+        _ => (filename.to_string(), String::new()),
     };
-    // Bounded: an unbounded search would spin forever on a directory that
-    // cannot be read. Falling back to the plain name after the bound is the
-    // same behaviour as before this function existed, and by then something is
-    // wrong that renaming cannot fix.
-    for n in 2..10_000u32 {
-        let candidate = dir.join(format!("{stem} ({n}){ext}"));
-        if !candidate.exists() {
-            return candidate;
+    let first = dir.join(filename);
+    let dir = dir.to_path_buf();
+    std::iter::once(first)
+        .chain((2..SAVE_NAME_TRIES).map(move |n| dir.join(format!("{stem} ({n}){ext}"))))
+}
+
+/// Write `data` as a new file in `dir` under `filename`, or under the first
+/// of [`save_names`] that nothing holds, and say which name it took.
+///
+/// Each name is claimed by [`safeio::write_new_atomically`], which refuses a
+/// name in use in the same step as it takes it. Finding a free name and then
+/// writing it -- what this used to do -- left a moment between the two in
+/// which another program's new file could arrive under the name and be
+/// replaced, since an atomic write renames over whatever is there; and once
+/// ten thousand names were taken it wrote over the first on purpose. Now a
+/// name found taken at the claim is passed over like one found taken by the
+/// look, and when every name is taken the save fails.
+///
+/// # Errors
+///
+/// [`std::io::ErrorKind::AlreadyExists`] when every name is taken. Any other
+/// error comes from the first name the write could not claim for another
+/// reason: a folder that is gone or read-only fails at once, with its own
+/// reason, not ten thousand times over.
+fn write_new_file(dir: &Path, filename: &str, data: &[u8]) -> std::io::Result<PathBuf> {
+    write_first_free(save_names(dir, filename), data, |name| {
+        std::fs::symlink_metadata(name).is_ok()
+    })
+}
+
+/// [`write_new_file`] over any list of names, with the look given, so that a
+/// test can stage a name taken after the look and before the claim.
+fn write_first_free(
+    names: impl IntoIterator<Item = PathBuf>,
+    data: &[u8],
+    taken: impl Fn(&Path) -> bool,
+) -> std::io::Result<PathBuf> {
+    let mut last = None;
+    for name in names {
+        // A name seen to be taken is passed over without writing anything:
+        // the claim would refuse it too, but only after writing the whole
+        // picture -- tens of megabytes -- to a temporary.
+        if !taken(&name) {
+            match safeio::write_new_atomically(&name, data) {
+                Ok(()) => return Ok(name),
+                // Taken since the look: on to the next name.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
         }
+        last = Some(name);
     }
-    dir.join(filename)
+    let why = match last {
+        Some(last) => format!("every name up to {} is in use", last.display()),
+        None => String::from("there is no name to save under"),
+    };
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, why))
 }
 
 /// Encode pixel data to an in-memory BMP byte buffer.
@@ -515,8 +553,8 @@ pub fn encode_bmp(width: u32, height: u32, pixels: &[u32]) -> Result<Vec<u8>, Bm
 ///
 /// Returns the bytes, not a `Result`: every way this encoding can fail — an
 /// overflowing file size, a pixel buffer that does not match the dimensions —
-/// is checked by the callers before they get here, so a `Result` that is always
-/// `Ok` made both of them write `?` for nothing and hid which of their steps
+/// is checked by [`encode_bmp`] before it gets here, so a `Result` that is
+/// always `Ok` would make it write `?` for nothing and hide which of its steps
 /// can really fail.
 fn encode_bmp_bytes(
     width: u32,
@@ -1038,13 +1076,16 @@ impl ScreenshotApp {
 
         // Save to file if that is the default action.
         if self.settings.default_action == PostCaptureAction::SaveToFile {
-            let filename = capture.default_filename();
-            let save_path = unused_save_path(&self.settings.save_directory, &filename);
-            let outcome = write_bmp(&save_path, capture.width, capture.height, &capture.pixels)
-                .map(|()| save_path.clone())
-                .map_err(SaveError::Bmp);
-            if outcome.is_ok() {
-                self.current_saved_path = Some(save_path);
+            let outcome = write_new_bmp(
+                &self.settings.save_directory,
+                &capture.default_filename(),
+                capture.width,
+                capture.height,
+                &capture.pixels,
+            )
+            .map_err(SaveError::Bmp);
+            if let Ok(path) = &outcome {
+                self.current_saved_path = Some(path.clone());
             }
             self.notify_save(&outcome);
         }
@@ -1072,21 +1113,31 @@ impl ScreenshotApp {
     /// arrow does not stack the first one twice.
     ///
     /// Saving the same capture again rewrites the file this capture already
-    /// produced. Saving a capture for the first time picks a name no file
-    /// holds — see [`unused_save_path`] for why the timestamp-derived name
-    /// cannot be trusted to be free.
+    /// produced. Saving a capture for the first time writes a new file under
+    /// a name no file holds, and never over one — see [`write_new_file`] for
+    /// how, and [`save_names`] for why the timestamp-derived name cannot be
+    /// trusted to be free.
     pub fn save_current(&mut self) -> Result<PathBuf, SaveError> {
         let capture = match &self.current_capture {
             Some(c) => c,
             None => return Err(SaveError::NoCapture),
         };
 
-        let save_path = match &self.current_saved_path {
-            Some(existing) => existing.clone(),
-            None => unused_save_path(&self.settings.save_directory, &capture.default_filename()),
-        };
         let pixels = flatten_annotations(capture, &self.annotations);
-        write_bmp(&save_path, capture.width, capture.height, &pixels)?;
+        let save_path = match &self.current_saved_path {
+            // Its own file: replaced, which is what saving again means.
+            Some(existing) => {
+                write_bmp(existing, capture.width, capture.height, &pixels)?;
+                existing.clone()
+            }
+            None => write_new_bmp(
+                &self.settings.save_directory,
+                &capture.default_filename(),
+                capture.width,
+                capture.height,
+                &pixels,
+            )?,
+        };
         // Recorded only on success: a failed first save must not claim a name
         // it did not manage to create, or the retry would rewrite a file that
         // is not there while a *different* capture keeps the name it wanted.
@@ -2907,14 +2958,123 @@ mod tests {
         let scratch = temp_dir("ext");
         let dir = scratch.dir().to_path_buf();
         std::fs::write(dir.join("shot.bmp"), b"taken").expect("occupy");
-        let picked = unused_save_path(&dir, "shot.bmp");
+        let picked = write_new_file(&dir, "shot.bmp", b"one").expect("save");
         assert_eq!(picked, dir.join("shot (2).bmp"));
-
-        std::fs::write(dir.join("shot (2).bmp"), b"taken too").expect("occupy");
-        assert_eq!(unused_save_path(&dir, "shot.bmp"), dir.join("shot (3).bmp"));
+        let next = write_new_file(&dir, "shot.bmp", b"two").expect("save");
+        assert_eq!(next, dir.join("shot (3).bmp"));
 
         // A free name is used as-is -- no suffix on the common case.
-        assert_eq!(unused_save_path(&dir, "fresh.bmp"), dir.join("fresh.bmp"));
+        let fresh = write_new_file(&dir, "fresh.bmp", b"three").expect("save");
+        assert_eq!(fresh, dir.join("fresh.bmp"));
+
+        for (name, held) in [
+            ("shot.bmp", &b"taken"[..]),
+            ("shot (2).bmp", b"one"),
+            ("shot (3).bmp", b"two"),
+            ("fresh.bmp", b"three"),
+        ] {
+            assert_eq!(std::fs::read(dir.join(name)).expect("read"), held, "{name}");
+        }
+    }
+
+    /// The names a new capture tries, in order and how many: the bound is
+    /// what stops a folder in which every name reads as taken from holding a
+    /// save forever.
+    #[test]
+    fn a_new_capture_tries_its_name_then_numbered_ones() {
+        let dir = Path::new("pictures");
+        let names: Vec<PathBuf> = save_names(dir, "shot.bmp").collect();
+        assert_eq!(names.first(), Some(&dir.join("shot.bmp")));
+        assert_eq!(names.get(1), Some(&dir.join("shot (2).bmp")));
+        assert_eq!(names.last(), Some(&dir.join("shot (9999).bmp")));
+        assert_eq!(names.len(), 9_999);
+        // No extension, or nothing before the dot: the number goes last.
+        assert_eq!(save_names(dir, "shot").nth(1), Some(dir.join("shot (2)")));
+        assert_eq!(save_names(dir, ".bmp").nth(1), Some(dir.join(".bmp (2)")));
+        // Only the last dot starts the extension.
+        assert_eq!(
+            save_names(dir, "a.b.bmp").nth(1),
+            Some(dir.join("a.b (2).bmp"))
+        );
+    }
+
+    /// A name another program takes after the look and before the write
+    /// keeps that program's file: the save goes on to the next name.
+    #[test]
+    fn a_name_taken_after_the_look_is_not_written_over() {
+        let scratch = temp_dir("race");
+        let dir = scratch.dir().to_path_buf();
+        std::fs::write(dir.join("shot.bmp"), b"theirs").expect("occupy");
+        // A look that sees nothing: as if their file arrived just after it.
+        let names = [dir.join("shot.bmp"), dir.join("shot (2).bmp")];
+        let picked = write_first_free(names, b"ours", |_| false).expect("save");
+        assert_eq!(picked, dir.join("shot (2).bmp"));
+        assert_eq!(
+            std::fs::read(dir.join("shot.bmp")).expect("read"),
+            b"theirs"
+        );
+        assert_eq!(std::fs::read(&picked).expect("read"), b"ours");
+    }
+
+    /// When every name is taken the save fails, and says why; it does not
+    /// fall back to replacing one of them.
+    #[test]
+    fn every_name_taken_fails_rather_than_replace_one() {
+        let scratch = temp_dir("full");
+        let dir = scratch.dir().to_path_buf();
+        let names = [dir.join("a.bmp"), dir.join("a (2).bmp")];
+        for name in &names {
+            std::fs::write(name, b"theirs").expect("occupy");
+        }
+        // Seen to be taken, and taken since the look.
+        for seen in [true, false] {
+            let err = write_first_free(names.clone(), b"ours", |_| seen)
+                .expect_err("every name is taken");
+            assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists, "{err}");
+            assert!(err.to_string().contains("a (2).bmp"), "{err}");
+        }
+        for name in &names {
+            assert_eq!(std::fs::read(name).expect("read"), b"theirs");
+        }
+        let left = std::fs::read_dir(&dir).expect("list").count();
+        assert_eq!(left, 2, "a temporary was left behind");
+
+        let none =
+            write_first_free(Vec::<PathBuf>::new(), b"ours", |_| false).expect_err("no names");
+        assert_eq!(none.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    /// A folder that cannot be written fails at the first name with its own
+    /// reason -- not as "every name is taken", ten thousand tries later.
+    #[test]
+    fn an_unwritable_folder_fails_at_once_with_its_reason() {
+        let dir = unwritable_dir("at-once");
+        let looked = std::cell::Cell::new(0u32);
+        let err = write_first_free(save_names(&dir, "shot.bmp"), b"ours", |_| {
+            looked.set(looked.get() + 1);
+            false
+        })
+        .expect_err("no folder to write in");
+        assert_ne!(err.kind(), std::io::ErrorKind::AlreadyExists, "{err}");
+        assert_eq!(
+            looked.get(),
+            1,
+            "went on after a failure that was not a name in use"
+        );
+    }
+
+    /// The look is only a shortcut past names seen to be taken: a name it
+    /// sees as taken is never written, not even to find out.
+    #[test]
+    fn a_name_seen_taken_is_passed_over_unwritten() {
+        let scratch = temp_dir("seen");
+        let dir = scratch.dir().to_path_buf();
+        let names = [dir.join("a.bmp"), dir.join("a (2).bmp")];
+        let first = names[0].clone();
+        let picked =
+            write_first_free(names, b"ours", |name| name == first.as_path()).expect("save");
+        assert_eq!(picked, dir.join("a (2).bmp"));
+        assert!(!first.exists(), "a name seen as taken was written");
     }
 
     /// Re-saving the *same* capture updates the file it already made, rather

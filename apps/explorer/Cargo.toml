@@ -46,6 +46,10 @@ ziparchive = { path = "../../ziparchive" }
 # without decoding a sample.
 audiotags = { path = "../audiotags" }
 
+# A video's length, picture size and frame rate, for the video columns --
+# read from its headers; nothing here decodes a frame.
+mediaprobe = { path = "../mediaprobe" }
+
 # The window, the event loop, and the hook that gets thumbnail pixels to the
 # compositor. Without it `main` was a scripted print-only demo: the explorer
 # could lay out a frame but had nowhere to put it and no way to be clicked.

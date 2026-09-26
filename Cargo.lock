@@ -821,6 +821,7 @@ dependencies = [
  "byteread",
  "guitk",
  "imagecodec",
+ "mediaprobe",
  "oswindow",
  "pathcodec",
  "scratchdir",
@@ -3072,6 +3073,10 @@ version = "0.1.0"
 dependencies = [
  "quoting",
 ]
+
+[[package]]
+name = "tararchive"
+version = "0.1.0"
 
 [[package]]
 name = "taskscheduler"

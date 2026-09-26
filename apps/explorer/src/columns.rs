@@ -24,6 +24,7 @@
 //! | [`StandardColumns`] | *(all files)* | Name, Size, Date Modified, Type, Date Created, Attributes |
 //! | [`ImageColumns`] | png, jpg, gif, bmp, webp, ico, tiff, svg | Dimensions, Color Depth, Aspect Ratio |
 //! | [`AudioColumns`] | mp3, wav, flac, ogg | Duration, Bitrate, Sample Rate, Artist, Album, Title |
+//! | [`VideoColumns`] | mp4, m4v, mov, mkv, webm, avi | Duration, Bitrate, Dimensions (shared), Frame Rate |
 //! | [`CodeColumns`] | rs, c, cpp, py, js, ts, ... | Line Count, Language |
 //! | [`ArchiveColumns`] | zip, tar, gz | Compressed Size, Compression Ratio, File Count Inside |
 //!
@@ -102,6 +103,11 @@ impl ColumnId {
     pub const COMPRESSED_SIZE: Self = Self(400);
     pub const COMPRESSION_RATIO: Self = Self(401);
     pub const FILE_COUNT_INSIDE: Self = Self(402);
+
+    // Video. Its length, bitrate and picture size are the Duration, Bitrate
+    // and Dimensions columns music and pictures use: one "Duration" column
+    // for everything that plays, not one per kind of file.
+    pub const FRAME_RATE: Self = Self(500);
 }
 
 // ============================================================================
@@ -256,6 +262,9 @@ pub enum Unit {
     Kbps,
     /// Hertz, shown in kilohertz: a sample rate.
     Hz,
+    /// Thousandths of a frame a second, shown in frames: 23976 is
+    /// "23.976 fps", the rate NTSC film runs at.
+    MilliFps,
 }
 
 impl ColumnValue {
@@ -270,6 +279,7 @@ impl ColumnValue {
             Self::Percentage(frac) => format_percentage(*frac),
             Self::Measure(n, Unit::Kbps) => format!("{} kbps", format_count(*n)),
             Self::Measure(n, Unit::Hz) => format_hz(*n),
+            Self::Measure(n, Unit::MilliFps) => format!("{} fps", format_thousandths(*n)),
             Self::Empty => String::new(),
         }
     }
@@ -419,6 +429,7 @@ impl ColumnManager {
         mgr.register_provider(Box::new(StandardColumns));
         mgr.register_provider(Box::new(ImageColumns));
         mgr.register_provider(Box::new(AudioColumns));
+        mgr.register_provider(Box::new(VideoColumns));
         mgr.register_provider(Box::new(CodeColumns));
         mgr.register_provider(Box::new(ArchiveColumns));
 
@@ -1094,6 +1105,92 @@ impl ColumnProvider for AudioColumns {
 }
 
 // ---------------------------------------------------------------------------
+// Video columns
+// ---------------------------------------------------------------------------
+
+/// Provider for video columns: how long a video plays, its bitrate and its
+/// picture's size -- the Duration, Bitrate and Dimensions columns music and
+/// pictures have -- and its frame rate. Video files had no columns at all.
+pub struct VideoColumns;
+
+impl VideoColumns {
+    /// The shared columns as their own providers define them -- one
+    /// definition each, so a width or a sort set on "Duration" is the same
+    /// column whichever kind of file is in the row -- and Frame Rate.
+    fn make_defs() -> Vec<ColumnDef> {
+        let shared = [ColumnId::DURATION, ColumnId::BITRATE, ColumnId::DIMENSIONS];
+        AudioColumns::make_defs()
+            .into_iter()
+            .chain(ImageColumns::make_defs())
+            .filter(|d| shared.contains(&d.id))
+            .chain(std::iter::once(ColumnDef {
+                id: ColumnId::FRAME_RATE,
+                key: "frame_rate",
+                label: "Frame Rate".to_string(),
+                width: ColumnWidth::Fixed(80.0),
+                alignment: Alignment::Right,
+                sortable: true,
+                sort_order: SortOrder::None,
+                visible: false,
+                category: ColumnCategory::Video,
+            }))
+            .collect()
+    }
+}
+
+impl ColumnProvider for VideoColumns {
+    fn columns(&self) -> &[ColumnDef] {
+        static COLS: std::sync::OnceLock<Vec<ColumnDef>> = std::sync::OnceLock::new();
+        COLS.get_or_init(VideoColumns::make_defs)
+    }
+
+    /// What `mediaprobe` reads from the file's headers -- the readers the
+    /// video player uses: the length in whole seconds, cut as the audio
+    /// column cuts it; the picture's size and frame rate; and the bitrate
+    /// the whole file averages, its size over its length. A cell the file
+    /// does not say is blank.
+    fn value(&self, path: &str, column_id: ColumnId) -> ColumnValue {
+        static FACTS: OnceLock<FactCache<Option<VideoFacts>>> = OnceLock::new();
+        let Some((probe, size)) = FACTS
+            .get_or_init(FactCache::new)
+            .get(path, video_facts)
+            .flatten()
+        else {
+            return ColumnValue::Empty;
+        };
+        let picture = probe.preferred(mediaprobe::Kind::Video);
+        match column_id {
+            ColumnId::DURATION => probe
+                .duration_secs
+                .and_then(whole_seconds)
+                .map_or(ColumnValue::Empty, ColumnValue::Duration),
+            ColumnId::BITRATE => probe
+                .duration_secs
+                .and_then(|secs| average_kbps(size, secs))
+                .map_or(ColumnValue::Empty, |kbps| {
+                    ColumnValue::Measure(kbps, Unit::Kbps)
+                }),
+            ColumnId::DIMENSIONS => picture
+                .and_then(|t| Some((t.width?, t.height?)))
+                .map_or(ColumnValue::Empty, |(w, h)| {
+                    ColumnValue::Text(format!("{w} \u{00d7} {h}"))
+                }),
+            ColumnId::FRAME_RATE => picture
+                .and_then(|t| t.frame_rate)
+                .and_then(milli)
+                .map_or(ColumnValue::Empty, |n| {
+                    ColumnValue::Measure(n, Unit::MilliFps)
+                }),
+            _ => ColumnValue::Empty,
+        }
+    }
+
+    fn supported_extensions(&self) -> &[&str] {
+        &["mp4", "m4v", "mov", "mkv", "webm", "avi"]
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Code columns
 // ---------------------------------------------------------------------------
 
@@ -1373,6 +1470,39 @@ fn image_size(path: &str) -> Option<(u32, u32)> {
 
 /// What an audio file says about itself: how it plays, and its tags.
 type AudioFacts = (audiotags::AudioInfo, audiotags::Tags);
+
+/// What a video file says about itself, and its size in bytes.
+type VideoFacts = (mediaprobe::Probe, u64);
+
+/// A video's facts, or `None` when it cannot be read -- a blank row, as for
+/// [`audio_facts`].
+fn video_facts(path: &str) -> Option<VideoFacts> {
+    let path = std::path::Path::new(path);
+    let size = std::fs::metadata(path).ok()?.len();
+    Some((mediaprobe::probe_path(path).ok()?, size))
+}
+
+/// `bytes` over `secs` in kilobits a second, to the nearest.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a file's size in bits over its length is a small positive number, checked finite"
+)]
+fn average_kbps(bytes: u64, secs: f64) -> Option<u64> {
+    let kbps = bytes as f64 * 8.0 / secs / 1000.0;
+    (kbps.is_finite() && kbps >= 0.0).then_some(kbps.round() as u64)
+}
+
+/// A rate in thousandths, to the nearest: 23.976 is 23976.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "checked finite and positive first, and `as` saturates"
+)]
+fn milli(rate: f64) -> Option<u64> {
+    (rate.is_finite() && rate > 0.0).then_some((rate * 1000.0).round() as u64)
+}
 
 /// The file's facts, or `None` when it cannot be read. A file that cannot be
 /// opened is a row whose audio cells are blank -- the same as one whose
@@ -1858,16 +1988,18 @@ fn format_hz(hz: u64) -> String {
     if hz < 1000 {
         return format!("{hz} Hz");
     }
-    let (whole, part) = (hz / 1000, hz % 1000);
+    format!("{} kHz", format_thousandths(hz))
+}
+
+/// Thousandths as the whole they make, exactly: 44100 is "44.1", 25000 "25",
+/// 23976 "23.976".
+fn format_thousandths(n: u64) -> String {
+    let (whole, part) = (n / 1000, n % 1000);
     if part == 0 {
-        format!("{} kHz", format_count(whole))
+        format_count(whole)
     } else {
         let digits = format!("{part:03}");
-        format!(
-            "{}.{} kHz",
-            format_count(whole),
-            digits.trim_end_matches('0')
-        )
+        format!("{}.{}", format_count(whole), digits.trim_end_matches('0'))
     }
 }
 
@@ -3208,6 +3340,81 @@ mod tests {
             text("After, retagged"),
             "the tags of the file that was there before were shown"
         );
+    }
+
+    /// A video's cells are what its headers say, in the columns music and
+    /// pictures already have; video files had no columns at all.
+    #[test]
+    fn a_video_shows_its_length_size_rate_and_bitrate() {
+        let dir = Scratch::new("video");
+        let mgr = ColumnManager::with_defaults();
+        let bytes = mediaprobe::testing::mp4(1920, 1080, 90, 25);
+        let film = dir.file("film.mp4", &bytes);
+        assert_eq!(
+            mgr.get_value(&film, ColumnId::DURATION),
+            ColumnValue::Duration(90)
+        );
+        assert_eq!(
+            mgr.get_value(&film, ColumnId::DIMENSIONS),
+            text("1920 \u{00d7} 1080")
+        );
+        assert_eq!(
+            mgr.get_value(&film, ColumnId::FRAME_RATE),
+            ColumnValue::Measure(25_000, Unit::MilliFps)
+        );
+        let kbps = (bytes.len() as f64 * 8.0 / 90.0 / 1000.0).round() as u64;
+        assert_eq!(
+            mgr.get_value(&film, ColumnId::BITRATE),
+            ColumnValue::Measure(kbps, Unit::Kbps)
+        );
+        let clip = dir.file("clip.webm", &mediaprobe::testing::webm(640, 360, 12, 30));
+        assert_eq!(
+            mgr.get_value(&clip, ColumnId::DURATION),
+            ColumnValue::Duration(12)
+        );
+        assert_eq!(
+            mgr.get_value(&clip, ColumnId::DIMENSIONS),
+            text("640 \u{00d7} 360")
+        );
+        let old = dir.file("old.avi", &mediaprobe::testing::avi(320, 240, 3, 15));
+        assert_eq!(
+            mgr.get_value(&old, ColumnId::FRAME_RATE),
+            ColumnValue::Measure(15_000, Unit::MilliFps)
+        );
+        // Not a video: blank, not a guess -- and the audio columns a song has
+        // are still the song's.
+        let fake = dir.file("fake.mkv", b"not a video");
+        for id in [
+            ColumnId::DURATION,
+            ColumnId::DIMENSIONS,
+            ColumnId::FRAME_RATE,
+        ] {
+            assert_eq!(mgr.get_value(&fake, id), ColumnValue::Empty, "{id:?}");
+        }
+        let song = dir.file("song.mp3", &audiotags::testing::mp3(2303, &[]));
+        assert_eq!(
+            mgr.get_value(&song, ColumnId::DURATION),
+            ColumnValue::Duration(60)
+        );
+        // One Duration column, whatever plays.
+        let durations = mgr
+            .all_column_defs()
+            .into_iter()
+            .filter(|d| d.label == "Duration")
+            .count();
+        assert_eq!(durations, 1);
+        assert_eq!(
+            ColumnValue::Measure(23_976, Unit::MilliFps).display(),
+            "23.976 fps"
+        );
+        assert_eq!(
+            ColumnValue::Measure(30_000, Unit::MilliFps).display(),
+            "30 fps"
+        );
+        assert_eq!(milli(29.97), Some(29_970));
+        assert_eq!(milli(f64::NAN), None);
+        assert_eq!(average_kbps(1_000_000, 8.0), Some(1000));
+        assert_eq!(average_kbps(1, 0.0), None, "no length, no rate");
     }
 
     #[test]

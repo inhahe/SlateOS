@@ -6984,7 +6984,6 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 ///      The per-subpage fault resolver zero-fills it on touch and shares the
 ///      straddled 16 KiB frame with the adjacent file-backed data segment.
 fn linux_anon_mmap_fixed(pid: u64, addr: u64, length: u64, prot: u64) -> SyscallResult {
-    use crate::mm::frame::FRAME_SIZE;
     use crate::mm::page_table::HW_PAGE_SIZE;
     use crate::mm::vma::{Vma, VmaKind};
 
@@ -6992,7 +6991,6 @@ fn linux_anon_mmap_fixed(pid: u64, addr: u64, length: u64, prot: u64) -> Syscall
         return linux_err(errno::EINVAL);
     }
     let hw_page = HW_PAGE_SIZE as u64;
-    let frame_size = FRAME_SIZE as u64;
 
     // MAP_FIXED address must be (4 KiB) page-aligned — Linux: EINVAL otherwise.
     if addr & hw_page.wrapping_sub(1) != 0 {
@@ -7030,7 +7028,7 @@ fn linux_anon_mmap_fixed(pid: u64, addr: u64, length: u64, prot: u64) -> Syscall
     }
 
     // Clear the range (4 KiB-granular unmap + VMA split/remove).
-    unmap_user_range(pml4, base, end, frame_size);
+    crate::mm::user::unmap_user_range(pml4, base, end);
     if pcb::remove_vma_range(pid, base, end).is_err() {
         pcb::linux_as_release(pid, length_aligned);
         return linux_err(errno::ENOMEM);
@@ -7705,7 +7703,7 @@ fn sys_madvise(args: &SyscallArgs) -> SyscallResult {
 ///
 /// The VMA bookkeeping and the `RLIMIT_AS` reservation are deliberately left
 /// intact: `MADV_DONTNEED` reclaims resident frames, it does not unmap the
-/// region. [`unmap_user_range`] is refcount-aware (a CoW-shared frame is
+/// region. [`crate::mm::user::unmap_user_range`] is refcount-aware (a CoW-shared frame is
 /// decremented rather than hard-freed) and TLB-invalidates each page it
 /// clears, so there is no stale-mapping window onto a freed/reused frame.
 fn madvise_reclaim(pid: u64, pml4: u64, start: u64, end: u64) {
@@ -7735,7 +7733,7 @@ fn madvise_reclaim(pid: u64, pml4: u64, start: u64, end: u64) {
         let lo = vma.start.max(aligned_start);
         let hi = vma.end.min(aligned_end);
         if lo < hi {
-            unmap_user_range(pml4, lo, hi, frame_size);
+            crate::mm::user::unmap_user_range(pml4, lo, hi);
         }
     }
 }
@@ -7753,7 +7751,7 @@ fn madvise_reclaim(pid: u64, pml4: u64, start: u64, end: u64) {
 ///    that rounds to zero (incl. `len == 0`) → `EINVAL`; address-arithmetic
 ///    overflow or a range leaving user space → `EINVAL` (Linux `do_vmi_munmap`
 ///    surfaces all of these as `EINVAL`, not `ENOMEM`).
-/// 2. **Unmap each 4 KiB sub-page** via [`unmap_user_range`], which clears the
+/// 2. **Unmap each 4 KiB sub-page** via [`crate::mm::user::unmap_user_range`], which clears the
 ///    PTE at 4 KiB granularity and frees the backing 16 KiB frame only once its
 ///    last sub-page tenant is gone (refcount-aware [`frame::free_frame`]) — so
 ///    a partial unmap that shares a straddling 16 KiB frame with a live
@@ -7770,7 +7768,6 @@ fn madvise_reclaim(pid: u64, pml4: u64, start: u64, end: u64) {
 /// munmap is idempotent: a range with no live mapping unmaps nothing, removes
 /// no VMA, refunds nothing, and still returns success.
 fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
-    use crate::mm::frame::FRAME_SIZE;
     use crate::mm::page_table::{HW_PAGE_SIZE, USER_SPACE_END};
 
     let addr = args.arg0;
@@ -7820,7 +7817,7 @@ fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
 
     // Tear down the page tables at 4 KiB granularity (refcount-aware frame
     // frees; absent sub-pages are skipped, so this is idempotent).
-    unmap_user_range(pml4, addr, end, FRAME_SIZE as u64);
+    crate::mm::user::unmap_user_range(pml4, addr, end);
 
     // VMA bookkeeping: split the covering VMA(s) at the 4 KiB boundaries and
     // drop the [addr, end) slice.  The only error remove_vma_range can return
@@ -7995,7 +7992,7 @@ fn sys_brk(args: &SyscallArgs) -> SyscallResult {
             return unchanged;
         };
         // Unmap + free any faulted frames in the released range.
-        unmap_user_range(pml4, new_top, old_top, frame_size);
+        crate::mm::user::unmap_user_range(pml4, new_top, old_top);
         // Refund the RLIMIT_AS charge for the released span.
         pcb::linux_as_release(pid, old_top.saturating_sub(new_top));
         // Truncate (or drop) the heap VMA to [brk_start, new_top).
@@ -12582,71 +12579,6 @@ fn drm_mmap_dumb(
     SyscallResult::ok(base as i64)
 }
 
-/// Unmap and free every present, allocator-owned frame in the user range
-/// `[start, end)` of `pml4`.
-///
-/// Used by the `MAP_FIXED` file-backed `mmap` path to clear whatever
-/// previously occupied the target span before the overlay (Linux:
-/// `MAP_FIXED` silently replaces existing mappings).  Frames that aren't
-/// present (e.g. a lazy reservation never faulted in) or aren't
-/// allocator-owned (shared/device frames) are skipped.  [`frame::free_frame`]
-/// is refcount-aware, so a CoW-shared reservation frame is decremented rather
-/// than hard-freed.  Each `unmap_frame` performs its own TLB invalidation.
-// Page arithmetic on bounded user addresses; the loop's `checked_add` is the
-// only place an overflow could occur and is handled explicitly.
-#[allow(clippy::arithmetic_side_effects)]
-fn unmap_user_range(pml4: u64, start: u64, end: u64, _frame_size: u64) {
-    use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
-    use crate::mm::page_table::{self, HW_PAGE_SIZE, HW_PAGES_PER_FRAME, VirtAddr};
-
-    let hw = HW_PAGE_SIZE as u64;
-    let frame_mask = FRAME_SIZE as u64 - 1;
-    let mut va = start;
-    while va < end {
-        // Unmap this 4 KiB subpage (skipped if absent).  Walking at 4 KiB
-        // granularity is required because a 16 KiB frame may be shared by
-        // segments with different permissions: unmapping the whole frame
-        // would clobber a sibling segment still in use (and the range may
-        // not be 16 KiB-aligned at either end).
-        //
-        // SAFETY: `pml4` is the live page table for the caller and `va` is a
-        // user address; `unmap_4k` reports an absent mapping via `Err`.
-        if let Ok(phys4k) = unsafe { page_table::unmap_4k(pml4, VirtAddr::new(va)) } {
-            // Invalidate the stale TLB entry for the page we just cleared.
-            crate::tlb::flush_range(va, 1);
-
-            // The 16 KiB physical frame backs up to 4 subpages.  Free it (and
-            // release its single RSS charge) only once its *last* mapped
-            // subpage is gone — a partial unmap leaves the frame owned by the
-            // siblings still mapped into it.
-            let frame_base_va = va & !frame_mask;
-            let mut still_mapped = false;
-            for i in 0..HW_PAGES_PER_FRAME {
-                let sv = frame_base_va + (i as u64) * hw;
-                if page_table::translate(pml4, VirtAddr::new(sv)).is_some() {
-                    still_mapped = true;
-                    break;
-                }
-            }
-            if !still_mapped {
-                crate::mm::accounting::uncharge(pml4, 1);
-                if let Some(pf) = PhysFrame::from_addr(phys4k & !frame_mask) {
-                    if frame::is_allocator_owned(pf) {
-                        // SAFETY: the frame's last subpage was just unmapped
-                        // (no PTE references it) and it is allocator-owned;
-                        // `free_frame` handles the refcount.
-                        let _ = unsafe { frame::free_frame(pf) };
-                    }
-                }
-            }
-        }
-        va = match va.checked_add(hw) {
-            Some(v) => v,
-            None => break,
-        };
-    }
-}
-
 /// Roll back a partial [`linux_file_mmap`]: unmap each frame mapped at
 /// `[base, base + count*frame_size)` and free it back to the allocator.
 ///
@@ -12722,7 +12654,7 @@ fn linux_vma_overlap_bytes(pid: u64, start: u64, end: u64) -> u64 {
 /// `ld.so` first reserves the whole load span (one file-backed
 /// `MAP_PRIVATE`), then overlays each segment with `MAP_FIXED`.  When
 /// `MAP_FIXED` is set we first clear the target range — unmap/free any frames
-/// there ([`unmap_user_range`]) and split/remove the covering VMAs
+/// there ([`crate::mm::user::unmap_user_range`]) and split/remove the covering VMAs
 /// ([`pcb::remove_vma_range`]) — exactly as Linux silently replaces existing
 /// mappings.
 ///
@@ -12851,7 +12783,7 @@ fn linux_file_mmap(
 
         // Clear any existing frames (4 KiB-granular) and split/remove the
         // covering VMAs — MAP_FIXED silently replaces whatever is there.
-        unmap_user_range(pml4, base, end, frame_size);
+        crate::mm::user::unmap_user_range(pml4, base, end);
         if pcb::remove_vma_range(pid, base, end).is_err() {
             pcb::linux_as_release(pid, length_aligned);
             return linux_err(errno::ENOMEM);

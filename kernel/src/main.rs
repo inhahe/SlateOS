@@ -3676,6 +3676,15 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         proc::spawn::self_test_spawn_ex2_abi(),
     );
+    // Native munmap's range checks, from ring 3 with no capability -- the way
+    // the kernel-half hole it closes was reachable. Diagnostic, like the probe
+    // above: a failure still fails the boot test, without halting the rungs
+    // after it.
+    selftest::dispatch_debug(
+        "SYS_MUNMAP argument-ABI (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_munmap_abi(),
+    );
 
     {
         #[inline(never)]
@@ -4440,6 +4449,17 @@ extern "C" fn kernel_main() -> ! {
         "cross-address-space fault-resolution",
         selftest::Severity::Diagnostic,
         mm::user::self_test_cross_as_resolution(),
+    );
+
+    // User-range teardown: the clamp that keeps every munmap-like syscall out
+    // of the kernel half, tried against a real mapped kernel page, and the
+    // last-sub-page rule for freeing. Needs a process, so it runs here with the
+    // test above. Diagnostic, like the ring-3 probe: a failure fails the boot
+    // test without halting the rungs after it.
+    selftest::dispatch_debug(
+        "user-range teardown (kernel half unreachable)",
+        selftest::Severity::Diagnostic,
+        mm::user::self_test_unmap_user_range(),
     );
 
     boot_timing::mark(boot_timing::Milestone::Filesystem);

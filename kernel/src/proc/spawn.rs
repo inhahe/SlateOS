@@ -23979,6 +23979,80 @@ pub fn self_test_spawn_ex2_abi() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of native `SYS_MUNMAP`'s argument checks, run as an attacker
+/// would run them: from a process, holding no capability.
+///
+/// Until 2026-09-26 any process could unmap kernel pages this way and hand
+/// their frames back to the allocator (known-issues.md
+/// `A-NATIVE-MUNMAP-UNMAPPED-KERNEL-PAGES`).  The probe program is
+/// [`elf::build_munmap_abi_test_elf`]; its doc has the table of what each exit
+/// code checks.
+pub fn self_test_munmap_abi() -> KernelResult<()> {
+    serial_println!("[spawn] Running SYS_MUNMAP argument-ABI (ring 3) test...");
+
+    let probe_elf = elf::build_munmap_abi_test_elf();
+
+    let argv: &[&[u8]] = &[b"munmapabi"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "spawn-test-munmap-abi",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&probe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: munmap-abi probe spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Eight syscalls that do not block: the probe exits within its first
+    // slice.  The yields let the scheduler reap it, as the other probes do.
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: munmap ABI (ring 3) — expected Zombie, got {:?}",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: munmap ABI (ring 3) — probe {:#04x} disagreed (exit {:?}); \
+             see build_munmap_abi_test_elf's probe table for what that code checks",
+            exit_code.unwrap_or(-1),
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   SYS_MUNMAP argument ABI (ring 3: 8 probes — kernel half, a range \
+         past USER_SPACE_END, overflow, zero length, misalignment refused; an empty \
+         user range and the last user frame accepted): OK"
+    );
+    Ok(())
+}
+
 /// Path Z end-to-end test: run a **real, prebuilt, dynamically-linked glibc**
 /// Linux binary to completion.
 ///

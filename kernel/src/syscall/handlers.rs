@@ -1195,32 +1195,39 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_MUNMAP` — unmap a region from the calling process's address space.
 ///
 /// `arg0`: virtual address (must be frame-aligned).
-/// `arg1`: size in bytes (rounded up to frame boundary).
+/// `arg1`: size in bytes (rounded up to frame boundary; zero is refused).
 ///
-/// For anonymous mappings, the physical frames are freed back to the
-/// allocator.  For MMIO mappings, only the page table entries are
-/// cleared (the physical memory belongs to the device).
+/// The whole range must lie in the user half; see [`munmap_range`] for every
+/// refusal, all of which happen before anything is touched.  Pages not mapped
+/// are skipped, so unmapping an empty range succeeds.  Frames are freed
+/// refcount-aware once no sub-page of them is mapped (a frame another address
+/// space still maps survives); device (MMIO) frames are unmapped, never freed.
+/// Every VMA the range covers is trimmed or removed.
 ///
 /// Returns: 0 on success.
+///
+/// # History
+///
+/// Until 2026-09-26 this took `arg0`/`arg1` as given: it checked alignment,
+/// then unmapped and freed every frame in the range with no check that the
+/// range was the caller's -- so any process could unmap *kernel* pages (the
+/// kernel half of every PML4 is the shared kernel tables) and hand their
+/// frames back to the allocator, with no capability.  It also freed each frame
+/// before the TLB shootdown, iterated a length the caller chose with unchecked
+/// arithmetic, and dropped only a VMA that began exactly at `arg0`.  Found by
+/// lane D reading the code (known-issues.md
+/// `A-NATIVE-MUNMAP-UNMAPPED-KERNEL-PAGES`).  `SYS_SHM_UNMAP` is this same
+/// function and had the same hole.
 pub fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
-    use crate::mm::frame::{self, FRAME_SIZE};
-    use crate::mm::page_table::{self, VirtAddr};
     use crate::proc::{pcb, thread};
 
-    let vaddr = args.arg0;
-    let size = args.arg1;
+    // Every argument check first: nothing below may run on a range that has
+    // not been proven to be the caller's own half of the address space.
+    let (start, end) = match munmap_range(args.arg0, args.arg1) {
+        Ok(range) => range,
+        Err(e) => return SyscallResult::err(e),
+    };
 
-    if size == 0 {
-        return SyscallResult::ok(0);
-    }
-
-    // Validate alignment.
-    let frame_size = FRAME_SIZE as u64;
-    if !vaddr.is_multiple_of(frame_size) {
-        return SyscallResult::err(KernelError::BadAlignment);
-    }
-
-    // Get the calling process's PML4.
     let task_id = sched::current_task_id();
     let pid = thread::owner_process(task_id).unwrap_or(0);
     let pml4_phys = match pcb::get_pml4(pid) {
@@ -1228,69 +1235,65 @@ pub fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
         _ => return SyscallResult::err(KernelError::NoSuchProcess),
     };
 
-    // Round size up.
-    #[allow(clippy::arithmetic_side_effects)]
-    let size_aligned = (size.saturating_add(frame_size - 1)) & !(frame_size - 1);
-    #[allow(clippy::arithmetic_side_effects)]
-    let num_frames = (size_aligned / frame_size) as usize;
+    // Clears the PTEs, shoots down every TLB once for the range, and only then
+    // frees the frames (see its doc for why that order is the point).
+    let pages = crate::mm::user::unmap_user_range(pml4_phys, start, end);
 
-    let mut unmapped = 0usize;
-
-    for i in 0..num_frames {
-        #[allow(clippy::arithmetic_side_effects)]
-        let va = vaddr + (i as u64) * frame_size;
-
-        // Unmap returns the physical frame that was mapped.
-        // SAFETY: pml4_phys is valid, va was mapped by a previous mmap.
-        match unsafe { page_table::unmap_frame(pml4_phys, VirtAddr::new(va)) } {
-            Ok(phys) => {
-                // Check if this is allocator-owned memory (not MMIO).
-                // MMIO physical addresses are typically above the usable
-                // RAM range.  A proper VMA tracker would record this;
-                // for now, we check if the frame belongs to the allocator.
-                if frame::is_allocator_owned(phys) {
-                    // SAFETY: The frame was allocated by our allocator
-                    // (verified by is_allocator_owned), the mapping was
-                    // just removed so no references remain.
-                    unsafe {
-                        let _ = frame::free_frame(phys);
-                    }
-                }
-                unmapped = unmapped.saturating_add(1);
-            }
-            Err(_) => {
-                // Frame wasn't mapped — skip silently (idempotent).
-            }
-        }
+    // Trim or drop every VMA the range covers, so a later fault in it is a
+    // fault, not a demand-page into memory the process has given back.
+    if let Err(e) = pcb::remove_vma_range(pid, start, end) {
+        return SyscallResult::err(e);
     }
 
-    // Flush the TLB for the whole unmapped range.  CRITICAL: `unmap_frame`
-    // only clears the page-table entries — it does NOT invalidate the TLB
-    // (its doc-comment makes flushing the caller's responsibility).  Without
-    // this flush the CPU keeps a stale VA→frame translation cached, so the
-    // process can continue to read/write a frame that we have already freed
-    // back to the buddy allocator.  Once that frame is recycled (its first
-    // 16 bytes become an intrusive `FreeNode`, or it is remapped elsewhere),
-    // the stale writes corrupt allocator state — observed as a kernel #PF in
-    // `BuddyAllocator::remove_free` dereferencing a user VA that had leaked
-    // into the free list.  Flush before the frames can be reused by anyone.
-    mmap_flush_range(vaddr, vaddr.saturating_add(size_aligned));
-
-    // Also remove any per-process VMA that starts at this address.
-    // Both committed and lazy (MAP_LAZY) mmap regions register a VMA, so
-    // this drops the address-space record alongside the unmapped frames.
-    // If no VMA matches (e.g. a partial unmap that doesn't start on a VMA
-    // boundary), this is a no-op.
-    pcb::remove_vma(pid, vaddr);
-
     serial_println!(
-        "[mmap] Unmapped {} frames at {:#x}..{:#x}",
-        unmapped,
-        vaddr,
-        vaddr + size_aligned
+        "[mmap] Unmapped {} page(s) at {:#x}..{:#x}",
+        pages,
+        start,
+        end
     );
 
     SyscallResult::ok(0)
+}
+
+/// The range a native `munmap(addr, len)` covers, or why it is refused.
+///
+/// Refused, in this order (Linux 6.6's `do_vmi_munmap` order, with the native
+/// ABI's own alignment error), before anything is touched:
+///
+/// | input | error |
+/// |---|---|
+/// | `addr` not 16 KiB-aligned | `BadAlignment` |
+/// | `len == 0` | `InvalidArgument` (POSIX: EINVAL) |
+/// | `len` rounded up to a frame overflows | `InvalidArgument` |
+/// | `addr + len` overflows | `InvalidArgument` |
+/// | any byte at or above `USER_SPACE_END` | `InvalidArgument` |
+///
+/// Otherwise `(addr, addr + len rounded up to a frame)`, wholly in the user
+/// half.  `len == 0` used to succeed doing nothing; POSIX and Linux both say
+/// EINVAL, and lane D asked for the same when it found the kernel-half hole.
+pub(crate) fn munmap_range(addr: u64, len: u64) -> Result<(u64, u64), KernelError> {
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::USER_SPACE_END;
+
+    let frame_size = FRAME_SIZE as u64;
+    let mask = frame_size.wrapping_sub(1);
+    if addr & mask != 0 {
+        return Err(KernelError::BadAlignment);
+    }
+    if len == 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    let len_aligned = len
+        .checked_add(mask)
+        .map(|v| v & !mask)
+        .ok_or(KernelError::InvalidArgument)?;
+    let end = addr
+        .checked_add(len_aligned)
+        .ok_or(KernelError::InvalidArgument)?;
+    if addr >= USER_SPACE_END || end > USER_SPACE_END {
+        return Err(KernelError::InvalidArgument);
+    }
+    Ok((addr, end))
 }
 
 /// `mprotect(addr, len, prot)` — native ABI (`SYS_MPROTECT` = 22).

@@ -7094,6 +7094,147 @@ pub fn build_spawn_ex2_abi_test_elf() -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Build the ring-3 probe for native `SYS_MUNMAP`'s argument checks.
+///
+/// Until 2026-09-26 `sys_munmap` unmapped and freed whatever canonical range a
+/// process named, kernel half included (known-issues.md
+/// `A-NATIVE-MUNMAP-UNMAPPED-KERNEL-PAGES`).  Only a ring-3 caller exercises
+/// that path as an attacker would -- the in-kernel tests cannot, because the
+/// handler resolves *the calling process* -- so this program issues the calls
+/// itself and exits with the code of the first one whose result disagrees.
+/// `exit(0)` means every probe agreed.
+///
+/// # Why no probe names a *mapped* kernel page
+///
+/// The kernel-half probe uses an address in the hole between the KASAN shadow
+/// and kernel text (`0xFFFF_E800_0000_0000`), which no region maps.  Against
+/// the old code that call returned `0` -- "unmapped nothing, success" -- so the
+/// probe still fails loudly if the check regresses, without the regression
+/// unmapping a kernel stack in the process of being detected.  The in-kernel
+/// half, `mm::user::self_test_unmap_user_range`, is the one that puts a real
+/// mapped kernel page in front of the teardown.
+///
+/// # Probes
+///
+/// | Code | `addr` | `len` | Expect | Proves |
+/// |---|---|---|---|---|
+/// | `0x31` | `0xFFFF_E800_0000_0000` | `0x4000` | `-3` | the kernel half is refused (was `0`) |
+/// | `0x32` | `0x7FFF_FFFF_C000` | `0x8000` | `-3` | a range that runs past `USER_SPACE_END` is refused whole |
+/// | `0x33` | `0xFFFF_FFFF_FFFF_C000` | `0x8000` | `-3` | `addr + len` overflowing is refused |
+/// | `0x34` | `0x30_0000_0000` | `u64::MAX` | `-3` | `len` rounding up overflowing is refused |
+/// | `0x35` | `0x30_0000_0000` | `0` | `-3` | a zero length is EINVAL, as POSIX says (was `0`) |
+/// | `0x36` | `0x30_0000_1000` | `0x4000` | `-103` | a start not on a 16 KiB frame is `BadAlignment` |
+/// | `0x37` | `0x30_0000_0000` | `0x4000` | `0` | control: an unmapped user range is accepted, and unmaps nothing |
+/// | `0x38` | `0x7FFF_FFFF_C000` | `0x4000` | `0` | control: the last user frame, ending exactly at `USER_SPACE_END`, is accepted |
+///
+/// The two controls are what make the refusals mean something: a handler that
+/// refused *everything* would pass `0x31`-`0x36` too.  `0x38` pins the
+/// boundary -- an off-by-one in the range check fails it.  (It sits above
+/// `USER_STACK_TOP`, `0x7FFF_FFFF_0000`, so nothing is mapped there to lose.)
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_munmap_abi_test_elf() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120; // 64 + 56
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    /// Native `SYS_MUNMAP` (`syscall::number`).
+    const SYS_MUNMAP: u32 = 21;
+    /// `KernelError::InvalidArgument` as it arrives in `rax`.
+    const EINVAL: i32 = -3;
+    /// `KernelError::BadAlignment` as it arrives in `rax`.
+    const EALIGN: i32 = -103;
+    /// A canonical user address that is never mapped in a fresh process.
+    const UNMAPPED_USER: u64 = 0x0000_0030_0000_0000;
+    /// The last 16 KiB frame of the user half.
+    const LAST_USER_FRAME: u64 = 0x0000_7FFF_FFFF_C000;
+    /// Canonical, kernel half, and in no kernel region (between the KASAN
+    /// shadow's end at `0xFFFF_E000_0000_0000` and kernel text).
+    const KERNEL_HOLE: u64 = 0xFFFF_E800_0000_0000;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    /// `munmap(addr, len)`; if `rax != expect`, `exit(fail)` on the spot.
+    fn probe(code: &mut alloc::vec::Vec<u8>, addr: u64, len: u64, expect: i32, fail: u32) {
+        code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, addr
+        code.extend_from_slice(&addr.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0xBE]); // movabs rsi, len
+        code.extend_from_slice(&len.to_le_bytes());
+        code.push(0xB8); // mov eax, SYS_MUNMAP
+        code.extend_from_slice(&SYS_MUNMAP.to_le_bytes());
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+        code.extend_from_slice(&[0x48, 0x3D]); // cmp rax, imm32 (sign-extended)
+        code.extend_from_slice(&(expect as u32).to_le_bytes());
+        code.extend_from_slice(&[0x74, 0x0D]); // je +13 — over the exit block
+        code.push(0xBF); // mov edi, <fail>
+        code.extend_from_slice(&fail.to_le_bytes());
+        code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, SYS_EXIT
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+        code.push(0xCC); // int3 — exit does not return
+    }
+
+    probe(&mut code, KERNEL_HOLE, 0x4000, EINVAL, 0x31);
+    probe(&mut code, LAST_USER_FRAME, 0x8000, EINVAL, 0x32);
+    probe(&mut code, 0xFFFF_FFFF_FFFF_C000, 0x8000, EINVAL, 0x33);
+    probe(&mut code, UNMAPPED_USER, u64::MAX, EINVAL, 0x34);
+    probe(&mut code, UNMAPPED_USER, 0, EINVAL, 0x35);
+    probe(&mut code, UNMAPPED_USER + 0x1000, 0x4000, EALIGN, 0x36);
+    probe(&mut code, UNMAPPED_USER, 0x4000, 0, 0x37);
+    probe(&mut code, LAST_USER_FRAME, 0x4000, 0, 0x38);
+
+    // --- every probe agreed -------------------------------------------------
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, SYS_EXIT
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.push(0xCC); // int3
+
+    // --- file image ---------------------------------------------------------
+    let code_len = code.len();
+    let file_size = code_offset as usize + code_len;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0); // e_shnum
+    write_u16(&mut buf, 62, 0); // e_shstrndx
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset); // p_offset
+    write_u64(&mut buf, ph + 16, load_vaddr); // p_vaddr
+    write_u64(&mut buf, ph + 24, 0); // p_paddr
+    write_u64(&mut buf, ph + 32, code_len as u64); // p_filesz
+    write_u64(&mut buf, ph + 40, code_len as u64); // p_memsz
+    write_u64(&mut buf, ph + 48, 0x1000); // p_align
+
+    buf[code_offset as usize..file_size].copy_from_slice(&code);
+
+    buf
+}
+
 /// Build a test ELF for SEH: exception handler catches fault and exits.
 ///
 /// The ELF contains two code regions:

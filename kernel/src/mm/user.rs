@@ -1218,6 +1218,102 @@ pub fn write_user_items<T: Copy>(user_dst: u64, items: &[T]) -> KernelResult<()>
 }
 
 // ---------------------------------------------------------------------------
+// Unmapping user memory
+// ---------------------------------------------------------------------------
+
+/// Unmap `[start, end)` from the **user half** of `pml4`, and free each
+/// backing frame once its last mapped sub-page is gone.
+///
+/// Every syscall that tears down part of a user address space comes through
+/// here -- native `munmap`/`shm_unmap`, and the Linux ABI's `munmap`, `brk`
+/// shrink, `MADV_DONTNEED`, and anonymous and file `MAP_FIXED` replacement --
+/// so the two properties below hold for all of them at once rather than at
+/// each caller.
+///
+/// # Only the user half, whatever the caller passes
+///
+/// The range is clamped to `[0, USER_SPACE_END)` before anything is touched.
+/// The kernel half of every PML4 is the *shared* kernel page tables: a
+/// kernel-half address unmapped "from a process" is unmapped from the kernel
+/// and every process at once, and its frame returned to the allocator while the
+/// kernel still uses it.  Until 2026-09-26 native `SYS_MUNMAP` did exactly that
+/// for any address a process chose, with no capability
+/// (known-issues.md `A-NATIVE-MUNMAP-UNMAPPED-KERNEL-PAGES`).  Callers validate
+/// their arguments first and must keep doing so -- the clamp is the second
+/// line, so the next caller that forgets cannot reach the kernel half either.
+///
+/// # No frame is freed while a TLB can still reach it
+///
+/// Cleared entries are collected in a [`crate::mm::tlb_gather::TlbGather`]:
+/// one shootdown covers the whole range (a full flush past its threshold), and
+/// only after it do the frames go back to the allocator.  Freeing first --
+/// which native `munmap` did -- leaves a window in which another CPU running a
+/// thread of this process writes through its stale TLB entry into a frame
+/// that already belongs to someone else.  Batching also replaces the
+/// one-IPI-per-4 KiB-page flushes the Linux path used to make.
+///
+/// # Granularity
+///
+/// 4 KiB: a 16 KiB frame can be shared by neighbouring mappings with different
+/// permissions, and the range need not be frame-aligned at either end, so a
+/// frame is freed (and its RSS charge released) only when no sub-page of it is
+/// still mapped.  Frames the allocator does not own (MMIO) are unmapped but
+/// never freed.  `free_frame` is refcount-aware, so a frame still mapped by
+/// another address space (CoW, shared memory) survives.
+///
+/// Returns the number of 4 KiB pages that were mapped and are now unmapped;
+/// absent pages are skipped, so the call is idempotent.
+pub fn unmap_user_range(pml4: u64, start: u64, end: u64) -> usize {
+    use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
+    use crate::mm::tlb_gather::TlbGather;
+    use page_table::{HW_PAGE_SIZE, HW_PAGES_PER_FRAME};
+
+    let end = end.min(USER_SPACE_END);
+    if start >= end {
+        return 0;
+    }
+    let hw = HW_PAGE_SIZE as u64;
+    let frame_mask = (FRAME_SIZE as u64).wrapping_sub(1);
+    let mut gather = TlbGather::new();
+    let mut unmapped = 0usize;
+    let mut va = start & !(hw.wrapping_sub(1));
+    while va < end {
+        // SAFETY: `pml4` is the caller's live page table and `va` is below
+        // USER_SPACE_END (clamped above), so this never touches the shared
+        // kernel half.  `unmap_4k` reports an absent page as `Err`.  The TLB
+        // is invalidated by `gather` before any frame it held is freed.
+        if let Ok(phys4k) = unsafe { page_table::unmap_4k(pml4, VirtAddr::new(va)) } {
+            unmapped = unmapped.saturating_add(1);
+            let frame_va = va & !frame_mask;
+            let still_mapped = (0..HW_PAGES_PER_FRAME).any(|i| {
+                let sibling = frame_va.saturating_add((i as u64).saturating_mul(hw));
+                page_table::translate(pml4, VirtAddr::new(sibling)).is_some()
+            });
+            let frame = PhysFrame::from_addr(phys4k & !frame_mask);
+            match frame {
+                Some(pf) if !still_mapped && frame::is_allocator_owned(pf) => {
+                    crate::mm::accounting::uncharge(pml4, 1);
+                    gather.add(frame_va, pf.addr());
+                }
+                _ => {
+                    if !still_mapped {
+                        // Device memory: its mapping goes, the memory stays.
+                        crate::mm::accounting::uncharge(pml4, 1);
+                    }
+                    gather.add_flush_only(va);
+                }
+            }
+        }
+        va = match va.checked_add(hw) {
+            Some(next) => next,
+            None => break,
+        };
+    }
+    gather.finish();
+    unmapped
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -1405,6 +1501,172 @@ pub fn self_test_cross_as_resolution() -> KernelResult<()> {
 
     result?;
     crate::serial_println!("[user] Cross-address-space fault-resolution self-test PASSED");
+    Ok(())
+}
+
+/// Self-test: user-range teardown never reaches the kernel half, frees a frame
+/// only when its last sub-page goes, and native `munmap` refuses every range
+/// that is not wholly the caller's.
+///
+/// The kernel-half case is tested against a **real mapped kernel page** -- a
+/// `vmalloc` allocation, looked up in the kernel's own page table -- which the
+/// ring-3 probe (`proc::elf::build_munmap_abi_test_elf`) deliberately avoids.
+/// If the clamp in [`unmap_user_range`] regresses, what this test loses is its
+/// own scratch page, and it says so, rather than a kernel stack.
+pub fn self_test_unmap_user_range() -> KernelResult<()> {
+    use crate::proc::pcb;
+
+    crate::serial_println!("[user] Running user-range teardown self-test...");
+
+    let target = pcb::create("user-unmap-target", 0);
+    let result = unmap_user_range_tests(target);
+    pcb::destroy(target);
+
+    result?;
+    crate::serial_println!(
+        "[user]   unmap_user_range: a mapped kernel page (vmalloc) survives a range that \
+         names it; frames go only with their last sub-page; munmap refuses the kernel half, \
+         overflow, zero length and misalignment, and accepts the last user frame: OK"
+    );
+    Ok(())
+}
+
+/// Body of [`self_test_unmap_user_range`], split out so the caller can destroy
+/// the throwaway process on every exit path.
+fn unmap_user_range_tests(target: crate::proc::pcb::ProcessId) -> KernelResult<()> {
+    use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
+    use crate::mm::vma::{Vma, VmaKind};
+    use crate::proc::pcb;
+    use crate::syscall::handlers::munmap_range;
+
+    let frame_size = FRAME_SIZE as u64;
+    let fail = |what: &str| {
+        crate::serial_println!("[user]   FAIL: unmap_user_range: {}", what);
+        Err(KernelError::InternalError)
+    };
+
+    // --- munmap's argument gate, on literals --------------------------------
+    const UNMAPPED: u64 = 0x0000_0030_0000_0000;
+    const LAST_USER_FRAME: u64 = 0x0000_7FFF_FFFF_C000;
+    const KERNEL_HOLE: u64 = 0xFFFF_E800_0000_0000;
+    let refusals: [(u64, u64, KernelError); 6] = [
+        (KERNEL_HOLE, 0x4000, KernelError::InvalidArgument),
+        (LAST_USER_FRAME, 0x8000, KernelError::InvalidArgument),
+        (0xFFFF_FFFF_FFFF_C000, 0x8000, KernelError::InvalidArgument),
+        (UNMAPPED, u64::MAX, KernelError::InvalidArgument),
+        (UNMAPPED, 0, KernelError::InvalidArgument),
+        (
+            UNMAPPED.wrapping_add(0x1000),
+            0x4000,
+            KernelError::BadAlignment,
+        ),
+    ];
+    for (addr, len, want) in refusals {
+        if munmap_range(addr, len) != Err(want) {
+            crate::serial_println!(
+                "[user]   FAIL: munmap_range({:#x}, {:#x}) = {:?}, expected Err({:?})",
+                addr,
+                len,
+                munmap_range(addr, len),
+                want
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    if munmap_range(UNMAPPED, 1) != Ok((UNMAPPED, UNMAPPED.wrapping_add(frame_size))) {
+        return fail("a one-byte length did not round up to one frame");
+    }
+    if munmap_range(LAST_USER_FRAME, frame_size) != Ok((LAST_USER_FRAME, USER_SPACE_END)) {
+        return fail("the last user frame, ending exactly at USER_SPACE_END, was refused");
+    }
+
+    // --- the clamp, against a real mapped kernel page -----------------------
+    let kernel_pml4 = page_table::kernel_pml4_phys()?;
+    let scratch = crate::mm::vmalloc::vmalloc(FRAME_SIZE)?;
+    let kva = scratch as u64;
+    let clamp_result = (|| {
+        if page_table::translate(kernel_pml4, VirtAddr::new(kva)).is_none() {
+            return fail("the vmalloc scratch page is not mapped in the kernel's table");
+        }
+        // The page itself, and a range that starts in the user half and runs
+        // through it.  Neither may touch it.
+        let direct = unmap_user_range(kernel_pml4, kva, kva.wrapping_add(frame_size));
+        let spanning = unmap_user_range(kernel_pml4, LAST_USER_FRAME, kva.wrapping_add(frame_size));
+        if direct != 0 || spanning != 0 {
+            return fail("a kernel-half range reported pages unmapped");
+        }
+        if page_table::translate(kernel_pml4, VirtAddr::new(kva)).is_none() {
+            return fail("the clamp let a kernel page be unmapped");
+        }
+        Ok(())
+    })();
+    // SAFETY: `scratch` came from `vmalloc` above and is freed exactly once,
+    // whatever the checks found (a page they had unmapped would already be
+    // gone, and `vfree` reports that rather than faulting).
+    let freed = unsafe { crate::mm::vmalloc::vfree(scratch) };
+    clamp_result?;
+    freed?;
+
+    // --- frames go only with their last sub-page ----------------------------
+    let Some(pml4) = pcb::get_pml4(target).filter(|&p| p != 0) else {
+        return fail("test process has no PML4");
+    };
+    let base: u64 = 0x0000_0031_0000_0000;
+    let end = base.wrapping_add(frame_size.wrapping_mul(2));
+    let rw = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    pcb::add_vma(
+        target,
+        Vma {
+            start: base,
+            end,
+            kind: VmaKind::Anonymous,
+            flags: rw,
+        },
+    )?;
+    for va in [base, base.wrapping_add(frame_size)] {
+        if !pcb::try_resolve_fault(target, va, 1 << 2) {
+            return fail("a demand fault in the scratch VMA did not resolve");
+        }
+    }
+    let Some(first) = page_table::translate(pml4, VirtAddr::new(base))
+        .and_then(|p| PhysFrame::from_addr(p & !frame_size.wrapping_sub(1)))
+    else {
+        return fail("the first scratch frame is not mapped after its fault");
+    };
+    // RSS moves exactly when a frame is handed over to be freed, so it is the
+    // deterministic witness; a refcount read after the free could already
+    // belong to the frame's next owner.
+    let rss = || crate::mm::accounting::query(pml4).map_or(u64::MAX, |s| s.rss_frames);
+    let rss_mapped = rss();
+    // One 4 KiB sub-page: the frame is still in use by its other three.
+    if unmap_user_range(pml4, base, base.wrapping_add(0x1000)) != 1 {
+        return fail("unmapping one sub-page did not report one page");
+    }
+    if page_table::translate(pml4, VirtAddr::new(base.wrapping_add(0x1000))).is_none()
+        || frame::refcount(first) == 0
+        || rss() != rss_mapped
+    {
+        return fail("unmapping one sub-page took the rest of the frame with it");
+    }
+    // The rest of both frames: 3 + 4 sub-pages.
+    if unmap_user_range(pml4, base, end) != 7 {
+        return fail("unmapping the rest did not report seven pages");
+    }
+    if page_table::translate(pml4, VirtAddr::new(base)).is_some()
+        || page_table::translate(pml4, VirtAddr::new(end.wrapping_sub(0x1000))).is_some()
+    {
+        return fail("a sub-page is still mapped after its range was unmapped");
+    }
+    if rss() != rss_mapped.wrapping_sub(2) {
+        return fail("the two frames were not released when their last sub-pages went");
+    }
+    // Idempotent: nothing left to unmap is not an error.
+    if unmap_user_range(pml4, base, end) != 0 {
+        return fail("unmapping an empty range reported pages");
+    }
     Ok(())
 }
 

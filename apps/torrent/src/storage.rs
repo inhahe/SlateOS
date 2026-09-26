@@ -264,7 +264,11 @@ impl Storage {
     }
 
     /// Make `folder` and every folder between it and the save folder,
-    /// refusing any that is already a symbolic link.
+    /// refusing any below the save folder that is already a symbolic link.
+    ///
+    /// The save folder itself is made if it is missing -- a new user has no
+    /// Downloads yet -- and followed if it is a link: a Downloads folder
+    /// linked to a bigger disk is the user's own arrangement.
     fn make_folders(&self, folder: &Path) -> io::Result<()> {
         let below = folder.strip_prefix(&self.root).map_err(|_| {
             io::Error::new(
@@ -272,6 +276,7 @@ impl Storage {
                 "a folder outside the save folder",
             )
         })?;
+        fs::create_dir_all(&self.root)?;
         let mut at = self.root.clone();
         for part in below.components() {
             at.push(part);
@@ -434,6 +439,17 @@ mod tests {
         assert!(!st.matches(0, &[0; 100]), "the wrong bytes");
         assert!(!st.matches(0, &stream[..99]), "the wrong length");
         assert!(st.write_piece(0, &stream[..99]).is_err());
+    }
+
+    /// A save folder that is not there yet is made.
+    #[test]
+    fn a_missing_save_folder_is_made() {
+        let (meta, stream) = torrent(&[("a", &[1; 10])], 16, true);
+        let dir = Scratch::new("made");
+        let save = dir.0.join("not").join("yet");
+        let st = Storage::new(&meta, &save).unwrap();
+        st.write_piece(0, &stream).unwrap();
+        assert_eq!(fs::read(save.join("Set").join("a")).unwrap(), vec![1; 10]);
     }
 
     /// A single-file torrent's file is the name itself, in the save folder.

@@ -129,8 +129,23 @@ fn host_port(authority: &str, default: Option<u16>) -> Result<(String, u16), Str
     Ok((host.to_string(), port))
 }
 
+/// The tests do not leave this machine: a tracker anywhere but loopback is
+/// refused before its name is even looked up. A test that starts a download
+/// of a sample torrent -- whose trackers are `example.com` names -- would
+/// otherwise send a DNS query and a connection out onto the network.
+#[cfg(test)]
+fn stays_home(host: &str) -> Result<(), String> {
+    if matches!(host, "127.0.0.1" | "::1" | "localhost") {
+        Ok(())
+    } else {
+        Err(format!("the tests do not reach {host}"))
+    }
+}
+
 /// A TCP connection to `host:port`, trying each address it resolves to.
 fn connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, String> {
+    #[cfg(test)]
+    stays_home(host)?;
     let addrs: Vec<SocketAddr> = (host, port)
         .to_socket_addrs()
         .map_err(|e| format!("could not find {host}: {e}"))?
@@ -366,6 +381,8 @@ fn from_http_body(body: &[u8]) -> Result<Announced, String> {
 fn udp_announce(rest: &str, req: &AnnounceRequest, timeout: Duration) -> Result<Announced, String> {
     let authority = rest.split(['/', '?']).next().unwrap_or(rest);
     let (host, port) = host_port(authority, None)?;
+    #[cfg(test)]
+    stays_home(&host)?;
     let addr = (host.as_str(), port)
         .to_socket_addrs()
         .map_err(|e| format!("could not find {host}: {e}"))?

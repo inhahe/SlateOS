@@ -366,24 +366,36 @@ mod tests {
             data: vec![9; 1000],
         }
         .encode();
+        // The second half is sent only once the client has taken the first
+        // and timed out waiting for more -- a handshake with the test rather
+        // than a sleep, so a loaded machine cannot reorder it.
+        let (go, wait) = std::sync::mpsc::channel::<()>();
         let (addr, server) = peer(HASH, move |mut s| {
             s.write_all(&piece[..500]).unwrap();
             s.flush().unwrap();
-            thread::sleep(Duration::from_millis(400));
+            wait.recv_timeout(PATIENT).unwrap();
             s.write_all(&piece[500..]).unwrap();
             s.write_all(&PeerMessage::Unchoke.encode()).unwrap();
-            thread::sleep(Duration::from_millis(200));
+            // Held open until the client has read it all; a signal or the
+            // test giving up are the same cue here, so which it was is moot.
+            let _ = wait.recv_timeout(PATIENT);
         });
         let mut conn = PeerConn::connect(addr, HASH, ME, PATIENT).unwrap();
-        // The first poll gives up before the second half comes.
-        assert_eq!(conn.poll(Duration::from_millis(100)).unwrap(), None);
+        // Polls give up, holding the half that came, until all of it has.
         let deadline = Instant::now() + PATIENT;
+        while conn.pending.len() < 500 && Instant::now() < deadline {
+            assert_eq!(conn.poll(Duration::from_millis(50)).unwrap(), None);
+        }
+        assert_eq!(conn.pending.len(), 500, "the first half never came");
+        assert_eq!(conn.poll(Duration::from_millis(50)).unwrap(), None);
+        go.send(()).unwrap();
         let mut got = Vec::new();
-        while got.len() < 2 && Instant::now() < deadline {
+        while got.len() < 2 && Instant::now() < deadline + PATIENT {
             if let Some(msg) = conn.poll(Duration::from_millis(100)).unwrap() {
                 got.push(msg);
             }
         }
+        go.send(()).unwrap();
         assert_eq!(
             got,
             vec![

@@ -74,8 +74,13 @@ pub enum Event {
         url: String,
         result: Result<TrackerAnswer, String>,
     },
-    /// A peer answered the handshake.
-    PeerUp { addr: SocketAddr, id: [u8; 20] },
+    /// A peer answered the handshake, with its id and whether it speaks
+    /// the extension protocol (BEP 10).
+    PeerUp {
+        addr: SocketAddr,
+        id: [u8; 20],
+        extensions: bool,
+    },
     /// A peer's connection ended, and why.
     PeerDown { addr: SocketAddr, why: String },
     /// A block arrived: `bytes` of payload.
@@ -103,6 +108,9 @@ pub struct TrackerAnswer {
 #[derive(Debug)]
 pub struct Session {
     stop: Arc<AtomicBool>,
+    /// Set once no thread of this download can write another byte: its peer
+    /// threads have ended. Telling the trackers it stopped comes after.
+    quiet: Arc<AtomicBool>,
     /// What happened, in order.
     pub events: Receiver<Event>,
     thread: Option<JoinHandle<()>>,
@@ -113,14 +121,16 @@ impl Session {
     #[must_use]
     pub fn start(plan: Plan) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
+        let quiet = Arc::new(AtomicBool::new(false));
         let (tx, events) = mpsc::channel();
-        let flag = Arc::clone(&stop);
+        let (flag, hush) = (Arc::clone(&stop), Arc::clone(&quiet));
         let thread = thread::Builder::new()
             .name(String::from("torrent-session"))
-            .spawn(move || coordinate(&plan, &flag, &tx))
+            .spawn(move || coordinate(&plan, &flag, &hush, &tx))
             .ok();
         Self {
             stop,
+            quiet,
             events,
             thread,
         }
@@ -131,7 +141,25 @@ impl Session {
         self.stop.store(true, Ordering::Relaxed);
     }
 
-    /// Stop, and wait for the coordinating thread to end.
+    /// Stop, and wait until nothing of this download can write to its
+    /// files any more -- a moment, the length of one peer poll -- but not for
+    /// the trackers to be told, which can take seconds and needs no waiting
+    /// on. What deleting the files needs first.
+    pub fn stop_until_quiet(&self) {
+        self.stop();
+        if self.thread.is_none() {
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.quiet.load(Ordering::Relaxed) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Stop, and wait for the coordinating thread to end -- trackers told
+    /// and all. For the tests, which must not leave threads behind them; the
+    /// window never needs to wait that long ([`Self::stop_until_quiet`]).
+    #[cfg(test)]
     pub fn stop_and_wait(mut self) {
         self.stop();
         if let Some(thread) = self.thread.take() {
@@ -225,7 +253,7 @@ fn lock(picker: &Mutex<Picker>) -> std::sync::MutexGuard<'_, Picker> {
 
 /// What a peer thread tells the coordinator.
 enum Report {
-    Up(SocketAddr, [u8; 20]),
+    Up(SocketAddr, [u8; 20], bool),
     Down(SocketAddr, String),
     Received(SocketAddr, u64),
     Piece(usize),
@@ -250,7 +278,8 @@ fn trackers(meta: &TorrentMetainfo) -> Vec<String> {
 }
 
 /// The download's own thread.
-fn coordinate(plan: &Plan, stop: &Arc<AtomicBool>, tx: &Sender<Event>) {
+fn coordinate(plan: &Plan, stop: &Arc<AtomicBool>, quiet: &AtomicBool, tx: &Sender<Event>) {
+    let hush = || quiet.store(true, Ordering::Relaxed);
     let say = |event: Event| {
         // The window has gone and dropped its end: there is nobody left to
         // tell, and the stop flag will end this thread shortly.
@@ -258,11 +287,17 @@ fn coordinate(plan: &Plan, stop: &Arc<AtomicBool>, tx: &Sender<Event>) {
     };
     let storage = match Storage::new(&plan.meta, &plan.save_dir) {
         Ok(storage) => Arc::new(storage),
-        Err(e) => return say(Event::Failed(e)),
+        Err(e) => {
+            hush();
+            return say(Event::Failed(e));
+        }
     };
     let have = match storage.have() {
         Ok(have) => have,
-        Err(e) => return say(Event::Failed(e)),
+        Err(e) => {
+            hush();
+            return say(Event::Failed(e));
+        }
     };
     say(Event::Checked(have.clone()));
     let count = storage.piece_count();
@@ -305,6 +340,7 @@ fn coordinate(plan: &Plan, stop: &Arc<AtomicBool>, tx: &Sender<Event>) {
     };
 
     if complete(&told) {
+        hush();
         return say(Event::Finished);
     }
 
@@ -388,7 +424,11 @@ fn coordinate(plan: &Plan, stop: &Arc<AtomicBool>, tx: &Sender<Event>) {
 
         match from_peers.recv_timeout(POLL) {
             Ok(report) => match report {
-                Report::Up(addr, id) => say(Event::PeerUp { addr, id }),
+                Report::Up(addr, id, extensions) => say(Event::PeerUp {
+                    addr,
+                    id,
+                    extensions,
+                }),
                 Report::Down(addr, why) => {
                     failed.insert(addr, Instant::now());
                     say(Event::PeerDown { addr, why });
@@ -418,18 +458,20 @@ fn coordinate(plan: &Plan, stop: &Arc<AtomicBool>, tx: &Sender<Event>) {
         }
     }
 
-    // Stopped: the peer threads see the flag within a poll. Trackers that
-    // were told this client started are told it stopped, unless it finished
-    // (they were told that instead).
+    // Stopped: the peer threads see the flag within a poll, and once they
+    // have ended nothing more is written. Then trackers that were told this
+    // client started are told it stopped, unless it finished (they were told
+    // that instead).
+    for (_, handle) in running {
+        // Each ends within a poll of the flag; a panic in one is over.
+        let _ = handle.join();
+    }
+    hush();
     if !lock(&picker).complete() && !first {
         finish(
             &urls,
             &request(TrackerEvent::Stopped, left(&picker), downloaded),
         );
-    }
-    for (_, handle) in running {
-        // Each ends within a poll of the flag; a panic in one is over.
-        let _ = handle.join();
     }
 }
 
@@ -474,7 +516,9 @@ impl PeerJob {
                 Ok(conn) => conn,
                 Err(e) => return e,
             };
-        let _ = self.reports.send(Report::Up(self.addr, conn.remote_id)); // A gone coordinator is handled by `run`.
+        let _ = self
+            .reports
+            .send(Report::Up(self.addr, conn.remote_id, conn.extensions)); // A gone coordinator is handled by `run`.
         *has = vec![false; count];
         if let Err(e) = conn.send(&PeerMessage::Interested) {
             return e;
@@ -661,6 +705,9 @@ fn bitfield(bits: &[u8], count: usize) -> Option<Vec<bool>> {
     Some(all.into_iter().take(count).collect())
 }
 
+/// A tracker and seeding peers on loopback ports, and a torrent for them to
+/// serve: what the session's tests and the window's run whole downloads
+/// against.
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -668,20 +715,20 @@ fn bitfield(bits: &[u8], count: usize) -> Option<Vec<bool>> {
     clippy::panic,
     clippy::indexing_slicing
 )]
-mod tests {
+pub(crate) mod testnet {
     use super::*;
     use crate::TorrentFile;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::AtomicUsize;
 
-    const PIECE: u64 = 32 * 1024;
+    pub(crate) const PIECE: u64 = 32 * 1024;
 
     /// A scratch folder, removed when dropped.
-    struct Scratch(PathBuf);
+    pub(crate) struct Scratch(pub(crate) PathBuf);
 
     impl Scratch {
-        fn new(tag: &str) -> Self {
+        pub(crate) fn new(tag: &str) -> Self {
             use std::sync::atomic::AtomicU64;
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let path = std::env::temp_dir().join(format!(
@@ -702,7 +749,7 @@ mod tests {
 
     /// Three files over five pieces of 32 KiB -- two blocks each -- whose
     /// bytes are not all the same, so a misplaced block shows.
-    fn content() -> (TorrentMetainfo, Arc<Vec<u8>>) {
+    pub(crate) fn content() -> (TorrentMetainfo, Arc<Vec<u8>>) {
         let stream: Vec<u8> = (0..(PIECE * 4 + 5000))
             .map(|i| (i * 7 % 251) as u8)
             .collect();
@@ -722,7 +769,7 @@ mod tests {
 
     /// How a test peer behaves.
     #[derive(Clone, Copy)]
-    enum Serve {
+    pub(crate) enum Serve {
         /// Every piece, honestly.
         Honest,
         /// Every piece, with piece `n` wrong.
@@ -733,7 +780,7 @@ mod tests {
 
     /// A seeding peer on a loopback port, serving `stream` to any number of
     /// connections until `stop`.
-    fn seeder(
+    pub(crate) fn seeder(
         meta: &TorrentMetainfo,
         stream: Arc<Vec<u8>>,
         serve: Serve,
@@ -835,7 +882,7 @@ mod tests {
 
     /// An HTTP tracker on a loopback port that gives `peers` to every
     /// announce, and counts them, until `stop`.
-    fn tracker_for(
+    pub(crate) fn tracker_for(
         peers: Vec<SocketAddr>,
         stop: Arc<AtomicBool>,
         asked: Arc<AtomicUsize>,
@@ -876,6 +923,19 @@ mod tests {
         });
         (format!("http://127.0.0.1:{port}/announce"), handle)
     }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use super::testnet::*;
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     fn plan(meta: TorrentMetainfo, dir: &Scratch) -> Plan {
         Plan {
@@ -1085,6 +1145,61 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         peer_thread.join().unwrap();
         tracker_thread.join().unwrap();
+    }
+
+    /// Waiting for a stopped download to go quiet does not wait for its
+    /// trackers: a tracker that takes its time answering "stopped" costs the
+    /// window nothing.
+    #[test]
+    fn a_stopped_download_goes_quiet_before_its_trackers_are_told() {
+        let (mut meta, stream) = content();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (peer, peer_thread) = seeder(&meta, stream, Serve::Never, Arc::clone(&stop));
+        // A tracker that answers the first announce and then keeps the
+        // "stopped" one waiting.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/announce", listener.local_addr().unwrap());
+        let slow = thread::spawn(move || {
+            use std::io::{Read, Write};
+            let compact = match peer {
+                SocketAddr::V4(v4) => [&v4.ip().octets()[..], &v4.port().to_be_bytes()].concat(),
+                SocketAddr::V6(_) => unreachable!(),
+            };
+            let body = [b"d8:intervali1800e5:peers6:".as_slice(), &compact, b"e"].concat();
+            for answer in [true, false] {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut buf = [0_u8; 4096];
+                let _ = s.read(&mut buf);
+                if answer {
+                    let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+                    s.write_all(&[head.as_bytes(), &body].concat()).unwrap();
+                } else {
+                    thread::sleep(Duration::from_secs(4));
+                }
+            }
+        });
+        meta.announce = url;
+        let dir = Scratch::new("quiet");
+        let session = Session::start(plan(meta, &dir));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if let Ok(Event::PeerUp { .. }) =
+                session.events.recv_timeout(Duration::from_millis(100))
+            {
+                break;
+            }
+        }
+        let asked = Instant::now();
+        session.stop_until_quiet();
+        assert!(
+            asked.elapsed() < Duration::from_secs(2),
+            "waited {:?} for the trackers",
+            asked.elapsed()
+        );
+        session.stop_and_wait();
+        stop.store(true, Ordering::Relaxed);
+        peer_thread.join().unwrap();
+        slow.join().unwrap();
     }
 
     /// A download whose files cannot be written says so and ends.

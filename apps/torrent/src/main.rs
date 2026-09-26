@@ -47,32 +47,17 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::path::{Path, PathBuf};
+
+use randrange::RandomSource;
 
 // The transport's parts land a stage at a time, each tested; the session that
 // drives them comes after the tracker and peer ones. `expect` rather than
 // `allow`, so this goes the moment something uses them.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by the download session, which lands after it"
-    )
-)]
 mod peer;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the window, which is wired to it next")
-)]
 mod session;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by the download session, which lands after it"
-    )
-)]
 mod storage;
 mod tracker;
 
@@ -1811,10 +1796,14 @@ pub struct ManagedTorrent {
     pub trackers: Vec<TrackerEntry>,
     pub download_speed: SpeedTracker,
     pub upload_speed: SpeedTracker,
+    /// Bytes of the pieces on disk that have matched their hashes -- what is
+    /// had, not what has arrived (a piece that failed its hash arrived and is
+    /// not had).
     pub downloaded: u64,
     pub uploaded: u64,
     pub total_size: u64,
-    pub save_path: String,
+    /// The folder the torrent's file or folder goes in.
+    pub save_path: PathBuf,
     pub added_time: u64,
     pub completed_time: Option<u64>,
     pub file_priorities: Vec<FilePriority>,
@@ -1824,6 +1813,8 @@ pub struct ManagedTorrent {
     pub sequential_download: bool,
     pub error_message: Option<String>,
     pub label: String,
+    /// Bytes that have arrived since the speed was last sampled.
+    pub unsampled: u64,
 }
 
 /// Tracker entry with status
@@ -1865,7 +1856,7 @@ impl fmt::Display for TrackerStatus {
 impl ManagedTorrent {
     /// Create from a parsed torrent file
     #[must_use]
-    pub fn from_metainfo(id: u32, meta: TorrentMetainfo, save_path: &str) -> Self {
+    pub fn from_metainfo(id: u32, meta: TorrentMetainfo, save_path: &Path) -> Self {
         let piece_count = meta.piece_count();
         let file_count = meta.files.len();
         let total_size = meta.total_size;
@@ -1917,7 +1908,7 @@ impl ManagedTorrent {
             downloaded: 0,
             uploaded: 0,
             total_size,
-            save_path: save_path.to_string(),
+            save_path: save_path.to_path_buf(),
             added_time: 0,
             completed_time: None,
             file_priorities: vec![FilePriority::Normal; file_count],
@@ -1927,12 +1918,13 @@ impl ManagedTorrent {
             sequential_download: false,
             error_message: None,
             label: String::new(),
+            unsampled: 0,
         }
     }
 
     /// Create from a magnet link
     #[must_use]
-    pub fn from_magnet(id: u32, magnet: MagnetLink, save_path: &str) -> Self {
+    pub fn from_magnet(id: u32, magnet: MagnetLink, save_path: &Path) -> Self {
         let name = magnet.display_name.clone().unwrap_or_else(|| {
             hex_encode(&magnet.info_hash)
                 .get(..16)
@@ -1971,7 +1963,7 @@ impl ManagedTorrent {
             downloaded: 0,
             uploaded: 0,
             total_size: 0,
-            save_path: save_path.to_string(),
+            save_path: save_path.to_path_buf(),
             added_time: 0,
             completed_time: None,
             file_priorities: Vec::new(),
@@ -1981,6 +1973,7 @@ impl ManagedTorrent {
             sequential_download: false,
             error_message: None,
             label: String::new(),
+            unsampled: 0,
         }
     }
 
@@ -2015,19 +2008,128 @@ impl ManagedTorrent {
 
     /// Pause the torrent
     pub fn pause(&mut self) {
-        if self.state == TorrentState::Downloading || self.state == TorrentState::Seeding {
+        if matches!(
+            self.state,
+            TorrentState::Downloading | TorrentState::Seeding | TorrentState::CheckingFiles
+        ) {
             self.state = TorrentState::Paused;
+            // Their connections end with the session.
+            self.peers.clear();
         }
     }
 
-    /// Resume the torrent
-    pub fn resume(&mut self) {
-        if self.state == TorrentState::Paused {
-            self.state = if self.pieces.is_complete() {
-                TorrentState::Seeding
-            } else {
-                TorrentState::Downloading
-            };
+    /// Whether a download can be started from here: added and not begun,
+    /// paused, or stopped by an error.
+    #[must_use]
+    pub fn can_start(&self) -> bool {
+        self.metainfo.is_some()
+            && matches!(
+                self.state,
+                TorrentState::Queued | TorrentState::Paused | TorrentState::Error
+            )
+    }
+
+    /// Which pieces are wanted: those of the files not set to Skip. A piece
+    /// shared by a skipped file and a wanted one is wanted.
+    #[must_use]
+    pub fn wanted(&self) -> Vec<bool> {
+        (0..self.pieces.total_count())
+            .map(|i| self.pieces.priority(i).is_some_and(|p| p > 0))
+            .collect()
+    }
+
+    /// Bytes of the pieces had.
+    fn have_bytes(&self) -> u64 {
+        let Some(meta) = &self.metainfo else {
+            return 0;
+        };
+        (0..meta.piece_count())
+            .filter(|&i| self.pieces.has_piece(i))
+            .map(|i| meta.piece_size(i))
+            .sum()
+    }
+
+    /// Take in what the torrent's download reports. Whether the download has
+    /// ended -- finished or failed -- so its session can go.
+    fn apply(&mut self, event: session::Event) -> bool {
+        use session::Event as E;
+        let same = |p: &PeerInfo, addr: &std::net::SocketAddr| {
+            p.port == addr.port() && p.address == addr.ip().to_string()
+        };
+        match event {
+            E::Checked(have) => {
+                for (i, _) in have.iter().enumerate().filter(|(_, h)| **h) {
+                    self.pieces.set_piece(i);
+                }
+                self.downloaded = self.have_bytes();
+                self.state = TorrentState::Downloading;
+                false
+            }
+            E::Tracker { url, result } => {
+                if let Some(t) = self.trackers.iter_mut().find(|t| t.url == url) {
+                    t.announce_count = t.announce_count.saturating_add(1);
+                    t.last_announce = Some(now_secs());
+                    match result {
+                        Ok(answer) => {
+                            t.status = TrackerStatus::Working;
+                            t.seeders = answer.seeders.unwrap_or(0);
+                            t.leechers = answer.leechers.unwrap_or(0);
+                            t.error_message = answer.warning;
+                        }
+                        Err(why) => {
+                            t.status = TrackerStatus::Error;
+                            t.error_message = Some(why);
+                        }
+                    }
+                }
+                false
+            }
+            E::PeerUp {
+                addr,
+                id,
+                extensions,
+            } => {
+                self.peers.retain(|p| !same(p, &addr));
+                let mut peer = PeerInfo::new(&addr.ip().to_string(), addr.port());
+                peer.supports_extensions = extensions;
+                peer.peer_id = Some(id);
+                peer.client_name = PeerInfo::identify_client(&id);
+                peer.state = PeerState::Connected;
+                self.peers.push(peer);
+                false
+            }
+            E::PeerDown { addr, .. } => {
+                self.peers.retain(|p| !same(p, &addr));
+                false
+            }
+            E::Received { addr, bytes } => {
+                self.unsampled = self.unsampled.saturating_add(bytes);
+                if let Some(p) = self.peers.iter_mut().find(|p| same(p, &addr)) {
+                    p.downloaded = p.downloaded.saturating_add(bytes);
+                }
+                false
+            }
+            E::Piece { index } => {
+                self.pieces.set_piece(index);
+                self.downloaded = self.have_bytes();
+                false
+            }
+            // Fetched again by the session; nothing to show but the time.
+            E::BadPiece { .. } => false,
+            E::Finished => {
+                // Complete, not Seeding: this client uploads nothing, and
+                // "Seeding" would say it was sharing the file.
+                self.state = TorrentState::Complete;
+                self.completed_time = Some(now_secs());
+                self.peers.clear();
+                true
+            }
+            E::Failed(why) => {
+                self.state = TorrentState::Error;
+                self.error_message = Some(why);
+                self.peers.clear();
+                true
+            }
         }
     }
 
@@ -2085,7 +2187,7 @@ pub struct ClientSettings {
     pub max_uploads_per_torrent: u32,
     pub global_download_limit: u64, // bytes/s, 0 = unlimited
     pub global_upload_limit: u64,
-    pub default_save_path: String,
+    pub default_save_path: PathBuf,
     pub dht_enabled: bool,
     pub pex_enabled: bool, // Peer exchange
     pub lsd_enabled: bool, // Local service discovery
@@ -2153,7 +2255,7 @@ impl Default for ClientSettings {
             max_uploads_per_torrent: 8,
             global_download_limit: 0,
             global_upload_limit: 0,
-            default_save_path: "/home/user/Downloads".to_string(),
+            default_save_path: downloads_folder(),
             dht_enabled: true,
             pex_enabled: true,
             lsd_enabled: true,
@@ -2185,65 +2287,6 @@ use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
-
-/// How many peers in `peers` hold each piece.
-///
-/// This is what `PieceTracker::pick_piece` compares to choose the rarest piece
-/// first, and it is the reason the picker takes an availability slice at all.
-/// The peers are simulated -- their bitfields are made up when a torrent is
-/// added -- but the counting and the choice are the real ones.
-fn piece_availability(peers: &[PeerInfo], piece_count: usize) -> Vec<u32> {
-    let mut counts = vec![0u32; piece_count];
-    for peer in peers {
-        for (index, count) in counts.iter_mut().enumerate() {
-            if peer_has_piece(peer, index) {
-                *count = count.saturating_add(1);
-            }
-        }
-    }
-    counts
-}
-
-/// The union of every peer's bitfield: what the swarm can supply between them.
-fn swarm_bitfield(peers: &[PeerInfo], bytes: usize) -> Vec<u8> {
-    let mut union = vec![0u8; bytes];
-    for peer in peers {
-        for (index, byte) in union.iter_mut().enumerate() {
-            *byte |= peer.bitfield.get(index).copied().unwrap_or(0);
-        }
-    }
-    union
-}
-
-/// Whether `peer` holds piece `index`.
-///
-/// Bit 7 of the first byte is piece 0, per BEP 3 -- the same order
-/// `PieceTracker::set_piece` writes in, which is why this is spelled out
-/// rather than left to a reader to match up.
-fn peer_has_piece(peer: &PeerInfo, index: usize) -> bool {
-    let byte = index / 8;
-    let bit = 7usize.saturating_sub(index % 8);
-    peer.bitfield
-        .get(byte)
-        .is_some_and(|b| b & (1u8 << bit) != 0)
-}
-
-/// How many bytes piece `index` holds.
-///
-/// Every piece is `total / count` except the last, which is the remainder --
-/// so a progress figure summed from these reaches the torrent's real size
-/// rather than overshooting it on the final piece.
-fn piece_size(total_size: u64, piece_count: usize, index: usize) -> u64 {
-    let count = piece_count as u64;
-    let Some(each) = total_size.checked_div(count) else {
-        return 0;
-    };
-    if index.saturating_add(1) >= piece_count {
-        total_size.saturating_sub(each.saturating_mul(count.saturating_sub(1)))
-    } else {
-        each
-    }
-}
 
 /// The window size to ask for.
 const WINDOW_WIDTH: f32 = 1300.0;
@@ -2354,15 +2397,81 @@ pub enum Target {
 /// parse and the parse error alone would blame the file.
 pub const MAX_TORRENT_BYTES: usize = 8 * 1024 * 1024;
 
-const CANNOT_TRANSFER_LINES: [&str; 3] = [
-    "This client cannot download or upload anything.",
-    "It has no network access and no way to write a file, so no tracker or peer has been contacted.",
-    "A torrent showing no progress is not an empty swarm -- nothing was ever asked for.",
+/// What this client does not do, where the transfers are listed.
+const TRANSFER_NOTE_LINES: [&str; 3] = [
+    "Downloads only: nothing is uploaded, and no peer can connect to this client.",
+    "Trackers are asked over UDP or plain HTTP; one reached only over https:// cannot be, for want of TLS.",
+    "A magnet link cannot be fetched yet: its files are learned from peers, which this client does not ask.",
 ];
+
+/// Where downloads go unless the user says otherwise: `Downloads` in the
+/// home folder. The tests' downloads go to a folder of their own in the
+/// temporary folder, whatever a test starts -- never the developer's.
+fn downloads_folder() -> PathBuf {
+    #[cfg(test)]
+    {
+        std::env::temp_dir().join(format!("slateos-torrent-tests-{}", std::process::id()))
+    }
+    #[cfg(not(test))]
+    {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map_or_else(
+                || PathBuf::from("Downloads"),
+                |home| PathBuf::from(home).join("Downloads"),
+            )
+    }
+}
+
+/// Delete the files a torrent downloaded, and the folders it made that are
+/// left empty. Only the torrent's own files, below its save folder: the same
+/// paths `storage` writes, and nothing else.
+fn delete_downloaded(torrent: &ManagedTorrent) -> Result<(), String> {
+    let Some(meta) = &torrent.metainfo else {
+        return Ok(());
+    };
+    let store = storage::Storage::new(meta, &torrent.save_path)?;
+    let mut folders = Vec::new();
+    for i in 0..meta.files.len() {
+        let Some(path) = store.file_path(i) else {
+            continue;
+        };
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("could not delete {}: {e}", path.display())),
+        }
+        let mut up = path.parent();
+        while let Some(folder) = up {
+            if folder == torrent.save_path || !folder.starts_with(&torrent.save_path) {
+                break;
+            }
+            if !folders.contains(&folder.to_path_buf()) {
+                folders.push(folder.to_path_buf());
+            }
+            up = folder.parent();
+        }
+    }
+    // Deepest first; one that is not empty holds something else, and stays.
+    folders.sort_by_key(|f| std::cmp::Reverse(f.components().count()));
+    for folder in folders {
+        // A folder left non-empty holds the user's own files: keeping it is
+        // the point, not a failure.
+        let _ = std::fs::remove_dir(&folder);
+    }
+    Ok(())
+}
+
+/// Seconds since the Unix epoch, for the times a torrent keeps.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
 
 /// What the settings panel has to say about itself.
 ///
-/// `CANNOT_TRANSFER_LINES` covers the transfers view. This covers the
+/// `TRANSFER_NOTE_LINES` covers the transfers view. This covers the
 /// settings panel, which was the half those three lines never reached: a
 /// person reading "this client cannot download or upload anything" has been
 /// told the *transfers* do not happen, and may still reasonably believe that
@@ -2377,8 +2486,8 @@ const CANNOT_TRANSFER_LINES: [&str; 3] = [
 ///
 /// The repair is this line and not a key. A control that moves and changes
 /// nothing is a claim; a fixed value beside an honest note is a gap.
-const SETTINGS_NOT_APPLIED: &str =
-    "Not applied: nothing reads these except this panel -- there is no network stack.";
+const SETTINGS_NOT_APPLIED: &str = "Only the listening port (announced to trackers) and the connections per \
+     torrent are used; nothing else here is read yet.";
 
 /// Columns of the Peers detail table.
 const PEER_COLUMNS: &[Column] = &[
@@ -2513,7 +2622,11 @@ pub struct TorrentApp {
     pub show_add_dialog: bool,
     pub magnet_input: TextInput,
     pub magnet_error: Option<String>,
-    pub add_save_path: String,
+    pub add_save_path: PathBuf,
+    /// Each running download, by torrent id. Dropping one stops it.
+    sessions: HashMap<u32, session::Session>,
+    /// Milliseconds of ticks since the speeds were last sampled.
+    since_sample_ms: u64,
     /// Whether the search box has the keys.
     pub search_active: bool,
     /// How far the transfer list is scrolled, in rows. It did not scroll:
@@ -2681,12 +2794,14 @@ impl Default for TorrentApp {
 impl TorrentApp {
     #[must_use]
     pub fn new() -> Self {
-        // Generate peer ID: -OT0100- + 12 random chars (OT = OurTorrent)
-        let mut peer_id = [0u8; 20];
-        peer_id[..8].copy_from_slice(b"-OT0100-");
-        // Fill remainder with deterministic-looking bytes for now
-        for i in 8..20 {
-            peer_id[i] = ((i as u8).wrapping_mul(37)).wrapping_add(42);
+        // An Azureus-style id (BEP 20): this client and version, then twelve
+        // characters drawn afresh each run, so no two clients share one.
+        let mut peer_id = *b"-SL0001-000000000000";
+        let mut rng = randrange::seeded_from_system(0x0070_6565_7269_6464);
+        const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        for b in peer_id.iter_mut().skip(8) {
+            let pick = usize::try_from(rng.next_u32()).unwrap_or(0) % DIGITS.len();
+            *b = DIGITS.get(pick).copied().unwrap_or(b'0');
         }
 
         Self {
@@ -2712,6 +2827,8 @@ impl TorrentApp {
             magnet_input: TextInput::new(),
             magnet_error: None,
             add_save_path: ClientSettings::default().default_save_path.clone(),
+            sessions: HashMap::new(),
+            since_sample_ms: 0,
             search_active: false,
             transfer_scroll: 0,
             clipboard: String::new(),
@@ -2731,22 +2848,28 @@ impl TorrentApp {
     }
 
     /// Add a torrent from parsed metainfo
-    pub fn add_torrent(&mut self, meta: TorrentMetainfo, save_path: Option<&str>) -> u32 {
+    pub fn add_torrent(&mut self, meta: TorrentMetainfo, save_path: Option<&Path>) -> u32 {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
-        let path = save_path.unwrap_or(&self.settings.default_save_path);
-        let torrent = ManagedTorrent::from_metainfo(id, meta, path);
+        let path = save_path.map_or_else(
+            || self.settings.default_save_path.clone(),
+            Path::to_path_buf,
+        );
+        let torrent = ManagedTorrent::from_metainfo(id, meta, &path);
         self.status_message = format!("Added: {}", torrent.name);
         self.torrents.push(torrent);
         id
     }
 
     /// Add a torrent from a magnet link
-    pub fn add_magnet(&mut self, magnet: MagnetLink, save_path: Option<&str>) -> u32 {
+    pub fn add_magnet(&mut self, magnet: MagnetLink, save_path: Option<&Path>) -> u32 {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
-        let path = save_path.unwrap_or(&self.settings.default_save_path);
-        let torrent = ManagedTorrent::from_magnet(id, magnet, path);
+        let path = save_path.map_or_else(
+            || self.settings.default_save_path.clone(),
+            Path::to_path_buf,
+        );
+        let torrent = ManagedTorrent::from_magnet(id, magnet, &path);
         self.status_message = format!("Added magnet: {}", torrent.name);
         self.torrents.push(torrent);
         id
@@ -2754,13 +2877,29 @@ impl TorrentApp {
 
     /// Remove a torrent by ID
     pub fn remove_torrent(&mut self, id: u32, delete_files: bool) {
+        // Its download ends first -- and when its files are to go, nothing may
+        // be writing them. Neither waits on the trackers being told.
+        if let Some(session) = self.sessions.remove(&id) {
+            if delete_files {
+                session.stop_until_quiet();
+            } else {
+                session.stop();
+            }
+        }
         if let Some(pos) = self.torrents.iter().position(|t| t.id == id) {
             let name = self
                 .torrents
                 .get(pos)
                 .map_or("Unknown", |t| &t.name)
                 .to_string();
-            self.torrents.remove(pos);
+            let removed = self.torrents.remove(pos);
+            if delete_files && let Err(why) = delete_downloaded(&removed) {
+                self.status_message = format!("Removed {name}, but {why}");
+                if self.selected_torrent == Some(id) {
+                    self.selected_torrent = None;
+                }
+                return;
+            }
             if self.selected_torrent == Some(id) {
                 self.selected_torrent = None;
             }
@@ -2782,68 +2921,6 @@ impl TorrentApp {
     // picker -- `pick_piece`, `set_piece`, `set_in_progress` -- which is the
     // whole of a `BitTorrent` client's download loop.
     // ====================================================================
-
-    /// Give a torrent a swarm to download from.
-    ///
-    /// The stand-in for a tracker announce: this tree has no HTTP client, so
-    /// `TrackerRequest::build_url` builds a URL nothing can fetch and no peer
-    /// list ever comes back. Without one, the Peers tab is empty for every
-    /// torrent -- which it was -- and `pick_piece` has nobody to ask, so
-    /// nothing downloads.
-    ///
-    /// The peers are invented; what is done with them is not. Their bitfields
-    /// overlap unevenly on purpose, so `piece_availability` produces genuinely
-    /// different counts and the picker's rarest-first choice is exercised
-    /// rather than being a tie broken by index.
-    #[cfg(test)]
-    fn attach_simulated_peers(&mut self, id: u32) {
-        let Some(torrent) = self.torrents.iter_mut().find(|t| t.id == id) else {
-            return;
-        };
-        if !torrent.peers.is_empty() {
-            return;
-        }
-        let bytes = torrent.pieces.bitfield().len();
-        // A seed, and two partial peers holding alternating halves -- so every
-        // piece is available, and how many peers hold each one differs.
-        for (index, (address, port, rule)) in [
-            ("203.0.113.10", 51_413u16, 0u8),
-            ("198.51.100.7", 6881, 1),
-            ("192.0.2.44", 6889, 2),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let mut peer = PeerInfo::new(address, port);
-            peer.bitfield = (0..bytes)
-                .map(|byte| match rule {
-                    // A seed: everything, so no piece is held by nobody.
-                    0 => 0xFF,
-                    // The first half, and every third byte. Between them the
-                    // counts come out 1, 2 or 3 -- which is the point, and is
-                    // what an earlier version of this got wrong: a seed plus
-                    // two peers holding alternate halves gives *every* piece a
-                    // count of exactly two, so rarest-first has nothing to
-                    // choose between and the picker falls back to index order.
-                    // The test noticed.
-                    1 => u8::from(byte < bytes / 2).wrapping_mul(0xFF),
-                    _ => u8::from(byte % 3 == 0).wrapping_mul(0xFF),
-                })
-                .collect();
-            // A real peer ID, so the Peers tab's client column is filled by
-            // `PeerInfo::identify_client` -- which parses the Azureus-style
-            // `-XX0000-` prefix, has two tests, and had no caller.
-            let prefixes: [&[u8; 8]; 3] = [b"-qB4650-", b"-TR4060-", b"-lt0D60-"];
-            let mut id_bytes = [0u8; 20];
-            let prefix = prefixes.get(index).copied().unwrap_or(b"-qB4650-");
-            if let Some(head) = id_bytes.get_mut(..8) {
-                head.copy_from_slice(prefix);
-            }
-            peer.peer_id = Some(id_bytes);
-            peer.client_name = PeerInfo::identify_client(&id_bytes);
-            torrent.peers.push(peer);
-        }
-    }
 
     /// Handle one event from the window.
     /// Read `path` as a `.torrent` and list what is in it.
@@ -2877,8 +2954,10 @@ impl TorrentApp {
             Ok(meta) => {
                 let name = meta.name.clone();
                 let files = meta.files.len().max(1);
-                self.add_torrent(meta, None);
-                format!("{note}Opened {name}: {files} file(s), nothing contacted")
+                let id = self.add_torrent(meta, None);
+                self.start_torrent(id);
+                let into = self.settings.default_save_path.display();
+                format!("{note}Opened {name}: {files} file(s), fetching into {into}")
             }
             // The parser's own reason, not one invented here: "missing 'info'
             // dict" and "missing torrent name" say which part is absent, and
@@ -2915,7 +2994,7 @@ impl TorrentApp {
                 result
             }
             Event::Mouse(mouse) => self.handle_mouse(mouse),
-            Event::Tick { .. } => self.handle_tick(),
+            Event::Tick { elapsed_ms } => self.handle_tick(*elapsed_ms),
             Event::Resize { width, height } => {
                 #[allow(
                     clippy::cast_precision_loss,
@@ -2931,68 +3010,50 @@ impl TorrentApp {
         }
     }
 
-    /// Take one piece for each downloading torrent.
+    /// Take in what each download has reported, and sample the speeds.
     ///
-    /// Through `PieceTracker::pick_piece` and `set_piece`, which is the point:
-    /// the picker chooses the rarest piece that is not already held, in
-    /// progress or set to skip, and it had no caller -- so a client whose
-    /// module doc leads with "piece management with bitfield tracking" never
-    /// picked one, and every torrent sat at whatever progress it was created
-    /// with.
-    ///
-    /// The peers are simulated, so the availability count is taken from the
-    /// peers the torrent has rather than from a wire; what the picker does
-    /// with it is the real thing.
-    fn handle_tick(&mut self) -> EventResult {
+    /// This used to simulate a download: it picked a piece from invented
+    /// peers each tick and marked it had, so a torrent ran to 100% with
+    /// nothing fetched and nothing written. The sessions do the real thing
+    /// now (`session.rs`), and a tick is when the window hears of it.
+    fn handle_tick(&mut self, elapsed_ms: u64) -> EventResult {
         let mut moved = false;
-        for torrent in &mut self.torrents {
-            if torrent.state != TorrentState::Downloading {
-                continue;
-            }
-            if torrent.peers.is_empty() {
-                // And that is where it stops. This used to call
-                // `attach_simulated_peers`, which invented a seed and two
-                // partial peers at 203.0.113.10, 198.51.100.7 and 192.0.2.44,
-                // between them holding every piece -- so the picker below
-                // always had something to pick, every piece "arrived" the
-                // instant it was requested, and the torrent ran to 100% and
-                // flipped to Seeding with a completion time.
-                //
-                // Nothing was transferred and nothing was written: this crate
-                // has no `std::net` and no `std::fs`. So the client reported a
-                // finished download of a file that exists nowhere, and then
-                // reported that it was uploading that file to other people.
-                //
-                // A finished download is acted on. It is the point at which
-                // someone stops looking for the thing, and may delete the
-                // source they got the torrent from.
-                continue;
-            }
-            let availability = piece_availability(&torrent.peers, torrent.pieces.total_count());
-            // What the swarm between them can supply. With no peers there is
-            // nothing to ask, which is the honest answer -- and is why a
-            // torrent with an empty peer list makes no progress rather than
-            // downloading from nobody.
-            let offered = swarm_bitfield(&torrent.peers, torrent.pieces.bitfield().len());
-            let Some(index) = torrent.pieces.pick_piece(&offered, &availability) else {
-                // Nothing to pick: finished, or every remaining piece is set
-                // to skip, or no peer has what is left.
-                if torrent.pieces.is_complete() {
-                    torrent.state = TorrentState::Seeding;
-                    torrent.completed_time = Some(torrent.added_time);
+        let ids: Vec<u32> = self.sessions.keys().copied().collect();
+        for id in ids {
+            let events: Vec<session::Event> = self
+                .sessions
+                .get(&id)
+                .map(|s| s.events.try_iter().collect())
+                .unwrap_or_default();
+            let mut ended = false;
+            match self.torrents.iter_mut().find(|t| t.id == id) {
+                Some(t) => {
+                    for event in events {
+                        moved = true;
+                        ended |= t.apply(event);
+                    }
                 }
-                continue;
-            };
-            torrent.pieces.set_in_progress(index);
-            torrent.pieces.set_piece(index);
-            torrent.pieces.clear_in_progress(index);
-            let size = piece_size(torrent.total_size, torrent.pieces.total_count(), index);
-            torrent.downloaded = torrent.downloaded.saturating_add(size);
-            if torrent.pieces.is_complete() {
-                torrent.state = TorrentState::Seeding;
-                torrent.completed_time = Some(torrent.added_time);
+                None => ended = true,
             }
-            moved = true;
+            if ended {
+                // Dropping it stops whatever of it is still running.
+                self.sessions.remove(&id);
+            }
+        }
+        // A second's worth of arrivals becomes one sample of the speed.
+        self.since_sample_ms = self.since_sample_ms.saturating_add(elapsed_ms);
+        if self.since_sample_ms >= 1000 {
+            self.since_sample_ms = 0;
+            let mut total = 0_u64;
+            for t in &mut self.torrents {
+                if self.sessions.contains_key(&t.id) || t.unsampled > 0 {
+                    t.download_speed.add_sample(t.unsampled);
+                    total = total.saturating_add(t.unsampled);
+                    t.unsampled = 0;
+                    moved = true;
+                }
+            }
+            self.global_download_speed.add_sample(total);
         }
         if moved {
             EventResult::Consumed
@@ -3115,11 +3176,12 @@ impl TorrentApp {
             // and not stopped.
             Key::Space => {
                 if let Some(id) = self.selected_torrent {
-                    let downloading = self
-                        .torrents
-                        .iter()
-                        .find(|t| t.id == id)
-                        .is_some_and(|t| t.state == TorrentState::Downloading);
+                    let downloading = self.torrents.iter().find(|t| t.id == id).is_some_and(|t| {
+                        matches!(
+                            t.state,
+                            TorrentState::Downloading | TorrentState::CheckingFiles
+                        )
+                    });
                     if downloading {
                         self.pause_torrent(id);
                     } else {
@@ -3220,32 +3282,65 @@ impl TorrentApp {
         self.selected_torrent = ids.first().copied();
     }
 
-    /// Pause a torrent
+    /// Start downloading torrent `id`: a session of its own checks what is
+    /// already on disk, asks the trackers for peers and fetches the rest.
+    pub fn start_torrent(&mut self, id: u32) {
+        if self.sessions.contains_key(&id) {
+            return;
+        }
+        let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) else {
+            return;
+        };
+        if !t.can_start() {
+            return;
+        }
+        let Some(meta) = t.metainfo.clone() else {
+            return;
+        };
+        let plan = session::Plan {
+            wanted: t.wanted(),
+            meta,
+            save_dir: t.save_path.clone(),
+            peer_id: self.peer_id,
+            port: self.settings.listen_port,
+            max_peers: usize::try_from(self.settings.max_connections_per_torrent)
+                .unwrap_or(usize::MAX)
+                .max(1),
+        };
+        t.state = TorrentState::CheckingFiles;
+        t.error_message = None;
+        self.sessions.insert(id, session::Session::start(plan));
+    }
+
+    /// Pause a torrent: its download stops, and what it has fetched stays.
     pub fn pause_torrent(&mut self, id: u32) {
         if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) {
             t.pause();
         }
+        if let Some(session) = self.sessions.remove(&id) {
+            session.stop();
+        }
     }
 
-    /// Resume a torrent
+    /// Resume a torrent: its download starts again from what is on disk.
     pub fn resume_torrent(&mut self, id: u32) {
-        if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) {
-            t.resume();
-        }
+        self.start_torrent(id);
     }
 
     /// Pause all torrents
     pub fn pause_all(&mut self) {
-        for t in &mut self.torrents {
-            t.pause();
+        let ids: Vec<u32> = self.torrents.iter().map(|t| t.id).collect();
+        for id in ids {
+            self.pause_torrent(id);
         }
         self.status_message = "All torrents paused".to_string();
     }
 
     /// Resume all torrents
     pub fn resume_all(&mut self) {
-        for t in &mut self.torrents {
-            t.resume();
+        let ids: Vec<u32> = self.torrents.iter().map(|t| t.id).collect();
+        for id in ids {
+            self.resume_torrent(id);
         }
         self.status_message = "All torrents resumed".to_string();
     }
@@ -3472,17 +3567,20 @@ impl TorrentApp {
 
         // The toolbar. Six buttons were drawn here and none could be pressed.
         let selected = self.selected();
-        let can_pause = selected
-            .is_some_and(|t| matches!(t.state, TorrentState::Downloading | TorrentState::Seeding));
-        let can_resume = selected.is_some_and(|t| t.state == TorrentState::Paused);
-        let any_running = self
-            .torrents
-            .iter()
-            .any(|t| matches!(t.state, TorrentState::Downloading | TorrentState::Seeding));
-        let any_paused = self
-            .torrents
-            .iter()
-            .any(|t| t.state == TorrentState::Paused);
+        let can_pause = selected.is_some_and(|t| {
+            matches!(
+                t.state,
+                TorrentState::Downloading | TorrentState::Seeding | TorrentState::CheckingFiles
+            )
+        });
+        let can_resume = selected.is_some_and(ManagedTorrent::can_start);
+        let any_running = self.torrents.iter().any(|t| {
+            matches!(
+                t.state,
+                TorrentState::Downloading | TorrentState::Seeding | TorrentState::CheckingFiles
+            )
+        });
+        let any_paused = self.torrents.iter().any(ManagedTorrent::can_start);
         let mut bx = 120.0;
         for (label, target, enabled) in [
             ("Open\u{2026}", Target::Open, true),
@@ -3775,7 +3873,7 @@ impl TorrentApp {
         // What this client cannot do, where it can be read. It was drawn
         // first, at the top of the window, and then painted over by the
         // background and the header.
-        for (i, line) in CANNOT_TRANSFER_LINES.iter().enumerate() {
+        for (i, line) in TRANSFER_NOTE_LINES.iter().enumerate() {
             f.push(RenderCommand::Text {
                 x: x + 12.0,
                 y: y + 6.0 + i as f32 * 14.0,
@@ -3992,7 +4090,7 @@ impl TorrentApp {
         // than "Downloading" in blue at 0% for good.
         let (status, status_color) = match torrent.state {
             TorrentState::Downloading if torrent.peers.is_empty() => {
-                (String::from("No network"), self.palette.subtext0)
+                (String::from("Looking for peers"), self.palette.subtext0)
             }
             TorrentState::Downloading => (
                 torrent.state.to_string(),
@@ -4092,7 +4190,7 @@ impl TorrentApp {
 
         let fields: Vec<(&str, String, Option<Target>)> = vec![
             ("Name:", torrent.name.clone(), None),
-            ("Save Path:", torrent.save_path.clone(), None),
+            ("Save Path:", torrent.save_path.display().to_string(), None),
             ("Total Size:", format_size(torrent.total_size), None),
             ("Downloaded:", format_size(torrent.downloaded), None),
             ("Uploaded:", format_size(torrent.uploaded), None),
@@ -4483,7 +4581,7 @@ impl TorrentApp {
             ),
             (
                 "Default Save Path:",
-                self.settings.default_save_path.clone(),
+                self.settings.default_save_path.display().to_string(),
             ),
             ("Encryption:", self.settings.encryption_mode.to_string()),
             ("DHT:", on_off(self.settings.dht_enabled)),
@@ -4616,8 +4714,8 @@ impl TorrentApp {
             Some(why) => (why.clone(), self.palette.ink(self.palette.red)),
             None => (
                 format!(
-                    "Saved to {} -- once there is a network to fetch it over.",
-                    self.add_save_path
+                    "Saved to {} once its files are known -- which this client cannot learn yet.",
+                    self.add_save_path.display()
                 ),
                 self.palette.subtext0,
             ),
@@ -4881,6 +4979,9 @@ impl TorrentApp {
             Ok(magnet) => {
                 let path = self.add_save_path.clone();
                 let id = self.add_magnet(magnet, Some(&path));
+                self.status_message = String::from(
+                    "Added; a magnet link's files are learned from peers, which this client cannot ask yet",
+                );
                 self.selected_torrent = Some(id);
                 self.close_magnet_dialog();
                 self.keep_selection_visible();
@@ -5036,11 +5137,23 @@ impl App for TorrentApp {
     /// tick every 150 ms while anything was "downloading", and with no
     /// network nothing ever has a peer -- so a transfer set going woke the
     /// machine seven times a second, for good, to find nothing to do.
+    ///
+    /// Now: while a download runs, since that is when there is news -- every
+    /// `PIECE_STEP` while one has peers, once a second while all are only
+    /// looking for them.
     fn tick_interval(&self) -> Option<Duration> {
-        self.torrents
+        if self.sessions.is_empty() {
+            return None;
+        }
+        let busy = self
+            .torrents
             .iter()
-            .any(|t| t.state == TorrentState::Downloading && !t.peers.is_empty())
-            .then_some(PIECE_STEP)
+            .any(|t| self.sessions.contains_key(&t.id) && !t.peers.is_empty());
+        Some(if busy {
+            PIECE_STEP
+        } else {
+            Duration::from_secs(1)
+        })
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -5207,7 +5320,7 @@ mod tests {
     /// routing and reports whose tests notice. Sixteen of twenty did not.
     /// The settings panel says its settings are not applied.
     ///
-    /// `CANNOT_TRANSFER_LINES` tells a reader the transfers do not happen.
+    /// `TRANSFER_NOTE_LINES` tells a reader the transfers do not happen.
     /// This panel separately reports "Encryption: Prefer" and "DHT: Enabled",
     /// which a reader can believe describes how the client behaves on a
     /// network -- and there is no network stack, so those values have never
@@ -5238,8 +5351,8 @@ about anything -- it drew {} text command(s)",
         assert!(
             texts
                 .iter()
-                .any(|t| t.contains("Not applied") && t.contains("nothing reads these")),
-            "the panel drew settings and did not say they are not applied"
+                .any(|t| t.contains("nothing else here is read yet")),
+            "the panel drew settings and did not say most are not applied"
         );
     }
 
@@ -5281,7 +5394,8 @@ about anything -- it drew {} text command(s)",
         let said = app.open_torrent_file(&path);
 
         assert!(said.starts_with("Opened A Thing"), "said: {said}");
-        assert!(said.contains("nothing contacted"), "said: {said}");
+        // It is fetched as well as listed: opening a torrent starts it.
+        assert!(said.contains("fetching"), "said: {said}");
         assert_eq!(app.torrents.len(), before + 1, "no torrent was added");
 
         let added = app.torrents.last().expect("the torrent");
@@ -5416,9 +5530,9 @@ about anything -- it drew {} text command(s)",
         assert!(t.completed_time.is_none(), "it recorded a completion");
     }
 
-    /// And the window says why, before the user wonders about the swarm.
+    /// And the window says what this client does not do.
     #[test]
-    fn the_window_says_it_cannot_transfer() {
+    fn the_window_says_what_it_does_not_do() {
         let app = TorrentApp::new();
         let cmds = app.render_commands(WINDOW_WIDTH, WINDOW_HEIGHT);
         let texts: Vec<&str> = cmds
@@ -5428,14 +5542,14 @@ about anything -- it drew {} text command(s)",
                 _ => None,
             })
             .collect();
-        for line in CANNOT_TRANSFER_LINES {
+        for line in TRANSFER_NOTE_LINES {
             assert!(texts.contains(&line), "the window never said {line:?}");
         }
         assert!(
-            CANNOT_TRANSFER_LINES
+            TRANSFER_NOTE_LINES
                 .iter()
-                .any(|l| l.contains("not an empty swarm")),
-            "nothing forecloses reading no progress as an unpopular torrent",
+                .any(|l| l.contains("nothing is uploaded")),
+            "nothing says the client does not share what it fetches",
         );
     }
 
@@ -5673,205 +5787,150 @@ about anything -- it drew {} text command(s)",
         assert!(app.torrents.len() > 1);
     }
 
-    // -- the download loop --
+    // -- downloads --
 
-    /// `pick_piece` and `set_piece` had no caller, so a client whose module
-    /// doc leads with "piece management with bitfield tracking" never picked
-    /// a piece and every torrent sat at whatever progress it was created with.
-    #[test]
-    fn a_downloading_torrent_takes_pieces_until_it_is_done() {
-        let mut app = seeded();
-        let id = app.torrents.first().map(|t| t.id).expect("a torrent");
-        if let Some(t) = app.torrents.iter_mut().find(|t| t.id == id) {
-            t.state = TorrentState::Downloading;
-        }
-        let before = app
-            .torrents
-            .iter()
-            .find(|t| t.id == id)
-            .map_or(0, |t| t.pieces.completed_count());
-        // Nobody to download from, so nothing to wake for: it ticked seven
-        // times a second for good with no network to bring a peer.
-        assert!(
-            app.tick_interval().is_none(),
-            "a download with nobody to download from asked for a clock"
+    /// A `.torrent` file for `stream`, laid out as `testnet::content` lays
+    /// it out, announcing to `announce`.
+    fn torrent_file(stream: &[u8], announce: &str) -> Vec<u8> {
+        use session::testnet::PIECE;
+        let bytes = |s: &str| BencodeValue::Bytes(s.as_bytes().to_vec());
+        let file = |path: &[&str], len: usize| {
+            let mut d = BTreeMap::new();
+            d.insert(
+                String::from("length"),
+                BencodeValue::Integer(i64::try_from(len).unwrap()),
+            );
+            d.insert(
+                String::from("path"),
+                BencodeValue::List(path.iter().map(|p| bytes(p)).collect()),
+            );
+            BencodeValue::Dict(d)
+        };
+        let pieces: Vec<u8> = stream.chunks(PIECE as usize).flat_map(sha1::sha1).collect();
+        let mut info = BTreeMap::new();
+        info.insert(
+            String::from("files"),
+            BencodeValue::List(vec![
+                file(&["one.bin"], 40_000),
+                file(&["sub", "two.bin"], 50_000),
+                file(&["three.bin"], stream.len() - 90_000),
+            ]),
         );
-
-        // The swarm is attached here rather than by the first tick. Until
-        // 2026-09-15 `handle_tick` called `attach_simulated_peers` itself, so
-        // a shipped client invented three peers and ran every torrent to 100%.
-        // What is still worth testing is the picker and the accounting, which
-        // are real; what is not is the swarm arriving out of nowhere.
-        app.attach_simulated_peers(id);
-        assert!(
-            app.torrents
-                .iter()
-                .find(|t| t.id == id)
-                .is_some_and(|t| !t.peers.is_empty()),
-            "the fixture attached no peers"
+        info.insert(String::from("name"), bytes("Set"));
+        info.insert(
+            String::from("piece length"),
+            BencodeValue::Integer(PIECE as i64),
         );
-        assert!(app.tick_interval().is_some(), "a download needs a clock");
-
-        // One tick, one piece. It used to take two, because the first tick
-        // was the one that invented the swarm.
-        app.handle_event(&tick());
-        let after = app
-            .torrents
-            .iter()
-            .find(|t| t.id == id)
-            .map_or(0, |t| t.pieces.completed_count());
-        assert_eq!(after, before + 1, "a tick with peers should take one piece");
+        info.insert(String::from("pieces"), BencodeValue::Bytes(pieces));
+        let mut top = BTreeMap::new();
+        top.insert(String::from("announce"), bytes(announce));
+        top.insert(String::from("info"), BencodeValue::Dict(info));
+        bencode_encode(&BencodeValue::Dict(top))
     }
 
-    /// The bytes follow the pieces, and the last piece is the remainder -- so
-    /// a finished torrent reports its real size rather than overshooting.
+    /// **Opening a `.torrent` downloads it.** The window starts a session,
+    /// hears of every piece on its ticks, and ends Complete -- the files on
+    /// disk byte for byte, the tracker marked working, the session gone and
+    /// the clock stopped.
     #[test]
-    fn the_downloaded_total_reaches_the_torrents_size_exactly() {
+    fn opening_a_torrent_downloads_it() {
+        use session::testnet::{Scratch, Serve, content, seeder, tracker_for};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let (_, stream) = content();
+        // The info hash does not depend on the tracker's address, so the
+        // peer can be started before the tracker exists.
+        let draft =
+            TorrentMetainfo::from_bencode(&torrent_file(&stream, "http://127.0.0.1:1/a")).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (peer, peer_thread) = seeder(
+            &draft,
+            Arc::clone(&stream),
+            Serve::Honest,
+            Arc::clone(&stop),
+        );
+        let (url, tracker_thread) =
+            tracker_for(vec![peer], Arc::clone(&stop), Arc::new(AtomicUsize::new(0)));
+        let dir = Scratch::new("window");
+        let file = dir.0.join("set.torrent");
+        std::fs::write(&file, torrent_file(&stream, &url)).unwrap();
+
         let mut app = TorrentApp::new();
-        let torrent = create_sample_torrent("Small", 1000, 256, "https://example/announce");
-        let id = app.add_torrent(torrent, None);
-        if let Some(t) = app.torrents.iter_mut().find(|t| t.id == id) {
-            t.state = TorrentState::Downloading;
-            t.downloaded = 0;
-        }
-        app.attach_simulated_peers(id);
-
-        for _ in 0..200 {
-            if app
-                .torrents
-                .iter()
-                .find(|t| t.id == id)
-                .is_some_and(|t| t.pieces.is_complete())
-            {
-                break;
-            }
+        app.settings.default_save_path = dir.0.join("downloads");
+        let said = app.open_torrent_file(&file);
+        assert!(said.contains("fetching"), "{said}");
+        assert_eq!(app.torrents[0].state, TorrentState::CheckingFiles);
+        assert!(app.tick_interval().is_some(), "a download needs a clock");
+        let deadline = std::time::Instant::now() + Duration::from_mins(1);
+        while app.torrents[0].state != TorrentState::Complete
+            && std::time::Instant::now() < deadline
+        {
             app.handle_event(&tick());
+            std::thread::sleep(Duration::from_millis(20));
         }
-        let t = app
-            .torrents
-            .iter()
-            .find(|t| t.id == id)
-            .expect("still there");
-        assert!(t.pieces.is_complete(), "it never finished");
-        assert_eq!(
-            t.downloaded, t.total_size,
-            "the byte total should land exactly on the size"
+        stop.store(true, Ordering::Relaxed);
+        let t = &app.torrents[0];
+        assert_eq!(t.state, TorrentState::Complete, "{:?}", t.error_message);
+        assert_eq!(t.downloaded, t.total_size);
+        assert!(t.pieces.is_complete());
+        assert_eq!(t.trackers[0].status, TrackerStatus::Working);
+        assert!(t.completed_time.is_some());
+        assert!(
+            app.sessions.is_empty(),
+            "a finished download kept its session"
         );
-        assert_eq!(
-            t.state,
-            TorrentState::Seeding,
-            "and it should start seeding"
-        );
-        assert_eq!(app.tick_interval(), None, "and the clock should stop");
+        assert_eq!(app.tick_interval(), None, "and its clock");
+        let saved = dir.0.join("downloads").join("Set");
+        let got = [
+            std::fs::read(saved.join("one.bin")).unwrap(),
+            std::fs::read(saved.join("sub").join("two.bin")).unwrap(),
+            std::fs::read(saved.join("three.bin")).unwrap(),
+        ]
+        .concat();
+        assert!(got == *stream, "the files do not hold the torrent's bytes");
+        peer_thread.join().unwrap();
+        tracker_thread.join().unwrap();
     }
 
-    /// A paused torrent takes nothing.
+    /// Space starts a download, stops it -- its session goes, what it
+    /// fetched stays -- and starts it again.
     #[test]
-    fn a_paused_torrent_makes_no_progress() {
-        let mut app = seeded();
-        let id = app.torrents.first().map(|t| t.id).expect("a torrent");
+    fn space_starts_pauses_and_resumes_a_download() {
+        let mut app = TorrentApp::new();
+        let meta = create_sample_torrent("Paused", 1000, 256, "http://127.0.0.1:1/announce");
+        let id = app.add_torrent(meta, None);
         app.selected_torrent = Some(id);
-        if let Some(t) = app.torrents.iter_mut().find(|t| t.id == id) {
-            t.state = TorrentState::Downloading;
-        }
-
+        let state = |app: &TorrentApp| app.torrents.iter().find(|t| t.id == id).unwrap().state;
+        assert_eq!(state(&app), TorrentState::Queued);
         app.handle_event(&press(Key::Space));
-        assert_ne!(
-            app.torrents.iter().find(|t| t.id == id).map(|t| t.state),
-            Some(TorrentState::Downloading),
-            "space should have paused it"
+        assert_eq!(state(&app), TorrentState::CheckingFiles);
+        assert!(app.sessions.contains_key(&id), "nothing was started");
+        app.handle_event(&press(Key::Space));
+        assert_eq!(state(&app), TorrentState::Paused);
+        assert!(
+            !app.sessions.contains_key(&id),
+            "a paused download kept running"
         );
-        let before = app
-            .torrents
-            .iter()
-            .find(|t| t.id == id)
-            .map_or(0, |t| t.pieces.completed_count());
-        for _ in 0..5 {
+        app.handle_event(&press(Key::Space));
+        assert!(app.sessions.contains_key(&id), "resuming started nothing");
+    }
+
+    /// A download a tracker has no peers for says it is looking, and the
+    /// clock slows to once a second: there is nothing to hear of.
+    #[test]
+    fn a_download_with_no_peers_says_it_is_looking() {
+        let (mut app, id) = chosen();
+        app.torrents.iter_mut().find(|t| t.id == id).unwrap().state = TorrentState::Paused;
+        probe::click(&mut app, Target::Resume);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while app.torrents.iter().find(|t| t.id == id).unwrap().state == TorrentState::CheckingFiles
+            && std::time::Instant::now() < deadline
+        {
             app.handle_event(&tick());
+            std::thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(
-            app.torrents
-                .iter()
-                .find(|t| t.id == id)
-                .map_or(0, |t| t.pieces.completed_count()),
-            before,
-            "a paused torrent kept downloading"
-        );
-
-        app.handle_event(&press(Key::Space));
-        assert_eq!(
-            app.torrents.iter().find(|t| t.id == id).map(|t| t.state),
-            Some(TorrentState::Downloading),
-            "and space again should resume it"
-        );
-    }
-
-    /// The swarm the first tick attaches is uneven on purpose, so
-    /// `piece_availability` returns different counts and the picker's
-    /// rarest-first choice is a real choice rather than a tie broken by index.
-    #[test]
-    fn the_attached_swarm_holds_every_piece_but_not_evenly() {
-        let mut app = seeded();
-        let id = app.torrents.first().map(|t| t.id).expect("a torrent");
-        if let Some(t) = app.torrents.iter_mut().find(|t| t.id == id) {
-            t.state = TorrentState::Downloading;
-        }
-        app.attach_simulated_peers(id);
-        app.handle_event(&tick());
-
-        let t = app.torrents.iter().find(|t| t.id == id).expect("there");
-        assert!(t.peers.len() > 1, "one peer is not a swarm");
-        let counts = piece_availability(&t.peers, t.pieces.total_count());
-        assert!(
-            counts.iter().all(|c| *c > 0),
-            "some piece is held by nobody, so it could never be downloaded"
-        );
-        assert!(
-            counts.iter().any(|c| *c != counts[0]),
-            "every piece is equally available, so rarest-first is a no-op: {counts:?}"
-        );
-    }
-
-    // -- the helpers the picker is fed with --
-
-    #[test]
-    fn availability_counts_the_peers_holding_each_piece() {
-        let mut a = PeerInfo::new("1.1.1.1", 1);
-        let mut b = PeerInfo::new("2.2.2.2", 2);
-        // Piece 0 only: bit 7 of byte 0.
-        a.bitfield = vec![0b1000_0000];
-        // Pieces 0 and 1.
-        b.bitfield = vec![0b1100_0000];
-
-        let counts = piece_availability(&[a, b], 3);
-        assert_eq!(counts, vec![2, 1, 0], "got {counts:?}");
-    }
-
-    #[test]
-    fn the_swarm_bitfield_is_the_union_of_the_peers() {
-        let mut a = PeerInfo::new("1.1.1.1", 1);
-        let mut b = PeerInfo::new("2.2.2.2", 2);
-        a.bitfield = vec![0b1000_0000];
-        b.bitfield = vec![0b0100_0000];
-        assert_eq!(swarm_bitfield(&[a, b], 1), vec![0b1100_0000]);
-    }
-
-    /// Every piece is the same size except the last, which is the remainder.
-    #[test]
-    fn the_last_piece_is_the_remainder() {
-        // 1000 bytes in 4 pieces: 250 each, and the last takes what is left.
-        assert_eq!(piece_size(1000, 4, 0), 250);
-        assert_eq!(piece_size(1000, 4, 3), 250);
-        // 1001 bytes in 4: 250 each and 251 at the end.
-        assert_eq!(piece_size(1001, 4, 0), 250);
-        assert_eq!(piece_size(1001, 4, 3), 251);
-        let total: u64 = (0..4).map(|i| piece_size(1001, 4, i)).sum();
-        assert_eq!(total, 1001, "the pieces should sum to the whole");
-    }
-
-    #[test]
-    fn a_torrent_with_no_pieces_has_no_piece_size() {
-        assert_eq!(piece_size(1000, 0, 0), 0, "and does not divide by zero");
+        assert!(texts(&app).iter().any(|t| t == "Looking for peers"));
+        assert_eq!(app.tick_interval(), Some(Duration::from_secs(1)));
     }
 
     // -- the list --
@@ -5940,9 +5999,10 @@ about anything -- it drew {} text command(s)",
 
         app.handle_event(&key_ev(Key::R, true));
         assert!(
-            app.torrents
-                .iter()
-                .any(|t| t.state == TorrentState::Downloading),
+            app.torrents.iter().any(|t| matches!(
+                t.state,
+                TorrentState::Downloading | TorrentState::CheckingFiles
+            )),
             "nothing resumed"
         );
     }
@@ -6411,7 +6471,8 @@ about anything -- it drew {} text command(s)",
         app.pause_torrent(id);
         assert_eq!(app.torrents[0].state, TorrentState::Paused);
         app.resume_torrent(id);
-        assert_eq!(app.torrents[0].state, TorrentState::Downloading);
+        assert_eq!(app.torrents[0].state, TorrentState::CheckingFiles);
+        assert!(app.sessions.contains_key(&id));
     }
 
     #[test]
@@ -6923,7 +6984,7 @@ about anything -- it drew {} text command(s)",
             .frame(app.win_width, app.win_height)
             .into_tree()
             .commands;
-        for line in CANNOT_TRANSFER_LINES {
+        for line in TRANSFER_NOTE_LINES {
             let at = cmds
                 .iter()
                 .position(|c| matches!(c, RenderCommand::Text { text, .. } if text == line))
@@ -6964,15 +7025,15 @@ about anything -- it drew {} text command(s)",
         probe::click(&mut app, Target::Pause);
         assert_eq!(state(&app), TorrentState::Paused);
         probe::click(&mut app, Target::Resume);
-        assert_eq!(state(&app), TorrentState::Downloading);
+        assert_eq!(state(&app), TorrentState::CheckingFiles);
         probe::click(&mut app, Target::PauseAll);
-        assert!(
-            app.torrents
-                .iter()
-                .all(|t| t.state != TorrentState::Downloading)
-        );
+        assert!(app.torrents.iter().all(|t| !matches!(
+            t.state,
+            TorrentState::Downloading | TorrentState::CheckingFiles
+        )));
+        assert!(app.sessions.is_empty(), "Pause all left a download running");
         probe::click(&mut app, Target::ResumeAll);
-        assert_eq!(state(&app), TorrentState::Downloading);
+        assert_eq!(state(&app), TorrentState::CheckingFiles);
         let n = app.torrents.len();
         probe::click(&mut app, Target::Remove);
         assert_eq!(app.torrents.len(), n - 1);
@@ -7256,29 +7317,10 @@ about anything -- it drew {} text command(s)",
             [0, 0, 5, 5],
             "a piece shared with a wanted file was skipped, or a skipped one kept"
         );
-        app.torrents.iter_mut().find(|t| t.id == id).unwrap().state = TorrentState::Downloading;
-        app.attach_simulated_peers(id);
-        for _ in 0..10 {
-            app.handle_event(&Event::Tick { elapsed_ms: 150 });
-        }
-        let t = app.torrents.iter().find(|t| t.id == id).unwrap();
-        assert!(
-            !t.pieces.has_piece(0) && !t.pieces.has_piece(1),
-            "a skipped piece was taken"
-        );
-        assert!(t.pieces.has_piece(2) && t.pieces.has_piece(3));
-    }
-
-    #[test]
-    fn a_stalled_download_says_there_is_no_network() {
-        let (mut app, id) = chosen();
-        app.torrents.iter_mut().find(|t| t.id == id).unwrap().state = TorrentState::Paused;
-        probe::click(&mut app, Target::Resume);
-        assert!(texts(&app).iter().any(|t| t == "No network"));
         assert_eq!(
-            app.tick_interval(),
-            None,
-            "a stalled download keeps the machine awake"
+            t.wanted(),
+            vec![false, false, true, true],
+            "the download would fetch a skipped file's pieces"
         );
     }
 

@@ -166194,42 +166194,67 @@ the size it inflates to, so its ratio is read without inflating it; a plain
 `Track::read_facts`, `PlayerState::load_m3u_from`.
 
 ### [E] The torrent client transfers nothing: it has no tracker or peer transport -- 2026-09-25
-**Status:** OPEN -- `apps/torrent/src/main.rs`; nothing blocks it but the
-work itself.
+**Status:** FIXED for downloading, 2026-09-26 (lane E) -- `apps/torrent/src/`
+`tracker.rs`, `peer.rs`, `storage.rs`, `session.rs`, wired in `main.rs`. OPEN,
+lane E's: uploading, incoming connections, the end of a download (no endgame),
+magnet links (BEP 9/10), DHT -- listed below. On SlateOS itself the whole of it
+waits on `std::net` reaching lane D's sockets, which nothing here has tried.
 
-**In short:** the torrent client reads `.torrent` files and magnet links,
-lists what they describe, and can do nothing else: there is no network code
-in it at all, so no tracker is asked for peers and no peer is asked for a
-piece. The window says so. Everything a transfer needs *around* the network
-is written and tested -- bencode, the info hash, the tracker URL and response
-parser, the peer-wire message encoder and decoder, the piece picker, piece
-priorities, the handshake -- and is waiting for the bytes.
+**In short:** the torrent client downloads now. Opening a `.torrent` starts it:
+the trackers are asked for peers (UDP or plain HTTP), each peer gets a thread,
+every piece is checked against its SHA-1 before a byte of it is written, and the
+window shows the pieces, peers, trackers and speed as they come. Pause stops it,
+Resume carries on from what is on disk. It does not share what it fetches.
 
-**Why this one is worth doing before the other network-less apps.** The
-weather, feed and mail programs need HTTPS, and there is no TLS an application
-can use. BitTorrent does not: most public trackers speak UDP (BEP 15), the rest
-plain HTTP, and peers speak unencrypted TCP. `std::net` is all it needs, on
-the host today and on SlateOS once lane D's sockets carry it.
+**What was built, in the order it was tested:**
+1. `.torrent` read as it is (`b8f43aba2`): the info hash over the file's own
+   bytes (it was the re-encoded dictionary's -- a torrent written non-canonically
+   got a hash no tracker knows); paths kept as bytes and checked a part at a
+   time, so none can climb out of the save folder (a non-UTF-8 part used to be
+   dropped silently); a file entry without a length an error (it used to be
+   skipped, shifting every later byte into the wrong file); bencode nesting
+   bounded. The tree's `sha1` crate replaces the crate's own copy.
+2. `storage.rs`: pieces mapped onto the files they span; only whole, checked
+   pieces written; a symbolic link below the save folder refused; what is
+   already on disk and whole found (`have`), so a restart fetches only the rest.
+3. `tracker.rs`: HTTP (deadline, 1 MiB cap, chunked, redirects to `http://`
+   only, BEP 7 IPv6 peers) and UDP (BEP 15; a reply with another transaction
+   number ignored). `https://` refused with the reason.
+4. `peer.rs`: the handshake, framed messages that survive a read timeout
+   mid-message, and a piece assembled from only the blocks asked for.
+5. `session.rs`: a coordinator thread, a thread a peer, a shared rarest-first
+   picker; a bad piece fetched again and a peer dropped after three; a snubbing
+   peer dropped after a minute; events to the window.
+6. The window: open starts, Space/Pause/Resume stop and start a session,
+   removing stops it (and, when asked, deletes the torrent's own files), ticks
+   apply the events, the speed is sampled a second at a time, a finished
+   download is Complete -- not Seeding, since nothing is uploaded -- and the
+   notice says what the client does not do. The simulated swarm the window used
+   to download from, and the helpers only it used, are gone.
 
-**The proper fix, in the order it can be tested:**
-1. A UDP tracker client (BEP 15: connect, announce, scrape) and an HTTP one
-   for `http://` trackers, returning `AnnounceResponse`, which already parses
-   the compact peer list.
-2. A peer connection: the handshake (`Handshake` encodes and decodes it), bitfield,
-   interested/choke, and `request`/`piece` for 16 KiB blocks, one thread per
-   connection reporting to the window through a channel.
-3. Piece assembly and SHA-1 verification against `TorrentMetainfo::pieces`
-   (`Sha1` is in the crate), then the bytes written to the files a piece
-   spans -- the same spans `set_file_priority` computes -- through a cap and
-   without following a path out of the save directory.
-4. Magnet links: the metadata exchange (BEP 9/10) from the peers the trackers
-   in the link return, since there is no DHT.
-5. Tests against a seed run in-process on localhost: a tracker stub and a
-   peer serving a known file, so a transfer can be checked byte for byte
-   without the internet.
+Tested byte for byte against a tracker and seeding peers run in threads on
+loopback (a download, one with a lying peer beside an honest one, a restart
+with pieces already on disk, a stop, an unwritable folder, the whole thing
+through the window). The tests cannot reach the network: in them a tracker
+anywhere but loopback is refused before its name is looked up, and the default
+save folder is a temporary one.
 
-The window wakes on a tick today; with a connection thread per peer it wants
-`requests/e-f-wake-an-application-for-its-own-descriptor.md` to stop polling.
+**Still to do:**
+- **Upload.** Requests are unanswered and no peer is unchoked. A client that
+  only takes is tolerated by swarms but is poor manners, and some private
+  trackers drop it. Needs a choking algorithm and a listener.
+- **Incoming connections.** Nothing listens on `listen_port`, which is still
+  announced; peers that try it fail. Belongs with upload.
+- **Endgame.** The last piece waits for the peer holding it, or for its silence
+  to time out after a minute; clients ask a second peer for the same blocks.
+- **Magnet links** (BEP 9/10 metadata exchange): the files are not known until
+  a peer sends the info dictionary. `PeerConn::extensions` records who could.
+- **DHT, PEX, encryption, µTP, proxies, bandwidth limits**: the settings panel
+  says only the port and connections per torrent are read.
+
+The window polls on a tick while a download runs (150 ms with peers, a second
+without); `requests/e-f-wake-an-application-for-its-own-descriptor.md` would
+let it wait instead.
 
 ### [E] The screenshot tool's first save can replace a file that took its name a moment earlier -- 2026-09-25
 **Status:** FIXED 2026-09-26 -- `apps/screenshot/src/main.rs`

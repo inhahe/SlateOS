@@ -71,7 +71,7 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::f32::consts::{PI, TAU};
 
-use crate::raster::coverage_on;
+use crate::raster::{coverage_on, mad};
 use crate::sfnt::{Face, Outline, PathCmd, Point};
 use crate::var::Coords;
 use crate::varstore::{IndexMap, VarStore};
@@ -754,16 +754,12 @@ impl Affine {
     /// `self` after `inner`: `inner` is applied to a point first.
     fn then(self, inner: Self) -> Self {
         Self {
-            xx: self.xx.mul_add(inner.xx, self.xy * inner.yx),
-            yx: self.yx.mul_add(inner.xx, self.yy * inner.yx),
-            xy: self.xx.mul_add(inner.xy, self.xy * inner.yy),
-            yy: self.yx.mul_add(inner.xy, self.yy * inner.yy),
-            dx: self
-                .xx
-                .mul_add(inner.dx, self.xy.mul_add(inner.dy, self.dx)),
-            dy: self
-                .yx
-                .mul_add(inner.dx, self.yy.mul_add(inner.dy, self.dy)),
+            xx: mad(self.xx, inner.xx, self.xy * inner.yx),
+            yx: mad(self.yx, inner.xx, self.yy * inner.yx),
+            xy: mad(self.xx, inner.xy, self.xy * inner.yy),
+            yy: mad(self.yx, inner.xy, self.yy * inner.yy),
+            dx: mad(self.xx, inner.dx, mad(self.xy, inner.dy, self.dx)),
+            dy: mad(self.yx, inner.dx, mad(self.yy, inner.dy, self.dy)),
         }
     }
 
@@ -776,14 +772,14 @@ impl Affine {
 
     fn apply(self, p: Point) -> Point {
         Point::new(
-            self.xx.mul_add(p.x, self.xy.mul_add(p.y, self.dx)),
-            self.yx.mul_add(p.x, self.yy.mul_add(p.y, self.dy)),
+            mad(self.xx, p.x, mad(self.xy, p.y, self.dx)),
+            mad(self.yx, p.x, mad(self.yy, p.y, self.dy)),
         )
     }
 
     /// The transform undoing this one; `None` if it squashes the plane flat.
     fn invert(self) -> Option<Self> {
-        let det = self.xx.mul_add(self.yy, -(self.xy * self.yx));
+        let det = mad(self.xx, self.yy, -(self.xy * self.yx));
         if !det.is_normal() {
             return None;
         }
@@ -794,8 +790,8 @@ impl Affine {
             yx,
             xy,
             yy,
-            dx: -xx.mul_add(self.dx, xy * self.dy),
-            dy: -yx.mul_add(self.dx, yy * self.dy),
+            dx: -mad(xx, self.dx, xy * self.dy),
+            dy: -mad(yx, self.dx, yy * self.dy),
         })
     }
 }
@@ -972,10 +968,10 @@ pub(crate) fn pack(c: Rgba) -> u32 {
 fn over(src: Rgba, dst: Rgba) -> Rgba {
     let k = 1.0 - src[3];
     [
-        k.mul_add(dst[0], src[0]),
-        k.mul_add(dst[1], src[1]),
-        k.mul_add(dst[2], src[2]),
-        k.mul_add(dst[3], src[3]),
+        mad(k, dst[0], src[0]),
+        mad(k, dst[1], src[1]),
+        mad(k, dst[2], src[2]),
+        mad(k, dst[3], src[3]),
     ]
 }
 
@@ -1078,7 +1074,7 @@ impl ColourLine {
         let f = if o1 > o0 { (t - o0) / (o1 - o0) } else { 1.0 };
         let mut out = CLEAR;
         for ((o, a), b) in out.iter_mut().zip(c0).zip(c1) {
-            *o = (b - a).mul_add(f, a);
+            *o = mad(b - a, f, a);
         }
         out
     }
@@ -1106,10 +1102,10 @@ enum Gradient {
 impl Gradient {
     fn linear(p0: Point, p1: Point, p2: Point) -> Self {
         let (nx, ny) = (p0.y - p2.y, p2.x - p0.x);
-        let len2 = nx.mul_add(nx, ny * ny);
+        let len2 = mad(nx, nx, ny * ny);
         let p3 = if len2 > f32::EPSILON {
-            let k = (p1.x - p0.x).mul_add(nx, (p1.y - p0.y) * ny) / len2;
-            Point::new(nx.mul_add(k, p0.x), ny.mul_add(k, p0.y))
+            let k = mad(p1.x - p0.x, nx, (p1.y - p0.y) * ny) / len2;
+            Point::new(mad(nx, k, p0.x), mad(ny, k, p0.y))
         } else {
             // No direction for the bands: run straight from p0 to p1.
             p1
@@ -1124,18 +1120,18 @@ impl Gradient {
         match *self {
             Self::Linear { p0, p3 } => {
                 let (vx, vy) = (p3.x - p0.x, p3.y - p0.y);
-                let len2 = vx.mul_add(vx, vy * vy);
-                (len2 > f32::EPSILON).then(|| (p.x - p0.x).mul_add(vx, (p.y - p0.y) * vy) / len2)
+                let len2 = mad(vx, vx, vy * vy);
+                (len2 > f32::EPSILON).then(|| mad(p.x - p0.x, vx, (p.y - p0.y) * vy) / len2)
             }
             Self::Radial { c0, r0, c1, r1 } => {
                 // The largest t whose circle, c0 + t (c1 - c0) with radius
                 // r0 + t (r1 - r0) >= 0, passes through p.
                 let (cdx, cdy, dr) = (c1.x - c0.x, c1.y - c0.y, r1 - r0);
                 let (px, py) = (p.x - c0.x, p.y - c0.y);
-                let a = cdx.mul_add(cdx, cdy.mul_add(cdy, -(dr * dr)));
-                let b = px.mul_add(cdx, py.mul_add(cdy, r0 * dr));
-                let c = px.mul_add(px, py.mul_add(py, -(r0 * r0)));
-                let reaches = |t: f32| dr.mul_add(t, r0) >= 0.0;
+                let a = mad(cdx, cdx, mad(cdy, cdy, -(dr * dr)));
+                let b = mad(px, cdx, mad(py, cdy, r0 * dr));
+                let c = mad(px, px, mad(py, py, -(r0 * r0)));
+                let reaches = |t: f32| mad(dr, t, r0) >= 0.0;
                 if a.abs() <= f32::EPSILON {
                     if b.abs() <= f32::EPSILON {
                         return None;
@@ -1143,7 +1139,7 @@ impl Gradient {
                     let t = c / (2.0 * b);
                     return reaches(t).then_some(t);
                 }
-                let disc = b.mul_add(b, -(a * c));
+                let disc = mad(b, b, -(a * c));
                 if disc < 0.0 {
                     return None;
                 }
@@ -1178,7 +1174,7 @@ fn composite(mode: u8, s: Rgba, b: Rgba) -> Rgba {
     let porter_duff = |fs: f32, fb: f32| {
         let mut out = CLEAR;
         for ((o, x), y) in out.iter_mut().zip(s).zip(b) {
-            *o = x.mul_add(fs, y * fb);
+            *o = mad(x, fs, y * fb);
         }
         out
     };
@@ -1225,7 +1221,7 @@ fn blend(mode: u8, s: Rgba, b: Rgba) -> Rgba {
     let both = sa * ba;
     let mut out = [0.0, 0.0, 0.0, sa + ba - both];
     for (((o, &x), &y), &m) in out.iter_mut().zip(&s).zip(&b).zip(&mixed) {
-        *o = x.mul_add(1.0 - ba, y.mul_add(1.0 - sa, both * m));
+        *o = mad(x, 1.0 - ba, mad(y, 1.0 - sa, both * m));
     }
     out
 }
@@ -1269,25 +1265,25 @@ fn separable(mode: u8, s: f32, b: f32) -> f32 {
         19 => hard_light(b, s),
         20 => {
             if s <= 0.5 {
-                (2.0f32.mul_add(-s, 1.0) * b).mul_add(-(1.0 - b), b)
+                mad(mad(2.0f32, -s, 1.0) * b, -(1.0 - b), b)
             } else {
                 let d = if b <= 0.25 {
-                    (16.0f32.mul_add(b, -12.0) * b + 4.0) * b
+                    (mad(16.0f32, b, -12.0) * b + 4.0) * b
                 } else {
                     b.sqrt()
                 };
-                2.0f32.mul_add(s, -1.0).mul_add(d - b, b)
+                mad(mad(2.0f32, s, -1.0), d - b, b)
             }
         }
         21 => (b - s).abs(),
-        22 => (-2.0 * b).mul_add(s, b + s),
+        22 => mad(-2.0 * b, s, b + s),
         _ => b * s,
     }
 }
 
 /// The hue, saturation, colour and luminosity modes, on straight colour.
 fn non_separable(mode: u8, s: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    let lum = |c: [f32; 3]| 0.3f32.mul_add(c[0], 0.59f32.mul_add(c[1], 0.11 * c[2]));
+    let lum = |c: [f32; 3]| mad(0.3f32, c[0], mad(0.59f32, c[1], 0.11 * c[2]));
     let max = |c: [f32; 3]| c[0].max(c[1]).max(c[2]);
     let min = |c: [f32; 3]| c[0].min(c[1]).min(c[2]);
     let clip = |c: [f32; 3]| {

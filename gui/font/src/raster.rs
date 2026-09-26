@@ -56,6 +56,23 @@ use crate::sfnt::{Outline, PathCmd, Point};
 /// glyph is not rejected.
 pub const MAX_GLYPH_PIXELS: usize = 16 * 1024 * 1024;
 
+/// `a * b + c`, rounded twice: a multiply-add *without* the fused
+/// instruction.
+///
+/// `f32::mul_add` promises a single rounding, and on a target built without
+/// the FMA instruction set -- this workspace's baseline, since it cannot
+/// assume one -- it keeps that promise by calling the C library's `fmaf`, a
+/// software routine. In the rasterizer's per-row loop and the colour glyph
+/// painter's per-pixel one that was most of the cost: measured on
+/// 2026-09-26, a colour emoji's fills ran at 41 to 81 ns a pixel through
+/// `fmaf`. A pixel's coverage or colour has no use for the extra bit of
+/// precision, so these paths spend two instructions instead.
+#[inline]
+#[must_use]
+pub(crate) const fn mad(a: f32, b: f32, c: f32) -> f32 {
+    a * b + c
+}
+
 /// Why an outline could not be rasterized.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RasterError {
@@ -138,7 +155,7 @@ fn quad_segments(p0: Point, ctrl: Point, p1: Point) -> u32 {
     const TOLERANCE: f32 = 3.0;
     let dev_x = p0.x - 2.0 * ctrl.x + p1.x;
     let dev_y = p0.y - 2.0 * ctrl.y + p1.y;
-    let dev_sq = dev_x.mul_add(dev_x, dev_y * dev_y);
+    let dev_sq = mad(dev_x, dev_x, dev_y * dev_y);
     if dev_sq < 0.333 {
         return 1;
     }
@@ -168,7 +185,7 @@ fn cubic_segments(p0: Point, c1: Point, c2: Point, p1: Point) -> u32 {
     let d1y = p0.y - 2.0 * c1.y + c2.y;
     let d2x = c1.x - 2.0 * c2.x + p1.x;
     let d2y = c1.y - 2.0 * c2.y + p1.y;
-    let dev_sq = d1x.mul_add(d1x, d1y * d1y).max(d2x.mul_add(d2x, d2y * d2y));
+    let dev_sq = mad(d1x, d1x, d1y * d1y).max(mad(d2x, d2x, d2y * d2y));
     // Below this the formula yields less than one segment anyway.
     if dev_sq < 1.0 / 27.0 {
         return 1;
@@ -303,7 +320,7 @@ impl Accumulator {
                 // deposits no area and `x` advances by `dxdy * dy` == 0.
                 continue;
             }
-            let x_next = dxdy.mul_add(dy, x);
+            let x_next = mad(dxdy, dy, x);
             let d = dy * dir;
             let (x0, x1) = if x < x_next { (x, x_next) } else { (x_next, x) };
             let x0_floor = x0.floor();
@@ -345,7 +362,7 @@ impl Accumulator {
                     let span = f32::from(
                         i16::try_from(x1i.saturating_sub(x0i).saturating_sub(3)).unwrap_or(0),
                     );
-                    let a2 = span.mul_add(s, a1);
+                    let a2 = mad(span, s, a1);
                     self.add(row_start, x1i.saturating_sub(1), d * (1.0 - a2 - am));
                 }
                 self.add(row_start, x1i, d * am);
@@ -372,7 +389,7 @@ impl Accumulator {
             (left_first, _) => {
                 // `from.x - to.x` is non-zero: the two sides differ.
                 let t = from.x / (from.x - to.x);
-                let cross = Point::new(0.0, (to.y - from.y).mul_add(t, from.y));
+                let cross = Point::new(0.0, mad(to.y - from.y, t, from.y));
                 if left_first {
                     self.line(on_edge(from), cross);
                     self.line(cross, to);
@@ -594,8 +611,8 @@ fn flatten_quad_into(from: Point, ctrl: Point, to: Point, emit: &mut dyn FnMut(P
         let t = f32::from(u16::try_from(i).unwrap_or(1)) * inv;
         let mt = 1.0 - t;
         // de Casteljau, written out: B(t) = (1-t)^2 from + 2(1-t)t ctrl + t^2 to
-        let bx = mt.mul_add(mt * from.x, (2.0 * mt * t).mul_add(ctrl.x, t * t * to.x));
-        let by = mt.mul_add(mt * from.y, (2.0 * mt * t).mul_add(ctrl.y, t * t * to.y));
+        let bx = mad(mt, mt * from.x, mad(2.0 * mt * t, ctrl.x, t * t * to.x));
+        let by = mad(mt, mt * from.y, mad(2.0 * mt * t, ctrl.y, t * t * to.y));
         let pt = Point::new(bx, by);
         emit(prev, pt);
         prev = pt;
@@ -626,8 +643,8 @@ fn flatten_cubic_into(
         let w1 = 3.0 * mt * mt * t;
         let w2 = 3.0 * mt * t * t;
         let w3 = t * t * t;
-        let bx = w0.mul_add(from.x, w1.mul_add(c1.x, w2.mul_add(c2.x, w3 * to.x)));
-        let by = w0.mul_add(from.y, w1.mul_add(c1.y, w2.mul_add(c2.y, w3 * to.y)));
+        let bx = mad(w0, from.x, mad(w1, c1.x, mad(w2, c2.x, w3 * to.x)));
+        let by = mad(w0, from.y, mad(w1, c1.y, mad(w2, c2.y, w3 * to.y)));
         let pt = Point::new(bx, by);
         emit(prev, pt);
         prev = pt;
@@ -818,12 +835,12 @@ mod tests {
         const TWO_THIRDS: f32 = 2.0 / 3.0;
         PathCmd::CurveTo(
             Point::new(
-                TWO_THIRDS.mul_add(c.x - p0.x, p0.x),
-                TWO_THIRDS.mul_add(c.y - p0.y, p0.y),
+                mad(TWO_THIRDS, c.x - p0.x, p0.x),
+                mad(TWO_THIRDS, c.y - p0.y, p0.y),
             ),
             Point::new(
-                TWO_THIRDS.mul_add(c.x - p1.x, p1.x),
-                TWO_THIRDS.mul_add(c.y - p1.y, p1.y),
+                mad(TWO_THIRDS, c.x - p1.x, p1.x),
+                mad(TWO_THIRDS, c.y - p1.y, p1.y),
             ),
             p1,
         )

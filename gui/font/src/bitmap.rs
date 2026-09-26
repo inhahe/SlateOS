@@ -31,6 +31,7 @@
 use alloc::vec::Vec;
 
 use crate::colr::{ColourImage, MAX_COLOUR_PIXELS, Rgba, pack, premultiply, unpack};
+use crate::raster::mad;
 use crate::sfnt::Face;
 
 /// The largest picture a strike may hold for one glyph: 1024 by 1024, eight
@@ -492,7 +493,7 @@ fn resample(source: &[Rgba], (sw, sh): (usize, usize), (dw, dh): (usize, usize))
         let mut out = [0.0f32; 4];
         for (p, w) in pixels {
             for (o, v) in out.iter_mut().zip(p) {
-                *o = v.mul_add(w, *o);
+                *o = mad(v, w, *o);
             }
         }
         out

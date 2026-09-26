@@ -177,7 +177,15 @@ if [ "$(readlink /var/run)" != /run ] && [ "$(readlink /var/run)" != ../run ]; t
   echo "pinky-diff: /var/run is not a link to /run here, so a private /run does not reach /var/run/utmp" >&2
   exit 1
 fi
-probe=$(unshare -rm sh "$fx/inns.sh" file sh -c 'test -s /var/run/utmp && head -c 5 /etc/passwd' 2>&1)
+# util-linux's `unshare` builds the private namespace every fixture case runs
+# in. Linux has it and the Windows host this script re-executes from does not,
+# so it is resolved once, here, and its absence said plainly rather than left
+# to become an empty probe. Absolute, like `xargs-diff.sh`'s `SETSID`.
+UNSHARE=$(command -v unshare) || {
+  echo "pinky-diff: unshare(1) is not on PATH; the utmp fixtures need a private mount namespace" >&2
+  exit 1
+}
+probe=$("$UNSHARE" -rm sh "$fx/inns.sh" file sh -c 'test -s /var/run/utmp && head -c 5 /etc/passwd' 2>&1)
 if [ "$probe" != "root:" ]; then
   echo "pinky-diff: cannot build the private namespace: $probe" >&2
   exit 1
@@ -193,7 +201,7 @@ compare() {
     if [ "$MODE" = live ]; then
       run=(env PATH="$bindir/$side:$PATH" pinky "$@")
     else
-      run=(unshare -rm sh "$fx/inns.sh" "$MODE" env PATH="$bindir/$side:$PATH" pinky "$@")
+      run=("$UNSHARE" -rm sh "$fx/inns.sh" "$MODE" env PATH="$bindir/$side:$PATH" pinky "$@")
     fi
     if [ -n "$TO_FULL" ]; then
       ( if [ -n "$ENVS" ]; then eval "export $ENVS"; fi; timeout -k 2 30 "${run[@]}" ) >/dev/full 2>"$err" </dev/null

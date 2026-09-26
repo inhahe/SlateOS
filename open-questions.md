@@ -84,6 +84,56 @@ subsystem".)
 one: write it up in `design-decisions.md` as a `Decided by: Operator` entry,
 **delete the entry from here**, and add one line to the `
 
+## F-Q2 — [F] Remote desktop's video fallback (for games and video): which video format do we write an encoder for? — Status: OPEN (raised 2026-09-26)
+
+**In short:** remote desktop here sends *drawing instructions* rather than
+pictures, which keeps text sharp and uses little bandwidth -- but a game or a
+playing video has no drawing instructions, only changing pixels, so today it
+arrives blank. The design's answer is a fallback that films the screen and
+sends it as video. Nothing in the tree can make video yet, so lane F would
+write an encoder (the part that compresses the screen into a video stream)
+and, for a SlateOS viewer, the matching decoder. Which video format to write
+decides the cost, who can watch it, and whether patents are involved.
+
+**The options.**
+
+| Option | *What changes:* |
+|---|---|
+| **A.** VP8 | Streams play in any browser and in SlateOS's own viewer; no patent fees; roughly the quality of 2010-era web video. |
+| **B.** H.264 | Plays anywhere, often decoded by the graphics chip; somewhat better quality per bit than VP8; patent-pooled (fees for some uses in some countries until about 2030). |
+| **C.** VP9 | Better quality per bit than either (roughly half H.264's bitrate); no patent fees; plays in browsers; several times the work to write, and slower to encode. |
+| **D.** VP8 first, VP9 later | A working fallback soon, and the efficient one when it is worth the effort. |
+
+**What each means for us.**
+
+- **VP8** (a video format Google made royalty-free) is the one this tree
+  already half-knows: a WebP photograph *is* a single VP8 frame, and
+  `gui/imagecodec` decodes those, to the bit. An encoder reuses that
+  understanding, and a viewer's decoder extends it with motion (the part that
+  says "this block moved from there"). Smallest effort by a wide margin.
+- **H.264** is the one every device can decode with dedicated hardware, which
+  matters for a phone or an old laptop as the *viewer*. Its patents are
+  pooled and licensed; most of the basic-profile ones have expired, not all.
+  That makes it a legal and policy question as much as an engineering one --
+  the same one F-Q1 asks about HEVC.
+- **VP9** is what the design text names alongside H.264. It is the best of
+  the three at a given bandwidth, and much the largest to write.
+
+**If never answered:** safe. Games and videos keep arriving blank over remote
+desktop, as they do now; ordinary windows are unaffected. Lane F works on
+other things meanwhile.
+
+**Claude's recommendation:** **D** -- VP8 now (royalty-free, playable
+everywhere, and a direct extension of code we already have and have tested to
+the bit), VP9 once the fallback is in use and bandwidth is the complaint. H.264
+only if hardware decoding on the viewer side turns out to matter more than the
+patent question.
+
+**Where it bites:** a new encoder beside `gui/imagecodec/src/webp/lossy/` (or
+its own crate), `gui/remote` (the stream), and the compositor's
+`capture_stream_frame`, which today sends buffer-backed windows -- games, video
+-- as empty command lists (roadmap: "Video-encoded capture fallback").
+
 ## F-Q1 — [F] iPhone photos (HEIC) and many web pictures (AVIF) will not open. Bring in the video decoders they need? — Status: OPEN (raised 2026-09-25)
 
 **In short:** two common kinds of picture cannot be opened at all: HEIC, which

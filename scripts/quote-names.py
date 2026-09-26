@@ -150,6 +150,15 @@ IGNORE = {
     # sixteen interpolates a fixed `"-d"`/`"-t"` and is not a name at all.
     "userspace/oils/src/interp.rs": "bash's own message text -- B-Q12",
     "userspace/oils/src/arith.rs": "bash's own message text -- B-Q12",
+    # gnulib parse-datetime.y's `--debug` text, byte for byte, which
+    # `date-diff.sh` and `parse-datetime-diff.sh` compare against GNU
+    # `date --debug`. Every single-quoted value in it is text the parser
+    # formatted itself: `(Y-M-D) 2021-06-15 12:00:00` with a numeric `TZ=`,
+    # `12:00:00`, or `str_days`'s words from two fixed tables. None is a name,
+    # and the file reads no names -- `date -f FILE` lives in bin/date.rs. The
+    # one echo of raw input, upstream's `TZ="..." in date string`, is
+    # double-quoted bytes and was never this pattern's to find.
+    "userspace/coreutils/src/parse_datetime/mod.rs": "gnulib's --debug text; the quotes wrap formatted dates",
 }
 
 # The macros that build a message somebody will read.

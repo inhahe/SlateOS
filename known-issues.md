@@ -167915,6 +167915,40 @@ So all three of lane A's long-red ring-3 rungs now have their kernel-side
 causes fixed: `ctest-pty` passes; `ctest-coreutils-runs` waits on the link
 faults (B, D); `ctest-python-repl` waits on `execv` (D).
 
+**Third addendum (2026-09-26) — the integration boot of `3fd70ae1d`.** Three
+rungs red, one of them lane A's own, and then a kernel panic that was also
+lane A's:
+
+- The panic: `kshell::self_test` rung 21 asserted `syshealth` exits 0, and
+  `syshealth` correctly reported a real fault — lockdep had caught an AB/BA
+  inversion in the VFS: `flock`/`funlock`/`lock_query` resolved the file's
+  identity (locking the mounted filesystem) while holding `LOCK_TABLE`, and
+  procfs's `/proc/locks` takes `LOCK_TABLE` under the procfs lock. The
+  assertion turned the report into a panic, and every self-test after it —
+  the network checks among them — never ran. Both fixed in the next change:
+  the identity is resolved before the table is taken (as `reclock.rs`
+  already did), and rung 21 now asserts that each checker's status matches
+  its printed verdict, failing the self-test at the end, not panicking, when
+  the kernel is unhealthy.
+
+- `ctest-python-repl`: exit 4, as above. Lane D fixed `execv` on its branch
+  on 2026-09-25 (`execve(path, argv, current_environ())`); it is not on `main`.
+  The rung needs both that and lane A's grant fix, which is on `lane-a` only —
+  so each lane's boot stays red on this rung until the other's fix is on
+  `main` (open question A-Q20).
+- `Path-Z real CMake`, `cmake 01`: exit -8. CMake ran its script, then crashed
+  inside `exit`: `cmsys::RegularExpression::~RegularExpression()` called with
+  `this = NULL` (fault at 0x220; symbolised from `build/spike/cmake-slateos.elf`).
+  libc's `__cxa_atexit` is a stub that drops the object pointer, so every C++
+  static destructor runs on a null `this`; its 32-entry table is also far too
+  small for CMake. Lane D's code:
+  `requests/a-d-cxa-atexit-drops-the-object-so-static-destructors-run-on-null.md`.
+- `SYS_PROCESS_SPAWN_EX2 argument-ABI`: probe 0x18. Lane A's own: §960 added
+  `cwd_ptr`/`cwd_len` to `SpawnEx2Args` (128 → 144 bytes) and the ring-3
+  probe program still aimed "the unknown tail" at byte 128 — now `cwd_ptr`, a
+  known field, so accepted. Fixed in the next change: the tail probes moved to
+  144/152, and five probes (0x21-0x25) now cover the `cwd` fields' own rules.
+
 ### [A] A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC: 21 syscalls copy a whole user buffer into one kernel allocation, and that allocation can now be 1 GiB -- 2026-09-25
 **Status:** OPEN (tech debt; `epoll_wait` fixed in the same change as §959, the rest listed below)
 

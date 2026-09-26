@@ -144,6 +144,11 @@ pub struct PerThread {
     /// handed the same bytes.  All-zero means "never seeded", which is what
     /// this block starts as — see [`crate::random::RandomState`].
     pub random: crate::random::RandomState,
+    /// The thread's kernel task id, or 0 before the first
+    /// [`crate::pthread::current_tid`] fetched it.  Cached because every
+    /// mutex lock records its owner, and a syscall there was the uncontended
+    /// path's whole cost.  `fork`'s child resets it: its id is new.
+    pub tid: i32,
 }
 
 impl PerThread {
@@ -164,6 +169,7 @@ impl PerThread {
         cancel_state: 0,
         cancel_type: 0,
         random: crate::random::RandomState::ZERO,
+        tid: 0,
     };
 }
 

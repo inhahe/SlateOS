@@ -20,11 +20,24 @@
 //!
 //! ## Synchronization Primitives
 //!
-//! - **Mutexes**: atomic CAS with spin-yield.  Supports normal,
-//!   recursive (reentrant), and error-checking mutex types.
-//! - **Condition variables**: generation counter with spin-yield wait.
-//! - **Read-write locks**: atomic state (0=unlocked, N=readers, -1=writer).
-//! - **Barriers**: arrival counter with generation-based release.
+//! Every blocking call sleeps on a futex ([`crate::lowlevellock`]) and is
+//! woken by the thread that releases it, and every uncontended path is one
+//! atomic operation with no syscall.  Until 2026-09-26 they slept in 1 ms
+//! steps and polled (`known-issues.md` →
+//! `B-D-PTHREAD-SYNC-POLLED-IN-1MS-STEPS`).
+//!
+//! - **Mutexes**: glibc's three-state low-level lock.  Normal, recursive
+//!   and error-checking types; the owner is the calling thread's task id,
+//!   cached in its per-thread block so locking makes no syscall.
+//! - **Condition variables**: a sequence counter the waiters sleep on, with
+//!   a count of waiters so that a signal nobody is waiting for costs no
+//!   syscall.  The clock the attribute named is kept and used
+//!   (`design-decisions.md` §1110).
+//! - **Read-write locks**: a reader-preferring futex lock (0 = unlocked,
+//!   N = readers, -1 = writer); the writer's own `rdlock`/`wrlock` is
+//!   `EDEADLK`.
+//! - **Barriers**: the arrival count and round number under a low-level
+//!   lock; waiters sleep on the round.
 //! - **Spinlocks**: pure atomic CAS busy-wait.
 //!
 //! ## Why each opaque type carries a `const` size assertion
@@ -71,14 +84,19 @@
 //!   `pthread_self`, `pthread_equal`, `pthread_exit`
 //! - Attributes: `pthread_attr_init`/`destroy`/`setstacksize`/
 //!   `getstacksize`/`setdetachstate`/`getdetachstate`
-//! - Mutex: `pthread_mutex_init`/`destroy`/`lock`/`trylock`/`unlock`
+//! - Mutex: `pthread_mutex_init`/`destroy`/`lock`/`trylock`/`timedlock`/
+//!   `clocklock`/`unlock`/`consistent`/`getprioceiling`/`setprioceiling`
 //! - Mutex attributes: `pthread_mutexattr_init`/`destroy`/`settype`/
-//!   `gettype`
+//!   `gettype` and the `pshared`, `protocol`, `prioceiling` and `robust`
+//!   getter/setter pairs
 //! - Condition: `pthread_cond_init`/`destroy`/`wait`/`timedwait`/
-//!   `signal`/`broadcast`
+//!   `clockwait`/`signal`/`broadcast`; `pthread_condattr_*` including
+//!   `setclock` and `setpshared`
 //! - RW lock: `pthread_rwlock_init`/`destroy`/`rdlock`/`tryrdlock`/
-//!   `wrlock`/`trywrlock`/`unlock`
-//! - Barrier: `pthread_barrier_init`/`destroy`/`wait`
+//!   `timedrdlock`/`clockrdlock`/`wrlock`/`trywrlock`/`timedwrlock`/
+//!   `clockwrlock`/`unlock`
+//! - Barrier: `pthread_barrier_init`/`destroy`/`wait`, and
+//!   `pthread_barrierattr_*`
 //! - Spinlock: `pthread_spin_init`/`destroy`/`lock`/`trylock`/`unlock`
 //! - Cancel stubs: `pthread_setcancelstate`/`setcanceltype`/
 //!   `testcancel`/`cancel`
@@ -104,11 +122,14 @@
 //!   a thread is stopping. (This line read "accepted but never actually
 //!   cancels a thread" until 2026-09-13, which described the function before
 //!   it started refusing.)
-//! - Mutex is a spinlock (no futex-based blocking).
-//! - Condition variables use spin-yield (1ms intervals) watching a
-//!   generation counter.  Correct but not efficient.
-//! - Recursive/error-checking mutexes track owner via syscall per
-//!   lock/unlock (no futex-based blocking yet).
+//! - Process-shared objects (`PTHREAD_PROCESS_SHARED`) are refused with
+//!   `ENOTSUP`, glibc's answer where shared futexes are unsupported: the
+//!   kernel keys a futex by address space, so a waiter in one process could
+//!   never be woken from another (`known-issues.md` →
+//!   `B-D-PROCESS-SHARED-SYNC-IS-SILENTLY-PRIVATE`).
+//! - Priority-inheritance, priority-protect and robust mutexes are not
+//!   supported: their attributes can be set and read back, but
+//!   `pthread_mutex_init` refuses them with `ENOTSUP`.
 
 use crate::errno;
 // The stack floor lives with the other pthread limits; `pthread_attr_setstack`
@@ -183,10 +204,21 @@ pub type PthreadMutexattrT = [u8; 4];
 /// threads spinning on `pthread_cond_wait`.
 #[repr(C)]
 pub struct PthreadCondT {
-    /// Generation counter — incremented on each signal/broadcast.
+    /// Sequence number, and the futex waiters sleep on: every signal and
+    /// broadcast advances it, so a waiter that saw the old value wakes.
     generation: AtomicI32,
+    /// The clock `pthread_cond_timedwait` measures its deadline against,
+    /// from the attribute's `pthread_condattr_setclock`: `CLOCK_REALTIME`
+    /// (0, also `PTHREAD_COND_INITIALIZER`'s) or `CLOCK_MONOTONIC`.  Until
+    /// 2026-09-26 the attribute was ignored and every deadline was read as
+    /// real time -- so a monotonic deadline, a few seconds past boot, had
+    /// always passed.
+    clock: i32,
+    /// Threads inside a wait, so a signal with no one waiting costs no
+    /// syscall.
+    waiters: AtomicI32,
     // Padding to match typical libc struct size.
-    _pad: [u8; 44],
+    _pad: [u8; 36],
 }
 
 /// See the module note on why these are `const` and not `#[test]`.
@@ -203,7 +235,9 @@ pub type PthreadCondattrT = [u8; 4];
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static PTHREAD_COND_INITIALIZER: PthreadCondT = PthreadCondT {
     generation: AtomicI32::new(0),
-    _pad: [0; 44],
+    clock: 0,
+    waiters: AtomicI32::new(0),
+    _pad: [0; 36],
 };
 
 /// Pthread once control type — thread-safe via atomic flag.
@@ -1037,9 +1071,6 @@ pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
 // Mutex operations — thread-safe via atomics
 // ---------------------------------------------------------------------------
 
-/// Maximum spin iterations before yielding on a contended mutex.
-const MUTEX_SPIN_LIMIT: u32 = 100;
-
 /// Initialize a mutex.
 ///
 /// Reads the mutex type from `attr` (if non-null) to determine whether
@@ -1049,17 +1080,23 @@ pub unsafe extern "C" fn pthread_mutex_init(
     mutex: *mut PthreadMutexT,
     attr: *const PthreadMutexattrT,
 ) -> i32 {
+    // glibc's order (nptl/pthread_mutex_init.c): the attribute's sanity
+    // checks, then the mutex.  A protocol other than none, and robustness,
+    // are ENOTSUP here -- no priority-inheriting futexes, no priority
+    // ceilings, no robust list -- as glibc answers where it lacks them.
+    let word: u32 = if attr.is_null() {
+        0
+    } else {
+        // SAFETY: attr verified non-null; `[u8; 4]`, so read unaligned.
+        unsafe { core::ptr::read_unaligned(attr.cast::<u32>()) }
+    };
+    if word & (MUTEXATTR_PROTOCOL_MASK | MUTEXATTR_FLAG_ROBUST) != 0 {
+        return errno::ENOTSUP;
+    }
     if mutex.is_null() {
         return errno::EFAULT;
     }
-    // Read kind from attr (default: PTHREAD_MUTEX_NORMAL = 0).
-    let kind: i32 = if attr.is_null() {
-        PTHREAD_MUTEX_NORMAL
-    } else {
-        // SAFETY: attr verified non-null.  PthreadMutexattrT is [u8; 8]
-        // with first 4 bytes holding the kind (set by mutexattr_settype).
-        unsafe { core::ptr::read_unaligned(attr.cast::<i32>()) }
-    };
+    let kind = (word & !MUTEXATTR_FLAG_BITS) as i32;
     // SAFETY: caller guarantees mutex is valid.
     unsafe {
         (*mutex).locked.store(0, Ordering::Release);
@@ -1070,16 +1107,64 @@ pub unsafe extern "C" fn pthread_mutex_init(
     0
 }
 
+/// The calling thread's kernel task id, from its per-thread block: fetched
+/// by syscall the first time, a load after.  glibc keeps it in `struct
+/// pthread` for the same reason -- every lock records its owner, and until
+/// 2026-09-26 a `SYS_TASK_ID` syscall was the uncontended lock's whole cost.
+/// `fork`'s child resets it (see `process::fork`), its id being new.
+pub(crate) fn current_tid() -> i32 {
+    let pt = crate::perthread::current();
+    // SAFETY: `current()` is the calling thread's block (or, in a program
+    // with no thread pointer, the single-threaded fallback); only this thread
+    // touches it.
+    let cached = unsafe { (*pt).tid };
+    if cached != 0 {
+        return cached;
+    }
+    let tid = raw_task_id();
+    // SAFETY: as above.
+    unsafe { (*pt).tid = tid };
+    tid
+}
+
+/// The task id from the kernel (on the host, the test thread's stand-in).
+fn raw_task_id() -> i32 {
+    #[cfg(target_os = "none")]
+    {
+        syscall::syscall0(syscall::SYS_TASK_ID) as i32
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        crate::process::gettid()
+    }
+}
+
+/// A recursive mutex's owner locking it again: one more level, or `EAGAIN`
+/// once the count would overflow, as glibc answers.
+fn recursive_relock(m: &PthreadMutexT) -> i32 {
+    let c = m.count.load(Ordering::Relaxed);
+    if c == i32::MAX {
+        return errno::EAGAIN;
+    }
+    m.count.store(c.wrapping_add(1), Ordering::Relaxed);
+    0
+}
+
+/// Whether the calling thread (`self_id`) holds `m`.
+fn held_by(m: &PthreadMutexT, self_id: i32) -> bool {
+    m.locked.load(Ordering::Relaxed) != 0 && m.owner.load(Ordering::Relaxed) == self_id
+}
+
 /// Lock a mutex.
 ///
-/// Uses atomic CAS for thread safety.  On contention, spins briefly
-/// then yields via `SYS_SLEEP(1ms)` to avoid wasting CPU time.
+/// The lock word is a futex ([`crate::lowlevellock`]): uncontended, this is
+/// one compare-and-swap and no syscall; contended, the thread sleeps in the
+/// kernel until the holder's unlock wakes it.  Until 2026-09-26 a contended
+/// lock spun, then slept in 1 ms steps and polled.
 ///
-/// Behavior depends on mutex type:
-/// - **Normal**: blocks until lock is acquired (deadlock if already
-///   held by calling thread).
+/// - **Normal**: relocking by the owner deadlocks, as POSIX specifies.
 /// - **Recursive**: if already held by calling thread, increments
-///   recursion count and returns 0.
+///   recursion count and returns 0 (`EAGAIN` at the count's limit).
 /// - **Error-checking**: if already held by calling thread, returns
 ///   EDEADLK without blocking.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -1087,60 +1172,27 @@ pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut PthreadMutexT) -> i32 {
     if mutex.is_null() {
         return errno::EFAULT;
     }
-
     // SAFETY: caller guarantees mutex is valid.
     let m = unsafe { &*mutex };
     let kind = m.kind.load(Ordering::Relaxed);
-    let self_id = syscall::syscall0(syscall::SYS_TASK_ID) as i32;
-
-    // Recursive / error-checking: check if we already own the lock.
-    if (kind == PTHREAD_MUTEX_RECURSIVE || kind == PTHREAD_MUTEX_ERRORCHECK)
-        && m.locked.load(Ordering::Acquire) != 0
-        && m.owner.load(Ordering::Relaxed) == self_id
-    {
+    let self_id = current_tid();
+    if kind != PTHREAD_MUTEX_NORMAL && held_by(m, self_id) {
         if kind == PTHREAD_MUTEX_RECURSIVE {
-            // Increment recursion count.
-            let c = m.count.load(Ordering::Relaxed);
-            m.count.store(c.wrapping_add(1), Ordering::Relaxed);
-            return 0;
+            return recursive_relock(m);
         }
-        // Error-checking: double-lock by same thread.
         return errno::EDEADLK;
     }
-
-    // Fast path: uncontended acquisition.
-    if m.locked
-        .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
-        .is_ok()
-    {
-        m.owner.store(self_id, Ordering::Relaxed);
-        m.count.store(1, Ordering::Relaxed);
-        return 0;
-    }
-
-    // Slow path: spin briefly, then yield.
-    loop {
-        for _ in 0..MUTEX_SPIN_LIMIT {
-            if m.locked
-                .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok()
-            {
-                m.owner.store(self_id, Ordering::Relaxed);
-                m.count.store(1, Ordering::Relaxed);
-                return 0;
-            }
-            core::hint::spin_loop();
-        }
-        // Yield to other threads for ~1 ms.
-        let _ = syscall::syscall1(syscall::SYS_SLEEP, 1_000_000);
-    }
+    crate::lowlevellock::lll_lock(&m.locked);
+    m.owner.store(self_id, Ordering::Relaxed);
+    m.count.store(1, Ordering::Relaxed);
+    0
 }
 
 /// Try to lock a mutex without blocking.
 ///
-/// Returns 0 on success, `EBUSY` if the mutex is already locked
-/// (by another thread).  For recursive mutexes, succeeds if the
-/// calling thread already holds the lock.
+/// Returns 0 on success, `EBUSY` if the mutex is already locked (by
+/// another thread, or -- for an error-checking mutex -- by this one).  A
+/// recursive mutex the calling thread holds gains a level.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut PthreadMutexT) -> i32 {
     if mutex.is_null() {
@@ -1149,22 +1201,11 @@ pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut PthreadMutexT) -> i32
     // SAFETY: caller guarantees mutex is valid.
     let m = unsafe { &*mutex };
     let kind = m.kind.load(Ordering::Relaxed);
-    let self_id = syscall::syscall0(syscall::SYS_TASK_ID) as i32;
-
-    // Recursive: if we already own it, increment count.
-    if kind == PTHREAD_MUTEX_RECURSIVE
-        && m.locked.load(Ordering::Acquire) != 0
-        && m.owner.load(Ordering::Relaxed) == self_id
-    {
-        let c = m.count.load(Ordering::Relaxed);
-        m.count.store(c.wrapping_add(1), Ordering::Relaxed);
-        return 0;
+    let self_id = current_tid();
+    if kind == PTHREAD_MUTEX_RECURSIVE && held_by(m, self_id) {
+        return recursive_relock(m);
     }
-
-    if m.locked
-        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
-        .is_ok()
-    {
+    if crate::lowlevellock::lll_trylock(&m.locked) {
         m.owner.store(self_id, Ordering::Relaxed);
         m.count.store(1, Ordering::Relaxed);
         0
@@ -1178,6 +1219,7 @@ pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut PthreadMutexT) -> i32
 /// For recursive mutexes, decrements the recursion count; the mutex
 /// is only released when the count reaches zero.  For error-checking
 /// mutexes, returns EPERM if the calling thread does not own the lock.
+/// Releasing a contended lock wakes one waiter.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut PthreadMutexT) -> i32 {
     if mutex.is_null() {
@@ -1188,8 +1230,7 @@ pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut PthreadMutexT) -> i32 
     let kind = m.kind.load(Ordering::Relaxed);
 
     if kind == PTHREAD_MUTEX_RECURSIVE || kind == PTHREAD_MUTEX_ERRORCHECK {
-        let self_id = syscall::syscall0(syscall::SYS_TASK_ID) as i32;
-        if m.owner.load(Ordering::Relaxed) != self_id {
+        if !held_by(m, current_tid()) {
             // POSIX: EPERM for error-checking; UB for recursive.
             // We return EPERM for both to prevent silent corruption.
             return errno::EPERM;
@@ -1204,12 +1245,9 @@ pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut PthreadMutexT) -> i32 
         }
     }
 
-    // Release the lock.
-    unsafe {
-        (*mutex).owner.store(0, Ordering::Relaxed);
-        (*mutex).count.store(0, Ordering::Relaxed);
-        (*mutex).locked.store(0, Ordering::Release);
-    }
+    m.owner.store(0, Ordering::Relaxed);
+    m.count.store(0, Ordering::Relaxed);
+    crate::lowlevellock::lll_unlock(&m.locked);
     0
 }
 
@@ -1259,10 +1297,16 @@ pub unsafe extern "C" fn pthread_once(once: *mut PthreadOnceT, init: extern "C" 
     {
         init();
         done.store(1, Ordering::Release);
+        crate::lowlevellock::futex_wake_all(done);
     } else {
-        // Another thread is initializing — spin until done.
-        while done.load(Ordering::Acquire) != 1 {
-            core::hint::spin_loop();
+        // Another thread is initializing: sleep until it is done.  Until
+        // 2026-09-26 this spun, for however long `init` took.
+        loop {
+            let d = done.load(Ordering::Acquire);
+            if d == 1 {
+                break;
+            }
+            crate::lowlevellock::futex_wait(done, d);
         }
     }
 
@@ -1547,19 +1591,26 @@ pub extern "C" fn pthread_key_delete(key: PthreadKeyT) -> i32 {
 // Condition variables
 // ---------------------------------------------------------------------------
 
-/// Initialize a condition variable.
+/// Initialize a condition variable, with the clock its attribute names
+/// (`CLOCK_REALTIME` without one).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pthread_cond_init(
-    cond: *mut PthreadCondT,
-    _attr: *const PthreadCondattrT,
-) -> i32 {
+pub extern "C" fn pthread_cond_init(cond: *mut PthreadCondT, attr: *const PthreadCondattrT) -> i32 {
     if cond.is_null() {
         return errno::EFAULT;
     }
+    let clock = if attr.is_null() {
+        crate::time::CLOCK_REALTIME
+    } else {
+        // SAFETY: non-null; `[u8; 4]`, so read unaligned.  The clock sits
+        // above the pshared bit (see `pthread_condattr_setclock`).
+        (unsafe { core::ptr::read_unaligned(attr.cast::<i32>()) } >> 1) & 1
+    };
     // SAFETY: cond is non-null.
     unsafe {
         let c = &mut *cond;
         c.generation = AtomicI32::new(0);
+        c.clock = clock;
+        c.waiters = AtomicI32::new(0);
     }
     0
 }
@@ -1572,103 +1623,128 @@ pub extern "C" fn pthread_cond_destroy(_cond: *mut PthreadCondT) -> i32 {
 
 /// Wait on a condition variable.
 ///
-/// Atomically releases `mutex`, waits for a signal/broadcast on `cond`,
-/// then re-acquires `mutex`.  Uses a spin-yield loop watching the
-/// generation counter — not ideal but correct.
+/// Atomically releases `mutex`, sleeps on the condition variable's futex
+/// until a signal or broadcast advances it, then re-acquires `mutex`.
+/// Until 2026-09-26 it slept in 1 ms steps and polled.  A `mutex` the caller
+/// cannot unlock is its unlock's error, returned before any wait, as glibc
+/// returns it.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_cond_wait(cond: *mut PthreadCondT, mutex: *mut PthreadMutexT) -> i32 {
     if cond.is_null() || mutex.is_null() {
         return errno::EFAULT;
     }
-
-    // SAFETY: Both pointers verified non-null.
-    let c = unsafe { &*cond };
-    let current_gen = c.generation.load(Ordering::Acquire);
-
-    // Release the mutex while waiting.
-    // SAFETY: mutex verified non-null above.
-    unsafe {
-        pthread_mutex_unlock(mutex);
-    }
-
-    // Spin-yield until the generation changes (signal/broadcast happened).
-    while c.generation.load(Ordering::Acquire) == current_gen {
-        core::hint::spin_loop();
-        // Yield the CPU to avoid burning cycles.
-        let _ = syscall::syscall1(syscall::SYS_SLEEP, 1_000_000); // 1ms yield.
-    }
-
-    // Re-acquire the mutex.
-    // SAFETY: mutex verified non-null above.
-    unsafe {
-        pthread_mutex_lock(mutex);
-    }
-    0
+    // SAFETY: both pointers verified non-null.
+    cond_wait_until(unsafe { &*cond }, mutex, None)
 }
 
 /// Wait on a condition variable with a timeout.
 ///
-/// Like `pthread_cond_wait` but returns `ETIMEDOUT` if the absolute
-/// time `abstime` passes before a signal.
+/// Like `pthread_cond_wait` but returns `ETIMEDOUT` if the absolute time
+/// `abstime` -- on the clock the condition variable was made with -- passes
+/// first.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_cond_timedwait(
     cond: *mut PthreadCondT,
     mutex: *mut PthreadMutexT,
     abstime: *const crate::stat::Timespec,
 ) -> i32 {
-    if cond.is_null() || mutex.is_null() || abstime.is_null() {
+    // glibc's order (nptl/pthread_cond_wait.c:635): the deadline is read
+    // first -- a NULL one is the first fault, a malformed `tv_nsec` EINVAL
+    // with the mutex still held -- and only then the condition variable.
+    // Until 2026-09-26 all three pointers were tested together, ahead of the
+    // deadline.
+    let Some(deadline) = read_deadline(abstime) else {
         return errno::EFAULT;
-    }
-
-    // Before anything else — before the mutex is released, before the
-    // generation counter is even read.  `___pthread_cond_timedwait64`
-    // (nptl/pthread_cond_wait.c:635) opens with
-    // `if (! valid_nanoseconds (abstime->tv_nsec)) return EINVAL;`, so a
-    // malformed deadline is rejected with the mutex still held and no
-    // observable side effect.  Note this is *not* the placement
-    // `pthread_mutex_timedlock` uses; see the comment there.
-    //
-    // A negative `tv_sec` is not covered: `valid_nanoseconds` looks only at
-    // `tv_nsec`, so a deadline in the past falls through to the loop below
-    // and times out immediately, which is correct.
-    // SAFETY: abstime verified non-null above; the caller's C-ABI contract
-    // is that it points to a live, properly aligned `Timespec`.
-    let abs = unsafe { &*abstime };
-    if !crate::time::valid_nanoseconds(abs.tv_nsec) {
+    };
+    if !crate::time::valid_nanoseconds(deadline.tv_nsec) {
         return errno::EINVAL;
     }
-
+    if cond.is_null() || mutex.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: verified non-null.
     let c = unsafe { &*cond };
-    let current_gen = c.generation.load(Ordering::Acquire);
+    cond_wait_until(c, mutex, Some((c.clock, deadline)))
+}
 
-    // SAFETY: mutex verified non-null above.
-    unsafe {
-        pthread_mutex_unlock(mutex);
-    }
-
-    // Get current time and compute deadline with full nanosecond precision.
-    let dl_secs = abs.tv_sec;
-    let dl_nanos = abs.tv_nsec;
-    let mut now_ts = crate::stat::Timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
+/// `pthread_cond_clockwait` (glibc 2.30): [`pthread_cond_timedwait`] with the
+/// deadline on `clockid` rather than the condition variable's own clock.
+/// glibc reads the deadline, then judges the clock (`CLOCK_REALTIME` or
+/// `CLOCK_MONOTONIC`), then the condition variable.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_cond_clockwait(
+    cond: *mut PthreadCondT,
+    mutex: *mut PthreadMutexT,
+    clockid: i32,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    let Some(deadline) = read_deadline(abstime) else {
+        return errno::EFAULT;
     };
+    if !crate::time::valid_nanoseconds(deadline.tv_nsec) {
+        return errno::EINVAL;
+    }
+    if !crate::lowlevellock::supported_clock(clockid) {
+        return errno::EINVAL;
+    }
+    if cond.is_null() || mutex.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: verified non-null.
+    cond_wait_until(unsafe { &*cond }, mutex, Some((clockid, deadline)))
+}
 
+/// A deadline read from `abstime`, or `None` for NULL.
+fn read_deadline(abstime: *const crate::stat::Timespec) -> Option<crate::stat::Timespec> {
+    if abstime.is_null() {
+        return None;
+    }
+    // SAFETY: non-null, and the caller's contract makes it a readable
+    // `timespec`; read unaligned, as a C caller's may not be.
+    Some(unsafe { core::ptr::read_unaligned(abstime) })
+}
+
+/// The wait: note the sequence number, release the mutex, sleep until the
+/// number moves (or the deadline passes), take the mutex back.
+///
+/// The waiter count is advanced before the sequence number is read and the
+/// signaller advances the number before it reads the count, all
+/// sequentially consistent: so a signaller that sees no waiters signalled
+/// before any waiter read the number, and that waiter does not sleep on the
+/// old value.  Spurious wakes stay inside the loop.
+fn cond_wait_until(
+    c: &PthreadCondT,
+    mutex: *mut PthreadMutexT,
+    deadline: Option<(i32, crate::stat::Timespec)>,
+) -> i32 {
+    c.waiters.fetch_add(1, Ordering::SeqCst);
+    let seq = c.generation.load(Ordering::SeqCst);
+    // SAFETY: the caller checked `mutex` non-null.
+    let err = unsafe { pthread_mutex_unlock(mutex) };
+    if err != 0 {
+        c.waiters.fetch_sub(1, Ordering::SeqCst);
+        return err;
+    }
     let mut timed_out = false;
-    while c.generation.load(Ordering::Acquire) == current_gen {
-        let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now_ts);
-        if now_ts.tv_sec > dl_secs || (now_ts.tv_sec == dl_secs && now_ts.tv_nsec >= dl_nanos) {
-            timed_out = true;
-            break;
+    while c.generation.load(Ordering::Acquire) == seq {
+        match deadline {
+            None => crate::lowlevellock::futex_wait(&c.generation, seq),
+            Some((clock, ref at)) => {
+                match crate::lowlevellock::ns_until(&crate::lowlevellock::now_on(clock), at) {
+                    None => {
+                        timed_out = true;
+                        break;
+                    }
+                    Some(ns) => crate::lowlevellock::futex_wait_timeout(&c.generation, seq, ns),
+                }
+            }
         }
-        core::hint::spin_loop();
-        let _ = syscall::syscall1(syscall::SYS_SLEEP, 1_000_000); // 1ms yield.
     }
-
-    // SAFETY: mutex verified non-null above.
-    unsafe {
-        pthread_mutex_lock(mutex);
-    }
+    c.waiters.fetch_sub(1, Ordering::SeqCst);
+    // The caller held the mutex, so taking it back cannot fail but by
+    // misuse the wait cannot report beyond what it returns.
+    // SAFETY: as above.
+    let _ = unsafe { pthread_mutex_lock(mutex) };
     if timed_out { errno::ETIMEDOUT } else { 0 }
 }
 
@@ -1678,18 +1754,28 @@ pub extern "C" fn pthread_cond_signal(cond: *mut PthreadCondT) -> i32 {
     if cond.is_null() {
         return errno::EFAULT;
     }
-    // Bump generation counter — any waiter spinning on it will notice.
+    // SAFETY: non-null.
     let c = unsafe { &*cond };
-    c.generation.fetch_add(1, Ordering::Release);
+    c.generation.fetch_add(1, Ordering::SeqCst);
+    if c.waiters.load(Ordering::SeqCst) > 0 {
+        crate::lowlevellock::futex_wake(&c.generation, 1);
+    }
     0
 }
 
 /// Broadcast (wake all waiters on) a condition variable.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_cond_broadcast(cond: *mut PthreadCondT) -> i32 {
-    // Same as signal — our spin-based implementation wakes all waiters
-    // since they all see the generation change.
-    pthread_cond_signal(cond)
+    if cond.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: non-null.
+    let c = unsafe { &*cond };
+    c.generation.fetch_add(1, Ordering::SeqCst);
+    if c.waiters.load(Ordering::SeqCst) > 0 {
+        crate::lowlevellock::futex_wake_all(&c.generation);
+    }
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -1704,9 +1790,20 @@ pub extern "C" fn pthread_cond_broadcast(cond: *mut PthreadCondT) -> i32 {
 /// - -1: one writer holding the lock
 #[repr(C)]
 pub struct PthreadRwlockT {
+    /// 0 unlocked, N > 0 held by N readers, [`RWLOCK_WRITER`] held by a
+    /// writer; also the futex waiters sleep on.
     state: AtomicI32,
-    _pad: [u8; 52],
+    /// Threads asleep (or about to sleep) on `state`, so an unlock with no
+    /// one waiting costs no syscall.
+    waiters: AtomicI32,
+    /// The writer's task id while `state` is [`RWLOCK_WRITER`], for
+    /// `EDEADLK`.
+    writer: AtomicI32,
+    _pad: [u8; 44],
 }
+
+/// [`PthreadRwlockT::state`] while a writer holds the lock.
+const RWLOCK_WRITER: i32 = -1;
 
 /// See the module note on why these are `const` and not `#[test]`.
 const _: () = {
@@ -1725,7 +1822,9 @@ pub type PthreadRwlockattrT = [u8; 8];
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static PTHREAD_RWLOCK_INITIALIZER: PthreadRwlockT = PthreadRwlockT {
     state: AtomicI32::new(0),
-    _pad: [0; 52],
+    waiters: AtomicI32::new(0),
+    writer: AtomicI32::new(0),
+    _pad: [0; 44],
 };
 
 /// Initialize a read-write lock.
@@ -1739,6 +1838,8 @@ pub extern "C" fn pthread_rwlock_init(
     }
     unsafe {
         (*rwlock).state = AtomicI32::new(0);
+        (*rwlock).waiters = AtomicI32::new(0);
+        (*rwlock).writer = AtomicI32::new(0);
     }
     0
 }
@@ -1751,36 +1852,17 @@ pub extern "C" fn pthread_rwlock_destroy(_rwlock: *mut PthreadRwlockT) -> i32 {
 
 /// Acquire a read lock (shared).
 ///
-/// Spins until no writer holds the lock, then increments the reader count.
+/// Taken at once unless a writer holds it; otherwise the thread sleeps on
+/// the lock's futex until the writer leaves.  Readers are preferred, as by
+/// glibc's default: a reader is not held back by a waiting writer.  A thread
+/// holding the lock for writing is `EDEADLK`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlock_rdlock(rwlock: *mut PthreadRwlockT) -> i32 {
     if rwlock.is_null() {
         return errno::EFAULT;
     }
-    let rw = unsafe { &*rwlock };
-    loop {
-        let current = rw.state.load(Ordering::Acquire);
-        // If a writer holds the lock (state == -1), spin.
-        if current < 0 {
-            core::hint::spin_loop();
-            let _ = syscall::syscall1(syscall::SYS_SLEEP, 1_000_000);
-            continue;
-        }
-        // Try to add a reader.
-        if rw
-            .state
-            .compare_exchange_weak(
-                current,
-                current.wrapping_add(1),
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            )
-            .is_ok()
-        {
-            return 0;
-        }
-        core::hint::spin_loop();
-    }
+    // SAFETY: non-null.
+    rdlock_until(unsafe { &*rwlock }, None)
 }
 
 /// Try to acquire a read lock without blocking.
@@ -1793,6 +1875,9 @@ pub extern "C" fn pthread_rwlock_tryrdlock(rwlock: *mut PthreadRwlockT) -> i32 {
     let current = rw.state.load(Ordering::Acquire);
     if current < 0 {
         return errno::EBUSY;
+    }
+    if current == i32::MAX {
+        return errno::EAGAIN;
     }
     if rw
         .state
@@ -1812,24 +1897,15 @@ pub extern "C" fn pthread_rwlock_tryrdlock(rwlock: *mut PthreadRwlockT) -> i32 {
 
 /// Acquire a write lock (exclusive).
 ///
-/// Spins until no readers or writers hold the lock.
+/// Sleeps on the lock's futex until no reader or writer holds it.  A thread
+/// already holding it for writing is `EDEADLK`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlock_wrlock(rwlock: *mut PthreadRwlockT) -> i32 {
     if rwlock.is_null() {
         return errno::EFAULT;
     }
-    let rw = unsafe { &*rwlock };
-    loop {
-        if rw
-            .state
-            .compare_exchange_weak(0, -1, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-        {
-            return 0;
-        }
-        core::hint::spin_loop();
-        let _ = syscall::syscall1(syscall::SYS_SLEEP, 1_000_000);
-    }
+    // SAFETY: non-null.
+    wrlock_until(unsafe { &*rwlock }, None)
 }
 
 /// Try to acquire a write lock without blocking.
@@ -1841,9 +1917,10 @@ pub extern "C" fn pthread_rwlock_trywrlock(rwlock: *mut PthreadRwlockT) -> i32 {
     let rw = unsafe { &*rwlock };
     if rw
         .state
-        .compare_exchange(0, -1, Ordering::AcqRel, Ordering::Relaxed)
+        .compare_exchange(0, RWLOCK_WRITER, Ordering::AcqRel, Ordering::Relaxed)
         .is_ok()
     {
+        rw.writer.store(current_tid(), Ordering::Relaxed);
         0
     } else {
         errno::EBUSY
@@ -1852,8 +1929,8 @@ pub extern "C" fn pthread_rwlock_trywrlock(rwlock: *mut PthreadRwlockT) -> i32 {
 
 /// Release a read-write lock.
 ///
-/// If the calling thread holds a read lock, decrements the reader count.
-/// If the calling thread holds a write lock, releases it (sets state to 0).
+/// A writer's release, or the last reader's, wakes the threads asleep on
+/// the lock.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlock_unlock(rwlock: *mut PthreadRwlockT) -> i32 {
     if rwlock.is_null() {
@@ -1861,15 +1938,182 @@ pub extern "C" fn pthread_rwlock_unlock(rwlock: *mut PthreadRwlockT) -> i32 {
     }
     let rw = unsafe { &*rwlock };
     let current = rw.state.load(Ordering::Acquire);
-    if current == -1 {
-        // Writer releasing — set to unlocked.
-        rw.state.store(0, Ordering::Release);
+    let released = if current == RWLOCK_WRITER {
+        rw.writer.store(0, Ordering::Relaxed);
+        rw.state.store(0, Ordering::SeqCst);
+        true
     } else if current > 0 {
-        // Reader releasing — decrement count.
-        rw.state.fetch_sub(1, Ordering::AcqRel);
+        rw.state.fetch_sub(1, Ordering::SeqCst) == 1
+    } else {
+        // Not held: undefined behaviour in POSIX; glibc does not check.
+        false
+    };
+    if released && rw.waiters.load(Ordering::SeqCst) > 0 {
+        crate::lowlevellock::futex_wake_all(&rw.state);
     }
-    // If current == 0, the lock wasn't held — no-op (undefined behavior in POSIX).
     0
+}
+
+/// `pthread_rwlock_timedrdlock`: [`pthread_rwlock_rdlock`] with a deadline
+/// on `CLOCK_REALTIME`.  Missing until 2026-09-26, so a program using it did
+/// not link.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_rwlock_timedrdlock(
+    rwlock: *mut PthreadRwlockT,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    pthread_rwlock_clockrdlock(rwlock, crate::time::CLOCK_REALTIME, abstime)
+}
+
+/// `pthread_rwlock_timedwrlock`: [`pthread_rwlock_wrlock`] with a deadline
+/// on `CLOCK_REALTIME`.  Missing until 2026-09-26.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_rwlock_timedwrlock(
+    rwlock: *mut PthreadRwlockT,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    pthread_rwlock_clockwrlock(rwlock, crate::time::CLOCK_REALTIME, abstime)
+}
+
+/// `pthread_rwlock_clockrdlock` (glibc 2.30).  The deadline and clock are
+/// judged first, eagerly -- glibc switched rwlocks from lazy to eager checks
+/// (nptl/pthread_rwlock_common.c:286) -- then the lock.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_rwlock_clockrdlock(
+    rwlock: *mut PthreadRwlockT,
+    clockid: i32,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    match rwlock_deadline(clockid, abstime) {
+        Ok(deadline) => {
+            if rwlock.is_null() {
+                return errno::EFAULT;
+            }
+            // SAFETY: non-null.
+            rdlock_until(unsafe { &*rwlock }, Some(deadline))
+        }
+        Err(e) => e,
+    }
+}
+
+/// `pthread_rwlock_clockwrlock` (glibc 2.30): as
+/// [`pthread_rwlock_clockrdlock`], for writing.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_rwlock_clockwrlock(
+    rwlock: *mut PthreadRwlockT,
+    clockid: i32,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    match rwlock_deadline(clockid, abstime) {
+        Ok(deadline) => {
+            if rwlock.is_null() {
+                return errno::EFAULT;
+            }
+            // SAFETY: non-null.
+            wrlock_until(unsafe { &*rwlock }, Some(deadline))
+        }
+        Err(e) => e,
+    }
+}
+
+/// A timed rwlock's deadline, judged as glibc judges it: `EFAULT` for a NULL
+/// one (the first fault), `EINVAL` for an unsupported clock or a malformed
+/// `tv_nsec`.
+fn rwlock_deadline(
+    clockid: i32,
+    abstime: *const crate::stat::Timespec,
+) -> Result<(i32, crate::stat::Timespec), i32> {
+    let Some(deadline) = read_deadline(abstime) else {
+        return Err(errno::EFAULT);
+    };
+    if !crate::lowlevellock::supported_clock(clockid)
+        || !crate::time::valid_nanoseconds(deadline.tv_nsec)
+    {
+        return Err(errno::EINVAL);
+    }
+    Ok((clockid, deadline))
+}
+
+/// Sleep on `rw.state` while it holds `seen`, or until the deadline; `false`
+/// once the deadline has passed.
+fn rwlock_sleep(
+    rw: &PthreadRwlockT,
+    seen: i32,
+    deadline: Option<&(i32, crate::stat::Timespec)>,
+) -> bool {
+    rw.waiters.fetch_add(1, Ordering::SeqCst);
+    let in_time = match deadline {
+        None => {
+            crate::lowlevellock::futex_wait(&rw.state, seen);
+            true
+        }
+        Some((clock, at)) => {
+            match crate::lowlevellock::ns_until(&crate::lowlevellock::now_on(*clock), at) {
+                None => false,
+                Some(ns) => {
+                    crate::lowlevellock::futex_wait_timeout(&rw.state, seen, ns);
+                    true
+                }
+            }
+        }
+    };
+    rw.waiters.fetch_sub(1, Ordering::SeqCst);
+    in_time
+}
+
+/// The read lock, with an optional deadline.
+fn rdlock_until(rw: &PthreadRwlockT, deadline: Option<(i32, crate::stat::Timespec)>) -> i32 {
+    if rw.state.load(Ordering::Relaxed) == RWLOCK_WRITER
+        && rw.writer.load(Ordering::Relaxed) == current_tid()
+    {
+        return errno::EDEADLK;
+    }
+    loop {
+        let s = rw.state.load(Ordering::Acquire);
+        if s >= 0 {
+            if s == i32::MAX {
+                return errno::EAGAIN;
+            }
+            if rw
+                .state
+                .compare_exchange_weak(s, s.wrapping_add(1), Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                return 0;
+            }
+            continue;
+        }
+        if !rwlock_sleep(rw, s, deadline.as_ref()) {
+            return errno::ETIMEDOUT;
+        }
+    }
+}
+
+/// The write lock, with an optional deadline.
+fn wrlock_until(rw: &PthreadRwlockT, deadline: Option<(i32, crate::stat::Timespec)>) -> i32 {
+    let self_id = current_tid();
+    if rw.state.load(Ordering::Relaxed) == RWLOCK_WRITER
+        && rw.writer.load(Ordering::Relaxed) == self_id
+    {
+        return errno::EDEADLK;
+    }
+    loop {
+        if rw
+            .state
+            .compare_exchange_weak(0, RWLOCK_WRITER, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            rw.writer.store(self_id, Ordering::Relaxed);
+            return 0;
+        }
+        let s = rw.state.load(Ordering::Acquire);
+        if s == 0 {
+            continue;
+        }
+        if !rwlock_sleep(rw, s, deadline.as_ref()) {
+            return errno::ETIMEDOUT;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2286,10 +2530,14 @@ pub struct PthreadBarrierT {
     count: u32,
     /// Current number of waiting threads.
     current: AtomicI32,
-    /// Generation counter — incremented when the barrier trips.
+    /// Generation counter — incremented when the barrier trips; also the
+    /// futex waiters sleep on.
     generation: AtomicI32,
+    /// A low-level lock over `current` and `generation`, so that an arrival
+    /// is counted in exactly one round (see [`pthread_barrier_wait`]).
+    lock: AtomicI32,
     /// Padding to reach glibc x86_64 size (32 bytes total).
-    _pad: [u8; 20],
+    _pad: [u8; 16],
 }
 
 /// See the module note on why these are `const` and not `#[test]`.
@@ -2306,6 +2554,56 @@ pub type PthreadBarrierattrT = [u8; 4];
 
 /// Return value for the one thread designated as the "serial thread".
 pub const PTHREAD_BARRIER_SERIAL_THREAD: i32 = -1;
+
+/// `pthread_barrierattr_init`: private (nptl/pthread_barrierattr_init.c).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_barrierattr_init(attr: *mut PthreadBarrierattrT) -> i32 {
+    if attr.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: non-null and writable, per the contract.
+    unsafe { core::ptr::write_unaligned(attr.cast::<i32>(), PTHREAD_PROCESS_PRIVATE) };
+    0
+}
+
+/// `pthread_barrierattr_destroy`: nothing to do, as in glibc.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_barrierattr_destroy(_attr: *mut PthreadBarrierattrT) -> i32 {
+    0
+}
+
+/// `pthread_barrierattr_getpshared` (nptl/pthread_barrierattr_getpshared.c).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_barrierattr_getpshared(
+    attr: *const PthreadBarrierattrT,
+    pshared: *mut i32,
+) -> i32 {
+    if attr.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: non-null; `[u8; 4]`, so read unaligned.
+    let word = unsafe { core::ptr::read_unaligned(attr.cast::<i32>()) };
+    put_i32(pshared, word)
+}
+
+/// `pthread_barrierattr_setpshared`: judged as the other `setpshared`s, so
+/// `PTHREAD_PROCESS_SHARED` is `ENOTSUP`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_barrierattr_setpshared(
+    attr: *mut PthreadBarrierattrT,
+    pshared: i32,
+) -> i32 {
+    let err = futex_supports_pshared(pshared);
+    if err != 0 {
+        return err;
+    }
+    if attr.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: non-null and writable, per the contract.
+    unsafe { core::ptr::write_unaligned(attr.cast::<i32>(), pshared) };
+    0
+}
 
 /// Upper bound on a barrier's `count`, matching glibc's `BARRIER_IN_THRESHOLD`
 /// (`UINT_MAX / 2`, sysdeps/nptl/internaltypes.h:119).  glibc reserves the top
@@ -2326,11 +2624,20 @@ const BARRIER_IN_THRESHOLD: u32 = u32::MAX / 2;
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_barrier_init(
     barrier: *mut PthreadBarrierT,
-    _attr: *const PthreadBarrierattrT,
+    attr: *const PthreadBarrierattrT,
     count: u32,
 ) -> i32 {
     if count == 0 || count >= BARRIER_IN_THRESHOLD {
         return errno::EINVAL;
+    }
+    // glibc's next check: an attribute holding neither sharing value is
+    // EINVAL (nptl/pthread_barrier_init.c).  Shared cannot be stored here.
+    if !attr.is_null() {
+        // SAFETY: non-null; `[u8; 4]`, so read unaligned.
+        let pshared = unsafe { core::ptr::read_unaligned(attr.cast::<i32>()) };
+        if pshared != PTHREAD_PROCESS_PRIVATE && pshared != PTHREAD_PROCESS_SHARED {
+            return errno::EINVAL;
+        }
     }
     if barrier.is_null() {
         return errno::EFAULT;
@@ -2340,6 +2647,7 @@ pub extern "C" fn pthread_barrier_init(
         (*barrier).count = count;
         (*barrier).current = AtomicI32::new(0);
         (*barrier).generation = AtomicI32::new(0);
+        (*barrier).lock = AtomicI32::new(0);
     }
     0
 }
@@ -2355,29 +2663,38 @@ pub extern "C" fn pthread_barrier_destroy(_barrier: *mut PthreadBarrierT) -> i32
 /// Blocks until `count` threads have called this function on the same
 /// barrier.  Exactly one thread returns `PTHREAD_BARRIER_SERIAL_THREAD`;
 /// all others return 0.
+///
+/// Arrivals are counted under the barrier's low-level lock, so each is
+/// counted in exactly one round.  Until 2026-09-26 they were not: between
+/// the last arrival's reset of the count and its advance of the generation,
+/// a thread arriving for the next round read the old generation and was
+/// released with this one.  Waiters sleep on the generation's futex, where
+/// they polled in 1 ms steps.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_barrier_wait(barrier: *mut PthreadBarrierT) -> i32 {
     if barrier.is_null() {
         return errno::EFAULT;
     }
 
+    // SAFETY: non-null, and the caller's contract makes it an initialised
+    // barrier.
     let b = unsafe { &*barrier };
-    let my_gen = b.generation.load(Ordering::Acquire);
-
-    // Increment arrival count.
-    let arrived = b.current.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
-
+    crate::lowlevellock::lll_lock(&b.lock);
+    let round = b.generation.load(Ordering::Relaxed);
+    let arrived = b.current.load(Ordering::Relaxed).wrapping_add(1);
     if arrived as u32 == b.count {
-        // Last thread to arrive — reset counter and bump generation.
-        b.current.store(0, Ordering::Release);
-        b.generation.fetch_add(1, Ordering::Release);
+        // The last arrival: reset for the next round, advance, release.
+        b.current.store(0, Ordering::Relaxed);
+        b.generation.store(round.wrapping_add(1), Ordering::Release);
+        crate::lowlevellock::lll_unlock(&b.lock);
+        crate::lowlevellock::futex_wake_all(&b.generation);
         return PTHREAD_BARRIER_SERIAL_THREAD;
     }
+    b.current.store(arrived, Ordering::Relaxed);
+    crate::lowlevellock::lll_unlock(&b.lock);
 
-    // Not the last — spin-yield until the generation changes.
-    while b.generation.load(Ordering::Acquire) == my_gen {
-        core::hint::spin_loop();
-        let _ = syscall::syscall1(syscall::SYS_SLEEP, 1_000_000);
+    while b.generation.load(Ordering::Acquire) == round {
+        crate::lowlevellock::futex_wait(&b.generation, round);
     }
     0
 }
@@ -2652,13 +2969,9 @@ pub extern "C" fn pthread_mutexattr_settype(attr: *mut PthreadMutexattrT, kind: 
     if attr.is_null() {
         return errno::EFAULT;
     }
-    // Store kind in first 4 bytes (all 4 bytes of the attr).
-    // SAFETY: attr is non-null and 4 bytes.
-    // Use write_unaligned because PthreadMutexattrT is [u8; 4] with align(1).
-    unsafe {
-        core::ptr::write_unaligned(attr.cast::<i32>(), kind);
-    }
-    0
+    // The type is the word's low bits; the flag bits are kept, as glibc's
+    // `(iattr->mutexkind & PTHREAD_MUTEXATTR_FLAG_BITS) | kind` keeps them.
+    update_mutexattr(attr, |w| (w & MUTEXATTR_FLAG_BITS) | kind as u32)
 }
 
 /// Get the mutex type attribute.
@@ -2670,9 +2983,295 @@ pub extern "C" fn pthread_mutexattr_gettype(attr: *const PthreadMutexattrT, kind
     // SAFETY: both pointers verified non-null.
     // Use read_unaligned because PthreadMutexattrT is [u8; 4] with align(1).
     unsafe {
-        *kind = core::ptr::read_unaligned(attr.cast::<i32>());
+        *kind = (core::ptr::read_unaligned(attr.cast::<u32>()) & !MUTEXATTR_FLAG_BITS) as i32;
     }
     0
+}
+
+// ---------------------------------------------------------------------------
+// Mutex attribute bits -- glibc's `struct pthread_mutexattr` layout
+// ---------------------------------------------------------------------------
+//
+// The attribute is one 32-bit word, laid out as glibc lays out `mutexkind`
+// (nptl/pthreadP.h): the type in the low bits, the priority ceiling in bits
+// 12..23, the protocol in bits 28..29, and a flag each for robustness (bit
+// 30) and process sharing (bit 31).  Until 2026-09-26 the type was the whole
+// word, and none of the other attributes existed.
+
+/// Protocol: no priority inheritance or protection.
+pub const PTHREAD_PRIO_NONE: i32 = 0;
+/// Protocol: priority inheritance.
+pub const PTHREAD_PRIO_INHERIT: i32 = 1;
+/// Protocol: priority protection (the ceiling).
+pub const PTHREAD_PRIO_PROTECT: i32 = 2;
+/// Robustness: a dead owner leaves the mutex locked.
+pub const PTHREAD_MUTEX_STALLED: i32 = 0;
+/// Robustness: a dead owner's mutex is handed on, `EOWNERDEAD`.
+pub const PTHREAD_MUTEX_ROBUST: i32 = 1;
+
+const MUTEXATTR_PROTOCOL_SHIFT: u32 = 28;
+const MUTEXATTR_PROTOCOL_MASK: u32 = 0x3000_0000;
+const MUTEXATTR_PRIO_CEILING_SHIFT: u32 = 12;
+const MUTEXATTR_PRIO_CEILING_MASK: u32 = 0x00ff_f000;
+const MUTEXATTR_FLAG_ROBUST: u32 = 0x4000_0000;
+const MUTEXATTR_FLAG_PSHARED: u32 = 0x8000_0000;
+/// Every bit that is not the type.
+const MUTEXATTR_FLAG_BITS: u32 = 0xf000_0000 | MUTEXATTR_PRIO_CEILING_MASK;
+
+/// glibc's `futex_supports_pshared` where shared futexes are unsupported
+/// (sysdeps/nptl/futex-internal.h): 0 for private, `ENOTSUP` for shared,
+/// `EINVAL` for anything else.  Ours are unsupported because the kernel keys
+/// a futex by address space and virtual address, so a waiter in one process
+/// is never woken from another (known-issues
+/// `B-D-PROCESS-SHARED-SYNC-IS-SILENTLY-PRIVATE`).
+fn futex_supports_pshared(pshared: i32) -> i32 {
+    match pshared {
+        PTHREAD_PROCESS_PRIVATE => 0,
+        PTHREAD_PROCESS_SHARED => errno::ENOTSUP,
+        _ => errno::EINVAL,
+    }
+}
+
+/// The attribute word at `attr`, or `EFAULT` for NULL -- this libc's
+/// substitute for glibc's fault on the dereference (design-decisions.md
+/// §303).
+fn mutexattr_word(attr: *const PthreadMutexattrT) -> Result<u32, i32> {
+    if attr.is_null() {
+        return Err(errno::EFAULT);
+    }
+    // SAFETY: non-null, and the caller's contract makes it a readable
+    // attribute; `PthreadMutexattrT` is `[u8; 4]`, so read unaligned.
+    Ok(unsafe { core::ptr::read_unaligned(attr.cast::<u32>()) })
+}
+
+/// Rewrite the attribute word at `attr` as `f` says; `EFAULT` for NULL.
+fn update_mutexattr(attr: *mut PthreadMutexattrT, f: impl FnOnce(u32) -> u32) -> i32 {
+    match mutexattr_word(attr) {
+        Ok(word) => {
+            // SAFETY: as `mutexattr_word`; the attribute is also writable.
+            unsafe { core::ptr::write_unaligned(attr.cast::<u32>(), f(word)) };
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// Write `value` through `out`; `EFAULT` for NULL.
+fn put_i32(out: *mut i32, value: i32) -> i32 {
+    if out.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: non-null, and the caller's contract makes it writable.
+    unsafe { core::ptr::write_unaligned(out, value) };
+    0
+}
+
+/// `pthread_mutexattr_getpshared` (nptl/pthread_mutexattr_getpshared.c).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_getpshared(
+    attr: *const PthreadMutexattrT,
+    pshared: *mut i32,
+) -> i32 {
+    match mutexattr_word(attr) {
+        Ok(word) => put_i32(
+            pshared,
+            if word & MUTEXATTR_FLAG_PSHARED != 0 {
+                PTHREAD_PROCESS_SHARED
+            } else {
+                PTHREAD_PROCESS_PRIVATE
+            },
+        ),
+        Err(e) => e,
+    }
+}
+
+/// `pthread_mutexattr_setpshared`: the value is judged first, as glibc
+/// judges it (`futex_supports_pshared`), and `PTHREAD_PROCESS_SHARED` is
+/// `ENOTSUP` -- see [`futex_supports_pshared`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_setpshared(attr: *mut PthreadMutexattrT, pshared: i32) -> i32 {
+    let err = futex_supports_pshared(pshared);
+    if err != 0 {
+        return err;
+    }
+    update_mutexattr(attr, |w| {
+        if pshared == PTHREAD_PROCESS_PRIVATE {
+            w & !MUTEXATTR_FLAG_PSHARED
+        } else {
+            w | MUTEXATTR_FLAG_PSHARED
+        }
+    })
+}
+
+/// `pthread_mutexattr_getprotocol` (nptl/pthread_mutexattr_getprotocol.c).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_getprotocol(
+    attr: *const PthreadMutexattrT,
+    protocol: *mut i32,
+) -> i32 {
+    match mutexattr_word(attr) {
+        Ok(word) => put_i32(
+            protocol,
+            ((word & MUTEXATTR_PROTOCOL_MASK) >> MUTEXATTR_PROTOCOL_SHIFT) as i32,
+        ),
+        Err(e) => e,
+    }
+}
+
+/// `pthread_mutexattr_setprotocol`: any of the three protocols is stored,
+/// as glibc stores it; the two this libc cannot provide are refused by
+/// [`pthread_mutex_init`], as glibc refuses what it cannot provide.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_setprotocol(
+    attr: *mut PthreadMutexattrT,
+    protocol: i32,
+) -> i32 {
+    if !(PTHREAD_PRIO_NONE..=PTHREAD_PRIO_PROTECT).contains(&protocol) {
+        return errno::EINVAL;
+    }
+    update_mutexattr(attr, |w| {
+        (w & !MUTEXATTR_PROTOCOL_MASK) | ((protocol as u32) << MUTEXATTR_PROTOCOL_SHIFT)
+    })
+}
+
+/// `pthread_mutexattr_getprioceiling`: a ceiling never set reads as the
+/// lowest `SCHED_FIFO` priority, as glibc's does.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_getprioceiling(
+    attr: *const PthreadMutexattrT,
+    prioceiling: *mut i32,
+) -> i32 {
+    match mutexattr_word(attr) {
+        Ok(word) => {
+            let mut ceiling =
+                ((word & MUTEXATTR_PRIO_CEILING_MASK) >> MUTEXATTR_PRIO_CEILING_SHIFT) as i32;
+            if ceiling == 0 {
+                ceiling = ceiling.max(crate::sched::sched_get_priority_min(
+                    crate::sched::SCHED_FIFO,
+                ));
+            }
+            put_i32(prioceiling, ceiling)
+        }
+        Err(e) => e,
+    }
+}
+
+/// `pthread_mutexattr_setprioceiling`: a ceiling outside the `SCHED_FIFO`
+/// priorities is `EINVAL` (nptl/pthread_mutexattr_setprioceiling.c).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_setprioceiling(
+    attr: *mut PthreadMutexattrT,
+    prioceiling: i32,
+) -> i32 {
+    let min = crate::sched::sched_get_priority_min(crate::sched::SCHED_FIFO);
+    let max = crate::sched::sched_get_priority_max(crate::sched::SCHED_FIFO);
+    let field = (MUTEXATTR_PRIO_CEILING_MASK >> MUTEXATTR_PRIO_CEILING_SHIFT) as i32;
+    if prioceiling < min || prioceiling > max || prioceiling & field != prioceiling {
+        return errno::EINVAL;
+    }
+    update_mutexattr(attr, |w| {
+        (w & !MUTEXATTR_PRIO_CEILING_MASK) | ((prioceiling as u32) << MUTEXATTR_PRIO_CEILING_SHIFT)
+    })
+}
+
+/// `pthread_mutexattr_getrobust` (nptl/pthread_mutexattr_getrobust.c).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_getrobust(
+    attr: *const PthreadMutexattrT,
+    robustness: *mut i32,
+) -> i32 {
+    match mutexattr_word(attr) {
+        Ok(word) => put_i32(
+            robustness,
+            if word & MUTEXATTR_FLAG_ROBUST != 0 {
+                PTHREAD_MUTEX_ROBUST
+            } else {
+                PTHREAD_MUTEX_STALLED
+            },
+        ),
+        Err(e) => e,
+    }
+}
+
+/// `pthread_mutexattr_setrobust`: stored as glibc stores it; a robust mutex
+/// is refused by [`pthread_mutex_init`], this libc having no robust list.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_setrobust(
+    attr: *mut PthreadMutexattrT,
+    robustness: i32,
+) -> i32 {
+    if robustness != PTHREAD_MUTEX_STALLED && robustness != PTHREAD_MUTEX_ROBUST {
+        return errno::EINVAL;
+    }
+    update_mutexattr(attr, |w| {
+        if robustness == PTHREAD_MUTEX_STALLED {
+            w & !MUTEXATTR_FLAG_ROBUST
+        } else {
+            w | MUTEXATTR_FLAG_ROBUST
+        }
+    })
+}
+
+/// `pthread_mutexattr_getrobust_np`, glibc's name before POSIX adopted it.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_getrobust_np(
+    attr: *const PthreadMutexattrT,
+    robustness: *mut i32,
+) -> i32 {
+    pthread_mutexattr_getrobust(attr, robustness)
+}
+
+/// `pthread_mutexattr_setrobust_np`, glibc's name before POSIX adopted it.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutexattr_setrobust_np(
+    attr: *mut PthreadMutexattrT,
+    robustness: i32,
+) -> i32 {
+    pthread_mutexattr_setrobust(attr, robustness)
+}
+
+/// `pthread_mutex_consistent`: `EINVAL` unless the mutex is robust and its
+/// owner died -- which no mutex here can be, [`pthread_mutex_init`] refusing
+/// robust ones (nptl/pthread_mutex_consistent.c).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutex_consistent(mutex: *mut PthreadMutexT) -> i32 {
+    if mutex.is_null() {
+        return errno::EFAULT;
+    }
+    errno::EINVAL
+}
+
+/// `pthread_mutex_consistent_np`, glibc's older name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutex_consistent_np(mutex: *mut PthreadMutexT) -> i32 {
+    pthread_mutex_consistent(mutex)
+}
+
+/// `pthread_mutex_getprioceiling`: `EINVAL` for a mutex without priority
+/// protection (nptl/pthread_mutex_getprioceiling.c), which is every mutex
+/// here.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutex_getprioceiling(
+    mutex: *const PthreadMutexT,
+    _prioceiling: *mut i32,
+) -> i32 {
+    if mutex.is_null() {
+        return errno::EFAULT;
+    }
+    errno::EINVAL
+}
+
+/// `pthread_mutex_setprioceiling`: as [`pthread_mutex_getprioceiling`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutex_setprioceiling(
+    mutex: *mut PthreadMutexT,
+    _prioceiling: i32,
+    _old_ceiling: *mut i32,
+) -> i32 {
+    if mutex.is_null() {
+        return errno::EFAULT;
+    }
+    errno::EINVAL
 }
 
 // ---------------------------------------------------------------------------
@@ -2681,9 +3280,9 @@ pub extern "C" fn pthread_mutexattr_gettype(attr: *const PthreadMutexattrT, kind
 
 /// Lock a mutex with a timeout.
 ///
-/// Attempts to lock the mutex.  If the mutex is already locked, blocks
+/// Attempts to lock the mutex.  If the mutex is already locked, sleeps
 /// until the mutex becomes available or the absolute timeout `abstime`
-/// expires.
+/// on `CLOCK_REALTIME` expires.
 ///
 /// Returns 0 on success, ETIMEDOUT on timeout, EINVAL on error.
 /// For recursive mutexes, succeeds immediately if already held by
@@ -2698,33 +3297,48 @@ pub extern "C" fn pthread_mutex_timedlock(
     mutex: *mut PthreadMutexT,
     abstime: *const crate::stat::Timespec,
 ) -> i32 {
-    if mutex.is_null() || abstime.is_null() {
+    mutex_lock_until(mutex, crate::time::CLOCK_REALTIME, abstime)
+}
+
+/// `pthread_mutex_clocklock` (glibc 2.30): [`pthread_mutex_timedlock`] with
+/// the deadline on `clockid`, which must be `CLOCK_REALTIME` or
+/// `CLOCK_MONOTONIC` -- judged first, before the mutex is looked at.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_mutex_clocklock(
+    mutex: *mut PthreadMutexT,
+    clockid: i32,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    if !crate::lowlevellock::supported_clock(clockid) {
+        return errno::EINVAL;
+    }
+    mutex_lock_until(mutex, clockid, abstime)
+}
+
+/// The timed lock, with the deadline on `clock`.
+fn mutex_lock_until(
+    mutex: *mut PthreadMutexT,
+    clock: i32,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    if mutex.is_null() {
         return errno::EFAULT;
     }
-
     // SAFETY: mutex verified non-null.
     let m = unsafe { &*mutex };
     let kind = m.kind.load(Ordering::Relaxed);
-    let self_id = syscall::syscall0(syscall::SYS_TASK_ID) as i32;
+    let self_id = current_tid();
 
     // Recursive / error-checking: check if we already own the lock.
-    if (kind == PTHREAD_MUTEX_RECURSIVE || kind == PTHREAD_MUTEX_ERRORCHECK)
-        && m.locked.load(Ordering::Acquire) != 0
-        && m.owner.load(Ordering::Relaxed) == self_id
-    {
+    if kind != PTHREAD_MUTEX_NORMAL && held_by(m, self_id) {
         if kind == PTHREAD_MUTEX_RECURSIVE {
-            let c = m.count.load(Ordering::Relaxed);
-            m.count.store(c.wrapping_add(1), Ordering::Relaxed);
-            return 0;
+            return recursive_relock(m);
         }
         return errno::EDEADLK;
     }
 
     // Fast path: try to acquire immediately.
-    if m.locked
-        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
-        .is_ok()
-    {
+    if crate::lowlevellock::lll_trylock(&m.locked) {
         m.owner.store(self_id, Ordering::Relaxed);
         m.count.store(1, Ordering::Relaxed);
         return 0;
@@ -2736,45 +3350,31 @@ pub extern "C" fn pthread_mutex_timedlock(
     // inside the contended branch, so an *uncontended* `timedlock` with a
     // malformed deadline succeeds and never looks at the timespec.  POSIX
     // permits exactly this: "the validity of the abstime parameter need not
-    // be checked if the lock can be immediately acquired."
+    // be checked if the lock can be immediately acquired."  (So is a NULL
+    // one: until 2026-09-26 it was EFAULT before the fast path.)
     //
     // The placement is deliberately different from `pthread_cond_timedwait`
-    // above and from `sem_timedwait`, both of which check eagerly — glibc
+    // and from `sem_timedwait`, both of which check eagerly — glibc
     // took the lazy option here and the eager one there, and
     // `pthread_rwlock_common.c:286-291` documents having *switched* from
     // lazy to eager for rwlocks.  Do not unify them.
-    // SAFETY: abstime verified non-null above.
-    let dl_secs = unsafe { (*abstime).tv_sec };
-    let dl_nanos = unsafe { (*abstime).tv_nsec };
-    if !crate::time::valid_nanoseconds(dl_nanos) {
+    if abstime.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: abstime verified non-null.
+    let deadline = unsafe { core::ptr::read_unaligned(abstime) };
+    if !crate::time::valid_nanoseconds(deadline.tv_nsec) {
         return errno::EINVAL;
     }
-
-    loop {
-        // Check timeout by reading current time.
-        let mut now = crate::stat::Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now);
-
-        if now.tv_sec > dl_secs || (now.tv_sec == dl_secs && now.tv_nsec >= dl_nanos) {
-            return errno::ETIMEDOUT;
-        }
-
-        // Try to acquire.
-        if m.locked
-            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
-            m.owner.store(self_id, Ordering::Relaxed);
-            m.count.store(1, Ordering::Relaxed);
-            return 0;
-        }
-
-        // Yield to avoid burning CPU.
-        sched_yield();
+    let taken = crate::lowlevellock::lll_timedlock(&m.locked, || {
+        crate::lowlevellock::ns_until(&crate::lowlevellock::now_on(clock), &deadline)
+    });
+    if !taken {
+        return errno::ETIMEDOUT;
     }
+    m.owner.store(self_id, Ordering::Relaxed);
+    m.count.store(1, Ordering::Relaxed);
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -2824,9 +3424,13 @@ pub extern "C" fn pthread_condattr_setclock(attr: *mut PthreadCondattrT, clock_i
     if attr.is_null() {
         return errno::EFAULT;
     }
-    // Store in first 4 bytes.
+    // glibc's layout (nptl/pthread_condattr_setclock.c): bit 0 is the
+    // process-shared flag, the clock is above it.  Until 2026-09-26 the clock
+    // was the whole word, which left no room for the flag.
+    // SAFETY: non-null and writable, per the contract.
     unsafe {
-        core::ptr::write_unaligned(attr.cast::<i32>(), clock_id);
+        let word = core::ptr::read_unaligned(attr.cast::<i32>());
+        core::ptr::write_unaligned(attr.cast::<i32>(), (word & 1) | (clock_id << 1));
     }
     0
 }
@@ -2841,7 +3445,41 @@ pub extern "C" fn pthread_condattr_getclock(
         return errno::EFAULT;
     }
     unsafe {
-        *clock_id = core::ptr::read_unaligned(attr.cast::<i32>());
+        *clock_id = (core::ptr::read_unaligned(attr.cast::<i32>()) >> 1) & 1;
+    }
+    0
+}
+
+/// `pthread_condattr_getpshared`: bit 0 of the attribute, as glibc keeps it
+/// (nptl/pthread_condattr_getpshared.c).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_condattr_getpshared(
+    attr: *const PthreadCondattrT,
+    pshared: *mut i32,
+) -> i32 {
+    if attr.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: non-null; `[u8; 4]`, so read unaligned.
+    let word = unsafe { core::ptr::read_unaligned(attr.cast::<i32>()) };
+    put_i32(pshared, word & 1)
+}
+
+/// `pthread_condattr_setpshared`: judged as [`pthread_mutexattr_setpshared`]
+/// judges it, so `PTHREAD_PROCESS_SHARED` is `ENOTSUP`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_condattr_setpshared(attr: *mut PthreadCondattrT, pshared: i32) -> i32 {
+    let err = futex_supports_pshared(pshared);
+    if err != 0 {
+        return err;
+    }
+    if attr.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: non-null and writable, per the contract.
+    unsafe {
+        let word = core::ptr::read_unaligned(attr.cast::<i32>());
+        core::ptr::write_unaligned(attr.cast::<i32>(), (word & !1) | pshared);
     }
     0
 }
@@ -4410,7 +5048,9 @@ mod tests {
     fn cond_init_zeroes_generation() {
         let mut cond = PthreadCondT {
             generation: AtomicI32::new(42),
-            _pad: [0xFF; 44],
+            clock: 0,
+            waiters: AtomicI32::new(0),
+            _pad: [0xFF; 36],
         };
         let ret = pthread_cond_init(&mut cond, core::ptr::null());
         assert_eq!(ret, 0);
@@ -4429,7 +5069,9 @@ mod tests {
     fn cond_destroy_returns_zero() {
         let mut cond = PthreadCondT {
             generation: AtomicI32::new(0),
-            _pad: [0; 44],
+            clock: 0,
+            waiters: AtomicI32::new(0),
+            _pad: [0; 36],
         };
         assert_eq!(pthread_cond_destroy(&mut cond), 0);
     }
@@ -4550,7 +5192,9 @@ mod tests {
     fn rwlock_init_zeroes_state() {
         let mut rwlock = PthreadRwlockT {
             state: AtomicI32::new(42),
-            _pad: [0xFF; 52],
+            waiters: AtomicI32::new(0),
+            writer: AtomicI32::new(0),
+            _pad: [0xFF; 44],
         };
         let ret = pthread_rwlock_init(&mut rwlock, core::ptr::null());
         assert_eq!(ret, 0);
@@ -4569,7 +5213,9 @@ mod tests {
     fn rwlock_destroy_returns_zero() {
         let mut rwlock = PthreadRwlockT {
             state: AtomicI32::new(0),
-            _pad: [0; 52],
+            waiters: AtomicI32::new(0),
+            writer: AtomicI32::new(0),
+            _pad: [0; 44],
         };
         assert_eq!(pthread_rwlock_destroy(&mut rwlock), 0);
     }
@@ -4696,7 +5342,8 @@ mod tests {
             count: 0,
             current: AtomicI32::new(99),
             generation: AtomicI32::new(99),
-            _pad: [0xFF; 20],
+            lock: AtomicI32::new(0),
+            _pad: [0xFF; 16],
         };
         let ret = pthread_barrier_init(&mut barrier, core::ptr::null(), 5);
         assert_eq!(ret, 0);
@@ -4711,7 +5358,8 @@ mod tests {
             count: 0,
             current: AtomicI32::new(0),
             generation: AtomicI32::new(0),
-            _pad: [0; 20],
+            lock: AtomicI32::new(0),
+            _pad: [0; 16],
         };
         let ret = pthread_barrier_init(&mut barrier, core::ptr::null(), 0);
         assert_eq!(ret, errno::EINVAL);
@@ -4729,7 +5377,8 @@ mod tests {
             count: 3,
             current: AtomicI32::new(0),
             generation: AtomicI32::new(0),
-            _pad: [0; 20],
+            lock: AtomicI32::new(0),
+            _pad: [0; 16],
         };
         assert_eq!(pthread_barrier_destroy(&mut barrier), 0);
     }
@@ -4744,7 +5393,8 @@ mod tests {
             count: 0,
             current: AtomicI32::new(0),
             generation: AtomicI32::new(0),
-            _pad: [0; 20],
+            lock: AtomicI32::new(0),
+            _pad: [0; 16],
         };
         let large = BARRIER_IN_THRESHOLD - 1;
         let ret = pthread_barrier_init(&mut barrier, core::ptr::null(), large);
@@ -4764,7 +5414,8 @@ mod tests {
             count: 0,
             current: AtomicI32::new(0),
             generation: AtomicI32::new(0),
-            _pad: [0; 20],
+            lock: AtomicI32::new(0),
+            _pad: [0; 16],
         };
         assert_eq!(
             pthread_barrier_init(&mut barrier, core::ptr::null(), u32::MAX),
@@ -5454,7 +6105,9 @@ mod tests {
     fn rwlock_rdlock_tryrdlock() {
         let mut rw = PthreadRwlockT {
             state: AtomicI32::new(0),
-            _pad: [0; 52],
+            waiters: AtomicI32::new(0),
+            writer: AtomicI32::new(0),
+            _pad: [0; 44],
         };
         // Read-lock.
         assert_eq!(pthread_rwlock_rdlock(&mut rw), 0);
@@ -5472,7 +6125,9 @@ mod tests {
     fn rwlock_wrlock_trywrlock() {
         let mut rw = PthreadRwlockT {
             state: AtomicI32::new(0),
-            _pad: [0; 52],
+            waiters: AtomicI32::new(0),
+            writer: AtomicI32::new(0),
+            _pad: [0; 44],
         };
         // Write-lock.
         assert_eq!(pthread_rwlock_wrlock(&mut rw), 0);
@@ -5508,7 +6163,9 @@ mod tests {
     fn cond_signal_increments_generation() {
         let mut cond = PthreadCondT {
             generation: AtomicI32::new(0),
-            _pad: [0; 44],
+            clock: 0,
+            waiters: AtomicI32::new(0),
+            _pad: [0; 36],
         };
         let gen_before = cond.generation.load(core::sync::atomic::Ordering::Relaxed);
         assert_eq!(pthread_cond_signal(&mut cond), 0);
@@ -5520,7 +6177,9 @@ mod tests {
     fn cond_broadcast_increments_generation() {
         let mut cond = PthreadCondT {
             generation: AtomicI32::new(0),
-            _pad: [0; 44],
+            clock: 0,
+            waiters: AtomicI32::new(0),
+            _pad: [0; 36],
         };
         assert_eq!(pthread_cond_broadcast(&mut cond), 0);
         assert_eq!(
@@ -5549,7 +6208,9 @@ mod tests {
         );
         let mut c = PthreadCondT {
             generation: AtomicI32::new(0),
-            _pad: [0; 44],
+            clock: 0,
+            waiters: AtomicI32::new(0),
+            _pad: [0; 36],
         };
         assert_eq!(
             pthread_cond_wait(&mut c, core::ptr::null_mut()),
@@ -5563,7 +6224,9 @@ mod tests {
         let mut m = PTHREAD_MUTEX_INITIALIZER;
         let mut c = PthreadCondT {
             generation: AtomicI32::new(0),
-            _pad: [0; 44],
+            clock: 0,
+            waiters: AtomicI32::new(0),
+            _pad: [0; 36],
         };
         let ts = crate::stat::Timespec {
             tv_sec: 0,
@@ -5983,6 +6646,9 @@ mod tests {
         assert_eq!(ret, crate::errno::EFAULT);
     }
 
+    /// A NULL deadline is looked at only when the lock must be waited for:
+    /// an uncontended lock succeeds, as glibc's does, and a contended one is
+    /// EFAULT where glibc's `__lll_clocklock_wait` would fault reading it.
     #[test]
     fn test_pthread_mutex_timedlock_null_abstime() {
         // SAFETY: zero-init is valid for PthreadMutexT (all-zeros = unlocked).
@@ -5990,8 +6656,14 @@ mod tests {
         unsafe {
             pthread_mutex_init(&raw mut m, core::ptr::null());
         }
-        let ret = pthread_mutex_timedlock(&raw mut m, core::ptr::null());
-        assert_eq!(ret, crate::errno::EFAULT);
+        assert_eq!(pthread_mutex_timedlock(&raw mut m, core::ptr::null()), 0);
+        // Held now, and a normal mutex does not look for its owner: this
+        // call would have to wait.
+        assert_eq!(
+            pthread_mutex_timedlock(&raw mut m, core::ptr::null()),
+            crate::errno::EFAULT
+        );
+        assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
     }
 
     #[test]
@@ -6478,5 +7150,433 @@ mod tests {
         );
         assert_eq!(current_cancel_state(), PTHREAD_CANCEL_DISABLE);
         assert_eq!(current_cancel_type(), PTHREAD_CANCEL_ASYNCHRONOUS);
+    }
+
+    // -- futex-based synchronisation, under real threads --
+
+    /// A shareable raw pointer for handing pthread objects to std threads.
+    struct Shared<T>(*mut T);
+    // By hand: `derive` would demand `T: Copy`, and the pthread objects are
+    // not.
+    impl<T> Clone for Shared<T> {
+        fn clone(&self) -> Self {
+            *self
+        }
+    }
+    impl<T> Copy for Shared<T> {}
+    // SAFETY: the pthread objects behind these pointers are designed for
+    // concurrent use, and every test joins its threads before the object
+    // goes out of scope.
+    unsafe impl<T> Send for Shared<T> {}
+    impl<T> Shared<T> {
+        /// By value, so a closure calling it captures the whole wrapper,
+        /// not the (non-`Send`) pointer field.
+        fn get(self) -> *mut T {
+            self.0
+        }
+    }
+
+    fn ts(sec: i64, nsec: i64) -> crate::stat::Timespec {
+        crate::stat::Timespec {
+            tv_sec: sec,
+            tv_nsec: nsec,
+        }
+    }
+
+    /// `clock`'s now, plus `ms` milliseconds.
+    fn in_ms(clock: i32, ms: i64) -> crate::stat::Timespec {
+        let now = crate::lowlevellock::now_on(clock);
+        let total = now.tv_nsec + ms * 1_000_000;
+        ts(now.tv_sec + total / 1_000_000_000, total % 1_000_000_000)
+    }
+
+    #[test]
+    fn futex_mutex_excludes_under_contention() {
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        let mp = Shared(&raw mut m);
+        let mut counter = 0u64;
+        let cp = Shared(&raw mut counter);
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let (mp, cp) = (mp.get(), cp.get());
+                    for _ in 0..500 {
+                        assert_eq!(unsafe { pthread_mutex_lock(mp) }, 0);
+                        unsafe { *cp += 1 };
+                        assert_eq!(unsafe { pthread_mutex_unlock(mp) }, 0);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(counter, 4000);
+        assert_eq!(m.locked.load(Ordering::Relaxed), 0, "left unlocked");
+    }
+
+    /// The owner is the calling thread's cached id: an error-checking mutex
+    /// held by one thread is EPERM to unlock from another and EDEADLK to
+    /// relock from its owner.
+    #[test]
+    fn futex_mutex_ownership_is_per_thread() {
+        let mut attr: PthreadMutexattrT = [0; 4];
+        pthread_mutexattr_init(&mut attr);
+        pthread_mutexattr_settype(&mut attr, PTHREAD_MUTEX_ERRORCHECK);
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        assert_eq!(unsafe { pthread_mutex_init(&raw mut m, &attr) }, 0);
+        assert_eq!(unsafe { pthread_mutex_lock(&raw mut m) }, 0);
+        assert_eq!(unsafe { pthread_mutex_lock(&raw mut m) }, errno::EDEADLK);
+        let mp = Shared(&raw mut m);
+        let other = std::thread::spawn(move || {
+            let mp = mp.get();
+            unsafe { pthread_mutex_unlock(mp) }
+        })
+        .join()
+        .unwrap();
+        assert_eq!(other, errno::EPERM);
+        assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
+    }
+
+    /// A lazily-checked deadline: an uncontended timed lock never reads it,
+    /// NULL included; a held lock times out.
+    #[test]
+    fn futex_mutex_timedlock() {
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        assert_eq!(pthread_mutex_timedlock(&raw mut m, core::ptr::null()), 0);
+        let mp = Shared(&raw mut m);
+        let r = std::thread::spawn(move || {
+            let mp = mp.get();
+            let soon = in_ms(crate::time::CLOCK_REALTIME, 20);
+            pthread_mutex_timedlock(mp, &raw const soon)
+        })
+        .join()
+        .unwrap();
+        assert_eq!(r, errno::ETIMEDOUT);
+        assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
+    }
+
+    /// `pthread_mutex_clocklock` judges its clock before the mutex.
+    #[test]
+    fn futex_mutex_clocklock_clock_first() {
+        assert_eq!(
+            pthread_mutex_clocklock(core::ptr::null_mut(), 42, core::ptr::null()),
+            errno::EINVAL
+        );
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        let at = in_ms(crate::time::CLOCK_MONOTONIC, 10);
+        assert_eq!(
+            pthread_mutex_clocklock(&raw mut m, crate::time::CLOCK_MONOTONIC, &raw const at),
+            0
+        );
+        assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
+    }
+
+    /// A producer and a consumer hand values over a condition variable; the
+    /// consumer sees every one in order.
+    #[test]
+    fn futex_cond_hands_over_values() {
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        let mut c: PthreadCondT = unsafe { core::mem::zeroed() };
+        assert_eq!(pthread_cond_init(&raw mut c, core::ptr::null()), 0);
+        let mut slot: Option<u32> = None;
+        let (mp, cp, sp) = (
+            Shared(&raw mut m),
+            Shared(&raw mut c),
+            Shared(&raw mut slot),
+        );
+        let consumer = std::thread::spawn(move || {
+            let (mp, cp, sp) = (mp.get(), cp.get(), sp.get());
+            let mut got = Vec::new();
+            for _ in 0..100 {
+                unsafe { pthread_mutex_lock(mp) };
+                while unsafe { (*sp).is_none() } {
+                    assert_eq!(pthread_cond_wait(cp, mp), 0);
+                }
+                got.push(unsafe { (*sp).take() }.unwrap());
+                pthread_cond_broadcast(cp);
+                unsafe { pthread_mutex_unlock(mp) };
+            }
+            got
+        });
+        for v in 0..100u32 {
+            unsafe { pthread_mutex_lock(&raw mut m) };
+            while slot.is_some() {
+                assert_eq!(pthread_cond_wait(&raw mut c, &raw mut m), 0);
+            }
+            slot = Some(v);
+            pthread_cond_signal(&raw mut c);
+            unsafe { pthread_mutex_unlock(&raw mut m) };
+        }
+        assert_eq!(consumer.join().unwrap(), (0..100).collect::<Vec<_>>());
+    }
+
+    /// The attribute's clock is the one the deadline is measured on.  A
+    /// monotonic deadline 30 ms ahead waits about 30 ms; until 2026-09-26 it
+    /// was read as real time -- decades past -- and returned at once.
+    #[test]
+    fn futex_cond_timedwait_honours_the_attribute_clock() {
+        let mut attr: PthreadCondattrT = [0; 4];
+        pthread_condattr_init(&mut attr);
+        assert_eq!(
+            pthread_condattr_setclock(&mut attr, crate::time::CLOCK_MONOTONIC),
+            0
+        );
+        let mut c: PthreadCondT = unsafe { core::mem::zeroed() };
+        assert_eq!(pthread_cond_init(&raw mut c, &attr), 0);
+        assert_eq!(c.clock, crate::time::CLOCK_MONOTONIC);
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        unsafe { pthread_mutex_lock(&raw mut m) };
+        let start = std::time::Instant::now();
+        let at = in_ms(crate::time::CLOCK_MONOTONIC, 30);
+        assert_eq!(
+            pthread_cond_timedwait(&raw mut c, &raw mut m, &raw const at),
+            errno::ETIMEDOUT
+        );
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(25),
+            "{:?}",
+            start.elapsed()
+        );
+        // The mutex is held again on return.
+        assert!(m.locked.load(Ordering::Relaxed) != 0);
+        unsafe { pthread_mutex_unlock(&raw mut m) };
+    }
+
+    /// `pthread_cond_clockwait` reads the deadline, then judges the clock,
+    /// then the condition variable; and it measures on the clock it is
+    /// given.
+    #[test]
+    fn futex_cond_clockwait() {
+        let bad = ts(0, 1_000_000_000);
+        assert_eq!(
+            pthread_cond_clockwait(
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                crate::time::CLOCK_MONOTONIC,
+                &raw const bad
+            ),
+            errno::EINVAL,
+            "the deadline first"
+        );
+        let ok = ts(0, 0);
+        assert_eq!(
+            pthread_cond_clockwait(
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                9,
+                &raw const ok
+            ),
+            errno::EINVAL,
+            "then the clock"
+        );
+        let mut c: PthreadCondT = unsafe { core::mem::zeroed() };
+        pthread_cond_init(&raw mut c, core::ptr::null());
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        unsafe { pthread_mutex_lock(&raw mut m) };
+        let at = in_ms(crate::time::CLOCK_MONOTONIC, 20);
+        let start = std::time::Instant::now();
+        assert_eq!(
+            pthread_cond_clockwait(
+                &raw mut c,
+                &raw mut m,
+                crate::time::CLOCK_MONOTONIC,
+                &raw const at
+            ),
+            errno::ETIMEDOUT
+        );
+        assert!(start.elapsed() >= std::time::Duration::from_millis(15));
+        unsafe { pthread_mutex_unlock(&raw mut m) };
+    }
+
+    /// `pthread_cond_timedwait` reads the deadline before the condition
+    /// variable: NULL pointers with a malformed deadline are EINVAL.
+    #[test]
+    fn futex_cond_timedwait_deadline_first() {
+        let bad = ts(0, -1);
+        assert_eq!(
+            pthread_cond_timedwait(core::ptr::null_mut(), core::ptr::null_mut(), &raw const bad),
+            errno::EINVAL
+        );
+        assert_eq!(
+            pthread_cond_timedwait(
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null()
+            ),
+            errno::EFAULT
+        );
+    }
+
+    /// A condition variable's wait returns its mutex's unlock error, having
+    /// not waited: an error-checking mutex the caller does not hold.
+    #[test]
+    fn futex_cond_wait_on_a_mutex_not_held() {
+        let mut attr: PthreadMutexattrT = [0; 4];
+        pthread_mutexattr_init(&mut attr);
+        pthread_mutexattr_settype(&mut attr, PTHREAD_MUTEX_ERRORCHECK);
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        unsafe { pthread_mutex_init(&raw mut m, &attr) };
+        let mut c: PthreadCondT = unsafe { core::mem::zeroed() };
+        pthread_cond_init(&raw mut c, core::ptr::null());
+        assert_eq!(pthread_cond_wait(&raw mut c, &raw mut m), errno::EPERM);
+        assert_eq!(c.waiters.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn futex_rwlock_readers_share_writers_exclude() {
+        // SAFETY: all-zero is `PTHREAD_RWLOCK_INITIALIZER`'s value.
+        let mut rw: PthreadRwlockT = unsafe { core::mem::zeroed() };
+        let p = Shared(&raw mut rw);
+        let mut value = 0u64;
+        let vp = Shared(&raw mut value);
+        let writers: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let (p, vp) = (p.get(), vp.get());
+                    for _ in 0..200 {
+                        assert_eq!(pthread_rwlock_wrlock(p), 0);
+                        unsafe { *vp += 1 };
+                        assert_eq!(pthread_rwlock_unlock(p), 0);
+                        assert_eq!(pthread_rwlock_rdlock(p), 0);
+                        let _ = unsafe { *vp };
+                        assert_eq!(pthread_rwlock_unlock(p), 0);
+                    }
+                })
+            })
+            .collect();
+        for t in writers {
+            t.join().unwrap();
+        }
+        assert_eq!(value, 800);
+        assert_eq!(rw.state.load(Ordering::Relaxed), 0);
+    }
+
+    /// The writer relocking is EDEADLK (glibc checks `__cur_writer`); a
+    /// timed write lock times out while a reader holds the lock.
+    #[test]
+    fn futex_rwlock_edeadlk_and_timeouts() {
+        // SAFETY: all-zero is `PTHREAD_RWLOCK_INITIALIZER`'s value.
+        let mut rw: PthreadRwlockT = unsafe { core::mem::zeroed() };
+        assert_eq!(pthread_rwlock_wrlock(&raw mut rw), 0);
+        assert_eq!(pthread_rwlock_wrlock(&raw mut rw), errno::EDEADLK);
+        assert_eq!(pthread_rwlock_rdlock(&raw mut rw), errno::EDEADLK);
+        assert_eq!(pthread_rwlock_unlock(&raw mut rw), 0);
+        assert_eq!(pthread_rwlock_rdlock(&raw mut rw), 0);
+        let p = Shared(&raw mut rw);
+        let r = std::thread::spawn(move || {
+            let p = p.get();
+            let soon = in_ms(crate::time::CLOCK_REALTIME, 20);
+            pthread_rwlock_timedwrlock(p, &raw const soon)
+        })
+        .join()
+        .unwrap();
+        assert_eq!(r, errno::ETIMEDOUT);
+        assert_eq!(pthread_rwlock_unlock(&raw mut rw), 0);
+        // The timed forms judge their deadline eagerly, before the lock.
+        let bad = ts(0, 1_000_000_000);
+        assert_eq!(
+            pthread_rwlock_timedrdlock(core::ptr::null_mut(), &raw const bad),
+            errno::EINVAL
+        );
+        assert_eq!(
+            pthread_rwlock_clockwrlock(core::ptr::null_mut(), 7, &raw const bad),
+            errno::EINVAL
+        );
+        assert_eq!(
+            pthread_rwlock_timedwrlock(&raw mut rw, core::ptr::null()),
+            errno::EFAULT
+        );
+    }
+
+    /// Many rounds of a reused barrier: in every round exactly one thread is
+    /// the serial one, and no thread leaves a round before all have arrived.
+    #[test]
+    fn futex_barrier_rounds() {
+        const N: usize = 4;
+        const ROUNDS: usize = 50;
+        let mut b: PthreadBarrierT = unsafe { core::mem::zeroed() };
+        assert_eq!(
+            pthread_barrier_init(&raw mut b, core::ptr::null(), N as u32),
+            0
+        );
+        let bp = Shared(&raw mut b);
+        let arrivals: std::sync::Arc<Vec<std::sync::atomic::AtomicUsize>> = std::sync::Arc::new(
+            (0..ROUNDS)
+                .map(|_| std::sync::atomic::AtomicUsize::new(0))
+                .collect(),
+        );
+        let serials: std::sync::Arc<Vec<std::sync::atomic::AtomicUsize>> = std::sync::Arc::new(
+            (0..ROUNDS)
+                .map(|_| std::sync::atomic::AtomicUsize::new(0))
+                .collect(),
+        );
+        let threads: Vec<_> = (0..N)
+            .map(|_| {
+                let (arrivals, serials) = (arrivals.clone(), serials.clone());
+                std::thread::spawn(move || {
+                    let bp = bp.get();
+                    for round in 0..ROUNDS {
+                        arrivals[round].fetch_add(1, Ordering::SeqCst);
+                        let r = pthread_barrier_wait(bp);
+                        assert_eq!(arrivals[round].load(Ordering::SeqCst), N, "left early");
+                        if r == PTHREAD_BARRIER_SERIAL_THREAD {
+                            serials[round].fetch_add(1, Ordering::SeqCst);
+                        } else {
+                            assert_eq!(r, 0);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        for round in 0..ROUNDS {
+            assert_eq!(serials[round].load(Ordering::SeqCst), 1, "round {round}");
+        }
+    }
+
+    static ONCE_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    extern "C" fn slow_once_init() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        ONCE_RUNS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Callers racing `pthread_once` wait for the one running `init` -- and
+    /// find it done when they return.
+    #[test]
+    fn futex_once_waiters_see_init_done() {
+        let mut once = PTHREAD_ONCE_INIT;
+        let op = Shared(&raw mut once);
+        let threads: Vec<_> = (0..6)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let op = op.get();
+                    assert_eq!(unsafe { pthread_once(op, slow_once_init) }, 0);
+                    assert!(
+                        ONCE_RUNS.load(Ordering::SeqCst) >= 1,
+                        "returned before init finished"
+                    );
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(ONCE_RUNS.load(Ordering::SeqCst), 1);
+    }
+
+    /// The thread id is cached in the per-thread block: the same across
+    /// calls, and different between threads.
+    #[test]
+    fn current_tid_is_cached_and_per_thread() {
+        let a = current_tid();
+        assert_ne!(a, 0);
+        assert_eq!(current_tid(), a);
+        assert_eq!(unsafe { (*crate::perthread::current()).tid }, a);
+        let b = std::thread::spawn(current_tid).join().unwrap();
+        assert_ne!(a, b);
     }
 }

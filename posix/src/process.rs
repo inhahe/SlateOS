@@ -937,6 +937,11 @@ pub extern "C" fn fork() -> PidT {
     let pid = errno::translate(ret) as PidT;
 
     if pid == 0 {
+        // The child is a new thread with the parent's per-thread block: its
+        // cached task id is the parent's, so drop it for the next
+        // `current_tid` to fetch.
+        // SAFETY: `current()` is this (now single) thread's block.
+        unsafe { (*crate::perthread::current()).tid = 0 };
         crate::malloc::unlock_after_fork_child();
     } else {
         crate::malloc::unlock_after_fork_parent();

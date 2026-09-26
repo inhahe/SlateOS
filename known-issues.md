@@ -165649,7 +165649,19 @@ glibc's `ftw_startup` makes it, instead of `EINVAL`. Symlink cycles without
 `FTW_PHYS` then need glibc's other half, the set of directories already walked
 (`find_object`), since `MAX_DEPTH` is what stops them today.
 
-### [D] B-D-PROCESS-SHARED-SYNC-IS-SILENTLY-PRIVATE — 2026-09-26 — OPEN
+### [D] B-D-PROCESS-SHARED-SYNC-IS-SILENTLY-PRIVATE — 2026-09-26 — PARTIAL 2026-09-26 (libc's half done)
+
+**Done 2026-09-26 (libc).** Step 1 below: `sem_init` with a non-zero
+`pshared` and every `setpshared(PTHREAD_PROCESS_SHARED)` are `ENOTSUP`, as
+glibc answers where shared futexes are unsupported, so nothing is silently
+private any more; and the missing calls exist, in glibc's attribute layout —
+`pthread_mutexattr_{get,set}{pshared,protocol,prioceiling,robust}` (with the
+`_np` robust names), `pthread_mutex_consistent`, `pthread_mutex_{get,set}prioceiling`,
+`pthread_condattr_{get,set}pshared` and the `pthread_barrierattr_*` family. A
+protocol other than none, and robustness, are stored and then refused by
+`pthread_mutex_init` with `ENOTSUP`, as glibc refuses what it lacks.
+**Still open:** step 2, requested of lane A
+(`requests/d-a-futexes-keyed-by-physical-page-for-process-shared-objects.md`).
 
 **Where:** `posix/src/semaphore.rs` (`sem_init`), `posix/src/pthread.rs` (the
 attribute calls), `kernel/src/ipc/futex.rs` (lane A).
@@ -165680,6 +165692,40 @@ it already refuses `PTHREAD_PROCESS_SHARED` with `ENOTSUP`.
 2. Then, in the kernel (a request to lane A): key a futex on a shared mapping by
    its physical page, as Linux does for a non-private futex, so that
    process-shared objects can be allowed.
+
+### [D] B-D-PTHREAD-SYNC-POLLED-IN-1MS-STEPS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/pthread.rs` — mutexes, condition variables, rwlocks,
+barriers, `pthread_once`; now over `posix/src/lowlevellock.rs`.
+
+**What it was.** None of pthread's blocking calls used a futex. A contended
+`pthread_mutex_lock` spun 100 times and then slept in 1 ms steps, polling;
+so did `pthread_cond_wait`/`timedwait`, `pthread_rwlock_rdlock`/`wrlock` and
+`pthread_barrier_wait`; `pthread_mutex_timedlock` busy-yielded; a thread
+waiting in `pthread_once` spun without yielding for however long `init` took.
+Every hand-off cost up to a millisecond, and a waiter nobody would wake kept
+waking up. Every lock, uncontended included, made a `SYS_TASK_ID` syscall
+first — the whole cost of what should be one compare-and-swap
+(`performance-targets.md`, "Futex wait/wake (uncontended)").
+
+And three correctness faults beside it: a condition variable ignored its
+attribute's clock, so a `CLOCK_MONOTONIC` deadline (seconds past boot) read
+as real time had always passed and every timed wait returned `ETIMEDOUT` at
+once; a barrier reused at once could release a thread with the round it did
+not belong to (between the last arrival's reset of the count and its advance
+of the generation); and `pthread_rwlock_timedrdlock`/`timedwrlock` did not
+exist.
+
+**Fix (design-decisions §1110).** A low-level futex lock (Drepper's
+three-state mutex, glibc's `lll_lock`) under every mutex, the barrier and the
+timed paths; a sequence-counter futex under condition variables, with the
+waiter count kept so a signal nobody waits for costs no syscall; a futex
+rwlock that answers `EDEADLK` to its writer; the calling thread's task id
+cached in its per-thread block (reset in a `fork` child). The clock a
+condition variable was made with is kept and used, and glibc 2.30's
+`pthread_cond_clockwait`, `pthread_mutex_clocklock`,
+`pthread_rwlock_clock{rd,wr}lock` and `sem_clockwait` exist, with the
+`pthread_rwlock_timed*` pair. Host tests drive each with real threads.
 
 ### [D] TD-D-TSEARCH-IS-AN-UNBALANCED-TREE — 2026-09-26 — FIXED 2026-09-26
 

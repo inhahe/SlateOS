@@ -1811,6 +1811,13 @@ D's to act on once answered).
       flag bits Linux ignores, refuses the clocks it cannot sleep on, and
       reports what the kernel reports; `setitimer(which, NULL, …)` disarms,
       as on Linux.
+    * pthread's blocking calls sleep on futexes (they polled in 1 ms steps):
+      mutexes, condition variables (which now keep their attribute's clock —
+      monotonic deadlines had always passed), rwlocks, barriers,
+      `pthread_once`; an uncontended lock makes no syscall.  glibc 2.30's
+      clock-selecting waits exist, with `pthread_rwlock_timed*`; the
+      attribute calls for process-shared, priority and robust mutexes exist,
+      answering `ENOTSUP` for what the kernel cannot back (§1110).
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

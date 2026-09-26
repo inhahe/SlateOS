@@ -101,7 +101,7 @@ pub const SEM_FAILED: *mut SemT = core::ptr::null_mut();
 
 /// Initialize an unnamed semaphore.
 ///
-/// `pshared` is ignored (cross-process semaphores not supported).
+/// A non-zero `pshared` is `ENOTSUP`: see the check below.
 /// `value` is the initial semaphore count.
 ///
 /// Returns 0 on success, -1 on error.  glibc's order (nptl/sem_init.c):
@@ -110,11 +110,21 @@ pub const SEM_FAILED: *mut SemT = core::ptr::null_mut();
 /// (design-decisions.md §303) -- only for a valid value.  The NULL test came
 /// first until 2026-09-26.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sem_init(sem: *mut SemT, _pshared: i32, value: u32) -> i32 {
+pub extern "C" fn sem_init(sem: *mut SemT, pshared: i32, value: u32) -> i32 {
     // Guard against u32 values that would wrap to negative when cast
     // to i32.  Our SEM_VALUE_MAX is i32::MAX.
     if value > i32::MAX as u32 {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Then glibc's `futex_supports_pshared`: a semaphore shared between
+    // processes needs a futex the kernel can wake across address spaces,
+    // which it cannot yet (known-issues
+    // `B-D-PROCESS-SHARED-SYNC-IS-SILENTLY-PRIVATE`), so it is ENOTSUP, as
+    // glibc answers where shared futexes are unsupported.  Until 2026-09-26
+    // it was accepted and then worked inside one process only.
+    if pshared != 0 {
+        errno::set_errno(errno::ENOTSUP);
         return -1;
     }
     if sem.is_null() {
@@ -341,8 +351,45 @@ pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Tim
         errno::set_errno(errno::EFAULT);
         return -1;
     }
+    // SAFETY: both pointers verified non-null.
+    sem_wait_until(unsafe { &*sem }, crate::time::CLOCK_REALTIME, unsafe {
+        &*abstime
+    })
+}
 
-    let atomic = unsafe { &(*sem).value };
+/// `sem_clockwait` (glibc 2.30): [`sem_timedwait`] with the deadline on
+/// `clockid`.  glibc judges the clock first (`CLOCK_REALTIME` or
+/// `CLOCK_MONOTONIC`, else `EINVAL`), then the deadline, then the semaphore.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sem_clockwait(
+    sem: *mut SemT,
+    clockid: i32,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    if !crate::lowlevellock::supported_clock(clockid) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if abstime.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: abstime verified non-null above.
+    if !crate::time::valid_nanoseconds(unsafe { (*abstime).tv_nsec }) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if sem.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: both pointers verified non-null.
+    sem_wait_until(unsafe { &*sem }, clockid, unsafe { &*abstime })
+}
+
+/// The timed wait, the deadline on `clock`.
+fn sem_wait_until(sem: &SemT, clock: i32, deadline: &crate::stat::Timespec) -> i32 {
+    let atomic = &sem.value;
 
     loop {
         // Try to decrement.
@@ -368,8 +415,7 @@ pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Tim
             tv_sec: 0,
             tv_nsec: 0,
         };
-        let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now);
-        let deadline = unsafe { &*abstime };
+        let _ = crate::time::clock_gettime(clock, &raw mut now);
         if now.tv_sec > deadline.tv_sec
             || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)
         {
@@ -1354,6 +1400,35 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    /// `sem_clockwait` judges the clock first: a bad one is EINVAL even with
+    /// NULL pointers.  A monotonic deadline already past times out; a
+    /// positive count is taken without waiting.
+    #[test]
+    fn test_sem_clockwait() {
+        errno::set_errno(0);
+        assert_eq!(
+            sem_clockwait(core::ptr::null_mut(), 5, core::ptr::null()),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        let mut sem = SemT::new(0);
+        sem_init(&raw mut sem, 0, 1);
+        let past = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        assert_eq!(
+            sem_clockwait(&raw mut sem, crate::time::CLOCK_MONOTONIC, &raw const past),
+            0
+        );
+        errno::set_errno(0);
+        assert_eq!(
+            sem_clockwait(&raw mut sem, crate::time::CLOCK_MONOTONIC, &raw const past),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::ETIMEDOUT);
+    }
+
     #[test]
     fn test_sem_timedwait_null_abstime() {
         crate::errno::set_errno(0);
@@ -1405,17 +1480,30 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ETIMEDOUT);
     }
 
-    // -- sem_init with pshared (ignored but accepted) --
+    // -- sem_init with pshared: ENOTSUP, not a private semaphore --
 
     #[test]
-    fn test_sem_init_pshared_nonzero() {
-        let mut sem = SemT::new(0);
-        // pshared=1 should still succeed (we ignore it)
-        let ret = sem_init(&raw mut sem, 1, 10);
-        assert_eq!(ret, 0);
-        let mut val: i32 = 0;
-        sem_getvalue(&raw mut sem, &raw mut val);
-        assert_eq!(val, 10);
+    fn test_sem_init_pshared_nonzero_enotsup() {
+        // A process-shared semaphore would never wake a waiter in another
+        // process, so it is refused -- after the value, before the pointer.
+        let mut sem = SemT::new(7);
+        errno::set_errno(0);
+        assert_eq!(sem_init(&raw mut sem, 1, 10), -1);
+        assert_eq!(errno::get_errno(), errno::ENOTSUP);
+        errno::set_errno(0);
+        assert_eq!(sem_init(core::ptr::null_mut(), 1, 10), -1);
+        assert_eq!(
+            errno::get_errno(),
+            errno::ENOTSUP,
+            "pshared before the pointer"
+        );
+        errno::set_errno(0);
+        assert_eq!(sem_init(&raw mut sem, 1, u32::MAX), -1);
+        assert_eq!(
+            errno::get_errno(),
+            errno::EINVAL,
+            "the value before pshared"
+        );
     }
 
     // -- SEM_FAILED constant --

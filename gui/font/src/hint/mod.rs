@@ -449,7 +449,7 @@ mod tests {
                 });
                 current = Some((px, font));
             }
-            let (_, font) = current.as_ref().unwrap();
+            let (_, font) = current.as_mut().unwrap();
             let got: Vec<i32> = font
                 .hinted_points(gid)
                 .unwrap_or_default()
@@ -505,7 +505,7 @@ mod tests {
         use crate::scaled::ScaledFont;
         let face = Face::parse(fixture::TTF.to_vec()).unwrap();
         let x = face.glyph_index('x').unwrap();
-        let font = ScaledFont::new(face, 13.0).unwrap();
+        let mut font = ScaledFont::new(face, 13.0).unwrap();
         assert_eq!(font.hinted_points(x), None);
         assert_eq!(font.hint_style(x), None);
     }

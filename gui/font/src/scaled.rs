@@ -117,6 +117,18 @@ pub struct Glyph {
     pub advance: f32,
 }
 
+/// Where a font's auto-hinter stands.
+#[derive(Clone, Debug)]
+enum Hinting {
+    /// Hinting is off.
+    Off,
+    /// On, but the face not yet measured: that happens on the first glyph
+    /// drawn, so that switching hinting on costs nothing up front.
+    Unmeasured,
+    /// On and measured; `None` for a face the hinter cannot use.
+    Ready(Option<Hinter>),
+}
+
 /// A face pinned to a pixel size, caching the glyphs it has drawn.
 pub struct ScaledFont {
     /// Shared because a UI wants the same face at several sizes at once — a
@@ -145,10 +157,11 @@ pub struct ScaledFont {
     rendering: Rendering,
     /// The auto-hinter fitted to this size, while hinting is on: every
     /// glyph's script and each script's alignment zones, measured from the
-    /// face's own letters. Rebuilt when the instance changes, since the zones
-    /// move with the axes. `None` for a face the hinter cannot read (no
-    /// Unicode `cmap`), which is then drawn unhinted.
-    hinter: Option<Hinter>,
+    /// face's own letters. Measured when the first glyph is drawn rather than
+    /// when hinting is switched on -- a few milliseconds a face, which a
+    /// fallback face that never draws a glyph should not pay -- and again
+    /// after the instance changes, since the zones move with the axes.
+    hinting: Hinting,
     metrics: FontMetrics,
     /// Keyed by glyph id, not character: two characters that map to the same
     /// glyph (and there are many — the space-like codepoints, the various
@@ -319,7 +332,7 @@ impl ScaledFont {
             scale,
             coords,
             rendering: Rendering::default(),
-            hinter: None,
+            hinting: Hinting::Off,
             metrics,
             cache: BTreeMap::new(),
             order: Vec::new(),
@@ -375,19 +388,32 @@ impl ScaledFont {
         self.refit_hinter();
     }
 
-    /// Measure the face for hinting again, at the current instance, if
-    /// hinting is on.
+    /// Forget the face's hinting measurements: they are taken again, at the
+    /// current instance, when the next glyph is drawn -- if hinting is on.
     fn refit_hinter(&mut self) {
-        let hinter = if self.rendering.hinting {
+        self.hinting = if self.rendering.hinting {
+            Hinting::Unmeasured
+        } else {
+            Hinting::Off
+        };
+    }
+
+    /// The hinter, measuring the face first if that has not been done since
+    /// hinting was switched on or the instance changed. `None` while hinting
+    /// is off, and for a face the hinter cannot use.
+    fn hinter(&mut self) -> Option<&Hinter> {
+        if matches!(self.hinting, Hinting::Unmeasured) {
             let shape = |cluster: &str| self.reference_glyphs(cluster);
-            Hinter::new(
+            let hinter = Hinter::new(
                 FaceHints::new(&self.face, &self.coords, &shape),
                 self.px_per_em,
-            )
-        } else {
-            None
-        };
-        self.hinter = hinter;
+            );
+            self.hinting = Hinting::Ready(hinter);
+        }
+        match &self.hinting {
+            Hinting::Ready(hinter) => hinter.as_ref(),
+            Hinting::Off | Hinting::Unmeasured => None,
+        }
     }
 
     /// Where the auto-hinter puts `gid`'s stored points at this size, in
@@ -398,12 +424,12 @@ impl ScaledFont {
     /// **For diagnostics only.** Drawing never needs it; it is the half of the
     /// check against FreeType's auto-hinter (`tools/hint_oracle.py`) that this
     /// crate answers, and FreeType answers in stored points, not paths.
-    #[must_use]
-    pub fn hinted_points(&self, gid: u16) -> Option<Vec<(f32, f32, bool)>> {
-        let points = self
-            .hinter
-            .as_ref()?
-            .hint_points(&self.face, &self.coords, gid)?;
+    pub fn hinted_points(&mut self, gid: u16) -> Option<Vec<(f32, f32, bool)>> {
+        self.hinter()?;
+        let Hinting::Ready(Some(hinter)) = &self.hinting else {
+            return None;
+        };
+        let points = hinter.hint_points(&self.face, &self.coords, gid)?;
         Some(
             points
                 .points
@@ -418,9 +444,8 @@ impl ScaledFont {
     /// name, `latn_dflt`, `hani_dflt` -- and whether it is a non-base glyph,
     /// never snapped to a zone. `None` while hinting is off. **For
     /// diagnostics only**, as [`hinted_points`](Self::hinted_points) is.
-    #[must_use]
-    pub fn hint_style(&self, gid: u16) -> Option<(&'static str, bool)> {
-        self.hinter.as_ref()?.style_of_glyph(gid)
+    pub fn hint_style(&mut self, gid: u16) -> Option<(&'static str, bool)> {
+        self.hinter()?.style_of_glyph(gid)
     }
 
     /// What one cluster of the hinter's reference letters shapes to: each
@@ -642,6 +667,9 @@ impl ScaledFont {
     /// not an error — it yields an empty mask.
     pub fn glyph(&mut self, gid: u16) -> Result<&Glyph, ScaledFontError> {
         if !self.cache.contains_key(&gid) {
+            // Measure the face now if hinting was switched on since the last
+            // glyph; `rasterize_glyph` only reads the result.
+            self.hinter();
             let entry = self.rasterize_glyph(gid)?;
             self.insert(gid, entry);
         }
@@ -746,10 +774,10 @@ impl ScaledFont {
         // A hinted glyph comes back in pixels already. One the hinter leaves
         // alone -- hinting off, a script it does not hint, a glyph it will not
         // take on -- is drawn from its outline as the designer placed it.
-        let hinted = self
-            .hinter
-            .as_ref()
-            .and_then(|h| h.hint(&self.face, &self.coords, gid));
+        let hinted = match &self.hinting {
+            Hinting::Ready(Some(h)) => h.hint(&self.face, &self.coords, gid),
+            Hinting::Ready(None) | Hinting::Unmeasured | Hinting::Off => None,
+        };
         let mask = match hinted {
             Some(pixels) => rasterize_with(&pixels, 1.0, self.rendering),
             None => {
@@ -2832,6 +2860,33 @@ mod tests {
         // And going back gets the original shape, not a second new one.
         f.set_axes(&[(*b"wght", 400.0)]);
         assert_eq!(f.glyph(1).unwrap().mask.width, plain.width);
+    }
+
+    #[test]
+    fn the_hinter_measures_the_face_only_once_a_glyph_is_drawn() {
+        // Measuring costs milliseconds a face, and a fallback face may never
+        // draw a glyph: switching hinting on must not pay it up front.
+        let hinted = Rendering {
+            hinting: true,
+            ..Rendering::default()
+        };
+        let mut f = variable_font(20.0);
+        assert!(matches!(f.hinting, Hinting::Off));
+        f.set_rendering(hinted);
+        assert!(matches!(f.hinting, Hinting::Unmeasured));
+        f.glyph(1).unwrap();
+        assert!(matches!(f.hinting, Hinting::Ready(Some(_))));
+        // A new instance moves the zones, so they are measured again -- once
+        // a glyph is drawn there.
+        f.set_axes(&[(*b"wght", 700.0)]);
+        assert!(matches!(f.hinting, Hinting::Unmeasured));
+        f.glyph(1).unwrap();
+        assert!(matches!(f.hinting, Hinting::Ready(Some(_))));
+        // Switching hinting off drops the measurements.
+        f.set_rendering(Rendering::default());
+        assert!(matches!(f.hinting, Hinting::Off));
+        f.glyph(1).unwrap();
+        assert!(matches!(f.hinting, Hinting::Off));
     }
 
     #[test]

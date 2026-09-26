@@ -1,0 +1,1 @@
+REFUSED read: Wrong bitspersample value (8), Thunder decoder only supports 4bits per sample.

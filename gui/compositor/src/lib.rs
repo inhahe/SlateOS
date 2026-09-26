@@ -2820,6 +2820,52 @@ impl RenderTarget for Framebuffer {
         }
     }
 
+    /// A colour glyph's pixels are premultiplied; [`blend_pixel`] blends
+    /// straight colour, so each is unpremultiplied on the way in -- one path for
+    /// every source's alpha, clip and window opacity, not a second blender for
+    /// glyphs. (An 8-bit round trip: a channel of a pixel with alpha `a` comes
+    /// back within `255 / a / 2` of where it was, which is invisible at the
+    /// alphas where it is large.)
+    ///
+    /// [`blend_pixel`]: Framebuffer::blend_pixel
+    fn draw_colour_glyph(
+        &mut self,
+        image: &osfont::colr::ColourImage,
+        pen: f32,
+        baseline: f32,
+        opacity: f32,
+        clip: Option<&Rect>,
+    ) {
+        // As in `draw_glyph`: the origin is another process's layout, and a
+        // non-finite one is dropped rather than cast to the top-left corner.
+        let (ox, oy) = (pen + image.left as f32, baseline + image.top as f32);
+        if !ox.is_finite() || !oy.is_finite() || image.width == 0 {
+            return;
+        }
+        let (ox, oy) = (ox.round() as i32, oy.round() as i32);
+        for (row, pixels) in image.pixels.chunks_exact(image.width as usize).enumerate() {
+            let fy = oy.saturating_add(row as i32);
+            if fy < 0 {
+                continue;
+            }
+            for (col, &px) in pixels.iter().enumerate() {
+                if px >> 24 == 0 {
+                    continue;
+                }
+                let fx = ox.saturating_add(col as i32);
+                if fx < 0 {
+                    continue;
+                }
+                if let Some(clip_rect) = clip
+                    && !clip_rect.contains(fx, fy)
+                {
+                    continue;
+                }
+                self.blend_pixel(fx as u32, fy as u32, unpremultiply(px), opacity);
+            }
+        }
+    }
+
     /// OPT: when the buffer is opaque (Xrgb) and the window is fully opaque, the
     /// per-row content is copied straight into the framebuffer
     /// ([`copy_row`](Framebuffer::copy_row)) instead of running a per-pixel
@@ -3953,6 +3999,26 @@ impl TranslateStack {
 // Text rendering
 // ---------------------------------------------------------------------------
 
+/// Straight `0xAARRGGBB` from premultiplied, rounding to nearest.
+///
+/// A premultiplied channel is at most its alpha in a well-formed image; the
+/// `min` keeps one that is not from spilling into the next channel.
+fn unpremultiply(px: u32) -> u32 {
+    let a = px >> 24;
+    if a == 0 || a == 255 {
+        return px;
+    }
+    // At most 255 * 255 + 127 before the division, and `a` is 1 to 254.
+    let channel = |shift: u32| {
+        ((px >> shift) & 0xFF)
+            .saturating_mul(255)
+            .saturating_add(a / 2)
+            .checked_div(a)
+            .map_or(0, |c| c.min(255))
+    };
+    (a << 24) | (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
 /// Translates the toolkit's weight hint into the one `osfont` understands.
 ///
 /// `Light` maps to regular because the built-in face has two weights and no
@@ -4020,6 +4086,22 @@ fn blit_run<T: RenderTarget + ?Sized>(
         // Resolved before the mask is fetched: `glyph_mask` borrows the font
         // mutably for as long as the mask lives, and this needs nothing from it.
         let ink = TextSpan::color_at(spans, shaped.cluster).map_or(color, |c| color_to_argb(&c));
+        // A colour glyph -- an emoji -- is a picture in its own colours. The
+        // text colour reaches it twice over: whatever parts of it the glyph
+        // paints in the text colour come painted in `ink` (opaque), and
+        // `ink`'s alpha is the picture's opacity, as it is a mask's.
+        if let Some(image) = font.glyph_image(shaped.key, ink) {
+            let ink_alpha = (ink >> 24) as f32 / 255.0;
+            fb.draw_colour_glyph(
+                image,
+                *pen + shaped.offset.0,
+                baseline - shaped.offset.1,
+                opacity * ink_alpha,
+                clip,
+            );
+            *pen += advance;
+            continue;
+        }
         if let Some(mask) = font.glyph_mask(shaped.key) {
             // `offset` is zero except on an attached combining mark, and its
             // `y` points up where the screen's points down.

@@ -11278,8 +11278,9 @@ of TIFF are not read yet (listed below) and are refused by name.
   and 2-D, Group 4, Modified Huffman byte- and word-aligned: `tif_fax3.c`'s
   macros written out, its code tables built as `mkg3states` builds them), and
   JPEG through this crate's port of libjpeg-turbo (§1318) driven as
-  `tif_jpeg.c` drives libjpeg -- with the horizontal predictor, `FillOrder`,
-  and big-endian 16-bit samples.
+  `tif_jpeg.c` drives libjpeg, and NeXT's 2-bit and ThunderScan's 4-bit
+  codecs in `next.rs` and `thunder.rs` -- with the horizontal predictor,
+  `FillOrder`, and big-endian 16-bit samples.
 - `rgba.rs`: `tif_getimage.c` -- `TIFFRGBAImageOK`, `TIFFRGBAImageBegin`, the
   strip and tile readers and their pixel routines: grey of 1 to 16 bits,
   palettes, RGB of 8 and 16 with each kind of alpha, CMYK, `YCbCr` (all seven
@@ -11327,9 +11328,8 @@ of TIFF are not read yet (listed below) and are refused by name.
 
 ### Not yet read
 
-Old-style JPEG compression, NeXT, ThunderScan, SGI LogLuv and PixarLog:
-libtiff reads them, and this refuses them by name, for now.
-(`YCbCr` and CIE L*a*b* samples followed on the same day, held the same way:
+Nothing libtiff's reader decodes is refused now; that took the rest of the
+day. (`YCbCr` and CIE L*a*b* samples followed on the same day, held the same way:
 23 more fixtures, and 12,000 mutants of them without a disagreement. So did
 fax, whose leniency is kept whole -- a bad code word ends only its row, a
 Group 4 strip cut short keeps the rows it has, and a Group 3 strip whose data
@@ -11346,23 +11346,62 @@ tables kept from strip to strip as libjpeg keeps them, so a strip that
 redefines them -- even after its scan, which `jpeg_finish_decompress` reads --
 redefines them for the abbreviated strips after it. libtiff ignores what that
 finish says: it returns `rows_left || finish()`, and a C `||` is 1 for the
-failure's -1. 38 fixtures, 30 of them decoded, and 12,000 mutants.) Only
-the first page of a multi-page TIFF is read -- as gdk-pixbuf reads it.
+failure's -1. 38 fixtures, 30 of them decoded, and 12,000 mutants; and five
+more with lossless strips, which libtiff reads as it reads any other -- except
+in a `YCbCr` file, where libjpeg will not convert them. NeXT and ThunderScan
+followed, with libtiff's edges: a NeXT strip whose data stops at a row's
+start is white from there and reads, a NeXT tile's rows are measured by the
+image's scanline, not the tile's, and ThunderScan has no tile decoder at all.
+libtiff writes neither, so their 27 fixtures come from encoders in the
+generator; 12,000 mutants. Then old-style JPEG -- TIFF 6.0's first JPEG
+scheme, superseded in 1995 and written every which way: libtiff reads it by
+building one JPEG out of the file, its tables and frame from
+`JPEGInterchangeFormat` or made up from the tags, then every strip's data
+with restart markers put back between strips, and this builds the same one
+for the libjpeg-turbo port, which gained raw output and libtiff's strict
+source for it (§1318). libtiff's quirks come along: the subsampling is read
+from the JPEG's own frame when the directory is read; a big-endian file
+loses the codec's post-decode step to the byte swap, so each strip after the
+first skips a strip's worth of the JPEG; tiles past libtiff's one-column
+frame show what its buffer last held. 26 fixtures -- three table layouts,
+tiles, planes apart, and those quirks -- and 20,000 mutants, which found two
+things libtiff does that this did not: a strip array the directory lacks
+fails the read, and an alpha plane promised past a separate-planes file's
+samples is read from strip 0 (`TIFFComputeStrip`), whatever the codec.
+Three corners are not modelled, each needing input built to reach it
+(`known-issues.md`). Then SGI LogLuv, whose codec turns high-dynamic-range
+luminance and chroma into the 8-bit grey or RGB the reader asks for, through
+`exp` -- exact only as glibc's `exp` is, which here is a correctly rounded
+double-double `exp` plus glibc's own answers for the 21 of its 33,790
+possible arguments where glibc is not correctly rounded, checked against
+glibc for every one; and through `sqrt`, done in integers, the crate having
+no maths library. 16 fixtures, written by an encoder in the generator, and
+8,000 mutants. Last, PixarLog: 11-bit log codes, differenced and deflated,
+turned to 8- or 16-bit samples through tables libtiff builds with glibc
+(kept here as glibc built them), with its bugs shown as it shows them -- for
+grey and grey with alpha, each row's last sum spills into the next row's
+first pixel, and a tile's rows are the image's width -- and the predictor
+it installs run over the output. It inflates with zlib, whose stopping
+place the shared `deflate` crate cannot find, so on damaged strips the two
+can differ (`known-issues.md`; asked of lane A). 18 fixtures, 12,000
+mutants.) Only the first page of a multi-page TIFF is read -- as gdk-pixbuf
+reads it.
 
 ### How it is held
 
-`tests/tiff.rs` against 224 fixtures (`tests/data/generate_tiff.py`: a
+`tests/tiff.rs` against 256 fixtures (`tests/data/generate_tiff.py`: a
 small TIFF writer for every layout, plus Pillow's libtiff-backed writer for
 real encoder output), each answered by libtiff 4.7.1 built from pinned
-sources: 187 decoded to exactly libtiff's raster, 37 refused where libtiff
+sources: 209 decoded to exactly libtiff's raster, 47 refused where libtiff
 refuses. Separate tests hold the straight-alpha conversion to libtiff's
 premultiplied raster, the eight orientations to the stored picture turned,
 limits, and every bit flip of eight fixtures to not panicking. A mutation
 fuzzer against the same libtiff -- bit flips, entry types, counts and values
 changed, entries dropped and duplicated, files cut short -- found no
 disagreement in 30,000 files without Deflate data, and in 8,000 with it only
-the nine Deflate cases above; the rounds for `YCbCr` with CIELab, for fax and for
-JPEG (12,000 each) found none once the two port errors the fax round turned up were
+the nine Deflate cases above; the rounds for `YCbCr` with CIELab, for fax, for
+JPEG and for NeXT with ThunderScan (12,000 each), and for lossless JPEG strips
+(6,000), found none once the two port errors the fax round turned up were
 fixed -- `RowsPerStrip` also sets the tile size while no tile tags have
 been read, and the tile truth test above.
 
@@ -11381,9 +11420,11 @@ it to the bit on every test file and on 32,000 damaged ones. Before, pixels
 were within a few levels of it -- invisible -- but some kinds of JPEG came out
 wrong or not at all: CMYK files from print work showed false colours,
 RGB-coded JPEGs came out in the wrong colours, and arithmetic-coded files
-and files sending each colour in a scan of its own were refused. Those now show as they
-do elsewhere. It is also faster: a 21-megapixel photograph in 0.76 s rather
-than 1.42 s, its thumbnail in 0.18 s rather than 0.45 s.
+and files sending each colour in a scan of its own were refused. Those now
+show as they do elsewhere, and so do lossless JPEGs, from medical and
+scientific imaging, which were refused too. It is also faster: a
+21-megapixel photograph in 0.76 s rather than 1.42 s, its thumbnail in
+0.18 s rather than 0.45 s.
 
 ### Why a port rather than a better decoder of our own
 
@@ -11426,7 +11467,7 @@ and the quantisation and Huffman tables outlive a datastream, as libjpeg's
 permanent pool does: TIFF needs both.
 
 The choices libjpeg leaves to its caller are taken, for the crate's own entry
-points, as Chrome takes them: RGB out for greyscale, RGB and YCbCr files;
+points, as Chrome takes them: RGB out for RGB and YCbCr files;
 CMYK and YCCK converted by Chrome's formula for the inverted CMYK Adobe
 writes (`c * k / 255`); two components, or five and more, refused, as Chrome
 refuses them; at most 100 scans, Chrome's (and libtiff's) progress-monitor
@@ -11437,6 +11478,16 @@ every program built on libjpeg; `dimensions` reads the header as libjpeg
 does, so a file whose header libjpeg refuses no longer reports a size (the
 old walker reported the first frame's size whatever surrounded it).
 
+One choice is not Chrome's: a greyscale file is decoded as greyscale and made
+RGB by the crate, as GNOME's image loader and Pillow do it, where Chrome asks
+libjpeg for RGB. For every lossy file the pixels are the same -- libjpeg's
+grey-to-RGB conversion only copies -- but libjpeg converts nothing at all in
+a lossless image, so Chrome's request makes a lossless greyscale JPEG fail,
+and greyscale is the kind lossless JPEG mostly is. *Against:* one more place
+where "what Chrome shows" is not the rule, and a browser shows those files
+as broken where this shows them; *for:* the free desktop's viewers show
+them, and nothing that decodes changes.
+
 Two parts of the old decoder live on: its compact coefficient store for
 thumbnails of progressive files (§1305), which keeps exactly the
 coefficients libjpeg's reduced transforms read and, for the rest, only
@@ -11446,11 +11497,40 @@ photograph still costs a fraction of its coefficients; and the upsampling
 filters (§1306), now chosen as libjpeg chooses them, including its refusal of
 sampling ratios that are not whole numbers.
 
-### Not yet
+The store is also decoded into the way libjpeg decodes into its coefficient
+array: a progressive AC scan's decoder reads and writes each coefficient
+where it lies (`coef::StoredBlock`), a DC scan moves the DC alone. The port
+first copied every block out and back for every scan, and that copying cost
+a large progressive photograph's thumbnail more than its decoding -- slower
+than the decoder it replaced, until this; a progressive thumbnail now takes
+0.56 s against its 0.70 s.
 
-Lossless JPEG (`SOF3`), which libjpeg-turbo 3 reads through the same
-interface at up to 8 bits: refused for now (`known-issues.md`). 12-bit JPEG is
-refused, as libjpeg's 8-bit interface refuses it.
+Old-style JPEG in TIFF (§1317) asked three more things of it, all libjpeg's:
+raw output (`raw_data_out`: each component's samples an iMCU row at a time,
+which libtiff packs into TIFF's subsampled `YCbCr`), a decompressor that owns
+its data and tables (libtiff keeps one session across strip reads), and a
+source that fails where libtiff's does -- data run out, a skip, a restart
+marker out of step. The last made reading ahead matter: the decoder read the
+next iMCU row a row early whatever the upsampler, harmless while running out
+could not fail; it now reads it when libjpeg's main controller does -- for
+the last row group of this one if an upsampler needs the rows below,
+otherwise not before its own first row.
+
+### Lossless JPEG
+
+Ported the same day, in `lossless` (`jdlhuff.c`, `jddiffct.c`,
+`jdlossls.c`): all seven predictors, the point transform, samples of 2 to 8
+bits handed out as they are (a 6-bit image runs from 0 to 63), any
+sampling, interleaved or in scans of their own. libjpeg-turbo's quirks are
+kept: it undifferences an iMCU row only once the row is decoded, so a
+restart marker inside one -- a component taller than one sample per MCU, in
+a scan of its own -- resets the predictor for the iMCU row's first row, not
+the row after the marker; data that runs out gives grey; a component no
+scan carries fails the decode, because libjpeg's whole-image sample array
+is not zeroed and reading an unwritten row of it is an error. A restart
+interval must be whole rows of MCUs. Samples wider than 8 bits need
+libjpeg's 12- and 16-bit interfaces, and are refused, as 12-bit lossy JPEG
+is; arithmetic-coded lossless (`SOF11`) libjpeg-turbo does not implement.
 
 ### How it is held
 
@@ -11466,6 +11546,210 @@ at all four sizes; then 32,000 mutants of them (header fields, segment
 lengths, marker codes, markers spliced into entropy data, cuts, bit flips).
 The only disagreements, two thumbnails, came from the old header walker the
 thumbnail path still used; it now reads the header through the port.
+
+Lossless JPEG has 56 fixtures of its own (`tests/jpeg_lossless.rs`), written
+by an encoder in `tests/data/generate_jpeg_lossless.py` that can produce
+every layout and the damage that matters, answered by the same libjpeg-turbo
+build -- and every undamaged one checked to decode to the picture that went
+in, which is what lossless means. Then 256 lossless seeds -- those, `cjpeg
+-lossless` at twelve settings, and 140 random layouts -- and 20,000 mutants of
+them, without a disagreement.
+
+## 1319. imagecodec reaches SSE2 through `#[target_feature]`: the crate's first `unsafe`, two call sites, each exact to the scalar code beside it
+
+**Date:** 2026-09-26
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** a JPEG photograph took three times as long to decode here as
+in a browser. The two steps that cost the most after the entropy decoding --
+undoing the compression's transform, and converting the colours -- are
+exactly the work a processor's vector instructions exist for, and the
+compiler would not use them on its own for this code. So the decoder now
+uses them directly, which Rust allows only through `unsafe`: two lines, each
+a call into a function that may run only on a processor with SSE2 -- every
+64-bit PC has it, and the build turns it on. The pictures are unchanged to
+the bit; a 21-megapixel photograph decodes in about 0.84 billion cycles
+where it took 1.80 (libjpeg-turbo: 0.62).
+
+**Decision.** `jpeg/idct/sse2.rs` and `jpeg/color/sse2.rs` are
+`#[target_feature(enable = "sse2")]` functions written with `core::arch`
+intrinsics, which are safe to call inside such a function; values go in and
+out by value, so there are no pointers. `idct::inverse` and
+`color::ycc_argb` reach them through one `unsafe` call each, compiled only
+under `cfg(all(target_arch = "x86_64", target_feature = "sse2"))`: the
+SlateOS target enables SSE2 for the whole build, and a build without it
+(`x86_64-unknown-none`) compiles the scalar code alone.
+
+Exactness is the point, and each is held to the scalar code, not merely
+near it:
+
+* The inverse DCT follows libjpeg's C arithmetic, not libjpeg-turbo's SIMD.
+  It checks every dequantised coefficient and every value between its two
+  passes against a bound (16,383) under which nothing it computes can
+  overflow its lane, and hands the block to the 64-bit scalar transform
+  when one is past it -- a corrupt file's block; no encoder makes one. Its
+  output stage masks to ten bits and maps them as the C code's range-limit
+  table does, where libjpeg-turbo's SIMD saturates.
+* The colour conversion computes libjpeg's table entries arithmetically,
+  each constant over 2^16 split so every multiplication is 16-bit; a test
+  compares all 2^24 inputs with the tables.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| Portable code the compiler vectorises (what the WebP decoder does) | no `unsafe` | tried first: the transform over `[i32; 8]` lanes compiled to scalar multiplies and array copies and was *slower* than the scalar code; the conversion compiled to a branchy scalar loop at ~16 cycles a pixel. SSE2 has no 32-bit lane multiply, and the compiler did not find `pmaddwd` |
+| Stay scalar | nothing to audit | roughly 0.7 billion cycles more per photograph; the decode is what an image viewer's wait is made of |
+| Match libjpeg-turbo's SIMD, not its C code | Chrome's and Pillow's arithmetic on x86, corrupt files included | the C code is the reference that agrees with itself on every machine, and what this port and its oracle follow (§1318) |
+
+**Measured** (thread cycles, 4000x5333 4:2:0, billions): 1.80 before;
+1.62 with the entropy decoder's bulk fills; 1.11 with the SSE2 transform;
+1.02 with the conversion written straight into `0xAARRGGBB` pixels (no row
+of bytes between); 0.86 with the SSE2 conversion; 0.84 with the bit buffer
+held in locals.
+Held to libjpeg-turbo 3.1.1's C build on its 402 seeds and 4,000 mutants at
+every reduced size, to libtiff on 3,000 mutated JPEG and old-JPEG TIFFs,
+and by tests that fail if a constant or the bound is wrong (both were
+tried).
+
+**How to reverse.** Delete the two `sse2.rs` modules and the two `cfg`
+blocks that call them; the scalar code is still there and still the
+fallback.
+
+## 1320. Face fallback: a line is drawn from as many faces as it needs, chosen a grapheme cluster at a time, shaped per face with the paragraph's levels
+
+**Date:** 2026-09-26
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** text was drawn from exactly one face per family, so every
+character the UI face lacks -- an emoji, an Arabic name, a CJK file name, an
+arrow -- came out as a box, whatever other fonts were installed. Now a font
+carries an ordered list of fallback faces, and each character the face lacks
+is drawn from the first fallback that has it. The toolkit and the compositor
+still shape, measure and draw one run, so nothing that walks text had to
+change, and a line the UI face covers is shaped exactly as before.
+
+**Decision.**
+
+* **Where:** in `osfont::system::SystemFont` (`with_fallbacks`) and
+  `FontCache` (`set_fallbacks`), the one type the toolkit and the compositor
+  both draw with -- not in the toolkit, so the two cannot fall back
+  differently. Which faces are the fallbacks is `FontDb`'s question and so
+  lane C's: `requests/f-cd-the-os-image-ships-no-fonts...` asks for an
+  `install_fallback_faces` beside `install_ui_faces`.
+* **The unit is the grapheme cluster** (`itemize.rs`, UAX #29's rules that
+  matter here): a letter and its accents, and an emoji sequence -- a flag, a
+  skin tone, a ZWJ family -- each go to one face, the first that has every
+  character in it, or failing that the first that has its first.
+* **Text or emoji presentation** decides the order faces are tried in: U+FE0F,
+  U+FE0E, then `Emoji_Presentation` (a generated table, `gen_emoji_tables.py`,
+  Unicode 16.0 like the crate's others). A colour face -- one with `COLR`,
+  `CBDT` or `sbix` -- goes first for a cluster asking for emoji and last
+  otherwise.
+* **One paragraph, several shapings.** The bidi levels are resolved over the
+  whole line; each face's stretch is shaped in its face with its share of
+  them (`ScaledFont::shape_leveled`, split out of `shape_with`), and the
+  drawing order is recomputed over the joined run. Within a stretch the
+  recomputed order is the stretch's own (a reversal swaps two glyphs according
+  to the levels between them only), so what each stretch's shaping did with
+  its order -- kerning charged across a reversal, marks placed against moving
+  pens -- stays right.
+* **A glyph names its face** in the key's high byte (`GlyphKey::in_face`), 0
+  being the font's own face: a font with no fallbacks makes the same keys as
+  before, bit for bit. Hence at most 255 fallbacks.
+* **Metrics** -- line height, ascent -- stay the font's own face's, as in every
+  browser: a fallback glyph that is taller overflows its line rather than
+  moving it.
+* **The built-in bitmap face takes no fallbacks**: it is keyed by character,
+  not glyph, and is what draws before there are faces to fall back to.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| Per character, not per cluster | simpler | splits `e` + accent and every emoji sequence across faces |
+| Shape each stretch as its own paragraph | no `shape_leveled` | an Arabic word in an English sentence resolves as its own RTL paragraph |
+| Fallback in the toolkit | the font list lives there | the compositor draws with its own cache; two implementations to keep agreeing |
+
+**How to reverse.** `SystemFont::with_fallbacks` and `FontCache::set_fallbacks`
+are the only entry points; a cache never given fallbacks behaves as before.
+
+## 1321. Colour glyphs: `COLR` versions 0 and 1 painted in floating point, premultiplied, to a picture that is cached per glyph and drawn beside the coverage masks
+
+**Date:** 2026-09-26
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** emoji came out as black silhouettes -- or as nothing -- because
+the glyph drawer only knew coverage masks tinted with the text colour, and an
+emoji font stores its pictures as recipes: layers of outlines, each in its own
+colour, or a graph of gradients, transforms and blend modes. Now a glyph whose
+face has a recipe for it is painted into a small colour picture, cached like
+the masks, and drawn as a picture by `draw_text` and by the compositor. Noto
+Color Emoji's vector build draws as Chrome draws it: measured against Edge on
+the same file, the differences are the edges a pixel-snapped glyph position
+moves, nothing inside a glyph.
+
+**Decision.**
+
+* **One renderer for both versions** (`osfont::colr::render`): version 0's
+  layers are painted as solid fills through the same path as version 1's
+  `PaintGlyph`, so there is one rasterizer, one blender and one set of limits.
+* **Floating point, premultiplied RGBA, gradients interpolated
+  premultiplied.** There is no reference rendering to match bit for bit, as
+  there is for the image codecs -- every engine rasterizes outlines its own
+  way -- so the arithmetic follows the specification's definitions rather
+  than any one engine's integer shortcuts, and the check is against Skia's
+  output (Edge, `target/colr_compare.py`) rather than to the bit.
+* **fontTools' conventions where the specification leaves room**, since the
+  fonts are built with fontTools: skew by `tan(-x)` and `tan(y)`, rotation
+  counter-clockwise, a transform's paint drawn in the space it transforms
+  (innermost first), and sweep angles stored less half a turn.
+* **The canvas is the glyph's clip box, or the union of its outlines' boxes**,
+  snapped to whole pixels with a 1/256-pixel allowance, so float error in a
+  transform does not cost a column of empty pixels.
+* **Cost:** a layer is rasterized over the pixels its box touches; a fill
+  under a `PaintGlyph` (through transforms) is evaluated only where the
+  outline covers; only a `PaintGlyph` over a more complicated graph, and a
+  composite, get a scratch canvas. About a millisecond per 64-px emoji the
+  first time, then a cached blit.
+* **Hostile fonts cost a bounded amount:** depth 64, 20 000 paint visits,
+  64 touches per canvas pixel, four canvases alive at once, a 1024x1024 cap
+  on the glyph (bigger draws the outline instead). Every offset is checked; a
+  mutation fuzz of every paint format is a unit test.
+* **The text colour is not an ingredient of the cache key unless the glyph
+  used it** (`ColourImage::uses_foreground`): palette entry `0xFFFF` is the
+  text colour, a glyph that paints with it is drawn again for another colour,
+  and one that does not -- most emoji -- is drawn once for every colour of
+  text. The text colour's *alpha* is applied to the finished picture as an
+  opacity, not passed in, or a half-transparent text colour would be applied
+  twice to what used it.
+* **A separate cache** in `ScaledFont`, with a pixel ceiling (16 MiB) as well
+  as a count, since a colour glyph weighs four bytes a pixel to a mask's one.
+* **The compositor gets a `draw_colour_glyph` primitive** on its
+  `RenderTarget` seam, beside `draw_glyph`: a GPU backend keeps these in a
+  colour atlas beside the coverage one. The software backend unpremultiplies
+  each pixel into its existing `blend_pixel`, so a colour glyph goes through
+  the same clip, frame clip and window opacity as everything else.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| Fixed-point arithmetic, as for the codecs | deterministic across machines | no reference to be exact *to*; costs clarity for nothing measurable |
+| Render every layer to its own canvas and composite | the specification's model, literally | a scratch canvas per layer, where most layers are one fill in one outline |
+| Draw the text colour's alpha into the picture | one fewer parameter | applied twice where the glyph used the text colour; a cache entry per alpha |
+| Rasterize the picture at draw time, no cache | nothing to invalidate | a millisecond per emoji per frame |
+
+**Not modelled** (`known-issues.md` [F] 2026-09-26): variation deltas in a
+variable `COLR`; palettes other than the first; a `PaintColrGlyph`'s clip
+box; colour *bitmaps* (`CBDT`, `sbix`).
+
+**How to reverse.** `ScaledFont::colour_glyph` and `SystemFont::glyph_image`
+are the only ways in; a face without `COLR` never reaches the renderer, and
+without them every glyph is drawn from its mask as before.
 
 ## §200 — The B-KNULLJUMP hunt runs the *uninstrumented* kernel first (E), and escalates to the optimized KASAN build (A) only if that fails to settle it
 

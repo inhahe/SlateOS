@@ -354,6 +354,55 @@ impl Accumulator {
         }
     }
 
+    /// [`line`](Self::line) on a grid that may not hold the whole outline:
+    /// the part of the segment left of the grid is moved onto its left edge,
+    /// as a vertical segment over the same rows.
+    ///
+    /// That keeps its winding. A segment wholly left of the grid still
+    /// decides, for every pixel to its right in the rows it crosses, whether
+    /// that pixel is inside the shape; [`add`](Self::add) drops what lands
+    /// off the grid, so without this the inside of a shape the grid cuts
+    /// through would come out empty. (The right edge needs nothing: what lies
+    /// beyond it changes no pixel's running sum.)
+    fn line_clipped(&mut self, from: Point, to: Point) {
+        let on_edge = |p: Point| Point::new(0.0, p.y);
+        match (from.x < 0.0, to.x < 0.0) {
+            (false, false) => self.line(from, to),
+            (true, true) => self.line(on_edge(from), on_edge(to)),
+            (left_first, _) => {
+                // `from.x - to.x` is non-zero: the two sides differ.
+                let t = from.x / (from.x - to.x);
+                let cross = Point::new(0.0, (to.y - from.y).mul_add(t, from.y));
+                if left_first {
+                    self.line(on_edge(from), cross);
+                    self.line(cross, to);
+                } else {
+                    self.line(from, cross);
+                    self.line(cross, on_edge(to));
+                }
+            }
+        }
+    }
+
+    /// Sweep each row into coverage between 0.0 and 1.0, the value
+    /// [`into_coverage`](Self::into_coverage) rounds to a byte.
+    fn into_alpha(self) -> Vec<f32> {
+        let mut out = Vec::with_capacity(self.width.saturating_mul(self.height));
+        for row in 0..self.height {
+            let row_start = row.saturating_mul(self.stride);
+            let mut acc = 0.0_f32;
+            for col in 0..self.width {
+                acc += row_start
+                    .checked_add(col)
+                    .and_then(|i| self.cells.get(i))
+                    .copied()
+                    .unwrap_or(0.0);
+                out.push(acc.abs().min(1.0));
+            }
+        }
+        out
+    }
+
     /// Sweep each row into 8-bit coverage.
     ///
     /// The running sum is reset per row rather than carried across the whole
@@ -388,6 +437,83 @@ impl Accumulator {
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
+
+/// Coverage of `outline` over a `width` x `height` grid, each point first
+/// mapped by `map` from font units to grid pixels (y down): one value from
+/// 0.0 to 1.0 per pixel, row by row.
+///
+/// What a colour glyph's layers need, where [`rasterize`] sizes its bitmap to
+/// the one outline: several outlines, each under its own transform, filled
+/// onto one canvas that need not contain any of them whole. Parts outside the
+/// grid are cut off without disturbing the rest (see
+/// `Accumulator::line_clipped`).
+///
+/// # Errors
+///
+/// [`RasterError::TooLarge`] for a grid over [`MAX_GLYPH_PIXELS`], and
+/// [`RasterError::NonFiniteCoordinate`] if `map` sends a point to NaN or an
+/// infinity.
+pub(crate) fn coverage_on(
+    outline: &Outline,
+    map: &dyn Fn(Point) -> Point,
+    width: usize,
+    height: usize,
+) -> Result<Vec<f32>, RasterError> {
+    if width
+        .checked_mul(height)
+        .is_none_or(|n| n > MAX_GLYPH_PIXELS)
+    {
+        return Err(RasterError::TooLarge);
+    }
+    let mut acc = Accumulator::new(width, height).ok_or(RasterError::TooLarge)?;
+    let place = |p: Point| {
+        let q = map(p);
+        if q.x.is_finite() && q.y.is_finite() {
+            Ok(q)
+        } else {
+            Err(RasterError::NonFiniteCoordinate)
+        }
+    };
+    let mut start = Point::default();
+    let mut cur = Point::default();
+    for cmd in &outline.commands {
+        match *cmd {
+            PathCmd::MoveTo(p) => {
+                if cur != start {
+                    acc.line_clipped(cur, start);
+                }
+                let p = place(p)?;
+                start = p;
+                cur = p;
+            }
+            PathCmd::LineTo(p) => {
+                let p = place(p)?;
+                acc.line_clipped(cur, p);
+                cur = p;
+            }
+            PathCmd::QuadTo(ctrl, p) => {
+                let (ctrl, p) = (place(ctrl)?, place(p)?);
+                flatten_quad_into(cur, ctrl, p, &mut |a, b| acc.line_clipped(a, b));
+                cur = p;
+            }
+            PathCmd::CurveTo(c1, c2, p) => {
+                let (c1, c2, p) = (place(c1)?, place(c2)?, place(p)?);
+                flatten_cubic_into(cur, c1, c2, p, &mut |a, b| acc.line_clipped(a, b));
+                cur = p;
+            }
+            PathCmd::Close => {
+                if cur != start {
+                    acc.line_clipped(cur, start);
+                }
+                cur = start;
+            }
+        }
+    }
+    if cur != start {
+        acc.line_clipped(cur, start);
+    }
+    Ok(acc.into_alpha())
+}
 
 /// The pixel-space extent of an outline.
 #[derive(Debug, Clone, Copy)]
@@ -456,6 +582,11 @@ fn outline_bounds(outline: &Outline, scale: f32) -> Result<Option<Bounds>, Raste
 
 /// Append a quadratic Bézier to `acc` as a fan of line segments.
 fn flatten_quad(acc: &mut Accumulator, from: Point, ctrl: Point, to: Point) {
+    flatten_quad_into(from, ctrl, to, &mut |a, b| acc.line(a, b));
+}
+
+/// [`flatten_quad`], each segment handed to `emit`.
+fn flatten_quad_into(from: Point, ctrl: Point, to: Point, emit: &mut dyn FnMut(Point, Point)) {
     let steps = quad_segments(from, ctrl, to);
     let inv = 1.0 / f32::from(u16::try_from(steps).unwrap_or(1));
     let mut prev = from;
@@ -466,13 +597,24 @@ fn flatten_quad(acc: &mut Accumulator, from: Point, ctrl: Point, to: Point) {
         let bx = mt.mul_add(mt * from.x, (2.0 * mt * t).mul_add(ctrl.x, t * t * to.x));
         let by = mt.mul_add(mt * from.y, (2.0 * mt * t).mul_add(ctrl.y, t * t * to.y));
         let pt = Point::new(bx, by);
-        acc.line(prev, pt);
+        emit(prev, pt);
         prev = pt;
     }
 }
 
 /// Append a cubic Bézier to `acc` as a fan of line segments.
 fn flatten_cubic(acc: &mut Accumulator, from: Point, c1: Point, c2: Point, to: Point) {
+    flatten_cubic_into(from, c1, c2, to, &mut |a, b| acc.line(a, b));
+}
+
+/// [`flatten_cubic`], each segment handed to `emit`.
+fn flatten_cubic_into(
+    from: Point,
+    c1: Point,
+    c2: Point,
+    to: Point,
+    emit: &mut dyn FnMut(Point, Point),
+) {
     let steps = cubic_segments(from, c1, c2, to);
     let inv = 1.0 / f32::from(u16::try_from(steps).unwrap_or(1));
     let mut prev = from;
@@ -487,7 +629,7 @@ fn flatten_cubic(acc: &mut Accumulator, from: Point, c1: Point, c2: Point, to: P
         let bx = w0.mul_add(from.x, w1.mul_add(c1.x, w2.mul_add(c2.x, w3 * to.x)));
         let by = w0.mul_add(from.y, w1.mul_add(c1.y, w2.mul_add(c2.y, w3 * to.y)));
         let pt = Point::new(bx, by);
-        acc.line(prev, pt);
+        emit(prev, pt);
         prev = pt;
     }
 }

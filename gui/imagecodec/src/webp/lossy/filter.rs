@@ -73,182 +73,221 @@ pub(super) enum Kind {
     Normal,
 }
 
+/// Up to sixteen segments' eight taps, a row a tap: `[p3, p2, p1, p0, q0, q1,
+/// q2, q3][lane]`, lanes past the edge's segments zero. Filtering a whole
+/// edge's segments side by side, the same arithmetic in every lane and the
+/// choice between filters a select rather than a branch, lets the compiler
+/// work on several at once; each lane is exactly one segment's filter.
+type Lanes = [[i16; 16]; 8];
+
+/// The taps of `count` segments starting at `at`, `along` apart, each
+/// crossing the edge in steps of `across`.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "count is at most 16 and the segments stay inside the plane, four samples clear of its start"
+)]
+fn load(buf: &[u8], at: usize, across: usize, along: usize, count: usize) -> Lanes {
+    let mut taps = [[0i16; 16]; 8];
+    let first = at.saturating_sub(4 * across);
+    if across == 1 {
+        // An edge between columns: each segment is eight samples in a row.
+        for lane in 0..count.min(16) {
+            let start = first + lane * along;
+            if let Some(row) = buf.get(start..start + 8) {
+                for (tap, &sample) in taps.iter_mut().zip(row) {
+                    if let Some(slot) = tap.get_mut(lane) {
+                        *slot = i16::from(sample);
+                    }
+                }
+            }
+        }
+    } else {
+        // An edge between rows: each tap is a run of the segments' samples.
+        for (k, tap) in taps.iter_mut().enumerate() {
+            let start = first + k * across;
+            if let Some(run) = buf.get(start..start + count.min(16) * along) {
+                for (slot, &sample) in tap.iter_mut().zip(run.iter().step_by(along.max(1))) {
+                    *slot = i16::from(sample);
+                }
+            }
+        }
+    }
+    taps
+}
+
+/// Write taps p2 to q2 (the only ones a filter changes) of `count` segments
+/// back, as [`load`] read them.
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "count is at most 16 and the segments stay inside the plane; every tap is a sample, 0..=255"
+)]
+fn store(buf: &mut [u8], at: usize, across: usize, along: usize, count: usize, taps: &Lanes) {
+    let first = at.saturating_sub(4 * across);
+    if across == 1 {
+        for lane in 0..count.min(16) {
+            let start = first + lane * along;
+            if let Some(row) = buf.get_mut(start..start + 8) {
+                for (slot, tap) in row.iter_mut().zip(taps.iter()).skip(1).take(6) {
+                    if let Some(&value) = tap.get(lane) {
+                        *slot = value as u8;
+                    }
+                }
+            }
+        }
+    } else {
+        for (k, tap) in taps.iter().enumerate().skip(1).take(6) {
+            let start = first + k * across;
+            if let Some(run) = buf.get_mut(start..start + count.min(16) * along) {
+                for (slot, &value) in run.iter_mut().step_by(along.max(1)).zip(tap) {
+                    *slot = value as u8;
+                }
+            }
+        }
+    }
+}
+
 /// `v` clamped to a signed byte.
-fn sclip1(v: i32) -> i32 {
+fn sclip1(v: i16) -> i16 {
     v.clamp(-128, 127)
 }
 
 /// `v` clamped to the range a filter tap can move a sample: -16..=15.
-fn sclip2(v: i32) -> i32 {
+fn sclip2(v: i16) -> i16 {
     v.clamp(-16, 15)
 }
 
-/// `v` clamped to a sample.
-fn clip1(v: i32) -> u8 {
-    super::transform::clamp(v)
+/// `v` clamped to a sample, as a lane holds it.
+fn clamp8(v: i16) -> i16 {
+    v.clamp(0, 255)
 }
 
-/// The eight samples straddling an edge, `p3 p2 p1 p0 | q0 q1 q2 q3`, read
-/// from `buf` at `at - 4 * step` .. `at + 3 * step`.
-#[derive(Clone, Copy)]
-struct Taps {
-    p3: i32,
-    p2: i32,
-    p1: i32,
-    p0: i32,
-    q0: i32,
-    q1: i32,
-    q2: i32,
-    q3: i32,
-}
-
-/// A position in a plane and the distance between the samples of the segment
-/// that crosses the edge there.
-#[derive(Clone, Copy)]
-struct Segment {
-    at: usize,
-    step: usize,
-}
-
-impl Segment {
-    #[allow(
-        clippy::arithmetic_side_effects,
-        reason = "the callers filter edges at least four samples from the plane's start and end, so every offset is inside it"
-    )]
-    fn index(self, k: isize) -> usize {
-        if k < 0 {
-            self.at - k.unsigned_abs() * self.step
-        } else {
-            self.at + k.unsigned_abs() * self.step
-        }
-    }
-
-    fn get(self, buf: &[u8], k: isize) -> i32 {
-        buf.get(self.index(k)).copied().map_or(0, i32::from)
-    }
-
-    fn set(self, buf: &mut [u8], k: isize, value: u8) {
-        if let Some(slot) = buf.get_mut(self.index(k)) {
-            *slot = value;
-        }
-    }
-
-    fn taps(self, buf: &[u8]) -> Taps {
-        Taps {
-            p3: self.get(buf, -4),
-            p2: self.get(buf, -3),
-            p1: self.get(buf, -2),
-            p0: self.get(buf, -1),
-            q0: self.get(buf, 0),
-            q1: self.get(buf, 1),
-            q2: self.get(buf, 2),
-            q3: self.get(buf, 3),
-        }
-    }
-}
-
-/// Whether the step across the edge is small enough to be an artefact:
-/// `2 * |p0 - q0| + |p1 - q1| / 2 <= limit`, which libwebp writes as
-/// `4 * |p0 - q0| + |p1 - q1| <= 2 * limit + 1`.
-#[allow(
-    clippy::arithmetic_side_effects,
-    reason = "samples are bytes, so every term is below 1300"
-)]
-fn needs_filter(t: &Taps, limit: i32) -> bool {
-    4 * (t.p0 - t.q0).abs() + (t.p1 - t.q1).abs() <= 2 * limit + 1
-}
-
-/// [`needs_filter`], and no step on either side exceeding `interior`.
+/// The simple filter on every lane: where the step across the edge is small
+/// enough to be an artefact -- `2 * |p0 - q0| + |p1 - q1| / 2 <= limit`,
+/// which libwebp writes as `4 * |p0 - q0| + |p1 - q1| <= 2 * limit + 1` --
+/// move p0 and q0 toward each other (libwebp's `DoFilter2`, the RFC's
+/// `common_adjust` with the outer taps).
 #[allow(clippy::arithmetic_side_effects, reason = "samples are bytes")]
-fn needs_filter_normal(t: &Taps, limit: i32, interior: i32) -> bool {
-    needs_filter(t, limit)
-        && (t.p3 - t.p2).abs() <= interior
-        && (t.p2 - t.p1).abs() <= interior
-        && (t.p1 - t.p0).abs() <= interior
-        && (t.q3 - t.q2).abs() <= interior
-        && (t.q2 - t.q1).abs() <= interior
-        && (t.q1 - t.q0).abs() <= interior
+fn simple_lanes(taps: &mut Lanes, limit: i16) {
+    let [_, _, p1, p0, q0, q1, _, _] = taps;
+    for (((p1, p0), q0), q1) in p1
+        .iter()
+        .zip(p0.iter_mut())
+        .zip(q0.iter_mut())
+        .zip(q1.iter())
+    {
+        let (vp1, vp0, vq0, vq1) = (*p1, *p0, *q0, *q1);
+        let mask = 4 * (vp0 - vq0).abs() + (vp1 - vq1).abs() <= 2 * limit + 1;
+        let a = 3 * (vq0 - vp0) + sclip1(vp1 - vq1);
+        let a1 = sclip2((a + 4) >> 3);
+        let a2 = sclip2((a + 3) >> 3);
+        *p0 = if mask { clamp8(vp0 + a2) } else { vp0 };
+        *q0 = if mask { clamp8(vq0 - a1) } else { vq0 };
+    }
 }
 
-/// High edge variance: a step beside the edge larger than `threshold`.
-#[allow(clippy::arithmetic_side_effects, reason = "samples are bytes")]
-fn high_variance(t: &Taps, threshold: i32) -> bool {
-    (t.p1 - t.p0).abs() > threshold || (t.q1 - t.q0).abs() > threshold
-}
-
-/// The RFC's `common_adjust` with the outer taps: move p0 and q0 toward each
-/// other (libwebp's `DoFilter2`).
+/// The normal filter on every lane, where the simple filter's test passes and
+/// no step on either side of the edge exceeds `interior`: at a macroblock
+/// edge (`MB`) three samples either side move by 3/7, 2/7 and 1/7 of the step
+/// (libwebp's `DoFilter6`), at an interior one p0 and q0 as `DoFilter2`
+/// without the outer taps and p1 and q1 by half as much (`DoFilter4`) --
+/// except where the edge has high variance (a step beside it above
+/// `hev_threshold`), which gets the simple filter's `DoFilter2`.
 #[allow(
     clippy::arithmetic_side_effects,
     reason = "samples are bytes; a is at most 3 * 255 + 127"
 )]
-fn filter2(buf: &mut [u8], s: Segment, t: &Taps) {
-    let a = 3 * (t.q0 - t.p0) + sclip1(t.p1 - t.q1);
-    let a1 = sclip2((a + 4) >> 3);
-    let a2 = sclip2((a + 3) >> 3);
-    s.set(buf, -1, clip1(t.p0 + a2));
-    s.set(buf, 0, clip1(t.q0 - a1));
-}
-
-/// The subblock filter without high variance: p0 and q0 as [`filter2`]
-/// without the outer taps, and p1 and q1 by half as much (libwebp's
-/// `DoFilter4`).
-#[allow(clippy::arithmetic_side_effects, reason = "samples are bytes")]
-fn filter4(buf: &mut [u8], s: Segment, t: &Taps) {
-    let a = 3 * (t.q0 - t.p0);
-    let a1 = sclip2((a + 4) >> 3);
-    let a2 = sclip2((a + 3) >> 3);
-    let a3 = (a1 + 1) >> 1;
-    s.set(buf, -2, clip1(t.p1 + a3));
-    s.set(buf, -1, clip1(t.p0 + a2));
-    s.set(buf, 0, clip1(t.q0 - a1));
-    s.set(buf, 1, clip1(t.q1 - a3));
-}
-
-/// The macroblock-edge filter without high variance: three samples either
-/// side, by 3/7, 2/7 and 1/7 of the step (libwebp's `DoFilter6`).
-#[allow(
-    clippy::arithmetic_side_effects,
-    reason = "samples are bytes and a is a signed byte"
-)]
-fn filter6(buf: &mut [u8], s: Segment, t: &Taps) {
-    let a = sclip1(3 * (t.q0 - t.p0) + sclip1(t.p1 - t.q1));
-    let a1 = (27 * a + 63) >> 7;
-    let a2 = (18 * a + 63) >> 7;
-    let a3 = (9 * a + 63) >> 7;
-    s.set(buf, -3, clip1(t.p2 + a3));
-    s.set(buf, -2, clip1(t.p1 + a2));
-    s.set(buf, -1, clip1(t.p0 + a1));
-    s.set(buf, 0, clip1(t.q0 - a1));
-    s.set(buf, 1, clip1(t.q1 - a2));
-    s.set(buf, 2, clip1(t.q2 - a3));
+fn normal_lanes<const MB: bool>(taps: &mut Lanes, limit: i16, interior: i16, hev_threshold: i16) {
+    let [p3, p2, p1, p0, q0, q1, q2, q3] = taps;
+    let lanes = p3
+        .iter()
+        .zip(p2.iter_mut())
+        .zip(p1.iter_mut())
+        .zip(p0.iter_mut())
+        .zip(q0.iter_mut())
+        .zip(q1.iter_mut())
+        .zip(q2.iter_mut())
+        .zip(q3.iter());
+    for (((((((p3, p2), p1), p0), q0), q1), q2), q3) in lanes {
+        let (vp3, vp2, vp1, vp0) = (*p3, *p2, *p1, *p0);
+        let (vq0, vq1, vq2, vq3) = (*q0, *q1, *q2, *q3);
+        let mask = 4 * (vp0 - vq0).abs() + (vp1 - vq1).abs() <= 2 * limit + 1
+            && (vp3 - vp2).abs() <= interior
+            && (vp2 - vp1).abs() <= interior
+            && (vp1 - vp0).abs() <= interior
+            && (vq3 - vq2).abs() <= interior
+            && (vq2 - vq1).abs() <= interior
+            && (vq1 - vq0).abs() <= interior;
+        let hev = (vp1 - vp0).abs() > hev_threshold || (vq1 - vq0).abs() > hev_threshold;
+        // `filter2`.
+        let a = 3 * (vq0 - vp0) + sclip1(vp1 - vq1);
+        let (f2p0, f2q0) = (
+            clamp8(vp0 + sclip2((a + 3) >> 3)),
+            clamp8(vq0 - sclip2((a + 4) >> 3)),
+        );
+        // `filter6`, or `filter4`.
+        let [np2, np1, np0, nq0, nq1, nq2] = if MB {
+            let w = sclip1(3 * (vq0 - vp0) + sclip1(vp1 - vq1));
+            let a1 = (27 * w + 63) >> 7;
+            let a2 = (18 * w + 63) >> 7;
+            let a3 = (9 * w + 63) >> 7;
+            [
+                clamp8(vp2 + a3),
+                clamp8(vp1 + a2),
+                clamp8(vp0 + a1),
+                clamp8(vq0 - a1),
+                clamp8(vq1 - a2),
+                clamp8(vq2 - a3),
+            ]
+        } else {
+            let a = 3 * (vq0 - vp0);
+            let a1 = sclip2((a + 4) >> 3);
+            let a2 = sclip2((a + 3) >> 3);
+            let a3 = (a1 + 1) >> 1;
+            [
+                vp2,
+                clamp8(vp1 + a3),
+                clamp8(vp0 + a2),
+                clamp8(vq0 - a1),
+                clamp8(vq1 - a3),
+                vq2,
+            ]
+        };
+        let full = mask && !hev;
+        let two = mask && hev;
+        *p2 = if full { np2 } else { vp2 };
+        *p1 = if full { np1 } else { vp1 };
+        *p0 = if full {
+            np0
+        } else if two {
+            f2p0
+        } else {
+            vp0
+        };
+        *q0 = if full {
+            nq0
+        } else if two {
+            f2q0
+        } else {
+            vq0
+        };
+        *q1 = if full { nq1 } else { vq1 };
+        *q2 = if full { nq2 } else { vq2 };
+    }
 }
 
 /// Filter `count` segments across one edge with the simple filter: the
 /// segments start at `at`, `along` apart, and cross the edge in steps of
 /// `across`.
-#[allow(
-    clippy::arithmetic_side_effects,
-    reason = "count is at most 16 and the segments stay inside the plane"
-)]
 fn simple_edge(buf: &mut [u8], at: usize, across: usize, along: usize, count: usize, limit: i32) {
-    for i in 0..count {
-        let s = Segment {
-            at: at + i * along,
-            step: across,
-        };
-        let t = s.taps(buf);
-        if needs_filter(&t, limit) {
-            filter2(buf, s, &t);
-        }
-    }
+    let mut taps = load(buf, at, across, along, count);
+    // A limit is at most 2 * 63 + 63 + 4.
+    simple_lanes(&mut taps, i16::try_from(limit).unwrap_or(i16::MAX));
+    store(buf, at, across, along, count, &taps);
 }
 
 /// Filter `count` segments across a macroblock edge with the normal filter.
-#[allow(
-    clippy::arithmetic_side_effects,
-    reason = "count is at most 16 and the segments stay inside the plane"
-)]
 fn macroblock_edge(
     buf: &mut [u8],
     at: usize,
@@ -257,31 +296,18 @@ fn macroblock_edge(
     count: usize,
     strength: Strength,
 ) {
-    let limit = i32::from(strength.limit) + 4;
-    let interior = i32::from(strength.interior);
-    let hev = i32::from(strength.hev_threshold);
-    for i in 0..count {
-        let s = Segment {
-            at: at + i * along,
-            step: across,
-        };
-        let t = s.taps(buf);
-        if needs_filter_normal(&t, limit, interior) {
-            if high_variance(&t, hev) {
-                filter2(buf, s, &t);
-            } else {
-                filter6(buf, s, &t);
-            }
-        }
-    }
+    let mut taps = load(buf, at, across, along, count);
+    normal_lanes::<true>(
+        &mut taps,
+        i16::from(strength.limit).saturating_add(4),
+        i16::from(strength.interior),
+        i16::from(strength.hev_threshold),
+    );
+    store(buf, at, across, along, count, &taps);
 }
 
 /// Filter `count` segments across an interior (subblock) edge with the
 /// normal filter.
-#[allow(
-    clippy::arithmetic_side_effects,
-    reason = "count is at most 16 and the segments stay inside the plane"
-)]
 fn subblock_edge(
     buf: &mut [u8],
     at: usize,
@@ -290,23 +316,14 @@ fn subblock_edge(
     count: usize,
     strength: Strength,
 ) {
-    let limit = i32::from(strength.limit);
-    let interior = i32::from(strength.interior);
-    let hev = i32::from(strength.hev_threshold);
-    for i in 0..count {
-        let s = Segment {
-            at: at + i * along,
-            step: across,
-        };
-        let t = s.taps(buf);
-        if needs_filter_normal(&t, limit, interior) {
-            if high_variance(&t, hev) {
-                filter2(buf, s, &t);
-            } else {
-                filter4(buf, s, &t);
-            }
-        }
-    }
+    let mut taps = load(buf, at, across, along, count);
+    normal_lanes::<false>(
+        &mut taps,
+        i16::from(strength.limit),
+        i16::from(strength.interior),
+        i16::from(strength.hev_threshold),
+    );
+    store(buf, at, across, along, count, &taps);
 }
 
 /// One plane of a frame being filtered: its samples and its row stride.

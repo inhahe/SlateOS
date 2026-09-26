@@ -623,6 +623,27 @@ pub(super) struct Directory {
     pub(super) strips_per_image: u32,
     pub(super) strip_offsets: Vec<u64>,
     pub(super) strip_byte_counts: Vec<u64>,
+    /// The old-style JPEG codec's tags, and what it keeps of
+    /// `YCbCrSubsampling` (`OJPEGVSetField`).
+    pub(super) ojpeg: OjpegTags,
+}
+
+/// The tags of old-style JPEG compression, as `OJPEGVSetField` keeps them.
+#[derive(Debug, Clone)]
+pub(super) struct OjpegTags {
+    /// `JPEGInterchangeFormat` and its length.
+    pub(super) jif: u64,
+    pub(super) jif_len: u64,
+    /// `JPEGQTables`, `JPEGDCTables`, `JPEGACTables`: offsets, at most three
+    /// of each (more and the tag is dropped).
+    pub(super) q_tables: Vec<u64>,
+    pub(super) dc_tables: Vec<u64>,
+    pub(super) ac_tables: Vec<u64>,
+    /// `JPEGRestartInterval`.
+    pub(super) restart_interval: u16,
+    /// `YCbCrSubsampling` as the codec keeps it: in a byte each.
+    pub(super) hor: u8,
+    pub(super) ver: u8,
 }
 
 impl Directory {
@@ -661,6 +682,17 @@ impl Directory {
             strips_per_image: 0,
             strip_offsets: Vec::new(),
             strip_byte_counts: Vec::new(),
+            // `TIFFInitOJPEG` sets 2x2 itself, as the tag's own default.
+            ojpeg: OjpegTags {
+                jif: 0,
+                jif_len: 0,
+                q_tables: Vec::new(),
+                dc_tables: Vec::new(),
+                ac_tables: Vec::new(),
+                restart_interval: 0,
+                hor: 2,
+                ver: 2,
+            },
         }
     }
 
@@ -1004,6 +1036,19 @@ pub(super) fn read(file: &File<'_>, offset: u64) -> ImageResult<Directory> {
             _ => {}
         }
     }
+    // Old-style JPEG hack: separate planes, but one strip offset and one
+    // byte count, is better read as planes together.
+    if dir.compression == compression::OJPEG && dir.planar_config == 2 {
+        let one = |t: u16| {
+            entries
+                .iter()
+                .find(|e| e.tag == t)
+                .is_some_and(|e| e.count == 1)
+        };
+        if one(tag::STRIP_OFFSETS) && one(tag::STRIP_BYTE_COUNTS) {
+            dir.planar_config = 1;
+        }
+    }
     if !dimensions_set {
         return Err(bad("TIFF directory without ImageLength"));
     }
@@ -1083,6 +1128,27 @@ pub(super) fn read(file: &File<'_>, offset: u64) -> ImageResult<Directory> {
         }
     }
 
+    // Old-style JPEG hacks: a missing or RGB photometric is `YCbCr`, missing
+    // bits are 8, and missing samples are 3 for `YCbCr` and 1 for grey.
+    if dir.compression == compression::OJPEG {
+        match dir.photometric {
+            None | Some(photometric::RGB) => dir.photometric = Some(photometric::YCBCR),
+            Some(_) => {}
+        }
+        if !bits_read {
+            dir.bits_per_sample = 8;
+        }
+        if !spp_set {
+            match dir.photometric {
+                Some(photometric::YCBCR) => dir.samples_per_pixel = 3,
+                Some(photometric::MIN_IS_WHITE | photometric::MIN_IS_BLACK) => {
+                    dir.samples_per_pixel = 1;
+                }
+                _ => {}
+            }
+        }
+    }
+
     // Strips or tiles.
     if tile_dimensions_set {
         dir.strips = dir.number_of_tiles();
@@ -1104,7 +1170,10 @@ pub(super) fn read(file: &File<'_>, offset: u64) -> ImageResult<Directory> {
             .checked_div(u32::from(dir.samples_per_pixel))
             .unwrap_or(0);
     }
-    if !have_offsets {
+    // Old-style JPEG hack: one strip needs no offset, its data being in
+    // the JPEGInterchangeFormat stream; it reads as offset 0.
+    let ojpeg_one_strip = dir.compression == compression::OJPEG && !dir.tiled && dir.strips == 1;
+    if !(have_offsets || ojpeg_one_strip) {
         return Err(bad("TIFF without StripOffsets"));
     }
     if let Some(entry) = offsets_entry {
@@ -1164,6 +1233,13 @@ pub(super) fn read(file: &File<'_>, offset: u64) -> ImageResult<Directory> {
     // The codec's chance to fix tags up (`tif_fixuptags`).
     if dir.compression == compression::JPEG {
         jpeg_fixup_subsampling(file, &mut dir);
+    }
+    // Old-style JPEG reports the subsampling its data has, which it reads
+    // the first time it is asked (`OJPEGVGetField`) -- by the scanline size
+    // below, for `YCbCr` held together, and by the RGBA reader otherwise, to
+    // the same effect.
+    if dir.compression == compression::OJPEG {
+        super::ojpeg::subsampling_as_read(file.data, &mut dir);
     }
 
     if dir.scanline_size().is_none() {
@@ -1509,8 +1585,48 @@ fn second_pass_field(file: &File<'_>, entry: &Entry, dir: &mut Directory) {
                     if let [h, w] = v.as_slice() {
                         dir.ycbcr_subsampling = [*h, *w];
                         dir.ycbcr_subsampling_set = true;
+                        if dir.compression == compression::OJPEG {
+                            // `OJPEGVSetField` keeps each in a byte.
+                            let [h, w] = [*h, *w].map(|v| v.to_le_bytes()[0]);
+                            dir.ojpeg.hor = h;
+                            dir.ojpeg.ver = w;
+                            dir.ycbcr_subsampling = [u16::from(h), u16::from(w)];
+                        }
                     }
                 }
+            }
+        }
+        tag::JPEG_IF_OFFSET | tag::JPEG_IF_BYTE_COUNT => {
+            // `TIFF_SETGET_UINT64`.
+            if let Ok(v) = file.scalar(entry, (0, i128::from(u64::MAX)), false) {
+                let v = u64::try_from(v).unwrap_or(0);
+                if entry.tag == tag::JPEG_IF_OFFSET {
+                    dir.ojpeg.jif = v;
+                } else {
+                    dir.ojpeg.jif_len = v;
+                }
+            }
+        }
+        tag::JPEG_Q_TABLES | tag::JPEG_DC_TABLES | tag::JPEG_AC_TABLES => {
+            // `TIFF_SETGET_C32_UINT64`; `OJPEGVSetField` refuses more than
+            // three, and keeps nothing of none.
+            if let Ok(values) = file.integers(entry, (0, i128::from(u64::MAX)), u64::MAX) {
+                if (1..=3).contains(&values.len()) {
+                    let values: Vec<u64> = values
+                        .into_iter()
+                        .map(|v| u64::try_from(v).unwrap_or(0))
+                        .collect();
+                    match entry.tag {
+                        tag::JPEG_Q_TABLES => dir.ojpeg.q_tables = values,
+                        tag::JPEG_DC_TABLES => dir.ojpeg.dc_tables = values,
+                        _ => dir.ojpeg.ac_tables = values,
+                    }
+                }
+            }
+        }
+        tag::JPEG_RESTART_INTERVAL => {
+            if let Ok(v) = file.short(entry) {
+                dir.ojpeg.restart_interval = v;
             }
         }
         tag::JPEG_TABLES => {

@@ -1,0 +1,1 @@
+REFUSED Sorry, arithmetic coding is not implemented

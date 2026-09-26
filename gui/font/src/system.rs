@@ -30,19 +30,41 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use crate::bidi::{self, Base, Level};
+use crate::colr::ColourImage;
+use crate::itemize::{self, Faces};
 use crate::lang::Lang;
 use crate::raster::GlyphMask;
-use crate::scaled::{ScaledFont, ScaledFontError, Target, blit_mask, pixel_coord};
+use crate::scaled::{
+    ScaledFont, ScaledFontError, Target, blit_image, blit_mask, byte_levels, pixel_coord,
+};
 use crate::sfnt::{Face, SfntError};
 use crate::shape::{GlyphKey, ShapedGlyph, ShapedRun, TAB_WIDTH_IN_SPACES};
 use crate::{FONT_HEIGHT, Font, FontMetrics, GlyphBitmap};
 
 /// A font that can draw text, backed by either an outline face or the
 /// built-in bitmap face.
+///
+/// An outline font may also draw from **fallback faces**
+/// ([`SystemFont::with_fallbacks`]): the characters its own face has no glyph
+/// for -- an emoji in a line of Latin, an Arabic name in an English list --
+/// are drawn from the first fallback face that has them, so a line comes out
+/// in as many faces as it needs rather than as a row of boxes. Which face
+/// draws which part is decided a grapheme cluster at a time
+/// ([`itemize`](crate::itemize)), and the parts are shaped each in its own
+/// face and joined into one [`ShapedRun`], so measuring, drawing and
+/// hit-testing still walk one list.
 #[derive(Debug)]
 pub struct SystemFont {
     backend: Backend,
+    /// The fallback faces, at this font's size, in preference order. Empty
+    /// for the bitmap backend, which draws from no face but its own.
+    fallbacks: Vec<ScaledFont>,
 }
+
+/// The most fallback faces a font draws from: a glyph names its face in one
+/// byte, and face 0 is the font's own.
+pub const MAX_FALLBACKS: usize = 255;
 
 #[derive(Debug)]
 enum Backend {
@@ -87,6 +109,7 @@ impl SystemFont {
                 font,
                 masks: BTreeMap::new(),
             },
+            fallbacks: Vec::new(),
         }
     }
 
@@ -102,6 +125,7 @@ impl SystemFont {
     pub fn from_bytes(data: Vec<u8>, px_per_em: f32) -> Result<Self, ScaledFontError> {
         Ok(Self {
             backend: Backend::Outline(ScaledFont::from_bytes(data, px_per_em)?),
+            fallbacks: Vec::new(),
         })
     }
 
@@ -130,7 +154,42 @@ impl SystemFont {
     pub fn from_shared(face: Arc<Face>, px_per_em: f32) -> Result<Self, ScaledFontError> {
         Ok(Self {
             backend: Backend::Outline(ScaledFont::shared(face, px_per_em)?),
+            fallbacks: Vec::new(),
         })
+    }
+
+    /// This font, drawing whatever its own face has no glyph for from
+    /// `faces`, in that order: face fallback. Each face is used at this
+    /// font's size, moved to `axes` where it has them -- `[(*b"wght",
+    /// 700.0)]` for a bold font, so that a variable fallback face is bold too
+    /// -- and a face that cannot be used at this size is skipped. At most
+    /// [`MAX_FALLBACKS`] are kept.
+    ///
+    /// The built-in bitmap face takes no fallbacks: it is keyed by character
+    /// rather than by glyph, and is what draws before there are any faces to
+    /// fall back to. It is returned unchanged.
+    #[must_use]
+    pub fn with_fallbacks(mut self, faces: &[Arc<Face>], axes: &[([u8; 4], f32)]) -> Self {
+        let Backend::Outline(primary) = &self.backend else {
+            return self;
+        };
+        let px = primary.px_per_em();
+        self.fallbacks = faces
+            .iter()
+            .filter_map(|face| {
+                let mut font = ScaledFont::shared(Arc::clone(face), px).ok()?;
+                font.set_axes(axes);
+                Some(font)
+            })
+            .take(MAX_FALLBACKS)
+            .collect();
+        self
+    }
+
+    /// How many fallback faces this font draws from.
+    #[must_use]
+    pub fn fallback_count(&self) -> usize {
+        self.fallbacks.len()
     }
 
     /// Whether this font came from a real font file.
@@ -181,7 +240,8 @@ impl SystemFont {
     #[must_use]
     pub fn shape_lang(&self, text: &str, lang: Option<Lang>) -> ShapedRun {
         match &self.backend {
-            Backend::Outline(f) => f.shape_lang(text, lang),
+            Backend::Outline(f) if self.fallbacks.is_empty() => f.shape_lang(text, lang),
+            Backend::Outline(f) => self.shape_across_faces(f, text, lang),
             // The bitmap face is a fixed grid: one glyph per character, no
             // kerning to apply and no substitutions to make. It still shapes
             // rather than being special-cased at every call site, so that the
@@ -216,6 +276,76 @@ impl SystemFont {
         }
     }
 
+    /// [`shape_lang`](Self::shape_lang) for an outline font with fallback
+    /// faces: `text` cut into stretches by the face that draws each
+    /// ([`itemize`]), each shaped in its face, joined into one run.
+    ///
+    /// The bidi levels are resolved once, over the whole line, and each
+    /// stretch is shaped with its share of them: a stretch shaped alone would
+    /// resolve its own, and an Arabic word drawn from a fallback face in the
+    /// middle of an English sentence would then decide it was a paragraph of
+    /// its own, with its own base direction. The drawing order is worked out
+    /// again over the joined run, from those levels, because it is a property
+    /// of the line and not of any stretch. Inside one stretch it comes out
+    /// exactly as the stretch's own did -- which glyphs a reversal swaps
+    /// depends only on the levels between them -- so what each stretch's
+    /// shaping did with its own order (kerning charged across a reversal,
+    /// marks placed against moving pens) stays right.
+    fn shape_across_faces(
+        &self,
+        primary: &ScaledFont,
+        text: &str,
+        lang: Option<Lang>,
+    ) -> ShapedRun {
+        let faces = FaceSet {
+            primary,
+            fallbacks: &self.fallbacks,
+        };
+        let stretches = itemize::stretches(text, &faces);
+        if let [only] = stretches.as_slice()
+            && only.face == 0
+        {
+            // The whole line in the font's own face: the common case, and
+            // exactly what a font with no fallbacks would have shaped.
+            return primary.shape_lang(text, lang);
+        }
+        let levels = byte_levels(text, Base::Auto);
+        let mut glyphs: Vec<ShapedGlyph> = Vec::new();
+        for stretch in &stretches {
+            let Some(part) = text.get(stretch.range.clone()) else {
+                continue;
+            };
+            let share = levels
+                .get(stretch.range.clone())
+                .map(<[Level]>::to_vec)
+                .unwrap_or_default();
+            let run = faces.font(stretch.face).shape_leveled(part, lang, share);
+            let face = u8::try_from(stretch.face).unwrap_or(0);
+            glyphs.extend(run.glyphs().iter().map(|g| ShapedGlyph {
+                key: GlyphKey::in_face(face, g.key.gid()),
+                cluster: g.cluster.saturating_add(stretch.range.start),
+                ..*g
+            }));
+        }
+        let per_glyph: Vec<Level> = if levels.is_empty() {
+            Vec::new()
+        } else {
+            glyphs
+                .iter()
+                .map(|g| levels.get(g.cluster).copied().unwrap_or(0))
+                .collect()
+        };
+        let visual = if per_glyph.is_empty() {
+            Vec::new()
+        } else {
+            bidi::visual_order(&per_glyph)
+                .into_iter()
+                .map(|i| u32::try_from(i).unwrap_or(u32::MAX))
+                .collect()
+        };
+        ShapedRun::reordered(glyphs, visual, per_glyph)
+    }
+
     /// Width of `text` in pixels, ignoring line breaks.
     #[must_use]
     pub fn measure(&self, text: &str) -> f32 {
@@ -226,7 +356,10 @@ impl SystemFont {
     #[must_use]
     pub fn wrap(&self, text: &str, max_width: f32) -> Vec<String> {
         match &self.backend {
-            Backend::Outline(f) => f.wrap(text, max_width),
+            Backend::Outline(f) if self.fallbacks.is_empty() => f.wrap(text, max_width),
+            // With fallback faces the widths are this font's, not its own
+            // face's: measured, like the bitmap face's, by the same rule.
+            Backend::Outline(_) => wrap_with(text, max_width, &|s| self.measure(s)),
             // The bitmap face has no wrapper of its own; `ScaledFont`'s rule
             // (break at spaces, never inside a word) is not outline-specific,
             // so it is reimplemented here against `measure` rather than
@@ -279,6 +412,20 @@ impl SystemFont {
         let drawn: Vec<ShapedGlyph> = run.draw_order().copied().collect();
         for shaped in &drawn {
             let advance = shaped.advance;
+            // A colour glyph -- an emoji -- is drawn as a picture, its own
+            // colours with the text's alpha as its opacity; see `glyph_image`.
+            if let Some(image) = self.glyph_image(shaped.key, target.color) {
+                #[allow(clippy::cast_precision_loss)]
+                let placed = (
+                    pixel_coord(pen + shaped.offset.0 + image.left as f32),
+                    pixel_coord(y - shaped.offset.1 + image.top as f32),
+                );
+                if let (Some(gx), Some(gy)) = placed {
+                    blit_image(image, target, gx, gy);
+                }
+                pen += advance;
+                continue;
+            }
             let Some(mask) = self.glyph_mask(shaped.key) else {
                 pen += advance;
                 continue;
@@ -326,7 +473,15 @@ impl SystemFont {
     /// backends, so a caller never learns which one it has.
     pub fn glyph_mask(&mut self, key: GlyphKey) -> Option<&GlyphMask> {
         match &mut self.backend {
-            Backend::Outline(f) => Some(&f.glyph(key.gid()).ok()?.mask),
+            Backend::Outline(f) => {
+                // Which face the glyph is in: 0 for this font's own, and the
+                // fallbacks from 1 (see `GlyphKey::in_face`).
+                let font = match usize::from(key.face()) {
+                    0 => f,
+                    face => self.fallbacks.get_mut(face.checked_sub(1)?)?,
+                };
+                Some(&font.glyph(key.gid()).ok()?.mask)
+            }
             Backend::Bitmap { font, masks } => {
                 let ch = key.ch();
                 let glyph = font.glyph(ch);
@@ -335,6 +490,32 @@ impl SystemFont {
                 Some(masks.entry(ch).or_insert_with(|| mask_from_bitmap(glyph)))
             }
         }
+    }
+
+    /// The colour image for a shaped glyph, if its face paints it in colour
+    /// -- an emoji from a face with a `COLR` table. `None` means the glyph is
+    /// drawn from its coverage mask ([`glyph_mask`](Self::glyph_mask)) in the
+    /// text colour, as every glyph of an ordinary face, and of the built-in
+    /// bitmap face, is.
+    ///
+    /// `foreground` is the text colour, which a colour glyph may paint parts
+    /// of itself in. Only its colour is used, never its alpha: the image is
+    /// drawn as for opaque text, and a caller drawing translucent text applies
+    /// the alpha to the whole image, as [`blit_image`] does -- a glyph that
+    /// painted with a half-transparent text colour and was then drawn half
+    /// transparent would come out a quarter opaque where it used it.
+    ///
+    /// Placed as a mask is, by `left` and `top` from the pen position on the
+    /// baseline, y down. The pixels are premultiplied `0xAARRGGBB`.
+    pub fn glyph_image(&mut self, key: GlyphKey, foreground: u32) -> Option<&ColourImage> {
+        let Backend::Outline(f) = &mut self.backend else {
+            return None;
+        };
+        let font = match usize::from(key.face()) {
+            0 => f,
+            face => self.fallbacks.get_mut(face.checked_sub(1)?)?,
+        };
+        font.colour_glyph(key.gid(), foreground | 0xFF00_0000)
     }
 
     /// The outline face behind this font, if there is one.
@@ -347,6 +528,40 @@ impl SystemFont {
             Backend::Outline(f) => Some(f),
             Backend::Bitmap { .. } => None,
         }
+    }
+}
+
+/// An outline font's own face and its fallbacks, as face fallback numbers
+/// them: 0 the font's own, then the fallbacks in order.
+struct FaceSet<'a> {
+    primary: &'a ScaledFont,
+    fallbacks: &'a [ScaledFont],
+}
+
+impl FaceSet<'_> {
+    /// Face `face`, or the font's own for a number it does not have.
+    fn font(&self, face: usize) -> &ScaledFont {
+        match face.checked_sub(1) {
+            Some(i) => self.fallbacks.get(i).unwrap_or(self.primary),
+            None => self.primary,
+        }
+    }
+}
+
+impl Faces for FaceSet<'_> {
+    fn count(&self) -> usize {
+        self.fallbacks.len().saturating_add(1)
+    }
+
+    fn has(&self, face: usize, ch: char) -> bool {
+        self.font(face)
+            .face()
+            .glyph_index(ch)
+            .is_some_and(|gid| gid != 0)
+    }
+
+    fn is_colour(&self, face: usize) -> bool {
+        self.font(face).face().has_colour_glyphs()
     }
 }
 
@@ -412,6 +627,9 @@ pub struct FontCache {
     /// owned per size: a UI asks for the same family at a handful of sizes,
     /// and a face is the whole font file.
     faces: BTreeMap<(Family, Weight), Arc<Face>>,
+    /// The faces every installed face falls back to, in order. See
+    /// [`FontCache::set_fallbacks`].
+    fallbacks: Vec<Arc<Face>>,
 }
 
 impl FontCache {
@@ -464,6 +682,28 @@ impl FontCache {
         self.faces.contains_key(&(family, weight))
     }
 
+    /// Draw whatever an installed face has no glyph for from `faces`, in
+    /// order, for every family and weight: face fallback (see
+    /// [`SystemFont::with_fallbacks`]). A bold font takes each fallback face
+    /// at weight 700 where it has a weight axis.
+    ///
+    /// Every font already built is dropped, as [`set_face`](Self::set_face)
+    /// drops a family's: each holds the fallbacks it was built with.
+    ///
+    /// Two caches that are to agree -- the toolkit's, which measures, and the
+    /// compositor's, which draws -- must be given the same list in the same
+    /// order, or a line is measured in one face and drawn in another.
+    pub fn set_fallbacks(&mut self, faces: Vec<Arc<Face>>) {
+        self.fallbacks = faces;
+        self.fonts.clear();
+    }
+
+    /// The fallback faces, in order.
+    #[must_use]
+    pub fn fallbacks(&self) -> &[Arc<Face>] {
+        &self.fallbacks
+    }
+
     /// The font for `px`, `weight` and `family`, building it on first use.
     ///
     /// A family with no face installed falls back to the built-in bitmap face
@@ -487,11 +727,17 @@ impl FontCache {
         let face = self.faces.get(&(family, weight)).map(Arc::clone);
         let key = round_px(px);
         let size = key_px(key);
+        let fallbacks = &self.fallbacks;
         self.fonts.entry((key, weight, family)).or_insert_with(|| {
+            let axes: &[([u8; 4], f32)] = match weight {
+                Weight::Regular => &[],
+                Weight::Bold => &[(*b"wght", 700.0)],
+            };
             // An installed face that will not scale to this size is a
             // per-size failure, not a reason to stop using the face: fall
             // back for this entry and leave the face installed.
             face.and_then(|f| SystemFont::from_shared(f, size).ok())
+                .map(|font| font.with_fallbacks(fallbacks, axes))
                 .unwrap_or_else(|| match weight {
                     Weight::Regular => SystemFont::builtin(size),
                     Weight::Bold => SystemFont::builtin_bold(size),
@@ -643,7 +889,148 @@ fn mask_from_bitmap(glyph: &GlyphBitmap) -> GlyphMask {
 )]
 mod tests {
     use super::*;
-    use crate::sfnt::tests::build_test_font;
+    use crate::sfnt::tests::{build_test_font, build_test_font_at};
+
+    /// The fixture face at 1000 px per em -- one font unit to the pixel
+    /// whatever its units per em, as the advances below assume -- with the
+    /// Greek fixture and a colour fixture at U+2764 as its fallbacks.
+    fn with_fallbacks() -> SystemFont {
+        let greek = Arc::new(Face::parse(build_test_font_at(0x03B1, false)).unwrap());
+        let hebrew = Arc::new(Face::parse(build_test_font_at(0x05D0, false)).unwrap());
+        let colour = Arc::new(Face::parse(build_test_font_at(0x2764, true)).unwrap());
+        let face = Arc::new(Face::parse(build_test_font()).unwrap());
+        let px = f32::from(face.units_per_em());
+        SystemFont::from_shared(face, px)
+            .unwrap()
+            .with_fallbacks(&[greek, hebrew, colour], &[])
+    }
+
+    fn keys(run: &ShapedRun) -> Vec<(u8, u16)> {
+        run.glyphs()
+            .iter()
+            .map(|g| (g.key.face(), g.key.gid()))
+            .collect()
+    }
+
+    #[test]
+    fn a_character_its_face_lacks_is_drawn_from_the_first_fallback_that_has_it() {
+        let font = with_fallbacks();
+        assert_eq!(font.fallback_count(), 3);
+        // A and B from the font's own face; alpha and gamma from the Greek
+        // one, which is fallback 1, face number 1.
+        let run = font.shape("A\u{03B1}B\u{03B3}");
+        assert_eq!(keys(&run), [(0, 1), (1, 1), (0, 2), (1, 3)]);
+        let clusters: Vec<usize> = run.glyphs().iter().map(|g| g.cluster).collect();
+        assert_eq!(clusters, [0, 1, 3, 4]);
+        // The fixture's glyphs advance 300, 400 and 400 units whichever
+        // face they are in.
+        assert_eq!(run.width(), 300.0 + 300.0 + 400.0 + 400.0);
+        assert_eq!(font.measure("A\u{03B1}B\u{03B3}"), run.width());
+        // A character no face has is the font's own missing-glyph box.
+        assert_eq!(keys(&font.shape("\u{4E00}")), [(0, 0)]);
+    }
+
+    #[test]
+    fn a_line_its_own_face_draws_whole_shapes_as_it_would_without_fallbacks() {
+        let fallback = with_fallbacks();
+        let face = Arc::new(Face::parse(build_test_font()).unwrap());
+        let px = f32::from(face.units_per_em());
+        let alone = SystemFont::from_shared(face, px).unwrap();
+        assert_eq!(fallback.shape("ABCA"), alone.shape("ABCA"));
+    }
+
+    #[test]
+    fn a_fallback_glyph_is_rasterized_from_its_own_face() {
+        let mut font = with_fallbacks();
+        let run = font.shape("A\u{03B2}");
+        let [a, beta] = [run.glyphs()[0].key, run.glyphs()[1].key];
+        // Glyph 1 and glyph 2 of the fixture are a square and a triangle; the
+        // beta is glyph 2 of the Greek face, so it must come out as the
+        // triangle and not as whatever glyph 2 of the font's own face is --
+        // which here is the same triangle, so compare against the Greek face's
+        // own rasterization instead of against a shape.
+        let mut greek = SystemFont::from_shared(
+            Arc::new(Face::parse(build_test_font_at(0x03B1, false)).unwrap()),
+            f32::from(Face::parse(build_test_font()).unwrap().units_per_em()),
+        )
+        .unwrap();
+        let greek_beta = greek.shape("\u{03B2}").glyphs()[0].key;
+        let expected = greek.glyph_mask(greek_beta).cloned();
+        assert!(font.glyph_mask(a).is_some());
+        assert_eq!(font.glyph_mask(beta).cloned(), expected);
+        // A key naming a face the font does not have is no glyph at all.
+        assert!(font.glyph_mask(GlyphKey::in_face(9, 1)).is_none());
+    }
+
+    #[test]
+    fn a_right_to_left_stretch_from_a_fallback_is_ordered_with_the_whole_line() {
+        let font = with_fallbacks();
+        // Alef bet A, in the Hebrew fixture (fallback 2) and the font's own:
+        // the first strong character is right-to-left, so the paragraph is,
+        // and the Latin letter sits at level 2 inside it. Drawn left to
+        // right: A, then bet, then alef.
+        let run = font.shape("\u{05D0}\u{05D1}A");
+        assert_eq!(keys(&run), [(2, 1), (2, 2), (0, 1)]);
+        let drawn: Vec<usize> = run.draw_order().map(|g| g.cluster).collect();
+        assert_eq!(drawn, [4, 2, 0]);
+        // Shaped alone, the Hebrew stretch would have been its own paragraph;
+        // in the line, what decides is still the first strong character. A
+        // Latin line with one Hebrew letter keeps its order.
+        let run = font.shape("A\u{05D0}B");
+        let drawn: Vec<usize> = run.draw_order().map(|g| g.cluster).collect();
+        assert_eq!(drawn, [0, 1, 3]);
+    }
+
+    #[test]
+    fn the_emoji_form_is_drawn_from_the_colour_face_and_the_text_form_is_not() {
+        // U+2764 in a text face and in a colour face, so that which one draws
+        // it is the presentation's choice and not a matter of coverage.
+        let text_heart = Arc::new(Face::parse(build_test_font_at(0x2764, false)).unwrap());
+        let colour_heart = Arc::new(Face::parse(build_test_font_at(0x2764, true)).unwrap());
+        let face = Arc::new(Face::parse(build_test_font()).unwrap());
+        let px = f32::from(face.units_per_em());
+        let font = SystemFont::from_shared(face, px)
+            .unwrap()
+            .with_fallbacks(&[colour_heart, text_heart], &[]);
+        // No selector: U+2764 is text by default, so the text face (fallback
+        // 2) draws it though the colour face comes first in the list.
+        assert_eq!(keys(&font.shape("\u{2764}"))[0].0, 2);
+        // With U+FE0F, the colour face. The selector itself is no glyph a
+        // face must have, and keeps to its heart's face.
+        let emoji = font.shape("\u{2764}\u{FE0F}");
+        assert_eq!(keys(&emoji)[0].0, 1);
+        assert!(emoji.glyphs().iter().all(|g| g.key.face() == 1));
+    }
+
+    #[test]
+    fn a_cache_builds_its_fonts_with_its_fallbacks() {
+        let mut cache = FontCache::new();
+        let face = Arc::new(Face::parse(build_test_font()).unwrap());
+        cache.set_face(Family::Ui, Weight::Regular, face);
+        assert_eq!(
+            cache
+                .get(16.0, Weight::Regular, Family::Ui)
+                .fallback_count(),
+            0
+        );
+        let greek = Arc::new(Face::parse(build_test_font_at(0x03B1, false)).unwrap());
+        cache.set_fallbacks(alloc::vec![greek]);
+        assert_eq!(cache.fallbacks().len(), 1);
+        // Built again, with the fallback.
+        assert_eq!(
+            cache
+                .get(16.0, Weight::Regular, Family::Ui)
+                .fallback_count(),
+            1
+        );
+        // The bitmap face -- nothing installed for Mono -- takes none.
+        assert_eq!(
+            cache
+                .get(16.0, Weight::Regular, Family::Mono)
+                .fallback_count(),
+            0
+        );
+    }
 
     fn surface(w: u32, h: u32) -> Vec<u32> {
         alloc::vec![0xFF00_0000_u32; (w * h) as usize]
@@ -1092,5 +1479,63 @@ mod tests {
             buf.iter().all(|p| p & 0x00FF_FFFF == 0),
             "off-surface text leaked into the buffer"
         );
+    }
+
+    #[test]
+    fn a_colour_glyph_is_drawn_in_its_own_colours_at_the_texts_opacity() {
+        let face = Arc::new(Face::parse(crate::colr::tests::colour_fixture()).unwrap());
+        let mut font = SystemFont::from_shared(face, 100.0).unwrap();
+        let (w, h) = (40_u32, 30_u32);
+        let draw = |font: &mut SystemFont, text: &str, color: u32| {
+            let mut buf = alloc::vec![0xFFFF_FFFF_u32; (w * h) as usize];
+            let mut target = Target {
+                buffer: &mut buf,
+                stride: w,
+                height: h,
+                color,
+            };
+            font.draw_text(text, &mut target, 0.0, 20.0);
+            buf
+        };
+        // `A` is a red square from x 10 to 20, and from the baseline at 20 up
+        // to 10: red in black text, and not black anywhere.
+        let buf = draw(&mut font, "A", 0xFF00_0000);
+        assert_eq!(buf[(15 * w + 15) as usize], 0xFFFF_0000);
+        assert!(!buf.contains(&0xFF00_0000));
+        // In half-transparent text, half-transparent over the white.
+        let buf = draw(&mut font, "A", 0x8000_0000);
+        assert_eq!(buf[(15 * w + 15) as usize], 0xFFFF_7F7F);
+        // `B` paints in the text colour, whichever it is.
+        let buf = draw(&mut font, "B", 0xFF00_00FF);
+        assert_eq!(buf[(18 * w + 5) as usize], 0xFF00_00FF);
+        let buf = draw(&mut font, "B", 0xFF00_FF00);
+        assert_eq!(buf[(18 * w + 5) as usize], 0xFF00_FF00);
+        // `C` has no colour recipe: a mask, in the text colour.
+        let c = font.shape("C").glyphs()[0].key;
+        assert!(font.glyph_image(c, 0xFF00_0000).is_none());
+        assert!(font.glyph_mask(c).is_some());
+    }
+
+    #[test]
+    fn a_colour_glyph_from_a_fallback_face_is_drawn_from_that_face() {
+        // The Greek fixture first, with `COLR` second: `A` is in both, so the
+        // font's own face draws it -- in outline -- and a key naming the
+        // colour face gets the colour face's picture.
+        let face = Arc::new(Face::parse(build_test_font_at(0x03B1, false)).unwrap());
+        let colour = Arc::new(Face::parse(crate::colr::tests::colour_fixture()).unwrap());
+        let mut font = SystemFont::from_shared(face, 100.0)
+            .unwrap()
+            .with_fallbacks(&[colour], &[]);
+        let own = font.shape("\u{03B1}").glyphs()[0].key;
+        assert_eq!(own.face(), 0);
+        assert!(font.glyph_image(own, 0xFF00_0000).is_none());
+        let a = font.shape("A").glyphs()[0].key;
+        assert_eq!((a.face(), a.gid()), (1, 1));
+        let image = font.glyph_image(a, 0xFF00_0000).unwrap();
+        assert!(image.pixels.iter().all(|&p| p == 0xFFFF_0000));
+        // The bitmap face has no colour glyphs at all.
+        let mut builtin = SystemFont::builtin(16.0);
+        let key = builtin.shape("A").glyphs()[0].key;
+        assert!(builtin.glyph_image(key, 0xFF00_0000).is_none());
     }
 }

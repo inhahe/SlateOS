@@ -1,0 +1,1 @@
+REFUSED read: Inappropriate photometric interpretation 2 for SGILog compression; must be either LogLUV or LogL

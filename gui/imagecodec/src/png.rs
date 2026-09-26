@@ -189,19 +189,28 @@ pub fn orientation(bytes: &[u8]) -> Orientation {
 
 /// The first `eXIf` chunk's contents before `IDAT`. One whose CRC is wrong is
 /// passed over, as every ancillary chunk is.
+///
+/// The chunk that ends the search is recognised by its type alone, before
+/// its CRC is checked: whether an `IDAT` is intact or not the answer is "no
+/// `eXIf`", and checking it would cost a pass over the whole compressed
+/// picture — every decode asks for the orientation, and a file written as one
+/// `IDAT` would have had its checksum computed twice.
 fn exif(bytes: &[u8]) -> Option<&[u8]> {
     if !is_png(bytes) {
         return None;
     }
-    for chunk in Chunks::new(bytes).skip(1) {
-        let chunk = chunk.ok()?;
-        match &chunk.kind {
-            b"IDAT" | b"IEND" => return None,
-            b"eXIf" => return Some(chunk.data),
-            _ => {}
+    let mut chunks = Chunks::new(bytes);
+    // `IHDR`, or whatever stands in its place: a damaged one ends the walk.
+    chunks.next();
+    loop {
+        if matches!(&chunks.peek_kind()?, b"IDAT" | b"IEND") {
+            return None;
+        }
+        let chunk = chunks.next()?.ok()?;
+        if chunk.kind == *b"eXIf" {
+            return Some(chunk.data);
         }
     }
-    None
 }
 
 /// Read and validate `IHDR`, which RFC 2083 requires to be the first chunk.
@@ -384,11 +393,12 @@ fn decode_inner(bytes: &[u8], limits: Limits, scale_to: Option<(u32, u32)>) -> I
             limit: limits.max_pixels,
         })?;
     let mut rows = Scanlines::new(idat, limit)?;
+    let pixels = Pixels::new(&header, &palette, trns.as_deref());
 
     if let Some((max_w, max_h)) = scale_to {
         let (dw, dh) = fit_within(header.width, header.height, max_w, max_h);
         let mut sink = BoxFilter::new(header.width, header.height, dw, dh)?;
-        expand(&header, &mut rows, &palette, trns.as_deref(), &mut sink)?;
+        expand(&header, &mut rows, &pixels, &mut sink)?;
         rows.finish()?;
         return Ok(Image {
             width: dw,
@@ -398,7 +408,7 @@ fn decode_inner(bytes: &[u8], limits: Limits, scale_to: Option<(u32, u32)>) -> I
     }
 
     let mut sink = FullSize::new(header.width, header.height)?;
-    expand(&header, &mut rows, &palette, trns.as_deref(), &mut sink)?;
+    expand(&header, &mut rows, &pixels, &mut sink)?;
     rows.finish()?;
     Ok(Image {
         width: header.width,
@@ -481,15 +491,11 @@ impl<'a> Scanlines<'a> {
         })
     }
 
-    /// The next row's filter type, with its filtered bytes read into `row`.
-    fn next_row(&mut self, row: &mut [u8]) -> ImageResult<u8> {
-        let mut filter = [0u8; 1];
-        self.fill(&mut filter)?;
-        self.fill(row)?;
-        Ok(u8::from_le_bytes(filter))
-    }
-
     /// Fill `buf` completely, or say the stream ended first: a short file.
+    ///
+    /// A row is read with its filter-type byte in one call, not two: each
+    /// call into the decompressor has a fixed cost, and a picture has a row
+    /// for every few thousand bytes.
     fn fill(&mut self, buf: &mut [u8]) -> ImageResult<()> {
         let mut filled = 0usize;
         while filled < buf.len() {
@@ -549,6 +555,26 @@ impl Sink for FullSize {
             *slot = argb;
         }
     }
+
+    fn put_row(&mut self, y: u32, x_start: u32, x_step: u32, argb: &[u32]) {
+        let width = self.width as usize;
+        let row = (y as usize)
+            .checked_mul(width)
+            .and_then(|start| self.pixels.get_mut(start..start.checked_add(width)?));
+        let Some(row) = row.and_then(|row| row.get_mut(x_start as usize..)) else {
+            return;
+        };
+        if x_step == 1 {
+            // A plain file's rows, and Adam7's last pass: a straight copy.
+            for (slot, &px) in row.iter_mut().zip(argb) {
+                *slot = px;
+            }
+        } else {
+            for (slot, &px) in row.iter_mut().step_by(x_step.max(1) as usize).zip(argb) {
+                *slot = px;
+            }
+        }
+    }
 }
 
 /// Reconstruct the whole picture into `sink`: one pass for a plain file, the
@@ -558,21 +584,11 @@ impl Sink for FullSize {
 fn expand(
     h: &Header,
     rows: &mut Scanlines<'_>,
-    palette: &[u32],
-    trns: Option<&[u8]>,
+    pixels: &Pixels,
     sink: &mut impl Sink,
 ) -> ImageResult<()> {
     if !h.interlaced {
-        return expand_pass(
-            h,
-            rows,
-            palette,
-            trns,
-            sink,
-            (0, 0, 1, 1),
-            h.width,
-            h.height,
-        );
+        return expand_pass(h, rows, pixels, sink, (0, 0, 1, 1), h.width, h.height);
     }
     for &(xs, ys, xstep, ystep) in &ADAM7 {
         let (pw, ph) = pass_size(h.width, h.height, xs, ys, xstep, ystep);
@@ -581,23 +597,21 @@ fn expand(
             // even filter bytes — see `raw_size`.
             continue;
         }
-        expand_pass(h, rows, palette, trns, sink, (xs, ys, xstep, ystep), pw, ph)?;
+        expand_pass(h, rows, pixels, sink, (xs, ys, xstep, ystep), pw, ph)?;
     }
     Ok(())
 }
 
-/// Unfilter one pass, row by row as the stream delivers it, and hand each pixel
-/// to `sink` at its place in the picture.
+/// Unfilter one pass, row by row as the stream delivers it, and hand each row
+/// of pixels to `sink` at its place in the picture.
 ///
 /// `placement` is `(x_start, y_start, x_step, y_step)`; for a non-interlaced
 /// image it is `(0, 0, 1, 1)`, which is why there is no second copy of this
 /// function for the simple case.
-#[allow(clippy::too_many_arguments)]
 fn expand_pass(
     h: &Header,
     rows: &mut Scanlines<'_>,
-    palette: &[u32],
-    trns: Option<&[u8]>,
+    pixels: &Pixels,
     sink: &mut impl Sink,
     placement: (u32, u32, u32, u32),
     pass_w: u32,
@@ -605,23 +619,25 @@ fn expand_pass(
 ) -> ImageResult<()> {
     let (xs, ys, xstep, ystep) = placement;
     let row_len = usize::try_from(h.row_bytes(pass_w)).map_err(|_| ImageError::Truncated)?;
+    // Each line is the row's filter-type byte, then the row.
+    let line_len = row_len.checked_add(1).ok_or(ImageError::Truncated)?;
     let step = h.filter_step();
 
     // Two rows kept, because Up/Average/Paeth all read the *reconstructed*
-    // previous row and nothing further back.
-    let mut prev = vec![0u8; row_len];
-    let mut cur = vec![0u8; row_len];
+    // previous row and nothing further back. The one above the first row is
+    // zeros, as RFC 2083 §6 defines it.
+    let mut prev = vec![0u8; line_len];
+    let mut cur = vec![0u8; line_len];
+    let mut argb = vec![0u32; pass_w as usize];
 
     for y in 0..pass_h {
-        let filter = rows.next_row(&mut cur)?;
-        unfilter(filter, &mut cur, &prev, step)?;
-
-        let out_y = ys.saturating_add(y.saturating_mul(ystep));
-        for x in 0..pass_w {
-            let out_x = xs.saturating_add(x.saturating_mul(xstep));
-            let px = pixel_at(h, &cur, x as usize, palette, trns)?;
-            sink.put(out_x, out_y, px);
-        }
+        rows.fill(&mut cur)?;
+        let (Some((filter, row)), Some(above)) = (cur.split_first_mut(), prev.get(1..)) else {
+            return Err(ImageError::Truncated);
+        };
+        unfilter(*filter, row, above, step)?;
+        pixels.convert(row, &mut argb)?;
+        sink.put_row(ys.saturating_add(y.saturating_mul(ystep)), xs, xstep, &argb);
         core::mem::swap(&mut prev, &mut cur);
     }
     Ok(())
@@ -631,64 +647,138 @@ fn expand_pass(
 ///
 /// All arithmetic is modulo 256 by definition of the format — `wrapping_add` is
 /// the specification here, not a shortcut around an overflow check.
+///
+/// `step` is RFC 2083's `bpp` — the distance to the same byte of the pixel to
+/// the left — and a PNG has only six: 1 (up to eight bits of one sample),
+/// 2, 3, 4, 6 and 8. Each is its own instance of the filters below, so the
+/// pixel is an array whose bytes the compiler can keep in registers and work
+/// on side by side; the per-byte loop `bytewise` is kept for any other step,
+/// which no header this module accepts produces, and as the tests' reference.
 fn unfilter(filter: u8, cur: &mut [u8], prev: &[u8], step: usize) -> ImageResult<()> {
+    /// Call `f::<step>` for the six steps, the per-byte loop otherwise.
+    macro_rules! by_step {
+        ($f:ident) => {
+            match step {
+                1 => $f::<1>(cur, prev),
+                2 => $f::<2>(cur, prev),
+                3 => $f::<3>(cur, prev),
+                4 => $f::<4>(cur, prev),
+                6 => $f::<6>(cur, prev),
+                8 => $f::<8>(cur, prev),
+                _ => bytewise(filter, cur, prev, step),
+            }
+        };
+    }
     match filter {
         0 => {}
-        // Sub: each byte is a delta from the byte one pixel to the left.
-        1 => {
-            for i in step..cur.len() {
-                let left = *cur.get(i.saturating_sub(step)).unwrap_or(&0);
-                if let Some(slot) = cur.get_mut(i) {
-                    *slot = slot.wrapping_add(left);
-                }
-            }
-        }
-        // Up: a delta from the byte above.
+        1 => by_step!(sub),
+        // Up: a delta from the byte above. No left neighbour, so no step.
         2 => {
-            for i in 0..cur.len() {
-                let up = *prev.get(i).unwrap_or(&0);
-                if let Some(slot) = cur.get_mut(i) {
-                    *slot = slot.wrapping_add(up);
-                }
+            for (x, &b) in cur.iter_mut().zip(prev) {
+                *x = x.wrapping_add(b);
             }
         }
-        // Average: a delta from the mean of left and above, floored. The sum is
-        // computed in u16 because the spec says so — a u8 sum would wrap before
-        // the halving and give a different, wrong answer.
-        3 => {
-            for i in 0..cur.len() {
-                let left = if i >= step {
-                    u16::from(*cur.get(i.saturating_sub(step)).unwrap_or(&0))
-                } else {
-                    0
-                };
-                let up = u16::from(*prev.get(i).unwrap_or(&0));
-                let avg = (left.saturating_add(up) / 2) as u8;
-                if let Some(slot) = cur.get_mut(i) {
-                    *slot = slot.wrapping_add(avg);
-                }
-            }
-        }
-        // Paeth: a delta from whichever of left/above/above-left is closest to
-        // their linear prediction.
-        4 => {
-            for i in 0..cur.len() {
-                let (a, c) = if i >= step {
-                    let j = i.saturating_sub(step);
-                    (*cur.get(j).unwrap_or(&0), *prev.get(j).unwrap_or(&0))
-                } else {
-                    (0, 0)
-                };
-                let b = *prev.get(i).unwrap_or(&0);
-                let pred = paeth(a, b, c);
-                if let Some(slot) = cur.get_mut(i) {
-                    *slot = slot.wrapping_add(pred);
-                }
-            }
-        }
+        3 => by_step!(average),
+        4 => by_step!(paeth_row),
         _ => return Err(ImageError::Malformed("scanline filter type")),
     }
     Ok(())
+}
+
+/// Sub, `N` bytes to a pixel: each byte is a delta from the byte one pixel to
+/// the left, and the first pixel's left neighbour is zero.
+fn sub<const N: usize>(cur: &mut [u8], _prev: &[u8]) {
+    let mut left = [0u8; N];
+    let mut pixels = cur.chunks_exact_mut(N);
+    for px in &mut pixels {
+        for (x, a) in px.iter_mut().zip(left.iter_mut()) {
+            *x = x.wrapping_add(*a);
+            *a = *x;
+        }
+    }
+    for (x, &a) in pixels.into_remainder().iter_mut().zip(&left) {
+        *x = x.wrapping_add(a);
+    }
+}
+
+/// Average, `N` bytes to a pixel: a delta from the mean of left and above,
+/// floored. The sum is taken in `u16` because the spec says so — a `u8` sum
+/// would wrap before the halving and give a different, wrong answer.
+fn average<const N: usize>(cur: &mut [u8], prev: &[u8]) {
+    let mean = |a: u8, b: u8| (u16::from(a).wrapping_add(u16::from(b)) >> 1) as u8;
+    let mut left = [0u8; N];
+    let mut pixels = cur.chunks_exact_mut(N);
+    let mut above = prev.chunks_exact(N);
+    for (px, up) in (&mut pixels).zip(&mut above) {
+        for ((x, a), &b) in px.iter_mut().zip(left.iter_mut()).zip(up) {
+            *x = x.wrapping_add(mean(*a, b));
+            *a = *x;
+        }
+    }
+    for ((x, &a), &b) in pixels
+        .into_remainder()
+        .iter_mut()
+        .zip(&left)
+        .zip(above.remainder())
+    {
+        *x = x.wrapping_add(mean(a, b));
+    }
+}
+
+/// Paeth, `N` bytes to a pixel: a delta from whichever of left, above and
+/// above-left is closest to their linear prediction ([`paeth`]).
+fn paeth_row<const N: usize>(cur: &mut [u8], prev: &[u8]) {
+    let mut left = [0u8; N];
+    let mut upper_left = [0u8; N];
+    let mut pixels = cur.chunks_exact_mut(N);
+    let mut above = prev.chunks_exact(N);
+    for (px, up) in (&mut pixels).zip(&mut above) {
+        for (((x, a), c), &b) in px
+            .iter_mut()
+            .zip(left.iter_mut())
+            .zip(upper_left.iter_mut())
+            .zip(up)
+        {
+            *x = x.wrapping_add(paeth_select(*a, b, *c));
+            *a = *x;
+            *c = b;
+        }
+    }
+    for (((x, &a), &c), &b) in pixels
+        .into_remainder()
+        .iter_mut()
+        .zip(&left)
+        .zip(&upper_left)
+        .zip(above.remainder())
+    {
+        *x = x.wrapping_add(paeth_select(a, b, c));
+    }
+}
+
+/// The five filters a byte at a time, for any `step`: the definition, with no
+/// assumption about the pixel's size. [`unfilter`] uses it only for a step no
+/// PNG has; the tests hold the per-step filters to it.
+fn bytewise(filter: u8, cur: &mut [u8], prev: &[u8], step: usize) {
+    for i in 0..cur.len() {
+        let left = |row: &[u8]| {
+            i.checked_sub(step)
+                .and_then(|j| row.get(j))
+                .copied()
+                .unwrap_or(0)
+        };
+        let (a, c) = (left(cur), left(prev));
+        let b = prev.get(i).copied().unwrap_or(0);
+        let predicted = match filter {
+            1 => a,
+            2 => b,
+            3 => (u16::from(a).wrapping_add(u16::from(b)) >> 1) as u8,
+            4 => paeth(a, b, c),
+            _ => 0,
+        };
+        if let Some(x) = cur.get_mut(i) {
+            *x = x.wrapping_add(predicted);
+        }
+    }
 }
 
 /// RFC 2083 §6.6's predictor. `i32` because `p` can be negative even though
@@ -714,140 +804,243 @@ const fn paeth(a: u8, b: u8, c: u8) -> u8 {
     }
 }
 
-/// Read sample number `index` out of an unfiltered row.
-///
-/// Returns the sample in its own range: 0..=1 for a one-bit image, 0..=65535
-/// for a sixteen-bit one. Scaling to eight bits is the caller's, because the
-/// transparency comparison has to happen at the original depth.
-fn sample(row: &[u8], depth: u8, index: usize) -> u32 {
+/// [`paeth`] in the form libpng computes it: `p - a` is `b - c`, `p - b` is
+/// `a - c` and `p - c` is their sum, so the prediction `p` itself is never
+/// formed, and the distances fit in 16 bits. The same choice, ties included,
+/// for every one of the 2^24 inputs (a test checks them all); written with
+/// selects rather than branches, which a photograph's noise makes
+/// unpredictable.
+#[inline]
+fn paeth_select(a: u8, b: u8, c: u8) -> u8 {
+    let (a16, b16, c16) = (i16::from(a), i16::from(b), i16::from(c));
+    let to_a = b16.wrapping_sub(c16);
+    let to_b = a16.wrapping_sub(c16);
+    let pa = to_a.wrapping_abs();
+    let pb = to_b.wrapping_abs();
+    let pc = to_a.wrapping_add(to_b).wrapping_abs();
+    let b_or_c = if pb <= pc { b } else { c };
+    if pa <= pb && pa <= pc { a } else { b_or_c }
+}
+
+/// How an unfiltered row becomes `0xAARRGGBB` pixels: the header's layout,
+/// with the palette and the transparency it needs worked out once, not once a
+/// pixel.
+enum Pixels {
+    /// One grey sample of 1, 2, 4, 8 or 16 bits, and the `tRNS` key, which is
+    /// compared with the sample as stored, before it is widened to 8 bits.
+    Gray { depth: u8, key: Option<u32> },
+    /// Grey and alpha, 8 or 16 bits each.
+    GrayAlpha { depth: u8 },
+    /// Red, green and blue of 8 or 16 bits, and the `tRNS` key, compared as
+    /// stored.
+    Rgb { depth: u8, key: Option<[u32; 3]> },
+    /// Red, green, blue and alpha, 8 or 16 bits each.
+    Rgba { depth: u8 },
+    /// A 1, 2, 4 or 8-bit index into `colours`: `PLTE`, with each entry's
+    /// alpha from `tRNS` (opaque past its end) already in its top byte. An
+    /// index past the palette is an error.
+    Palette { depth: u8, colours: Vec<u32> },
+}
+
+impl Pixels {
+    fn new(h: &Header, palette: &[u32], trns: Option<&[u8]>) -> Self {
+        // `tRNS` holds each key sample as a big-endian `u16` at the image's
+        // depth; one too short to hold the key is no key at all.
+        let key_sample = |i: usize| -> Option<u32> {
+            let t = trns?;
+            let hi = *t.get(i.checked_mul(2)?)?;
+            let lo = *t.get(i.checked_mul(2)?.checked_add(1)?)?;
+            Some((u32::from(hi) << 8) | u32::from(lo))
+        };
+        let depth = h.depth;
+        match h.color {
+            ColorType::Gray => Self::Gray {
+                depth,
+                key: key_sample(0),
+            },
+            ColorType::GrayAlpha => Self::GrayAlpha { depth },
+            ColorType::Rgb => Self::Rgb {
+                depth,
+                key: match (key_sample(0), key_sample(1), key_sample(2)) {
+                    (Some(r), Some(g), Some(b)) => Some([r, g, b]),
+                    _ => None,
+                },
+            },
+            ColorType::Rgba => Self::Rgba { depth },
+            ColorType::Palette => Self::Palette {
+                depth,
+                colours: palette
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &rgb)| {
+                        let alpha = trns
+                            .and_then(|t| t.get(i))
+                            .map_or(255u32, |&v| u32::from(v));
+                        (alpha << 24) | (rgb & 0x00FF_FFFF)
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    /// Convert the unfiltered `row` into `out.len()` pixels.
+    ///
+    /// # Errors
+    ///
+    /// A palette index past `PLTE`. Returning an error rather than a default
+    /// colour: a picture that renders in the wrong colours is a bug report
+    /// about the *encoder* that nobody can act on, where a refusal names the
+    /// file.
+    fn convert(&self, row: &[u8], out: &mut [u32]) -> ImageResult<()> {
+        match *self {
+            Self::Gray { depth: 16, key } => {
+                for (o, p) in out.iter_mut().zip(row.as_chunks::<2>().0) {
+                    let [hi, lo] = *p;
+                    let raw = (u32::from(hi) << 8) | u32::from(lo);
+                    *o = opaque_unless(key == Some(raw)) | grey(hi);
+                }
+            }
+            Self::Gray { depth: 8, key } => {
+                for (o, &g) in out.iter_mut().zip(row) {
+                    *o = opaque_unless(key == Some(u32::from(g))) | grey(g);
+                }
+            }
+            Self::Gray { depth, key } => {
+                unpack(row, depth, out);
+                let scale = widen(depth);
+                for o in out.iter_mut() {
+                    let raw = *o;
+                    // `raw` is below 2^depth, so the product is at most 255.
+                    let g = raw.wrapping_mul(scale) as u8;
+                    *o = opaque_unless(key == Some(raw)) | grey(g);
+                }
+            }
+            Self::GrayAlpha { depth: 16 } => {
+                for (o, p) in out.iter_mut().zip(row.as_chunks::<4>().0) {
+                    let [g, _, a, _] = *p;
+                    *o = (u32::from(a) << 24) | grey(g);
+                }
+            }
+            Self::GrayAlpha { .. } => {
+                for (o, p) in out.iter_mut().zip(row.as_chunks::<2>().0) {
+                    let [g, a] = *p;
+                    *o = (u32::from(a) << 24) | grey(g);
+                }
+            }
+            Self::Rgb {
+                depth: 16,
+                key: Some(key),
+            } => {
+                for (o, p) in out.iter_mut().zip(row.as_chunks::<6>().0) {
+                    let [r0, r1, g0, g1, b0, b1] = *p;
+                    let raw = [
+                        (u32::from(r0) << 8) | u32::from(r1),
+                        (u32::from(g0) << 8) | u32::from(g1),
+                        (u32::from(b0) << 8) | u32::from(b1),
+                    ];
+                    *o = opaque_unless(raw == key) | rgb(r0, g0, b0);
+                }
+            }
+            Self::Rgb {
+                depth: 16,
+                key: None,
+            } => {
+                for (o, p) in out.iter_mut().zip(row.as_chunks::<6>().0) {
+                    let [r, _, g, _, b, _] = *p;
+                    *o = 0xFF00_0000 | rgb(r, g, b);
+                }
+            }
+            Self::Rgb { key: Some(key), .. } => {
+                for (o, p) in out.iter_mut().zip(row.as_chunks::<3>().0) {
+                    let [r, g, b] = *p;
+                    let raw = [u32::from(r), u32::from(g), u32::from(b)];
+                    *o = opaque_unless(raw == key) | rgb(r, g, b);
+                }
+            }
+            Self::Rgb { key: None, .. } => {
+                for (o, p) in out.iter_mut().zip(row.as_chunks::<3>().0) {
+                    let [r, g, b] = *p;
+                    *o = 0xFF00_0000 | rgb(r, g, b);
+                }
+            }
+            Self::Rgba { depth: 16 } => {
+                for (o, p) in out.iter_mut().zip(row.as_chunks::<8>().0) {
+                    let [r, _, g, _, b, _, a, _] = *p;
+                    *o = u32::from_be_bytes([a, r, g, b]);
+                }
+            }
+            Self::Rgba { .. } => {
+                for (o, p) in out.iter_mut().zip(row.as_chunks::<4>().0) {
+                    let [r, g, b, a] = *p;
+                    *o = u32::from_be_bytes([a, r, g, b]);
+                }
+            }
+            Self::Palette {
+                depth: 8,
+                ref colours,
+            } => {
+                for (o, &index) in out.iter_mut().zip(row) {
+                    *o = *colours
+                        .get(usize::from(index))
+                        .ok_or(ImageError::Malformed("palette index past PLTE"))?;
+                }
+            }
+            Self::Palette { depth, ref colours } => {
+                unpack(row, depth, out);
+                for o in out.iter_mut() {
+                    *o = *colours
+                        .get(*o as usize)
+                        .ok_or(ImageError::Malformed("palette index past PLTE"))?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `0xFF000000`, or nothing where the `tRNS` key matched.
+const fn opaque_unless(transparent: bool) -> u32 {
+    if transparent { 0 } else { 0xFF00_0000 }
+}
+
+/// A grey level in all three colour channels, alpha zero.
+const fn grey(g: u8) -> u32 {
+    (g as u32).wrapping_mul(0x0001_0101)
+}
+
+/// Red, green and blue in place, alpha zero.
+const fn rgb(r: u8, g: u8, b: u8) -> u32 {
+    ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+}
+
+/// The factor that widens a `depth`-bit sample to the full 0..=255 range:
+/// multiplication rather than a shift, so that the maximum value maps to 255
+/// and not to 254 — a one-bit white shifted up would be 128, a grey.
+const fn widen(depth: u8) -> u32 {
     match depth {
-        16 => {
-            let at = index.saturating_mul(2);
-            let hi = u32::from(*row.get(at).unwrap_or(&0));
-            let lo = u32::from(*row.get(at.saturating_add(1)).unwrap_or(&0));
-            (hi << 8) | lo
-        }
-        8 => u32::from(*row.get(index).unwrap_or(&0)),
-        // Sub-byte samples are packed most-significant first within each byte,
-        // which is the opposite of the least-significant-first bit order that
-        // DEFLATE uses to deliver these very bytes.
-        _ => {
-            let per_byte = usize::from(8u8.checked_div(depth).unwrap_or(8)).max(1);
-            let byte = *row
-                .get(index.checked_div(per_byte).unwrap_or(0))
-                .unwrap_or(&0);
-            let within = index.checked_rem(per_byte).unwrap_or(0);
-            let shift = 8u32.saturating_sub(u32::from(depth)).saturating_sub(
-                u32::try_from(within)
-                    .unwrap_or(0)
-                    .saturating_mul(u32::from(depth)),
-            );
-            let mask = 1u32
-                .checked_shl(u32::from(depth))
-                .unwrap_or(0)
-                .saturating_sub(1);
-            (u32::from(byte) >> shift) & mask
-        }
+        1 => 255,
+        2 => 85,
+        4 => 17,
+        _ => 1,
     }
 }
 
-/// Widen a sample of `depth` bits to the full 0..=255 range.
-///
-/// Multiplication rather than a shift, so that the maximum value maps to 255
-/// and not to 254: a one-bit white of `1 << 7` would be 128, a grey.
-const fn scale_to_8(v: u32, depth: u8) -> u32 {
-    match depth {
-        16 => v >> 8,
-        8 => v & 0xFF,
-        4 => (v & 0x0F).saturating_mul(17),
-        2 => (v & 0x03).saturating_mul(85),
-        _ => (v & 0x01).saturating_mul(255),
-    }
-}
-
-/// Convert pixel `x` of an unfiltered row into `0xAARRGGBB`.
-fn pixel_at(
-    h: &Header,
-    row: &[u8],
-    x: usize,
-    palette: &[u32],
-    trns: Option<&[u8]>,
-) -> ImageResult<u32> {
-    let base = x.saturating_mul(h.color.channels() as usize);
-    let d = h.depth;
-
-    let px = match h.color {
-        ColorType::Gray => {
-            let raw = sample(row, d, base);
-            let g = scale_to_8(raw, d);
-            let a = if trns_gray_matches(trns, raw) { 0 } else { 255 };
-            (a << 24) | (g << 16) | (g << 8) | g
-        }
-        ColorType::GrayAlpha => {
-            let g = scale_to_8(sample(row, d, base), d);
-            let a = scale_to_8(sample(row, d, base.saturating_add(1)), d);
-            (a << 24) | (g << 16) | (g << 8) | g
-        }
-        ColorType::Rgb => {
-            let rr = sample(row, d, base);
-            let gg = sample(row, d, base.saturating_add(1));
-            let bb = sample(row, d, base.saturating_add(2));
-            let a = if trns_rgb_matches(trns, rr, gg, bb) {
-                0
-            } else {
-                255
-            };
-            (a << 24) | (scale_to_8(rr, d) << 16) | (scale_to_8(gg, d) << 8) | scale_to_8(bb, d)
-        }
-        ColorType::Rgba => {
-            let rr = scale_to_8(sample(row, d, base), d);
-            let gg = scale_to_8(sample(row, d, base.saturating_add(1)), d);
-            let bb = scale_to_8(sample(row, d, base.saturating_add(2)), d);
-            let aa = scale_to_8(sample(row, d, base.saturating_add(3)), d);
-            (aa << 24) | (rr << 16) | (gg << 8) | bb
-        }
-        ColorType::Palette => {
-            let idx = sample(row, d, base) as usize;
-            // An index past the palette is a malformed file. Returning an error
-            // rather than a default colour: a picture that renders in the wrong
-            // colours is a bug report about the *encoder* that nobody can act
-            // on, where a refusal names the file.
-            let rgb = *palette
-                .get(idx)
-                .ok_or(ImageError::Malformed("palette index past PLTE"))?;
-            let a = trns
-                .and_then(|t| t.get(idx))
-                .map_or(255u32, |&v| u32::from(v));
-            (a << 24) | (rgb & 0x00FF_FFFF)
-        }
+/// Unpack `out.len()` samples of `depth` (1, 2 or 4) bits from `row`, most
+/// significant first within each byte — the opposite of the least-significant-
+/// first bit order DEFLATE delivers these very bytes in.
+fn unpack(row: &[u8], depth: u8, out: &mut [u32]) {
+    let (per_byte, bits, mask): (usize, u32, u32) = match depth {
+        1 => (8, 1, 0x1),
+        2 => (4, 2, 0x3),
+        _ => (2, 4, 0xF),
     };
-    Ok(px)
-}
-
-/// Does this greyscale sample match the `tRNS` colour-key?
-///
-/// The key is stored at the image's own bit depth in a two-byte big-endian
-/// field, so the comparison is against the *raw* sample, before scaling.
-fn trns_gray_matches(trns: Option<&[u8]>, raw: u32) -> bool {
-    let Some(t) = trns else { return false };
-    if t.len() < 2 {
-        return false;
+    for (samples, &byte) in out.chunks_mut(per_byte).zip(row) {
+        let mut shift = 8u32;
+        for o in samples {
+            shift = shift.wrapping_sub(bits);
+            *o = u32::from(byte).wrapping_shr(shift) & mask;
+        }
     }
-    let key = (u32::from(*t.first().unwrap_or(&0)) << 8) | u32::from(*t.get(1).unwrap_or(&0));
-    key == raw
-}
-
-/// The same for truecolour, where `tRNS` holds three two-byte samples.
-fn trns_rgb_matches(trns: Option<&[u8]>, r: u32, g: u32, b: u32) -> bool {
-    let Some(t) = trns else { return false };
-    if t.len() < 6 {
-        return false;
-    }
-    let at = |i: usize| -> u32 {
-        (u32::from(*t.get(i).unwrap_or(&0)) << 8)
-            | u32::from(*t.get(i.saturating_add(1)).unwrap_or(&0))
-    };
-    at(0) == r && at(2) == g && at(4) == b
 }
 
 /// `PLTE` is a run of RGB triples, at most 256 of them.
@@ -888,6 +1081,20 @@ impl<'a> Chunks<'a> {
             pos: 8,
             done: false,
         }
+    }
+
+    /// The type of the chunk the next call to `next` will look at, read
+    /// without checking anything else about it. `None` where `next` would
+    /// return nothing, and where the next chunk's header is cut off — which
+    /// `next` would report as an error.
+    fn peek_kind(&self) -> Option<[u8; 4]> {
+        if self.done {
+            return None;
+        }
+        let kind = self
+            .bytes
+            .get(self.pos.checked_add(4)?..self.pos.checked_add(8)?)?;
+        kind.try_into().ok()
     }
 }
 
@@ -933,7 +1140,7 @@ impl<'a> Iterator for Chunks<'a> {
             self.pos = crc_end;
 
             let want = be_u32(crc_bytes, 0);
-            let got = crc32(&kind, data);
+            let got = chunk_crc(&kind, data);
             if want != got {
                 // Critical chunks are named with a capital first letter; bit 5
                 // of the byte is the case bit. See the module docs for why the
@@ -965,46 +1172,15 @@ fn be_u32(data: &[u8], offset: usize) -> u32 {
     ])
 }
 
-/// The CRC-32 table PNG uses (the reflected IEEE 802.3 polynomial).
-///
-/// Built at compile time, so there is no lazily-initialised static to be racy
-/// and no cost to the first picture decoded.
-const CRC_TABLE: [u32; 256] = build_crc_table();
-
-// A `const fn` may not call `get_mut`, and an array of 256 has to be written to
-// by index to be built at all. Both counters are bounded by the loop conditions
-// immediately above them, and the whole function runs at compile time — an
-// out-of-range index here would be a build error, not a runtime one.
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
-const fn build_crc_table() -> [u32; 256] {
-    let mut table = [0u32; 256];
-    let mut n = 0usize;
-    while n < 256 {
-        let mut c = n as u32;
-        let mut k = 0;
-        while k < 8 {
-            c = if c & 1 != 0 {
-                0xEDB8_8320 ^ (c >> 1)
-            } else {
-                c >> 1
-            };
-            k += 1;
-        }
-        table[n] = c;
-        n += 1;
-    }
-    table
-}
-
 /// CRC-32 over a chunk's type and data, which is what the trailing four bytes
 /// cover — the length field is deliberately *not* included (RFC 2083 §3.2).
-fn crc32(kind: &[u8; 4], data: &[u8]) -> u32 {
-    let mut c = 0xFFFF_FFFFu32;
-    for &byte in kind.iter().chain(data.iter()) {
-        let idx = ((c ^ u32::from(byte)) & 0xFF) as usize;
-        c = CRC_TABLE.get(idx).copied().unwrap_or(0) ^ (c >> 8);
-    }
-    c ^ 0xFFFF_FFFF
+///
+/// The reflected IEEE polynomial of gzip and ZIP, from the `crc32` crate that
+/// exists so this crate would stop carrying its own table: the type is fed in
+/// first and the data continues the same accumulator, so the two are never
+/// copied together.
+fn chunk_crc(kind: &[u8; 4], data: &[u8]) -> u32 {
+    crc32::crc32_seed(crc32::crc32_raw(!0, kind), data)
 }
 
 #[cfg(test)]
@@ -1026,7 +1202,7 @@ mod tests {
         out.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
         out.extend_from_slice(kind);
         out.extend_from_slice(data);
-        out.extend_from_slice(&crc32(kind, data).to_be_bytes());
+        out.extend_from_slice(&chunk_crc(kind, data).to_be_bytes());
         out
     }
 
@@ -1256,6 +1432,70 @@ mod tests {
         assert_eq!(paeth(10, 10, 10), 10);
         assert_eq!(paeth(1, 2, 3), 1, "p = 0, all distances equal-ish");
         assert_eq!(paeth(0, 255, 0), 255);
+    }
+
+    #[test]
+    fn libpngs_form_of_paeth_chooses_as_the_rfc_does_on_every_input() {
+        // All 2^24 (left, above, upper-left) triples: the rewritten distances
+        // and the select must agree with the definition everywhere, ties
+        // included, or a photograph comes out right almost everywhere.
+        for a in 0..=255u8 {
+            for b in 0..=255u8 {
+                for c in 0..=255u8 {
+                    assert_eq!(paeth_select(a, b, c), paeth(a, b, c), "({a}, {b}, {c})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_filter_at_every_step_reconstructs_what_the_bytewise_definition_does() {
+        // The per-step filters against `bytewise`, which is RFC 2083 §6 a
+        // byte at a time: random rows, random rows above, lengths that are
+        // and are not a whole number of pixels.
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut byte = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        };
+        for step in [1usize, 2, 3, 4, 6, 8] {
+            for len in [
+                0usize,
+                1,
+                step,
+                step + 1,
+                5 * step,
+                5 * step + step / 2,
+                257,
+            ] {
+                for filter in 0..=4u8 {
+                    for _ in 0..20 {
+                        let row: Vec<u8> = (0..len).map(|_| byte()).collect();
+                        let above: Vec<u8> = (0..len).map(|_| byte()).collect();
+                        let mut fast = row.clone();
+                        unfilter(filter, &mut fast, &above, step).unwrap();
+                        let mut slow = row.clone();
+                        bytewise(filter, &mut slow, &above, step);
+                        assert_eq!(fast, slow, "filter {filter}, step {step}, {len} bytes");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_step_no_png_has_still_unfilters_by_the_definition() {
+        // Unreachable from a header, which only yields 1, 2, 3, 4, 6 and 8;
+        // kept total rather than trusted.
+        let above = [10u8, 20, 30, 40, 50];
+        let mut row = [1u8, 2, 3, 4, 5];
+        unfilter(1, &mut row, &above, 5).unwrap();
+        assert_eq!(row, [1, 2, 3, 4, 5], "no pixel has a left neighbour");
+        let mut row = [1u8, 2, 3, 4, 5];
+        unfilter(4, &mut row, &above, 5).unwrap();
+        assert_eq!(row, [11, 22, 33, 44, 55], "Paeth with no left is Up");
     }
 
     #[test]
@@ -1506,7 +1746,7 @@ mod tests {
         // An empty IEND's CRC is a constant every PNG in the world contains,
         // which makes it the one value that can be checked against the world
         // rather than against this implementation.
-        assert_eq!(crc32(b"IEND", b""), 0xAE42_6082);
+        assert_eq!(chunk_crc(b"IEND", b""), 0xAE42_6082);
     }
 
     // ------------------------------------------------------------------

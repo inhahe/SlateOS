@@ -1,0 +1,1 @@
+REFUSED read: ThunderScan tile decoding is not implemented

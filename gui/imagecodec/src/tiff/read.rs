@@ -14,7 +14,11 @@ use alloc::vec::Vec;
 
 use super::dir::{self, Directory, File, compression, photometric};
 use super::fax::{self, Fax};
+use super::luv::{self, Luv};
 use super::lzw::Lzw;
+use super::ojpeg::Ojpeg;
+use super::pixarlog::{self, PixarLog};
+use super::{next, thunder};
 use crate::jpeg::{ColorSpace, Decompress, Headed, Tables};
 use crate::{ImageError, ImageResult, Limits};
 
@@ -49,6 +53,12 @@ pub(super) struct Reader<'a> {
     lzw: Option<Lzw>,
     fax: Option<Fax>,
     jpeg: Option<Jpeg>,
+    /// The old-style JPEG codec's state, which spans strips.
+    ojpeg: Option<Ojpeg>,
+    /// The SGI LogLuv codec's state, once set up.
+    luv: Option<Luv>,
+    /// The PixarLog codec's state, once set up.
+    pixarlog: Option<PixarLog>,
     /// The codec's one-time setup (`tif_setupdecode`), once it has run.
     setup: Option<bool>,
     /// What a JPEG strip's decode may allocate.
@@ -66,6 +76,9 @@ impl<'a> Reader<'a> {
             lzw: None,
             fax: None,
             jpeg: None,
+            ojpeg: None,
+            luv: None,
+            pixarlog: None,
             setup: None,
             limits,
         }
@@ -90,7 +103,10 @@ impl<'a> Reader<'a> {
         if index >= self.dir.strips {
             return Err(ImageError::Malformed("TIFF strip out of range"));
         }
-        let raw = self.fill(index)?;
+        // Old-style JPEG reads the file itself (`TIFF_NOREADRAW`): no strip
+        // is filled, and its byte count is never checked.
+        let ojpeg = self.dir.compression == compression::OJPEG;
+        let raw = if ojpeg { None } else { Some(self.fill(index)?) };
         if let Some(alloc_size) = first_tile {
             let tile_size = self.dir.tile_size().unwrap_or(0);
             if self.dir.compression == compression::NONE {
@@ -114,6 +130,23 @@ impl<'a> Reader<'a> {
         let dest = out
             .get_mut(..size)
             .ok_or(ImageError::Malformed("TIFF strip larger than its buffer"))?;
+        let Some(raw) = raw else {
+            // `OJPEGPreDecode`, `OJPEGDecode` and `OJPEGPostDecode`.
+            let plane = index
+                .checked_div(self.dir.strips_per_image)
+                .and_then(|p| u16::try_from(p).ok())
+                .unwrap_or(0);
+            let codec = self
+                .ojpeg
+                .get_or_insert_with(|| Ojpeg::new(self.dir, self.limits));
+            codec.pre_decode(self.file.data, self.dir, plane, index)?;
+            // A big-endian file's `BitsPerSample`, set after the codec, puts
+            // the byte swap in place of `OJPEGPostDecode` (`_TIFFVSetField`).
+            let swapped = self.file.big_endian
+                && matches!(self.dir.bits_per_sample, 8 | 16 | 24 | 32 | 64 | 128);
+            codec.decode(dest, self.dir, !swapped)?;
+            return if swapped { self.after(dest) } else { Ok(()) };
+        };
         self.run_codec(raw, dest, index)?;
         self.after(dest)
     }
@@ -174,7 +207,13 @@ impl<'a> Reader<'a> {
     /// that fails fails every strip.
     fn setup(&mut self) -> ImageResult<()> {
         if self.setup.is_none() {
-            let ok = predictor_valid(self.dir) && self.setup_fax() && self.setup_jpeg();
+            let ok = predictor_valid(self.dir)
+                && self.setup_fax()
+                && self.setup_jpeg()
+                && (self.dir.compression != compression::THUNDERSCAN
+                    || thunder::setup(self.dir.bits_per_sample))
+                && self.setup_luv()
+                && self.setup_pixarlog();
             self.setup = Some(ok);
         }
         if self.setup == Some(true) {
@@ -184,6 +223,27 @@ impl<'a> Reader<'a> {
                 "TIFF compression for these samples",
             ))
         }
+    }
+
+    /// `LogLuvSetupDecode`, for SGI LogLuv: true for any other scheme.
+    fn setup_luv(&mut self) -> bool {
+        if !matches!(
+            self.dir.compression,
+            compression::SGILOG | compression::SGILOG24
+        ) {
+            return true;
+        }
+        self.luv = luv::setup(self.dir, self.limits.max_decompressed_bytes);
+        self.luv.is_some()
+    }
+
+    /// `PixarLogSetupDecode`, for PixarLog: true for any other scheme.
+    fn setup_pixarlog(&mut self) -> bool {
+        if self.dir.compression != compression::PIXARLOG {
+            return true;
+        }
+        self.pixarlog = pixarlog::setup(self.dir, self.limits.max_decompressed_bytes);
+        self.pixarlog.is_some()
     }
 
     /// `Fax3SetupState`, for the fax schemes: true for any other.
@@ -337,6 +397,12 @@ impl<'a> Reader<'a> {
             out.fill(0);
             return Err(fail);
         }
+        // Each scanline goes straight into the strip buffer a line apart, as
+        // libtiff reads it. A scanline is a byte a sample, which only a
+        // lossless JPEG of fewer than 8 bits makes longer than the TIFF's
+        // packed line: then the scanlines overlap, and libtiff's last one runs
+        // past the buffer's end -- a heap overflow there, stopped at the end
+        // here, so the two agree wherever libtiff's run is defined.
         for r in 0..rows {
             let Ok(samples) = stream.read_row() else {
                 out.fill(0);
@@ -411,6 +477,58 @@ impl<'a> Reader<'a> {
                 };
                 self.decode_jpeg(bytes, out, index)
             }
+            compression::NEXT => {
+                // `NeXTPreDecode`, then the decode, whose rows are the
+                // image's scanlines even in a tile.
+                next::pre_decode(self.dir.bits_per_sample)?;
+                let width = if self.dir.tiled {
+                    self.dir.tile_width
+                } else {
+                    self.dir.width
+                };
+                next::decode(bytes, out, scanline(self.dir)?, u64::from(width))
+            }
+            compression::THUNDERSCAN => {
+                // No tile decoder (`_TIFFNoTileDecode`).
+                if self.dir.tiled {
+                    return Err(ImageError::Unsupported("TIFF ThunderScan tiles"));
+                }
+                let width = usize::try_from(self.dir.width)
+                    .map_err(|_| ImageError::Malformed("TIFF width"))?;
+                thunder::decode(bytes, out, scanline(self.dir)?, width)
+            }
+            compression::PIXARLOG => {
+                let codec = self
+                    .pixarlog
+                    .as_ref()
+                    .ok_or(ImageError::Unsupported("TIFF PixarLog"))?;
+                codec.decode(
+                    bytes,
+                    out,
+                    self.dir.width,
+                    self.file.big_endian,
+                    self.limits.max_decompressed_bytes,
+                )
+            }
+            compression::SGILOG | compression::SGILOG24 => {
+                // A row at a time: the image's scanline, or a tile's row, of
+                // the 8-bit samples the codec was asked for.
+                let row = if self.dir.tiled {
+                    self.dir.tile_row_size()
+                } else {
+                    self.dir.scanline_size()
+                };
+                let row = row.and_then(|r| usize::try_from(r).ok()).unwrap_or(0);
+                let luv = self
+                    .luv
+                    .as_mut()
+                    .ok_or(ImageError::Unsupported("TIFF LogLuv"))?;
+                if luv.decode(bytes, out, row) {
+                    Ok(())
+                } else {
+                    Err(ImageError::Malformed("TIFF LogLuv strip"))
+                }
+            }
             compression::DEFLATE | compression::ADOBE_DEFLATE => {
                 let full = if self.dir.tiled {
                     self.dir.tile_size()
@@ -435,14 +553,21 @@ impl<'a> Reader<'a> {
     /// predictor does itself when it runs.
     fn after(&self, out: &mut [u8]) -> ImageResult<()> {
         let dir = self.dir;
-        // `JPEGSetupDecode` takes the byte swap away (`_TIFFNoPostDecode`).
-        if dir.compression == compression::JPEG {
+        // `JPEGSetupDecode` and `LogLuvSetupDecode` take the byte swap away
+        // (`_TIFFNoPostDecode`).
+        if matches!(
+            dir.compression,
+            compression::JPEG | compression::SGILOG | compression::SGILOG24
+        ) {
             return Ok(());
         }
         let swab16 = self.file.big_endian && dir.bits_per_sample == 16;
         let uses_predictor = matches!(
             dir.compression,
-            compression::LZW | compression::DEFLATE | compression::ADOBE_DEFLATE
+            compression::LZW
+                | compression::DEFLATE
+                | compression::ADOBE_DEFLATE
+                | compression::PIXARLOG
         );
         if uses_predictor && dir.predictor == 2 {
             let row = usize::try_from(
@@ -478,11 +603,21 @@ impl<'a> Reader<'a> {
             }
             return Ok(());
         }
-        if swab16 {
+        // `PixarLogSetupDecode` takes the byte swap away too -- but not the
+        // predictor's own, above.
+        if swab16 && dir.compression != compression::PIXARLOG {
             swap16(out);
         }
         Ok(())
     }
+}
+
+/// The image's scanline in bytes (`tif_scanlinesize`), which the NeXT and
+/// ThunderScan decoders measure rows by, tiles included.
+fn scanline(dir: &Directory) -> ImageResult<usize> {
+    dir.scanline_size()
+        .and_then(|size| usize::try_from(size).ok())
+        .ok_or(ImageError::Malformed("TIFF scanline size"))
 }
 
 /// Where a filled strip's bytes are.
@@ -496,7 +631,10 @@ enum Raw {
 fn predictor_valid(dir: &Directory) -> bool {
     let uses_predictor = matches!(
         dir.compression,
-        compression::LZW | compression::DEFLATE | compression::ADOBE_DEFLATE
+        compression::LZW
+            | compression::DEFLATE
+            | compression::ADOBE_DEFLATE
+            | compression::PIXARLOG
     );
     if !uses_predictor {
         return true;

@@ -78,15 +78,15 @@ impl<'a> Reader<'a> {
         reason = "shifts are by 8 or 56, below 64; next and bits move by at most 7 bytes' worth"
     )]
     fn load(&mut self) {
-        let end = self.next.saturating_add(7);
-        let eight_remain = self.data.len().saturating_sub(self.next) >= 8;
-        if let Some(chunk) = self.data.get(self.next..end).filter(|_| eight_remain) {
-            let fresh = chunk
-                .iter()
-                .fold(0u64, |acc, &byte| (acc << 8) | u64::from(byte));
-            self.value = (self.value << 56) | fresh;
+        let eight = self
+            .data
+            .get(self.next..self.next.saturating_add(8))
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok());
+        if let Some(bytes) = eight {
+            // The first seven of the eight.
+            self.value = (self.value << 56) | (u64::from_be_bytes(bytes) >> 8);
             self.bits += 56;
-            self.next = end;
+            self.next += 7;
         } else if let Some(&byte) = self.data.get(self.next) {
             self.value = (self.value << 8) | u64::from(byte);
             self.bits += 8;

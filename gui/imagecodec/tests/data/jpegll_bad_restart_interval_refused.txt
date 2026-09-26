@@ -1,0 +1,1 @@
+REFUSED Invalid restart interval 7; must be an integer multiple of the number of MCUs in an MCU row (13)

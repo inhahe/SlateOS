@@ -967,6 +967,16 @@ impl Codes {
         }
     }
 
+    /// Zero at the first column of each block of pixels that share a group
+    /// (libwebp's `huffman_mask_`): every bit set when one group covers the
+    /// image, so zero only at a row's start.
+    const fn block_mask(&self) -> usize {
+        match &self.entropy {
+            Some((bits, _, _)) => (1usize << *bits).wrapping_sub(1),
+            None => usize::MAX,
+        }
+    }
+
     /// libwebp's `Is8bOptimizable`, over the groups libwebp keeps: no colour
     /// cache, and one red, blue and alpha value in every group.
     const fn byte_per_pixel(&self) -> bool {
@@ -1116,10 +1126,23 @@ fn decode_pixels(
 
     let mut at = 0usize;
     let (mut x, mut y) = (0usize, 0usize);
-    while at < total {
-        let group = codes
+    // The group is looked up as libwebp looks it up: at the start of each
+    // block of pixels that share one, and after a copy that ends inside a
+    // block -- every other symbol starts inside the block of the last lookup.
+    let mask = codes.block_mask();
+    let lookup = |x: usize, y: usize| {
+        codes
             .group_at(x, y)
-            .ok_or(ImageError::Malformed("a VP8L block naming no code"))?;
+            .ok_or(ImageError::Malformed("a VP8L block naming no code"))
+    };
+    let mut current = None;
+    while at < total {
+        if x & mask == 0 || current.is_none() {
+            current = Some(lookup(x, y)?);
+        }
+        let Some(group) = current else {
+            break;
+        };
         if let Some(argb) = group.trivial_pixel() {
             if let Some(slot) = out.get_mut(at) {
                 *slot = argb;
@@ -1164,15 +1187,35 @@ fn decode_pixels(
                 if dist > at || length > total - at {
                     return Err(ImageError::Malformed("a VP8L copy from outside the image"));
                 }
-                for _ in 0..length {
-                    let argb = out.get(at - dist).copied().unwrap_or(0);
-                    if let Some(slot) = out.get_mut(at) {
-                        *slot = argb;
+                if dist >= length {
+                    // Apart: one move.
+                    out.copy_within(at - dist..at - dist + length, at);
+                } else {
+                    // Overlapping: pixel by pixel, each one read after the
+                    // one `dist` before it was written.
+                    for i in at..at + length {
+                        let argb = out.get(i - dist).copied().unwrap_or(0);
+                        if let Some(slot) = out.get_mut(i) {
+                            *slot = argb;
+                        }
                     }
-                    insert(&mut cache, argb);
-                    at += 1;
                 }
+                if codes.cache_bits.is_some() {
+                    for &argb in out.get(at..at + length).unwrap_or_default() {
+                        insert(&mut cache, argb);
+                    }
+                }
+                at += length;
                 x += length;
+                // A copy can run on over several rows.
+                while x >= width && width > 0 {
+                    x -= width;
+                    y += 1;
+                }
+                if x & mask != 0 {
+                    current = Some(lookup(x, y)?);
+                }
+                continue;
             } else {
                 let key = symbol - LITERALS - LENGTH_CODES;
                 let argb = *cache.get(key).ok_or(ImageError::Malformed(
@@ -1186,9 +1229,9 @@ fn decode_pixels(
                 x += 1;
             }
         }
-        if width > 0 {
-            y += x / width;
-            x %= width;
+        if x >= width {
+            x = 0;
+            y += 1;
         }
     }
     bits.note_end();
@@ -1313,9 +1356,16 @@ impl Transform {
                 image
             }
             Self::Color(blocks, width) => {
-                for (i, pixel) in image.iter_mut().enumerate() {
-                    let element = blocks.at(i % width, i / width);
-                    *pixel = uncolor(*pixel, element);
+                // A row at a time, in runs of one block, whose element is
+                // looked up once a run.
+                let run = 1usize << blocks.size_bits;
+                for (y, row) in image.chunks_mut((*width).max(1)).enumerate().take(height) {
+                    for (b, pixels) in row.chunks_mut(run).enumerate() {
+                        let element = blocks.at(b << blocks.size_bits, y);
+                        for pixel in pixels {
+                            *pixel = uncolor(*pixel, element);
+                        }
+                    }
                 }
                 image
             }
@@ -1442,40 +1492,49 @@ fn predict(mode: u32, left: u32, top: u32, top_right: u32, top_left: u32) -> u32
 }
 
 /// Undo the predictor transform in place, row by row, each pixel from the ones
-/// already undone.
+/// already undone: the first row from the left (its first pixel from opaque
+/// black), each later row's first pixel from above, and the rest in runs of one
+/// block, whose mode is looked up once a run.
 #[allow(
     clippy::arithmetic_side_effects,
     reason = "positions are inside the image, and a pixel with a row above has i >= width"
 )]
 fn unpredict(image: &mut [u32], width: usize, height: usize, blocks: &Blocks) {
-    let get = |image: &[u32], i: usize| image.get(i).copied().unwrap_or(0);
-    for y in 0..height {
-        for x in 0..width {
-            let i = y * width + x;
-            let prediction = if y == 0 {
-                if x == 0 {
-                    0xFF00_0000
-                } else {
-                    get(image, i - 1)
-                }
-            } else if x == 0 {
-                get(image, i - width)
-            } else {
-                let mode = (blocks.at(x, y) >> 8) & 0x0F;
+    if width == 0 {
+        return;
+    }
+    let mut rows = image.chunks_exact_mut(width).take(height);
+    let Some(first) = rows.next() else {
+        return;
+    };
+    let mut left = 0xFF00_0000;
+    for pixel in first.iter_mut() {
+        *pixel = add_pixels(*pixel, left);
+        left = *pixel;
+    }
+    let mut above: &[u32] = first;
+    for (y, row) in (1..).zip(rows) {
+        let top = |x: usize| above.get(x).copied().unwrap_or(0);
+        if let Some(pixel) = row.first_mut() {
+            *pixel = add_pixels(*pixel, top(0));
+        }
+        let row_start = row.first().copied().unwrap_or(0);
+        let mut x = 1;
+        while x < width {
+            let end = (((x >> blocks.size_bits) + 1) << blocks.size_bits).min(width);
+            let mode = (blocks.at(x, y) >> 8) & 0x0F;
+            let mut left = row.get(x - 1).copied().unwrap_or(0);
+            for (i, pixel) in row.iter_mut().enumerate().take(end).skip(x) {
                 // For the last column, the pixel after the one above is the
                 // first of this row, which is what the format specifies.
-                predict(
-                    mode,
-                    get(image, i - 1),
-                    get(image, i - width),
-                    get(image, i - width + 1),
-                    get(image, i - width - 1),
-                )
-            };
-            if let Some(pixel) = image.get_mut(i) {
+                let top_right = if i + 1 < width { top(i + 1) } else { row_start };
+                let prediction = predict(mode, left, top(i), top_right, top(i - 1));
                 *pixel = add_pixels(*pixel, prediction);
+                left = *pixel;
             }
+            x = end;
         }
+        above = row;
     }
 }
 

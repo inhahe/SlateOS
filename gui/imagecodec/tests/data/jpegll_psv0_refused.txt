@@ -1,0 +1,1 @@
+REFUSED Invalid progressive/lossless parameters Ss=0 Se=0 Ah=0 Al=0

@@ -1,0 +1,1 @@
+REFUSED not OK: Sorry, can not handle images with IEEE floating-point samples

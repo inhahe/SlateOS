@@ -1,0 +1,1 @@
+REFUSED Huffman table 0x00 was not defined

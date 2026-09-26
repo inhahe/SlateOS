@@ -12,6 +12,7 @@
 //! counter to -1 and decodes nothing more in the scan (until a restart), with
 //! a warning rather than an error. Both are reproduced.
 
+use super::coef::Coefficients;
 use super::error::{Error, jerr};
 use super::huffman::{Pass, left_shift};
 use super::marker::{Header, Input, read_restart_marker};
@@ -379,9 +380,39 @@ impl Arith {
         match self.pass {
             None => self.sequential(input, header, blocks),
             Some(Pass::DcFirst) => self.dc_first(input, header, blocks),
-            Some(Pass::AcFirst) => self.ac_first(input, header, blocks),
             Some(Pass::DcRefine) => self.dc_refine(input, header, blocks),
-            Some(Pass::AcRefine) => self.ac_refine(input, header, blocks),
+            Some(Pass::AcFirst | Pass::AcRefine) => {
+                if let Some(block) = blocks.first_mut() {
+                    self.ac(input, header, block);
+                }
+            }
+        }
+    }
+
+    /// One MCU of an AC scan decoded into `block` wherever it lies:
+    /// [`Self::decode_mcu`] for the scans the coefficient store decodes in
+    /// place.
+    pub(super) fn decode_ac<B: Coefficients>(
+        &mut self,
+        input: &mut Input<'_>,
+        header: &Header,
+        block: &mut B,
+    ) {
+        if header.restart_interval != 0 {
+            if self.restarts_to_go == 0 {
+                self.restart(input, header);
+            }
+            self.restarts_to_go = self.restarts_to_go.wrapping_sub(1);
+        }
+        self.ac(input, header, block);
+    }
+
+    /// The AC pass this scan is.
+    fn ac<B: Coefficients>(&mut self, input: &mut Input<'_>, header: &Header, block: &mut B) {
+        match self.pass {
+            Some(Pass::AcFirst) => self.ac_first(input, header, block),
+            Some(Pass::AcRefine) => self.ac_refine(input, header, block),
+            _ => {}
         }
     }
 
@@ -587,7 +618,7 @@ impl Arith {
         clippy::arithmetic_side_effects,
         reason = "the coder's registers: A stays below 2^17, C holds at most 16 bits of interval and 16 of buffered data, and the bin, magnitude and position counters are all small: nothing here approaches the i64 or usize range"
     )]
-    fn ac_first(&mut self, input: &mut Input<'_>, header: &Header, blocks: &mut [[i16; 64]]) {
+    fn ac_first<B: Coefficients>(&mut self, input: &mut Input<'_>, header: &Header, block: &mut B) {
         if self.ct == -1 {
             return;
         }
@@ -597,9 +628,6 @@ impl Arith {
             .components
             .get(ci)
             .map_or(0, |c| usize::from(c.ac_tbl_no));
-        let Some(block) = blocks.first_mut() else {
-            return;
-        };
         let se = usize::from(scan.se);
         let mut k = usize::from(scan.ss);
         while k <= se {
@@ -619,9 +647,7 @@ impl Arith {
             let Some(v) = self.ac_value(input, header, table, k, st) else {
                 return;
             };
-            if let Some(cell) = block.get_mut(natural(k)) {
-                *cell = ((v as u32) << scan.al) as i16;
-            }
+            block.set(natural(k), ((v as u32) << scan.al) as i16);
             k += 1;
         }
     }
@@ -641,7 +667,12 @@ impl Arith {
         clippy::arithmetic_side_effects,
         reason = "the coder's registers: A stays below 2^17, C holds at most 16 bits of interval and 16 of buffered data, and the bin, magnitude and position counters are all small: nothing here approaches the i64 or usize range"
     )]
-    fn ac_refine(&mut self, input: &mut Input<'_>, header: &Header, blocks: &mut [[i16; 64]]) {
+    fn ac_refine<B: Coefficients>(
+        &mut self,
+        input: &mut Input<'_>,
+        header: &Header,
+        block: &mut B,
+    ) {
         if self.ct == -1 {
             return;
         }
@@ -651,15 +682,12 @@ impl Arith {
             .components
             .get(ci)
             .map_or(0, |c| usize::from(c.ac_tbl_no));
-        let Some(block) = blocks.first_mut() else {
-            return;
-        };
         let p1 = 1i32 << scan.al;
         let m1 = -1i32 << scan.al;
         let se = usize::from(scan.se);
         // The previous stage's end of block.
         let mut kex = se;
-        while kex > 0 && block.get(natural(kex)).copied().unwrap_or(0) == 0 {
+        while kex > 0 && block.at(natural(kex)) == 0 {
             kex -= 1;
         }
         let mut k = usize::from(scan.ss);
@@ -670,24 +698,21 @@ impl Arith {
             }
             loop {
                 let at = natural(k);
-                let value = block.get(at).copied().unwrap_or(0);
+                let value = block.at(at);
                 if value != 0 {
                     if self.decode(input, Bin::Ac(table, st.wrapping_add(2))) != 0 {
-                        if let Some(cell) = block.get_mut(at) {
-                            *cell = if value < 0 {
-                                cell.wrapping_add(m1 as i16)
-                            } else {
-                                cell.wrapping_add(p1 as i16)
-                            };
-                        }
+                        let refined = if value < 0 {
+                            value.wrapping_add(m1 as i16)
+                        } else {
+                            value.wrapping_add(p1 as i16)
+                        };
+                        block.set(at, refined);
                     }
                     break;
                 }
                 if self.decode(input, Bin::Ac(table, st.wrapping_add(1))) != 0 {
                     let negative = self.decode(input, Bin::Fixed) != 0;
-                    if let Some(cell) = block.get_mut(at) {
-                        *cell = if negative { m1 as i16 } else { p1 as i16 };
-                    }
+                    block.set(at, if negative { m1 as i16 } else { p1 as i16 });
                     break;
                 }
                 st = st.wrapping_add(3);

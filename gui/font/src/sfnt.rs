@@ -602,6 +602,14 @@ pub struct Face {
     /// outer/inner pair arrives in the `VariationIndex`'s own first four bytes,
     /// so there is nothing between the caller and `VarStore::delta`.
     gdef_store: Option<varstore::VarStore>,
+    /// The `COLR` table: glyphs drawn in colour, as layers of outlines
+    /// (version 0) or a paint graph (version 1). `None` for a face with no
+    /// colour glyphs of this kind.
+    colr: Option<Span>,
+    /// The `CPAL` table: the palettes `COLR`'s colours index.
+    cpal: Option<Span>,
+    /// Whether the face carries colour *bitmaps* (`CBDT` or `sbix`).
+    bitmap_colour: bool,
 }
 
 /// Where a face sits within its family — the axes a font picker selects on.
@@ -708,6 +716,9 @@ impl Face {
         let mut hvar_span = None;
         let mut mvar_span = None;
         let mut has_cff2 = false;
+        let mut colr = None;
+        let mut cpal = None;
+        let mut bitmap_colour = false;
 
         for i in 0..usize::from(num_tables) {
             let rec = records
@@ -748,6 +759,13 @@ impl Face {
                 b"HVAR" => hvar_span = Some(span),
                 b"MVAR" => mvar_span = Some(span),
                 b"CFF2" => has_cff2 = true,
+                b"COLR" => colr = Some(span),
+                b"CPAL" => cpal = Some(span),
+                // Colour bitmaps: Google's `CBDT` and Apple's `sbix`. Noted
+                // rather than kept, since nothing here draws them yet; what
+                // face fallback needs is only to know the face is a colour
+                // face (see `has_colour_glyphs`).
+                b"CBDT" | b"sbix" => bitmap_colour = true,
                 _ => {}
             }
         }
@@ -933,6 +951,9 @@ impl Face {
             hvar,
             mvar,
             gdef_store,
+            colr,
+            cpal,
+            bitmap_colour,
             data,
         })
     }
@@ -1137,6 +1158,26 @@ impl Face {
     #[must_use]
     pub fn has_cmap(&self) -> bool {
         self.cmap.is_some()
+    }
+
+    /// Whether the face draws glyphs in colour -- a `COLR` table, or colour
+    /// bitmaps (`CBDT`, `sbix`) -- which in practice means it is an emoji
+    /// face.
+    ///
+    /// Face fallback asks, to decide which face a character that could be
+    /// drawn either way comes from: `☺` is in plenty of text faces and in the
+    /// emoji face too, and which one draws it depends on whether the text asks
+    /// for its emoji form. See [`itemize`](crate::itemize).
+    #[must_use]
+    pub fn has_colour_glyphs(&self) -> bool {
+        self.colr.is_some() || self.bitmap_colour
+    }
+
+    /// The bytes of `COLR`, and of `CPAL` if the face has one, for
+    /// [`colr`](crate::colr) to read. `None` without `COLR`.
+    pub(crate) fn colour_tables(&self) -> Option<(&[u8], Option<&[u8]>)> {
+        let table = |span: Span| self.data.get(span.off..span.off.checked_add(span.len)?);
+        Some((table(self.colr?)?, self.cpal.and_then(table)))
     }
 
     /// The scale factor from font units to pixels at `px_per_em`.
@@ -3622,6 +3663,62 @@ pub(crate) mod tests {
 
     fn face() -> Face {
         Face::parse(build_test_font()).expect("synthetic font must parse")
+    }
+
+    /// The fixture with `extra` tables added -- a `COLR` and a `CPAL`, say,
+    /// for a colour glyph test that needs outlines whose every coordinate it
+    /// knows.
+    pub(crate) fn build_test_font_with(extra: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
+        let mut tables = build_test_tables(TRUE_LSB_3);
+        tables.extend(extra);
+        assemble(&tables)
+    }
+
+    /// The fixture with its three glyphs at `first`, `first + 1` and
+    /// `first + 2` (all in the BMP) instead of A, B and C -- a second face
+    /// whose coverage the first does not share, for face fallback -- and, if
+    /// `colour`, carrying a `COLR` table, so that it reads as a colour face.
+    /// The table is a bare version-0 header with nothing in it: presence is
+    /// all face fallback asks about.
+    pub(crate) fn build_test_font_at(first: u16, colour: bool) -> Vec<u8> {
+        let mut tables = build_test_tables(TRUE_LSB_3);
+        let last = first + 2;
+        let mut sub4 = Vec::new();
+        for v in [4u16, 32, 0, 4, 4, 1, 0, last, 0xFFFF, 0, first, 0xFFFF] {
+            sub4.extend_from_slice(&v.to_be_bytes());
+        }
+        sub4.extend_from_slice(&1u16.wrapping_sub(first).to_be_bytes());
+        for v in [1u16, 0, 0] {
+            sub4.extend_from_slice(&v.to_be_bytes());
+        }
+        let mut cmap = Vec::new();
+        for v in [0u16, 1, 3, 1] {
+            cmap.extend_from_slice(&v.to_be_bytes());
+        }
+        cmap.extend_from_slice(&12u32.to_be_bytes());
+        cmap.extend_from_slice(&sub4);
+        for (tag, data) in &mut tables {
+            if tag == b"cmap" {
+                *data = cmap.clone();
+            }
+        }
+        if colour {
+            tables.insert(0, (*b"COLR", alloc::vec![0; 14]));
+        }
+        assemble(&tables)
+    }
+
+    #[test]
+    fn a_face_built_at_another_range_maps_there_and_says_whether_it_is_colour() {
+        let greek = Face::parse(build_test_font_at(0x03B1, false)).unwrap();
+        assert_eq!(greek.glyph_index('\u{03B1}'), Some(1));
+        assert_eq!(greek.glyph_index('\u{03B3}'), Some(3));
+        assert_eq!(greek.glyph_index('A'), None);
+        assert!(!greek.has_colour_glyphs());
+        let colour = Face::parse(build_test_font_at(0x2764, true)).unwrap();
+        assert_eq!(colour.glyph_index('\u{2764}'), Some(1));
+        assert!(colour.has_colour_glyphs());
+        assert!(!face().has_colour_glyphs());
     }
 
     /// VARIATION SELECTOR-1, the one a real face is most likely to carry.

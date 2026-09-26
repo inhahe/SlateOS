@@ -31,15 +31,37 @@ pub(super) struct Input<'a> {
     pub(super) next_restart_num: u8,
     /// libjpeg's warning count, for diagnostics.
     pub(super) warnings: u32,
+    /// Whether the source manager fails where libjpeg's own would skip or
+    /// resynchronise: libtiff's old-style JPEG source, which reports any
+    /// `skip_input_data` or `resync_to_restart` as an error.
+    pub(super) strict: bool,
+    /// Set when a strict source has failed. libjpeg's error exit abandons the
+    /// call there; here the call runs on and the failure is reported when it
+    /// returns ([`super::decompress::Decompress`]).
+    pub(super) failed: bool,
 }
 
 impl<'a> Input<'a> {
+    /// Input over bytes of its own.
+    pub(super) const fn owned(data: Vec<u8>) -> Input<'static> {
+        Input {
+            src: Source::owned(data),
+            unread_marker: 0,
+            next_restart_num: 0,
+            warnings: 0,
+            strict: false,
+            failed: false,
+        }
+    }
+
     pub(super) const fn new(data: &'a [u8]) -> Self {
         Self {
             src: Source::new(data),
             unread_marker: 0,
             next_restart_num: 0,
             warnings: 0,
+            strict: false,
+            failed: false,
         }
     }
 
@@ -468,7 +490,7 @@ fn get_interesting_appn(input: &mut Input<'_>, header: &mut Header) {
         header.adobe_transform = data.get(11).copied().unwrap_or(0);
     }
     if length > 0 {
-        input.src.skip(length.unsigned_abs());
+        skip_input_data(input, length.unsigned_abs());
     }
 }
 
@@ -476,8 +498,16 @@ fn get_interesting_appn(input: &mut Input<'_>, header: &mut Header) {
 fn skip_variable(input: &mut Input<'_>) {
     let length = i64::from(input.src.word()).wrapping_sub(2);
     if length > 0 {
-        input.src.skip(length.unsigned_abs());
+        skip_input_data(input, length.unsigned_abs());
     }
+}
+
+/// The source manager's `skip_input_data`: a failure for a strict source.
+fn skip_input_data(input: &mut Input<'_>, count: u64) {
+    if input.strict {
+        input.failed = true;
+    }
+    input.src.skip(count);
 }
 
 /// `read_restart_marker`, with `jpeg_resync_to_restart` for when the marker
@@ -499,6 +529,10 @@ pub(super) fn read_restart_marker(input: &mut Input<'_>) {
 /// leave it for the entropy decoder to stop at, depending on how far it is
 /// from the restart marker wanted.
 fn resync_to_restart(input: &mut Input<'_>, desired: u8) {
+    // A strict source's `resync_to_restart` is an error.
+    if input.strict {
+        input.failed = true;
+    }
     // JWRN_MUST_RESYNC.
     input.warn();
     let rst = |offset: u8| 0xD0u8.wrapping_add(desired.wrapping_add(offset) & 7);

@@ -1,0 +1,1 @@
+REFUSED read: PixarLog compression can't handle bits depth/data format combination (depth: 8)

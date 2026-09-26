@@ -136,6 +136,11 @@
 #![no_std]
 
 extern crate alloc;
+// The tests' stub drivers count what the loader does to them in
+// `thread_local!` cells -- libtest runs each test on a thread of its own, so
+// that is per-test state with no lock -- and `thread_local!` is `std`'s.
+#[cfg(test)]
+extern crate std;
 
 pub mod device;
 pub mod dispatch;

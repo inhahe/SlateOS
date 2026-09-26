@@ -16,6 +16,18 @@ use crate::{Image, ImageError, ImageResult};
 pub(crate) trait Sink {
     /// The pixel at `(x, y)` of the picture is `argb`.
     fn put(&mut self, x: u32, y: u32, argb: u32);
+
+    /// A row's worth at once: `argb[i]` is the pixel at
+    /// `(x_start + i * x_step, y)` — a whole row of a plain picture, or one
+    /// Adam7 pass's share of a row. The same as [`Sink::put`] for each
+    /// pixel, which is what this does unless a sink can do better.
+    fn put_row(&mut self, y: u32, x_start: u32, x_step: u32, argb: &[u32]) {
+        let mut x = x_start;
+        for &px in argb {
+            self.put(x, y, px);
+            x = x.saturating_add(x_step);
+        }
+    }
 }
 
 /// A picture no larger than a thumbnail, each cell the average of the source

@@ -40,6 +40,9 @@ osfont = { path = "../font" }
 # ordinary dependency when building tests.
 appearance = { path = "../appearance", features = ["testing"] }
 settingsfile = { path = "../settingsfile", features = ["testing"] }
+# `osfont::testing::colour_face`, a face with a colour glyph, so the colour
+# path from `blit_run` to the backend is tested without a real emoji font.
+osfont = { path = "../font", features = ["testing"] }
 
 [lints]
 workspace = true

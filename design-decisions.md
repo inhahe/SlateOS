@@ -11571,6 +11571,202 @@ in, which is what lossless means. Then 256 lossless seeds -- those, `cjpeg
 -lossless` at twelve settings, and 140 random layouts -- and 20,000 mutants of
 them, without a disagreement.
 
+## 1319. imagecodec reaches SSE2 through `#[target_feature]`: the crate's first `unsafe`, two call sites, each exact to the scalar code beside it
+
+**Date:** 2026-09-26
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** a JPEG photograph took three times as long to decode here as
+in a browser. The two steps that cost the most after the entropy decoding --
+undoing the compression's transform, and converting the colours -- are
+exactly the work a processor's vector instructions exist for, and the
+compiler would not use them on its own for this code. So the decoder now
+uses them directly, which Rust allows only through `unsafe`: two lines, each
+a call into a function that may run only on a processor with SSE2 -- every
+64-bit PC has it, and the build turns it on. The pictures are unchanged to
+the bit; a 21-megapixel photograph decodes in about 0.84 billion cycles
+where it took 1.80 (libjpeg-turbo: 0.62).
+
+**Decision.** `jpeg/idct/sse2.rs` and `jpeg/color/sse2.rs` are
+`#[target_feature(enable = "sse2")]` functions written with `core::arch`
+intrinsics, which are safe to call inside such a function; values go in and
+out by value, so there are no pointers. `idct::inverse` and
+`color::ycc_argb` reach them through one `unsafe` call each, compiled only
+under `cfg(all(target_arch = "x86_64", target_feature = "sse2"))`: the
+SlateOS target enables SSE2 for the whole build, and a build without it
+(`x86_64-unknown-none`) compiles the scalar code alone.
+
+Exactness is the point, and each is held to the scalar code, not merely
+near it:
+
+* The inverse DCT follows libjpeg's C arithmetic, not libjpeg-turbo's SIMD.
+  It checks every dequantised coefficient and every value between its two
+  passes against a bound (16,383) under which nothing it computes can
+  overflow its lane, and hands the block to the 64-bit scalar transform
+  when one is past it -- a corrupt file's block; no encoder makes one. Its
+  output stage masks to ten bits and maps them as the C code's range-limit
+  table does, where libjpeg-turbo's SIMD saturates.
+* The colour conversion computes libjpeg's table entries arithmetically,
+  each constant over 2^16 split so every multiplication is 16-bit; a test
+  compares all 2^24 inputs with the tables.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| Portable code the compiler vectorises (what the WebP decoder does) | no `unsafe` | tried first: the transform over `[i32; 8]` lanes compiled to scalar multiplies and array copies and was *slower* than the scalar code; the conversion compiled to a branchy scalar loop at ~16 cycles a pixel. SSE2 has no 32-bit lane multiply, and the compiler did not find `pmaddwd` |
+| Stay scalar | nothing to audit | roughly 0.7 billion cycles more per photograph; the decode is what an image viewer's wait is made of |
+| Match libjpeg-turbo's SIMD, not its C code | Chrome's and Pillow's arithmetic on x86, corrupt files included | the C code is the reference that agrees with itself on every machine, and what this port and its oracle follow (§1318) |
+
+**Measured** (thread cycles, 4000x5333 4:2:0, billions): 1.80 before;
+1.62 with the entropy decoder's bulk fills; 1.11 with the SSE2 transform;
+1.02 with the conversion written straight into `0xAARRGGBB` pixels (no row
+of bytes between); 0.86 with the SSE2 conversion; 0.84 with the bit buffer
+held in locals.
+Held to libjpeg-turbo 3.1.1's C build on its 402 seeds and 4,000 mutants at
+every reduced size, to libtiff on 3,000 mutated JPEG and old-JPEG TIFFs,
+and by tests that fail if a constant or the bound is wrong (both were
+tried).
+
+**How to reverse.** Delete the two `sse2.rs` modules and the two `cfg`
+blocks that call them; the scalar code is still there and still the
+fallback.
+
+## 1320. Face fallback: a line is drawn from as many faces as it needs, chosen a grapheme cluster at a time, shaped per face with the paragraph's levels
+
+**Date:** 2026-09-26
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** text was drawn from exactly one face per family, so every
+character the UI face lacks -- an emoji, an Arabic name, a CJK file name, an
+arrow -- came out as a box, whatever other fonts were installed. Now a font
+carries an ordered list of fallback faces, and each character the face lacks
+is drawn from the first fallback that has it. The toolkit and the compositor
+still shape, measure and draw one run, so nothing that walks text had to
+change, and a line the UI face covers is shaped exactly as before.
+
+**Decision.**
+
+* **Where:** in `osfont::system::SystemFont` (`with_fallbacks`) and
+  `FontCache` (`set_fallbacks`), the one type the toolkit and the compositor
+  both draw with -- not in the toolkit, so the two cannot fall back
+  differently. Which faces are the fallbacks is `FontDb`'s question and so
+  lane C's: `requests/f-cd-the-os-image-ships-no-fonts...` asks for an
+  `install_fallback_faces` beside `install_ui_faces`.
+* **The unit is the grapheme cluster** (`itemize.rs`, UAX #29's rules that
+  matter here): a letter and its accents, and an emoji sequence -- a flag, a
+  skin tone, a ZWJ family -- each go to one face, the first that has every
+  character in it, or failing that the first that has its first.
+* **Text or emoji presentation** decides the order faces are tried in: U+FE0F,
+  U+FE0E, then `Emoji_Presentation` (a generated table, `gen_emoji_tables.py`,
+  Unicode 16.0 like the crate's others). A colour face -- one with `COLR`,
+  `CBDT` or `sbix` -- goes first for a cluster asking for emoji and last
+  otherwise.
+* **One paragraph, several shapings.** The bidi levels are resolved over the
+  whole line; each face's stretch is shaped in its face with its share of
+  them (`ScaledFont::shape_leveled`, split out of `shape_with`), and the
+  drawing order is recomputed over the joined run. Within a stretch the
+  recomputed order is the stretch's own (a reversal swaps two glyphs according
+  to the levels between them only), so what each stretch's shaping did with
+  its order -- kerning charged across a reversal, marks placed against moving
+  pens -- stays right.
+* **A glyph names its face** in the key's high byte (`GlyphKey::in_face`), 0
+  being the font's own face: a font with no fallbacks makes the same keys as
+  before, bit for bit. Hence at most 255 fallbacks.
+* **Metrics** -- line height, ascent -- stay the font's own face's, as in every
+  browser: a fallback glyph that is taller overflows its line rather than
+  moving it.
+* **The built-in bitmap face takes no fallbacks**: it is keyed by character,
+  not glyph, and is what draws before there are faces to fall back to.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| Per character, not per cluster | simpler | splits `e` + accent and every emoji sequence across faces |
+| Shape each stretch as its own paragraph | no `shape_leveled` | an Arabic word in an English sentence resolves as its own RTL paragraph |
+| Fallback in the toolkit | the font list lives there | the compositor draws with its own cache; two implementations to keep agreeing |
+
+**How to reverse.** `SystemFont::with_fallbacks` and `FontCache::set_fallbacks`
+are the only entry points; a cache never given fallbacks behaves as before.
+
+## 1321. Colour glyphs: `COLR` versions 0 and 1 painted in floating point, premultiplied, to a picture that is cached per glyph and drawn beside the coverage masks
+
+**Date:** 2026-09-26
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** emoji came out as black silhouettes -- or as nothing -- because
+the glyph drawer only knew coverage masks tinted with the text colour, and an
+emoji font stores its pictures as recipes: layers of outlines, each in its own
+colour, or a graph of gradients, transforms and blend modes. Now a glyph whose
+face has a recipe for it is painted into a small colour picture, cached like
+the masks, and drawn as a picture by `draw_text` and by the compositor. Noto
+Color Emoji's vector build draws as Chrome draws it: measured against Edge on
+the same file, the differences are the edges a pixel-snapped glyph position
+moves, nothing inside a glyph.
+
+**Decision.**
+
+* **One renderer for both versions** (`osfont::colr::render`): version 0's
+  layers are painted as solid fills through the same path as version 1's
+  `PaintGlyph`, so there is one rasterizer, one blender and one set of limits.
+* **Floating point, premultiplied RGBA, gradients interpolated
+  premultiplied.** There is no reference rendering to match bit for bit, as
+  there is for the image codecs -- every engine rasterizes outlines its own
+  way -- so the arithmetic follows the specification's definitions rather
+  than any one engine's integer shortcuts, and the check is against Skia's
+  output (Edge, `target/colr_compare.py`) rather than to the bit.
+* **fontTools' conventions where the specification leaves room**, since the
+  fonts are built with fontTools: skew by `tan(-x)` and `tan(y)`, rotation
+  counter-clockwise, a transform's paint drawn in the space it transforms
+  (innermost first), and sweep angles stored less half a turn.
+* **The canvas is the glyph's clip box, or the union of its outlines' boxes**,
+  snapped to whole pixels with a 1/256-pixel allowance, so float error in a
+  transform does not cost a column of empty pixels.
+* **Cost:** a layer is rasterized over the pixels its box touches; a fill
+  under a `PaintGlyph` (through transforms) is evaluated only where the
+  outline covers; only a `PaintGlyph` over a more complicated graph, and a
+  composite, get a scratch canvas. About a millisecond per 64-px emoji the
+  first time, then a cached blit.
+* **Hostile fonts cost a bounded amount:** depth 64, 20 000 paint visits,
+  64 touches per canvas pixel, four canvases alive at once, a 1024x1024 cap
+  on the glyph (bigger draws the outline instead). Every offset is checked; a
+  mutation fuzz of every paint format is a unit test.
+* **The text colour is not an ingredient of the cache key unless the glyph
+  used it** (`ColourImage::uses_foreground`): palette entry `0xFFFF` is the
+  text colour, a glyph that paints with it is drawn again for another colour,
+  and one that does not -- most emoji -- is drawn once for every colour of
+  text. The text colour's *alpha* is applied to the finished picture as an
+  opacity, not passed in, or a half-transparent text colour would be applied
+  twice to what used it.
+* **A separate cache** in `ScaledFont`, with a pixel ceiling (16 MiB) as well
+  as a count, since a colour glyph weighs four bytes a pixel to a mask's one.
+* **The compositor gets a `draw_colour_glyph` primitive** on its
+  `RenderTarget` seam, beside `draw_glyph`: a GPU backend keeps these in a
+  colour atlas beside the coverage one. The software backend unpremultiplies
+  each pixel into its existing `blend_pixel`, so a colour glyph goes through
+  the same clip, frame clip and window opacity as everything else.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| Fixed-point arithmetic, as for the codecs | deterministic across machines | no reference to be exact *to*; costs clarity for nothing measurable |
+| Render every layer to its own canvas and composite | the specification's model, literally | a scratch canvas per layer, where most layers are one fill in one outline |
+| Draw the text colour's alpha into the picture | one fewer parameter | applied twice where the glyph used the text colour; a cache entry per alpha |
+| Rasterize the picture at draw time, no cache | nothing to invalidate | a millisecond per emoji per frame |
+
+**Not modelled** (`known-issues.md` [F] 2026-09-26): variation deltas in a
+variable `COLR`; palettes other than the first; a `PaintColrGlyph`'s clip
+box; colour *bitmaps* (`CBDT`, `sbix`).
+
+**How to reverse.** `ScaledFont::colour_glyph` and `SystemFont::glyph_image`
+are the only ways in; a face without `COLR` never reaches the renderer, and
+without them every glyph is drawn from its mask as before.
+
 ## §200 — The B-KNULLJUMP hunt runs the *uninstrumented* kernel first (E), and escalates to the optimized KASAN build (A) only if that fails to settle it
 
 **Date:** 2026-08-15

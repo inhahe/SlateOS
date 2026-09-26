@@ -24339,6 +24339,28 @@ no Landlock functions.
   every ruleset was then refused -- `B-D-LANDLOCK-SAID-YES-THEN-NO` (new,
   fixed with it).
 
+**Thirty-seventh pass, 2026-09-26 — `fts.rs` and `ftw.rs` (2 sites each),
+lane D.** Against glibc 2.39's io/fts.c and io/ftw.c, on which both files
+were rebuilt on 2026-09-25 and 26 -- but their NULLs had not been put to
+them.
+
+- **`fts_open(NULL, …)`** was `EFAULT` before the options were looked at;
+  glibc judges the options, allocates the stream, and faults only when it
+  reads `argv`. A bad option beside a NULL list is `EINVAL` now. The same
+  reading found an invented check: `fts_open` refused both and neither of
+  `FTS_LOGICAL` and `FTS_PHYSICAL`, because the manual page says one must be
+  given. glibc checks neither -- `FTS_LOGICAL` makes the walk logical, and
+  without it the walk is physical -- so a program that gave neither worked
+  there and failed here. Removed.
+- **`fts_set(sp, NULL, …)`** was `EFAULT` before the instruction was
+  judged, and a NULL `sp` was `EBADF`; glibc judges the instruction first
+  and never reads `sp`. Both are glibc's now, and `fts_children` judges its
+  instruction before its stream.
+- **`ftw(NULL, …)`, `nftw(NULL, …)`** were right: glibc reads `dir[0]`
+  first, after `nftw`'s flags. Their callback is another matter -- it could
+  not be NULL at all, and nor could a dozen others; that is the
+  thirty-ninth pass.
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24352,18 +24374,16 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-thirty-six swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
+thirty-seven swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
 `sched.rs`, `mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`,
 `linux_module.rs`, `sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs`, `sysv_sem.rs`,
 `linux_aio_abi.rs`, `linux_seccomp.rs`, `mman.rs`, `resource.rs`, `crypt.rs`,
 `iconv.rs`, `linux_io_uring.rs`, `sysv_shm.rs`, `sys_quota.rs`,
-`sys_timex.rs` and `linux_landlock.rs`. That finishes every file the sweep
-counted at four and at three, the three the recount of 2026-09-26 added among
-them: `pwd.rs`, `dirent.rs` and `signal.rs` needed nothing at their NULLs --
-`pwd.rs`'s database did (`B-D-PWD-KNEW-ONLY-ROOT`). Of the files at two,
-`sysv_shm.rs`, `sys_quota.rs`, `sys_timex.rs` and `linux_landlock.rs` are
-done; next are `fts.rs`, `ftw.rs` and `xattr.rs` (walked by the fourth
-pass).
+`sys_timex.rs`, `linux_landlock.rs`, `fts.rs` and `ftw.rs`. That finishes
+every file the sweep counted at four and at three, the three the recount of
+2026-09-26 added among them: `pwd.rs`, `dirent.rs` and `signal.rs` needed
+nothing at their NULLs -- `pwd.rs`'s database did (`B-D-PWD-KNEW-ONLY-ROOT`).
+Of the files at two, only `xattr.rs` (walked by the fourth pass) is left.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL

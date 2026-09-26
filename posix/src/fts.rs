@@ -59,9 +59,9 @@
 //!   read.
 //! - `fts_symfd` is always -1, since there is no directory to return to.
 //! - A NULL `ftsp` or `FTSENT *` is refused with `EBADF`/`EFAULT` rather than
-//!   dereferenced.
-//! - `fts_open` insists on exactly one of [`FTS_LOGICAL`] and
-//!   [`FTS_PHYSICAL`], as the manual page says it must.
+//!   dereferenced -- after whatever glibc checks before it would touch it, so
+//!   a call wrong in two ways gets glibc's answer. `fts_set` never reads its
+//!   stream, here or in glibc, so a NULL one is no error there.
 //!
 //! ## Testing
 //!
@@ -895,11 +895,14 @@ fn sort(sp: &mut Stream, head: *mut FtsEnt, nitems: usize, compar: FtsCompar) ->
 
 /// Open a traversal of the NULL-terminated list of paths `argv`.
 ///
-/// `options` must include exactly one of [`FTS_LOGICAL`] and
-/// [`FTS_PHYSICAL`], and nothing outside [`FTS_OPTIONMASK`]; otherwise
-/// `EINVAL`. An empty path is `ENOENT`, as in glibc. An empty list is a
-/// traversal that ends at once. `compar`, if given, orders the roots and the
-/// entries of every directory.
+/// A bit outside [`FTS_OPTIONMASK`] is `EINVAL`, before `argv` is read, as
+/// in glibc. [`FTS_LOGICAL`] follows every symlink, and without it the walk
+/// is physical: the manual page says to give exactly one of it and
+/// [`FTS_PHYSICAL`], but glibc checks neither, so a program that gives both
+/// or neither works there -- and here, since 2026-09-26; it was `EINVAL`. An
+/// empty path is `ENOENT`, as in glibc. An empty list is a traversal that
+/// ends at once. `compar`, if given, orders the roots and the entries of
+/// every directory.
 ///
 /// Returns the stream, or NULL with `errno` set.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -918,15 +921,7 @@ pub(crate) fn open_with(
     compar: Option<FtsCompar>,
     ops: &'static FsOps,
 ) -> *mut Fts {
-    if argv.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return core::ptr::null_mut();
-    }
     if options & !FTS_OPTIONMASK != 0 {
-        errno::set_errno(errno::EINVAL);
-        return core::ptr::null_mut();
-    }
-    if (options & FTS_LOGICAL != 0) == (options & FTS_PHYSICAL != 0) {
         errno::set_errno(errno::EINVAL);
         return core::ptr::null_mut();
     }
@@ -975,6 +970,12 @@ pub(crate) fn open_with(
 /// Build the root list under an invisible root parent, and the `FTS_INIT`
 /// entry `fts_read` starts from (glibc's `fts_open` body).
 fn populate(sp: &mut Stream, argv: *const *const u8) -> Result<(), i32> {
+    // glibc reads `argv` first here, after the options and the stream's
+    // allocation (`fts_maxarglen`), and a NULL faults; EFAULT is this libc's
+    // substitute for the fault.
+    if argv.is_null() {
+        return Err(errno::EFAULT);
+    }
     // The buffer must hold the longest root; `grow_path` adds 256.
     let mut longest = 0usize;
     let mut n = 0usize;
@@ -1267,12 +1268,13 @@ unsafe fn name_and_return(sp: &mut Stream, p: *mut FtsEnt) -> *mut FtsEnt {
 /// following `fts_read` walks it rather than reading the directory again.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fts_children(ftsp: *mut Fts, instr: i32) -> *mut FtsEnt {
-    if ftsp.is_null() {
-        errno::set_errno(errno::EBADF);
-        return core::ptr::null_mut();
-    }
+    // glibc judges `instr` before it reads the stream.
     if instr != 0 && instr != FTS_NAMEONLY {
         errno::set_errno(errno::EINVAL);
+        return core::ptr::null_mut();
+    }
+    if ftsp.is_null() {
+        errno::set_errno(errno::EBADF);
         return core::ptr::null_mut();
     }
     // SAFETY: a stream from `fts_open`.
@@ -1309,20 +1311,18 @@ pub extern "C" fn fts_children(ftsp: *mut Fts, instr: i32) -> *mut FtsEnt {
 /// instruction, as in glibc).
 ///
 /// Returns 0, or — glibc's value, not the `-1` its manual page states — 1
-/// with `errno` `EINVAL` for any other instruction; `EBADF`/`EFAULT` for a
-/// NULL stream or entry.
+/// with `errno` `EINVAL` for any other instruction, and then 1 with `EFAULT`
+/// for a NULL entry, where glibc faults. The stream is not used, here or in
+/// glibc ("it would be necessary if anyone wanted to add global semantics"),
+/// so a NULL one is no error; it was `EBADF` until 2026-09-26.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fts_set(ftsp: *mut Fts, p: *mut FtsEnt, instr: i32) -> i32 {
-    if ftsp.is_null() {
-        errno::set_errno(errno::EBADF);
+pub extern "C" fn fts_set(_ftsp: *mut Fts, p: *mut FtsEnt, instr: i32) -> i32 {
+    if !matches!(instr, 0 | FTS_AGAIN | FTS_FOLLOW | FTS_NOINSTR | FTS_SKIP) {
+        errno::set_errno(errno::EINVAL);
         return 1;
     }
     if p.is_null() {
         errno::set_errno(errno::EFAULT);
-        return 1;
-    }
-    if !matches!(instr, 0 | FTS_AGAIN | FTS_FOLLOW | FTS_NOINSTR | FTS_SKIP) {
-        errno::set_errno(errno::EINVAL);
         return 1;
     }
     // SAFETY: a live entry of this stream (the caller's contract). 0 is
@@ -1873,12 +1873,23 @@ mod tests {
     #[test]
     fn open_refuses_what_it_must() {
         reset();
+        let before = crate::malloc::live_allocations::count();
         errno::set_errno(0);
         assert!(open_with(core::ptr::null(), FTS_PHYSICAL, None, &MEM_OPS).is_null());
         assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(
+            crate::malloc::live_allocations::count(),
+            before,
+            "the stream allocated before argv was read is freed"
+        );
+        // glibc judges the options before it reads `argv`: a call wrong both
+        // ways is EINVAL.  It was EFAULT until 2026-09-26.
+        errno::set_errno(0);
+        assert!(open_with(core::ptr::null(), FTS_PHYSICAL | 0x400, None, &MEM_OPS).is_null());
+        assert_eq!(errno::get_errno(), errno::EINVAL);
 
         let (_o, ptrs) = cstrings(&["x"]);
-        for bad in [0, FTS_LOGICAL | FTS_PHYSICAL, FTS_PHYSICAL | 0x400] {
+        for bad in [FTS_PHYSICAL | 0x400, FTS_LOGICAL | FTS_NAMEONLY, i32::MIN] {
             errno::set_errno(0);
             assert!(
                 open_with(ptrs.as_ptr(), bad, None, &MEM_OPS).is_null(),
@@ -1917,6 +1928,25 @@ mod tests {
         assert_eq!(opts & FTS_NOCHDIR, FTS_NOCHDIR);
         assert_eq!(opts & FTS_PHYSICAL, FTS_PHYSICAL);
         assert_eq!(fts_close(sp), 0);
+    }
+
+    /// The manual page says to give exactly one of FTS_LOGICAL and
+    /// FTS_PHYSICAL; glibc checks neither, and walks logically when
+    /// FTS_LOGICAL is given and physically when it is not.  Both and neither
+    /// were EINVAL until 2026-09-26.
+    #[test]
+    fn logical_decides_the_walk_and_neither_flag_is_required() {
+        reset();
+        mk("t", Kind::Dir);
+        mk("t/f", Kind::File);
+        mk("t/tofile", Kind::Link("/t/f"));
+        let neither = paths(&walk(&["t"], 0, None));
+        assert!(
+            neither.contains(&p(FTS_SL, "t/tofile")),
+            "neither: physical"
+        );
+        let both = paths(&walk(&["t"], FTS_LOGICAL | FTS_PHYSICAL, None));
+        assert!(both.contains(&p(FTS_F, "t/tofile")), "both: logical");
     }
 
     // -----------------------------------------------------------------------
@@ -2226,10 +2256,31 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(fts_set(sp, e, 99), 1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+        // glibc judges the instruction before it writes through the entry.
+        errno::set_errno(0);
+        assert_eq!(fts_set(sp, core::ptr::null_mut(), 99), 1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        errno::set_errno(0);
         assert_eq!(fts_set(sp, core::ptr::null_mut(), FTS_SKIP), 1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
-        assert_eq!(fts_set(core::ptr::null_mut(), e, FTS_SKIP), 1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
+        assert_eq!(fts_close(sp), 0);
+    }
+
+    /// glibc's `fts_set` never reads its stream, so a NULL one is no error
+    /// and the instruction lands.  It was EBADF until 2026-09-26.
+    #[test]
+    fn set_does_not_need_the_stream() {
+        small_tree();
+        let sp = open(&["t"], FTS_PHYSICAL, None);
+        let root = fts_read(sp);
+        assert_eq!(copy_out(root).info, FTS_D);
+        errno::set_errno(0);
+        assert_eq!(fts_set(core::ptr::null_mut(), root, FTS_SKIP), 0);
+        assert_eq!(errno::get_errno(), 0);
+        let after = fts_read(sp);
+        assert_eq!(after, root, "the skipped directory's post-order visit");
+        assert_eq!(copy_out(after).info, FTS_DP);
+        assert!(fts_read(sp).is_null(), "and nothing under it");
         assert_eq!(fts_close(sp), 0);
     }
 
@@ -2529,6 +2580,10 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EBADF);
         assert!(fts_children(core::ptr::null_mut(), 0).is_null());
         assert_eq!(errno::get_errno(), errno::EBADF);
+        // glibc judges `instr` before it reads the stream.
+        errno::set_errno(0);
+        assert!(fts_children(core::ptr::null_mut(), 5).is_null());
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     /// The real filesystem path is the one `fts_open` uses; on the host its

@@ -1,0 +1,17 @@
+[package]
+name = "smartcols"
+version = "0.1.0"
+edition = "2024"
+description = "libsmartcols, util-linux's table printer, ported: widths, trees, raw/export/JSON"
+
+[lints]
+workspace = true
+
+[dependencies]
+# mbrtowc (`next_mb`) and iswprint (`printable_char`), as every port here
+# decodes and escapes text.
+quoting = { path = "../quoting" }
+# wcwidth, measured against glibc.
+charwidth = { path = "../charwidth" }
+# `get_env_int`'s strtol, for COLUMNS and LINES.
+ulstrutils = { path = "../ulstrutils" }

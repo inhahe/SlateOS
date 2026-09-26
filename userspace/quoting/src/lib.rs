@@ -270,7 +270,13 @@ impl Piece {
 /// (§101) leaves U+2028 raw. The two are allowed to differ: osh is quoting
 /// *for re-execution by a shell*, where a separator is an ordinary character,
 /// and coreutils is quoting *for a human reading a line-oriented stream*.
-fn printable_char(c: char) -> bool {
+///
+/// Public because it is `iswprint` for every port that measures or escapes
+/// text the way glibc does -- `smartcols`' `mbs_safe_encode` among them --
+/// and a second answer to "is this printable?" would be a second place for the
+/// two to drift apart.
+#[must_use]
+pub fn printable_char(c: char) -> bool {
     !c.is_control() && c != '\u{2028}' && c != '\u{2029}'
 }
 

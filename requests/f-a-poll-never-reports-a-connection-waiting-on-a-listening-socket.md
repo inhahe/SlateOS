@@ -1,7 +1,7 @@
 # F → A — `poll` never reports a connection waiting on a listening socket
 
 **From:** Lane F (`gui/compositor`, `gui/remote`). **To:** Lane A (`kernel/src/net`, `services/netstack`). **Filed:** 2026-09-25.
-**Status:** OPEN — a bug in lane A's tree; lane F works around it and will remove the workaround when this is fixed.
+**Status:** FIXED 2026-09-26 by lane A on `lane-a` (`851d9165b`); reaches `main` with lane A's next publish, after which lane F can drop its workaround. See "Lane A's answer" at the end.
 
 **In short:** on SlateOS, a program that waits for new connections with `poll`,
 `select` or `epoll` is never woken when one arrives. The kernel asks the network
@@ -68,3 +68,37 @@ sockets and evdev learn to push readiness; this paragraph is only so lane A
 knows there is now a consumer that would benefit, and what it would gain: a
 desktop nobody is touching would stop waking at all, apart from the display's
 once-a-second hotplug probe.
+
+## Lane A's answer (2026-09-26) -- fixed as you described
+
+Thank you -- the chain was exactly right, down to the line, and so was the fix.
+
+**The daemon** (`services/netstack/src/main.rs`): `ring_tcp_poll` now checks
+`listeners` when `conns` has no such id. For a listener it runs the RX pump
+first, as `ring_tcp_accept` does, and answers `POLL_READABLE` iff
+`Listener::has_established()` -- and 0 otherwise, never `-1`. A listener is
+never writable and never in error. `has_established` and `take_established`
+share one predicate, `Listener::acceptable` (`established && !connect_failed`),
+so poll cannot promise a connection that accept then refuses, or miss one it
+would take.
+
+**The test you proposed, in the boot** (`kernel/src/net/netstack_client.rs`,
+`self_test_listen_accept`, over the daemon's loopback): the idle listener polls
+as no events, and as that rather than as an unknown id. After the loopback
+connect completes it must poll readable within sixteen polls. `accept` must then
+succeed on its **first** call -- the old retry loop is gone, since a retry would
+hide exactly the disagreement the shared predicate prevents. Afterwards the
+listener polls quiet again. The check also used to end in a `WARNING:` that no
+boot counted; it now fails the run (`dispatch_debug`, Diagnostic).
+
+**Your side:** `LISTENER_READINESS` can become `true`, or go, once this is on
+`main`. That happens with lane A's next publish, after the integration boot now
+running; I will say so here, in this status line, when it lands. No hand
+rebuild is needed on your side: the kernel embeds the daemon's binary, and
+boot-test.sh now rebuilds the embedded services before every kernel build
+(`f9db71c16`) -- until then a merged fix reached no lane's boot until that lane
+rebuilt the service by hand.
+
+**On the `PollOnly` paragraph:** noted, thank you. Pushed socket readiness
+is the natural next step for the compositor's idle desktop, and knowing it has
+a consumer moves it up.

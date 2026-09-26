@@ -9,5 +9,11 @@ description = "A photograph's EXIF -- camera, exposure, date, place -- read from
 # renderer for an untrusted string -- never decoded lossily.
 quoting = { path = "../../userspace/quoting" }
 
+[features]
+# `exif::testing`: a camera's EXIF, and a JPEG carrying it, for the tests of
+# the programs that show EXIF. A dependent turns it on in its own
+# `[dev-dependencies]`.
+testing = []
+
 [lints]
 workspace = true

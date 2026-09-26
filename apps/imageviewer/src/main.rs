@@ -4556,52 +4556,16 @@ the picture at once, which reads as D advancing the slideshow"
         assert!(!looks_like_svg(b"not a drawing at all"));
     }
 
-    /// A TIFF structure holding a camera's EXIF: the make, and in the Exif
-    /// directory an ISO, an aperture and the date it was taken.
-    fn camera_exif() -> Vec<u8> {
-        let mut t: Vec<u8> = b"II".to_vec();
-        t.extend_from_slice(&42u16.to_le_bytes());
-        t.extend_from_slice(&8u32.to_le_bytes());
-        // IFD0 at 8 (30 bytes), the Exif directory at 38 (42 bytes), then the
-        // values that do not fit in an entry.
-        let (make_at, fnum_at, date_at) = (80u32, 86u32, 94u32);
-        let entry = |t: &mut Vec<u8>, tag: u16, kind: u16, count: u32, value: u32| {
-            t.extend_from_slice(&tag.to_le_bytes());
-            t.extend_from_slice(&kind.to_le_bytes());
-            t.extend_from_slice(&count.to_le_bytes());
-            t.extend_from_slice(&value.to_le_bytes());
-        };
-        t.extend_from_slice(&2u16.to_le_bytes());
-        entry(&mut t, 0x010F, 2, 6, make_at);
-        entry(&mut t, 0x8769, 4, 1, 38);
-        t.extend_from_slice(&0u32.to_le_bytes());
-        t.extend_from_slice(&3u16.to_le_bytes());
-        entry(&mut t, 0x8827, 3, 1, 400);
-        entry(&mut t, 0x829D, 5, 1, fnum_at);
-        entry(&mut t, 0x9003, 2, 20, date_at);
-        t.extend_from_slice(&0u32.to_le_bytes());
-        assert_eq!(t.len(), make_at as usize);
-        t.extend_from_slice(b"Canon\0");
-        t.extend_from_slice(&28u32.to_le_bytes());
-        t.extend_from_slice(&10u32.to_le_bytes());
-        t.extend_from_slice(b"2025:06:15 14:30:22\0");
-        t
-    }
-
     /// **The info panel tells the camera's story**: the EXIF fields it drew
     /// when present were filled by nothing, for every photograph.
     #[test]
     fn the_info_panel_shows_the_cameras_exif() {
         let guard = scratch("exif");
         let file = guard.dir().join("photo.jpg");
-        let jpeg = imagecodec::testing::SMALL_JPEG;
-        let tiff = camera_exif();
-        let mut data = jpeg[..2].to_vec();
-        data.extend_from_slice(&[0xFF, 0xE1]);
-        data.extend_from_slice(&u16::try_from(2 + 6 + tiff.len()).unwrap().to_be_bytes());
-        data.extend_from_slice(b"Exif\0\0");
-        data.extend_from_slice(&tiff);
-        data.extend_from_slice(&jpeg[2..]);
+        let data = exif::testing::with_exif(
+            imagecodec::testing::SMALL_JPEG,
+            &exif::testing::camera_tiff(),
+        );
         std::fs::write(&file, &data).expect("write");
         let mut state = ViewerState::new(1024.0, 768.0);
         assert_eq!(

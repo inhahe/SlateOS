@@ -645,3 +645,6 @@ fn degrees(tiff: Tiff<'_>, value: Value<'_>) -> Option<f64> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;

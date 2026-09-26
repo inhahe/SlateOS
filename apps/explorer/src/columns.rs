@@ -87,6 +87,9 @@ impl ColumnId {
     pub const DIMENSIONS: Self = Self(100);
     pub const COLOR_DEPTH: Self = Self(101);
     pub const ASPECT_RATIO: Self = Self(102);
+    pub const CAMERA: Self = Self(103);
+    pub const DATE_TAKEN: Self = Self(104);
+    pub const ORIENTATION: Self = Self(105);
 
     // Audio
     pub const DURATION: Self = Self(200);
@@ -925,6 +928,40 @@ impl ImageColumns {
                 visible: false,
                 category: ColumnCategory::Image,
             },
+            ColumnDef {
+                id: ColumnId::CAMERA,
+                key: "camera",
+                label: "Camera".to_string(),
+                width: ColumnWidth::Fixed(140.0),
+                alignment: Alignment::Left,
+                sortable: true,
+                sort_order: SortOrder::None,
+                visible: false,
+                category: ColumnCategory::Image,
+            },
+            // Written `2025-06-15 14:30:22`, so text order is time order.
+            ColumnDef {
+                id: ColumnId::DATE_TAKEN,
+                key: "date_taken",
+                label: "Date Taken".to_string(),
+                width: ColumnWidth::Fixed(140.0),
+                alignment: Alignment::Left,
+                sortable: true,
+                sort_order: SortOrder::None,
+                visible: false,
+                category: ColumnCategory::Image,
+            },
+            ColumnDef {
+                id: ColumnId::ORIENTATION,
+                key: "orientation",
+                label: "Orientation".to_string(),
+                width: ColumnWidth::Fixed(130.0),
+                alignment: Alignment::Left,
+                sortable: true,
+                sort_order: SortOrder::None,
+                visible: false,
+                category: ColumnCategory::Image,
+            },
         ]
     }
 }
@@ -940,13 +977,29 @@ impl ColumnProvider for ImageColumns {
     /// and the cell said "24-bit" for every picture.
     fn value(&self, path: &str, column_id: ColumnId) -> ColumnValue {
         static SIZES: OnceLock<FactCache<Option<(u32, u32)>>> = OnceLock::new();
+        static EXIFS: OnceLock<FactCache<Option<exif::ExifData>>> = OnceLock::new();
         let size = || {
             SIZES
                 .get_or_init(FactCache::new)
                 .get(path, image_size)
                 .flatten()
         };
+        let exif = || {
+            EXIFS
+                .get_or_init(FactCache::new)
+                .get(path, image_exif)
+                .flatten()
+        };
+        let text = |t: Option<String>| t.map_or(ColumnValue::Empty, ColumnValue::Text);
         match column_id {
+            ColumnId::CAMERA => text(exif().and_then(|e| e.camera())),
+            ColumnId::DATE_TAKEN => text(exif().and_then(|e| e.date_taken).map(|d| exif_date(&d))),
+            ColumnId::ORIENTATION => text(
+                exif()
+                    .and_then(|e| e.orientation)
+                    .and_then(orientation_words)
+                    .map(str::to_owned),
+            ),
             ColumnId::DIMENSIONS => size().map_or(ColumnValue::Empty, |(w, h)| {
                 ColumnValue::Text(format!("{w} \u{00d7} {h}"))
             }),
@@ -1460,6 +1513,53 @@ const IMAGE_HEAD_BYTES: usize = 64 * 1024;
 /// How much is read when the size is not in the first [`IMAGE_HEAD_BYTES`].
 /// A picture larger than this whose size lies past it is left blank.
 const IMAGE_WHOLE_BYTES: usize = 64 * 1024 * 1024;
+
+/// A picture's EXIF, or `None` if it is not a file that can hold one.
+///
+/// Read from the head of the file first, where a JPEG's and a PNG's are; a
+/// TIFF may keep its directories, and a WebP its EXIF chunk, anywhere -- a
+/// WebP's is usually after the picture -- so those are read whole when the
+/// head held none.
+fn image_exif(path: &str) -> Option<exif::ExifData> {
+    let head = read_prefix(path, IMAGE_HEAD_BYTES)?;
+    let found = exif::read(&head);
+    let anywhere = head.starts_with(b"II*\0")
+        || head.starts_with(b"MM\0*")
+        || (head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP"));
+    if !found.is_empty() || !anywhere || head.len() < IMAGE_HEAD_BYTES {
+        return Some(found);
+    }
+    read_prefix(path, IMAGE_WHOLE_BYTES).map(|whole| exif::read(&whole))
+}
+
+/// An EXIF date, `2025:06:15 14:30:22`, as the rest of the desktop writes one:
+/// `2025-06-15 14:30:22` -- which also sorts as text in time order. Anything
+/// else is shown as the file has it.
+fn exif_date(when: &str) -> String {
+    let b = when.as_bytes();
+    if b.len() >= 10 && b.get(4) == Some(&b':') && b.get(7) == Some(&b':') {
+        let (date, rest) = when.split_at(10);
+        format!("{}{rest}", date.replace(':', "-"))
+    } else {
+        when.to_owned()
+    }
+}
+
+/// What an EXIF orientation asks of a viewer, in the words the image viewer's
+/// info panel uses for its own turns.
+fn orientation_words(value: u16) -> Option<&'static str> {
+    Some(match value {
+        1 => "As stored",
+        2 => "Mirrored",
+        3 => "Upside down",
+        4 => "Flipped top to bottom",
+        5 => "Mirrored, turned left",
+        6 => "Turned right",
+        7 => "Mirrored, turned right",
+        8 => "Turned left",
+        _ => return None,
+    })
+}
 
 /// A picture's size, as shown -- `imagecodec` turns it by the orientation the
 /// file records -- or `None` if it is not a picture `imagecodec` measures.
@@ -3142,6 +3242,66 @@ mod tests {
         fn drop(&mut self) {
             drop(std::fs::remove_dir_all(&self.0));
         }
+    }
+
+    /// **A photograph's camera, date and turn are columns**, read from its
+    /// EXIF; a picture with none leaves them blank.
+    #[test]
+    fn a_photographs_exif_is_three_columns() {
+        let dir = Scratch::new("exif");
+        let photo = dir.file(
+            "photo.jpg",
+            &exif::testing::with_exif(
+                imagecodec::testing::SMALL_JPEG,
+                &exif::testing::camera_tiff(),
+            ),
+        );
+        let plain = dir.file("plain.png", &imagecodec::testing::png_gradient(4, 4));
+        let mgr = ColumnManager::with_defaults();
+        let text = |t: &str| ColumnValue::Text(String::from(t));
+        assert_eq!(
+            mgr.get_value(&photo, ColumnId::CAMERA),
+            text("Canon EOS R5")
+        );
+        assert_eq!(
+            mgr.get_value(&photo, ColumnId::DATE_TAKEN),
+            text("2025-06-15 14:30:22")
+        );
+        assert_eq!(
+            mgr.get_value(&photo, ColumnId::ORIENTATION),
+            text("Turned right")
+        );
+        for column in [
+            ColumnId::CAMERA,
+            ColumnId::DATE_TAKEN,
+            ColumnId::ORIENTATION,
+        ] {
+            assert_eq!(mgr.get_value(&plain, column), ColumnValue::Empty);
+        }
+        assert_eq!(orientation_words(9), None);
+        assert_eq!(exif_date("sometime"), "sometime");
+    }
+
+    /// A WebP keeps its EXIF after the picture, past the head of the file
+    /// that is read first: the rest is read for it.
+    #[test]
+    fn exif_past_the_head_of_a_webp_is_found() {
+        let dir = Scratch::new("exif-webp");
+        let tiff = exif::testing::camera_tiff();
+        let picture = vec![0x55_u8; IMAGE_HEAD_BYTES + 1000];
+        let mut data = b"RIFF\0\0\0\0WEBP".to_vec();
+        data.extend_from_slice(b"VP8L");
+        data.extend_from_slice(&u32::try_from(picture.len()).unwrap().to_le_bytes());
+        data.extend_from_slice(&picture);
+        data.extend_from_slice(b"EXIF");
+        data.extend_from_slice(&u32::try_from(tiff.len()).unwrap().to_le_bytes());
+        data.extend_from_slice(&tiff);
+        let photo = dir.file("late.webp", &data);
+        let mgr = ColumnManager::with_defaults();
+        assert_eq!(
+            mgr.get_value(&photo, ColumnId::CAMERA),
+            ColumnValue::Text(String::from("Canon EOS R5"))
+        );
     }
 
     #[test]

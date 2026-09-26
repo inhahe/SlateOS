@@ -40,6 +40,9 @@ byteread = { path = "../../byteread" }
 # TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE-ID-NAMES-NOTHING.
 imagecodec = { path = "../../gui/imagecodec" }
 
+# A photograph's EXIF, for the Camera, Date Taken and Orientation columns.
+exif = { path = "../exif" }
+
 # A zip archive's own directory, for the archive columns: how many files it
 # holds and what they take up. Read from the end of the file through
 # `ziparchive::parse_at`, without reading the rest.
@@ -73,6 +76,8 @@ thumbs = { path = "../../gui/thumbs" }
 offloop = { path = "../offloop" }
 
 [dev-dependencies]
+# `exif::testing`: a camera's EXIF, for the EXIF columns' tests.
+exif = { path = "../exif", features = ["testing"] }
 # Gzipped fixtures for the archive columns' tests.
 deflate = { path = "../../deflate" }
 # Test fixtures only: a private temp directory per test, removed on drop.

@@ -318,6 +318,21 @@ fn a_directory_pointing_at_itself_is_read_once() {
     assert_eq!(exif.camera_make, None, "a pointer below IFD0 was followed");
 }
 
+/// The fixture the viewer's and the file manager's tests use reads as it
+/// says it does.
+#[test]
+fn the_shared_fixture_reads_as_it_says() {
+    let exif = read(&testing::with_exif(
+        &[0xFF, 0xD8, 0xFF, 0xD9],
+        &testing::camera_tiff(),
+    ));
+    assert_eq!(exif.camera().as_deref(), Some("Canon EOS R5"));
+    assert_eq!(exif.orientation, Some(6));
+    assert_eq!(exif.iso, Some(400));
+    assert_eq!(exif.aperture, Some(2.8));
+    assert_eq!(exif.date_taken.as_deref(), Some("2025:06:15 14:30:22"));
+}
+
 /// A value that runs past the end is left out; so is one of the wrong type;
 /// an orientation outside 1 to 8 is no orientation.
 #[test]

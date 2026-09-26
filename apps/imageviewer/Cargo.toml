@@ -49,6 +49,8 @@ oswindow = { path = "../../gui/window" }
 # named from the process id and a counter, so two tests in one process can
 # never draw the same name the way a clock-tagged name could.
 [dev-dependencies]
+# `exif::testing`: a camera's EXIF, for the info panel's tests.
+exif = { path = "../exif", features = ["testing"] }
 # `appearance::palette_check`.
 appearance = { path = "../../gui/appearance", features = ["testing"] }
 scratchdir = { path = "../../userspace/scratchdir" }

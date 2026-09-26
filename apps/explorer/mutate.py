@@ -20,11 +20,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
 from mutation_harness import sweep  # noqa: E402  (path set above)
 
-SRC = Path(__file__).parent / "src" / "main.rs"
+SRC = Path(__file__).parent / "src"
 
 OFF = "thumbnails_are_made_off_the_window"
+EXIF = "a_photographs_exif_is_three_columns"
+LATE = "exif_past_the_head_of_a_webp_is_found"
 
-MUTATIONS = [
+MAIN = [
     (
         "no waker is asked for",
         "    fn wants_waker(&self) -> bool {\n        true",
@@ -57,6 +59,52 @@ MUTATIONS = [
     ),
 ]
 
+COLUMNS = [
+    (
+        "the camera column reads nothing",
+        "            ColumnId::CAMERA => text(exif().and_then(|e| e.camera())),",
+        "            ColumnId::CAMERA => ColumnValue::Empty,",
+        [EXIF],
+    ),
+    (
+        "the date column keeps the file's colons",
+        "            ColumnId::DATE_TAKEN => text(exif().and_then(|e| e.date_taken).map(|d| exif_date(&d))),",
+        "            ColumnId::DATE_TAKEN => text(exif().and_then(|e| e.date_taken)),",
+        [EXIF],
+    ),
+    (
+        "a turn right is called a turn left",
+        "        6 => \"Turned right\",",
+        "        6 => \"Turned left\",",
+        [EXIF],
+    ),
+    (
+        "EXIF past the head of the file is never looked for",
+        "    if !found.is_empty() || !anywhere || head.len() < IMAGE_HEAD_BYTES {",
+        "    if true {",
+        [LATE],
+    ),
+]
+
+TABLES = {
+    "main.rs": MAIN,
+    "columns.rs": COLUMNS,
+}
+
 if __name__ == "__main__":
-    only = sys.argv[1:] or None
-    raise SystemExit(sweep(SRC, MUTATIONS, "explorer", timeout=900, only=only))
+    only = sys.argv[1:]
+    names = [name for rows in TABLES.values() for name, *_ in rows]
+    unmatched = [o for o in only if not any(o in n for n in names)]
+    if unmatched:
+        print(f"{len(unmatched)} filter(s) name no row in any table:")
+        for o in unmatched:
+            print(f"  {o!r}")
+        raise SystemExit(2)
+    worst = 0
+    for file, rows in TABLES.items():
+        mine = [o for o in only if any(o in name for name, *_ in rows)]
+        if only and not mine:
+            continue
+        print(f"\n######## {file} ########")
+        worst = max(worst, sweep(SRC / file, rows, "explorer", timeout=900, only=mine))
+    raise SystemExit(worst)

@@ -834,6 +834,7 @@ dependencies = [
  "audiotags",
  "byteread",
  "deflate",
+ "exif",
  "guitk",
  "imagecodec",
  "mediaprobe",

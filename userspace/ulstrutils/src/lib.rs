@@ -13,11 +13,13 @@
 //!   1536, `1.5` is refused.
 //! * The two message shapes differ, and the difference is observable (see
 //!   [`num_error_message`] and [`size_error_message`]).
+//! * [`strtotimeval`] is `strtold` then two truncations toward zero, so
+//!   `0.0000001` is a zero timeout and `-1.5` is `{-1, -500000}`.
 //!
 //! Pure functions over bytes; no I/O. Callers wrap the messages in their own
 //! error types, because each program reports through its own diagnostic path.
 
-use quoting::quoteaf_os;
+use quoting::escaped_in_quotes_os;
 use std::ffi::OsStr;
 
 /// What went wrong in a C string-to-number conversion, which is `errno` and is
@@ -167,6 +169,299 @@ pub fn ul_strtos64(s: &[u8], base: u32) -> Result<i64, NumErr> {
     let magnitude = i128::try_from(sc.magnitude).map_err(|_| NumErr::Range)?;
     let value = if sc.negative { -magnitude } else { magnitude };
     i64::try_from(value).map_err(|_| NumErr::Range)
+}
+
+/// `ul_strtos32(str, &num, base)`: [`ul_strtos64`], then a range check to
+/// `int32_t`, which is `ERANGE` like an overflow.
+///
+/// # Errors
+///
+/// As [`ul_strtos64`], and [`NumErr::Range`] outside `i32`.
+pub fn ul_strtos32(s: &[u8], base: u32) -> Result<i32, NumErr> {
+    let wide = ul_strtos64(s, base)?;
+    i32::try_from(wide).map_err(|_| NumErr::Range)
+}
+
+/// A `struct timeval` as util-linux's `strtotimeval_or_err` builds one:
+/// `strtold`, then `tv_sec = (time_t) x` and `tv_usec = (suseconds_t)((x -
+/// tv_sec) * 1000000)` -- two truncations toward zero, so `1.9999999` is
+/// `{1, 999999}` and `-1.5` is `{-1, -500000}`.
+///
+/// `Ok(None)` is a number `time_t` cannot hold -- infinite, NaN, or at least
+/// 2^63 in size -- whose conversion C leaves undefined and x86-64 turns into
+/// `INT64_MIN`: a negative time, which every timer refuses. Callers report it
+/// as that refusal.
+///
+/// Decimal input is converted exactly, digit by digit, where upstream goes
+/// through an 80-bit `long double`; the two differ only for an input of more
+/// than about 18 significant digits that falls within a rounding error of a
+/// microsecond boundary. Hexadecimal input (`0x1p-3`) goes through `f64`.
+///
+/// # Errors
+///
+/// [`NumErr::Invalid`] for what `strtold` cannot read whole -- nothing,
+/// leading junk, anything left over; [`NumErr::Range`] for what it reads
+/// with `ERANGE`, a magnitude outside `long double`'s range.
+pub fn strtotimeval(s: &[u8]) -> Result<Option<(i64, i64)>, NumErr> {
+    match strtold(s)? {
+        LongDouble::NotFinite => Ok(None),
+        LongDouble::Hex(v) => Ok(timeval_of_f64(v)),
+        LongDouble::Decimal {
+            negative,
+            digits,
+            point,
+        } => Ok(timeval_of_decimal(negative, &digits, point)),
+    }
+}
+
+/// What `strtold` read: kept exact for a decimal number, so the conversion
+/// to a `timeval` can truncate exactly.
+enum LongDouble {
+    /// Infinity or NaN.
+    NotFinite,
+    /// A hexadecimal float, as `f64`.
+    Hex(f64),
+    /// `±0.DIGITS × 10^point`: the significant digits with no leading zero,
+    /// and where the decimal point falls among them. No digits is zero.
+    Decimal {
+        negative: bool,
+        digits: Vec<u8>,
+        point: i64,
+    },
+}
+
+/// `long double`'s range as a decimal exponent: `LDBL_MAX` is about
+/// 1.19e4932, and below about 3.6e-4951 even a subnormal is zero.
+const LDBL_MAX_10_EXP: i64 = 4932;
+const LDBL_TRUE_MIN_10_EXP: i64 = -4950;
+
+/// `strtold(s, &end)`, with `strtold_or_err`'s refusals: nothing read, or
+/// anything left after what was read, or `ERANGE`.
+fn strtold(s: &[u8]) -> Result<LongDouble, NumErr> {
+    let mut i = s.iter().take_while(|&&b| c_isspace(b)).count();
+    let mut negative = false;
+    match s.get(i) {
+        Some(b'-') => {
+            negative = true;
+            i = i.saturating_add(1);
+        }
+        Some(b'+') => i = i.saturating_add(1),
+        _ => {}
+    }
+    let rest = s.get(i..).unwrap_or_default();
+    let lower: Vec<u8> = rest.iter().map(u8::to_ascii_lowercase).collect();
+    if lower == b"inf" || lower == b"infinity" {
+        return Ok(LongDouble::NotFinite);
+    }
+    if let Some(after) = lower.strip_prefix(b"nan") {
+        // `nan` or `nan(n-char-sequence)`; anything else after it is left over.
+        let ok = after.is_empty()
+            || (after.first() == Some(&b'(')
+                && after.last() == Some(&b')')
+                && after
+                    .get(1..after.len().saturating_sub(1))
+                    .is_some_and(|m| m.iter().all(|&c| c.is_ascii_alphanumeric() || c == b'_')));
+        return if ok {
+            Ok(LongDouble::NotFinite)
+        } else {
+            Err(NumErr::Invalid)
+        };
+    }
+    if (lower.starts_with(b"0x"))
+        && lower.get(2).is_some_and(|&c| {
+            c.is_ascii_hexdigit() || (c == b'.' && lower.get(3).is_some_and(u8::is_ascii_hexdigit))
+        })
+    {
+        return hex_float(negative, lower.get(2..).unwrap_or_default());
+    }
+    decimal(negative, rest)
+}
+
+/// The decimal form: digits with at most one `.`, at least one digit, then
+/// an exponent only if a digit follows its `e` and sign.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "the exponent saturates at ±10^15, far past long double's range, and every sum below is of two such bounded values"
+)]
+fn decimal(negative: bool, s: &[u8]) -> Result<LongDouble, NumErr> {
+    let mut mantissa: Vec<u8> = Vec::new();
+    let mut point: Option<usize> = None;
+    let mut i = 0usize;
+    let mut any_digit = false;
+    while let Some(&c) = s.get(i) {
+        if c.is_ascii_digit() {
+            any_digit = true;
+            mantissa.push(c - b'0');
+        } else if c == b'.' && point.is_none() {
+            point = Some(mantissa.len());
+        } else {
+            break;
+        }
+        i += 1;
+    }
+    if !any_digit {
+        return Err(NumErr::Invalid);
+    }
+    let mut exponent: i64 = 0;
+    if matches!(s.get(i), Some(b'e' | b'E')) {
+        let mut j = i + 1;
+        let mut exp_negative = false;
+        match s.get(j) {
+            Some(b'-') => {
+                exp_negative = true;
+                j += 1;
+            }
+            Some(b'+') => j += 1,
+            _ => {}
+        }
+        if s.get(j).is_some_and(u8::is_ascii_digit) {
+            while let Some(&c) = s.get(j) {
+                if !c.is_ascii_digit() {
+                    break;
+                }
+                exponent = (exponent * 10 + i64::from(c - b'0')).min(1_000_000_000_000_000);
+                j += 1;
+            }
+            if exp_negative {
+                exponent = -exponent;
+            }
+            i = j;
+        }
+    }
+    if i != s.len() {
+        return Err(NumErr::Invalid);
+    }
+    // `0.DIGITS × 10^point`, leading zeros taken off the digits and into
+    // the point.
+    let int_len = i64::try_from(point.unwrap_or(mantissa.len())).unwrap_or(i64::MAX);
+    let lead = mantissa.iter().take_while(|&&d| d == 0).count();
+    let digits: Vec<u8> = mantissa.get(lead..).unwrap_or_default().to_vec();
+    let point = int_len - i64::try_from(lead).unwrap_or(0) + exponent;
+    if !digits.is_empty() {
+        if point - 1 > LDBL_MAX_10_EXP {
+            return Err(NumErr::Range);
+        }
+        if point - 1 < LDBL_TRUE_MIN_10_EXP {
+            return Err(NumErr::Range);
+        }
+    }
+    Ok(LongDouble::Decimal {
+        negative,
+        digits,
+        point,
+    })
+}
+
+/// The hexadecimal form, after its `0x`: hex digits with at most one `.`,
+/// then a binary exponent only if a digit follows its `p` and sign.
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_precision_loss,
+    reason = "the value is built in f64, as its approximation is documented to be; the exponent saturates far past f64's range"
+)]
+fn hex_float(negative: bool, s: &[u8]) -> Result<LongDouble, NumErr> {
+    let mut value = 0f64;
+    let mut scale: i64 = 0;
+    let mut seen_point = false;
+    let mut i = 0usize;
+    while let Some(&c) = s.get(i) {
+        if let Some(d) = char::from(c).to_digit(16) {
+            value = value * 16.0 + f64::from(d);
+            if seen_point {
+                scale -= 4;
+            }
+        } else if c == b'.' && !seen_point {
+            seen_point = true;
+        } else {
+            break;
+        }
+        i += 1;
+    }
+    let mut exponent: i64 = 0;
+    if s.get(i) == Some(&b'p') {
+        let mut j = i + 1;
+        let mut exp_negative = false;
+        match s.get(j) {
+            Some(b'-') => {
+                exp_negative = true;
+                j += 1;
+            }
+            Some(b'+') => j += 1,
+            _ => {}
+        }
+        if s.get(j).is_some_and(u8::is_ascii_digit) {
+            while let Some(&c) = s.get(j) {
+                if !c.is_ascii_digit() {
+                    break;
+                }
+                exponent = (exponent * 10 + i64::from(c - b'0')).min(1_000_000);
+                j += 1;
+            }
+            if exp_negative {
+                exponent = -exponent;
+            }
+            i = j;
+        }
+    }
+    if i != s.len() {
+        return Err(NumErr::Invalid);
+    }
+    let power = i32::try_from((scale + exponent).clamp(-100_000, 100_000)).unwrap_or(0);
+    let magnitude = value * 2f64.powi(power);
+    if !magnitude.is_finite() {
+        return Err(NumErr::Range);
+    }
+    Ok(LongDouble::Hex(if negative {
+        -magnitude
+    } else {
+        magnitude
+    }))
+}
+
+/// `{(time_t) x, (suseconds_t)((x - tv_sec) * 1e6)}` for a decimal `x`,
+/// exactly: the integer digits, and the first six after the point.
+fn timeval_of_decimal(negative: bool, digits: &[u8], point: i64) -> Option<(i64, i64)> {
+    let digit_at = |k: i64| -> u8 {
+        // The digit worth 10^(point - 1 - k); zero outside `digits`.
+        usize::try_from(k)
+            .ok()
+            .and_then(|k| digits.get(k))
+            .copied()
+            .unwrap_or(0)
+    };
+    let mut sec: i64 = 0;
+    for k in 0..point.max(0) {
+        sec = sec.checked_mul(10)?.checked_add(i64::from(digit_at(k)))?;
+    }
+    let mut usec: i64 = 0;
+    for k in point..point.saturating_add(6) {
+        // Six digits cannot overflow an i64.
+        usec = usec
+            .saturating_mul(10)
+            .saturating_add(i64::from(digit_at(k)));
+    }
+    if negative {
+        // `usec` is at most 999 999, so its negation is exact.
+        Some((sec.checked_neg()?, usec.saturating_neg()))
+    } else {
+        Some((sec, usec))
+    }
+}
+
+/// The same conversion for a hexadecimal float, through `f64`.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "both values are range-checked first, and truncation toward zero is the conversion being reproduced"
+)]
+fn timeval_of_f64(v: f64) -> Option<(i64, i64)> {
+    // 2^63: at or beyond it, `(time_t) x` is undefined.
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    if !v.is_finite() || v.abs() >= LIMIT {
+        return None;
+    }
+    let sec = v.trunc();
+    Some((sec as i64, ((v - sec) * 1_000_000.0).trunc() as i64))
 }
 
 /// `ul_strtou64(str, &num, base)`.
@@ -348,6 +643,10 @@ pub fn parse_size(s: &[u8]) -> Result<u64, NumErr> {
     scaled.map(|()| x)
 }
 
+/// The argument is inside util-linux's own `'%s'`, escaped where it is not
+/// printable (`quoting::escaped_in_quotes`): byte for byte upstream's for any
+/// printable text, `it's` included.
+///
 /// The message `str2num_or_err` gives -- and so `strtos32_or_err`,
 /// `strtou32_or_err`, `strtoul_or_err` and the rest -- for a failed
 /// conversion of `arg`, without the program-name prefix.
@@ -359,8 +658,8 @@ pub fn parse_size(s: &[u8]) -> Result<u64, NumErr> {
 #[must_use]
 pub fn num_error_message(errmesg: &str, arg: &OsStr, e: NumErr) -> String {
     match e {
-        NumErr::Invalid => format!("{errmesg}: {}", quoteaf_os(arg)),
-        NumErr::Range => format!("{errmesg}: {}: {}", quoteaf_os(arg), e.strerror()),
+        NumErr::Invalid => format!("{errmesg}: {}", escaped_in_quotes_os(arg)),
+        NumErr::Range => format!("{errmesg}: {}: {}", escaped_in_quotes_os(arg), e.strerror()),
     }
 }
 
@@ -371,7 +670,7 @@ pub fn num_error_message(errmesg: &str, arg: &OsStr, e: NumErr) -> String {
 /// where [`num_error_message`] says nothing.
 #[must_use]
 pub fn size_error_message(errmesg: &str, arg: &OsStr, e: NumErr) -> String {
-    format!("{errmesg}: {}: {}", quoteaf_os(arg), e.strerror())
+    format!("{errmesg}: {}: {}", escaped_in_quotes_os(arg), e.strerror())
 }
 
 #[cfg(test)]
@@ -443,6 +742,80 @@ mod tests {
         assert_eq!(
             size_error_message("failed to parse message size", arg, NumErr::Invalid),
             "failed to parse message size: 'x': Invalid argument"
+        );
+    }
+
+    #[test]
+    fn strtos32_is_strtos64_then_a_range_check() {
+        assert_eq!(ul_strtos32(b"2147483647", 10), Ok(i32::MAX));
+        assert_eq!(ul_strtos32(b"-2147483648", 10), Ok(i32::MIN));
+        assert_eq!(ul_strtos32(b"2147483648", 10), Err(NumErr::Range));
+        assert_eq!(ul_strtos32(b"x", 10), Err(NumErr::Invalid));
+    }
+
+    #[test]
+    fn a_timeval_is_two_truncations_toward_zero() {
+        assert_eq!(strtotimeval(b"1.5"), Ok(Some((1, 500_000))));
+        assert_eq!(strtotimeval(b"1.9999999"), Ok(Some((1, 999_999))));
+        assert_eq!(strtotimeval(b"-1.5"), Ok(Some((-1, -500_000))));
+        assert_eq!(strtotimeval(b"0.0000001"), Ok(Some((0, 0))));
+        assert_eq!(strtotimeval(b"0.3"), Ok(Some((0, 300_000))));
+        assert_eq!(strtotimeval(b" +2e1"), Ok(Some((20, 0))));
+        assert_eq!(strtotimeval(b"25e-1"), Ok(Some((2, 500_000))));
+        assert_eq!(strtotimeval(b".5"), Ok(Some((0, 500_000))));
+        assert_eq!(strtotimeval(b"5."), Ok(Some((5, 0))));
+        assert_eq!(strtotimeval(b"0x1.8p1"), Ok(Some((3, 0))));
+        assert_eq!(strtotimeval(b"-0"), Ok(Some((0, 0))));
+    }
+
+    #[test]
+    fn what_time_t_cannot_hold_is_none() {
+        assert_eq!(strtotimeval(b"inf"), Ok(None));
+        assert_eq!(strtotimeval(b"-Infinity"), Ok(None));
+        assert_eq!(strtotimeval(b"nan"), Ok(None));
+        assert_eq!(strtotimeval(b"NaN(abc)"), Ok(None));
+        assert_eq!(strtotimeval(b"1e30"), Ok(None));
+        assert_eq!(
+            strtotimeval(b"9223372036854775807"),
+            Ok(Some((i64::MAX, 0)))
+        );
+        assert_eq!(strtotimeval(b"9223372036854775808"), Ok(None));
+    }
+
+    #[test]
+    fn strtold_refuses_what_it_cannot_read_whole() {
+        for bad in [
+            &b""[..],
+            b" ",
+            b"abc",
+            b"1x",
+            b"1e",
+            b"1e+",
+            b"0x",
+            b"1 ",
+            b"--1",
+            b".",
+            b"nanx",
+            b"infx",
+        ] {
+            assert_eq!(strtotimeval(bad), Err(NumErr::Invalid), "{bad:?}");
+        }
+        // An exponent with no digits is not read, so the `e` is left over.
+        assert_eq!(strtotimeval(b"2e"), Err(NumErr::Invalid));
+        assert_eq!(strtotimeval(b"1e5000"), Err(NumErr::Range));
+        assert_eq!(strtotimeval(b"1e-5000"), Err(NumErr::Range));
+        assert_eq!(strtotimeval(b"0e5000"), Ok(Some((0, 0))));
+    }
+
+    #[test]
+    fn a_refused_argument_is_in_upstreams_own_quotes() {
+        assert_eq!(
+            num_error_message("invalid exit code", OsStr::new("it's"), NumErr::Invalid),
+            "invalid exit code: 'it's'"
+        );
+        assert_eq!(
+            num_error_message("x", OsStr::new("a\nb"), NumErr::Range),
+            "x: 'a\\012b': Numerical result out of range"
         );
     }
 }

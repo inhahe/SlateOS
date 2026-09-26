@@ -9327,6 +9327,127 @@ raise_qemu_priority &
 #
 # `date +%s` per iteration rather than bash's `SECONDS`: SECONDS counts from
 # shell start, which includes the gates, the build and staging.
+# The one kind of line the kernel prints on a timer rather than because the
+# boot did something: the liveness watchdog's breadcrumb, every 30 s for as long
+# as the machine is alive (`liveness_boot_deadline_check`,
+# kernel/src/sched/mod.rs).  It proves the machine is alive and says nothing
+# about whether the boot is getting anywhere, so "is the guest still producing
+# output?" must not count it.
+#
+# Until 2026-09-25 both places that ask that question did count it, by watching
+# the serial log's *size*.  A boot stuck in one test for half an hour was
+# reported "STILL PRODUCING OUTPUT ... a budget that was too small, not a hang"
+# -- lane C's boot of 1ef989906, stuck in ctest-pty from 310 s to its 2400 s
+# timeout with nothing after the pty line but breadcrumbs (requests/
+# c-a-a-stuck-boot-is-called-a-small-budget-because-breadcrumbs-count-as-output.md).
+# And a --stall-secs of 30 or more could never fire on a live machine at all,
+# since a breadcrumb landed inside every window: wedge-soak's 150 s caught only
+# a machine that had died outright.  It is the mistake the liveness watchdog
+# made about its own breadcrumbs in August, one layer up.
+WATCHDOG_LINE_RE='^\[liveness\] boot-window breadcrumb:'
+
+# scan_own_output FILE -- classify the serial log's newly completed lines.
+#
+# Advances OWN_LINES_SEEN past them, and if any is the boot's own output --
+# neither a watchdog breadcrumb nor blank -- sets OWN_LAST_GROWTH to ELAPSED
+# and OWN_LAST_LINE to the last such line.  Only complete lines are read (`wc
+# -l` counts newlines), so a line still being written is classified once,
+# whole, on a later call: a breadcrumb caught half-written would otherwise read
+# as output of the boot's own.  Never fails -- this runs under `set -e`, in
+# the loop that decides the boot's verdict.
+scan_own_output() {
+    local file="$1" total own
+    [ -f "$file" ] || return 0
+    total=$(wc -l < "$file" 2>/dev/null | tr -d '[:space:]') || return 0
+    case "$total" in ''|*[!0-9]*) return 0 ;; esac
+    # A log that shrank was replaced: read the new one from its start.
+    if [ "$total" -lt "$OWN_LINES_SEEN" ]; then
+        OWN_LINES_SEEN=0
+    fi
+    [ "$total" -gt "$OWN_LINES_SEEN" ] || return 0
+    # `|| own=""`: with nothing but breadcrumbs, grep selects no line and
+    # exits 1, which `pipefail` would otherwise make this script's exit.
+    own=$(sed -n "$((OWN_LINES_SEEN + 1)),${total}p" "$file" 2>/dev/null \
+        | tr -d '\r' \
+        | grep -av -e "$WATCHDOG_LINE_RE" -e '^[[:space:]]*$' \
+        | tail -n 1) || own=""
+    OWN_LINES_SEEN=$total
+    if [ -n "$own" ]; then
+        OWN_LAST_GROWTH=$ELAPSED
+        OWN_LAST_LINE=$own
+    fi
+    return 0
+}
+
+# timeout_progress_verdict -- what a timeout means, from the progress record.
+#
+# Says whether the boot was still producing output of its own when the clock
+# ran out (a budget too small), had gone quiet but for the watchdog's
+# breadcrumbs (alive and stuck -- and then which line it stopped at, which is
+# where to look), or had gone quiet altogether; and sets RIP_LABEL to match.
+# Reads ELAPSED, STALL_LAST_GROWTH (the log's last growth of any kind) and the
+# OWN_* record kept by scan_own_output.
+timeout_progress_verdict() {
+    local since_any=$((ELAPSED - STALL_LAST_GROWTH))
+    local since_own=$((ELAPSED - OWN_LAST_GROWTH))
+    if [ -n "$OWN_LAST_LINE" ] && [ "$since_own" -lt 10 ]; then
+        echo "=== Timeout at ${TIMEOUT}s with the guest STILL PRODUCING OUTPUT (its own output grew ${since_own}s ago) ==="
+        echo "=== This is a budget that was too small, not a hang. Re-run with a larger --timeout. ==="
+        RIP_LABEL="RIP when the clock ran out (guest was live; not a hang)"
+    elif [ -n "$OWN_LAST_LINE" ] && [ "$since_any" -lt "$since_own" ]; then
+        echo "=== Timeout at ${TIMEOUT}s: the boot's last own output was ${since_own}s ago; nothing since but the liveness watchdog's breadcrumbs (the last ${since_any}s ago) -- the machine was alive and the boot was stuck ($WAIT_MARKER never reached) ==="
+        echo "=== Its last own line: ${OWN_LAST_LINE} ==="
+        RIP_LABEL="RIP at timeout (machine alive, boot stuck)"
+    else
+        echo "=== Timeout at ${TIMEOUT}s; serial last grew ${since_any}s ago ($WAIT_MARKER never reached) ==="
+        RIP_LABEL="RIP at timeout"
+    fi
+}
+
+# stall_wedge_message -- the --stall-secs verdict's first lines.
+#
+# The detector fires on STALL_SECS without output of the boot's own, so the
+# machine may still be printing breadcrumbs: say which, because "stuck but
+# alive" and "dead" are different hunts.  The `=== WEDGE: serial` prefix is
+# what wedge-soak.sh greps for.
+stall_wedge_message() {
+    if [ -n "$OWN_LAST_LINE" ] && [ "$STALL_LAST_GROWTH" -gt "$OWN_LAST_GROWTH" ]; then
+        echo "=== WEDGE: serial output stalled for ${STALL_SECS}s at ${ELAPSED}s -- nothing since the boot's last own line but the liveness watchdog's breadcrumbs, so the machine is alive and the boot is stuck ($WAIT_MARKER never reached) ==="
+        echo "=== Its last own line: ${OWN_LAST_LINE} ==="
+    else
+        echo "=== WEDGE: serial output stalled for ${STALL_SECS}s at ${ELAPSED}s (kernel not progressing; $WAIT_MARKER never reached) ==="
+    fi
+}
+
+# scan_own_output_throttled FILE -- scan_own_output, at most once every
+# OWN_SCAN_EVERY seconds.
+#
+# The wait loop calls this whenever the log has grown, which in a live boot is
+# nearly every second, and scan_own_output starts five processes (wc, sed, tr,
+# grep, tail).  On 2026-09-26, six lanes building, starting one process took
+# the MSYS shell up to ten seconds, so an unthrottled scan would have been the
+# loop's main cost for the whole boot.  Nothing is lost by the wait: the scan
+# reads every line since the previous one, and each verdict that depends on
+# the record rescans first (own_output_stalled; the timeout path) -- so the
+# throttle only coarsens OWN_LAST_GROWTH, by at most OWN_SCAN_EVERY seconds,
+# and only towards "more recent".
+scan_own_output_throttled() {
+    [ $((ELAPSED - OWN_LAST_SCAN)) -ge "$OWN_SCAN_EVERY" ] || return 0
+    OWN_LAST_SCAN=$ELAPSED
+    scan_own_output "$1"
+}
+
+# own_output_stalled FILE -- true when --stall-secs is set and the boot has
+# printed nothing of its own for STALL_SECS, judged on a fresh scan: the
+# throttled one may not yet have read the line that would save the boot.
+own_output_stalled() {
+    [ "$STALL_SECS" -gt 0 ] || return 1
+    [ $((ELAPSED - OWN_LAST_GROWTH)) -ge "$STALL_SECS" ] || return 1
+    OWN_LAST_SCAN=$ELAPSED
+    scan_own_output "$1"
+    [ $((ELAPSED - OWN_LAST_GROWTH)) -ge "$STALL_SECS" ]
+}
+
 WAIT_START_EPOCH="$(date +%s)"
 ELAPSED=0
 # Serial-stall tracking.  We remember the serial log's last observed size and
@@ -9343,6 +9464,13 @@ ELAPSED=0
 # see the timeout path below.
 STALL_LAST_SIZE=-1
 STALL_LAST_GROWTH=0
+# The same record for the boot's *own* output, which is what both verdicts are
+# about: see WATCHDOG_LINE_RE and scan_own_output above.
+OWN_LINES_SEEN=0
+OWN_LAST_GROWTH=0
+OWN_LAST_LINE=""
+OWN_LAST_SCAN=-100
+OWN_SCAN_EVERY=10
 while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     sleep 1
     ELAPSED=$(( $(date +%s) - WAIT_START_EPOCH ))
@@ -9389,16 +9517,20 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
 
     # Serial-stall wedge detection (opt-in).  A wedged kernel stops writing to
     # the serial log; a slow-but-healthy boot keeps appending self-test output.
-    # If the log has not grown for STALL_SECS seconds and the marker still isn't
-    # present, treat it as a genuine hang (distinct from a slow host that would
-    # eventually reach the marker) — capture the frozen RIP and exit 2.
+    # If the boot has printed nothing of its own for STALL_SECS seconds -- the
+    # watchdog's breadcrumbs do not count, see WATCHDOG_LINE_RE -- and the
+    # marker still isn't present, treat it as a genuine hang (distinct from a
+    # slow host that would eventually reach the marker): capture the RIP and
+    # exit 2.
     if [ -f "$SERIAL_FILE" ]; then
         cur_size=$(wc -c < "$SERIAL_FILE" 2>/dev/null || echo 0)
         if [ "$cur_size" -ne "$STALL_LAST_SIZE" ]; then
             STALL_LAST_SIZE=$cur_size
             STALL_LAST_GROWTH=$ELAPSED
-        elif [ "$STALL_SECS" -gt 0 ] && [ $((ELAPSED - STALL_LAST_GROWTH)) -ge "$STALL_SECS" ]; then
-            echo "=== WEDGE: serial output stalled for ${STALL_SECS}s at ${ELAPSED}s (kernel not progressing; $WAIT_MARKER never reached) ==="
+            scan_own_output_throttled "$SERIAL_FILE"
+        fi
+        if own_output_stalled "$SERIAL_FILE"; then
+            stall_wedge_message
             if [ "${#MONITOR_ARGS[@]}" -gt 0 ] && kill -0 "$QEMU_PID" 2>/dev/null; then
                 RIPDUMP="${SERIAL_FILE%.txt}-regs.txt"
                 capture_guest_state "$MONITOR_PORT" "$RIPDUMP" "Wedged RIP" || true
@@ -9425,15 +9557,9 @@ done
 # land, and under KASAN that is the shadow checker on nearly every sample.
 if [ "${#MONITOR_ARGS[@]}" -gt 0 ] && kill -0 "$QEMU_PID" 2>/dev/null; then
     if ! grep -q "^$WAIT_MARKER" "$SERIAL_FILE" 2>/dev/null; then
-        SINCE_GROWTH=$((ELAPSED - STALL_LAST_GROWTH))
-        if [ "$STALL_LAST_SIZE" -gt 0 ] && [ "$SINCE_GROWTH" -lt 10 ]; then
-            echo "=== Timeout at ${TIMEOUT}s with the guest STILL PRODUCING OUTPUT (serial grew ${SINCE_GROWTH}s ago) ==="
-            echo "=== This is a budget that was too small, not a hang. Re-run with a larger --timeout. ==="
-            RIP_LABEL="RIP when the clock ran out (guest was live; not a hang)"
-        else
-            echo "=== Timeout at ${TIMEOUT}s; serial last grew ${SINCE_GROWTH}s ago ($WAIT_MARKER never reached) ==="
-            RIP_LABEL="RIP at timeout"
-        fi
+        # Once more, so a line that landed after the loop's last pass counts.
+        scan_own_output "$SERIAL_FILE"
+        timeout_progress_verdict
         RIPDUMP="${SERIAL_FILE%.txt}-regs.txt"
         capture_guest_state "$MONITOR_PORT" "$RIPDUMP" "$RIP_LABEL" || true
     fi

@@ -63,12 +63,9 @@ use std::fmt;
 mod peer;
 #[cfg_attr(
     not(test),
-    expect(
-        dead_code,
-        reason = "used by the download session, which lands after it"
-    )
+    expect(dead_code, reason = "used by the window, which is wired to it next")
 )]
-mod storage;
+mod session;
 #[cfg_attr(
     not(test),
     expect(
@@ -76,6 +73,7 @@ mod storage;
         reason = "used by the download session, which lands after it"
     )
 )]
+mod storage;
 mod tracker;
 
 // ─── Bencode ─────────────────────────────────────────────────────────

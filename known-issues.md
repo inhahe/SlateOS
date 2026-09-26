@@ -166374,13 +166374,16 @@ loop has its own edge cases around values, `=`, and operands.
 
 **Where:** the standalone ports that already share `usageerror` (the
 diagnostic wording) but not a parser -- `blockdev`, `capsh`, `chattr`,
-`hostnamectl`, `lscpu`, `lsmem`, `objdump`, `resolvectl`,
+`hostnamectl`, `lscpu`, `objdump`, `resolvectl`,
 `route`, `sanitize`, `systemctl`, `tput` -- plus hand-parsed programs that do
 not use it yet. (`logger` was one; its port uses `getoptlong`, 413e56f1d. So
 was `getopt` itself -- now a port of util-linux's, whose script-facing parse
 is `getoptlong` with the knobs it gained for it: keep-going, long-only,
 distinct entries, `W;`. And `flock`, now a port of util-linux's, whose
-old hand parser took an unknown option for the file to lock.)
+old hand parser took an unknown option for the file to lock. And `lsmem`,
+now a port of util-linux's printing through the `smartcols` crate, whose old
+parser refused `--summ`, and whose old program invented a block size when it
+could not read one -- design-decisions §1036.)
 
 **The proper fix,** now possible: `getoptlong` (extracted from
 `coreutils/src/getopt.rs` on 2026-09-26) is the shared parser. Converting a
@@ -166588,3 +166591,56 @@ them for emoji).
 **How to see it.** `target/fontcheck` draws emoji lines from
 `target/fonts/notoemoji__Noto-COLRv1.ttf` (drawn) and
 `target/fonts/notocoloremoji__NotoColorEmoji-Regular.ttf` (blank).
+
+## TD-B-TABLE-PROGRAMS-LAY-OUT-THEIR-OWN-TABLES (lane B, 2026-09-26) — **open**
+
+**In short:** the util-linux programs that print tables do not decide their
+own column widths upstream -- a library, libsmartcols, does -- but ours each
+lay out their tables themselves. So on a narrow terminal each cuts
+differently from util-linux (and from one another), and `--json`, `--raw`
+and `--pairs` are each program's own dialect. The library is ported now, as
+`userspace/smartcols` (design-decisions §1036), and `lsmem` prints through
+it and matches util-linux 2.39.3 at every terminal width
+(`scripts/lsmem-diff.sh`); the others still do not use it.
+
+**Where:** `userspace/lsblk`, `findmnt`, `lscpu` (its `-e`/`-p` tables),
+`lsns`, `losetup` (`--list`), `swapon` (`--show`), `prlimit`, `column`
+(`-t`), `rfkill`, `lsirq`, `fdisk` (`-l`'s partition table).
+
+**The proper fix:** port each program from util-linux 2.39.3 onto
+`smartcols`, as `lsmem` was -- the program's own logic function by function,
+the table handed to the crate -- with a differential harness against WSL's
+util-linux that includes a pty at several widths. Parts of libsmartcols not
+yet ported (the crate's module docs list them: groups, sorting, custom wrap
+functions, colours) are added when a program needs them; `lsblk`,
+`findmnt` and `lsns` need only trees, which are ported. Each of these is
+also on TD-B-STANDALONE-PORTS-MATCH-LONG-OPTIONS-WHOLE's list, and the two
+are one job per program.
+
+## TD-B-UTIL-LINUX-PORTS-WRITE-THROUGH-RUST-STDIO (lane B, 2026-09-26) — **open**
+
+**In short:** util-linux programs end with `close_stdout`, which decides the
+exit status from what happened to standard output and standard error --
+and a Rust program cannot see most of that through `println!` and
+`eprintln!`: the runtime reopens a closed descriptor on `/dev/null` before
+`main`, and Rust's `Stdout`/`Stderr` report a write to a closed descriptor
+as a success. `lsmem` now does what util-linux does (the `stdfdguard` and
+`ulclosestream` crates); `flock`, `getopt` and `logger` still write through
+`std`, so for them `>&-` and `2>&-` are invisible, and output that outgrows
+glibc's 4096-byte buffer before failing is reported with a reason where
+upstream gives none.
+
+**Where:** `userspace/flock/src/main.rs` (`Out`, which flushes through
+`io::stdout()`), `userspace/getopt/src/main.rs`, `userspace/logger/src/main.rs`
+-- their stdout and diagnostic paths.
+
+**How to see it:** `getopt -o a -- $(seq 3000 | sed 's/^/-a /') >&-` -- the
+output is larger than 4096 bytes, so upstream's write fails before the end
+and it exits 3 with `getopt: write error`; ours exits 0.
+
+**The proper fix:** in each, `stdfdguard::guard_std_fds!()` at module scope
+and `stdfdguard::restore()` first in `main`; stdout through
+`ulclosestream::Stdout` (with the program's own `CLOSE_EXIT_CODE` -- 3 for
+`getopt`); diagnostics through `ulclosestream::warnx`/`warn`/`stderr_write`;
+and cases for `>&-`, `>/dev/full`, `2>&-` and `2>/dev/full`, with small and
+large output, in each program's harness.

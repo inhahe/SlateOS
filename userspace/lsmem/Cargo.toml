@@ -2,11 +2,28 @@
 name = "lsmem"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS memory information display"
+description = "lsmem, util-linux 2.39.3's, ported: memory blocks from /sys in a libsmartcols table"
+
+[lints]
+workspace = true
+
 [dependencies]
-# getopt's usage diagnostics, spelled once. The wording is not ours -- it is
-# what `getopt_long` prints and what util-linux repeats verbatim -- so every
-# program here has to render it identically. Pure formatting over `quoting`,
-# no I/O, so §768 exempt.
-usageerror = { path = "../usageerror" }
-procinfo = { path = "../../procinfo" }
+# glibc's getopt_long, as every util-linux program parses its options.
+getoptlong = { path = "../getoptlong" }
+# argv and file names are bytes; a diagnostic escapes what is unprintable.
+quoting = { path = "../quoting" }
+# strerror(3)'s wording for a failed call.
+errmsg = { path = "../errmsg" }
+# util-linux's close_stdout, and stdout buffered as glibc buffers it.
+ulclosestream = { path = "../ulclosestream" }
+# libsmartcols: the table, and the terminal query lsmem's errno depends on.
+smartcols = { path = "../smartcols" }
+# A stdout the process was started without stays closed, as upstream sees it:
+# `lsmem -a >&-` is a write error there, and the runtime's /dev/null hides it.
+stdfdguard = { path = "../stdfdguard" }
+# strutils.c: size_to_human_string, string_add_to_idarray, strtoumax's
+# scanner; and glibc's strverscmp for scandir's versionsort.
+ulstrutils = { path = "../ulstrutils" }
+
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

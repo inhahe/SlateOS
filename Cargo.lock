@@ -444,6 +444,7 @@ dependencies = [
  "sha1",
  "sha2",
  "sm3",
+ "stdfdguard",
  "sysroot-dep",
  "ulstrutils",
  "userspec",
@@ -1667,8 +1668,14 @@ version = "0.1.0"
 name = "lsmem"
 version = "0.1.0"
 dependencies = [
- "procinfo",
- "usageerror",
+ "errmsg",
+ "getoptlong",
+ "quoting",
+ "scratchdir",
+ "smartcols",
+ "stdfdguard",
+ "ulclosestream",
+ "ulstrutils",
 ]
 
 [[package]]
@@ -2720,6 +2727,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "smartcols"
+version = "0.1.0"
+dependencies = [
+ "charwidth",
+ "quoting",
+ "ulstrutils",
+]
+
+[[package]]
 name = "snake"
 version = "0.1.0"
 dependencies = [
@@ -2867,6 +2883,10 @@ dependencies = [
  "guitk",
  "oswindow",
 ]
+
+[[package]]
+name = "stdfdguard"
+version = "0.1.0"
 
 [[package]]
 name = "stickynotes"
@@ -3205,6 +3225,14 @@ name = "udisks"
 version = "0.1.0"
 dependencies = [
  "procinfo",
+ "quoting",
+]
+
+[[package]]
+name = "ulclosestream"
+version = "0.1.0"
+dependencies = [
+ "errmsg",
  "quoting",
 ]
 

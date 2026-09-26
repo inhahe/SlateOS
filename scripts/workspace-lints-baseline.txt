@@ -113,7 +113,6 @@ userspace/lp
 userspace/lsblk
 userspace/lscpu  # bare deny(clippy::all)
 userspace/lsirq  # bare deny(clippy::all)
-userspace/lsmem  # bare deny(clippy::all)
 userspace/lsmod
 userspace/lsns  # bare deny(clippy::all)
 userspace/lsof  # bare deny(clippy::all)

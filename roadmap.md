@@ -4328,7 +4328,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] nsenter: enter namespaces of other processes (8 namespace types, per-ns file overrides)
   - [x] unshare: create new namespaces (CLONE_NEW* flags, user mapping, mount propagation)
   - [x] lscpu: CPU architecture info (topology, caches, flags, JSON, vulnerabilities)
-  - [x] lsmem: memory block display (sysfs enumeration, range merging, JSON, summary)
+  - [x] lsmem: memory block display (sysfs enumeration, range merging, JSON, summary) -- since 2026-09-26 a port of util-linux 2.39.3's `lsmem.c` printing through `smartcols`, the libsmartcols port (design-decisions §1036); `scripts/lsmem-diff.sh`, 346 cases, all agree
   - [x] chattr/lsattr: ext4 file attributes (22 flag types, +/-/= specification, recursive)
   - [x] perf/perf-stat/perf-record/perf-report/perf-top: performance monitoring (14 events, binary perf.data format, 172 tests)
   - [x] dmsetup/dmstats/kpartx: device mapper control (19 commands, 12 target types, MBR/GPT partition parsing, 190 tests)

@@ -1832,6 +1832,11 @@ D's to act on once answered).
       on Linux; `sched_getaffinity` takes any mask length Linux takes and
       clears the rest; `SCHED_RESET_ON_FORK` is accepted, and
       `SCHED_DEADLINE` through `sched_setscheduler` is `EINVAL`.
+    * message queues, the seventeenth pass: Linux's sizes and limits (a
+      default queue holds 10 messages of 8192 bytes, not 64), storage per
+      queue, access modes, names judged as the kernel judges them, errors
+      in its order, futex waits instead of spinning, and `mq_notify`.  Still
+      one process's queues (D-Q3).
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

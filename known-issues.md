@@ -23939,6 +23939,25 @@ pass's.
   `EPERM`, where Linux says `EINVAL` -- a deadline task's parameters come only
   from `sched_setattr`, and through this call they are zero.
 
+**Seventeenth pass, 2026-09-26 — `mqueue.rs` (5 sites), lane D.** Against Linux
+6.6's ipc/mqueue.c and glibc 2.39's wrappers. The name's NULL (`EFAULT`, where
+glibc reads `name[0]`) was right, and the eleventh pass had already made NULL
+timeouts and attributes Linux's.
+
+- **`mq_send`** refused a NULL message before the priority, the descriptor
+  and the size; Linux's order is the priority (`EINVAL`), the descriptor
+  (`EBADF`), its write access (`EBADF` -- not kept at all), the size
+  (`EMSGSIZE`), and the message last (`load_msg`, `EFAULT`).
+- **`mq_receive`** refused a NULL buffer before the descriptor, the size and
+  an empty queue. Linux reaches the buffer only after taking the message:
+  `store_msg` faults, the call fails with `EFAULT`, and the message is gone.
+- **`mq_notify`** looked at the descriptor before the `sigevent`; Linux
+  judges `sigev_notify` and the signal first.
+- Beside them, the module was a small static pool -- 8 queues of 32
+  messages of 256 bytes, a default message size of 64, busy-spinning waits,
+  no access modes, no `mq_notify` --
+  `B-D-MQUEUE-LIMITS-ACCESS-AND-ERROR-ORDER` (new, fixed with it).
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -23952,8 +23971,8 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-sixteen swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs` and `sched.rs`;
-next are `mqueue.rs` and `resolv.rs` at five, and twelve files at four, in
+seventeen swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`, `sched.rs`
+and `mqueue.rs`; next is `resolv.rs` at five, then twelve files at four, in
 that order.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
@@ -165815,6 +165834,36 @@ Host tests cover the attribute reading, the layout arithmetic, the table's
 growth and the sentinels; `services/ctest-pthread` checks it all in ring 3,
 once lane A runs it (`requests/d-a-run-the-ctest-pthread-fixture.md`).
 Design choices in `design-decisions.md` §1111.
+
+### [D] B-D-MQUEUE-LIMITS-ACCESS-AND-ERROR-ORDER — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/mqueue.rs`.
+
+**What it was.** POSIX message queues were a static pool: 8 queues of 32
+messages of up to 256 bytes, names up to 63 bytes, and a default message size
+of 64 -- so a program that opened a queue with no attributes and sent 100
+bytes got `EMSGSIZE`, where Linux's default queue holds 10 messages of 8192.
+The descriptor's access mode was not kept, so a queue opened `O_RDONLY` could
+be sent to. `O_WRONLY|O_RDWR` was refused before the lookup, where Linux
+refuses it only for a queue that already exists (after `EEXIST`). Names were
+judged by their own rule: `"/"` was `EINVAL` (Linux: `ENOENT`), `"/a/b"`
+`EINVAL` (`EACCES`). A blocked `mq_send` or `mq_receive` busy-spun without
+yielding. `mq_notify` was `ENOSYS`. The errors came in the wrong order (the
+seventeenth pass).
+
+**Fix.** Linux's semantics throughout: the kernel's defaults and limits
+(10 x 8192; up to 10 and 8192, or 65536 and 16 MiB with `CAP_SYS_RESOURCE`;
+256 queues), each queue's storage allocated at its size; access modes kept
+and enforced; names judged as glibc and the kernel judge them; errors in the
+kernel's order; waits that sleep on a futex until the queues change; and
+`mq_notify` -- one registration per queue, fired once when a message arrives
+in the empty queue with no receiver waiting, through the notification code
+aio uses (now `posix/src/sigevent.rs`).
+
+**What remains.** Queues live in one process: two programs opening one name
+get two queues. That is open question D-Q3. An `mqd_t` is an index into this
+module's table, not a file descriptor, so `poll`, `select` and `close` do not
+take one, as Linux's do.
 
 ### [D] B-D-AIO-OUTCOMES-EVICTED-AND-NEVER-NOTIFIED — 2026-09-26 — FIXED 2026-09-26
 

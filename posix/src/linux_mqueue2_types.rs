@@ -41,10 +41,11 @@ pub const O_EXCL_MQ: u32 = 0x0080;
 // Mqueue notification methods
 // ---------------------------------------------------------------------------
 
-/// No notification.
-pub const SIGEV_NONE: u32 = 0;
+/// No notification.  (1, as Linux numbers it -- this said 0 until
+/// 2026-09-26.)
+pub const SIGEV_NONE: u32 = 1;
 /// Signal notification.
-pub const SIGEV_SIGNAL: u32 = 1;
+pub const SIGEV_SIGNAL: u32 = 0;
 /// Thread notification.
 pub const SIGEV_THREAD: u32 = 2;
 /// Thread ID notification (Linux extension).
@@ -94,6 +95,14 @@ mod tests {
                 assert_ne!(flags[i], flags[j]);
             }
         }
+    }
+
+    #[test]
+    fn test_sigev_values_are_linuxs() {
+        assert_eq!(SIGEV_SIGNAL, 0);
+        assert_eq!(SIGEV_NONE, 1);
+        assert_eq!(SIGEV_THREAD, 2);
+        assert_eq!(SIGEV_THREAD_ID, 4);
     }
 
     #[test]

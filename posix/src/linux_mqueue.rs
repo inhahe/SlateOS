@@ -33,10 +33,11 @@ pub const MQ_MAXQUEUES: i32 = 256;
 // Notification types (for mq_notify via sigev_notify)
 // ---------------------------------------------------------------------------
 
-/// No notification.
-pub const SIGEV_NONE_: i32 = 0;
+/// No notification.  (1, as Linux numbers it -- this said 0, which is
+/// `SIGEV_SIGNAL`'s value, until 2026-09-26.)
+pub const SIGEV_NONE_: i32 = 1;
 /// Signal notification.
-pub const SIGEV_SIGNAL_: i32 = 1;
+pub const SIGEV_SIGNAL_: i32 = 0;
 /// Thread notification.
 pub const SIGEV_THREAD_: i32 = 2;
 
@@ -62,9 +63,12 @@ mod tests {
 
     #[test]
     fn test_sigev_types() {
-        assert_eq!(SIGEV_NONE_, 0);
-        assert_eq!(SIGEV_SIGNAL_, 1);
+        assert_eq!(SIGEV_NONE_, 1);
+        assert_eq!(SIGEV_SIGNAL_, 0);
         assert_eq!(SIGEV_THREAD_, 2);
+        // The values `time.rs` and every other copy use.
+        assert_eq!(SIGEV_NONE_, crate::time::SIGEV_NONE);
+        assert_eq!(SIGEV_SIGNAL_, crate::time::SIGEV_SIGNAL);
     }
 
     #[test]

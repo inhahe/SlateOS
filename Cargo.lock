@@ -1344,7 +1344,15 @@ version = "0.1.0"
 name = "journalctl"
 version = "0.1.0"
 dependencies = [
+ "journalio",
  "quoting",
+ "scratchdir",
+]
+
+[[package]]
+name = "journalio"
+version = "0.1.0"
+dependencies = [
  "scratchdir",
 ]
 
@@ -1555,6 +1563,7 @@ version = "0.1.0"
 dependencies = [
  "errmsg",
  "getoptlong",
+ "journalio",
  "journalrec",
  "localtime",
  "quoting",
@@ -3029,6 +3038,7 @@ dependencies = [
 name = "syslogd"
 version = "0.1.0"
 dependencies = [
+ "journalio",
  "journalrec",
  "quoting",
  "scratchdir",
@@ -3062,6 +3072,7 @@ dependencies = [
 name = "systemctl"
 version = "0.1.0"
 dependencies = [
+ "journalio",
  "journalrec",
  "procinfo",
  "quoting",

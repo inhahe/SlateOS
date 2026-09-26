@@ -7,6 +7,10 @@ description = "SlateOS journalctl - journal log viewer and manager"
 # Diagnostics name journal file paths, and a path may hold spaces or
 # newlines; scripts/quote-names.py enforces that they are quoted.
 quoting = { path = "../quoting" }
+# The journal's rewrite protocol (design-decisions §1037): --vacuum-time and
+# --vacuum-size rewrite a log under its lock, and rename the result over it,
+# so a record appended meanwhile is not lost.
+journalio = { path = "../journalio" }
 
 [dev-dependencies]
 # Log files for the reading tests: a bad byte, text lines, a torn append,

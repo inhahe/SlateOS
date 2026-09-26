@@ -18,7 +18,6 @@
 //! when SlateOS gains them it stops running there too.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
 #[cfg(unix)]
@@ -299,19 +298,17 @@ pub fn journal_record(parts: Parts<'_>, ts: u64) -> io::Result<journalrec::Recor
     })
 }
 
-/// Append one record, as one write, to the file `journalctl` reads.
+/// Append one record, as one write, to the file `journalctl` reads, under
+/// the journal's lock (design-decisions §1037), so that a vacuum or a
+/// rotation happening at that moment does not lose it.
 ///
 /// # Errors
 ///
-/// The file cannot be opened or written.
+/// The file cannot be opened, locked or written.
 pub fn append_record(record: &journalrec::Record) -> io::Result<()> {
     let mut line = record.to_json_line().into_bytes();
     line.push(b'\n');
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(journalrec::MAIN_LOG_PATH)?
-        .write_all(&line)
+    journalio::append(std::path::Path::new(journalrec::MAIN_LOG_PATH), &line)
 }
 
 fn now_secs() -> u64 {

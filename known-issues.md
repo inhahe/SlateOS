@@ -169439,7 +169439,7 @@ Found by a test for the torn-append fix
 escape JSON defines is decoded, a surrogate pair as its one character; what
 cannot be decoded is kept exactly as written. Four tests.
 
-## B-JOURNALCTL-VACUUM-LOSES-RECORDS-APPENDED-DURING-ITS-REWRITE (lane B, 2026-09-26) — **open**
+## B-JOURNALCTL-VACUUM-LOSES-RECORDS-APPENDED-DURING-ITS-REWRITE (lane B, 2026-09-26) — ✅ FIXED 2026-09-26 (lane B)
 
 **In short:** `--vacuum-time` and `--vacuum-size` read a log file, filter it,
 and write the survivors back over the same path. A record another program
@@ -169458,6 +169458,21 @@ start a fresh one), filter the renamed file at leisure, and have the readers
 include rotated files. That changes where `journalctl` finds records outside
 `/var/log/journal/`, so it is a design change of its own, not a patch to the
 vacuum.
+
+**Fixed** with a lock rather than rotation (design-decisions §1037, which
+weighs the two: a writer that opened the file just before a rotation's rename
+would still have written into the renamed file after it was read). Every
+writer -- `syslogd`, `logger`, `systemd-cat` -- appends through
+`journalio::append`: `flock`, check the path still names the file, write,
+close. Every rewriter -- both vacuums and `syslogd clean` -- holds the lock
+from its read to a rename of a new file over the old one, and `syslogd`'s
+rotation holds it for each rename. A writer arriving meanwhile waits, then
+lands in the new file; `journalio`'s two race tests fail when the lock is
+removed. Two more defects went with it: `syslogd clean` refused a whole log
+for one byte that was not UTF-8, and rewrote the file when it had removed
+nothing; and `journalctl` never read `syslogd`'s rotated copies
+(`syslog.jsonl.1` ...), so every record older than the last rotation was
+invisible -- it reads them now, oldest first, and vacuums them.
 
 ## TD-B-STANDALONE-PORTS-MATCH-LONG-OPTIONS-WHOLE (lane B, 2026-09-26) — **open**
 

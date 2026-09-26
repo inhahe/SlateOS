@@ -35,7 +35,7 @@
 
 #![cfg_attr(not(test), no_main)]
 
-use quoting::{quoteaf_os, quotef_os};
+use quoting::quotef_os;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt::Write as FmtWrite;
@@ -50,8 +50,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // ============================================================================
 
 const JOURNAL_DIR: &str = "/var/log/journal";
-/// Fallback log paths when journal dir does not exist.
-const FALLBACK_PATHS: &[&str] = &["/var/log/syslog.jsonl", "/var/log/syslog"];
+/// Fallback log paths when journal dir does not exist, and whether
+/// `syslogd` rotates each: `syslog.jsonl` grows `syslog.jsonl.1`, `.2`, ...
+/// as it passes 5 MiB, and those are the journal's older records.
+const FALLBACK_PATHS: &[(&str, bool)] =
+    &[("/var/log/syslog.jsonl", true), ("/var/log/syslog", false)];
 
 // ============================================================================
 // Priority levels (RFC 5424 / syslog compatible)
@@ -795,19 +798,82 @@ fn discover() -> (Vec<PathBuf>, Vec<(PathBuf, io::Error)>) {
     if journal_path.is_dir() {
         collect_jsonl_files(journal_path, &mut files, &mut unreadable);
     }
+    files.sort();
 
-    // If no journal files found, try fallback paths.
+    // If no journal files found, try fallback paths: each one's rotated
+    // copies first, oldest first, then the file itself -- the order the
+    // records were written in, which is the order `--vacuum-size` trims.
     if files.is_empty() {
-        for path_str in FALLBACK_PATHS {
+        for &(path_str, rotated) in FALLBACK_PATHS {
             let p = Path::new(path_str);
+            if rotated {
+                files.extend(rotated_siblings(p));
+            }
             if p.is_file() {
                 files.push(p.to_path_buf());
             }
         }
     }
 
-    files.sort();
     (files, unreadable)
+}
+
+/// `syslogd`'s rotated copies of `live` -- `NAME.1`, `NAME.2`, ..., the
+/// higher the older -- oldest first. Until 2026-09-26 nothing read these,
+/// so every record older than the last rotation was invisible here.
+fn rotated_siblings(live: &Path) -> Vec<PathBuf> {
+    let (Some(dir), Some(name)) = (live.parent(), live.file_name()) else {
+        return Vec::new();
+    };
+    let mut prefix = name.as_encoded_bytes().to_vec();
+    prefix.push(b'.');
+    // A directory that cannot be listed has no rotated copies to offer; the
+    // live file, if there, is still read -- and reported if unreadable.
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(u64, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let file_name = e.file_name();
+            let n = rotation_number(file_name.as_encoded_bytes(), &prefix)?;
+            let path = e.path();
+            path.is_file().then_some((n, path))
+        })
+        .collect();
+    found.sort_by_key(|&(n, _)| std::cmp::Reverse(n));
+    found.into_iter().map(|(_, p)| p).collect()
+}
+
+/// `N` of a name that is `prefix` then the digits of `N` (1 or more).
+fn rotation_number(name: &[u8], prefix: &[u8]) -> Option<u64> {
+    let digits = name.strip_prefix(prefix)?;
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(digits)
+        .ok()?
+        .parse()
+        .ok()
+        .filter(|&n| n > 0)
+}
+
+/// Whether `path` is one of `syslogd`'s rotated copies: an archive, which
+/// a vacuum that empties it removes, where the live file is kept.
+fn is_rotated(path: &Path) -> bool {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    FALLBACK_PATHS.iter().any(|&(live, rotated)| {
+        let live = Path::new(live);
+        rotated
+            && live.parent() == Some(dir)
+            && live.file_name().is_some_and(|l| {
+                let mut prefix = l.as_encoded_bytes().to_vec();
+                prefix.push(b'.');
+                rotation_number(name.as_encoded_bytes(), &prefix).is_some()
+            })
+    })
 }
 
 /// Recursively collect .jsonl, .log and .journal files from a directory,
@@ -1529,62 +1595,113 @@ fn cmd_disk_usage() {
 
 fn cmd_vacuum_time(max_age_secs: u64) -> i32 {
     let cutoff = now_secs().saturating_sub(max_age_secs);
-    let (files, mut unreadable) = discover();
-    let mut total_removed = 0usize;
-    let mut total_kept = 0usize;
-    let mut failures = 0usize;
-
-    for file in &files {
-        // Bytes, not a `String`: a file holding one byte that is not UTF-8
-        // used to be skipped here without a word.
-        let content = match fs::read(file) {
-            Ok(c) => c,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                unreadable.push((file.clone(), e));
-                continue;
-            }
-        };
-
-        let mut kept_lines: Vec<&[u8]> = Vec::new();
-        let mut removed = 0usize;
-
-        for line in lines_of(&content) {
-            match record_of(line) {
-                Some(entry) if entry.timestamp < cutoff => removed += 1,
-                // A record young enough, and anything that is not a record,
-                // are kept exactly as they were.
-                _ => kept_lines.push(line),
-            }
-        }
-
-        if removed > 0 {
-            let new_content = joined_lines(&kept_lines);
-            // A failed rewrite is reported and counted, as `--vacuum-size`
-            // reports its own; until 2026-09-26 this one was only not counted.
-            match fs::write(file, new_content) {
-                Ok(()) => {
-                    total_removed += removed;
-                    total_kept += kept_lines.len();
-                }
-                Err(e) => {
-                    eprintln!("journalctl: cannot rewrite {}: {e}", quoteaf_os(file));
-                    failures += 1;
-                }
-            }
-        } else {
-            total_kept += kept_lines.len();
-        }
-    }
+    let (files, unreadable) = discover();
+    let vacuumed = vacuum_time(&files, cutoff, &is_rotated);
 
     println!(
         "Vacuumed by time: removed {} entries, kept {} entries.",
-        total_removed, total_kept
+        vacuumed.removed, vacuumed.kept
     );
     for (path, e) in &unreadable {
         eprintln!("journalctl: cannot read {}: {e}", quotef_os(path));
     }
-    i32::from(failures > 0 || !unreadable.is_empty())
+    vacuumed.report();
+    i32::from(!vacuumed.failures.is_empty() || !unreadable.is_empty())
+}
+
+/// Why one file of a vacuum was left as it was.
+#[derive(Debug)]
+enum VacuumFailure {
+    /// It could not be opened and locked.
+    Open(io::Error),
+    /// It could not be read.
+    Read(io::Error),
+    /// Its new contents could not be written in its place.
+    Rewrite(io::Error),
+}
+
+/// What a vacuum did, over every file it looked at.
+#[derive(Debug, Default)]
+struct Vacuumed {
+    /// Lines removed, and kept, in the files it rewrote or left alone.
+    removed: usize,
+    kept: usize,
+    /// Each file left as it was, and why.
+    failures: Vec<(PathBuf, VacuumFailure)>,
+}
+
+impl Vacuumed {
+    /// Say on stderr which files were left as they were, and why.
+    fn report(&self) {
+        for (path, failure) in &self.failures {
+            let (what, e) = match failure {
+                VacuumFailure::Open(e) => ("open", e),
+                VacuumFailure::Read(e) => ("read", e),
+                VacuumFailure::Rewrite(e) => ("rewrite", e),
+            };
+            eprintln!("journalctl: cannot {what} {}: {e}", quotef_os(path));
+        }
+    }
+}
+
+/// One file of a vacuum, under the journal's lock (design-decisions §1037):
+/// the file as it is once locked, each line kept or dropped by `keep`, and --
+/// if any is dropped -- the rest written to a new file renamed over it, or,
+/// for an `archive` (a rotated copy) left empty, the file removed. The live
+/// file is kept even when empty: its writers would only make it again.
+///
+/// A record another program appends meanwhile waits for the lock, then lands
+/// in the new file. The old way -- read, filter, write back over the same
+/// path -- lost it: `B-JOURNALCTL-VACUUM-LOSES-RECORDS-APPENDED-DURING-ITS-
+/// REWRITE`.
+///
+/// Returns the lines removed and kept; a file that has gone -- rotated away
+/// since it was listed -- is (0, 0).
+fn vacuum_file(
+    path: &Path,
+    archive: bool,
+    keep: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<(usize, usize), VacuumFailure> {
+    let Some(mut held) = journalio::Locked::open(path).map_err(VacuumFailure::Open)? else {
+        return Ok((0, 0));
+    };
+    let content = held.read_all().map_err(VacuumFailure::Read)?;
+    let mut kept: Vec<&[u8]> = Vec::new();
+    let mut removed = 0usize;
+    for line in lines_of(&content) {
+        if keep(line) {
+            kept.push(line);
+        } else {
+            removed = removed.saturating_add(1);
+        }
+    }
+    if removed > 0 {
+        let written = if kept.is_empty() && archive {
+            held.remove()
+        } else {
+            held.replace(&joined_lines(&kept))
+        };
+        written.map_err(VacuumFailure::Rewrite)?;
+    }
+    Ok((removed, kept.len()))
+}
+
+/// `--vacuum-time`: every record older than `cutoff` dropped from `files`.
+/// A record young enough, and anything that is not a record, is kept exactly
+/// as it was. `archive` says which files are rotated copies.
+fn vacuum_time(files: &[PathBuf], cutoff: u64, archive: &dyn Fn(&Path) -> bool) -> Vacuumed {
+    let mut vacuumed = Vacuumed::default();
+    for file in files {
+        let mut keep = |line: &[u8]| record_of(line).is_none_or(|e| e.timestamp >= cutoff);
+        match vacuum_file(file, archive(file), &mut keep) {
+            Ok((removed, kept)) => {
+                vacuumed.removed = vacuumed.removed.saturating_add(removed);
+                vacuumed.kept = vacuumed.kept.saturating_add(kept);
+            }
+            Err(failure) => vacuumed.failures.push((file.clone(), failure)),
+        }
+    }
+    vacuumed
 }
 
 /// The lines of a log file's bytes: split on newlines, with a final newline
@@ -1618,67 +1735,58 @@ fn cmd_vacuum_size(max_bytes: u64) {
         return;
     }
 
-    let mut total_removed = 0usize;
-    let mut failures = 0usize;
-    let bytes_to_remove = current_total - max_bytes;
-    let mut bytes_removed: u64 = 0;
-
-    // Process files oldest-first, removing oldest entries.
-    for file in &files {
-        if bytes_removed >= bytes_to_remove {
-            break;
-        }
-
-        let content = match fs::read(file) {
-            Ok(c) => c,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                eprintln!("journalctl: cannot read {}: {e}", quotef_os(file));
-                failures += 1;
-                continue;
-            }
-        };
-
-        let lines: Vec<&[u8]> = lines_of(&content).collect();
-        let mut keep_from = 0;
-        let mut entries_cut = 0usize;
-
-        for (idx, line) in lines.iter().enumerate() {
-            if bytes_removed >= bytes_to_remove {
-                break;
-            }
-            // Count bytes of this line plus the newline.
-            bytes_removed += (line.len() as u64) + 1;
-            entries_cut += 1;
-            keep_from = idx + 1;
-        }
-
-        let kept = lines.get(keep_from..).unwrap_or_default();
-        let new_content = joined_lines(kept);
-        // Counted only once the file has accepted the truncation. The
-        // discarded `let _ =` here was the odd one out: `cmd_vacuum_time`
-        // above already guards its identical write with `.is_ok()` and only
-        // then adds to its total, so the two halves of the same command
-        // disagreed about whether a failed write counts as removed entries.
-        match fs::write(file, new_content) {
-            Ok(()) => total_removed = total_removed.saturating_add(entries_cut),
-            Err(e) => {
-                eprintln!("journalctl: cannot truncate {}: {e}", quoteaf_os(file));
-                failures += 1;
-            }
-        }
-    }
+    let vacuumed = vacuum_size(&files, current_total - max_bytes, &is_rotated);
 
     let (_, new_total) = journal_disk_usage();
     println!(
         "Vacuumed by size: removed {} entries. Journal now uses {}.",
-        total_removed,
+        vacuumed.removed,
         format_size(new_total)
     );
-    if failures > 0 {
-        eprintln!("journalctl: {failures} journal file(s) could not be read or truncated");
+    vacuumed.report();
+    if !vacuumed.failures.is_empty() {
+        eprintln!(
+            "journalctl: {} journal file(s) could not be read or truncated",
+            vacuumed.failures.len()
+        );
         process::exit(1);
     }
+}
+
+/// `--vacuum-size`: lines dropped from the front of `files` -- the oldest
+/// first, as [`discover`] lists them -- until `bytes_to_remove` bytes are
+/// gone. `archive` says which files are rotated copies, removed when
+/// emptied.
+fn vacuum_size(
+    files: &[PathBuf],
+    bytes_to_remove: u64,
+    archive: &dyn Fn(&Path) -> bool,
+) -> Vacuumed {
+    let mut vacuumed = Vacuumed::default();
+    let mut bytes_removed: u64 = 0;
+    for file in files {
+        if bytes_removed >= bytes_to_remove {
+            break;
+        }
+        let before = bytes_removed;
+        let mut keep = |line: &[u8]| {
+            if bytes_removed >= bytes_to_remove {
+                return true;
+            }
+            // The line and its newline.
+            bytes_removed = bytes_removed.saturating_add(len_u64(line).saturating_add(1));
+            false
+        };
+        match vacuum_file(file, archive(file), &mut keep) {
+            Ok((removed, _)) => vacuumed.removed = vacuumed.removed.saturating_add(removed),
+            Err(failure) => {
+                // Nothing of this file was removed after all.
+                bytes_removed = before;
+                vacuumed.failures.push((file.clone(), failure));
+            }
+        }
+    }
+    vacuumed
 }
 
 // ============================================================================
@@ -3187,6 +3295,102 @@ mod tests {
         let len = fs::metadata(&file).unwrap().len();
         let lines = tail.advance(&file, len).unwrap();
         assert_eq!(lines, [rec(3, "new").into_bytes()]);
+    }
+
+    // --- Rotated files, and vacuums under the journal's lock ---
+
+    #[test]
+    fn rotated_copies_are_found_oldest_first() {
+        let dir = ScratchDir::new("journalctl_rotated");
+        let live = dir.path("syslog.jsonl");
+        for name in [
+            "syslog.jsonl",
+            "syslog.jsonl.1",
+            "syslog.jsonl.10",
+            "syslog.jsonl.2",
+            "syslog.jsonl.0",
+            "syslog.jsonl.x",
+            "syslog.jsonl.",
+            ".syslog.jsonl.12.tmp",
+            "other.1",
+        ] {
+            fs::write(dir.path(name), b"").unwrap();
+        }
+        let found = rotated_siblings(&live);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            ["syslog.jsonl.10", "syslog.jsonl.2", "syslog.jsonl.1"]
+        );
+    }
+
+    #[test]
+    fn only_syslogds_live_log_has_rotated_copies() {
+        assert!(is_rotated(Path::new("/var/log/syslog.jsonl.3")));
+        assert!(!is_rotated(Path::new("/var/log/syslog.jsonl")));
+        assert!(!is_rotated(Path::new("/var/log/syslog.1")));
+        assert!(!is_rotated(Path::new("/tmp/syslog.jsonl.3")));
+    }
+
+    /// A vacuum by time keeps what is young and what is not a record, and
+    /// removes a rotated copy it empties -- never the live file.
+    #[test]
+    fn vacuum_by_time_trims_and_removes_an_emptied_archive() {
+        let dir = ScratchDir::new("journalctl_vacuum_time");
+        let old = dir.path("syslog.jsonl.1");
+        let live = dir.path("syslog.jsonl");
+        fs::write(&old, format!("{}\n{}\n", rec(10, "a"), rec(20, "b"))).unwrap();
+        fs::write(
+            &live,
+            format!("{}\nnot a record\n{}\n", rec(30, "c"), rec(300, "d")),
+        )
+        .unwrap();
+        let archive = |p: &Path| p == old.as_path();
+        let v = vacuum_time(&[old.clone(), live.clone()], 100, &archive);
+        assert_eq!((v.removed, v.kept), (3, 2));
+        assert!(v.failures.is_empty());
+        assert!(!old.exists(), "an emptied archive is removed");
+        assert_eq!(
+            fs::read_to_string(&live).unwrap(),
+            format!("not a record\n{}\n", rec(300, "d"))
+        );
+        // The live file stays, even when nothing is left in it.
+        let v = vacuum_time(std::slice::from_ref(&live), 1000, &archive);
+        assert_eq!(v.removed, 1);
+        assert_eq!(fs::read_to_string(&live).unwrap(), "not a record\n");
+    }
+
+    /// A vacuum by size trims the oldest file first, and stops as soon as
+    /// enough is gone.
+    #[test]
+    fn vacuum_by_size_trims_oldest_first() {
+        let dir = ScratchDir::new("journalctl_vacuum_size");
+        let old = dir.path("syslog.jsonl.1");
+        let live = dir.path("syslog.jsonl");
+        let (a, b, c) = (rec(1, "a"), rec(2, "b"), rec(3, "c"));
+        fs::write(&old, format!("{a}\n{b}\n")).unwrap();
+        fs::write(&live, format!("{c}\n")).unwrap();
+        let archive = |p: &Path| p == old.as_path();
+        // One byte more than the first line: the first two go.
+        let want = u64::try_from(a.len()).unwrap() + 2;
+        let v = vacuum_size(&[old.clone(), live.clone()], want, &archive);
+        assert_eq!(v.removed, 2);
+        assert!(!old.exists());
+        assert_eq!(fs::read_to_string(&live).unwrap(), format!("{c}\n"));
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_rewritten_is_left_whole_and_reported() {
+        let dir = ScratchDir::new("journalctl_vacuum_fail");
+        // A directory: it opens, and cannot be read as a file.
+        let not_a_file = dir.path("syslog.jsonl");
+        fs::create_dir(&not_a_file).unwrap();
+        let v = vacuum_time(std::slice::from_ref(&not_a_file), 100, &|_| false);
+        assert_eq!(v.failures.len(), 1);
+        assert!(not_a_file.is_dir());
     }
 
     #[test]

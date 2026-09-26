@@ -43,3 +43,6 @@ localtime = { path = "../localtime" }
 # reads: where `/dev/log` cannot exist (no Unix-domain sockets on SlateOS
 # yet), and for `--journald`, which has no journald to send to.
 journalrec = { path = "../journalrec" }
+# Appended under the journal's lock (design-decisions §1037), so a vacuum or
+# rotation at that moment does not lose the record.
+journalio = { path = "../journalio" }

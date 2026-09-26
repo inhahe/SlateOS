@@ -165263,9 +165263,18 @@ have the disc's colour at partial alpha.
 **How to see it.** Thumbnail a GIF or PNG with an opaque coloured shape on a
 transparent background over a light background: the shape has a dark rim.
 
-### [F] Lossless WebP decodes at half libwebp's speed -- 2026-09-25
+### [F] Lossless WebP decodes at half libwebp's speed -- 2026-09-25 -- **fixed 2026-09-25**
 
-**Status:** OPEN — lane F's; tech debt, not a bug.
+**Status:** FIXED — it now takes fewer cycles than libwebp: 0.39 billion for
+the 2000x1500 picture against libwebp's 0.46 (it was 0.63), measured in the
+decoding thread's CPU cycles. The pixel loop looks its prefix-code group up
+once a block and walks columns without dividing (libwebp's own scheme, item
+1 below), non-overlapping copies are one move, and the predictor and colour
+transforms work a row at a time in runs of one block, their mode or element
+looked up once a run (in the spirit of item 3). Every fixture as before,
+and 3,750 bit-flipped and 2,183 truncated lossless and alpha WebPs decoded
+exactly as libwebp decodes them. Item 2 was not needed. The original report
+follows.
 
 **In short:** opening a large lossless WebP takes about twice as long here as
 in a browser: 0.31 s for a 2000x1500 picture against libwebp's 0.15 s. The

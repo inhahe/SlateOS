@@ -158816,7 +158816,7 @@ one of these was introduced by an edit that added something and left the
 header alone.
 
 ## `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT` (lane C, 2026-09-17)
-**Status:** OPEN — 2026-09-24 (lane F): the stall is about 3.5x shorter, not gone. `imagecodec`'s JPEG decoder is now about 3.3x faster with bit-identical output (4000x5333: whole picture 3.65 s → ~1.1 s, 128-px thumbnail 1.25 s → ~0.34 s, release, this machine), but the decode still runs on the thread that draws; moving it off that thread is still the fix. — 2026-09-25 (lane F): **the missing piece this entry names, the wake, now exists.** An application that returns `true` from `App::wants_waker` is handed a `std::task::Waker` in `App::attach_waker` before its first frame; a worker that calls `wake()` gets the application an `App::on_wake` on the loop's thread, then a frame (`EventLoop::waker`, `Dispatch::Woken`; design-decisions §1303). What remains is lane E's: moving the two decodes onto a worker — `requests/f-ce-a-finished-decode-can-now-wake-the-window-that-asked-for-it.md`.
+**Status:** OPEN — 2026-09-24 (lane F): the stall is about 3.5x shorter, not gone. `imagecodec`'s JPEG decoder is now about 3.3x faster with bit-identical output (4000x5333: whole picture 3.65 s → ~1.1 s, 128-px thumbnail 1.25 s → ~0.34 s, release, this machine), but the decode still runs on the thread that draws; moving it off that thread is still the fix. — 2026-09-25 (lane F): **the missing piece this entry names, the wake, now exists.** An application that returns `true` from `App::wants_waker` is handed a `std::task::Waker` in `App::attach_waker` before its first frame; a worker that calls `wake()` gets the application an `App::on_wake` on the loop's thread, then a frame (`EventLoop::waker`, `Dispatch::Woken`; design-decisions §1303). What remains is lane E's: moving the two decodes onto a worker — `requests/f-ce-a-finished-decode-can-now-wake-the-window-that-asked-for-it.md`. — 2026-09-26 (lane E): **both decodes are off the thread that draws.** `apps/imageviewer` (`display_image` → `request`) and `apps/photomanager` (`sync_picture`) ask for the waker and decode on a worker from the new `apps/offloop` (`Latest`: a request supersedes those waiting behind it, and only the newest request's result is handed back, so paging past photographs decodes the one the user stops on and a slow one can never land on top of the next). The viewer keeps the last picture up and says which is coming; the photo manager shows the card until the pixels arrive. With no waker (before the window exists, in tests) each decodes in place as before. Closing this entry is lane C's. Still on the drawing thread: the grids' **thumbnails** (`thumbs::ThumbnailGenerator::process_batch`, a bounded batch per frame, in `apps/explorer` and `apps/photomanager`) -- lane E's to move, a queue of every visible card rather than newest-wins; tracked in `[E] Thumbnails are still generated on the thread that draws`.
 
 **In short:** click a photograph and the window stops responding until the
 picture has been decoded -- about two thirds of a second for a photograph from
@@ -167118,6 +167118,31 @@ Enter) in it edits `input` itself -- drawn verbatim, with a caret, Up/Down by
 line, the caret kept on screen, the parse re-run as the text changes -- and
 Escape returns to the formatted view. `guitk` has no multi-line editor to lend
 (`textedit` is single-line), so the editing stays in this crate.
+
+### [E] Thumbnails are still generated on the thread that draws -- 2026-09-26
+**Status:** OPEN -- `apps/explorer/src/main.rs` (`pump_thumbnails` ->
+`self.thumb_gen.process_batch(batch)`), `apps/photomanager/src/main.rs`
+(`sync_thumbnails` -> `process_batch(Self::THUMB_BATCH)`).
+
+**In short:** opening a folder of photographs in the file manager, or the
+photo manager's grid, makes each thumbnail on the thread that draws the
+window, a few per frame. `imagecodec::decode_scaled` makes one cheap for a
+small picture, but a camera's JPEG still costs about a third of a second at
+128 pixels (lane F's figure, 4000x5333, release), so every frame that makes
+two or three of them is a frame the window cannot answer in. The selected
+photograph's own decode moved off that thread on 2026-09-26 (`apps/offloop`,
+`TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT`); the grids'
+thumbnails did not.
+
+**The proper fix** is the same worker with a different rule. A viewer wants
+only the newest request (`offloop::Latest`); a grid wants *every* card it can
+see, and each result as soon as it exists. So: a second `offloop` type whose
+request is the whole set of visible cards -- replacing the set not yet
+started, since cards scrolled away are no longer wanted -- and whose results
+are handed back one by one as they are made, each waking the loop. The
+thumbnail cache (`gui/thumbs`, lane C's) stays where it is; only the
+`process_batch` call moves to the worker, with the generator's input and
+output crossing by channel.
 
 ### [E] The process explorer's window picker, blocking analyzer and affinity and priority controls are unwired -- 2026-09-26
 **Status:** OPEN -- `apps/procexplorer/src/features.rs`, under an

@@ -53,6 +53,17 @@ working waker, and waking it before the loop runs delivers one `on_wake`
 For explorer the choice is lane E's: its bounded batches already cap the stall
 per frame, and a worker would remove it.
 
+**Lane E, 2026-09-26: done for the two photographs.** `apps/imageviewer` and
+`apps/photomanager` ask for the waker and decode on a worker from the new
+`apps/offloop` crate (`Latest`: newest request wins; a result is handed back
+only for the newest request, so a slow photograph paged past cannot land on
+top of the next). Each keeps a synchronous path for when no waker is given
+(before the window exists; tests), and is tested end to end through
+`offloop::channel_waker`. The explorer's (and the photo manager's) grid
+thumbnails are not moved yet: that is a different shape -- every visible
+card, results one by one -- and is `known-issues.md` -> `[E] Thumbnails are
+still generated on the thread that draws`.
+
 ## For lane C
 
 `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT`'s "the missing

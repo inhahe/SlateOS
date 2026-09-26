@@ -24304,6 +24304,19 @@ Linux 6.6's ipc/shm.c.
 - Beside them, the finding of the pass: the segments were a four-slot pool
   of 64 KiB -- `B-D-SYSV-SHM-WAS-A-STATIC-POOL` (new, fixed with it).
 
+**Thirty-fourth pass, 2026-09-26 — `sys_quota.rs` (2 sites), lane D.** Against
+Linux 6.6's fs/quota/quota.c.
+
+- **`quotactl(cmd, NULL, …)`** was `EFAULT`, the doc comment citing a
+  `getname` of the NULL name; Linux tests `special` for NULL itself and
+  answers `ENODEV` -- or, for `Q_SYNC`, syncs every filesystem with quotas
+  and returns 0.
+- **`quotactl(cmd, special, …, NULL)`** was `EFAULT` before the device was
+  looked at; Linux reaches `addr` only inside a filesystem's quota
+  operations, and no filesystem here has any.
+- Beside them, the finding of the pass: the whole order was its own --
+  `B-D-QUOTACTL-WAS-NOT-LINUXS` (new, fixed with it).
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24317,17 +24330,17 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-thirty-three swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
+thirty-four swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
 `sched.rs`, `mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`,
 `linux_module.rs`, `sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs`, `sysv_sem.rs`,
 `linux_aio_abi.rs`, `linux_seccomp.rs`, `mman.rs`, `resource.rs`, `crypt.rs`,
-`iconv.rs`, `linux_io_uring.rs` and `sysv_shm.rs`. That finishes every file
-the sweep counted at four and at three, the three the recount of 2026-09-26
-added among them: `pwd.rs`, `dirent.rs` and `signal.rs` needed nothing at
-their NULLs -- `pwd.rs`'s database did (`B-D-PWD-KNEW-ONLY-ROOT`). Of the
-files at two, `sysv_shm.rs` is done; next are `fts.rs`, `ftw.rs`,
-`linux_landlock.rs`, `sys_quota.rs`, `sys_timex.rs` and `xattr.rs` (walked by
-the fourth pass).
+`iconv.rs`, `linux_io_uring.rs`, `sysv_shm.rs` and `sys_quota.rs`. That
+finishes every file the sweep counted at four and at three, the three the
+recount of 2026-09-26 added among them: `pwd.rs`, `dirent.rs` and `signal.rs`
+needed nothing at their NULLs -- `pwd.rs`'s database did
+(`B-D-PWD-KNEW-ONLY-ROOT`). Of the files at two, `sysv_shm.rs` and
+`sys_quota.rs` are done; next are `fts.rs`, `ftw.rs`, `linux_landlock.rs`,
+`sys_timex.rs` and `xattr.rs` (walked by the fourth pass).
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
@@ -169900,6 +169913,28 @@ semaphores already were.
   kernel, which authorizes only a region's creator.
 - **`SHM_HUGETLB`** is `ENOMEM`, as on a Linux system with no huge pages set
   aside.
+
+### [D] B-D-QUOTACTL-WAS-NOT-LINUXS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/sys_quota.rs`, `quotactl`.
+
+**In short:** `quotactl` manages disk quotas, which no filesystem here
+supports. Quota tools ask it anyway and decide from the error what to say --
+"no such device", "not a block device", "quotas not supported". Ours judged
+the call in an order of its own, so the tools were told the wrong thing: a
+missing device was a bad address, and an unprivileged query was "permission
+denied" rather than "not supported".
+
+**What was wrong, against Linux 6.6 (fs/quota/quota.c):**
+
+| | was | Linux, and now |
+|---|---|---|
+| a bad quota type with `Q_SYNC` | ignored | `EINVAL`, first, for every subcommand |
+| an unknown subcommand | `EINVAL`, first | never judged: `ENODEV` with no device, `ENOSYS` with one |
+| no `special` | `EFAULT` | `ENODEV`; `Q_SYNC` returns 0 |
+| a NULL `addr` | `EFAULT`, before the device | never reached: a filesystem's quota operations read it, and there are none |
+| `special` naming no file, or not a block device | `ENOSYS` | `stat`'s error, or `ENOTBLK` (`lookup_bdev`) |
+| no `CAP_SYS_ADMIN` | `EPERM`, before `ENOSYS` | never reached: `do_quotactl`'s `ENOSYS` comes first |
 
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 

@@ -1,7 +1,11 @@
 //! logger — send messages to the system log for Slate OS
 //!
-//! Compatible with POSIX/BSD logger(1). Writes log entries to
-//! the system log via /dev/log socket or direct file append.
+//! Compatible with POSIX/BSD logger(1). Appends each entry to the system log
+//! file, `/var/log/syslog`.
+//!
+//! Not to `/dev/log`, where util-linux sends: a Unix-domain socket cannot be
+//! bound to a path on SlateOS yet, so nothing listens there. See
+//! `known-issues.md` -> TD-B-NOTHING-RECEIVES-SYSLOG-MESSAGES.
 
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -277,77 +281,74 @@ fn parse_priority(s: &str) -> Result<(Facility, Severity), PriorityError> {
 
 // ── Timestamp formatting ─────────────────────────────────────────
 
-fn format_timestamp() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    // Convert epoch seconds to broken-down time (simplified UTC)
-    let days = secs / 86400;
-    let time_of_day = secs % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
-
-    // Calculate month and day from days since epoch (1970-01-01)
-    let (year, month, day) = days_to_date(days);
-    let _ = year; // We only need month and day for syslog format
-
-    let month_name = match month {
-        1 => "Jan",
-        2 => "Feb",
-        3 => "Mar",
-        4 => "Apr",
-        5 => "May",
-        6 => "Jun",
-        7 => "Jul",
-        8 => "Aug",
-        9 => "Sep",
-        10 => "Oct",
-        11 => "Nov",
-        12 => "Dec",
-        _ => "???",
-    };
-
-    format!(
-        "{} {:>2} {:02}:{:02}:{:02}",
-        month_name, day, hours, minutes, seconds
-    )
+/// The current time as `gettimeofday`'s `tv_sec`, which is what util-linux
+/// formats: whole seconds since the epoch.
+fn now_secs() -> i64 {
+    unix_secs(SystemTime::now())
 }
 
-fn days_to_date(days_since_epoch: u64) -> (u64, u32, u32) {
-    // Civil days algorithm
-    let z = days_since_epoch + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m as u32, d as u32)
+/// [`now_secs`] for a given instant, so its rounding can be tested.
+///
+/// Rounded DOWN, as `struct timeval` is: its `tv_usec` is never negative, so
+/// an instant half a second before 1970 is second -1 plus 500 000 us, not
+/// second 0. The version this replaced clamped everything before 1970 to 0.
+fn unix_secs(t: SystemTime) -> i64 {
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(after) => i64::try_from(after.as_secs()).unwrap_or(i64::MAX),
+        Err(e) => {
+            let before = e.duration();
+            let whole = i64::try_from(before.as_secs()).unwrap_or(i64::MAX);
+            whole
+                .saturating_add(i64::from(before.subsec_nanos() > 0))
+                .saturating_neg()
+        }
+    }
 }
 
-fn format_rfc3339() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+/// util-linux's `rfc3164_current_time`: the syslog TIMESTAMP, `Mmm dd
+/// hh:mm:ss`, for instant `t` in `zone`.
+///
+/// **Local time**, because that is what the field means. RFC 3164 gives it no
+/// zone marker, so a receiver can only read it as local, and util-linux
+/// writes `localtime_r` of the current time. This wrote UTC until 2026-09-26,
+/// which in any other zone is a different hour with nothing in the line to
+/// show it -- `known-issues.md` ->
+/// TD-B-EVERY-SYSLOG-TIMESTAMP-WE-WRITE-IS-UTC-WHERE-SYSLOG-MEANS-LOCAL-TIME.
+///
+/// The month names are upstream's own English table rather than `%b`, so the
+/// field does not change with the locale, and the day is padded with a space,
+/// which is RFC 3164's rule.
+fn rfc3164_time(zone: &localtime::Zone, t: i64) -> String {
+    const MONTHNAMES: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    // Upstream does not check `localtime_r` and formats whatever the
+    // uninitialised `tm` holds when it fails. It fails only when the year
+    // overflows an `int`, which the current time cannot do; `local`, which
+    // saturates instead of failing, is at least a defined answer.
+    let [mon, mday, hour, min, sec] = zone.localtime_r(t).map_or_else(
+        || {
+            let tm = zone.local(t, 0);
+            [tm.month.saturating_sub(1), tm.day, tm.hour, tm.minute, tm.second].map(i64::from)
+        },
+        |tm| [tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec].map(i64::from),
+    );
+    let month = usize::try_from(mon)
+        .ok()
+        .and_then(|m| MONTHNAMES.get(m))
+        .copied()
+        .unwrap_or("???");
+    format!("{month} {mday:2} {hour:02}:{min:02}:{sec:02}")
+}
 
-    let days = secs / 86400;
-    let time_of_day = secs % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
-
-    let (year, month, day) = days_to_date(days);
-
+/// `--rfc3339`, which is this program's own -- util-linux has `--rfc5424`
+/// instead: instant `t` in UTC, marked `Z`. Unlike the RFC 3164 field it says
+/// which reading it means, so UTC is simply true here.
+fn format_rfc3339(t: i64) -> String {
+    let tm = localtime::Zone::utc().local(t, 0);
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hours, minutes, seconds
+        tm.year, tm.month, tm.day, tm.hour, tm.minute, tm.second
     )
 }
 
@@ -794,14 +795,17 @@ fn get_pid() -> u32 {
 ///
 /// `--json` keeps its hostname: that output is this program's own, not a
 /// syslog frame, and a log line that has left the machine benefits from it.
-fn format_syslog_entry(opts: &Options, message: &str, tag: &str, pid: u32) -> String {
+///
+/// `timestamp` is the caller's, so that one reading of the clock serves the
+/// whole entry and a test can pin it.
+fn format_syslog_entry(
+    opts: &Options,
+    timestamp: &str,
+    message: &str,
+    tag: &str,
+    pid: u32,
+) -> String {
     let pri = (opts.priority.0 as u32) * 8 + (opts.priority.1 as u32);
-
-    let timestamp = if opts.rfc3339 {
-        format_rfc3339()
-    } else {
-        format_timestamp()
-    };
 
     let pid_part = if opts.id {
         format!("[{}]", opts.pid_override.unwrap_or(pid))
@@ -822,7 +826,14 @@ fn format_syslog_entry(opts: &Options, message: &str, tag: &str, pid: u32) -> St
     format!("<{pri}>{timestamp} {tag}{pid_part}: {msg}")
 }
 
-fn format_json_entry(opts: &Options, message: &str, hostname: &str, tag: &str, pid: u32) -> String {
+fn format_json_entry(
+    opts: &Options,
+    timestamp: &str,
+    message: &str,
+    hostname: &str,
+    tag: &str,
+    pid: u32,
+) -> String {
     let pri = (opts.priority.0 as u32) * 8 + (opts.priority.1 as u32);
 
     let msg = if let Some(limit) = opts.size_limit {
@@ -837,7 +848,7 @@ fn format_json_entry(opts: &Options, message: &str, hostname: &str, tag: &str, p
 
     let mut json = String::with_capacity(256);
     json.push_str("{\"timestamp\":\"");
-    json.push_str(&json_escape(&format_rfc3339()));
+    json.push_str(&json_escape(timestamp));
     json.push_str("\",\"hostname\":\"");
     json.push_str(&json_escape(hostname));
     json.push_str("\",\"facility\":\"");
@@ -881,11 +892,26 @@ fn write_log_entry(opts: &Options, entry: &str) {
     }
 }
 
-fn log_message(opts: &Options, message: &str, hostname: &str, tag: &str, pid: u32) {
+fn log_message(
+    opts: &Options,
+    zone: &localtime::Zone,
+    message: &str,
+    hostname: &str,
+    tag: &str,
+    pid: u32,
+) {
+    // One reading of the clock per entry: upstream regenerates its header,
+    // and with it the time, once per message.
+    let now = now_secs();
     let entry = if opts.json {
-        format_json_entry(opts, message, hostname, tag, pid)
+        format_json_entry(opts, &format_rfc3339(now), message, hostname, tag, pid)
     } else {
-        format_syslog_entry(opts, message, tag, pid)
+        let timestamp = if opts.rfc3339 {
+            format_rfc3339(now)
+        } else {
+            rfc3164_time(zone, now)
+        };
+        format_syslog_entry(opts, &timestamp, message, tag, pid)
     };
 
     write_log_entry(opts, &entry);
@@ -904,11 +930,14 @@ fn main() {
     let hostname = get_hostname();
     let tag = opts.tag.clone().unwrap_or_else(get_username);
     let pid = get_pid();
+    // `TZ` and `/etc/localtime` are read at the first conversion and not
+    // again, as glibc's `localtime_r` reads them.
+    let zone = localtime::Zone::from_env();
 
     if !opts.line_messages.is_empty() {
         // `-f`: one entry per line of the file, in order.
         for msg in &opts.line_messages {
-            log_message(&opts, msg, &hostname, &tag, pid);
+            log_message(&opts, &zone, msg, &hostname, &tag, pid);
         }
     } else if opts.read_stdin {
         // Each line read is its own message, as with `-f`.
@@ -917,7 +946,7 @@ fn main() {
             match line {
                 Ok(msg) => {
                     if !(opts.skip_empty && msg.is_empty()) {
-                        log_message(&opts, &msg, &hostname, &tag, pid);
+                        log_message(&opts, &zone, &msg, &hostname, &tag, pid);
                     }
                 }
                 Err(e) => {
@@ -929,7 +958,7 @@ fn main() {
     } else {
         // Argv words ARE joined -- `logger hello world` is one message.
         let message = opts.message_parts.join(" ");
-        log_message(&opts, &message, &hostname, &tag, pid);
+        log_message(&opts, &zone, &message, &hostname, &tag, pid);
     }
 }
 
@@ -1143,43 +1172,53 @@ mod tests {
     }
 
     // Timestamp formatting
+
+    /// US Eastern as a POSIX rule, so the test needs no zoneinfo database.
+    fn eastern() -> localtime::Zone {
+        localtime::Zone::from_tz(Some(b"EST5EDT,M3.2.0,M11.1.0".as_slice()))
+    }
+
+    /// The TIMESTAMP is local time. The same instant in UTC is what this
+    /// printed, in every zone, until 2026-09-26.
     #[test]
-    fn test_format_timestamp_not_empty() {
-        let ts = format_timestamp();
-        assert!(!ts.is_empty());
-        // Should be like "May 18 12:34:56"
-        assert!(ts.len() >= 14);
+    fn the_rfc3164_timestamp_is_local_time() {
+        // 2020-01-20 06:00:00 UTC is 01:00 EST.
+        assert_eq!(rfc3164_time(&eastern(), 1_579_500_000), "Jan 20 01:00:00");
+        // 2020-03-08 09:00:00 UTC is 05:00 EDT, that morning's change having
+        // come at 07:00 UTC -- and the 8th is padded with a space, not a zero.
+        assert_eq!(rfc3164_time(&eastern(), 1_583_658_000), "Mar  8 05:00:00");
+        assert_eq!(
+            rfc3164_time(&localtime::Zone::utc(), 1_583_658_000),
+            "Mar  8 09:00:00"
+        );
+    }
+
+    /// A zone east of Greenwich by a fraction of an hour moves the minutes
+    /// too, and can move the date: 2020-12-31 20:00 UTC is New Year's Day
+    /// in India.
+    #[test]
+    fn a_half_hour_zone_moves_the_minutes_and_the_date() {
+        let india = localtime::Zone::from_tz(Some(b"IST-5:30".as_slice()));
+        assert_eq!(rfc3164_time(&india, 1_609_444_800), "Jan  1 01:30:00");
     }
 
     #[test]
-    fn test_format_rfc3339_not_empty() {
-        let ts = format_rfc3339();
-        assert!(!ts.is_empty());
-        assert!(ts.contains('T'));
-        assert!(ts.ends_with('Z'));
-    }
-
-    // Date conversion
-    #[test]
-    fn test_days_to_date_epoch() {
-        let (y, m, d) = days_to_date(0);
-        assert_eq!((y, m, d), (1970, 1, 1));
+    fn the_clock_rounds_down_before_1970_as_gettimeofday_does() {
+        use std::time::Duration;
+        assert_eq!(unix_secs(UNIX_EPOCH), 0);
+        assert_eq!(unix_secs(UNIX_EPOCH + Duration::from_millis(1500)), 1);
+        assert_eq!(unix_secs(UNIX_EPOCH - Duration::from_millis(500)), -1);
+        assert_eq!(unix_secs(UNIX_EPOCH - Duration::from_secs(1)), -1);
+        assert_eq!(unix_secs(UNIX_EPOCH - Duration::from_millis(1500)), -2);
     }
 
     #[test]
-    fn test_days_to_date_known() {
-        // 2024-01-01 = day 19723
-        let (y, m, d) = days_to_date(19723);
-        assert_eq!((y, m, d), (2024, 1, 1));
-    }
-
-    #[test]
-    fn test_days_to_date_leap_year() {
-        // 2024-02-29 = day 19782
-        let (y, m, d) = days_to_date(19782);
-        assert_eq!(y, 2024);
-        assert_eq!(m, 2);
-        assert_eq!(d, 29);
+    fn rfc3339_is_utc_and_says_so() {
+        assert_eq!(format_rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_rfc3339(1_704_067_200), "2024-01-01T00:00:00Z");
+        // A leap day.
+        assert_eq!(format_rfc3339(1_709_164_800), "2024-02-29T00:00:00Z");
+        assert_eq!(format_rfc3339(1_583_658_000), "2020-03-08T09:00:00Z");
     }
 
     // JSON escaping
@@ -1233,7 +1272,8 @@ mod tests {
             skip_empty: false,
             line_messages: Vec::new(),
         };
-        let entry = format_syslog_entry(&opts, "test message", "mytag", 1234);
+        let entry = format_syslog_entry(&opts, "Mar  8 05:00:00", "test message", "mytag", 1234);
+        assert_eq!(entry, "<13>Mar  8 05:00:00 mytag: test message");
         // Priority: user(1)*8 + notice(5) = 13
         assert!(entry.starts_with("<13>"));
         assert!(entry.contains("mytag"));
@@ -1263,7 +1303,7 @@ mod tests {
             skip_empty: false,
             line_messages: Vec::new(),
         };
-        let entry = format_syslog_entry(&opts, "error", "daemon", 5678);
+        let entry = format_syslog_entry(&opts, "Jan 20 01:00:00", "error", "daemon", 5678);
         // Priority: daemon(3)*8 + err(3) = 27
         assert!(entry.starts_with("<27>"));
         assert!(entry.contains("[5678]"));
@@ -1287,7 +1327,7 @@ mod tests {
             skip_empty: false,
             line_messages: Vec::new(),
         };
-        let entry = format_syslog_entry(&opts, "msg", "tag", 1111);
+        let entry = format_syslog_entry(&opts, "Jan 20 01:00:00", "msg", "tag", 1111);
         assert!(entry.contains("[9999]"));
         assert!(!entry.contains("[1111]"));
     }
@@ -1310,7 +1350,13 @@ mod tests {
             skip_empty: false,
             line_messages: Vec::new(),
         };
-        let entry = format_syslog_entry(&opts, "this is a very long message", "t", 0);
+        let entry = format_syslog_entry(
+            &opts,
+            "Jan 20 01:00:00",
+            "this is a very long message",
+            "t",
+            0,
+        );
         assert!(entry.contains("this is a "));
         assert!(!entry.contains("very long"));
     }
@@ -1334,7 +1380,15 @@ mod tests {
             skip_empty: false,
             line_messages: Vec::new(),
         };
-        let entry = format_json_entry(&opts, "test msg", "myhost", "mytag", 42);
+        let entry = format_json_entry(
+            &opts,
+            "2020-03-08T09:00:00Z",
+            "test msg",
+            "myhost",
+            "mytag",
+            42,
+        );
+        assert!(entry.starts_with("{\"timestamp\":\"2020-03-08T09:00:00Z\","));
         assert!(entry.starts_with('{'));
         assert!(entry.ends_with('}'));
         assert!(entry.contains("\"facility\":\"user\""));
@@ -1364,7 +1418,7 @@ mod tests {
             skip_empty: false,
             line_messages: Vec::new(),
         };
-        let entry = format_json_entry(&opts, "msg", "h", "t", 42);
+        let entry = format_json_entry(&opts, "2020-03-08T09:00:00Z", "msg", "h", "t", 42);
         assert!(entry.contains("\"pid\":42"));
     }
 

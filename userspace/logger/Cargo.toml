@@ -11,3 +11,8 @@ authlib = { path = "../authlib" }
 # the diagnostic that refuses it, as the bytes the caller passed. Pure
 # formatting, no I/O, so 768-exempt.
 quoting = { path = "../quoting" }
+
+# The zone this process runs in -- `TZ`, `TZDIR`, `/etc/localtime`, read as
+# glibc reads them -- for the RFC 3164 TIMESTAMP, which is local time. Shared
+# with `date`, `ls` and the shell, so all of them agree on what "local" is.
+localtime = { path = "../localtime" }

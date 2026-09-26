@@ -165331,10 +165331,27 @@ Until then the gate keeps this from getting worse, and nothing else does: the
 collision is silent at build time apart from one cargo warning, and silent at
 runtime because both programs answer `kill -9 <pid>` plausibly.
 
-## TD-B-EVERY-SYSLOG-TIMESTAMP-WE-WRITE-IS-UTC-WHERE-SYSLOG-MEANS-LOCAL-TIME (lane B, 2026-09-16) — **open**
+## TD-B-EVERY-SYSLOG-TIMESTAMP-WE-WRITE-IS-UTC-WHERE-SYSLOG-MEANS-LOCAL-TIME (lane B, 2026-09-16) — FIXED 2026-09-26
 
-**Status: OPEN**, found 2026-09-16 while bringing `logger`'s frame in line with
-util-linux 2.39.3.
+**Status: FIXED 2026-09-26**, found 2026-09-16 while bringing `logger`'s frame
+in line with util-linux 2.39.3.
+
+**The fix.** The "small shared local-time facility" this entry asked for now
+exists -- `userspace/localtime`, glibc's `tzset`/`tzfile` resolution of `TZ`,
+`TZDIR` and `/etc/localtime` -- and `logger` is a caller: its RFC 3164
+TIMESTAMP is util-linux's `rfc3164_current_time`, `localtime_r` of the
+current second formatted `Mmm dd hh:mm:ss` with upstream's own English month
+table. `Zone::from_env()` is resolved once per run, as glibc's `localtime_r`
+reads `TZ` once. `--rfc3339` (this program's own) stays UTC with `Z`, which
+is honest; it now shares the crate's calendar instead of a private
+`days_to_date`, and the clock is read as `gettimeofday` reads it -- rounded
+down, so a time before 1970 is no longer clamped to 0. Tests pin a winter
+and a summer instant in US Eastern, a half-hour zone that moves the date, and
+the rounding.
+
+**What is still not util-linux here** is most of the rest of the program, and
+where its messages go -- see TD-B-NOTHING-RECEIVES-SYSLOG-MESSAGES, whose step
+3 is the faithful port.
 
 **In short:** the time stamped on every line `logger` writes is UTC, but the
 syslog format it is writing means *local* time. On a machine four hours behind

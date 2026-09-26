@@ -222,7 +222,6 @@
 # open.  A stale blocker is indistinguishable from a real one from the
 # outside, and this one had sat for a week.
 apps/installer/src/grub.rs
-apps/procexplorer/src/features.rs
 apps/settings/src/remote.rs
 gui/compositor/src/server.rs
 gui/desktop/src/about.rs

@@ -13,7 +13,17 @@
 //!   variables.
 //! - **Memory map viewer** — display virtual memory regions with color-coded
 //!   region types.
-#![allow(dead_code)]
+// The environment and memory-map views are wired (the Environment and Memory
+// tabs, from /proc/<pid>). The rest is not yet: the window picker needs the
+// compositor to say which window is under the pointer, the blocking analyzer
+// needs the kernel to say what a process waits on, and the affinity and
+// priority controls need their system calls -- known-issues.md, "[E] The
+// process explorer's window picker, blocking analyzer and affinity and
+// priority controls are unwired". `expect`, so this goes when they are.
+#![expect(
+    dead_code,
+    reason = "the window picker, blocking analyzer, and affinity and priority controls are not wired yet"
+)]
 
 use appearance::{Palette, Surface};
 use guitk::color::Color;
@@ -40,7 +50,7 @@ use std::collections::{HashMap, HashSet};
 // and subtext1, which is what they were standing in for.
 
 /// Standard row height used across feature panels.
-const FEATURE_ROW_HEIGHT: f32 = 22.0;
+pub(crate) const FEATURE_ROW_HEIGHT: f32 = 22.0;
 /// Standard left padding for text in panels.
 const FEATURE_TEXT_PAD: f32 = 8.0;
 /// Standard font size for body text.
@@ -135,6 +145,7 @@ impl WindowPicker {
     }
 
     /// Return a mock pick result for UI testing.
+    #[cfg(test)]
     pub fn mock_pick() -> PickResult {
         PickResult {
             window_id: 0x1A3F,
@@ -482,6 +493,7 @@ impl BlockingAnalyzer {
     }
 
     /// Create an analyzer pre-loaded with realistic stub data.
+    #[cfg(test)]
     pub fn with_demo_data() -> Self {
         let mut a = Self::new();
 
@@ -1387,7 +1399,46 @@ impl EnvViewer {
             .map(|e| e.name.clone())
     }
 
-    /// Create a viewer pre-loaded with realistic stub data.
+    /// The environment `/proc/<pid>/environ` holds: `NAME=value` strings,
+    /// each ended by a NUL. A name or value that is not text is shown by its
+    /// bytes, as escapes; an entry with no `=` is a name with no value.
+    pub fn from_environ(pid: u32, bytes: &[u8]) -> Self {
+        let shown = |b: &[u8]| {
+            std::str::from_utf8(b).map_or_else(|_| quoting::escape_unprintable(b), str::to_owned)
+        };
+        let env = bytes
+            .split(|&b| b == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| match entry.iter().position(|&b| b == b'=') {
+                Some(at) => {
+                    let (name, rest) = entry.split_at(at);
+                    (shown(name), shown(rest.get(1..).unwrap_or_default()))
+                }
+                None => (shown(entry), String::new()),
+            })
+            .collect();
+        Self::new(pid, env)
+    }
+
+    /// The first row on screen.
+    pub fn scroll(&self) -> usize {
+        self.scroll_offset
+    }
+
+    /// How many entries the filter leaves.
+    pub fn len(&self) -> usize {
+        self.filtered_entries().len()
+    }
+
+    /// Scroll by `delta` rows, keeping a page of `rows` in view.
+    pub fn scroll_by(&mut self, delta: isize, rows: usize) {
+        let most = self.len().saturating_sub(rows.max(1));
+        self.scroll_offset = self.scroll_offset.saturating_add_signed(delta).min(most);
+    }
+
+    /// A viewer of invented variables, for the tests of its drawing only:
+    /// the window reads a real environment (`from_environ`).
+    #[cfg(test)]
     pub fn with_demo_data(pid: u32) -> Self {
         Self::new(
             pid,
@@ -1702,8 +1753,9 @@ pub struct MemoryRegion {
     pub protection: Protection,
     /// Backing description (file path, "[heap]", "[stack]", etc.).
     pub backing: String,
-    /// Committed (resident) bytes.
-    pub committed: u64,
+    /// Resident bytes, when known. `/proc/<pid>/maps` does not say, and a
+    /// number put here without a source would be a guess shown as a fact.
+    pub committed: Option<u64>,
     /// Reserved (mapped) bytes.
     pub reserved: u64,
 }
@@ -1722,27 +1774,102 @@ pub struct MemoryMap {
     pub pid: u32,
     /// All memory regions, sorted by start address.
     pub regions: Vec<MemoryRegion>,
-    /// Total committed memory across all regions.
-    pub total_committed: u64,
+    /// Total resident memory across the regions, when every region's is known.
+    pub total_committed: Option<u64>,
     /// Total reserved memory across all regions.
     pub total_reserved: u64,
+    /// The first region row on screen.
+    scroll: usize,
+}
+
+/// One line of `/proc/<pid>/maps`, as a region.
+fn parse_maps_line(line: &[u8]) -> Option<MemoryRegion> {
+    let mut fields = line.splitn(6, |&b| b == b' ');
+    let range = fields.next()?;
+    let perms = fields.next()?;
+    let _offset = fields.next()?;
+    let _dev = fields.next()?;
+    let _inode = fields.next()?;
+    let path = fields.next().unwrap_or_default().trim_ascii();
+    let dash = range.iter().position(|&b| b == b'-')?;
+    let (start, end) = range.split_at(dash);
+    let hex = |b: &[u8]| u64::from_str_radix(std::str::from_utf8(b).ok()?, 16).ok();
+    let start_addr = hex(start)?;
+    let end_addr = hex(end.get(1..)?)?;
+    let bit = |i: usize, c: u8| perms.get(i).is_some_and(|&b| b == c);
+    let protection = Protection {
+        read: bit(0, b'r'),
+        write: bit(1, b'w'),
+        execute: bit(2, b'x'),
+    };
+    let shared = bit(3, b's');
+    let backing =
+        std::str::from_utf8(path).map_or_else(|_| quoting::escape_unprintable(path), str::to_owned);
+    let region_type = if backing == "[heap]" {
+        RegionType::Heap
+    } else if backing.starts_with("[stack") {
+        RegionType::Stack
+    } else if shared {
+        RegionType::Shared
+    } else if protection.execute {
+        RegionType::Code
+    } else if !backing.is_empty() && !backing.starts_with('[') && !protection.write {
+        RegionType::MappedFile
+    } else {
+        RegionType::Data
+    };
+    Some(MemoryRegion {
+        start_addr,
+        end_addr,
+        region_type,
+        protection,
+        backing,
+        committed: None,
+        reserved: end_addr.saturating_sub(start_addr),
+    })
 }
 
 impl MemoryMap {
     /// Create a memory map from a list of regions.
     pub fn new(pid: u32, mut regions: Vec<MemoryRegion>) -> Self {
         regions.sort_by_key(|r| r.start_addr);
-        let total_committed = regions.iter().map(|r| r.committed).sum();
+        let total_committed = regions.iter().map(|r| r.committed).sum::<Option<u64>>();
         let total_reserved = regions.iter().map(|r| r.reserved).sum();
         Self {
             pid,
             regions,
             total_committed,
             total_reserved,
+            scroll: 0,
         }
     }
 
-    /// Create a memory map pre-loaded with realistic stub data.
+    /// The regions `/proc/<pid>/maps` lists, a line each:
+    /// `start-end perms offset dev inode [path]`, addresses in hex. A line
+    /// that does not parse is left out; a path that is not text is shown by
+    /// its bytes.
+    pub fn from_maps(pid: u32, bytes: &[u8]) -> Self {
+        let regions = bytes
+            .split(|&b| b == b'\n')
+            .filter_map(parse_maps_line)
+            .collect();
+        Self::new(pid, regions)
+    }
+
+    /// The first region row on screen.
+    pub fn scroll(&self) -> usize {
+        self.scroll
+    }
+
+    /// Scroll by `delta` rows, keeping a page of `rows` in view.
+    pub fn scroll_by(&mut self, delta: isize, rows: usize) {
+        let most = self.regions.len().saturating_sub(rows.max(1));
+        self.scroll = self.scroll.saturating_add_signed(delta).min(most);
+    }
+
+    /// A map of invented regions, for the tests of its drawing only: the
+    /// window reads a real one (`from_maps`).
+    #[cfg(test)]
     pub fn with_demo_data(pid: u32) -> Self {
         let regions = vec![
             MemoryRegion {
@@ -1755,7 +1882,7 @@ impl MemoryMap {
                     execute: true,
                 },
                 backing: "/usr/bin/editor".to_string(),
-                committed: 512 * 1024,
+                committed: Some(512 * 1024),
                 reserved: 512 * 1024,
             },
             MemoryRegion {
@@ -1768,7 +1895,7 @@ impl MemoryMap {
                     execute: false,
                 },
                 backing: "/usr/bin/editor".to_string(),
-                committed: 128 * 1024,
+                committed: Some(128 * 1024),
                 reserved: 128 * 1024,
             },
             MemoryRegion {
@@ -1781,7 +1908,7 @@ impl MemoryMap {
                     execute: false,
                 },
                 backing: "[heap]".to_string(),
-                committed: 8 * 1024 * 1024,
+                committed: Some(8 * 1024 * 1024),
                 reserved: 16 * 1024 * 1024,
             },
             MemoryRegion {
@@ -1794,7 +1921,7 @@ impl MemoryMap {
                     execute: false,
                 },
                 backing: "/usr/lib/libguitk.so".to_string(),
-                committed: 1024 * 1024,
+                committed: Some(1024 * 1024),
                 reserved: 1024 * 1024,
             },
             MemoryRegion {
@@ -1807,7 +1934,7 @@ impl MemoryMap {
                     execute: true,
                 },
                 backing: "/usr/lib/libguitk.so".to_string(),
-                committed: 512 * 1024,
+                committed: Some(512 * 1024),
                 reserved: 512 * 1024,
             },
             MemoryRegion {
@@ -1820,7 +1947,7 @@ impl MemoryMap {
                     execute: false,
                 },
                 backing: "shm:compositor-buffer".to_string(),
-                committed: 256 * 1024,
+                committed: Some(256 * 1024),
                 reserved: 256 * 1024,
             },
             MemoryRegion {
@@ -1833,7 +1960,7 @@ impl MemoryMap {
                     execute: false,
                 },
                 backing: "[stack]".to_string(),
-                committed: 64 * 1024,
+                committed: Some(64 * 1024),
                 reserved: 2 * 1024 * 1024,
             },
         ];
@@ -1841,7 +1968,14 @@ impl MemoryMap {
     }
 
     /// Render the memory map viewer.
-    pub fn render(&self, palette: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render(
+        &self,
+        palette: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+        max_rows: usize,
+    ) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let mut cy = y;
 
@@ -1880,11 +2014,19 @@ impl MemoryMap {
         cmds.push(RenderCommand::Text {
             x: x + FEATURE_TEXT_PAD + 8.0,
             y: cy + 4.0,
-            text: format!(
-                "Committed: {}   Reserved: {}",
-                format_size(self.total_committed),
-                format_size(self.total_reserved),
-            ),
+            text: match self.total_committed {
+                Some(resident) => format!(
+                    "{} regions   Resident: {}   Mapped: {}",
+                    self.regions.len(),
+                    format_size(resident),
+                    format_size(self.total_reserved),
+                ),
+                None => format!(
+                    "{} regions   Mapped: {}",
+                    self.regions.len(),
+                    format_size(self.total_reserved),
+                ),
+            },
             color: palette.text,
             font_size: FEATURE_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
@@ -1992,8 +2134,14 @@ impl MemoryMap {
         }
         cy += FEATURE_ROW_HEIGHT;
 
-        // Region rows.
-        for (i, region) in self.regions.iter().enumerate() {
+        // Region rows: a page of them, from the scroll.
+        for (i, region) in self
+            .regions
+            .iter()
+            .enumerate()
+            .skip(self.scroll)
+            .take(max_rows)
+        {
             let bg = if i % 2 == 0 {
                 palette.base
             } else {
@@ -2460,7 +2608,7 @@ mod tests {
     #[test]
     fn memory_map_totals() {
         let map = MemoryMap::with_demo_data(100);
-        let expected_committed: u64 = map.regions.iter().map(|r| r.committed).sum();
+        let expected_committed = map.regions.iter().map(|r| r.committed).sum::<Option<u64>>();
         let expected_reserved: u64 = map.regions.iter().map(|r| r.reserved).sum();
         assert_eq!(map.total_committed, expected_committed);
         assert_eq!(map.total_reserved, expected_reserved);
@@ -2478,7 +2626,7 @@ mod tests {
                 execute: true,
             },
             backing: "test".to_string(),
-            committed: 4096,
+            committed: Some(4096),
             reserved: 4096,
         };
         assert_eq!(r.size(), 0x1000);
@@ -2549,7 +2697,7 @@ mod tests {
     #[test]
     fn memory_map_render_produces_output() {
         let map = MemoryMap::with_demo_data(100);
-        let cmds = map.render(&Palette::for_mode(false), 0.0, 0.0, 800.0);
+        let cmds = map.render(&Palette::for_mode(false), 0.0, 0.0, 800.0, 100);
         assert!(!cmds.is_empty());
     }
 
@@ -2592,7 +2740,7 @@ mod tests {
                 ),
                 (
                     "memory map",
-                    MemoryMap::with_demo_data(100).render(&p, 0.0, 0.0, 800.0),
+                    MemoryMap::with_demo_data(100).render(&p, 0.0, 0.0, 800.0, 100),
                 ),
             ];
             for (what, cmds) in panels {
@@ -2620,5 +2768,87 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `/proc/<pid>/environ`: NUL-ended `NAME=value`s; a value may hold `=`;
+    /// an entry with no `=` has no value; a byte that is not text is an escape.
+    #[test]
+    fn an_environment_is_read_from_environ() {
+        let v = EnvViewer::from_environ(9, b"B=2\0A=x=y\0FLAG\0\0C=caf\xe9\0");
+        let got: Vec<(String, String)> = v
+            .filtered_entries()
+            .iter()
+            .map(|e| (e.name.clone(), e.value.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("A".into(), "x=y".into()),
+                ("B".into(), "2".into()),
+                ("C".into(), r"caf\351".into()),
+                ("FLAG".into(), String::new()),
+            ]
+        );
+    }
+
+    /// `/proc/<pid>/maps`: each line a region, typed by what backs it and
+    /// how it may be used; a line that does not parse is left out.
+    #[test]
+    fn a_memory_map_is_read_from_maps() {
+        let map = MemoryMap::from_maps(
+            9,
+            b"00400000-00452000 r-xp 00000000 08:02 173521 /usr/bin/dbus\n\
+              00651000-00652000 rw-p 00051000 08:02 173521 /usr/bin/dbus\n\
+              00652000-00655000 r--p 00052000 08:02 173521 /usr/lib/libc.so\n\
+              01a00000-01b00000 rw-p 00000000 00:00 0 [heap]\n\
+              7ffc0000-7ffe0000 rw-p 00000000 00:00 0 [stack]\n\
+              7f000000-7f100000 rw-s 00000000 00:05 3 /dev/shm/pool\n\
+              7e000000-7e100000 rw-p 00000000 00:00 0 \n\
+              not a line\n",
+        );
+        let types: Vec<RegionType> = map.regions.iter().map(|r| r.region_type).collect();
+        assert_eq!(
+            types,
+            vec![
+                RegionType::Code,
+                RegionType::Data,
+                RegionType::MappedFile,
+                RegionType::Heap,
+                RegionType::Data,
+                RegionType::Shared,
+                RegionType::Stack,
+            ],
+            "sorted by address"
+        );
+        assert_eq!(map.regions[0].size(), 0x52000);
+        assert_eq!(map.regions[0].protection.to_rwx(), "r-x");
+        assert_eq!(
+            map.total_committed, None,
+            "maps does not say what is resident"
+        );
+        assert_eq!(
+            map.total_reserved,
+            map.regions.iter().map(MemoryRegion::size).sum::<u64>()
+        );
+        let named = MemoryMap::from_maps(9, b"10-20 r--p 0 0:0 0 /tmp/caf\xe9\n");
+        assert_eq!(named.regions[0].backing, r"/tmp/caf\351");
+    }
+
+    /// Scrolling stops with a page still in view, and at the top.
+    #[test]
+    fn a_view_scrolls_within_its_list() {
+        let mut map = MemoryMap::from_maps(
+            9,
+            &(0..20)
+                .flat_map(|i| format!("{i:x}000-{i:x}800 rw-p 0 0:0 0\n").into_bytes())
+                .collect::<Vec<u8>>(),
+        );
+        map.scroll_by(100, 5);
+        assert_eq!(map.scroll(), 15);
+        map.scroll_by(-100, 5);
+        assert_eq!(map.scroll(), 0);
+        let mut env = EnvViewer::from_environ(9, b"A=1\0B=2\0C=3\0");
+        env.scroll_by(10, 2);
+        assert_eq!(env.scroll(), 1);
     }
 }

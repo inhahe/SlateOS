@@ -357,6 +357,10 @@ pub enum Tab {
     System,
     Network,
     Details,
+    /// The selected process's environment, from `/proc/<pid>/environ`.
+    Environment,
+    /// The selected process's memory map, from `/proc/<pid>/maps`.
+    Memory,
 }
 
 impl Tab {
@@ -367,11 +371,38 @@ impl Tab {
             Self::System => "System",
             Self::Network => "Network",
             Self::Details => "Details",
+            Self::Environment => "Environment",
+            Self::Memory => "Memory",
         }
     }
 
     /// All tabs in display order.
-    pub const ALL: [Tab; 4] = [Tab::Processes, Tab::System, Tab::Network, Tab::Details];
+    pub const ALL: [Tab; 6] = [
+        Tab::Processes,
+        Tab::System,
+        Tab::Network,
+        Tab::Details,
+        Tab::Environment,
+        Tab::Memory,
+    ];
+
+    /// The tab `step` places after this one, wrapping.
+    fn step(self, step: isize) -> Self {
+        let at = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
+        let len = Self::ALL.len();
+        // `rem_euclid` keeps a step back from the first tab on the last one.
+        let next = isize::try_from(at)
+            .ok()
+            .and_then(|at| at.checked_add(step))
+            .and_then(|n| usize::try_from(n.rem_euclid(isize::try_from(len).ok()?)).ok())
+            .unwrap_or(0);
+        Self::ALL.get(next).copied().unwrap_or(self)
+    }
+
+    /// Whether this tab shows one process's own lists, read on demand.
+    fn is_process_view(self) -> bool {
+        matches!(self, Self::Environment | Self::Memory)
+    }
 }
 
 /// Columns in the process table.
@@ -595,6 +626,14 @@ pub struct ProcessExplorerState {
     /// was no way to move by a single row at all.
     wheel: wheel::Accumulator,
 
+    // -- One process's own lists ----------------------------------------------
+    /// The selected process's environment, or why it could not be read.
+    env_view: Option<Result<features::EnvViewer, String>>,
+    /// The selected process's memory map, or why it could not be read.
+    mem_view: Option<Result<features::MemoryMap, String>>,
+    /// Which process the two views were read for.
+    views_pid: Option<u32>,
+
     // -- Search / filter -----------------------------------------------------
     /// Filter text (search box content).
     pub filter_text: String,
@@ -675,6 +714,9 @@ impl ProcessExplorerState {
             view_mode: ViewMode::List,
             scroll_offset: 0,
             wheel: wheel::Accumulator::default(),
+            env_view: None,
+            mem_view: None,
+            views_pid: None,
             filter_text: String::new(),
             show_help: false,
             filter_focused: false,
@@ -823,6 +865,8 @@ impl ProcessExplorerState {
             self.proc_unreadable = true;
         }
         self.read_system(&fs);
+        // A process's maps change as it runs; its lists are read again.
+        self.load_views(&fs, true);
 
         self.rebuild_visible_list();
         self.update_histories();
@@ -1218,22 +1262,22 @@ impl ProcessExplorerState {
             }
             // Tab = next tab
             Key::Tab if key.modifiers == Modifiers::NONE => {
-                self.active_tab = match self.active_tab {
-                    Tab::Processes => Tab::System,
-                    Tab::System => Tab::Network,
-                    Tab::Network => Tab::Details,
-                    Tab::Details => Tab::Processes,
-                };
+                self.set_tab(self.active_tab.step(1));
                 EventResult::Consumed
             }
             // Shift+Tab = previous tab
             Key::Tab if key.modifiers.shift => {
-                self.active_tab = match self.active_tab {
-                    Tab::Processes => Tab::Details,
-                    Tab::System => Tab::Processes,
-                    Tab::Network => Tab::System,
-                    Tab::Details => Tab::Network,
-                };
+                self.set_tab(self.active_tab.step(-1));
+                EventResult::Consumed
+            }
+            // Page Up and Page Down page through the list a process view
+            // shows; Up and Down still choose the process it shows.
+            Key::PageUp if self.active_tab.is_process_view() => {
+                self.scroll_view(0_isize.saturating_sub_unsigned(self.view_rows()));
+                EventResult::Consumed
+            }
+            Key::PageDown if self.active_tab.is_process_view() => {
+                self.scroll_view(isize::try_from(self.view_rows()).unwrap_or(isize::MAX));
                 EventResult::Consumed
             }
             // Arrow keys for process list navigation
@@ -1366,7 +1410,7 @@ impl ProcessExplorerState {
                     for tab in &Tab::ALL {
                         let tab_w = tab_width(tab.label());
                         if mx >= tab_x && mx < tab_x + tab_w {
-                            self.active_tab = *tab;
+                            self.set_tab(*tab);
                             return EventResult::Consumed;
                         }
                         tab_x += tab_w;
@@ -1428,6 +1472,12 @@ impl ProcessExplorerState {
                 EventResult::Consumed
             }
 
+            // Scroll wheel -- a process view's list, on those tabs
+            MouseEventKind::Scroll { dy, .. } if self.active_tab.is_process_view() => {
+                let rows = self.wheel.rows(*dy);
+                self.scroll_view(rows);
+                EventResult::Consumed
+            }
             // Scroll wheel — scroll the process list
             MouseEventKind::Scroll { dy, .. } => {
                 let rows = self.wheel.rows(*dy);
@@ -1529,6 +1579,8 @@ impl ProcessExplorerState {
         #[allow(clippy::cast_sign_loss)]
         let new_idx = current.saturating_add(delta).clamp(0, max_idx) as usize;
         self.selected_index = Some(new_idx);
+        // A process view follows the selection.
+        self.load_views(&procinfo::ProcFs::new(), false);
 
         // Ensure the selection is visible by adjusting scroll.
         let visible_rows = self.visible_row_count();
@@ -1596,6 +1648,122 @@ impl ProcessExplorerState {
     }
 
     /// Number of process rows visible in the current window.
+    /// Switch to `tab`, reading the selected process's lists if it shows them.
+    fn set_tab(&mut self, tab: Tab) {
+        self.active_tab = tab;
+        self.load_views(&procinfo::ProcFs::new(), false);
+    }
+
+    /// Read the selected process's environment and memory map from `fs`, when
+    /// a process view is showing and they were read for another process, or
+    /// `again`. Each is kept or its failure is: a process that has gone, or
+    /// whose files this user may not read, says so in its view.
+    fn load_views(&mut self, fs: &procinfo::ProcFs, again: bool) {
+        if !self.active_tab.is_process_view() {
+            return;
+        }
+        let Some(pid) = self.selected_process().map(|p| p.pid) else {
+            self.env_view = None;
+            self.mem_view = None;
+            self.views_pid = None;
+            return;
+        };
+        if !again && self.views_pid == Some(pid) {
+            return;
+        }
+        let read = |name: &str| {
+            fs.read(&format!("{pid}/{name}"))
+                .map_err(|e| format!("Cannot read /proc/{pid}/{name}: {e}"))
+        };
+        // The scroll is kept across a re-read of the same process, so a list
+        // being read looks the same from one second to the next.
+        let keep = self.views_pid == Some(pid);
+        let env_scroll = self
+            .env_view
+            .as_ref()
+            .and_then(|v| v.as_ref().ok())
+            .map(features::EnvViewer::scroll);
+        let mem_scroll = self
+            .mem_view
+            .as_ref()
+            .and_then(|v| v.as_ref().ok())
+            .map(features::MemoryMap::scroll);
+        self.env_view = Some(read("environ").map(|b| {
+            let mut v = features::EnvViewer::from_environ(pid, &b);
+            if keep && let Some(at) = env_scroll {
+                v.scroll_by(at as isize, 0);
+            }
+            v
+        }));
+        self.mem_view = Some(read("maps").map(|b| {
+            let mut v = features::MemoryMap::from_maps(pid, &b);
+            if keep && let Some(at) = mem_scroll {
+                v.scroll_by(at as isize, 0);
+            }
+            v
+        }));
+        self.views_pid = Some(pid);
+    }
+
+    /// How many list rows a process view has room for.
+    fn view_rows(&self) -> usize {
+        let top = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 8.0;
+        let height = self.window_height as f32 - top - STATUS_BAR_HEIGHT;
+        // Its header, filter or summary, bar, legend and column heads.
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let rows = (height / features::FEATURE_ROW_HEIGHT) as usize;
+        rows.saturating_sub(6).max(1)
+    }
+
+    /// Scroll the showing process view by `rows`.
+    fn scroll_view(&mut self, rows: isize) {
+        let page = self.view_rows();
+        match self.active_tab {
+            Tab::Environment => {
+                if let Some(Ok(v)) = self.env_view.as_mut() {
+                    v.scroll_by(rows, page);
+                }
+            }
+            Tab::Memory => {
+                if let Some(Ok(v)) = self.mem_view.as_mut() {
+                    v.scroll_by(rows, page);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The Environment or Memory tab: the selected process's list, or why
+    /// there is none.
+    fn render_process_view(&self, tree: &mut RenderTree) {
+        let w = self.window_width as f32;
+        let y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 8.0;
+        let pad = 16.0;
+        let view = match self.active_tab {
+            Tab::Environment => self.env_view.as_ref().map(|v| {
+                v.as_ref()
+                    .map(|v| v.render(&self.palette, pad, y, w - pad * 2.0, self.view_rows()))
+                    .map_err(Clone::clone)
+            }),
+            _ => self.mem_view.as_ref().map(|v| {
+                v.as_ref()
+                    .map(|v| v.render(&self.palette, pad, y, w - pad * 2.0, self.view_rows()))
+                    .map_err(Clone::clone)
+            }),
+        };
+        match view {
+            Some(Ok(cmds)) => tree.commands.extend(cmds),
+            Some(Err(why)) => tree.text(pad, y + 20.0, &why, self.palette.subtext0, 13.0),
+            None => tree.text(
+                pad,
+                y + 20.0,
+                "No process selected. Select a process on the Processes tab.",
+                self.palette.subtext0,
+                13.0,
+            ),
+        }
+    }
+
     fn visible_row_count(&self) -> usize {
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let rows = (self.rows_height() / ROW_HEIGHT) as usize;
@@ -1630,6 +1798,7 @@ impl ProcessExplorerState {
             Tab::System => self.render_system_tab(&mut tree),
             Tab::Network => self.render_network_tab(&mut tree),
             Tab::Details => self.render_details_tab(&mut tree),
+            Tab::Environment | Tab::Memory => self.render_process_view(&mut tree),
         }
 
         // Status bar
@@ -3351,6 +3520,110 @@ mod tests {
         app
     }
 
+    /// A `/proc` of one process, 42, whose environment and memory map
+    /// are `environ` and `maps`.
+    fn a_proc_of_one(tag: &str, environ: &[u8], maps: &[u8]) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("procexplorer-views-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("42")).unwrap();
+        std::fs::write(dir.join("42").join("environ"), environ).unwrap();
+        std::fs::write(dir.join("42").join("maps"), maps).unwrap();
+        dir
+    }
+
+    fn texts_of(app: &ProcessExplorerState) -> Vec<String> {
+        app.render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The Environment and Memory tabs show the selected process's own.**
+    /// They were written with invented lists and reachable from nothing.
+    #[test]
+    fn the_environment_and_memory_tabs_read_the_selected_process() {
+        let dir = a_proc_of_one(
+            "read",
+            b"PATH=/bin:/usr/bin\0HOME=/home/ada\0",
+            b"00400000-00452000 r-xp 00000000 08:02 173521 /usr/bin/dbus\n\
+              01a00000-01b00000 rw-p 00000000 00:00 0 [heap]\n",
+        );
+        let fs = procinfo::ProcFs::at(&dir);
+        let mut app = app_with_processes(1);
+        app.processes[0].pid = 42;
+        app.selected_index = Some(0);
+        app.active_tab = Tab::Environment;
+        app.load_views(&fs, true);
+        let shown = texts_of(&app);
+        assert!(shown.iter().any(|t| t == "PATH"), "{shown:?}");
+        assert!(
+            shown.iter().any(|t| t.contains("/bin:/usr/bin")),
+            "{shown:?}"
+        );
+        app.active_tab = Tab::Memory;
+        let shown = texts_of(&app);
+        assert!(shown.iter().any(|t| t == "[heap]"), "{shown:?}");
+        assert!(shown.iter().any(|t| t == "/usr/bin/dbus"), "{shown:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A process whose files cannot be read says so; no process, likewise.
+    #[test]
+    fn a_process_view_says_why_it_is_empty() {
+        let dir = a_proc_of_one("gone", b"", b"");
+        let fs = procinfo::ProcFs::at(&dir);
+        let mut app = app_with_processes(1);
+        app.processes[0].pid = 7;
+        app.selected_index = Some(0);
+        app.active_tab = Tab::Environment;
+        app.load_views(&fs, true);
+        assert!(
+            texts_of(&app)
+                .iter()
+                .any(|t| t.starts_with("Cannot read /proc/7/environ")),
+            "{:?}",
+            texts_of(&app)
+        );
+        app.selected_index = None;
+        app.load_views(&fs, true);
+        assert!(
+            texts_of(&app)
+                .iter()
+                .any(|t| t.starts_with("No process selected"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Tab and Shift+Tab go through all six tabs and wrap.
+    #[test]
+    fn tab_goes_through_every_tab_and_wraps() {
+        let mut app = ProcessExplorerState::new();
+        let tab = || KeyEvent {
+            key: Key::Tab,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        };
+        let mut seen = vec![app.active_tab];
+        for _ in 0..Tab::ALL.len() {
+            app.handle_key(&tab());
+            seen.push(app.active_tab);
+        }
+        assert_eq!(&seen[..6], &Tab::ALL[..]);
+        assert_eq!(seen[6], Tab::Processes, "did not wrap");
+        let back = KeyEvent {
+            modifiers: Modifiers::shift(),
+            ..tab()
+        };
+        app.handle_key(&back);
+        assert_eq!(app.active_tab, Tab::Memory, "Shift+Tab did not wrap back");
+    }
+
     fn wheel(app: &mut ProcessExplorerState, dy: f32) {
         app.handle_mouse(&MouseEvent {
             x: 100.0,
@@ -3525,7 +3798,7 @@ mod tests {
             let mut app = ProcessExplorerState::new();
             app.palette = Palette::for_mode(light);
             app.processes = app_with_a_shouting_process().processes;
-            for tab in [Tab::Processes, Tab::System, Tab::Network, Tab::Details] {
+            for tab in Tab::ALL {
                 app.active_tab = tab;
                 appearance::palette_check::assert_drawn_from(
                     &app.palette,

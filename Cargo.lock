@@ -2378,6 +2378,7 @@ dependencies = [
  "libcall",
  "oswindow",
  "procinfo",
+ "quoting",
 ]
 
 [[package]]

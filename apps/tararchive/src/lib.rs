@@ -20,13 +20,22 @@
 //! says so. What came before it is still listed, because a damaged archive's
 //! first members are still worth getting out.
 //!
+//! # Writing
+//!
+//! [`write_header`] writes one member's header -- ustar, which every reader
+//! reads, with a PAX header before it only when a name, a link, a size or a
+//! time does not fit ustar's fields -- and the caller writes the member's
+//! bytes and [`write_padding`] after it; [`write_end`] closes the archive.
+//! A long name goes in ustar's prefix where a `/` lets it, as GNU and POSIX
+//! tars both read, and in a PAX `path` record where it does not.
+//!
 //! # A name is not a path
 //!
 //! A member's name is bytes someone else wrote, and may be `../../etc/passwd`.
 //! It is given as it is; confining it under a destination is the extractor's
 //! job, as it is for ZIP.
 
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 pub mod testing;
 
@@ -60,6 +69,21 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// The type flag a header writes for this kind.
+    #[must_use]
+    pub fn flag(self) -> u8 {
+        match self {
+            Self::File => b'0',
+            Self::HardLink => b'1',
+            Self::Symlink => b'2',
+            Self::CharDevice => b'3',
+            Self::BlockDevice => b'4',
+            Self::Directory => b'5',
+            Self::Fifo => b'6',
+            Self::Other(flag) => flag,
+        }
+    }
+
     fn from_flag(flag: u8) -> Self {
         match flag {
             b'0' | 0 | b'7' => Self::File,
@@ -499,6 +523,182 @@ fn read_exact_at<R: Read + Seek>(r: &mut R, at: u64, n: u64) -> io::Result<Vec<u
     r.seek(SeekFrom::Start(at))?;
     r.read_exact(&mut buf)?;
     Ok(buf)
+}
+
+// ============================================================================
+// Writing
+// ============================================================================
+
+/// The largest number ustar's twelve-byte fields hold: eleven octal digits.
+const USTAR_MAX: u64 = 0o777_7777_7777;
+
+/// A member to write: what its header says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NewMember<'a> {
+    /// Its name in the archive, as bytes. A directory's should end in `/`.
+    pub name: &'a [u8],
+    pub kind: Kind,
+    pub mode: u32,
+    /// Seconds since 1970; negative before.
+    pub mtime: i64,
+    /// The bytes the caller writes after the header: 0 for what has none.
+    pub size: u64,
+    pub link: Option<&'a [u8]>,
+}
+
+/// Write `member`'s header, with a PAX header before it when ustar cannot
+/// hold a field. The caller writes `member.size` bytes after it, then
+/// [`write_padding`].
+///
+/// # Errors
+///
+/// When `w` does.
+pub fn write_header<W: Write>(w: &mut W, member: &NewMember) -> io::Result<()> {
+    let mut pax = Vec::new();
+    let (prefix, name) = match split_name(member.name) {
+        Some(split) => split,
+        None => {
+            pax_record(&mut pax, b"path", member.name);
+            (&[][..], member.name.get(..100).unwrap_or(member.name))
+        }
+    };
+    let link = member.link.unwrap_or(&[]);
+    if link.len() > 100 {
+        pax_record(&mut pax, b"linkpath", link);
+    }
+    if member.size > USTAR_MAX {
+        pax_record(&mut pax, b"size", member.size.to_string().as_bytes());
+    }
+    let mtime = u64::try_from(member.mtime).ok().filter(|&t| t <= USTAR_MAX);
+    if mtime.is_none() {
+        pax_record(&mut pax, b"mtime", member.mtime.to_string().as_bytes());
+    }
+    if !pax.is_empty() {
+        let base = member
+            .name
+            .rsplit(|&b| b == b'/')
+            .find(|part| !part.is_empty())
+            .unwrap_or(b"member");
+        let mut pax_name = b"PaxHeader/".to_vec();
+        pax_name.extend_from_slice(base);
+        pax_name.truncate(100);
+        let len = u64::try_from(pax.len()).unwrap_or(u64::MAX);
+        w.write_all(&ustar_block(&pax_name, &[], b'x', 0o644, len, 0, &[]))?;
+        w.write_all(&pax)?;
+        write_padding(w, len)?;
+    }
+    let size = member.size.min(USTAR_MAX);
+    let block = ustar_block(
+        name,
+        prefix,
+        member.kind.flag(),
+        member.mode,
+        if member.size > USTAR_MAX { 0 } else { size },
+        mtime.unwrap_or(0),
+        link.get(..100).unwrap_or(link),
+    );
+    w.write_all(&block)
+}
+
+/// The zeros that pad `size` bytes of a member to a whole block.
+///
+/// # Errors
+///
+/// When `w` does.
+pub fn write_padding<W: Write>(w: &mut W, size: u64) -> io::Result<()> {
+    let rest = size % BLOCK;
+    if rest == 0 {
+        return Ok(());
+    }
+    let pad = usize::try_from(BLOCK.saturating_sub(rest)).unwrap_or(0);
+    w.write_all(&vec![0; pad])
+}
+
+/// The two blocks of zeros that close an archive.
+///
+/// # Errors
+///
+/// When `w` does.
+pub fn write_end<W: Write>(w: &mut W) -> io::Result<()> {
+    w.write_all(&[0; 1024])
+}
+
+/// `name` split at a `/` into ustar's 155-byte prefix and 100-byte name, or
+/// `None` when no `/` makes both fit. A name that fits the name field whole
+/// has no prefix.
+fn split_name(name: &[u8]) -> Option<(&[u8], &[u8])> {
+    if name.len() <= 100 {
+        return Some((&[], name));
+    }
+    // The leftmost `/` that leaves a name of 100 or less keeps the prefix
+    // shortest; it must still be 155 or less, and the name not empty.
+    name.iter()
+        .enumerate()
+        .filter(|&(_, &b)| b == b'/')
+        .map(|(i, _)| i)
+        .find(|&i| name.len().saturating_sub(i.saturating_add(1)) <= 100)
+        .filter(|&i| i <= 155 && i.saturating_add(1) < name.len())
+        .and_then(|i| Some((name.get(..i)?, name.get(i.checked_add(1)?..)?)))
+}
+
+/// One PAX record onto `out`: `LENGTH KEY=VALUE\n`, the length counting its
+/// own digits.
+fn pax_record(out: &mut Vec<u8>, key: &[u8], value: &[u8]) {
+    // " KEY=VALUE\n" and the digits of a length that includes them.
+    let body = key.len().saturating_add(value.len()).saturating_add(3);
+    let mut n = body.saturating_add(1);
+    while n.to_string().len().saturating_add(body) != n {
+        n = n.saturating_add(1);
+    }
+    out.extend_from_slice(n.to_string().as_bytes());
+    out.push(b' ');
+    out.extend_from_slice(key);
+    out.push(b'=');
+    out.extend_from_slice(value);
+    out.push(b'\n');
+}
+
+/// A ustar header block, its checksum filled in.
+fn ustar_block(
+    name: &[u8],
+    prefix: &[u8],
+    flag: u8,
+    mode: u32,
+    size: u64,
+    mtime: u64,
+    link: &[u8],
+) -> [u8; 512] {
+    let mut h = [0_u8; 512];
+    let mut put = |at: usize, bytes: &[u8]| {
+        for (i, &b) in bytes.iter().enumerate() {
+            if let Some(slot) = at.checked_add(i).and_then(|j| h.get_mut(j)) {
+                *slot = b;
+            }
+        }
+    };
+    put(0, name.get(..100).unwrap_or(name));
+    put(100, format!("{:07o}\0", mode & 0o7777).as_bytes());
+    put(108, b"0000000\0");
+    put(116, b"0000000\0");
+    put(124, format!("{size:011o}\0").as_bytes());
+    put(136, format!("{mtime:011o}\0").as_bytes());
+    put(148, b"        ");
+    put(156, &[flag]);
+    put(157, link.get(..100).unwrap_or(link));
+    put(257, b"ustar\x0000");
+    put(329, b"0000000\0");
+    put(337, b"0000000\0");
+    put(345, prefix.get(..155).unwrap_or(prefix));
+    let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+    let mut put = |at: usize, bytes: &[u8]| {
+        for (i, &b) in bytes.iter().enumerate() {
+            if let Some(slot) = at.checked_add(i).and_then(|j| h.get_mut(j)) {
+                *slot = b;
+            }
+        }
+    };
+    put(148, format!("{sum:06o}\0 ").as_bytes());
+    h
 }
 
 #[cfg(test)]

@@ -327,3 +327,162 @@ fn list_bytes_is_list() {
     let a = tar(&[("x", b"xyz".as_slice())]);
     assert_eq!(list_bytes(&a), listed(&a));
 }
+
+// ============================================================================
+// Writing
+// ============================================================================
+
+/// An archive written with the writer: each member's header, its bytes and
+/// their padding, then the end.
+fn written(members: &[(NewMember, &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (m, data) in members {
+        write_header(&mut out, m).unwrap();
+        out.extend_from_slice(data);
+        write_padding(&mut out, data.len() as u64).unwrap();
+    }
+    write_end(&mut out).unwrap();
+    out
+}
+
+fn member(name: &[u8], kind: Kind, size: u64) -> NewMember<'_> {
+    NewMember {
+        name,
+        kind,
+        mode: 0o640,
+        mtime: 1_700_000_000,
+        size,
+        link: None,
+    }
+}
+
+#[test]
+fn what_is_written_lists_back_as_it_was() {
+    let long = "deep/".repeat(40) + "file.txt"; // 208 bytes: a prefix split
+    let very_long = "x".repeat(150) + "/" + &"y".repeat(150); // no split fits
+    let target = "t/".repeat(60) + "target"; // a link past 100 bytes
+    let a = written(&[
+        (member(b"dir/", Kind::Directory, 0), b""),
+        (member(b"dir/a.txt", Kind::File, 5), b"hello"),
+        (member(long.as_bytes(), Kind::File, 3), b"abc"),
+        (member(very_long.as_bytes(), Kind::File, 600), &[9; 600]),
+        (
+            NewMember {
+                link: Some(target.as_bytes()),
+                ..member(b"ln", Kind::Symlink, 0)
+            },
+            b"",
+        ),
+        (
+            NewMember {
+                mtime: -86_400,
+                ..member(b"old", Kind::File, 1)
+            },
+            b"o",
+        ),
+    ]);
+    let l = listed(&a);
+    assert_eq!(l.end, End::Marker);
+    assert_eq!(
+        names(&l),
+        [
+            "dir/",
+            "dir/a.txt",
+            long.as_str(),
+            very_long.as_str(),
+            "ln",
+            "old"
+        ]
+    );
+    assert_eq!(l.entries[0].kind, Kind::Directory);
+    assert_eq!(data(&a, &l.entries[1]), b"hello");
+    assert_eq!(data(&a, &l.entries[2]), b"abc");
+    assert_eq!(data(&a, &l.entries[3]), &[9; 600][..]);
+    assert_eq!(l.entries[4].link.as_deref(), Some(target.as_bytes()));
+    assert_eq!(
+        l.entries[5].mtime, -86_400,
+        "a time before 1970, through PAX"
+    );
+    assert_eq!(l.entries[1].mode, 0o640);
+    assert_eq!(l.entries[1].mtime, 1_700_000_000);
+    // Only the members that needed one have a PAX header: the rest are plain
+    // ustar, which every reader reads.
+    let pax_headers = a
+        .chunks(512)
+        .filter(|b| is_header(b) && b[156] == b'x')
+        .count();
+    assert_eq!(pax_headers, 3, "very long name, long link, negative time");
+}
+
+#[test]
+fn a_size_past_eleven_octal_digits_goes_in_a_pax_record() {
+    let mut out = Vec::new();
+    write_header(&mut out, &member(b"huge", Kind::File, 1 << 40)).unwrap();
+    // The PAX header, its record, then the member's own header.
+    assert_eq!(out[156], b'x');
+    let record = until_nul(&out[512..1024]);
+    assert_eq!(record, format!("22 size={}\n", 1_u64 << 40).as_bytes());
+    assert!(is_header(&out[1024..1536]));
+    assert_eq!(number(&out[1024 + 124..1024 + 136]), Some(0));
+}
+
+#[test]
+fn a_pax_record_counts_its_own_length() {
+    let mut out = Vec::new();
+    pax_record(&mut out, b"path", b"a");
+    assert_eq!(out, b"9 path=a\n", "nine bytes, the 9 among them");
+    // Where adding the length's own digits crosses a power of ten.
+    let mut out = Vec::new();
+    let value = "v".repeat(92);
+    pax_record(&mut out, b"path", value.as_bytes());
+    let text = String::from_utf8(out).unwrap();
+    let (n, _) = text.split_once(' ').unwrap();
+    assert_eq!(n.parse::<usize>().unwrap(), text.len());
+}
+
+#[test]
+fn a_name_is_split_at_the_slash_that_lets_both_parts_fit() {
+    assert_eq!(split_name(b"short"), Some((&b""[..], &b"short"[..])));
+    let name = [b"p".repeat(120), b"/".to_vec(), b"n".repeat(90)].concat();
+    let (prefix, rest) = split_name(&name).unwrap();
+    assert_eq!((prefix.len(), rest.len()), (120, 90));
+    assert_eq!(
+        split_name(&[b"p".repeat(160), b"/".to_vec(), b"n".repeat(90)].concat()),
+        None,
+        "prefix too long"
+    );
+    assert_eq!(split_name(&b"n".repeat(101)), None, "no slash");
+    assert_eq!(
+        split_name(&[b"p".repeat(100), b"/".to_vec()].concat()),
+        None,
+        "nothing after the slash"
+    );
+}
+
+#[test]
+fn every_kind_has_the_flag_it_is_read_back_as() {
+    for kind in [
+        Kind::File,
+        Kind::Directory,
+        Kind::Symlink,
+        Kind::HardLink,
+        Kind::CharDevice,
+        Kind::BlockDevice,
+        Kind::Fifo,
+        Kind::Other(b'V'),
+    ] {
+        assert_eq!(Kind::from_flag(kind.flag()), kind);
+    }
+}
+
+#[test]
+fn padding_fills_to_a_block_and_the_end_is_two() {
+    for (size, pad) in [(0, 0), (1, 511), (511, 1), (512, 0), (513, 511)] {
+        let mut out = Vec::new();
+        write_padding(&mut out, size).unwrap();
+        assert_eq!(out.len(), pad, "{size}");
+    }
+    let mut end = Vec::new();
+    write_end(&mut end).unwrap();
+    assert_eq!(end, [0; 1024]);
+}

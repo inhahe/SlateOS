@@ -36,9 +36,10 @@
 //! every archive 0 files. A column a user turned on showed the same numbers
 //! for every row. A cell now holds what was read from the file, or nothing:
 //! pictures are measured by `imagecodec`, source files counted, zip archives
-//! read through `ziparchive`, audio files through `audiotags`. What nothing
-//! here reads yet -- a picture's colour depth, the inside of a tar, 7z or rar
-//! -- is blank rather than a guess (known-issues.md,
+//! read through `ziparchive` and TAR archives through `tararchive`, audio
+//! files through `audiotags`. What nothing here reads yet -- a picture's
+//! colour depth, the inside of a 7z or a rar, how many files a `.tar.gz`
+//! holds -- is blank rather than a guess (known-issues.md,
 //! `[E] The explorer's file-type columns showed the same invented values for
 //! every file`).
 //!
@@ -1335,16 +1336,25 @@ impl ColumnProvider for ArchiveColumns {
 
     /// A zip archive's own directory, read through `ziparchive`: how many
     /// files it holds, what they take up compressed, and how much of their
-    /// size that saves. Every cell was 0 for every archive. Tar, gzip, 7z and
-    /// rar are blank: nothing here reads them yet.
+    /// size that saves. Every cell was 0 for every archive.
+    ///
+    /// A TAR's headers, read through `tararchive`: a TAR compresses nothing,
+    /// so it saves nothing, and says so. A gzip file's own trailer gives the
+    /// size it inflates to, so its ratio is read without inflating it; a
+    /// `.tar.gz`'s count of files would need the whole archive inflated while
+    /// the window waits, and is blank. 7z and rar are blank: nothing here
+    /// reads them.
     fn value(&self, path: &str, column_id: ColumnId) -> ColumnValue {
-        static ZIPS: OnceLock<FactCache<Option<ArchiveFacts>>> = OnceLock::new();
-        if path_extension(path) != "zip" {
-            return ColumnValue::Empty;
-        }
-        let Some(facts) = ZIPS
+        static FACTS: OnceLock<FactCache<Option<ArchiveFacts>>> = OnceLock::new();
+        let read: fn(&str) -> Option<ArchiveFacts> = match path_extension(path).as_str() {
+            "zip" => zip_facts,
+            "tar" => tar_facts,
+            "gz" | "tgz" => gzip_facts,
+            _ => return ColumnValue::Empty,
+        };
+        let Some(facts) = FACTS
             .get_or_init(FactCache::new)
-            .get(path, zip_facts)
+            .get(path, read)
             .flatten()
         else {
             return ColumnValue::Empty;
@@ -1354,15 +1364,16 @@ impl ColumnProvider for ArchiveColumns {
             ColumnId::COMPRESSION_RATIO => facts
                 .saved()
                 .map_or(ColumnValue::Empty, ColumnValue::Percentage),
-            ColumnId::FILE_COUNT_INSIDE => {
-                i64::try_from(facts.files).map_or(ColumnValue::Empty, ColumnValue::Number)
-            }
+            ColumnId::FILE_COUNT_INSIDE => facts
+                .files
+                .and_then(|n| i64::try_from(n).ok())
+                .map_or(ColumnValue::Empty, ColumnValue::Number),
             _ => ColumnValue::Empty,
         }
     }
 
     fn supported_extensions(&self) -> &[&str] {
-        &["zip", "tar", "gz", "7z", "rar"]
+        &["zip", "tar", "gz", "tgz", "7z", "rar"]
     }
 }
 
@@ -1570,8 +1581,9 @@ fn line_count(path: &str) -> Option<i64> {
 /// What a zip archive's directory says about what it holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ArchiveFacts {
-    /// Its files, not counting directories.
-    files: u64,
+    /// Its files, not counting directories; `None` where counting them
+    /// would mean inflating the whole archive -- a `.tar.gz`.
+    files: Option<u64>,
     /// What they take up in the archive.
     compressed: u64,
     /// What they take up taken out of it.
@@ -1631,16 +1643,63 @@ fn zip_facts(path: &str) -> Option<ArchiveFacts> {
     let files = entries.iter().filter(|e| !e.is_dir);
     Some(files.fold(
         ArchiveFacts {
-            files: 0,
+            files: Some(0),
             compressed: 0,
             uncompressed: 0,
         },
         |facts, e| ArchiveFacts {
-            files: facts.files.saturating_add(1),
+            files: facts.files.map(|n| n.saturating_add(1)),
             compressed: facts.compressed.saturating_add(e.compressed_size),
             uncompressed: facts.uncompressed.saturating_add(e.uncompressed_size),
         },
     ))
+}
+
+/// A TAR's headers: its files, and what they take up -- the same in the
+/// archive as out of it, since a TAR stores and does not compress. `None` if
+/// the file's first block is not a TAR header.
+fn tar_facts(path: &str) -> Option<ArchiveFacts> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let listing = tararchive::list(&mut file).ok()?;
+    if let tararchive::End::Damaged { at: 0, .. } = listing.end {
+        return None;
+    }
+    let (files, bytes) = listing
+        .entries
+        .iter()
+        .filter(|e| e.kind == tararchive::Kind::File)
+        .fold((0_u64, 0_u64), |(n, b), e| {
+            (n.saturating_add(1), b.saturating_add(e.size))
+        });
+    Some(ArchiveFacts {
+        files: Some(files),
+        compressed: bytes,
+        uncompressed: bytes,
+    })
+}
+
+/// A gzip file's size and the size its trailer says it inflates to (modulo
+/// 4 GiB, as the format keeps it). One file inside, for a plain `.gz`; not
+/// counted for a `.tar.gz`. `None` if the file is not gzip.
+fn gzip_facts(path: &str) -> Option<ArchiveFacts> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut magic = [0_u8; 2];
+    file.read_exact(&mut magic).ok()?;
+    if magic != [0x1F, 0x8B] || len < 18 {
+        return None;
+    }
+    file.seek(SeekFrom::End(-4)).ok()?;
+    let mut isize = [0_u8; 4];
+    file.read_exact(&mut isize).ok()?;
+    let lower = path.to_ascii_lowercase();
+    let is_tar = lower.ends_with(".tar.gz") || lower.ends_with(".tgz");
+    Some(ArchiveFacts {
+        files: (!is_tar).then_some(1),
+        compressed: len,
+        uncompressed: u64::from(u32::from_le_bytes(isize)),
+    })
 }
 
 // ============================================================================
@@ -3208,11 +3267,64 @@ mod tests {
             mgr.get_value(&fake, ColumnId::FILE_COUNT_INSIDE),
             ColumnValue::Empty
         );
+        // An empty TAR holds nothing, which is not the same as blank.
         let tar = dir.file("one.tar", &[0; 1024]);
         assert_eq!(
             mgr.get_value(&tar, ColumnId::FILE_COUNT_INSIDE),
-            ColumnValue::Empty
+            ColumnValue::Number(0)
         );
+    }
+
+    /// A TAR's cells are its headers', a gzip's its trailer's: both were
+    /// blank, as every archive but a zip was.
+    #[test]
+    fn a_tar_and_a_gzip_say_what_they_hold() {
+        let dir = Scratch::new("tars");
+        let mgr = ColumnManager::with_defaults();
+        let tar = tararchive::testing::archive(&[
+            tararchive::testing::dir("folder/"),
+            tararchive::testing::file("folder/a.txt", &[b'a'; 3000]),
+            tararchive::testing::file("b.bin", &[1; 100]),
+        ]);
+        let plain = dir.file("two.tar", &tar);
+        assert_eq!(
+            mgr.get_value(&plain, ColumnId::FILE_COUNT_INSIDE),
+            ColumnValue::Number(2)
+        );
+        assert_eq!(
+            mgr.get_value(&plain, ColumnId::COMPRESSED_SIZE),
+            ColumnValue::Size(3100)
+        );
+        assert_eq!(
+            mgr.get_value(&plain, ColumnId::COMPRESSION_RATIO),
+            ColumnValue::Percentage(0.0),
+            "a TAR saves nothing, and says so"
+        );
+        let gz = deflate::gzip(&tar);
+        let tgz = dir.file("two.tar.gz", &gz);
+        assert_eq!(
+            mgr.get_value(&tgz, ColumnId::FILE_COUNT_INSIDE),
+            ColumnValue::Empty,
+            "counting would inflate the whole archive"
+        );
+        assert_eq!(
+            mgr.get_value(&tgz, ColumnId::COMPRESSED_SIZE),
+            ColumnValue::Size(gz.len() as u64)
+        );
+        let ColumnValue::Percentage(saved) = mgr.get_value(&tgz, ColumnId::COMPRESSION_RATIO) else {
+            panic!("no ratio");
+        };
+        let want = 1.0 - gz.len() as f64 / tar.len() as f64;
+        assert!((f64::from(saved) - want).abs() < 0.01, "{saved} vs {want}");
+        let single = dir.file("notes.txt.gz", &deflate::gzip(b"some notes"));
+        assert_eq!(
+            mgr.get_value(&single, ColumnId::FILE_COUNT_INSIDE),
+            ColumnValue::Number(1)
+        );
+        let fake = dir.file("fake.gz", b"not gzip at all, not even close");
+        assert_eq!(mgr.get_value(&fake, ColumnId::COMPRESSED_SIZE), ColumnValue::Empty);
+        let not_tar = dir.file("fake.tar", b"words, not headers");
+        assert_eq!(mgr.get_value(&not_tar, ColumnId::FILE_COUNT_INSIDE), ColumnValue::Empty);
     }
 
     const AUDIO_COLUMNS: [ColumnId; 6] = [

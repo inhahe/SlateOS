@@ -166123,7 +166123,7 @@ what the last save did were drawn at the foot of the window, over the list's
 last row; they have lines in the strip under the header now.
 
 ### [E] The explorer's file-type columns showed the same invented values for every file -- 2026-09-25
-**Status:** FIXED for pictures, source files and zip archives (lane E, 2026-09-25), and for audio files, video files, TAR and gzip archives (lane E, 2026-09-26); OPEN for a picture's colour depth, the count of files in a `.tar.gz`, and 7z and rar archives -- lane E's.
+**Status:** FIXED for pictures, source files and zip archives (lane E, 2026-09-25), and for audio files, video files, TAR and gzip archives (lane E, 2026-09-26); OPEN for a picture's colour depth (lane F's to read: `requests/e-f-a-pictures-colour-depth-from-its-header.md`), the count of files in a `.tar.gz`, and 7z and rar archives -- lane E's.
 
 **In short:** the file explorer's detail view can show extra columns for
 pictures (size, colour depth, shape), songs (length, bitrate, artist...),
@@ -166179,7 +166179,9 @@ the size it inflates to, so its ratio is read without inflating it; a plain
 
 **Still open, and blank rather than guessed:**
 - **Colour depth** -- `imagecodec` does not report a picture's bit depth; a
-  header-only `info` beside `dimensions` would be lane F's.
+  header-only `pixel_format` beside `dimensions` would be lane F's, and is
+  asked for in `requests/e-f-a-pictures-colour-depth-from-its-header.md`
+  (2026-09-26).
 - **How many files a `.tar.gz` holds** -- counting them means inflating the
   whole archive, synchronously, while the window draws the row. The proper
   fix is a background reader for the columns (the thumbnails have one); until

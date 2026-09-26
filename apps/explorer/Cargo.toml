@@ -41,6 +41,10 @@ imagecodec = { path = "../../gui/imagecodec" }
 # `ziparchive::parse_at`, without reading the rest.
 ziparchive = { path = "../../ziparchive" }
 
+# A TAR's own headers, for the archive columns: what it holds and what
+# that takes up, read a header at a time.
+tararchive = { path = "../tararchive" }
+
 # An audio file's length, bitrate, sample rate and tags, for the audio
 # columns -- the readers the music player uses, from its headers and tags
 # without decoding a sample.
@@ -61,6 +65,8 @@ oswindow = { path = "../../gui/window" }
 thumbs = { path = "../../gui/thumbs" }
 
 [dev-dependencies]
+# Gzipped fixtures for the archive columns' tests.
+deflate = { path = "../../deflate" }
 # Test fixtures only: a private temp directory per test, removed on drop.
 scratchdir = { path = "../../userspace/scratchdir" }
 

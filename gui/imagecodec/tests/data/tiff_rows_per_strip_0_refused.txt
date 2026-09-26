@@ -1,0 +1,1 @@
+REFUSED open: /mnt/e/visual studio projects/os-lane-f/gui/imagecodec/tests/data/tiff_rows_per_strip_0_refused.tif: Bad value 0 for "RowsPerStrip" tag

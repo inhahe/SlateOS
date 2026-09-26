@@ -1,0 +1,1 @@
+REFUSED metadata: The decoder for Bmp does not support the format features Unknown bitmap header type (size=100)

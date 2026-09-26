@@ -1,0 +1,1 @@
+REFUSED read: Invalid JPEG file structure: missing SOS marker

@@ -1,0 +1,1 @@
+REFUSED not OK: Sorry, requested compression method is not configured

@@ -25,6 +25,7 @@ use crate::control::{
     REQUEST_MAGIC, RESPONSE_MAGIC, Request, Response, decode_requests, decode_responses,
 };
 use crate::input::{INPUT_MAGIC, InputEvent, decode_input_frame};
+use crate::repaint::{REPAINT_MAGIC, Repaint, decode_repaint};
 use crate::scene::{SCENE_MAGIC, SceneFrame, decode_scene_frame};
 use crate::submit::{SUBMIT_MAGIC, Submission, decode_submit};
 use crate::window_list::{WINDOW_LIST_MAGIC, WindowList, decode_window_list};
@@ -51,6 +52,8 @@ pub enum Frame {
     WindowList(WindowList),
     /// The system tray's icons, for a subscribed shell (`TRAY`).
     TrayList(crate::tray::TrayList),
+    /// Windows the compositor asks a client to draw whole again (`RPNT`).
+    Repaint(Repaint),
 }
 
 impl Frame {
@@ -66,6 +69,7 @@ impl Frame {
             Self::Responses(_) => "control response",
             Self::WindowList(_) => "window list",
             Self::TrayList(_) => "tray list",
+            Self::Repaint(_) => "repaint",
         }
     }
 }
@@ -118,6 +122,10 @@ pub fn decode_any(input: &[u8]) -> Result<(Frame, usize), DecodeError> {
         crate::tray::TRAY_MAGIC => {
             let (list, used) = crate::tray::decode_tray_list(input)?;
             Ok((Frame::TrayList(list), used))
+        }
+        REPAINT_MAGIC => {
+            let (repaint, used) = decode_repaint(input)?;
+            Ok((Frame::Repaint(repaint), used))
         }
         _ => Err(DecodeError::BadMagic),
     }

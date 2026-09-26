@@ -87,6 +87,15 @@ pub use a11ykeys::{AccessibilityKeys, MouseKeyAction, Rejected, StickyModifier, 
 // GPU backend needs in order to exist at all. See the module docs.
 mod render;
 pub use render::{RenderBackend, RenderTarget};
+// Which pixels a frame repaints: the damage made disjoint, spread through the
+// blurred windows it reaches, and the history a multi-buffered target needs to
+// catch up on the frames it missed. See the module docs.
+mod repaint;
+use repaint::{Change, DamageHistory, Region};
+// The mouse pointer: its artwork, and the plane it is drawn on over the frame
+// rather than into it. See the module docs.
+pub mod cursor;
+pub use cursor::{CursorCache, CursorImage, CursorStyle, PointerSprite, PointerState};
 mod keymap;
 pub use keymap::{ModifierState, key_for_scancode};
 // The one piece of keyboard state that spans two events. `keymap` is a pure
@@ -109,7 +118,7 @@ pub use server::{Disconnect, Server, ServerStats};
 // arrived; `present` is the one seam that closes both, because both had the
 // same cause — the compositor owned no device.
 pub mod present;
-pub use present::{Headless, Present, Recording};
+pub use present::{Frame, Headless, Present, Recording};
 // Remote draw-command streaming uses the shared `guiremote` crate's scene
 // protocol (multi-window deltas built on its single-window RenderCommand wire
 // codec), rather than a compositor-local duplicate.
@@ -544,12 +553,13 @@ impl Rect {
             return vec![*self];
         };
         let mut out = Vec::with_capacity(4);
+        // The far edges through `right`/`bottom`, which saturate, rather than
+        // `x + width as i32`, which turns a width past `i32::MAX` negative and
+        // puts the edge left of the origin — see `intersect`.
         let (sx0, sy0) = (self.x, self.y);
-        let sx1 = self.x.saturating_add(self.width as i32);
-        let sy1 = self.y.saturating_add(self.height as i32);
+        let (sx1, sy1) = (self.right(), self.bottom());
         let (ix0, iy0) = (i.x, i.y);
-        let ix1 = i.x.saturating_add(i.width as i32);
-        let iy1 = i.y.saturating_add(i.height as i32);
+        let (ix1, iy1) = (i.right(), i.bottom());
 
         if iy0 > sy0 {
             out.push(Rect::new(sx0, sy0, self.width, span(sy0, iy0)));
@@ -623,6 +633,17 @@ struct DeferredKey {
 }
 
 /// Which mouse button a mouse-keys action presses, or `None` if it moves.
+/// Whether a key press, with the modifiers in force, is the display's
+/// artifact-recovery chord: Ctrl+Super+R, and nothing else held.
+///
+/// Exact, so that Ctrl+Shift+Super+R and friends stay free for applications:
+/// a recovery that fired on a superset would redraw the whole desktop on some
+/// program's own three-modifier shortcut. `R` is the letter wherever the
+/// layout puts it, as every shortcut in this tree is.
+fn is_recovery_chord(key: Key, modifiers: Modifiers) -> bool {
+    key == Key::R && modifiers.ctrl && modifiers.super_key && !modifiers.alt && !modifiers.shift
+}
+
 const fn mouse_key_button(action: a11ykeys::MouseKeyAction) -> Option<MouseButton> {
     match action {
         a11ykeys::MouseKeyAction::Click | a11ykeys::MouseKeyAction::DoubleClick => {
@@ -670,6 +691,14 @@ pub enum InputEvent {
     KeyUp { scancode: u32 },
     /// Text input (after IME processing).
     TextInput { text: String },
+    /// The pointer left the output.
+    ///
+    /// Only a hosted build's window can lose the pointer — the mouse moves on
+    /// to the host's own desktop — and until it comes back nothing on this
+    /// desktop is under it, so no pointer is drawn. Without this the pointer
+    /// would hang at the window's edge, where it was last seen, while the
+    /// real one is somewhere else.
+    PointerLeft,
 }
 
 // ---------------------------------------------------------------------------
@@ -1588,16 +1617,54 @@ impl DamageRegion {
 // Framebuffer
 // ---------------------------------------------------------------------------
 
-/// Double-buffered framebuffer for compositing.
+/// The software compositor's pixels: the buffer a frame is composited into,
+/// and — only when constructed with [`with_ring`](Self::with_ring) — the
+/// buffers presented before it.
+///
+/// # Why one buffer, and what the ring is for
+///
+/// This was a front/back pair until 2026-09-24, swapped on every present. The
+/// pair bought nothing: every [`Present`](crate::present::Present)
+/// implementation copies the finished frame out *synchronously* inside the
+/// same loop iteration that composited it — the DRM presenter into its own
+/// double-buffered scanout memory, the host window through `StretchDIBits` —
+/// so nothing ever reads the presented frame while the next one is being
+/// drawn. What the pair did cost was correctness: a partial recomposite draws
+/// only the damaged rectangles, and after a swap the buffer it draws into holds
+/// the frame from *two* presents ago, so every change the previous frame made
+/// outside this frame's damage silently reverted
+/// (`a_partial_frame_keeps_what_the_frame_before_it_drew`). It also cost a
+/// whole extra frame of memory — 33 MB at 4K.
+///
+/// The ring survives for the targets that genuinely are multi-buffered — a GPU
+/// swapchain, or composing straight into the DRM scanout pair, which is the
+/// proper fix for `TD-COMPOSITOR-COPIES-EVERY-FRAME-TWICE` — and so that the
+/// compositor's handling of such a target can be tested against real pixels.
+/// What makes a ring correct is [`buffer_age`](RenderTarget::buffer_age): the
+/// compositor asks how stale the buffer it is about to draw into is, and
+/// repaints everything that changed since. A ring of one answers "one frame",
+/// which is the cheapest possible answer — nothing but this frame's own
+/// damage.
 pub struct Framebuffer {
     /// Width in pixels.
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
-    /// Back buffer (being composited into).
+    /// The buffer being composited into.
+    ///
+    /// Named for what it was in the front/back pair; with a ring of one it is
+    /// also the buffer [`presented_pixels`](RenderTarget::presented_pixels)
+    /// returns.
     back: Vec<u32>,
-    /// Front buffer (currently being displayed).
-    front: Vec<u32>,
+    /// The value of [`presents`](Self::presents) at which `back`'s current
+    /// contents were presented, or `None` when they never have been — a fresh
+    /// or resized buffer, whose contents are a placeholder rather than a frame.
+    back_stamp: Option<u64>,
+    /// The other buffers of a ring, oldest first, each with its stamp. Empty
+    /// for the single buffer the compositor uses.
+    retired: std::collections::VecDeque<(Vec<u32>, Option<u64>)>,
+    /// How many frames have been presented through this target.
+    presents: u64,
     /// Screen-space rectangle every drawing primitive is confined to, or `None`
     /// for the whole framebuffer.
     ///
@@ -1675,17 +1742,84 @@ impl Framebuffer {
             width,
             height,
             back: vec![0xFF_00_00_00; size], // Opaque black
-            front: vec![0xFF_00_00_00; size],
+            back_stamp: None,
+            retired: std::collections::VecDeque::new(),
+            presents: 0,
             frame_clip: None,
         })
     }
 
+    /// Most buffers a ring may hold. Four covers every swap depth a display
+    /// stack uses (double, triple, and the quad-buffering some VR paths ask
+    /// for); the compositor's damage history is sized to match, so a deeper
+    /// ring could only ever be repainted whole.
+    pub const MAX_RING: usize = 4;
+
+    /// A framebuffer of `buffers` buffers that rotate on every present, the
+    /// way a swapchain does.
+    ///
+    /// The compositor itself uses [`new`](Self::new) — one buffer — and this
+    /// exists for the multi-buffered targets described on the type, and for
+    /// the tests that hold the compositor's damage history to account against
+    /// real pixels. `buffers` is clamped to `1..=MAX_RING`.
+    ///
+    /// # Errors
+    ///
+    /// As [`new`](Self::new).
+    pub fn with_ring(width: u32, height: u32, buffers: usize) -> CompositorResult<Self> {
+        let mut fb = Self::new(width, height)?;
+        let extra = buffers.clamp(1, Self::MAX_RING).saturating_sub(1);
+        for _ in 0..extra {
+            fb.retired.push_back((fb.back.clone(), None));
+        }
+        Ok(fb)
+    }
+
+    /// How many buffers this framebuffer rotates through.
+    #[must_use]
+    pub fn ring_len(&self) -> usize {
+        self.retired.len().saturating_add(1)
+    }
+
+    /// Finish the frame in [`back`](Self::back): it becomes the presented one,
+    /// and on a ring the oldest buffer becomes the next to draw into.
+    fn present_back(&mut self) {
+        self.presents = self.presents.saturating_add(1);
+        self.back_stamp = Some(self.presents);
+        if let Some((oldest, stamp)) = self.retired.pop_front() {
+            let shown = std::mem::replace(&mut self.back, oldest);
+            let shown_stamp = std::mem::replace(&mut self.back_stamp, stamp);
+            self.retired.push_back((shown, shown_stamp));
+        }
+    }
+
+    /// How many presents ago [`back`](Self::back) last held the current frame.
+    ///
+    /// `Some(1)`: it holds exactly the frame most recently presented — always
+    /// the case for a ring of one. `Some(n)`: it holds the frame presented
+    /// `n` presents ago, so everything that changed in the `n - 1` frames since
+    /// must be repainted as well as this frame's own damage. `None`: it holds
+    /// no frame at all — fresh, resized, or not yet rotated through.
+    fn back_age(&self) -> Option<u32> {
+        let stamp = self.back_stamp?;
+        let age = self.presents.checked_sub(stamp)?.checked_add(1)?;
+        u32::try_from(age).ok()
+    }
+
+    /// The most recently presented buffer.
+    fn shown(&self) -> &[u32] {
+        self.retired
+            .back()
+            .map_or(self.back.as_slice(), |(buf, _)| buf.as_slice())
+    }
+
     /// Confine every subsequent drawing primitive to `clip` (screen space).
     ///
-    /// `None` restores the whole framebuffer. The background clear
-    /// ([`clear`](Self::clear) / [`clear_except`](Self::clear_except)) is
-    /// deliberately *not* clipped: it runs once per frame before any window and
-    /// has its own, separate cull.
+    /// `None` restores the whole framebuffer. [`clear`](Self::clear) and
+    /// [`clear_rect`](Self::clear_rect) ignore it; the background clear the
+    /// compositor actually uses, [`clear_except`](Self::clear_except), honours
+    /// it, because a partial frame clears the desktop one repaint rectangle at
+    /// a time and must not wipe anything outside the rectangle it is on.
     fn set_frame_clip(&mut self, clip: Option<Rect>) {
         self.frame_clip = clip;
     }
@@ -1803,11 +1937,6 @@ impl Framebuffer {
         (raw * opacity).clamp(0.0, 255.0) as u8
     }
 
-    /// Swap front and back buffers.
-    pub fn swap(&mut self) {
-        std::mem::swap(&mut self.front, &mut self.back);
-    }
-
     /// Clear the back buffer to a solid color.
     ///
     /// OPT (BENCH-COMPOSITOR-SLOW): a full 4K clear writes ~33 MB, enough that a
@@ -1853,13 +1982,19 @@ impl Framebuffer {
 
     /// Fill `buf` — which holds `band_rows` contiguous scanlines of `width`
     /// pixels each, the first of which is at absolute framebuffer row `y0` — with
-    /// `color`, skipping the horizontal spans covered by any `covered` rect.
+    /// `color` across columns `columns.0..columns.1`, skipping the horizontal
+    /// spans covered by any `covered` rect.
     ///
     /// Shared by the single-threaded and parallel [`clear_except`] paths so the
     /// per-scanline span-merging logic lives in exactly one place. `covered`
     /// rects are given in absolute framebuffer coordinates; the vertical overlap
     /// test uses the absolute row `y0 + r`, and writes target the band-local row
-    /// offset `r * width`.
+    /// offset `r * width`. `columns` is the frame clip's horizontal extent, or
+    /// `(0, width)` for an unclipped clear.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one scanline band's geometry; bundling it into a struct used only here adds a type and hides nothing"
+    )]
     fn fill_uncovered_band(
         buf: &mut [u32],
         y0: u32,
@@ -1868,7 +2003,12 @@ impl Framebuffer {
         color: u32,
         covered: &[Rect],
         fb_height: u32,
+        columns: (u32, u32),
     ) {
+        let (x_lo, x_hi) = (columns.0.min(width), columns.1.min(width));
+        if x_hi <= x_lo {
+            return;
+        }
         let width_usize = width as usize;
         // Reused across scanlines so this allocates once, not per row.
         let mut spans: Vec<(u32, u32)> = Vec::with_capacity(covered.len());
@@ -1879,8 +2019,11 @@ impl Framebuffer {
                 let ry0 = rect.y.max(0) as u32;
                 let ry1 = (rect.y.saturating_add(rect.height as i32).max(0) as u32).min(fb_height);
                 if abs_y >= ry0 && abs_y < ry1 {
-                    let x0 = rect.x.max(0) as u32;
-                    let x1 = (rect.x.saturating_add(rect.width as i32).max(0) as u32).min(width);
+                    // Clamped into the clear's own columns, so a cover that
+                    // reaches past the clip cannot move the cursor past it.
+                    let x0 = (rect.x.max(0) as u32).clamp(x_lo, x_hi);
+                    let x1 =
+                        (rect.x.saturating_add(rect.width as i32).max(0) as u32).clamp(x_lo, x_hi);
                     if x1 > x0 {
                         spans.push((x0, x1));
                     }
@@ -1888,14 +2031,15 @@ impl Framebuffer {
             }
             let row = r as usize;
             if spans.is_empty() {
-                if let Some(s) = buf.get_mut(Self::row_range(width_usize, row, 0, width_usize)) {
+                let whole = Self::row_range(width_usize, row, x_lo as usize, x_hi as usize);
+                if let Some(s) = buf.get_mut(whole) {
                     s.fill(color);
                 }
                 continue;
             }
             // Sort covered spans by start, then fill the complementary gaps.
             spans.sort_unstable_by_key(|&(a, _)| a);
-            let mut cursor = 0u32;
+            let mut cursor = x_lo;
             for &(a, b) in &spans {
                 if a > cursor {
                     let gap = Self::row_range(width_usize, row, cursor as usize, a as usize);
@@ -1905,8 +2049,8 @@ impl Framebuffer {
                 }
                 cursor = cursor.max(b);
             }
-            if cursor < width {
-                let tail = Self::row_range(width_usize, row, cursor as usize, width_usize);
+            if cursor < x_hi {
+                let tail = Self::row_range(width_usize, row, cursor as usize, x_hi as usize);
                 if let Some(s) = buf.get_mut(tail) {
                     s.fill(color);
                 }
@@ -1951,30 +2095,64 @@ impl Framebuffer {
     /// OPT (BENCH-COMPOSITOR-SLOW): culls the desktop-background clear under
     /// fully-opaque covering windows. Per-scanline interval math is O(rows ×
     /// covered) which is negligible next to the pixel stores it elides.
+    ///
+    /// Confined to the [frame clip](Self::set_frame_clip) when one is set: a
+    /// partial frame clears its damage one repaint rectangle at a time, and the
+    /// pixels outside the rectangle belong to a frame that is being kept.
     pub fn clear_except(&mut self, color: u32, covered: &[Rect]) {
-        if covered.is_empty() {
+        let screen = Rect::new(0, 0, self.width, self.height);
+        let bounds = match self.frame_clip {
+            None => screen,
+            Some(clip) => match clip.intersect(&screen) {
+                Some(bounds) => bounds,
+                // A clip wholly off the surface clears nothing, which is what
+                // every other primitive does with it too.
+                None => return,
+            },
+        };
+        if covered.is_empty() && bounds == screen {
             // Delegates to the (possibly parallel) full-buffer clear.
             self.clear(color);
             return;
         }
         let width = self.width;
         let height = self.height;
-        let workers = Self::fill_worker_count(self.back.len());
+        // `bounds` lies inside the surface, so both conversions are exact.
+        let columns = (
+            u32::try_from(bounds.x).unwrap_or(0),
+            u32::try_from(bounds.right()).unwrap_or(0),
+        );
+        let (y_lo, y_hi) = (
+            u32::try_from(bounds.y).unwrap_or(0),
+            u32::try_from(bounds.bottom()).unwrap_or(0),
+        );
+        let rows = Self::row_range(width as usize, y_lo as usize, 0, 0).start
+            ..Self::row_range(width as usize, y_hi as usize, 0, 0).start;
+        let Some(region) = self.back.get_mut(rows) else {
+            return;
+        };
+        let area = (bounds.width as usize).saturating_mul(bounds.height as usize);
+        let workers = Self::fill_worker_count(area);
+        let band_count = y_hi.saturating_sub(y_lo);
         if workers <= 1 {
-            Self::fill_uncovered_band(&mut self.back, 0, height, width, color, covered, height);
+            Self::fill_uncovered_band(
+                region, y_lo, band_count, width, color, covered, height, columns,
+            );
             return;
         }
         // Partition the scanlines into `workers` disjoint row-bands. Each band is
         // a non-overlapping `&mut [u32]` (via chunks_mut), so the scoped threads
         // never alias — safe parallel fill with no `unsafe`.
-        let rows_per_band = height.div_ceil(workers as u32);
+        let rows_per_band = band_count.div_ceil(workers as u32).max(1);
         let band_stride = Self::pixel_index(width as usize, 0, rows_per_band as usize);
         std::thread::scope(|s| {
-            for (band_idx, chunk) in self.back.chunks_mut(band_stride).enumerate() {
-                let y0 = (band_idx as u32).saturating_mul(rows_per_band);
+            for (band_idx, chunk) in region.chunks_mut(band_stride).enumerate() {
+                let y0 = y_lo.saturating_add((band_idx as u32).saturating_mul(rows_per_band));
                 let band_rows = Self::rows_in(chunk, width);
                 s.spawn(move || {
-                    Self::fill_uncovered_band(chunk, y0, band_rows, width, color, covered, height);
+                    Self::fill_uncovered_band(
+                        chunk, y0, band_rows, width, color, covered, height, columns,
+                    );
                 });
             }
         });
@@ -2328,9 +2506,15 @@ impl Framebuffer {
         }
     }
 
-    /// Get a reference to the front buffer for display.
+    /// The most recently presented frame.
+    ///
+    /// With a ring of one — the compositor's own configuration — this is the
+    /// same memory as the buffer being drawn into, so between the first draw
+    /// of a frame and its present it shows the frame in progress. Nothing reads
+    /// it there: the server shows a frame only after `compose_frame` has
+    /// presented it.
     pub fn front_buffer(&self) -> &[u32] {
-        &self.front
+        self.shown()
     }
 
     /// Resize the framebuffer. Clears all contents.
@@ -2348,7 +2532,13 @@ impl Framebuffer {
         self.width = width;
         self.height = height;
         self.back = vec![0xFF_00_00_00; size];
-        self.front = vec![0xFF_00_00_00; size];
+        // Every buffer is a placeholder again, so no stamp survives: the next
+        // frame into each must be drawn whole.
+        self.back_stamp = None;
+        for (buf, stamp) in &mut self.retired {
+            *buf = vec![0xFF_00_00_00; size];
+            *stamp = None;
+        }
         Ok(())
     }
 
@@ -2755,12 +2945,17 @@ impl RenderTarget for Framebuffer {
     }
 
     fn present(&mut self) {
-        self.swap();
+        self.present_back();
+    }
+
+    #[inline]
+    fn buffer_age(&self) -> Option<u32> {
+        self.back_age()
     }
 
     #[inline]
     fn presented_pixels(&self) -> &[u32] {
-        &self.front
+        self.shown()
     }
 
     #[inline]
@@ -3076,6 +3271,19 @@ impl FrameStats {
             None => true,
         }
     }
+
+    /// When [`Self::should_compose`] next says yes: one target interval after
+    /// the last frame began, or `None` if no frame has been composed and one
+    /// may be now.
+    ///
+    /// The instant a loop that has something to draw should wake at. The two
+    /// are the same comparison written in two directions, so a loop that waits
+    /// until this and then asks `should_compose` is told yes.
+    #[must_use]
+    pub fn next_compose_at(&self) -> Option<Instant> {
+        self.last_frame_start
+            .and_then(|start| start.checked_add(self.target_interval))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3170,6 +3378,11 @@ pub enum CompositorRequest {
     ///
     /// See [`guiremote::control::RequestBody::ReloadSession`].
     ReloadSession,
+    /// Recover the display: the full redraw the Ctrl+Super+R chord asks for.
+    ///
+    /// See [`guiremote::control::RequestBody::RecoverDisplay`] and
+    /// [`Compositor::request_recovery`].
+    RecoverDisplay,
     /// Begin a remote draw-command stream session (returns a stream id).
     StreamStart,
     /// Capture the current scene for a stream session as an encoded wire frame.
@@ -3506,8 +3719,15 @@ fn wire_event(n: EventNotification) -> guiremote::InputEvent {
 /// compositor does not know where a client's widgets are, and double-click
 /// timing belongs with the widget that has to honour it. Synthesising them here
 /// would be guessing at layout the compositor cannot see.
+///
+/// What the compositor does supply is *when*: every event is stamped with its
+/// clock as it is routed (`InputEvent::time`), and the client's event loop
+/// pairs presses by those stamps into double clicks (`oswindow`'s `Clicks`),
+/// so a client busy while the user clicked still times the clicks as made.
 const fn wire_mouse_kind(kind: MouseEventKind) -> ClientMouseKind {
     match kind {
+        MouseEventKind::Enter => ClientMouseKind::Enter,
+        MouseEventKind::Leave => ClientMouseKind::Leave,
         MouseEventKind::Move => ClientMouseKind::Move,
         MouseEventKind::ButtonPress(b) => ClientMouseKind::Press(wire_button(b)),
         MouseEventKind::ButtonRelease(b) => ClientMouseKind::Release(wire_button(b)),
@@ -3528,10 +3748,18 @@ const fn wire_button(b: MouseButton) -> ClientMouseButton {
 /// Mouse event kind for notifications.
 #[derive(Clone, Copy, Debug)]
 pub enum MouseEventKind {
+    /// The pointer came into the window's client area.
+    Enter,
+    /// The pointer left the window's client area — onto another window, onto
+    /// this one's frame, onto the desktop, or off the output altogether.
+    Leave,
     Move,
     ButtonPress(MouseButton),
     ButtonRelease(MouseButton),
-    Scroll { dx: f32, dy: f32 },
+    Scroll {
+        dx: f32,
+        dy: f32,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -4914,6 +5142,77 @@ impl Default for DecorationTheme {
 // Compositor
 // ---------------------------------------------------------------------------
 
+/// The facts about the window stack one repaint consults, gathered once per
+/// frame rather than re-derived per window.
+///
+/// Per z-position, bottom first: the window, the rectangle it provably paints
+/// opaquely (if any), and the frame its backdrop blur reads (if it has one).
+struct StackPlan {
+    z_stack: Vec<WindowId>,
+    covers: Vec<Option<Rect>>,
+    blurs: Vec<Option<Rect>>,
+}
+
+impl StackPlan {
+    /// The opaque covers that may cull what lies beneath z-position `below` —
+    /// or beneath every window, the desktop background, for `None`.
+    ///
+    /// A cover culls what is under it because nothing will ever see those
+    /// pixels. A backdrop blur is the one thing that does: it reads everything
+    /// drawn beneath its window, across the window's whole frame, before the
+    /// windows above are drawn. So a cover belonging to a window *above* a
+    /// blurred window, meeting that window's frame, hides pixels the blur is
+    /// about to read, and culling under it would feed the blur whatever the
+    /// buffer held from last frame — the covering window's own pixels, smeared
+    /// back under the glass along its edge. Such covers are left out: the
+    /// pixels are drawn after all, and the blur reads what is really there.
+    /// Conservative in that a whole cover is dropped for a partial meeting; it
+    /// only ever costs drawing, never correctness.
+    ///
+    /// **Including the covering window's own blur.** A blurred window whose
+    /// content is opaque is its own cover, and its blur reads the whole frame —
+    /// client area included — before the content goes on top. Culling beneath
+    /// its own cover fed that blur last frame's copy of the window itself, so
+    /// every full frame blurred its own previous output and the picture crept
+    /// from frame to frame with nothing in the scene changing. It was found by
+    /// `partial_frames_composite_exactly_what_a_full_frame_would`, where it was
+    /// the *full* frame that was wrong.
+    fn occluders_above(&self, below: Option<usize>) -> Vec<Rect> {
+        let first = below.map_or(0, |idx| idx.saturating_add(1));
+        self.covers
+            .iter()
+            .enumerate()
+            .skip(first)
+            .filter_map(|(at, cover)| {
+                let cover = (*cover)?;
+                // Every blurred window from just above `below` up to and
+                // including the cover's own.
+                let read_by_a_blur = self
+                    .blurs
+                    .iter()
+                    .skip(first)
+                    .take(at.saturating_sub(first).saturating_add(1))
+                    .flatten()
+                    .any(|frame| frame.intersect(&cover).is_some());
+                (!read_by_a_blur).then_some(cover)
+            })
+            .collect()
+    }
+}
+
+/// What the pointer is over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PointerTarget {
+    /// A window's client area — its own pixels, and so its input.
+    Client(WindowId),
+    /// A window's frame: title bar, border, and the resize margin around it.
+    /// The compositor's own furniture, and opaque to input — it hides
+    /// whatever lies beneath it exactly as it hides it from view.
+    Frame(WindowId),
+    /// Nothing but the desktop.
+    Desktop,
+}
+
 /// How the most recently presented frame was produced.
 ///
 /// In the [`Direct`](Scanout::Direct) case the displayed pixels come straight
@@ -4973,6 +5272,25 @@ pub struct Compositor {
     cursor_y: i32,
     /// Current cursor shape.
     cursor_shape: CursorShape,
+    /// Whether the pointer is over this compositor's output at all — see
+    /// [`InputEvent::PointerLeft`]. True from the start: a real display has
+    /// its pointer on it from the moment it lights, at the centre.
+    pointer_on_output: bool,
+    /// The window whose client area the pointer was last reported inside —
+    /// the one owed a `Leave` when that stops being true. See
+    /// [`track_pointer_window`](Self::track_pointer_window).
+    pointer_window: Option<WindowId>,
+    /// The window a held button was pressed in, and the button.
+    ///
+    /// Until that button is released, pointer motion and the release itself
+    /// go to that window wherever the pointer is — the implicit grab every
+    /// windowing system has, and what lets a slider, a scrollbar or a text
+    /// selection keep following a pointer that has strayed outside the window.
+    /// Motion used to go to whatever window was under the pointer, so a drag
+    /// stopped dead at the window's edge; and the release went to the
+    /// *focused* window, which for a right-click on a window that was not
+    /// focused is a different window from the one that saw the press.
+    pointer_grab: Option<(WindowId, MouseButton)>,
     /// Active drag operation (if any).
     drag: Option<DragState>,
     /// Where the window being dragged would land if the user let go now.
@@ -5061,6 +5379,9 @@ pub struct Compositor {
     layout: &'static keylayout::Layout,
     /// Outbound event notifications for clients (stub queue).
     pending_notifications: VecDeque<EventNotification>,
+    /// When this compositor started: the zero of the clock input events are
+    /// stamped with ([`Self::input_clock_ms`]).
+    input_epoch: Instant,
     /// Reused encoding buffer for
     /// [`route_window_list`](Self::route_window_list), so that a shell polling
     /// an unchanged desktop at 60 Hz allocates nothing.
@@ -5119,10 +5440,36 @@ pub struct Compositor {
     /// somewhere. Released before then, it is dropped — that is precisely the
     /// accidental tap the feature exists to discard.
     deferred_key: Option<DeferredKey>,
+    /// Whether the display's artifact recovery has been asked for and not yet
+    /// run — by the Ctrl+Super+R chord or a shell's `RecoverDisplay`. The
+    /// server runs it, since part of it (dropping surfaces no live client owns,
+    /// asking clients to repaint, resetting the display hardware) needs things
+    /// only the server holds. See [`Compositor::request_recovery`].
+    recovery_requested: bool,
+    /// The scan code of the key that completed the recovery chord, while it is
+    /// held, so that its repeats and its release are swallowed with it. A
+    /// window that was sent none of the chord must not be sent its end.
+    recovery_key: Option<u32>,
     /// Whether a full recomposite is needed (e.g., after display resize).
     full_recomposite: bool,
-    /// Whether [`render_all_windows`](Self::render_all_windows) may skip the
-    /// parts of a window that windows above it opaquely cover.
+    /// Whether the framebuffer's pixels no longer describe the scene at all.
+    ///
+    /// Set by a direct-scanout frame, which puts a client's own buffer on the
+    /// display, drops the frame's damage and composites nothing — so every
+    /// change made while a fullscreen window was being scanned out is a change
+    /// the framebuffer never saw, and the next composited frame is drawn whole.
+    ///
+    /// Not folded into [`full_recomposite`](Self::full_recomposite), which is
+    /// also a reason to *compose* at all: an idle fullscreen window would then
+    /// be re-presented every frame for nothing. This one is only a statement
+    /// about the framebuffer.
+    framebuffer_stale: bool,
+    /// What each of the last few composited frames changed, for a render
+    /// target whose next buffer is older than the frame just presented. See
+    /// [`RenderTarget::buffer_age`].
+    damage_history: DamageHistory,
+    /// Whether the repaint may skip the parts of a window that windows above
+    /// it opaquely cover.
     ///
     /// Always on in production. It exists as a switch so a test can composite
     /// the same scene with and without the cull and compare the framebuffers
@@ -5302,6 +5649,9 @@ impl Compositor {
             cursor_x: width as i32 / 2,
             cursor_y: height as i32 / 2,
             cursor_shape: CursorShape::Arrow,
+            pointer_on_output: true,
+            pointer_window: None,
+            pointer_grab: None,
             drag: None,
             drag_preview: None,
             last_title_press: None,
@@ -5320,6 +5670,7 @@ impl Compositor {
             input: None,
             layout: keylayout::default_layout(),
             pending_notifications: VecDeque::new(),
+            input_epoch: Instant::now(),
             window_list_scratch: Vec::new(),
             tray_icons: Vec::new(),
             tray_list_scratch: Vec::new(),
@@ -5328,7 +5679,11 @@ impl Compositor {
             dead_keys: deadkey::DeadKeys::new(),
             a11y_keys: a11ykeys::AccessibilityKeys::default(),
             deferred_key: None,
+            recovery_requested: false,
+            recovery_key: None,
             full_recomposite: true,
+            framebuffer_stale: false,
+            damage_history: DamageHistory::new(),
             occlusion_cull: true,
             scanout: Scanout::Composited,
             idle_watches: HashMap::new(),
@@ -5794,6 +6149,13 @@ impl Compositor {
         // shell keep Alt+Tab for the rest of the session with nothing on screen
         // able to release it.
         self.release_grabs_of(window_id);
+        // A window that is gone cannot hold the pointer or be told it left.
+        if self.pointer_window == Some(window_id) {
+            self.pointer_window = None;
+        }
+        if self.pointer_grab.is_some_and(|(id, _)| id == window_id) {
+            self.pointer_grab = None;
+        }
 
         let closed_layer = self.layer_of(window_id);
         self.windows.remove(idx);
@@ -6583,9 +6945,12 @@ impl Compositor {
             return None;
         }
         // The attached buffer must match the display exactly for a valid,
-        // fully-covering scanout.
+        // fully-covering scanout — and have nothing to see through. Scanout
+        // hands the display the client's pixels as they are; a translucent
+        // buffer's alpha would be dropped on the floor and whatever it was
+        // meant to show through would simply vanish.
         let buf = win.buffer.as_ref()?;
-        if (buf.width(), buf.height()) == self.backend.size() {
+        if buf.is_opaque() && (buf.width(), buf.height()) == self.backend.size() {
             Some(top)
         } else {
             None
@@ -7225,14 +7590,32 @@ impl Compositor {
         self.refresh_window_scales();
 
         match event {
-            InputEvent::MouseMove { x, y } => self.handle_mouse_move(x, y),
+            InputEvent::MouseMove { x, y } => {
+                self.pointer_on_output = true;
+                self.handle_mouse_move(x, y);
+            }
             InputEvent::MouseButton {
                 button,
                 pressed,
                 x,
                 y,
-            } => self.handle_mouse_button(button, pressed, x, y),
-            InputEvent::MouseScroll { dx, dy, x, y } => self.handle_mouse_scroll(dx, dy, x, y),
+            } => {
+                self.pointer_on_output = true;
+                self.handle_mouse_button(button, pressed, x, y);
+            }
+            InputEvent::MouseScroll { dx, dy, x, y } => {
+                self.pointer_on_output = true;
+                self.handle_mouse_scroll(dx, dy, x, y);
+            }
+            InputEvent::PointerLeft => {
+                self.pointer_on_output = false;
+                // The release of a held button will never be seen now — on the
+                // host it happens outside the window — so the grab ends here
+                // rather than holding the pointer in a window it has left.
+                self.pointer_grab = None;
+                let (x, y) = (self.cursor_x, self.cursor_y);
+                self.track_pointer_window(x, y);
+            }
             InputEvent::KeyDown {
                 scancode,
                 character,
@@ -7295,19 +7678,16 @@ impl Compositor {
 
         // Update cursor shape based on what's under the cursor.
         self.update_cursor_shape(x, y);
+        self.track_pointer_window(x, y);
 
-        // Route mouse move to the window under the cursor.
-        if let Some(window_id) = self.window_at(x, y)
-            && let Some(win) = self.window_ref(window_id)
-        {
-            let (local_x, local_y) = win.local_point(x, y);
-            self.pending_notifications
-                .push_back(EventNotification::MouseEvent {
-                    window_id,
-                    x: local_x,
-                    y: local_y,
-                    kind: MouseEventKind::Move,
-                });
+        // Motion goes to the window holding the grab, if a button is down, and
+        // otherwise to the client area under the pointer.
+        let target = self
+            .pointer_grab
+            .map(|(window_id, _)| window_id)
+            .or_else(|| self.window_at(x, y));
+        if let Some(window_id) = target {
+            self.notify_pointer(window_id, x, y, MouseEventKind::Move);
         }
     }
 
@@ -7459,28 +7839,29 @@ impl Compositor {
         // the keyboard layout. Shift+click to extend a selection is the common
         // case and would otherwise fire Alt+Shift's neighbour on every use.
         self.modifier_episode.spent |= pressed;
+        self.track_pointer_window(x, y);
 
         // Release ends any active drag.
         if !pressed && button == MouseButton::Left {
             if let Some(drag) = self.drag.take() {
                 self.finish_drag(&drag, x, y);
+                return;
             }
-            return;
         }
 
         if !pressed {
-            // Route release to focused window.
-            if let Some(window_id) = self.focused_window
-                && let Some(win) = self.window_ref(window_id)
+            // The release goes where the press went. A release with no press
+            // this compositor delivered — the press landed on a title bar, or
+            // on the desktop — goes nowhere: a client told about a release it
+            // never saw pressed would take it for the end of a click.
+            if let Some((window_id, held)) = self.pointer_grab
+                && held == button
             {
-                let (local_x, local_y) = win.local_point(x, y);
-                self.pending_notifications
-                    .push_back(EventNotification::MouseEvent {
-                        window_id,
-                        x: local_x,
-                        y: local_y,
-                        kind: MouseEventKind::ButtonRelease(button),
-                    });
+                self.pointer_grab = None;
+                self.notify_pointer(window_id, x, y, MouseEventKind::ButtonRelease(button));
+                // The grab held the pointer inside the window; now it is
+                // wherever it really is.
+                self.track_pointer_window(x, y);
             }
             return;
         }
@@ -7580,46 +7961,40 @@ impl Compositor {
                         });
                         return;
                     }
-                    // Client area click.
-                    let (local_x, local_y) = win.local_point(x, y);
-                    self.pending_notifications
-                        .push_back(EventNotification::MouseEvent {
-                            window_id,
-                            x: local_x,
-                            y: local_y,
-                            kind: MouseEventKind::ButtonPress(button),
-                        });
+                    // Client area click — unless the press landed on a
+                    // resize margin, which `detect_border_drag` declined only
+                    // because the window is not resizable: that is still the
+                    // frame, not the client.
+                    if win.client_rect().contains(x, y) {
+                        self.press_in(window_id, button, x, y);
+                    }
                 }
             }
-        } else {
-            // Non-left button: route to window under cursor.
-            if let Some(window_id) = self.window_at(x, y)
-                && let Some(win) = self.window_ref(window_id)
-            {
-                let (local_x, local_y) = win.local_point(x, y);
-                self.pending_notifications
-                    .push_back(EventNotification::MouseEvent {
-                        window_id,
-                        x: local_x,
-                        y: local_y,
-                        kind: MouseEventKind::ButtonPress(button),
-                    });
-            }
+        } else if let Some(window_id) = self.window_at(x, y) {
+            // Any other button, on a client area.
+            self.press_in(window_id, button, x, y);
+        }
+    }
+
+    /// Deliver a button press to a window's client area, and grab the pointer
+    /// for that window until the button comes back up.
+    fn press_in(&mut self, window_id: WindowId, button: MouseButton, x: i32, y: i32) {
+        self.notify_pointer(window_id, x, y, MouseEventKind::ButtonPress(button));
+        // The first button down owns the grab; a second button pressed during
+        // it goes to the same window without taking the grab over.
+        if self.pointer_grab.is_none() {
+            self.pointer_grab = Some((window_id, button));
         }
     }
 
     fn handle_mouse_scroll(&mut self, dx: f32, dy: f32, x: i32, y: i32) {
-        if let Some(window_id) = self.window_at(x, y)
-            && let Some(win) = self.window_ref(window_id)
-        {
-            let (local_x, local_y) = win.local_point(x, y);
-            self.pending_notifications
-                .push_back(EventNotification::MouseEvent {
-                    window_id,
-                    x: local_x,
-                    y: local_y,
-                    kind: MouseEventKind::Scroll { dx, dy },
-                });
+        self.track_pointer_window(x, y);
+        let target = self
+            .pointer_grab
+            .map(|(window_id, _)| window_id)
+            .or_else(|| self.window_at(x, y));
+        if let Some(window_id) = target {
+            self.notify_pointer(window_id, x, y, MouseEventKind::Scroll { dx, dy });
         }
     }
 
@@ -7764,13 +8139,105 @@ impl Compositor {
     }
 
     /// Whether a keystroke is waiting out its slow-keys threshold.
-    ///
-    /// The server loop treats this as activity: to the idle backoff a waiting
-    /// key looks like perfect quiet, and backing off would deliver it late by
-    /// up to `IdleBackoff::IDLE_INTERVAL`, differently each time.
     #[must_use]
     pub fn has_deferred_key(&self) -> bool {
         self.deferred_key.is_some()
+    }
+
+    /// Ask for the display's artifact recovery: the full redraw.
+    ///
+    /// What the Ctrl+Super+R chord and a shell's `RecoverDisplay` both do.
+    /// Recorded rather than run, because most of the work needs things only
+    /// the server holds: [`Server::recover`](crate::Server::recover) drops the
+    /// surfaces no live client owns, calls [`Self::reset_for_recovery`], resets
+    /// the display, and asks every client to draw its windows whole. It runs
+    /// before the next frame. Asking twice before it runs is asking once.
+    pub const fn request_recovery(&mut self) {
+        self.recovery_requested = true;
+    }
+
+    /// Whether recovery has been asked for since this was last asked, clearing
+    /// the answer.
+    pub const fn take_recovery_request(&mut self) -> bool {
+        let requested = self.recovery_requested;
+        self.recovery_requested = false;
+        requested
+    }
+
+    /// Forget everything this compositor believes about what is on screen, so
+    /// the next frame is drawn whole from the windows themselves.
+    ///
+    /// The compositor half of recovery. Partial frames trust two records — the
+    /// damage accumulated since the last frame, and the history of what recent
+    /// frames changed, which says what a reused buffer is missing (§1300) — and
+    /// an artifact that survives normal drawing is, by definition, somewhere
+    /// those records are wrong. So both are discarded: the whole screen is
+    /// damaged, the history is emptied (every buffer's age becomes "unknown",
+    /// which already means "repaint it all"), and the framebuffer is declared
+    /// stale so a direct-scanout frame cannot stand in for the redraw.
+    pub fn reset_for_recovery(&mut self) {
+        self.full_recomposite = true;
+        self.framebuffer_stale = true;
+        self.damage_history = DamageHistory::new();
+        let (width, height) = self.backend.size();
+        self.damage.mark_full(width, height);
+        for window in &mut self.windows {
+            window.dirty = true;
+        }
+    }
+
+    /// Destroy every window no live client owns, and return their ids.
+    ///
+    /// `live` is the connection ids of the clients still connected. A window
+    /// whose owner is not among them is an orphan: something it was drawing —
+    /// a tooltip, a popup, a menu — outlived the program that drew it, and the
+    /// compositor would go on drawing its last frame for ever. The server's
+    /// ordinary reaping removes a departed client's windows when its
+    /// connection closes; this is the sweep for whatever that missed, run as
+    /// part of recovery (`Server::recover`).
+    pub fn drop_windows_without_owner(&mut self, live: &[u64]) -> Vec<WindowId> {
+        let orphans: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|w| !live.contains(&w.client_pid))
+            .map(|w| w.id)
+            .collect();
+        for &id in &orphans {
+            // Found in the list a line above, so `WindowNotFound` cannot
+            // happen; and a window that is already gone is what was wanted.
+            let _ = self.destroy_window(id);
+        }
+        orphans
+    }
+
+    /// When something the compositor is waiting on by the clock next comes
+    /// due: a keystroke's slow-keys threshold, or a window's idle deadline.
+    /// `None` if nothing is.
+    ///
+    /// Nothing else would wake a loop for these. To a loop that waits for
+    /// input, a key waiting out its threshold is perfect quiet — no input, no
+    /// damage — and so is a session sliding towards its screen lock; without
+    /// this the key would land whenever the user next moved the mouse
+    /// (`design-decisions.md` §821) and the lock would never engage at all.
+    /// The server wakes at this instant and runs
+    /// [`poll_deferred_key`](Self::poll_deferred_key) and
+    /// [`queue_idle_notifications`](Self::queue_idle_notifications), which
+    /// compare against the clock the same way, so a wake here is never early.
+    #[must_use]
+    pub fn wake_at(&self) -> Option<Instant> {
+        let key = self.deferred_key.as_ref().and_then(|deferred| {
+            let due_ms = deferred
+                .pressed_at_ms
+                .saturating_add(u64::from(self.a11y_keys.filter.slow_keys_ms()));
+            self.started_at.checked_add(Duration::from_millis(due_ms))
+        });
+        let idle = self
+            .idle_watches
+            .values()
+            .filter(|watch| !watch.fired)
+            .filter_map(|watch| self.last_input.checked_add(watch.after))
+            .min();
+        present::earliest(key, idle)
     }
 
     /// Replace the accessibility settings.
@@ -7950,6 +8417,25 @@ impl Compositor {
         modifiers.alt |= stuck.alt;
         modifiers.shift |= stuck.shift;
         modifiers.super_key |= stuck.super_key;
+
+        // The recovery chord is the compositor's own, and is checked before
+        // the grab table so that no client can claim it: it exists for when
+        // something on screen has gone wrong, and the shell that would
+        // otherwise hold desktop shortcuts may be what went wrong. After the
+        // sticky merge, so that someone who cannot hold three keys still has
+        // it. Its repeats and its release are swallowed with the press — see
+        // `recovery_key`.
+        if self.recovery_key == Some(scancode) {
+            if !pressed {
+                self.recovery_key = None;
+            }
+            return;
+        }
+        if pressed && is_recovery_chord(key, modifiers) {
+            self.recovery_key = Some(scancode);
+            self.request_recovery();
+            return;
+        }
 
         // Grabs are consulted *here*: after the chord is known, before the
         // focused window is looked up. Both halves matter. After, because a grab
@@ -8361,24 +8847,95 @@ impl Compositor {
     // Hit testing
     // -----------------------------------------------------------------------
 
-    /// Find the topmost window whose client area contains the point.
+    /// What the pointer is over at `(x, y)`: the topmost window whose frame
+    /// or client area contains it, and which of the two.
     ///
     /// A window with [`input_transparent`](Window::input_transparent) set is
     /// skipped rather than returned, so the search continues *past* it to what
     /// is behind — which is the whole point: the click was aimed at the window
     /// under the overlay, not at the overlay.
-    fn window_at(&self, x: i32, y: i32) -> Option<WindowId> {
+    ///
+    /// **The frame counts.** This used to look for the topmost *client area*
+    /// containing the point, so a point on one window's title bar fell straight
+    /// through to the client area of whatever window lay beneath it: pointer
+    /// motion, the scroll wheel and a right-click on a title bar all went to a
+    /// window the user could not see there. A frame hides what is beneath it
+    /// from input exactly as it does from view.
+    fn pointer_target(&self, x: i32, y: i32) -> PointerTarget {
         // Iterate z_stack from top to bottom.
         for &window_id in self.z_stack.iter().rev() {
-            if let Some(win) = self.window_ref(window_id)
-                && win.is_showing(self.current_workspace)
-                && !win.input_transparent
-                && win.client_rect().contains(x, y)
-            {
-                return Some(window_id);
+            let Some(win) = self.window_ref(window_id) else {
+                continue;
+            };
+            if !win.is_showing(self.current_workspace) || win.input_transparent {
+                continue;
+            }
+            if win.client_rect().contains(x, y) {
+                return PointerTarget::Client(window_id);
+            }
+            if win.outer_rect().contains(x, y) {
+                return PointerTarget::Frame(window_id);
             }
         }
-        None
+        PointerTarget::Desktop
+    }
+
+    /// The window whose client area is under the point, if the point is on a
+    /// client area at all rather than on a frame or the desktop.
+    fn window_at(&self, x: i32, y: i32) -> Option<WindowId> {
+        match self.pointer_target(x, y) {
+            PointerTarget::Client(window_id) => Some(window_id),
+            PointerTarget::Frame(_) | PointerTarget::Desktop => None,
+        }
+    }
+
+    /// Tell a window something about the pointer, at `(x, y)` in its own
+    /// coordinates — which may lie outside it, for a `Leave` or for motion
+    /// during a grab.
+    fn notify_pointer(&mut self, window_id: WindowId, x: i32, y: i32, kind: MouseEventKind) {
+        if let Some(win) = self.window_ref(window_id) {
+            let (local_x, local_y) = win.local_point(x, y);
+            self.pending_notifications
+                .push_back(EventNotification::MouseEvent {
+                    window_id,
+                    x: local_x,
+                    y: local_y,
+                    kind,
+                });
+        }
+    }
+
+    /// Bring [`pointer_window`](Self::pointer_window) up to date with a
+    /// pointer at `(x, y)`: a `Leave` to the window it was in, an `Enter` to
+    /// the one it is in now.
+    ///
+    /// These were never sent, although the protocol carries both and a dozen
+    /// places in the toolkit and the applications act on them. A hover
+    /// highlight is turned off by the pointer *leaving*, so without `Leave` a
+    /// button the pointer had crossed stayed lit after the pointer moved on to
+    /// another window, until it happened to come back.
+    ///
+    /// Held still during a grab: the pointer is inside the grabbing window for
+    /// as long as the button is down, wherever it is on the screen.
+    fn track_pointer_window(&mut self, x: i32, y: i32) {
+        if self.pointer_grab.is_some() {
+            return;
+        }
+        let now = if self.pointer_on_output {
+            self.window_at(x, y)
+        } else {
+            None
+        };
+        if now == self.pointer_window {
+            return;
+        }
+        if let Some(old) = self.pointer_window.take() {
+            self.notify_pointer(old, x, y, MouseEventKind::Leave);
+        }
+        if let Some(new) = now {
+            self.notify_pointer(new, x, y, MouseEventKind::Enter);
+        }
+        self.pointer_window = now;
     }
 
     /// Find the topmost window whose full area (including decorations) contains the point.
@@ -8465,7 +9022,9 @@ impl Compositor {
             let Some(win) = self.window_ref(window_id) else {
                 continue;
             };
-            if !win.is_showing(self.current_workspace) {
+            // A click-through window is skipped here as `pointer_target` skips
+            // it: the pointer should look like what a click would reach.
+            if !win.is_showing(self.current_workspace) || win.input_transparent {
                 continue;
             }
             if let Some(mode) = self.detect_border_drag(win, x, y) {
@@ -8542,9 +9101,11 @@ impl Compositor {
         let mut redraw: Vec<Rect> = Vec::new();
         for window in &mut self.windows {
             let scale = self.display_manager.scale_for(&window.client_rect());
-            let before = window.outer_rect();
+            // The drawn extent rather than the outer rect, as in
+            // `damage_window`: the shadow reaches past the outer rect.
+            let before = Self::window_drawn_extent(window);
             window.scale_factor = scale;
-            let after = window.outer_rect();
+            let after = Self::window_drawn_extent(window);
             if before != after {
                 window.dirty = true;
                 // Both: the frame vacated the old box and now occupies the new
@@ -8561,6 +9122,18 @@ impl Compositor {
     // -----------------------------------------------------------------------
     // Compositing pipeline
     // -----------------------------------------------------------------------
+
+    /// Whether [`Self::compose_frame`] has anything to draw: damage, a full
+    /// repaint pending, or a drop preview, which is repainted every frame it
+    /// is up.
+    ///
+    /// What a loop asks before deciding whether to wake for the next frame. A
+    /// desktop with nothing owed has no reason to wake at the frame rate at
+    /// all, and this is what lets it not.
+    #[must_use]
+    pub fn frame_owed(&self) -> bool {
+        self.full_recomposite || self.drag_preview.is_some() || self.damage.has_damage()
+    }
 
     /// Composite a frame. Returns true if a frame was actually composited
     /// (false if skipped due to no damage or frame budget).
@@ -8623,6 +9196,9 @@ impl Compositor {
                 buf.mark_released();
             }
             self.full_recomposite = false;
+            // The damage is dropped without being drawn, so the framebuffer
+            // stops describing the scene; see the field.
+            self.framebuffer_stale = true;
             self.damage.clear();
             self.frame_stats.bypass_frames = self.frame_stats.bypass_frames.saturating_add(1);
             self.frame_stats.end_frame();
@@ -8630,19 +9206,14 @@ impl Compositor {
         }
         self.scanout = Scanout::Composited;
 
-        if self.full_recomposite {
-            // Full recomposite: clear and redraw everything.
-            self.full_recomposite_into_back();
-        } else {
-            // Partial recomposite: only redraw damaged areas.
-            let damaged_rects: Vec<Rect> = self.damage.rects().to_vec();
-            for rect in &damaged_rects {
-                self.backend.clear_rect(rect, self.theme.desktop_background);
-            }
-            // Re-render windows that overlap with damaged areas.
-            self.render_damaged_windows(&damaged_rects);
-            self.damage.clear();
-        }
+        let (region, change) = self.plan_repaint();
+        let plan = self.stack_plan();
+        self.repaint_background(&region, &plan);
+        self.repaint_windows(&region, &plan);
+        self.damage_history.record(change);
+        self.full_recomposite = false;
+        self.framebuffer_stale = false;
+        self.damage.clear();
 
         // After the windows and over them: the preview says where the window
         // is going, and a preview drawn under the windows it is about to
@@ -8656,57 +9227,267 @@ impl Compositor {
         true
     }
 
-    /// Full recomposite into the back buffer: clear to the desktop
-    /// background and redraw every window bottom-to-top, then clear the
+    /// Full recomposite into the buffer: clear to the desktop background and
+    /// redraw every window bottom-to-top, then clear the
     /// pending-recomposite/damage state.
     ///
-    /// Shared by [`compose_frame`](Compositor::compose_frame)'s
-    /// full-recomposite branch and the benchmark hook
-    /// [`bench_full_composite`](Compositor::bench_full_composite) so the two
-    /// measure exactly the same work and can never drift. Does NOT swap
-    /// buffers — the caller owns presentation.
+    /// Shared by the benchmark hooks ([`bench_full_composite`](Compositor::bench_full_composite)
+    /// and its phase-split sibling) so they measure the repaint `compose_frame`
+    /// runs rather than a copy of it. Does NOT present — the caller owns
+    /// presentation.
     fn full_recomposite_into_back(&mut self) {
-        // OPT (BENCH-COMPOSITOR-SLOW): don't clear the desktop background under
-        // windows that will fully overwrite it with opaque content — that clear
-        // is pure overdraw. `clear_except` fills only the uncovered region.
-        let covered = self.opaque_cover_rects();
-        self.backend
-            .clear_except(self.theme.desktop_background, &covered);
-        self.render_all_windows();
+        let region = Region::from_rect(self.screen_rect());
+        let plan = self.stack_plan();
+        self.repaint_background(&region, &plan);
+        self.repaint_windows(&region, &plan);
+        self.damage_history.record(Change::Everything);
         self.full_recomposite = false;
+        self.framebuffer_stale = false;
         self.damage.clear();
     }
 
-    /// Collect the screen-space rectangles that are guaranteed to be fully
-    /// overwritten with opaque content during this recomposite.
+    /// The whole surface, as a rectangle.
+    fn screen_rect(&self) -> Rect {
+        let (width, height) = self.backend.size();
+        Rect::new(0, 0, width, height)
+    }
+
+    /// Which pixels this frame repaints, and what it changed.
     ///
-    /// Used by [`full_recomposite_into_back`](Self::full_recomposite_into_back)
-    /// to cull the desktop-background clear under opaque windows. Only windows
-    /// whose *client area* is provably opaque and fully covered are included:
+    /// The two differ, and the difference is what makes a multi-buffered target
+    /// correct. What the frame *changed* is its damage, spread through the
+    /// blurred windows it reaches; that is what is remembered for later frames.
+    /// What it *repaints* is that, plus whatever the buffer about to be drawn
+    /// into missed — the changes of the frames since it was last on screen,
+    /// which [`RenderTarget::buffer_age`] says how many of. Remembering the
+    /// repaint instead would make each frame's record include the one before
+    /// it, and on a ring the region would grow without bound for as long as
+    /// anything kept changing.
+    fn plan_repaint(&self) -> (Region, Change) {
+        let screen = self.screen_rect();
+        let whole = Region::from_rect(screen);
+        if self.full_recomposite || self.framebuffer_stale {
+            return (whole, Change::Everything);
+        }
+        let mut damaged = Region::new();
+        for rect in self.damage.rects() {
+            if let Some(on_screen) = rect.intersect(&screen) {
+                damaged.add(on_screen);
+            }
+        }
+        let changed = self.spread_through_blur(damaged, screen);
+        let missed = match self.backend.buffer_age() {
+            // Holds the frame just presented: missing nothing.
+            Some(1) => Some(Region::new()),
+            // Holds an older frame: missing the frames since, if remembered.
+            Some(age) => age
+                .checked_sub(1)
+                .and_then(|back| usize::try_from(back).ok())
+                .and_then(|back| self.damage_history.changed_in_last(back)),
+            // Holds no frame at all.
+            None => None,
+        };
+        let Some(missed) = missed else {
+            return (whole, Change::Region(changed));
+        };
+        let mut repaint = changed.clone();
+        if !missed.is_empty() {
+            repaint.add_region(&missed);
+            repaint = self.spread_through_blur(repaint, screen);
+        }
+        (repaint, Change::Region(changed))
+    }
+
+    /// `region`, grown by the whole frame of every blurred window it reaches.
     ///
-    /// - buffer-less windows whose first render command opaquely covers the
-    ///   whole client area (same predicate the per-window bg-fill cull uses),
-    ///   at full window opacity; and
-    /// - buffer-backed windows carrying an opaque buffer at full opacity, over
-    ///   the sub-rectangle actually covered by the buffer.
+    /// A backdrop blur's output at one pixel depends on the backdrop around it,
+    /// out to the blur's reach — and the pass reads and rewrites the window's
+    /// entire frame, so it can only run over a frame that is being repainted
+    /// entirely. Anything less and it would blur, a second time, pixels that
+    /// already carry last frame's blur and the window drawn over it. So damage
+    /// that touches a blurred window repaints all of it.
     ///
-    /// Decorations (title bar, border, shadow) are deliberately excluded: they
-    /// lie outside the client rect and the shadow is translucent, so the
-    /// background under them must still be cleared. Being conservative here only
-    /// costs a little extra (correct) overdraw, never correctness.
-    fn opaque_cover_rects(&self) -> Vec<Rect> {
-        self.windows
+    /// Repeated to a fixed point, because a blurred window's frame can reach a
+    /// second blurred window, whose pass reads that one's pixels. Each round
+    /// adds at least one whole frame that was not wholly in the region, so it
+    /// ends within one round per window.
+    fn spread_through_blur(&self, mut region: Region, screen: Rect) -> Region {
+        let frames: Vec<Rect> = self
+            .windows
             .iter()
-            .filter_map(|win| Self::window_opaque_cover(win, self.current_workspace))
-            .collect()
+            .filter(|win| win.blur_behind.is_blurred() && win.is_showing(self.current_workspace))
+            .filter_map(|win| win.frame_rect().intersect(&screen))
+            .collect();
+        loop {
+            let mut grew = false;
+            for frame in &frames {
+                if region.intersects(frame) && !region.contains_rect(frame) {
+                    region.add(*frame);
+                    grew = true;
+                }
+            }
+            if !grew {
+                return region;
+            }
+        }
+    }
+
+    /// The per-window facts one repaint consults, gathered once.
+    fn stack_plan(&self) -> StackPlan {
+        let z_stack = self.z_stack.clone();
+        let covers = z_stack
+            .iter()
+            .map(|&id| {
+                self.window_ref(id)
+                    .and_then(|win| Self::window_opaque_cover(win, self.current_workspace))
+            })
+            .collect();
+        let blurs = z_stack
+            .iter()
+            .map(|&id| {
+                self.window_ref(id).and_then(|win| {
+                    (win.blur_behind.is_blurred() && win.is_showing(self.current_workspace))
+                        .then(|| win.frame_rect())
+                })
+            })
+            .collect();
+        StackPlan {
+            z_stack,
+            covers,
+            blurs,
+        }
+    }
+
+    /// The frame clip for one repaint rectangle: `None` when the rectangle is
+    /// the whole surface, so a full frame pays nothing for being clipped.
+    fn clip_for(&self, rect: Rect) -> Option<Rect> {
+        (rect != self.screen_rect()).then_some(rect)
+    }
+
+    /// Clear `region` to the desktop background, except under covers that
+    /// provably get painted over opaquely later in the frame.
+    ///
+    /// OPT (BENCH-COMPOSITOR-SLOW): the clear under an opaque window is pure
+    /// overdraw — except where a blurred window would read it, which is why the
+    /// covers come through [`StackPlan::occluders_above`].
+    fn repaint_background(&mut self, region: &Region, plan: &StackPlan) {
+        let covered = plan.occluders_above(None);
+        for &rect in region.rects() {
+            let clip = self.clip_for(rect);
+            self.backend.set_frame_clip(clip);
+            self.backend
+                .clear_except(self.theme.desktop_background, &covered);
+        }
+        self.backend.set_frame_clip(None);
+    }
+
+    /// Redraw, bottom to top, every window that reaches `region`, confined to
+    /// `region` and skipping the parts windows above it opaquely cover.
+    ///
+    /// # Why windows are the outer loop
+    ///
+    /// Rectangle-major order — finish one repaint rectangle, then the next — is
+    /// the obvious shape and it is wrong for one window in particular: a
+    /// blurred one. Its blur reads the backdrop across its whole frame, which
+    /// may span several rectangles, and in rectangle-major order the ones not
+    /// reached yet still hold last frame's pixels. Walking windows outermost
+    /// means that when a window's turn comes, everything beneath it is already
+    /// drawn in *every* rectangle.
+    ///
+    /// # Why every draw is clipped
+    ///
+    /// A window reaching the region is redrawn only where the region is. This
+    /// used to redraw it whole, which is only right if the whole of it is in
+    /// the region — and a window below the damage that merely touched it
+    /// painted itself over every window above it that the damage did not
+    /// reach (`a_partial_frame_does_not_paint_a_lower_window_over_a_higher_one`),
+    /// while its translucent edges were blended a second time onto their own
+    /// last-frame copies.
+    ///
+    /// # The occlusion cull
+    ///
+    /// OPT (BENCH-COMPOSITOR-SLOW): windows are painted back-to-front, so a
+    /// part of a window that an opaque window above will overwrite is pure
+    /// overdraw. On the 4K benchmark's 16-window cascade each window is ~72%
+    /// covered by its immediate successor alone, and window rendering was 11.1
+    /// ms of the 12.5 ms frame — so the hidden pixels, not the visible ones,
+    /// were the bulk of the work. Each window's piece of each rectangle has
+    /// the opaque covers above it subtracted and is drawn once per surviving
+    /// fragment; the fragments are disjoint ([`Rect::subtract`]), so no pixel
+    /// is painted twice.
+    fn repaint_windows(&mut self, region: &Region, plan: &StackPlan) {
+        /// Past this many fragments the per-fragment replay of a window's
+        /// command list costs more than the pixels it saves.
+        const MAX_FRAGMENTS: usize = 4;
+
+        for (idx, &window_id) in plan.z_stack.iter().enumerate() {
+            let Some(win) = self.window_ref(window_id) else {
+                continue;
+            };
+            if !win.is_showing(self.current_workspace) {
+                continue;
+            }
+            let extent = Self::window_drawn_extent(win);
+            if !region.intersects(&extent) {
+                continue;
+            }
+            let occluders: Vec<Rect> = if self.occlusion_cull {
+                plan.occluders_above(Some(idx))
+                    .into_iter()
+                    .filter(|cover| cover.intersect(&extent).is_some())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            // Everything beneath is drawn now, in every rectangle; and
+            // `spread_through_blur` put the whole frame in the region, so the
+            // pass rewrites only pixels this frame is repainting anyway.
+            if let Some(blur) = plan.blurs.get(idx).copied().flatten()
+                && region.intersects(&blur)
+            {
+                self.blur_behind_window(window_id);
+            }
+
+            for &rect in region.rects() {
+                let Some(part) = extent.intersect(&rect) else {
+                    continue;
+                };
+                match subtract_region(part, &occluders, MAX_FRAGMENTS) {
+                    Some(fragments) => {
+                        for fragment in fragments {
+                            let clip = self.clip_for(fragment);
+                            self.backend.set_frame_clip(clip);
+                            self.render_window(window_id);
+                        }
+                    }
+                    // Too fragmented to be worth it: drawn over the whole
+                    // piece, which is correct — the cull only ever saves work.
+                    None => {
+                        let clip = self.clip_for(part);
+                        self.backend.set_frame_clip(clip);
+                        self.render_window(window_id);
+                    }
+                }
+            }
+        }
+        self.backend.set_frame_clip(None);
+    }
+
+    /// The rectangles the background clear skips, for tests that ask which
+    /// windows count as covers. Production reads the same answer off the
+    /// frame's [`StackPlan`].
+    #[cfg(test)]
+    fn opaque_cover_rects(&self) -> Vec<Rect> {
+        self.stack_plan().occluders_above(None)
     }
 
     /// The screen-space rectangle this one window is guaranteed to overwrite
     /// with fully opaque pixels, if any.
     ///
-    /// Shared by the background-clear cull ([`opaque_cover_rects`](Self::opaque_cover_rects))
-    /// and the inter-window cull in [`render_all_windows`](Self::render_all_windows),
-    /// so the two can never disagree about what counts as opaque — a window
+    /// Shared by the background-clear cull and the inter-window cull in
+    /// [`repaint_windows`](Self::repaint_windows), through [`StackPlan`], so
+    /// the two can never disagree about what counts as opaque — a window
     /// treated as an occluder by one and not the other would leave a hole.
     fn window_opaque_cover(win: &Window, current_workspace: u32) -> Option<Rect> {
         if !win.is_showing(current_workspace) || win.opacity < 1.0 {
@@ -8801,118 +9582,20 @@ impl Compositor {
 
     pub fn bench_full_composite_phases(&mut self) -> (u64, u64) {
         self.full_recomposite = true;
-        let covered = self.opaque_cover_rects();
+        let region = Region::from_rect(self.screen_rect());
+        let plan = self.stack_plan();
         let t0 = std::time::Instant::now();
-        self.backend
-            .clear_except(self.theme.desktop_background, &covered);
+        self.repaint_background(&region, &plan);
         let clear_ns = t0.elapsed().as_nanos() as u64;
         let t1 = std::time::Instant::now();
-        self.render_all_windows();
+        self.repaint_windows(&region, &plan);
         let windows_ns = t1.elapsed().as_nanos() as u64;
+        self.damage_history.record(Change::Everything);
         self.full_recomposite = false;
+        self.framebuffer_stale = false;
         self.damage.clear();
         self.backend.present();
         (clear_ns, windows_ns)
-    }
-
-    /// Render all visible windows from bottom to top z-order, skipping the
-    /// parts of each that windows above it will opaquely cover.
-    ///
-    /// OPT (BENCH-COMPOSITOR-SLOW): windows are painted back-to-front, so
-    /// without this every pixel of every window is drawn even when a window
-    /// above overwrites it a moment later. On the 4K benchmark's 16-window
-    /// cascade each window is ~72% covered by its immediate successor alone,
-    /// and window rendering was 11.1 ms of the 12.5 ms frame — so the hidden
-    /// pixels, not the visible ones, were the bulk of the work.
-    ///
-    /// For each window this subtracts the opaque covers of every window above
-    /// it from that window's drawn extent, and redraws it once per surviving
-    /// fragment under [`Framebuffer::frame_clip`]. A window with nothing left
-    /// is skipped outright. Correctness rests on two things: the occluders are
-    /// only regions *provably* repainted opaquely later
-    /// ([`window_opaque_cover`](Self::window_opaque_cover)), and the fragments
-    /// are disjoint ([`Rect::subtract`]), so no pixel is painted twice.
-    fn render_all_windows(&mut self) {
-        /// Past this many fragments the per-fragment replay of a window's
-        /// command list costs more than the pixels it saves.
-        const MAX_FRAGMENTS: usize = 4;
-
-        let z_stack_copy: Vec<WindowId> = self.z_stack.clone();
-
-        if !self.occlusion_cull {
-            for &window_id in &z_stack_copy {
-                self.blur_behind_window(window_id);
-                self.render_window(window_id);
-            }
-            return;
-        }
-
-        // Opaque cover per z-position, so window k can look at k+1.. without
-        // re-deriving them for every window (O(n^2) predicate evaluations, and
-        // `first_command_covers_client` walks a command list).
-        let covers: Vec<Option<Rect>> = z_stack_copy
-            .iter()
-            .map(|&id| {
-                self.window_ref(id)
-                    .and_then(|win| Self::window_opaque_cover(win, self.current_workspace))
-            })
-            .collect();
-
-        for (idx, &window_id) in z_stack_copy.iter().enumerate() {
-            let Some(win) = self.window_ref(window_id) else {
-                continue;
-            };
-            if !win.is_showing(self.current_workspace) {
-                continue;
-            }
-            let extent = Self::window_drawn_extent(win);
-
-            // Only occluders that actually meet this window matter; the rest
-            // would just cost a subtraction that returns the input unchanged.
-            let occluders: Vec<Rect> = covers
-                .iter()
-                .skip(idx.saturating_add(1))
-                .flatten()
-                .filter(|c| c.intersect(&extent).is_some())
-                .copied()
-                .collect();
-
-            if occluders.is_empty() {
-                self.render_window(window_id);
-                continue;
-            }
-
-            match subtract_region(extent, &occluders, MAX_FRAGMENTS) {
-                // Wholly hidden — the cheapest outcome there is.
-                Some(parts) if parts.is_empty() => {}
-                Some(parts) => {
-                    for part in parts {
-                        self.backend.set_frame_clip(Some(part));
-                        self.render_window(window_id);
-                    }
-                    self.backend.set_frame_clip(None);
-                }
-                // Too fragmented to be worth it: draw it whole, as before.
-                None => self.render_window(window_id),
-            }
-        }
-    }
-
-    /// Render only windows that overlap with the given damaged rects.
-    fn render_damaged_windows(&mut self, damaged_rects: &[Rect]) {
-        let z_stack_copy: Vec<WindowId> = self.z_stack.clone();
-        for &window_id in &z_stack_copy {
-            if let Some(win) = self.window_ref(window_id) {
-                if !win.is_showing(self.current_workspace) {
-                    continue;
-                }
-                let outer = win.outer_rect();
-                let overlaps = damaged_rects.iter().any(|r| r.intersect(&outer).is_some());
-                if overlaps {
-                    self.render_window(window_id);
-                }
-            }
-        }
     }
 
     /// Render a single window (shadow, decorations, client content).
@@ -9569,6 +10252,10 @@ impl Compositor {
                 self.announce_settings_change(SettingsGroup::Session);
                 CompositorResponse::Ok
             }
+            CompositorRequest::RecoverDisplay => {
+                self.request_recovery();
+                CompositorResponse::Ok
+            }
             CompositorRequest::ReloadInput => {
                 self.reload_input();
                 self.announce_settings_change(SettingsGroup::Input);
@@ -9760,12 +10447,29 @@ impl Compositor {
         if self.pending_notifications.is_empty() {
             return None;
         }
+        let now = self.input_clock_ms();
         let events: Vec<guiremote::InputEvent> = self
             .pending_notifications
             .drain(..)
-            .map(wire_event)
+            .map(|note| wire_event(note).at(now))
             .collect();
         Some(guiremote::encode_input_frame(&events))
+    }
+
+    /// The clock input events are stamped with: milliseconds since this
+    /// compositor started, wrapping at `u32` (see `guiremote::InputEvent::time`
+    /// for why a client needs it). Read when events are routed to their
+    /// clients, which the server does in the same pass as it handles the input
+    /// that caused them -- so a stamp is within a tick of the event, and no
+    /// client's delay in reading it can move it.
+    #[must_use]
+    pub fn input_clock_ms(&self) -> u32 {
+        // Wrapping by design: only differences between stamps mean anything,
+        // and the low 32 bits of the milliseconds are those differences for
+        // any two events less than 49 days apart.
+        #[allow(clippy::cast_possible_truncation, reason = "wraps on purpose")]
+        let low = self.input_epoch.elapsed().as_millis() as u32;
+        low
     }
 
     // -----------------------------------------------------------------------
@@ -10173,6 +10877,92 @@ impl Compositor {
         self.cursor_shape
     }
 
+    /// The pointer the display should draw over the frame, or `None` when
+    /// there is none to draw: it has left the output, or the window under it
+    /// asked for [`CursorShape::Hidden`].
+    ///
+    /// A description — shape, hot spot, size and colours — rather than pixels:
+    /// the picture is a presentation concern ([`CursorCache`]), and keeping it
+    /// out of the compositor is what lets a presenter hand the same
+    /// description to a hardware cursor plane instead.
+    ///
+    /// The size is [`pointer_preferences`](Self::pointer_preferences)' size
+    /// times the scale of the display the pointer is on, so a pointer crossing
+    /// onto a 2x monitor doubles as it crosses, exactly as the window
+    /// decorations there do.
+    #[must_use]
+    pub fn pointer(&self) -> Option<PointerState> {
+        if !self.pointer_on_output || self.cursor_shape == CursorShape::Hidden {
+            return None;
+        }
+        let (x, y) = (self.cursor_x, self.cursor_y);
+        let scale = self.display_manager.scale_for(&Rect::new(x, y, 1, 1));
+        let (size, scheme) = Self::pointer_preferences();
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "16 to 48 pixels times a display scale; the rasterizer clamps the result, and a nonsense scale saturates rather than wrapping"
+        )]
+        let size_px = (size.pixels() as f32 * scale).round() as u32;
+        let (fill, outline) = Self::pointer_colors(scheme, self.palette.accent);
+        Some(PointerState {
+            shape: self.cursor_shape,
+            x,
+            y,
+            style: CursorStyle {
+                size_px,
+                fill,
+                outline,
+            },
+        })
+    }
+
+    /// The pointer's size and colour scheme: the defaults, on purpose, until
+    /// the user's choice has one home.
+    ///
+    /// Three settings hold a pointer size — `appearance`'s `cursor_size`,
+    /// `inputsettings`' `mouse.cursor_size`, and the Settings app's own
+    /// `CursorSize`, which it never saves — and no control writes any of them
+    /// where another program can read it. `known-issues.md` →
+    /// `TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-AND-NO-READER`,
+    /// lane C's entry about lane C's models, asks that they be collapsed to one
+    /// before anything reads one: wiring one of several rival copies leaves the
+    /// others silently wrong instead of uniformly inert. The pointer now exists
+    /// to read the survivor, and which one survives is asked in
+    /// `requests/f-ce-the-pointer-is-drawn-now-which-cursor-size-setting-survives.md`.
+    /// When it is answered, this reads it and nothing else changes.
+    const fn pointer_preferences() -> (appearance::CursorSize, appearance::CursorScheme) {
+        (
+            appearance::CursorSize::Normal,
+            appearance::CursorScheme::Default,
+        )
+    }
+
+    /// The pointer's fill and outline for `scheme`, as `0xAARRGGBB`: white
+    /// edged in black, the reverse, or `accent` edged in whichever of black and
+    /// white stands out from it more.
+    fn pointer_colors(scheme: appearance::CursorScheme, accent: Color) -> (u32, u32) {
+        const WHITE: u32 = 0xFFFF_FFFF;
+        const BLACK: u32 = 0xFF00_0000;
+        match scheme {
+            appearance::CursorScheme::Default => (WHITE, BLACK),
+            appearance::CursorScheme::Inverted => (BLACK, WHITE),
+            appearance::CursorScheme::AccentColored => {
+                let edge = if appearance::contrast_ratio(accent, Color::BLACK)
+                    >= appearance::contrast_ratio(accent, Color::WHITE)
+                {
+                    BLACK
+                } else {
+                    WHITE
+                };
+                // Opaque whatever the accent's own alpha: a see-through pointer
+                // is one the user loses.
+                (color_to_argb(&accent) | 0xFF00_0000, edge)
+            }
+        }
+    }
+
     /// Where the pointer is, in screen pixels.
     ///
     /// The cheapest evidence that input reached the compositor at all: a caller
@@ -10550,10 +11340,19 @@ impl Compositor {
     }
 
     /// Mark the area occupied by a window (including decorations) as damaged.
+    /// Mark everything the window draws as needing a repaint.
+    ///
+    /// [`window_drawn_extent`](Self::window_drawn_extent), not
+    /// [`Window::outer_rect`]: the shadow is cast three pixels down and right
+    /// of the frame, so it reaches past the outer rect on those two sides, and
+    /// a window moved with outer-rect damage left the last two rows and
+    /// columns of its old shadow behind. The extent is the bound the repaint
+    /// itself trusts to contain a window's drawing, so damage and repaint now
+    /// agree by construction.
     fn damage_window(&mut self, window_id: WindowId) {
         if let Some(win) = self.window_ref(window_id) {
-            let outer = win.outer_rect();
-            self.damage.add(outer);
+            let extent = Self::window_drawn_extent(win);
+            self.damage.add(extent);
         }
     }
 }
@@ -11005,15 +11804,17 @@ mod tests {
         assert_eq!(fb.get_pixel(200, 200), None); // Out of bounds
     }
 
+    /// One buffer: what was drawn is what is presented, and the next frame
+    /// starts from it. (This test used to pin the opposite — that a present
+    /// swapped in the *previous* frame's buffer — which is the property that
+    /// made every partial frame lose the frame before it.)
     #[test]
-    fn test_framebuffer_swap() {
+    fn test_framebuffer_present_keeps_the_frame() {
         let mut fb = Framebuffer::new(10, 10).unwrap();
         fb.set_pixel(0, 0, 0xFF_11_22_33);
-        fb.swap();
-        // After swap, front buffer should have the pixel.
+        RenderTarget::present(&mut fb);
         assert_eq!(fb.front_buffer()[0], 0xFF_11_22_33);
-        // Back buffer should be the old front (initial black).
-        assert_eq!(fb.get_pixel(0, 0), Some(0xFF_00_00_00));
+        assert_eq!(fb.get_pixel(0, 0), Some(0xFF_11_22_33));
     }
 
     #[test]
@@ -16290,7 +17091,16 @@ mod tests {
 
         // Ground truth: fill the same buffer single-threaded via the shared helper.
         let mut reference = vec![0xFF_00_00_00u32; (W * H) as usize];
-        Framebuffer::fill_uncovered_band(&mut reference, 0, H, W, 0xFF_AB_CD_EF, &covered, H);
+        Framebuffer::fill_uncovered_band(
+            &mut reference,
+            0,
+            H,
+            W,
+            0xFF_AB_CD_EF,
+            &covered,
+            H,
+            (0, W),
+        );
 
         assert_eq!(par.back.len(), reference.len());
         assert!(
@@ -16491,9 +17301,9 @@ mod tests {
         let rects = comp.opaque_cover_rects();
         assert_eq!(rects, vec![Rect::new(wx, wy, 8, 6)]);
 
-        // An Argb buffer (not is_opaque) must NOT be reported.
+        // An Argb buffer that uses its alpha must NOT be reported.
         let id2 = comp.create_window("Argb".to_string(), 20, 20, 2);
-        let bytes2 = solid_buffer_bytes(8, 6, 0xFF00_FF00);
+        let bytes2 = solid_buffer_bytes(8, 6, 0x8000_FF00);
         comp.attach_buffer(id2, 2, 8, 6, 8 * 4, BufferFormat::Argb8888, &bytes2)
             .unwrap();
         let id2_pos = {
@@ -16502,7 +17312,22 @@ mod tests {
         };
         assert!(
             !comp.opaque_cover_rects().contains(&id2_pos),
-            "Argb buffer window must not be treated as opaque"
+            "a translucent Argb buffer window must not be treated as opaque"
+        );
+
+        // An Argb buffer whose alpha is 0xFF everywhere *is* opaque: the
+        // format says what the client may do, the pixels say what it did.
+        let id3 = comp.create_window("Argb, opaque".to_string(), 20, 20, 3);
+        let bytes3 = solid_buffer_bytes(8, 6, 0xFF00_FF00);
+        comp.attach_buffer(id3, 3, 8, 6, 8 * 4, BufferFormat::Argb8888, &bytes3)
+            .unwrap();
+        let id3_pos = {
+            let w = comp.window_ref(id3).unwrap();
+            Rect::new(w.x, w.y, 8, 6)
+        };
+        assert!(
+            comp.opaque_cover_rects().contains(&id3_pos),
+            "an Argb buffer that never uses its alpha was not treated as opaque"
         );
     }
 
@@ -16930,10 +17755,21 @@ mod tests {
             assert!(!rows.is_empty(), "font_size = {size} drew nothing");
         }
         // An enormous size is clamped rather than honoured — a 1e30-pixel face
-        // would be a memory bomb — so its glyphs are merely too big for this
-        // 200x120 surface. What matters is that asking does not panic.
-        let (rows, _) = ink_of("W", 1e30, FontWeightHint::Regular, None);
-        assert!(rows.is_empty(), "a 512px glyph should not fit in 120 rows");
+        // would be a memory bomb — to the largest size fonts are built at, so
+        // it draws exactly what that size draws.
+        //
+        // Compared against that size rather than asserted to draw nothing:
+        // whether a 512px glyph's ink reaches this 200x120 surface depends on
+        // the face's ascent, and the face is whichever one the machine has
+        // installed. With Windows' UI face the "W" lands below the surface; with
+        // DejaVu Sans, which a Linux host finds first, the top of it is inside,
+        // and the old `rows.is_empty()` failed there.
+        let max = f32::from(osfont::system::MAX_PX);
+        assert_eq!(
+            ink_of("W", 1e30, FontWeightHint::Regular, None),
+            ink_of("W", max, FontWeightHint::Regular, None),
+            "a 1e30px request did not draw what the largest size draws"
+        );
     }
 
     // ---- rich text (per-glyph colour) --------------------------------------
@@ -22293,6 +23129,1088 @@ mod tests {
             c.backend.working_pixels(),
             before.as_slice(),
             "a window that asked for no blur had the pixels behind it rewritten"
+        );
+    }
+
+    // -- partial frames ---------------------------------------------------------
+    //
+    // A partial frame repaints only what changed, and it is correct exactly
+    // when its pixels are the ones a full recomposite of the same scene would
+    // produce. Until 2026-09-24 three separate faults broke that, none of them
+    // caught because no test ever compared the two: the buffer drawn into was
+    // two frames stale, a window reaching the damage was redrawn whole over
+    // the windows above it, and the backdrop blur never ran at all. The first
+    // two tests below are the smallest scenes that show the first two faults;
+    // the property test after them is the one that would have caught all of
+    // them, and the next one.
+
+    /// An unthrottled compositor over a ring of `buffers` framebuffers.
+    ///
+    /// The compositor itself draws into one buffer; rings of two and three are
+    /// what a swapchain or a scanout pair would be, and running every partial
+    /// frame test over all three is what holds the damage history to account.
+    fn ringed(width: u32, height: u32, buffers: usize) -> Compositor {
+        let mut comp = Compositor::new(width, height, 2_000_000).expect("compositor");
+        comp.backend =
+            RenderBackend::Software(Framebuffer::with_ring(width, height, buffers).expect("ring"));
+        comp
+    }
+
+    /// A client's whole drawing: one fill of `color` over `width`x`height`.
+    fn solid(width: f32, height: f32, color: Color) -> Vec<RenderCommand> {
+        vec![RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
+            color,
+            corner_radii: CornerRadii::ZERO,
+        }]
+    }
+
+    #[test]
+    fn a_partial_frame_keeps_what_the_frame_before_it_drew() {
+        for buffers in 1..=3 {
+            let mut comp = ringed(800, 600, buffers);
+            let a = comp.create_window_from_spec(
+                &WindowSpec {
+                    position: Some((50, 80)),
+                    ..WindowSpec::new("A", 100, 100)
+                },
+                1,
+            );
+            let b = comp.create_window_from_spec(
+                &WindowSpec {
+                    position: Some((500, 380)),
+                    ..WindowSpec::new("B", 100, 100)
+                },
+                1,
+            );
+            assert!(comp.compose_frame(), "the first frame was refused");
+            let (ax, ay) = {
+                let w = comp.window_ref(a).expect("A");
+                (w.x + 50, w.y + 50)
+            };
+
+            comp.submit_render(a, solid(100.0, 100.0, Color::RED))
+                .expect("A");
+            assert!(comp.compose_frame());
+            let red = presented_pixel(&comp, ax, ay);
+
+            // Frames that change only B must leave A as the last one drew it,
+            // however many buffers ago that was.
+            for (step, color) in [Color::BLUE, Color::GREEN, Color::BLUE, Color::WHITE]
+                .into_iter()
+                .enumerate()
+            {
+                comp.submit_render(b, solid(100.0, 100.0, color))
+                    .expect("B");
+                assert!(comp.compose_frame());
+                assert_eq!(
+                    presented_pixel(&comp, ax, ay),
+                    red,
+                    "ring of {buffers}: A's red was lost {} frame(s) after it was drawn",
+                    step + 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_partial_frame_does_not_paint_a_lower_window_over_a_higher_one() {
+        for buffers in 1..=3 {
+            let mut comp = ringed(800, 600, buffers);
+            let lower = comp.create_window_from_spec(
+                &WindowSpec {
+                    position: Some((50, 80)),
+                    ..WindowSpec::new("lower", 300, 300)
+                },
+                1,
+            );
+            comp.submit_render(lower, solid(300.0, 300.0, Color::RED))
+                .expect("lower");
+            let upper = comp.create_window_from_spec(
+                &WindowSpec {
+                    position: Some((300, 100)),
+                    ..WindowSpec::new("upper", 200, 200)
+                },
+                1,
+            );
+            comp.submit_render(upper, solid(200.0, 200.0, Color::BLUE))
+                .expect("upper");
+            let small = comp.create_window_from_spec(
+                &WindowSpec {
+                    position: Some((80, 300)),
+                    ..WindowSpec::new("small", 40, 40)
+                },
+                1,
+            );
+            comp.submit_render(small, solid(40.0, 40.0, Color::GREEN))
+                .expect("small");
+            assert!(comp.compose_frame());
+
+            // A pixel of the upper window over the lower one.
+            let (ux, uy) = {
+                let w = comp.window_ref(upper).expect("upper");
+                (w.x + 10, w.y + 100)
+            };
+            assert!(
+                comp.window_ref(lower)
+                    .expect("lower")
+                    .client_rect()
+                    .contains(ux, uy),
+                "the probe is not over the lower window, so it proves nothing"
+            );
+            let blue = presented_pixel(&comp, ux, uy);
+
+            // The small window's damage reaches the lower window and not the
+            // upper one, so the lower one is redrawn and the upper is not.
+            comp.submit_render(small, solid(40.0, 40.0, Color::WHITE))
+                .expect("small");
+            let upper_extent =
+                Compositor::window_drawn_extent(comp.window_ref(upper).expect("upper"));
+            assert!(
+                comp.damage
+                    .rects()
+                    .iter()
+                    .all(|d| d.intersect(&upper_extent).is_none()),
+                "the damage reaches the upper window, so it would be redrawn and prove nothing"
+            );
+            assert!(comp.compose_frame());
+            assert_eq!(
+                presented_pixel(&comp, ux, uy),
+                blue,
+                "ring of {buffers}: the lower window painted itself over the upper one"
+            );
+        }
+    }
+
+    /// A small deterministic generator, so a failure names a seed that
+    /// reproduces it rather than a run that cannot be repeated.
+    struct Dice(u64);
+
+    impl Dice {
+        fn next(&mut self) -> u64 {
+            // xorshift64*
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n.max(1)
+        }
+
+        fn range(&mut self, lo: i32, hi: i32) -> i32 {
+            lo + self.below((hi - lo).max(1) as u64) as i32
+        }
+
+        fn chance(&mut self, percent: u64) -> bool {
+            self.below(100) < percent
+        }
+
+        fn color(&mut self, translucent: bool) -> Color {
+            let mut c = Color::rgb(
+                self.below(256) as u8,
+                self.below(256) as u8,
+                self.below(256) as u8,
+            );
+            if translucent {
+                c.a = 40 + self.below(180) as u8;
+            }
+            c
+        }
+    }
+
+    /// One change to the scene, drawn at random.
+    #[derive(Clone, Debug)]
+    enum SceneOp {
+        Create(WindowSpec),
+        Draw(usize, Vec<RenderCommand>),
+        Move(usize, i32, i32),
+        Resize(usize, u32, u32),
+        Focus(usize),
+        Opacity(usize, f32),
+        Hide(usize, bool),
+        Minimize(usize),
+        Restore(usize),
+        Destroy(usize),
+    }
+
+    fn random_op(dice: &mut Dice, windows: usize, width: i32, height: i32) -> SceneOp {
+        let pick = |dice: &mut Dice| dice.below(windows as u64) as usize;
+        if windows == 0 || (windows < 7 && dice.chance(15)) {
+            let blur = match dice.below(6) {
+                0 => BlurKind::Standard,
+                1 => BlurKind::Menu,
+                _ => BlurKind::None,
+            };
+            return SceneOp::Create(WindowSpec {
+                position: Some((dice.range(-40, width - 10), dice.range(-20, height - 10))),
+                decorations: dice.chance(70),
+                transparent: dice.chance(35),
+                blur_behind: blur,
+                ..WindowSpec::new(
+                    "w",
+                    dice.range(12, width / 2) as u32,
+                    dice.range(12, height / 2) as u32,
+                )
+            });
+        }
+        match dice.below(12) {
+            0..=3 => {
+                let mut commands = Vec::new();
+                // Sometimes an opaque full cover first, which is what makes a
+                // window an occluder for the cull.
+                if dice.chance(50) {
+                    commands.push(RenderCommand::FillRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 4000.0,
+                        height: 4000.0,
+                        color: dice.color(false),
+                        corner_radii: CornerRadii::ZERO,
+                    });
+                }
+                for _ in 0..dice.below(4) {
+                    let translucent = dice.chance(60);
+                    commands.push(RenderCommand::FillRect {
+                        x: dice.range(-10, 120) as f32,
+                        y: dice.range(-10, 90) as f32,
+                        width: dice.range(1, 90) as f32,
+                        height: dice.range(1, 70) as f32,
+                        color: dice.color(translucent),
+                        corner_radii: if dice.chance(30) {
+                            CornerRadii::all(dice.range(1, 12) as f32)
+                        } else {
+                            CornerRadii::ZERO
+                        },
+                    });
+                }
+                if dice.chance(30) {
+                    commands.push(RenderCommand::Text {
+                        x: dice.range(0, 40) as f32,
+                        y: dice.range(0, 40) as f32,
+                        text: "Ag".to_string(),
+                        color: dice.color(false),
+                        font_size: 12.0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: None,
+                        overflow: TextOverflow::Clip,
+                    });
+                }
+                SceneOp::Draw(pick(dice), commands)
+            }
+            4 | 5 => SceneOp::Move(
+                pick(dice),
+                dice.range(-60, width - 5),
+                dice.range(-40, height - 5),
+            ),
+            6 => SceneOp::Resize(
+                pick(dice),
+                dice.range(8, width / 2) as u32,
+                dice.range(8, height / 2) as u32,
+            ),
+            7 => SceneOp::Focus(pick(dice)),
+            8 => SceneOp::Opacity(pick(dice), 0.25 + dice.below(76) as f32 / 100.0),
+            9 => SceneOp::Hide(pick(dice), dice.chance(50)),
+            10 => {
+                if dice.chance(50) {
+                    SceneOp::Minimize(pick(dice))
+                } else {
+                    SceneOp::Restore(pick(dice))
+                }
+            }
+            _ => SceneOp::Destroy(pick(dice)),
+        }
+    }
+
+    /// Apply `op` to `comp`. Errors are ignored on purpose: the same op is
+    /// applied to both compositors, so a refused op is refused by both and the
+    /// scenes stay identical — which is the only thing the comparison needs.
+    fn apply_op(comp: &mut Compositor, ids: &mut Vec<WindowId>, op: &SceneOp) {
+        let id = |i: &usize| ids.get(*i).copied();
+        match op {
+            SceneOp::Create(spec) => ids.push(comp.create_window_from_spec(spec, 1)),
+            SceneOp::Draw(i, commands) => {
+                if let Some(w) = id(i) {
+                    let _ = comp.submit_render(w, commands.clone());
+                }
+            }
+            SceneOp::Move(i, x, y) => {
+                if let Some(w) = id(i) {
+                    let _ = comp.move_window(w, *x, *y);
+                }
+            }
+            SceneOp::Resize(i, w_, h_) => {
+                if let Some(w) = id(i) {
+                    let _ = comp.resize_window(w, *w_, *h_);
+                }
+            }
+            SceneOp::Focus(i) => {
+                if let Some(w) = id(i) {
+                    comp.focus_window(w);
+                }
+            }
+            SceneOp::Opacity(i, o) => {
+                if let Some(w) = id(i) {
+                    let _ = comp.set_opacity(w, *o);
+                }
+            }
+            SceneOp::Hide(i, visible) => {
+                if let Some(w) = id(i) {
+                    let _ = comp.set_visible(w, *visible);
+                }
+            }
+            SceneOp::Minimize(i) => {
+                if let Some(w) = id(i) {
+                    let _ = comp.minimize_window(w);
+                }
+            }
+            SceneOp::Restore(i) => {
+                if let Some(w) = id(i) {
+                    let _ = comp.restore_window(w);
+                }
+            }
+            SceneOp::Destroy(i) => {
+                if let Some(w) = id(i) {
+                    let _ = comp.destroy_window(w);
+                    ids.remove(*i);
+                }
+            }
+        }
+    }
+
+    /// The first pixel two frames disagree on, as `(x, y, left, right)`.
+    fn first_difference(a: &[u32], b: &[u32], width: u32) -> Option<(u32, u32, u32, u32)> {
+        a.iter().zip(b).position(|(x, y)| x != y).map(|at| {
+            let at = at as u32;
+            (at % width, at / width, a[at as usize], b[at as usize])
+        })
+    }
+
+    /// Run the scene script for `seed` through two compositors and require
+    /// every frame to agree — see
+    /// [`partial_frames_composite_exactly_what_a_full_frame_would`].
+    fn assert_partial_matches_full(buffers: usize, seed: u64, frames: usize) {
+        const WIDTH: u32 = 200;
+        const HEIGHT: u32 = 150;
+        let mut dice = Dice(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let mut partial = ringed(WIDTH, HEIGHT, buffers);
+        let mut full = ringed(WIDTH, HEIGHT, 1);
+        let (mut partial_ids, mut full_ids) = (Vec::new(), Vec::new());
+        let mut script: Vec<SceneOp> = Vec::new();
+        for frame in 0..frames {
+            for _ in 0..=dice.below(2) {
+                let op = random_op(&mut dice, partial_ids.len(), WIDTH as i32, HEIGHT as i32);
+                apply_op(&mut partial, &mut partial_ids, &op);
+                apply_op(&mut full, &mut full_ids, &op);
+                script.push(op);
+            }
+            partial.compose_frame();
+            full.full_recomposite = true;
+            full.compose_frame();
+            if let Some((x, y, got, want)) =
+                first_difference(partial.present_pixels(), full.present_pixels(), WIDTH)
+            {
+                let last_ops: Vec<&SceneOp> = script.iter().rev().take(4).collect();
+                panic!(
+                    "ring of {buffers}, seed {seed}, frame {frame}: pixel ({x}, {y}) is {got:#010x} after a partial frame and {want:#010x} after a full one. Last ops: {last_ops:?}"
+                );
+            }
+        }
+    }
+
+    /// **The property a partial frame exists under:** its pixels are exactly
+    /// the ones a full recomposite of the same scene would produce.
+    ///
+    /// Two compositors are handed the same random scene changes — windows
+    /// created, drawn, moved, resized, raised, faded, hidden, minimized and
+    /// destroyed, some translucent, some blurring what is behind them, some
+    /// undecorated. One composites the way the display server does, repainting
+    /// only what changed; the other repaints the whole screen every frame. They
+    /// must agree on every pixel of every frame.
+    ///
+    /// Any fault in damage tracking, the repaint's clipping, the occlusion
+    /// cull, the blur's spread or the damage history shows up here as a pixel
+    /// that differs, with the seed and frame that produced it. It has already
+    /// found one fault in the *full* path: a blurred window with opaque
+    /// content culled the backdrop under itself, so its blur read its own last
+    /// frame and every full frame drifted (`StackPlan::occluders_above`).
+    ///
+    /// One buffer here, which is what the compositor uses; the two tests below
+    /// are rings of two and three, which is what the damage history is for.
+    /// Split three ways so the harness runs them side by side — the full
+    /// reference repaints every blurred window every frame, which is slow in a
+    /// debug build. `…_over_many_scenes` is the long form, ignored by default.
+    #[test]
+    fn partial_frames_composite_exactly_what_a_full_frame_would() {
+        for seed in 1..=2 {
+            assert_partial_matches_full(1, seed, 90);
+        }
+    }
+
+    #[test]
+    fn partial_frames_into_a_ring_of_two_match_full_frames() {
+        for seed in 3..=4 {
+            assert_partial_matches_full(2, seed, 90);
+        }
+    }
+
+    #[test]
+    fn partial_frames_into_a_ring_of_three_match_full_frames() {
+        for seed in 5..=6 {
+            assert_partial_matches_full(3, seed, 90);
+        }
+    }
+
+    /// The long form: forty scenes of three hundred frames over every ring
+    /// depth. Minutes in a debug build, so ignored by default — run it with
+    /// `cargo test -p compositor --release -- --ignored over_many_scenes` after
+    /// touching damage tracking, the repaint or the blur.
+    #[test]
+    #[ignore = "long-form sweep; run explicitly after changing the repaint"]
+    fn partial_frames_match_full_frames_over_many_scenes() {
+        for buffers in 1..=Framebuffer::MAX_RING {
+            for seed in 100..140 {
+                assert_partial_matches_full(buffers, seed, 300);
+            }
+        }
+    }
+
+    /// While a fullscreen window is scanned out directly, the framebuffer is
+    /// not drawn into — so the frame after the bypass cannot trust anything the
+    /// framebuffer holds, and must be drawn whole even though its own damage
+    /// is small.
+    #[test]
+    fn the_first_frame_after_direct_scanout_is_drawn_whole() {
+        const WIDTH: u32 = 160;
+        const HEIGHT: u32 = 120;
+        let mut comp = ringed(WIDTH, HEIGHT, 1);
+        let under = comp.create_window_from_spec(
+            &WindowSpec {
+                position: Some((20, 30)),
+                ..WindowSpec::new("under", 60, 40)
+            },
+            1,
+        );
+        comp.submit_render(under, solid(60.0, 40.0, Color::RED))
+            .expect("under");
+        assert!(comp.compose_frame());
+
+        // A game takes the screen, with an opaque display-sized buffer of blue.
+        let game = comp.create_window_from_spec(&WindowSpec::new("game", WIDTH, HEIGHT), 1);
+        comp.set_fullscreen(game, true).expect("fullscreen");
+        let blue: Vec<u8> =
+            std::iter::repeat_n([0xDC, 0x64, 0x32, 0xFF], (WIDTH * HEIGHT) as usize)
+                .flatten()
+                .collect();
+        comp.attach_buffer(
+            game,
+            7,
+            WIDTH,
+            HEIGHT,
+            WIDTH * 4,
+            BufferFormat::Xrgb8888,
+            &blue,
+        )
+        .expect("buffer");
+        assert!(comp.compose_frame());
+        assert_eq!(
+            comp.scanout,
+            Scanout::Direct(game),
+            "the fixture did not reach direct scanout"
+        );
+
+        // The window under it changes while it is being bypassed.
+        comp.submit_render(under, solid(60.0, 40.0, Color::GREEN))
+            .expect("under");
+        assert!(comp.compose_frame());
+        assert_eq!(comp.scanout, Scanout::Direct(game));
+
+        // A notification appears over the game: direct scanout ends, and the
+        // only damage is the notification's own rectangle.
+        let toast = comp.create_window_from_spec(
+            &WindowSpec {
+                position: Some((100, 80)),
+                layer: Layer::Overlay,
+                ..WindowSpec::new("toast", 40, 20)
+            },
+            1,
+        );
+        comp.submit_render(toast, solid(40.0, 20.0, Color::WHITE))
+            .expect("toast");
+        assert!(comp.compose_frame());
+        assert_eq!(
+            comp.scanout,
+            Scanout::Composited,
+            "the toast did not end the bypass"
+        );
+
+        // Anywhere the toast is not, the game is.
+        let game_pixel = presented_pixel(&comp, 5, 5);
+        let under_pixel = presented_pixel(&comp, 30, 40);
+        assert_eq!(
+            under_pixel, game_pixel,
+            "the pixel under the game shows {under_pixel:#010x}, the game shows {game_pixel:#010x}: \
+             the frame after the bypass kept the framebuffer's pre-fullscreen picture"
+        );
+    }
+
+    /// Direct scanout hands the display the client's pixels as they are, so it
+    /// is only right for a buffer with nothing to see through.
+    #[test]
+    fn a_translucent_fullscreen_buffer_is_composited_not_scanned_out() {
+        const WIDTH: u32 = 80;
+        const HEIGHT: u32 = 60;
+        let mut comp = ringed(WIDTH, HEIGHT, 1);
+        let game = comp.create_window_from_spec(&WindowSpec::new("overlay", WIDTH, HEIGHT), 1);
+        comp.set_fullscreen(game, true).expect("fullscreen");
+        let half: Vec<u8> =
+            std::iter::repeat_n([0x40, 0x40, 0x40, 0x80], (WIDTH * HEIGHT) as usize)
+                .flatten()
+                .collect();
+        comp.attach_buffer(
+            game,
+            9,
+            WIDTH,
+            HEIGHT,
+            WIDTH * 4,
+            BufferFormat::Argb8888,
+            &half,
+        )
+        .expect("buffer");
+        assert!(comp.compose_frame());
+        assert_eq!(comp.scanout, Scanout::Composited);
+    }
+
+    /// The backdrop blur runs as part of an ordinary frame.
+    ///
+    /// `a_surface_that_asks_for_blur_softens_the_edge_behind_it` calls the pass
+    /// directly, and passed for as long as the pass was never called by
+    /// anything else: it was wired only into the branch for compositing with the
+    /// occlusion cull switched off, which production never is. This one goes
+    /// through `compose_frame`, full and partial.
+    #[test]
+    fn a_blurring_window_blurs_what_is_behind_it_in_a_real_frame() {
+        const WIDTH: u32 = 160;
+        const HEIGHT: u32 = 120;
+        for buffers in 1..=2 {
+            let mut comp = ringed(WIDTH, HEIGHT, buffers);
+            // A hard vertical edge: white left half, black right half.
+            let stripes = comp.create_window_from_spec(
+                &WindowSpec {
+                    position: Some((0, 0)),
+                    decorations: false,
+                    ..WindowSpec::new("stripes", WIDTH, HEIGHT)
+                },
+                1,
+            );
+            let mut edge = solid(WIDTH as f32, HEIGHT as f32, Color::BLACK);
+            edge.extend(solid(64.0, HEIGHT as f32, Color::WHITE));
+            comp.submit_render(stripes, edge).expect("stripes");
+            let glass = comp.create_window_from_spec(
+                &WindowSpec {
+                    position: Some((20, 20)),
+                    decorations: false,
+                    transparent: true,
+                    blur_behind: BlurKind::Standard,
+                    ..WindowSpec::new("glass", 100, 60)
+                },
+                1,
+            );
+            comp.submit_render(glass, Vec::new()).expect("glass");
+
+            let distinct = |comp: &Compositor| {
+                let mut seen = std::collections::BTreeSet::new();
+                for x in 40..90 {
+                    seen.insert(presented_pixel(comp, x, 50));
+                }
+                seen.len()
+            };
+            assert!(comp.compose_frame());
+            assert!(
+                distinct(&comp) > 2,
+                "ring of {buffers}: the edge under the glass is still hard after a full frame -- \
+                 the blur did not run"
+            );
+
+            // A partial frame that touches the glass must blur again, and must
+            // not blur what is already blurred.
+            let full_frame: Vec<u32> = comp.present_pixels().to_vec();
+            comp.submit_render(glass, Vec::new()).expect("glass");
+            assert!(comp.compose_frame());
+            assert_eq!(
+                comp.present_pixels(),
+                full_frame.as_slice(),
+                "ring of {buffers}: redrawing the glass changed the picture -- the blur ran over \
+                 pixels that were already blurred"
+            );
+        }
+    }
+
+    /// A window moved away takes all of its shadow with it.
+    ///
+    /// The shadow is cast three pixels down and right of the frame, so it
+    /// reaches past `outer_rect` on those two sides — and damage used to be
+    /// the outer rect, so a moved window left its shadow's last two rows and
+    /// columns behind on the desktop.
+    #[test]
+    fn moving_a_window_leaves_none_of_its_shadow_behind() {
+        let mut comp = ringed(600, 400, 1);
+        let id = comp.create_window_from_spec(
+            &WindowSpec {
+                position: Some((60, 60)),
+                ..WindowSpec::new("shadowed", 120, 80)
+            },
+            1,
+        );
+        assert!(comp.compose_frame());
+        let before = Compositor::window_drawn_extent(comp.window_ref(id).expect("window"));
+        let background = presented_pixel(&comp, 5, 395);
+        comp.move_window(id, 380, 260).expect("move");
+        assert!(comp.compose_frame());
+        let after = Compositor::window_drawn_extent(comp.window_ref(id).expect("window"));
+        assert!(
+            before.intersect(&after).is_none(),
+            "the window did not move clear of where it was, so the check below proves nothing"
+        );
+        for y in before.y.max(0)..before.bottom() {
+            for x in before.x.max(0)..before.right() {
+                assert_eq!(
+                    presented_pixel(&comp, x, y),
+                    background,
+                    "({x}, {y}) still shows part of the window that moved away"
+                );
+            }
+        }
+    }
+
+    /// A frame repaints only what changed: the first is whole, and one
+    /// window's redraw is exactly that window's drawn extent.
+    #[test]
+    fn a_frame_repaints_only_its_damage() {
+        let mut comp = ringed(800, 600, 1);
+        let id = comp.create_window_from_spec(
+            &WindowSpec {
+                position: Some((100, 100)),
+                ..WindowSpec::new("w", 50, 40)
+            },
+            1,
+        );
+        assert_eq!(
+            comp.plan_repaint().0.area(),
+            800 * 600,
+            "the first frame is whole"
+        );
+        assert!(comp.compose_frame());
+        comp.submit_render(id, solid(50.0, 40.0, Color::RED))
+            .expect("draw");
+        let extent = Compositor::window_drawn_extent(comp.window_ref(id).expect("w"));
+        assert_eq!(
+            comp.plan_repaint().0.area(),
+            u64::from(extent.width) * u64::from(extent.height),
+            "one window's redraw repaints something other than that window"
+        );
+    }
+
+    // -- the pointer ---------------------------------------------------------------
+
+    #[test]
+    fn the_pointer_starts_at_the_centre_as_an_arrow() {
+        let comp = Compositor::new(800, 600, 60).expect("compositor");
+        let pointer = comp
+            .pointer()
+            .expect("a real display has a pointer from the start");
+        assert_eq!(
+            (pointer.shape, pointer.x, pointer.y),
+            (CursorShape::Arrow, 400, 300)
+        );
+    }
+
+    #[test]
+    fn a_pointer_that_leaves_the_output_is_not_drawn_until_it_comes_back() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.handle_input(InputEvent::MouseMove { x: 790, y: 10 });
+        assert!(comp.pointer().is_some());
+        comp.handle_input(InputEvent::PointerLeft);
+        assert_eq!(
+            comp.pointer(),
+            None,
+            "the pointer hangs at the edge it left by"
+        );
+        comp.handle_input(InputEvent::MouseMove { x: 5, y: 5 });
+        let back = comp.pointer().expect("the pointer came back");
+        assert_eq!((back.x, back.y), (5, 5));
+    }
+
+    /// A game hides the pointer over its own window, and only there.
+    #[test]
+    fn a_window_that_hides_the_pointer_hides_it_over_itself_only() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let game = comp.create_window_from_spec(
+            &WindowSpec {
+                position: Some((100, 100)),
+                ..WindowSpec::new("game", 300, 200)
+            },
+            1,
+        );
+        comp.set_cursor(game, CursorShape::Hidden)
+            .expect("the window exists");
+        comp.handle_input(InputEvent::MouseMove { x: 200, y: 200 });
+        assert_eq!(
+            comp.pointer(),
+            None,
+            "the pointer shows over a window that hid it"
+        );
+        comp.handle_input(InputEvent::MouseMove { x: 600, y: 500 });
+        assert_eq!(
+            comp.pointer().map(|p| p.shape),
+            Some(CursorShape::Arrow),
+            "the pointer stayed hidden off the window that hid it"
+        );
+    }
+
+    /// The pointer is its size times the display's scale, so it keeps its
+    /// size on the glass as it crosses onto a denser screen.
+    #[test]
+    fn the_pointer_grows_with_the_display_it_is_on() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let normal = comp.pointer().expect("pointer").style.size_px;
+        assert_eq!(normal, appearance::CursorSize::Normal.pixels());
+        if let Some(d) = comp.display_manager.displays.first_mut() {
+            d.scale_factor = 2.0;
+        }
+        assert_eq!(comp.pointer().expect("pointer").style.size_px, normal * 2);
+    }
+
+    /// The user's pointer settings are not read yet, on purpose — see
+    /// `pointer_preferences`. This pins that: a change to one of the rival
+    /// copies must not reach the pointer until the copies are one, or the
+    /// others become silently wrong. It is the test to update, not to delete,
+    /// when the survivor is named.
+    #[test]
+    fn the_pointer_does_not_read_a_rival_copy_of_its_settings() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let before = comp.pointer().expect("pointer").style;
+        comp.set_appearance(AppearanceSettings {
+            cursor_size: appearance::CursorSize::ExtraLarge,
+            cursor_scheme: appearance::CursorScheme::Inverted,
+            ..AppearanceSettings::default()
+        });
+        assert_eq!(comp.pointer().expect("pointer").style, before);
+    }
+
+    #[test]
+    fn each_scheme_colours_the_pointer_as_it_says() {
+        let accent = Color::rgb(0x3A, 0x7B, 0xF2);
+        assert_eq!(
+            Compositor::pointer_colors(appearance::CursorScheme::Default, accent),
+            (0xFFFF_FFFF, 0xFF00_0000)
+        );
+        assert_eq!(
+            Compositor::pointer_colors(appearance::CursorScheme::Inverted, accent),
+            (0xFF00_0000, 0xFFFF_FFFF)
+        );
+        let (fill, edge) =
+            Compositor::pointer_colors(appearance::CursorScheme::AccentColored, accent);
+        assert_eq!(fill, 0xFF3A_7BF2, "the accent scheme is not the accent");
+        assert_eq!(
+            edge, 0xFF00_0000,
+            "a mid blue stands out more against black"
+        );
+        // A dark accent is edged in white, and a translucent one is made opaque.
+        let (fill, edge) = Compositor::pointer_colors(
+            appearance::CursorScheme::AccentColored,
+            Color::rgba(0x10, 0x10, 0x30, 0x80),
+        );
+        assert_eq!((fill, edge), (0xFF10_1030, 0xFFFF_FFFF));
+    }
+
+    /// Moving the pointer is not a change to the scene: over the desktop, over
+    /// a window, across a window's edge, there is nothing to compose.
+    #[test]
+    fn moving_the_pointer_composes_nothing() {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let _ = comp.create_window_from_spec(
+            &WindowSpec {
+                position: Some((100, 100)),
+                ..WindowSpec::new("w", 300, 200)
+            },
+            1,
+        );
+        assert!(comp.compose_frame());
+        for (x, y) in [(50, 50), (200, 200), (399, 150), (401, 150), (700, 500)] {
+            comp.handle_input(InputEvent::MouseMove { x, y });
+            assert!(
+                !comp.compose_frame(),
+                "moving the pointer to ({x}, {y}) damaged the scene"
+            );
+        }
+    }
+
+    // -- where pointer input goes -----------------------------------------------------
+
+    /// The pointer notifications queued since the last call, as
+    /// `(window, kind)` with the kind spelled as its `Debug` form.
+    fn pointer_news(comp: &mut Compositor) -> Vec<(WindowId, String)> {
+        comp.drain_notifications()
+            .into_iter()
+            .filter_map(|n| match n {
+                EventNotification::MouseEvent {
+                    window_id, kind, ..
+                } => Some((window_id, format!("{kind:?}"))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A decorated window with its client area at `(x, y)`.
+    fn window_at_point(comp: &mut Compositor, x: i32, y: i32, w: u32, h: u32) -> WindowId {
+        comp.create_window_from_spec(
+            &WindowSpec {
+                position: Some((x, y)),
+                ..WindowSpec::new("w", w, h)
+            },
+            1,
+        )
+    }
+
+    fn button_down(comp: &mut Compositor, button: MouseButton, x: i32, y: i32) {
+        comp.handle_input(InputEvent::MouseButton {
+            button,
+            pressed: true,
+            x,
+            y,
+        });
+    }
+
+    fn button_up(comp: &mut Compositor, button: MouseButton, x: i32, y: i32) {
+        comp.handle_input(InputEvent::MouseButton {
+            button,
+            pressed: false,
+            x,
+            y,
+        });
+    }
+
+    fn move_to(comp: &mut Compositor, x: i32, y: i32) {
+        comp.handle_input(InputEvent::MouseMove { x, y });
+    }
+
+    /// A click is a press *and a release*, to the same window.
+    ///
+    /// The release of the left button used to return before reaching any
+    /// window at all, whether or not a window drag had been in progress — so
+    /// no application ever saw one. The toolkit's checkbox toggles on the
+    /// release, and its button stays drawn pressed until one arrives.
+    #[test]
+    fn a_left_click_reaches_the_window_as_a_press_and_a_release() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        move_to(&mut comp, 150, 150);
+        button_down(&mut comp, MouseButton::Left, 150, 150);
+        button_up(&mut comp, MouseButton::Left, 150, 150);
+        assert_eq!(
+            pointer_news(&mut comp),
+            vec![
+                (a, "Enter".to_string()),
+                (a, "Move".to_string()),
+                (a, "ButtonPress(Left)".to_string()),
+                (a, "ButtonRelease(Left)".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_pointer_moving_between_windows_leaves_one_and_enters_the_other() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 50, 100, 150, 150);
+        let b = window_at_point(&mut comp, 400, 100, 150, 150);
+        move_to(&mut comp, 100, 150);
+        let _ = pointer_news(&mut comp);
+        move_to(&mut comp, 450, 150);
+        assert_eq!(
+            pointer_news(&mut comp),
+            vec![
+                (a, "Leave".to_string()),
+                (b, "Enter".to_string()),
+                (b, "Move".to_string()),
+            ]
+        );
+        // Out onto the desktop: a Leave, and nothing else.
+        move_to(&mut comp, 700, 500);
+        assert_eq!(pointer_news(&mut comp), vec![(b, "Leave".to_string())]);
+    }
+
+    /// A title bar hides the window beneath it from the pointer, exactly as it
+    /// hides it from view: no motion, no scroll and no right-click reaches the
+    /// lower window through the upper one's frame.
+    #[test]
+    fn a_title_bar_hides_the_window_beneath_it_from_the_pointer() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let lower = window_at_point(&mut comp, 100, 150, 400, 300);
+        // Its title bar sits some 30 px above its client area, well inside the
+        // lower window's.
+        let upper = window_at_point(&mut comp, 200, 260, 200, 100);
+        let bar = comp
+            .window_ref(upper)
+            .expect("upper")
+            .title_bar_rect()
+            .expect("a decorated window has a title bar");
+        let (x, y) = (bar.x + bar.width as i32 / 2, bar.y + bar.height as i32 / 2);
+        assert!(
+            comp.window_ref(lower)
+                .expect("lower")
+                .client_rect()
+                .contains(x, y),
+            "the probe is not over the lower window's client area, so it proves nothing"
+        );
+        move_to(&mut comp, x, y);
+        comp.handle_input(InputEvent::MouseScroll {
+            dx: 0.0,
+            dy: 1.0,
+            x,
+            y,
+        });
+        button_down(&mut comp, MouseButton::Right, x, y);
+        button_up(&mut comp, MouseButton::Right, x, y);
+        let reached_lower: Vec<_> = pointer_news(&mut comp)
+            .into_iter()
+            .filter(|(id, _)| *id == lower)
+            .collect();
+        assert_eq!(
+            reached_lower,
+            Vec::new(),
+            "input on the upper window's title bar reached the window beneath it"
+        );
+    }
+
+    /// While a button is held the pointer belongs to the window it was pressed
+    /// in: a slider dragged past the window's edge keeps following it, and the
+    /// window beneath the pointer is not entered until the button comes up.
+    #[test]
+    fn a_drag_keeps_the_pointer_in_the_window_it_started_in() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 50, 100, 150, 150);
+        let b = window_at_point(&mut comp, 400, 100, 150, 150);
+        move_to(&mut comp, 100, 150);
+        button_down(&mut comp, MouseButton::Left, 100, 150);
+        let _ = pointer_news(&mut comp);
+
+        move_to(&mut comp, 450, 150);
+        assert_eq!(
+            pointer_news(&mut comp),
+            vec![(a, "Move".to_string())],
+            "motion during a drag left the window that holds it"
+        );
+        button_up(&mut comp, MouseButton::Left, 450, 150);
+        assert_eq!(
+            pointer_news(&mut comp),
+            vec![
+                (a, "ButtonRelease(Left)".to_string()),
+                (a, "Leave".to_string()),
+                (b, "Enter".to_string()),
+            ]
+        );
+    }
+
+    /// The release goes where the press went — not to the focused window,
+    /// which a right-click does not change.
+    #[test]
+    fn a_right_click_releases_to_the_window_it_pressed_in() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 50, 100, 150, 150);
+        let b = window_at_point(&mut comp, 400, 100, 150, 150);
+        comp.focus_window(a);
+        button_down(&mut comp, MouseButton::Right, 450, 150);
+        button_up(&mut comp, MouseButton::Right, 450, 150);
+        let news = pointer_news(&mut comp);
+        assert!(
+            news.iter()
+                .any(|n| *n == (b, "ButtonRelease(Right)".to_string())),
+            "the right-click's release did not reach the window it was pressed in: {news:?}"
+        );
+        assert!(
+            news.iter().all(|(id, _)| *id != a),
+            "the focused window heard about a click on another window: {news:?}"
+        );
+    }
+
+    /// A release whose press no window saw goes nowhere, rather than to
+    /// whichever window is focused.
+    #[test]
+    fn a_release_with_no_press_behind_it_goes_nowhere() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        comp.focus_window(a);
+        button_down(&mut comp, MouseButton::Left, 700, 500); // on the desktop
+        move_to(&mut comp, 150, 150);
+        button_up(&mut comp, MouseButton::Left, 150, 150);
+        let news = pointer_news(&mut comp);
+        assert!(
+            news.iter()
+                .all(|(_, kind)| !kind.starts_with("ButtonRelease")),
+            "a window was sent a release for a press it never saw: {news:?}"
+        );
+    }
+
+    #[test]
+    fn the_pointer_leaving_the_output_leaves_the_window_it_was_in() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        move_to(&mut comp, 150, 150);
+        let _ = pointer_news(&mut comp);
+        comp.handle_input(InputEvent::PointerLeft);
+        assert_eq!(pointer_news(&mut comp), vec![(a, "Leave".to_string())]);
+        // And coming back is entering again.
+        move_to(&mut comp, 160, 160);
+        assert_eq!(
+            pointer_news(&mut comp),
+            vec![(a, "Enter".to_string()), (a, "Move".to_string())]
+        );
+    }
+
+    /// A click-through overlay takes neither the pointer nor its shape: both
+    /// come from what a click would reach.
+    #[test]
+    fn a_click_through_window_takes_neither_the_pointer_nor_its_shape() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 300, 200);
+        comp.set_cursor(a, CursorShape::Text).expect("a");
+        let overlay = comp.create_window_from_spec(
+            &WindowSpec {
+                position: Some((150, 150)),
+                input_transparent: true,
+                decorations: false,
+                ..WindowSpec::new("overlay", 100, 100)
+            },
+            1,
+        );
+        move_to(&mut comp, 200, 200);
+        let news = pointer_news(&mut comp);
+        assert!(news.iter().all(|(id, _)| *id != overlay), "{news:?}");
+        assert!(news.contains(&(a, "Enter".to_string())), "{news:?}");
+        assert_eq!(comp.cursor_shape(), CursorShape::Text);
+    }
+
+    /// A closed window drops out of the pointer's bookkeeping: it is not sent a
+    /// `Leave` it cannot receive, and it does not keep a grab.
+    #[test]
+    fn a_closed_window_no_longer_holds_the_pointer() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        let b = window_at_point(&mut comp, 400, 100, 200, 150);
+        move_to(&mut comp, 150, 150);
+        button_down(&mut comp, MouseButton::Left, 150, 150);
+        comp.destroy_window(a).expect("close");
+        let _ = pointer_news(&mut comp);
+        move_to(&mut comp, 450, 150);
+        assert_eq!(
+            pointer_news(&mut comp),
+            vec![(b, "Enter".to_string()), (b, "Move".to_string())],
+            "a closed window still held the pointer"
         );
     }
 }

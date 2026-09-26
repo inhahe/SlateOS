@@ -9760,6 +9760,1713 @@ negative-exit-value ambiguity.
 
 ---
 
+## 1300. A partial frame is exactly a full frame: one buffer, a buffer-age contract, and a clipped, window-major repaint
+
+**Date:** 2026-09-24
+**Lane:** F
+**Decided by:** Claude (autonomous)
+
+**In short:** the compositor saves work by redrawing only the parts of the
+screen that changed. That shortcut was broken in four ways at once, and a
+test that compares every shortcut frame against a full redraw of the same
+scene found all of them: content that had just changed flickered back to its
+old state, a window could paint itself over the window above it, the frosted
+"blur" effect never ran at all, and a moved window left a faint trail of
+shadow. This entry records how the redraw now works so that it cannot drift
+from a full redraw again — and the one real trade-off in it, which is that the
+software renderer now keeps one screen's worth of pixels instead of two.
+
+### What was wrong
+
+`Compositor::compose_frame`'s partial path, measured against a full recomposite
+of the same scene (`partial_frames_composite_exactly_what_a_full_frame_would`):
+
+1. **The buffer drawn into was two frames stale.** `Framebuffer` was a
+   front/back pair swapped on every present. A partial frame repaints only this
+   frame's damage — into the buffer that last held the frame *before* the
+   previous one — so every change the previous frame made outside this frame's
+   damage reverted. A window updated in frame N showed its old content again in
+   frame N+1 if anything else on the screen changed.
+2. **A window reaching the damage was redrawn whole.** `render_damaged_windows`
+   cleared each damaged rectangle, then re-rendered every overlapping window
+   *unclipped*. A lower window that merely touched the damage painted itself over
+   every window above it that the damage did not reach, and its translucent
+   edges (shadow, rounded corners) were blended a second time onto their own
+   last-frame copies.
+3. **The backdrop blur never ran.** `fc54f3ac2` wired `blur_behind_window` into
+   `render_all_windows`' branch for compositing *without* the occlusion cull,
+   which production never takes. Its tests called the pass directly and so
+   stayed green.
+4. **Damage stopped short of the shadow.** `damage_window` used
+   `Window::outer_rect`, but the shadow is cast 3 px down and right of the frame
+   and so reaches 2 px past the outer rect on those sides.
+
+### The decisions
+
+**The software framebuffer is one buffer.** The alternatives, all of which
+also fix fault 1:
+
+| | cost per frame | memory at 4K | kept |
+|---|---|---|---|
+| front/back pair, copy the previous frame's damage forward after each swap | a `memcpy` of last frame's damage | 66 MB | no |
+| front/back pair, repaint this frame's *and* last frame's damage (age 2) | re-rendering last frame's damage | 66 MB | no |
+| **one buffer (age 1)** | **nothing** | **33 MB** | **yes** |
+
+The pair bought nothing: every `Present` implementation copies the finished
+frame out synchronously inside the loop iteration that composited it — the DRM
+presenter into its own double-buffered scanout memory, the host window through
+`StretchDIBits` — so nothing ever reads the presented frame while the next is
+drawn. **Revisit if** a presenter ever reads the frame asynchronously (a
+presenter thread, or a capture path that holds a reference across frames): that
+presenter must then own a copy, or the compositor must go back to a ring.
+
+**`RenderTarget::buffer_age` is part of the backend contract,** with the
+compositor keeping a short `DamageHistory` (the `EGL_EXT_buffer_age` model): a
+target reports how many presents ago the buffer about to be drawn into held the
+current frame, and the compositor repaints this frame's damage plus that many
+frames' worth of history — or everything, if it cannot answer. A ring survives
+in `Framebuffer::with_ring` because the targets that genuinely are
+multi-buffered are coming — a GPU swapchain, or composing straight into the DRM
+scanout pair, which is the proper fix for `TD-COMPOSITOR-COPIES-EVERY-FRAME-TWICE`
+— and the history is tested against real pixels over rings of two and three.
+What is *remembered* is each frame's own change, not its repaint; remembering
+the repaint would make each record contain the one before it, and on a ring the
+region would grow without bound.
+
+**The repaint walks windows outermost, rectangles innermost, and clips every
+draw** to a disjoint region (`gui/compositor/src/repaint.rs`). Rectangle-major
+order is the obvious shape and is wrong for a blurred window, whose blur reads
+the backdrop across its whole frame — possibly several rectangles, some not yet
+repainted. Disjointness is load-bearing: each translucent layer is blended once
+per rectangle, so overlapping rectangles would double-blend it.
+
+**Damage that touches a blurred window repaints all of it** (to a fixed point,
+since one blurred frame can reach another), and **no opaque cover culls the
+backdrop inside a blurred window's frame** if the cover belongs to that window
+or one above it. The blur rewrites the whole frame from what is beneath it, so
+it can only run over a frame repainted entirely and fully drawn underneath. The
+cost is repainting a menu's or a taskbar's whole rectangle when anything under
+it changes — small surfaces, which is what blur is used on. The own-cover half
+of this was found by the property test in the *full* path: a blurred window
+with opaque content culled the backdrop under itself, so its blur read its own
+previous frame and every full frame drifted with nothing changing.
+
+**Damage is `window_drawn_extent`,** the same bound the repaint trusts to
+contain a window's drawing, so the two agree by construction.
+
+**A shared buffer's opacity is measured from its pixels,** not assumed from its
+format. Needed because direct scanout now requires an opaque buffer (it hands
+the display the client's pixels as they are, so a translucent one would lose
+its alpha), and an `Argb8888` buffer that never uses its alpha — the ordinary
+case for video and games — was being treated as translucent everywhere: never
+an occluder, never the memcpy blit, never scanned out.
+
+**The first frame after direct scanout is drawn whole.** A bypass frame drops
+its damage without drawing it, so the framebuffer stops describing the scene;
+`framebuffer_stale` records that without also making an idle fullscreen window
+re-present every frame, which folding it into `full_recomposite` would have.
+
+### How it is held
+
+- `partial_frames_composite_exactly_what_a_full_frame_would` and its two ring
+  siblings: two compositors, one random scene script (windows created, drawn,
+  moved, resized, raised, faded, hidden, minimized, destroyed; some translucent,
+  undecorated or blurred), one repainting only what changed and one repainting
+  everything; every pixel of every frame must agree. The long form,
+  `partial_frames_match_full_frames_over_many_scenes` (ignored by default; run
+  it in release after touching the repaint), is 48,000 frames over ring depths
+  one to four.
+- One small test per fault, so a regression names its cause.
+- `a_frame_repaints_only_its_damage`, which counts the repaint region's pixels
+  rather than timing it. (A `FrameStats::repainted_pixels` field did this for
+  a day and was removed: nothing in production read it, and
+  `check-fields-written-never-read.py` refused the push, rightly.)
+
+### How to reverse
+
+Each piece is separable. Going back to a front/back pair is
+`RenderBackend::software` constructing `Framebuffer::with_ring(w, h, 2)` — the
+history makes it correct, at the costs in the table above.
+
+---
+
+## 1301. The mouse pointer is a layer over the frame, drawn by every presenter — including over fullscreen
+
+**Date:** 2026-09-24
+**Lane:** F
+**Decided by:** Claude (autonomous). Two of the calls below touch an open
+operator question (C-Q18) and another lane's settings; both are flagged in
+`todo.txt` → `## Lane F` → Judgment Calls, and both are one-line reversals.
+
+**In short:** SlateOS now draws a mouse pointer; it drew none at all before. The
+pointer is drawn *on top of* each finished frame as it goes to the screen, the
+way a graphics chip's cursor overlay works, rather than being painted into the
+frame. That makes moving the mouse cost almost nothing, lets the pointer appear
+over fullscreen games and video without slowing them down, and means switching
+to a hardware cursor later changes one component. The pointer uses the default
+size and colours for now, because the user's pointer-size setting exists in
+three rival copies and the lane that owns them has asked that none be wired
+until they are merged into one.
+
+### The decisions
+
+**A layer, not part of the picture.** `Present::show` takes a `Frame`: the
+composited picture, a serial saying which picture it is, and the pointer
+sprite. Alternatives:
+
+| | moving the mouse costs | over direct scanout | a hardware cursor later |
+|---|---|---|---|
+| paint the pointer into the frame, with damage | re-rendering every window under the old and new pointer rectangles, every motion event | impossible — the frame is never composited (C-Q18's dilemma) | the pointer has to be taken back *out* of the pipeline |
+| **a layer the presenter draws** | restoring and redrawing ~2,000 pixels | free on every presenter that exists: each already copies the frame | a change to the DRM presenter only |
+
+The first is what software compositors without retained window textures
+usually cannot afford: this compositor re-executes a window's render commands to
+repaint it, so a pointer crossing a text-heavy window would re-shape text on
+every motion event.
+
+**Drawn over fullscreen too** (`POINTER_OVER_DIRECT_SCANOUT` in
+`gui/compositor/src/server.rs`). C-Q18 asked the operator to choose between
+losing the fullscreen shortcut (A), hiding the pointer over fullscreen (B) and a
+hardware cursor (C). With the pointer as a layer the first cost disappears on
+every presenter that exists, so the pointer is shown — the user-visible outcome
+A and C share — and a game that wants no pointer asks for `CursorShape::Hidden`
+over its window, which answers B's argument for games without B's cost to video
+players. The dilemma returns only when a presenter scans a client's buffer out
+*without copying it*; `requests/f-c-c-q18s-premise-changed-...` asks lane C to
+defer C-Q18 to that trigger.
+
+**The compositor describes the pointer; the server draws it.**
+`Compositor::pointer` returns a `PointerState` — shape, hot spot, size, colours —
+and `CursorCache` (owned by `Server`) rasterizes it. Keeping the art out of the
+compositor keeps "what pointer is up" testable without pixels, and is the split
+a hardware cursor needs.
+
+**Vector artwork with a grown outline** (`gui/compositor/src/cursor.rs`). Every
+shape is contours on a 32-unit grid, rasterized by the font engine's exact-area
+rasterizer at any size; the outline is the body's coverage grown by one to two
+pixels rather than a second drawn shape, so it stays concentric at every size.
+Alternative: bitmap cursors per size, as X11 and Windows themes ship them —
+sharper at their native sizes, and a new asset for every size and scheme.
+
+**A frame serial, so a still picture is not recopied.** Presenters that keep a
+copy of the picture (the DRM scanout buffers, the host window's staging buffer)
+compare `Frame::serial` and, when only the pointer moved, restore the old
+pointer rectangle from the picture and draw the new one. The serial is the
+compositor's own count of frames produced, so it is right however
+`compose_frame` was reached; `None` means "copy it" and is what a caller keeping
+no count, a test above all, gets by default.
+
+**The host window hides Windows' arrow and shows SlateOS's.** Windows' own
+pointer would be smoother — it has no frame of latency — and would mean the
+development harness never showed the pointer SlateOS draws.
+
+**Default size and scheme, for now** (`Compositor::pointer_preferences`). Three
+settings hold a pointer size (`appearance`, `inputsettings`, and the Settings
+app's own, which it never saves), no control writes any of them where another
+program can read it, and `TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-AND-NO-READER`
+— lane C's, about lane C's models — says to collapse them before wiring any.
+`requests/f-ce-the-pointer-is-drawn-now-which-cursor-size-setting-survives.md`
+asks which survives. The size is still scaled for the display under the pointer,
+so it is the right size on the glass.
+
+### How it is held
+
+Thirteen shapes at five sizes rasterize and wind correctly
+(`cursor::tests`); the pointer's presence, hiding, scale and scheme colours
+(`the_pointer_*`, `a_window_that_hides_the_pointer_*`); moving it composes
+nothing; the server shows a frame for a pointer-only move with the picture's
+serial unchanged, through the real loop as well as by hand; night light reaches
+the pointer; and the DRM presenter's restore path, including a test that a
+frame claiming an unchanged picture really does rewrite only the pointer's
+rectangles, and a pointer straddling two monitors.
+
+### How to reverse
+
+The pointer over fullscreen: set `POINTER_OVER_DIRECT_SCANOUT` to `false`. The
+user's settings: make `pointer_preferences` read the survivor. A hardware
+cursor: the DRM presenter hands `PointerSprite` to `SYS_DRM_CURSOR_SET` instead
+of blending it.
+
+---
+
+## 1302. The compositor waits for work instead of polling for it — and still draws at most once per refresh
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous). Mechanism rather than policy, with no
+user-visible fork, but it removes lane C's `IdleBackoff`, changes how §821's
+slow key reaches its deadline, and works around a lane A bug, so it is written
+down.
+
+**In short:** between frames the compositor used to sleep for one frame and
+then ask every client and device whether anything had happened. A request that
+arrived just after it went to sleep waited up to a frame to be read, and a
+desktop nobody was touching still woke sixty times a second to find nothing. It
+now blocks until a client writes, the user does something, or something it is
+waiting for comes due — and still draws at most once per screen refresh however
+often it wakes. On the development host an idle desktop now wakes twice in the
+time the old loop woke eighteen. On SlateOS one kernel-side gap (below) keeps
+the full saving out of reach for now.
+
+### What it waits on
+
+`guiremote::WaitSet` (`gui/remote/src/wait.rs`, new) is the missing primitive —
+the standard library can block on one socket, never on several. The server loop
+puts in it the listener, every client, and whatever the display adds through
+`Present::wait_on` (evdev's descriptors), and waits until the earliest of:
+
+| deadline | from |
+|---|---|
+| the next frame, when one is owed (damage, or a pointer that moved) | the server: one refresh after the last frame shown, and not before `FrameStats::next_compose_at` |
+| a slow key's threshold; a window's idle deadline | `Compositor::wake_at` |
+| the next hotplug probe (1 s); the held key's next repeat | `Present::deadline` — DRM and evdev |
+
+### The choices with two sides
+
+1. **A wake knows what woke it, and the tick after reads only that.** A client
+   the wait did not report is not read, and the listener is not asked for
+   connections nobody is making. *For:* on SlateOS every socket call is a round
+   trip to the network daemon; a loop that wakes on every mouse movement and
+   reads every client each time would cost more than the polling it replaced.
+   *Against:* two ways to run a tick. The narrowing lasts exactly one tick and
+   defaults to "read everyone", so every caller that drives `Server::tick`
+   without waiting — all the tests, both apps' real-compositor harnesses — is
+   untouched.
+2. **Frames are paced by the last frame shown, pointer-only frames included.**
+   *For:* a 1000 Hz mouse would otherwise flip the screen a thousand times a
+   second. *Against the alternative of a fixed grid*, which would not drift: the
+   kernel retires a flip before the ioctl returns and sends no vblank event, so
+   there is no grid to align to, and the old loop drifted the same fraction of a
+   millisecond per frame.
+3. **On Windows, event-select per wait rather than `WSAPoll`.** The host
+   window's input is a message queue, `WSAPoll` cannot wait on one, and a GUI
+   thread that does not pump for five seconds is marked not responding. So a
+   wait registers each socket against one event, waits on it, a
+   high-resolution timer and (for the host window) the message queue, and
+   unregisters before returning — because a registered socket cannot be made
+   blocking again, and `Socket::finish_write` does exactly that. Two system
+   calls per socket per wait, on the development host only.
+4. **A failed wait degrades to sleeping**, reported when it starts and when it
+   stops, rather than stopping the desktop — the same rule as a failed client.
+5. **`IdleBackoff` is deleted, not kept as a fallback.** Its whole job was
+   waking less when nothing was connected; waiting subsumes it, and a desktop
+   with clients — the case it deliberately did not cover — now idles too.
+   §821's reasoning ("teaching the backoff to wake at a specific deadline is
+   more machinery for the same result") no longer applies: the loop wakes at
+   the slow key's exact deadline, which is `Compositor::wake_at`'s job.
+
+### What SlateOS does not give it yet
+
+- **A listening socket is never reported ready.** The kernel asks the network
+  daemon (`OP_POLL` on the listener id), the daemon answers only for
+  connections, and `-1` becomes "nothing waiting". A server that trusted the
+  wait would never accept anyone. So `guiremote::LISTENER_READINESS` is `false`
+  on SlateOS, and there the loop asks its listener every tick and never waits
+  longer than a frame — which keeps an idle SlateOS desktop waking at the frame
+  rate, as before, while requests on existing connections are already read at
+  once. `requests/f-a-poll-never-reports-a-connection-waiting-on-a-listening-socket.md`;
+  `known-issues.md` → `[F]` 2026-09-25.
+- **Sockets and evdev are poll-only in the kernel**
+  (`kernel/src/ipc/multiwait.rs`): a set holding them is re-scanned on a
+  0.5 → 20 ms backoff rather than parked. Correct, cheaper than the old loop,
+  and fixed for every caller the day those families push readiness — which is
+  the argument for declaring a wait at all.
+
+### How it is held
+
+`an_idle_desktop_does_not_wake_until_something_happens` (two ticks in 300 ms,
+the old loop eighteen), `a_request_wakes_the_loop_and_is_answered_without_a_timer`,
+`the_loop_shows_a_frame_when_only_the_pointer_moved` (the pointer frame held for
+its slot is shown without any further input),
+`a_fast_pointer_is_shown_once_per_refresh_at_its_latest_position`, the
+`next_wake` tests one deadline at a time, and `WaitSet`'s own suite on both
+Windows and Linux, including that a window message wakes a GUI thread and that
+a socket can be made blocking again after a wait.
+
+### How to reverse
+
+`Server::run_with` is one loop; putting `std::thread::sleep(interval)` back in
+place of `wait_for_work` restores polling, and nothing else depends on the wait.
+
+---
+
+## 1303. An application wakes its own event loop with a standard `Waker`, opted into, and learns of it as a `Dispatch`, not an `Event`
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous). An API shape inside lane F's crates with
+no user-visible fork; recorded because every application that does work on a
+second thread will be written against it, and because the rejected placement —
+a new `guitk::event::Event` variant — is the one that looks more obvious.
+
+**In short:** an application's window loop sleeps until something happens on
+its connection to the compositor. Work the application does on another thread
+— decoding a photograph, reading a file — had no way to say "finished, draw
+again", so a result sat unseen until the user moved the mouse
+(`TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT`). Now it has
+one: an application asks for a waker, gives it to its worker, and is called
+back on its own thread when the worker uses it.
+
+### The mechanism
+
+`guiremote::wait::wake_channel` is the self-pipe trick: a receiving half that
+goes into a `WaitSet` (§1302) and a `Send + Sync` sending half. A `Socket`
+that has handed out a waker waits on its stream and the pipe together; one that
+has not keeps its blocking `peek`. `Transport::waker` exposes it, defaulted to
+`None`; `EventLoop::waker` wraps it so that a wake also sets a flag the loop can
+read — the transport alone cannot tell a wake from a stray return of its wait.
+
+### The choices with two sides
+
+1. **A `std::task::Waker`, not a type of our own.** *For:* it is the standard
+   handle for exactly "tell whoever is waiting to look again" — cloneable,
+   `Send`, understood by any async executor an application might bring.
+   *Against:* its `wake` cannot report failure. Nothing a waker can hit is the
+   waker's to act on (a full pipe already holds a wake; a closed one has nobody
+   left to wake), so nothing is lost.
+2. **A pipe on Linux and SlateOS, a loopback UDP pair elsewhere.** A pipe is
+   kernel-native and, on SlateOS, one of the few objects a `poll` truly parks
+   on; sockets there go through the network daemon. Windows' wait takes only
+   sockets.
+3. **Opt-in (`App::wants_waker`), not always made.** *For:* nearly every
+   application does everything on one thread and would be paying a pipe and,
+   worse, a different wait path (see the `Socket` note above) for nothing.
+   *Against:* a second method to implement. Accepted: the default is correct
+   for the 140 applications that will never override it.
+4. **`Dispatch::Woken`, not `Event::Woken`.** *For `Event`:* `EventLoop::run`'s
+   per-event handler would see it without change. *Against, and decisive:*
+   `guitk::event::Event` is what arrives from the compositor, addressed to a
+   window — a wake does neither, and every `match` on `Event` across the tree
+   (lane C's toolkit and 140 applications) would have to learn to ignore it.
+   `Dispatch` is oswindow's own vocabulary for what the loop hands over,
+   already carries a non-event (`Settled`), and is matched in two places.
+   `run` users who need wakes use `run_batched`, or `take_woken` by hand.
+5. **Delivered after the batch's events and before its `Settled`,** so a result
+   picked up in `on_wake` is drawn in the same frame, and wakes that land
+   together are one delivery — the application drains everything ready rather
+   than one item per wake.
+6. **`App::on_wake` defaults to `Redraw`,** which is right for the simplest
+   integration (a worker leaves its result where `render` looks); only an
+   application that opted in ever reaches it.
+
+### How it is held
+
+`WaitSet`'s wake tests on Windows and Linux (a wake from another thread ends a
+wait; one sent before anyone waits is not lost; a drained receiver blocks
+again; 200,000 wakes never block the waker); `Socket`'s (a waker ends a wait, a
+consumed wake does not end the next, a socket with a waker still wakes for
+bytes, one outliving its socket is harmless); oswindow's (a wake is handed over
+before the frame it belongs to, wakes that land together are one, a real
+socket's parked loop is woken from another thread); and `app`'s (a finished
+result is handed back and drawn, `Idle` draws nothing, `Exit` ends it, an
+application that wants no waker gets none).
+
+---
+
+## 1304. Artifact recovery: a compositor-owned Ctrl+Super+R that redraws everything from scratch
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous). The feature and its shortcut are the
+design's own (`roadmap-detailed.md` §3.3, "Full-screen redraw /
+artifact-recovery path", which names Ctrl+Super+R); what is recorded here are
+the shapes chosen to build it.
+
+**In short:** if something stray is left on the screen — a tooltip that
+outlived its program, a patch of an old frame — pressing Ctrl+Super+R now
+throws away everything the desktop believes about what is on screen and draws
+it all again from scratch: windows whose program has gone are removed, the
+display is reset, and every program is asked to draw its windows whole. A
+shell can ask for the same thing over the display protocol. Everyday drawing
+is unchanged; this is the way back when it has gone wrong, and a way to tell
+whose fault it was — an artifact that survives it is in the compositor itself.
+
+### What it does, in order (`Server::recover`)
+
+1. Drops every window no live client owns (`Compositor::drop_windows_without_owner`),
+   counted in `ServerStats::orphans_swept` — non-zero means ordinary reaping
+   missed one.
+2. Forgets the compositor's records of the screen
+   (`Compositor::reset_for_recovery`): the whole screen becomes damage, the
+   frame history that partial frames trust (§1300) is emptied, and the
+   framebuffer is declared stale so a direct-scanout frame cannot stand in.
+3. Resets the display (`Present::reset`): the DRM presenter programs every
+   live head's mode again and forgets what each buffer holds; the host window
+   drops its staged copy.
+4. Forgets the server's own copies (filtered frame, drawn pointers) and forces
+   the next frame onto a new serial, so no presenter can skip copying it.
+5. Asks every client to draw its windows whole: a new `RPNT` frame
+   (`guiremote::repaint`), which oswindow turns into `Dispatch::Repaint` and
+   `app::drive` into a full redraw.
+
+### The choices with two sides
+
+1. **The chord is the compositor's own, checked before the grab table.**
+   *For:* recovery is for when something has gone wrong, and the shell that
+   holds every other desktop shortcut may be the thing that went wrong; a
+   grabbable chord could also be taken by any client. *Against:* one chord no
+   application can ever use. Accepted, and the match is exact (Ctrl+Super+R
+   and nothing else held) so that Ctrl+Shift+Super+R stays an application's.
+   The R's repeats and release are swallowed with its press, so the focused
+   window never sees half a chord.
+2. **The client repaint is a frame of its own, not an input event.** *For an
+   event:* a per-event handler would see it unchanged. *Against, and
+   decisive:* `guitk::event::Event` is what the user did to a window, and every
+   widget matches on it; a repaint is the display asking, which already has
+   frames of its own (window lists, the tray). A fake `Resize` to the same
+   size was also rejected — it would work, and it would be a lie every
+   application had to be told was not a resize.
+3. **Orphans are found from the server's live connections, not by asking
+   every client which surfaces it owns.** The design's full form re-enumerates
+   by asking. The connection-level sweep catches the case the design is
+   written about — a surface whose owner died — with no round trip and no
+   timeout policy for a client that does not answer; asking each client, and
+   deciding what to do about a live client that disowns a window, is left for
+   when a transport can attest who a client is (the same gap as
+   `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`).
+4. **`RecoverDisplay` goes through the shell privilege seam**
+   (`ClientLink::require_shell`), since it redraws and may drop other clients'
+   windows. Today that seam admits everyone, as it does for every shell
+   request; the day it checks, this is covered.
+
+### Not done here
+
+Transient-surface TTLs (tooltips that need a heartbeat to stay up) are the
+design's other orphan defence and are not built; hardware overlay and cursor
+planes are not reset because nothing in this tree uses one yet — the pointer is
+drawn in software (§1301).
+
+### How it is held
+
+`ctrl_super_r_asks_for_recovery_and_no_window_sees_the_r`,
+`a_chord_with_another_modifier_is_not_recovery`,
+`a_grab_on_the_recovery_chord_does_not_take_it`,
+`recovery_drops_orphans_and_asks_every_client_to_repaint`,
+`the_frame_after_recovery_is_drawn_whole_under_a_new_serial`,
+`a_shell_can_ask_for_recovery_over_the_wire`,
+`the_loop_recovers_when_the_chord_is_pressed`, the DRM
+`a_reset_programs_every_mode_again_and_forgets_what_the_buffers_hold`, the
+`RPNT` codec's own suite, and oswindow's `Dispatch::Repaint` and
+`app::drive` tests.
+
+---
+
+## 1305. Progressive JPEG: coefficients gathered across every pass, a thumbnail keeping only what it draws, and a cut-off file shown as far as it got
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous). Mechanism inside `gui/imagecodec`; the one
+call with a user-visible side is how a truncated file is treated, recorded
+below.
+**Superseded by §1318** the same day: the decoder this describes was replaced
+by a port of libjpeg-turbo. Its compact coefficient store for thumbnails lives
+on there, and a cut-off file is still shown as far as it got -- now exactly as
+libjpeg shows it.
+
+**In short:** photographs saved "progressive" — a large share of those on the
+web and many a camera's export — used to be refused outright, so the file
+manager showed no thumbnail and the image viewer said it could not open them.
+They now decode, to exactly the same pixels as the same picture saved the
+ordinary way, and a thumbnail of one costs a fraction of the memory the full
+picture would.
+
+### How
+
+`gui/imagecodec/src/jpeg/progressive.rs`. A progressive file sends the picture
+as up to a dozen scans, each adding a band of frequencies or one more bit of
+precision, so nothing can be turned into pixels until the last scan is in. The
+coefficients of every block are gathered in `Coefficients` across all four
+kinds of scan (DC first and refinement; AC first, with end-of-band runs, and
+refinement, transcribed from T.81 G.1.2.3 and cross-read against libjpeg and
+stb_image), then reconstructed through the baseline path's own dequantising,
+inverse DCT, upsampling and colour conversion — so the two share every step
+after entropy decoding and cannot disagree.
+
+### The choices with two sides
+
+1. **A scaled decode keeps only the coefficients its transform reads, plus a
+   one-bit "non-zero" mask for the rest.** *(Since §1307 the transform reads a
+   different set -- 7 a side at half scale, 5 at a quarter -- and 4:2:0 chroma
+   is reconstructed at twice the picture's block size; the principle is
+   unchanged.)* *For:* the whole picture's
+   coefficients must be held until the last scan — 136 bytes a block, some 70 MB
+   for a 21-megapixel photograph — and a thumbnail's scaled transform reads only
+   the top-left `n x n` of each block; an eighth-scale thumbnail needs the DC
+   alone, 10 bytes a block. *Against:* two storage shapes. The mask is not
+   optional: a refinement scan reads a correction bit for exactly the
+   coefficients already non-zero, so parsing needs to know that for every
+   position even where the value is thrown away. Held to exactness by a test
+   that the scaled progressive decode equals the scaled baseline decode at five
+   sizes.
+2. **A file cut off early is reconstructed from the passes that arrived**,
+   mid-pass included, rather than refused. *For:* that is what progressive is
+   for, it is what every browser shows, and the earlier passes are a genuinely
+   right picture at lower precision — not the "recognisable and wrong" first
+   scan the old refusal worried about, which was about decoding *one* pass of a
+   *complete* file. *Against:* a truncated download shows as a soft picture
+   rather than an error. Baseline already returns the rows it decoded, so this
+   is the same policy.
+3. **Quantisation tables are latched per component at its first scan**, as
+   libjpeg does: a `DQT` between scans may reuse a table number, and the
+   coefficients already sent were quantised with the old table.
+4. **The reference comparison covers the unsubsampled fixtures only, for now.**
+   Against Pillow, 4:4:4 and greyscale agree to within inverse-DCT rounding
+   (worst 2 levels). The subsampled ones differ by up to 100 at sharp colour
+   edges — not a progressive defect, since the baseline twin decodes to the
+   same pixels, but this crate's nearest-neighbour chroma upsampling against
+   libjpeg's interpolating one. That is fixed separately (§1306).
+   *Since §1306 the comparison covers every fixture.*
+
+### How it is held
+
+`tests/jpeg_progressive.rs` over six Pillow-written pairs (4:2:0, 4:2:2, 4:4:4,
+greyscale with non-interleaved DC passes, a larger picture with partial MCUs,
+and restart markers inside every pass): the progressive file decodes to
+exactly its baseline twin's pixels, full size and at five thumbnail sizes;
+agrees with Pillow where no upsampling intervenes; reads its size from the
+header; decodes when cut between passes or mid-pass; survives every truncation
+and a spread of bit flips; and is refused past the byte budget at full size
+while its eighth-scale thumbnail fits in the same budget.
+
+---
+
+## 1306. JPEG colour is brought back up with libjpeg's own filter, rounding and all
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous). It reverses a judgment recorded in the
+decoder's own comments ("interpolating would be a better picture than the file
+contains"), which was also Claude's; the operator has ruled on neither.
+**Superseded by §1318** the same day: the filter lives on, chosen as libjpeg
+chooses it, and the 3-level tolerance is gone -- the whole decoder is now
+libjpeg-turbo's.
+
+**In short:** most photographs store their colour at half resolution, so a
+decoder has to stretch it back to full size. This one used to repeat each
+colour sample across the pixels it covers, where every other program — web
+browsers, image libraries, desktops, nearly all of them built on the same
+library, libjpeg — blends each sample with its neighbours. The difference
+showed as stepped, blocky fringes wherever colour changes sharply: up to 105
+levels (of 255) away from what any other program shows for the same file.
+It now blends them exactly as libjpeg does, and the same files come out within
+3 levels of it — the rounding any two correct decoders differ by.
+
+### What it does
+
+`gui/imagecodec/src/jpeg/upsample.rs`, transcribed from libjpeg-turbo's
+`jdsample.c`. Colour halved across (4:2:2), down (4:4:0) or both (4:2:0) is
+brought back with libjpeg's "fancy" triangle filter: each output sample is
+three quarters the input it lies nearer and a quarter the next one out, in
+each direction the plane was halved. The two outputs of each input round with
+different biases (`+1`/`+2`, and `+8`/`+7` both ways), the outermost sample
+stands in for its missing neighbour at every edge, and the filter reads only
+the plane's real samples — never the padding that fills out the last block,
+which is decoded data from outside the picture. Every other ratio (4:1:1's
+quarter, say) repeats each sample, as libjpeg does. Baseline, progressive and
+scaled decodes all go through it, since they share `to_pixels`.
+
+### The choices with two sides
+
+1. **Blend, where the old comment said repeat.** Its argument: the file holds
+   a quarter of the colour, and interpolating shows a picture better than the
+   file contains. *For blending:* the encoder made each colour sample by
+   averaging a 2x2 patch, and the smooth reconstruction is the better estimate
+   of what it averaged — repeating is not "what the file contains" either, it
+   is a different guess with steps in it. And for a JPEG, "correct" in practice
+   means what everything else shows: a photograph whose colour edges look
+   different here from every browser is a defect report waiting to be filed.
+   *Against:* a little more work per pixel (measured below).
+2. **libjpeg's filter exactly, not merely a filter like it** — its rounding
+   biases, and its choice of when *not* to filter: a plane only one or two
+   samples wide (`downsampled_width > 2`), any ratio but two, and an
+   eighth-scale decode. *For:* the filter can then be held to exactness, not a
+   tolerance — a unit test compares it with a literal transcription of
+   libjpeg's pointer-walking loops over every plane from 3x1 to 19x7, with
+   garbage in the padding — and the end-to-end comparison has only IDCT
+   rounding to allow for. *Against:* the eighth-scale exception is libjpeg's
+   implementation limit (its buffer controller cannot supply the neighbouring
+   rows at that size), not a judgment about quality, and it is inherited
+   anyway. It costs nothing visible: an eighth-scale decode is a thumbnail,
+   box-filtered after.
+3. **The reference tolerance is 3 levels, from 2.** Each decoder rounds its
+   inverse DCT its own way, so a luma and a chroma sample may each come out a
+   level apart, and the colour conversion scales chroma by up to 1.772 before
+   both round again: one plus 1.772 rounds to 3. It turns up in a few channels
+   in ten thousand. The mean is held under 0.10 on every fixture of a thousand
+   pixels or more (all are under 0.05); the 36-pixel narrow fixtures are too
+   few for a mean to mean anything, and are there for the filter's edge.
+
+### How it is held
+
+- `upsample.rs`'s unit tests: every filter against the transcription above; a
+  flat plane stays flat through every filter at eight values (the test that a
+  wrong bias fails); the weights by hand; narrow planes repeat; the choice
+  table for every layout; odd sizes keep the first of the last output pair.
+- `tests/jpeg_sampling.rs`: every colour layout against Pillow's decode
+  (libjpeg-turbo): 4:4:4, 4:2:2, 4:2:0 (three ways), greyscale, 4:4:0 and 4:1:1
+  written by TurboJPEG itself (Pillow cannot write them), and two planes two
+  samples wide and one three wide — the edge of the filter. Filtering the
+  narrow ones, or repeating the slim one, puts 41 to 72 of their channels 7 or
+  more levels off; the old repetition put jpeg422 105 levels off.
+- `tests/jpeg_progressive.rs`: the progressive reference comparison now covers
+  every fixture, subsampled ones included (§1305 had to leave them out).
+
+### Measured
+
+Release build, a synthetic 4000x5333 photograph at quality 90, the least of
+nine runs taken alternately with the previous decoder on a machine that was
+busy with a boot test: the whole 4:2:0 picture 1.07 s before, 0.97 s after --
+faster, because luma no longer goes through the per-pixel column lookup the
+old repetition used for every plane, which pays for the filter; 4:2:2 1.26 s
+before, 1.31 s after; 128-pixel thumbnails unchanged at about 0.32 s, since an
+eighth-scale decode is not filtered. The first cut of the filter, a neighbour
+iterator that asked at every sample whether it was at an edge, cost 4:2:2 about
+a tenth; `in_pairs`, which does the two edge samples on their own and the rest
+as three shifted slices zipped together, brought that back to noise.
+
+---
+
+## 1307. A JPEG thumbnail is libjpeg-turbo's scaled decode: each sample the mean of the square it stands for, and 4:2:0 colour reconstructed at the output's size
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous). Mechanism inside `gui/imagecodec`; the
+trade it makes is memory in a progressive thumbnail, recorded below.
+**Superseded by §1318** the same day: scaled decoding is now libjpeg-turbo's
+own reduced transforms (`jidctred.c`), bit for bit, and the progressive
+thumbnail's store keeps what they read.
+
+**In short:** a JPEG thumbnail is made by decoding the photograph directly at
+a half, a quarter or an eighth of its size, which is far cheaper than decoding
+it whole and shrinking it. This decoder's way of doing that was its own: its
+reduced picture sat half an original pixel off the full one, and its colour
+was stretched up from a plane a quarter the size. It now does exactly what
+libjpeg-turbo does — the library under every mainstream browser, image
+library and desktop — so a thumbnail here is the one every other program
+would make of the same file, and like the full-size decode it can be tested
+against that.
+
+### What changed
+
+1. **The reduced transform averages** (`idct_scaled`). Each reduced sample is
+   now the mean of the full transform's samples over the square it stands for,
+   which is what libjpeg-turbo's `jidctred.c` computes — its header says so,
+   and a probe confirmed it: TurboJPEG's scaled greyscale decode is its full
+   decode box-averaged, to within 0.75 of a level. The mean of a basis function
+   over a group of samples is a number, so the reduced transform is the full
+   one with averaged weights (`Basis::reduced`); the frequencies whose averages
+   are all zero (the fourth over pairs, the even ones over fours, all but the
+   DC over the whole block) get weights of exactly zero. The old transform
+   used only the top-left `n` x `n` coefficients and sampled the basis at whole
+   positions, half a source pixel from the centres of the squares it stood for.
+2. **4:2:0 colour is reconstructed at the output's size** (`component_block`,
+   libjpeg's `jdmaster.c` rule). A component sampled coarsely enough in both
+   directions has its blocks transformed at twice the picture's block size —
+   four times, for colour quartered both ways — so at half scale 4:2:0 chroma
+   gets a full 8x8 transform and needs no upsampling at all. Colour halved one
+   way only (4:2:2, 4:4:0) cannot be, and is upsampled as at full size (§1306).
+3. **A progressive thumbnail keeps what its transform reads** (`Kept`): 7
+   coefficients a side at half scale, 5 at a quarter, the DC alone at an
+   eighth, per plane — since chroma may now be transformed at a larger size
+   than luma. The zero weights are exact, so a dropped coefficient changes no
+   bit of the output, and the progressive scaled decode is still its baseline
+   twin's bit for bit.
+
+### The choices with two sides
+
+1. **libjpeg-turbo's averaging, not IJG libjpeg 9's truncation.** The other
+   well-known reduction transforms only the low `n` x `n` coefficients,
+   sampled at the right centres: a sharper picture (it keeps every frequency
+   the smaller size can show, at full strength), with some ringing at edges,
+   and a progressive thumbnail's store stays at `n` x `n`. *For averaging:* it
+   is what libjpeg-turbo does, so the thumbnail is the one users see in every
+   other program, and there is a reference to hold it to; `decode_scaled`
+   already box-filters after the transform, so the whole path is now one
+   filter; no ringing. *Against:* softer; and a progressive thumbnail keeps
+   more — 49 coefficients a block at half scale instead of 16, 25 at a quarter
+   instead of 4 (an eighth is unchanged, the DC alone).
+2. **4:2:0 colour at twice the block size.** *For:* the colour is resolved by
+   the transform at the thumbnail's own resolution, which is a better picture
+   than upsampling a plane a quarter the size, and it is libjpeg-turbo's.
+   *Against:* at an eighth of the size a progressive 4:2:0 thumbnail keeps 25
+   coefficients per chroma block instead of 1: 156 bytes a 16x16 MCU instead
+   of 60, or for a 24-megapixel photograph about 15 MB instead of 6 — still a
+   twentieth of what the full picture's store needs, and far inside
+   `gui/thumbs`' budget of 16 bytes per source pixel. A baseline decode holds
+   no coefficients and pays nothing.
+
+### How it is held
+
+- `jpeg.rs` unit tests: every reduced sample is the mean of the full
+  transform's samples over its square (2000 random blocks at all three scales);
+  the coefficients a reduced transform ignores change no bit of its output;
+  each layout gets libjpeg's per-component size.
+- `tests/jpeg_sampling.rs`: every fixture — every colour layout, and the narrow
+  planes — at a half, a quarter and an eighth of its size against TurboJPEG's
+  own scaled decode, generated through `simplejpeg`.
+- `tests/jpeg_progressive.rs`: each progressive file's scaled decode is still
+  its baseline twin's at five sizes; the byte-budget test recounts what a
+  progressive thumbnail holds.
+
+### Measured
+
+Against TurboJPEG's own scaled decode, every fixture at every scale is now
+within 2 levels (mean under 0.06 on every fixture big enough to average); the
+previous decoder was up to 157 levels off, with a mean of 17 on 4:2:0 at half
+scale.
+
+Speed, release, a synthetic 4000x5333 photograph at quality 90, the least of
+nine runs taken alternately with the previous decoder on a busy machine:
+eighth scale -- every thumbnail of a photograph that size -- unchanged (4:2:0
+0.31 s both; 4:2:2 0.39 s against 0.42 s, inside the noise); half scale much
+faster (4:2:0 1.23 s to 0.70 s, 4:2:2 1.71 s to 0.98 s), since the old
+transform skipped no zeros and 4:2:0 chroma now needs no upsampling; quarter
+scale a little slower by the least run (4:2:0 0.40 s to 0.43 s, 4:2:2 0.54 s
+to 0.59 s) and about level at the quarter mark of the runs (0.45 to 0.47, 0.69
+to 0.69) -- the averages weigh five frequencies a side where truncation
+weighed two. It took three rounds to get there: the first averaging
+transform, walking a runtime list of frequencies, made the eighth-scale 4:2:0
+thumbnail 37% slower. An eighth-scale block is now its DC outright
+(`flat_block`), each size is a const-generic kernel that unrolls, and
+mirrored outputs share an even and an odd sum (`reduced_transform`).
+
+---
+
+## 1308. GIF decodes, animations included, and where decoders disagree it does what browsers do
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous). Mechanism inside `gui/imagecodec`; the
+calls with a user-visible side are how the file's ambiguities are resolved,
+recorded below.
+
+**In short:** GIFs -- still the web's animation format and common in any
+downloads folder -- used to show as a plain coloured rectangle in the file
+manager and could not be opened at all, because nothing decoded them. They
+now decode: a thumbnail or still viewer gets the first frame, and a viewer
+that animates gets every frame, composited as it should be, with its timing.
+Where the format leaves a choice to the decoder, this makes the choice
+browsers make, so a GIF looks here as it does in a web page.
+
+### What it is
+
+`gui/imagecodec/src/gif.rs` and `gif/lzw.rs`. The LZW decoder handles the
+three places decoders go wrong -- the code not yet in the table, when the code
+width grows (one code after the encoder), and a table that fills without a
+clear -- each with its own unit test. `gif::Animation` walks the file's
+structure once without decoding (frame count, loop count, the canvas size),
+then composites one frame at a time onto one reused canvas: each image drawn
+over what the ones before it left, the previous image's disposal applied first
+(keep, clear, or restore what was under it). `decode` is its first frame;
+`decode_scaled` averages that by the same rule as a PNG thumbnail, which moved
+from `png.rs` into a shared `scale.rs` so that the two cannot drift apart.
+
+### The choices with two sides
+
+1. **Browsers' answers, not Pillow's, where the two differ.** The format
+   leaves several things open, and the two references at hand disagree on
+   four: the colour the canvas starts as and is cleared to (browsers:
+   transparent, ignoring the header's background colour; Pillow: the
+   background colour), disposal 3 on the first frame (browsers: the empty
+   canvas; Pillow: keeps the frame), a first image smaller than the screen
+   (browsers: the rest transparent; Pillow: palette entry 0), and an image
+   past the canvas after the first (browsers: clipped; Pillow: grows the
+   canvas). *For browsers:* that is how the files were authored and viewed;
+   a GIF whose animation leaves stray colour behind here, when it does not in
+   any browser, is a bug report. *Against:* Pillow cannot answer those cases,
+   so they are held to a small reference compositor in the fixture generator
+   instead -- and the generator checks that Pillow really does decode each of
+   them differently, so none of them passes either way by accident.
+2. **An image with a minimum code size outside 2 to 8 is skipped.** 1 is below
+   the format's minimum and giflib's own encoder never writes it; the decoders
+   that accept it disagree about when its codes widen (giflib after the first
+   code, Firefox and Chrome after four entries), and Pillow rejects it. With no
+   agreed picture to reproduce, drawing any is a guess. Above 8, codes name
+   indices no byte holds.
+3. **The first image may enlarge the canvas; later ones are clipped.** A first
+   image bigger than its logical screen is a broken encoder's file, and
+   Firefox and Pillow both grow the canvas to show it; growing it again for a
+   later frame would change the picture's size mid-animation.
+4. **The display delay is a helper, not applied.** `Frame::delay_cs` is the
+   file's number; `display_delay_ms` gives what browsers show (0 or 1
+   hundredths become a tenth of a second). A viewer that wants the file's word
+   can have it.
+5. **One canvas, lent per frame** (`next_frame` returns a borrow of it), not a
+   list of frames. A 500-frame GIF at 500x500 is 500 MB as a list; as a
+   canvas it is 1 MB, and a viewer keeps only what it shows.
+
+### How it is held
+
+`tests/gif.rs` over nineteen fixtures (`tests/data/generate_gif.py`), every
+frame compared exactly -- GIF is lossless: Pillow-written photographs (256
+colours, interlaced and not), four colours, animations with each disposal and
+transparency, answered by Pillow's decode where it agrees with browsers; and
+hand-written files -- a full table left uncleared, clears mid-string, uneven
+interlace, 87a, an image bigger than its screen, no colour table, indices past
+it, frames off the canvas, disposal 2 without transparency, disposal 3 first --
+answered by the indices they were made from. The hand-written files come from a
+writer validated by round-tripping 630 files through Pillow's decoder. Also:
+rewind replays identically, loop counts, delays, a file cut off mid-image draws
+a prefix equal to its whole twin's, the canvas is refused past the byte budget
+before it exists, and no truncation or bit flip panics. Removing the disposal,
+the interlace mapping or the first-frame enlargement each fails the suite.
+
+### Measured
+
+Release, a 480x360, 100-frame, 256-colour animation of 3 MB: the first frame
+in 2 ms; every frame, composited, in 150 to 170 ms, 1.6 ms a frame, where
+Pillow takes 320 ms. Playing at 25 frames a second leaves a frame 40 ms.
+
+---
+
+## 1309. An application may decline a close request -- in so many words
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous), at lane E's request
+(`requests/e-f-let-an-application-decline-a-close-so-it-can-ask-about-unsaved-work.md`,
+which proposed exactly this shape).
+
+**In short:** clicking a window's close button used to close it whatever the
+application answered, so no editor could stop to ask "save your changes?" --
+the text editor, the markdown editor, the hex editor and the JSON viewer all
+threw away unsaved work without a word, and the markdown editor's dialog was
+drawn into a window that was already gone. An application can now answer a
+close request with "not yet" (`KeepOpen`), show its question, and close itself
+when the user answers. One that does not answer that way still closes exactly
+as before, so no window can end up with a close button that does nothing.
+
+### What changed
+
+`gui/window`: `EventResponse::KeepOpen` for the event loop and
+`Response::KeepOpen` for `oswindow::app`. `run_batched` still ends the loop on
+`CloseRequested` -- unless the answer to it is `KeepOpen`. To any other event
+the new answer is `Continue` (and, for an `App`, `Redraw`). The compositor
+already only *asked*: its close button and `request_close` send the client a
+close request rather than destroying the window, so the whole change is on the
+client's side.
+
+### The choices with two sides
+
+1. **Declining is an explicit answer, not "anything but Exit".** *For:* the
+   rule it replaces had a real reason -- most applications answer events they
+   do not handle with `Idle`, and a close button that does nothing is worse
+   than an application that quits when it would rather not have. That still
+   holds for every application that has not thought about closing. *Against:*
+   an application has to know the new answer exists to use it; that is the
+   point, and every desktop's equivalent (`WM_CLOSE`, `windowShouldClose`,
+   GTK's `delete-event`) is equally explicit.
+2. **`Response::KeepOpen` redraws.** *For:* an application declining a close is
+   about to show something -- its question -- and one that forgot to ask for a
+   frame would leave the user clicking the X and seeing nothing happen, which
+   is the very failure the default guards against. *Against:* a frame nobody
+   needed, if an application declines without drawing anything new; that costs
+   one frame.
+3. **A hung application is not this rule's to help.** It is not dispatching
+   events at all, so it cannot answer either way; closing one that has stopped
+   responding is the compositor's, and is not built yet.
+
+### How it is held
+
+`gui/window` tests: a close answered `KeepOpen` leaves the loop running until
+the application's own `Exit`; `KeepOpen` to anything else is `Continue`; a close
+answered anything else still ends the loop (the existing
+`run_ends_on_a_close_request_the_handler_ignores`); and through `App`, a
+declined close keeps the window and draws the question. Reverting the loop's
+condition fails the first and the last.
+
+---
+
+## 1310. Double clicks are recognised once, in every application's event loop, and timed by the compositor's clock
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous), at lane E's request
+(`requests/e-f-let-an-application-decline-a-close-so-it-can-ask-about-unsaved-work.md`,
+its second ask). The rules for pairing presses are §502's, settled by lane C for
+the compositor's title bars and carried over as they stand.
+
+**In short:** double-clicking did nothing anywhere inside an application: the
+file picker could not open a file by double-clicking it, and double-clicking a
+word selected nothing. Every widget that reacts to a double click was waiting
+for an event that nothing produced -- the compositor sends only individual
+presses, deliberately, and no application recognised two of them as a pair.
+Now every application's event loop does, using the double-click speed the user
+set in Settings, and the compositor stamps each press with the time it
+happened so that a busy application still pairs clicks by when the user made
+them, not by when it got round to reading them.
+
+### What changed
+
+- **`oswindow`**: `EventLoop::poll` recognises a press that completes a double
+  click and delivers `MouseEventKind::DoubleClick(button)` straight after it --
+  the press itself still delivered, since consumers are written for both. The
+  interval is `EventLoop::set_double_click_interval`, which `oswindow::app`
+  keeps at `input.yaml`'s `double_click_ms` (the same file and number the
+  compositor's title bars use), clamped to the setting's range.
+- **`guiremote`**: `InputEvent::time`, the compositor's clock in milliseconds,
+  wrapping; input protocol version 7.
+- **`compositor`**: stamps every event as it routes it to its client
+  (`input_clock_ms`), in the same pass as it handled the input.
+
+### The choices with two sides
+
+1. **In the client's event loop, not the compositor.** The compositor
+   deliberately never sends `DoubleClick`: it does not know where a client's
+   widgets are, and a pair of clicks on two different rows of a list is two
+   clicks. *For the loop:* it sees every press of every application, needs no
+   layout, and doing it once there means no application invents its own
+   timing. *Against:* the loop pairs on position, not on widgets, so it can
+   pair two clicks on neighbouring widgets less than four pixels apart --
+   rare, and exactly what every desktop's double click does.
+2. **Timed by a stamp from the compositor, which needed a protocol change.**
+   Timing the presses as the loop reads them is right while the application
+   is responsive, and wrong exactly when it matters: a program busy for a
+   second reads two clicks made a second apart one straight after the other,
+   and pairs them -- opening a file the user clicked twice slowly because
+   nothing seemed to happen. X11, Wayland and Windows all stamp input for this
+   reason. *Against:* a wire-format version (6 to 7) and four bytes an event.
+   An event nothing stamped (a test's, a synthetic one) is still timed by when
+   the loop read it.
+3. **Stamped when routed, not when the device reported it.** The server routes
+   in the same pass as it handles the input, so the stamp is within a tick of
+   the press; stamping at the device would mean threading a time through every
+   input source for a precision no double click needs.
+4. **§502's rules, plus a distance.** Keyed on window and button; any press in
+   between breaks the pair; a completed double click arms nothing, so three
+   quick clicks are a double click and a click. And the second press must land
+   within four pixels of the first either way (`DOUBLE_CLICK_SLOP`, Windows'
+   default), which a title bar did not need and a list does.
+
+### How it is held
+
+`gui/window` tests: two quick presses in one place are followed by exactly one
+double click after the second press; 400 ms apart pairs and 401 does not;
+clicks stamped 0.6 s apart are not paired though read together; stamps compare
+across the clock's wrap; two windows, two buttons, a press in between, or a
+move past the slop each break the pair; three clicks are one double, four are
+two; unstamped presses pair when read together and not when read further apart
+than the interval (a sleep that can only overrun); and the interval in
+`input.yaml` reaches the loop. `guiremote`: a stamp round-trips, zero included,
+and a bad presence byte is refused. `compositor`: routed events carry a clock
+that moves with time. Letting a completed double click re-arm, or timing
+stamped presses by when they were read, each fails the suite.
+
+---
+
+## 1311. WebP, starting with lossless: decoded to the bit, and bounded where a file could inflate it
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** WebP is now the web's commonest picture format, and nothing here
+read it: a downloaded WebP showed as a plain coloured rectangle in the file
+manager and would not open. This adds the container and the lossless half of
+the format, which decodes to exactly the pixels libwebp (the reference, under
+every browser) produces. The lossy half -- a VP8 video frame, which is most
+WebP photographs -- and animation are refused by name for now and come next.
+
+### What it is
+
+`gui/imagecodec/src/webp.rs` (the RIFF container, the extended `VP8X` header)
+and `webp/lossless.rs` (RFC 9649 §3): prefix codes built as two-level lookup
+tables; pixels that are literals, LZ77 copies (with the two-dimensional
+distance map) or colour-cache hits; per-block prefix-code groups chosen by an
+entropy image; and the four inverse transforms -- predictor (all fourteen
+modes and the edge rules), colour, subtract-green, and colour indexing with
+pixel bundling.
+
+### The choices with two sides
+
+1. **Lossless first.** Lossy WebP is the more common file, and a larger decoder
+   (RFC 6386's VP8 key frame). *For lossless first:* it is self-contained, its
+   container code is the same, and being exact by definition it can be proven
+   against libwebp to the bit before the lossy decoder -- whose alpha plane is
+   itself lossless-coded -- is built on it. *Against:* most WebP photographs
+   still do not open until lossy lands; `decode` says so by name
+   (`ImageError::Unsupported("lossy WebP")`) rather than failing obscurely.
+2. **Only the prefix-code groups a block uses are kept.** The entropy image may
+   name up to 65,536 groups of five codes, all of which are in the stream and
+   must be parsed to reach the pixels; a few hundred kilobytes of file could
+   otherwise make the decoder build gigabytes of tables. Each group is parsed and
+   validated; only the used ones are built and kept, and their tables count
+   against the caller's byte budget (`Limits::max_decompressed_bytes`), as the
+   pixels do. libwebp does the same.
+3. **A prefix code must describe a complete tree**, one symbol excepted, as
+   libwebp requires. The RFC says the tree "must be" complete but not what to do
+   when it is not; following the reference means a file libwebp refuses is
+   refused here too, rather than decoded to something no one else shows.
+4. **A cut-off file is an error, not a partial picture.** Unlike progressive
+   JPEG or interlaced GIF, a lossless stream's early part is not a coarser
+   picture -- the transforms can only be undone once all the pixels are in -- so
+   there is nothing honest to show. `ImageError::Truncated`.
+
+### How it is held
+
+`tests/webp.rs` over twelve libwebp-written fixtures, every pixel of every one
+compared exactly, transparent pixels' colours included: a photograph at the
+most and the least encoder effort, a larger one, one with every kind of alpha,
+two, four, thirteen and a hundred colours (colour indexing at each of its four
+bundling widths), one pixel, one row, one column, and the extended container. A
+unit test in `webp/lossless.rs` checks that between them the fixtures still use
+every tool the format has, so a regenerated set cannot quietly test less. Unit
+tests pin the prefix-code construction (canonical order, second-level tables,
+the one-symbol case, incomplete and over-subscribed trees refused), the distance
+map, the channel arithmetic, `Select`'s tie-break, the colour transform's order
+and the predictor's edge rules. Every prefix of the small fixtures and a spread
+of bit flips decode without a panic.
+
+### Measured
+
+Release, a 2000x1500 lossless photograph (3.7 MB): 0.31 s, where libwebp (through
+Pillow) takes 0.15 s. Twice as slow as a hand-tuned C library with vector
+paths; faster decoding (literals decoded several channels at a time, the group
+looked up once per block rather than per pixel) is recorded in `known-issues.md`.
+
+---
+
+## 1312. Lossy WebP: a VP8 key frame decoded to libwebp's pixels, corrupt files included
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** Most WebP pictures are lossy -- photographs saved by browsers,
+phones and every image tool -- and until now they did not open here. They do
+now, with their transparency, and every pixel is the one libwebp (the decoder
+inside Chrome, Firefox and Android) produces: the same colours to the last
+bit, over 36 test pictures that between them use every feature the format
+has. Where the format's own reference decoder and libwebp disagree -- only on
+files no encoder writes -- this follows libwebp, so a damaged or unusual file
+looks here as it looks in a browser.
+
+### What it is
+
+`gui/imagecodec/src/webp/lossy.rs` and `webp/lossy/`: the frame header and
+per-macroblock modes, the coefficient tokens (`lossy.rs`), the boolean
+entropy decoder (`reader.rs`), intra prediction (`predict.rs`), the inverse
+DCT and Walsh-Hadamard transforms (`transform.rs`), the loop filter
+(`filter.rs`), and the conversion to RGB (`yuv.rs`); VP8's probability and
+quantiser tables (`tables.rs`) are generated from RFC 6386's text, whose two
+copies of each were checked against each other number by number.
+`webp/alpha.rs` decodes the `ALPH` chunk: raw or lossless-compressed, under
+any of the four predictive filters.
+
+### The choices with two sides
+
+1. **libwebp, not the RFC's reference decoder, where they part.** RFC 6386
+   ships a reference decoder ("dixie") and libwebp departs from it in a few
+   places no encoder reaches: a segmentation with no values of its own is
+   absolute zeros in libwebp and deltas in dixie (and in libvpx); a filter
+   level is clamped once after every adjustment in libwebp, twice in dixie;
+   the colour-space bits are ignored by libwebp and refused by dixie.
+   *For libwebp:* it is what every browser shows, and a picture that looks
+   one way everywhere else and another way here is a bug report. *Against:*
+   the RFC is the specification, and on these files this decoder is, by the
+   letter, the one out of step. The tests hold each case to libwebp through
+   frames whose headers `tests/data/vp8rewrite.py` rewrites into exactly
+   those settings.
+2. **libwebp's colour conversion.** VP8 stops at Y'CbCr; turning that into
+   RGB is the application's business, and libwebp's is BT.601 studio swing in
+   14-bit fixed point with its "fancy" chroma upsampling (a 9-3-3-1 filter,
+   which equals libwebp's two-step form exactly -- a test checks every
+   input). *For:* the pixels match the browsers'. *Against:* it is not the
+   conversion this crate's JPEG decoder uses (JPEG's full-range, libjpeg's
+   upsampling); the two formats' colours are each right for their format.
+3. **Libwebp's answer on corrupt files, too.** A truncated or damaged file
+   should fail, or show, as it does in a browser. That took three details a
+   valid file never reaches: a frame's decoder is handed its chunk *with* the
+   padding byte of an odd-length chunk, as libwebp's demuxer hands it, so a
+   frame one byte short still decodes; the boolean decoder keeps libwebp's
+   exact formulation, down to reading a coefficient's sign as its
+   `VP8GetSigned` does -- which differs from an ordinary even-odds decision
+   once a corrupt partition (a first byte of `0xFF`) has pushed the coder's
+   value past its range; and the lossless decoder flags running out where
+   libwebp's reader does (never within the first 64 bits it loads), and, for
+   an alpha plane libwebp decodes a byte per pixel, forgives the last
+   symbol's overrun as libwebp does. *For:* 6,981 corrupted and truncated
+   files decode here exactly as in libwebp, or fail where it fails, which
+   makes the comparison a regression test for anything done to the decoder
+   later (a speed-up, say). *Against:* these are libwebp's implementation
+   details, not the format's; they cost a few careful lines each, and
+   comments saying why. Where libwebp's SIMD inverse DCT computes in 16 bits
+   (coefficients no valid stream has) this follows its C code, and the
+   comparisons found no file on which that shows.
+4. **Reconstructed whole, filtered a row behind.** Prediction reads the frame
+   before loop filtering; libwebp keeps copies of the unfiltered edges so it
+   can filter as it goes. Here the planes are the frame, and a row of
+   macroblocks is filtered once the row below it has been reconstructed --
+   which is when nothing still needs it unfiltered, since a row's filter
+   reaches three samples up and none down. *For:* no edge caches to get
+   wrong. *Against:* one more pass over each row's samples; not measurable
+   next to the rest.
+
+### How it is held
+
+`tests/webp.rs` compares 36 fixtures pixel for pixel with Pillow's decode
+(libwebp 1.6): libwebp's own output at several sizes and settings
+(segments, the simple and normal filters and none, sharpness, 1 to 8
+partitions, the skip flag, odd sizes down to 1x1), libvpx's, alpha planes
+under each filter raw and compressed, headers rewritten into what no encoder
+writes, one corrupt frame and one frame cut short. A census test in
+`lossy.rs` parses the fixtures with the decoder's own functions and fails if
+they stop using any feature: every segmentation form, filter, high-variance
+threshold, partition count, quantiser delta, prediction mode and coefficient
+token. The transforms, predictors and loop filter are each checked against
+the RFC's reference code over thousands of inputs.
+
+Outside the suite, 701 cut files and 6,280 bit-flipped ones were compared
+with libwebp; every difference found was one of the details in item 3.
+
+*Addendum, same day.* The lossless decoder's bit reader is now a port of
+libwebp's `VP8LBitReader` -- its 64-bit window, the refills at the points
+libwebp refills, symbol reads that move the position without looking, the end
+flagged where libwebp flags it -- and its pixel loops check where libwebp's
+do, including the byte-per-pixel loop libwebp uses for colour-indexed alpha
+planes. That closed the last difference the comparisons had found (an alpha
+plane whose last symbol read stale bits from the window) and three more that
+a further 4,500 corrupted lossless files turned up: a simple prefix code
+naming a symbol past its alphabet names nothing, as in libwebp; a lossless
+picture whose header says it has no alpha is shown opaque, as Pillow and
+Firefox (through `WebPGetFeatures`) show it; and a lossy frame's `ALPH` chunk
+under a `VP8X` header without the alpha flag is dropped unread, as libwebp's
+demuxer drops it. What remains are files whose RIFF structure libwebp's
+demuxer refuses and this decoder's chunk walk accepts; porting the demuxer is
+the next step, and animation needs it anyway (done: §1313). Four more
+fixtures hold these cases.
+
+### Measured
+
+Release, Windows, best of five: a 2000x1500 photograph at quality 80 decodes
+in 181 ms, where libwebp (through Pillow) takes 97; 4000x5333, 1.53 s against
+0.86. About half libwebp's speed, like the lossless decoder; what to do about
+it is in `known-issues.md`.
+
+---
+
+## 1313. WebP's container and its animations, read as libwebp reads them
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** Animated WebP pictures -- the stickers, reactions and short
+clips the web is full of -- now play, and every frame comes out exactly as
+libwebp (the library Chrome, Firefox and Pillow read WebP with) composites
+it. Whether a WebP file is acceptable at all is now decided the way libwebp
+decides it, so a damaged file shows here as it shows elsewhere, or is refused
+where it is refused elsewhere: of 4,500 damaged test files, the six this
+decoder used to accept and libwebp refused are now refused, and 3,387
+damaged animations play, stop, or are refused frame for frame as in libwebp.
+
+### What it is
+
+`gui/imagecodec/src/webp/riff.rs` ports libwebp's three readers of the
+container: `WebPGetFeatures` (a quick look at the headers, which is what
+`webp::dimensions` now returns), the demuxer (`WebPDemux`: every chunk
+walked, each frame's place found, the whole checked), and the header parse a
+frame's decode starts with. `webp.rs` ports the animation decoder
+(`anim_decode.c`) as `webp::Animation`; `webp::decode` gives a still picture,
+or an animation's first frame.
+
+### The choices with two sides
+
+1. **libwebp's readers, all three, exactly.** RFC 9649 leaves much to the
+   reader: whether a `VP8X` chunk may be longer than ten bytes, whether flags
+   the format does not define make a file invalid, what a chunk after the
+   picture inside an `ANMF` means, whether a frame's `ANMF` size or its
+   picture's wins. libwebp answers each -- differently in its different
+   readers, sometimes (the demuxer takes a long `VP8X` chunk,
+   `WebPGetFeatures` refuses it) -- and a file is shown only if all of them
+   accept it. *For:* a file is acceptable here exactly when it is acceptable
+   to the programs people use, and corrupted files make a regression suite
+   for it (below). *Against:* libwebp's quirks become this decoder's: a
+   frame's `ANMF` size is ignored for its picture's; a chunk after the
+   picture inside an `ANMF` is read as if it followed the `ANMF`; a running
+   size total wraps as a 32-bit number does in C. Each is commented where it
+   is, and `riff.rs`'s unit tests pin each one -- and each of their
+   expectations was checked against libwebp itself, through its Python
+   bindings.
+2. **The alpha shown is the alpha `WebPGetFeatures` reports.** Pillow and
+   Firefox show a picture with its alpha only if `WebPGetFeatures` says the
+   file has any: a lossless stream's own flag, or for an animation the
+   `VP8X` chunk's. So an animation whose `VP8X` chunk lacks the flag is
+   shown opaque, its uncovered canvas black. *For:* one rule for stills and
+   animations, the two reference programs' rule. *Against:* Chrome decides
+   from the demuxer's flags; the two differ only on files no encoder writes
+   (encoders set the flag whenever any frame has alpha).
+3. **libwebp's compositing, not the specification's formula.** RFC 9649
+   describes blending by the ideal alpha formula. libwebp's animation decoder
+   approximates it in integers (the canvas's share is `a·(256−s)>>8`, and a
+   reciprocal scale), which can come out a level off the ideal; inside a
+   rectangle the frame before cleared to transparent, it does not blend at
+   all, which is not quite the same as blending with transparency; and it
+   starts from a cleared canvas for any frame that owes nothing to the one
+   before. All of that is ported. *For:* Pillow and libwebp's own tools are
+   this decoder, so every frame can be tested to the bit. *Against:* the
+   browsers composite with the same rules but their own arithmetic (Chrome,
+   premultiplied), so a partly transparent pixel blended over another can
+   differ from a browser's by a level. Opaque frames -- most frames -- are
+   the same everywhere.
+4. **A broken frame is an error.** libwebp's animation decoder and Pillow
+   stop with an error at a frame that will not decode; so does
+   `next_frame`, and again if asked again, with the canvas left as the last
+   good frame drew it. A broken GIF frame, by contrast, draws what it had,
+   because browsers do that (§1308). *For:* libwebp. *Against:* what
+   browsers do with a broken WebP frame was not checked; they decode frames
+   with libwebp's incremental decoder, which might show part of one
+   (`todo.txt`, Judgment Calls).
+5. **Memory: two canvases, three for a file shown opaque.** libwebp keeps
+   the canvas and the canvas after the last frame's disposal. A file shown
+   without its alpha needs a third to show it in, since the canvas itself
+   must keep the true alpha for blending the next frame. `Limits` is checked
+   against all of them before anything is decoded. A still decode needs one.
+
+The API mirrors `gif::Animation` (`new`, `size`, `frame_count`, `repeat`,
+`next_frame`, `rewind`, `into_canvas`), plus `has_alpha`. `Repeat::Times(n)`
+counts plays, the first included, as WebP defines its loop count; GIF's
+`Repeat::Count` is reported as written, because GIF decoders disagree on it.
+`Frame::display_duration_ms` shows 10 ms or less as 100 ms, the browsers'
+rule for every animated format.
+
+### How it is held
+
+`tests/webp.rs` plays nine animations frame by frame against Pillow's frames
+(libwebp 1.6's animation decoder): five written by libwebp's encoder
+(lossless; lossy, alpha in `ALPH` chunks; both mixed; key frames forced on a
+clear canvas; opaque, and so shown without alpha), four by hand for what no
+encoder is made to do -- each of the four reasons a frame is a key frame,
+blending beside a rectangle the frame before cleared, clear pixels that are
+not blended, a missing alpha flag, and the demuxer's reading of chunks where
+an encoder would not put them. A census test in `webp.rs` fails if the
+fixtures stop reaching any of those rules; the blending arithmetic is checked
+against a transcription of libwebp's C, types included, for every pair of
+alphas.
+
+Outside the suite: the 4,500 corrupted lossless files of §1312's addendum,
+which had left six differences (all containers the demuxer refuses), leave
+none; 2,700 bit-flipped animations and 687 cut ones leave none -- 1,195 play
+every frame the same, 1,012 stop at the same frame, 1,167 are refused by
+both, and 13 whose flipped canvases were too large to write an answer for
+were only played, for panics.
+
+### Measured
+
+Release, Windows, best of five, a 480x270 animation of 60 frames: lossy,
+6.0 ms a frame against libwebp's 3.0 (through Pillow); lossless, 4.4 against
+3.5. The lossy gap is the lossy decoder's (`known-issues.md`); a 25 fps clip
+has 40 ms for each frame.
+
+## 1314. BMP: Chrome's decoder, ported and held to the original
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** Windows bitmap pictures (`.bmp`) now open -- the image viewer
+used to say "BMP images cannot be displayed yet", and the file manager had a
+separate, partial reader of its own. Every kind Chrome shows is read, and each
+comes out exactly as Chrome shows it: over 69 test pictures and more than
+22,000 damaged or deliberately odd files, this decoder and Chrome's own agree
+on every pixel, and on every file neither will show.
+
+### What it is
+
+`gui/imagecodec/src/bmp.rs`: the file header; every bitmap header (OS/2
+1.x's 12 bytes, Windows' 40, 52, 56, 108 and 124, OS/2 2.x's 16 to 64);
+palettes of 1, 2, 4 and 8 bits; 16- and 32-bit bit fields, narrow, wide and
+with alpha; 24- and 32-bit colour; RLE8, RLE4 and OS/2's RLE24, both row
+orders.
+
+### The choices with two sides
+
+1. **Chrome's answers, and Chrome's current decoder's.** BMP's
+   documentation leaves most corner cases open, and the decoders people use
+   answer them differently: what pixels a run-length stream skips become
+   (black in Windows and now Chrome; transparent in Firefox and Chrome's
+   older decoder); whether a 32-bit picture's fourth byte is alpha; what a
+   file that stops short shows (nothing, in Chrome). Chrome is most of the browsers people use, and it now reads
+   BMP through image-rs 0.25.10 with four patches of Chromium's own
+   (inside Skia, `rust_bmp`); this module ports that decoder in its lenient
+   mode. *For:* the pictures look as they do in the browser most people
+   have, and the reference is exact and runnable -- the generator builds it
+   from the same crate and patches, so every answer in the tests is the real
+   decoder's. *Against:* Chrome changed decoders recently and may change
+   answers again; and some of its answers are not the friendliest -- a file
+   missing one byte of its last row's padding is refused outright, where
+   Pillow shows it. Following the browser means following it
+   there too; the tests would say at once if Chrome moved (by rebuilding the
+   reference from a newer Chromium).
+2. **Refuse what Chrome refuses, including short files.** Chrome's decoder
+   reports a short file as incomplete, and Blink fails an image whose data
+   has all arrived and is still incomplete. So a truncated BMP -- even one
+   whose run-length stream is only missing its end code before the last row
+   is finished -- is `Truncated` here, not half a picture. *For:* no picture
+   here that Chrome would not show. *Against:* GIF, by contrast, draws what a
+   short file has (§1308), because there browsers do; the two formats differ
+   because the browsers do.
+3. **Alpha only where the header asks for it.** A 32-bit picture with a
+   40-byte header is opaque whatever its fourth byte, since most such files
+   leave it unset or fill it with junk; a V4 or V5 header's alpha mask makes
+   it alpha even uncompressed, and so does any bit-field picture's alpha
+   mask. Chrome's older decoder also rescued pictures whose alpha was all
+   zero (showing them opaque); the current one does not, and neither does
+   this. *For:* Chrome. *Against:* a V5 picture written by a program that set
+   the alpha mask and left the channel empty is fully transparent -- as it
+   is in Chrome today.
+4. **Colour spaces and profiles are not applied.** V4 and V5 headers can
+   carry calibrated primaries or an ICC profile; like the PNG and JPEG
+   decoders here, this one does not apply them, since the desktop has no
+   colour pipeline yet. It still refuses a file whose V5 header names an
+   embedded profile lying past the end of the file, as Chrome does.
+
+### How it is held
+
+`tests/bmp.rs` decodes 69 fixtures (`tests/data/generate_bmp.py`) and
+compares each with Chrome's answer to the pixel, or to the refusal: every
+header, depth, mask shape and run-length escape, Pillow's own files, and 13
+files Chrome refuses. The generator downloads image-rs 0.25.10 and
+Chromium's four patches (pinned to a commit, checked against SHA-256 sums),
+builds them into a small program, and has it answer every fixture; it also
+reports where Pillow differs (it widens 5-bit channels differently, ignores
+V4/V5 alpha masks, forgives short files and misreads several headers).
+Outside the suite, 12,240 bit-flipped, cut and header-rewritten files and a
+sweep of 10,368 combinations of header size, compression and bit depth were
+decoded by both: every one agrees. Two mistakes in the port were caught on
+the way -- a Windows header's masks read from past its end (by the
+fixtures), and an OS/2 header's compression code taken to mean a fourth mask
+(by the corrupted files; now a fixture and a unit test too).
+
+## 1315. ICO and CUR: Chrome's older icon decoder, ported
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** Windows icons and cursors (`.ico`, `.cur`) -- every program's
+icon, every website's favicon -- now open, where the file manager showed a
+coloured rectangle. An icon file holds the same picture at several sizes;
+this shows the one Chrome shows, the largest, and makes it transparent where
+Chrome does.
+
+### What it is
+
+`gui/imagecodec/src/ico.rs`: the icon directory, the choice of image, PNG
+images (through the PNG decoder), and BMP images with their one-bit
+transparency ("AND") masks, through a port of Chrome's older BMP reader in
+its icon mode -- which Chrome still uses for icons, though plain BMPs now go
+through image-rs (§1314).
+
+### The choices with two sides
+
+1. **Chrome's rules, where decoders differ.** The best image is the largest,
+   then the deepest (Pillow takes the shallowest of the largest); only it is
+   decoded, and if it fails the icon does (no fallback to the next). A BMP's
+   mask is read where its pixels end (Pillow reads it from the end of the
+   entry's stated size). A 32-bit image whose alpha is all zero is opaque,
+   under its mask -- written for a reader that ignored alpha -- where Pillow
+   shows it clear; and once a pixel with alpha appears, everything decoded
+   before it is cleared, as Chrome clears it. A mask cut short -- including
+   the unpadded masks Pillow's own writer produces for widths that are not a
+   multiple of 32 -- is refused. *For:* the icons look as they do in Chrome,
+   the browser most people have. *Against:* these are the rules of Chrome's
+   older code, which it may retire as it did for BMP; and the tests cannot
+   run that code, see below.
+2. **Held to rules, not to a running reference.** Chrome's icon decoder is
+   C++ inside Blink and cannot be built alone, as its BMP decoder could. So
+   three icons Pillow writes (where Pillow and Chrome agree) are answered by
+   Pillow, and the other 23 by Chrome's rules applied to the pixels, palettes
+   and masks they were built from -- not by a decoder --
+   with the generator checking that Pillow really does get each Chrome-only
+   rule wrong. *For:* no second decoder of mine checking the first. *Against:*
+   the rules are my reading of Chrome's source; a misreading would be in both
+   the answers and the code.
+3. **What an embedded colour profile holds is not checked.** Chrome refuses
+   an icon whose V5 header names a profile that is missing or will not parse.
+   This refuses a missing or empty one, and accepts any other, since nothing
+   here reads profiles (`known-issues.md`).
+
+### How it is held
+
+`tests/ico.rs`: 26 fixtures (`tests/data/generate_ico.py`) -- Pillow's PNG
+and BMP icons, every BMP depth under its mask, 32-bit alpha in each of its
+cases, bit fields, run-length data, a cursor, the choice between entries,
+and 9 files Chrome refuses -- plus every truncation of four of them, and bit
+flips of five for panics.
+
+## 1316. EXIF orientation: turned as Chrome turns it
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** Photographs from phones used to open lying on their side: a
+phone stores its picture as the sensor saw it and notes in the file which way
+up it belongs, and nothing here read that note. Now pictures are turned as
+Chrome turns them -- from the note in JPEGs and PNGs, not in WebPs, GIFs or
+BMPs, where Chrome ignores it -- and everything that reports a picture's size
+reports it the way up it is shown.
+
+### What it is
+
+`gui/imagecodec/src/orientation.rs`: the `Orientation` values and the eight
+ways of turning pixels, and a port of Skia's `SkExif::Parse` for the
+orientation tag. `jpeg::orientation` finds it the way Blink's JPEG decoder
+does (the first `APP1` segment before the scan that starts `Exif\0`);
+`png::orientation` the way Skia's Rust PNG codec does (the first `eXIf`
+chunk before the image data, one with a bad CRC passed over). Both decoders
+apply it in `decode`, `decode_scaled` and `dimensions`.
+
+### The choices with two sides
+
+1. **Applied by default, everywhere.** Every caller wants the picture as it
+   is shown -- the viewer, the thumbnails, a wallpaper -- and a decoder that
+   leaves turning to each of them gets it wrong in the one that forgets, as
+   the thumbnailer and the viewer both would have. *Against:* a program that
+   edits a photograph and rewrites its EXIF would want the stored pixels;
+   none exists yet, and `jpeg::orientation`, `png::orientation` and
+   `Orientation::inverse` are public for the day one does. The size reported for a sideways photograph changes, which is
+   the point: a size that disagrees with the picture it describes is the bug.
+2. **Chrome's reading, where readers differ.** Pillow's `exif_transpose`
+   looks only in the first EXIF directory, takes an orientation of any
+   integer type, and reads a PNG `eXIf` wherever it is; Chrome follows the
+   pointer to the EXIF sub-directory, takes only a `SHORT`, and reads only an
+   `eXIf` before the image data. Chrome's is followed, and fixtures for each
+   difference check that Pillow really does read them otherwise.
+3. **Not for WebP.** The WebP container has an `EXIF` chunk and Chrome does
+   not turn by it (Blink's WebP decoder never reads it); neither does this.
+
+### How it is held
+
+`tests/orientation.rs`: one picture stored under all eight orientations as a
+JPEG and as a PNG, against Pillow's decode turned by `exif_transpose` (the
+JPEGs to within rounding; the PNGs exactly, and each JPEG exactly the upright
+decode turned); the five cases where Chrome and Pillow read the orientation
+differently; and thumbnails that fit their box the way up the picture is
+shown. Unit tests hold the parser to Skia's rules (byte order, entry types,
+the sub-directory pointer, directories cut short) and each turn to its
+definition.
+
+## 1317. TIFF: libtiff's RGBA reader, ported
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** TIFF pictures -- scans, print and photo exports, screenshots
+from scientific tools -- now open. No browser shows a TIFF, so the picture a
+TIFF "should" look like is the one the image viewers on free desktops show,
+and they all get it from libtiff. `imagecodec` now reads a TIFF the way
+libtiff does, line for line, and agrees with a real libtiff on every test
+file to the last bit -- including which damaged files it refuses. Some kinds
+of TIFF are not read yet (listed below) and are refused by name.
+
+### What it is
+
+`gui/imagecodec/src/tiff/`: a port of libtiff 4.7.1 --
+
+- `dir.rs`: the header (classic, BigTIFF, and Microsoft's "EP" variant) and
+  `TIFFReadDirectory`: which tags must read cleanly for the file to open,
+  which are dropped with a warning, how every entry type converts, and the
+  repairs libtiff makes (missing or implausible `StripByteCounts` estimated,
+  surplus colour channels made extra samples, a palette image without a
+  palette made grey or RGB).
+- `read.rs`: `TIFFFillStrip`/`TIFFFillTile` and the codecs -- none,
+  PackBits, Deflate, LZW in `lzw.rs` (both the TIFF 6.0 codes and the
+  old-style ones libtiff still reads), and CCITT fax in `fax.rs` (Group 3 1-D
+  and 2-D, Group 4, Modified Huffman byte- and word-aligned: `tif_fax3.c`'s
+  macros written out, its code tables built as `mkg3states` builds them), and
+  JPEG through this crate's port of libjpeg-turbo (§1318) driven as
+  `tif_jpeg.c` drives libjpeg -- with the horizontal predictor, `FillOrder`,
+  and big-endian 16-bit samples.
+- `rgba.rs`: `tif_getimage.c` -- `TIFFRGBAImageOK`, `TIFFRGBAImageBegin`, the
+  strip and tile readers and their pixel routines: grey of 1 to 16 bits,
+  palettes, RGB of 8 and 16 with each kind of alpha, CMYK, `YCbCr` (all seven
+  subsamplings libtiff converts), CIE L*a*b*, planes together or apart.
+- `color.rs`: `tif_color.c`'s `YCbCr` and L*a*b* conversions, in libtiff's
+  own single-precision order so they agree to the bit; its one call to
+  `pow` is a table generated with the C library libtiff runs on.
+
+### The choices with two sides
+
+1. **libtiff's RGBA interface as the reference.** It is what gdk-pixbuf
+   (GNOME's viewer, and most GTK programs) calls. *Against:* macOS's ImageIO
+   and Windows' WIC decode differently in places, but they are closed; Qt's
+   handler uses libtiff too, through other paths for some layouts. libtiff is
+   open, the most used, and can be run: every fixture's answer is a real
+   libtiff's, built with the codecs a distribution builds it with.
+2. **Its conversions kept, crude ones included.** CMYK becomes RGB by
+   `(255-K)(255-C)/255` with no colour profile; 16-bit grey keeps its high
+   byte while 16-bit RGB rounds; `FillOrder` 2 reverses the bits of 8-bit data
+   too; an uncompressed first tile whose bit-reversed read buffer (rounded up
+   to 1024 bytes) is not its size is refused. Each is what the user of a
+   libtiff viewer sees, and "better" guesses would be a third behaviour
+   agreeing with nobody.
+3. **Refused on the first strip that will not read.** gdk-pixbuf asks libtiff
+   to stop at the first error and then shows nothing; the alternative, a
+   partial picture, would need rules libtiff does not have (its
+   carry-on mode leaves stale rows).
+4. **Turned truly by `Orientation`.** libtiff's reader only flips (5-8 are
+   read as 1-4); gdk-pixbuf then applies the rest. The picture that reaches
+   the screen is the tag's, all eight values, which is what `decode` returns;
+   `decode_libtiff_raster` gives libtiff's flipped raster for the tests.
+5. **Straight alpha, as the file holds it.** libtiff premultiplies
+   unassociated alpha into its raster and passes associated alpha through;
+   the compositor wants straight alpha, so unassociated alpha is kept exactly
+   and associated alpha divided back out (to the value that premultiplies
+   back to libtiff's, exhaustively checked). Grey with alpha libtiff passes
+   through unpremultiplied either way; that is kept.
+6. **Deflate through the shared `deflate` crate, not a second inflater.**
+   libtiff decompresses with libdeflate, which stops at the first piece of
+   the stream that will not fit the strip; `deflate` decodes a block at a
+   time. The two agree on every well-formed file; on some damaged ones they
+   do not (`known-issues.md`), and the exact behaviour is asked of lane A
+   (`requests/f-a-deflate-decode-into-a-fixed-buffer-as-libdeflate-does.md`)
+   rather than written a second time here.
+
+### Not yet read
+
+Old-style JPEG compression, NeXT, ThunderScan, SGI LogLuv and PixarLog:
+libtiff reads them, and this refuses them by name, for now.
+(`YCbCr` and CIE L*a*b* samples followed on the same day, held the same way:
+23 more fixtures, and 12,000 mutants of them without a disagreement. So did
+fax, whose leniency is kept whole -- a bad code word ends only its row, a
+Group 4 strip cut short keeps the rows it has, and a Group 3 strip whose data
+runs out is decoded again from its start without end-of-line codes, into the
+rows still to fill, which can show a cut file whole and wrong; and a fax
+tile that fails is shown as far as it decoded, because libtiff tests a
+tile's decode for truth where it tests a strip's for success, and fax fails
+with -1: 25 fixtures, from libtiff's own encoder, and 12,000 mutants. And so
+did JPEG, once JPEG itself was libjpeg-turbo's (§1318): each strip's
+datastream checked against its strip as `JPEGPreDecode` checks it, a last
+strip's full-height datastream tolerated, the subsampling read from the first
+strip's frame when the tag is missing, `JPEGTables` parsed once, and the
+tables kept from strip to strip as libjpeg keeps them, so a strip that
+redefines them -- even after its scan, which `jpeg_finish_decompress` reads --
+redefines them for the abbreviated strips after it. libtiff ignores what that
+finish says: it returns `rows_left || finish()`, and a C `||` is 1 for the
+failure's -1. 38 fixtures, 30 of them decoded, and 12,000 mutants.) Only
+the first page of a multi-page TIFF is read -- as gdk-pixbuf reads it.
+
+### How it is held
+
+`tests/tiff.rs` against 224 fixtures (`tests/data/generate_tiff.py`: a
+small TIFF writer for every layout, plus Pillow's libtiff-backed writer for
+real encoder output), each answered by libtiff 4.7.1 built from pinned
+sources: 187 decoded to exactly libtiff's raster, 37 refused where libtiff
+refuses. Separate tests hold the straight-alpha conversion to libtiff's
+premultiplied raster, the eight orientations to the stored picture turned,
+limits, and every bit flip of eight fixtures to not panicking. A mutation
+fuzzer against the same libtiff -- bit flips, entry types, counts and values
+changed, entries dropped and duplicated, files cut short -- found no
+disagreement in 30,000 files without Deflate data, and in 8,000 with it only
+the nine Deflate cases above; the rounds for `YCbCr` with CIELab, for fax and for
+JPEG (12,000 each) found none once the two port errors the fax round turned up were
+fixed -- `RowsPerStrip` also sets the tile size while no tile tags have
+been read, and the tile truth test above.
+
+## 1318. JPEG is libjpeg-turbo's decompressor, ported: every pixel its pixel
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous). It replaces the decoder §1305, §1306 and
+§1307 describe, which were Claude's too; the operator has ruled on none of
+them.
+
+**In short:** JPEG photographs now decode to exactly the pixels every other
+program shows. Browsers, GNOME's image viewer and Pillow all decode JPEG with
+the same library, libjpeg-turbo, and this is now a port of it, agreeing with
+it to the bit on every test file and on 32,000 damaged ones. Before, pixels
+were within a few levels of it -- invisible -- but some kinds of JPEG came out
+wrong or not at all: CMYK files from print work showed false colours,
+RGB-coded JPEGs came out in the wrong colours, and arithmetic-coded files
+and files sending each colour in a scan of its own were refused. Those now show as they
+do elsewhere. It is also faster: a 21-megapixel photograph in 0.76 s rather
+than 1.42 s, its thumbnail in 0.18 s rather than 0.45 s.
+
+### Why a port rather than a better decoder of our own
+
+The old decoder implemented the standard, with libjpeg's upsampling filter
+added (§1306), a floating-point inverse DCT, and tests that allowed 3 levels
+a channel. The standard allows that latitude, but what anyone compares a
+picture against is what their other programs show, and they all show
+libjpeg-turbo. TIFF needed more: everything else in the TIFF port (§1317) is
+held to libtiff's exact output, and a JPEG-compressed TIFF is decoded by
+libjpeg underneath. And the latitude is only about rounding. What a decoder
+does with a *damaged* file -- where it stops, what fills the rest, which
+markers it forgives, when it gives up -- is where decoders differ visibly,
+and there the only reference is libjpeg's own behaviour.
+
+*Alternatives:* (a) keep the old decoder and its tolerance -- cheapest, and
+the rounding differences are invisible, but damaged files would go on
+decoding differently, JPEG-in-TIFF could not be held exactly, and the CMYK,
+RGB and arithmetic gaps would each need a fix of their own; (b) reproduce
+libjpeg-turbo's SIMD arithmetic, which computes the inverse DCT in 16-bit
+lanes and is what x86 distributions run -- but it is not one reference
+(SSE2, AVX2 and NEON can differ where a value overflows), it would be obscure
+to maintain, and it agrees with the C code on every file whose coefficients
+fit 16 bits, which is every valid one. Chosen: (c) the C code, operation for
+operation -- its 64-bit arithmetic, its truncations to `int`, its 10-bit
+range-limit wrap -- so that even garbage decodes to libjpeg's garbage.
+
+### What it is
+
+`gui/imagecodec/src/jpeg/`, each part citing the libjpeg-turbo 3.1.1 file it
+transcribes: `source` (the fake end-of-image markers every libjpeg data
+source supplies past the end of the data, from which the handling of a
+cut-off file follows), `marker` (`jdmarker.c`), `huffman` (`jdhuff.c`,
+`jdphuff.c`), `arith` (`jdarith.c`), `coef` (`jdcoefct.c`: the coefficient
+store of a multi-scan image, and block smoothing), `idct` (`jidctint.c`'s
+accurate integer transform, `jidctred.c`'s reduced ones), `upsample`
+(`jdsample.c`), `color` (`jdcolor.c`), and `decompress` (`jdapimin.c`,
+`jdapistd.c`, `jdinput.c`, `jdmaster.c`). The interface is libjpeg's --
+read the header, choose colour spaces and scale, start, read rows, finish --
+and the quantisation and Huffman tables outlive a datastream, as libjpeg's
+permanent pool does: TIFF needs both.
+
+The choices libjpeg leaves to its caller are taken, for the crate's own entry
+points, as Chrome takes them: RGB out for greyscale, RGB and YCbCr files;
+CMYK and YCCK converted by Chrome's formula for the inverted CMYK Adobe
+writes (`c * k / 255`); two components, or five and more, refused, as Chrome
+refuses them; at most 100 scans, Chrome's (and libtiff's) progress-monitor
+limit; and nothing after the last row read -- a picture whose rows all
+decoded is shown whatever follows, where `jpeg_finish_decompress` could still
+object to it. A file cut off shows the rows that arrived and then grey, as in
+every program built on libjpeg; `dimensions` reads the header as libjpeg
+does, so a file whose header libjpeg refuses no longer reports a size (the
+old walker reported the first frame's size whatever surrounded it).
+
+Two parts of the old decoder live on: its compact coefficient store for
+thumbnails of progressive files (§1305), which keeps exactly the
+coefficients libjpeg's reduced transforms read and, for the rest, only
+whether each is zero -- all a refinement scan ever asks of a coefficient it
+does not produce -- so it stays exact, and a thumbnail of a large progressive
+photograph still costs a fraction of its coefficients; and the upsampling
+filters (§1306), now chosen as libjpeg chooses them, including its refusal of
+sampling ratios that are not whole numbers.
+
+### Not yet
+
+Lossless JPEG (`SOF3`), which libjpeg-turbo 3 reads through the same
+interface at up to 8 bits: refused for now (`known-issues.md`). 12-bit JPEG is
+refused, as libjpeg's 8-bit interface refuses it.
+
+### How it is held
+
+Every JPEG test in the crate now compares exactly; the tolerance is gone
+(`tests/common/mod.rs`). The 24x16 reference, every chroma layout at full
+size and at a half, a quarter and an eighth against TurboJPEG, the
+progressive fixtures and the EXIF orientation fixtures all pass to the bit.
+A libjpeg-turbo 3.1.1 oracle (its C build) answered 146 seeds made by
+`cjpeg` and Pillow -- baseline at five subsamplings, greyscale, progressive,
+arithmetic sequential and progressive, restart markers, RGB, optimised
+tables, 16-bit quantisers, separate-scan sequential, CMYK -- all identical
+at all four sizes; then 32,000 mutants of them (header fields, segment
+lengths, marker codes, markers spliced into entropy data, cuts, bit flips).
+The only disagreements, two thumbnails, came from the old header walker the
+thumbnail path still used; it now reads the header through the port.
+
 ## §200 — The B-KNULLJUMP hunt runs the *uninstrumented* kernel first (E), and escalates to the optimized KASAN build (A) only if that fails to settle it
 
 **Date:** 2026-08-15

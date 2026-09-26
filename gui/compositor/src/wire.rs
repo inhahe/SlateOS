@@ -242,16 +242,6 @@ impl ClientLink {
         self.wants_window_list
     }
 
-    /// Start or stop sending this client the desktop's window list.
-    ///
-    /// Subscribing always forgets what was last sent, so a re-subscribe
-    /// re-sends the list rather than being a no-op. That is the useful reading
-    /// of a repeated subscribe — "I may have lost track" — and it is what makes
-    /// the first list after subscribing arrive at all.
-    ///
-    /// Unsubscribing also forgets it, so that a later re-subscribe cannot be
-    /// answered with silence because the list happens not to have changed while
-    /// the client was not listening.
     /// Whether this link asked for the tray list.
     #[must_use]
     pub const fn wants_tray(&self) -> bool {
@@ -269,6 +259,16 @@ impl ClientLink {
         }
     }
 
+    /// Start or stop sending this client the desktop's window list.
+    ///
+    /// Subscribing always forgets what was last sent, so a re-subscribe
+    /// re-sends the list rather than being a no-op. That is the useful reading
+    /// of a repeated subscribe — "I may have lost track" — and it is what makes
+    /// the first list after subscribing arrive at all.
+    ///
+    /// Unsubscribing also forgets it, so that a later re-subscribe cannot be
+    /// answered with silence because the list happens not to have changed while
+    /// the client was not listening.
     pub fn set_window_list_subscription(&mut self, on: bool) {
         self.wants_window_list = on;
         self.window_list_sent.clear();
@@ -302,6 +302,23 @@ impl ClientLink {
     #[must_use]
     pub fn has_outgoing(&self) -> bool {
         !self.outbox.is_empty()
+    }
+
+    /// Ask the client to draw these of its windows whole again (an `RPNT`
+    /// frame), as part of the display's recovery.
+    ///
+    /// Queued like everything else, and written with the next flush. Nothing
+    /// is queued for a link that has closed, nor for an empty list.
+    pub fn queue_repaint(&mut self, windows: &[WindowId]) {
+        if self.closed || windows.is_empty() {
+            return;
+        }
+        guiremote::repaint::encode_repaint_into(
+            &mut self.outbox,
+            &guiremote::Repaint {
+                windows: windows.iter().map(|w| w.raw()).collect(),
+            },
+        );
     }
 
     /// The windows opened over this link.
@@ -531,6 +548,13 @@ fn to_compositor_request(
         RequestBody::ReloadInput => CompositorRequest::ReloadInput,
         RequestBody::ReloadNotifications => CompositorRequest::ReloadNotifications,
         RequestBody::ReloadSession => CompositorRequest::ReloadSession,
+        // A shell's, because what it does lands on every client: their windows
+        // are redrawn, and any they have lost track of is dropped. Carries no
+        // window, so there is nothing to resolve.
+        RequestBody::RecoverDisplay => {
+            link.require_shell()?;
+            CompositorRequest::RecoverDisplay
+        }
         // Handled by `answer_requests` before it reaches here, because it
         // changes the *link*, not the compositor: nothing about a subscription
         // belongs in the window/display state a `CompositorRequest` describes,
@@ -805,6 +829,7 @@ impl Compositor {
                 Frame::Input(_) => return Err(WireError::WrongDirection("input")),
                 Frame::WindowList(_) => return Err(WireError::WrongDirection("window list")),
                 Frame::TrayList(_) => return Err(WireError::WrongDirection("tray list")),
+                Frame::Repaint(_) => return Err(WireError::WrongDirection("repaint")),
             }
         }
 
@@ -1046,9 +1071,12 @@ impl Compositor {
                 true
             }
         });
+        // One stamp for the batch: the server routes in the same pass as it
+        // handled the input, so this is within a tick of every event in it.
+        let now = self.input_clock_ms();
         for note in self.pending_notifications.drain(..) {
             if link.owns(note.window_id()) {
-                mine.push(crate::wire_event(note));
+                mine.push(crate::wire_event(note).at(now));
             } else {
                 theirs.push_back(note);
             }
@@ -1509,6 +1537,31 @@ mod tests {
         // And the compositor's queue is empty afterwards, not doubly delivered.
         assert_eq!(comp.discard_unrouted_input(), 0);
         assert_ne!(mine, theirs);
+    }
+
+    #[test]
+    fn every_routed_event_carries_the_compositors_clock() {
+        // What lets a client time a double click by when the clicks happened
+        // rather than by when it got round to reading them.
+        let (mut comp, mut link) = wired();
+        let _window = open(&mut comp, &mut link, "Timed");
+        comp.route_input(&mut link);
+        drop(link.take_outgoing());
+
+        let stamp_of = |comp: &mut Compositor, link: &mut ClientLink| {
+            comp.handle_key(0x1E, true, Some('a'));
+            assert_eq!(comp.route_input(link), 1);
+            let (events, _) = decode_input_frame(&link.take_outgoing()).expect("decodes");
+            events[0].time.expect("a routed event is stamped")
+        };
+        let first = stamp_of(&mut comp, &mut link);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let second = stamp_of(&mut comp, &mut link);
+        // Bounded from below only: a sleep can overrun, never fall short.
+        assert!(
+            second.wrapping_sub(first) >= 30,
+            "30 ms apart, stamped {first} and {second}"
+        );
     }
 
     #[test]

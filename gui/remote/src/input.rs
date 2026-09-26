@@ -27,6 +27,8 @@
 //! n_events : u32                       event count, little-endian
 //!   per event:
 //!     window : u64                     addressee window id
+//!     stamped: u8                      1 if a time follows, 0 if not
+//!     time   : u32                     (if stamped) the compositor's clock, ms
 //!     tag    : u8                      EventTag
 //!     payload: variable                see the per-tag encoders below
 //! ```
@@ -79,7 +81,12 @@ pub const INPUT_MAGIC: [u8; 4] = *b"INPT";
 /// terms 3 set out, and recorded here rather than waved through as "one more
 /// tag": the rule established above is that a vocabulary change *is* a version
 /// change, and the first exception to it would make the version meaningless.
-pub const INPUT_VERSION: u8 = 6;
+///
+/// **7** — every event carries the compositor's clock when it was handled
+/// ([`InputEvent::time`]), between its window id and its tag. A layout change
+/// in the plainest sense: a version-6 peer would read the stamp's presence
+/// byte as the event's tag.
+pub const INPUT_VERSION: u8 = 7;
 
 /// Input-frame header: magic + version + flags + event count.
 const INPUT_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -121,6 +128,21 @@ pub struct InputEvent {
     /// ~500 places in this tree that build a `KeyEvent`, nearly all of them
     /// tests for which a scancode is meaningless noise.
     pub scancode: Option<u32>,
+
+    /// When the compositor handled the event, in milliseconds on its own clock
+    /// -- which starts anywhere and wraps after about 49 days, so only the
+    /// difference between two stamps means anything.
+    ///
+    /// What makes a double click, and every other gesture that is about time,
+    /// measurable by a client at all. A client that timed events as it read
+    /// them would be timing its own reading: a program busy for half a second
+    /// reads two clicks made a second apart one straight after the other, and
+    /// pairs them. The compositor stamps each event within a tick of handling
+    /// it, where no client's delay can move it -- which is why X11, Wayland and
+    /// Windows all stamp their input too.
+    ///
+    /// `None` for an event nothing stamped: a test's, or one a client made up.
+    pub time: Option<u32>,
 }
 
 impl InputEvent {
@@ -131,7 +153,15 @@ impl InputEvent {
             window,
             event,
             scancode: None,
+            time: None,
         }
+    }
+
+    /// This event, stamped with the compositor's clock: see [`Self::time`].
+    #[must_use]
+    pub const fn at(mut self, time: u32) -> Self {
+        self.time = Some(time);
+        self
     }
 
     /// A key event addressed to `window`, carrying the physical key position.
@@ -141,6 +171,7 @@ impl InputEvent {
             window,
             event: Event::Key(event),
             scancode: Some(scancode),
+            time: None,
         }
     }
 }
@@ -346,6 +377,14 @@ pub fn encode_input_frame_into(out: &mut Vec<u8>, events: &[InputEvent]) {
 
 fn encode_event(out: &mut Vec<u8>, ev: &InputEvent) {
     write_u64(out, ev.window);
+    // The stamp, ahead of the event it dates: see `InputEvent::time`.
+    match ev.time {
+        Some(time) => {
+            out.push(1);
+            write_u32(out, time);
+        }
+        None => out.push(0),
+    }
     match &ev.event {
         Event::Mouse(m) => {
             out.push(EventTag::Mouse as u8);
@@ -566,6 +605,11 @@ fn decode_internal(input: &[u8]) -> Result<(Vec<InputEvent>, usize), DecodeError
 
 fn decode_event(r: &mut Reader<'_>) -> Result<InputEvent, DecodeError> {
     let window = r.read_u64()?;
+    let time = match r.read_u8()? {
+        0 => None,
+        1 => Some(r.read_u32()?),
+        other => return Err(DecodeError::BadTag(other)),
+    };
     let tag_byte = r.read_u8()?;
     let tag = EventTag::from_byte(tag_byte).ok_or(DecodeError::BadTag(tag_byte))?;
     let (event, scancode) = match tag {
@@ -652,6 +696,7 @@ fn decode_event(r: &mut Reader<'_>) -> Result<InputEvent, DecodeError> {
         window,
         event,
         scancode,
+        time,
     })
 }
 
@@ -1027,6 +1072,7 @@ mod tests {
             window: 4,
             event: Event::Key(key(Key::Enter)),
             scancode: None,
+            time: None,
         };
         assert_eq!(roundtrip(std::slice::from_ref(&ev)), vec![ev]);
     }
@@ -1081,6 +1127,42 @@ mod tests {
         let mut bytes = encode_input_frame(&[]);
         bytes[..4].copy_from_slice(&crate::MAGIC);
         assert_eq!(decode_input_frame(&bytes), Err(DecodeError::BadMagic));
+    }
+
+    #[test]
+    fn a_stamp_travels_with_its_event_and_an_unstamped_event_stays_unstamped() {
+        let events = [
+            InputEvent::new(
+                7,
+                Event::Mouse(MouseEvent {
+                    x: 1.5,
+                    y: 2.5,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                }),
+            )
+            .at(4_000_000_000),
+            InputEvent::new(7, Event::FocusIn),
+            InputEvent::new(9, Event::CloseRequested).at(0),
+        ];
+        let bytes = encode_input_frame(&events);
+        let (back, used) = decode_input_frame(&bytes).unwrap();
+        assert_eq!(used, bytes.len());
+        assert_eq!(back, events);
+        assert_eq!(back[0].time, Some(4_000_000_000), "near the wrap, whole");
+        assert_eq!(back[1].time, None);
+        assert_eq!(back[2].time, Some(0), "zero is a time, not an absence");
+    }
+
+    /// What comes before an unstamped event's tag: its window id (8 bytes) and
+    /// the stamp's presence byte, which says there is no stamp.
+    const UNSTAMPED_HEAD: usize = 8 + 1;
+
+    #[test]
+    fn a_stamp_byte_that_is_neither_yes_nor_no_is_refused() {
+        let mut bytes = encode_input_frame(&[InputEvent::new(1, Event::FocusIn)]);
+        // The header, the window id, then the stamp's presence byte.
+        bytes[INPUT_HEADER_LEN + 8] = 2;
+        assert_eq!(decode_input_frame(&bytes), Err(DecodeError::BadTag(2)));
     }
 
     #[test]
@@ -1151,8 +1233,11 @@ mod tests {
     #[test]
     fn an_unknown_event_tag_names_the_byte() {
         let mut bytes = encode_input_frame(&[InputEvent::new(1, Event::FocusIn)]);
-        // window id occupies the eight bytes after the header.
-        let tag_at = INPUT_HEADER_LEN + 8;
+        // The window id and the stamp's presence byte come before the tag.
+        // (At `+ 8` this test poked the presence byte after version 7 moved
+        // the tag, and passed anyway, because an unknown presence byte is
+        // refused with the same error: so the offset is named, not counted.)
+        let tag_at = INPUT_HEADER_LEN + UNSTAMPED_HEAD;
         bytes[tag_at] = 0xFE;
         assert_eq!(decode_input_frame(&bytes), Err(DecodeError::BadTag(0xFE)));
     }
@@ -1161,8 +1246,8 @@ mod tests {
     fn an_unknown_key_code_names_the_byte() {
         let bytes = encode_input_frame(&[InputEvent::key(1, key(Key::A), 30)]);
         let mut bytes = bytes;
-        // header, window (8), event tag (1), then the key code.
-        let key_at = INPUT_HEADER_LEN + 8 + 1;
+        // header, window and stamp, event tag (1), then the key code.
+        let key_at = INPUT_HEADER_LEN + UNSTAMPED_HEAD + 1;
         bytes[key_at] = 0xF0;
         assert_eq!(decode_input_frame(&bytes), Err(DecodeError::BadKey(0xF0)));
     }
@@ -1177,8 +1262,9 @@ mod tests {
                 kind: MouseEventKind::Press(MouseButton::Left),
             }),
         )]);
-        // header, window (8), tag (1), x (4), y (4), kind (1), then the button.
-        let button_at = INPUT_HEADER_LEN + 8 + 1 + 4 + 4 + 1;
+        // header, window and stamp, tag (1), x (4), y (4), kind (1), then the
+        // button.
+        let button_at = INPUT_HEADER_LEN + UNSTAMPED_HEAD + 1 + 4 + 4 + 1;
         bytes[button_at] = 0x09;
         assert_eq!(
             decode_input_frame(&bytes),
@@ -1196,7 +1282,7 @@ mod tests {
                 kind: MouseEventKind::Move,
             }),
         )]);
-        let kind_at = INPUT_HEADER_LEN + 8 + 1 + 4 + 4;
+        let kind_at = INPUT_HEADER_LEN + UNSTAMPED_HEAD + 1 + 4 + 4;
         bytes[kind_at] = 0x7F;
         assert_eq!(
             decode_input_frame(&bytes),
@@ -1235,9 +1321,9 @@ mod tests {
             },
             30,
         )]);
-        // header, window (8), tag (1), key (1), pressed (1), mods (1),
+        // header, window and stamp, tag (1), key (1), pressed (1), mods (1),
         // text length (4), then the text's bytes.
-        let text_at = INPUT_HEADER_LEN + 8 + 1 + 1 + 1 + 1 + 4;
+        let text_at = INPUT_HEADER_LEN + UNSTAMPED_HEAD + 1 + 1 + 1 + 1 + 4;
         // A lone continuation byte: never the start of a UTF-8 sequence. The
         // point is that this is an *error*, not a U+FFFD — `from_utf8_lossy`
         // would hand the widget a replacement character and no way to tell it

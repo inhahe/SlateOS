@@ -1,0 +1,1 @@
+REFUSED read: Bits/sample must be 1 for Group 3/4 encoding/decoding

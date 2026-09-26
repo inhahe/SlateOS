@@ -11743,9 +11743,14 @@ moves, nothing inside a glyph.
 | Draw the text colour's alpha into the picture | one fewer parameter | applied twice where the glyph used the text colour; a cache entry per alpha |
 | Rasterize the picture at draw time, no cache | nothing to invalidate | a millisecond per emoji per frame |
 
-**Not modelled** (`known-issues.md` [F] 2026-09-26): variation deltas in a
-variable `COLR`; palettes other than the first; a `PaintColrGlyph`'s clip
-box. Colour *bitmaps* (`CBDT`, `sbix`) are §1322.
+**Variations** (added the same day): a variable colour font's paints, colour
+stops and clip boxes move with its axes, each field by the delta its
+`varIndexBase` names -- through the `DeltaSetIndexMap` if there is one -- in
+the field's own units, read through the same `varstore` as `HVAR`'s.
+
+**Not modelled** (`known-issues.md` [F] 2026-09-26): palettes other than the
+first; a `PaintColrGlyph`'s clip box. Colour *bitmaps* (`CBDT`, `sbix`) are
+§1322.
 
 **How to reverse.** `ScaledFont::colour_glyph` and `SystemFont::glyph_image`
 are the only ways in; a face without `COLR` never reaches the renderer, and

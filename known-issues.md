@@ -165359,29 +165359,24 @@ cycles, the minimum of N) and Pillow's `Image.open(...).load()` measured
 with `QueryThreadCycleTime`; `target/jpeg_wip/jpeg_fuzz.py` holds any change
 to libjpeg-turbo's C build.
 
-### [F] Colour glyphs: variable or dark-palette `COLR` draws at its defaults -- 2026-09-26
+### [F] Colour glyphs: a dark-mode palette is never chosen -- 2026-09-26
 
 **Status:** OPEN — lane F's.
 
 **In short:** emoji are drawn in colour whichever way their font stores them
--- as a recipe (`COLR`, Noto's and Microsoft's vector emoji) or as pictures
-(`CBDT`, `sbix`, Noto's bitmap build) -- and match Chrome. What is not yet
-honoured: a vector colour font drawn at a variation instance (its colours and
-shapes stay at the defaults), and a font's second palette -- the dark-mode
-colours some fonts carry.
+-- a recipe (`COLR`, variable ones included) or pictures (`CBDT`, `sbix`) --
+and match Chrome. What is not yet honoured is a font's *second* palette: the
+dark-mode colours some colour fonts carry for text on a dark background.
 
-**Where:** `gui/font/src/colr.rs`.
+**Where:** `gui/font/src/colr.rs` (`render` takes palette 0).
 
 **What is missing, and the proper fix:**
-1. **Variation deltas**: the `Var` paint formats' fields and the clip boxes
-   are read at their default values. Apply `COLR`'s `ItemVariationStore`
-   (the crate's `varstore` reads the same structure for `HVAR`) through its
-   `DeltaSetIndexMap`, at the `ScaledFont`'s instance.
-2. **Palette choice**: `CPAL` version 1 marks palettes usable on light or
-   dark backgrounds; `render` takes palette 0. A `palette` argument, chosen
-   by the caller from the theme, and part of the colour cache's key.
-3. **`PaintColrGlyph`'s clip box**: the referenced glyph's `ClipBox` should
-   clip its graph; it is ignored (the outer canvas still bounds it).
+1. **Palette choice**: `CPAL` version 1 marks palettes usable on light or
+   dark backgrounds. A `palette` argument to `render`, chosen by the caller
+   from the theme and made part of the colour cache's key.
+2. **`PaintColrGlyph`'s clip box**: the referenced glyph's `ClipBox` should
+   clip its graph; it is ignored (the outer canvas still bounds it). No font
+   seen so far depends on it.
 
 **How to see it.** `target/fontcheck` draws emoji lines from any font given
 it; `target/colr_compare.py` compares with Edge.

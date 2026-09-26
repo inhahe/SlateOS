@@ -53,10 +53,18 @@
 //! would exceed it is skipped. Every offset is bounds-checked, and the canvas
 //! is at most [`MAX_COLOUR_PIXELS`].
 //!
-//! Not modelled: variable paints are drawn at their default values (the
-//! deltas of `COLR`'s variation store are not applied), only the first
-//! palette is used, and a `PaintColrGlyph` does not apply the clip box of the
-//! glyph it names.
+//! # Variations
+//!
+//! A variable colour font moves its paints with its axes: every `Var` paint
+//! format, `VarColorStop` and format-2 clip box ends in a `varIndexBase`, and
+//! its *n*th field moves by the delta the variation store holds for index
+//! `varIndexBase + n` -- through the `DeltaSetIndexMap` if the table has one,
+//! as the outer and inner halves of the index if not -- in the field's own
+//! units: whole font units for a coordinate, 1/16384 for an `F2DOT14`, 1/65536
+//! for a `Fixed`. At the default instance nothing is read.
+//!
+//! Not modelled: only the first palette is used, and a `PaintColrGlyph` does
+//! not apply the clip box of the glyph it names.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -66,6 +74,7 @@ use core::f32::consts::{PI, TAU};
 use crate::raster::coverage_on;
 use crate::sfnt::{Face, Outline, PathCmd, Point};
 use crate::var::Coords;
+use crate::varstore::{IndexMap, VarStore};
 
 /// How deep a paint graph is followed.
 pub const MAX_DEPTH: u32 = 64;
@@ -109,7 +118,8 @@ pub struct ColourImage {
 /// Whether `face` has a colour recipe for glyph `gid`.
 #[must_use]
 pub fn has_colour(face: &Face, gid: u16) -> bool {
-    Tables::of(face).is_some_and(|t| t.base_v1(gid).is_some() || t.base_v0(gid).is_some())
+    Tables::of(face, &Coords::default())
+        .is_some_and(|t| t.base_v1(gid).is_some() || t.base_v0(gid).is_some())
 }
 
 /// Glyph `gid` of `face` painted in colour at `scale` pixels per font unit,
@@ -130,7 +140,7 @@ pub fn render(
     if !scale.is_finite() || scale <= 0.0 {
         return None;
     }
-    let tables = Tables::of(face)?;
+    let tables = Tables::of(face, coords)?;
     let root = if let Some(paint) = tables.base_v1(gid) {
         Root::Paint(paint)
     } else {
@@ -328,10 +338,18 @@ struct Tables<'a> {
     base_list: Option<usize>,
     layer_list: Option<usize>,
     clip_list: Option<usize>,
+    /// The instance drawn, normalized.
+    coords: &'a [i16],
+    /// The variation store and index map, for a variable font drawn away
+    /// from its default instance; `None` otherwise, when nothing moves.
+    var: Option<(VarStore, Option<IndexMap>)>,
 }
 
+/// A `varIndexBase` that names no variation.
+const NO_VARIATION: u32 = 0xFFFF_FFFF;
+
 impl<'a> Tables<'a> {
-    fn of(face: &'a Face) -> Option<Self> {
+    fn of(face: &'a Face, coords: &'a Coords) -> Option<Self> {
         let (colr, cpal) = face.colour_tables()?;
         let version = u16_at(colr, 0)?;
         let records =
@@ -344,6 +362,14 @@ impl<'a> Tables<'a> {
         } else {
             (None, None, None)
         };
+        let var = if version >= 1 && !coords.is_default() {
+            let axes = face.variation_axes().map_or(0, |v| v.axes().len());
+            list(30)
+                .and_then(|store| VarStore::parse(colr, store, axes))
+                .map(|store| (store, list(26).and_then(|map| IndexMap::parse(colr, map))))
+        } else {
+            None
+        };
         Some(Self {
             colr,
             cpal,
@@ -352,7 +378,40 @@ impl<'a> Tables<'a> {
             base_list,
             layer_list,
             clip_list,
+            coords: coords.as_slice(),
+            var,
         })
+    }
+
+    /// The `varIndexBase` at `at`, or none if the field is not there.
+    fn var_base(&self, at: Option<usize>) -> u32 {
+        at.and_then(|at| u32_at(self.colr, at))
+            .and_then(|base| u32::try_from(base).ok())
+            .unwrap_or(NO_VARIATION)
+    }
+
+    /// How far field `i` of a table whose `varIndexBase` is `base` moves at
+    /// this instance, in the field's raw units. Nothing, for a font that does
+    /// not vary, at the default instance, or for an index with no row.
+    fn delta(&self, base: u32, i: u32) -> f32 {
+        let Some((store, map)) = &self.var else {
+            return 0.0;
+        };
+        if base == NO_VARIATION {
+            return 0.0;
+        }
+        let Some(index) = base.checked_add(i) else {
+            return 0.0;
+        };
+        let row = match map {
+            Some(map) => map.get(self.colr, index),
+            // No map: the index is the row, outer half and inner half.
+            None => u16::try_from(index >> 16)
+                .ok()
+                .zip(u16::try_from(index & 0xFFFF).ok()),
+        };
+        row.and_then(|(outer, inner)| store.delta(self.colr, outer, inner, self.coords))
+            .unwrap_or(0.0)
     }
 
     /// The version-1 paint of base glyph `gid`, from the BaseGlyphList.
@@ -424,15 +483,17 @@ impl<'a> Tables<'a> {
         }
         let clip = at_offset(list, u24_at(d, at.checked_add(4)?)?)?;
         // Formats 1 and 2 share the box; 2 adds a variation index.
-        if !matches!(u8_at(d, clip)?, 1 | 2) {
+        let format = u8_at(d, clip)?;
+        if !matches!(format, 1 | 2) {
             return None;
         }
-        let v = |k: usize| fword(d, clip.checked_add(k)?);
+        let base = self.var_base((format == 2).then(|| clip.checked_add(9)).flatten());
+        let v = |k: usize, i: u32| Some(fword(d, clip.checked_add(k)?)? + self.delta(base, i));
         Some(Rect {
-            min_x: v(1)?,
-            min_y: v(3)?,
-            max_x: v(5)?,
-            max_y: v(7)?,
+            min_x: v(1, 0)?,
+            min_y: v(3, 1)?,
+            max_x: v(5, 2)?,
+            max_y: v(7, 3)?,
         })
     }
 
@@ -442,10 +503,26 @@ impl<'a> Tables<'a> {
         let d = self.colr;
         let field = |k: usize| at.checked_add(k);
         let child = |k: usize| at_offset(at, u24_at(d, field(k)?)?);
-        let word = |k: usize| fword(d, field(k)?);
-        let frac = |k: usize| f2dot14(d, field(k)?);
-        let point = |k: usize| Some(Point::new(word(k)?, word(k.checked_add(2)?)?));
         let format = u8_at(d, at)?;
+        // The variable formats are the odd ones from 3 to 31; each ends in a
+        // `varIndexBase`, at an offset that depends on the format.
+        let base = self.var_base(match format {
+            3 => field(5),
+            5 | 7 => field(16),
+            9 => field(12),
+            _ => None,
+        });
+        // Field `k`, moved by delta `i`: in font units, or in 1/16384 for an
+        // `F2DOT14`.
+        let word = |k: usize, i: u32| Some(fword(d, field(k)?)? + self.delta(base, i));
+        let uword = |k: usize, i: u32| Some(ufword(d, field(k)?)? + self.delta(base, i));
+        let frac = |k: usize, i: u32| Some(f2dot14(d, field(k)?)? + self.delta(base, i) / 16384.0);
+        let point = |k: usize, i: u32| {
+            Some(Point::new(
+                word(k, i)?,
+                word(k.checked_add(2)?, i.checked_add(1)?)?,
+            ))
+        };
         Some(match format {
             1 => Node::Layers {
                 count: usize::from(u8_at(d, field(1)?)?),
@@ -453,21 +530,21 @@ impl<'a> Tables<'a> {
             },
             2 | 3 => Node::Solid {
                 index: u16_at(d, field(1)?)?,
-                alpha: frac(3)?,
+                alpha: frac(3, 0)?,
             },
             4 | 5 => Node::Gradient {
                 line: child(1)?,
                 variable: format == 5,
-                gradient: Gradient::linear(point(4)?, point(8)?, point(12)?),
+                gradient: Gradient::linear(point(4, 0)?, point(8, 2)?, point(12, 4)?),
             },
             6 | 7 => Node::Gradient {
                 line: child(1)?,
                 variable: format == 7,
                 gradient: Gradient::Radial {
-                    c0: point(4)?,
-                    r0: ufword(d, field(8)?)?,
-                    c1: point(10)?,
-                    r1: ufword(d, field(14)?)?,
+                    c0: point(4, 0)?,
+                    r0: uword(8, 2)?.max(0.0),
+                    c1: point(10, 3)?,
+                    r1: uword(14, 5)?.max(0.0),
                 },
             },
             8 | 9 => Node::Gradient {
@@ -476,9 +553,9 @@ impl<'a> Tables<'a> {
                 // Stored less a half-turn, so that 0 to 360 degrees fits
                 // the field's -2 to 2.
                 gradient: Gradient::Sweep {
-                    c: point(4)?,
-                    start: (frac(8)? + 1.0) * PI,
-                    end: (frac(10)? + 1.0) * PI,
+                    c: point(4, 0)?,
+                    start: (frac(8, 2)? + 1.0) * PI,
+                    end: (frac(10, 3)? + 1.0) * PI,
                 },
             },
             10 => Node::Glyph {
@@ -505,30 +582,54 @@ impl<'a> Tables<'a> {
     fn transform(&self, format: u8, at: usize) -> Option<Affine> {
         let d = self.colr;
         let field = |k: usize| at.checked_add(k);
-        let word = |k: usize| fword(d, field(k)?);
-        let frac = |k: usize| f2dot14(d, field(k)?);
+        // Where the variable form keeps its `varIndexBase`: after its last
+        // field (for 13, in the `VarAffine2x3` it points at, read below).
+        let base = self.var_base(match format {
+            21 | 25 => field(6),
+            15 | 17 | 29 => field(8),
+            23 | 27 => field(10),
+            19 | 31 => field(12),
+            _ => None,
+        });
+        let word = |k: usize, i: u32| Some(fword(d, field(k)?)? + self.delta(base, i));
+        let frac = |k: usize, i: u32| Some(f2dot14(d, field(k)?)? + self.delta(base, i) / 16384.0);
         Some(match format {
             12 | 13 => {
                 let t = at_offset(at, u24_at(d, field(4)?)?)?;
-                let f = |k: usize| fixed(d, t.checked_add(k)?);
+                let base = self.var_base((format == 13).then(|| t.checked_add(24)).flatten());
+                let f = |k: usize, i: u32| {
+                    Some(fixed(d, t.checked_add(k)?)? + self.delta(base, i) / 65536.0)
+                };
                 Affine {
-                    xx: f(0)?,
-                    yx: f(4)?,
-                    xy: f(8)?,
-                    yy: f(12)?,
-                    dx: f(16)?,
-                    dy: f(20)?,
+                    xx: f(0, 0)?,
+                    yx: f(4, 1)?,
+                    xy: f(8, 2)?,
+                    yy: f(12, 3)?,
+                    dx: f(16, 4)?,
+                    dy: f(20, 5)?,
                 }
             }
-            14 | 15 => Affine::translate(word(4)?, word(6)?),
-            16 | 17 => Affine::scale(frac(4)?, frac(6)?),
-            18 | 19 => Affine::around(Affine::scale(frac(4)?, frac(6)?), word(8)?, word(10)?),
-            20 | 21 => Affine::scale(frac(4)?, frac(4)?),
-            22 | 23 => Affine::around(Affine::scale(frac(4)?, frac(4)?), word(6)?, word(8)?),
-            24 | 25 => Affine::rotate(frac(4)?),
-            26 | 27 => Affine::around(Affine::rotate(frac(4)?), word(6)?, word(8)?),
-            28 | 29 => Affine::skew(frac(4)?, frac(6)?),
-            30 | 31 => Affine::around(Affine::skew(frac(4)?, frac(6)?), word(8)?, word(10)?),
+            14 | 15 => Affine::translate(word(4, 0)?, word(6, 1)?),
+            16 | 17 => Affine::scale(frac(4, 0)?, frac(6, 1)?),
+            18 | 19 => Affine::around(
+                Affine::scale(frac(4, 0)?, frac(6, 1)?),
+                word(8, 2)?,
+                word(10, 3)?,
+            ),
+            20 | 21 => Affine::scale(frac(4, 0)?, frac(4, 0)?),
+            22 | 23 => Affine::around(
+                Affine::scale(frac(4, 0)?, frac(4, 0)?),
+                word(6, 1)?,
+                word(8, 2)?,
+            ),
+            24 | 25 => Affine::rotate(frac(4, 0)?),
+            26 | 27 => Affine::around(Affine::rotate(frac(4, 0)?), word(6, 1)?, word(8, 2)?),
+            28 | 29 => Affine::skew(frac(4, 0)?, frac(6, 1)?),
+            30 | 31 => Affine::around(
+                Affine::skew(frac(4, 0)?, frac(6, 1)?),
+                word(8, 2)?,
+                word(10, 3)?,
+            ),
             _ => return None,
         })
     }
@@ -1315,9 +1416,13 @@ impl Renderer<'_> {
         let mut stops = Vec::with_capacity(count);
         for i in 0..count {
             let s = at.checked_add(3)?.checked_add(i.checked_mul(size)?)?;
-            let offset = f2dot14(d, s)?;
+            // A VarColorStop's offset and alpha move, in that order.
+            let base = self
+                .t
+                .var_base(variable.then(|| s.checked_add(6)).flatten());
+            let offset = f2dot14(d, s)? + self.t.delta(base, 0) / 16384.0;
             let index = u16_at(d, s.checked_add(2)?)?;
-            let alpha = f2dot14(d, s.checked_add(4)?)?;
+            let alpha = f2dot14(d, s.checked_add(4)?)? + self.t.delta(base, 1) / 16384.0;
             stops.push((offset, self.palette_colour(index, alpha)));
         }
         // Stable, so that two stops at one offset keep their order: a hard
@@ -1602,6 +1707,10 @@ pub(crate) mod tests {
         RotateAround(f32, i16, i16, Box<P>),
         Skew(f32, f32, Box<P>),
         Composite(u8, Box<P>, Box<P>),
+        /// `PaintVarSolid`: palette index, alpha, `varIndexBase`.
+        VarSolid(u16, f32, u32),
+        /// `PaintVarTranslate`: dx, dy, `varIndexBase`.
+        VarTranslate(i16, i16, u32, Box<P>),
     }
 
     fn f2(v: f32) -> [u8; 2] {
@@ -1721,6 +1830,18 @@ pub(crate) mod tests {
                 child(out, 1, source);
                 child(out, 5, backdrop);
             }
+            P::VarSolid(i, a, base) => {
+                out.push(3);
+                out.extend_from_slice(&i.to_be_bytes());
+                out.extend_from_slice(&f2(*a));
+                out.extend_from_slice(&base.to_be_bytes());
+            }
+            P::VarTranslate(dx, dy, base, paint) => {
+                out.extend_from_slice(&[15, 0, 0, 0]);
+                words(out, &[*dx, *dy]);
+                out.extend_from_slice(&base.to_be_bytes());
+                child(out, 1, paint);
+            }
         }
         at
     }
@@ -1732,6 +1853,17 @@ pub(crate) mod tests {
     /// A version-1 `COLR`: `bases` (sorted by glyph), `layers`, and `clips`
     /// (first glyph, last glyph, box).
     fn colr_v1(bases: &[(u16, P)], layers: &[P], clips: &[(u16, u16, [i16; 4])]) -> Vec<u8> {
+        colr_v1_varied(bases, layers, clips, None, None)
+    }
+
+    /// [`colr_v1`] with an `ItemVariationStore` and a `DeltaSetIndexMap`.
+    fn colr_v1_varied(
+        bases: &[(u16, P)],
+        layers: &[P],
+        clips: &[(u16, u16, [i16; 4])],
+        store: Option<Vec<u8>>,
+        map: Option<Vec<u8>>,
+    ) -> Vec<u8> {
         let mut out = vec![0u8; 34];
         out[0..2].copy_from_slice(&1u16.to_be_bytes());
         let base_list = out.len();
@@ -1768,6 +1900,13 @@ pub(crate) mod tests {
         put32(&mut out, 14, base_list);
         put32(&mut out, 18, layer_list);
         put32(&mut out, 22, if clips.is_empty() { 0 } else { clip_list });
+        for (field, table) in [(26, map), (30, store)] {
+            if let Some(table) = table {
+                let at = out.len();
+                out.extend_from_slice(&table);
+                put32(&mut out, field, at);
+            }
+        }
         out
     }
 
@@ -2258,6 +2397,85 @@ pub(crate) mod tests {
         let face = face_with(colr_v1(&[(1, paint)], &[], &[(1, 1, [0, 0, 1000, 1000])]));
         let img = render(&face, 1, 1.0, &Coords::default(), 0).unwrap();
         assert_eq!((img.width, img.height), (1000, 1000));
+    }
+
+    /// A face on the fixture's one variation axis (`wght`, 100 to 700, 400
+    /// the default) whose `COLR` is `colr`.
+    fn variable_face_with(colr: Vec<u8>) -> Face {
+        let cpal = cpal(&[0xFFFF_0000, 0xFF00_FF00, 0xFF00_00FF]);
+        Face::parse(crate::sfnt::tests::build_variable_test_font_with(vec![
+            (*b"COLR", colr),
+            (*b"CPAL", cpal),
+        ]))
+        .unwrap()
+    }
+
+    fn at_weight(face: &Face, wght: f32) -> Coords {
+        face.variation_axes()
+            .unwrap()
+            .normalize_tags(&[(*b"wght", wght)])
+    }
+
+    #[test]
+    fn a_variable_paint_moves_with_the_axes() {
+        // Rows: 100 and 0 (the translate), -127 (the alpha), 50.
+        let store = crate::varstore::one_axis_store(&[100, 0, -127, 50]);
+        let paint = P::VarTranslate(
+            0,
+            0,
+            0,
+            Box::new(P::Glyph(1, Box::new(P::VarSolid(RED, 1.0, 2)))),
+        );
+        let face = variable_face_with(colr_v1_varied(
+            &[(1, paint)],
+            &[],
+            &[],
+            Some(store.clone()),
+            None,
+        ));
+        let draw_at = |wght: f32| render(&face, 1, 0.1, &at_weight(&face, wght), 0).unwrap();
+        // The default instance: where the recipe says, opaque.
+        let img = draw_at(400.0);
+        assert_eq!(place(&img), (10, -10, 10, 10));
+        assert!(img.pixels.iter().all(|&p| p == 0xFFFF_0000));
+        // The heaviest: 100 units right, and alpha down by 127/16384.
+        let img = draw_at(700.0);
+        assert_eq!(place(&img), (20, -10, 10, 10));
+        let a = (((1.0 - 127.0 / 16384.0) * 255.0) + 0.5) as u32;
+        assert!(
+            img.pixels.iter().all(|&p| p == (a << 24 | a << 16)),
+            "{:x}",
+            img.pixels[0]
+        );
+        // Half-way along the axis's upper half: half the delta.
+        assert_eq!(place(&draw_at(550.0)), (15, -10, 10, 10));
+        // A DeltaSetIndexMap sends index 0 to row 3 instead.
+        let map = vec![0, 0x07, 0, 2, 3, 1];
+        let paint = P::VarTranslate(0, 0, 0, square(solid(RED)));
+        let face = variable_face_with(colr_v1_varied(
+            &[(1, paint)],
+            &[],
+            &[],
+            Some(store),
+            Some(map),
+        ));
+        assert_eq!(
+            place(&render(&face, 1, 0.1, &at_weight(&face, 700.0), 0).unwrap()),
+            (15, -10, 10, 10)
+        );
+        // A base of 0xFFFFFFFF varies nothing.
+        let paint = P::VarTranslate(0, 0, NO_VARIATION, square(solid(RED)));
+        let face = variable_face_with(colr_v1_varied(
+            &[(1, paint)],
+            &[],
+            &[],
+            Some(crate::varstore::one_axis_store(&[100])),
+            None,
+        ));
+        assert_eq!(
+            place(&render(&face, 1, 0.1, &at_weight(&face, 700.0), 0).unwrap()),
+            (10, -10, 10, 10)
+        );
     }
 
     /// Every paint format, for the mutation test to break.

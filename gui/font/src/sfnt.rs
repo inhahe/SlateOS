@@ -3510,6 +3510,17 @@ pub(crate) mod tests {
         assemble(&tables)
     }
 
+    /// The fixture on [`build_variable_test_font`]'s one axis, `wght`, with
+    /// `extra` tables and no `gvar`: its outlines hold still, so what varies is
+    /// only what `extra` varies -- a `COLR`, say.
+    pub(crate) fn build_variable_test_font_with(extra: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
+        let mut tables = build_test_tables(TRUE_LSB_3);
+        tables.push((*b"fvar", variable_fvar()));
+        tables.extend(extra);
+        tables.sort_by_key(|(tag, _)| *tag);
+        assemble(&tables)
+    }
+
     /// A `cmap` holding one format-4 subtable with the given
     /// `(start, end, idDelta)` segments, which must be sorted and must end with
     /// the mandatory `0xFFFF` one.

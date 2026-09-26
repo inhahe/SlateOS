@@ -18,10 +18,13 @@
 //! the `EOI` after it. Both reach the same marker, so which is modelled changes
 //! nothing that decoding produces.
 
+use alloc::borrow::Cow;
+use alloc::vec::Vec;
+
 /// The bytes of one datastream, then `FF D9` repeated.
 #[derive(Debug, Clone)]
 pub(super) struct Source<'a> {
-    data: &'a [u8],
+    data: Cow<'a, [u8]>,
     /// The next real byte; `data.len()` once they are all read.
     at: usize,
     /// Bytes left in the current fake marker: 2, 1, or 0 when the next read
@@ -29,17 +32,42 @@ pub(super) struct Source<'a> {
     fake_left: u8,
     /// How often the data has run out (a `JWRN_JPEG_EOF` each time).
     pub(super) ran_out: u32,
+    /// Whether running out is a failure rather than the fake markers: the
+    /// source libtiff builds for old-style JPEG, whose data can end in "no
+    /// more to give" rather than in end-of-image markers.
+    hard_end: bool,
+    /// Set once data was asked for past a hard end.
+    pub(super) overrun: bool,
 }
 
 impl<'a> Source<'a> {
     /// A source over `data`.
     pub(super) const fn new(data: &'a [u8]) -> Self {
         Self {
-            data,
+            data: Cow::Borrowed(data),
             at: 0,
             fake_left: 0,
             ran_out: 0,
+            hard_end: false,
+            overrun: false,
         }
+    }
+
+    /// A source over bytes of its own.
+    pub(super) const fn owned(data: Vec<u8>) -> Source<'static> {
+        Source {
+            data: Cow::Owned(data),
+            at: 0,
+            fake_left: 0,
+            ran_out: 0,
+            hard_end: false,
+            overrun: false,
+        }
+    }
+
+    /// Make running out a failure ([`Self::overrun`]).
+    pub(super) const fn set_hard_end(&mut self) {
+        self.hard_end = true;
     }
 
     /// `INPUT_BYTE`: the next byte, real or fake.
@@ -47,6 +75,9 @@ impl<'a> Source<'a> {
         if let Some(&byte) = self.data.get(self.at) {
             self.at = self.at.saturating_add(1);
             return byte;
+        }
+        if self.hard_end {
+            self.overrun = true;
         }
         if self.fake_left == 0 {
             self.refill();

@@ -923,6 +923,13 @@ fn cursor(v: usize) -> ImageResult<isize> {
 fn strip_of(dir: &Directory, row: u32, plane: u32) -> u32 {
     let strip = row.checked_div(dir.rows_per_strip).unwrap_or(0);
     if dir.planar_config == 2 {
+        // A plane past the samples -- the alpha plane `Matteing` or
+        // `ExtraSamples` promises a picture that has no room for one -- is
+        // reported and then read from strip 0, whose samples the colour
+        // conversions that take no alpha never look at.
+        if plane >= u32::from(dir.samples_per_pixel) {
+            return 0;
+        }
         strip.wrapping_add(plane.wrapping_mul(dir.strips_per_image))
     } else {
         strip

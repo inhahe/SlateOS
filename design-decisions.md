@@ -11328,8 +11328,8 @@ of TIFF are not read yet (listed below) and are refused by name.
 
 ### Not yet read
 
-Old-style JPEG compression, SGI LogLuv and PixarLog: libtiff reads them,
-and this refuses them by name, for now.
+SGI LogLuv and PixarLog: libtiff reads them, and this refuses them by name,
+for now.
 (`YCbCr` and CIE L*a*b* samples followed on the same day, held the same way:
 23 more fixtures, and 12,000 mutants of them without a disagreement. So did
 fax, whose leniency is kept whole -- a bad code word ends only its row, a
@@ -11354,8 +11354,24 @@ followed, with libtiff's edges: a NeXT strip whose data stops at a row's
 start is white from there and reads, a NeXT tile's rows are measured by the
 image's scanline, not the tile's, and ThunderScan has no tile decoder at all.
 libtiff writes neither, so their 27 fixtures come from encoders in the
-generator; 12,000 mutants.) Only
-the first page of a multi-page TIFF is read -- as gdk-pixbuf reads it.
+generator; 12,000 mutants. Then old-style JPEG -- TIFF 6.0's first JPEG
+scheme, superseded in 1995 and written every which way: libtiff reads it by
+building one JPEG out of the file, its tables and frame from
+`JPEGInterchangeFormat` or made up from the tags, then every strip's data
+with restart markers put back between strips, and this builds the same one
+for the libjpeg-turbo port, which gained raw output and libtiff's strict
+source for it (§1318). libtiff's quirks come along: the subsampling is read
+from the JPEG's own frame when the directory is read; a big-endian file
+loses the codec's post-decode step to the byte swap, so each strip after the
+first skips a strip's worth of the JPEG; tiles past libtiff's one-column
+frame show what its buffer last held. 26 fixtures -- three table layouts,
+tiles, planes apart, and those quirks -- and 20,000 mutants, which found two
+things libtiff does that this did not: a strip array the directory lacks
+fails the read, and an alpha plane promised past a separate-planes file's
+samples is read from strip 0 (`TIFFComputeStrip`), whatever the codec.
+Three corners are not modelled, each needing input built to reach it
+(`known-issues.md`).) Only the first page of a multi-page TIFF is read -- as
+gdk-pixbuf reads it.
 
 ### How it is held
 
@@ -11474,6 +11490,17 @@ first copied every block out and back for every scan, and that copying cost
 a large progressive photograph's thumbnail more than its decoding -- slower
 than the decoder it replaced, until this; a progressive thumbnail now takes
 0.56 s against its 0.70 s.
+
+Old-style JPEG in TIFF (§1317) asked three more things of it, all libjpeg's:
+raw output (`raw_data_out`: each component's samples an iMCU row at a time,
+which libtiff packs into TIFF's subsampled `YCbCr`), a decompressor that owns
+its data and tables (libtiff keeps one session across strip reads), and a
+source that fails where libtiff's does -- data run out, a skip, a restart
+marker out of step. The last made reading ahead matter: the decoder read the
+next iMCU row a row early whatever the upsampler, harmless while running out
+could not fail; it now reads it when libjpeg's main controller does -- for
+the last row group of this one if an upsampler needs the rows below,
+otherwise not before its own first row.
 
 ### Lossless JPEG
 

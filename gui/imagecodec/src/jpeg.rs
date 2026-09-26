@@ -82,7 +82,7 @@ mod tables;
 mod upsample;
 
 pub(crate) use color::ColorSpace;
-pub(crate) use decompress::{Decompress, Headed};
+pub(crate) use decompress::{Decompress, Headed, RawPlane};
 pub(crate) use tables::Tables;
 
 /// Whether `bytes` begins with a JPEG signature.

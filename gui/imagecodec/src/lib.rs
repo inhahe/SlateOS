@@ -105,7 +105,7 @@
 //! on free desktops use -- converts it: grey, palette, RGB, CMYK, `YCbCr`
 //! and CIE L*a*b* samples of every depth it takes, strips or tiles, planes
 //! together or apart, uncompressed or PackBits, LZW, Deflate, CCITT fax,
-//! JPEG, NeXT or ThunderScan. See [`tiff`].
+//! JPEG (old style too), NeXT or ThunderScan. See [`tiff`].
 //!
 //! **EXIF orientation is applied**, as Chrome applies it: a JPEG's or PNG's
 //! EXIF saying the picture is on its side turns it, so [`decode`],

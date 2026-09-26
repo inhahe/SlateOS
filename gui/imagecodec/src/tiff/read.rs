@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 use super::dir::{self, Directory, File, compression, photometric};
 use super::fax::{self, Fax};
 use super::lzw::Lzw;
+use super::ojpeg::Ojpeg;
 use super::{next, thunder};
 use crate::jpeg::{ColorSpace, Decompress, Headed, Tables};
 use crate::{ImageError, ImageResult, Limits};
@@ -50,6 +51,8 @@ pub(super) struct Reader<'a> {
     lzw: Option<Lzw>,
     fax: Option<Fax>,
     jpeg: Option<Jpeg>,
+    /// The old-style JPEG codec's state, which spans strips.
+    ojpeg: Option<Ojpeg>,
     /// The codec's one-time setup (`tif_setupdecode`), once it has run.
     setup: Option<bool>,
     /// What a JPEG strip's decode may allocate.
@@ -67,6 +70,7 @@ impl<'a> Reader<'a> {
             lzw: None,
             fax: None,
             jpeg: None,
+            ojpeg: None,
             setup: None,
             limits,
         }
@@ -91,7 +95,10 @@ impl<'a> Reader<'a> {
         if index >= self.dir.strips {
             return Err(ImageError::Malformed("TIFF strip out of range"));
         }
-        let raw = self.fill(index)?;
+        // Old-style JPEG reads the file itself (`TIFF_NOREADRAW`): no strip
+        // is filled, and its byte count is never checked.
+        let ojpeg = self.dir.compression == compression::OJPEG;
+        let raw = if ojpeg { None } else { Some(self.fill(index)?) };
         if let Some(alloc_size) = first_tile {
             let tile_size = self.dir.tile_size().unwrap_or(0);
             if self.dir.compression == compression::NONE {
@@ -115,6 +122,23 @@ impl<'a> Reader<'a> {
         let dest = out
             .get_mut(..size)
             .ok_or(ImageError::Malformed("TIFF strip larger than its buffer"))?;
+        let Some(raw) = raw else {
+            // `OJPEGPreDecode`, `OJPEGDecode` and `OJPEGPostDecode`.
+            let plane = index
+                .checked_div(self.dir.strips_per_image)
+                .and_then(|p| u16::try_from(p).ok())
+                .unwrap_or(0);
+            let codec = self
+                .ojpeg
+                .get_or_insert_with(|| Ojpeg::new(self.dir, self.limits));
+            codec.pre_decode(self.file.data, self.dir, plane, index)?;
+            // A big-endian file's `BitsPerSample`, set after the codec, puts
+            // the byte swap in place of `OJPEGPostDecode` (`_TIFFVSetField`).
+            let swapped = self.file.big_endian
+                && matches!(self.dir.bits_per_sample, 8 | 16 | 24 | 32 | 64 | 128);
+            codec.decode(dest, self.dir, !swapped)?;
+            return if swapped { self.after(dest) } else { Ok(()) };
+        };
         self.run_codec(raw, dest, index)?;
         self.after(dest)
     }

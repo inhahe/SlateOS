@@ -170235,7 +170235,11 @@ Escape returns to the formatted view. `guitk` has no multi-line editor to lend
 (`textedit` is single-line), so the editing stays in this crate.
 
 ### [E] The two text editors draw a file name's control characters raw in the tab and title -- 2026-09-26
-**Status:** OPEN -- `apps/editor/src/main.rs` and `apps/markdowneditor/src/main.rs`,
+**Status:** FIXED (lane E, 2026-09-26) -- `Document::shown_name` in both editors
+renders the name through `pathtext` at every drawing and message site; `name`
+itself stays exact for Save As and the conflict markers. Tests
+`a_documents_name_is_kept_exactly_and_drawn_escaped` in each. Was:
+`apps/editor/src/main.rs` and `apps/markdowneditor/src/main.rs`,
 `shown_file_name` and every use of `Document::name` / the document's `name`.
 
 **In short:** a document's name is one string doing two jobs. It is *used* --

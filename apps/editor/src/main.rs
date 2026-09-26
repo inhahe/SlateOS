@@ -334,6 +334,14 @@ impl Default for Document {
 }
 
 impl Document {
+    /// The name as it is drawn and put into messages (`pathtext`): a control
+    /// character in it escaped. `name` itself stays exact, because it is used
+    /// as well as shown -- Save As suggests it, and a merge writes it into the
+    /// text as a conflict marker.
+    pub fn shown_name(&self) -> String {
+        std::path::Path::new(&self.name).shown().to_string()
+    }
+
     /// Put the caret at `cursor` on `line`, keeping the affinity.
     ///
     /// The one place a hit-test's answer becomes the document's caret, so that
@@ -1828,7 +1836,7 @@ impl EditorState {
         match modified {
             Some(true) => {
                 self.tabs.set_active(idx);
-                let name = self.active_document().name.clone();
+                let name = self.active_document().shown_name();
                 self.question = Some(Question::new(
                     &unsaved::message_for(&[&name]),
                     "Save them before the tab closes?",
@@ -1847,12 +1855,13 @@ impl EditorState {
     /// not, the question is up.
     pub fn request_quit(&mut self) -> bool {
         if self.tabs.iter().any(|d| d.modified) {
-            let names: Vec<&str> = self
+            let shown: Vec<String> = self
                 .tabs
                 .iter()
                 .filter(|d| d.modified)
-                .map(|d| d.name.as_str())
+                .map(Document::shown_name)
                 .collect();
+            let names: Vec<&str> = shown.iter().map(String::as_str).collect();
             self.question = Some(Question::new(
                 &unsaved::message_for(&names),
                 "Save them before the window closes?",
@@ -1910,7 +1919,7 @@ impl EditorState {
             {
                 failed = Some(format!(
                     "Could not save {}: {e}, so the window stays open",
-                    doc.name
+                    doc.shown_name()
                 ));
                 break;
             }
@@ -1935,7 +1944,7 @@ impl EditorState {
         self.open_dialog(purpose);
         self.status = Some(format!(
             "Choose where to save {} before it closes",
-            self.active_document().name
+            self.active_document().shown_name()
         ));
     }
 
@@ -2188,9 +2197,9 @@ impl EditorState {
 
             // Tab title
             let title = if doc.modified {
-                format!("\u{25CF} {}", doc.name) // bullet for modified
+                format!("\u{25CF} {}", doc.shown_name()) // bullet for modified
             } else {
-                doc.name.clone()
+                doc.shown_name()
             };
             tree.text(x + 12.0, top + 9.0, &title, self.palette.text, 12.0);
 
@@ -2761,7 +2770,7 @@ impl EditorState {
         let name = self
             .tabs
             .get(prompt.tab)
-            .map_or("file", |d| d.name.as_str());
+            .map_or_else(|| String::from("file"), Document::shown_name);
 
         let (title, body): (&str, String) = match &prompt.change {
             DiskChange::Deleted => (
@@ -2840,7 +2849,7 @@ impl EditorState {
         let name = self
             .tabs
             .get(prompt.tab)
-            .map_or("file", |d| d.name.as_str());
+            .map_or_else(|| String::from("file"), Document::shown_name);
         let header = format!(
             "Review merge — {name}  ({} conflict(s))",
             review.conflict_count()
@@ -2851,7 +2860,7 @@ impl EditorState {
         let col_w = (dw - 24.0) / 2.0;
         let ours_x = dx + 12.0;
         let theirs_x = dx + 12.0 + col_w;
-        tree.text(ours_x, dy + 40.0, name, self.palette.green, 11.0);
+        tree.text(ours_x, dy + 40.0, &name, self.palette.green, 11.0);
         tree.text(theirs_x, dy + 40.0, "disk", self.palette.red, 11.0);
 
         // Each conflict as a row block.
@@ -2926,7 +2935,7 @@ impl oswindow::app::App for EditorState {
     }
 
     fn title(&self) -> String {
-        format!("{} — Editor", self.active_document().name)
+        format!("{} — Editor", self.active_document().shown_name())
     }
 
     fn initial_size(&self) -> (u32, u32) {
@@ -4163,6 +4172,17 @@ mod caret_tests {
             "a caret in plain view scrolled the line by {}",
             editor.active_document().scroll_px,
         );
+    }
+
+    /// A document's name is kept exactly -- Save As suggests it, a merge
+    /// writes it into the text -- and drawn escaped: a control character in
+    /// a file's name cannot break the tab or the title.
+    #[test]
+    fn a_documents_name_is_kept_exactly_and_drawn_escaped() {
+        let mut doc = Document::new();
+        doc.name = String::from("a\tb.txt");
+        assert_eq!(doc.shown_name(), r"a\011b.txt");
+        assert_eq!(doc.name, "a\tb.txt", "the name itself was changed");
     }
 
     /// `cursor_col` is a byte offset, and every move used to step by one byte.

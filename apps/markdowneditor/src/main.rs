@@ -460,6 +460,14 @@ fn clamp_col(line: &str, byte: usize) -> usize {
 }
 
 impl Document {
+    /// The name as it is drawn and put into messages (`pathtext`): a control
+    /// character in it escaped. `name` itself stays exact, because it is used
+    /// as well as shown -- Save As suggests it, and a merge writes it into the
+    /// text as a conflict marker.
+    pub fn shown_name(&self) -> String {
+        std::path::Path::new(&self.name).shown().to_string()
+    }
+
     /// Create a new empty document.
     pub fn new() -> Self {
         Self {
@@ -4162,9 +4170,9 @@ struct TabSlot {
 /// The label a document's tab shows.
 fn tab_label(doc: &Document) -> String {
     if doc.modified {
-        format!("{} *", doc.name)
+        format!("{} *", doc.shown_name())
     } else {
-        doc.name.clone()
+        doc.shown_name()
     }
 }
 
@@ -5748,7 +5756,7 @@ impl App {
     /// call sites discarded the `Result`, so a save onto a full disk or a
     /// read-only file looked exactly like a save that worked.
     pub fn save_active(&mut self) -> bool {
-        let name = self.active_document().name.clone();
+        let name = self.active_document().shown_name();
         match self.active_document_mut().save() {
             Ok(()) => {
                 self.save_error = None;
@@ -5784,7 +5792,7 @@ impl App {
                     // First failure wins: it is the one the user can act on,
                     // and a later tab's error would otherwise overwrite it.
                     if failure.is_none() {
-                        failure = Some(format!("Auto-save failed for {}: {e}", doc.name));
+                        failure = Some(format!("Auto-save failed for {}: {e}", doc.shown_name()));
                     }
                 }
             }
@@ -6157,7 +6165,7 @@ impl App {
         let name = self
             .documents
             .get(prompt.tab)
-            .map_or("file", |d| d.name.as_str());
+            .map_or_else(|| String::from("file"), Document::shown_name);
         let (title, body): (&str, String) = match &prompt.change {
             DiskChange::Deleted => (
                 "File deleted on disk",
@@ -6211,7 +6219,7 @@ impl App {
         let name = self
             .documents
             .get(prompt.tab)
-            .map_or("file", |d| d.name.as_str());
+            .map_or_else(|| String::from("file"), Document::shown_name);
         self.draw_dialog_frame(
             f,
             width,
@@ -6231,7 +6239,7 @@ impl App {
         let ours_x = dx + 12.0 + REVIEW_CHIPS_W;
         let theirs_x = ours_x + col_w;
         for (x, label, color) in [
-            (ours_x, name, self.palette.green),
+            (ours_x, name.as_str(), self.palette.green),
             (theirs_x, "disk", self.palette.red),
         ] {
             f.push(RenderCommand::Text {
@@ -6423,7 +6431,7 @@ impl App {
         match self.documents.get(idx) {
             Some(doc) if doc.modified => {
                 self.question = Some(Question::new(
-                    &unsaved::message_for(&[&doc.name]),
+                    &unsaved::message_for(&[&doc.shown_name()]),
                     "Save them before the tab closes?",
                     CloseScope::Tab(idx),
                 ));
@@ -6447,12 +6455,13 @@ impl App {
             self.save_every_titled_document();
         }
         if self.documents.iter().any(|d| d.modified) {
-            let names: Vec<&str> = self
+            let shown: Vec<String> = self
                 .documents
                 .iter()
                 .filter(|d| d.modified)
-                .map(|d| d.name.as_str())
+                .map(Document::shown_name)
                 .collect();
+            let names: Vec<&str> = shown.iter().map(String::as_str).collect();
             let question = Question::new(
                 &unsaved::message_for(&names),
                 "Save them before the window closes?",
@@ -6480,7 +6489,7 @@ impl App {
                 && let Err(e) = doc.save()
                 && failure.is_none()
             {
-                failure = Some(format!("Could not save {}: {e}", doc.name));
+                failure = Some(format!("Could not save {}: {e}", doc.shown_name()));
             }
         }
         match failure {
@@ -6514,7 +6523,7 @@ impl App {
             self.ask_where_to_save(SavePurpose::DocumentThenClose(idx), name);
             return;
         }
-        let name = doc.name.clone();
+        let name = doc.shown_name();
         match doc.save() {
             Ok(()) => {
                 self.save_error = None;
@@ -8003,12 +8012,19 @@ mod tests {
 
     // --- Document tests ---
 
-    /// Open puts the picker up instead of quietly making a blank document.
-    ///
-    /// `ToolbarAction::OpenFile` called `self.new_document()`, under the
-    /// comment "In a real app, this would open a file dialog. For now, we
-    /// create a new document." Click Open, get a blank page -- and a tab count
-    /// that went up, so it looked like something had happened.
+    /// A document's name is kept exactly -- Save As suggests it, a merge
+    /// writes it into the text -- and drawn escaped: a control character in
+    /// a file's name cannot break the tab or the title.
+    #[test]
+    fn a_documents_name_is_kept_exactly_and_drawn_escaped() {
+        let mut doc = Document::new();
+        doc.name = String::from("a\tb.txt");
+        assert_eq!(doc.shown_name(), r"a\011b.txt");
+        assert_eq!(doc.name, "a\tb.txt", "the name itself was changed");
+        doc.modified = true;
+        assert_eq!(tab_label(&doc), r"a\011b.txt *");
+    }
+
     /// A file name that is text is shown as it is; one that is not, by its
     /// bytes -- two such names never look the same.
     #[test]
@@ -8041,6 +8057,12 @@ mod tests {
         assert_ne!(shown_a, shown_b, "two names became one");
     }
 
+    /// Open puts the picker up instead of quietly making a blank document.
+    ///
+    /// `ToolbarAction::OpenFile` called `self.new_document()`, under the
+    /// comment "In a real app, this would open a file dialog. For now, we
+    /// create a new document." Click Open, get a blank page -- and a tab count
+    /// that went up, so it looked like something had happened.
     #[test]
     fn open_puts_the_picker_up_rather_than_making_a_new_document() {
         let mut app = App::new(1280.0, 800.0);

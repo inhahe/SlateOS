@@ -24222,6 +24222,23 @@ Against Linux 6.6's kernel/seccomp.c and net/core/filter.c.
   and `prctl`'s seccomp options answering `EINVAL` --
   `B-D-SECCOMP-FLAGS-AND-PRCTL` (new, fixed with it).
 
+**Twenty-eighth pass, 2026-09-26 — `mman.rs` (5 sites), lane D.** Against
+Linux 6.6's mm/mmap.c, mm/mprotect.c, mm/mincore.c and mm/memfd.c.
+
+- **`munmap(NULL, n)`** was `EINVAL`; `do_vmi_munmap` unmaps `[0, n)` and
+  answers 0.  Its range check was missing, so a kernel-half address reached
+  the kernel -- which then unmapped it (lane A's, reported and being fixed).
+- **`mprotect(NULL, n)`** was `EINVAL` before anything; `do_mprotect_pkey`
+  judges the growth flags, the alignment, a zero length (0), the range's end
+  (`ENOMEM`) and only then the prot bits, and a NULL range is the kernel's
+  `ENOMEM`.
+- **`mincore(addr, 0, NULL)`** was `EFAULT`; with no pages nothing is copied,
+  so it is 0.
+- **`memfd_create(NULL, …)`** was right, and the name beside it was not --
+  `B-D-MEMFD-NAME-WAS-A-PATH` (new, fixed with it).
+- `shm_open(NULL, …)` keeps the §303 substitute: glibc reads the name at
+  once and faults.
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24235,13 +24252,13 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-twenty-seven swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
+twenty-eight swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
 `sched.rs`, `mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`,
 `linux_module.rs`, `sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs`, `sysv_sem.rs`,
-`linux_aio_abi.rs` and `linux_seccomp.rs`. That finishes the files at four:
-`pwd.rs`, `dirent.rs` and `signal.rs` needed nothing at their NULLs --
-`pwd.rs`'s database did (`B-D-PWD-KNEW-ONLY-ROOT`). Next are the other files
-at three: `mman.rs` and `resource.rs`.
+`linux_aio_abi.rs`, `linux_seccomp.rs` and `mman.rs`. That finishes the files
+at four: `pwd.rs`, `dirent.rs` and `signal.rs` needed nothing at their NULLs
+-- `pwd.rs`'s database did (`B-D-PWD-KNEW-ONLY-ROOT`). Next is `resource.rs`,
+the last of the files at three.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
@@ -169646,6 +169663,22 @@ already confined was told the call does not exist.
 (`EINVAL`), the gate (`EACCES`), the program pointer (`EINVAL`), then
 `ENOSYS` as before. `PR_GET_SECCOMP` answers the mode, disabled;
 `PR_SET_SECCOMP` is `seccomp()` by `prctl_set_seccomp`'s mapping.
+
+### [D] B-D-MEMFD-NAME-WAS-A-PATH — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/mman.rs`, `memfd_create`.
+
+**What it was.** The name a program gives a memfd is a label -- Linux shows it
+in `/proc` and accepts any bytes in it. Ours was spliced into the path of the
+file behind the descriptor, `/dev/shm/.memfd_<n>_<name>`, so a name with a
+`/` in it was refused with `EINVAL`, and names were limited to 200 bytes of
+Linux's 249. The counter that made the path unique was the process's own, so
+two processes creating memfds at the same moment could pick the same path,
+and the second failed with `EEXIST`.
+
+**Fix.** The name is measured (`EFAULT`, and `EINVAL` past 249 bytes) and
+not used; the path is `/dev/shm/.memfd_<pid>_<n>`, retried past a name
+another process left.
 
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 

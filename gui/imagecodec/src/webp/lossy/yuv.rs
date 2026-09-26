@@ -14,13 +14,19 @@
 //!
 //! * **The conversion is BT.601 studio swing in 14-bit fixed point**
 //!   (libwebp's `src/dsp/yuv.h`): Y' from 16 to 235 and chroma centred on
-//!   128, with libwebp's own constants and rounding.
+//!   128, with libwebp's own constants and rounding -- computed as its SSE2
+//!   code computes it, in 16-bit lanes the compiler can vectorise, which
+//!   equals the scalar formula on every input (tested exhaustively).
+//!
+//! A row is converted at a time: its chroma blended down once, then across
+//! into a row of each pixel's own chroma, then converted in one pass.
 
 use alloc::vec;
 use alloc::vec::Vec;
 
 /// `(v * coeff) >> 8`: libwebp's `MultHi`, an emulation of the SIMD
 /// multiply-high it uses.
+#[cfg(test)]
 #[allow(
     clippy::arithmetic_side_effects,
     reason = "v is a sample and coeff below 2^16, so the product is below 2^24"
@@ -30,6 +36,7 @@ const fn mult_hi(v: i32, coeff: i32) -> i32 {
 }
 
 /// A 14-bit fixed-point channel value to a byte, saturating.
+#[cfg(test)]
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -46,17 +53,60 @@ const fn clip8(v: i32) -> u8 {
     }
 }
 
-/// One pixel from Y'CbCr to `0x00RRGGBB` (libwebp's `VP8YuvToRgb`).
+/// One pixel from Y'CbCr to `0x00RRGGBB` (libwebp's `VP8YuvToRgb`): the
+/// scalar reference [`rgb_lanes`] is held to.
+#[cfg(test)]
 #[allow(
     clippy::arithmetic_side_effects,
     reason = "each term is below 2^16 in magnitude"
 )]
-pub(super) const fn rgb(y: u8, u: u8, v: u8) -> u32 {
+const fn rgb(y: u8, u: u8, v: u8) -> u32 {
     let (y, u, v) = (y as i32, u as i32, v as i32);
     let luma = mult_hi(y, 19077);
     let r = clip8(luma + mult_hi(v, 26149) - 14234);
     let g = clip8(luma - mult_hi(u, 6419) - mult_hi(v, 13320) + 8708);
     let b = clip8(luma + mult_hi(u, 33050) - 17685);
+    ((r as u32) << 16) | ((g as u32) << 8) | b as u32
+}
+
+/// `(x * k) >> 8` as a 16-bit multiply-high: `x` put in a sample's high byte,
+/// the product's high half -- libwebp's SSE2 `_mm_mulhi_epu16`, which is its
+/// scalar `MultHi` exactly.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the product of two 16-bit values shifted right by 16 fits 16 bits"
+)]
+const fn mulhi16(x: u8, k: u16) -> u16 {
+    (((x as u32) << 8).wrapping_mul(k as u32) >> 16) as u16
+}
+
+/// One pixel from Y'CbCr to `0x00RRGGBB` (libwebp's `VP8YuvToRgb`), in
+/// libwebp's SSE2 formulation (`ConvertYUV444ToRGB_SSE2`): 16-bit lanes,
+/// multiply-highs and saturating unsigned arithmetic for blue, which the
+/// compiler can do eight or sixteen pixels at a time. It equals the scalar
+/// formulation on every input -- red and green stay within `i16` (-14234..=30815 and
+/// -10953..=27710 before the shift), blue within `u16`, and clamping after
+/// the shift is `clip8` -- which a test here checks exhaustively.
+#[allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    reason = "each 16-bit value is in the range the doc gives, and each clamped result is a byte"
+)]
+fn rgb_lanes(y: u8, u: u8, v: u8) -> u32 {
+    let y1 = mulhi16(y, 19077) as i16;
+    let r = (y1
+        .wrapping_sub(14234)
+        .wrapping_add(mulhi16(v, 26149) as i16)
+        >> 6)
+        .clamp(0, 255);
+    let g0 = mulhi16(u, 6419).wrapping_add(mulhi16(v, 13320)) as i16;
+    let g = (y1.wrapping_add(8708).wrapping_sub(g0) >> 6).clamp(0, 255);
+    let b = mulhi16(u, 33050)
+        .saturating_add(y1 as u16)
+        .saturating_sub(17685)
+        >> 6;
+    let b = if b > 255 { 255 } else { b };
     ((r as u32) << 16) | ((g as u32) << 8) | b as u32
 }
 
@@ -131,6 +181,9 @@ pub(super) fn to_argb(
     let chroma_width = width.div_ceil(2);
     let mut tu = vec![0u16; chroma_width];
     let mut tv = vec![0u16; chroma_width];
+    // Each output pixel's own chroma, for the row being converted.
+    let mut cu = vec![0u8; width];
+    let mut cv = vec![0u8; width];
     let last = chroma_width.saturating_sub(1);
     for (row, dest) in out.chunks_exact_mut(width.max(1)).enumerate().take(height) {
         let (near_row, far_row) = neighbours(row, height);
@@ -144,37 +197,61 @@ pub(super) fn to_argb(
             v.row(far_row, chroma_width),
             &mut tv,
         );
+        upsample_row(&tu, last, &mut cu);
+        upsample_row(&tv, last, &mut cv);
         let luma = y.row(row, width);
-        let alpha_row = alpha.and_then(|a| a.get(row * width..(row + 1) * width));
-        let across =
-            |near: u16, far: u16| -> u8 { ((u32::from(near) * 3 + u32::from(far) + 8) >> 4) as u8 };
-        // Two output pixels to a chroma column: the even one leans left, the
-        // odd one right, each clamped at the row's ends (`neighbours`).
-        for (k, pair) in dest.chunks_mut(2).enumerate() {
-            let at = |t: &[u16], i: usize| t.get(i).copied().unwrap_or(0);
-            let (un, ul, ur) = (
-                at(&tu, k),
-                at(&tu, k.saturating_sub(1)),
-                at(&tu, (k + 1).min(last)),
-            );
-            let (vn, vl, vr) = (
-                at(&tv, k),
-                at(&tv, k.saturating_sub(1)),
-                at(&tv, (k + 1).min(last)),
-            );
-            let chroma = [
-                (across(un, ul), across(vn, vl)),
-                (across(un, ur), across(vn, vr)),
-            ];
-            for (i, (pixel, (cu, cv))) in pair.iter_mut().zip(chroma).enumerate() {
-                let x = 2 * k + i;
-                let a = alpha_row.and_then(|a| a.get(x)).copied().unwrap_or(0xFF);
-                let l = luma.get(x).copied().unwrap_or(0);
-                *pixel = (u32::from(a) << 24) | rgb(l, cu, cv);
+        for (((pixel, &l), &u), &v) in dest.iter_mut().zip(luma).zip(&cu).zip(&cv) {
+            *pixel = 0xFF00_0000 | rgb_lanes(l, u, v);
+        }
+        if let Some(alpha_row) = alpha.and_then(|a| a.get(row * width..(row + 1) * width)) {
+            for (pixel, &a) in dest.iter_mut().zip(alpha_row) {
+                *pixel = (*pixel & 0x00FF_FFFF) | (u32::from(a) << 24);
             }
         }
     }
     out
+}
+
+/// A row's chroma across: from `t` (a chroma row blended down,
+/// [`blend_rows`]), each output pixel's own sample, `(3 * near + far + 8) >>
+/// 4` -- two output pixels to a chroma column, the even one leaning left and
+/// the odd one right, each clamped at the row's ends (`neighbours`).
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    reason = "each blend is at most 4 * 1020 + 8, and the quotient is a sample"
+)]
+fn upsample_row(t: &[u16], last: usize, out: &mut [u8]) {
+    let across = |near: u16, far: u16| ((u32::from(near) * 3 + u32::from(far) + 8) >> 4) as u8;
+    let at = |i: usize| t.get(i).copied().unwrap_or(0);
+    // The columns with a neighbour on each side, from three views of the row.
+    if let (Some(mid), Some(left), Some(right), Some(body)) = (
+        t.get(1..last),
+        t.get(..last.saturating_sub(1)),
+        t.get(2..=last),
+        out.get_mut(2..2 * last),
+    ) {
+        for (((pair, &n), &l), &r) in body.chunks_exact_mut(2).zip(mid).zip(left).zip(right) {
+            if let [even, odd] = pair {
+                *even = across(n, l);
+                *odd = across(n, r);
+            }
+        }
+    }
+    // The first column and the last, clamped.
+    for k in [0, last] {
+        let near = at(k);
+        let pair = [
+            across(near, at(k.saturating_sub(1))),
+            across(near, at((k + 1).min(last))),
+        ];
+        let start = 2 * k;
+        if let Some(slots) = out.get_mut(start..(start + 2).min(out.len())) {
+            for (slot, value) in slots.iter_mut().zip(pair) {
+                *slot = value;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -214,6 +291,17 @@ mod tests {
             for c in 0u32..256 {
                 let edge = (3 * a + c + 2) >> 2;
                 assert_eq!(edge, (9 * a + 3 * a + 3 * c + c + 8) >> 4);
+            }
+        }
+    }
+
+    #[test]
+    fn the_sse2_formulation_is_the_scalar_one_on_every_input() {
+        for y in 0..=255u8 {
+            for u in 0..=255u8 {
+                for v in 0..=255u8 {
+                    assert_eq!(rgb_lanes(y, u, v), rgb(y, u, v), "{y} {u} {v}");
+                }
             }
         }
     }

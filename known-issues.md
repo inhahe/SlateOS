@@ -165290,20 +165290,21 @@ lossless screenshots and artwork.
 
 ### [F] Lossy WebP decodes at about half libwebp's speed -- 2026-09-25
 
-**Status:** OPEN — lane F's; tech debt, not a bug. Partly paid: the three
-steps below are done, and the gap is now about a third rather than a half.
+**Status:** OPEN — lane F's; tech debt, not a bug. Mostly paid: the steps
+below are done, and the gap is now 5 to 12 per cent rather than a half.
 
 **In short:** a large lossy WebP -- the common kind, a photograph -- took
 about twice as long to open here as in a browser. Measured in the decoding
 thread's CPU cycles (wall time is useless on a machine shared with QEMU and
-five other sessions), it now takes 3.93 billion cycles for a 4000x5333
-picture against libwebp's 2.99 (it was 5.03), and 0.40 for 2000x1500 against
+five other sessions), it now takes 3.36 billion cycles for a 4000x5333
+picture against libwebp's 2.99 (it was 5.03), and 0.31 for 2000x1500 against
 0.30 (was 0.57). The pixels are libwebp's to the bit, corrupt files
-included; only the speed is behind. Lossy animations inherit it.
+included; only the speed is a little behind. Lossy animations inherit it.
 
-**Where.** `gui/imagecodec/src/webp/lossy/`. The time now splits roughly:
-coefficient tokens 36%, loop filter 25%, conversion to RGB 21%, prediction
-and inverse transform 18%.
+**Where.** `gui/imagecodec/src/webp/lossy/`. Before the last step the time
+split roughly: coefficient tokens 36%, loop filter 25%, conversion to RGB
+21%, prediction and inverse transform 18%; the conversion has since shrunk
+the most.
 
 **Done** (each measured on its own, each held to the fixtures and to 5,856
 corrupted and truncated files decoded exactly as libwebp decodes them):
@@ -165317,13 +165318,16 @@ corrupted and truncated files decoded exactly as libwebp decodes them):
 3. The token loop's probabilities banded by position, one lookup a
    coefficient (libwebp's `bands_ptr`), and the boolean decoder's refill one
    eight-byte load.
+4. The conversion itself in libwebp's SSE2 formulation -- 16-bit
+   multiply-highs, saturating unsigned blue -- held equal to the scalar one
+   on all 2^24 inputs by a test, over whole rows the compiler vectorises; and
+   the horizontal chroma upsampling over three shifted views of the row, the
+   two end columns apart.
 
 **The proper fix, the rest:** libwebp's remaining edge is SIMD it writes by
-hand -- its SSE2 inverse transform and predictors, its SSE2 conversion
-(eight pixels at a time, 16-bit multiply-high), its 16-byte-wide filter.
-The Rust equivalents are the same shapes the filter now has: fixed-size
-16-bit lane arrays the compiler can vectorise, first for the conversion,
-then the inverse transform.
+hand for the inverse transform and the predictors. The Rust equivalent is
+the shape the filter and the conversion now have: fixed-size 16-bit lane
+arrays the compiler can vectorise.
 
 **How to see it.** `target/perfbench` (a scratch harness: the working crate
 against a snapshot copy, interleaved, the minimum of N runs in thread

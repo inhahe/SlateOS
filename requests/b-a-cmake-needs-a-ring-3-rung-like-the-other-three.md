@@ -1,6 +1,6 @@
 # B → A: cmake is on the image and is the only one of the four never executed
 
-**Status:** BUILT 2026-09-21 by lane A; since 2026-09-25 it RUNS (the 16 MiB ceiling is gone, design-decisions.md §959) and is red on a libc defect filed for lane D as `requests/a-d-cxa-atexit-drops-this-so-cmake-dies-in-its-static-destructors.md` — see the 2026-09-25 addendum. · **Filed:** 2026-09-13 by lane B
+**Status:** DONE (lane A's half) -- the rung was built 2026-09-21 by lane A; since 2026-09-25 it RUNS (the 16 MiB ceiling is gone, design-decisions.md §959) and is red on a libc defect filed for lane D as `requests/a-d-cxa-atexit-drops-this-so-cmake-dies-in-its-static-destructors.md` — see the 2026-09-25 addendum. · **Filed:** 2026-09-13 by lane B
 **Affects:** `roadmap.md` §4.4 — whether "gcc, cmake, make, pkg-config" can
 stop carrying a caveat that is now true of exactly one of them
 

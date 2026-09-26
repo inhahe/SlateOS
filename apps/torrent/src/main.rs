@@ -60,6 +60,14 @@ use std::fmt;
         reason = "used by the download session, which lands after it"
     )
 )]
+mod peer;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "used by the download session, which lands after it"
+    )
+)]
 mod storage;
 #[cfg_attr(
     not(test),

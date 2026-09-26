@@ -991,7 +991,9 @@ fn launch(
     #[cfg(not(target_os = "none"))]
     let entry: u64 = 0;
 
-    // Create the kernel thread.
+    // Create the kernel thread, counted first: it may end before the
+    // syscall returns (`LIVE_THREADS`).
+    live_threads_add(&LIVE_THREADS);
     let ret = syscall::syscall3(
         syscall::SYS_THREAD_CREATE,
         entry,
@@ -999,6 +1001,8 @@ fn launch(
         u64::MAX, // default priority
     );
     if ret < 0 {
+        // It never ran, so it can never be the last; the result is moot.
+        let _ = live_threads_remove(&LIVE_THREADS);
         let _ = crate::mman::munmap(mem, plan.map_size);
         return Err(errno::EAGAIN);
     }
@@ -1318,12 +1322,55 @@ pub extern "C" fn pthread_getcpuclockid(
     0
 }
 
+/// Threads of this process that have not ended: the initial thread, plus
+/// each one `pthread_create` started, less each one that reached
+/// `pthread_exit` -- glibc's `__nptl_nthreads`.
+///
+/// The thread that takes it to zero ends the process as `exit(0)` would, as
+/// POSIX requires of `pthread_exit` ("as if the implementation called
+/// exit() with a zero argument at thread termination time"): `atexit`
+/// handlers and static destructors run, and streams are flushed.  Until
+/// 2026-09-26 the kernel ended the process when its last thread ended, and
+/// none of that happened -- a program whose `main` called `pthread_exit` lost
+/// its threads' buffered output.
+///
+/// Every thread this libc starts goes through [`launch`] (`pthread_create`'s),
+/// which counts it *before* `SYS_THREAD_CREATE`, so a new thread that ends at
+/// once can never take the count below the threads still running.  `fork`'s
+/// child has one thread and says so ([`reset_live_threads_after_fork`]).
+static LIVE_THREADS: AtomicUsize = AtomicUsize::new(1);
+
+/// Count one more thread, about to be started.
+fn live_threads_add(count: &AtomicUsize) {
+    count.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Count one thread fewer: `true` when it was the last.
+///
+/// Saturating, so a count that is somehow already zero stays there rather
+/// than wrapping to "many threads left"; the caller then treats the thread as
+/// the last, which is what a zero count means.
+fn live_threads_remove(count: &AtomicUsize) -> bool {
+    let before = count
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            Some(n.saturating_sub(1))
+        })
+        .unwrap_or_else(|n| n);
+    before <= 1
+}
+
+/// `fork`'s child: the one thread that called `fork`.
+pub(crate) fn reset_live_threads_after_fork() {
+    LIVE_THREADS.store(1, Ordering::Release);
+}
+
 /// Terminate the calling thread.
 ///
 /// Runs the calling thread's `thread_local` destructors, then its
 /// thread-specific-data destructors -- glibc's order -- then issues
 /// `SYS_THREAD_EXIT` with the specified return value.  If this is the last
-/// thread in the process, the process exits.
+/// thread in the process, the process ends as `exit(0)` would
+/// ([`LIVE_THREADS`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
     // C++ `thread_local` destructors first, as glibc's `start_thread` calls
@@ -1336,6 +1383,12 @@ pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
     let self_tid = pthread_self();
     tsd_thread_cleanup();
     thread_name_release(self_tid);
+
+    // The last thread ends the process, and as `exit(0)`: see
+    // `LIVE_THREADS`.  Before anything below gives this thread's stack away.
+    if live_threads_remove(&LIVE_THREADS) {
+        crate::crt::exit(0);
+    }
 
     // Decide how this thread's stack is reclaimed.  The `compare_exchange`
     // arbitrates against a concurrent `pthread_detach`: exactly one party
@@ -8187,5 +8240,34 @@ mod tests {
         assert_eq!(unsafe { (*crate::perthread::current()).tid }, a);
         let b = std::thread::spawn(current_tid).join().unwrap();
         assert_ne!(a, b);
+    }
+
+    // -- the last thread's pthread_exit is exit(0) --
+
+    #[test]
+    fn only_the_last_thread_is_the_last() {
+        let n = AtomicUsize::new(1);
+        live_threads_add(&n);
+        live_threads_add(&n);
+        assert!(!live_threads_remove(&n), "three running, one ends");
+        assert!(!live_threads_remove(&n), "two running, one ends");
+        assert!(live_threads_remove(&n), "the initial thread's count, last");
+    }
+
+    #[test]
+    fn a_thread_that_ends_before_its_creator_resumes_is_not_the_last() {
+        // The creator counts it before the system call, so the order in
+        // which the two run cannot make the new thread look like the last.
+        let n = AtomicUsize::new(1);
+        live_threads_add(&n);
+        assert!(!live_threads_remove(&n), "the creator is still running");
+        assert_eq!(n.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn a_zero_count_does_not_wrap() {
+        let n = AtomicUsize::new(0);
+        assert!(live_threads_remove(&n));
+        assert_eq!(n.load(Ordering::Acquire), 0, "saturates at zero");
     }
 }

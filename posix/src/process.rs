@@ -942,6 +942,8 @@ pub extern "C" fn fork() -> PidT {
         // `current_tid` to fetch.
         // SAFETY: `current()` is this (now single) thread's block.
         unsafe { (*crate::perthread::current()).tid = 0 };
+        // One thread: this one.  Its `pthread_exit` is the last.
+        crate::pthread::reset_live_threads_after_fork();
         crate::malloc::unlock_after_fork_child();
     } else {
         crate::malloc::unlock_after_fork_parent();

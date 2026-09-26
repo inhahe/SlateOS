@@ -6823,9 +6823,9 @@ pub fn build_exec_test_elf(elf_addr: u64, elf_len: u32) -> alloc::vec::Vec<u8> {
 /// | `0x13` | `struct_size = 108` | `-3` | not a multiple of 8 |
 /// | `0x14` | `struct_size = 4104` | `-3` | above `SPAWN_EX2_MAX_SIZE` |
 /// | `0x15` | `struct_size = 104` | `-101` | a short struct is legal, and the missing tail is zero-filled — an unzeroed `cap_mode` would have been rejected |
-/// | `0x16` | `struct_size = 128` | `-101` | the exact current size is accepted |
-/// | `0x17` | `struct_size = 136`, tail `= 0` | `-101` | a *newer* caller with an all-zero tail is accepted |
-/// | `0x18` | `struct_size = 136`, tail `= 1` | `-3` | a non-zero unknown field is refused, never ignored |
+/// | `0x16` | `struct_size = 144` | `-101` | the exact current size is accepted |
+/// | `0x17` | `struct_size = 152`, tail `= 0` | `-101` | a *newer* caller with an all-zero tail is accepted |
+/// | `0x18` | `struct_size = 152`, tail `= 1` | `-3` | a non-zero unknown field is refused, never ignored |
 /// | `0x19` | `cap_mode = 2` | `-3` | an unknown mode is not clamped to a known one |
 /// | `0x1A` | `cap_mode = 1`, `cap_ptr = 0`, `cap_count = 3` | `-3` | a null array with a count is a caller bug, not "no capabilities" |
 /// | `0x1B` | `cap_mode = 1`, `cap_ptr = 0`, `cap_count = 0` | `-101` | …but the two spellings of "nothing" agree |
@@ -6834,6 +6834,15 @@ pub fn build_exec_test_elf(elf_addr: u64, elf_len: u32) -> alloc::vec::Vec<u8> {
 /// | `0x1E` | entry `_reserved[0] = 1` | `-3` | the reserved field is validated, not skipped |
 /// | `0x1F` | a well-formed entry | `-101` | …and a clean entry passes the decode |
 /// | `0x20` | `cap_mode = 0` with a junk `cap_ptr`/`cap_count` | `-101` | inherit-all ignores the array entirely |
+/// | `0x21` | `cwd_ptr` unmapped, `cwd_len = 0` | `-101` | a zero length inherits the parent's directory and the pointer is never read |
+/// | `0x22` | `cwd_ptr = 0`, `cwd_len = 1` | `-3` | a null path with a length is a caller bug, not "inherit" |
+/// | `0x23` | `cwd_ptr` unmapped, `cwd_len = 4096` | `-3` | over `CWD_MAX_LEN` is refused *before* the pointer is read (a read first would say -101) |
+/// | `0x24` | `cwd` = `"a"` | `-3` | a relative directory is refused, not resolved or ignored |
+/// | `0x25` | `cwd` = `"/"` | `-101` | …and a canonical one passes the gate |
+///
+/// The size probes (`0x16`-`0x18`) moved when `cwd_ptr`/`cwd_len` made the
+/// struct 144 bytes (§960, 2026-09-25): aimed at the old 128, "the unknown
+/// tail" was `cwd_ptr`, a known field that is accepted, and `0x18` failed.
 ///
 /// # Deliberately out of scope
 ///
@@ -6873,12 +6882,20 @@ pub fn build_spawn_ex2_abi_test_elf() -> alloc::vec::Vec<u8> {
     const F_CAP_MODE: u32 = 104;
     const F_CAP_PTR: u32 = 112;
     const F_CAP_COUNT: u32 = 120;
+    /// `cwd_ptr` and `cwd_len`, the two fields the working-directory change
+    /// (design-decisions.md §960) added -- which made the struct 144 bytes.
+    const F_CWD_PTR: u32 = 128;
+    const F_CWD_LEN: u32 = 136;
     /// The first byte past the struct — the "unknown tail" a newer caller
-    /// would have written a new field into.
-    const F_TAIL: u32 = 128;
+    /// would have written a new field into.  It was 128 until `cwd_ptr` took
+    /// that slot; a probe left aimed there then wrote a *known* field, which
+    /// is accepted, and 0x18 failed on every boot until this moved.
+    const F_TAIL: u32 = 144;
     /// A scratch `CapEntryInfo`: `resource_type` and `_reserved[3]` share this
     /// qword, then `rights`, then `resource_id` (both left zero).
     const F_ENTRY: u32 = 160;
+    /// A scratch path for the `cwd` probes: one byte, then zeroes.
+    const F_PATH: u32 = 200;
 
     let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
 
@@ -6963,17 +6980,17 @@ pub fn build_spawn_ex2_abi_test_elf() -> alloc::vec::Vec<u8> {
     // zero there is rejected.
     set(&mut code, F_SIZE, 104);
     probe(&mut code, EFAULT, 0x15);
-    set(&mut code, F_SIZE, 128);
+    set(&mut code, F_SIZE, 144);
     probe(&mut code, EFAULT, 0x16);
 
     // --- the unknown tail ---------------------------------------------------
-    set(&mut code, F_SIZE, 136);
+    set(&mut code, F_SIZE, 152);
     set(&mut code, F_TAIL, 0);
     probe(&mut code, EFAULT, 0x17);
     set(&mut code, F_TAIL, 1);
     probe(&mut code, EINVAL, 0x18);
     set(&mut code, F_TAIL, 0);
-    set(&mut code, F_SIZE, 128);
+    set(&mut code, F_SIZE, 144);
 
     // --- cap_mode dispatch --------------------------------------------------
     set(&mut code, F_CAP_MODE, 2);
@@ -7007,6 +7024,28 @@ pub fn build_spawn_ex2_abi_test_elf() -> alloc::vec::Vec<u8> {
     set(&mut code, F_CAP_PTR, UNMAPPED);
     set(&mut code, F_CAP_COUNT, 7);
     probe(&mut code, EFAULT, 0x20);
+
+    // --- the working directory ----------------------------------------------
+    // Checked at the gate, before the ELF read, so an accepted `cwd` still ends
+    // in -101 and a refused one in -3.  Inherit-all stays on from above, so the
+    // capability array plays no part.
+    set(&mut code, F_CWD_PTR, UNMAPPED);
+    set(&mut code, F_CWD_LEN, 0);
+    probe(&mut code, EFAULT, 0x21);
+    set(&mut code, F_CWD_PTR, 0);
+    set(&mut code, F_CWD_LEN, 1);
+    probe(&mut code, EINVAL, 0x22);
+    set(&mut code, F_CWD_PTR, UNMAPPED);
+    set(&mut code, F_CWD_LEN, 4096); // CWD_MAX_LEN + 1
+    probe(&mut code, EINVAL, 0x23);
+    lea_rax(&mut code, F_PATH);
+    store(&mut code, F_CWD_PTR);
+    set(&mut code, F_CWD_LEN, 1);
+    set(&mut code, F_PATH, u64::from(b'a'));
+    probe(&mut code, EINVAL, 0x24);
+    set(&mut code, F_PATH, u64::from(b'/'));
+    probe(&mut code, EFAULT, 0x25);
+    set(&mut code, F_CWD_LEN, 0);
 
     // --- every probe agreed -------------------------------------------------
     code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi

@@ -23904,10 +23904,10 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
 /// kernel-side test can execute.  This runs it.
 ///
 /// The probe program is [`elf::build_spawn_ex2_abi_test_elf`]; its doc
-/// comment lists all sixteen probes and what each one proves.  Every probe
+/// comment lists all twenty-one probes and what each one proves.  Every probe
 /// compares the syscall's return against an expected error and exits on the
 /// first disagreement with its own code, so a non-zero exit names the exact
-/// rule that broke.  `exit(0)` means all sixteen agreed.
+/// rule that broke.  `exit(0)` means all twenty-one agreed.
 ///
 /// The child is given **no capabilities**, because it never gets far enough
 /// to need one: `SYS_PROCESS_SPAWN_EX2` is not capability-gated (neither is
@@ -23941,7 +23941,7 @@ pub fn self_test_spawn_ex2_abi() -> KernelResult<()> {
         }
     };
 
-    // Sixteen syscalls, none of which block, so the probe runs to exit within
+    // Twenty-one syscalls, none of which block, so the probe runs to exit within
     // its first slice; the yields are the same belt-and-braces the other ring-3
     // tests use for the scheduler to actually reap it.
     crate::sched::yield_now();
@@ -23973,8 +23973,8 @@ pub fn self_test_spawn_ex2_abi() -> KernelResult<()> {
     }
 
     serial_println!(
-        "[spawn]   SYS_PROCESS_SPAWN_EX2 argument ABI (ring 3: 16 probes — size gate, \
-         unknown tail, cap_mode, CapEntryInfo): OK"
+        "[spawn]   SYS_PROCESS_SPAWN_EX2 argument ABI (ring 3: 21 probes — size gate, \
+         unknown tail, cap_mode, CapEntryInfo, cwd): OK"
     );
     Ok(())
 }

@@ -3,6 +3,10 @@ r"""Check the auto-hinter in `gui/font/src/hint/` against FreeType's own.
     python gui/font/tools/hint_oracle.py FONT [--sizes 9,10,...] [--gids 1,2,...]
                                               [--show N] [--no-build]
                                               [--freetype DIR]
+                                              [--var wght=700,...]
+
+`--var` compares a variable font at another instance than its default one,
+given in user-space axis values; both sides measure the face there.
 
 Needs `freetype-py` (`pip install freetype-py`), whose wheels bundle FreeType
 2.13.2 built with HarfBuzz -- the release and configuration the port follows.
@@ -87,11 +91,12 @@ def exe(target):
     sys.exit(f"hint_dump not found in {examples}")
 
 
-def mine(path, sizes, gids, target):
+def mine(path, sizes, gids, target, var=None):
     """This crate's points for `gids` (every glyph when `None`, which
     `hint_dump` does itself: a large font's ids would overflow a Windows
-    command line)."""
-    cmd = [exe(target), path, ",".join(str(s) for s in sizes)] + [str(g) for g in gids or []]
+    command line), at the variable instance `var` names if any."""
+    cmd = [exe(target)] + (["--var", var] if var else [])
+    cmd += [path, ",".join(str(s) for s in sizes)] + [str(g) for g in gids or []]
     out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
     table = {}
     for line in out.splitlines():
@@ -169,13 +174,23 @@ def main():
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--target", default=TARGET)
     ap.add_argument("--freetype", help="directory holding FreeType's autofit sources")
+    ap.add_argument("--var", help="a variable font's instance, as tag=value,... in user-space units")
     args = ap.parse_args()
     if not args.no_build:
         build(args.target)
     sizes = [float(s) for s in args.sizes.split(",")]
     face = freetype.Face(args.font)
+    if args.var:
+        # The same instance in FreeType, set before anything is loaded so its
+        # auto-hinter measures the face there.
+        wanted = {tag: float(value) for tag, value in (p.split("=") for p in args.var.split(","))}
+        axes = face.get_variation_info().axes
+        unknown = set(wanted) - {a.tag for a in axes}
+        if unknown:
+            sys.exit(f"--var: the face has no axis {sorted(unknown)}")
+        face.set_var_design_coords([wanted.get(a.tag, a.default) for a in axes])
     asked = [int(g) for g in args.gids.split(",")] if args.gids else None
-    table = mine(args.font, sizes, asked, args.target)
+    table = mine(args.font, sizes, asked, args.target, args.var)
     gids = asked if asked is not None else list(range(face.num_glyphs))
 
     # The sorting first: a glyph in the wrong style is hinted to the wrong

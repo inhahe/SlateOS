@@ -58,6 +58,7 @@ mod emoji_tables;
 mod fallback;
 #[cfg(test)]
 mod fixture;
+mod ftcalc;
 mod gpos;
 pub mod gsub;
 mod gvar;

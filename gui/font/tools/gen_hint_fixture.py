@@ -48,6 +48,12 @@ It is written twice: as TrueType (quadratic, clockwise) and as CFF (cubic,
 counter-clockwise), since the two reach the hinter through different loaders
 and point conventions. For each, at every size in `SIZES`, every glyph's
 hinted points are recorded in 1/64 pixel, both coordinates.
+
+And the TrueType face once more as a variable font (`build_var`): Regular and
+a Bold master whose every point, accent offset, scaled component and bearing
+moves, so that at weight 610 each delta lands on a fraction -- once with
+`HVAR` and once without, since only without it does `gvar` move a glyph's
+origin. Its answers are taken at that weight, at `VAR_SIZES`.
 """
 
 import io
@@ -322,8 +328,12 @@ def draw_all(pen_for, g):
     return out
 
 
-def build_ttf(g):
-    order = [".notdef"] + list(g) + ["eacute"]
+def build_ttf(g, bold=False):
+    """The face as TrueType -- or, with `bold`, the Bold master of the
+    variable face (see `build_var`): every point moved, the accent's offset
+    and the scaled component's too, and each bearing 7 units short of the
+    glyph's left edge, so that the left phantom point moves."""
+    order = [".notdef"] + list(g) + ["eacute", "o.small"]
     fb = FontBuilder(UPEM, isTTF=True)
     fb.setupGlyphOrder(order)
     cmap = {cp: name for name, (cp, _) in g.items() if cp is not None}
@@ -339,18 +349,71 @@ def build_ttf(g):
             draw(Cu2QuPen(pen, 1.0, reverse_direction=True))
         else:
             draw(pen)
-        glyf[name] = pen.glyph()
+        glyph = pen.glyph()
+        if bold:
+            # Moved point by point after the drawing, so the masters keep one
+            # structure whatever quadratic conversion made of a curve.
+            glyph.coordinates.transform(((1.06, 0), (0, 1.02)))
+            glyph.coordinates.translate((5, -3))
+            glyph.coordinates.toInt()
+        glyf[name] = glyph
     # A composite: e with the acute lifted over it.
     pen = TTGlyphPen(glyf)
     pen.addComponent("e", (1, 0, 0, 1, 0, 0))
-    pen.addComponent("acute", (1, 0, 0, 1, 60, 0))
+    pen.addComponent("acute", (1, 0, 0, 1, 75, 8) if bold else (1, 0, 0, 1, 60, 0))
     glyf["eacute"] = pen.glyph()
+    # And a scaled one: a small o, placed by an offset that also varies.
+    pen = TTGlyphPen(glyf)
+    pen.addComponent("o", (0.6, 0, 0, 0.6, 126, 305) if bold else (0.6, 0, 0, 0.6, 120, 300))
+    glyf["o.small"] = pen.glyph()
     fb.setupGlyf(glyf)
-    fb.setupHorizontalMetrics(fb_metrics(g, order))
+    glyf_table = fb.font["glyf"]
+
+    def left_edge(name):
+        glyph = glyf_table[name]
+        glyph.recalcBounds(glyf_table)
+        return getattr(glyph, "xMin", 0)
+
+    metrics = fb_metrics(g, order)
+    metrics["o.small"] = (600, left_edge("o.small"))
+    if bold:
+        metrics = {name: (600, left_edge(name) - 7) for name in order}
+    fb.setupHorizontalMetrics(metrics)
     fb.addOpenTypeFeatures(FEATURES)
     finish(fb, "HintFixture")
     buf = io.BytesIO()
     fb.save(buf)
+    return buf.getvalue(), order
+
+
+def build_var(g, hvar):
+    """The TrueType face made variable along `wght`, 400 to 700: the face
+    itself the Regular master and `build_ttf(bold=True)` the Bold. At weight
+    610 (0.7 of the way, 0.69999695 in FreeType's 16.16) every delta lands on
+    a fraction -- the accent's offset moves 10.4999 units, which FreeType
+    rounds to 10 where 0.7 in `F2Dot14` would make 11 -- so the points the
+    hinter reads are FreeType's only if they are rounded as its loader rounds
+    them. Without `HVAR`, FreeType also moves each glyph by its left phantom
+    point's delta; with it, not."""
+    from fontTools import varLib
+    from fontTools.designspaceLib import AxisDescriptor, DesignSpaceDocument, SourceDescriptor
+    from fontTools.ttLib import TTFont
+
+    ds = DesignSpaceDocument()
+    axis = AxisDescriptor()
+    axis.tag, axis.name = "wght", "Weight"
+    axis.minimum, axis.default, axis.maximum = 400, 400, 700
+    ds.addAxis(axis)
+    order = None
+    for weight, bold in ((400, False), (700, True)):
+        data, order = build_ttf(g, bold=bold)
+        src = SourceDescriptor()
+        src.font = TTFont(io.BytesIO(data))
+        src.location = {"Weight": weight}
+        ds.addSource(src)
+    vf, _, _ = varLib.build(ds, exclude=[] if hvar else ["HVAR"])
+    buf = io.BytesIO()
+    vf.save(buf)
     return buf.getvalue(), order
 
 
@@ -416,14 +479,21 @@ def finish(fb, family):
     fb.setupPost()
 
 
-def expectations(data, order):
+# The variable face's instance, and the sizes its answers are kept at.
+VAR_WEIGHT = 610
+VAR_SIZES = [10, 13, 16, 20]
+
+
+def expectations(data, order, weight=None, sizes=None):
     path = os.path.join(os.environ.get("TEMP", "/tmp"), "hint_fixture.bin")
     with open(path, "wb") as f:
         f.write(data)
     face = freetype.Face(path)
+    if weight is not None:
+        face.set_var_design_coords([weight])
     rows = []
     flags = freetype.FT_LOAD_NO_BITMAP | freetype.FT_LOAD_FORCE_AUTOHINT | freetype.FT_LOAD_TARGET_LIGHT
-    for px in SIZES:
+    for px in sizes or SIZES:
         face.set_char_size(0, int(round(px * 64)), 72, 72)
         for gid, name in enumerate(order):
             face.load_glyph(gid, flags)
@@ -451,10 +521,23 @@ def main():
         w("//! Generated by `gui/font/tools/gen_hint_fixture.py` with FreeType\n")
         w(f"//! {'.'.join(str(v) for v in freetype.version())} (freetype-py). Do not edit: run the script\n")
         w("//! instead. See that script for what each glyph is drawn to test.\n\n")
-        for label, data, order in (("TTF", ttf, ttf_order), ("OTF", otf, otf_order)):
-            w(f"/// The face as {'TrueType' if label == 'TTF' else 'CFF'}.\n")
+        var, var_order = build_var(g, hvar=True)
+        var_nohvar, _ = build_var(g, hvar=False)
+        what = {
+            "TTF": "The face as TrueType.",
+            "OTF": "The face as CFF.",
+            "VAR": f"The TrueType face made variable, with `HVAR`; answers at weight {VAR_WEIGHT}.",
+            "VAR_NOHVAR": f"The same without `HVAR`, so `gvar` moves each glyph's origin; at weight {VAR_WEIGHT}.",
+        }
+        for label, data, order, weight in (
+            ("TTF", ttf, ttf_order, None),
+            ("OTF", otf, otf_order, None),
+            ("VAR", var, var_order, VAR_WEIGHT),
+            ("VAR_NOHVAR", var_nohvar, var_order, VAR_WEIGHT),
+        ):
+            w(f"/// {what[label]}\n")
             w(f"pub(super) static {label}: [u8; {len(data)}] = [{rust_bytes(data)}];\n\n")
-            rows = expectations(data, order)
+            rows = expectations(data, order, weight, VAR_SIZES if weight else None)
             # x and y in turn in one flat array, not as pairs: rustfmt packs a
             # list of numbers into lines but gives every tuple a line of its
             # own, which would triple the file.
@@ -466,7 +549,7 @@ def main():
                 w(f"    ({float(px)}, {gid}, \"{name}\", &[{flat}]),\n")
             w("];\n\n")
     rustfmt(out)
-    print(f"{len(ttf)} + {len(otf)} bytes of font -> {out}")
+    print(f"{len(ttf)} + {len(otf)} + {len(var)} + {len(var_nohvar)} bytes of font -> {out}")
 
 
 if __name__ == "__main__":

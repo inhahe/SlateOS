@@ -11992,6 +11992,24 @@ does, and a tool compares the two glyph by glyph.
   auto-hinter's debug dumps (`FT_DEBUG_AUTOFIT`) and comparing edge tables;
   that single difference moved Malgun Gothic's stems 3/64 pixel on 2,925
   glyphs.
+* **A variable font's points are FreeType's too, added 2026-09-26.** At a
+  non-default instance the hinter reads each glyph as FreeType's TrueType
+  loader hands it to FreeType's hinter, not as this crate draws it: the
+  instance normalized in 16.16 as `ft_var_to_normalized` does (a
+  `Coords` now carries that beside HarfBuzz's `F2Dot14`), each `gvar` delta
+  summed in FreeType's fixed point and rounded to a whole unit per point
+  (`TT_Vary_Apply_Glyph_Deltas`), component offsets likewise, scaled
+  components through `FT_MulFix`, and the glyph moved by its left phantom
+  point -- which `gvar` moves only in a face without `HVAR`
+  (`Face::load_unscaled`, `Gvar::deltas_fixed`, `ftcalc`). Drawing keeps
+  its exact, HarfBuzz-following outlines; only the hinter's input changed.
+  Before, 31% of Noto Sans's glyphs at a bold condensed instance differed
+  from FreeType's, a few by a whole pixel; now none do, at fifteen
+  instances of eight variable fonts (Segoe UI Variable with `avar` and
+  `opsz`, Bahnschrift, Cascadia Code, Sitka, Reem Kufi, Noto Sans, Open
+  Sans, JetBrains Mono). The fixture gained a variable face, with `HVAR`
+  and without, whose weight-610 deltas all land on fractions; both halves
+  were mutation-checked (2.14 coordinates, and phantom moves under `HVAR`).
 * **Checked against FreeType.** `tools/hint_oracle.py` runs FreeType (from
   `freetype-py`) and this crate over every glyph of a face at eleven sizes
   and compares every hinted point, both coordinates, to the 64th of a pixel,

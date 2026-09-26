@@ -54,6 +54,12 @@
 //! `apply_deltas_to_points` — because HarfBuzz is this crate's oracle
 //! elsewhere and a glyph that differs from it by a unit is indistinguishable
 //! from a glyph that differs from it by a bug.
+//!
+//! One reader follows FreeType instead: [`Gvar::deltas_fixed`], FreeType's
+//! `TT_Vary_Apply_Glyph_Deltas` in its own 16.16 arithmetic, for the
+//! auto-hinter ([`crate::hint`]), which is a port of FreeType's and must see
+//! the points FreeType's loader gives it. The two agree to a fraction of a
+//! unit; the hinter rounds each point to a unit, where the fraction decides.
 
 use alloc::vec::Vec;
 
@@ -303,6 +309,311 @@ impl Gvar {
         }
         Some(out)
     }
+
+    /// The summed delta, 16.16, for every point of `gid` at the FreeType
+    /// coordinates `coords` (16.16, [`crate::var::Coords::fixed`]), computed
+    /// as FreeType's `TT_Vary_Apply_Glyph_Deltas` computes it: each tuple's
+    /// scale by `ft_var_apply_tuple`, each delta scaled by `FT_MulFix`, the
+    /// points a tuple does not name interpolated in 16.16 by
+    /// `tt_interpolate_deltas`. For the auto-hinter, which must see the points
+    /// FreeType's loader gives FreeType's; [`deltas`](Self::deltas) follows
+    /// HarfBuzz for everything else.
+    ///
+    /// `points` are the glyph's points in whole font units, *with* the four
+    /// phantom points at the end -- for a composite, one point per component
+    /// (its offset) and then the phantoms; `ends` the contours' exclusive
+    /// ends over the rest. `None` where the glyph does not vary or its data
+    /// cannot be read.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "16.16 values of 16-bit font units and deltas: under 2^31 each, and               a sum over at most 4096 tuples stays under 2^43 -- far inside i64;               point indices stay below the point count"
+    )]
+    pub(crate) fn deltas_fixed(
+        &self,
+        data: &[u8],
+        gid: u16,
+        coords: &[i32],
+        points: &[(i64, i64)],
+        ends: &[usize],
+    ) -> Option<Vec<(i64, i64)>> {
+        use crate::ftcalc::mul_fix;
+        let span = self.glyph_span(data, gid)?;
+        let g = data.get(span.off..span.off.checked_add(span.len)?)?;
+        let total = points.len();
+        let count_word = u16_at(g, 0)?;
+        let tuple_count = usize::from(count_word & TUPLE_COUNT_MASK);
+        if tuple_count == 0 || tuple_count > MAX_TUPLES {
+            return None;
+        }
+        let mut serial = usize::from(u16_at(g, 2)?);
+        let shared_points = if count_word & SHARED_POINT_NUMBERS != 0 {
+            Some(read_packed_points(g, &mut serial, total)?)
+        } else {
+            None
+        };
+        let org: Vec<(i64, i64)> = points.iter().map(|&(x, y)| (x << 16, y << 16)).collect();
+        let mut sum = alloc::vec![(0i64, 0i64); total];
+        let mut header = 4usize;
+        for _ in 0..tuple_count {
+            let data_size = usize::from(u16_at(g, header)?);
+            let index = u16_at(g, header.checked_add(2)?)?;
+            let mut h = header.checked_add(4)?;
+            let peak = if index & EMBEDDED_PEAK_TUPLE != 0 {
+                let t = read_tuple(g, h, self.axis_count)?;
+                h = h.checked_add(self.axis_count.checked_mul(2)?)?;
+                t
+            } else {
+                self.shared_tuple(data, usize::from(index & TUPLE_INDEX_MASK))?
+            };
+            let region = if index & INTERMEDIATE_REGION != 0 {
+                let start = read_tuple(g, h, self.axis_count)?;
+                h = h.checked_add(self.axis_count.checked_mul(2)?)?;
+                let end = read_tuple(g, h, self.axis_count)?;
+                h = h.checked_add(self.axis_count.checked_mul(2)?)?;
+                Some((start, end))
+            } else {
+                None
+            };
+            header = h;
+            let tuple_end = serial.checked_add(data_size)?;
+            let apply = ft_apply_tuple(&peak, region.as_ref(), coords);
+            if apply != 0 {
+                let mut p = serial;
+                let set = if index & PRIVATE_POINT_NUMBERS != 0 {
+                    read_packed_points(g, &mut p, total)?
+                } else {
+                    shared_points.clone().unwrap_or(PointSet::All)
+                };
+                let named = match &set {
+                    PointSet::All => total,
+                    PointSet::Some(list) => list.len(),
+                };
+                let xs = read_packed_deltas(g, &mut p, named)?;
+                let ys = read_packed_deltas(g, &mut p, named)?;
+                let scaled = |d: i16| mul_fix(i64::from(d) << 16, apply);
+                match &set {
+                    PointSet::All => {
+                        for (j, slot) in sum.iter_mut().enumerate() {
+                            slot.0 += scaled(*xs.get(j)?);
+                            slot.1 += scaled(*ys.get(j)?);
+                        }
+                    }
+                    PointSet::Some(list) => {
+                        // A named point's delta added to where it stands, the
+                        // rest interpolated from those, then the difference
+                        // from the original taken as this tuple's delta.
+                        let mut out = org.clone();
+                        let mut has = alloc::vec![false; total];
+                        for (k, &idx) in list.iter().enumerate() {
+                            let i = usize::from(idx);
+                            let (Some(o), Some(f)) = (out.get_mut(i), has.get_mut(i)) else {
+                                continue;
+                            };
+                            *f = true;
+                            o.0 += scaled(*xs.get(k)?);
+                            o.1 += scaled(*ys.get(k)?);
+                        }
+                        ft_interpolate(ends, &mut out, &org, &has)?;
+                        for ((slot, o), g0) in sum.iter_mut().zip(&out).zip(&org) {
+                            slot.0 += o.0 - g0.0;
+                            slot.1 += o.1 - g0.1;
+                        }
+                    }
+                }
+            }
+            serial = tuple_end;
+        }
+        Some(sum)
+    }
+}
+
+/// How much of a tuple applies at the FreeType coordinates `coords`, 16.16:
+/// `ft_var_apply_tuple`. Unlike [`scalar`] (HarfBuzz's), a coordinate of 0
+/// ends the tuple before its region is looked at, and a malformed region is
+/// not set aside.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "16.16 values of 16-bit font units and deltas: under 2^31 each, and               a sum over at most 4096 tuples stays under 2^43 -- far inside i64;               point indices stay below the point count"
+)]
+fn ft_apply_tuple(peak: &[i16], region: Option<&(Vec<i16>, Vec<i16>)>, coords: &[i32]) -> i64 {
+    use crate::ftcalc::{f2dot14_to_fixed, mul_div};
+    let mut apply: i64 = 0x10000;
+    for (i, &pk) in peak.iter().enumerate() {
+        let tc = f2dot14_to_fixed(pk);
+        if tc == 0 {
+            continue;
+        }
+        let nc = i64::from(coords.get(i).copied().unwrap_or(0));
+        if nc == 0 {
+            return 0;
+        }
+        if nc == tc {
+            continue;
+        }
+        match region {
+            None => {
+                if nc < tc.min(0) || nc > tc.max(0) {
+                    return 0;
+                }
+                apply = mul_div(apply, nc, tc);
+            }
+            Some((start, end)) => {
+                let (Some(&s), Some(&e)) = (start.get(i), end.get(i)) else {
+                    return 0;
+                };
+                let (s, e) = (f2dot14_to_fixed(s), f2dot14_to_fixed(e));
+                if nc <= s || nc >= e {
+                    return 0;
+                }
+                apply = if nc < tc {
+                    mul_div(apply, nc - s, tc - s)
+                } else {
+                    mul_div(apply, e - nc, e - tc)
+                };
+            }
+        }
+    }
+    apply
+}
+
+/// Interpolate, contour by contour, the points a tuple did not name, from
+/// the named ones either side: `tt_interpolate_deltas`, in 16.16. `out`
+/// holds each point's position, moved for the named ones; `org` where each
+/// was. A contour with one named point moves whole with it.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "16.16 values of 16-bit font units and deltas: under 2^31 each, and               a sum over at most 4096 tuples stays under 2^43 -- far inside i64;               point indices stay below the point count"
+)]
+fn ft_interpolate(
+    ends: &[usize],
+    out: &mut [(i64, i64)],
+    org: &[(i64, i64)],
+    has: &[bool],
+) -> Option<()> {
+    let named = |i: usize| has.get(i).copied().unwrap_or(false);
+    let mut point = 0usize;
+    for &end in ends {
+        let Some(end_point) = end.checked_sub(1) else {
+            continue;
+        };
+        let first_point = point;
+        while point <= end_point && !named(point) {
+            point += 1;
+        }
+        if point <= end_point {
+            let first_delta = point;
+            let mut cur_delta = point;
+            point += 1;
+            while point <= end_point {
+                if named(point) {
+                    ft_delta_interpolate(cur_delta + 1, point - 1, cur_delta, point, org, out)?;
+                    cur_delta = point;
+                }
+                point += 1;
+            }
+            if cur_delta == first_delta {
+                ft_delta_shift(first_point, end_point, cur_delta, org, out)?;
+            } else {
+                ft_delta_interpolate(cur_delta + 1, end_point, cur_delta, first_delta, org, out)?;
+                if first_delta > 0 {
+                    ft_delta_interpolate(
+                        first_point,
+                        first_delta - 1,
+                        cur_delta,
+                        first_delta,
+                        org,
+                        out,
+                    )?;
+                }
+            }
+        }
+        // The next contour starts after this one, wherever the search ended.
+        point = point.max(end);
+    }
+    Some(())
+}
+
+/// Move points `p1..=p2`, all but `reference`, as far as `reference` moved:
+/// `tt_delta_shift`.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "16.16 values of 16-bit font units and deltas: under 2^31 each, and               a sum over at most 4096 tuples stays under 2^43 -- far inside i64;               point indices stay below the point count"
+)]
+fn ft_delta_shift(
+    p1: usize,
+    p2: usize,
+    reference: usize,
+    org: &[(i64, i64)],
+    out: &mut [(i64, i64)],
+) -> Option<()> {
+    let (o, r) = (*out.get(reference)?, *org.get(reference)?);
+    let delta = (o.0 - r.0, o.1 - r.1);
+    if delta == (0, 0) {
+        return Some(());
+    }
+    for p in (p1..reference).chain(reference + 1..=p2) {
+        let slot = out.get_mut(p)?;
+        slot.0 += delta.0;
+        slot.1 += delta.1;
+    }
+    Some(())
+}
+
+/// Interpolate points `p1..=p2` between two named ones, following the nearer
+/// outside them: `tt_delta_interpolate`, each coordinate on its own. Where
+/// the named points share a coordinate but moved differently, their
+/// neighbours stay where they were.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "16.16 values of 16-bit font units and deltas: under 2^31 each, and               a sum over at most 4096 tuples stays under 2^43 -- far inside i64;               point indices stay below the point count"
+)]
+fn ft_delta_interpolate(
+    p1: usize,
+    p2: usize,
+    ref1: usize,
+    ref2: usize,
+    org: &[(i64, i64)],
+    out: &mut [(i64, i64)],
+) -> Option<()> {
+    use crate::ftcalc::{div_fix, mul_fix};
+    if p1 > p2 {
+        return Some(());
+    }
+    let pick = |v: (i64, i64), dim: usize| if dim == 0 { v.0 } else { v.1 };
+    for dim in 0..2 {
+        let (mut r1, mut r2) = (ref1, ref2);
+        if pick(*org.get(r1)?, dim) > pick(*org.get(r2)?, dim) {
+            core::mem::swap(&mut r1, &mut r2);
+        }
+        let (in1, in2) = (pick(*org.get(r1)?, dim), pick(*org.get(r2)?, dim));
+        let (out1, out2) = (pick(*out.get(r1)?, dim), pick(*out.get(r2)?, dim));
+        let (d1, d2) = (out1 - in1, out2 - in2);
+        if in1 == in2 && out1 != out2 {
+            continue;
+        }
+        let scale = if in1 == in2 {
+            0
+        } else {
+            div_fix(out2 - out1, in2 - in1)
+        };
+        for p in p1..=p2 {
+            let o = pick(*org.get(p)?, dim);
+            let moved = if o <= in1 {
+                o + d1
+            } else if o >= in2 {
+                o + d2
+            } else {
+                out1 + mul_fix(o - in1, scale)
+            };
+            let slot = out.get_mut(p)?;
+            if dim == 0 {
+                slot.0 = moved;
+            } else {
+                slot.1 = moved;
+            }
+        }
+    }
+    Some(())
 }
 
 /// Which points a tuple names.

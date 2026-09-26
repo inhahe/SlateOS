@@ -474,11 +474,6 @@ impl Exact {
         Self { x, y }
     }
 
-    /// An outline's point, widened.
-    fn from_point(p: Point) -> Self {
-        Self::new(f64::from(p.x), f64::from(p.y))
-    }
-
     /// `self` transformed by `t`, exactly.
     fn transformed(self, t: &Transform) -> Self {
         let (a, b, c, d) = (
@@ -523,43 +518,10 @@ pub(crate) struct TaggedOutline {
 }
 
 impl TaggedOutline {
-    /// Append one simple glyph's points as contours.
-    fn push_glyph(&mut self, glyph: &SimpleGlyph) {
-        let base = self.points.len();
-        self.points
-            .extend(glyph.points.iter().map(|p| Exact::from_point(p.p)));
-        self.tags.extend(
-            glyph
-                .points
-                .iter()
-                .map(|p| if p.on_curve { Tag::On } else { Tag::Conic }),
-        );
-        self.ends
-            .extend(glyph.ends.iter().map(|&end| base.saturating_add(end)));
-    }
-
-    /// Append `other`, transformed by `t` -- a composite's component.
-    fn extend_transformed(&mut self, other: &Self, t: &Transform) {
-        let base = self.points.len();
-        self.points
-            .extend(other.points.iter().map(|&p| p.transformed(t)));
-        self.tags.extend_from_slice(&other.tags);
-        self.ends
-            .extend(other.ends.iter().map(|&end| base.saturating_add(end)));
-    }
-
     /// Transform every point by `t` -- a CFF face's `FontMatrix`.
     pub(crate) fn transform(&mut self, t: &Transform) {
         for p in &mut self.points {
             *p = p.transformed(t);
-        }
-    }
-
-    /// Move every point right by `dx`: [`Outline::translate_x`]'s twin.
-    fn translate_x(&mut self, dx: f32) {
-        let dx = f64::from(dx);
-        for p in &mut self.points {
-            p.x += dx;
         }
     }
 
@@ -3031,15 +2993,24 @@ impl Face {
     /// A glyph's stored points at a variable-font instance, tagged on- or
     /// off-curve: the form the auto-hinter reads. See [`TaggedOutline`].
     ///
-    /// Placed exactly where [`outline_at`](Self::outline_at) places the path --
-    /// the same side-bearing shift, the same `gvar` deltas, the same composite
-    /// transforms -- so that [`TaggedOutline::to_path`] on the result draws
-    /// the same glyph. A CFF glyph's are the points FreeType's CFF loader
-    /// stores, exactly: see [`CffPoints`].
+    /// The points FreeType's loaders hand FreeType's auto-hinter, exactly --
+    /// in whole font units, as `FT_LOAD_NO_SCALE` loads them. A `glyf`
+    /// glyph's come from [`load_unscaled`](Self::load_unscaled), FreeType's
+    /// TrueType loader ported to the bit: at a variable instance each point
+    /// moves by its summed `gvar` delta rounded to a unit, a composite's
+    /// component offsets likewise, a scaled component's points by
+    /// `FT_MulFix`, and the whole glyph by its left phantom point. That can
+    /// sit a fraction of a unit from [`outline_at`](Self::outline_at)'s exact
+    /// path, and the hinter needs FreeType's, not the exact one: a unit's
+    /// rounding decides where a hinted stem lands. At the default instance
+    /// the two agree wherever no component is scaled. A CFF glyph's are the
+    /// points FreeType's CFF loader stores: see [`CffPoints`].
     ///
     /// # Errors
     ///
-    /// As [`outline_at`](Self::outline_at).
+    /// As [`outline_at`](Self::outline_at), and FreeType's
+    /// `Invalid_Composite` for a component matched to a point that is not
+    /// there.
     pub(crate) fn tagged_outline_at(
         &self,
         gid: u16,
@@ -3047,11 +3018,18 @@ impl Face {
     ) -> Result<TaggedOutline, SfntError> {
         match &self.outlines {
             Outlines::Glyf { .. } => {
-                let gvar = self.gvar.as_ref().filter(|_| !coords.is_default());
-                let mut out = TaggedOutline::default();
-                let shift = self.tagged_into(gvar, gid, coords.as_slice(), &mut out, 0)?;
-                out.translate_x(shift);
-                Ok(out)
+                if gid >= self.num_glyphs {
+                    return Err(SfntError::GlyphOutOfRange);
+                }
+                let var = self
+                    .gvar
+                    .as_ref()
+                    .filter(|_| !coords.is_default_fixed())
+                    .map(|g| (g, coords.fixed()));
+                let mut out = Unscaled::default();
+                let pp1 = self.load_unscaled(var, gid, &mut out, 0)?;
+                // `TT_Load_Glyph`: the origin moved to the left phantom point.
+                Ok(out.into_tagged(pp1))
             }
             Outlines::Cff(cff) => {
                 // As `outline`: `maxp`'s count is the one trusted.
@@ -3065,90 +3043,163 @@ impl Face {
         }
     }
 
-    /// [`outline_into_at`](Self::outline_into_at) for points: one glyph's
-    /// tagged points, varied by `gvar` when there is one, returning how far
-    /// the finished glyph moves right to sit on its phantom point.
-    fn tagged_into(
+    /// One `glyf` glyph as FreeType's `load_truetype_glyph` loads it with
+    /// `FT_LOAD_NO_SCALE`, appended to `out`; the answer is the loader's left
+    /// phantom point afterwards (`pp1.x`), which the finished glyph is moved
+    /// by.
+    ///
+    /// `var` is the face's `gvar` with FreeType's 16.16 coordinates, `None`
+    /// at the default instance. There each point moves by
+    /// `FT_fixedToInt` of its summed delta ([`Gvar::deltas_fixed`]), a
+    /// composite's offset components likewise -- and the phantom points too,
+    /// unless the face has `HVAR`, whose advances FreeType takes instead
+    /// (`TT_Vary_Apply_Glyph_Deltas`). A composite's components are placed
+    /// by `TT_Process_Composite_Component`: scaled by `FT_MulFix`, an offset
+    /// scaled too when the component asks, a point-matched one placed by
+    /// the points already loaded. Each component's phantom points are the
+    /// parent's again after it, unless it is flagged `USE_MY_METRICS`.
+    ///
+    /// [`Gvar::deltas_fixed`]: gvar::Gvar::deltas_fixed
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "font units within 16 bits and their deltas, under 2^31 even \
+                  after a 16.16 scale -- far inside i64; point counts are \
+                  bounded by the glyph data read"
+    )]
+    fn load_unscaled(
         &self,
-        gvar: Option<&gvar::Gvar>,
+        var: Option<(&gvar::Gvar, &[i32])>,
         gid: u16,
-        coords: &[i16],
-        out: &mut TaggedOutline,
+        out: &mut Unscaled,
         depth: u8,
-    ) -> Result<f32, SfntError> {
+    ) -> Result<i64, SfntError> {
+        use crate::ftcalc::fixed_to_int;
         if depth > MAX_COMPOSITE_DEPTH {
             return Err(SfntError::CompositeTooDeep);
         }
-        let Some(span) = self.glyph_span(gid)? else {
-            return Ok(0.0);
+        // With `HVAR`, FreeType moves no phantom point by `gvar`.
+        let hvar = self.hvar.is_some();
+        let lsb = i64::from(self.left_side_bearing(gid).unwrap_or(0));
+        let glyph = match self.glyph_span(gid)? {
+            Some(span) => {
+                let end = span.off.checked_add(span.len).ok_or(SfntError::TooShort)?;
+                self.data
+                    .get(span.off..end)
+                    .ok_or(SfntError::MalformedTable("glyf"))?
+            }
+            None => &[][..],
         };
-        let end = span.off.checked_add(span.len).ok_or(SfntError::TooShort)?;
-        let g = self
-            .data
-            .get(span.off..end)
-            .ok_or(SfntError::MalformedTable("glyf"))?;
-        let num_contours = i16_at(g, 0).ok_or(SfntError::MalformedTable("glyf"))?;
-        let body = g.get(10..).ok_or(SfntError::MalformedTable("glyf"))?;
-        if num_contours >= 0 {
-            let n = usize::try_from(num_contours).map_err(|_| SfntError::MalformedTable("glyf"))?;
-            let Some(mut glyph) = read_simple_glyph(body, n)? else {
-                return Ok(self.glyf_shift(gid));
-            };
-            let mut phantom = 0.0;
-            if let Some(gvar) = gvar
-                && let Some(deltas) =
-                    gvar.deltas(&self.data, gid, coords, &glyph.points, &glyph.ends)
-            {
-                for (pt, &(dx, dy)) in glyph.points.iter_mut().zip(deltas.iter()) {
-                    pt.p.x += dx;
-                    pt.p.y += dy;
-                }
-                phantom = deltas.get(glyph.points.len()).map_or(0.0, |&(dx, _)| dx);
-            }
-            out.push_glyph(&glyph);
-            Ok(self.glyf_shift(gid) - phantom)
+        let num_contours = if glyph.is_empty() {
+            0
         } else {
-            let mut components = read_components(body)?;
-            let mut phantom = 0.0;
-            if let Some(gvar) = gvar {
-                // As in `outline_into_at`: one variation point per component,
-                // and only an offset-placed component may move.
-                let placements: Vec<GlyphPoint> = components
-                    .iter()
-                    .map(|c| GlyphPoint {
-                        p: Point::new(c.xform.e, c.xform.f),
-                        on_curve: true,
-                    })
-                    .collect();
-                if let Some(deltas) = gvar.deltas(&self.data, gid, coords, &placements, &[]) {
-                    for (c, &(dx, dy)) in components.iter_mut().zip(deltas.iter()) {
-                        if c.offset_placed {
-                            c.xform.e += dx;
-                            c.xform.f += dy;
-                        }
-                    }
-                    phantom = deltas.get(components.len()).map_or(0.0, |&(dx, _)| dx);
-                }
+            i16_at(glyph, 0).ok_or(SfntError::MalformedTable("glyf"))?
+        };
+        // `tt_loader_set_pp`: the header's `xMin` less the `hmtx` bearing,
+        // an empty glyph's `xMin` taken as 0.
+        let x_min = if num_contours == 0 {
+            0
+        } else {
+            i64::from(i16_at(glyph, 2).ok_or(SfntError::MalformedTable("glyf"))?)
+        };
+        let mut pp1 = x_min - lsb;
+        // The phantom points as `gvar` numbers them after a glyph's own:
+        // only the first is read back, and no delta of theirs depends on
+        // where they stand.
+        let phantoms = [(pp1, 0), (0, 0), (0, 0), (0, 0)];
+        let vary_pp1 = |pp1: &mut i64, deltas: &[(i64, i64)], first: usize| {
+            if !hvar && let Some(&(dx, _)) = deltas.get(first) {
+                *pp1 += fixed_to_int(dx);
             }
-            // Placed by its own phantom point unless a component says to use
-            // its metrics instead (the last that does), as in `outline_into_at`.
-            let mut shift = self.glyf_shift(gid) - phantom;
-            for c in components {
-                let mut child = TaggedOutline::default();
-                let child_shift = self.tagged_into(
-                    gvar,
-                    c.gid,
-                    coords,
-                    &mut child,
-                    depth.checked_add(1).ok_or(SfntError::CompositeTooDeep)?,
-                )?;
-                if c.use_my_metrics {
-                    shift = child_shift;
-                }
-                out.extend_transformed(&child, &c.xform);
+        };
+
+        if num_contours == 0 {
+            if let Some((gvar, coords)) = var
+                && let Some(d) = gvar.deltas_fixed(&self.data, gid, coords, &phantoms, &[])
+            {
+                vary_pp1(&mut pp1, &d, 0);
             }
-            Ok(shift)
+            return Ok(pp1);
         }
+        let body = glyph.get(10..).ok_or(SfntError::MalformedTable("glyf"))?;
+        if num_contours > 0 {
+            let n = usize::try_from(num_contours).map_err(|_| SfntError::MalformedTable("glyf"))?;
+            let Some(simple) = read_simple_glyph(body, n)? else {
+                return Ok(pp1);
+            };
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "a `glyf` coordinate is a 16-bit integer, widened to f32 exactly"
+            )]
+            let mut points: Vec<(i64, i64)> = simple
+                .points
+                .iter()
+                .map(|p| (p.p.x as i64, p.p.y as i64))
+                .collect();
+            let count = points.len();
+            if let Some((gvar, coords)) = var {
+                let mut all = points.clone();
+                all.extend(phantoms);
+                if let Some(d) = gvar.deltas_fixed(&self.data, gid, coords, &all, &simple.ends) {
+                    for (p, &(dx, dy)) in points.iter_mut().zip(&d) {
+                        p.0 += fixed_to_int(dx);
+                        p.1 += fixed_to_int(dy);
+                    }
+                    vary_pp1(&mut pp1, &d, count);
+                }
+            }
+            let base = out.points.len();
+            out.points.extend(points);
+            out.tags.extend(
+                simple
+                    .points
+                    .iter()
+                    .map(|p| if p.on_curve { Tag::On } else { Tag::Conic }),
+            );
+            out.ends.extend(simple.ends.iter().map(|&e| base + e));
+            return Ok(pp1);
+        }
+
+        // A composite.
+        let mut components = read_components_raw(body)?;
+        let start_point = out.points.len();
+        if let Some((gvar, coords)) = var {
+            // One point per component, its offset (or, for a point-matched
+            // one, its two point numbers, which a delta never moves), each
+            // its own contour; then the phantoms.
+            let mut all: Vec<(i64, i64)> = components.iter().map(|c| (c.arg1, c.arg2)).collect();
+            let ends: Vec<usize> = (1..=all.len()).collect();
+            all.extend(phantoms);
+            if let Some(d) = gvar.deltas_fixed(&self.data, gid, coords, &all, &ends) {
+                for (c, &(dx, dy)) in components.iter_mut().zip(&d) {
+                    if c.flags & COMPONENT_ARGS_ARE_XY_VALUES != 0 {
+                        // `(FT_Int16)`, as FreeType stores the moved offset.
+                        c.arg1 = i64::from(wrap_i16(c.arg1 + fixed_to_int(dx)));
+                        c.arg2 = i64::from(wrap_i16(c.arg2 + fixed_to_int(dy)));
+                    }
+                }
+                vary_pp1(&mut pp1, &d, components.len());
+            }
+        }
+        for c in &components {
+            let parent_pp1 = pp1;
+            let num_base_points = out.points.len();
+            let child_pp1 = self.load_unscaled(
+                var,
+                c.gid,
+                out,
+                depth.checked_add(1).ok_or(SfntError::CompositeTooDeep)?,
+            )?;
+            pp1 = if c.flags & COMPONENT_USE_MY_METRICS != 0 {
+                child_pp1
+            } else {
+                parent_pp1
+            };
+            if out.points.len() == num_base_points {
+                continue;
+            }
+            place_component(out, c, start_point, num_base_points)?;
+        }
+        Ok(pp1)
     }
 
     /// Build one glyph at `coords`, returning how far the finished glyph moves
@@ -3311,6 +3362,205 @@ pub(crate) struct Component {
     /// `USE_MY_METRICS`: the composite is placed by this component's metrics,
     /// not its own. See [`Face::drawn_shift`].
     pub(crate) use_my_metrics: bool,
+}
+
+/// `ARGS_ARE_XY_VALUES`: a component placed by an offset, not by matching
+/// two points.
+const COMPONENT_ARGS_ARE_XY_VALUES: u16 = 0x0002;
+/// `WE_HAVE_A_SCALE`, `WE_HAVE_AN_X_AND_Y_SCALE`, `WE_HAVE_A_TWO_BY_TWO`.
+const COMPONENT_SCALED: u16 = 0x0008 | 0x0040 | 0x0080;
+/// `USE_MY_METRICS`.
+const COMPONENT_USE_MY_METRICS: u16 = 0x0200;
+/// `SCALED_COMPONENT_OFFSET`: the offset is scaled with the component.
+const COMPONENT_SCALED_OFFSET: u16 = 0x0800;
+
+/// One component of a composite as FreeType's `TT_Load_Composite_Glyph`
+/// reads it: its arguments as integers (signed offsets, or unsigned point
+/// numbers), its transform in 16.16.
+#[derive(Clone, Copy, Debug)]
+struct RawComponent {
+    flags: u16,
+    gid: u16,
+    arg1: i64,
+    arg2: i64,
+    /// `x' = xx*x + xy*y`, `y' = yx*x + yy*y`, each 16.16.
+    xx: i64,
+    yx: i64,
+    xy: i64,
+    yy: i64,
+}
+
+/// A composite's components, read as [`RawComponent`]s.
+fn read_components_raw(data: &[u8]) -> Result<Vec<RawComponent>, SfntError> {
+    const ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
+    const WE_HAVE_A_SCALE: u16 = 0x0008;
+    const MORE_COMPONENTS: u16 = 0x0020;
+    const WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
+    const WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
+    const MAX_COMPONENTS: usize = 4096;
+    let bad = || SfntError::MalformedTable("glyf");
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    let short = |pos: usize| i16_at(data, pos).map(|v| i64::from(v) << 2).ok_or(bad());
+    loop {
+        let flags = u16_at(data, pos).ok_or(bad())?;
+        let gid = u16_at(data, pos.checked_add(2).ok_or(SfntError::TooShort)?).ok_or(bad())?;
+        pos = pos.checked_add(4).ok_or(SfntError::TooShort)?;
+        let xy_values = flags & COMPONENT_ARGS_ARE_XY_VALUES != 0;
+        let (arg1, arg2) = if flags & ARG_1_AND_2_ARE_WORDS != 0 {
+            let a = u16_at(data, pos).ok_or(bad())?;
+            let b = u16_at(data, pos.checked_add(2).ok_or(SfntError::TooShort)?).ok_or(bad())?;
+            pos = pos.checked_add(4).ok_or(SfntError::TooShort)?;
+            #[allow(clippy::cast_possible_wrap, reason = "an offset is signed")]
+            if xy_values {
+                (i64::from(a as i16), i64::from(b as i16))
+            } else {
+                (i64::from(a), i64::from(b))
+            }
+        } else {
+            let a = *data.get(pos).ok_or(bad())?;
+            let b = *data
+                .get(pos.checked_add(1).ok_or(SfntError::TooShort)?)
+                .ok_or(bad())?;
+            pos = pos.checked_add(2).ok_or(SfntError::TooShort)?;
+            #[allow(clippy::cast_possible_wrap, reason = "an offset is signed")]
+            if xy_values {
+                (i64::from(a as i8), i64::from(b as i8))
+            } else {
+                (i64::from(a), i64::from(b))
+            }
+        };
+        let (mut xx, mut yx, mut xy, mut yy) = (0x10000, 0, 0, 0x10000);
+        if flags & WE_HAVE_A_SCALE != 0 {
+            xx = short(pos)?;
+            yy = xx;
+            pos = pos.checked_add(2).ok_or(SfntError::TooShort)?;
+        } else if flags & WE_HAVE_AN_X_AND_Y_SCALE != 0 {
+            xx = short(pos)?;
+            yy = short(pos.checked_add(2).ok_or(SfntError::TooShort)?)?;
+            pos = pos.checked_add(4).ok_or(SfntError::TooShort)?;
+        } else if flags & WE_HAVE_A_TWO_BY_TWO != 0 {
+            let at = |k: usize| pos.checked_add(k).ok_or(SfntError::TooShort);
+            xx = short(pos)?;
+            yx = short(at(2)?)?;
+            xy = short(at(4)?)?;
+            yy = short(at(6)?)?;
+            pos = pos.checked_add(8).ok_or(SfntError::TooShort)?;
+        }
+        out.push(RawComponent {
+            flags,
+            gid,
+            arg1,
+            arg2,
+            xx,
+            yx,
+            xy,
+            yy,
+        });
+        if flags & MORE_COMPONENTS == 0 || out.len() >= MAX_COMPONENTS {
+            return Ok(out);
+        }
+    }
+}
+
+/// Place a component just loaded -- `out`'s points from `num_base_points`
+/// on -- as FreeType's `TT_Process_Composite_Component` does with
+/// `FT_LOAD_NO_SCALE`: transformed by `FT_Vector_Transform`, then moved by
+/// its offset (scaled by the transform's `FT_Hypot` lengths if the component
+/// says so) or so that its point `arg2` meets the composite's point `arg1`.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "font units and offsets within 16 bits, and products formed by \
+              `FT_MulFix` -- far inside i64"
+)]
+fn place_component(
+    out: &mut Unscaled,
+    c: &RawComponent,
+    start_point: usize,
+    num_base_points: usize,
+) -> Result<(), SfntError> {
+    use crate::ftcalc::{mul_fix, vector_length};
+    let have_scale = c.flags & COMPONENT_SCALED != 0;
+    let current = out
+        .points
+        .get_mut(num_base_points..)
+        .ok_or(SfntError::MalformedTable("glyf"))?;
+    if have_scale {
+        for p in current.iter_mut() {
+            let (x, y) = *p;
+            *p = (
+                mul_fix(x, c.xx) + mul_fix(y, c.xy),
+                mul_fix(x, c.yx) + mul_fix(y, c.yy),
+            );
+        }
+    }
+    let (x, y) = if c.flags & COMPONENT_ARGS_ARE_XY_VALUES == 0 {
+        let invalid = SfntError::MalformedTable("glyf: a component matched to no point");
+        let k = usize::try_from(c.arg1).map_err(|_| invalid)? + start_point;
+        let l = usize::try_from(c.arg2).map_err(|_| invalid)? + num_base_points;
+        if k >= num_base_points || l >= out.points.len() {
+            return Err(invalid);
+        }
+        let (Some(&p1), Some(&p2)) = (out.points.get(k), out.points.get(l)) else {
+            return Err(invalid);
+        };
+        (p1.0 - p2.0, p1.1 - p2.1)
+    } else {
+        let (mut x, mut y) = (c.arg1, c.arg2);
+        if x == 0 && y == 0 {
+            return Ok(());
+        }
+        if have_scale && c.flags & COMPONENT_SCALED_OFFSET != 0 {
+            x = mul_fix(x, vector_length(c.xx, c.xy));
+            y = mul_fix(y, vector_length(c.yy, c.yx));
+        }
+        (x, y)
+    };
+    if x != 0 || y != 0 {
+        for p in out.points.get_mut(num_base_points..).unwrap_or(&mut []) {
+            p.0 += x;
+            p.1 += y;
+        }
+    }
+    Ok(())
+}
+
+/// A value cut to 16 bits, as C's `(FT_Int16)` cast cuts it.
+fn wrap_i16(v: i64) -> i16 {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the cut to 16 bits is FreeType's own `(FT_Int16)` cast"
+    )]
+    let r = v as i16;
+    r
+}
+
+/// A glyph's points as FreeType's TrueType loader builds them with
+/// `FT_LOAD_NO_SCALE`: whole font units, before the phantom point moves them.
+#[derive(Default)]
+struct Unscaled {
+    points: Vec<(i64, i64)>,
+    tags: Vec<Tag>,
+    ends: Vec<usize>,
+}
+
+impl Unscaled {
+    /// The finished glyph, its origin moved to the left phantom point `pp1`.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "font units within 32 bits, exact in f64"
+    )]
+    fn into_tagged(self, pp1: i64) -> TaggedOutline {
+        TaggedOutline {
+            points: self
+                .points
+                .iter()
+                .map(|&(x, y)| Exact::new(x.saturating_sub(pp1) as f64, y as f64))
+                .collect(),
+            tags: self.tags,
+            ends: self.ends,
+        }
+    }
 }
 
 /// Read a composite glyph's component list.

@@ -577,9 +577,21 @@ mod tests {
     /// Every point of every glyph of `font`, hinted at each size in
     /// `expected`, against where FreeType put it.
     fn matches_freetype(font: &[u8], expected: &[(f32, u16, &str, &[i32])]) {
+        matches_freetype_at(font, &[], expected);
+    }
+
+    /// [`matches_freetype`] at the variable instance `variations` names, in
+    /// user-space axis values.
+    fn matches_freetype_at(
+        font: &[u8],
+        variations: &[([u8; 4], f32)],
+        expected: &[(f32, u16, &str, &[i32])],
+    ) {
         use crate::raster::Rendering;
         use crate::scaled::ScaledFont;
         let face = alloc::sync::Arc::new(Face::parse(font.to_vec()).unwrap());
+        let coords = (!variations.is_empty())
+            .then(|| face.variation_axes().unwrap().normalize_tags(variations));
         let mut failures = Vec::new();
         let mut current: Option<(f32, ScaledFont)> = None;
         for &(px, gid, name, want) in expected {
@@ -588,6 +600,9 @@ mod tests {
                 .is_none_or(|(p, _)| p.to_bits() != px.to_bits())
             {
                 let mut font = ScaledFont::shared(face.clone(), px).unwrap();
+                if let Some(coords) = &coords {
+                    font.set_variations(coords.clone());
+                }
                 font.set_rendering(Rendering {
                     hinting: true,
                     ..Rendering::default()
@@ -625,6 +640,26 @@ mod tests {
     #[test]
     fn a_cff_face_is_hinted_exactly_as_freetype_hints_it() {
         matches_freetype(&fixture::OTF, &fixture::OTF_EXPECTED);
+    }
+
+    /// At weight 610 every `gvar` delta of the fixture lands on a fraction,
+    /// which FreeType's loader rounds point by point and offset by offset in
+    /// its own 16.16 -- the accent's offset by 10.4999 units, to 10 -- and a
+    /// scaled component goes through `FT_MulFix`.
+    #[test]
+    fn a_variable_face_is_hinted_exactly_as_freetype_hints_it_at_an_instance() {
+        matches_freetype_at(&fixture::VAR, &[(*b"wght", 610.0)], &fixture::VAR_EXPECTED);
+    }
+
+    /// And without `HVAR`, where `gvar` moves each glyph's origin by its left
+    /// phantom point's delta (4.9 units, to 5), which with `HVAR` it does not.
+    #[test]
+    fn without_hvar_a_glyph_moves_with_its_left_phantom_point() {
+        matches_freetype_at(
+            &fixture::VAR_NOHVAR,
+            &[(*b"wght", 610.0)],
+            &fixture::VAR_NOHVAR_EXPECTED,
+        );
     }
 
     #[test]

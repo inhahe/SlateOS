@@ -168574,6 +168574,56 @@ settings and says why not this one).
 **How to see it.** `target/fontcheck modes` draws a line in each rendering
 mode; compare a small size against the same text in Chrome.
 
+### [F] A variable font at another weight was hinted from points a unit off FreeType's -- 2026-09-26 -- **FIXED 2026-09-26**
+
+**Status:** FIXED 2026-09-26 (lane F) — the hinter now reads a variable
+glyph as FreeType's loader gives it to FreeType's hinter: the instance in
+FreeType's 16.16 normalization (`Coords::fixed`), `gvar` in FreeType's
+fixed point, each point's delta and each component offset rounded to a
+unit, scaled components by `FT_MulFix`, and the origin moved by the left
+phantom point only without `HVAR` (`Face::load_unscaled`,
+`Gvar::deltas_fixed`). Every glyph agrees with FreeType at fifteen
+instances of eight variable fonts; the hint fixture holds a variable face
+with and without `HVAR` (design-decisions §1325).
+
+**In short (as found):** bold or condensed text in a variable font -- Segoe UI
+Variable, Bahnschrift, Noto Sans -- was hinted from glyph points a fraction of
+a font unit off the ones FreeType's hinter sees. Mostly that moved a point a
+64th of a pixel; on a few accented letters it moved a stroke a whole pixel.
+The default weight was never affected.
+
+**Why.** The glyph's points came from the drawing path: `gvar` deltas summed
+exactly and HarfBuzz's `F2Dot14` coordinates, with the final sum rounded
+once. FreeType's loader normalizes in 16.16, sums in its fixed point, rounds
+each point's delta and each component offset separately, and with `HVAR`
+does not move the glyph by its phantom point's delta at all -- where this
+subtracted it. Found by `hint_oracle.py --var` (new): 69% agreement for Noto
+Sans at weight 700, width 87.5.
+
+### [F] A variable font whose `avar` is version 2 loses its whole axis correction -- 2026-09-26
+
+**Status:** OPEN — lane F's.
+
+**In short:** a variable font that ships the newer version of its weight
+correction table (`avar` 2) is drawn as if it had no correction at all, so
+"Semibold" can come out lighter or bolder than the designer drew it. No font
+installed here uses version 2, which is new (2023), so nothing on screen is
+wrong today.
+
+**Where.** `gui/font/src/var.rs`, `parse_avar` and `parse_avar_pairs`: each
+returns nothing for any version but 1. Version 2 keeps version 1's segment
+maps at the same place and adds an item variation store (and a delta-set
+index map) whose deltas are added to each normalized coordinate afterwards.
+Dropping the table drops the segment maps too.
+
+**The proper fix.** Read version 2's segment maps as version 1's, then the
+axis-index map and item variation store (`varstore.rs` reads the same
+structures for `HVAR`), and add each axis's delta: in `F2Dot14` for the
+HarfBuzz path (`hb-ot-var-avar-table.hh`), and in 16.16 for FreeType's
+(`ft_var_to_normalized`: `v += delta << 2`, clamped to ±1). Check both
+against their libraries with a font fontTools builds with a designspace
+`<mappings>` element, since no installed one has the table.
+
 ### [F] Ideographs, and glyphs no script claims, are drawn unhinted -- 2026-09-26 -- **FIXED 2026-09-26**
 
 **Status:** FIXED 2026-09-26 (lane F) — `gui/font/src/hint/cjk.rs` ports

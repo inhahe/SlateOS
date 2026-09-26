@@ -55,6 +55,18 @@
 //! should have been. Since HarfBuzz is this crate's oracle everywhere else,
 //! agreeing with it is worth more than being a fraction more accurate in
 //! isolation.
+//!
+//! # FreeType's coordinates, beside HarfBuzz's
+//!
+//! The auto-hinter ([`crate::hint`]) is a port of FreeType's, and FreeType
+//! normalizes differently: in 16.16 rather than `F2Dot14`, by `FT_DivFix`,
+//! with `avar` applied by `FT_MulDiv` and never rounded to 14 bits
+//! (`ft_var_to_normalized`). The two agree to a 65536th and differ below it
+//! -- weight 700 of 100..400..900 is `0.60000610` in FreeType and `0.59997559`
+//! in `F2Dot14` -- which is enough to round a delta the other way, and a
+//! hinted stem with it. So a [`Coords`] carries both: [`Coords::as_slice`]
+//! for everything that follows HarfBuzz, [`Coords::fixed`] for the points the
+//! hinter is given.
 
 use alloc::vec::Vec;
 
@@ -120,34 +132,47 @@ pub struct Instance {
 }
 
 /// A position on the face's axes, in normalized `F2Dot14` — the form every
-/// variation table is indexed by.
+/// variation table is indexed by — and, beside it, the same position as
+/// FreeType normalizes it (see the module docs).
 ///
 /// Made only by [`Variations::normalize`] and its siblings, so that a value of
 /// this type is always the output of the full pipeline (clamp, normalize,
-/// `avar`) and never a raw user number that happens to be in range. The inner
+/// `avar`) and never a raw user number that happens to be in range. Each
 /// vector is one entry per axis, in `fvar` order, which is the order every
 /// variation region in the file is written in.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Coords(Vec<i16>);
+pub struct Coords {
+    /// `F2Dot14`, as HarfBuzz normalizes.
+    norm: Vec<i16>,
+    /// 16.16, as FreeType normalizes.
+    fixed: Vec<i32>,
+}
 
 impl Coords {
     /// The normalized coordinates, in `fvar` axis order.
     #[must_use]
     pub fn as_slice(&self) -> &[i16] {
-        &self.0
+        &self.norm
+    }
+
+    /// The same position as FreeType's `ft_var_to_normalized` puts it, in
+    /// 16.16: what the auto-hinter's points are varied by.
+    #[must_use]
+    pub(crate) fn fixed(&self) -> &[i32] {
+        &self.fixed
     }
 
     /// How many axes this position covers.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.norm.len()
     }
 
     /// Whether this position covers no axes at all — which is what a
     /// non-variable face yields.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.norm.is_empty()
     }
 
     /// Whether every axis sits at its default.
@@ -159,13 +184,20 @@ impl Coords {
     /// ought to sum to zero.
     #[must_use]
     pub fn is_default(&self) -> bool {
-        self.0.iter().all(|&c| c == 0)
+        self.norm.iter().all(|&c| c == 0)
+    }
+
+    /// Whether FreeType would take this for the default instance: every
+    /// 16.16 coordinate zero, when no tuple of a variation table applies.
+    #[must_use]
+    pub(crate) fn is_default_fixed(&self) -> bool {
+        self.fixed.iter().all(|&c| c == 0)
     }
 
     /// One axis's coordinate, or `None` past the end.
     #[must_use]
     pub fn get(&self, axis: usize) -> Option<i16> {
-        self.0.get(axis).copied()
+        self.norm.get(axis).copied()
     }
 }
 
@@ -263,12 +295,19 @@ impl SegmentMap {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Variations {
     axes: Vec<Axis>,
+    /// Each axis's minimum, default and maximum as `fvar` stores them, 16.16:
+    /// what FreeType normalizes against.
+    limits: Vec<[i64; 3]>,
     instances: Vec<Instance>,
     /// One per axis, in `fvar` order. Empty when the face carries no `avar`,
     /// which is the identity mapping — distinct from a per-axis empty
     /// `SegmentMap`, which means the face has an `avar` that declines to
     /// correct *that* axis.
     segments: Vec<SegmentMap>,
+    /// `avar`'s curves as FreeType reads them: every version-1 pair as it
+    /// stands, unsorted ones included, which `segments` drops. Empty with no
+    /// usable `avar`.
+    ft_segments: Vec<Vec<(i16, i16)>>,
 }
 
 impl Variations {
@@ -286,15 +325,20 @@ impl Variations {
     /// guess that silently applies the weight correction to the width.
     #[must_use]
     pub(crate) fn parse(data: &[u8], fvar: Span, avar: Option<Span>) -> Option<Self> {
-        let (axes, instances) = parse_fvar(data, fvar)?;
-        let segments = match avar {
-            Some(span) => parse_avar(data, span, axes.len()).unwrap_or_default(),
-            None => Vec::new(),
+        let (axes, limits, instances) = parse_fvar(data, fvar)?;
+        let (segments, ft_segments) = match avar {
+            Some(span) => (
+                parse_avar(data, span, axes.len()).unwrap_or_default(),
+                parse_avar_pairs(data, span, axes.len()).unwrap_or_default(),
+            ),
+            None => (Vec::new(), Vec::new()),
         };
         Some(Self {
             axes,
+            limits,
             instances,
             segments,
+            ft_segments,
         })
     }
 
@@ -326,7 +370,10 @@ impl Variations {
     /// by construction, whatever the user-space defaults are.
     #[must_use]
     pub fn default_coords(&self) -> Coords {
-        Coords(alloc::vec![0i16; self.axes.len()])
+        Coords {
+            norm: alloc::vec![0i16; self.axes.len()],
+            fixed: alloc::vec![0i32; self.axes.len()],
+        }
     }
 
     /// Normalize a full set of user-space coordinates, one per axis in `fvar`
@@ -339,16 +386,7 @@ impl Variations {
     /// call site.
     #[must_use]
     pub fn normalize(&self, user: &[f32]) -> Coords {
-        Coords(
-            self.axes
-                .iter()
-                .enumerate()
-                .map(|(i, axis)| {
-                    let value = user.get(i).copied().unwrap_or(axis.default);
-                    self.normalize_axis(i, axis, value)
-                })
-                .collect(),
-        )
+        self.coords_from(|i, axis| user.get(i).copied().unwrap_or(axis.default))
     }
 
     /// Normalize a position given as `(tag, value)` pairs, leaving unmentioned
@@ -361,20 +399,31 @@ impl Variations {
     /// that cannot honour it.
     #[must_use]
     pub fn normalize_tags(&self, requested: &[([u8; 4], f32)]) -> Coords {
-        Coords(
-            self.axes
+        self.coords_from(|_, axis| {
+            requested
                 .iter()
-                .enumerate()
-                .map(|(i, axis)| {
-                    let value = requested
-                        .iter()
-                        .rev()
-                        .find(|(tag, _)| *tag == axis.tag)
-                        .map_or(axis.default, |&(_, v)| v);
-                    self.normalize_axis(i, axis, value)
-                })
-                .collect(),
-        )
+                .rev()
+                .find(|(tag, _)| *tag == axis.tag)
+                .map_or(axis.default, |&(_, v)| v)
+        })
+    }
+
+    /// Both normalizations of the user-space value `value(index, axis)`
+    /// gives each axis.
+    fn coords_from(&self, value: impl Fn(usize, &Axis) -> f32) -> Coords {
+        let (norm, fixed) = self
+            .axes
+            .iter()
+            .enumerate()
+            .map(|(i, axis)| {
+                let v = value(i, axis);
+                (
+                    self.normalize_axis(i, axis, v),
+                    self.ft_normalize_axis(i, v),
+                )
+            })
+            .unzip();
+        Coords { norm, fixed }
     }
 
     /// The normalized position of one of the face's named instances.
@@ -382,6 +431,57 @@ impl Variations {
     pub fn instance_coords(&self, index: usize) -> Option<Coords> {
         let instance = self.instances.get(index)?;
         Some(self.normalize(&instance.coords))
+    }
+
+    /// `value` normalized as FreeType's `ft_var_to_normalized` does it, 16.16:
+    /// the design coordinate as 16.16 (to the nearest 65536th, ties to even,
+    /// as freetype-py hands it over), by `FT_DivFix` toward the nearer end
+    /// of the axis -- a value at or past an end is that end exactly -- then
+    /// through `avar`'s first segment that ends past it, by `FT_MulDiv`.
+    fn ft_normalize_axis(&self, index: usize, value: f32) -> i32 {
+        use crate::ftcalc::{div_fix, f2dot14_to_fixed, mul_div};
+        let Some(&[min, def, max]) = self.limits.get(index) else {
+            return 0;
+        };
+        if value.is_nan() {
+            return 0;
+        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "a design coordinate is a 16.16 `Fixed`; one past 2^47 is \
+                      clamped to the axis end below whatever it narrows to"
+        )]
+        let coord = (f64::from(value) * 65536.0).round_ties_even() as i64;
+        let mut n = match coord.cmp(&def) {
+            core::cmp::Ordering::Greater if coord >= max => 0x10000,
+            core::cmp::Ordering::Greater => {
+                div_fix(coord.saturating_sub(def), max.saturating_sub(def))
+            }
+            core::cmp::Ordering::Less if coord <= min => -0x10000,
+            core::cmp::Ordering::Less => {
+                div_fix(coord.saturating_sub(def), def.saturating_sub(min))
+            }
+            core::cmp::Ordering::Equal => 0,
+        };
+        if let Some(pairs) = self.ft_segments.get(index) {
+            for w in pairs.windows(2) {
+                let (Some(&(from0, to0)), Some(&(from1, to1))) = (w.first(), w.get(1)) else {
+                    break;
+                };
+                let (from0, to0) = (f2dot14_to_fixed(from0), f2dot14_to_fixed(to0));
+                let (from1, to1) = (f2dot14_to_fixed(from1), f2dot14_to_fixed(to1));
+                if n < from1 {
+                    n = mul_div(
+                        n.saturating_sub(from0),
+                        to1.saturating_sub(to0),
+                        from1.saturating_sub(from0),
+                    )
+                    .saturating_add(to0);
+                    break;
+                }
+            }
+        }
+        i32::try_from(n.clamp(-0x2_0000, 0x2_0000)).unwrap_or(0)
     }
 
     /// Clamp, normalize to -1..1 about the default, then apply `avar`.
@@ -493,8 +593,19 @@ fn fixed_at(data: &[u8], off: usize) -> Option<f32> {
     Some(f32::from(hi) + f32::from(lo) / 65536.0)
 }
 
-/// Read `fvar` into its axes and named instances.
-fn parse_fvar(data: &[u8], span: Span) -> Option<(Vec<Axis>, Vec<Instance>)> {
+/// Read a `Fixed` (16.16) at `off`, as its raw 32 bits.
+fn raw_fixed_at(data: &[u8], off: usize) -> Option<i64> {
+    let hi = i16_at(data, off)?;
+    let lo = u16_at(data, off.checked_add(2)?)?;
+    Some(i64::from(hi) << 16 | i64::from(lo))
+}
+
+/// An axis's limits and instances as `fvar` holds them.
+type Fvar = (Vec<Axis>, Vec<[i64; 3]>, Vec<Instance>);
+
+/// Read `fvar` into its axes -- with their limits as stored, 16.16 -- and
+/// named instances.
+fn parse_fvar(data: &[u8], span: Span) -> Option<Fvar> {
     let table = data.get(span.off..span.off.checked_add(span.len)?)?;
     if u16_at(table, 0)? != 1 {
         // Only major version 1 exists. A future one may move the fields this
@@ -512,8 +623,14 @@ fn parse_fvar(data: &[u8], span: Span) -> Option<(Vec<Axis>, Vec<Instance>)> {
     }
 
     let mut axes = Vec::with_capacity(axis_count);
+    let mut limits = Vec::with_capacity(axis_count);
     for i in 0..axis_count {
         let rec = axes_off.checked_add(i.checked_mul(axis_size)?)?;
+        limits.push([
+            raw_fixed_at(table, rec.checked_add(4)?)?,
+            raw_fixed_at(table, rec.checked_add(8)?)?,
+            raw_fixed_at(table, rec.checked_add(12)?)?,
+        ]);
         axes.push(Axis {
             tag: tag_at(table, rec)?,
             min: fixed_at(table, rec.checked_add(4)?)?,
@@ -576,7 +693,7 @@ fn parse_fvar(data: &[u8], span: Span) -> Option<(Vec<Axis>, Vec<Instance>)> {
         out
     };
 
-    Some((axes, instances))
+    Some((axes, limits, instances))
 }
 
 /// Read `avar` into one segment map per axis.
@@ -621,6 +738,34 @@ fn parse_avar(data: &[u8], span: Span, axis_count: usize) -> Option<Vec<SegmentM
         } else {
             SegmentMap::default()
         });
+    }
+    Some(maps)
+}
+
+/// Read `avar`'s curves as FreeType's `ft_var_load_avar` does: every pair of
+/// every axis, as stored. Version 1 only; `None` for anything this cannot
+/// read, or an axis count that disagrees with `fvar`'s -- where FreeType
+/// ignores the table too.
+fn parse_avar_pairs(data: &[u8], span: Span, axis_count: usize) -> Option<Vec<Vec<(i16, i16)>>> {
+    let table = data.get(span.off..span.off.checked_add(span.len)?)?;
+    if u16_at(table, 0)? != 1 || usize::from(u16_at(table, 6)?) != axis_count {
+        return None;
+    }
+    let mut maps = Vec::with_capacity(axis_count);
+    let mut pos = 8usize;
+    for _ in 0..axis_count {
+        let count = usize::from(u16_at(table, pos)?);
+        pos = pos.checked_add(2)?;
+        // FreeType's own bound: four bytes a pair within the table.
+        if count.checked_mul(4)? > table.len() {
+            return None;
+        }
+        let mut pairs = Vec::with_capacity(count);
+        for _ in 0..count {
+            pairs.push((i16_at(table, pos)?, i16_at(table, pos.checked_add(2)?)?));
+            pos = pos.checked_add(4)?;
+        }
+        maps.push(pairs);
     }
     Some(maps)
 }
@@ -680,11 +825,56 @@ mod tests {
     }
 
     fn vars(axes: Vec<Axis>, segments: Vec<SegmentMap>) -> Variations {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "test axes are small user values"
+        )]
+        let raw = |v: f32| (f64::from(v) * 65536.0) as i64;
+        let limits = axes
+            .iter()
+            .map(|a| [raw(a.min), raw(a.default), raw(a.max)])
+            .collect();
+        let ft_segments = segments.iter().map(|m| m.points.clone()).collect();
         Variations {
             axes,
+            limits,
             instances: Vec::new(),
             segments,
+            ft_segments,
         }
+    }
+
+    // --- FreeType's normalization, beside HarfBuzz's ---
+
+    #[test]
+    fn freetype_normalizes_in_sixteen_sixteen_without_rounding_to_f2dot14() {
+        let v = vars(alloc::vec![axis(b"wght", 100.0, 400.0, 900.0)], Vec::new());
+        let c = v.normalize_tags(&[(*b"wght", 700.0)]);
+        // FT_DivFix(300, 500) against 0.6 in F2Dot14.
+        assert_eq!(c.fixed(), &[39322]);
+        assert_eq!(c.as_slice(), &[9830]);
+        // The ends exactly, and past them.
+        assert_eq!(v.normalize_tags(&[(*b"wght", 900.0)]).fixed(), &[0x10000]);
+        assert_eq!(v.normalize_tags(&[(*b"wght", 50.0)]).fixed(), &[-0x10000]);
+        assert!(v.default_coords().is_default_fixed());
+    }
+
+    #[test]
+    fn freetype_applies_avar_by_mul_div_from_the_first_segment_past_the_value() {
+        // -1 -> -1, 0 -> 0, 0.5 -> 0.75, 1 -> 1.
+        let map = SegmentMap {
+            points: alloc::vec![(-16384, -16384), (0, 0), (8192, 12288), (16384, 16384)],
+        };
+        let v = vars(
+            alloc::vec![axis(b"wght", 100.0, 400.0, 900.0)],
+            alloc::vec![map],
+        );
+        // 650 is 0.5 of the way up: FT_DivFix gives 0x8000, which the third
+        // segment's `from` (0.5) does not exceed, so the fourth maps it --
+        // 0.75 + (0.5 - 0.5) * ... = 0.75 exactly.
+        assert_eq!(v.normalize_tags(&[(*b"wght", 650.0)]).fixed(), &[0xC000]);
+        // 525 is 0.25 up: the third segment, 0.25 * 0.75 / 0.5 = 0.375.
+        assert_eq!(v.normalize_tags(&[(*b"wght", 525.0)]).fixed(), &[0x6000]);
     }
 
     // --- normalize_value: the specified formula ---

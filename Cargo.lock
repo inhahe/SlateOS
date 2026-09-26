@@ -840,8 +840,8 @@ dependencies = [
  "mediaprobe",
  "offloop",
  "oswindow",
- "pathcodec",
  "quoting",
+ "recyclebin",
  "scratchdir",
  "settingsfile",
  "tararchive",
@@ -2494,6 +2494,15 @@ dependencies = [
 [[package]]
 name = "readpass"
 version = "0.1.0"
+
+[[package]]
+name = "recyclebin"
+version = "0.1.0"
+dependencies = [
+ "pathcodec",
+ "quoting",
+ "scratchdir",
+]
 
 [[package]]
 name = "regextester"

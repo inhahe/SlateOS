@@ -1,0 +1,18 @@
+[package]
+name = "recyclebin"
+version = "0.1.0"
+edition = "2024"
+description = "The recycle bin: files moved aside, restorable, emptied or aged out -- shared by the file manager and the image viewer"
+
+[dependencies]
+# A path written into meta.txt without destroying it: a name may hold any
+# byte but `/` and NUL.
+pathcodec = { path = "../../gui/pathcodec" }
+# A name that is not text is shown by its bytes, as escapes.
+quoting = { path = "../../userspace/quoting" }
+
+[dev-dependencies]
+scratchdir = { path = "../../userspace/scratchdir" }
+
+[lints]
+workspace = true

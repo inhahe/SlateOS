@@ -9,10 +9,6 @@ description = "SlateOS File Explorer — graphical file manager with tree view"
 # renderer for an untrusted name -- never as a lossy decode.
 quoting = { path = "../../userspace/quoting" }
 
-# design-decisions 426's path escape. A crate rather than a copy in each
-# program, because 426 chose one escape so that two formats could not
-# drift, and two copies of it reintroduced exactly that.
-pathcodec = { path = "../../gui/pathcodec" }
 
 # Which program opens which kind of file. This crate is the one that *obeys*
 # the associations, so it reads them through the shared model rather than
@@ -74,6 +70,8 @@ thumbs = { path = "../../gui/thumbs" }
 # waker the window gives it, so a folder of photographs never stalls the
 # window.
 offloop = { path = "../offloop" }
+# The recycle bin, shared with the image viewer's Delete so both use one bin.
+recyclebin = { path = "../recyclebin" }
 
 [dev-dependencies]
 # `exif::testing`: a camera's EXIF, for the EXIF columns' tests.

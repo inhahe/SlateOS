@@ -19,10 +19,21 @@
 //! follows the C code, which is the reference and is the same on every
 //! machine.
 //!
+//! So does the full-size transform's SSE2 form (`idct/sse2.rs`), which does a
+//! block the way libjpeg-turbo's SIMD does when it can show that nothing will
+//! overflow -- every coefficient and every value between the passes at most
+//! 16,383 in magnitude, which every encoder's blocks are -- and otherwise
+//! hands the block to the C code's arithmetic here. Its output stage is the
+//! C code's too: the value modulo 1024 looked up as the range-limit table
+//! would, where libjpeg-turbo's SIMD saturates.
+//!
 //! Each transform skips work for columns and rows whose AC terms are all zero,
 //! as libjpeg's do. Those shortcuts compute what the full arithmetic would for
 //! any value that does not overflow; they are kept because where one does
 //! overflow they are what libjpeg computes.
+
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+mod sse2;
 
 const CONST_BITS: u32 = 13;
 const PASS1_BITS: u32 = 2;
@@ -98,6 +109,25 @@ pub(super) struct Target<'a> {
 }
 
 impl Target<'_> {
+    /// Eight samples of `row`, from column 0.
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    #[inline]
+    fn put_row(&mut self, row: usize, values: [u8; 8]) {
+        let index = self.at.wrapping_add(row.wrapping_mul(self.stride));
+        if let Some(slots) = index
+            .checked_add(8)
+            .and_then(|end| self.out.get_mut(index..end))
+        {
+            slots.copy_from_slice(&values);
+        } else {
+            // A row the plane cannot hold whole: the samples that fit, as
+            // `put` stores them.
+            for (col, value) in values.into_iter().enumerate() {
+                self.put(row, col, value);
+            }
+        }
+    }
+
     #[inline]
     fn put(&mut self, row: usize, col: usize, value: u8) {
         let index = self
@@ -114,7 +144,22 @@ impl Target<'_> {
 /// or 8; anything else writes nothing, which the caller never asks for).
 pub(super) fn inverse(size: usize, coef: &[i16; 64], quant: &[u16; 64], target: &mut Target<'_>) {
     match size {
-        8 => islow(coef, quant, target),
+        8 => {
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+            {
+                // SAFETY: `sse2::islow` requires SSE2 and nothing else, and
+                // this is compiled only where `target_feature = "sse2"` is
+                // on for the whole build -- every x86-64 target, SSE2 being
+                // part of the architecture's baseline.
+                if let Some(rows) = unsafe { sse2::islow(coef, quant) } {
+                    for (row, samples) in rows.into_iter().enumerate() {
+                        target.put_row(row, samples);
+                    }
+                    return;
+                }
+            }
+            islow(coef, quant, target);
+        }
         4 => idct_4x4(coef, quant, target),
         2 => idct_2x2(coef, quant, target),
         1 => idct_1x1(coef, quant, target),
@@ -404,7 +449,12 @@ fn idct_1x1(coef: &[i16; 64], quant: &[u16; 64], target: &mut Target<'_>) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 
@@ -465,6 +515,168 @@ mod tests {
                 }
             }
             assert_eq!(before, run(size, &changed, &quant), "size {size}");
+        }
+    }
+
+    /// The plain transform, libjpeg's arithmetic, written the way `run` does.
+    fn scalar(coef: &[i16; 64], quant: &[u16; 64]) -> [u8; 64] {
+        let mut out = [0u8; 64];
+        islow(
+            coef,
+            quant,
+            &mut Target {
+                out: &mut out,
+                at: 0,
+                stride: 8,
+            },
+        );
+        out
+    }
+
+    /// A small xorshift, so the tests need no crate and repeat exactly.
+    struct Noise(u64);
+
+    impl Noise {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        /// Uniform in `-range..=range`.
+        fn signed(&mut self, range: i32) -> i32 {
+            (self.next() % (2 * range as u64 + 1)) as i32 - range
+        }
+    }
+
+    #[test]
+    fn the_transform_at_full_size_is_libjpegs_on_every_kind_of_block() {
+        // `inverse(8, ..)` takes the SSE2 path where it can and the plain one
+        // where it cannot; either way the samples are the plain transform's.
+        // Blocks as encoders make them (few coefficients, small quantisers),
+        // dense ones, ones at the SSE2 path's bound and past it, and wild
+        // ones (full-range coefficients and quantisers), whose values
+        // overflow and wrap in libjpeg's arithmetic.
+        let mut noise = Noise(0x9E37_79B9_7F4A_7C15);
+        for case in 0..40_000 {
+            let mut coef = [0i16; 64];
+            let mut quant = [1u16; 64];
+            match case % 5 {
+                0 => {
+                    for q in &mut quant {
+                        *q = 1 + (noise.next() % 60) as u16;
+                    }
+                    coef[0] = noise.signed(1024 / 8) as i16;
+                    for _ in 0..(noise.next() % 12) {
+                        let at = (noise.next() % 64) as usize;
+                        coef[at] = noise.signed(40) as i16;
+                    }
+                }
+                1 => {
+                    for (c, q) in coef.iter_mut().zip(&mut quant) {
+                        *q = 1 + (noise.next() % 8) as u16;
+                        *c = noise.signed(250) as i16;
+                    }
+                }
+                2 => {
+                    // Up to the bound and a little past it, in every
+                    // position.
+                    for c in &mut coef {
+                        *c = noise.signed(16_390) as i16;
+                    }
+                }
+                3 => {
+                    for (c, q) in coef.iter_mut().zip(&mut quant) {
+                        *q = (noise.next() % 65_536) as u16;
+                        *c = noise.next() as i16;
+                    }
+                }
+                _ => {
+                    // Sparse, but with one enormous coefficient.
+                    coef[(noise.next() % 64) as usize] = noise.next() as i16;
+                    quant = [(noise.next() % 65_536) as u16; 64];
+                }
+            }
+            assert_eq!(
+                run(8, &coef, &quant),
+                scalar(&coef, &quant),
+                "case {case}: {coef:?} x {quant:?}"
+            );
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    #[test]
+    fn the_sse2_transform_takes_every_block_an_encoder_makes_and_is_exact_at_its_bound() {
+        // Every column pattern of the extremes the bound allows -- each of
+        // the eight inputs at -16,383, 0 or 16,383 -- in every column at
+        // once: 6,561 blocks that drive the first pass's intermediates as far
+        // as they go. Whatever the SSE2 transform accepts must be exact, and
+        // the bound is chosen so that it accepts the first pass of all of
+        // them (a second-pass value past the bound hands the block back).
+        let quant = [1u16; 64];
+        let mut taken = 0;
+        for pattern in 0..6561u32 {
+            let mut coef = [0i16; 64];
+            let mut p = pattern;
+            for row in 0..8 {
+                let value = [-16_383i16, 0, 16_383][(p % 3) as usize];
+                p /= 3;
+                for col in 0..8 {
+                    // Vary the columns a little so the second pass sees
+                    // rows that are not constant.
+                    coef[row * 8 + col] = if (col + row) % 3 == 0 {
+                        value
+                    } else {
+                        value / 7
+                    };
+                }
+            }
+            // SAFETY: SSE2 is on for this build (the `cfg` above).
+            if let Some(rows) = unsafe { sse2::islow(&coef, &quant) } {
+                taken += 1;
+                let expect = scalar(&coef, &quant);
+                for (r, row) in rows.iter().enumerate() {
+                    assert_eq!(row[..], expect[r * 8..r * 8 + 8], "pattern {pattern}");
+                }
+            }
+        }
+        assert!(taken > 0, "the bound refused every extreme block");
+        // One past the bound is refused, whatever it would come to.
+        let mut coef = [0i16; 64];
+        coef[9] = 16_384;
+        // SAFETY: as above.
+        assert!(unsafe { sse2::islow(&coef, &quant) }.is_none());
+        coef[9] = -16_384;
+        // SAFETY: as above.
+        assert!(unsafe { sse2::islow(&coef, &quant) }.is_none());
+        // And a quantiser over 32,767, whose lane would read as negative.
+        let mut big = [1u16; 64];
+        big[5] = 40_000;
+        let mut coef = [0i16; 64];
+        coef[5] = 0;
+        // SAFETY: as above.
+        assert!(unsafe { sse2::islow(&coef, &big) }.is_none());
+        // Blocks as a photograph's are -- a DC anywhere in its range, and a
+        // few AC terms of a few hundred -- all taken.
+        let mut noise = Noise(7);
+        for _ in 0..10_000 {
+            let mut coef = [0i16; 64];
+            let mut quant = [0u16; 64];
+            for q in &mut quant {
+                *q = 1 + (noise.next() % 100) as u16;
+            }
+            coef[0] = (noise.signed(1024) / i32::from(quant[0])) as i16;
+            for _ in 0..(noise.next() % 11) {
+                let at = 1 + (noise.next() % 63) as usize;
+                coef[at] = (noise.signed(300) / i32::from(quant[at])) as i16;
+            }
+            // SAFETY: as above.
+            let rows = unsafe { sse2::islow(&coef, &quant) }.expect("an encoder's block");
+            let expect = scalar(&coef, &quant);
+            for (r, row) in rows.iter().enumerate() {
+                assert_eq!(row[..], expect[r * 8..r * 8 + 8]);
+            }
         }
     }
 }

@@ -6,6 +6,12 @@
 //! claim about memory, and memory is what this measures: a counting global
 //! allocator records the peak bytes live during one decode.
 //!
+//! The counts are kept per thread. libtest runs each test on a thread of its
+//! own and the decoders do not start threads, so a test's counts are its
+//! decode's and nothing else's: not the harness printing on another thread,
+//! not a sibling test decoding at the same moment. That is what lets the tests
+//! run side by side, with nothing shared for their order to matter to.
+//!
 //! Before the change, a full decode held the stream *and* the pixels, and a
 //! scaled decode held the stream on its way to a thumbnail -- for a
 //! 24-megapixel photograph, 96 MB spent producing 64 KB of preview. The
@@ -22,16 +28,39 @@
 )]
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
 use imagecodec::Limits;
 
 /// The system allocator, counting.
 struct Counting;
 
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    // Signed, because a thread can free what another allocated -- a test's
+    // name, handed to it by the harness -- and its count then falls below
+    // where it started. `const`-initialised with no destructor, so reading
+    // them allocates nothing, which is what code inside an allocator needs.
+    static LIVE: Cell<isize> = const { Cell::new(0) };
+    static PEAK: Cell<isize> = const { Cell::new(0) };
+}
+
+/// Add `bytes` (negative for a free) to this thread's live count, raising its
+/// peak to match.
+fn count(bytes: isize) {
+    // `try_with`, not `with`: an allocation made while the thread is being
+    // torn down, after its locals are gone, is simply not counted -- panicking
+    // inside an allocator would abort the whole run.
+    let _ = LIVE.try_with(|live| {
+        let now = live.get().wrapping_add(bytes);
+        live.set(now);
+        let _ = PEAK.try_with(|peak| peak.set(peak.get().max(now)));
+    });
+}
+
+/// A size as a signed count. No allocation exceeds `isize::MAX` bytes.
+fn signed(bytes: usize) -> isize {
+    isize::try_from(bytes).unwrap_or(isize::MAX)
+}
 
 // SAFETY: every method forwards to `System` with the arguments it was given,
 // so the allocator's contract is `System`'s; the counters are bookkeeping on
@@ -41,8 +70,7 @@ unsafe impl GlobalAlloc for Counting {
         // SAFETY: forwarded unchanged; the caller upholds `alloc`'s contract.
         let p = unsafe { System.alloc(layout) };
         if !p.is_null() {
-            let now = LIVE.fetch_add(layout.size(), Ordering::SeqCst) + layout.size();
-            PEAK.fetch_max(now, Ordering::SeqCst);
+            count(signed(layout.size()));
         }
         p
     }
@@ -50,20 +78,14 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         // SAFETY: forwarded unchanged; `ptr` came from this allocator.
         unsafe { System.dealloc(ptr, layout) };
-        LIVE.fetch_sub(layout.size(), Ordering::SeqCst);
+        count(-signed(layout.size()));
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         // SAFETY: forwarded unchanged; the caller upholds `realloc`'s contract.
         let p = unsafe { System.realloc(ptr, layout, new_size) };
         if !p.is_null() {
-            if new_size >= layout.size() {
-                let grown = new_size - layout.size();
-                let now = LIVE.fetch_add(grown, Ordering::SeqCst) + grown;
-                PEAK.fetch_max(now, Ordering::SeqCst);
-            } else {
-                LIVE.fetch_sub(layout.size() - new_size, Ordering::SeqCst);
-            }
+            count(signed(new_size) - signed(layout.size()));
         }
         p
     }
@@ -72,15 +94,14 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-/// The tests in this file share the counters, so they take turns.
-static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
-
-/// Peak bytes live during `work`, above what was live when it started.
+/// Peak bytes live on this thread during `work`, above what was live when it
+/// started.
 fn peak_during<T>(work: impl FnOnce() -> T) -> (T, usize) {
-    let base = LIVE.load(Ordering::SeqCst);
-    PEAK.store(base, Ordering::SeqCst);
+    let base = LIVE.with(Cell::get);
+    PEAK.with(|peak| peak.set(base));
     let out = work();
-    (out, PEAK.load(Ordering::SeqCst).saturating_sub(base))
+    let peak = PEAK.with(Cell::get);
+    (out, usize::try_from(peak - base).unwrap_or(0))
 }
 
 const W: u32 = 2000;
@@ -93,9 +114,6 @@ const PIXEL_BYTES: usize = (W as usize) * (H as usize) * 4;
 
 #[test]
 fn a_thumbnail_never_holds_the_picture_at_its_own_size() {
-    let _turn = ONE_AT_A_TIME
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let file = imagecodec::testing::png_gradient(W, H);
     let (thumb, peak) =
         peak_during(|| imagecodec::decode_scaled(&file, Limits::default(), 128, 128));
@@ -110,9 +128,6 @@ fn a_thumbnail_never_holds_the_picture_at_its_own_size() {
 
 #[test]
 fn a_full_decode_holds_the_picture_once_not_twice() {
-    let _turn = ONE_AT_A_TIME
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let file = imagecodec::testing::png_gradient(W, H);
     let (image, peak) = peak_during(|| imagecodec::decode(&file, Limits::default()));
     let image = image.expect("a picture");

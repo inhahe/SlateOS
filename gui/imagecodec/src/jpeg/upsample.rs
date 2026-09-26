@@ -58,48 +58,107 @@ pub(super) struct Shape {
 
 /// One component's reconstructed samples.
 ///
-/// A plane grows as the decoder reconstructs it, a whole iMCU row at a time,
-/// so a decode that is asked for only its first rows -- a TIFF strip whose
-/// JPEG claims more rows than the strip has -- holds only those.
+/// A plane is made room for as the decoder reconstructs it, a whole iMCU row
+/// at a time, and keeps only the last few: as many rows as its `kept` says,
+/// the rest of the picture having gone to the output already. That is
+/// libjpeg's main buffer, and for the same reasons -- a 24-megapixel
+/// photograph's planes are 36 MB whole, and every page of that fresh memory
+/// cost a fault on first touch, a seventh of a JPEG decode's time. The last
+/// three iMCU rows are all a read ever reaches: the one the output row is in,
+/// and -- for a filter between rows -- the one before it and the one after,
+/// which the main controller reads ahead for ([`Rows::needs_context`]). A
+/// plane that must hold the whole picture -- a multi-scan lossless image's,
+/// which each scan adds to -- keeps every row.
 pub(super) struct Samples {
     pub(super) shape: Shape,
-    /// Up to `stride * rows` samples, row by row.
-    pub(super) data: Vec<u8>,
+    /// Up to `stride * kept` samples: row `r` in slot `r % kept`.
+    data: Vec<u8>,
+    /// How many rows the plane keeps: a whole number of iMCU rows, or all of
+    /// them.
+    kept: usize,
+    /// How many rows have been made room for.
+    grown: usize,
 }
 
 impl Samples {
-    /// A plane of `shape` with no rows reconstructed yet.
-    pub(super) const fn new(shape: Shape) -> Self {
+    /// A plane of `shape` with no rows reconstructed yet, keeping at most
+    /// `kept` of them (a whole number of iMCU rows).
+    pub(super) fn new(shape: Shape, kept: usize) -> Self {
         Self {
+            kept: kept.clamp(1, shape.rows.max(1)),
             shape,
             data: Vec::new(),
+            grown: 0,
         }
     }
 
-    /// Make room for the first `rows` rows, zero until written over.
+    /// A plane keeping the three iMCU rows, `imcu_rows` rows each, that
+    /// decoding and output ever reach at once (see [`Samples`]).
+    pub(super) fn ring(shape: Shape, imcu_rows: usize) -> Self {
+        Self::new(shape, imcu_rows.saturating_mul(3))
+    }
+
+    /// How many rows the plane keeps at most.
+    pub(super) const fn kept(&self) -> usize {
+        self.kept
+    }
+
+    /// Make room for the first `rows` rows, zero until written over -- in a
+    /// kept slot, which a row long gone had held, as much as in new memory.
     pub(super) fn grow_to(&mut self, rows: usize) {
-        let len = rows.min(self.shape.rows).saturating_mul(self.shape.stride);
+        let rows = rows.min(self.shape.rows);
+        if rows <= self.grown {
+            return;
+        }
+        let stride = self.shape.stride;
+        let len = rows.min(self.kept).saturating_mul(stride);
         if len > self.data.len() {
             self.data.resize(len, 0);
         }
+        for r in self.grown.max(self.kept)..rows {
+            let slot = r.checked_rem(self.kept).unwrap_or(0).saturating_mul(stride);
+            if let Some(samples) = self.data.get_mut(slot..slot.saturating_add(stride)) {
+                samples.fill(0);
+            }
+        }
+        self.grown = rows;
     }
 
-    /// The picture's samples in row `r`, without the padding: as many of them
-    /// as the plane holds, which is all of them unless a truncated file cut it
-    /// short, and none past the bottom.
-    fn line(&self, r: usize) -> &[u8] {
-        if r >= self.shape.rows {
-            return &[];
+    /// Where row `r` starts in `data`: `None` for a row not made room for
+    /// yet, or one the plane no longer keeps.
+    fn offset(&self, r: usize) -> Option<usize> {
+        if r >= self.grown || r.saturating_add(self.kept) < self.grown {
+            return None;
         }
-        let start = r.saturating_mul(self.shape.stride);
+        Some(r.checked_rem(self.kept)?.saturating_mul(self.shape.stride))
+    }
+
+    /// Rows `first` to `first + count`, made room for and kept, as one run of
+    /// `count * stride` samples. They lie together wherever `first` starts an
+    /// iMCU row and `count` is at most one: a plane keeps whole iMCU rows.
+    pub(super) fn rows_mut(&mut self, first: usize, count: usize) -> Option<&mut [u8]> {
+        let start = self.offset(first)?;
+        let len = count.saturating_mul(self.shape.stride);
+        self.data.get_mut(start..start.checked_add(len)?)
+    }
+
+    /// The picture's samples in row `r`, without the padding: all of them
+    /// for a row the plane holds, and none for one it does not -- past the
+    /// bottom, or not reconstructed yet.
+    fn line(&self, r: usize) -> &[u8] {
+        let Some(start) = self.offset(r) else {
+            return &[];
+        };
         let rest = self.data.get(start..).unwrap_or(&[]);
         let len = self.shape.width.min(self.shape.stride).min(rest.len());
         rest.get(..len).unwrap_or(&[])
     }
 
-    /// Row `r` whole, padding included; empty past the bottom.
-    fn padded_line(&self, r: usize) -> &[u8] {
-        let start = r.saturating_mul(self.shape.stride);
+    /// Row `r` whole, padding included; empty where [`Self::line`] is.
+    pub(super) fn padded_line(&self, r: usize) -> &[u8] {
+        let Some(start) = self.offset(r) else {
+            return &[];
+        };
         self.data
             .get(start..start.saturating_add(self.shape.stride))
             .unwrap_or(&[])
@@ -402,7 +461,12 @@ mod tests {
         for (r, line) in picture.chunks(width).enumerate() {
             data[r * shape.stride..r * shape.stride + width].copy_from_slice(line);
         }
-        Samples { shape, data }
+        Samples {
+            kept: shape.rows,
+            grown: shape.rows,
+            shape,
+            data,
+        }
     }
 
     /// Every output row of `samples` at `out_w` x `out_h`.
@@ -748,6 +812,8 @@ mod tests {
                 down: (1, 1),
             },
             data: vec![9, 9],
+            kept: 2,
+            grown: 1,
         };
         let rows = upsample(&samples, (4, 3), true);
         assert_eq!(
@@ -758,14 +824,17 @@ mod tests {
 
     #[test]
     fn a_plane_grows_by_whole_rows_up_to_its_shape() {
-        let mut samples = Samples::new(Shape {
-            stride: 3,
-            rows: 4,
-            width: 3,
-            height: 4,
-            across: (1, 1),
-            down: (1, 1),
-        });
+        let mut samples = Samples::new(
+            Shape {
+                stride: 3,
+                rows: 4,
+                width: 3,
+                height: 4,
+                across: (1, 1),
+                down: (1, 1),
+            },
+            4,
+        );
         assert!(samples.data.is_empty());
         samples.grow_to(2);
         assert_eq!(samples.data.len(), 6);
@@ -773,5 +842,49 @@ mod tests {
         assert_eq!(samples.data.len(), 6);
         samples.grow_to(9);
         assert_eq!(samples.data.len(), 12);
+    }
+
+    #[test]
+    fn a_ring_keeps_its_last_rows_and_hands_each_new_one_out_zeroed() {
+        // Two rows kept of six: row `r` in slot `r % 2`, and a row whose
+        // slot has been taken again is gone -- read as nothing, not as the
+        // row now in its place.
+        let mut samples = Samples::new(
+            Shape {
+                stride: 2,
+                rows: 6,
+                width: 2,
+                height: 6,
+                across: (1, 1),
+                down: (1, 1),
+            },
+            2,
+        );
+        for r in 0..6u8 {
+            samples.grow_to(usize::from(r) + 1);
+            let row = samples.rows_mut(usize::from(r), 1).unwrap();
+            assert_eq!(row, &[0, 0], "row {r} starts as zeros");
+            row.copy_from_slice(&[r, r + 10]);
+            assert_eq!(samples.data.len(), 2 * usize::from(r + 1).min(2));
+            assert_eq!(samples.line(usize::from(r)), &[r, r + 10]);
+            if r >= 1 {
+                assert_eq!(samples.line(usize::from(r) - 1), &[r - 1, r + 9]);
+            }
+            if r >= 2 {
+                assert!(samples.line(usize::from(r) - 2).is_empty());
+                assert!(samples.padded_line(usize::from(r) - 2).is_empty());
+            }
+            assert!(
+                samples.line(usize::from(r) + 1).is_empty(),
+                "not made room for yet"
+            );
+        }
+        // Two rows at once, as an iMCU row: one run of samples.
+        let mut samples = Samples::new(samples.shape, 4);
+        samples.grow_to(4);
+        assert_eq!(samples.rows_mut(2, 2).map(|rows| rows.len()), Some(4));
+        samples.grow_to(6);
+        assert_eq!(samples.rows_mut(4, 2).map(|rows| rows.len()), Some(4));
+        assert!(samples.rows_mut(0, 2).is_none(), "rows 0 and 1 are gone");
     }
 }

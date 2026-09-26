@@ -1824,7 +1824,7 @@ pub unsafe extern "C" fn destroy_debug_utils_messenger(
 #[cfg(test)]
 mod tests {
     use super::{
-        SpinLock, create_across, create_device, create_instance, destroy_across, destroy_device,
+        create_across, create_device, create_instance, destroy_across, destroy_device,
         destroy_instance, enumerate_across, enumerate_instance_extension_properties,
         enumerate_instance_layer_properties, enumerate_instance_version,
         enumerate_physical_devices, extensions_across, get_device_proc_addr,
@@ -1845,16 +1845,20 @@ mod tests {
     use alloc::boxed::Box;
     use alloc::vec;
     use alloc::vec::Vec;
+    use core::cell::Cell;
     use core::ffi::{CStr, c_char, c_void};
     use core::ptr;
-    use core::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Serialises the tests that touch [`LIVE`]. Nothing in the loader needs
-    /// this; a shared counter across parallel tests does.
-    static ORDER: SpinLock<()> = SpinLock::new(());
-
-    /// Driver instances created and not yet destroyed, across all stub drivers.
-    static LIVE: AtomicUsize = AtomicUsize::new(0);
+    std::thread_local! {
+        /// Driver instances created and not yet destroyed, across all stub
+        /// drivers.
+        ///
+        /// Per thread, and so per test: the stub drivers are called on the
+        /// thread that called the loader, and libtest gives each test a thread
+        /// of its own, so no test sees another's instances and none has to wait
+        /// for another to finish.
+        static LIVE: Cell<usize> = const { Cell::new(0) };
+    }
 
     /// A stub driver's `VkPhysicalDevice`.
     #[repr(C)]
@@ -1887,7 +1891,7 @@ mod tests {
                 })
                 .collect(),
         });
-        LIVE.fetch_add(1, Ordering::SeqCst);
+        LIVE.set(LIVE.get().wrapping_add(1));
         unsafe { *out = Box::into_raw(instance).cast::<c_void>() };
         VK_SUCCESS
     }
@@ -1936,14 +1940,14 @@ mod tests {
             loader_data: 0,
             devices: Vec::new(),
         });
-        LIVE.fetch_add(1, Ordering::SeqCst);
+        LIVE.set(LIVE.get().wrapping_add(1));
         unsafe { *out = Box::into_raw(instance).cast::<c_void>() };
         VK_SUCCESS
     }
 
     unsafe extern "C" fn destroy(instance: Handle, _allocator: *const c_void) {
         drop(unsafe { Box::from_raw(instance.cast::<FakeInstance>()) });
-        LIVE.fetch_sub(1, Ordering::SeqCst);
+        LIVE.set(LIVE.get().wrapping_sub(1));
     }
 
     unsafe extern "C" fn enumerate(
@@ -2146,8 +2150,11 @@ mod tests {
     // A stub driver that can make devices, not just instances
     // -----------------------------------------------------------------------
 
-    /// Devices created and not yet destroyed, across all stub drivers.
-    static DEVICES_LIVE: AtomicUsize = AtomicUsize::new(0);
+    std::thread_local! {
+        /// Devices created and not yet destroyed, across all stub drivers --
+        /// per test, as [`LIVE`] is.
+        static DEVICES_LIVE: Cell<usize> = const { Cell::new(0) };
+    }
 
     /// A stub driver's `VkDevice`. Dispatchable, so the loader may adopt it.
     #[repr(C)]
@@ -2164,14 +2171,14 @@ mod tests {
         let gpu = Box::new(FakeGpu {
             loader_data: ICD_LOADER_MAGIC as usize,
         });
-        DEVICES_LIVE.fetch_add(1, Ordering::SeqCst);
+        DEVICES_LIVE.set(DEVICES_LIVE.get().wrapping_add(1));
         unsafe { *out = Box::into_raw(gpu).cast::<c_void>() };
         VK_SUCCESS
     }
 
     unsafe extern "C" fn destroy_gpu(device: Handle, _allocator: *const c_void) {
         drop(unsafe { Box::from_raw(device.cast::<FakeGpu>()) });
-        DEVICES_LIVE.fetch_sub(1, Ordering::SeqCst);
+        DEVICES_LIVE.set(DEVICES_LIVE.get().wrapping_sub(1));
     }
 
     /// Stands in for a device command this loader has never heard of. Never
@@ -2194,24 +2201,29 @@ mod tests {
     // Stub drivers that answer physical-device commands
     // -----------------------------------------------------------------------
 
-    /// Which entry point the loader last found a physical-device command
-    /// through.
-    ///
-    /// A driver may be asked two ways, and the answer looks identical either
-    /// way — a function pointer — so the order [`crate::physical::ask`]
-    /// prescribes is unobservable from outside unless the stub says which route
-    /// the question arrived by. This is that.
-    static VIA: AtomicUsize = AtomicUsize::new(0);
+    std::thread_local! {
+        /// Which entry point the loader last found a physical-device command
+        /// through.
+        ///
+        /// A driver may be asked two ways, and the answer looks identical
+        /// either way — a function pointer — so the order
+        /// [`crate::physical::ask`] prescribes is unobservable from outside
+        /// unless the stub says which route the question arrived by. This is
+        /// that.
+        static VIA: Cell<usize> = const { Cell::new(0) };
+    }
     const VIA_NOTHING: usize = 0;
     const VIA_PHYSICAL_DEVICE_PROC_ADDR: usize = 1;
     const VIA_INSTANCE_PROC_ADDR: usize = 2;
 
-    /// The `VkPhysicalDevice` a stub driver's command was last called with,
-    /// as an address.
-    ///
-    /// The point of the whole module under test: this must be the *driver's*
-    /// handle, never the loader's wrapper.
-    static SEEN: AtomicUsize = AtomicUsize::new(0);
+    std::thread_local! {
+        /// The `VkPhysicalDevice` a stub driver's command was last called
+        /// with, as an address.
+        ///
+        /// The point of the whole module under test: this must be the
+        /// *driver's* handle, never the loader's wrapper.
+        static SEEN: Cell<usize> = const { Cell::new(0) };
+    }
 
     /// How many queue families every stub driver claims.
     const STUB_QUEUE_FAMILIES: u32 = 3;
@@ -2223,7 +2235,7 @@ mod tests {
     /// Vulkan structure on purpose — a stub that declared one would be testing
     /// the loader against a promise the loader does not make.
     unsafe extern "C" fn gpu_queue_families(physical: Handle, count: *mut u32, _out: *mut c_void) {
-        SEEN.store(physical as usize, Ordering::SeqCst);
+        SEEN.set(physical as usize);
         unsafe { *count = STUB_QUEUE_FAMILIES };
     }
 
@@ -2234,7 +2246,7 @@ mod tests {
     /// proves the *rest* of the signature survived the trampoline too, which is
     /// the part a wrong `PFN_` declaration would break.
     unsafe extern "C" fn gpu_format_properties(physical: Handle, format: VkEnum, out: *mut c_void) {
-        SEEN.store(physical as usize, Ordering::SeqCst);
+        SEEN.set(physical as usize);
         unsafe { *out.cast::<VkEnum>() = format };
     }
 
@@ -2250,7 +2262,7 @@ mod tests {
         if bytes != b"vkGetPhysicalDeviceQueueFamilyProperties" {
             return None;
         }
-        VIA.store(VIA_PHYSICAL_DEVICE_PROC_ADDR, Ordering::SeqCst);
+        VIA.set(VIA_PHYSICAL_DEVICE_PROC_ADDR);
         Some(unsafe {
             core::mem::transmute::<*const (), unsafe extern "C" fn()>(
                 gpu_queue_families as *const (),
@@ -2273,7 +2285,7 @@ mod tests {
             b"vkCreateDevice" => create_gpu as *const (),
             b"vkGetDeviceProcAddr" => gdpa as *const (),
             b"vkGetPhysicalDeviceFormatProperties" => {
-                VIA.store(VIA_INSTANCE_PROC_ADDR, Ordering::SeqCst);
+                VIA.set(VIA_INSTANCE_PROC_ADDR);
                 gpu_format_properties as *const ()
             }
             // Everything else is the shared stub's answer, which is what gives
@@ -2288,7 +2300,7 @@ mod tests {
     unsafe extern "C" fn gipa_physical_only(_instance: Handle, name: *const c_char) -> VoidFn {
         if unsafe { CStr::from_ptr(name) }.to_bytes() == b"vkGetPhysicalDeviceQueueFamilyProperties"
         {
-            VIA.store(VIA_INSTANCE_PROC_ADDR, Ordering::SeqCst);
+            VIA.set(VIA_INSTANCE_PROC_ADDR);
             return Some(unsafe {
                 core::mem::transmute::<*const (), unsafe extern "C" fn()>(
                     gpu_queue_families as *const (),
@@ -2320,13 +2332,12 @@ mod tests {
 
     #[test]
     fn every_driver_that_succeeds_is_in_the_fan_out() {
-        let _order = ORDER.lock();
         let registry = registry_of(&[gipa_one_device, gipa_two_devices]);
-        let before = LIVE.load(Ordering::SeqCst);
+        let before = LIVE.get();
 
         let instance = unsafe { create_across(&registry, ptr::null(), ptr::null()) }.unwrap();
         assert_eq!(instance.drivers().len(), 2);
-        assert_eq!(LIVE.load(Ordering::SeqCst), before + 2);
+        assert_eq!(LIVE.get(), before + 2);
         assert_eq!(
             instance.dispatch_word(),
             table() as usize,
@@ -2334,16 +2345,15 @@ mod tests {
         );
 
         unsafe { destroy_across(&registry, instance.drivers(), ptr::null()) };
-        assert_eq!(LIVE.load(Ordering::SeqCst), before);
+        assert_eq!(LIVE.get(), before);
     }
 
     #[test]
     fn a_refusing_driver_does_not_take_the_others_down_with_it() {
         // The rule with the most user-visible consequence, end to end this
         // time: the application still starts.
-        let _order = ORDER.lock();
         let registry = registry_of(&[gipa_refusing, gipa_one_device]);
-        let before = LIVE.load(Ordering::SeqCst);
+        let before = LIVE.get();
 
         let instance = unsafe { create_across(&registry, ptr::null(), ptr::null()) }.unwrap();
         assert_eq!(instance.drivers().len(), 1);
@@ -2354,7 +2364,7 @@ mod tests {
         );
 
         unsafe { destroy_across(&registry, instance.drivers(), ptr::null()) };
-        assert_eq!(LIVE.load(Ordering::SeqCst), before);
+        assert_eq!(LIVE.get(), before);
     }
 
     #[test]
@@ -2394,14 +2404,13 @@ mod tests {
 
     #[test]
     fn an_instance_without_the_loader_magic_sinks_the_whole_call() {
-        let _order = ORDER.lock();
         let registry = registry_of(&[gipa_one_device, gipa_unstamped]);
-        let before = LIVE.load(Ordering::SeqCst);
+        let before = LIVE.get();
 
         let result = unsafe { create_across(&registry, ptr::null(), ptr::null()) };
         assert_eq!(result.err(), Some(VK_ERROR_INITIALIZATION_FAILED));
         assert_eq!(
-            LIVE.load(Ordering::SeqCst),
+            LIVE.get(),
             before,
             "the instances created before the bad one were leaked"
         );
@@ -2409,7 +2418,6 @@ mod tests {
 
     #[test]
     fn physical_devices_are_aggregated_across_drivers_in_order() {
-        let _order = ORDER.lock();
         let registry = registry_of(&[gipa_one_device, gipa_two_devices]);
         let instance = unsafe { create_across(&registry, ptr::null(), ptr::null()) }.unwrap();
 
@@ -2433,7 +2441,6 @@ mod tests {
     fn wrapping_a_device_leaves_the_drivers_own_handle_alone() {
         // The loader passes these back down to the driver; overwriting their
         // dispatch word would be writing into the driver's object.
-        let _order = ORDER.lock();
         let registry = registry_of(&[gipa_two_devices]);
         let instance = unsafe { create_across(&registry, ptr::null(), ptr::null()) }.unwrap();
 
@@ -2453,9 +2460,8 @@ mod tests {
     fn a_driver_that_cannot_list_devices_contributes_none_and_blocks_nobody() {
         // The instance it created is still real and still gets destroyed; it
         // simply appears in no device list.
-        let _order = ORDER.lock();
         let registry = registry_of(&[gipa_cannot_list, gipa_two_devices]);
-        let before = LIVE.load(Ordering::SeqCst);
+        let before = LIVE.get();
 
         let instance = unsafe { create_across(&registry, ptr::null(), ptr::null()) }.unwrap();
         assert_eq!(instance.drivers().len(), 2);
@@ -2468,7 +2474,7 @@ mod tests {
         );
 
         unsafe { destroy_across(&registry, instance.drivers(), ptr::null()) };
-        assert_eq!(LIVE.load(Ordering::SeqCst), before);
+        assert_eq!(LIVE.get(), before);
     }
 
     fn lookup(instance: Handle, name: &CStr) -> VoidFn {
@@ -2505,9 +2511,8 @@ mod tests {
     /// whose order across tests nothing fixes.
     #[test]
     fn a_device_lives_and_dies_through_the_exported_symbols() {
-        let _order = ORDER.lock();
-        let instances_before = LIVE.load(Ordering::SeqCst);
-        let devices_before = DEVICES_LIVE.load(Ordering::SeqCst);
+        let instances_before = LIVE.get();
+        let devices_before = DEVICES_LIVE.get();
 
         // SAFETY: both names are string literals, so `'static`, and every
         // function pointer is an item in this module and lives for the process.
@@ -2559,7 +2564,7 @@ mod tests {
             unsafe { create_instance(ptr::null(), ptr::null(), &raw mut instance) },
             VK_SUCCESS
         );
-        assert_eq!(LIVE.load(Ordering::SeqCst), instances_before + 3);
+        assert_eq!(LIVE.get(), instances_before + 3);
 
         let mut count: u32 = 0;
         // SAFETY: the instance is this loader's own and `count` is writable; a
@@ -2596,8 +2601,8 @@ mod tests {
             "the fixture is not testing anything: wrapper and inner handle coincide"
         );
 
-        VIA.store(VIA_NOTHING, Ordering::SeqCst);
-        SEEN.store(0, Ordering::SeqCst);
+        VIA.set(VIA_NOTHING);
+        SEEN.set(0);
         let mut families: u32 = 0;
         // SAFETY: `handles[0]` is this loader's, `families` is writable, and a
         // null array is how the C API asks for the count alone.
@@ -2613,12 +2618,12 @@ mod tests {
             "the count never reached the driver"
         );
         assert_eq!(
-            SEEN.load(Ordering::SeqCst),
+            SEEN.get(),
             drivers_own as usize,
             "the driver was called with the loader's wrapper instead of its own handle"
         );
         assert_eq!(
-            VIA.load(Ordering::SeqCst),
+            VIA.get(),
             VIA_PHYSICAL_DEVICE_PROC_ADDR,
             "a version-4 driver was not asked through its version-4 entry point first"
         );
@@ -2627,8 +2632,8 @@ mod tests {
         // The Loader–Driver Interface requires falling back to the instance
         // lookup, and treating that null as final would lose the command on a
         // driver that is behaving correctly.
-        VIA.store(VIA_NOTHING, Ordering::SeqCst);
-        SEEN.store(0, Ordering::SeqCst);
+        VIA.set(VIA_NOTHING);
+        SEEN.set(0);
         let mut echoed: VkEnum = 0;
         let format: VkEnum = 37;
         // SAFETY: `handles[0]` is this loader's and `echoed` is a writable
@@ -2644,16 +2649,16 @@ mod tests {
             echoed, format,
             "a scalar argument did not survive the trampoline"
         );
-        assert_eq!(SEEN.load(Ordering::SeqCst), drivers_own as usize);
+        assert_eq!(SEEN.get(), drivers_own as usize);
         assert_eq!(
-            VIA.load(Ordering::SeqCst),
+            VIA.get(),
             VIA_INSTANCE_PROC_ADDR,
             "the loader gave up when the version-4 entry point answered null"
         );
 
         // The third driver settled below version 4, so there is only one route
         // to it and the loader must take it.
-        VIA.store(VIA_NOTHING, Ordering::SeqCst);
+        VIA.set(VIA_NOTHING);
         let mut families: u32 = 0;
         // SAFETY: as for `handles[0]`.
         unsafe {
@@ -2664,7 +2669,7 @@ mod tests {
             );
         }
         assert_eq!(families, STUB_QUEUE_FAMILIES);
-        assert_eq!(VIA.load(Ordering::SeqCst), VIA_INSTANCE_PROC_ADDR);
+        assert_eq!(VIA.get(), VIA_INSTANCE_PROC_ADDR);
 
         // The second driver answers no physical-device command at all — not a
         // conforming Vulkan 1.0 driver. The count is set to zero rather than
@@ -2692,7 +2697,7 @@ mod tests {
             unsafe { create_device(handles[0], ptr::null(), ptr::null(), &raw mut device) },
             VK_SUCCESS
         );
-        assert_eq!(DEVICES_LIVE.load(Ordering::SeqCst), devices_before + 1);
+        assert_eq!(DEVICES_LIVE.get(), devices_before + 1);
         assert!(!device.is_null());
 
         // Adopted rather than wrapped: the handle the application holds is the
@@ -2735,7 +2740,7 @@ mod tests {
         );
         assert!(refused.is_null());
         assert_eq!(
-            DEVICES_LIVE.load(Ordering::SeqCst),
+            DEVICES_LIVE.get(),
             devices_before + 1,
             "the refused call created a device anyway"
         );
@@ -2744,14 +2749,14 @@ mod tests {
         // created with the same (null) allocator.
         unsafe { destroy_device(device, ptr::null()) };
         assert_eq!(
-            DEVICES_LIVE.load(Ordering::SeqCst),
+            DEVICES_LIVE.get(),
             devices_before,
             "the driver was not told to destroy its device"
         );
 
         // SAFETY: as above, for the instance.
         unsafe { destroy_instance(instance, ptr::null()) };
-        assert_eq!(LIVE.load(Ordering::SeqCst), instances_before);
+        assert_eq!(LIVE.get(), instances_before);
     }
 
     #[test]

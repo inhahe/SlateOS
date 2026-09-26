@@ -20,7 +20,11 @@ path = "src/lib.rs"
 # `requests/a-c-deflate-is-a-crate-now.md`), it is `no_std` + `alloc` too, and it
 # depends only on `crc32`. So depending on it costs the widget-freedom nothing
 # and buys the deletion of 872 lines that had to be right about RFC 1951 twice.
+# `crc32`, the checksum on every PNG chunk, is the same kind of leaf: `no_std`,
+# no allocator, no dependencies; this crate kept a private copy of its table
+# until 2026-09-26.
 [dependencies]
+crc32 = { path = "../../crc32" }
 deflate = { path = "../../deflate" }
 
 [lints]

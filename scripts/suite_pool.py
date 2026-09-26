@@ -33,17 +33,26 @@ sped this up.
 Per-case state a suite used to keep in a module global -- a label suffix, say
 -- belongs in `context`, a thread-local: set it inside the case's callable,
 where it is that case's alone.
+
+A case's directory is removed after it with retries (`_remove`): on Windows a
+process the case ran -- a `git` -- can hold a file in it for a moment after
+exiting, and a clean-up that failed once used to fail the suite, and with it a
+boot's whole gate phase, over a case that had passed (2026-09-26).
 """
 
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import io
 import os
+import shutil
+import stat
 import sys
 import tempfile
 import threading
-from typing import Callable, Optional, Sequence
+import time
+from typing import Callable, Iterator, Optional, Sequence
 
 #: Per-case state. Each case runs on one worker thread from start to finish,
 #: so anything a case sets here is that case's and nobody else's.
@@ -63,6 +72,60 @@ class _CaseOutput(io.TextIOBase):
 
     def flush(self) -> None:
         self._real.flush()
+
+
+#: How many times a case's directory is tried before it is left behind, and
+#: the pause before the first retry; each later pause is one step longer.
+REMOVE_ATTEMPTS = 8
+REMOVE_STEP_SECONDS = 0.1
+
+
+def _writable_then_again(function, path, _error) -> None:
+    """`shutil.rmtree`'s error handler: make `path` writable and try again.
+
+    `git` writes its objects read-only, and Windows will not delete a
+    read-only file -- which `tempfile.TemporaryDirectory` handles the same
+    way. A second failure propagates, and `_remove` retries the whole tree.
+    """
+    os.chmod(path, stat.S_IWRITE)
+    function(path)
+
+
+def _remove(path: str, attempts: int = REMOVE_ATTEMPTS) -> bool:
+    """Remove the tree at `path`, trying `attempts` times with a growing
+    pause; answer whether it is gone.
+
+    A tree that cannot be removed is left, with a line on stderr naming it:
+    it is a temporary directory, which the system cleans, and failing a case
+    that passed over its clean-up is the wrong answer to "is the checker
+    right". Nothing it leaves is in the tree being tested.
+    """
+    handler = ({"onexc": _writable_then_again} if sys.version_info >= (3, 12)
+               else {"onerror": _writable_then_again})
+    for attempt in range(max(1, attempts)):
+        try:
+            shutil.rmtree(path, **handler)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if attempt + 1 < attempts:
+                time.sleep(REMOVE_STEP_SECONDS * (attempt + 1))
+    if not os.path.exists(path):
+        return True
+    sys.__stderr__.write(
+        f"suite_pool: left {path} behind: something still holds a file in it\n")
+    return False
+
+
+@contextlib.contextmanager
+def _case_dir() -> Iterator[str]:
+    """A temporary directory for one case, removed by `_remove` after it."""
+    path = tempfile.mkdtemp()
+    try:
+        yield path
+    finally:
+        _remove(path)
 
 
 def jobs() -> int:
@@ -91,7 +154,7 @@ def run(cases: Sequence[tuple[Optional[str], Callable[[str], None]]],
         for heading, case in cases:
             if heading:
                 print(heading)
-            with tempfile.TemporaryDirectory() as tmp:
+            with _case_dir() as tmp:
                 case(tmp)
         return
 
@@ -99,7 +162,7 @@ def run(cases: Sequence[tuple[Optional[str], Callable[[str], None]]],
         buf = io.StringIO()
         context._out = buf
         try:
-            with tempfile.TemporaryDirectory() as tmp:
+            with _case_dir() as tmp:
                 case(tmp)
         except BaseException as error:  # re-raised on the calling thread
             return buf.getvalue(), error
@@ -167,6 +230,63 @@ def self_test() -> int:
             problems.append("the failing case's own output was lost")
     finally:
         sys.stdout = saved
+
+    # Every case's directory is gone afterwards -- a read-only file in it,
+    # as `git` writes its objects, included.
+    def read_only(tmp: str) -> None:
+        name = os.path.join(tmp, "object")
+        with open(name, "w", encoding="utf-8") as handle:
+            handle.write("x")
+        os.chmod(name, stat.S_IREAD)
+
+    kept: list[str] = []
+    run([(None, lambda tmp: (kept.append(tmp), read_only(tmp))[-1])], workers=1)
+    run([(None, lambda tmp: (kept.append(tmp), read_only(tmp))[-1])], workers=2)
+    for tmp in kept:
+        if os.path.exists(tmp):
+            problems.append(f"a case's directory was left: {tmp}")
+
+    # A removal that fails a few times, as a file a just-exited process holds
+    # makes it fail on Windows, is retried until it works...
+    real_rmtree = shutil.rmtree
+    failures = {"left": 3}
+
+    def flaky(path, **kwargs):
+        if failures["left"] > 0:
+            failures["left"] -= 1
+            raise PermissionError(32, "being used by another process", path)
+        return real_rmtree(path, **kwargs)
+
+    target = tempfile.mkdtemp()
+    shutil.rmtree = flaky
+    try:
+        if not _remove(target, attempts=5) or os.path.exists(target):
+            problems.append("a removal that failed three times was not retried")
+    finally:
+        shutil.rmtree = real_rmtree
+
+    # ...and one that never works is left behind without failing anything.
+    def stuck(path, **kwargs):
+        raise PermissionError(32, "being used by another process", path)
+
+    target = tempfile.mkdtemp()
+    shutil.rmtree = stuck
+    saved_err = sys.__stderr__
+    sys.__stderr__ = io.StringIO()
+    try:
+        gone = _remove(target, attempts=2)
+        said = sys.__stderr__.getvalue()
+    except OSError as error:
+        gone, said = True, ""
+        problems.append(f"a removal that never works raised: {error}")
+    finally:
+        shutil.rmtree = real_rmtree
+        sys.__stderr__ = saved_err
+    if gone:
+        problems.append("a directory that could not be removed was reported gone")
+    elif target not in said:
+        problems.append("the directory left behind was not named on stderr")
+    real_rmtree(target, ignore_errors=True)
 
     for line in problems:
         print(f"FAIL  {line}")

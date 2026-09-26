@@ -24228,6 +24228,16 @@ Measured on the same loaded machine (other lanes building):
 | `test-checkers-honour-head.py` | 3127 s | 861 s -- all 124 cases pass |
 | `test-pre-push-fmt-gate.py` | 1894 s | 564 s -- all pass, labels per mode |
 
+**Follow-up, 2026-09-26: a case's clean-up failed a boot.** A case's temporary
+directory could not be deleted -- on Windows a `git` the case had run still held
+a file in it (WinError 32) -- and `TemporaryDirectory`'s exception failed the
+suite, and so the gate phase, over a case that had passed. `suite_pool` now
+removes each case's directory with retries and a growing pause, making `git`'s
+read-only objects writable as `tempfile` does, and leaves a directory it still
+cannot remove with a line on stderr rather than failing anything. Its
+self-test covers the read-only file, three failures then success, and a
+removal that never works.
+
 **Not taken: running one gate of the hook.** The fmt suite still runs the
 whole hook for each case to exercise gate 7. A switch the hook honours only for
 the gates it names would cut that further, but it is a change to

@@ -225,5 +225,37 @@ if [ -w /dev/full ]; then
   full_case -V
 fi
 
+# --- standard descriptors that cannot be written -------------------------------------
+# util-linux's close_stdout decides the status from them: a write that failed,
+# and a diagnostic that could not be written, are flock's CLOSE_EXIT_CODE, 1
+# -- `flock --bogus 2>&-` is 1, not 64. And a descriptor flock was started
+# without stays closed for the command too: with stdout closed the lock file
+# takes descriptor 1, and the command inherits it there, as upstream's does.
+# The redirection is applied by the shell that execs flock, since the
+# harness's own `diff_run` needs descriptor 2.
+run_redir() {
+  local side=$1 how=$2; shift 2
+  diff_run env LC_ALL=C.UTF-8 PATH="$bindir/$side:$PATH" timeout -k 2 20 \
+    bash -c "exec flock \"\$@\" $how" flock "$@"
+}
+redir_case() {
+  local how=$1 o_rc g_rc; shift
+  run_redir ours "$how" "$@" >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"; o_rc=$?
+  run_redir gnu "$how" "$@" >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"; g_rc=$?
+  judge "$o_rc" "$g_rc"
+  report "flock $(printf '%q ' "$@")$how"
+}
+for how in '>&-' '>/dev/full' '2>&-' '2>/dev/full'; do
+  redir_case "$how" -h
+  redir_case "$how" -V
+  redir_case "$how" --bogus
+  redir_case "$how" -w abc "$F" true
+  redir_case "$how" --verbose "$F" true
+  redir_case "$how" "$F" sh -c 'echo out; echo err >&2'
+  redir_case "$how" -o "$F" sh -c 'echo out; echo err >&2'
+  redir_case "$how" -F "$F" sh -c 'echo out; echo err >&2'
+  redir_case "$how" --verbose -F "$F" true
+done
+
 echo "flock-diff: $pass passed, $fail failed, $broken broken"
 [ "$fail" -eq 0 ] && [ "$broken" -eq 0 ]

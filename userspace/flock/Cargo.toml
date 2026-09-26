@@ -14,5 +14,9 @@ getoptlong = { path = "../getoptlong" }
 ulstrutils = { path = "../ulstrutils" }
 # Names in diagnostics with their unprintable bytes escaped (§370).
 quoting = { path = "../quoting" }
-# strerror's wording.
-errmsg = { path = "../errmsg" }
+# util-linux's close_stdout: stdout buffered as glibc buffers it (--verbose's
+# lines follow the command's output), and a lost diagnostic counted.
+ulclosestream = { path = "../ulclosestream" }
+# A standard descriptor the process was started without stays closed, for
+# flock and for the command it runs, rather than the runtime's /dev/null.
+stdfdguard = { path = "../stdfdguard" }

@@ -31,9 +31,10 @@ mod sys;
 use getoptlong::{Opt, Program, Takes};
 use quoting::{escape_unprintable, os_bytes};
 use std::ffi::{OsStr, OsString};
-use std::io::{self, IsTerminal, Write};
+use std::io;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
+use ulclosestream::Stdout as Out;
 use ulstrutils::{num_error_message, strtotimeval, ul_strtos32};
 
 /// `<sysexits.h>`.
@@ -86,65 +87,24 @@ const LOCK_UN: i32 = 8;
 /// Longest sleep between two tries of a `-w` wait.
 const POLL_MAX: Duration = Duration::from_millis(25);
 
+stdfdguard::guard_std_fds!();
+
 fn main() -> ExitCode {
+    // Before anything touches standard I/O: a descriptor the process was
+    // started without is closed again, as upstream -- and the command it
+    // runs, which inherits it -- would find it.
+    stdfdguard::restore();
     let argv: Vec<OsString> = std::env::args_os().collect();
-    let mut out = Out::new();
+    let short = short_name(
+        argv.first()
+            .map_or(OsStr::new("flock"), OsString::as_os_str),
+    );
+    // stdout as glibc holds it: `--verbose`'s lines follow the command's
+    // output unless stdout is a terminal, and vanish if flock `exec`s it.
+    let mut out = Out::new(CLOSE_EXIT_CODE);
     let status = run(&argv, &mut out);
-    ExitCode::from(out.close(status))
-}
-
-/// stdout as C's stdio would hold it: line-buffered on a terminal, and
-/// otherwise kept until exit -- which is observable, because `--verbose`'s
-/// lines then follow the command's output, and vanish if flock `exec`s it.
-struct Out {
-    tty: bool,
-    held: Vec<u8>,
-    short: Vec<u8>,
-}
-
-impl Out {
-    fn new() -> Self {
-        Out {
-            tty: io::stdout().is_terminal(),
-            held: Vec::new(),
-            short: b"flock".to_vec(),
-        }
-    }
-
-    /// `printf` of one whole line.
-    fn line(&mut self, text: &[u8]) {
-        self.held.extend_from_slice(text);
-        if self.tty {
-            let held = std::mem::take(&mut self.held);
-            // A terminal that cannot be written loses the line, as a failed
-            // line-buffered flush does; `close` still reports it.
-            if io::stdout().lock().write_all(&held).is_err() {
-                self.held = held;
-            }
-        }
-    }
-
-    /// What `exec` does to a buffer: drops it.
-    fn discard(&mut self) {
-        self.held.clear();
-    }
-
-    /// `close_stdout`: write what is held, or report why not.
-    fn close(&mut self, status: u8) -> u8 {
-        let held = std::mem::take(&mut self.held);
-        let mut stdout = io::stdout().lock();
-        match stdout.write_all(&held).and_then(|()| stdout.flush()) {
-            Ok(()) => status,
-            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => status,
-            Err(e) => {
-                warn_msg(
-                    &self.short,
-                    &format!("write error: {}", errmsg::strerror(&e)),
-                );
-                CLOSE_EXIT_CODE
-            }
-        }
-    }
+    // `close_stdout`, which upstream registers with `atexit`.
+    ExitCode::from(out.close(status, &short))
 }
 
 /// `program_invocation_short_name`: argv[0] past its last `/`.
@@ -162,23 +122,21 @@ fn shown(text: &[u8]) -> String {
     escape_unprintable(text)
 }
 
-/// `warnx`: `NAME: MSG`.
+/// `warnx`: `NAME: MSG`. A diagnostic that cannot be written counts against
+/// the exit status at `close_stdout`, as upstream's does.
 fn warn_msg(short: &[u8], msg: &str) {
-    let line = format!("{}: {msg}\n", shown(short));
-    // A diagnostic that cannot be written has nowhere else to go.
-    let _ = io::stderr().lock().write_all(line.as_bytes());
+    ulclosestream::warnx(short, msg);
 }
 
 /// `warn`: `NAME: MSG: strerror`.
 fn warn_err(short: &[u8], msg: &str, e: &io::Error) {
-    warn_msg(short, &format!("{msg}: {}", errmsg::strerror(e)));
+    ulclosestream::warn(short, msg, e);
 }
 
 /// `errtryhelp(status)`.
 fn errtryhelp(short: &[u8], status: u8) -> u8 {
     let line = format!("Try '{} --help' for more information.\n", shown(short));
-    // As in `warn_msg`: stderr is the last resort.
-    let _ = io::stderr().lock().write_all(line.as_bytes());
+    ulclosestream::stderr_write(line.as_bytes());
     status
 }
 
@@ -247,7 +205,6 @@ fn run(argv: &[OsString], out: &mut Out) -> u8 {
         .first()
         .map_or(OsStr::new("flock"), OsString::as_os_str);
     let short = short_name(arg0);
-    out.short.clone_from(&short);
 
     if argv.len() < 2 {
         warn_msg(&short, "not enough arguments");
@@ -272,8 +229,7 @@ fn run(argv: &[OsString], out: &mut Out) -> u8 {
             Err(e) => {
                 // glibc names the program by argv[0] as given.
                 let line = format!("{}: {}\n", shown(&os_bytes(arg0)), e.sentence);
-                // stderr is the last resort, as in `warn_msg`.
-                let _ = io::stderr().lock().write_all(line.as_bytes());
+                ulclosestream::stderr_write(line.as_bytes());
                 return errtryhelp(&short, EX_USAGE);
             }
         };
@@ -326,11 +282,11 @@ fn run(argv: &[OsString], out: &mut Out) -> u8 {
             b'V' => {
                 let mut line = short.clone();
                 line.extend_from_slice(b" from util-linux 2.39.3\n");
-                out.line(&line);
+                out.write(&line);
                 return EX_OK;
             }
             b'h' => {
-                out.line(&usage(&short));
+                out.write(&usage(&short));
                 return EX_OK;
             }
             _ => return errtryhelp(&short, EX_USAGE),
@@ -480,7 +436,7 @@ fn run(argv: &[OsString], out: &mut Out) -> u8 {
 
     if ctl.verbose {
         let took = started.elapsed();
-        out.line(
+        out.write(
             format!(
                 "{}: getting lock took {}.{:06} seconds\n",
                 shown(&short),
@@ -498,7 +454,7 @@ fn run(argv: &[OsString], out: &mut Out) -> u8 {
         return EX_OK;
     };
     if ctl.verbose {
-        out.line(
+        out.write(
             format!(
                 "{}: executing {}\n",
                 shown(&short),

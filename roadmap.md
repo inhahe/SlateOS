@@ -695,9 +695,10 @@ on the same day, to the same lane:**
    of it that may be months stale.** `git -C "E:/visual studio projects/os"
    pull` before you read it, or read `origin/main` directly with `git show`.
 3. **The worktree was never provisioned, and the script that provisions it was
-   one merge away.** `scripts/bootstrap-worktree.sh` fetches `limine/`, copies
-   `rootfs.ext4`, and builds the six service ELFs `kernel/src/main.rs`
-   `include_bytes!`es. It landed on `main` on 2026-08-13 (`0d013beb1`,
+   one merge away.** `scripts/bootstrap-worktree.sh` fetches `limine/` and
+   builds the six service ELFs `kernel/src/main.rs` `include_bytes!`es. (It
+   copied a sibling's `rootfs.ext4` too until 2026-09-26; the boot test refuses
+   another tree's image, so it now says how to build one.) It landed on `main` on 2026-08-13 (`0d013beb1`,
    `60dab49d5`). Lane B did not have it, so its first boot test failed on a
    missing `limine/BOOTX64.EFI` and on six missing service binaries — and
    those got diagnosed as unrelated build problems rather than as one stale

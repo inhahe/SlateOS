@@ -89,7 +89,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 
 def make_tree(parent: str, name: str, services, *, limine=True, rootfs="good",
-              embeds=None):
+              embeds=None, manifest=True):
     """Build a fake worktree and return its root.
 
     `services` are the names to *embed* in the fake kernel.  `embeds`, when
@@ -98,6 +98,8 @@ def make_tree(parent: str, name: str, services, *, limine=True, rootfs="good",
     Artifacts are created for every service in `services` unless the caller
     removes them afterwards, which keeps "what the kernel wants" and "what the
     tree has" independently controllable, exactly as they are in reality.
+    A good `rootfs.ext4` gets the `rootfs.ext4.manifest` that
+    `create-ext4-rootfs.sh` writes beside it unless `manifest` is false.
     """
     root = os.path.join(parent, name)
     os.makedirs(os.path.join(root, "scripts"), exist_ok=True)
@@ -130,16 +132,27 @@ def make_tree(parent: str, name: str, services, *, limine=True, rootfs="good",
             blob[1080:1082] = b"\x53\xef"
         with open(os.path.join(root, "rootfs.ext4"), "wb") as fh:
             fh.write(blob)
+        if rootfs == "good" and manifest:
+            with open(os.path.join(root, "rootfs.ext4.manifest"), "w",
+                      newline="") as fh:
+                fh.write("# fake manifest for the bootstrap-worktree.sh tests\n")
 
     return root
 
 
-def run_check(root: str, *args):
-    """Run `--check` in `root` and return (exit status, combined output)."""
+def run_check(root: str, *args, extra_env=None):
+    """Run `--check` in `root` and return (exit status, combined output).
+
+    `extra_env` adds variables to the child's environment; without it the
+    boot test's own switch is removed, so a developer who has it set in their
+    shell does not change what these tests see."""
+    env = dict(os.environ)
+    env.pop("BOOT_TEST_SKIP_ROOTFS_CHECK", None)
+    env.update(extra_env or {})
     proc = subprocess.run(
         [BASH, os.path.join(root, "scripts", "bootstrap-worktree.sh"),
          "--check", *args],
-        cwd=root, capture_output=True, text=True,
+        cwd=root, capture_output=True, text=True, env=env,
     )
     return proc.returncode, proc.stdout + proc.stderr
 
@@ -229,6 +242,36 @@ def test_truncated_rootfs_is_not_treated_as_present(tmp):
     status, out = run_check(root)
     check("rootfs.ext4 without a superblock exits 3", status == DEGRADING,
           "got %d\n%s" % (status, out))
+
+
+def test_rootfs_without_manifest_blocks(tmp):
+    """An image with no `rootfs.ext4.manifest` is one the boot test refuses.
+
+    `ctest-fixtures.py image-check` fails closed on it, and the boot test
+    exits 1 at staging -- after the whole build, two hours and fifty minutes
+    into lane F's run on 2026-09-25, when the bootstrap had copied such an
+    image from a sibling.  `--check` runs before the build, so it says so
+    there; and since provisioning cannot fix it, it does not say to provision.
+    """
+    root = make_tree(tmp, "no-manifest", ["init"], manifest=False)
+    status, out = run_check(root)
+    check("rootfs.ext4 without a manifest exits 1", status == BLOCKING,
+          "got %d\n%s" % (status, out))
+    check("it is named as unusable", "UNUSABLE rootfs.ext4" in out, out)
+    check("it says how to rebuild it", "create-ext4-rootfs.sh" in out, out)
+    check("it does not send the reader to the bootstrap, which cannot fix it",
+          "./scripts/bootstrap-worktree.sh" not in out, out)
+
+
+def test_skip_rootfs_check_keeps_the_boot_tests_escape_hatch(tmp):
+    """`BOOT_TEST_SKIP_ROOTFS_CHECK=1` makes the boot test attach an image it
+    cannot verify, under a loud banner.  `--check` runs first; if it refused,
+    the hatch would be shut before the boot test reached it."""
+    root = make_tree(tmp, "no-manifest-skip", ["init"], manifest=False)
+    status, out = run_check(root, extra_env={"BOOT_TEST_SKIP_ROOTFS_CHECK": "1"})
+    check("unverified rootfs.ext4 with the switch set exits 3", status == DEGRADING,
+          "got %d\n%s" % (status, out))
+    check("it is named as unverified", "UNVERIFIED rootfs.ext4" in out, out)
 
 
 def test_no_embeds_at_all_is_an_error_not_a_pass(tmp):
@@ -355,6 +398,8 @@ def main() -> int:
         test_missing_limine_blocks,
         test_missing_rootfs_degrades_but_does_not_block,
         test_truncated_rootfs_is_not_treated_as_present,
+        test_rootfs_without_manifest_blocks,
+        test_skip_rootfs_check_keeps_the_boot_tests_escape_hatch,
         test_no_embeds_at_all_is_an_error_not_a_pass,
         test_one_service_two_artifacts_is_refused,
         test_unknown_service_argument_is_rejected,

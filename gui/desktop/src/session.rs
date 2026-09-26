@@ -1773,6 +1773,8 @@ impl<T: Transport> ShellSession<T> {
             // its tile or its start menu row. Beside the other menus, and
             // for their reason: opening one dismisses the rest.
             self.shell.render_pin_menu(),
+            // The bar's own options, on the same terms.
+            self.shell.render_taskbar_menu(),
             self.shell.render_shortcut_card(),
             self.shell.render_alt_tab(),
             // Last of all, over Alt-Tab too, and for the opposite reason to

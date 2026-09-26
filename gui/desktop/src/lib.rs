@@ -1537,6 +1537,9 @@ pub struct DesktopShell {
     /// [`Hit::TaskbarPinned`] carries an index: the list is the authority, and
     /// a copy of a path here would be a second one to keep in step.
     pin_menu: Option<(guitk::menu::ContextMenu, PinTarget)>,
+    /// The taskbar's own menu -- a right-click on the bar between its tiles
+    /// and its tray -- when it is open: the bar's options.
+    taskbar_menu: Option<guitk::menu::ContextMenu>,
     /// A pinned button being dragged along the bar.
     ///
     /// Keyed on the executable path rather than the slot, for the reason the
@@ -2203,6 +2206,7 @@ impl DesktopShell {
             tray_drag: None,
             tray_overflow_menu: None,
             pin_menu: None,
+            taskbar_menu: None,
             pin_drag: None,
             pin_drag_off_bar: false,
             start_drag: None,
@@ -2811,12 +2815,18 @@ impl DesktopShell {
 
     /// How wide a window's tile would like to be -- its picture, its title and
     /// the room around them, up to [`TASKBAR_BUTTON_MAX_WIDTH`] -- and never
-    /// narrower than `square`, a pinned program's tile.
+    /// narrower than `square`, a pinned program's tile; or `square` itself,
+    /// when the user has asked for no titles (`taskbar_labels`), which then
+    /// leaves the tile too narrow for one and it draws its picture alone.
     ///
     /// Measured, not guessed: the title is drawn in a proportional face, and
     /// only the text layer knows how much wider "WWW Browser" is than
     /// "initialising".
     fn window_tile_width(&self, title: &str, square: f32) -> f32 {
+        // Titles off: a window is its picture alone, on a pin's square.
+        if !self.appearance.taskbar_labels {
+            return square;
+        }
         let title = text::measure(
             title,
             self.font_size(TextRole::Caption),
@@ -4107,6 +4117,19 @@ impl DesktopShell {
                 _ => return ShellAction::Consumed,
             }
         }
+        // The taskbar's menu, on the pin menu's terms just below.
+        if self.taskbar_menu.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    if let Some(menu) = self.taskbar_menu.as_mut() {
+                        menu.handle_mouse_move(event.x, event.y);
+                    }
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Press(_) => return self.click_taskbar_menu(event.x, event.y),
+                _ => return ShellAction::Consumed,
+            }
+        }
         // The pin menu, for the same reason as the overflow list below it: it
         // is drawn over everything, so a press either landed on it or
         // dismissed it, and nothing underneath should see the same press.
@@ -4792,6 +4815,12 @@ impl DesktopShell {
                 // `TD-C-NOTHING-CONNECTS-A-LAUNCHER-ENTRY-TO-THE-WINDOWS-IT-OPENS`.
                 Hit::TaskbarPinned(index) => {
                     self.open_pin_menu(PinTarget::Pinned(index), x, y);
+                    return ShellAction::Consumed;
+                }
+                // The bar itself, between its tiles and its tray: the bar's
+                // own options, where every taskbar keeps them.
+                Hit::TaskbarPanel => {
+                    self.open_taskbar_menu(x, y);
                     return ShellAction::Consumed;
                 }
                 _ => {}
@@ -5765,6 +5794,18 @@ impl DesktopShell {
             }
         }
 
+        // The taskbar's menu, on the pin menu's terms just below.
+        if self.taskbar_menu.is_some() {
+            match self.taskbar_menu.as_mut().map(|menu| menu.handle_key(key)) {
+                Some(Some(MenuAction::Selected(id))) => {
+                    self.taskbar_menu = None;
+                    self.activate_taskbar_menu_item(id);
+                }
+                Some(Some(MenuAction::Closed)) => self.taskbar_menu = None,
+                _ => {}
+            }
+            return HotkeyOutcome::consumed();
+        }
         // The pin menu, on the same terms as the two below it: a popup that
         // owns the keyboard while it is up. Without this it could be opened
         // and then only used with the mouse, and Escape would do whatever the
@@ -8134,6 +8175,79 @@ impl DesktopShell {
         self.pin_app(&exec, &name);
     }
 
+    /// The taskbar menu's "Show window titles" item.
+    const MENU_SHOW_TITLES: MenuItemId = 1;
+
+    /// Open the taskbar's own menu at `(x, y)`: the bar's options.
+    ///
+    /// One so far, a switch: whether windows' tiles show their titles
+    /// (`taskbar_labels`) -- `design.txt`'s "option to show app name along
+    /// with app icon". A switch, ticked when on, because it *is* a state of
+    /// the bar, unlike the pin menu's items, which are actions. Here as well
+    /// as in the Settings app for the reason the desktop's View menu carries
+    /// the icon size: it is a property of the thing under the pointer.
+    fn open_taskbar_menu(&mut self, x: f32, y: f32) {
+        // Opening a menu closes whatever else was open, as the desktop's does.
+        self.dismiss_popups();
+        let mut menu = guitk::menu::ContextMenu::new(vec![guitk::menu::MenuItem::Action {
+            id: Self::MENU_SHOW_TITLES,
+            label: "Show window titles".to_string(),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: Some(self.appearance.taskbar_labels),
+        }]);
+        // The real screen, not the toolkit's assumed one: this opens from the
+        // bottom edge, where a wrong viewport puts the rows off the display.
+        menu.show(x, y, self.viewport());
+        self.taskbar_menu = Some(menu);
+    }
+
+    /// A press while the taskbar's menu is open: a row takes its action, and
+    /// a press anywhere else closes the menu, as the desktop menu does.
+    fn click_taskbar_menu(&mut self, x: f32, y: f32) -> ShellAction {
+        let chosen = self
+            .taskbar_menu
+            .as_mut()
+            .and_then(|menu| menu.handle_click(x, y));
+        self.taskbar_menu = None;
+        if let Some(id) = chosen {
+            self.activate_taskbar_menu_item(id);
+        }
+        ShellAction::Consumed
+    }
+
+    /// One row of the taskbar's menu, chosen by click or by key.
+    fn activate_taskbar_menu_item(&mut self, id: MenuItemId) {
+        if id == Self::MENU_SHOW_TITLES {
+            self.toggle_taskbar_labels();
+        }
+    }
+
+    /// Show windows' titles on their tiles, or stop -- written to
+    /// `appearance.yaml`, the file the Settings app edits too, so the two
+    /// agree. Load, modify, save, and a failed write reported with the bar
+    /// changed anyway, for the reasons [`toggle_night_light`](Self::toggle_night_light)
+    /// gives. The compositor is not told: it draws no taskbar.
+    fn toggle_taskbar_labels(&mut self) {
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.taskbar_labels = !self.appearance.taskbar_labels;
+        self.appearance.taskbar_labels = file.settings.taskbar_labels;
+        if let Err(err) = file.save() {
+            eprintln!("desktop: could not save appearance.yaml: {err}");
+        }
+    }
+
+    /// The taskbar menu's draw commands, `None` when it is closed.
+    #[must_use]
+    pub fn render_taskbar_menu(&self) -> Option<RenderTree> {
+        let menu = self.taskbar_menu.as_ref()?;
+        let mut tree = RenderTree::new();
+        tree.commands
+            .extend(menu.render(&Palette::from_settings(&self.appearance)));
+        Some(tree)
+    }
+
     /// The pin menu's draw commands, empty when it is closed.
     #[must_use]
     pub fn render_pin_menu(&self) -> Option<RenderTree> {
@@ -10326,6 +10440,7 @@ impl DesktopShell {
         self.desktop_menu.is_visible()
             || self.tray_overflow_menu.is_some()
             || self.pin_menu.is_some()
+            || self.taskbar_menu.is_some()
             || self.start_menu_open
             || self.power_menu_open
             || self.calendar.visible
@@ -10346,6 +10461,7 @@ impl DesktopShell {
         self.desktop_menu.hide();
         self.tray_overflow_menu = None;
         self.pin_menu = None;
+        self.taskbar_menu = None;
         // Through the one exit, which also ends a drag from the menu: Escape
         // in the middle of carrying a program used to close the menu and
         // leave the drag to finish on the release.
@@ -18516,6 +18632,183 @@ mod taskbar_pin_tests {
                         if (*x - (divider.x + divider.w)).abs() < 0.01
                             && *color == super::TASKBAR_DIVIDER_SHADOW)),
                 "the divider has no shadow"
+            );
+        });
+    }
+
+    // ---- the option to show windows' titles ----
+
+    /// **With titles off, a window is its picture alone**, on a square tile
+    /// like a pin's -- `design.txt`'s option, the other way round.
+    #[test]
+    fn with_titles_off_a_window_is_its_picture_alone() {
+        use guitk::render::RenderCommand;
+        let mut shell = shell();
+        shell.appearance.taskbar_labels = false;
+        shell.apply_window_list(&WindowList::new(0, vec![window_of(1, "", "notes.txt")]));
+        let tile = shell.taskbar_layout()[0];
+        assert!((tile.w - tile.h).abs() < 0.01, "not square: {tile:?}");
+        let tree = shell.render_taskbar();
+        let on_tile = drawn_inside(&tree, tile);
+        assert!(
+            !on_tile
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { .. })),
+            "a title was drawn with titles off: {on_tile:?}"
+        );
+        assert!(
+            on_tile
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Image { .. })),
+            "the picture went with the title"
+        );
+    }
+
+    /// **The bar's menu answers the keyboard** while it is up, as every
+    /// menu here does: Enter takes the highlighted row, Escape closes it.
+    #[test]
+    fn the_bars_menu_answers_the_keyboard() {
+        with_scratch_config("shell-taskbar-menu-keys", |_root| {
+            let mut shell = shell();
+            let (x, y) = bare_bar(&shell);
+            shell.handle_press(x, y, MouseButton::Right);
+            drop(shell.handle_hotkey(&press(Key::Down)));
+            drop(shell.handle_hotkey(&press(Key::Enter)));
+            assert!(
+                shell.render_taskbar_menu().is_none(),
+                "Enter left the menu open"
+            );
+            assert!(
+                !shell.appearance.taskbar_labels,
+                "Enter did not take the row"
+            );
+
+            shell.handle_press(x, y, MouseButton::Right);
+            drop(shell.handle_hotkey(&press(Key::Escape)));
+            assert!(
+                shell.render_taskbar_menu().is_none(),
+                "Escape left the menu open"
+            );
+            assert!(
+                !shell.appearance.taskbar_labels,
+                "Escape changed the setting"
+            );
+        });
+    }
+
+    /// **Opening the bar's menu closes what else is open** -- the one popup
+    /// a press on the bar does not put away first is the shortcut card, which
+    /// is there to be read, and a user who has turned to the bar has stopped.
+    #[test]
+    fn opening_the_bars_menu_closes_the_shortcut_card() {
+        with_scratch_config("shell-taskbar-menu-card", |_root| {
+            let mut shell = shell();
+            shell.shortcut_card_open = true;
+            let (x, y) = bare_bar(&shell);
+            shell.handle_press(x, y, MouseButton::Right);
+            assert!(
+                shell.render_taskbar_menu().is_some(),
+                "the premise: it opened"
+            );
+            assert!(
+                !shell.shortcut_card_open,
+                "the card stayed up under the menu"
+            );
+        });
+    }
+
+    /// A point on the bar between the tiles and the tray.
+    fn bare_bar(shell: &DesktopShell) -> (f32, f32) {
+        let bar = shell.taskbar_rect();
+        (shell.tray_x() - 40.0, bar.y + bar.h / 2.0)
+    }
+
+    /// **A right-click on the bar offers its options**: the titles switch,
+    /// ticked while they are shown; choosing it hides them and says so in
+    /// `appearance.yaml`, where the Settings app reads it too.
+    #[test]
+    fn a_right_click_on_the_bar_offers_the_titles_switch() {
+        with_scratch_config("shell-taskbar-menu", |_root| {
+            let mut shell = shell();
+            let (x, y) = bare_bar(&shell);
+            assert_eq!(
+                shell.hit_test(x, y),
+                Hit::TaskbarPanel,
+                "the premise: bare bar"
+            );
+            shell.handle_press(x, y, MouseButton::Right);
+            let drawn = format!("{:?}", shell.render_taskbar_menu().expect("no menu opened"));
+            assert!(drawn.contains("Show window titles"), "{drawn}");
+            assert!(drawn.contains('\u{2713}'), "shown, and not ticked: {drawn}");
+            assert!(
+                shell.any_popup_open(),
+                "an open taskbar menu is not a popup"
+            );
+
+            shell.taskbar_menu = None;
+            shell.activate_taskbar_menu_item(DesktopShell::MENU_SHOW_TITLES);
+            assert!(
+                !shell.appearance.taskbar_labels,
+                "the switch did not switch"
+            );
+            shell.handle_press(x, y, MouseButton::Right);
+            let drawn = format!("{:?}", shell.render_taskbar_menu().expect("no menu opened"));
+            assert!(
+                !drawn.contains('\u{2713}'),
+                "hidden, and still ticked: {drawn}"
+            );
+            shell.taskbar_menu = None;
+            assert!(
+                !appearance::AppearanceFile::load().settings.taskbar_labels,
+                "the choice was not saved"
+            );
+            shell.activate_taskbar_menu_item(DesktopShell::MENU_SHOW_TITLES);
+            assert!(
+                shell.appearance.taskbar_labels,
+                "the switch does not switch back"
+            );
+        });
+    }
+
+    /// **Escape, or a click away, closes the bar's menu**, as it closes the
+    /// others -- and a right-click that closes another popup is spent doing
+    /// so, as every dismissing press is (`handle_press`), rather than opening
+    /// the bar's menu as well.
+    #[test]
+    fn the_bars_menu_closes_as_the_others_do() {
+        with_scratch_config("shell-taskbar-menu-close", |_root| {
+            let mut shell = shell();
+            shell.toggle_start_menu();
+            let (x, y) = bare_bar(&shell);
+            shell.handle_press(x, y, MouseButton::Right);
+            assert!(
+                !shell.start_menu_open,
+                "the right-click left the start menu open"
+            );
+            assert!(
+                shell.render_taskbar_menu().is_none(),
+                "the press that closed the start menu opened another as well"
+            );
+            shell.handle_press(x, y, MouseButton::Right);
+            assert!(
+                shell.render_taskbar_menu().is_some(),
+                "the premise: it opened"
+            );
+            assert!(shell.dismiss_popups());
+            assert!(
+                shell.render_taskbar_menu().is_none(),
+                "dismissing left it open"
+            );
+
+            shell.handle_press(x, y, MouseButton::Right);
+            shell.handle_mouse(&at(40.0, 40.0, MouseEventKind::Press(MouseButton::Left)));
+            assert!(
+                shell.render_taskbar_menu().is_none(),
+                "a click away left it open"
+            );
+            assert!(
+                shell.appearance.taskbar_labels,
+                "a click away changed the setting"
             );
         });
     }

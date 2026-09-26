@@ -1859,6 +1859,13 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **Windows' titles on the taskbar are an option** -- done 2026-09-26
+  (`design-decisions.md` §1401). `appearance.yaml`'s `taskbar.labels`, on by
+  default; off, a window's tile is its picture alone. Switched from the bar's
+  own right-click menu -- the first thing that right-click has offered -- and
+  asked of lane E for the Settings app
+  (`requests/c-e-a-show-window-titles-switch-beside-auto-hide.md`).
+
 - `[C]` **The taskbar's tiles are the Aero reference's** -- done 2026-09-26
   (`design-decisions.md` §1400). A pinned program is its picture on a
   36-pixel square; a window is its picture and title on a glass tile as wide

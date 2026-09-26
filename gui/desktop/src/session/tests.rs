@@ -588,6 +588,41 @@ fn right_clicking_a_pinned_tile_draws_its_menu() {
     });
 }
 
+/// **The bar's own menu is put on the screen** -- the part list the
+/// surface is mapped from has it, which is the whole of what a menu needs to
+/// be seen (see `right_clicking_a_pinned_tile_draws_its_menu`).
+#[test]
+fn right_clicking_the_bare_bar_draws_its_menu() {
+    settingsfile::testing::with_scratch_config("session-taskbar-menu-drawn", |_root| {
+        let (mut session, desktop, _turn) = session();
+        let popups = session.popups().window();
+        let bar = session.shell().taskbar_rect();
+        let (x, y) = (session.shell().tray_x() - 40.0, bar.y + bar.h / 2.0);
+        assert_eq!(
+            session.shell().hit_test(x, y),
+            Hit::TaskbarPanel,
+            "the premise: bare bar"
+        );
+        let before = desktop.borrow().seen.len();
+
+        right_click_at(&desktop, session.panel(), x, y);
+        session.pump().expect("pump");
+
+        assert!(
+            session.shell().render_taskbar_menu().is_some(),
+            "the premise: the right-click opened the menu"
+        );
+        assert!(
+            desktop.borrow().seen[before..].iter().any(|r| r.body
+                == RequestBody::SetVisible {
+                    window: popups,
+                    visible: true
+                }),
+            "the bar's menu opened with nothing to draw it on"
+        );
+    });
+}
+
 /// **The tray's overflow list is seen.** It was drawn -- onto the popup
 /// surface, which was mapped only for the things on a second list, and the
 /// list was not on it. So the chevron opened a list nobody could see.

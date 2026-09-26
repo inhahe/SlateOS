@@ -1604,6 +1604,15 @@ pub struct AppearanceSettings {
     /// setting they did not knowingly change. Every desktop this imitates ships
     /// it off. See design-decisions 813.
     pub taskbar_autohide: bool,
+    /// Whether a window's taskbar tile shows its title beside its picture:
+    /// `design.txt`'s "option to show app name along with app icon in
+    /// taskbar". On by default, because the Aero reference -- which the
+    /// default theme follows (design-decisions §815) -- labels every running
+    /// window. Off, a window's tile is its picture alone, square, as a pinned
+    /// program's is; pinned programs are their picture alone either way.
+    /// `taskbar.labels` in the file, beside auto-hide: a behaviour of the bar
+    /// rather than a visual treatment.
+    pub taskbar_labels: bool,
     /// Whether to show accent color on window title bars.
     pub accent_titlebars: bool,
     /// Whether to show window drop shadows.
@@ -1659,6 +1668,7 @@ impl Default for AppearanceSettings {
             taskbar_style: TaskbarStyle::Translucent,
             accent_taskbar: false,
             taskbar_autohide: false,
+            taskbar_labels: true,
             accent_titlebars: false,
             drop_shadows: true,
             scaling_percent: 100,
@@ -2343,6 +2353,7 @@ impl AppearanceSettings {
             doc.get_bool(&["effects", "accent_taskbar"])
         );
         read_into!(s.taskbar_autohide, doc.get_bool(&["taskbar", "autohide"]));
+        read_into!(s.taskbar_labels, doc.get_bool(&["taskbar", "labels"]));
         read_into!(
             s.accent_titlebars,
             doc.get_bool(&["effects", "accent_titlebars"])
@@ -2560,6 +2571,7 @@ impl AppearanceSettings {
         // not an appearance: the group a key sits in is the only clue a person
         // hand-editing this file gets about what else to look for nearby.
         doc.set_bool(&["taskbar", "autohide"], self.taskbar_autohide);
+        doc.set_bool(&["taskbar", "labels"], self.taskbar_labels);
         doc.set_bool(&["effects", "accent_titlebars"], self.accent_titlebars);
         doc.set_bool(&["effects", "drop_shadows"], self.drop_shadows);
 
@@ -3202,6 +3214,7 @@ mod tests {
             taskbar_style: TaskbarStyle::Transparent,
             accent_taskbar: true,
             taskbar_autohide: true,
+            taskbar_labels: false,
             accent_titlebars: true,
             drop_shadows: false,
             scaling_percent: 150,
@@ -3236,6 +3249,22 @@ mod tests {
         assert_eq!(
             doc.get_str(&["theme", "colors"]).as_deref(),
             Some("nord 100%25 %C3%A7a")
+        );
+    }
+
+    /// **Windows' titles are on the taskbar unless the file says otherwise**:
+    /// the Aero reference labels every running window, and `taskbar.labels`
+    /// is what says otherwise.
+    #[test]
+    fn the_taskbar_shows_titles_unless_the_file_says_not() {
+        assert!(AppearanceSettings::default().taskbar_labels);
+        let off = AppearanceSettings::read_from(&Document::parse("taskbar:\n  labels: false\n"));
+        assert!(!off.taskbar_labels);
+        let unrelated =
+            AppearanceSettings::read_from(&Document::parse("taskbar:\n  autohide: true\n"));
+        assert!(
+            unrelated.taskbar_labels,
+            "a file that does not say keeps the default"
         );
     }
 

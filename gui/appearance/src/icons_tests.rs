@@ -42,6 +42,31 @@ impl Fixture {
     }
 }
 
+/// A data directory of the fixture's own, for icons programs install.
+impl Fixture {
+    fn data(&self) -> std::path::PathBuf {
+        self.scratch.dir().join("data")
+    }
+
+    /// Put `bytes` at `relative` under the data directory.
+    fn install(&self, relative: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let path = self.data().join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// A theme reading this fixture's themes and data directory.
+    fn theme(&self) -> IconTheme {
+        IconTheme::named(OsStr::new("mine"), self.dirs()).with_data_dirs(vec![self.data()])
+    }
+}
+
+/// A PNG `side` pixels square, all `rgba`.
+fn png(side: u32, rgba: [u8; 4]) -> Vec<u8> {
+    imagecodec::testing::png_rgba(side, side, |_, _| rgba)
+}
+
 /// A square filling its box, in the colour the icon is drawn in.
 const SQUARE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect x="0" y="0" width="10" height="10" fill="currentColor"/></svg>"#;
 /// A disc in a fixed red of its own.
@@ -318,6 +343,242 @@ fn a_missing_name_falls_back_to_a_shorter_one() {
     fx.put("user", "mine", "folder", SQUARE.as_bytes());
     assert_eq!(theme.source("folder-documents").unwrap(), SQUARE);
     assert_eq!(theme.source("no-such-icon"), None);
+}
+
+/// **A program's own icon, installed into `hicolor`, is drawn** -- under a
+/// name no theme has, `org.example.Sketch` -- scalable first.
+#[test]
+fn a_programs_own_icon_in_hicolor_is_drawn() {
+    let fx = Fixture::new("hicolor-svg");
+    fx.install(
+        "icons/hicolor/scalable/apps/org.example.Sketch.svg",
+        RED_DOT.as_bytes(),
+    );
+    let icon = fx
+        .theme()
+        .render("org.example.Sketch", 20, INK)
+        .expect("drawn");
+    assert_eq!(icon.size, 20);
+    assert_eq!(
+        icon.argb[(10 * 20 + 10) as usize],
+        0xFFFF_0000,
+        "the icon's own red"
+    );
+    assert_eq!(fx.theme().render("org.example.Absent", 20, INK), None);
+}
+
+/// **The PNG whose size suits best is the one drawn**: the smallest at least
+/// as large as asked, scaled down -- here a 48 for 20, not the 16 -- and the
+/// largest when none is large enough.
+#[test]
+fn the_best_sized_png_in_hicolor_is_drawn() {
+    let fx = Fixture::new("hicolor-png");
+    fx.install(
+        "icons/hicolor/16x16/apps/sketch.png",
+        &png(16, [0, 0, 255, 255]),
+    );
+    fx.install(
+        "icons/hicolor/48x48/apps/sketch.png",
+        &png(48, [0, 255, 0, 255]),
+    );
+    let icon = fx.theme().render("sketch", 20, INK).expect("drawn");
+    assert_eq!(icon.size, 20);
+    assert_eq!(icon.argb.len(), 400);
+    assert!(
+        icon.argb.iter().all(|px| *px == 0xFF00_FF00),
+        "not the 48 scaled to 20, all green"
+    );
+    let big = fx.theme().render("sketch", 64, INK).expect("drawn");
+    assert!(
+        big.argb.iter().all(|px| *px == 0xFF00_FF00),
+        "the largest there is"
+    );
+}
+
+/// **An icon named by its path is that file**, SVG or PNG -- as a desktop
+/// entry may give it -- and a path to anything else draws nothing.
+#[test]
+fn an_icon_named_by_its_path_is_that_file() {
+    let fx = Fixture::new("path");
+    let svg = fx.install("opt/app/icon.svg", RED_DOT.as_bytes());
+    let raster = fx.install("opt/app/icon.png", &png(32, [255, 255, 0, 255]));
+    let text = fx.install("opt/app/icon.txt", b"not a picture");
+    let theme = fx.theme();
+    let drawn = theme
+        .render(svg.to_str().unwrap(), 20, INK)
+        .expect("the svg");
+    assert_eq!(drawn.argb[(10 * 20 + 10) as usize], 0xFFFF_0000);
+    let drawn = theme
+        .render(raster.to_str().unwrap(), 20, INK)
+        .expect("the png");
+    assert!(drawn.argb.iter().all(|px| *px == 0xFFFF_FF00));
+    assert_eq!(theme.render(text.to_str().unwrap(), 20, INK), None);
+    let missing = fx.data().join("opt/app/none.png");
+    assert_eq!(theme.render(missing.to_str().unwrap(), 20, INK), None);
+}
+
+/// An entry that wrote its icon's extension -- `Icon=sketch.png`, which the
+/// specification says to leave off -- still finds it.
+#[test]
+fn an_icon_name_with_its_extension_still_finds_it() {
+    let fx = Fixture::new("extension");
+    fx.install(
+        "icons/hicolor/32x32/apps/sketch.png",
+        &png(32, [0, 0, 255, 255]),
+    );
+    assert!(fx.theme().render("sketch.png", 16, INK).is_some());
+}
+
+/// **The theme and the built-in set come before `hicolor`** for a name both
+/// draw -- the desktop's look kept together -- while a program's own icon
+/// under its exact name comes before a shorter built-in one.
+#[test]
+fn the_theme_and_built_in_come_first_and_an_exact_name_before_a_shorter_one() {
+    let fx = Fixture::new("hicolor-order");
+    // A red `folder` in hicolor: the built-in folder is drawn instead.
+    fx.install("icons/hicolor/scalable/apps/folder.svg", RED_DOT.as_bytes());
+    let built_in = fx.theme().render("folder", 16, INK).expect("drawn");
+    assert!(
+        built_in
+            .argb
+            .iter()
+            .all(|px| *px >> 24 == 0 || *px & 0x00FF_FFFF == 0x0020_80C0),
+        "hicolor's folder beat the built-in one"
+    );
+    // `folder-sketchbook`: the built-in set would give `folder` for it, but a
+    // program installed that exact name, and it is drawn.
+    fx.install(
+        "icons/hicolor/scalable/apps/folder-sketchbook.svg",
+        RED_DOT.as_bytes(),
+    );
+    let own = fx
+        .theme()
+        .render("folder-sketchbook", 20, INK)
+        .expect("drawn");
+    assert_eq!(own.argb[(10 * 20 + 10) as usize], 0xFFFF_0000);
+    // The chosen theme's own folder beats both, for its every folder.
+    fx.put("user", "mine", "folder", SQUARE.as_bytes());
+    let themed = fx
+        .theme()
+        .render("folder-sketchbook", 20, INK)
+        .expect("drawn");
+    assert_eq!(themed.argb[(10 * 20 + 10) as usize], 0xFF20_80C0);
+}
+
+/// **A PNG scaled down is averaged, not sampled**, in premultiplied alpha: a
+/// half-transparent checkerboard drawn at half size is an even grey of half
+/// cover rather than whichever cell a sample happened to hit -- and a clear
+/// pixel's hidden colour does not tint its neighbour.
+#[test]
+fn a_scaled_png_is_averaged_in_premultiplied_alpha() {
+    let fx = Fixture::new("average");
+    // Opaque black beside clear *white*: the average is black at half cover,
+    // not grey -- in every channel, so each channel's averaging is checked.
+    let bytes = imagecodec::testing::png_rgba(32, 32, |x, y| {
+        if (x + y) % 2 == 0 {
+            [0, 0, 0, 255]
+        } else {
+            [255, 255, 255, 0]
+        }
+    });
+    let path = fx.install("opt/app/check.png", &bytes);
+    let icon = fx
+        .theme()
+        .render(path.to_str().unwrap(), 16, INK)
+        .expect("drawn");
+    for px in &icon.argb {
+        let [a, r, g, b] = px.to_be_bytes();
+        assert!((126..=129).contains(&a), "not half cover: {px:08x}");
+        assert_eq!((r, g, b), (0, 0, 0), "the clear white bled in: {px:08x}");
+    }
+}
+
+/// A picture that is not square keeps its shape, centred: the rest is clear.
+#[test]
+fn a_png_that_is_not_square_keeps_its_shape() {
+    let fx = Fixture::new("aspect");
+    let bytes = imagecodec::testing::png_rgba(40, 20, |_, _| [0, 0, 0, 255]);
+    let path = fx.install("opt/app/wide.png", &bytes);
+    let icon = fx
+        .theme()
+        .render(path.to_str().unwrap(), 20, INK)
+        .expect("drawn");
+    let row = |y: usize| &icon.argb[y * 20..(y + 1) * 20];
+    assert!(
+        row(0).iter().all(|px| px >> 24 == 0),
+        "the top is not clear"
+    );
+    assert!(
+        row(19).iter().all(|px| px >> 24 == 0),
+        "the bottom is not clear"
+    );
+    assert!(
+        row(10).iter().all(|px| *px == 0xFF00_0000),
+        "the middle band is not drawn"
+    );
+}
+
+/// A program that put its picture in `pixmaps`, the older place, is still
+/// drawn when `hicolor` has none.
+#[test]
+fn a_picture_in_pixmaps_is_found_after_hicolor() {
+    let fx = Fixture::new("pixmaps");
+    fx.install("pixmaps/oldapp.png", &png(32, [0, 255, 0, 255]));
+    let icon = fx.theme().render("oldapp", 16, INK).expect("drawn");
+    assert!(icon.argb.iter().all(|px| *px == 0xFF00_FF00));
+    // hicolor first, when both have it.
+    fx.install("icons/hicolor/scalable/apps/oldapp.svg", RED_DOT.as_bytes());
+    let icon = fx.theme().render("oldapp", 20, INK).expect("drawn");
+    assert_eq!(icon.argb[(10 * 20 + 10) as usize], 0xFFFF_0000);
+}
+
+/// A program's icon name is still never a way out of the directory looked
+/// in, however loose the rule for such names is.
+#[test]
+fn a_program_icon_name_is_never_a_way_out() {
+    let fx = Fixture::new("way-out");
+    fx.install("icons/hicolor/scalable/apps/secret.svg", RED_DOT.as_bytes());
+    // Files a name starting with `.` or `-` would reach, were such names
+    // looked for: hidden files, and names a command line would take for an
+    // option.
+    fx.install(
+        "icons/hicolor/scalable/apps/.secret.svg",
+        RED_DOT.as_bytes(),
+    );
+    fx.install(
+        "icons/hicolor/scalable/apps/-secret.svg",
+        RED_DOT.as_bytes(),
+    );
+    let theme = fx.theme();
+    for name in [
+        "../hicolor/scalable/apps/secret",
+        "apps/secret",
+        "scalable\\apps\\secret",
+        ".secret",
+        "-secret",
+        "",
+    ] {
+        assert_eq!(theme.render(name, 16, INK), None, "{name:?}");
+    }
+    assert!(theme.render("secret", 16, INK).is_some(), "the premise");
+}
+
+/// A translucent colour fades a PNG icon too, as it does an SVG one: the
+/// ghost of a dragged program is its own picture, faded.
+#[test]
+fn a_translucent_colour_fades_a_png_icon() {
+    let fx = Fixture::new("fade");
+    let path = fx.install("opt/app/solid.png", &png(16, [10, 20, 30, 255]));
+    let ghost = Color::rgba(0x20, 0x80, 0xc0, 128);
+    let icon = fx
+        .theme()
+        .render(path.to_str().unwrap(), 16, ghost)
+        .expect("drawn");
+    assert!(
+        icon.argb.iter().all(|px| *px == 0x800A_141E),
+        "{:08x}",
+        icon.argb[0]
+    );
 }
 
 /// Something that is not a name is not looked for anywhere: it would be a

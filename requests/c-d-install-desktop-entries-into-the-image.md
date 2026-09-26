@@ -21,9 +21,8 @@ entry too, or the program is installed and missing from the menu.
   saying `Exec=calculator` finds `/usr/bin/calculator` on `$PATH`; one naming
   an absolute path must name the one the image uses.
 - Icons, if a program ships its own: `/usr/share/icons/hicolor/scalable/apps/<name>.svg`
-  is where the Icon Theme Specification puts them. (The shell draws theme icons
-  from its own icon themes today; reading `hicolor` is lane C's to add when a
-  program ships one.)
+  (or `.../<n>x<n>/apps/<name>.png`) is where the Icon Theme Specification puts
+  them, and where the desktop now looks (lane C, 2026-09-26).
 
 ## Where the desktop looks
 

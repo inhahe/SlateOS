@@ -147004,7 +147004,12 @@ find it, and the test is the only thing standing over it.
 
 ## TD-C-A-PROGRAMS-OWN-ICON-FILE-IS-NOT-READ
 
-**Date:** 2026-09-26. **Lane:** C. **OPEN.**
+**Date:** 2026-09-26. **Lane:** C. **FIXED 2026-09-26**, the same day:
+`IconTheme::render` draws an icon file named by its path (SVG, or PNG scaled
+by area to the size asked), and a name no theme draws from `hicolor` --
+scalable first, then the best-sized PNG, in each standard context -- and then
+`pixmaps`; the exact name in the built-in set and `hicolor` before any shorter
+one. Kept below as it was written.
 
 **In short:** a program's desktop entry may name its picture as a file
 (`Icon=/opt/app/icon.png`) or ship it into the standard `hicolor` icon

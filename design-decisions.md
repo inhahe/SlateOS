@@ -80308,9 +80308,10 @@ entry yet, so the menu still shows the shell's own ten, now in folders.
 - **Programs ship no entries yet** (`requests/c-e-ship-a-desktop-entry-with-each-program.md`),
   and the image installs none (`requests/c-d-install-desktop-entries-into-the-image.md`).
   The terminal ignores `-e`, so a `Terminal=true` program opens a shell (lane E).
-- **Icons come from the icon theme only**: an entry naming an icon file by path,
-  or an icon installed in `hicolor`, draws the generic program picture
-  (`known-issues.md` `TD-C-A-PROGRAMS-OWN-ICON-FILE-IS-NOT-READ`).
+- ~~Icons come from the icon theme only.~~ Done the same day: an entry naming
+  an icon file by path, or an icon installed in `hicolor` or `pixmaps`, is
+  drawn -- SVG, or PNG scaled by area -- after the chosen theme and, name by
+  name, beside the built-in set (`appearance::icons::IconTheme::render`).
 - ~~Jump lists (an entry's `Actions`) are read and not yet offered.~~ Offered
   the same day: a program's right-click menu -- its start menu row, its pinned
   taskbar button -- starts with its actions, above a separator; an action with

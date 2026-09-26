@@ -42,7 +42,9 @@ version = "0.1.0"
 dependencies = [
  "datetimesettings",
  "daywindow",
+ "desktopentry",
  "guitk",
+ "imagecodec",
  "pathcodec",
  "scratchdir",
  "settingsfile",

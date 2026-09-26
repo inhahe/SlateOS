@@ -392,6 +392,10 @@ pub struct IconTheme {
     /// icon is looked up, not when the theme is named, so that the setting
     /// is the name alone and two readings of one file compare equal.
     dirs: Option<ThemeDirs>,
+    /// The XDG data directories whose `icons/hicolor` programs install their
+    /// own icons into, or `None` for the environment's -- read at lookup, as
+    /// `dirs` is.
+    data_dirs: Option<Vec<PathBuf>>,
 }
 
 impl Default for IconTheme {
@@ -415,7 +419,16 @@ impl IconTheme {
         Self {
             id: id.to_os_string(),
             dirs: Some(dirs),
+            data_dirs: None,
         }
+    }
+
+    /// Look for programs' own icons (`hicolor`, `pixmaps`) under these data
+    /// directories, in this order, rather than the environment's.
+    #[must_use]
+    pub fn with_data_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.data_dirs = Some(dirs);
+        self
     }
 
     /// The theme `id`, looked for in the standard theme directories.
@@ -424,6 +437,7 @@ impl IconTheme {
         Self {
             id: id.to_os_string(),
             dirs: None,
+            data_dirs: None,
         }
     }
 
@@ -472,15 +486,269 @@ impl IconTheme {
     /// `name` drawn `size` pixels square, `currentColor` as `color`. `None`
     /// when nothing draws the name, or `size` is zero; a size past
     /// [`MAX_ICON_PX`] is drawn at that.
+    ///
+    /// Where it is looked for, in order:
+    ///
+    /// 1. A file, when `name` is an absolute path -- as a program's desktop
+    ///    entry may give its icon.
+    /// 2. The theme's own icons, with the shorter names: a theme that draws
+    ///    only `folder` gives that for every folder, its look kept together.
+    /// 3. Name by name, the exact name first: the built-in set, then the icons
+    ///    programs install into the `hicolor` theme (and the older `pixmaps`).
+    ///    So a program's own icon is drawn under its own name before a
+    ///    shorter, generic one is, as the Icon Theme Specification has it.
+    ///
+    /// SVG or PNG; a PNG is scaled to the size asked, keeping its shape.
     #[must_use]
     pub fn render(&self, name: &str, size: u32, color: Color) -> Option<Icon> {
         let size = size.min(MAX_ICON_PX);
         if size == 0 {
             return None;
         }
-        let source = self.source(name)?;
-        render_svg(&source, size, color)
+        if Path::new(name).is_absolute() {
+            return render_file(Path::new(name), size, color);
+        }
+        if is_valid_name(name) {
+            for candidate in candidates(name) {
+                if let Some(text) = self.theme_file(candidate) {
+                    return render_svg(&text, size, color);
+                }
+            }
+        }
+        let name = strip_icon_extension(name);
+        if !is_program_icon_name(name) {
+            return None;
+        }
+        for candidate in candidates(name) {
+            if let Some((_, svg)) = BUILT_IN.iter().find(|(built, _)| *built == candidate) {
+                return render_svg(svg, size, color);
+            }
+            if let Some(icon) = self.installed(candidate, size, color) {
+                return Some(icon);
+            }
+        }
+        None
     }
+
+    /// A program's own icon `name`, as programs install them: in `hicolor`,
+    /// the theme every icon theme falls back to -- scalable first, then the
+    /// PNG whose size suits best -- and then in `pixmaps`, the older place.
+    /// The first data directory that has it wins, the user's before the
+    /// system's.
+    fn installed(&self, name: &str, size: u32, color: Color) -> Option<Icon> {
+        let dirs = match &self.data_dirs {
+            Some(dirs) => dirs.clone(),
+            None => desktopentry::scan::DataDirs::from_env(|n| std::env::var_os(n))
+                .dirs()
+                .to_vec(),
+        };
+        for dir in dirs {
+            let hicolor = dir.join("icons").join("hicolor");
+            for context in HICOLOR_CONTEXTS {
+                let svg = hicolor
+                    .join("scalable")
+                    .join(context)
+                    .join(format!("{name}.svg"));
+                if let Some(icon) = read_icon(&svg).and_then(|text| render_svg(&text, size, color))
+                {
+                    return Some(icon);
+                }
+                if let Some(icon) = best_png(&hicolor, context, name, size)
+                    .and_then(|path| render_raster(&path, size, color))
+                {
+                    return Some(icon);
+                }
+            }
+            let pixmaps = dir.join("pixmaps");
+            if let Some(icon) = render_file(&pixmaps.join(format!("{name}.svg")), size, color)
+                .or_else(|| render_file(&pixmaps.join(format!("{name}.png")), size, color))
+            {
+                return Some(icon);
+            }
+        }
+        None
+    }
+}
+
+/// The sizes `hicolor` keeps its PNGs at, as `<n>x<n>` directories.
+const HICOLOR_SIZES: [u32; 11] = [16, 22, 24, 32, 48, 64, 96, 128, 192, 256, 512];
+
+/// The kinds of icon `hicolor` sorts them into, most likely first: a
+/// program's own icon is under `apps`.
+const HICOLOR_CONTEXTS: [&str; 8] = [
+    "apps",
+    "places",
+    "mimetypes",
+    "devices",
+    "categories",
+    "status",
+    "actions",
+    "emblems",
+];
+
+/// The largest PNG icon file read: a 512-pixel icon compresses to well under
+/// a megabyte, so four is room for any icon and no room for a photograph
+/// named by mistake.
+pub const MAX_RASTER_ICON_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Whether `name` can name a program's icon: what a desktop entry's `Icon`
+/// gives when it is not a path -- `firefox`, `org.gnome.Calculator`,
+/// `accessories-text-editor`. Looser than [`is_valid_name`], which is for the
+/// icon theme's own names; still never a path out of the directory looked in.
+fn is_program_icon_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(['.', '-'])
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'+'))
+}
+
+/// `name` without a `.png`, `.svg` or `.xpm` its entry wrote on the end, which
+/// the specification says to leave off and many entries do not.
+fn strip_icon_extension(name: &str) -> &str {
+    for ext in [".png", ".svg", ".xpm"] {
+        if let Some(stem) = name.strip_suffix(ext) {
+            return stem;
+        }
+    }
+    name
+}
+
+/// The `hicolor` PNG of `name` whose size suits `size` best: the smallest at
+/// least as large, so it is only ever scaled down, else the largest there is.
+fn best_png(hicolor: &Path, context: &str, name: &str, size: u32) -> Option<PathBuf> {
+    let file = format!("{name}.png");
+    let found: Vec<(u32, PathBuf)> = HICOLOR_SIZES
+        .iter()
+        .map(|s| {
+            (
+                *s,
+                hicolor.join(format!("{s}x{s}")).join(context).join(&file),
+            )
+        })
+        .filter(|(_, path)| path.is_file())
+        .collect();
+    found
+        .iter()
+        .find(|(s, _)| *s >= size)
+        .or_else(|| found.last())
+        .map(|(_, path)| path.clone())
+}
+
+/// An icon file named by its path: an SVG, or a PNG scaled to `size`.
+fn render_file(path: &Path, size: u32, color: Color) -> Option<Icon> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "svg" => read_icon(path).and_then(|text| render_svg(&text, size, color)),
+        "png" => render_raster(path, size, color),
+        _ => None,
+    }
+}
+
+/// A PNG icon, decoded and fitted into a `size`-pixel square, faded by
+/// `color`'s alpha as an SVG icon is. A raster picture has no `currentColor`,
+/// so its own colours are kept.
+fn render_raster(path: &Path, size: u32, color: Color) -> Option<Icon> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_RASTER_ICON_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let image = imagecodec::decode(&bytes, imagecodec::Limits::default()).ok()?;
+    let argb: Vec<u32> = fit_square(&image, size)
+        .into_iter()
+        .map(|px| {
+            let [a, r, g, b] = px.to_be_bytes();
+            let faded = u16::from(a).saturating_mul(u16::from(color.a));
+            let alpha = u8::try_from(faded.saturating_add(127) / 255).unwrap_or(u8::MAX);
+            u32::from_be_bytes([alpha, r, g, b])
+        })
+        .collect();
+    if argb.iter().all(|px| px & 0xFF00_0000 == 0) {
+        return None;
+    }
+    Some(Icon { size, argb })
+}
+
+/// `image` fitted into a `size`-pixel square: scaled to the largest size that
+/// fits, keeping its proportions, centred, the rest clear.
+///
+/// Each pixel drawn is the average of the part of the picture it covers,
+/// weighted by how much of each source pixel it covers, in premultiplied
+/// alpha -- so a 256-pixel icon drawn at 20 keeps its thin lines as thin grey
+/// lines rather than losing them between the samples, and a transparent edge
+/// does not bleed its hidden colour into the picture.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "icon sizes are at most MAX_ICON_PX and images are bounded by imagecodec's limits;               every float is a pixel coordinate or a colour channel well inside f32's exact range"
+)]
+fn fit_square(image: &imagecodec::Image, size: u32) -> Vec<u32> {
+    let side = size as usize;
+    let mut out = vec![0_u32; side.saturating_mul(side)];
+    let (w, h) = (image.width as f32, image.height as f32);
+    if image.width == 0 || image.height == 0 || side == 0 {
+        return out;
+    }
+    let target = size as f32;
+    let scale = (target / w).min(target / h);
+    let dw = (w * scale).round().clamp(1.0, target);
+    let dh = (h * scale).round().clamp(1.0, target);
+    let ox = ((target - dw) / 2.0).floor() as usize;
+    let oy = ((target - dh) / 2.0).floor() as usize;
+    let (sx, sy) = (w / dw, h / dh);
+    let stride = image.width as usize;
+    for dy in 0..dh as usize {
+        let y0 = dy as f32 * sy;
+        let y1 = y0 + sy;
+        for dx in 0..dw as usize {
+            let x0 = dx as f32 * sx;
+            let x1 = x0 + sx;
+            let mut sum = [0.0_f32; 4];
+            let mut area = 0.0_f32;
+            for py in y0.floor() as usize..(y1.ceil() as usize).min(image.height as usize) {
+                let wy = (y1.min(py as f32 + 1.0) - y0.max(py as f32)).max(0.0);
+                for px in x0.floor() as usize..(x1.ceil() as usize).min(stride) {
+                    let wx = (x1.min(px as f32 + 1.0) - x0.max(px as f32)).max(0.0);
+                    let weight = wx * wy;
+                    let pixel = py
+                        .checked_mul(stride)
+                        .and_then(|row| row.checked_add(px))
+                        .and_then(|at| image.pixels.get(at))
+                        .copied()
+                        .unwrap_or(0);
+                    let [a, r, g, b] = pixel.to_be_bytes();
+                    let alpha = f32::from(a) / 255.0;
+                    sum[0] += alpha * weight;
+                    sum[1] += f32::from(r) * alpha * weight;
+                    sum[2] += f32::from(g) * alpha * weight;
+                    sum[3] += f32::from(b) * alpha * weight;
+                    area += weight;
+                }
+            }
+            if area <= 0.0 || sum[0] <= 0.0 {
+                continue;
+            }
+            let alpha = sum[0] / area;
+            let channel = |v: f32| (v / sum[0]).round().clamp(0.0, 255.0) as u8;
+            let packed = u32::from_be_bytes([
+                (alpha * 255.0).round().clamp(0.0, 255.0) as u8,
+                channel(sum[1]),
+                channel(sum[2]),
+                channel(sum[3]),
+            ]);
+            if let Some(slot) = oy
+                .saturating_add(dy)
+                .checked_mul(side)
+                .and_then(|row| row.checked_add(ox.saturating_add(dx)))
+                .and_then(|at| out.get_mut(at))
+            {
+                *slot = packed;
+            }
+        }
+    }
+    out
 }
 
 /// A theme's icon file, if it is one: small enough, text, and an SVG this

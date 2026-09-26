@@ -14,6 +14,11 @@ pathcodec = { path = "../pathcodec" }
 # converted at every boundary — would put a second definition of a colour in
 # the one crate whose job is to stop there being two definitions of anything.
 guitk = { path = "../toolkit" }
+# A program's own icon may be a PNG, in `hicolor` or named by its path.
+imagecodec = { path = "../imagecodec" }
+# The XDG data directories, where `hicolor` is: one reading of them for the
+# start menu's entries and the icons those entries name.
+desktopentry = { path = "../desktopentry" }
 
 # Format-preserving YAML. A settings file a user has commented has to come back
 # with the comments intact. See yamldoc/src/lib.rs.

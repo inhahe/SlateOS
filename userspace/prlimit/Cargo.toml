@@ -2,8 +2,24 @@
 name = "prlimit"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS prlimit utility"
+description = "prlimit, util-linux 2.39.3's, ported: resource limits shown in a libsmartcols table, or set"
+
+[lints]
+workspace = true
+
 [dependencies]
-# One rendering of caller-supplied text in a diagnostic: the rejected
-# resource name and the command that could not be run both come off argv.
+# glibc's getopt_long: `+`, optional values (`-n5`, `--nofile=5`), and the
+# doubled `v` read as upstream's getopt reads it.
+getoptlong = { path = "../getoptlong" }
+# argv is bytes; a name in a diagnostic is escaped.
 quoting = { path = "../quoting" }
+# libsmartcols: the table.
+smartcols = { path = "../smartcols" }
+# strtos32_or_err for --pid, string_to_idarray for -o, strtoull's scanner.
+ulstrutils = { path = "../ulstrutils" }
+# util-linux's close_stdout, and stdout buffered as glibc buffers it -- which
+# is what decides whether the table survives an exec of COMMAND.
+ulclosestream = { path = "../ulclosestream" }
+# A standard descriptor prlimit was started without stays closed, for it and
+# for COMMAND.
+stdfdguard = { path = "../stdfdguard" }

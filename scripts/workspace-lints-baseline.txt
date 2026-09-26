@@ -143,7 +143,6 @@ userspace/ping
 userspace/pkg
 userspace/plymouth  # bare deny(clippy::all)
 userspace/powerctl
-userspace/prlimit  # bare deny(clippy::all)
 userspace/pstree  # bare deny(clippy::all)
 userspace/pv
 userspace/quoting  # bare deny(clippy::all)

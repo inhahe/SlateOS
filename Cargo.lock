@@ -2331,7 +2331,12 @@ version = "0.1.0"
 name = "prlimit"
 version = "0.1.0"
 dependencies = [
+ "getoptlong",
  "quoting",
+ "smartcols",
+ "stdfdguard",
+ "ulclosestream",
+ "ulstrutils",
 ]
 
 [[package]]

@@ -4357,7 +4357,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] blockdev/blkzone: block device ioctls and zone management (get/set read-ahead, sector size, RO flag)
   - [x] cal/ncal: calendar display (Zeller's congruence, leap years, Julian days, week numbers, year view)
   - [x] chage: password aging management (shadow file parsing, date conversion, expiry policies)
-  - [x] prlimit/ulimit: process resource limits (16 resource types, /proc/pid/limits, JSON output)
+  - [x] prlimit/ulimit: process resource limits (16 resource types, /proc/pid/limits, JSON output) -- since 2026-09-26 a port of util-linux 2.39.3's `prlimit.c` on `smartcols`, through the C library's `prlimit()`; the invented JSON output and the unreachable `ulimit` personality are gone (`ulimit` is the shell's). `scripts/prlimit-diff.sh`: 182 cases agree, 5 more where only upstream never finishes
   - [x] dnsmasq/dnsmasq-dhcp: DNS forwarder + DHCP + TFTP server (packet structures, cache, lease management, 4624 lines)
   - [x] iptables/ip6tables/iptables-save/iptables-restore: packet filtering (4 tables, CIDR matching, NAT, 4747 lines)
   - [ ] parted/partprobe/partx: disk partition editor (GPT + MBR parsing, CRC32, type GUIDs, 4802 lines)

@@ -127,7 +127,6 @@ userspace/pkg/src/main.rs:argv-as-string
 userspace/plymouth/src/main.rs:argv-as-string
 userspace/polkit/src/main.rs:argv-as-string
 userspace/powerctl/src/main.rs:argv-as-string
-userspace/prlimit/src/main.rs:argv-as-string
 userspace/pstree/src/main.rs:argv-as-string
 userspace/pv/src/main.rs:argv-as-string
 userspace/readelf/src/main.rs:argv-as-string

@@ -169735,10 +169735,12 @@ differently from util-linux (and from one another), and `--json`, `--raw`
 and `--pairs` are each program's own dialect. The library is ported now, as
 `userspace/smartcols` (design-decisions §1036), and `lsmem` prints through
 it and matches util-linux 2.39.3 at every terminal width
-(`scripts/lsmem-diff.sh`); the others still do not use it.
+(`scripts/lsmem-diff.sh`), and so does `prlimit` (`scripts/prlimit-diff.sh`:
+182 cases, plus five narrow widths at which only upstream never finishes);
+the others still do not use it.
 
 **Where:** `userspace/lsblk`, `findmnt`, `lscpu` (its `-e`/`-p` tables),
-`lsns`, `losetup` (`--list`), `swapon` (`--show`), `prlimit`, `column`
+`lsns`, `losetup` (`--list`), `swapon` (`--show`), `column`
 (`-t`), `rfkill`, `lsirq`, `fdisk` (`-l`'s partition table).
 
 **The proper fix:** port each program from util-linux 2.39.3 onto

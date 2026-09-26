@@ -99,7 +99,6 @@ perf:perf-report
 perf:perf-stat
 perf:perf-top
 plymouth:plymouthd
-prlimit:ulimit
 resolvectl:host
 resolvectl:resolvconf
 resolvectl:systemd-resolve

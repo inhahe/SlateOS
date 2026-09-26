@@ -168288,12 +168288,23 @@ not parse, and apply it when it does. Parsing it only to refuse it, before
 anything uses profiles, would mean an ICC parser whose one job is to agree
 with skcms on what is malformed -- a second port for a file nobody has.
 
-### [F] A damaged Deflate TIFF strip can decode otherwise than in libtiff -- 2026-09-25
+### [F] A damaged Deflate TIFF strip can decode otherwise than in libtiff -- 2026-09-25 -- **FIXED 2026-09-26**
 
-**Status:** OPEN — waiting on lane A
-(`requests/f-a-deflate-decode-into-a-fixed-buffer-as-libdeflate-does.md`).
+**Status:** FIXED 2026-09-26 — `tiff/read.rs`'s `inflate` is now two calls
+into lane A's fixed-buffer inflates (4e0b7f205, the answer to the request
+below): `deflate::zlib_decompress_into`, libdeflate 1.24's decisions, when
+the reader asks for the whole of a strip or tile, and
+`deflate::zlib_inflate_into`, zlib 1.3's, when it asks for less -- the
+choice `ZIPDecode` makes. Switching over, the fuzzer found one more thing
+this entry had wrong: libtiff's "whole strip" is the strip's *own* rows, so
+the shorter last strip goes to libdeflate too, not to zlib (an
+over-full last strip then shows the strip before it, where libdeflate
+writes nothing). Fixtures `tiff_grey8_deflate_last_strip_holds_more_stored`
+and `..._match` pin that. Checked: 9,000 mutants of the Deflate, ZIP and
+PixarLog fixtures against libtiff 4.7.1, whole pixels compared -- 0
+disagreements.
 
-**In short:** a TIFF whose Deflate-compressed data is longer than its strip,
+**In short (as it was):** a TIFF whose Deflate-compressed data is longer than its strip,
 or damaged after the part the strip needs, can be refused here where libtiff
 shows it, or shown with different pixels in its last strip. Undamaged files
 decode identically; it takes a damaged or hand-made file.
@@ -168317,12 +168328,14 @@ stream or a stream damaged past the strip's end.
 semantics (the request above spells them out); `inflate` becomes a call to it.
 Not a second inflater in `imagecodec`: design-decisions §555.
 
-### [F] A damaged PixarLog TIFF strip can be refused where libtiff shows it -- 2026-09-25
+### [F] A damaged PixarLog TIFF strip can be refused where libtiff shows it -- 2026-09-25 -- **FIXED 2026-09-26**
 
-**Status:** OPEN — waiting on lane A
-(`requests/f-a-zlib-inflate-into-a-fixed-buffer-as-zlib-does.md`).
+**Status:** FIXED 2026-09-26 — `pixarlog::inflate` is a call to lane A's
+`deflate::zlib_inflate_into` (4e0b7f205, the answer to the request below),
+which stops where zlib 1.3 stops; `check_trailer` is gone. Checked with the
+Deflate entry above: 0 disagreements with libtiff in 9,000 mutants.
 
-**In short:** libtiff inflates a PixarLog strip with zlib, which stops as
+**In short (as it was):** libtiff inflates a PixarLog strip with zlib, which stops as
 soon as the strip's buffer is full; the shared `deflate` crate decodes a
 whole Deflate block at a time, so damage after the part of a block the strip
 needs -- or a strip cut just short of its end-of-block code, which zlib

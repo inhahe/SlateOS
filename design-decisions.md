@@ -11342,7 +11342,11 @@ of TIFF are not read yet (listed below) and are refused by name.
    time. The two agree on every well-formed file; on some damaged ones they
    do not (`known-issues.md`), and the exact behaviour is asked of lane A
    (`requests/f-a-deflate-decode-into-a-fixed-buffer-as-libdeflate-does.md`)
-   rather than written a second time here.
+   rather than written a second time here. *2026-09-26:* answered (lane A's
+   4e0b7f205, §967) and in use: a request for the whole of a strip or tile
+   -- the strip's own rows, so the short last strip too -- goes through the
+   crate's libdeflate port, a request for less through its zlib port, as
+   `ZIPDecode` chooses; damaged strips now decode as libtiff decodes them.
 
 ### Not yet read
 
@@ -11400,8 +11404,9 @@ turned to 8- or 16-bit samples through tables libtiff builds with glibc
 grey and grey with alpha, each row's last sum spills into the next row's
 first pixel, and a tile's rows are the image's width -- and the predictor
 it installs run over the output. It inflates with zlib, whose stopping
-place the shared `deflate` crate cannot find, so on damaged strips the two
-can differ (`known-issues.md`; asked of lane A). 18 fixtures, 12,000
+place the shared `deflate` crate could not find, so on damaged strips the two
+could differ (`known-issues.md`; asked of lane A, and since 2026-09-26 done
+with the crate's port of zlib's inflate). 18 fixtures, 12,000
 mutants.) Only the first page of a multi-page TIFF is read -- as gdk-pixbuf
 reads it.
 

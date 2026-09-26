@@ -7762,7 +7762,9 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" ");
             assert!(
-                question.contains("not saved"),
+                // The question's own words: the strip under the bar says
+                // "was not saved" too, and would pass for it.
+                question.contains("Your latest changes to your calendar are not saved."),
                 "the question is not drawn: {question}"
             );
             // A key under the question reaches nothing.

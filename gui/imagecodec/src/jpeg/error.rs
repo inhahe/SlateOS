@@ -103,6 +103,11 @@ pub(super) mod jerr {
         Error::Malformed("JPEG: a lossless restart interval not a whole number of MCU rows");
     pub(in crate::jpeg) const ARITH_NOTIMPL: Error =
         Error::Unsupported("JPEG: arithmetic-coded lossless (SOF11)");
+    pub(in crate::jpeg) const SOURCE_FAILED: Error = Error::Malformed(
+        "JPEG: the data ran out, or was out of step, where its source cannot go on",
+    );
+    pub(in crate::jpeg) const NOTIMPL: Error =
+        Error::Unsupported("JPEG: raw output of a lossless image");
     pub(in crate::jpeg) const BAD_VIRTUAL_ACCESS: Error =
         Error::Malformed("JPEG: a component of a lossless image that no scan carries");
     pub(in crate::jpeg) const TOO_MANY_SCANS: Error =

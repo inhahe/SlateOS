@@ -1,0 +1,1 @@
+REFUSED read: Decoding error at scanline 0, incorrect data check

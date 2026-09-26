@@ -165791,9 +165791,18 @@ have the disc's colour at partial alpha.
 **How to see it.** Thumbnail a GIF or PNG with an opaque coloured shape on a
 transparent background over a light background: the shape has a dark rim.
 
-### [F] Lossless WebP decodes at half libwebp's speed -- 2026-09-25
+### [F] Lossless WebP decodes at half libwebp's speed -- 2026-09-25 -- **fixed 2026-09-25**
 
-**Status:** OPEN — lane F's; tech debt, not a bug.
+**Status:** FIXED — it now takes fewer cycles than libwebp: 0.39 billion for
+the 2000x1500 picture against libwebp's 0.46 (it was 0.63), measured in the
+decoding thread's CPU cycles. The pixel loop looks its prefix-code group up
+once a block and walks columns without dividing (libwebp's own scheme, item
+1 below), non-overlapping copies are one move, and the predictor and colour
+transforms work a row at a time in runs of one block, their mode or element
+looked up once a run (in the spirit of item 3). Every fixture as before,
+and 3,750 bit-flipped and 2,183 truncated lossless and alpha WebPs decoded
+exactly as libwebp decodes them. Item 2 was not needed. The original report
+follows.
 
 **In short:** opening a large lossless WebP takes about twice as long here as
 in a browser: 0.31 s for a 2000x1500 picture against libwebp's 0.15 s. The
@@ -165818,34 +165827,49 @@ lossless screenshots and artwork.
 
 ### [F] Lossy WebP decodes at about half libwebp's speed -- 2026-09-25
 
-**Status:** OPEN — lane F's; tech debt, not a bug.
+**Status:** OPEN — lane F's; tech debt, not a bug. Mostly paid: the steps
+below are done, and the gap is now 5 to 12 per cent rather than a half.
 
-**In short:** a large lossy WebP -- the common kind, a photograph -- takes
-about twice as long to open here as in a browser: 181 ms for a 2000x1500
-picture against libwebp's 97, 1.5 s for 4000x5333 against 0.86. The pixels
-are libwebp's to the bit; only the speed is behind. Lossy animations inherit
-it: 6.0 ms a frame at 480x270 against libwebp's 3.0 (design-decisions.md
-§1313) -- well inside real time, but the same factor of two.
+**In short:** a large lossy WebP -- the common kind, a photograph -- took
+about twice as long to open here as in a browser. Measured in the decoding
+thread's CPU cycles (wall time is useless on a machine shared with QEMU and
+five other sessions), it now takes 3.36 billion cycles for a 4000x5333
+picture against libwebp's 2.99 (it was 5.03), and 0.31 for 2000x1500 against
+0.30 (was 0.57). The pixels are libwebp's to the bit, corrupt files
+included; only the speed is a little behind. Lossy animations inherit it.
 
-**Where.** `gui/imagecodec/src/webp/lossy/` -- the conversion to RGB
-(`yuv.rs`), the loop filter (`filter.rs`), the token loop (`lossy.rs`).
+**Where.** `gui/imagecodec/src/webp/lossy/`. Before the last step the time
+split roughly: coefficient tokens 36%, loop filter 25%, conversion to RGB
+21%, prediction and inverse transform 18%; the conversion has since shrunk
+the most.
 
-**The proper fix,** each measurable on its own against
-`examples/time_decode.rs`, and each held to the fixtures and to a rerun of
-the corrupt-file comparison in design-decisions.md §1312:
-1. Convert a row at a time: upsample each pair of chroma rows once into a
-   row buffer, instead of reading four chroma samples per pixel per channel
-   through bounds-checked lookups.
-2. Filter sixteen samples at a time: load the eight rows (or, for a vertical
-   edge, the transposed columns) across an edge into arrays and filter them
-   lane-wise, which the compiler vectorises, instead of one segment at a time
-   through `Segment::get`.
-3. Keep the token loop's probability rows in a flat, pre-banded table per
-   block type, as libwebp's `bands_ptr` does, so each coefficient costs one
-   indexed load rather than three `get`s.
+**Done** (each measured on its own, each held to the fixtures and to 5,856
+corrupted and truncated files decoded exactly as libwebp decodes them):
+1. The conversion a row at a time: each chroma column blended down once per
+   row, each pixel then two lookups in a row buffer (was four bounds-checked
+   lookups per channel per pixel).
+2. The loop filter an edge at a time: sixteen segments' taps loaded as eight
+   rows of 16-bit lanes and filtered lane-wise with selects instead of
+   branches, which SSE2 can do (32-bit lanes were slower than the scalar
+   code: SSE2 has no 32-bit min, max or abs).
+3. The token loop's probabilities banded by position, one lookup a
+   coefficient (libwebp's `bands_ptr`), and the boolean decoder's refill one
+   eight-byte load.
+4. The conversion itself in libwebp's SSE2 formulation -- 16-bit
+   multiply-highs, saturating unsigned blue -- held equal to the scalar one
+   on all 2^24 inputs by a test, over whole rows the compiler vectorises; and
+   the horizontal chroma upsampling over three shifted views of the row, the
+   two end columns apart.
 
-**How to see it.** `cargo run --release -p imagecodec --example time_decode --
-<lossy.webp>`, against Pillow's `Image.open(...).load()` on the same file.
+**The proper fix, the rest:** libwebp's remaining edge is SIMD it writes by
+hand for the inverse transform and the predictors. The Rust equivalent is
+the shape the filter and the conversion now have: fixed-size 16-bit lane
+arrays the compiler can vectorise.
+
+**How to see it.** `target/perfbench` (a scratch harness: the working crate
+against a snapshot copy, interleaved, the minimum of N runs in thread
+cycles), and libwebp's cycles from Pillow's `load()` measured the same way
+with `QueryThreadCycleTime`.
 
 ### [F] A lossless alpha plane cut off mid-symbol can differ from libwebp in its last pixel -- 2026-09-25 -- **fixed 2026-09-25**
 
@@ -165945,21 +165969,22 @@ ported (design-decisions §1318), and fuzz it against the same oracle.
 
 ### [F] Some TIFFs are refused that libtiff shows -- 2026-09-25
 
-**Status:** OPEN — lane F's, in progress.
+**Status:** FIXED 2026-09-25 -- PixarLog (`gui/imagecodec/src/tiff/pixarlog.rs`)
+was the last; every compression libtiff's reader decodes now decodes here
+(design-decisions §1317). The original report follows.
 
-**In short:** TIFFs compressed with old-style JPEG, SGI LogLuv or PixarLog
-are refused (`ImageError::Unsupported`) though libtiff reads them. All are
-rare: old-style JPEG is a 1990s scheme superseded in 1995, and the others
-are single vendors' formats. (`YCbCr` and CIELab samples, fax, JPEG, NeXT
-and ThunderScan were on this list; they decode now.)
+**In short:** TIFFs compressed with PixarLog are refused
+(`ImageError::Unsupported`) though libtiff reads them. It is a rare, single
+vendor's format. (`YCbCr` and CIELab samples, fax, JPEG, old-style JPEG,
+NeXT, ThunderScan and SGI LogLuv were on this list; they decode now.)
 
 **Where.** `gui/imagecodec/src/tiff/read.rs` (`run_codec`) and `rgba.rs`
 (`pick_contig`, `pick_separate`, `begin`).
 
 **The proper fix.** Port the rest of libtiff's reader, as the first stages were
-(design-decisions §1317): the rare codecs, old-style JPEG
-through this crate's libjpeg-turbo port as `tif_ojpeg.c` drives libjpeg.
-Fixtures from the same libtiff oracle.
+(design-decisions §1317): `tif_pixarlog.c`, whose tables are made with
+glibc's `exp` and `log` and must come out as glibc's do -- generated from
+glibc, as CIELab's were. Fixtures from the same libtiff oracle.
 
 ## TD-B-COREUTILS-GETOPT-IGNORED-POSIXLY-CORRECT (lane B, 2026-09-25) — FIXED 2026-09-25
 
@@ -166349,3 +166374,60 @@ the age `(boot_tics - start_time) / Hz` as a double and back to whole jiffies,
 `ticks * 100 / jiffies`, the low 32 bits, capped at 99. Unit tests pin the
 arithmetic; `ps-diff.sh` 60/0. What is still missing is a harness case whose
 subject is busy and old enough to have a non-zero `C` on an idle host.
+
+### [F] A damaged PixarLog TIFF strip can be refused where libtiff shows it -- 2026-09-25
+
+**Status:** OPEN — waiting on lane A
+(`requests/f-a-zlib-inflate-into-a-fixed-buffer-as-zlib-does.md`).
+
+**In short:** libtiff inflates a PixarLog strip with zlib, which stops as
+soon as the strip's buffer is full; the shared `deflate` crate decodes a
+whole Deflate block at a time, so damage after the part of a block the strip
+needs -- or a strip cut just short of its end-of-block code, which zlib
+never needs -- makes this refuse a picture libtiff shows. Undamaged files
+are unaffected.
+
+**Where.** `gui/imagecodec/src/tiff/pixarlog.rs`, `inflate` and
+`check_trailer`.
+
+**How to see it.** The lane F TIFF fuzzer over `tests/data/tiff_pixarlog_*`
+(`ONLY=pixarlog`), answered by libtiff 4.7.1: about 1 in 1,000 mutants,
+`LIBTIFF DECODES, WE REFUSE: Corrupt("TIFF PixarLog data")`, every one of
+them a strip zlib fills before it reaches the damage.
+
+**The proper fix.** A zlib-exact "inflate into this buffer" in `deflate`
+(the request above), then `pixarlog::inflate` becomes a call to it and
+`check_trailer`'s search for the end of the Deflate data goes.
+
+### [F] Old-style JPEG TIFFs: three corners of libtiff's reading not modelled -- 2026-09-25
+
+**Status:** OPEN — lane F's; left deliberately, each needing input built to
+reach it.
+
+**In short:** old-style JPEG TIFFs decode exactly as libtiff decodes them
+except in three situations only a file made for the purpose reaches, where
+this could refuse a picture libtiff shows, or show one libtiff refuses.
+
+**Where.** `gui/imagecodec/src/tiff/ojpeg.rs` (its module notes).
+
+1. **When input is asked for.** libtiff hands libjpeg a block 2048 bytes at
+   a time, and libjpeg-turbo's Huffman decoder has a fast path that asks for
+   nothing while a piece still holds 512 bytes for each block of the MCU.
+   What is decoded is the same; when the source is next asked is not. It
+   shows only if the input ends hard (no strip after the data), with no
+   restart interval, within a few bytes of the last bits the scan needs:
+   then one of the two fails and the other does not.
+2. **Where a session starts.** libtiff restarts a plane from its first data
+   unless its input already stands at that file offset, and then carries on
+   from where it is -- the same thing, unless one file range belongs to two
+   blocks (strips of different planes overlapping) and the last session
+   stopped at a piece boundary exactly there.
+3. **A BigTIFF table offset past 2^63** is a failed seek in libtiff, which
+   then reads the table from wherever its file position was; here there is
+   no table and the file is refused.
+
+**The proper fix.** Model libtiff's input exactly: its 2048-byte pieces and
+how much of each libjpeg has taken (which needs libjpeg-turbo's fast path,
+since it takes bytes differently), its `in_buffer_file_pos_log`, and its
+file position through every read. No writer's file reaches any of them, and
+20,000 fuzzed files found none.

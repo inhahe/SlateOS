@@ -59,7 +59,7 @@ unset LANG LANGUAGE POSIXLY_CORRECT
 
 pass=0; fail=0; xfail=0; xpass=0
 ENVS=
-MODE=file
+MODE='file'
 TO_FULL=
 
 fx=$DIFF_TMP/fx
@@ -265,7 +265,7 @@ xfail_case() {
   return 0
 }
 
-MODE=file
+MODE='file'
 for ENVS in 'LC_ALL=C.UTF-8' 'LC_ALL=C' 'LC_ALL=POSIX' 'LANG=C.UTF-8' \
             'LC_ALL= LANG=C.UTF-8' 'LC_ALL= LC_TIME=POSIX LANG=C.UTF-8' \
             'LC_TIME=C.UTF-8 LANG=C' ''; do
@@ -332,7 +332,7 @@ xfail_case 'glibc hides the failure; gnulib and ours report it' -f
 run_case -l alice
 
 # --- errors and the command line -----------------------------------------------------
-MODE=file
+MODE='file'
 run_case -l
 run_case -l -f
 run_case -x

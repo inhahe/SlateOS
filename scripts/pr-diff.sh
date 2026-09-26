@@ -69,7 +69,7 @@ printf 'x\ny' > noeol
     printf 'tab\there then a long tail %s\n' "$(printf 'z%.0s' $(seq 80))"
     printf '%s\tend\n' "$(printf 'y%.0s' $(seq 70))"
 } > wide
-printf 'a\tb\tc\n\tlead\n12345678\tx\n1234567\ty\n:colon:sep:\n \t mixed\n' > tabs
+printf 'a\tb\tc\n\tlead\n12345678\tx\n1234567\ty\n:colon:sep:\n \t mixed\n' > 'tabs'
 printf 'a\001b\007c\bd\re\177f\351g\377h\n\tx\013y\n\033[1mbold\033[0m\n' > ctrl
 printf 'ab\b\bcd\n\b\bstart\nx\by\bz\n' > bs
 printf 'one\ntwo\n\fthree\nfour\n\f\ffive\nsix\fseven\n\f\n' > ff

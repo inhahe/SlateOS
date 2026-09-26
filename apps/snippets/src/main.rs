@@ -93,10 +93,15 @@ use guitk::frame::{Frame, Rect};
 use guitk::probe::Probe;
 use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
-use guitk::{scroll_window, text, wheel};
+use guitk::textinput::TextInput;
+use guitk::{scroll_window, text, textedit, wheel};
 use oswindow::app::{self, App as WindowApp, Response};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
+use textarea::TextArea;
+use textfmt::tsv;
+use unsaved::{Choice, Question};
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -159,6 +164,7 @@ const TWISTY_OPEN: &str = "v";
 const TWISTY_SHUT: &str = ">";
 const USE_LABEL: &str = "Use";
 const DELETE_LABEL: &str = "Delete";
+const EDIT_LABEL: &str = "Edit";
 const TEMPLATE_LABEL: &str = "TEMPLATE";
 const NEW_FOLDER_LABEL: &str = "+ New folder";
 const EMPTY_LIST: &str = "Nothing here";
@@ -729,12 +735,13 @@ struct Snippet {
     folder_id: Option<FolderId>,
     tags: Vec<String>,
     favorite: bool,
-    /// When it was made. Also what "Oldest"/"Newest" sort by.
+    /// When it was made, in milliseconds since 1970 by the clock -- never
+    /// earlier than a time already given, so the order it gives is the order
+    /// they were made in. Also what "Oldest"/"Newest" sort by.
     ///
-    /// There used to be a `modified_at` beside this, set to the same value at
-    /// the one site that sets either and then never read, never exported and
-    /// never updated — because nothing in this program can modify a snippet.
-    /// `#![allow(dead_code)]` was what kept it from being said out loud.
+    /// It was the snippet's id, "simplified timestamp", which restarted with
+    /// every window and would have put every snippet made after a restart
+    /// before every kept one.
     created_at: u64,
     use_count: u32,
     description: String,
@@ -764,6 +771,477 @@ impl IdGen {
         let id = self.next;
         self.next = self.next.saturating_add(1);
         id
+    }
+}
+
+// ============================================================================
+// The kept library
+// ============================================================================
+
+/// The first line of the library file, and the format it names.
+const LIBRARY_FORMAT: &str = "slateos-snippets\t1";
+
+/// The largest library file this will read: `MAX_SNIPPETS` snippets of
+/// `MAX_CONTENT_LEN` each would be more, but a file cut short would be read as
+/// a library missing its last snippets, with nothing to say so -- so a larger
+/// file is refused whole.
+const MAX_LIBRARY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Why nothing is kept, when the environment names no home directory.
+const NO_HOME: &str = "Nothing is kept: no home directory is set";
+
+/// Where the library is kept, or `None` when the environment names no home
+/// directory.
+fn library_path() -> Option<PathBuf> {
+    settingsfile::config_dir().map(|dir| dir.join("snippets").join("library.txt"))
+}
+
+/// Milliseconds since 1970 by the clock; 0 if it reads earlier than that.
+fn clock_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// A colour as written: `#RRGGBB`, or `#RRGGBBAA` when it is not opaque.
+fn colour_text(c: Color) -> String {
+    if c.a == 255 {
+        format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+    } else {
+        format!("#{:02X}{:02X}{:02X}{:02X}", c.r, c.g, c.b, c.a)
+    }
+}
+
+/// A colour read back from `#RRGGBB` or `#RRGGBBAA`.
+fn parse_colour_text(text: &str) -> Option<Color> {
+    let hex = text.strip_prefix('#')?;
+    if !hex.is_ascii() || !(hex.len() == 6 || hex.len() == 8) {
+        return None;
+    }
+    let byte = |at: usize| {
+        hex.get(at..at.saturating_add(2))
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+    };
+    let a = if hex.len() == 8 { byte(6)? } else { 255 };
+    Some(Color::rgba(byte(0)?, byte(2)?, byte(4)?, a))
+}
+
+/// An optional id as written: `-` for none.
+fn optional_id(id: Option<u64>) -> String {
+    id.map_or_else(|| String::from("-"), |id| id.to_string())
+}
+
+/// What a library file holds.
+#[derive(Debug, Default)]
+struct Library {
+    folders: Vec<Folder>,
+    snippets: Vec<Snippet>,
+    recent: Vec<SnippetId>,
+}
+
+/// The library as the file holds it: the format line, the folders (each
+/// after its parent), the snippets -- each followed by its tags -- and the
+/// recently used, most recent first.
+///
+/// Tab-separated, as the notes library and the calendar keep theirs
+/// (design-decisions §1205, §1209); the free text escaped with
+/// `textfmt::tsv`, so a snippet's tabs and line breaks cannot start a new
+/// field or a new line of the file. Whether a snippet is a template, and its
+/// variables, are read from its content again rather than written.
+fn library_text(folders: &[Folder], snippets: &[Snippet], recent: &[SnippetId]) -> String {
+    let mut out = String::from(LIBRARY_FORMAT);
+    out.push('\n');
+    for f in folders {
+        let fields = [
+            String::from("folder"),
+            f.id.to_string(),
+            optional_id(f.parent_id),
+            String::from(if f.expanded { "y" } else { "n" }),
+            colour_text(f.color),
+            tsv::escape(&f.name),
+        ];
+        out.push_str(&fields.join("\t"));
+        out.push('\n');
+    }
+    for sn in snippets {
+        let fields = [
+            String::from("snippet"),
+            sn.id.to_string(),
+            optional_id(sn.folder_id),
+            sn.language.name().to_owned(),
+            sn.created_at.to_string(),
+            sn.use_count.to_string(),
+            String::from(if sn.favorite { "y" } else { "n" }),
+            tsv::escape(&sn.title),
+            tsv::escape(&sn.description),
+            tsv::escape(&sn.content),
+        ];
+        out.push_str(&fields.join("\t"));
+        out.push('\n');
+        for tag in &sn.tags {
+            out.push_str("tag\t");
+            out.push_str(&tsv::escape(tag));
+            out.push('\n');
+        }
+    }
+    for id in recent {
+        out.push_str("recent\t");
+        out.push_str(&id.to_string());
+        out.push('\n');
+    }
+    out
+}
+
+/// The library read back from [`library_text`]'s format, or why it cannot
+/// be: read whole or not at all (design-decisions §1202), the refusal naming
+/// the line. A folder's parent and a snippet's folder must be written before
+/// it, so a tree cannot hang from nothing.
+fn parse_library(text: &str) -> Result<Library, String> {
+    let mut lines = text.lines();
+    match lines.next() {
+        Some(first) if first == LIBRARY_FORMAT => {}
+        Some(first) if first.starts_with("slateos-snippets\t") => {
+            return Err(format!(
+                "it is written in a later format ({}) than this version reads",
+                first.trim_start_matches("slateos-snippets\t")
+            ));
+        }
+        _ => return Err(String::from("it is not a SlateOS snippet library")),
+    }
+    let mut lib = Library::default();
+    for (i, line) in lines.enumerate() {
+        let n = i.saturating_add(2);
+        if line.is_empty() {
+            continue;
+        }
+        let bad = |why: &str| format!("line {n}: {why}");
+        let fields: Vec<&str> = line.split('\t').collect();
+        let text = |t: &str, what: &str| {
+            tsv::unescape(t).ok_or_else(|| bad(&format!("its {what} has a broken escape")))
+        };
+        let number = |t: &str, what: &str| {
+            t.parse::<u64>()
+                .ok()
+                .filter(|&v| v > 0 && v < u64::MAX)
+                .ok_or_else(|| bad(&format!("its {what} is not a number")))
+        };
+        let flag = |t: &str, what: &str| match t {
+            "y" => Ok(true),
+            "n" => Ok(false),
+            _ => Err(bad(&format!("whether it is {what} is not said"))),
+        };
+        match fields.as_slice() {
+            ["folder", id, parent, open, colour, name] => {
+                let id = number(id, "number")?;
+                if lib.folders.iter().any(|f| f.id == id) {
+                    return Err(bad(&format!("another folder has its number ({id})")));
+                }
+                let parent_id = match *parent {
+                    "-" => None,
+                    p => {
+                        let p = number(p, "parent")?;
+                        if !lib.folders.iter().any(|f| f.id == p) {
+                            return Err(bad("its parent is not written before it"));
+                        }
+                        Some(p)
+                    }
+                };
+                lib.folders.push(Folder {
+                    id,
+                    name: text(name, "name")?,
+                    parent_id,
+                    expanded: flag(open, "open")?,
+                    color: parse_colour_text(colour).ok_or_else(|| bad("its colour is not one"))?,
+                });
+            }
+            [
+                "snippet",
+                id,
+                folder,
+                language,
+                created,
+                uses,
+                favourite,
+                title,
+                description,
+                content,
+            ] => {
+                let id = number(id, "number")?;
+                if lib.snippets.iter().any(|sn| sn.id == id) {
+                    return Err(bad(&format!("another snippet has its number ({id})")));
+                }
+                let folder_id = match *folder {
+                    "-" => None,
+                    f => {
+                        let f = number(f, "folder")?;
+                        if !lib.folders.iter().any(|x| x.id == f) {
+                            return Err(bad("its folder is not written before it"));
+                        }
+                        Some(f)
+                    }
+                };
+                let language = Language::all()
+                    .iter()
+                    .copied()
+                    .find(|l| l.name() == *language)
+                    .ok_or_else(|| {
+                        bad(&format!(
+                            "its language ({language}) is not one this version knows"
+                        ))
+                    })?;
+                let content = text(content, "content")?;
+                let template_vars = extract_template_vars(&content);
+                lib.snippets.push(Snippet {
+                    id,
+                    title: text(title, "title")?,
+                    content,
+                    language,
+                    folder_id,
+                    tags: Vec::new(),
+                    favorite: flag(favourite, "a favourite")?,
+                    created_at: created
+                        .parse()
+                        .map_err(|_| bad("when it was made is not a number"))?,
+                    use_count: uses
+                        .parse()
+                        .map_err(|_| bad("how often it was used is not a number"))?,
+                    description: text(description, "description")?,
+                    is_template: !template_vars.is_empty(),
+                    template_vars,
+                });
+            }
+            ["tag", tag] => {
+                let tag = text(tag, "tag")?;
+                lib.snippets
+                    .last_mut()
+                    .ok_or_else(|| bad("a tag with no snippet before it"))?
+                    .tags
+                    .push(tag);
+            }
+            ["recent", id] => {
+                let id = number(id, "number")?;
+                if !lib.snippets.iter().any(|sn| sn.id == id) {
+                    return Err(bad("a recently used snippet that is not in the library"));
+                }
+                lib.recent.push(id);
+            }
+            ["folder" | "snippet" | "tag" | "recent", ..] => {
+                return Err(bad(&format!(
+                    "{} fields, which is not how many its kind has",
+                    fields.len()
+                )));
+            }
+            _ => return Err(bad("it is not a folder, a snippet, a tag or a use")),
+        }
+    }
+    Ok(lib)
+}
+
+// ============================================================================
+// The editor
+// ============================================================================
+
+/// A field of the snippet editor, in the order Tab walks them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnippetField {
+    Title,
+    Language,
+    Folder,
+    Tags,
+    Description,
+    /// The code itself: Tab indents here, and Shift+Tab leaves.
+    Content,
+}
+
+impl SnippetField {
+    const ALL: [Self; 6] = [
+        Self::Title,
+        Self::Language,
+        Self::Folder,
+        Self::Tags,
+        Self::Description,
+        Self::Content,
+    ];
+
+    /// Whether the field is one line typed into.
+    fn is_line(self) -> bool {
+        matches!(self, Self::Title | Self::Tags | Self::Description)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Title => "Title",
+            Self::Language => "Language",
+            Self::Folder => "Folder",
+            Self::Tags => "Tags",
+            Self::Description => "About",
+            Self::Content => "Code",
+        }
+    }
+
+    /// What an empty one-line field says it wants.
+    fn placeholder(self) -> &'static str {
+        match self {
+            Self::Title => "What it is",
+            Self::Tags => "Tags, separated by commas",
+            Self::Description => "What it is for (optional)",
+            Self::Language | Self::Folder | Self::Content => "",
+        }
+    }
+
+    /// The most characters a one-line field holds.
+    fn capacity(self) -> usize {
+        match self {
+            Self::Title | Self::Description => 300,
+            Self::Tags => 500,
+            Self::Language | Self::Folder | Self::Content => 0,
+        }
+    }
+}
+
+/// The indent Tab types into the code.
+const INDENT: &str = "    ";
+
+/// A snippet being written: a copy of it the editor changes, kept apart from
+/// the library until it is saved, so that leaving without saving leaves the
+/// snippet as it was.
+///
+/// Nothing could change a snippet: its title came from the search box when it
+/// was made, its content was empty, and nothing could give it a line of code,
+/// a tag or a description, or move it to another folder.
+#[derive(Clone, Debug)]
+pub struct Editing {
+    id: SnippetId,
+    title: TextInput,
+    language: Language,
+    folder: Option<FolderId>,
+    tags: TextInput,
+    description: TextInput,
+    content: TextArea,
+    field: SnippetField,
+    /// What the last Save found wrong.
+    error: Option<String>,
+    /// Escape was pressed over changes: Enter now throws them away, and
+    /// Escape goes back to editing.
+    confirm_discard: bool,
+    /// The first line of the code on show.
+    scroll: usize,
+}
+
+impl Editing {
+    /// Snippet `sn`, to edit, its code measured at `font` in the fixed-pitch
+    /// face it is drawn in.
+    fn of(sn: &Snippet, font: f32) -> Self {
+        let line = |v: &str| {
+            let mut input = TextInput::new();
+            input.set_text(v);
+            input
+        };
+        let mut content = TextArea::new(font).with_family(FontFamily::Mono);
+        content.set_text(&sn.content);
+        Self {
+            id: sn.id,
+            title: line(&sn.title),
+            language: sn.language,
+            folder: sn.folder_id,
+            tags: line(&sn.tags.join(", ")),
+            description: line(&sn.description),
+            content,
+            field: SnippetField::Title,
+            error: None,
+            confirm_discard: false,
+            scroll: 0,
+        }
+    }
+
+    /// One-line field `which`, to type into.
+    fn line_mut(&mut self, which: SnippetField) -> Option<&mut TextInput> {
+        match which {
+            SnippetField::Title => Some(&mut self.title),
+            SnippetField::Tags => Some(&mut self.tags),
+            SnippetField::Description => Some(&mut self.description),
+            _ => None,
+        }
+    }
+
+    /// One-line field `which`, to read.
+    fn line(&self, which: SnippetField) -> Option<&TextInput> {
+        match which {
+            SnippetField::Title => Some(&self.title),
+            SnippetField::Tags => Some(&self.tags),
+            SnippetField::Description => Some(&self.description),
+            _ => None,
+        }
+    }
+
+    /// The tags the field lists: split at commas, trimmed, the empty ones and
+    /// the second of any two the same left out.
+    fn tag_list(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for tag in self.tags.text().split(',') {
+            let tag = tag.trim();
+            if !tag.is_empty() && !out.iter().any(|t| t == tag) {
+                out.push(tag.to_owned());
+            }
+        }
+        out
+    }
+
+    /// Whether the editor holds anything the snippet does not.
+    fn differs_from(&self, sn: &Snippet) -> bool {
+        self.title.text().trim() != sn.title
+            || self.language != sn.language
+            || self.folder != sn.folder_id
+            || self.tag_list() != sn.tags
+            || self.description.text() != sn.description
+            || self.content.text() != sn.content
+    }
+
+    /// The label a chosen field shows.
+    fn choice_label(&self, which: SnippetField, folders: &[Folder]) -> String {
+        match which {
+            SnippetField::Language => {
+                format!("{} .{}", self.language.name(), self.language.extension())
+            }
+            SnippetField::Folder => self
+                .folder
+                .and_then(|id| folders.iter().find(|f| f.id == id))
+                .map_or_else(|| String::from("(no folder)"), |f| f.name.clone()),
+            _ => String::new(),
+        }
+    }
+
+    /// Step chosen field `which` on or back. Whether it is one.
+    fn step(&mut self, which: SnippetField, forward: bool, folders: &[Folder]) -> bool {
+        let next = |at: usize, len: usize| {
+            if forward {
+                at.saturating_add(1).checked_rem(len).unwrap_or(0)
+            } else {
+                at.checked_sub(1).unwrap_or(len.saturating_sub(1))
+            }
+        };
+        match which {
+            SnippetField::Language => {
+                let all = Language::all();
+                let at = all.iter().position(|l| *l == self.language).unwrap_or(0);
+                if let Some(l) = all.get(next(at, all.len())) {
+                    self.language = *l;
+                }
+            }
+            SnippetField::Folder => {
+                // "No folder", then every folder in the order they are listed.
+                let mut choices: Vec<Option<FolderId>> = vec![None];
+                choices.extend(folders.iter().map(|f| Some(f.id)));
+                let at = choices.iter().position(|c| *c == self.folder).unwrap_or(0);
+                if let Some(c) = choices.get(next(at, choices.len())) {
+                    self.folder = *c;
+                }
+            }
+            _ => return false,
+        }
+        true
     }
 }
 
@@ -1170,6 +1648,24 @@ pub enum Target {
     List,
     /// The code panel, so the wheel over it scrolls the code.
     Code,
+    /// Open the selected snippet in the editor.
+    Edit,
+    /// A field of the editor: a press gives it the keys (and, in the code,
+    /// puts the caret under it).
+    EditField(SnippetField),
+    /// The arrows beside a chosen field of the editor.
+    EditStep(SnippetField, bool),
+    /// The editor's buttons.
+    EditSave,
+    EditCancel,
+    /// The rest of the window while the editor is up: a press there does
+    /// nothing, so a stray press cannot pick another snippet out from under
+    /// an unsaved one.
+    EditBackdrop,
+    /// The answers to "Delete this snippet?", and around them.
+    ConfirmDelete,
+    KeepSnippet,
+    ConfirmBackdrop,
 }
 
 /// Whether an event changed anything the window would need to redraw.
@@ -1390,6 +1886,27 @@ pub struct App {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// The snippet being edited, while one is.
+    editing: Option<Editing>,
+    /// The snippet a delete is waiting on its answer for.
+    pending_delete: Option<SnippetId>,
+    /// What was last copied or cut in the editor.
+    clipboard: String,
+    /// The latest time a snippet was stamped with, so the next is later.
+    last_stamp: u64,
+    /// How many changes the library has had; written when it moves.
+    revision: u64,
+    /// Whether the library is kept: set by `from_settings`, never by `new`,
+    /// so a window a test makes writes nothing.
+    persist: bool,
+    /// The revision when the library was last written or read.
+    kept_revision: u64,
+    /// Why the library is not being kept, when it is not.
+    store_error: Option<String>,
+    /// "Your latest changes are not saved", while it is being asked.
+    question: Option<Question<()>>,
+    /// Set when the window may close.
+    quit: bool,
 }
 
 impl App {
@@ -1543,7 +2060,426 @@ impl App {
             export_path: PathBuf::from(DEFAULT_EXPORT_NAME),
             export_note: None,
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            editing: None,
+            pending_delete: None,
+            clipboard: String::new(),
+            last_stamp: 5000,
+            revision: 0,
+            persist: false,
+            kept_revision: 0,
+            store_error: None,
+            question: None,
+            quit: false,
         }
+    }
+
+    /// The window's library: the one kept last time -- or, on a first run,
+    /// the examples `new` starts with -- and every change kept from here on.
+    fn from_settings() -> Self {
+        let mut app = Self::new();
+        match library_path() {
+            Some(path) => {
+                app.persist = true;
+                app.load_library(&path);
+            }
+            // Nowhere to keep anything, and never will be while this window
+            // is open: said once, and not asked about again at every close.
+            None => app.store_error = Some(String::from(NO_HOME)),
+        }
+        app
+    }
+
+    /// Read the library at `path`; with none there yet, this is a first run.
+    /// A file that cannot be read whole is left exactly as it is: nothing is
+    /// saved over it, and the window says so while it is open.
+    fn load_library(&mut self, path: &Path) {
+        self.load_library_within(path, MAX_LIBRARY_BYTES);
+    }
+
+    /// [`load_library`](Self::load_library) with the size limit given, so a
+    /// test can reach it without writing sixty-four megabytes.
+    fn load_library_within(&mut self, path: &Path, max_bytes: usize) {
+        let refused = |why: String| {
+            format!(
+                "{} was not read ({why}), so nothing is saved over it",
+                show_path(path)
+            )
+        };
+        let read = match safeio::read_to_string_capped(path, max_bytes) {
+            Ok(read) => read,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+            Err(err) => {
+                self.persist = false;
+                self.store_error = Some(refused(err.to_string()));
+                return;
+            }
+        };
+        if read.truncated {
+            self.persist = false;
+            self.store_error = Some(refused(format!(
+                "it is larger than {} MiB",
+                max_bytes / (1024 * 1024)
+            )));
+            return;
+        }
+        match parse_library(&read.text) {
+            Ok(lib) => {
+                let highest = lib
+                    .folders
+                    .iter()
+                    .map(|f| f.id)
+                    .chain(lib.snippets.iter().map(|sn| sn.id))
+                    .max()
+                    .unwrap_or(0);
+                self.last_stamp = lib
+                    .snippets
+                    .iter()
+                    .map(|sn| sn.created_at)
+                    .max()
+                    .unwrap_or(0);
+                self.folders = lib.folders;
+                self.snippets = lib.snippets;
+                self.recently_used = lib.recent;
+                // New ids go past every one the file used.
+                self.id_gen = IdGen {
+                    next: highest.saturating_add(1),
+                };
+                self.selected_snippet_id = None;
+                self.selected_folder_id = None;
+                self.kept_revision = self.revision;
+            }
+            Err(why) => {
+                self.persist = false;
+                self.store_error = Some(refused(why));
+            }
+        }
+    }
+
+    /// Note that the library changed: it is written after the event.
+    fn changed(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// A time for something made now: the clock's, and later than any given.
+    fn stamp(&mut self) -> u64 {
+        let at = clock_ms().max(self.last_stamp.saturating_add(1));
+        self.last_stamp = at;
+        at
+    }
+
+    /// Write the library, if it changed since it was last written and this
+    /// window keeps anything. A failure is said on the status line, and the
+    /// next change tries again.
+    fn keep(&mut self) {
+        if !self.persist || self.revision == self.kept_revision {
+            return;
+        }
+        let Some(path) = library_path() else {
+            self.store_error = Some(String::from(NO_HOME));
+            return;
+        };
+        let text = library_text(&self.folders, &self.snippets, &self.recently_used);
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| safeio::write_str_atomically(&path, &text));
+        match written {
+            Ok(()) => {
+                self.kept_revision = self.revision;
+                self.store_error = None;
+            }
+            Err(err) => {
+                self.store_error = Some(format!(
+                    "Your snippets were not saved to {}: {err}",
+                    show_path(&path)
+                ));
+            }
+        }
+    }
+
+    /// Whether the library holds a change that is not written.
+    fn unkept(&self) -> bool {
+        self.persist && self.revision != self.kept_revision
+    }
+
+    /// The window has been asked to close. Whether it may go now: at once,
+    /// unless a snippet is being edited with changes -- asked about -- or the
+    /// library has changes a save is failing to write.
+    fn request_close(&mut self) -> bool {
+        if let Some(ed) = &self.editing
+            && self
+                .snippets
+                .iter()
+                .find(|sn| sn.id == ed.id)
+                .is_none_or(|sn| ed.differs_from(sn))
+        {
+            let name = ed.title.text().trim().to_owned();
+            self.show_stats = false;
+            self.question = Some(Question::new(
+                &unsaved::message_for(&[if name.is_empty() {
+                    "The snippet"
+                } else {
+                    &name
+                }]),
+                "Save it before closing?",
+                (),
+            ));
+            return false;
+        }
+        self.editing = None;
+        self.keep();
+        if !self.unkept() {
+            return true;
+        }
+        self.show_stats = false;
+        let detail = self.store_error.clone().unwrap_or_default();
+        self.question = Some(Question::new(
+            "Your latest changes to your snippets are not saved.",
+            &format!("{detail} -- try saving again before closing?"),
+            (),
+        ));
+        false
+    }
+
+    /// Act on the close question's answer: Save saves the snippet being
+    /// edited, if there is one, and the library; the window goes only if
+    /// both are written.
+    fn answer(&mut self, choice: Choice) {
+        match choice {
+            Choice::Save => {
+                if self.editing.is_some() && !self.save_edit() {
+                    return;
+                }
+                self.keep();
+                self.quit = !self.unkept();
+            }
+            Choice::Discard => self.quit = true,
+            Choice::Cancel => {}
+        }
+    }
+
+    /// Open snippet `id` in the editor.
+    fn edit(&mut self, id: SnippetId) -> EventResult {
+        let font = self.layout().font;
+        let Some(sn) = self.snippets.iter().find(|sn| sn.id == id) else {
+            return EventResult::Ignored;
+        };
+        self.editing = Some(Editing::of(sn, font));
+        self.search_focus = false;
+        EventResult::Consumed
+    }
+
+    /// Put the editor's copy into the library. Whether it went: the fault is
+    /// said in the editor if not.
+    fn save_edit(&mut self) -> bool {
+        let Some(ed) = self.editing.as_mut() else {
+            return false;
+        };
+        let title = ed.title.text().trim().to_owned();
+        if title.is_empty() {
+            ed.error = Some(String::from("Give it a title"));
+            return false;
+        }
+        let tags = ed.tag_list();
+        let ed = ed.clone();
+        let Some(sn) = self.snippets.iter_mut().find(|sn| sn.id == ed.id) else {
+            // Deleted from under the editor: nothing to put it in.
+            self.editing = None;
+            return false;
+        };
+        sn.title = title;
+        sn.language = ed.language;
+        sn.folder_id = ed.folder;
+        sn.tags = tags;
+        ed.description.text().clone_into(&mut sn.description);
+        ed.content.text().clone_into(&mut sn.content);
+        sn.template_vars = extract_template_vars(&sn.content);
+        sn.is_template = !sn.template_vars.is_empty();
+        let note = format!("Saved \u{201C}{}\u{201D}", sn.title);
+        self.editing = None;
+        self.export_note = Some(Ok(note));
+        self.changed();
+        true
+    }
+
+    /// Escape in the editor: leave at once when nothing was changed; with
+    /// changes, ask first -- Enter throws them away.
+    fn leave_editor(&mut self) {
+        let Some(ed) = self.editing.as_mut() else {
+            return;
+        };
+        if ed.confirm_discard {
+            ed.confirm_discard = false;
+            return;
+        }
+        let changed = self
+            .snippets
+            .iter()
+            .find(|sn| sn.id == ed.id)
+            .is_none_or(|sn| ed.differs_from(sn));
+        if changed {
+            ed.confirm_discard = true;
+        } else {
+            self.editing = None;
+        }
+    }
+
+    /// The rows of the code on show in the editor, at this window's size.
+    fn edit_code_rows(&self) -> usize {
+        let l = self.layout();
+        let area = self.edit_code_area(&l);
+        let rows = (area.h / l.line).floor();
+        if rows.is_finite() && rows > 0.0 {
+            usize_from_f32(rows)
+        } else {
+            1
+        }
+    }
+
+    /// Scroll the code so the caret is on show.
+    fn keep_caret_in_view(&mut self) {
+        let rows = self.edit_code_rows();
+        let Some(ed) = self.editing.as_mut() else {
+            return;
+        };
+        let line = ed.content.line_index(ed.content.caret());
+        if line < ed.scroll {
+            ed.scroll = line;
+        } else if line >= ed.scroll.saturating_add(rows) {
+            ed.scroll = line.saturating_add(1).saturating_sub(rows);
+        }
+    }
+
+    /// A key while the editor is up: every key is its.
+    fn handle_edit_key(&mut self, ev: &KeyEvent) -> EventResult {
+        let folders = self.folders.clone();
+        let rows = self.edit_code_rows();
+        let Some(ed) = self.editing.as_mut() else {
+            return EventResult::Ignored;
+        };
+        if ed.confirm_discard {
+            match ev.key {
+                Key::Enter => self.editing = None,
+                Key::Escape => ed.confirm_discard = false,
+                _ => {}
+            }
+            return EventResult::Consumed;
+        }
+        let field = ed.field;
+        match ev.key {
+            Key::S if ev.modifiers.ctrl => {
+                self.save_edit();
+                return EventResult::Consumed;
+            }
+            Key::Escape => {
+                self.leave_editor();
+                return EventResult::Consumed;
+            }
+            Key::Tab if ev.modifiers.shift => {
+                let all = SnippetField::ALL;
+                let at = all.iter().position(|f| *f == field).unwrap_or(0);
+                ed.field = at
+                    .checked_sub(1)
+                    .and_then(|i| all.get(i))
+                    .copied()
+                    .unwrap_or(SnippetField::Content);
+                return EventResult::Consumed;
+            }
+            // In the code, Tab is an indent: it is code.
+            Key::Tab if field == SnippetField::Content => {
+                ed.content.insert(INDENT, MAX_CONTENT_LEN);
+            }
+            Key::Tab => {
+                let all = SnippetField::ALL;
+                let at = all.iter().position(|f| *f == field).unwrap_or(0);
+                ed.field = all
+                    .get(at.saturating_add(1))
+                    .copied()
+                    .unwrap_or(SnippetField::Title);
+                return EventResult::Consumed;
+            }
+            Key::Enter if field != SnippetField::Content => {
+                self.save_edit();
+                return EventResult::Consumed;
+            }
+            Key::Left | Key::Right | Key::Space
+                if matches!(field, SnippetField::Language | SnippetField::Folder) =>
+            {
+                ed.step(field, ev.key != Key::Left, &folders);
+            }
+            _ if field == SnippetField::Content => {
+                let edited = ed.content.apply_key(
+                    ev,
+                    MAX_CONTENT_LEN,
+                    &self.clipboard,
+                    rows.saturating_sub(1),
+                );
+                if let Some(copied) = edited.copied {
+                    self.clipboard = copied;
+                }
+                if !edited.handled {
+                    return EventResult::Ignored;
+                }
+            }
+            _ => {
+                let clipboard = self.clipboard.clone();
+                let Some(input) = ed.line_mut(field) else {
+                    return EventResult::Ignored;
+                };
+                let done = textline::apply_key(input, ev, field.capacity(), &clipboard, 13.0);
+                if let Some(copied) = done.copied {
+                    self.clipboard = copied;
+                }
+                if !done.handled {
+                    return EventResult::Ignored;
+                }
+            }
+        }
+        if let Some(ed) = self.editing.as_mut() {
+            ed.error = None;
+        }
+        self.keep_caret_in_view();
+        EventResult::Consumed
+    }
+
+    /// A press while the editor is up.
+    fn press_in_editor(&mut self, target: Target, x: f32, y: f32) -> EventResult {
+        let folders = self.folders.clone();
+        let l = self.layout();
+        let code = self.edit_code_area(&l);
+        let Some(ed) = self.editing.as_mut() else {
+            return EventResult::Ignored;
+        };
+        match target {
+            Target::EditField(field) => {
+                ed.field = field;
+                ed.confirm_discard = false;
+                if field == SnippetField::Content {
+                    let line = usize_from_f32(((y - code.y) / l.line).floor().max(0.0))
+                        .saturating_add(ed.scroll);
+                    ed.content.click(line, (x - code.x).max(0.0), false);
+                } else if !field.is_line() {
+                    ed.step(field, true, &folders);
+                }
+            }
+            Target::EditStep(field, forward) => {
+                ed.field = field;
+                ed.step(field, forward, &folders);
+            }
+            Target::EditSave => {
+                self.save_edit();
+            }
+            Target::EditCancel => self.leave_editor(),
+            // The backdrop, and anything behind it: nothing.
+            _ => return EventResult::Consumed,
+        }
+        EventResult::Consumed
+    }
+
+    /// Delete snippet `id` -- after asking, which `pending_delete` holds.
+    fn confirm_delete(&mut self, id: SnippetId) {
+        self.delete_snippet(id);
+        self.pending_delete = None;
     }
 
     /// Add a snippet, or `None` if the library is full or the content too
@@ -1565,6 +2501,8 @@ impl App {
         let id = self.id_gen.next_id();
         let template_vars = extract_template_vars(content);
         let is_template = !template_vars.is_empty();
+        self.changed();
+        let created_at = self.stamp();
 
         self.snippets.push(Snippet {
             id,
@@ -1574,7 +2512,7 @@ impl App {
             folder_id: self.selected_folder_id,
             tags: Vec::new(),
             favorite: false,
-            created_at: id, // simplified timestamp
+            created_at,
             use_count: 0,
             description: String::new(),
             is_template,
@@ -1585,6 +2523,7 @@ impl App {
     }
 
     fn delete_snippet(&mut self, id: SnippetId) {
+        self.changed();
         self.snippets.retain(|s| s.id != id);
         if self.selected_snippet_id == Some(id) {
             self.selected_snippet_id = None;
@@ -1601,6 +2540,7 @@ impl App {
         }
 
         let id = self.id_gen.next_id();
+        self.changed();
         self.folders.push(Folder {
             id,
             name: name.into(),
@@ -1612,6 +2552,7 @@ impl App {
     }
 
     fn delete_folder(&mut self, id: FolderId) {
+        self.changed();
         // Move snippets to root
         for snippet in &mut self.snippets {
             if snippet.folder_id == Some(id) {
@@ -1637,6 +2578,7 @@ impl App {
     fn toggle_favorite(&mut self, id: SnippetId) {
         if let Some(snippet) = self.snippets.iter_mut().find(|s| s.id == id) {
             snippet.favorite = !snippet.favorite;
+            self.changed();
         }
     }
 
@@ -1661,6 +2603,7 @@ impl App {
             return EventResult::Ignored;
         };
         snippet.use_count = snippet.use_count.saturating_add(1);
+        self.changed();
         self.recently_used.retain(|&rid| rid != id);
         self.recently_used.insert(0, id);
         self.recently_used.truncate(MAX_RECENT);
@@ -1986,7 +2929,9 @@ impl App {
     fn export(&mut self) {
         let json = export_snippets_json(&self.snippets);
         let path = self.export_path.clone();
-        self.export_note = Some(match std::fs::write(&path, json) {
+        // Atomically: a write cut short by a full disk or a crash would leave
+        // a half export where a whole one was.
+        self.export_note = Some(match safeio::write_str_atomically(&path, &json) {
             Ok(()) => Ok(format!(
                 "Exported {} to {}",
                 self.snippets.len(),
@@ -1999,7 +2944,22 @@ impl App {
     /// Act on a left click that landed on `target`.
     fn press(&mut self, target: Target) -> EventResult {
         match target {
-            Target::New => return self.new_snippet(),
+            // Made at once, named from the search box, and opened in the
+            // editor, where it can be given what a name alone cannot.
+            Target::New => {
+                if self.new_snippet() == EventResult::Ignored {
+                    return EventResult::Ignored;
+                }
+                if let Some(id) = self.selected_snippet_id {
+                    self.edit(id);
+                }
+            }
+            Target::Edit => {
+                let Some(id) = self.selected_snippet_id else {
+                    return EventResult::Ignored;
+                };
+                return self.edit(id);
+            }
             Target::Export => self.export(),
             Target::Stats => self.show_stats = true,
             Target::CloseStats => self.show_stats = false,
@@ -2029,6 +2989,7 @@ impl App {
             Target::Twisty(id) => {
                 if let Some(folder) = self.folders.iter_mut().find(|f| f.id == id) {
                     folder.expanded = !folder.expanded;
+                    self.changed();
                 }
             }
             Target::Tag(index) => {
@@ -2050,12 +3011,28 @@ impl App {
                 };
                 return self.use_snippet(id);
             }
+            // Asked first: there is no undo, and a snippet can be a page
+            // of somebody's code.
             Target::Delete => {
                 let Some(id) = self.selected_snippet_id else {
                     return EventResult::Ignored;
                 };
-                self.delete_snippet(id);
+                self.pending_delete = Some(id);
             }
+            Target::ConfirmDelete => {
+                if let Some(id) = self.pending_delete {
+                    self.confirm_delete(id);
+                }
+            }
+            Target::KeepSnippet => self.pending_delete = None,
+            // The editor's own targets are pressed through `press_in_editor`,
+            // and the backdrops are presses on nothing.
+            Target::EditField(_)
+            | Target::EditStep(..)
+            | Target::EditSave
+            | Target::EditCancel
+            | Target::EditBackdrop
+            | Target::ConfirmBackdrop => return EventResult::Ignored,
             // The panels themselves are hit boxes so the wheel knows which one
             // it is over. A press on one is a press on nothing.
             Target::List | Target::Code => return EventResult::Ignored,
@@ -2132,6 +3109,19 @@ impl App {
         if !ev.pressed {
             return EventResult::Ignored;
         }
+        // The editor has every key while it is up, the delete question every
+        // key while it is asked.
+        if self.editing.is_some() {
+            return self.handle_edit_key(ev);
+        }
+        if let Some(id) = self.pending_delete {
+            match ev.key {
+                Key::Enter | Key::Y => self.confirm_delete(id),
+                Key::Escape | Key::N => self.pending_delete = None,
+                _ => {}
+            }
+            return EventResult::Consumed;
+        }
         // The overlay is modal. A key that reached the library behind it would
         // change a list the user cannot see, and would leave the numbers on
         // the overlay describing a library that had moved on.
@@ -2177,6 +3167,7 @@ impl App {
             }
             Key::S => self.press(Target::Stats),
             Key::N => self.press(Target::New),
+            Key::F2 => self.press(Target::Edit),
             Key::E => self.press(Target::Export),
             Key::O => self.press(Target::Sort),
             Key::Escape => {
@@ -2239,6 +3230,28 @@ impl App {
         let Some(target) = frame.hit_test(ev.x, ev.y) else {
             return EventResult::Ignored;
         };
+        if self.editing.is_some() {
+            return match ev.kind {
+                MouseEventKind::Press(MouseButton::Left) => {
+                    self.press_in_editor(target, ev.x, ev.y)
+                }
+                MouseEventKind::Scroll { dy, .. }
+                    if target == Target::EditField(SnippetField::Content) =>
+                {
+                    let rows = self.wheel.rows(dy);
+                    let total = self
+                        .editing
+                        .as_ref()
+                        .map_or(0, |ed| ed.content.line_count());
+                    let shown = self.edit_code_rows();
+                    if let Some(ed) = self.editing.as_mut() {
+                        ed.scroll = clamp_scroll(ed.scroll, rows, total, shown);
+                    }
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
         match ev.kind {
             MouseEventKind::Press(MouseButton::Left) => self.press(target),
             MouseEventKind::Scroll { dy, .. } => self.scroll(target, dy),
@@ -2266,6 +3279,9 @@ impl App {
         self.draw_editor(&mut f, &l);
         if self.show_stats {
             self.draw_stats(&mut f, &l);
+        }
+        if let Some(id) = self.pending_delete {
+            self.draw_confirm_delete(&mut f, &l, id);
         }
         f
     }
@@ -2999,7 +4015,9 @@ impl App {
         );
         let parts = self.editor_parts(l);
         f.clip(col);
-        if let Some(s) = self.selected_snippet() {
+        if let Some(ed) = &self.editing {
+            self.draw_edit_form(f, l, ed);
+        } else if let Some(s) = self.selected_snippet() {
             self.draw_editor_header(f, l, s, parts.header);
             self.draw_code(f, l, s, parts.code);
         } else {
@@ -3051,6 +4069,7 @@ impl App {
         for (label, color, target) in [
             (DELETE_LABEL, self.palette.red, Target::Delete),
             (USE_LABEL, self.palette.blue, Target::Use),
+            (EDIT_LABEL, self.palette.green, Target::Edit),
         ] {
             let want = text::padded_width(label, l.pad * 2.0, l.tiny, FontWeightHint::Bold);
             let button = inset_y(take_right(&mut top, want, l.pad), l.pad * 0.25);
@@ -3268,6 +4287,49 @@ impl App {
             );
         }
 
+        // Why the library is not being kept takes the line first: it is the
+        // one thing here that is about losing work.
+        if let Some(error) = &self.store_error {
+            label_left(
+                f,
+                &Label {
+                    text: error,
+                    size: l.tiny,
+                    weight: FontWeightHint::Bold,
+                    color: self.palette.red,
+                },
+                rest,
+            );
+            return;
+        }
+        // In the editor, the keys that work it -- or the question over its
+        // changes, or what is wrong with them.
+        if let Some(ed) = &self.editing {
+            let (message, color) = if ed.confirm_discard {
+                (
+                    "Throw away your changes? Enter throws them away, Esc goes back to them",
+                    self.palette.red,
+                )
+            } else if let Some(error) = &ed.error {
+                (error.as_str(), self.palette.red)
+            } else {
+                (
+                    "Tab: next field (in the code, an indent)  \u{00B7}  Shift+Tab: back  \u{00B7}  Ctrl+S: save  \u{00B7}  Esc: leave",
+                    self.palette.overlay0,
+                )
+            };
+            label_left(
+                f,
+                &Label {
+                    text: message,
+                    size: l.tiny,
+                    weight: FontWeightHint::Regular,
+                    color,
+                },
+                rest,
+            );
+            return;
+        }
         // What the last export did takes the line while there is something to
         // say, because it is news and the tags are not.
         if let Some(note) = &self.export_note {
@@ -3314,6 +4376,395 @@ impl App {
                 },
                 pill,
             );
+        }
+    }
+
+    /// How wide the editor's field names are drawn: the widest of them.
+    fn edit_label_w(l: &Layout) -> f32 {
+        text::measure("Language", l.small, FontWeightHint::Regular) + l.pad * 2.0
+    }
+
+    /// Where the editor's code field is, at this window's size.
+    fn edit_code_area(&self, l: &Layout) -> Rect {
+        let parts = self.editor_parts(l);
+        let head = parts.header.y;
+        let rows_h =
+            (l.row + l.pad * 0.5) * f32_from_usize(SnippetField::ALL.len().saturating_sub(1));
+        let top = head + l.pad + text::line_height(l.head, FontWeightHint::Bold) + l.pad + rows_h;
+        let bottom = parts.status.y - l.pad;
+        let x = l.editor.x + l.pad + Self::edit_label_w(l);
+        shrink(
+            Rect::new(
+                x,
+                top,
+                (l.editor.right() - l.pad - x).max(0.0),
+                (bottom - top).max(0.0),
+            ),
+            l.pad * 0.5,
+        )
+    }
+
+    /// The editor, in the column the snippet is shown in: a heading with Save
+    /// and Cancel, a row per field, and the code filling the rest.
+    fn draw_edit_form(&self, f: &mut Frame<Target>, l: &Layout, ed: &Editing) {
+        let col = l.editor;
+        let parts = self.editor_parts(l);
+        // Everywhere else in the window is a press on nothing while it is up.
+        f.hit(Target::EditBackdrop, l.window);
+        fill(
+            f,
+            Rect::new(
+                col.x + 1.0,
+                parts.header.y,
+                col.w - 1.0,
+                parts.status.y - parts.header.y,
+            ),
+            self.palette.crust,
+            CornerRadii::ZERO,
+        );
+        let mut top = Rect::new(
+            col.x + l.pad,
+            parts.header.y + l.pad,
+            (col.w - l.pad * 2.0).max(0.0),
+            text::line_height(l.head, FontWeightHint::Bold),
+        );
+        for (label, color, target) in [
+            ("Cancel", self.palette.surface1, Target::EditCancel),
+            ("Save", self.palette.blue, Target::EditSave),
+        ] {
+            let want = text::padded_width(label, l.pad * 2.0, l.tiny, FontWeightHint::Bold);
+            let button = inset_y(take_right(&mut top, want, l.pad), l.pad * 0.25);
+            fill(f, button, color, CornerRadii::all(l.pad * 0.5));
+            label_centred(
+                f,
+                &Label {
+                    text: label,
+                    size: l.tiny,
+                    weight: FontWeightHint::Bold,
+                    color: self.palette.crust,
+                },
+                button,
+            );
+            f.hit(target, button);
+        }
+        label_left(
+            f,
+            &Label {
+                text: "Editing",
+                size: l.head,
+                weight: FontWeightHint::Bold,
+                color: self.palette.text,
+            },
+            top,
+        );
+        let label_w = Self::edit_label_w(l);
+        let mut y = top.bottom() + l.pad;
+        for field in SnippetField::ALL {
+            let focused = ed.field == field;
+            if field == SnippetField::Content {
+                let area = self.edit_code_area(l);
+                label_left(
+                    f,
+                    &Label {
+                        text: field.label(),
+                        size: l.small,
+                        weight: if focused {
+                            FontWeightHint::Bold
+                        } else {
+                            FontWeightHint::Regular
+                        },
+                        color: if focused {
+                            self.palette.blue
+                        } else {
+                            self.palette.subtext0
+                        },
+                    },
+                    Rect::new(col.x + l.pad, y, label_w, l.row),
+                );
+                self.draw_edit_code(f, l, ed, area, focused);
+                continue;
+            }
+            let row = Rect::new(col.x + l.pad, y, (col.w - l.pad * 2.0).max(0.0), l.row);
+            label_left(
+                f,
+                &Label {
+                    text: field.label(),
+                    size: l.small,
+                    weight: if focused {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    color: if focused {
+                        self.palette.blue
+                    } else {
+                        self.palette.subtext0
+                    },
+                },
+                Rect::new(row.x, row.y, label_w, row.h),
+            );
+            let control = Rect::new(row.x + label_w, row.y, (row.w - label_w).max(0.0), row.h);
+            fill(f, control, self.palette.base, CornerRadii::all(l.pad * 0.4));
+            stroke(
+                f,
+                control,
+                if focused {
+                    self.palette.blue
+                } else {
+                    self.palette.surface1
+                },
+                if focused { 2.0 } else { 1.0 },
+                CornerRadii::all(l.pad * 0.4),
+            );
+            if let Some(input) = ed.line(field) {
+                if input.text().is_empty() && !focused {
+                    label_left(
+                        f,
+                        &Label {
+                            text: field.placeholder(),
+                            size: l.small,
+                            weight: FontWeightHint::Regular,
+                            color: self.palette.overlay0,
+                        },
+                        inset_x(control, l.pad * 0.5),
+                    );
+                } else {
+                    let mut tree = RenderTree::new();
+                    textedit::draw(
+                        &mut tree,
+                        &textedit::SingleLine {
+                            text: input.text(),
+                            cursor: if focused {
+                                input.cursor()
+                            } else {
+                                text::TextCursor::default()
+                            },
+                            selection_anchor: if focused {
+                                input.selection_anchor()
+                            } else {
+                                None
+                            },
+                            focused,
+                            x: control.x + l.pad * 0.5,
+                            y: control.y
+                                + (control.h - text::line_height(13.0, FontWeightHint::Regular))
+                                    / 2.0,
+                            width: (control.w - l.pad).max(0.0),
+                            line_height: text::line_height(13.0, FontWeightHint::Regular),
+                            font_size: 13.0,
+                            weight: FontWeightHint::Regular,
+                            color: self.palette.text,
+                            selection_bg: self.palette.blue,
+                            selection_fg: self.palette.crust,
+                            caret_width: textedit::CARET_WIDTH,
+                        },
+                    );
+                    f.extend(tree.commands);
+                }
+                f.hit(Target::EditField(field), control);
+            } else {
+                let arrow = control.h;
+                let back = Rect::new(control.x, control.y, arrow, control.h);
+                let forward = Rect::new(control.right() - arrow, control.y, arrow, control.h);
+                for (glyph, rect, fwd) in [("\u{25C0}", back, false), ("\u{25B6}", forward, true)] {
+                    label_centred(
+                        f,
+                        &Label {
+                            text: glyph,
+                            size: l.small,
+                            weight: FontWeightHint::Regular,
+                            color: self.palette.subtext0,
+                        },
+                        rect,
+                    );
+                    f.hit(Target::EditStep(field, fwd), rect);
+                }
+                let value = Rect::new(
+                    back.right(),
+                    control.y,
+                    (control.w - arrow * 2.0).max(0.0),
+                    control.h,
+                );
+                let choice = ed.choice_label(field, &self.folders);
+                label_centred(
+                    f,
+                    &Label {
+                        text: &choice,
+                        size: l.small,
+                        weight: FontWeightHint::Regular,
+                        color: self.palette.text,
+                    },
+                    value,
+                );
+                f.hit(Target::EditField(field), value);
+            }
+            y += l.row + l.pad * 0.5;
+        }
+    }
+
+    /// The code being edited: lines in the fixed-pitch face, the selection
+    /// under them, and the caret where the keys will type.
+    fn draw_edit_code(
+        &self,
+        f: &mut Frame<Target>,
+        l: &Layout,
+        ed: &Editing,
+        area: Rect,
+        focused: bool,
+    ) {
+        let frame = Rect::new(
+            area.x - l.pad * 0.5,
+            area.y - l.pad * 0.5,
+            area.w + l.pad,
+            area.h + l.pad,
+        );
+        fill(f, frame, self.palette.base, CornerRadii::all(l.pad * 0.6));
+        stroke(
+            f,
+            frame,
+            if focused {
+                self.palette.blue
+            } else {
+                self.palette.surface1
+            },
+            if focused { 2.0 } else { 1.0 },
+            CornerRadii::all(l.pad * 0.6),
+        );
+        f.hit(Target::EditField(SnippetField::Content), frame);
+        f.clip(area);
+        f.push(RenderCommand::PushFont {
+            family: FontFamily::Mono,
+        });
+        let content = &ed.content;
+        let selection = if focused { content.selection() } else { None };
+        let rows = self.edit_code_rows();
+        let mut start = 0_usize;
+        for (i, line) in content.text().split('\n').enumerate() {
+            let end = start.saturating_add(line.len());
+            if i >= ed.scroll && i < ed.scroll.saturating_add(rows) {
+                let y = area.y + f32_from_usize(i.saturating_sub(ed.scroll)) * l.line;
+                if let Some((from, to)) = selection {
+                    let a = from.clamp(start, end).saturating_sub(start);
+                    let b = to.clamp(start, end).saturating_sub(start);
+                    if a < b {
+                        for (left, w) in text::selection_boxes_in(
+                            line,
+                            a,
+                            b,
+                            l.font,
+                            FontWeightHint::Regular,
+                            FontFamily::Mono,
+                        ) {
+                            fill(
+                                f,
+                                Rect::new(area.x + left, y, w, l.line),
+                                self.palette.surface2,
+                                CornerRadii::ZERO,
+                            );
+                        }
+                    }
+                }
+                push_text(
+                    f,
+                    &Label {
+                        text: line,
+                        size: l.font,
+                        weight: FontWeightHint::Regular,
+                        color: self.palette.text,
+                    },
+                    area.x,
+                    y,
+                    area.w,
+                );
+                if focused && (start..=end).contains(&content.caret()) {
+                    let x = text::measure_in(
+                        line.get(..content.caret().saturating_sub(start))
+                            .unwrap_or(""),
+                        l.font,
+                        FontWeightHint::Regular,
+                        FontFamily::Mono,
+                    );
+                    fill(
+                        f,
+                        Rect::new(area.x + x, y, textedit::CARET_WIDTH, l.line),
+                        self.palette.text,
+                        CornerRadii::ZERO,
+                    );
+                }
+            }
+            start = end.saturating_add(1);
+        }
+        f.push(RenderCommand::PopFont);
+        f.unclip();
+    }
+
+    /// "Delete this snippet?", with a button for each answer.
+    fn draw_confirm_delete(&self, f: &mut Frame<Target>, l: &Layout, id: SnippetId) {
+        fill(f, l.window, Color::rgba(0, 0, 0, 128), CornerRadii::ZERO);
+        f.hit(Target::ConfirmBackdrop, l.window);
+        let title = self
+            .snippets
+            .iter()
+            .find(|sn| sn.id == id)
+            .map_or("", |sn| sn.title.as_str());
+        let question = format!("Delete \u{201C}{title}\u{201D}?");
+        let line = text::line_height(l.head, FontWeightHint::Bold);
+        let w = (text::measure(&question, l.head, FontWeightHint::Bold) + l.pad * 4.0)
+            .max(320.0)
+            .min(l.window.w * OVERLAY_SHARE);
+        let h = l.pad * 5.0 + line * 3.0;
+        let dialog = Rect::new(
+            l.window.x + (l.window.w - w) / 2.0,
+            l.window.y + (l.window.h - h) / 2.0,
+            w,
+            h,
+        );
+        fill(f, dialog, self.palette.mantle, CornerRadii::all(l.pad));
+        let inner = inset_x(dialog, l.pad * 1.5);
+        label_left(
+            f,
+            &Label {
+                text: &question,
+                size: l.head,
+                weight: FontWeightHint::Bold,
+                color: self.palette.text,
+            },
+            Rect::new(inner.x, dialog.y + l.pad, inner.w, line),
+        );
+        label_left(
+            f,
+            &Label {
+                text: "It cannot be brought back. Enter or Y deletes it; Esc or N keeps it.",
+                size: l.small,
+                weight: FontWeightHint::Regular,
+                color: self.palette.subtext0,
+            },
+            Rect::new(inner.x, dialog.y + l.pad * 2.0 + line, inner.w, line),
+        );
+        let mut buttons = Rect::new(
+            inner.x,
+            dialog.bottom() - l.pad - line * 1.2,
+            inner.w,
+            line * 1.2,
+        );
+        for (label, color, target) in [
+            ("Delete", self.palette.red, Target::ConfirmDelete),
+            ("Keep it", self.palette.surface1, Target::KeepSnippet),
+        ] {
+            let want = text::padded_width(label, l.pad * 2.0, l.small, FontWeightHint::Bold);
+            let button = take_right(&mut buttons, want, l.pad);
+            fill(f, button, color, CornerRadii::all(l.pad * 0.5));
+            label_centred(
+                f,
+                &Label {
+                    text: label,
+                    size: l.small,
+                    weight: FontWeightHint::Bold,
+                    color: self.palette.crust,
+                },
+                button,
+            );
+            f.hit(target, button);
         }
     }
 
@@ -3656,6 +5107,20 @@ fn shrink(r: Rect, d: f32) -> Rect {
     inset_y(inset_x(r, d), d)
 }
 
+/// A non-negative whole `f32` as a `usize`; anything else as 0.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "callers pass a floor of a small non-negative count"
+)]
+fn usize_from_f32(v: f32) -> usize {
+    if v.is_finite() && v > 0.0 {
+        v as usize
+    } else {
+        0
+    }
+}
+
 /// A row number as a distance to multiply a row height by.
 ///
 /// Written out so the lint does not have to be turned off across the whole
@@ -3705,15 +5170,34 @@ fn format_size(bytes: usize) -> String {
 /// The one body both the window and the test probe drive, so what a click does
 /// in a test is what it does on a screen.
 pub fn handle_event(app: &mut App, event: &Event) -> EventResult {
-    match event {
+    // The close question has every key and click while it is up.
+    if let Some(question) = app.question.as_mut()
+        && matches!(event, Event::Key(_) | Event::Mouse(_))
+    {
+        if let Some(choice) = question.handle(event) {
+            app.question = None;
+            app.answer(choice);
+        }
+        return EventResult::Consumed;
+    }
+    let result = match event {
         Event::Key(ev) => app.handle_key(ev),
         Event::Mouse(ev) => app.handle_mouse(ev),
         Event::Resize { width, height } => {
             app.resize(f32_from_u32(*width), f32_from_u32(*height));
             EventResult::Consumed
         }
+        Event::CloseRequested => {
+            if app.request_close() {
+                app.quit = true;
+            }
+            EventResult::Consumed
+        }
         _ => EventResult::Ignored,
-    }
+    };
+    // Kept after every event that changed it.
+    app.keep();
+    result
 }
 
 impl WindowApp for App {
@@ -3738,11 +5222,18 @@ impl WindowApp for App {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
+    /// Closing asks first over a snippet being edited with changes, or
+    /// latest changes that cannot be saved; the window then waits for the
+    /// answer (`KeepOpen`) with the question drawn.
     fn on_event(&mut self, event: &Event) -> Response {
-        if matches!(event, Event::CloseRequested) {
+        let result = handle_event(self, event);
+        if self.quit {
             return Response::Exit;
         }
-        match handle_event(self, event) {
+        if matches!(event, Event::CloseRequested) {
+            return Response::KeepOpen;
+        }
+        match result {
             EventResult::Consumed => Response::Redraw,
             EventResult::Ignored => Response::Idle,
         }
@@ -3754,7 +5245,12 @@ impl WindowApp for App {
         // this replaces drew at `WINDOW_WIDTH` whatever window it was in, and
         // received no clicks to read against anything.
         self.resize(width, height);
-        self.frame(width, height).into_tree()
+        let mut tree = self.frame(width, height).into_tree();
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
+        }
+        tree
     }
 }
 
@@ -3798,7 +5294,8 @@ impl Probe for App {
 }
 
 fn main() -> ExitCode {
-    let mut app = App::new();
+    // The library kept last time; on a first run, the examples `new` holds.
+    let mut app = App::from_settings();
     app::launch("snippets", &mut app)
 }
 
@@ -4777,6 +6274,8 @@ mod tests {
         let mut a = app_with(&["one", "two"]);
         a.select(id_of(&a, "two"));
         click(&mut a, Target::Delete);
+        assert_eq!(titles(&a).len(), 2, "deleted without asking");
+        click(&mut a, Target::ConfirmDelete);
         assert_eq!(titles(&a), vec!["one".to_string()]);
         assert!(a.selected_snippet_id.is_none());
     }
@@ -4796,6 +6295,7 @@ mod tests {
         a.select(id);
         click(&mut a, Target::Use);
         click(&mut a, Target::Delete);
+        click(&mut a, Target::ConfirmDelete);
         assert!(a.recently_used.is_empty());
     }
 
@@ -5302,6 +6802,14 @@ mod tests {
         let mut a = app_with(&["one", "two"]);
         a.select(id_of(&a, "two"));
         key(&mut a, &press(Key::Delete));
+        assert_eq!(titles(&a).len(), 2, "deleted without asking");
+        // A key under the question is swallowed; Escape keeps it; Y deletes.
+        key(&mut a, &press(Key::Down));
+        assert_eq!(a.pending_delete, Some(id_of(&a, "two")));
+        key(&mut a, &press(Key::Escape));
+        assert_eq!(titles(&a).len(), 2, "Escape deleted it");
+        key(&mut a, &press(Key::Delete));
+        key(&mut a, &press(Key::Y));
         assert_eq!(titles(&a), vec!["one".to_string()]);
     }
 
@@ -6102,10 +7610,12 @@ mod tests {
             handle_event(&mut a, &Event::Tick { elapsed_ms: 16 }),
             EventResult::Ignored
         );
+        // Asked to close with nothing unsaved, it goes: taken, not ignored.
         assert_eq!(
             handle_event(&mut a, &Event::CloseRequested),
-            EventResult::Ignored
+            EventResult::Consumed
         );
+        assert!(a.quit);
     }
 
     #[test]
@@ -6315,5 +7825,564 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // ── The editor, the kept library, and the question before a delete ──
+
+    /// Every string the window draws, joined -- a field's text included,
+    /// which `textedit` draws as rich text, with its selection.
+    fn all_text(a: &App) -> String {
+        a.frame(W.0, W.1)
+            .into_tree()
+            .commands
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } | RenderCommand::RichText { text, .. } => {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// A library with something of every kind the file has to hold: nested
+    /// folders, a snippet in each place, text that needs escaping in every
+    /// free field, tags, favourites, uses, and the recently used.
+    fn awkward_library() -> App {
+        let mut a = app_with(&[]);
+        // Numbered from one, so a case below can name a line by its numbers.
+        a.id_gen = IdGen::new();
+        let top = a.create_folder("Top\tfolder").unwrap();
+        a.selected_folder_id = Some(top);
+        let inner = a.create_folder("Inner").unwrap();
+        if let Some(f) = a.folders.iter_mut().find(|f| f.id == inner) {
+            f.expanded = false;
+            f.color = Color::rgba(1, 2, 3, 4);
+        }
+        a.selected_folder_id = Some(inner);
+        let one = a
+            .create_snippet(
+                "Tab\there, a line\nbreak",
+                "fn main() {\n\tprintln!(\"\\\\n\");\n}\n",
+                Language::Rust,
+            )
+            .unwrap();
+        a.selected_folder_id = None;
+        let two = a
+            .create_snippet(
+                "Template ${name}",
+                "Hello ${name}, \\ backslash",
+                Language::Python,
+            )
+            .unwrap();
+        if let Some(sn) = a.snippets.iter_mut().find(|sn| sn.id == one) {
+            sn.tags = vec![String::from("a tag"), String::from("tab\ttag")];
+            sn.favorite = true;
+            sn.description = String::from("what\tit\nis");
+            sn.use_count = 7;
+        }
+        a.recently_used = vec![two, one];
+        a
+    }
+
+    /// Everything about a snippet the file keeps.
+    fn describe(sn: &Snippet) -> String {
+        format!(
+            "{} {:?} {:?} {:?} {:?} {:?} {} {} {} {:?} {} {:?}",
+            sn.id,
+            sn.title,
+            sn.content,
+            sn.language,
+            sn.folder_id,
+            sn.tags,
+            sn.favorite,
+            sn.created_at,
+            sn.use_count,
+            sn.description,
+            sn.is_template,
+            sn.template_vars
+        )
+    }
+
+    fn describe_folder(f: &Folder) -> String {
+        format!(
+            "{} {:?} {:?} {} {:?}",
+            f.id, f.name, f.parent_id, f.expanded, f.color
+        )
+    }
+
+    #[test]
+    fn the_kept_library_reads_back_what_it_wrote_whatever_the_text() {
+        let a = awkward_library();
+        let text = library_text(&a.folders, &a.snippets, &a.recently_used);
+        let back = parse_library(&text).expect("it reads back");
+        assert_eq!(
+            back.folders.iter().map(describe_folder).collect::<Vec<_>>(),
+            a.folders.iter().map(describe_folder).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            back.snippets.iter().map(describe).collect::<Vec<_>>(),
+            a.snippets.iter().map(describe).collect::<Vec<_>>()
+        );
+        assert_eq!(back.recent, a.recently_used);
+        assert!(
+            back.snippets[1].is_template,
+            "the template was not read again from its content"
+        );
+        assert_eq!(
+            library_text(&back.folders, &back.snippets, &back.recent),
+            text
+        );
+    }
+
+    #[test]
+    fn a_library_that_cannot_be_read_whole_is_refused_and_says_why() {
+        let a = awkward_library();
+        let good = library_text(&a.folders, &a.snippets, &a.recently_used);
+        let cases: [(&str, String, &str); 8] = [
+            (
+                "later",
+                good.replacen("slateos-snippets\t1", "slateos-snippets\t2", 1),
+                "later format (2)",
+            ),
+            (
+                "not ours",
+                String::from("{\"snippets\":[]}\n"),
+                "not a SlateOS snippet library",
+            ),
+            (
+                "orphan folder",
+                good.replacen("folder\t2\t1\t", "folder\t2\t9\t", 1),
+                "its parent is not written before it",
+            ),
+            (
+                "orphan snippet",
+                good.replacen("\t2\tRust\t", "\t9\tRust\t", 1),
+                "its folder is not written before it",
+            ),
+            (
+                "language",
+                good.replacen("\tRust\t", "\tCobol\t", 1),
+                "its language (Cobol)",
+            ),
+            (
+                "stray tag",
+                good.replacen(
+                    "slateos-snippets\t1\n",
+                    "slateos-snippets\t1\ntag\tearly\n",
+                    1,
+                ),
+                "a tag with no snippet before it",
+            ),
+            (
+                "stray use",
+                good.replacen("recent\t3", "recent\t99", 1),
+                "not in the library",
+            ),
+            (
+                "escape",
+                good.replacen("a tag", "a\\q tag", 1),
+                "broken escape",
+            ),
+        ];
+        for (name, text, why) in cases {
+            assert_ne!(text, good, "control: case {name} changed nothing");
+            let said = parse_library(&text).map(|_| ()).unwrap_err();
+            assert!(said.contains(why), "{name}: {said}");
+        }
+    }
+
+    #[test]
+    fn a_snippet_is_written_in_the_editor_and_is_there_next_time() {
+        settingsfile::testing::with_scratch_config("snippets-kept", |_| {
+            let mut a = App::from_settings();
+            assert!(a.store_error.is_none(), "{:?}", a.store_error);
+            let examples = a.snippets.len();
+            assert!(examples > 0, "control: a first run starts on the examples");
+            assert!(
+                !library_path().unwrap().exists(),
+                "a first run wrote a library nobody had touched"
+            );
+            a.search_query = String::from("hello.py");
+            key(&mut a, &press(Key::N));
+            assert!(
+                a.editing.is_some(),
+                "N did not open the editor on what it made"
+            );
+            a.editing.as_mut().unwrap().field = SnippetField::Content;
+            type_str(&mut a, "def hello():");
+            key(&mut a, &press(Key::Enter));
+            key(&mut a, &press(Key::Tab));
+            type_str(&mut a, "return 1");
+            a.editing.as_mut().unwrap().field = SnippetField::Tags;
+            type_str(&mut a, "greeting, python , greeting,");
+            key(&mut a, &ctrl(Key::S));
+            assert!(a.editing.is_none(), "Ctrl+S did not save");
+            let made = a
+                .snippets
+                .iter()
+                .find(|sn| sn.title == "hello.py")
+                .expect("made")
+                .clone();
+            assert_eq!(made.content, "def hello():\n    return 1");
+            assert_eq!(made.language, Language::Python);
+            assert_eq!(
+                made.tags,
+                ["greeting", "python"],
+                "tags are split at commas and kept once"
+            );
+
+            let again = App::from_settings();
+            assert!(again.store_error.is_none(), "{:?}", again.store_error);
+            assert_eq!(again.snippets.len(), examples + 1);
+            let kept = again
+                .snippets
+                .iter()
+                .find(|sn| sn.id == made.id)
+                .expect("kept");
+            assert_eq!(describe(kept), describe(&made));
+            // One made after the restart takes no kept one's number, and a
+            // later time.
+            let mut again = again;
+            let id = again.create_snippet("Next", "", Language::Rust).unwrap();
+            assert!(
+                again
+                    .snippets
+                    .iter()
+                    .all(|sn| sn.id != id || sn.title == "Next")
+            );
+            let next = again.snippets.iter().find(|sn| sn.id == id).unwrap();
+            assert!(next.created_at > made.created_at);
+        });
+    }
+
+    #[test]
+    fn a_window_made_by_new_keeps_nothing() {
+        settingsfile::testing::with_scratch_config("snippets-quiet", |dir| {
+            let mut a = app();
+            key(&mut a, &press(Key::N));
+            key(&mut a, &ctrl(Key::S));
+            assert!(!dir.join("slateos").join("snippets").exists());
+            assert!(matches!(a.on_event(&Event::CloseRequested), Response::Exit));
+        });
+    }
+
+    #[test]
+    fn leaving_the_editor_over_changes_asks_and_enter_throws_them_away() {
+        let mut a = app_with(&["one"]);
+        let id = id_of(&a, "one");
+        a.select(id);
+        key(&mut a, &press(Key::F2));
+        assert!(a.editing.is_some(), "F2 did not open the editor");
+        type_str(&mut a, " more");
+        key(&mut a, &press(Key::Escape));
+        assert!(
+            a.editing.as_ref().unwrap().confirm_discard,
+            "left over changes without asking"
+        );
+        assert!(
+            all_text(&a).contains("Throw away your changes?"),
+            "the question is not drawn"
+        );
+        key(&mut a, &press(Key::Escape));
+        assert!(
+            !a.editing.as_ref().unwrap().confirm_discard,
+            "Escape did not go back to editing"
+        );
+        key(&mut a, &press(Key::Escape));
+        key(&mut a, &press(Key::Enter));
+        assert!(a.editing.is_none(), "Enter did not throw them away");
+        assert_eq!(
+            a.snippets[0].title, "one",
+            "the snippet changed without a save"
+        );
+        // Nothing changed: Escape leaves at once.
+        key(&mut a, &press(Key::F2));
+        key(&mut a, &press(Key::Escape));
+        assert!(a.editing.is_none());
+    }
+
+    #[test]
+    fn a_snippet_needs_a_title() {
+        let mut a = app_with(&["one"]);
+        a.select(id_of(&a, "one"));
+        key(&mut a, &press(Key::F2));
+        key(&mut a, &ctrl(Key::A));
+        key(&mut a, &press(Key::Backspace));
+        key(&mut a, &press(Key::Enter));
+        let ed = a.editing.as_ref().expect("saved with no title");
+        assert_eq!(ed.error.as_deref(), Some("Give it a title"));
+        assert!(
+            all_text(&a).contains("Give it a title"),
+            "the fault is not drawn"
+        );
+        assert_eq!(a.snippets[0].title, "one");
+    }
+
+    #[test]
+    fn tab_indents_the_code_and_shift_tab_leaves_it() {
+        let mut a = app_with(&["one"]);
+        a.select(id_of(&a, "one"));
+        key(&mut a, &press(Key::F2));
+        for _ in 0..5 {
+            key(&mut a, &press(Key::Tab));
+        }
+        assert_eq!(a.editing.as_ref().unwrap().field, SnippetField::Content);
+        key(&mut a, &press(Key::Tab));
+        assert_eq!(
+            a.editing.as_ref().unwrap().field,
+            SnippetField::Content,
+            "Tab left the code"
+        );
+        assert_eq!(a.editing.as_ref().unwrap().content.text(), INDENT);
+        key(&mut a, &shift(Key::Tab));
+        assert_eq!(a.editing.as_ref().unwrap().field, SnippetField::Description);
+    }
+
+    #[test]
+    fn the_editor_takes_every_key_and_press_while_it_is_up() {
+        let mut a = app_with(&["one", "two"]);
+        let one = id_of(&a, "one");
+        a.select(one);
+        key(&mut a, &press(Key::F2));
+        // N is a letter of the title, not a new snippet.
+        key(&mut a, &press(Key::N));
+        assert_eq!(a.snippets.len(), 2, "N made a snippet under the editor");
+        // A press on another snippet's row picks nothing.
+        let two = id_of(&a, "two");
+        let row = rect_of(&a, Target::Row(two));
+        if let Some(r) = row {
+            let (x, y) = r.centre();
+            a.click_at(x, y, MouseButton::Left, W);
+        }
+        assert_eq!(
+            a.selected_snippet_id,
+            Some(one),
+            "a press picked another snippet under the editor"
+        );
+        assert!(a.editing.is_some());
+    }
+
+    #[test]
+    fn the_editors_fields_answer_presses() {
+        let mut a = app_with(&["one"]);
+        a.select(id_of(&a, "one"));
+        key(&mut a, &press(Key::F2));
+        let before = a.editing.as_ref().unwrap().language;
+        click(&mut a, Target::EditStep(SnippetField::Language, true));
+        assert_ne!(
+            a.editing.as_ref().unwrap().language,
+            before,
+            "the arrow did not step the language"
+        );
+        click(&mut a, Target::EditField(SnippetField::Tags));
+        assert_eq!(a.editing.as_ref().unwrap().field, SnippetField::Tags);
+        click(&mut a, Target::EditField(SnippetField::Content));
+        assert_eq!(a.editing.as_ref().unwrap().field, SnippetField::Content);
+        type_str(&mut a, "x = 1");
+        click(&mut a, Target::EditSave);
+        assert!(a.editing.is_none(), "Save did not save");
+        assert_eq!(a.snippets[0].content, "x = 1");
+        assert!(
+            all_text(&a).contains("Saved \u{201C}one\u{201D}"),
+            "the save was not said"
+        );
+    }
+
+    #[test]
+    fn the_code_is_drawn_in_the_editor_with_the_rest_of_the_snippet() {
+        let mut a = app_with(&["one"]);
+        a.select(id_of(&a, "one"));
+        if let Some(sn) = a.snippets.first_mut() {
+            sn.content = String::from("first line\nsecond line");
+            sn.description = String::from("about it");
+        }
+        key(&mut a, &press(Key::F2));
+        let drawn = all_text(&a);
+        for want in [
+            "Editing",
+            "first line",
+            "second line",
+            "about it",
+            "Save",
+            "Cancel",
+        ] {
+            assert!(drawn.contains(want), "{want:?} is not drawn: {drawn}");
+        }
+    }
+
+    #[test]
+    fn closing_while_editing_with_changes_asks_and_save_keeps_them() {
+        settingsfile::testing::with_scratch_config("snippets-close", |_| {
+            let mut a = App::from_settings();
+            let id = a.snippets[0].id;
+            a.select(id);
+            key(&mut a, &press(Key::F2));
+            type_str(&mut a, "!");
+            assert!(matches!(
+                a.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            let question: String = a
+                .render(W.0, W.1)
+                .commands
+                .into_iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                question.contains("has changes that are not saved"),
+                "{question}"
+            );
+            assert!(matches!(
+                a.on_event(&Event::Key(press(Key::S))),
+                Response::Exit
+            ));
+            let again = App::from_settings();
+            assert!(
+                again
+                    .snippets
+                    .iter()
+                    .any(|sn| sn.id == id && sn.title.ends_with('!'))
+            );
+        });
+    }
+
+    #[test]
+    fn closing_while_a_save_fails_asks_first() {
+        settingsfile::testing::with_scratch_config("snippets-failing", |_| {
+            let mut a = App::from_settings();
+            let path = library_path().unwrap();
+            std::fs::create_dir_all(&path).unwrap();
+            key(&mut a, &press(Key::N));
+            key(&mut a, &ctrl(Key::S));
+            let error = a.store_error.clone().expect("a failed save said nothing");
+            assert!(
+                error.starts_with("Your snippets were not saved to "),
+                "{error}"
+            );
+            assert!(
+                all_text(&a).contains(&error),
+                "the failure is not on screen"
+            );
+            assert!(matches!(
+                a.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            assert!(matches!(
+                a.on_event(&Event::Key(press(Key::S))),
+                Response::Redraw
+            ));
+            assert!(!a.quit);
+            assert!(matches!(
+                a.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            std::fs::remove_dir(&path).unwrap();
+            assert!(matches!(
+                a.on_event(&Event::Key(press(Key::S))),
+                Response::Exit
+            ));
+        });
+    }
+
+    #[test]
+    fn a_library_file_that_cannot_be_read_is_left_as_it_is() {
+        settingsfile::testing::with_scratch_config("snippets-broken", |_| {
+            let path = library_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let broken = "slateos-snippets\t1\nsnippet\tnot a number\n";
+            std::fs::write(&path, broken).unwrap();
+            let mut a = App::from_settings();
+            let error = a
+                .store_error
+                .clone()
+                .expect("an unreadable file was taken without a word");
+            assert!(error.contains("line 2"), "{error}");
+            assert!(
+                all_text(&a).contains(&error),
+                "the refusal is not on screen"
+            );
+            key(&mut a, &press(Key::N));
+            key(&mut a, &ctrl(Key::S));
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                broken,
+                "the unreadable file was saved over"
+            );
+            assert!(matches!(a.on_event(&Event::CloseRequested), Response::Exit));
+        });
+    }
+
+    #[test]
+    fn a_library_file_too_big_to_read_whole_is_refused() {
+        settingsfile::testing::with_scratch_config("snippets-big", |_| {
+            let lib = awkward_library();
+            let text = library_text(&lib.folders, &lib.snippets, &lib.recently_used);
+            let path = library_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &text).unwrap();
+            let mut a = app();
+            a.persist = true;
+            a.load_library_within(&path, text.len() - 1);
+            assert!(a.store_error.clone().unwrap().contains("larger than"));
+            assert!(!a.persist, "a file read in part would be saved over");
+            let mut whole = app();
+            whole.persist = true;
+            whole.load_library_within(&path, text.len());
+            assert!(whole.store_error.is_none(), "{:?}", whole.store_error);
+            assert_eq!(whole.snippets.len(), 2, "control: the whole file reads");
+        });
+    }
+
+    #[test]
+    fn a_new_snippet_is_stamped_by_the_clock_and_later_than_the_last() {
+        let mut a = app_with(&[]);
+        let before = clock_ms();
+        let one = a.create_snippet("one", "", Language::Rust).unwrap();
+        let two = a.create_snippet("two", "", Language::Rust).unwrap();
+        let stamp = |id| a.snippets.iter().find(|sn| sn.id == id).unwrap().created_at;
+        assert!(stamp(one) >= before, "not the clock's time");
+        assert!(
+            stamp(two) > stamp(one),
+            "two made in one millisecond share a time"
+        );
+    }
+
+    #[test]
+    fn every_change_is_counted_and_looking_is_not() {
+        let mut a = app_with(&["one"]);
+        let id = id_of(&a, "one");
+        let mut last = a.revision;
+        let mut counted = |a: &App, what: &str| {
+            assert_ne!(a.revision, last, "{what} was not counted");
+            last = a.revision;
+        };
+        a.toggle_favorite(id);
+        counted(&a, "a favourite");
+        a.use_snippet(id);
+        counted(&a, "a use");
+        let f = a.create_folder("F").unwrap();
+        counted(&a, "a new folder");
+        a.press(Target::Twisty(f));
+        counted(&a, "a folder opened or shut");
+        a.delete_folder(f);
+        counted(&a, "a folder deleted");
+        a.select(id);
+        a.edit(id);
+        a.editing.as_mut().unwrap().field = SnippetField::Content;
+        type_str(&mut a, "x");
+        a.save_edit();
+        counted(&a, "an edit saved");
+        a.delete_snippet(id);
+        counted(&a, "a delete");
+        let now = a.revision;
+        a.select(id);
+        let _ = a.frame(W.0, W.1);
+        assert_eq!(a.revision, now, "looking counted as a change");
     }
 }

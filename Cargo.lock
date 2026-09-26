@@ -2748,6 +2748,12 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "safeio",
+ "settingsfile",
+ "textarea",
+ "textfmt",
+ "textline",
+ "unsaved",
 ]
 
 [[package]]

@@ -166865,7 +166865,7 @@ buttons; it is the next candidate for the same treatment, not a reason to
 have left this one hand-drawn.
 
 ### [E] Notes, contacts, snippets and kanban keep nothing -- 2026-09-25
-**Status:** FIXED for notes, contacts and kanban (lane E, 2026-09-25); OPEN for snippets -- lane E's next, which wants a way to edit a snippet first.
+**Status:** FIXED -- notes, contacts and kanban (lane E, 2026-09-25), snippets (2026-09-26).
 
 **In short:** the notes app, the address book, the snippet library and the
 kanban boards each hold everything the user puts in them in memory only. There
@@ -166975,6 +166975,20 @@ retried; closing while it fails asks. Also fixed:
 - Card times were a counter from 1000; they are the clock's, never earlier
   than a time already kept.
 Mutation table `apps/kanban/mutate.py` (new).
+
+**Snippets, 2026-09-26.** A snippet can be written now: F2, the new Edit
+button, or making one (N, which still names it from the search box) opens it
+in the column it is shown in -- title, language, folder, tags, a description
+and the code itself, in the fixed-pitch face it is shown in, Tab indenting
+there (`apps/textarea`, which learned to measure in that face). Ctrl+S saves;
+Escape over changes asks before throwing them away. The library is
+`snippets/library.txt` in the settings directory, written after every change
+and read whole or not at all (design-decisions §1211); a first run still opens
+on the examples, which are not written until something changes. Also fixed:
+Delete deleted at once, with no undo -- it asks now; a snippet's time was its
+id, which restarted with every window -- it is the clock's; and the JSON
+export was written with `fs::write`, which truncates before writing -- it is
+atomic now.
 
 ### [E] The JSON viewer's text input cannot be reached -- 2026-09-25
 **Status:** OPEN -- lane E

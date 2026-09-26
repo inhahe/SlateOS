@@ -21,7 +21,7 @@
 //! Offsets are bytes into the text, always on a character boundary.
 
 use guitk::event::{Key, KeyEvent};
-use guitk::render::FontWeightHint;
+use guitk::render::{FontFamily, FontWeightHint};
 use guitk::text;
 
 /// A text field of any number of lines.
@@ -37,6 +37,10 @@ pub struct TextArea {
     goal_x: Option<f32>,
     /// The size the text is drawn at, which measuring a line needs.
     font_size: f32,
+    /// The face it is drawn in, which measuring needs as much as the size: a
+    /// code editor draws in a fixed-pitch face, and a caret placed by the
+    /// proportional one lands a column or two off in it.
+    family: FontFamily,
 }
 
 impl Default for TextArea {
@@ -67,7 +71,21 @@ impl TextArea {
             anchor: None,
             goal_x: None,
             font_size,
+            family: FontFamily::Ui,
         }
+    }
+
+    /// The same field, measured -- and so drawn -- in `family`.
+    #[must_use]
+    pub fn with_family(mut self, family: FontFamily) -> Self {
+        self.family = family;
+        self
+    }
+
+    /// The face the field is measured in.
+    #[must_use]
+    pub fn family(&self) -> FontFamily {
+        self.family
     }
 
     /// The text.
@@ -226,7 +244,7 @@ impl TextArea {
         let here = self.line_index(self.caret);
         let goal = self.goal_x.unwrap_or_else(|| {
             let line = self.text.get(start..self.caret).unwrap_or("");
-            text::measure(line, self.font_size, FontWeightHint::Regular)
+            text::measure_in(line, self.font_size, FontWeightHint::Regular, self.family)
         });
         let last = self.line_count().saturating_sub(1);
         let target = if down {
@@ -248,7 +266,14 @@ impl TextArea {
         }
         let from = self.start_of_line(target);
         let line = self.text.get(from..self.line_end(from)).unwrap_or("");
-        let within = text::cursor_at(line, goal, self.font_size, FontWeightHint::Regular).byte;
+        let within = text::cursor_at_in(
+            line,
+            goal,
+            self.font_size,
+            FontWeightHint::Regular,
+            self.family,
+        )
+        .byte;
         self.move_to(from.saturating_add(within), shift);
         self.goal_x = Some(goal);
     }
@@ -333,7 +358,14 @@ impl TextArea {
         let line = line.min(self.line_count().saturating_sub(1));
         let from = self.start_of_line(line);
         let text = self.text.get(from..self.line_end(from)).unwrap_or("");
-        let within = text::cursor_at(text, x, self.font_size, FontWeightHint::Regular).byte;
+        let within = text::cursor_at_in(
+            text,
+            x,
+            self.font_size,
+            FontWeightHint::Regular,
+            self.family,
+        )
+        .byte;
         self.move_to(from.saturating_add(within), shift);
     }
 
@@ -544,5 +576,23 @@ mod tests {
         assert_eq!(a.caret(), 0);
         a.click(9, 0.0, true);
         assert_eq!(a.selected_text(), "first\n");
+    }
+
+    /// A field drawn in a fixed-pitch face is measured in it: a press lands
+    /// on the column it was drawn at, and Up and Down keep to it.
+    #[test]
+    fn a_field_in_a_fixed_pitch_face_is_measured_in_it() {
+        let mut area = TextArea::new(14.0).with_family(FontFamily::Mono);
+        assert_eq!(area.family(), FontFamily::Mono);
+        area.set_text("iiiiiiii\nWWWWWWWW");
+        let x = text::measure_in("iiii", 14.0, FontWeightHint::Regular, FontFamily::Mono);
+        area.click(0, x, false);
+        assert_eq!(area.caret(), 4, "a press landed off the column drawn");
+        area.vertical(true, 1, false);
+        assert_eq!(
+            area.caret() - area.start_of_line(1),
+            4,
+            "Down left the column in a face where every column is as wide"
+        );
     }
 }

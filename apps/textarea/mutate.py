@@ -36,8 +36,8 @@ MUTATIONS = [
     ),
     (
         "Up and Down lose the column",
-        "        let within = text::cursor_at(line, goal, self.font_size, FontWeightHint::Regular).byte;",
-        "        let within = 0;",
+        "        let within = text::cursor_at_in(\n            line,\n            goal,",
+        "        let within = 0;\n        let _ = text::cursor_at_in(\n            line,\n            goal,",
         ["up_and_down_keep_the_column"],
     ),
     (

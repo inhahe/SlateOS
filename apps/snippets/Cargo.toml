@@ -13,5 +13,21 @@ guitk = { path = "../../gui/toolkit" }
 # ever arrived.
 oswindow = { path = "../../gui/window" }
 
+# Where the library is kept (the settings folder), the escapes its text is
+# written with, and the atomic write -- as the notes library keeps its own.
+safeio = { path = "../safeio" }
+settingsfile = { path = "../../gui/settingsfile" }
+textfmt = { path = "../../textfmt" }
+
+# The editor's fields: one-line and the code itself.
+textline = { path = "../textline" }
+textarea = { path = "../textarea" }
+
+# "Your latest changes are not saved", asked the way every editor here asks.
+unsaved = { path = "../unsaved" }
+
+[dev-dependencies]
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
+
 [lints]
 workspace = true

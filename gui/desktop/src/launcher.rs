@@ -118,8 +118,9 @@ const DESC_FONT_SIZE: f32 = 12.0;
 // ============================================================================
 
 /// Category of a launchable item.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Category {
+    #[default]
     Application,
     System,
     Setting,
@@ -160,8 +161,18 @@ impl Category {
 // App entry
 // ============================================================================
 
+/// The picture a program is drawn with when its own cannot be: the icon
+/// theme's generic program.
+pub const GENERIC_PROGRAM_ICON: &str = "application-x-executable";
+
 /// A launchable item in the database.
-#[derive(Clone, Debug)]
+///
+/// Either one of the shell's own ([`builtin_app_database`]) or an installed
+/// program's desktop entry ([`AppEntry::from_desktop`]). `executable_path`
+/// is the program's identity in both: pins and dragged buttons store it, so
+/// it is what a click finds the entry again by -- see
+/// `DesktopShell::launch_for`.
+#[derive(Clone, Debug, Default)]
 pub struct AppEntry {
     pub name: String,
     pub description: String,
@@ -169,6 +180,109 @@ pub struct AppEntry {
     pub keywords: Vec<String>,
     pub category: Category,
     pub launch_count: u32,
+    /// The picture that stands for it: a name in the icon theme. `None`
+    /// draws [`GENERIC_PROGRAM_ICON`].
+    pub icon: Option<String>,
+    /// The start menu folder it is listed in.
+    pub folder: Folder,
+    /// How to start it, when its desktop entry says: the program with its
+    /// arguments. `None` starts `executable_path` with none.
+    pub exec: Option<desktopentry::Exec>,
+    /// Its additional actions -- the rows of its jump list.
+    pub actions: Vec<desktopentry::Action>,
+    /// It runs in a terminal, which is started to hold it.
+    pub terminal: bool,
+    /// The desktop file ID it was read from; `None` for the shell's own.
+    pub desktop_id: Option<String>,
+}
+
+/// The folders of the start menu's applications tree.
+pub use desktopentry::menu::Category as Folder;
+
+impl AppEntry {
+    /// The shell's entry for an installed program's desktop entry, or `None`
+    /// for one it cannot start: an entry with no `Exec` is started by D-Bus
+    /// activation, and this system has no D-Bus.
+    #[must_use]
+    pub fn from_desktop(app: desktopentry::App) -> Option<Self> {
+        let exec = app.exec?;
+        let folder = Folder::of(&app.categories);
+        Some(Self {
+            name: app.name,
+            // A comment says what it does; a generic name says what it is.
+            // Either is a better second line than nothing.
+            description: app.comment.or(app.generic_name).unwrap_or_default(),
+            executable_path: exec.program(),
+            keywords: app.keywords,
+            category: if folder == Folder::Settings {
+                Category::Setting
+            } else {
+                Category::Application
+            },
+            launch_count: 0,
+            icon: app.icon,
+            folder,
+            exec: Some(exec),
+            actions: app.actions,
+            terminal: app.terminal,
+            desktop_id: Some(app.id),
+        })
+    }
+
+    /// How to start it with nothing to open: its desktop entry's command
+    /// line, or its program with no arguments -- inside a terminal when the
+    /// entry says it runs in one.
+    #[must_use]
+    pub fn launch(&self) -> crate::hotkeys::Launch {
+        self.launch_with(self.exec.as_ref())
+    }
+
+    /// How to start one of its actions (its jump list), by the action's id:
+    /// `None` for an action it does not have, or one with no command line.
+    #[must_use]
+    pub fn launch_action(&self, id: &str) -> Option<crate::hotkeys::Launch> {
+        let action = self.actions.iter().find(|a| a.id == id)?;
+        Some(self.launch_with(Some(action.exec.as_ref()?)))
+    }
+
+    fn launch_with(&self, exec: Option<&desktopentry::Exec>) -> crate::hotkeys::Launch {
+        use std::ffi::OsString;
+        let argv: Vec<OsString> = match exec {
+            Some(exec) => {
+                let invocation = desktopentry::Invocation {
+                    icon: self.icon.as_deref(),
+                    name: &self.name,
+                    location: None,
+                };
+                exec.command_lines(&[], &invocation)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default()
+            }
+            None => vec![OsString::from(&self.executable_path)],
+        };
+        let mut argv = argv.into_iter();
+        let Some(program) = argv.next() else {
+            // A parsed line always has a program; this is the built-in
+            // entry's own path, which cannot be empty either.
+            return crate::hotkeys::Launch::program(&self.executable_path);
+        };
+        if self.terminal {
+            // `-e`, as xterm and every terminal that copied it take a
+            // command: the rest of the line is the program and its
+            // arguments, each its own argument.
+            let mut args = vec![OsString::from("-e"), program];
+            args.extend(argv);
+            return crate::hotkeys::Launch {
+                program: std::path::PathBuf::from(TERMINAL),
+                args,
+            };
+        }
+        crate::hotkeys::Launch {
+            program: std::path::PathBuf::from(program),
+            args: argv.collect(),
+        }
+    }
 }
 
 // ============================================================================
@@ -892,6 +1006,9 @@ pub fn builtin_app_database() -> Vec<AppEntry> {
             ],
             category: Category::Application,
             launch_count: 0,
+            icon: Some("utilities-terminal".to_owned()),
+            folder: Folder::System,
+            ..AppEntry::default()
         },
         AppEntry {
             name: "Text Editor".to_string(),
@@ -905,6 +1022,9 @@ pub fn builtin_app_database() -> Vec<AppEntry> {
             ],
             category: Category::Application,
             launch_count: 0,
+            icon: Some("accessories-text-editor".to_owned()),
+            folder: Folder::Accessories,
+            ..AppEntry::default()
         },
         AppEntry {
             name: "File Explorer".to_string(),
@@ -918,6 +1038,9 @@ pub fn builtin_app_database() -> Vec<AppEntry> {
             ],
             category: Category::Application,
             launch_count: 0,
+            icon: Some("system-file-manager".to_owned()),
+            folder: Folder::Accessories,
+            ..AppEntry::default()
         },
         AppEntry {
             name: "Calculator".to_string(),
@@ -926,6 +1049,9 @@ pub fn builtin_app_database() -> Vec<AppEntry> {
             keywords: vec!["math".into(), "calc".into(), "compute".into()],
             category: Category::Application,
             launch_count: 0,
+            icon: Some("accessories-calculator".to_owned()),
+            folder: Folder::Accessories,
+            ..AppEntry::default()
         },
         // The words of three entries that are no longer here. "Display
         // Settings", "Network Settings" and "Sound Settings" named
@@ -964,6 +1090,9 @@ pub fn builtin_app_database() -> Vec<AppEntry> {
             ],
             category: Category::Setting,
             launch_count: 0,
+            icon: Some("preferences-system".to_owned()),
+            folder: Folder::Settings,
+            ..AppEntry::default()
         },
         AppEntry {
             name: "System Info".to_string(),
@@ -977,6 +1106,9 @@ pub fn builtin_app_database() -> Vec<AppEntry> {
             ],
             category: Category::Application,
             launch_count: 0,
+            icon: Some("computer".to_owned()),
+            folder: Folder::System,
+            ..AppEntry::default()
         },
         AppEntry {
             name: "Process Explorer".to_string(),
@@ -990,6 +1122,9 @@ pub fn builtin_app_database() -> Vec<AppEntry> {
             ],
             category: Category::Application,
             launch_count: 0,
+            icon: Some("utilities-system-monitor".to_owned()),
+            folder: Folder::System,
+            ..AppEntry::default()
         },
         AppEntry {
             name: "Image Viewer".to_string(),
@@ -1004,6 +1139,9 @@ pub fn builtin_app_database() -> Vec<AppEntry> {
             ],
             category: Category::Application,
             launch_count: 0,
+            icon: Some("image-x-generic".to_owned()),
+            folder: Folder::Graphics,
+            ..AppEntry::default()
         },
         AppEntry {
             name: "Music Player".to_string(),
@@ -1012,6 +1150,9 @@ pub fn builtin_app_database() -> Vec<AppEntry> {
             keywords: vec!["audio".into(), "song".into(), "mp3".into(), "media".into()],
             category: Category::Application,
             launch_count: 0,
+            icon: Some("audio-x-generic".to_owned()),
+            folder: Folder::Multimedia,
+            ..AppEntry::default()
         },
         AppEntry {
             name: "Screenshot".to_string(),
@@ -1025,6 +1166,9 @@ pub fn builtin_app_database() -> Vec<AppEntry> {
             ],
             category: Category::Application,
             launch_count: 0,
+            icon: Some("applets-screenshooter".to_owned()),
+            folder: Folder::Accessories,
+            ..AppEntry::default()
         },
     ]
 }
@@ -1667,6 +1811,7 @@ mod tests {
             keywords: vec!["zzzcustom".into()],
             category: Category::Command,
             launch_count: 0,
+            ..Default::default()
         });
         st.show();
         for ch in "zzzcustom".chars() {
@@ -1855,6 +2000,7 @@ mod tests {
                 keywords: Vec::new(),
                 category,
                 launch_count: 0,
+                ..Default::default()
             }
         }
         let mut st = LauncherState::new(1280.0, 800.0);

@@ -113,6 +113,49 @@ fn asked_for(held: Option<&(u64, PathBuf)>, job: &Job) -> bool {
     held.is_some_and(|(id, path)| *id == job.id && *path == job.path)
 }
 
+/// Where installed programs' desktop entries are looked for: the
+/// environment's data directories -- and in this crate's own tests none, so
+/// that a test's menu is the shell's own list on every machine rather than
+/// whatever the machine running the tests has installed.
+fn default_app_dirs() -> desktopentry::scan::DataDirs {
+    if cfg!(test) {
+        desktopentry::scan::DataDirs::new(Vec::new())
+    } else {
+        desktopentry::scan::DataDirs::from_env(|name| std::env::var_os(name))
+    }
+}
+
+/// When each directory that can hold desktop entries last changed -- each
+/// `applications` directory and the directories directly inside it -- `None`
+/// for one that does not exist.
+///
+/// A directory's time changes when a file is added to it or removed, which is
+/// how programs are installed and uninstalled. An entry edited in place is
+/// not noticed until something else changes, or the next login.
+fn app_dir_stamps(
+    dirs: &desktopentry::scan::DataDirs,
+) -> Vec<(PathBuf, Option<std::time::SystemTime>)> {
+    let stamp = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let mut stamps = Vec::new();
+    for dir in dirs.dirs() {
+        let apps = dir.join("applications");
+        stamps.push((apps.clone(), stamp(&apps)));
+        if let Ok(listing) = std::fs::read_dir(&apps) {
+            let mut inner: Vec<PathBuf> = listing
+                .filter_map(Result::ok)
+                .map(|item| item.path())
+                .filter(|path| path.is_dir())
+                .collect();
+            inner.sort();
+            stamps.extend(inner.into_iter().map(|path| {
+                let when = stamp(&path);
+                (path, when)
+            }));
+        }
+    }
+    stamps
+}
+
 /// What became of an attempt to put a picture on a surface.
 ///
 /// Distinguishes the two kinds of failure that must not be confused: one
@@ -339,6 +382,20 @@ pub struct ShellSession<T: Transport> {
     /// The thread that decodes pictures, so a photograph's second of decoding
     /// is not a second the desktop stops drawing (`crate::pictures`).
     pictures: PictureWorker,
+    /// Where installed programs' desktop entries are looked for.
+    app_dirs: desktopentry::scan::DataDirs,
+    /// When each directory holding them had last changed, at the last read
+    /// -- `None` before the first. Compared on the way into the start menu,
+    /// so a program installed while the desktop is up is in the menu the
+    /// next time it opens, without reading every entry on every open.
+    app_dirs_seen: Option<Vec<(PathBuf, Option<std::time::SystemTime>)>>,
+    /// Whether the start menu was open at the end of the last pump: what
+    /// tells a pump the menu has just opened.
+    start_menu_was_open: bool,
+    /// Entry files the last read could not use, and why, for the binary to
+    /// report (`take_app_problems`): the answer to "my program is not in the
+    /// menu".
+    app_problems: Vec<desktopentry::scan::Skipped>,
     /// The login screen, while the machine has not let anyone in yet.
     ///
     /// `None` is a session in use. It is *not* "login is disabled": a machine
@@ -683,6 +740,10 @@ impl<T: Transport> ShellSession<T> {
             wallpaper_image: None,
             wallpaper_uploaded: None,
             pictures: PictureWorker::spawn(picture_waker),
+            app_dirs: default_app_dirs(),
+            app_dirs_seen: None,
+            start_menu_was_open: false,
+            app_problems: Vec::new(),
             wallpaper_error: None,
             save_errors: BTreeMap::new(),
             focus_left_shell: false,
@@ -716,6 +777,7 @@ impl<T: Transport> ShellSession<T> {
         {
             session.shell.set_user_name(&pathcodec::display_os(&name));
         }
+        session.refresh_installed_apps();
         session.repaint()?;
         Ok(session)
     }
@@ -1260,6 +1322,61 @@ impl<T: Transport> ShellSession<T> {
         Ok(())
     }
 
+    /// Read the installed programs' desktop entries into the shell's list, if
+    /// a directory holding them has changed since the last read -- or always,
+    /// the first time.
+    ///
+    /// What the menu shows is decided here, where the filesystem is: the
+    /// entries a menu lists (`desktopentry::menu::shows_in_menu`: not
+    /// `NoDisplay`, not for another desktop), whose `TryExec` program is
+    /// installed, and that can be started without D-Bus. Files that could not
+    /// be used are kept for [`Self::take_app_problems`].
+    fn refresh_installed_apps(&mut self) {
+        let stamps = app_dir_stamps(&self.app_dirs);
+        if self.app_dirs_seen.as_ref() == Some(&stamps) {
+            return;
+        }
+        self.app_dirs_seen = Some(stamps);
+        let locale = desktopentry::Locale::from_env(|name| std::env::var(name).ok());
+        let scan = desktopentry::scan::scan(&self.app_dirs);
+        let (apps, invalid) = desktopentry::scan::apps(&scan, locale.as_ref());
+        let search_path = std::env::var_os("PATH");
+        let installed: Vec<crate::launcher::AppEntry> = apps
+            .into_iter()
+            .filter(|app| {
+                desktopentry::menu::shows_in_menu(app, &[desktopentry::menu::DESKTOP_NAME])
+            })
+            .filter(|app| {
+                app.try_exec.as_deref().is_none_or(|program| {
+                    desktopentry::scan::program_exists(program, search_path.as_deref())
+                })
+            })
+            .filter_map(crate::launcher::AppEntry::from_desktop)
+            .collect();
+        self.app_problems = scan.skipped;
+        self.app_problems.extend(invalid);
+        // Not marked dirty: both callers paint next anyway -- `start_with`
+        // repaints, and the start menu opening is a repaint of its own -- and
+        // a flag set here would paint the whole desktop a second time.
+        self.shell.set_installed_apps(installed);
+    }
+
+    /// The entry files the last read of installed programs could not use,
+    /// each with why, taken so each is reported once.
+    pub fn take_app_problems(&mut self) -> Vec<desktopentry::scan::Skipped> {
+        core::mem::take(&mut self.app_problems)
+    }
+
+    /// Look for installed programs in `dirs` from now on, reading them at
+    /// once -- a test's own directories, where the session's default in this
+    /// crate's tests is none.
+    #[cfg(test)]
+    pub(crate) fn set_app_dirs(&mut self, dirs: desktopentry::scan::DataDirs) {
+        self.app_dirs = dirs;
+        self.app_dirs_seen = None;
+        self.refresh_installed_apps();
+    }
+
     /// Adopt every picture the decoding thread has finished, answering whether
     /// there were any.
     ///
@@ -1775,6 +1892,15 @@ impl<T: Transport> ShellSession<T> {
     /// As [`Self::pump`].
     fn finish_batch(&mut self) -> Result<bool, Error<T>> {
         let mut worked = false;
+
+        // The start menu has just opened: a program installed since the last
+        // read belongs in it. Before the paint below, so the menu opens with
+        // it rather than a frame later.
+        let menu_open = self.shell.start_menu_open;
+        if menu_open && !self.start_menu_was_open {
+            self.refresh_installed_apps();
+        }
+        self.start_menu_was_open = menu_open;
 
         // *After* the input, deliberately. `poll` is also what reads the window
         // list off the wire, so by here the connection may already hold a newer

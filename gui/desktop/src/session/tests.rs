@@ -2964,6 +2964,182 @@ fn an_unrelated_settings_change_does_not_reload_the_picture() {
     );
 }
 
+// ---- installed programs ----
+
+/// A data directory of the test's own, with `entries` -- `(file name, text)`
+/// -- under its `applications`.
+fn data_dir(scratch: &scratchdir::ScratchDir, entries: &[(&str, &str)]) -> std::path::PathBuf {
+    let dir = scratch.path("share");
+    let apps = dir.join("applications");
+    std::fs::create_dir_all(&apps).expect("mkdir");
+    for (name, text) in entries {
+        std::fs::write(apps.join(name), text).expect("write");
+    }
+    dir
+}
+
+/// The names the start menu lists.
+fn menu_names(session: &Session) -> Vec<String> {
+    session
+        .shell()
+        .start_menu_entries()
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect()
+}
+
+const SKETCHPAD: &str = "[Desktop Entry]\nType=Application\nName=Sketchpad\nExec=sketch --new %U\nCategories=Graphics;\n";
+
+/// **The programs installed on the machine are in the start menu**, read
+/// from their desktop entries -- the ones a menu lists, whose program is
+/// there to start.
+#[test]
+fn installed_programs_are_in_the_start_menu() {
+    let (mut session, _desktop, _turn) = session();
+    let scratch = scratchdir::ScratchDir::new("session-installed");
+    let dir = data_dir(
+        &scratch,
+        &[
+            ("sketch.desktop", SKETCHPAD),
+            (
+                "helper.desktop",
+                "[Desktop Entry]\nType=Application\nName=Helper\nExec=helper\nNoDisplay=true\n",
+            ),
+            (
+                "absent.desktop",
+                "[Desktop Entry]\nType=Application\nName=Absent\nExec=absent\nTryExec=/definitely/not/installed/absent\n",
+            ),
+            (
+                "elsewhere.desktop",
+                "[Desktop Entry]\nType=Application\nName=Elsewhere\nExec=x\nOnlyShowIn=GNOME;\n",
+            ),
+        ],
+    );
+    session.set_app_dirs(desktopentry::scan::DataDirs::new(vec![dir]));
+    let names = menu_names(&session);
+    assert!(names.contains(&"Sketchpad".to_owned()), "{names:?}");
+    for kept_out in ["Helper", "Absent", "Elsewhere"] {
+        assert!(
+            !names.contains(&kept_out.to_owned()),
+            "{kept_out} is in the menu: {names:?}"
+        );
+    }
+    assert_eq!(
+        session.shell().launch_for("sketch"),
+        crate::hotkeys::Launch {
+            program: std::path::PathBuf::from("sketch"),
+            args: vec![std::ffi::OsString::from("--new")],
+        }
+    );
+}
+
+/// **A program installed while the desktop is up is in the start menu the
+/// next time it opens**, without a login.
+#[test]
+fn a_program_installed_while_the_desktop_is_up_is_in_the_menu_when_it_opens() {
+    let (mut session, desktop, _turn) = session();
+    let scratch = scratchdir::ScratchDir::new("session-installed-later");
+    let dir = data_dir(&scratch, &[]);
+    session.set_app_dirs(desktopentry::scan::DataDirs::new(vec![dir.clone()]));
+    assert!(!menu_names(&session).contains(&"Sketchpad".to_owned()));
+
+    // Installed now: a new file in the directory.
+    std::fs::write(dir.join("applications").join("sketch.desktop"), SKETCHPAD).expect("write");
+
+    let start = centre(session.shell().start_button_rect());
+    press_at(&desktop, session.panel(), start.0, start.1);
+    session.pump().expect("pump");
+    assert!(
+        session.shell().start_menu_open,
+        "the premise: the menu opened"
+    );
+    assert!(
+        menu_names(&session).contains(&"Sketchpad".to_owned()),
+        "the menu opened without the program installed since the last read"
+    );
+}
+
+/// A program installed one directory down -- `applications/vendor/`, where
+/// some packages put theirs -- changes only that directory's time, and is
+/// noticed all the same.
+#[test]
+fn a_program_installed_in_a_subdirectory_is_noticed() {
+    let (mut session, desktop, _turn) = session();
+    let scratch = scratchdir::ScratchDir::new("session-installed-subdir");
+    let dir = data_dir(&scratch, &[]);
+    let vendor = dir.join("applications").join("vendor");
+    std::fs::create_dir_all(&vendor).expect("mkdir");
+    session.set_app_dirs(desktopentry::scan::DataDirs::new(vec![dir]));
+
+    std::fs::write(vendor.join("sketch.desktop"), SKETCHPAD).expect("write");
+
+    let start = centre(session.shell().start_button_rect());
+    press_at(&desktop, session.panel(), start.0, start.1);
+    session.pump().expect("pump");
+    assert!(
+        menu_names(&session).contains(&"Sketchpad".to_owned()),
+        "a program installed one directory down was not noticed"
+    );
+}
+
+/// **An entry that cannot be used is reported once**, naming the file and
+/// why, rather than a program silently missing from the menu.
+#[test]
+fn an_entry_that_cannot_be_used_is_reported_once() {
+    let (mut session, _desktop, _turn) = session();
+    let scratch = scratchdir::ScratchDir::new("session-installed-broken");
+    let dir = data_dir(
+        &scratch,
+        &[
+            ("broken.desktop", "not a desktop entry\n"),
+            (
+                "nameless.desktop",
+                "[Desktop Entry]\nType=Application\nExec=x\n",
+            ),
+            ("sketch.desktop", SKETCHPAD),
+        ],
+    );
+    session.set_app_dirs(desktopentry::scan::DataDirs::new(vec![dir]));
+    let problems = session.take_app_problems();
+    let files: Vec<String> = problems
+        .iter()
+        .filter_map(|p| {
+            p.path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(
+        files,
+        ["broken.desktop", "nameless.desktop"],
+        "{problems:?}"
+    );
+    assert!(problems.iter().all(|p| !p.why.is_empty()));
+    assert!(session.take_app_problems().is_empty(), "reported twice");
+    assert!(menu_names(&session).contains(&"Sketchpad".to_owned()));
+}
+
+/// Opening the menu with nothing changed does not read every entry again:
+/// the directories' times are compared first.
+#[test]
+fn an_unchanged_directory_is_not_read_again() {
+    let (mut session, desktop, _turn) = session();
+    let scratch = scratchdir::ScratchDir::new("session-installed-unchanged");
+    let dir = data_dir(&scratch, &[("broken.desktop", "not an entry\n")]);
+    session.set_app_dirs(desktopentry::scan::DataDirs::new(vec![dir]));
+    assert_eq!(session.take_app_problems().len(), 1, "the premise");
+
+    let start = centre(session.shell().start_button_rect());
+    press_at(&desktop, session.panel(), start.0, start.1);
+    session.pump().expect("pump");
+    assert!(session.shell().start_menu_open);
+    assert!(
+        session.take_app_problems().is_empty(),
+        "the entries were read again with nothing changed"
+    );
+}
+
 fn fixture(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(format!(
         "{}/../imagecodec/tests/data/{name}.png",

@@ -16,7 +16,7 @@ pub const DESKTOP_NAME: &str = "SlateOS";
 ///
 /// Declared in the order a menu lists them: alphabetical by their English
 /// names, with Other -- programs that name no main category -- last.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Category {
     /// `Utility`: small tools.
     Accessories,
@@ -40,7 +40,9 @@ pub enum Category {
     Settings,
     /// `System`.
     System,
-    /// No main category at all.
+    /// No main category at all -- and the folder of anything that has not
+    /// said.
+    #[default]
     Other,
 }
 

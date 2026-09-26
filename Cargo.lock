@@ -585,6 +585,7 @@ dependencies = [
  "authlib",
  "datetimesettings",
  "daywindow",
+ "desktopentry",
  "globmatch",
  "guiremote",
  "guitk",

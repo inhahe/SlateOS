@@ -100,6 +100,9 @@ yamldoc = { path = "../../yamldoc" }
 # two processes cannot disagree about what the user chose. The shell paints
 # from it (DesktopTheme::from_settings) and hosts the panel that edits it.
 appearance = { path = "../appearance" }
+# The installed programs' desktop entries: what the start menu lists, under
+# which folder, with which picture, and how each starts.
+desktopentry = { path = "../desktopentry" }
 
 # The input settings model, on the same terms as `appearance` above: the
 # compositor applies these values, the Settings application edits them, and the

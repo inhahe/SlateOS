@@ -57,6 +57,7 @@ fn shell_with_a_long_menu() -> DesktopShell {
             keywords: Vec::new(),
             category: Category::Application,
             launch_count: 0,
+            ..Default::default()
         });
     }
     assert!(

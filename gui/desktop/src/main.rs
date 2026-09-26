@@ -204,6 +204,15 @@ fn drain<T: guiremote::client::Transport>(session: &mut ShellSession<T>) {
             eprintln!("desktop: cannot start {}: {e}", launch.display_line());
         }
     }
+    // An installed program's entry that could not be used is a program
+    // missing from the menu with no word why -- except this one.
+    for problem in session.take_app_problems() {
+        eprintln!(
+            "desktop: {}: not in the menu: {}",
+            pathcodec::display_os(problem.path.as_os_str()),
+            problem.why
+        );
+    }
 }
 #[cfg(test)]
 mod tests {

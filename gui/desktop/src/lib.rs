@@ -2790,6 +2790,79 @@ impl DesktopShell {
         }
     }
 
+    /// Adopt the programs installed on this machine -- their desktop entries,
+    /// which the session reads -- beside the shell's own list.
+    ///
+    /// An installed program replaces the shell's own entry for the same
+    /// program, matched by file name (the entry says `calculator`, the
+    /// shell's list `/usr/bin/calculator`): the entry is the one the program
+    /// ships, with its own name, picture and command line. The shell's own
+    /// stay for programs no entry names, so a machine with none installed --
+    /// every one today -- still has a menu.
+    ///
+    /// The list is kept in name order, which is the order the menu lists
+    /// programs in. Each program's launch count carries over, and the
+    /// programs pinned to the start menu are looked up again, so a pin shows
+    /// the installed entry's name and picture.
+    pub fn set_installed_apps(&mut self, installed: Vec<AppEntry>) {
+        use std::collections::BTreeMap;
+        use std::ffi::OsString;
+        let file_name = |exec: &str| {
+            Path::new(exec)
+                .file_name()
+                .map(std::ffi::OsStr::to_os_string)
+        };
+        let named: std::collections::BTreeSet<OsString> = installed
+            .iter()
+            .filter_map(|app| file_name(&app.executable_path))
+            .collect();
+        let counts: BTreeMap<String, u32> = self
+            .apps
+            .iter()
+            .map(|app| (app.executable_path.clone(), app.launch_count))
+            .collect();
+        let mut apps: Vec<AppEntry> = launcher::builtin_app_database()
+            .into_iter()
+            .filter(|own| file_name(&own.executable_path).is_none_or(|name| !named.contains(&name)))
+            .chain(installed)
+            .collect();
+        for app in &mut apps {
+            if let Some(count) = counts.get(&app.executable_path) {
+                app.launch_count = *count;
+            }
+        }
+        apps.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| a.executable_path.cmp(&b.executable_path))
+        });
+        self.apps = apps;
+        let pins = std::mem::take(&mut self.start_pins);
+        self.start_pins = pins
+            .into_iter()
+            .map(|pin| self.start_entry_for(&pin.executable_path))
+            .collect();
+        self.start_menu_scroll = self.start_menu_scroll.min(self.start_menu_max_scroll());
+        self.start_selected = None;
+    }
+
+    /// How to start the program known by `exec` -- a pin's, a start menu
+    /// row's: its entry's command line when it has one (the arguments its
+    /// desktop entry gives, in a terminal when it asks for one), otherwise
+    /// the program with no arguments.
+    ///
+    /// Found again by `exec` rather than carried with it, because a pin
+    /// stores only the program: the entry it is started by is whichever is
+    /// installed now.
+    #[must_use]
+    pub fn launch_for(&self, exec: &str) -> hotkeys::Launch {
+        self.apps
+            .iter()
+            .find(|app| app.executable_path == exec)
+            .map_or_else(|| hotkeys::Launch::program(exec), AppEntry::launch)
+    }
+
     /// The launcher's name for an executable, or its file name.
     ///
     /// The fallback is the file name rather than the whole path: a button is
@@ -3240,6 +3313,7 @@ impl DesktopShell {
                 keywords: Vec::new(),
                 category: Category::Application,
                 launch_count: 0,
+                ..Default::default()
             })
     }
 
@@ -5490,7 +5564,7 @@ impl DesktopShell {
         });
         if let Some(exec) = chosen {
             self.close_start_menu();
-            return HotkeyOutcome::start(vec![hotkeys::Launch::program(PathBuf::from(exec))]);
+            return HotkeyOutcome::start(vec![self.launch_for(&exec)]);
         }
         if query.is_empty() {
             return HotkeyOutcome::consumed();
@@ -7641,7 +7715,7 @@ impl DesktopShell {
             return ShellAction::Consumed;
         }
         exec.map_or(ShellAction::Consumed, |exec| {
-            ShellAction::Launch(hotkeys::Launch::program(exec))
+            ShellAction::Launch(self.launch_for(&exec))
         })
     }
 
@@ -7661,7 +7735,7 @@ impl DesktopShell {
         };
         if !was_drag {
             self.close_start_menu();
-            return ShellAction::Launch(hotkeys::Launch::program(PathBuf::from(exec)));
+            return ShellAction::Launch(self.launch_for(&exec));
         }
         let on_menu = self.start_menu_rect().contains(x, y);
         self.drop_program(&exec, &drag.name, x, y);
@@ -19443,6 +19517,7 @@ mod start_pin_tests {
                 keywords: Vec::new(),
                 category: super::launcher::Category::Application,
                 launch_count: 0,
+                ..Default::default()
             });
         }
         shell.pin_to_start(UNKNOWN);
@@ -19907,6 +19982,125 @@ mod start_search_tests {
         assert_eq!(shell.start_query.text(), name);
     }
 
+    /// An installed program's entry, as the session makes it from the
+    /// program's desktop entry.
+    fn installed(text: &str) -> super::launcher::AppEntry {
+        let entry = desktopentry::DesktopEntry::parse(text.as_bytes()).expect("parses");
+        let app = desktopentry::App::from_entry(&entry, "fixture.desktop", None).expect("valid");
+        super::launcher::AppEntry::from_desktop(app).expect("startable")
+    }
+
+    fn launch(program: &str, args: &[&str]) -> crate::hotkeys::Launch {
+        crate::hotkeys::Launch {
+            program: std::path::PathBuf::from(program),
+            args: args.iter().map(std::ffi::OsString::from).collect(),
+        }
+    }
+
+    /// **An installed program is in the menu under its own name, and starts
+    /// with the arguments its entry gives** -- not as a bare program, which
+    /// is all the shell's own list could say.
+    #[test]
+    fn an_installed_program_starts_as_its_entry_says() {
+        let mut shell = shell();
+        shell.set_installed_apps(vec![installed(
+            "[Desktop Entry]\nType=Application\nName=Sketchpad\nExec=sketch --new \"blank page\" %U\nIcon=applications-graphics\nCategories=Graphics;\n",
+        )]);
+        assert!(names(&shell).contains(&"Sketchpad".to_owned()));
+        type_text(&mut shell, "Sketchpad");
+        let outcome = shell.handle_hotkey(&press(Key::Enter));
+        assert_eq!(
+            outcome.launches,
+            [launch("sketch", &["--new", "blank page"])],
+            "not started as its entry says"
+        );
+    }
+
+    /// **An installed program replaces the shell's own entry for it**, and
+    /// the shell's own stay for the programs nothing installed names.
+    #[test]
+    fn an_installed_program_replaces_the_shells_own_entry_for_it() {
+        let mut shell = shell();
+        let before = names(&shell);
+        assert!(before.contains(&"Calculator".to_owned()), "the premise");
+        shell.set_installed_apps(vec![installed(
+            "[Desktop Entry]\nType=Application\nName=Abacus\nExec=/opt/bin/calculator\n",
+        )]);
+        let after = names(&shell);
+        assert!(after.contains(&"Abacus".to_owned()));
+        assert!(
+            !after.contains(&"Calculator".to_owned()),
+            "the shell's own entry stayed beside the installed one: {after:?}"
+        );
+        assert!(
+            after.contains(&"Terminal".to_owned()),
+            "an unnamed own entry went"
+        );
+        let mut sorted = after.clone();
+        sorted.sort_by_key(|n| n.to_lowercase());
+        assert_eq!(after, sorted, "the menu is not in name order");
+    }
+
+    /// **A program that runs in a terminal is started in one**, as the
+    /// terminal's `-e`.
+    #[test]
+    fn a_terminal_program_is_started_in_the_terminal() {
+        let mut shell = shell();
+        shell.set_installed_apps(vec![installed(
+            "[Desktop Entry]\nType=Application\nName=Top\nExec=htop --tree\nTerminal=true\n",
+        )]);
+        assert_eq!(
+            shell.launch_for("htop"),
+            launch(super::launcher::TERMINAL, &["-e", "htop", "--tree"])
+        );
+    }
+
+    /// **A pin shows the installed entry's name**, looked up again when the
+    /// installed programs change; a program nothing knows is started bare.
+    #[test]
+    fn a_pin_follows_the_installed_entry() {
+        let mut shell = shell();
+        shell.pin_to_start("/opt/bin/paint");
+        assert_eq!(
+            shell.start_pins()[0].name,
+            "paint",
+            "named for its file, unknown"
+        );
+        shell.set_installed_apps(vec![installed(
+            "[Desktop Entry]\nType=Application\nName=Paint Studio\nExec=/opt/bin/paint --studio\n",
+        )]);
+        assert_eq!(shell.start_pins()[0].name, "Paint Studio");
+        assert_eq!(
+            shell.launch_for("/opt/bin/paint"),
+            launch("/opt/bin/paint", &["--studio"])
+        );
+        assert_eq!(
+            shell.launch_for("/opt/bin/unknown"),
+            launch("/opt/bin/unknown", &[])
+        );
+    }
+
+    /// A program's launch count survives the list being read again.
+    #[test]
+    fn launch_counts_survive_a_new_list() {
+        let mut shell = shell();
+        let terminal = super::launcher::TERMINAL;
+        if let Some(app) = shell
+            .apps
+            .iter_mut()
+            .find(|a| a.executable_path == terminal)
+        {
+            app.launch_count = 7;
+        }
+        shell.set_installed_apps(Vec::new());
+        let count = shell
+            .apps
+            .iter()
+            .find(|a| a.executable_path == terminal)
+            .map(|a| a.launch_count);
+        assert_eq!(count, Some(7));
+    }
+
     /// Enter starts the best match, and closes the menu.
     #[test]
     fn enter_starts_the_best_match() {
@@ -19950,6 +20144,7 @@ mod start_search_tests {
                 keywords: Vec::new(),
                 category: super::launcher::Category::Application,
                 launch_count: 0,
+                ..Default::default()
             });
         }
         let rows = shell.start_menu_visible_rows();

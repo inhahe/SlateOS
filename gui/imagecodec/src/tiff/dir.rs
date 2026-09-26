@@ -424,12 +424,66 @@ impl<'a> File<'a> {
         Ok(out)
     }
 
+    /// Bytes (`TIFFReadDirEntryByteArray`): ASCII and UNDEFINED as they
+    /// are, any integer type whose values are 0 to 255.
+    fn byte_array(&self, entry: &Entry) -> Result<Vec<u8>, ReadErr> {
+        if matches!(entry.kind, kind::ASCII | kind::UNDEFINED | kind::BYTE) {
+            return Ok(match self.raw(entry, u64::MAX)? {
+                Some((raw, _)) => raw.bytes().to_vec(),
+                None => Vec::new(),
+            });
+        }
+        Ok(self
+            .integers(entry, (0, 255), u64::MAX)?
+            .into_iter()
+            .map(|v| u8::try_from(v).unwrap_or(0))
+            .collect())
+    }
+
     fn shorts(&self, entry: &Entry) -> Result<Vec<u16>, ReadErr> {
         Ok(self
             .integers(entry, (0, i128::from(u16::MAX)), u64::MAX)?
             .into_iter()
             .map(|v| u16::try_from(v).unwrap_or(0))
             .collect())
+    }
+
+    /// Numbers of a fixed count (`TIFFReadDirEntryFloatArray`, for a
+    /// `TIFF_SETGET_C0_FLOAT` field): the wrong count, or anything that will
+    /// not read, drops the field -- `None`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)] // As the C converts.
+    fn floats(&self, entry: &Entry, count: u64) -> Option<Vec<f32>> {
+        if entry.count != count || !kind::numeric(entry.kind) {
+            return None;
+        }
+        let (raw, n) = self.raw(entry, u64::MAX).ok()??;
+        let bytes = raw.bytes();
+        let mut out = Vec::with_capacity(n as usize);
+        for i in 0..n as usize {
+            let at = i.saturating_mul(usize::try_from(kind::width(entry.kind)).unwrap_or(0));
+            let here = bytes.get(at..).unwrap_or(&[]);
+            let v = match entry.kind {
+                // Numerator over denominator, each converted to single
+                // precision first; the denominator unsigned even in a
+                // signed rational; zero over zero is zero.
+                kind::RATIONAL | kind::SRATIONAL => {
+                    let den = self.u32(here.get(4..).unwrap_or(&[]));
+                    if den == 0 {
+                        0.0
+                    } else if entry.kind == kind::RATIONAL {
+                        self.u32(here) as f32 / den as f32
+                    } else {
+                        self.u32(here).cast_signed() as f32 / den as f32
+                    }
+                }
+                kind::FLOAT => f32::from_bits(self.u32(here)),
+                kind::DOUBLE => f64::from_bits(self.u64(here)) as f32,
+                // An integer straight to single precision, rounded once.
+                _ => self.integer_at(bytes, entry.kind, i) as f32,
+            };
+            out.push(v);
+        }
+        Some(out)
     }
 
     /// A per-sample field of which libtiff keeps one value: at least one
@@ -543,8 +597,24 @@ pub(super) struct Directory {
     /// Red, green and blue, `1 << bits_per_sample` entries each.
     pub(super) color_map: Option<[Vec<u16>; 3]>,
     pub(super) ycbcr_subsampling: [u16; 2],
+    /// Whether `YCbCrSubsampling` was read from the file, which the JPEG
+    /// codec notes (`ycbcrsampling_fetched`): if not, it takes the
+    /// subsampling from the first strip's JPEG header instead.
+    pub(super) ycbcr_subsampling_set: bool,
+    /// `JPEGTables`: a JPEG datastream of tables alone, which every strip's
+    /// abbreviated datastream is decoded with.
+    pub(super) jpeg_tables: Option<Vec<u8>>,
+    /// `YCbCrCoefficients`, when present and of three values.
+    pub(super) ycbcr_coefficients: Option<[f32; 3]>,
+    /// `ReferenceBlackWhite`, when present and of six values.
+    pub(super) reference_black_white: Option<[f32; 6]>,
+    /// `WhitePoint`, when present and of two values.
+    pub(super) white_point: Option<[f32; 2]>,
     pub(super) ink_set: u16,
     pub(super) predictor: u16,
+    /// `Group3Options`, of a Group 3 fax image; bit 0 says rows may be
+    /// coded against the row before.
+    pub(super) group3_options: u32,
     /// Whether a codec hands back this `YCbCr` image's chroma already
     /// upsampled (`TIFF_UPSAMPLED`, which the JPEG codec sets when asked for
     /// RGB), so sizes count every pixel's three samples.
@@ -578,8 +648,14 @@ impl Directory {
             sample_info: Vec::new(),
             color_map: None,
             ycbcr_subsampling: [2, 2],
+            ycbcr_subsampling_set: false,
+            jpeg_tables: None,
+            ycbcr_coefficients: None,
+            reference_black_white: None,
+            white_point: None,
             ink_set: 1,
             predictor: 1,
+            group3_options: 0,
             upsampled: false,
             strips: 0,
             strips_per_image: 0,
@@ -893,6 +969,13 @@ pub(super) fn read(file: &File<'_>, offset: u64) -> ImageResult<Directory> {
                     return Err(bad("TIFF RowsPerStrip"));
                 }
                 dir.rows_per_strip = v;
+                // Until a tile tag has been read, rows per strip is also the
+                // tile height, and the tile the width of the image so far: a
+                // TileWidth later with no TileLength makes tiles this tall.
+                if !tile_dimensions_set {
+                    dir.tile_length = v;
+                    dir.tile_width = dir.width;
+                }
                 rows_per_strip_set = true;
                 entry.ignore = true;
             }
@@ -1078,6 +1161,11 @@ pub(super) fn read(file: &File<'_>, offset: u64) -> ImageResult<Directory> {
     }
     let _ = spp_set;
 
+    // The codec's chance to fix tags up (`tif_fixuptags`).
+    if dir.compression == compression::JPEG {
+        jpeg_fixup_subsampling(file, &mut dir);
+    }
+
     if dir.scanline_size().is_none() {
         return Err(bad("TIFF of zero-width rows"));
     }
@@ -1103,6 +1191,141 @@ pub(super) fn byte_count(dir: &Directory, strip: u32) -> u64 {
 /// A strip's offset, 0 past the end of the array.
 pub(super) fn strip_offset(dir: &Directory, strip: u32) -> u64 {
     dir.strip_offsets.get(strip as usize).copied().unwrap_or(0)
+}
+
+/// `JPEGFixupTagsSubsampling`: for `YCbCr` JPEG with no `YCbCrSubsampling`
+/// tag, the subsampling the first strip's JPEG frame actually uses.
+///
+/// Some writers leave the tag out and subsample 2x1 or 1x1 all the same, and
+/// the strip sizes depend on it, so libtiff reads the first strip's markers up
+/// to its frame header and takes the luma's sampling factors from there -- if
+/// the chroma is unsubsampled and the factors are ones a TIFF can say. It reads
+/// the strip in 2048-byte pieces through the file, so a strip whose count runs
+/// past the end of the file fails when a piece would, and a failure of any kind
+/// leaves the tags as they were.
+fn jpeg_fixup_subsampling(file: &File<'_>, dir: &mut Directory) {
+    if dir.photometric != Some(photometric::YCBCR)
+        || dir.planar_config != 1
+        || dir.samples_per_pixel != 3
+        || dir.ycbcr_subsampling_set
+    {
+        return;
+    }
+    let offset = strip_offset(dir, 0);
+    if offset == 0 {
+        return;
+    }
+    let mut reader = FixupReader {
+        data: file.data,
+        buffer: &[],
+        file_offset: offset,
+        file_left: byte_count(dir, 0),
+    };
+    let spp = dir.samples_per_pixel;
+    if let Some([h, v]) = reader.frame_sampling(spp) {
+        dir.ycbcr_subsampling = [h, v];
+    }
+}
+
+/// `JPEGFixupTagsSubsamplingData` and its readers.
+struct FixupReader<'a> {
+    data: &'a [u8],
+    /// What is left of the last 2048-byte piece.
+    buffer: &'a [u8],
+    file_offset: u64,
+    file_left: u64,
+}
+
+impl FixupReader<'_> {
+    /// `JPEGFixupTagsSubsamplingReadByte`.
+    fn byte(&mut self) -> Option<u8> {
+        if self.buffer.is_empty() {
+            if self.file_left == 0 {
+                return None;
+            }
+            let piece = self.file_left.min(2048);
+            let start = usize::try_from(self.file_offset).ok()?;
+            let len = usize::try_from(piece).ok()?;
+            // A short read fails.
+            self.buffer = self.data.get(start..start.checked_add(len)?)?;
+            self.file_offset = self.file_offset.saturating_add(piece);
+            self.file_left = self.file_left.saturating_sub(piece);
+        }
+        let (&first, rest) = self.buffer.split_first()?;
+        self.buffer = rest;
+        Some(first)
+    }
+
+    /// `JPEGFixupTagsSubsamplingReadWord`.
+    fn word(&mut self) -> Option<u16> {
+        let high = self.byte()?;
+        let low = self.byte()?;
+        Some(u16::from_be_bytes([high, low]))
+    }
+
+    /// `JPEGFixupTagsSubsamplingSkip`.
+    fn skip(&mut self, n: u16) {
+        let n = usize::from(n);
+        if n <= self.buffer.len() {
+            self.buffer = self.buffer.get(n..).unwrap_or(&[]);
+            return;
+        }
+        // `n` is more than what the buffer holds.
+        let beyond = n.saturating_sub(self.buffer.len()) as u64;
+        self.buffer = &[];
+        if beyond <= self.file_left {
+            self.file_offset = self.file_offset.saturating_add(beyond);
+            self.file_left = self.file_left.saturating_sub(beyond);
+        } else {
+            self.file_left = 0;
+        }
+    }
+
+    /// `JPEGFixupTagsSubsamplingSec`: the new subsampling, or `None` to leave
+    /// it as it is.
+    fn frame_sampling(&mut self, spp: u16) -> Option<[u16; 2]> {
+        loop {
+            while self.byte()? != 0xFF {}
+            let mut marker = self.byte()?;
+            while marker == 0xFF {
+                marker = self.byte()?;
+            }
+            match marker {
+                0xD8 => {}
+                0xFE | 0xE0..=0xEF | 0xDB | 0xDA | 0xC4 | 0xDD => {
+                    let n = self.word()?;
+                    if n < 2 {
+                        return None;
+                    }
+                    if n > 2 {
+                        self.skip(n.saturating_sub(2));
+                    }
+                }
+                0xC0 | 0xC1 | 0xC2 | 0xC9 | 0xCA => {
+                    let n = self.word()?;
+                    if u32::from(n) != u32::from(spp).saturating_mul(3).saturating_add(8) {
+                        return None;
+                    }
+                    self.skip(7);
+                    let p = self.byte()?;
+                    let (h, v) = (u16::from(p >> 4), u16::from(p & 15));
+                    self.skip(1);
+                    for _ in 1..spp {
+                        self.skip(1);
+                        if self.byte()? != 0x11 {
+                            return None;
+                        }
+                        self.skip(1);
+                    }
+                    if !matches!(h, 1 | 2 | 4) || !matches!(v, 1 | 2 | 4) {
+                        return None;
+                    }
+                    return Some([h, v]);
+                }
+                _ => return None,
+            }
+        }
+    }
 }
 
 /// Read the directory's entries (`TIFFFetchDirectory`, memory-mapped).
@@ -1257,13 +1480,45 @@ fn second_pass_field(file: &File<'_>, entry: &Entry, dir: &mut Directory) {
                 dir.predictor = v;
             }
         }
+        tag::YCBCR_COEFFICIENTS => {
+            if let Some([a, b, c]) = file.floats(entry, 3).as_deref() {
+                dir.ycbcr_coefficients = Some([*a, *b, *c]);
+            }
+        }
+        tag::REFERENCE_BLACK_WHITE => {
+            if let Some(v) = file.floats(entry, 6) {
+                if let Ok(six) = <[f32; 6]>::try_from(v.as_slice()) {
+                    dir.reference_black_white = Some(six);
+                }
+            }
+        }
+        tag::WHITE_POINT => {
+            if let Some([x, y]) = file.floats(entry, 2).as_deref() {
+                dir.white_point = Some([*x, *y]);
+            }
+        }
+        tag::GROUP3_OPTIONS => {
+            if let Ok(v) = file.long(entry) {
+                dir.group3_options = v;
+            }
+        }
         tag::YCBCR_SUBSAMPLING => {
             // Exactly two values, or it is dropped.
             if entry.count == 2 {
                 if let Ok(v) = file.shorts(entry) {
                     if let [h, w] = v.as_slice() {
                         dir.ycbcr_subsampling = [*h, *w];
+                        dir.ycbcr_subsampling_set = true;
                     }
+                }
+            }
+        }
+        tag::JPEG_TABLES => {
+            // `TIFF_SETGET_C32_UINT8`, and `JPEGVSetField` refuses a count of
+            // zero.
+            if let Ok(bytes) = file.byte_array(entry) {
+                if !bytes.is_empty() {
+                    dir.jpeg_tables = Some(bytes);
                 }
             }
         }

@@ -16,6 +16,12 @@
 //! * [`strtotimeval`] is `strtold` then two truncations toward zero, so
 //!   `0.0000001` is a zero timeout and `-1.5` is `{-1, -500000}`.
 //!
+//! The same file's other string helpers live here too, as the programs
+//! ported on top of them need them: [`size_to_human_string`] (every size a
+//! util-linux table prints), [`string_add_to_idarray`] (every `-o` column
+//! list), and [`isdigit_string`]. So does glibc's [`strverscmp`], the order
+//! `scandir(..., versionsort)` gives the sysfs directories util-linux reads.
+//!
 //! Pure functions over bytes; no I/O. Callers wrap the messages in their own
 //! error types, because each program reports through its own diagnostic path.
 
@@ -103,8 +109,13 @@ pub fn scan_integer(s: &[u8], base: u32) -> Option<Scanned> {
         } else {
             radix = 10;
         }
-    } else if radix == 16 && s.get(i) == Some(&b'0') && matches!(s.get(i + 1), Some(&b'x' | &b'X'))
+    } else if radix == 16
+        && s.get(i) == Some(&b'0')
+        && matches!(s.get(i + 1), Some(&b'x' | &b'X'))
+        && s.get(i + 2).is_some_and(u8::is_ascii_hexdigit)
     {
+        // As in base 0: `0x` is a prefix only when a hex digit follows it.
+        // `0xg` is the number 0 ending before the `x`, as glibc reads it.
         i += 2;
     }
 
@@ -673,6 +684,302 @@ pub fn size_error_message(errmesg: &str, arg: &OsStr, e: NumErr) -> String {
     format!("{errmesg}: {}: {}", escaped_in_quotes_os(arg), e.strerror())
 }
 
+/// `isdigit_string(str)`: one or more ASCII digits and nothing else.
+#[must_use]
+pub fn isdigit_string(s: &[u8]) -> bool {
+    !s.is_empty() && s.iter().all(u8::is_ascii_digit)
+}
+
+/// `SIZE_SUFFIX_1LETTER`: `B`, `K`, `M`, ... straight after the number.
+pub const SIZE_SUFFIX_1LETTER: u32 = 0;
+/// `SIZE_SUFFIX_3LETTER`: `KiB`, `MiB`, ... -- but still `B` for bytes.
+pub const SIZE_SUFFIX_3LETTER: u32 = 1 << 0;
+/// `SIZE_SUFFIX_SPACE`: a space between the number and its unit.
+pub const SIZE_SUFFIX_SPACE: u32 = 1 << 1;
+/// `SIZE_DECIMAL_2DIGITS`: two digits after the point rather than one.
+pub const SIZE_DECIMAL_2DIGITS: u32 = 1 << 2;
+
+/// `get_exp(n)`: the multiple of ten, at most 60, that is the power of two of
+/// the unit `n` is shown in.
+fn get_exp(n: u64) -> u32 {
+    const BELOW: [(u64, u32); 6] = [
+        (1 << 10, 0),
+        (1 << 20, 10),
+        (1 << 30, 20),
+        (1 << 40, 30),
+        (1 << 50, 40),
+        (1 << 60, 50),
+    ];
+    BELOW
+        .iter()
+        .find(|&&(limit, _)| n < limit)
+        .map_or(60, |&(_, exp)| exp)
+}
+
+/// `size_to_human_string(options, bytes)` from `lib/strutils.c`: a size in
+/// the largest binary unit below it, as `lsblk`, `lsmem` and the rest show
+/// sizes.
+///
+/// Upstream's rounding, which is not a round-to-nearest of the whole value:
+/// the fraction is first cut to thousandths, then rounded half-up to one
+/// digit (two with [`SIZE_DECIMAL_2DIGITS`]); a trailing zero is dropped, so
+/// one digit or none shows; and a fraction that rounds up to a whole unit
+/// carries into the number without moving to the next unit -- 1023.96 KiB is
+/// `1024K`, not `1M`. The number is `%d` of the quotient: no thousands
+/// separators.
+///
+/// The decimal point is the C locale's `.`. Upstream asks `localeconv()`,
+/// and SlateOS's locales are C and C.UTF-8, whose point it is.
+#[must_use]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "exp is at most 60, so every shift is in range; frac < 2^exp, and the multiplications are guarded as upstream guards them"
+)]
+pub fn size_to_human_string(options: u32, bytes: u64) -> String {
+    let mut suffix = String::new();
+    if options & SIZE_SUFFIX_SPACE != 0 {
+        suffix.push(' ');
+    }
+    let exp = get_exp(bytes);
+    let unit = b"BKMGTPE"
+        .get(usize::try_from(exp / 10).unwrap_or(0))
+        .copied()
+        .unwrap_or(b'B');
+    let (mut dec, mut frac) = if exp == 0 {
+        (bytes, 0)
+    } else {
+        (bytes >> exp, bytes & ((1u64 << exp) - 1))
+    };
+    suffix.push(char::from(unit));
+    if options & SIZE_SUFFIX_3LETTER != 0 && unit != b'B' {
+        suffix.push_str("iB");
+    }
+
+    if frac != 0 {
+        // Three digits after the point.
+        if frac >= u64::MAX / 1000 {
+            frac = ((frac / 1024) * 1000) / (1u64 << (exp - 10));
+        } else {
+            frac = (frac * 1000) / (1u64 << exp);
+        }
+        if options & SIZE_DECIMAL_2DIGITS != 0 {
+            frac = (frac + 5) / 10;
+        } else {
+            frac = ((frac + 50) / 100) * 10;
+        }
+        // Rounding could have overflowed.
+        if frac == 100 {
+            dec += 1;
+            frac = 0;
+        }
+    }
+
+    if frac == 0 {
+        format!("{dec}{suffix}")
+    } else {
+        let mut text = format!("{dec}.{frac:02}");
+        if text.ends_with('0') {
+            text.pop();
+        }
+        text.push_str(&suffix);
+        text
+    }
+}
+
+/// Why a list of names was refused: `string_to_idarray`'s negative returns,
+/// which the programs calling it tell apart only by exiting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdListError {
+    /// `-1`: an empty list, an empty name, or one `name2id` did not know.
+    Invalid,
+    /// `-2`: more names than the array has room for.
+    Full,
+}
+
+/// `string_to_idarray(list, ary, arysz, name2id)`: the comma-separated names
+/// in `list`, each turned into an id by `name2id` and pushed onto `ary`,
+/// which may take at most `arysz` of them. The number pushed, or why not.
+///
+/// Upstream's scan, kept exactly because its edges show: an empty name is
+/// refused (`RANGE,,SIZE`) silently, but a trailing comma is not an empty
+/// name -- it is part of the last one, which `name2id` then does not know
+/// (`SIZE,`), and a lone `,` is a name of its own. The room is checked
+/// before each byte, so a list one name too long is [`IdListError::Full`]
+/// even when that name is unknown.
+///
+/// `name2id` is handed the name and, as upstream's is, everything from the
+/// start of the name to the end of the list: util-linux's `unknown column`
+/// warnings print that rest, not the name alone.
+///
+/// # Errors
+///
+/// [`IdListError::Invalid`] for an empty list or name or an unknown one,
+/// [`IdListError::Full`] when `ary` would outgrow `arysz`.
+pub fn string_to_idarray<T>(
+    list: &[u8],
+    ary: &mut Vec<T>,
+    arysz: usize,
+    mut name2id: impl FnMut(&[u8], &[u8]) -> Option<T>,
+) -> Result<usize, IdListError> {
+    if list.is_empty() || arysz == 0 {
+        return Err(IdListError::Invalid);
+    }
+    let mut begin: Option<usize> = None;
+    let mut n = 0usize;
+    for (p, &byte) in list.iter().enumerate() {
+        if n >= arysz {
+            return Err(IdListError::Full);
+        }
+        let start = *begin.get_or_insert(p);
+        let at_end = p.saturating_add(1) == list.len();
+        let end = if at_end {
+            p.saturating_add(1)
+        } else if byte == b',' {
+            p
+        } else {
+            continue;
+        };
+        if end <= start {
+            return Err(IdListError::Invalid);
+        }
+        let name = list.get(start..end).unwrap_or_default();
+        let rest = list.get(start..).unwrap_or_default();
+        ary.push(name2id(name, rest).ok_or(IdListError::Invalid)?);
+        n = n.saturating_add(1);
+        begin = None;
+        if at_end {
+            break;
+        }
+    }
+    Ok(n)
+}
+
+/// `string_add_to_idarray(list, ary, arysz, &ary_pos, name2id)`: as
+/// [`string_to_idarray`], but a list that starts with `+` is added to what
+/// `ary` already holds instead of replacing it -- `-o +NODE`. `ary.len()` is
+/// upstream's `*ary_pos`, and like it is left where it was when the list is
+/// refused.
+///
+/// # Errors
+///
+/// As [`string_to_idarray`]; also [`IdListError::Invalid`] for an empty
+/// list, or `+` alone.
+pub fn string_add_to_idarray<T>(
+    list: &[u8],
+    ary: &mut Vec<T>,
+    arysz: usize,
+    name2id: impl FnMut(&[u8], &[u8]) -> Option<T>,
+) -> Result<usize, IdListError> {
+    if list.is_empty() || ary.len() > arysz {
+        return Err(IdListError::Invalid);
+    }
+    let add = match list.strip_prefix(b"+") {
+        Some(rest) => rest,
+        None => {
+            ary.clear();
+            list
+        }
+    };
+    let pos = ary.len();
+    let room = arysz.saturating_sub(pos);
+    let added = string_to_idarray(add, ary, room, name2id);
+    if added.is_err() {
+        ary.truncate(pos);
+    }
+    added
+}
+
+/// glibc's `strverscmp(s1, s2)`: the order of names holding version numbers
+/// or indices, which is `versionsort`'s and so the order util-linux's
+/// `scandir` calls list `memory0`, `memory1`, ..., `memory10`.
+///
+/// glibc 2.39's state machine, transcribed: runs of digits compare as
+/// numbers, but a run with leading zeros is a fraction and sorts before a
+/// run without (`000 < 00 < 01 < 010 < 09 < 0 < 1 < 9 < 10`). The end of a
+/// slice is C's terminating NUL, so neither may hold one.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "state is below 12 and every class below 3, so both tables are indexed in range, and a difference of two bytes fits i32; the tests walk every reachable pair"
+)]
+pub fn strverscmp(s1: &[u8], s2: &[u8]) -> std::cmp::Ordering {
+    // States: normal, comparing an integral part, a fractional part, and a
+    // fractional part of leading zeros only.
+    const S_N: usize = 0;
+    const S_I: usize = 3;
+    const S_F: usize = 6;
+    const S_Z: usize = 9;
+    // Result types: return the byte difference, or compare the runs' lengths.
+    const CMP: i8 = 2;
+    const LEN: i8 = 3;
+    #[rustfmt::skip]
+    const NEXT_STATE: [usize; 12] = [
+        /* S_N */ S_N, S_I, S_Z,
+        /* S_I */ S_N, S_I, S_I,
+        /* S_F */ S_N, S_F, S_F,
+        /* S_Z */ S_N, S_F, S_Z,
+    ];
+    #[rustfmt::skip]
+    const RESULT_TYPE: [i8; 36] = [
+        /* S_N */ CMP, CMP, CMP, CMP, LEN, CMP, CMP, CMP, CMP,
+        /* S_I */ CMP, -1, -1, 1, LEN, LEN, 1, LEN, LEN,
+        /* S_F */ CMP, CMP, CMP, CMP, CMP, CMP, CMP, CMP, CMP,
+        /* S_Z */ CMP, 1, 1, -1, CMP, CMP, -1, CMP, CMP,
+    ];
+    // The class a byte adds to a state: 0 other, 1 a digit 1-9, 2 a zero.
+    fn class(c: u8) -> usize {
+        match c {
+            b'0' => 2,
+            b'1'..=b'9' => 1,
+            _ => 0,
+        }
+    }
+    let at = |s: &[u8], i: usize| s.get(i).copied().unwrap_or(0);
+
+    let (mut i1, mut i2) = (1usize, 1usize);
+    let mut c1 = at(s1, 0);
+    let mut c2 = at(s2, 0);
+    let mut state = S_N + class(c1);
+    let diff = loop {
+        let diff = i32::from(c1) - i32::from(c2);
+        if diff != 0 {
+            break diff;
+        }
+        if c1 == 0 {
+            return std::cmp::Ordering::Equal;
+        }
+        state = NEXT_STATE[state];
+        c1 = at(s1, i1);
+        c2 = at(s2, i2);
+        i1 = i1.saturating_add(1);
+        i2 = i2.saturating_add(1);
+        state += class(c1);
+    };
+
+    let result = match RESULT_TYPE[state * 3 + class(c2)] {
+        CMP => diff,
+        LEN => loop {
+            let d1 = at(s1, i1);
+            i1 = i1.saturating_add(1);
+            if !d1.is_ascii_digit() {
+                break if at(s2, i2).is_ascii_digit() {
+                    -1
+                } else {
+                    diff
+                };
+            }
+            let d2 = at(s2, i2);
+            i2 = i2.saturating_add(1);
+            if !d2.is_ascii_digit() {
+                break 1;
+            }
+        },
+        fixed => i32::from(fixed),
+    };
+    result.cmp(&0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -817,5 +1124,199 @@ mod tests {
             num_error_message("x", OsStr::new("a\nb"), NumErr::Range),
             "x: 'a\\012b': Numerical result out of range"
         );
+    }
+
+    #[test]
+    fn strtoumax_base_16_reads_0x_as_a_prefix_only_before_a_hex_digit() {
+        let at = |s: &[u8]| scan_integer(s, 16).map(|sc| (sc.magnitude, sc.end));
+        assert_eq!(at(b"0x1f"), Some((31, 4)));
+        assert_eq!(at(b"8000000"), Some((0x800_0000, 7)));
+        // `0xg` and `0x` are the number 0, ending before the `x`.
+        assert_eq!(at(b"0xg"), Some((0, 1)));
+        assert_eq!(at(b"0x"), Some((0, 1)));
+        assert_eq!(at(b"zz"), None);
+    }
+
+    #[test]
+    fn a_digit_string_is_digits_and_nothing_else() {
+        assert!(isdigit_string(b"0"));
+        assert!(isdigit_string(b"0123"));
+        assert!(!isdigit_string(b""));
+        assert!(!isdigit_string(b"12a"));
+        assert!(!isdigit_string(b"-1"));
+        assert!(!isdigit_string(b" 1"));
+    }
+
+    #[test]
+    fn human_sizes_are_util_linuxs() {
+        let h = |b| size_to_human_string(SIZE_SUFFIX_1LETTER, b);
+        assert_eq!(h(0), "0B");
+        assert_eq!(h(1023), "1023B");
+        assert_eq!(h(1024), "1K");
+        assert_eq!(h(1536), "1.5K");
+        assert_eq!(h(128 << 20), "128M");
+        assert_eq!(h(32 << 30), "32G");
+        // lsmem's 3.9G: 0xf8000000 bytes is 3.875 GiB, and upstream rounds
+        // the thousandths (875) half-up to one digit.
+        assert_eq!(h(0xf800_0000), "3.9G");
+        assert_eq!(h(0x7_0800_0000), "28.1G");
+        // A fraction that rounds to a whole unit carries without a new unit.
+        assert_eq!(h((1 << 20) - 1), "1024K");
+        assert_eq!(h(u64::MAX), "16E");
+        assert_eq!(h(1 << 60), "1E");
+        assert_eq!(h((1 << 60) + (1 << 59)), "1.5E");
+    }
+
+    #[test]
+    fn human_size_options_are_util_linuxs() {
+        let three = SIZE_SUFFIX_3LETTER | SIZE_SUFFIX_SPACE;
+        assert_eq!(size_to_human_string(three, 512), "512 B");
+        assert_eq!(size_to_human_string(three, 1536), "1.5 KiB");
+        let two = three | SIZE_DECIMAL_2DIGITS;
+        assert_eq!(size_to_human_string(two, 1024 + 51), "1.05 KiB");
+        assert_eq!(size_to_human_string(two, 1024 + 512), "1.5 KiB");
+        assert_eq!(size_to_human_string(SIZE_SUFFIX_3LETTER, 1024), "1KiB");
+    }
+
+    /// `lsmem`'s `column_name_to_id`, for the list tests.
+    fn column(name: &[u8], _rest: &[u8]) -> Option<usize> {
+        [&b"RANGE"[..], b"SIZE", b"STATE"]
+            .iter()
+            .position(|c| c.eq_ignore_ascii_case(name))
+    }
+
+    #[test]
+    fn a_list_of_names_is_split_as_upstream_splits_it() {
+        let mut ary = Vec::new();
+        assert_eq!(string_to_idarray(b"range,SIZE", &mut ary, 4, column), Ok(2));
+        assert_eq!(ary, [0, 1]);
+        let mut ary = Vec::new();
+        // An empty name is refused; a trailing comma belongs to the name.
+        assert_eq!(
+            string_to_idarray(b"RANGE,,SIZE", &mut ary, 4, column),
+            Err(IdListError::Invalid)
+        );
+        let mut seen = Vec::new();
+        let mut ary = Vec::new();
+        let refused = string_to_idarray(b"SIZE,", &mut ary, 4, |name, rest| {
+            seen.push((name.to_vec(), rest.to_vec()));
+            column(name, rest)
+        });
+        assert_eq!(refused, Err(IdListError::Invalid));
+        assert_eq!(seen, [(b"SIZE,".to_vec(), b"SIZE,".to_vec())]);
+        // A lone comma is a name of its own.
+        let mut seen = Vec::new();
+        let mut ary: Vec<usize> = Vec::new();
+        let refused = string_to_idarray(b",", &mut ary, 4, |name, _| {
+            seen.push(name.to_vec());
+            None
+        });
+        assert_eq!(refused, Err(IdListError::Invalid));
+        assert_eq!(seen, [b",".to_vec()]);
+    }
+
+    #[test]
+    fn an_unknown_name_is_shown_with_the_rest_of_the_list() {
+        let mut rests = Vec::new();
+        let mut ary = Vec::new();
+        let r = string_to_idarray(b"RANGE,FOO,SIZE", &mut ary, 4, |name, rest| {
+            rests.push(rest.to_vec());
+            column(name, rest)
+        });
+        assert_eq!(r, Err(IdListError::Invalid));
+        assert_eq!(rests.last(), Some(&b"FOO,SIZE".to_vec()));
+    }
+
+    #[test]
+    fn room_is_checked_before_each_byte() {
+        let mut ary = Vec::new();
+        assert_eq!(string_to_idarray(b"RANGE", &mut ary, 1, column), Ok(1));
+        let mut ary = Vec::new();
+        assert_eq!(
+            string_to_idarray(b"RANGE,BOGUS", &mut ary, 1, column),
+            Err(IdListError::Full)
+        );
+        let mut ary = Vec::new();
+        assert_eq!(
+            string_to_idarray(b"", &mut ary, 1, column),
+            Err(IdListError::Invalid)
+        );
+    }
+
+    #[test]
+    fn a_plus_adds_to_the_list_and_anything_else_replaces_it() {
+        let mut ary = vec![2];
+        assert_eq!(string_add_to_idarray(b"+RANGE", &mut ary, 4, column), Ok(1));
+        assert_eq!(ary, [2, 0]);
+        assert_eq!(string_add_to_idarray(b"SIZE", &mut ary, 4, column), Ok(1));
+        assert_eq!(ary, [1]);
+        // Refused, the position stays where it was -- after the reset, when
+        // the list was to replace.
+        assert_eq!(
+            string_add_to_idarray(b"+", &mut ary, 4, column),
+            Err(IdListError::Invalid)
+        );
+        assert_eq!(ary, [1]);
+        assert_eq!(
+            string_add_to_idarray(b"+RANGE,BOGUS", &mut ary, 4, column),
+            Err(IdListError::Invalid)
+        );
+        assert_eq!(ary, [1]);
+        assert_eq!(
+            string_add_to_idarray(b"RANGE,BOGUS", &mut ary, 4, column),
+            Err(IdListError::Invalid)
+        );
+        assert!(ary.is_empty());
+        // No room left at all is upstream's `!arysz` test, which comes
+        // before the scan: refused as invalid, not as full.
+        let mut full = vec![0, 1];
+        assert_eq!(
+            string_add_to_idarray(b"+RANGE", &mut full, 2, column),
+            Err(IdListError::Invalid)
+        );
+        let mut nearly = vec![0];
+        assert_eq!(
+            string_add_to_idarray(b"+RANGE,SIZE", &mut nearly, 2, column),
+            Err(IdListError::Full)
+        );
+        assert_eq!(nearly, [0]);
+    }
+
+    #[test]
+    fn version_order_is_glibcs() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        // The glibc manual's own example, in order.
+        let ordered: [&[u8]; 9] = [b"000", b"00", b"01", b"010", b"09", b"0", b"1", b"9", b"10"];
+        for pair in ordered.windows(2) {
+            if let [a, b] = pair {
+                assert_eq!(strverscmp(a, b), Less, "{a:?} < {b:?}");
+                assert_eq!(strverscmp(b, a), Greater, "{b:?} > {a:?}");
+            }
+        }
+        assert_eq!(strverscmp(b"memory9", b"memory10"), Less);
+        assert_eq!(strverscmp(b"memory10", b"memory10"), Equal);
+        assert_eq!(strverscmp(b"memory100", b"memory99"), Greater);
+        assert_eq!(strverscmp(b"", b""), Equal);
+        assert_eq!(strverscmp(b"a", b""), Greater);
+        assert_eq!(strverscmp(b"item#99", b"item#100"), Less);
+    }
+
+    #[test]
+    fn version_order_never_indexes_out_of_its_tables() {
+        // Every arrangement of pieces holding each class and the end: every
+        // state and class pair the machine can reach is visited, and the
+        // order is antisymmetric throughout.
+        let pieces: [&[u8]; 6] = [b"", b"0", b"1", b"9", b"a", b"00"];
+        for a in pieces {
+            for b in pieces {
+                for c in pieces {
+                    let s1 = [a, b, c].concat();
+                    let s2 = [c, a, b].concat();
+                    let one = strverscmp(&s1, &s2);
+                    let other = strverscmp(&s2, &s1);
+                    assert_eq!(one, other.reverse(), "{s1:?} {s2:?}");
+                }
+            }
+        }
     }
 }

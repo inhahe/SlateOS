@@ -68,6 +68,12 @@ pub struct Stdout {
     buffering: Option<Buffering>,
     /// Written, not yet flushed.
     held: Vec<u8>,
+    /// How much of the buffer `held` fills: its bytes, or on a wide stream
+    /// its characters.
+    held_units: usize,
+    /// `fwide(stdout, 1)`: written with `fputws`/`putwchar`, whose buffer
+    /// holds characters (see [`Stdout::orient_wide`]).
+    wide: bool,
     /// `ferror(stdout)`: a flush before the end failed, and why.
     failed: Option<io::Error>,
     /// The program's `CLOSE_EXIT_CODE`: `EXIT_FAILURE` unless it defines its
@@ -83,8 +89,31 @@ impl Stdout {
         Stdout {
             buffering: None,
             held: Vec::new(),
+            held_units: 0,
+            wide: false,
             failed: None,
             close_exit_code,
+        }
+    }
+
+    /// Make stdout a wide stream, as the first `fputws` or `putwchar` does:
+    /// glibc then buffers `wchar_t`s, as many as its byte buffer holds
+    /// bytes, and converts them only when that buffer overflows -- so text
+    /// that is not ASCII reaches the descriptor later than the same bytes
+    /// written with `fputs` would. What is written must be UTF-8 (ASCII in
+    /// the C locale), each character counted once.
+    pub fn orient_wide(&mut self) {
+        self.wide = true;
+        self.held_units = self.units(&self.held);
+    }
+
+    /// How much of the buffer `bytes` take.
+    fn units(&self, bytes: &[u8]) -> usize {
+        if self.wide {
+            // A UTF-8 character is one byte that does not continue another.
+            bytes.iter().filter(|&&b| b & 0xc0 != 0x80).count()
+        } else {
+            bytes.len()
         }
     }
 
@@ -93,6 +122,7 @@ impl Stdout {
     /// flushed, as upstream's does.
     pub fn discard(&mut self) {
         self.held.clear();
+        self.held_units = 0;
     }
 
     /// `fputs`, `printf`: into the buffer, and out of it when glibc would
@@ -100,6 +130,7 @@ impl Stdout {
     /// otherwise.
     pub fn write(&mut self, data: &[u8]) {
         self.held.extend_from_slice(data);
+        self.held_units = self.held_units.saturating_add(self.units(data));
         let buffering = *self.buffering.get_or_insert_with(allocate);
         let due = match buffering {
             Buffering::Line => self
@@ -107,10 +138,11 @@ impl Stdout {
                 .iter()
                 .rposition(|&b| b == b'\n')
                 .map(|nl| nl.saturating_add(1)),
-            Buffering::Full(size) => (self.held.len() > size).then_some(self.held.len()),
+            Buffering::Full(size) => (self.held_units > size).then_some(self.held.len()),
         };
         if let Some(n) = due {
             let chunk: Vec<u8> = self.held.drain(..n).collect();
+            self.held_units = self.units(&self.held);
             if let Err(e) = sys::write_all(sys::STDOUT, &chunk)
                 && self.failed.is_none()
             {

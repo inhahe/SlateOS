@@ -165,6 +165,20 @@ pub fn freetype_coords(coords: &crate::var::Coords) -> &[i32] {
     coords.fixed()
 }
 
+/// Glyph `gid`'s box as HarfBuzz reports it at `coords`
+/// (`hb_font_get_glyph_extents`, one unit per font unit): left edge, top
+/// edge, width and height, as the mark fallback places marks by. For
+/// `examples/outline_dump.rs`, which `tools/outline_oracle.py` checks against
+/// HarfBuzz itself.
+#[must_use]
+pub fn harfbuzz_extents(
+    face: &crate::sfnt::Face,
+    gid: u16,
+    coords: &crate::var::Coords,
+) -> Option<[i32; 4]> {
+    face.glyph_extents_at(gid, coords)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

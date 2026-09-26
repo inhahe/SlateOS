@@ -78,7 +78,7 @@ mod latin;
 mod tables;
 
 #[cfg(test)]
-mod fixture;
+pub(crate) mod fixture;
 
 use alloc::vec::Vec;
 
@@ -649,6 +649,18 @@ mod tests {
     #[test]
     fn a_variable_face_is_hinted_exactly_as_freetype_hints_it_at_an_instance() {
         matches_freetype_at(&fixture::VAR, &[(*b"wght", 610.0)], &fixture::VAR_EXPECTED);
+    }
+
+    /// A `CFF2` face at an instance: its points come from charstrings whose
+    /// `blend`s FreeType weighs in 16.16 (`cf2_doBlend`), fractional deltas
+    /// included, and the hinter must see exactly those.
+    #[test]
+    fn a_cff2_face_is_hinted_exactly_as_freetype_hints_it_at_an_instance() {
+        matches_freetype_at(
+            &fixture::VAR_CFF2,
+            &[(*b"wght", 610.0)],
+            &fixture::VAR_CFF2_EXPECTED,
+        );
     }
 
     /// And without `HVAR`, where `gvar` moves each glyph's origin by its left

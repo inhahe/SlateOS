@@ -25,6 +25,12 @@ testing = []
 name = "var_dump"
 required-features = ["testing"]
 
+[[example]]
+# Prints outlines and extents at instances for `tools/outline_oracle.py`; the
+# extents are reached through `testing`.
+name = "outline_dump"
+required-features = ["testing"]
+
 [dependencies]
 # The PNG decoder for colour bitmap glyphs (`bitmap.rs`: `CBDT` and `sbix`
 # store each emoji as a picture). `no_std` + `alloc` like this crate means to

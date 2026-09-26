@@ -44,8 +44,7 @@
 //!   points still exist here, at their correct indices, because the *point
 //!   numbering* depends on them.
 //! * **`CFF2`** varies through the charstring interpreter rather than through
-//!   this table. No face on this host carries it (`variable_survey.py`), so it
-//!   is not implemented and cannot be checked against a real file if it were.
+//!   this table: see [`crate::cff`].
 //!
 //! # References
 //!

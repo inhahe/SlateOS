@@ -36,9 +36,6 @@
 //!
 //! # What is not, and why that is an error rather than a silent wrong answer
 //!
-//! * **CFF2** (the variable-font revision of `CFF `). A face carrying one
-//!   fails to open with `SfntError::CffUnsupported` rather than being
-//!   misparsed as CFF, which it structurally resembles but is not.
 //! * **Hinting.** `fpgm`/`prep`/glyph instructions are skipped. Modern
 //!   rendering at reasonable sizes with anti-aliasing does not need the
 //!   TrueType interpreter, and running untrusted bytecode from a font file
@@ -94,8 +91,9 @@ pub enum SfntError {
     /// No `cmap` subtable in a format we can read.
     UnsupportedCmap,
     /// The face stores outlines in a CFF construct that [`cff`](crate::cff)
-    /// deliberately does not guess at — CFF2, Type 1 charstrings, or one of
-    /// the Type 2 arithmetic operators. The string names which.
+    /// deliberately does not guess at — Type 1 charstrings, a CFF version it
+    /// does not know, or one of the Type 2 arithmetic operators. The string
+    /// names which.
     CffUnsupported(&'static str),
     /// Composite glyphs nest deeper than [`MAX_COMPOSITE_DEPTH`].
     CompositeTooDeep,
@@ -1094,7 +1092,7 @@ impl Face {
         let mut gvar_span = None;
         let mut hvar_span = None;
         let mut mvar_span = None;
-        let mut has_cff2 = false;
+        let mut cff2 = None;
         let mut colr = None;
         let mut cpal = None;
         let mut cblc = None;
@@ -1139,7 +1137,7 @@ impl Face {
                 b"gvar" => gvar_span = Some(span),
                 b"HVAR" => hvar_span = Some(span),
                 b"MVAR" => mvar_span = Some(span),
-                b"CFF2" => has_cff2 = true,
+                b"CFF2" => cff2 = Some(span),
                 b"COLR" => colr = Some(span),
                 b"CPAL" => cpal = Some(span),
                 // Colour bitmaps: Google's `CBLC` + `CBDT` and Apple's `sbix`,
@@ -1189,11 +1187,15 @@ impl Face {
                 span.len,
                 units_per_em,
             )?))
-        } else if has_cff2 {
-            // CFF2 is the variable-font revision of CFF: no Name INDEX, blend
-            // operators, an item-variation store. Running it as CFF would
-            // misread it rather than fail.
-            return Err(SfntError::CffUnsupported("CFF2 table"));
+        } else if let Some(span) = cff2 {
+            // The variable-font revision of CFF: its own container, the same
+            // charstrings plus `blend`. See `cff::Cff::parse2`.
+            Outlines::Cff(alloc::boxed::Box::new(crate::cff::Cff::parse2(
+                &data,
+                span.off,
+                span.len,
+                units_per_em,
+            )?))
         } else if (cblc.is_some() && cbdt.is_some()) || sbix.is_some() {
             Outlines::Pictures
         } else {
@@ -2732,7 +2734,8 @@ impl Face {
     /// where the accent goes is not.
     #[must_use]
     pub fn glyph_bbox_at(&self, gid: u16, coords: &var::Coords) -> Option<BBox> {
-        if coords.is_default() || self.gvar.is_none() {
+        let cff2 = matches!(&self.outlines, Outlines::Cff(cff) if cff.is_cff2());
+        if coords.is_default() || (self.gvar.is_none() && !cff2) {
             return self.glyph_bbox(gid);
         }
         const EMPTY: BBox = BBox {
@@ -2769,6 +2772,9 @@ impl Face {
     #[must_use]
     pub(crate) fn glyph_extents_at(&self, gid: u16, coords: &var::Coords) -> Option<[i32; 4]> {
         use crate::hbcalc::roundf_i32;
+        if let Outlines::Cff(cff) = &self.outlines {
+            return self.cff_extents(cff, gid, coords);
+        }
         let b = self.glyph_bbox_at(gid, coords)?;
         let varied = !coords.is_default()
             && self.gvar.is_some()
@@ -2786,32 +2792,6 @@ impl Face {
                 roundf_i32(b.y_min - whole_f32(y_bearing)),
             ]);
         }
-        if matches!(self.outlines, Outlines::Cff(_)) {
-            // HarfBuzz's `roundf` on a `double`: `floor(x + 0.5)`.
-            let round = |v: f64| {
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "a font-unit coordinate, far inside i32; `as` \
-                              saturates what no glyph reaches"
-                )]
-                {
-                    (v + 0.5).floor() as i32
-                }
-            };
-            let (x_bearing, width) = if b.x_min >= b.x_max {
-                (0, 0)
-            } else {
-                let x = round(f64::from(b.x_min));
-                (x, round(f64::from(b.x_max) - f64::from(x)))
-            };
-            let (y_bearing, height) = if b.y_min >= b.y_max {
-                (0, 0)
-            } else {
-                let y = round(f64::from(b.y_max));
-                (y, round(f64::from(b.y_min) - f64::from(y)))
-            };
-            return Some([x_bearing, y_bearing, width, height]);
-        }
         // A stated box, or a picture's empty one: whole units already.
         let [x_min, y_min, x_max, y_max] =
             [b.x_min, b.y_min, b.x_max, b.y_max].map(crate::hbcalc::roundf_i32);
@@ -2821,6 +2801,53 @@ impl Face {
             x_max.saturating_sub(x_min),
             y_min.saturating_sub(y_max),
         ])
+    }
+
+    /// [`glyph_extents_at`](Self::glyph_extents_at) for a CFF or `CFF2`
+    /// glyph: HarfBuzz's box around its path, at HarfBuzz's instance
+    /// (`cff1::accelerator_t::get_extents`, and `cff2`'s): each direction
+    /// empty on its own, or else its low edge rounded and its extent rounded
+    /// from that, by HarfBuzz's `roundf` on a `double` (`floor(x + 0.5)`).
+    fn cff_extents(
+        &self,
+        cff: &crate::cff::Cff,
+        gid: u16,
+        coords: &var::Coords,
+    ) -> Option<[i32; 4]> {
+        if gid >= self.num_glyphs {
+            return None;
+        }
+        let instance = if cff.is_cff2() && !coords.is_default() {
+            crate::cff::Instance::HarfBuzz(coords.as_slice())
+        } else {
+            crate::cff::Instance::Default
+        };
+        let Some([x_min, y_min, x_max, y_max]) = cff.bounds(&self.data, gid, instance).ok()? else {
+            return Some([0; 4]);
+        };
+        let round = |v: f64| {
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "a font-unit coordinate, far inside i32; `as` \
+                          saturates what no glyph reaches"
+            )]
+            {
+                (v + 0.5).floor() as i32
+            }
+        };
+        let (x_bearing, width) = if x_min >= x_max {
+            (0, 0)
+        } else {
+            let x = round(x_min);
+            (x, round(x_max - f64::from(x)))
+        };
+        let (y_bearing, height) = if y_min >= y_max {
+            (0, 0)
+        } else {
+            let y = round(y_max);
+            (y, round(y_min - f64::from(y)))
+        };
+        Some([x_bearing, y_bearing, width, height])
     }
 
     /// How far a `glyf` glyph's ink has to move right for it to start at the
@@ -3062,6 +3089,21 @@ impl Face {
     /// the same reasoning as `Gvar::parse` returning
     /// `None` — a face that fails to vary still draws.
     pub fn outline_at(&self, gid: u16, coords: &var::Coords) -> Result<Outline, SfntError> {
+        // A `CFF2` glyph varies through its charstring's `blend`s, weighed
+        // as HarfBuzz weighs them, at HarfBuzz's coordinates.
+        if let Outlines::Cff(cff) = &self.outlines
+            && cff.is_cff2()
+            && !coords.is_default()
+        {
+            if gid >= self.num_glyphs {
+                return Err(SfntError::GlyphOutOfRange);
+            }
+            return cff.outline_at(
+                &self.data,
+                gid,
+                crate::cff::Instance::HarfBuzz(coords.as_slice()),
+            );
+        }
         let Some(gvar) = self.gvar.as_ref() else {
             return self.outline(gid);
         };
@@ -3127,7 +3169,14 @@ impl Face {
                 if gid >= self.num_glyphs {
                     return Err(SfntError::GlyphOutOfRange);
                 }
-                cff.tagged_outline(&self.data, gid)
+                // A `CFF2` glyph blends as FreeType blends, at its 16.16
+                // coordinates: these are the points FreeType's hinter sees.
+                let instance = if cff.is_cff2() && !coords.is_default_fixed() {
+                    crate::cff::Instance::FreeType(coords.fixed())
+                } else {
+                    crate::cff::Instance::Default
+                };
+                cff.tagged_outline(&self.data, gid, instance)
             }
             // A face of pictures has no points to hint.
             Outlines::Pictures => self.outline(gid).map(|_| TaggedOutline::default()),

@@ -430,6 +430,29 @@ impl VarStore {
         self.regions.len().checked_div(self.axis_count).unwrap_or(0)
     }
 
+    /// How many regions subtable `outer`'s columns are over -- 0 for a
+    /// subtable the store does not have (HarfBuzz's
+    /// `get_region_index_count`).
+    pub(crate) fn region_index_count(&self, outer: u16) -> usize {
+        self.subtables
+            .get(usize::from(outer))
+            .map_or(0, |s| s.region_indices.len())
+    }
+
+    /// The scalar of each region subtable `outer` names, at `coords`, in its
+    /// order -- none for a subtable the store does not have (HarfBuzz's
+    /// `get_region_scalars`, which a `CFF2` blend weighs its deltas by).
+    pub(crate) fn region_scalars(&self, outer: u16, coords: &[i16]) -> Vec<f32> {
+        self.subtables
+            .get(usize::from(outer))
+            .map_or_else(Vec::new, |s| {
+                s.region_indices
+                    .iter()
+                    .map(|&r| self.scalar(r, coords, None))
+                    .collect()
+            })
+    }
+
     /// How strongly region `index` applies at `coords`, in `0.0..=1.0` --
     /// HarfBuzz's `VarRegionList::evaluate`, through `cache` when there is
     /// one (see [`ScalarCache`]).

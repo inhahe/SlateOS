@@ -2261,8 +2261,11 @@ lane C's `guitk`.
   2026-09-26, three of them rounded the wrong way).
   The lesson §451 records: the HarfBuzz sweep had been green over 556 faces the
   whole time, because it only ever asked about the **default** instance — a
-  differential test proves only the questions it asks. Still out of scope:
-  `CFF2`, which no installed face carries.
+  differential test proves only the questions it asks. `CFF2` -- a variable
+  font with CFF outlines, which no installed face carries -- is read too
+  (2026-09-26, §1328), its `blend`s weighed as HarfBuzz weighs them for
+  drawing and as FreeType does for the hinter, checked against both on four
+  real fonts fetched for it (`tools/outline_oracle.py`, `hint_oracle.py`).
   A legacy `kern` pair is now *split* between the two glyphs, which is what
   HarfBuzz's `hb_kern_machine_t` does: `kern >> 1` onto the left glyph's
   advance, the remainder onto the right glyph's advance and its offset. The

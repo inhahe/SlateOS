@@ -54,6 +54,15 @@ a Bold master whose every point, accent offset, scaled component and bearing
 moves, so that at weight 610 each delta lands on a fraction -- once with
 `HVAR` and once without, since only without it does `gvar` move a glyph's
 origin. Its answers are taken at that weight, at `VAR_SIZES`.
+
+And the CFF face made variable too (`build_var_cff2`), which makes a `CFF2`
+table: its glyphs vary through their charstrings' `blend` operators, which
+FreeType weighs in 16.16 and HarfBuzz in floating point. Its Bold master
+moves its points as the TrueType one does, fractions kept where the glyph is
+drawn without rounding, so that the two libraries' blends can part. Beside
+FreeType's hinted points at weight 610, HarfBuzz's drawing of each glyph
+there is recorded -- its box and its path -- since that is what the crate
+draws and measures from.
 """
 
 import io
@@ -65,6 +74,7 @@ from fontTools.pens.cu2quPen import Cu2QuPen
 from fontTools.pens.recordingPen import RecordingPen
 from fontTools.pens.reverseContourPen import ReverseContourPen
 from fontTools.pens.t2CharStringPen import T2CharStringPen
+from fontTools.pens.transformPen import TransformPen
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 
 from rustfmt_out import rustfmt
@@ -417,7 +427,10 @@ def build_var(g, hvar):
     return buf.getvalue(), order
 
 
-def build_otf(g):
+def build_otf(g, bold=False):
+    """The face as CFF -- or, with `bold`, the Bold master of the `CFF2` face
+    (see `build_var_cff2`): every point moved as the TrueType Bold's are, the
+    glyphs drawn without rounding keeping the fractions that makes."""
     order = [".notdef"] + list(g)
     fb = FontBuilder(UPEM, isTTF=False)
     fb.setupGlyphOrder(order)
@@ -426,10 +439,14 @@ def build_otf(g):
     charstrings = {}
     pen = T2CharStringPen(600, None)
     charstrings[".notdef"] = pen.getCharString()
+
+    def moved(pen):
+        return TransformPen(pen, (1.06, 0, 0, 1.02, 5, -3)) if bold else pen
+
     for name, (_, draw) in g.items():
         if name in CFF_NATIVE:
             pen = T2CharStringPen(600, None, roundTolerance=0)
-            draw(pen)
+            draw(moved(pen))
             # Unoptimized: fontTools' specializer drops a line of no length,
             # and that line is what the glyph is drawn to test.
             charstrings[name] = pen.getCharString(optimize=False)
@@ -438,7 +455,7 @@ def build_otf(g):
             draw(rec)
             pen = T2CharStringPen(600, None)
             # PostScript winds its outer contours the other way.
-            rec.replay(ReverseContourPen(pen))
+            rec.replay(ReverseContourPen(moved(pen)))
             charstrings[name] = pen.getCharString()
     fb.setupCFF("HintFixtureCFF", {"FullName": "HintFixtureCFF"}, charstrings, {})
     fb.setupHorizontalMetrics(fb_metrics(g, order))
@@ -447,6 +464,103 @@ def build_otf(g):
     buf = io.BytesIO()
     fb.save(buf)
     return buf.getvalue(), order
+
+
+def build_var_cff2(g):
+    """The CFF face made variable along `wght`, 400 to 700, as `build_var`
+    makes the TrueType one: `build_otf` the Regular master and
+    `build_otf(bold=True)` the Bold. fontTools merges CFF masters into a
+    `CFF2` table, each point that moves a `blend`."""
+    from fontTools import varLib
+    from fontTools.designspaceLib import AxisDescriptor, DesignSpaceDocument, SourceDescriptor
+    from fontTools.ttLib import TTFont
+
+    ds = DesignSpaceDocument()
+    axis = AxisDescriptor()
+    axis.tag, axis.name = "wght", "Weight"
+    axis.minimum, axis.default, axis.maximum = 400, 400, 700
+    ds.addAxis(axis)
+    order = None
+    for weight, bold in ((400, False), (700, True)):
+        data, order = build_otf(g, bold=bold)
+        src = SourceDescriptor()
+        src.font = TTFont(io.BytesIO(data))
+        src.location = {"Weight": weight}
+        ds.addSource(src)
+    vf, _, _ = varLib.build(ds)
+    assert "CFF2" in vf
+    buf = io.BytesIO()
+    vf.save(buf)
+    return buf.getvalue(), order
+
+
+class Recorder:
+    """A fontTools-style pen keeping HarfBuzz's drawing as ops."""
+
+    def __init__(self):
+        self.ops = []
+
+    def moveTo(self, p):
+        self.ops.append(("M", [p]))
+
+    def lineTo(self, p):
+        self.ops.append(("L", [p]))
+
+    def curveTo(self, *points):
+        self.ops.append(("C", list(points)))
+
+    def qCurveTo(self, *points):
+        self.ops.append(("Q", list(points)))
+
+    def closePath(self):
+        self.ops.append(("Z", []))
+
+    def endPath(self):
+        self.ops.append(("Z", []))
+
+
+def drawn(data, order, weight):
+    """HarfBuzz's box and path for each glyph at `weight`, one unit per font
+    unit: `(gid, name, [x_bearing, y_bearing, width, height], ops, coords)`,
+    the path's contours with nothing drawn left out and a closing line back
+    to a contour's start dropped -- the two ways HarfBuzz spells a contour
+    that this crate's outline does not."""
+    import uharfbuzz as hb
+
+    face = hb.Face(hb.Blob(data))
+    font = hb.Font(face)
+    font.scale = (face.upem, face.upem)
+    font.set_variations({"wght": weight})
+    rows = []
+    for gid, name in enumerate(order):
+        e = font.get_glyph_extents(gid)
+        pen = Recorder()
+        font.draw_glyph_with_pen(gid, pen)
+        contours, cur = [], None
+        for kind, pts in pen.ops:
+            if kind == "M":
+                cur = (pts[0], [])
+            elif kind == "Z":
+                if cur is not None:
+                    contours.append(cur)
+                cur = None
+            elif cur is not None:
+                cur[1].append((kind, pts))
+        ops, coords = "", []
+        for start, segs in contours:
+            if segs and segs[-1][0] == "L" and segs[-1][1][0] == start:
+                segs = segs[:-1]
+            if not segs:
+                continue
+            ops += "M"
+            coords += list(start)
+            for kind, pts in segs:
+                ops += kind
+                for p in pts:
+                    coords += list(p)
+            ops += "Z"
+        rows.append((gid, name, [e.x_bearing, e.y_bearing, e.width, e.height], ops, coords))
+    return rows
 
 
 def x_min(draw):
@@ -503,6 +617,25 @@ def expectations(data, order, weight=None, sizes=None):
     return rows
 
 
+def rust_f32(v):
+    """The shortest decimal that reads back as the `f32` `v` is: what Rust
+    prints for one, and all the precision an `f32` literal may carry."""
+    import struct
+
+    def f32(x):
+        return struct.unpack("<f", struct.pack("<f", x))[0]
+
+    v = f32(v)
+    for digits in range(1, 10):
+        s = f"{v:.{digits}g}"
+        if f32(float(s)) == v:
+            break
+    if "e" in s:
+        mantissa, exponent = s.split("e")
+        s = f"{mantissa if '.' in mantissa else mantissa + '.0'}e{int(exponent)}"
+    return s if ("." in s or "e" in s) else s + ".0"
+
+
 def rust_bytes(data):
     return ", ".join(f"0x{b:02X}" for b in data)
 
@@ -523,33 +656,48 @@ def main():
         w("//! instead. See that script for what each glyph is drawn to test.\n\n")
         var, var_order = build_var(g, hvar=True)
         var_nohvar, _ = build_var(g, hvar=False)
+        var_cff2, cff2_order = build_var_cff2(g)
         what = {
             "TTF": "The face as TrueType.",
             "OTF": "The face as CFF.",
             "VAR": f"The TrueType face made variable, with `HVAR`; answers at weight {VAR_WEIGHT}.",
             "VAR_NOHVAR": f"The same without `HVAR`, so `gvar` moves each glyph's origin; at weight {VAR_WEIGHT}.",
+            "VAR_CFF2": f"The CFF face made variable, a `CFF2` table; answers at weight {VAR_WEIGHT}.",
         }
         for label, data, order, weight in (
             ("TTF", ttf, ttf_order, None),
             ("OTF", otf, otf_order, None),
             ("VAR", var, var_order, VAR_WEIGHT),
             ("VAR_NOHVAR", var_nohvar, var_order, VAR_WEIGHT),
+            ("VAR_CFF2", var_cff2, cff2_order, VAR_WEIGHT),
         ):
             w(f"/// {what[label]}\n")
-            w(f"pub(super) static {label}: [u8; {len(data)}] = [{rust_bytes(data)}];\n\n")
+            w(f"pub(crate) static {label}: [u8; {len(data)}] = [{rust_bytes(data)}];\n\n")
             rows = expectations(data, order, weight, VAR_SIZES if weight else None)
             # x and y in turn in one flat array, not as pairs: rustfmt packs a
             # list of numbers into lines but gives every tuple a line of its
             # own, which would triple the file.
             w(f"/// FreeType's hinted points for the {label} face: `(px, glyph, name, x and y\n")
             w("/// in turn, in 1/64 pixel, of each stored point)`.\n")
-            w(f"pub(super) static {label}_EXPECTED: [(f32, u16, &str, &[i32]); {len(rows)}] = [\n")
+            w(f"pub(crate) static {label}_EXPECTED: [(f32, u16, &str, &[i32]); {len(rows)}] = [\n")
             for px, gid, name, points in rows:
                 flat = ", ".join(f"{x}, {y}" for (x, y) in points)
                 w(f"    ({float(px)}, {gid}, \"{name}\", &[{flat}]),\n")
             w("];\n\n")
+        rows = drawn(var_cff2, cff2_order, VAR_WEIGHT)
+        w(f"/// HarfBuzz's drawing of each glyph of the VAR_CFF2 face at weight {VAR_WEIGHT}: `(glyph,\n")
+        w("/// name, [x_bearing, y_bearing, width, height], path ops (`M`, `L`, `C`, `Q`, `Z`),\n")
+        w("/// their points' x and y in turn)`, at one unit per font unit; a contour with\n")
+        w("/// nothing drawn is left out, and a closing line back to its start dropped.\n")
+        w("pub(crate) type Drawn = (u16, &'static str, [i32; 4], &'static str, &'static [f32]);\n\n")
+        w("/// Each glyph's row: see [`Drawn`].\n")
+        w(f"pub(crate) static VAR_CFF2_DRAWN: [Drawn; {len(rows)}] = [\n")
+        for gid, name, ext, ops, coords in rows:
+            flat = ", ".join(rust_f32(v) for v in coords)
+            w(f"    ({gid}, \"{name}\", [{', '.join(str(v) for v in ext)}], \"{ops}\", &[{flat}]),\n")
+        w("];\n\n")
     rustfmt(out)
-    print(f"{len(ttf)} + {len(otf)} + {len(var)} + {len(var_nohvar)} bytes of font -> {out}")
+    print(f"{len(ttf)} + {len(otf)} + {len(var)} + {len(var_nohvar)} + {len(var_cff2)} bytes of font -> {out}")
 
 
 if __name__ == "__main__":

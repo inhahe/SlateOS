@@ -7,8 +7,10 @@
 //! `stdout` does not have:
 //!
 //! * **Whether a write was attempted before the end.** glibc holds output in
-//!   a 4096-byte buffer when stdout is not a terminal (`st_blksize` of a
-//!   pipe, a file, `/dev/full`) and line by line when it is. `lsmem >
+//!   a buffer of `st_blksize` bytes when stdout is not a terminal -- 4096
+//!   for a pipe, a file or `/dev/full`, and `BUFSIZ`, 8192, on a closed
+//!   descriptor, which `fstat` cannot size -- and line by line when it is.
+//!   `lsmem >
 //!   /dev/full` prints `lsmem: write error: No space left on device`: nothing
 //!   reached the descriptor until the final flush, whose `errno` is
 //!   reported. `lsmem -a > /dev/full` prints `lsmem: write error` with no
@@ -40,17 +42,30 @@
 use std::io::{self, IsTerminal};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// glibc's buffer size for a stream that is not a terminal.
-const BUFSIZ: usize = 4096;
+/// glibc's `BUFSIZ`: the buffer when `fstat` cannot say better.
+const BUFSIZ: usize = 8192;
 
 /// `ferror(stderr)`: a diagnostic could not be written. Process-global, as
 /// stderr is.
 static STDERR_FAILED: AtomicBool = AtomicBool::new(false);
 
+/// How glibc buffers a stream: chosen by `_IO_file_doallocate` when the
+/// stream is first written to, from what descriptor 1 is at that moment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Buffering {
+    /// A terminal: out at each newline.
+    Line,
+    /// Anything else: out when this many bytes are exceeded.
+    Full(usize),
+}
+
 /// Standard output, buffered as glibc buffers it.
 pub struct Stdout {
-    /// Line buffered rather than fully buffered.
-    tty: bool,
+    /// Chosen at the first write, not before: a program that opens a file
+    /// with its stdout closed has that file on descriptor 1 by then, and
+    /// glibc sizes the buffer by *its* `fstat` -- upstream lsmem's `/sys`
+    /// directory, 4096, where a closed descriptor would have given 8192.
+    buffering: Option<Buffering>,
     /// Written, not yet flushed.
     held: Vec<u8>,
     /// `ferror(stdout)`: a flush before the end failed, and why.
@@ -66,11 +81,18 @@ impl Stdout {
     #[must_use]
     pub fn new(close_exit_code: u8) -> Self {
         Stdout {
-            tty: io::stdout().is_terminal(),
+            buffering: None,
             held: Vec::new(),
             failed: None,
             close_exit_code,
         }
+    }
+
+    /// What `exec` does to the buffer: drops it, unwritten. A program that
+    /// replaces itself (`flock -F`) loses what it had printed and not yet
+    /// flushed, as upstream's does.
+    pub fn discard(&mut self) {
+        self.held.clear();
     }
 
     /// `fputs`, `printf`: into the buffer, and out of it when glibc would
@@ -78,13 +100,14 @@ impl Stdout {
     /// otherwise.
     pub fn write(&mut self, data: &[u8]) {
         self.held.extend_from_slice(data);
-        let due = if self.tty {
-            self.held
+        let buffering = *self.buffering.get_or_insert_with(allocate);
+        let due = match buffering {
+            Buffering::Line => self
+                .held
                 .iter()
                 .rposition(|&b| b == b'\n')
-                .map(|nl| nl.saturating_add(1))
-        } else {
-            (self.held.len() > BUFSIZ).then_some(self.held.len())
+                .map(|nl| nl.saturating_add(1)),
+            Buffering::Full(size) => (self.held.len() > size).then_some(self.held.len()),
         };
         if let Some(n) = due {
             let chunk: Vec<u8> = self.held.drain(..n).collect();
@@ -101,36 +124,99 @@ impl Stdout {
     /// does, then judge stderr. Returns the status to exit with -- `status`,
     /// or `CLOSE_EXIT_CODE`.
     pub fn close(mut self, status: u8, short: &[u8]) -> u8 {
-        let verdict = if let Some(e) = self.failed.take() {
-            if e.kind() == io::ErrorKind::BrokenPipe {
-                None
-            } else {
-                // `flush_standard_stream` resets errno and finds the flag:
-                // `warnx`, no reason.
-                warnx(short, "write error");
-                Some(self.close_exit_code)
-            }
+        let earlier = self.failed.take();
+        // `ferror(stdout) || fflush(stdout)`: with the flag set, nothing more
+        // is written.
+        let at_close = if earlier.is_some() {
+            Ok(())
         } else {
             let held = std::mem::take(&mut self.held);
-            match sys::write_all(sys::STDOUT, &held).and_then(|()| sys::dup_close(sys::STDOUT)) {
-                Ok(()) => None,
-                // A closed stdout: forgiven.
-                Err(e) if sys::is_ebadf(&e) => None,
-                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => None,
-                Err(e) => {
-                    warn(short, "write error", &e);
-                    Some(self.close_exit_code)
-                }
-            }
+            sys::write_all(sys::STDOUT, &held).and_then(|()| sys::dup_close(sys::STDOUT))
         };
-        if let Some(code) = verdict {
-            return code;
+        let stdout = judge(earlier, at_close);
+        match &stdout {
+            Outcome::Fine => {}
+            Outcome::FailedBefore => warnx(short, "write error"),
+            Outcome::FailedAtClose(e) => warn(short, "write error", e),
         }
-        // `flush_standard_stream(stderr)`: a diagnostic that was lost.
-        if STDERR_FAILED.load(Ordering::Relaxed) {
-            return self.close_exit_code;
-        }
-        status
+        verdict(
+            &stdout,
+            STDERR_FAILED.load(Ordering::Relaxed),
+            status,
+            self.close_exit_code,
+        )
+    }
+}
+
+/// What `close_stdout` makes of standard output.
+#[derive(Debug)]
+enum Outcome {
+    /// Written -- or forgiven: a closed stdout at the final flush, a reader
+    /// that went away.
+    Fine,
+    /// A write before the end failed: `flush_standard_stream` finds only the
+    /// error flag, with errno reset, and `close_stdout` says `write error`.
+    FailedBefore,
+    /// The final flush failed: `write error: REASON`.
+    FailedAtClose(io::Error),
+}
+
+/// `flush_standard_stream(stdout)` as `close_stdout` reads it, from the
+/// failure of a write before the end, if any, and the final flush's result.
+fn judge(earlier: Option<io::Error>, at_close: io::Result<()>) -> Outcome {
+    if let Some(e) = earlier {
+        return if e.kind() == io::ErrorKind::BrokenPipe {
+            Outcome::Fine
+        } else {
+            Outcome::FailedBefore
+        };
+    }
+    match at_close {
+        Ok(()) => Outcome::Fine,
+        Err(e) if is_ebadf(&e) || e.kind() == io::ErrorKind::BrokenPipe => Outcome::Fine,
+        Err(e) => Outcome::FailedAtClose(e),
+    }
+}
+
+/// The status to exit with: `CLOSE_EXIT_CODE` for stdout's failure, then for
+/// a lost diagnostic (`flush_standard_stream(stderr)`), else the program's.
+fn verdict(stdout: &Outcome, stderr_failed: bool, status: u8, close_exit_code: u8) -> u8 {
+    match stdout {
+        Outcome::FailedBefore | Outcome::FailedAtClose(_) => close_exit_code,
+        Outcome::Fine if stderr_failed => close_exit_code,
+        Outcome::Fine => status,
+    }
+}
+
+/// `EBADF`, on Linux and in the SlateOS C library.
+const EBADF: i32 = 9;
+
+/// Whether a failure is `EBADF`. On the Windows host `std` never reports it
+/// for a standard stream, so this is only ever true where it is meant.
+fn is_ebadf(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(EBADF)
+}
+
+/// `_IO_file_doallocate`: a terminal is line buffered; anything else gets a
+/// buffer [`buffer_size`] bytes long.
+fn allocate() -> Buffering {
+    if io::stdout().is_terminal() {
+        Buffering::Line
+    } else {
+        Buffering::Full(buffer_size(sys::block_size(sys::STDOUT)))
+    }
+}
+
+/// `_IO_file_doallocate`'s size: `st_blksize` when `fstat` gives one below
+/// `BUFSIZ` -- 4096 for a pipe, a file or `/dev/full` -- and `BUFSIZ` when it
+/// gives none or `fstat` fails, which it does on a closed descriptor. So
+/// `getopt` with 6 KB of output to a closed stdout never writes before the
+/// end, and its final `EBADF` is forgiven, where the same output to
+/// `/dev/full` fails on the way.
+fn buffer_size(block: Option<u64>) -> usize {
+    match block.and_then(|b| usize::try_from(b).ok()) {
+        Some(b) if b > 0 && b < BUFSIZ => b,
+        _ => BUFSIZ,
     }
 }
 
@@ -176,8 +262,6 @@ mod sys {
 
     pub const STDOUT: c_int = 1;
     pub const STDERR: c_int = 2;
-    /// `EBADF`, on Linux and in the SlateOS C library.
-    const EBADF: i32 = 9;
 
     /// `write(fd, ...)` until all of `data` is out.
     pub fn write_all(fd: c_int, mut data: &[u8]) -> io::Result<()> {
@@ -218,9 +302,18 @@ mod sys {
         Ok(())
     }
 
-    /// Whether a failure is `EBADF`.
-    pub fn is_ebadf(e: &io::Error) -> bool {
-        e.raw_os_error() == Some(EBADF)
+    /// `fstat(fd).st_blksize`, or `None` when `fstat` fails.
+    pub fn block_size(fd: c_int) -> Option<u64> {
+        use std::mem::ManuallyDrop;
+        use std::os::fd::FromRawFd;
+        use std::os::unix::fs::MetadataExt;
+
+        // SAFETY: `fd` is 1 or 2, never -1 (which `from_raw_fd` refuses), and
+        // `File::metadata` on it is `fstat(2)`, defined for any descriptor
+        // number: a closed one reports EBADF. `ManuallyDrop` keeps the
+        // borrowed descriptor from being closed here.
+        let file = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+        file.metadata().ok().map(|m| m.blksize())
     }
 }
 
@@ -252,9 +345,13 @@ mod sys {
         Ok(())
     }
 
-    /// The host never reports it: `std` hides it.
-    pub fn is_ebadf(_e: &io::Error) -> bool {
-        false
+    /// The host's descriptors have no `st_blksize`; a pipe's is assumed.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the signature of the unix function this stands in for"
+    )]
+    pub fn block_size(_fd: i32) -> Option<u64> {
+        Some(4096)
     }
 }
 
@@ -263,25 +360,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_clean_close_keeps_the_status() {
-        let mut out = Stdout::new(1);
-        out.write(b"");
-        assert_eq!(out.close(0, b"t"), 0);
-        let out = Stdout::new(3);
-        assert_eq!(out.close(2, b"t"), 2);
+    fn the_buffer_is_sized_as_glibc_sizes_it() {
+        assert_eq!(buffer_size(Some(4096)), 4096);
+        assert_eq!(buffer_size(Some(512)), 512);
+        // Not below BUFSIZ, zero, or no fstat at all: BUFSIZ.
+        assert_eq!(buffer_size(Some(8192)), 8192);
+        assert_eq!(buffer_size(Some(65536)), 8192);
+        assert_eq!(buffer_size(Some(0)), 8192);
+        assert_eq!(buffer_size(None), 8192);
+    }
+
+    fn err(kind: io::ErrorKind) -> io::Error {
+        io::Error::from(kind)
     }
 
     #[test]
-    fn an_earlier_broken_pipe_is_not_reported() {
-        let mut out = Stdout::new(1);
-        out.failed = Some(io::Error::from(io::ErrorKind::BrokenPipe));
-        assert_eq!(out.close(0, b"t"), 0);
+    fn an_earlier_failure_is_reported_without_its_reason() {
+        let full = Some(err(io::ErrorKind::StorageFull));
+        assert!(matches!(judge(full, Ok(())), Outcome::FailedBefore));
+        // Even a closed stdout: the flag is what is found, not the EBADF.
+        let closed = Some(io::Error::from_raw_os_error(EBADF));
+        assert!(matches!(judge(closed, Ok(())), Outcome::FailedBefore));
     }
 
     #[test]
-    fn an_earlier_failure_is_the_close_exit_code() {
-        let mut out = Stdout::new(3);
-        out.failed = Some(io::Error::from(io::ErrorKind::StorageFull));
-        assert_eq!(out.close(0, b"t"), 3);
+    fn a_failing_final_flush_is_reported_with_its_reason() {
+        let full = Err(err(io::ErrorKind::StorageFull));
+        assert!(matches!(judge(None, full), Outcome::FailedAtClose(_)));
+    }
+
+    #[test]
+    fn a_closed_stdout_at_the_end_and_a_reader_gone_are_forgiven() {
+        let closed = Err(io::Error::from_raw_os_error(EBADF));
+        assert!(matches!(judge(None, closed), Outcome::Fine));
+        let pipe = Err(err(io::ErrorKind::BrokenPipe));
+        assert!(matches!(judge(None, pipe), Outcome::Fine));
+        let earlier_pipe = Some(err(io::ErrorKind::BrokenPipe));
+        assert!(matches!(judge(earlier_pipe, Ok(())), Outcome::Fine));
+        assert!(matches!(judge(None, Ok(())), Outcome::Fine));
+    }
+
+    #[test]
+    fn the_status_is_the_programs_unless_something_was_lost() {
+        assert_eq!(verdict(&Outcome::Fine, false, 0, 3), 0);
+        assert_eq!(verdict(&Outcome::Fine, false, 2, 3), 2);
+        // A lost diagnostic overrides a success and a failure alike.
+        assert_eq!(verdict(&Outcome::Fine, true, 0, 3), 3);
+        assert_eq!(verdict(&Outcome::Fine, true, 1, 3), 3);
+        assert_eq!(verdict(&Outcome::FailedBefore, false, 0, 1), 1);
+        let reason = Outcome::FailedAtClose(err(io::ErrorKind::StorageFull));
+        assert_eq!(verdict(&reason, false, 4, 3), 3);
     }
 }

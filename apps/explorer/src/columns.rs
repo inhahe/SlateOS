@@ -1352,11 +1352,7 @@ impl ColumnProvider for ArchiveColumns {
             "gz" | "tgz" => gzip_facts,
             _ => return ColumnValue::Empty,
         };
-        let Some(facts) = FACTS
-            .get_or_init(FactCache::new)
-            .get(path, read)
-            .flatten()
-        else {
+        let Some(facts) = FACTS.get_or_init(FactCache::new).get(path, read).flatten() else {
             return ColumnValue::Empty;
         };
         match column_id {
@@ -3311,7 +3307,8 @@ mod tests {
             mgr.get_value(&tgz, ColumnId::COMPRESSED_SIZE),
             ColumnValue::Size(gz.len() as u64)
         );
-        let ColumnValue::Percentage(saved) = mgr.get_value(&tgz, ColumnId::COMPRESSION_RATIO) else {
+        let ColumnValue::Percentage(saved) = mgr.get_value(&tgz, ColumnId::COMPRESSION_RATIO)
+        else {
             panic!("no ratio");
         };
         let want = 1.0 - gz.len() as f64 / tar.len() as f64;
@@ -3322,9 +3319,15 @@ mod tests {
             ColumnValue::Number(1)
         );
         let fake = dir.file("fake.gz", b"not gzip at all, not even close");
-        assert_eq!(mgr.get_value(&fake, ColumnId::COMPRESSED_SIZE), ColumnValue::Empty);
+        assert_eq!(
+            mgr.get_value(&fake, ColumnId::COMPRESSED_SIZE),
+            ColumnValue::Empty
+        );
         let not_tar = dir.file("fake.tar", b"words, not headers");
-        assert_eq!(mgr.get_value(&not_tar, ColumnId::FILE_COUNT_INSIDE), ColumnValue::Empty);
+        assert_eq!(
+            mgr.get_value(&not_tar, ColumnId::FILE_COUNT_INSIDE),
+            ColumnValue::Empty
+        );
     }
 
     const AUDIO_COLUMNS: [ColumnId; 6] = [

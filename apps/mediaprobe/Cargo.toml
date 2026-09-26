@@ -1,0 +1,10 @@
+[package]
+name = "mediaprobe"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS video file facts for applications: container, length and each track's codec, picture, rate and language, read from headers without decoding."
+
+[dependencies]
+
+[lints]
+workspace = true

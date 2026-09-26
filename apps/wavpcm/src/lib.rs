@@ -974,8 +974,14 @@ pub fn resample(audio: &Audio, rate: u32, progress: &mut dyn FnMut(f32)) -> Audi
         .collect();
     let kernel = |d: f64| -> f64 {
         let pos = d.abs() * TABLE_RESOLUTION;
-        let i = pos.floor() as usize;
-        let frac = pos - pos.floor();
+        // `pos` is never negative, so truncating it is flooring it, exactly:
+        // the same `i` and the same `frac` for every `pos` this can see (far
+        // below 2^52). A cast is one instruction; `f64::floor` is a call into
+        // libm on this target's x86-64 baseline, which has no SSE4.1 -- twice
+        // per tap, for every tap of every output frame (lane F's finding,
+        // design-decisions.md section 1323).
+        let i = pos as usize;
+        let frac = pos - i as f64;
         let a = table.get(i).copied().unwrap_or(0.0);
         let b = table.get(i.saturating_add(1)).copied().unwrap_or(0.0);
         a + (b - a) * frac
@@ -1051,6 +1057,21 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    /// How long resampling takes: ten seconds of a 44.1 kHz tone to 48 kHz.
+    /// A figure to compare before and after a change to the inner loop, not a
+    /// verdict: `cargo test -p wavpcm --release -- --ignored --nocapture
+    /// resample_speed`.
+    #[test]
+    #[ignore = "a measurement, not a test: run with --release --ignored"]
+    fn resample_speed() {
+        let audio = tone(44_100, 440.0, 10.0, 0.5);
+        let start = std::time::Instant::now();
+        let out = resample(&audio, 48_000, &mut |_| {});
+        let took = start.elapsed();
+        assert_eq!(out.sample_rate, 48_000);
+        println!("resample 10 s mono 44.1 kHz -> 48 kHz: {took:?}");
     }
 
     fn rms(samples: &[f32]) -> f32 {
@@ -1250,6 +1271,29 @@ mod tests {
         assert!((to_channels(&five_one, 1).samples[0] - 3.0 / 5.0).abs() < 1e-6);
         let quad = to_channels(&mono, 4);
         assert_eq!(quad.samples[..4], [0.5, 0.5, 0.0, 0.0]);
+    }
+
+    /// Between the ends, each output sample is the input's waveform at that
+    /// sample's own instant, to within 5e-5 (it lands within 1.5e-5): the
+    /// kernel is zero-phase, and it
+    /// is interpolated from its table, not merely read near it. The
+    /// level-and-pitch test passes a kernel interpolated the wrong way within
+    /// each table step; this one does not.
+    #[test]
+    fn a_resampled_tone_lands_on_its_own_waveform() {
+        let wave = |t: f64| 0.5 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
+        let input = Audio {
+            sample_rate: 44_100,
+            channels: 1,
+            samples: (0..22_050)
+                .map(|i| wave(f64::from(i) / 44_100.0) as f32)
+                .collect(),
+        };
+        let out = resample(&input, 48_000, &mut |_| {});
+        let worst = (2000..22_000)
+            .map(|n| (f64::from(out.samples[n]) - wave(n as f64 / 48_000.0)).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(worst < 5e-5, "{worst:e}");
     }
 
     #[test]

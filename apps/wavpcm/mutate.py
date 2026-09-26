@@ -121,6 +121,21 @@ MUTATIONS = [
         "                (*a) as f32",
         ["a_constant_stays_constant_to_the_ends"],
     ),
+    # The table index is not mutated alone: `frac` is measured from it, so an
+    # index a step off is extrapolated back from the next segment -- as
+    # accurate as interpolating, and no test could or should tell them apart.
+    (
+        "the kernel's fraction is measured from the wrong end of its step",
+        "        let frac = pos - i as f64;",
+        "        let frac = 1.0 - (pos - i as f64);",
+        ["a_resampled_tone_lands_on_its_own_waveform"],
+    ),
+    (
+        "the kernel is read from the table without interpolating",
+        "        let frac = pos - i as f64;",
+        "        let frac = 0.0 * (pos - i as f64);",
+        ["a_resampled_tone_lands_on_its_own_waveform"],
+    ),
     (
         "no anti-alias filter",
         "    let cutoff = 0.5 * (1.0 / ratio).min(1.0) * 0.97;",

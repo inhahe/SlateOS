@@ -165405,7 +165405,18 @@ System V again, with the note in a PT_NOTE of their own (`readelf -h`, `-l`,
 byte, which this kernel reads as an ABI decision. Emit marker notes with
 assembler directives, never with `#[used]`.
 
-### [D] B-D-EPOLL-DOES-NOT-FORGET-A-CLOSED-DESCRIPTOR — 2026-09-25 — OPEN
+### [D] B-D-EPOLL-DOES-NOT-FORGET-A-CLOSED-DESCRIPTOR — 2026-09-25 — FIXED 2026-09-26
+
+**Fix.** As the proper fix below describes. An entry records the target's
+`(kind, handle)` at `EPOLL_CTL_ADD`; readiness comes from that; ADD, MOD and
+DEL find an entry by `(descriptor, kind, handle)`, as upstream's `ep_find` does
+by `(file, fd)`; and `close()` and `dup2()`'s eviction call
+`epoll::forget_file` once a file's last descriptor is gone, as upstream's
+`eventpoll_release` does. `EPOLL_CTL_DEL` of a closed descriptor is `EBADF`
+again, as upstream — the deviation that let it succeed existed only for this
+bug. Tests: `test_epoll_forgets_a_closed_descriptor`,
+`test_epoll_entry_follows_the_file_not_the_number` (the dup case, the reused
+number, and DEL's `EBADF`), `test_epoll_forgets_a_file_dup2_evicts`.
 
 **Where:** `posix/src/epoll.rs` — `EpollEntry` is keyed by descriptor number,
 and `compute_revents` looks the number up at wait time; `posix/src/file.rs`
@@ -165441,7 +165452,19 @@ handle has no descriptor left (`fdtable::is_handle_referenced`), purge every
 entry naming it from every instance. A `dup` then keeps the entry alive as it
 does upstream, and the `EPOLL_CTL_DEL` deviation can go.
 
-### [D] TD-D-INOTIFY-SHIM-IGNORES-ITS-CONTROL-FLAGS — 2026-09-25 — OPEN
+### [D] TD-D-INOTIFY-SHIM-IGNORES-ITS-CONTROL-FLAGS — 2026-09-25 — PARTIAL 2026-09-26 (four of six done)
+
+**Done 2026-09-26.** `IN_ONLYDIR` refuses a non-directory with `ENOTDIR`, after
+the missing-path `ENOENT`, as `LOOKUP_DIRECTORY` does. `IN_MASK_CREATE` refuses
+an existing watch with `EEXIST`, and `IN_MASK_ADD` ORs the new mask (and
+oneshot) into the old — `watch_after_add`, a port of
+`inotify_update_existing_watch`, tested on the host. `IN_ONESHOT` retires the
+watch after its first event with an `IN_IGNORED`, in the event pump
+(`retire_after_first_event`, tested on the host; upstream is
+inotify_fsnotify.c:132). **Still open:** `IN_DONT_FOLLOW` and `IN_EXCL_UNLINK`,
+as the proper fix below says, and a ring-3 check of the four done ones — the
+host cannot reach `inotify_add_watch`'s existing-watch branch at all, because
+`stat_self` has no host double and every path is missing there.
 
 **Where:** `posix/src/epoll.rs`, `inotify_add_watch` and the event pump
 (`IN_KNOWN_EVENTS`'s doc comment says so outright).

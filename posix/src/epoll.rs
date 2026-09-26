@@ -130,9 +130,20 @@ pub const MAX_EPOLL_ENTRIES: usize = 128;
 pub const EP_MAX_EVENTS: i32 = i32::MAX / (core::mem::size_of::<EpollEvent>() as i32);
 
 /// One entry in an epoll instance's interest list.
+///
+/// Upstream's `epitem` is keyed by `(struct file *, fd)` and holds the file,
+/// not the number (fs/eventpoll.c, `ep_find`).  This entry does the same with
+/// the descriptor's `(kind, handle)`: readiness is computed from the file it
+/// was added for, a descriptor number reused by a later `open` names a
+/// different entry, and closing the file's last descriptor removes the entry
+/// ([`forget_file`]).
 #[derive(Clone, Copy)]
 struct EpollEntry {
     fd: i32,
+    /// The kind of the watched file, recorded at `EPOLL_CTL_ADD`.
+    kind: HandleKind,
+    /// The watched file's handle, recorded at `EPOLL_CTL_ADD`.
+    handle: u64,
     events: u32,
     data: u64,
     /// Already fired with `EPOLLONESHOT` set; suppress until re-armed
@@ -253,6 +264,40 @@ pub fn epoll_instance_close(idx: u64) {
     });
 }
 
+/// Remove every interest-list entry that watches the file `(kind, handle)`,
+/// in every instance.  Called by `close()` and `dup2()` once the last
+/// descriptor for that file is gone.
+///
+/// This is upstream's `eventpoll_release` (fs/eventpoll.c), which runs when a
+/// file's last reference is dropped: an epoll entry does not outlive its
+/// file.  Until 2026-09-26 nothing here did this, so a closed descriptor's
+/// entry was reported as `EPOLLERR | EPOLLHUP` on every later wait, with the
+/// caller's `data` — often a pointer it had freed with the descriptor — and a
+/// reused number inherited the old registration.
+///
+/// A file that is still open through another descriptor keeps its entries,
+/// as upstream's do: they go on reporting it, and are removed when that
+/// descriptor closes too.
+///
+/// Takes [`instances_lock`]: it scans every slot's `in_use`, which is the
+/// scan the lock serialises.
+pub(crate) fn forget_file(kind: HandleKind, handle: u64) {
+    // SAFETY: `instances_lock()` is this context's lock, valid as long as the
+    // table it guards.
+    let _guard = unsafe { crate::perprocess::lock_pool(instances_lock()) };
+    // SAFETY: the guard is held, and every scan of the table takes it.
+    unsafe {
+        let table = &mut *instances_ptr();
+        for inst in table.iter_mut().filter(|inst| inst.in_use) {
+            for slot in &mut inst.entries {
+                if slot.is_some_and(|e| e.kind == kind && e.handle == handle) {
+                    *slot = None;
+                }
+            }
+        }
+    }
+}
+
 /// Returns `true` if at least one fd in the instance has a ready event
 /// matching its watched mask.  Used by `poll()`/`select()` to support
 /// nesting epoll inside another multiplexer.
@@ -263,7 +308,7 @@ pub fn epoll_instance_has_ready(idx: u64) -> bool {
             if slot.oneshot_fired {
                 continue;
             }
-            if compute_revents(slot.fd, slot.events) != 0 {
+            if compute_revents(slot.kind, slot.handle, slot.events) != 0 {
                 return true;
             }
         }
@@ -275,15 +320,11 @@ pub fn epoll_instance_has_ready(idx: u64) -> bool {
 /// Compute revents for one watched fd.  Returns 0 if not ready or if
 /// the fd is invalid (the caller handles invalid-fd reporting via
 /// `EPOLLNVAL`-equivalent semantics in `epoll_wait`).
-fn compute_revents(fd: i32, mask: u32) -> u32 {
-    let Some(entry) = fdtable::get_fd(fd) else {
-        // Watched fd was closed without EPOLL_CTL_DEL.  Linux reports
-        // EPOLLERR | EPOLLHUP in this case if the caller asked for any
-        // events; we mirror that.
-        return EPOLLERR | EPOLLHUP;
-    };
-    let (readable, writable, hangup, error) =
-        crate::poll::check_readiness(entry.kind, entry.handle);
+fn compute_revents(kind: HandleKind, handle: u64, mask: u32) -> u32 {
+    // The file the entry was added for, not whatever its number names now:
+    // an entry whose file has been closed is gone (`forget_file`), so the
+    // handle here is always live.
+    let (readable, writable, hangup, error) = crate::poll::check_readiness(kind, handle);
     let mut revents: u32 = 0;
     // Linux: POLLERR/POLLHUP imply readability for wake-up purposes.
     let eff_readable = readable || hangup || error;
@@ -398,14 +439,15 @@ fn create_internal(flags: i32) -> i32 {
 ///    is refused as `epfd` is; this compared descriptor numbers until
 ///    2026-09-25.
 /// 5. The op: ADD of a present fd → `EEXIST`; MOD or DEL of an absent one
-///    → `ENOENT`; any other op → `EINVAL`.
+///    → `ENOENT`; any other op → `EINVAL`.  "Present" means an entry for
+///    this descriptor *and this file*, as upstream's `ep_find(ep, file, fd)`
+///    does, so a number reused by a later `open` is a new entry.
 ///
-/// One deviation is kept: `EPOLL_CTL_DEL` tolerates a closed target fd,
-/// where Linux says `EBADF`.  Upstream never needs to be asked, because
-/// closing a file removes it from every interest list; this interest list
-/// is keyed by descriptor number and does not hear about the close, so the
-/// `DEL` is how a caller removes the entry (see `known-issues.md` →
-/// `B-D-EPOLL-DOES-NOT-FORGET-A-CLOSED-DESCRIPTOR`).
+/// Until 2026-09-26 `EPOLL_CTL_DEL` of a closed descriptor succeeded, where
+/// Linux says `EBADF`: the interest list did not hear about closes, and that
+/// `DEL` was the only way to remove the entry.  Closing a file's last
+/// descriptor now removes its entries ([`forget_file`]), so upstream's
+/// answer is safe to give.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut EpollEvent) -> i32 {
     // 1. EFAULT — the event, for every op but DEL, before any fd lookup.
@@ -413,30 +455,29 @@ pub extern "C" fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut EpollEvent)
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    // 2. epfd, then the target, must be open (the DEL deviation aside).
+    // 2. epfd, then the target, must be open.
     let Some(ep_entry) = fdget(epfd) else {
         errno::set_errno(errno::EBADF);
         return -1;
     };
-    let target = fdget(fd);
-    if op != EPOLL_CTL_DEL && target.is_none() {
+    let Some(target) = fdget(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
-    }
+    };
     // 3. EPERM — the target must support poll.
-    if target.as_ref().is_some_and(|t| !kind_can_poll(t.kind)) {
+    if !kind_can_poll(target.kind) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
     // 4. EINVAL — epfd must be an epoll fd, and not the target's own file.
     if ep_entry.kind != HandleKind::Epoll
-        || target
-            .as_ref()
-            .is_some_and(|t| t.kind == HandleKind::Epoll && t.handle == ep_entry.handle)
+        || (target.kind == HandleKind::Epoll && target.handle == ep_entry.handle)
     {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    // The entry's identity: this descriptor, and the file it names now.
+    let is_this = |e: &EpollEntry| e.fd == fd && e.kind == target.kind && e.handle == target.handle;
 
     let idx = ep_entry.handle;
 
@@ -457,17 +498,17 @@ pub extern "C" fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut EpollEvent)
                 // accept whatever the caller passes.
             }
             let res = with_instance_mut(idx, |inst| {
-                // Reject if fd already present.
-                for slot in inst.entries.iter().flatten() {
-                    if slot.fd == fd {
-                        return Err(errno::EEXIST);
-                    }
+                // Reject if this descriptor's file is already present.
+                if inst.entries.iter().flatten().any(is_this) {
+                    return Err(errno::EEXIST);
                 }
                 // Find a free slot.
                 for slot in &mut inst.entries {
                     if slot.is_none() {
                         *slot = Some(EpollEntry {
                             fd,
+                            kind: target.kind,
+                            handle: target.handle,
                             events: events_val,
                             data: data_val,
                             oneshot_fired: false,
@@ -498,7 +539,7 @@ pub extern "C" fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut EpollEvent)
             let res = with_instance_mut(idx, |inst| {
                 for slot in &mut inst.entries {
                     if let Some(entry) = slot.as_mut()
-                        && entry.fd == fd
+                        && is_this(entry)
                     {
                         entry.events = events_val;
                         entry.data = data_val;
@@ -525,7 +566,7 @@ pub extern "C" fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut EpollEvent)
             let res = with_instance_mut(idx, |inst| {
                 for slot in &mut inst.entries {
                     if let Some(entry) = slot.as_ref()
-                        && entry.fd == fd
+                        && is_this(entry)
                     {
                         *slot = None;
                         return Ok(());
@@ -638,7 +679,7 @@ pub unsafe extern "C" fn epoll_wait(
                     && let Some(watched) = entry.as_mut()
                     && !watched.oneshot_fired
                 {
-                    let revents = compute_revents(watched.fd, watched.events);
+                    let revents = compute_revents(watched.kind, watched.handle, watched.events);
                     if revents != 0 && events.is_null() {
                         // `ep_send_events` could not write the first event:
                         // EFAULT, with the event left pending and a oneshot
@@ -1790,10 +1831,13 @@ pub const IN_CLOEXEC: i32 = 0o2_000_000;
 /// Non-blocking flag.
 pub const IN_NONBLOCK: i32 = 0o4000;
 
-/// Mask bits we recognize on `inotify_add_watch`.  Anything else
-/// (notably `IN_MASK_ADD`, `IN_ONESHOT`, `IN_DONT_FOLLOW`,
-/// `IN_EXCL_UNLINK`, `IN_MASK_CREATE`) is accepted by the call but
-/// silently ignored on the polling fast path.
+/// The event bits of an `inotify_add_watch` mask — the part a watch filters
+/// its events by.  The control flags are handled by `inotify_add_watch`
+/// itself (`IN_ONLYDIR`, `IN_MASK_ADD`, `IN_MASK_CREATE`) and by the event
+/// pump (`IN_ONESHOT`).  Two are still accepted and ignored, because the
+/// watches here are keyed by path rather than by inode: `IN_DONT_FOLLOW`
+/// and `IN_EXCL_UNLINK` (`known-issues.md` →
+/// `TD-D-INOTIFY-SHIM-IGNORES-ITS-CONTROL-FLAGS`).
 const IN_KNOWN_EVENTS: u32 = IN_ALL_EVENTS;
 
 /// Linux's `ALL_INOTIFY_BITS` (include/linux/inotify.h:12): every bit
@@ -1857,6 +1901,9 @@ struct InotifyWatch {
     /// Kernel watch ID from `SYS_FS_WATCH_CREATE`, or 0 if the mask
     /// mapped to no kernel-deliverable events (the watch is then inert).
     kernel_id: u64,
+    /// `IN_ONESHOT`: the watch is removed, with an `IN_IGNORED`, once it has
+    /// reported one event (fs/notify/inotify/inotify_fsnotify.c:132).
+    oneshot: bool,
     /// Resolved absolute path being watched (without trailing slash),
     /// used to compute event basenames relative to the watch.
     path: [u8; INOTIFY_PATH_MAX],
@@ -1868,6 +1915,7 @@ const INOTIFY_WATCH_INIT: InotifyWatch = InotifyWatch {
     wd: 0,
     mask: 0,
     kernel_id: 0,
+    oneshot: false,
     path: [0u8; INOTIFY_PATH_MAX],
     path_len: 0,
 };
@@ -2260,6 +2308,33 @@ const TRANSLATION_EMPTY: Translation = Translation {
     disarm: false,
 };
 
+/// `IN_ONESHOT`, applied to one kernel event's translation: upstream queues
+/// the watch's first event and then destroys the mark
+/// (fs/notify/inotify/inotify_fsnotify.c:132), which queues `IN_IGNORED`
+/// (`inotify_freeing_mark`, :138).  So a translation that reports anything
+/// for the watch is cut to its first event, followed by `IN_IGNORED`, and
+/// disarms the watch.  A rename reported as `IN_MOVED_FROM` + `IN_MOVED_TO`
+/// therefore yields only the first, as upstream's two separate events do.
+///
+/// A translation that is already a disarm (a self-delete: `IN_DELETE_SELF`,
+/// `IN_IGNORED`) and an overflow are left alone — neither is an event the
+/// watch reports.
+fn retire_after_first_event(t: &mut Translation, wd: i32) {
+    if t.disarm || t.count == 0 {
+        return;
+    }
+    let Some(first) = t.events.first().copied() else {
+        return;
+    };
+    if first.mask & IN_Q_OVERFLOW != 0 {
+        return;
+    }
+    *t = TRANSLATION_EMPTY;
+    push_tr(t, first);
+    push_tr(t, make_event(wd, IN_IGNORED, &[]));
+    t.disarm = true;
+}
+
 fn push_tr(t: &mut Translation, ev: InotifyPending) {
     if let Some(slot) = t.events.get_mut(t.count) {
         *slot = ev;
@@ -2415,8 +2490,9 @@ fn stat_self(path: &[u8]) -> (bool, u64, bool) {
 
 /// Drain all pending kernel events for one watch and queue the
 /// translated inotify events on its instance.  Auto-removes the watch
-/// (and closes its kernel watch) on a self-delete.
-fn pump_one_watch(idx: u64, wd: i32, kernel_id: u64, mask: u32, watched: &[u8]) {
+/// (and closes its kernel watch) on a self-delete, and — for an
+/// `IN_ONESHOT` watch — after the first event it reports.
+fn pump_one_watch(idx: u64, wd: i32, kernel_id: u64, mask: u32, oneshot: bool, watched: &[u8]) {
     loop {
         // Read a batch of kernel records into the shared scratch buffer.  The
         // guard covers the fill *and* the parse below: the records are read
@@ -2466,9 +2542,12 @@ fn pump_one_watch(idx: u64, wd: i32, kernel_id: u64, mask: u32, watched: &[u8]) 
             } else {
                 0
             };
-            let tr = translate_kernel_event(
+            let mut tr = translate_kernel_event(
                 watched, mask, wd, etype, affected, new_path, cookie, is_dir,
             );
+            if oneshot {
+                retire_after_first_event(&mut tr, wd);
+            }
             let _ = with_inotify_mut(idx, |inst| {
                 for k in 0..tr.count {
                     if let Some(ev) = tr.events.get(k) {
@@ -2508,12 +2587,11 @@ fn pump_instance(idx: u64) {
         Ok(i) if i < MAX_INOTIFY_INSTANCES => i,
         _ => return,
     };
-    // Snapshot the active watches by value so we don't hold a borrow on
-    // the instance table across `pump_one_watch` (which re-borrows it).
-    let mut snap: [(bool, i32, u64, u32, [u8; INOTIFY_PATH_MAX], usize); MAX_INOTIFY_WATCHES] =
-        [(false, 0, 0, 0, [0u8; INOTIFY_PATH_MAX], 0); MAX_INOTIFY_WATCHES];
+    // Snapshot the watches by value so we don't hold a borrow on the
+    // instance table across `pump_one_watch` (which re-borrows it).  A slot
+    // is pumped if it is in use and has a kernel watch behind it.
     // SAFETY: the caller names one slot by index; see [`with_instance_mut`].
-    unsafe {
+    let snap = unsafe {
         let table = &*inotify_table_ptr();
         let Some(inst) = table.get(inst_id) else {
             return;
@@ -2521,24 +2599,13 @@ fn pump_instance(idx: u64) {
         if !inst.in_use {
             return;
         }
-        for (j, w) in inst.watches.iter().enumerate() {
-            if w.in_use
-                && w.kernel_id != 0
-                && let Some(slot) = snap.get_mut(j)
-            {
-                *slot = (true, w.wd, w.kernel_id, w.mask, w.path, w.path_len as usize);
-            }
-        }
-    }
-    for entry in &snap {
-        let (active, wd, kernel_id, mask, path_buf, path_len) = *entry;
-        if !active {
-            continue;
-        }
-        let Some(watched) = path_buf.get(..path_len) else {
+        inst.watches
+    };
+    for w in snap.iter().filter(|w| w.in_use && w.kernel_id != 0) {
+        let Some(watched) = w.path.get(..w.path_len as usize) else {
             continue;
         };
-        pump_one_watch(idx, wd, kernel_id, mask, watched);
+        pump_one_watch(idx, w.wd, w.kernel_id, w.mask, w.oneshot, watched);
     }
 }
 
@@ -2728,6 +2795,33 @@ pub extern "C" fn inotify_init1(flags: i32) -> i32 {
     fd
 }
 
+/// What `inotify_add_watch` makes of a watch, given the one already on the
+/// path (`old`, as `(event mask, oneshot)`), the caller's `flags` word, and
+/// what it asks for: `inotify_update_existing_watch` (inotify_user.c:537).
+///
+/// * no existing watch — the new mask and flags;
+/// * existing, `IN_MASK_CREATE` — `EEXIST` (:551);
+/// * existing, `IN_MASK_ADD` — the new mask and flags ORed into the old
+///   (:564-565);
+/// * existing, neither — the new ones replace the old (:560-563).
+///
+/// Until 2026-09-26 both flags were ignored, so every re-add replaced.
+fn watch_after_add(
+    old: Option<(u32, bool)>,
+    flags: u32,
+    requested_mask: u32,
+    requested_oneshot: bool,
+) -> Result<(u32, bool), i32> {
+    use crate::linux_fsnotify_user_types::{IN_MASK_ADD, IN_MASK_CREATE};
+    match old {
+        Some(_) if flags & IN_MASK_CREATE != 0 => Err(errno::EEXIST),
+        Some((old_mask, old_oneshot)) if flags & IN_MASK_ADD != 0 => {
+            Ok((old_mask | requested_mask, old_oneshot || requested_oneshot))
+        }
+        _ => Ok((requested_mask, requested_oneshot)),
+    }
+}
+
 /// Add a watch to an inotify instance.
 ///
 /// Returns a non-negative watch descriptor on success, -1 on error.
@@ -2758,7 +2852,7 @@ pub extern "C" fn inotify_init1(flags: i32) -> i32 {
 /// mask check fires before any user pointer is touched.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn inotify_add_watch(fd: i32, pathname: *const u8, mask: u32) -> i32 {
-    use crate::linux_fsnotify_user_types::{IN_MASK_ADD, IN_MASK_CREATE};
+    use crate::linux_fsnotify_user_types::{IN_MASK_ADD, IN_MASK_CREATE, IN_ONESHOT, IN_ONLYDIR};
 
     // Steps 1-2: the mask, before any user pointer or fd is touched.
     if mask & !ALL_INOTIFY_BITS != 0 || mask == 0 {
@@ -2802,23 +2896,28 @@ pub extern "C" fn inotify_add_watch(fd: i32, pathname: *const u8, mask: u32) -> 
     }
     let path_bytes = &resolved[..resolved_len];
 
-    // Stat to check existence (Linux: a missing path → ENOENT).  inotify
-    // watches both files and directories; the kernel watch backend does
-    // not distinguish, so we no longer track the type.
-    let (exists, _self_size, _is_dir) = stat_self(path_bytes);
+    // Stat to check existence (Linux: a missing path → ENOENT), and — for
+    // `IN_ONLYDIR`, which upstream turns into `LOOKUP_DIRECTORY`
+    // (inotify_user.c:774) — that it is a directory, or ENOTDIR.
+    let (exists, _self_size, is_dir) = stat_self(path_bytes);
     if !exists {
         errno::set_errno(errno::ENOENT);
         return -1;
     }
+    if mask & IN_ONLYDIR != 0 && !is_dir {
+        errno::set_errno(errno::ENOTDIR);
+        return -1;
+    }
 
-    let effective_mask = mask & IN_KNOWN_EVENTS;
-    let kmask = inotify_to_kernel_mask(effective_mask);
+    let requested_mask = mask & IN_KNOWN_EVENTS;
+    let requested_oneshot = mask & IN_ONESHOT != 0;
 
     // Phase 1: locate an existing watch for this path (re-arm) or a free
     // slot (new watch).  We only capture indices/ids here — the kernel
     // watch is (re)created outside the borrow because it issues a
     // syscall.
-    let mut existing: Option<(usize, i32, u64)> = None; // (slot, wd, old kernel_id)
+    // (slot, wd, old kernel_id, old mask, old oneshot)
+    let mut existing: Option<(usize, i32, u64, u32, bool)> = None;
     let mut free_slot: Option<usize> = None;
     let _ = with_inotify_mut(idx, |inst| {
         for (j, w) in inst.watches.iter().enumerate() {
@@ -2826,7 +2925,7 @@ pub extern "C" fn inotify_add_watch(fd: i32, pathname: *const u8, mask: u32) -> 
                 && w.path_len as usize == resolved_len
                 && w.path.get(..resolved_len) == Some(path_bytes)
             {
-                existing = Some((j, w.wd, w.kernel_id));
+                existing = Some((j, w.wd, w.kernel_id, w.mask, w.oneshot));
                 return;
             }
         }
@@ -2841,6 +2940,17 @@ pub extern "C" fn inotify_add_watch(fd: i32, pathname: *const u8, mask: u32) -> 
         errno::set_errno(errno::ENOSPC);
         return -1;
     }
+
+    let old = existing.map(|(_, _, _, old_mask, old_oneshot)| (old_mask, old_oneshot));
+    let (effective_mask, oneshot) =
+        match watch_after_add(old, mask, requested_mask, requested_oneshot) {
+            Ok(v) => v,
+            Err(e) => {
+                errno::set_errno(e);
+                return -1;
+            }
+        };
+    let kmask = inotify_to_kernel_mask(effective_mask);
 
     // Create the backing kernel watch unless the mask maps to no kernel
     // event bits (e.g. only IN_OPEN / IN_CLOSE_* requested), in which
@@ -2864,10 +2974,11 @@ pub extern "C" fn inotify_add_watch(fd: i32, pathname: *const u8, mask: u32) -> 
     let mut wd_out: i32 = -1;
     let mut to_close = 0u64;
     let _ = with_inotify_mut(idx, |inst| {
-        if let Some((j, wd, old_kid)) = existing {
+        if let Some((j, wd, old_kid, _, _)) = existing {
             if let Some(w) = inst.watches.get_mut(j) {
                 w.mask = effective_mask;
                 w.kernel_id = new_kid;
+                w.oneshot = oneshot;
                 wd_out = wd;
             }
             to_close = old_kid;
@@ -2883,6 +2994,7 @@ pub extern "C" fn inotify_add_watch(fd: i32, pathname: *const u8, mask: u32) -> 
                 w.wd = next;
                 w.mask = effective_mask;
                 w.kernel_id = new_kid;
+                w.oneshot = oneshot;
                 if let Some(dst) = w.path.get_mut(..resolved_len) {
                     dst.copy_from_slice(path_bytes);
                 }
@@ -3888,6 +4000,82 @@ mod tests {
         crate::file::close(fd);
     }
 
+    /// The re-add rule (`inotify_update_existing_watch`): IN_MASK_CREATE
+    /// refuses an existing watch, IN_MASK_ADD merges, anything else replaces.
+    #[test]
+    fn test_watch_after_add_follows_update_existing_watch() {
+        use crate::linux_fsnotify_user_types::{IN_MASK_ADD, IN_MASK_CREATE};
+        // No watch yet: whatever was asked, whatever the flags.
+        assert_eq!(
+            watch_after_add(None, IN_MASK_CREATE, IN_MODIFY, true),
+            Ok((IN_MODIFY, true))
+        );
+        assert_eq!(
+            watch_after_add(None, IN_MASK_ADD, IN_CREATE, false),
+            Ok((IN_CREATE, false))
+        );
+        // An existing one.
+        let old = Some((IN_CREATE, true));
+        assert_eq!(
+            watch_after_add(old, IN_MASK_CREATE, IN_MODIFY, false),
+            Err(errno::EEXIST)
+        );
+        assert_eq!(
+            watch_after_add(old, IN_MASK_ADD, IN_MODIFY, false),
+            Ok((IN_CREATE | IN_MODIFY, true)),
+            "IN_MASK_ADD keeps the old mask and the old oneshot"
+        );
+        assert_eq!(
+            watch_after_add(old, 0, IN_MODIFY, false),
+            Ok((IN_MODIFY, false)),
+            "without IN_MASK_ADD the new mask and flags replace the old"
+        );
+    }
+
+    /// IN_ONESHOT: a translation that reports something is cut to its first
+    /// event and an IN_IGNORED, and disarms; a self-delete and an overflow
+    /// are left as they are; an empty translation stays empty.
+    #[test]
+    fn test_retire_after_first_event() {
+        let wd = 5;
+        let mut t = TRANSLATION_EMPTY;
+        push_tr(&mut t, pending_with_cookie(wd, IN_MOVED_FROM, 9, b"a"));
+        push_tr(&mut t, pending_with_cookie(wd, IN_MOVED_TO, 9, b"b"));
+        retire_after_first_event(&mut t, wd);
+        assert_eq!(t.count, 2);
+        let masks = [t.events[0].mask, t.events[1].mask];
+        assert_eq!(
+            masks,
+            [IN_MOVED_FROM, IN_IGNORED],
+            "only the first, then IN_IGNORED"
+        );
+        assert!(t.disarm);
+
+        let mut self_delete = TRANSLATION_EMPTY;
+        push_tr(&mut self_delete, make_event(wd, IN_DELETE_SELF, &[]));
+        push_tr(&mut self_delete, make_event(wd, IN_IGNORED, &[]));
+        self_delete.disarm = true;
+        retire_after_first_event(&mut self_delete, wd);
+        let masks = [self_delete.events[0].mask, self_delete.events[1].mask];
+        assert_eq!(
+            masks,
+            [IN_DELETE_SELF, IN_IGNORED],
+            "one IN_IGNORED, not two"
+        );
+
+        let mut overflow = TRANSLATION_EMPTY;
+        push_tr(
+            &mut overflow,
+            pending_with_cookie(-1, IN_Q_OVERFLOW, 0, &[]),
+        );
+        retire_after_first_event(&mut overflow, wd);
+        assert_eq!((overflow.count, overflow.disarm), (1, false));
+
+        let mut empty = TRANSLATION_EMPTY;
+        retire_after_first_event(&mut empty, wd);
+        assert_eq!((empty.count, empty.disarm), (0, false));
+    }
+
     /// `ALL_INOTIFY_BITS` is 0xF700_EFFF (include/linux/inotify.h:12).
     #[test]
     fn test_all_inotify_bits_value() {
@@ -4683,6 +4871,124 @@ mod tests {
         let fd = epoll_create1(0xDEAD_BEEFu32 as i32);
         assert_eq!(fd, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// Collect up to four ready events without waiting.
+    fn wait_now(ep: i32) -> std::vec::Vec<(u32, u64)> {
+        let mut out = [EpollEvent { events: 0, data: 0 }; 4];
+        // SAFETY: `out` holds 4 entries.
+        let n = unsafe { epoll_wait(ep, out.as_mut_ptr(), 4, 0) };
+        assert!(n >= 0, "epoll_wait failed: errno {}", errno::get_errno());
+        out.iter()
+            .take(n as usize)
+            .map(|e| {
+                let (ev, data) = (e.events, e.data);
+                (ev, data)
+            })
+            .collect()
+    }
+
+    /// Closing a watched file's last descriptor removes it from the interest
+    /// list, as upstream's `eventpoll_release` does.  Until 2026-09-26 the
+    /// entry stayed and every later wait reported EPOLLERR|EPOLLHUP with the
+    /// caller's stale `data`.
+    #[test]
+    fn test_epoll_forgets_a_closed_descriptor() {
+        let ep = epoll_create1(0);
+        assert!(ep >= 0);
+        let efd = eventfd(0, 0);
+        assert!(efd >= 0);
+        let mut ev = EpollEvent {
+            events: EPOLLOUT,
+            data: 7,
+        };
+        assert_eq!(epoll_ctl(ep, EPOLL_CTL_ADD, efd, &raw mut ev), 0);
+        assert_eq!(wait_now(ep).len(), 1, "an eventfd is always writable");
+        assert_eq!(crate::file::close(efd), 0);
+        assert!(
+            wait_now(ep).is_empty(),
+            "the closed file's entry must be gone"
+        );
+        crate::file::close(ep);
+    }
+
+    /// A file still open through a `dup` keeps its entry, reported through
+    /// the file rather than the (closed) number; a number reused by a new
+    /// file is a new entry, not EEXIST; and the old entry goes when the dup
+    /// closes.  This is upstream's `(file, fd)` keying.
+    #[test]
+    fn test_epoll_entry_follows_the_file_not_the_number() {
+        let ep = epoll_create1(0);
+        assert!(ep >= 0);
+        let a = eventfd(0, 0);
+        assert!(a >= 0);
+        let keep = crate::file::dup(a);
+        assert!(keep >= 0);
+        let mut ev = EpollEvent {
+            events: EPOLLOUT,
+            data: 1,
+        };
+        assert_eq!(epoll_ctl(ep, EPOLL_CTL_ADD, a, &raw mut ev), 0);
+        assert_eq!(crate::file::close(a), 0);
+        assert_eq!(
+            wait_now(ep),
+            [(EPOLLOUT, 1)],
+            "the dup keeps the file, and its entry"
+        );
+
+        // DEL of the closed number is EBADF, as upstream: there is no
+        // descriptor to name the entry by.
+        errno::set_errno(0);
+        assert_eq!(epoll_ctl(ep, EPOLL_CTL_DEL, a, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+
+        let b = eventfd(0, 0);
+        assert!(b >= 0);
+        let mut ev2 = EpollEvent {
+            events: EPOLLOUT,
+            data: 2,
+        };
+        assert_eq!(
+            epoll_ctl(ep, EPOLL_CTL_ADD, b, &raw mut ev2),
+            0,
+            "a new file is a new entry, even under a reused number"
+        );
+        let mut both = wait_now(ep);
+        both.sort_by_key(|&(_, d)| d);
+        assert_eq!(both, [(EPOLLOUT, 1), (EPOLLOUT, 2)]);
+
+        assert_eq!(crate::file::close(keep), 0);
+        assert_eq!(
+            wait_now(ep),
+            [(EPOLLOUT, 2)],
+            "the last close removes the first entry"
+        );
+        crate::file::close(b);
+        crate::file::close(ep);
+    }
+
+    /// `dup2` over a watched descriptor closes the file it held; if that was
+    /// the file's last descriptor its entry goes too.
+    #[test]
+    fn test_epoll_forgets_a_file_dup2_evicts() {
+        let ep = epoll_create1(0);
+        assert!(ep >= 0);
+        let watched = eventfd(0, 0);
+        let other = eventfd(0, 0);
+        assert!(watched >= 0 && other >= 0);
+        let mut ev = EpollEvent {
+            events: EPOLLOUT,
+            data: 9,
+        };
+        assert_eq!(epoll_ctl(ep, EPOLL_CTL_ADD, watched, &raw mut ev), 0);
+        assert_eq!(crate::file::dup2(other, watched), watched);
+        assert!(
+            wait_now(ep).is_empty(),
+            "the evicted file's entry must be gone"
+        );
+        crate::file::close(watched);
+        crate::file::close(other);
+        crate::file::close(ep);
     }
 
     #[test]

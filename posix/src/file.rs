@@ -216,6 +216,9 @@ pub extern "C" fn close(fd: Fd) -> i32 {
     if fdtable::is_handle_referenced(entry.kind, entry.handle) {
         return 0;
     }
+    // The file's last descriptor: it leaves every epoll interest list, as
+    // upstream's `eventpoll_release` makes it.
+    crate::epoll::forget_file(entry.kind, entry.handle);
 
     let ret = match entry.kind {
         HandleKind::File => syscall1(SYS_FS_CLOSE, entry.handle),
@@ -1834,6 +1837,9 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
         };
         // Only close the old kernel handle if no other fd still uses it.
         if !fdtable::is_handle_referenced(old.kind, old.handle) {
+            // And only then does the evicted file leave epoll's interest
+            // lists — see `close()`.
+            crate::epoll::forget_file(old.kind, old.handle);
             // For TCP streams: respect SO_LINGER on the evicted socket,
             // matching close() behavior per POSIX dup2 spec ("closed first").
             if old.kind == HandleKind::TcpStream && old.handle != 0 {

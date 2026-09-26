@@ -213,18 +213,23 @@ impl IconType {
         Self::Executable,
     ];
 
-    /// Unicode glyph representing this icon type.
-    fn glyph(self) -> &'static str {
+    /// The icon this type is drawn as, by its freedesktop name -- every one
+    /// in the built-in icon set, so there is always a picture.
+    ///
+    /// They were emoji glyphs until 2026-09-26, drawn as text: a UI face
+    /// without emoji drew a box for every icon on the desktop.
+    #[must_use]
+    pub const fn icon_name(self) -> &'static str {
         match self {
-            Self::Folder => "\u{1F4C1}",     // folder
-            Self::File => "\u{1F4C4}",       // page facing up
-            Self::Shortcut => "\u{1F517}",   // link
-            Self::Drive => "\u{1F4BE}",      // floppy disk (drive)
-            Self::RecycleBin => "\u{1F5D1}", // wastebasket
-            Self::Computer => "\u{1F4BB}",   // laptop
-            Self::Document => "\u{1F4DD}",   // memo
-            Self::Image => "\u{1F5BC}",      // framed picture
-            Self::Executable => "\u{2699}",  // gear
+            Self::Folder => "folder",
+            Self::File => "text-x-generic",
+            Self::Shortcut => "emblem-symbolic-link",
+            Self::Drive => "drive-harddisk",
+            Self::RecycleBin => "user-trash",
+            Self::Computer => "computer",
+            Self::Document => "x-office-document",
+            Self::Image => "image-x-generic",
+            Self::Executable => "application-x-executable",
         }
     }
 
@@ -729,6 +734,8 @@ pub struct DesktopIconLayer {
     /// off the icons because a default's own name is not remembered anywhere
     /// once it is changed, so "was this renamed" cannot be asked of the icon.
     label_overrides: BTreeMap<String, String>,
+    /// The icons this layer drew, by image id, for the session to upload.
+    icon_registry: crate::IconRegistry,
 }
 
 impl DesktopIconLayer {
@@ -747,7 +754,20 @@ impl DesktopIconLayer {
             renaming: None,
             caret_width: DEFAULT_CARET_WIDTH,
             label_overrides: BTreeMap::new(),
+            icon_registry: crate::IconRegistry::default(),
         }
+    }
+
+    /// What the icon this layer drew under `id` is, if it drew one.
+    #[must_use]
+    pub fn icon_request(&self, id: u64) -> Option<crate::IconRequest> {
+        self.icon_registry.request(id)
+    }
+
+    /// Forget the icons drawn: the appearance changed, and they are drawn
+    /// again in new colours under new ids.
+    pub fn clear_icon_requests(&self) {
+        self.icon_registry.clear();
     }
 
     // ======================================================================
@@ -2182,22 +2202,21 @@ impl DesktopIconLayer {
                         corner_radii: CornerRadii::all(4.0),
                     });
 
-                    // Ghost glyph.
+                    // Ghost icon: the icon's own, faded.
                     let glyph = px_f32(self.glyph_px);
                     let glyph_x = ghost_x + (self.grid.cell_width() as f32 - glyph) / 2.0;
                     let glyph_y = ghost_y + ICON_TOP_PADDING;
-                    cmds.push(RenderCommand::Text {
+                    let c = p.ink(icon.icon_type.color(p));
+                    cmds.push(RenderCommand::Image {
                         x: glyph_x,
                         y: glyph_y,
-                        text: icon.icon_type.glyph().to_string(),
-                        color: {
-                            let c = p.ink(icon.icon_type.color(p));
-                            Color::rgba(c.r, c.g, c.b, 120)
-                        },
-                        font_size: glyph,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: None,
-                        overflow: TextOverflow::Clip,
+                        width: glyph,
+                        height: glyph,
+                        image_id: self.icon_registry.icon(
+                            icon.icon_type.icon_name(),
+                            self.glyph_px,
+                            Color::rgba(c.r, c.g, c.b, 120),
+                        ),
                     });
                 }
             }
@@ -2288,20 +2307,22 @@ impl DesktopIconLayer {
             });
         }
 
-        // Icon glyph (centered horizontally within the cell).
+        // The icon (centred horizontally within the cell), in its type's hue:
+        // the hues are the legend the glyphs used to carry.
         let glyph = px_f32(self.glyph_px);
         let glyph_x = ix + (cw - glyph) / 2.0;
         let glyph_y = iy + ICON_TOP_PADDING;
 
-        cmds.push(RenderCommand::Text {
+        cmds.push(RenderCommand::Image {
             x: glyph_x,
             y: glyph_y,
-            text: icon.icon_type.glyph().to_string(),
-            color: p.ink(icon.icon_type.color(p)),
-            font_size: glyph,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            width: glyph,
+            height: glyph,
+            image_id: self.icon_registry.icon(
+                icon.icon_type.icon_name(),
+                self.glyph_px,
+                p.ink(icon.icon_type.color(p)),
+            ),
         });
 
         // The field replaces the label while the name is being edited: the
@@ -3940,7 +3961,7 @@ mod tests {
 
         for light in [false, true] {
             let cmds = layer.render(&Palette::for_mode(light));
-            // Each icon produces: glyph text + label shadow + label text
+            // Each icon produces: its icon image + label shadow + label text
             // (minimum). Selected icons also get highlight rect + border.
             assert!(!cmds.is_empty());
             // At least 3 commands per icon (glyph + shadow + text) * 4 icons.
@@ -4013,9 +4034,8 @@ mod tests {
         );
         layer.select_single(id);
 
-        // The glyphs are Text commands too, and they *do* follow the mode
-        // (`p.text` for a plain file), so match on the label strings rather
-        // than on the command kind.
+        // Match on the label strings rather than on the command kind: the
+        // selection's own label is text like any other.
         let labels_of = |light: bool| -> Vec<(String, Color)> {
             layer
                 .render(&Palette::for_mode(light))
@@ -4222,16 +4242,18 @@ mod tests {
         layer.add_icon("Readme", IconType::File, custom("r"), x, y);
         layer.set_icon_size(48);
         let cmds = layer.render(&Palette::for_mode(false));
-        let glyph_sizes: Vec<f32> = cmds
+        let glyph_sizes: Vec<(f32, f32)> = cmds
             .iter()
             .filter_map(|c| match c {
-                RenderCommand::Text { font_size, .. } if *font_size > LABEL_FONT_SIZE => {
-                    Some(*font_size)
-                }
+                RenderCommand::Image { width, height, .. } => Some((*width, *height)),
                 _ => None,
             })
             .collect();
-        assert_eq!(glyph_sizes, [48.0], "one glyph, at the setting's size");
+        assert_eq!(
+            glyph_sizes,
+            [(48.0, 48.0)],
+            "one icon, at the setting's size"
+        );
 
         // The last one: each line is drawn twice, its shadow first, one
         // pixel right and down -- and the shadow is not what is centred.
@@ -4251,6 +4273,92 @@ mod tests {
         assert!(
             (left - right).abs() <= 1.0,
             "centred: {left} on the left, {right} on the right"
+        );
+    }
+
+    /// The one icon image `layer` draws, with what it was asked to draw.
+    fn only_image(layer: &DesktopIconLayer, p: &Palette) -> (u64, crate::IconRequest) {
+        let ids: Vec<u64> = layer
+            .render(p)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Image { image_id, .. } => Some(*image_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 1, "one icon, one image: {ids:?}");
+        let request = layer
+            .icon_request(ids[0])
+            .expect("the layer forgot the icon it drew");
+        (ids[0], request)
+    }
+
+    /// **Each type of icon is drawn as its own picture, in its own hue, and
+    /// every picture is one the built-in set draws.**
+    ///
+    /// They were emoji until 2026-09-26, drawn as text: a UI face without
+    /// emoji drew a box for every icon on the desktop. A name the built-in set
+    /// did not draw would be the same failure one step later -- a gap where
+    /// the icon should be -- on every machine with no icon theme installed.
+    #[test]
+    fn every_type_of_icon_draws_its_own_picture_in_its_own_hue() {
+        let drawn = appearance::icons::built_in_names();
+        for dark in [false, true] {
+            let p = Palette::for_mode(dark);
+            for ty in IconType::ALL {
+                assert!(
+                    drawn.contains(&ty.icon_name()),
+                    "{ty:?} is drawn as {}, which the built-in set does not draw",
+                    ty.icon_name()
+                );
+                let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+                let (x, y) = layer.grid.from_cell(0, 0);
+                layer.add_icon("it", ty, custom("it"), x, y);
+                let (id, request) = only_image(&layer, &p);
+                assert_ne!(id & crate::ICON_ID_TAG, 0, "{ty:?}: not an icon id");
+                assert_eq!(request.name, ty.icon_name(), "{ty:?}");
+                assert_eq!(request.color, p.ink(ty.color(&p)), "{ty:?}");
+                assert_eq!(request.px, layer.glyph_px, "{ty:?}");
+            }
+        }
+    }
+
+    /// **A dragged icon's ghost is its own picture, faded** -- the same
+    /// icon in the same hue at a lower alpha, so the icon being carried is
+    /// recognisably the one picked up.
+    #[test]
+    fn a_dragged_icons_ghost_is_its_own_picture_faded() {
+        let p = Palette::for_mode(false);
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let (x, y) = layer.grid.from_cell(0, 0);
+        layer.add_icon("pic", IconType::Image, custom("pic"), x, y);
+        let (sx, sy) = (x as f32 + 20.0, y as f32 + 20.0);
+        layer.handle_mouse_down(sx, sy, MouseButton::Left, false);
+        layer.handle_mouse_move(sx + 300.0, sy, false);
+
+        let requests: Vec<crate::IconRequest> = layer
+            .render(&p)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Image { image_id, .. } => layer.icon_request(*image_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(requests.len(), 2, "the icon and its ghost: {requests:?}");
+        let (icon, ghost) = (&requests[0], &requests[1]);
+        assert_eq!(ghost.name, icon.name);
+        assert_eq!(ghost.px, icon.px);
+        let hue = p.ink(IconType::Image.color(&p));
+        assert_eq!(icon.color, hue);
+        assert_eq!(
+            (ghost.color.r, ghost.color.g, ghost.color.b),
+            (hue.r, hue.g, hue.b),
+            "the ghost is another colour"
+        );
+        assert!(
+            ghost.color.a < hue.a,
+            "the ghost is not faded: {:?}",
+            ghost.color
         );
     }
 

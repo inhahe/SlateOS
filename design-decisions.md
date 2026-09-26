@@ -79929,8 +79929,10 @@ to use them.
 
 ### What is not done here
 
-- The taskbar, the desktop's icons and the tray still draw words or glyphs;
-  they move onto the icons next.
+- The taskbar and the tray still draw words; they move onto the icons next.
+  (The desktop's icons did the same day: each type is its own picture in its
+  own hue, and a dragged icon's ghost is the same picture faded -- an icon
+  drawn in a translucent colour is drawn translucent.)
 - Programs have no icon of their own: which icon is a program's is the
   application registry's to say (`open-questions.md`).
 - A change to an icon file while its theme stays chosen is not noticed until

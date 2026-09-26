@@ -3003,9 +3003,9 @@ fn scratch(name: &str, bytes: &[u8]) -> std::path::PathBuf {
     path
 }
 
-/// Every image upload the session sent, as `(window, image_id, width, height,
-/// stride, byte count)`.
-fn uploads(desktop: &Desktop) -> Vec<(u64, u64, u32, u32, u32, usize)> {
+/// Every image upload the session sent, icons and pictures alike, as
+/// `(window, image_id, width, height, stride, byte count)`.
+fn all_uploads(desktop: &Desktop) -> Vec<(u64, u64, u32, u32, u32, usize)> {
     desktop
         .borrow()
         .seen
@@ -3025,8 +3025,27 @@ fn uploads(desktop: &Desktop) -> Vec<(u64, u64, u32, u32, u32, usize)> {
         .collect()
 }
 
-/// Every image release the session sent, as `(window, image_id)`.
-fn drops(desktop: &Desktop) -> Vec<(u64, u64)> {
+/// Every *picture* the session uploaded -- a wallpaper, the greeter's --
+/// leaving out the icons, which the desktop's own icons send at start and
+/// which are not what a test of pictures is about.
+fn uploads(desktop: &Desktop) -> Vec<(u64, u64, u32, u32, u32, usize)> {
+    all_uploads(desktop)
+        .into_iter()
+        .filter(|u| u.1 & crate::ICON_ID_TAG == 0)
+        .collect()
+}
+
+/// Every icon the session uploaded.
+fn icon_uploads(desktop: &Desktop) -> Vec<(u64, u64, u32, u32, u32, usize)> {
+    all_uploads(desktop)
+        .into_iter()
+        .filter(|u| u.1 & crate::ICON_ID_TAG != 0)
+        .collect()
+}
+
+/// Every image release the session sent, icons and pictures alike, as
+/// `(window, image_id)`.
+fn all_drops(desktop: &Desktop) -> Vec<(u64, u64)> {
     desktop
         .borrow()
         .seen
@@ -3038,13 +3057,40 @@ fn drops(desktop: &Desktop) -> Vec<(u64, u64)> {
         .collect()
 }
 
-/// The names of every request the session has sent, in order.
+/// Every *picture* released -- not an icon.
+fn drops(desktop: &Desktop) -> Vec<(u64, u64)> {
+    all_drops(desktop)
+        .into_iter()
+        .filter(|d| d.1 & crate::ICON_ID_TAG == 0)
+        .collect()
+}
+
+/// Every icon released.
+fn icon_drops(desktop: &Desktop) -> Vec<(u64, u64)> {
+    all_drops(desktop)
+        .into_iter()
+        .filter(|d| d.1 & crate::ICON_ID_TAG != 0)
+        .collect()
+}
+
+/// The pictures the session uploaded and released, in the order it sent them,
+/// as `("UploadImage" | "DropImage", image_id)` -- icons left out.
 ///
-/// Separate from the typed helpers above because two of these tests are about
+/// Separate from the typed helpers above because a test here is about
 /// *sequence* rather than payload — a drop that arrives after the upload it was
 /// meant to make room for is a correct-looking pair in the wrong order.
-fn order(desktop: &Desktop) -> Vec<&'static str> {
-    desktop.borrow_mut().asked()
+fn picture_order(desktop: &Desktop) -> Vec<(&'static str, u64)> {
+    desktop
+        .borrow()
+        .seen
+        .iter()
+        .filter_map(|r| match r.body {
+            RequestBody::UploadImage { image_id, .. } => Some(("UploadImage", image_id)),
+            RequestBody::DropImage { image_id, .. } => Some(("DropImage", image_id)),
+            _ => None,
+        })
+        .filter(|(_, id)| id & crate::ICON_ID_TAG == 0)
+        .collect()
 }
 
 #[test]
@@ -3155,15 +3201,15 @@ fn a_slideshow_step_releases_the_old_picture_before_uploading_the_new_one() {
     assert_eq!(sent[0].1, first);
     assert_eq!(sent[1].1, second);
 
-    let names = order(&desktop);
+    let names = picture_order(&desktop);
     let dropped = names
         .iter()
-        .position(|n| *n == "DropImage")
+        .position(|n| n.0 == "DropImage")
         .expect("no drop was sent");
     let second_upload = names
         .iter()
         .enumerate()
-        .filter(|(_, n)| **n == "UploadImage")
+        .filter(|(_, n)| n.0 == "UploadImage")
         .map(|(i, _)| i)
         .nth(1)
         .expect("no second upload was sent");
@@ -5333,7 +5379,7 @@ fn the_start_menus_icons_go_up_before_the_frame_that_names_them() {
             crate::StartShortcut::ALL.len() + 1,
             "a place or the power button drew no icon"
         );
-        let sent = uploads(&desktop);
+        let sent = icon_uploads(&desktop);
         for (id, px) in &wanted {
             let bytes = usize::try_from(px * px * 4).unwrap();
             assert!(
@@ -5355,7 +5401,160 @@ fn the_start_menus_icons_go_up_before_the_frame_that_names_them() {
         );
 
         session.paint_chrome().expect("paint again");
-        assert_eq!(uploads(&desktop).len(), sent.len(), "an icon went up twice");
+        assert_eq!(
+            icon_uploads(&desktop).len(),
+            sent.len(),
+            "an icon went up twice"
+        );
+    });
+}
+
+/// The icon uploads to `window` sent since the last image release of any
+/// kind, as `(image_id, size)`.
+fn icons_sent_since_the_last_drop(desktop: &Desktop, window: u64) -> Vec<(u64, u32)> {
+    let desktop = desktop.borrow();
+    let from = desktop
+        .seen
+        .iter()
+        .rposition(|r| matches!(r.body, RequestBody::DropImage { .. }))
+        .expect("nothing was ever dropped");
+    desktop.seen[from..]
+        .iter()
+        .filter_map(|r| match &r.body {
+            RequestBody::UploadImage {
+                window: w,
+                image_id,
+                width,
+                ..
+            } if *w == window && image_id & crate::ICON_ID_TAG != 0 => Some((*image_id, *width)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **A desktop icon reaches the compositor before the background frame that
+/// names it**, on the background's own surface and at the size it is drawn.
+#[test]
+fn a_desktop_icon_goes_up_before_the_background_that_names_it() {
+    let (mut session, desktop, _turn) = session();
+    let background = session.background().window();
+    // A type none of the default icons is, so its picture is new here.
+    session.shell_mut().icons.add_icon(
+        "setup",
+        crate::icons::IconType::Executable,
+        crate::icons::IconAction::Custom("setup".into()),
+        0,
+        0,
+    );
+    let frames = desktop.borrow_mut().drawn().len();
+
+    session.paint_background().expect("paint");
+
+    let tree = session
+        .background_drawn
+        .clone()
+        .expect("the frame was sent");
+    let wanted: Vec<(u64, u32)> = icon_ids(&tree)
+        .into_iter()
+        .filter(|(id, _)| {
+            session
+                .shell()
+                .icon_request(*id)
+                .is_some_and(|r| r.name == crate::icons::IconType::Executable.icon_name())
+        })
+        .collect();
+    assert_eq!(wanted.len(), 1, "the new icon is not drawn: {wanted:?}");
+    let (id, px) = wanted[0];
+    let bytes = usize::try_from(px * px * 4).unwrap();
+    assert!(
+        icon_uploads(&desktop).contains(&(background, id, px, px, px * 4, bytes)),
+        "the icon did not go up on the background at {px} px"
+    );
+    // The upload is a round trip, answered; the frame is one-way and still
+    // unread in the pipe -- so the icon went first.
+    assert_eq!(
+        desktop.borrow().submitted.len(),
+        frames,
+        "the background overtook its icon"
+    );
+    assert_eq!(desktop.borrow_mut().drawn().len(), frames + 1);
+}
+
+/// **After a change of appearance the desktop's icons are sent again and
+/// the background drawn after them** -- the old ones dropped, and every icon
+/// the new frame names uploaded since.
+///
+/// Two changes, because they fail differently. A light-to-dark switch
+/// redraws the icons in new colours under new ids, so the frame differs and
+/// is sent. An accent change leaves the desktop's icons -- drawn in their
+/// types' own hues -- under the same ids, so the frame is identical to the
+/// last one sent; were the frame compared as it stood, nothing would be sent
+/// and every icon on the desktop would be a gap from then on.
+#[test]
+fn after_an_appearance_change_the_desktops_icons_are_sent_again() {
+    settingsfile::testing::with_scratch_config("session-desktop-icons", |_root| {
+        let (mut session, desktop, _turn) = session();
+        session.shell_mut().load_appearance();
+        session.paint_background().expect("paint");
+        let background = session.background().window();
+
+        for change in ["mode", "accent"] {
+            let old: Vec<u64> = icon_ids(session.background_drawn.as_ref().expect("drawn"))
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            assert!(!old.is_empty(), "the desktop drew no icons");
+            let frames = frames_on(&desktop, background);
+
+            let mut file = appearance::AppearanceFile::load();
+            if change == "mode" {
+                file.settings.theme_mode = match file.settings.theme_mode {
+                    appearance::ThemeMode::Light => appearance::ThemeMode::Dark,
+                    _ => appearance::ThemeMode::Light,
+                };
+            } else {
+                file.settings.accent_color = if file.settings.accent_color == AccentColor::Teal {
+                    AccentColor::Mauve
+                } else {
+                    AccentColor::Teal
+                };
+            }
+            file.save().expect("save");
+            announce(&desktop, session.panel(), SettingsGroup::Appearance);
+            session.pump().expect("pump");
+
+            let dropped = icon_drops(&desktop);
+            for id in &old {
+                assert!(
+                    dropped.contains(&(background, *id)),
+                    "{change}: icon {id:x} was kept past the change"
+                );
+            }
+            let now = icon_ids(session.background_drawn.as_ref().expect("drawn"));
+            let resent = icons_sent_since_the_last_drop(&desktop, background);
+            for icon in &now {
+                assert!(
+                    resent.contains(icon),
+                    "{change}: icon {:x} is drawn and was not sent since the drop",
+                    icon.0
+                );
+            }
+            assert_eq!(
+                frames_on(&desktop, background),
+                frames + 1,
+                "{change}: the background was not drawn after its icons"
+            );
+            assert!(background_is_current(&session), "{change}: stale frame");
+            if change == "mode" {
+                assert!(
+                    now.iter().any(|(id, _)| !old.contains(id)),
+                    "{change}: the icons are the same colours in both modes"
+                );
+            } else {
+                let ids: Vec<u64> = now.iter().map(|(id, _)| *id).collect();
+                assert_eq!(ids, old, "{change}: the case this is here for is gone");
+            }
+        }
     });
 }
 
@@ -5369,7 +5568,7 @@ fn an_appearance_change_drops_the_icons_and_the_next_frame_sends_new_ones() {
         session.shell_mut().load_appearance();
         session.shell_mut().toggle_start_menu();
         session.paint_chrome().expect("paint");
-        let old: Vec<u64> = uploads(&desktop).iter().map(|u| u.1).collect();
+        let old: Vec<u64> = icon_uploads(&desktop).iter().map(|u| u.1).collect();
         assert!(!old.is_empty());
 
         let mut file = appearance::AppearanceFile::load();
@@ -5381,7 +5580,7 @@ fn an_appearance_change_drops_the_icons_and_the_next_frame_sends_new_ones() {
         announce(&desktop, session.panel(), SettingsGroup::Appearance);
         session.pump().expect("pump");
 
-        let dropped: Vec<u64> = drops(&desktop).iter().map(|d| d.1).collect();
+        let dropped: Vec<u64> = icon_drops(&desktop).iter().map(|d| d.1).collect();
         for id in &old {
             assert!(dropped.contains(id), "icon {id:x} was kept past the change");
         }
@@ -5390,7 +5589,7 @@ fn an_appearance_change_drops_the_icons_and_the_next_frame_sends_new_ones() {
         }
         session.paint_chrome().expect("paint");
         let now = icon_ids(&session.shell().render_start_menu().expect("open"));
-        let sent: Vec<u64> = uploads(&desktop).iter().map(|u| u.1).collect();
+        let sent: Vec<u64> = icon_uploads(&desktop).iter().map(|u| u.1).collect();
         for (id, _) in &now {
             assert!(!old.contains(id), "the new colours reused an old id");
             assert!(

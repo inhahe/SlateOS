@@ -229,3 +229,18 @@ fn the_start_menus_places_each_have_an_icon() {
         theme.source("text-x-generic")
     );
 }
+
+/// A translucent colour draws a translucent icon: the whole icon faded by the
+/// colour's alpha, its own colours included.
+#[test]
+fn a_translucent_colour_draws_a_translucent_icon() {
+    let half = Color::rgba(0x20, 0x80, 0xC0, 128);
+    let icon = render_svg(SQUARE, 8, half).expect("draws");
+    assert!(
+        icon.argb.iter().all(|px| *px == 0x8020_80C0),
+        "{:08x?}",
+        &icon.argb[..2]
+    );
+    let red = render_svg(RED_DOT, 20, half).expect("draws");
+    assert_eq!(red.argb[(10 * 20 + 10) as usize], 0x80FF_0000);
+}

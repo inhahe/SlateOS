@@ -3348,6 +3348,41 @@ fn every_place_and_the_power_button_draws_its_icon() {
     );
 }
 
+/// **The shell answers for the desktop's icons as for its menus'**, which is
+/// what the session asks before it uploads one -- and forgets them when the
+/// appearance changes, since they are drawn again in the new colours.
+#[test]
+fn the_shell_answers_for_the_desktops_icons_and_forgets_them_on_a_change() {
+    let mut shell = shell();
+    let (x, y) = shell.icons.grid().from_cell(0, 0);
+    shell.icons.add_icon(
+        "notes.txt",
+        icons::IconType::File,
+        icons::IconAction::Custom("notes".into()),
+        x,
+        y,
+    );
+    let ids: Vec<u64> = shell
+        .render_icons()
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::Image { image_id, .. } => Some(*image_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids.len(), 1, "one icon, one image: {ids:?}");
+    let request = shell
+        .icon_request(ids[0])
+        .expect("the shell does not know the desktop's icon");
+    assert_eq!(request.name, icons::IconType::File.icon_name());
+
+    shell.set_appearance(AppearanceSettings::default());
+    assert!(
+        shell.icon_request(ids[0]).is_none(),
+        "a desktop icon's request outlived the appearance it was drawn in"
+    );
+}
+
 /// The places column says who is using the desktop, once somebody is known:
 /// their name, and its first letter as their picture.
 #[test]

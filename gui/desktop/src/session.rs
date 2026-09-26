@@ -1029,6 +1029,8 @@ impl<T: Transport> ShellSession<T> {
         if self.background_drawn.as_ref() == Some(&tree) {
             return Ok(());
         }
+        // The desktop's icons, before the frame that draws them.
+        self.upload_icons(self.background.window, &tree)?;
         self.events.submit(self.background.window, &tree)?;
         // Only once it is sent: a refused frame is one to send again.
         self.background_drawn = Some(tree);
@@ -1921,7 +1923,16 @@ impl<T: Transport> ShellSession<T> {
 
     /// Give back every icon uploaded, on every surface. A drop the compositor
     /// cannot carry out is one it has no bytes for already.
+    ///
+    /// The background's frame is forgotten with them. It names icons that are
+    /// now gone, and the frame drawn next may name the very same ids -- a
+    /// change of icon theme, or of an accent the desktop's icons are not drawn
+    /// in, leaves every id as it was -- so a refresh that compared frames would
+    /// find nothing changed, upload nothing, and leave the desktop's icons as
+    /// gaps. With no frame to compare against, the next refresh uploads them
+    /// again and sends the frame after them.
     fn drop_icons(&mut self) {
+        self.background_drawn = None;
         for (window, id) in std::mem::take(&mut self.icons_uploaded) {
             if let Some(mut handle) = self.events.window_mut(window) {
                 // Dropping an id that was never stored succeeds; a connection

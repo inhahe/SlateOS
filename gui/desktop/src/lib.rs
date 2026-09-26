@@ -449,6 +449,45 @@ pub struct IconRequest {
     pub color: Color,
 }
 
+/// The icons a part of the shell has drawn, by the image id each was given.
+///
+/// Each part that draws icons keeps one -- the shell for its menus, the
+/// desktop's icon layer for its icons -- and [`DesktopShell::icon_request`]
+/// answers for them all, which is what the session asks before uploading.
+#[derive(Debug, Default)]
+pub struct IconRegistry {
+    requests: core::cell::RefCell<std::collections::BTreeMap<u64, IconRequest>>,
+}
+
+impl IconRegistry {
+    /// The image id of `name` drawn `px` square in `color`, remembering the
+    /// request under it.
+    ///
+    /// The id is the request's hash under [`ICON_ID_TAG`]: the same icon asked
+    /// for again, in any frame, is the same id, so it is uploaded once.
+    pub fn icon(&self, name: &'static str, px: u32, color: Color) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let request = IconRequest { name, px, color };
+        let mut hasher = std::hash::DefaultHasher::new();
+        request.hash(&mut hasher);
+        let id = ICON_ID_TAG | (hasher.finish() & ICON_ID_MASK);
+        self.requests.borrow_mut().insert(id, request);
+        id
+    }
+
+    /// What was drawn under `id`, if anything was.
+    #[must_use]
+    pub fn request(&self, id: u64) -> Option<IconRequest> {
+        self.requests.borrow().get(&id).cloned()
+    }
+
+    /// Forget every request: the appearance changed, and every icon is drawn
+    /// again in new colours under new ids.
+    pub fn clear(&self) {
+        self.requests.borrow_mut().clear();
+    }
+}
+
 // --- Power menu ------------------------------------------------------------
 
 /// Inset of the power button and the places from their column's edges.
@@ -1514,7 +1553,7 @@ pub struct DesktopShell {
     /// session reads to upload an icon before submitting a tree that names it.
     /// Filled as trees are drawn and emptied when the appearance changes, when
     /// every icon is drawn again in the new colours under new ids.
-    icon_requests: core::cell::RefCell<std::collections::BTreeMap<u64, IconRequest>>,
+    icon_registry: IconRegistry,
     /// The name of the person using the desktop, for the top of the start
     /// menu's places column. Empty until somebody is known: a desktop
     /// started behind a login screen does not know who will sign in.
@@ -2054,7 +2093,7 @@ impl DesktopShell {
             menu_icon: None,
             widget_drag: None,
             user_name: String::new(),
-            icon_requests: core::cell::RefCell::new(std::collections::BTreeMap::new()),
+            icon_registry: IconRegistry::default(),
             note_selecting: false,
             widgets_dirty: false,
             // `appearance::watcher`, not a plain one: an edit to the chosen
@@ -2153,7 +2192,8 @@ impl DesktopShell {
         // Every icon is drawn again, in the new colours and the new theme's
         // pictures, under new ids; the old requests would only be a registry
         // of images the session has dropped.
-        self.icon_requests.borrow_mut().clear();
+        self.icon_registry.clear();
+        self.icons.clear_icon_requests();
         // The caret width goes to the surface that draws one. Pushed here
         // rather than read at draw time because `render` is handed a
         // `Palette`, and a palette is colours: 839 put the caret's width in
@@ -3101,26 +3141,19 @@ impl DesktopShell {
         )
     }
 
-    /// The image id of `name` drawn `px` square in `color`, remembering the
-    /// request under it so the session can upload the icon before the frame
-    /// that names it.
-    ///
-    /// The id is the request's hash under [`ICON_ID_TAG`]: the same icon asked
-    /// for again, in any frame, is the same id, so it is uploaded once.
+    /// The image id of `name` drawn `px` square in `color`, remembered so
+    /// the session can upload the icon before the frame that names it.
     fn icon(&self, name: &'static str, px: u32, color: Color) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let request = IconRequest { name, px, color };
-        let mut hasher = std::hash::DefaultHasher::new();
-        request.hash(&mut hasher);
-        let id = ICON_ID_TAG | (hasher.finish() & ICON_ID_MASK);
-        self.icon_requests.borrow_mut().insert(id, request);
-        id
+        self.icon_registry.icon(name, px, color)
     }
 
-    /// What the icon uploaded under `id` is, if a frame has drawn one there.
+    /// What the icon uploaded under `id` is, if a frame has drawn one there
+    /// -- in the shell's own menus or on the desktop.
     #[must_use]
     pub fn icon_request(&self, id: u64) -> Option<IconRequest> {
-        self.icon_requests.borrow().get(&id).cloned()
+        self.icon_registry
+            .request(id)
+            .or_else(|| self.icons.icon_request(id))
     }
 
     /// An icon's side, `logical` pixels at this scale, as a whole number.

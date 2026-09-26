@@ -114,6 +114,18 @@ const BUILT_IN: &[(&str, &str)] = &[
         "system-search",
         include_str!("../themes/aero/icons/system-search.svg"),
     ),
+    (
+        "drive-harddisk",
+        include_str!("../themes/aero/icons/drive-harddisk.svg"),
+    ),
+    (
+        "emblem-symbolic-link",
+        include_str!("../themes/aero/icons/emblem-symbolic-link.svg"),
+    ),
+    (
+        "x-office-document",
+        include_str!("../themes/aero/icons/text-x-generic.svg"),
+    ),
 ];
 
 /// The names the built-in theme draws, for a caller that lists them.
@@ -271,7 +283,10 @@ fn read_icon(path: &Path) -> Option<String> {
     SvgDocument::parse(&text).ok().map(|_| text)
 }
 
-/// `svg` drawn `size` pixels square, `currentColor` as `color`.
+/// `svg` drawn `size` pixels square, `currentColor` as `color` -- and the
+/// whole icon faded by `color`'s alpha, so a translucent colour draws a
+/// translucent icon (the ghost of a dragged icon, say) whatever colours the
+/// icon's own shapes are in.
 fn render_svg(svg: &str, size: u32, color: Color) -> Option<Icon> {
     let hex = format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b);
     let tinted = svg
@@ -283,7 +298,13 @@ fn render_svg(svg: &str, size: u32, color: Color) -> Option<Icon> {
     let argb: Vec<u32> = bytes
         .chunks_exact(4)
         .map(|p| match p {
-            [r, g, b, a] => u32::from_be_bytes([*a, *r, *g, *b]),
+            [r, g, b, a] => {
+                // `a * color.a / 255`, rounded: both at most 255, so the
+                // product fits and the quotient is a byte again.
+                let faded = u16::from(*a).saturating_mul(u16::from(color.a));
+                let alpha = u8::try_from(faded.saturating_add(127) / 255).unwrap_or(u8::MAX);
+                u32::from_be_bytes([alpha, *r, *g, *b])
+            }
             _ => 0,
         })
         .collect();

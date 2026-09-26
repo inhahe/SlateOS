@@ -1807,9 +1807,10 @@ live.
   chooses the icons apart from the colours; a folder of icons alone is an
   icon pack. The shell names an icon by a deterministic image id and the
   session uploads each once before the frame that names it. The start
-  menu's places and power button are drawn with them; the taskbar, the
-  desktop's icons and the tray are next. The toolkit's SVG renderer learned
-  to inherit the root element's style, which is how most icon sets are
+  menu's places and power button are drawn with them, and the desktop's
+  icons -- each type its own picture in its own hue, where they were emoji;
+  the taskbar and the tray are next. The toolkit's SVG renderer learned to
+  inherit the root element's style, which is how most icon sets are
   written.
 
 Known-issues: no open GUI entries today beyond the theme debt named above

@@ -586,7 +586,7 @@ impl PosixSpawnFileActionsT {
 /// `release` -- or null for the actions that name no path.
 #[repr(C)]
 struct FileActionSlot {
-    /// 1 = Close, 2 = Dup2, 3 = Open, 4 = Chdir, 5 = Closefrom.
+    /// 1 = Close, 2 = Dup2, 3 = Open, 4 = Chdir, 5 = Closefrom, 6 = Fchdir.
     tag: u8,
     fd: Fd,
     newfd: Fd,
@@ -862,6 +862,42 @@ pub extern "C" fn posix_spawn_file_actions_addchdir_np(
         fd: -1,
         path: stored,
         path_len,
+        ..FileActionSlot::empty()
+    })
+}
+
+// ---------------------------------------------------------------------------
+// posix_spawn_file_actions_addfchdir_np
+// ---------------------------------------------------------------------------
+
+/// Add a change-directory action naming the directory by descriptor
+/// (glibc 2.29's `posix_spawn_file_actions_addfchdir_np`).
+///
+/// Carried out in order with the others, as `addchdir_np` is: `fd` is the
+/// child's descriptor as the earlier actions left it -- an `addopen` of a
+/// directory just before is the usual source -- and the child starts in the
+/// directory it names. The spawn fails with `EBADF` if `fd` is not open in the
+/// child then, and `ENOTDIR` if it is not a directory.
+///
+/// `EBADF` now for an `fd` no descriptor can have, as glibc's
+/// `__spawn_valid_fd` does before touching the object.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_spawn_file_actions_addfchdir_np(
+    acts: *mut PosixSpawnFileActionsT,
+    fd: Fd,
+) -> i32 {
+    if !spawn_valid_fd(fd) {
+        return errno::EBADF;
+    }
+    if acts.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: acts is non-null (checked above).
+    let a = unsafe { &mut *acts };
+    // Tag 6: carried out by `apply_file_actions`.
+    a.push(FileActionSlot {
+        tag: 6,
+        fd,
         ..FileActionSlot::empty()
     })
 }
@@ -1475,11 +1511,41 @@ impl Drop for OpenedHandles {
 /// The second array holds the descriptors that are open but *not*
 /// inheritable — `FD_CLOEXEC` — because one file action can still hand one of
 /// them over: POSIX specifies that `adddup2(fd, fd)` clears `FD_CLOEXEC` on
-/// `fd` in the child. It is a snapshot taken here, before any `open` action
-/// can put a temporary descriptor of the parent's at the same number.
+/// `fd` in the child. It starts as a snapshot taken here, before any `open`
+/// action can put a temporary descriptor of the parent's at the same number,
+/// and an `O_CLOEXEC` open action adds to it. A number is in at most one of the
+/// two arrays.
+///
+/// `from` is where each open slot's descriptor came from: the parent
+/// descriptor whose table entry -- and so whose recorded path -- it shares. An
+/// `addfchdir_np` action needs a path, since the kernel is told the child's
+/// directory by name.
 struct ChildFds {
     virt: [Option<(u8, u64)>; MAX_FD_MAP],
     cloexec: [Option<(u8, u64)>; MAX_FD_MAP],
+    from: [Option<Fd>; MAX_FD_MAP],
+}
+
+impl ChildFds {
+    /// Close `fd` in the child, whether or not it was close-on-exec.
+    fn close(&mut self, fd: usize) {
+        if let (Some(v), Some(c), Some(f)) = (
+            self.virt.get_mut(fd),
+            self.cloexec.get_mut(fd),
+            self.from.get_mut(fd),
+        ) {
+            *v = None;
+            *c = None;
+            *f = None;
+        }
+    }
+
+    /// Is `fd` open in the child at this point in the actions? A
+    /// close-on-exec descriptor is: the child closes it only at `exec`.
+    fn is_open(&self, fd: usize) -> bool {
+        self.virt.get(fd).is_some_and(Option::is_some)
+            || self.cloexec.get(fd).is_some_and(Option::is_some)
+    }
 }
 
 fn inheritable_fds() -> ChildFds {
@@ -1488,6 +1554,7 @@ fn inheritable_fds() -> ChildFds {
     let mut out = ChildFds {
         virt: [None; MAX_FD_MAP],
         cloexec: [None; MAX_FD_MAP],
+        from: [None; MAX_FD_MAP],
     };
     let mut idx = 0usize;
     while idx < MAX_FD_MAP {
@@ -1522,6 +1589,7 @@ fn inheritable_fds() -> ChildFds {
                 } else {
                     out.cloexec[idx] = wire;
                 }
+                out.from[idx] = Some(fd);
             }
         }
         idx = idx.wrapping_add(1);
@@ -1643,9 +1711,11 @@ fn apply_file_actions(
         match slot.tag {
             1 => {
                 // Close. A descriptor that is not open in the child has nothing
-                // to close, which glibc does not treat as an error either.
+                // to close, which glibc does not treat as an error either. A
+                // close-on-exec one is closed too: it was still open until now,
+                // and a later `adddup2(fd, fd)` must not bring it back.
                 if let Ok(fd) = child_slot(slot.fd) {
-                    child.virt[fd] = None;
+                    child.close(fd);
                 }
             }
             2 => {
@@ -1661,6 +1731,10 @@ fn apply_file_actions(
                     child.virt[src]
                 };
                 child.virt[dst] = Some(entry.ok_or(errno::EBADF)?);
+                // `dup2` clears `FD_CLOEXEC` on the new descriptor, and it now
+                // shares `src`'s table entry and path.
+                child.cloexec[dst] = None;
+                child.from[dst] = child.from[src];
             }
             3 => {
                 // Open, "as if `open(path, oflag, mode)`" — so it *is* `open`,
@@ -1681,24 +1755,47 @@ fn apply_file_actions(
                 }
                 opened.push(fd)?;
                 let entry = fdtable::get_fd(fd).ok_or(errno::EBADF)?;
+                let wire = Some((kind_to_handle_type(entry.kind), entry.handle));
                 // `O_CLOEXEC` on an action's open means the child's exec
-                // closes it at once, so the child never has it.
-                child.virt[target] = if slot.oflag & crate::fcntl::O_CLOEXEC != 0 {
-                    None
+                // closes it at once, so the kernel is not handed it; but it is
+                // open until then, for a later `fchdir` or `dup2(fd, fd)`.
+                child.close(target);
+                if slot.oflag & crate::fcntl::O_CLOEXEC != 0 {
+                    child.cloexec[target] = wire;
                 } else {
-                    Some((kind_to_handle_type(entry.kind), entry.handle))
-                };
+                    child.virt[target] = wire;
+                }
+                child.from[target] = Some(fd);
             }
             4 => {
                 // chdir: see `ChildCwd::change_to`.
                 cwd.change_to(slot.path_bytes())?;
             }
             5 => {
-                // closefrom(lowfd): every descriptor from lowfd up.
+                // closefrom(lowfd): every descriptor from lowfd up,
+                // close-on-exec ones included.
                 let low = usize::try_from(slot.fd).map_err(|_| errno::EBADF)?;
-                for entry in child.virt.iter_mut().skip(low) {
-                    *entry = None;
+                for fd in low..MAX_FD_MAP {
+                    child.close(fd);
                 }
+            }
+            6 => {
+                // fchdir(fd): the directory a descriptor open in the child
+                // names, then as `chdir` -- see `ChildCwd::change_to`. The
+                // path is the one the parent's `open` recorded for the
+                // descriptor the slot came from; a pipe or a socket has none,
+                // and is not a directory.
+                let fd = child_slot(slot.fd)?;
+                if !child.is_open(fd) {
+                    return Err(errno::EBADF);
+                }
+                let parent_fd = child.from[fd].ok_or(errno::EBADF)?;
+                let mut path = [0u8; crate::unistd::PATH_MAX];
+                let n = fdtable::get_fd_path(parent_fd, &mut path);
+                if n == 0 {
+                    return Err(errno::ENOTDIR);
+                }
+                cwd.change_to(path.get(..n).ok_or(errno::ENAMETOOLONG)?)?;
             }
             _ => return Err(errno::EINVAL),
         }
@@ -5343,6 +5440,112 @@ mod tests {
             "an older kernel is not asked"
         );
         crate::unistd::model_kernel_without_cwd_record(false);
+    }
+
+    /// `addfchdir_np` starts the child in the directory a descriptor names:
+    /// here one the parent holds with a recorded path, as `open` records it.
+    #[test]
+    fn an_fchdir_action_moves_the_child_to_its_descriptors_directory() {
+        use crate::fdtable::{HandleKind, close_fd, install_fd, store_fd_path};
+        ensure_std_fds();
+        fresh_spawn_cwd(b"/");
+        crate::unistd::host_dirs::add(b"/srv/data");
+        let _ = install_fd(41, HandleKind::File, 4141);
+        store_fd_path(41, b"/srv/data".as_ptr(), 9);
+
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        assert_eq!(posix_spawn_file_actions_addfchdir_np(&raw mut acts, 41), 0);
+        let mut out = empty_map();
+        let mut opened = OpenedHandles::new();
+        let plan = plan_child(&raw const acts, &mut out, &mut opened);
+        posix_spawn_file_actions_destroy(&raw mut acts);
+        let _ = close_fd(41);
+        let plan = plan.expect("fd 41 names /srv/data");
+        assert!(plan.cwd.moved);
+        assert_eq!(plan.cwd.as_bytes(), b"/srv/data");
+    }
+
+    /// Through a `dup2`, the new number names the same directory.
+    #[test]
+    fn an_fchdir_through_a_dup2_follows_the_original() {
+        use crate::fdtable::{HandleKind, close_fd, install_fd, store_fd_path};
+        ensure_std_fds();
+        fresh_spawn_cwd(b"/");
+        crate::unistd::host_dirs::add(b"/home/u");
+        let _ = install_fd(42, HandleKind::File, 4242);
+        store_fd_path(42, b"/home/u".as_ptr(), 7);
+
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        assert_eq!(posix_spawn_file_actions_adddup2(&raw mut acts, 42, 9), 0);
+        assert_eq!(posix_spawn_file_actions_addclose(&raw mut acts, 42), 0);
+        assert_eq!(posix_spawn_file_actions_addfchdir_np(&raw mut acts, 9), 0);
+        let mut out = empty_map();
+        let mut opened = OpenedHandles::new();
+        let plan = plan_child(&raw const acts, &mut out, &mut opened);
+        posix_spawn_file_actions_destroy(&raw mut acts);
+        let _ = close_fd(42);
+        assert_eq!(plan.expect("9 is 42's copy").cwd.as_bytes(), b"/home/u");
+    }
+
+    /// A descriptor that is not open in the child is `EBADF`; one with no
+    /// path -- a pipe, a console -- is not a directory.
+    #[test]
+    fn an_fchdir_to_nothing_or_to_a_non_directory_fails_the_spawn() {
+        use crate::fdtable::{HandleKind, close_fd, install_fd};
+        ensure_std_fds();
+        fresh_spawn_cwd(b"/");
+        let plan_of = |fd: Fd, close_first: bool| {
+            let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+            posix_spawn_file_actions_init(&raw mut acts);
+            if close_first {
+                assert_eq!(posix_spawn_file_actions_addclose(&raw mut acts, fd), 0);
+            }
+            assert_eq!(posix_spawn_file_actions_addfchdir_np(&raw mut acts, fd), 0);
+            let mut out = empty_map();
+            let mut opened = OpenedHandles::new();
+            let r = plan_child(&raw const acts, &mut out, &mut opened).map(|_| ());
+            posix_spawn_file_actions_destroy(&raw mut acts);
+            r
+        };
+        let _ = install_fd(43, HandleKind::Pipe, 4343);
+        assert_eq!(
+            plan_of(43, false),
+            Err(errno::ENOTDIR),
+            "a pipe has no path"
+        );
+        assert_eq!(
+            plan_of(43, true),
+            Err(errno::EBADF),
+            "closed by the action before"
+        );
+        let _ = close_fd(43);
+        assert_eq!(plan_of(44, false), Err(errno::EBADF), "never open");
+        assert_eq!(
+            posix_spawn_file_actions_addfchdir_np(core::ptr::null_mut(), -1),
+            errno::EBADF
+        );
+    }
+
+    /// A close action closes a close-on-exec descriptor too, so a later
+    /// `adddup2(fd, fd)` cannot hand it over after all.
+    #[test]
+    fn a_closed_close_on_exec_descriptor_stays_closed() {
+        use crate::fdtable::{FD_CLOEXEC, HandleKind, close_fd, install_fd, set_fd_flags};
+        ensure_std_fds();
+        let _ = install_fd(45, HandleKind::File, 4545);
+        assert!(set_fd_flags(45, FD_CLOEXEC));
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        assert_eq!(posix_spawn_file_actions_addclose(&raw mut acts, 45), 0);
+        assert_eq!(posix_spawn_file_actions_adddup2(&raw mut acts, 45, 45), 0);
+        let mut out = empty_map();
+        let mut opened = OpenedHandles::new();
+        let r = build_fd_map(&raw const acts, &mut out, &mut opened);
+        posix_spawn_file_actions_destroy(&raw mut acts);
+        let _ = close_fd(45);
+        assert_eq!(r, Err(errno::EBADF));
     }
 
     /// Each `chdir` starts from where the one before it left the child.

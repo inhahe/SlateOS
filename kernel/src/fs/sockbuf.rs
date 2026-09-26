@@ -139,7 +139,7 @@ fn make_pool(
 /// generator and the `sockbuf` kshell command surface this table (and
 /// `pool_stats`) as if it reflects real buffer-pool activity, so seeding it
 /// with invented allocations would be fabricated procfs data. The counters
-/// advance only through real [`alloc`] / [`free`] / [`record_drop`] calls.
+/// advance only through real [`fn@alloc`] / [`free`] / [`record_drop`] calls.
 ///
 /// (Previously this seeded fabricated activity across all six pools —
 /// e.g. TCP with 50,000 active buffers, 100M allocs and 200MB in flight —

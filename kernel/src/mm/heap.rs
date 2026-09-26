@@ -446,10 +446,16 @@ unsafe fn check_poison(ptr: *mut u8, class_size: usize) {
 static SLAB_ALLOCS: AtomicU64 = AtomicU64::new(0);
 /// Total number of slab deallocations since boot.
 static SLAB_FREES: AtomicU64 = AtomicU64::new(0);
-/// Total number of large allocations (> MAX_SLAB_SIZE) since boot.
+/// Total number of large allocations (> MAX_SLAB_SIZE) since boot, whether
+/// the buddy allocator or vmalloc served them.
 static LARGE_ALLOCS: AtomicU64 = AtomicU64::new(0);
-/// Total number of large deallocations since boot.
+/// Total number of large deallocations since boot (both backings).
 static LARGE_FREES: AtomicU64 = AtomicU64::new(0);
+/// Of [`LARGE_ALLOCS`], those served by vmalloc because they exceed the
+/// buddy allocator's largest block (see [`HeapInner::exceeds_buddy`]).
+static VIRTUAL_ALLOCS: AtomicU64 = AtomicU64::new(0);
+/// Of [`LARGE_FREES`], those returned to vmalloc.
+static VIRTUAL_FREES: AtomicU64 = AtomicU64::new(0);
 /// Total number of slab refills (new frame carved into slots).
 static SLAB_REFILLS: AtomicU64 = AtomicU64::new(0);
 /// Total number of failed allocations (OOM).
@@ -672,6 +678,87 @@ impl KernelHeap {
             guard: core::mem::ManuallyDrop::new(guard),
         }
     }
+
+    /// Serve a large allocation from vmalloc — one that
+    /// [`HeapInner::exceeds_buddy`] says no buddy block can hold.
+    ///
+    /// Runs without the heap lock: mapping a 20 MiB allocation is over a
+    /// thousand frame allocations and page-table writes, and every other
+    /// allocation on the slow path would wait for them. vmalloc has its own
+    /// lock and needs nothing the heap lock protects.
+    ///
+    /// The memory is virtually contiguous only. That is all a `Vec` or a
+    /// `Box` needs; nothing in the kernel derives a physical address from a
+    /// heap pointer (devices get memory from the frame and DMA allocators),
+    /// and requests this size used to fail outright, so no existing caller
+    /// can depend on contiguity here.
+    #[allow(clippy::cast_possible_truncation)] // A frame count fits u64.
+    fn alloc_virtual(&self, layout: &Layout) -> *mut u8 {
+        // Same contract as the locked path: nothing before `init`.
+        if !self.lock_tracked().initialized {
+            return ptr::null_mut();
+        }
+        // vmalloc hands out 16 KiB-aligned memory and nothing coarser. No
+        // caller asks for more; refusing is the honest answer if one does.
+        if layout.align() > FRAME_SIZE {
+            ALLOC_FAILURES.fetch_add(1, Ordering::Relaxed);
+            return ptr::null_mut();
+        }
+        let ptr = match super::vmalloc::vmalloc(layout.size()) {
+            Ok(p) => p,
+            Err(_) => {
+                ALLOC_FAILURES.fetch_add(1, Ordering::Relaxed);
+                return ptr::null_mut();
+            }
+        };
+        let frames = layout.size().div_ceil(FRAME_SIZE) as u64;
+        super::memtype::charge(super::memtype::MemType::LargeHeap, frames);
+        LARGE_ALLOCS.fetch_add(1, Ordering::Relaxed);
+        VIRTUAL_ALLOCS.fetch_add(1, Ordering::Relaxed);
+        let current = BYTES_IN_USE
+            .fetch_add(layout.size() as u64, Ordering::Relaxed)
+            .saturating_add(layout.size() as u64);
+        // Ignoring the result: `Err` only means the peak was already higher.
+        let _ = PEAK_BYTES_IN_USE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |peak| {
+            if current > peak { Some(current) } else { None }
+        });
+        if crate::mm::kasan::is_enabled() {
+            crate::mm::kasan::on_alloc(ptr, layout.size(), kasan_slot_size(None, layout));
+        }
+        ptr
+    }
+
+    /// Return a vmalloc-backed allocation made by [`Self::alloc_virtual`].
+    ///
+    /// A pointer vmalloc does not recognise — a double free, or a stray
+    /// pointer into the vmalloc range — is reported and otherwise ignored:
+    /// handing it to the buddy allocator, the only alternative, would
+    /// corrupt it.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must have come from [`Self::alloc_virtual`] with `layout`, and
+    /// must not be used afterwards.
+    #[allow(clippy::cast_possible_truncation)] // A frame count fits u64.
+    unsafe fn dealloc_virtual(&self, ptr: *mut u8, layout: &Layout) {
+        // SAFETY: the caller guarantees ptr is a live vmalloc allocation.
+        match unsafe { super::vmalloc::vfree(ptr) } {
+            Ok(()) => {
+                let frames = layout.size().div_ceil(FRAME_SIZE) as u64;
+                super::memtype::uncharge(super::memtype::MemType::LargeHeap, frames);
+                LARGE_FREES.fetch_add(1, Ordering::Relaxed);
+                VIRTUAL_FREES.fetch_add(1, Ordering::Relaxed);
+                BYTES_IN_USE.fetch_sub(layout.size() as u64, Ordering::Relaxed);
+            }
+            Err(e) => serial_println!(
+                "[heap] ERROR: freeing {:#x} ({} bytes): vmalloc does not know it ({:?}); \
+                 a double free or a corrupted pointer. Left alone.",
+                ptr as u64,
+                layout.size(),
+                e
+            ),
+        }
+    }
 }
 
 /// Dump the current holder of the global heap lock to the serial log.
@@ -892,7 +979,22 @@ impl HeapInner {
         frames.next_power_of_two().trailing_zeros() as usize
     }
 
-    /// Allocate directly from the buddy allocator (for large requests).
+    /// Whether a large allocation needs a bigger block than the buddy
+    /// allocator can ever produce (order above
+    /// [`frame::BUDDY_MAX_ORDER`], i.e. over 16 MiB), and so must be mapped
+    /// from vmalloc instead.
+    ///
+    /// Only these go to vmalloc. Everything the buddy allocator can serve
+    /// keeps being served by it, physically contiguous and reached through
+    /// the direct map's large pages, exactly as before; the requests routed
+    /// away are ones that used to fail outright, whatever memory was free.
+    fn exceeds_buddy(layout: &Layout) -> bool {
+        Self::large_order(layout) > frame::BUDDY_MAX_ORDER
+    }
+
+    /// Allocate directly from the buddy allocator (for large requests that
+    /// fit one buddy block; larger ones never reach here — see
+    /// [`Self::exceeds_buddy`] and `KernelHeap::alloc_virtual`).
     fn large_alloc(&self, layout: &Layout) -> *mut u8 {
         let order = Self::large_order(layout);
         // Large kernel allocations are still heap storage for census purposes.
@@ -1332,6 +1434,14 @@ unsafe impl GlobalAlloc for KernelHeap {
             }
         }
 
+        // Too big for any buddy block (over 16 MiB): map it from vmalloc,
+        // outside the heap lock. Before this, such a request failed however
+        // much memory was free — which is why no program over 16 MiB could
+        // be read in and started.
+        if class_idx.is_none() && HeapInner::exceeds_buddy(&layout) {
+            return self.alloc_virtual(&layout);
+        }
+
         // Global locked path.
         let mut inner = self.lock_tracked();
         if !inner.initialized {
@@ -1440,6 +1550,18 @@ unsafe impl GlobalAlloc for KernelHeap {
             }
         }
 
+        // A vmalloc-backed large allocation goes back to vmalloc, outside the
+        // heap lock like its allocation. The address alone decides: the buddy
+        // allocator's memory is reached through the direct map, which never
+        // overlaps the vmalloc region.
+        if class_idx.is_none() && super::vmalloc::contains(ptr as u64) {
+            // SAFETY: only `alloc_virtual` hands out vmalloc addresses from
+            // this heap, and the caller guarantees ptr came from this heap
+            // with this layout and is dead from here on.
+            unsafe { self.dealloc_virtual(ptr, &layout) };
+            return;
+        }
+
         // Per-CPU slab cache fast path.
         // OPT: No atomic counter on this path — the per-CPU
         // cache.slab_frees counter (plain increment, no lock prefix)
@@ -1519,10 +1641,16 @@ pub struct HeapStats {
     pub slab_allocs: u64,
     /// Total slab-path deallocations since boot.
     pub slab_frees: u64,
-    /// Total large (buddy-path) allocations since boot.
+    /// Total large (non-slab) allocations since boot, buddy- or
+    /// vmalloc-backed.
     pub large_allocs: u64,
-    /// Total large (buddy-path) deallocations since boot.
+    /// Total large (non-slab) deallocations since boot.
     pub large_frees: u64,
+    /// Of `large_allocs`, those too big for any buddy block (over 16 MiB)
+    /// and therefore mapped from vmalloc.
+    pub virtual_allocs: u64,
+    /// Of `large_frees`, those returned to vmalloc.
+    pub virtual_frees: u64,
     /// Number of slab refills (new frame carved into slots).
     pub slab_refills: u64,
     /// Number of failed allocations (OOM).
@@ -1568,6 +1696,8 @@ pub fn stats() -> HeapStats {
         slab_frees: pcpu_frees + SLAB_FREES.load(Ordering::Relaxed),
         large_allocs: LARGE_ALLOCS.load(Ordering::Relaxed),
         large_frees: LARGE_FREES.load(Ordering::Relaxed),
+        virtual_allocs: VIRTUAL_ALLOCS.load(Ordering::Relaxed),
+        virtual_frees: VIRTUAL_FREES.load(Ordering::Relaxed),
         slab_refills: SLAB_REFILLS.load(Ordering::Relaxed),
         alloc_failures: ALLOC_FAILURES.load(Ordering::Relaxed),
         poison_enabled: POISON_ENABLED.load(Ordering::Relaxed),
@@ -2104,6 +2234,126 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[heap]   Batch alloc/free ({} x 64B): OK", count);
 
     serial_println!("[heap] Heap allocator self-test PASSED");
+    Ok(())
+}
+
+/// Self-test for heap allocations too big for any buddy block (over
+/// 16 MiB), which the heap maps from vmalloc (`KernelHeap::alloc_virtual`).
+///
+/// Separate from [`self_test`] because it runs later in boot: it needs
+/// `page_table::init` and a working vmalloc, and the heap is tested before
+/// either exists.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+pub fn virtual_alloc_self_test() -> KernelResult<()> {
+    use alloc::vec::Vec;
+    const MIB: usize = 1024 * 1024;
+    // A prime stride, so the sampled bytes fall at every offset within a
+    // page over the course of a buffer rather than always the same one.
+    const STRIDE: usize = 4093;
+
+    serial_println!("[heap] Running large (vmalloc-backed) allocation self-test...");
+    let fail = |what: core::fmt::Arguments<'_>| {
+        serial_println!("[heap]   FAIL: {}", what);
+        KernelError::InternalError
+    };
+    let pattern = |i: usize| (i ^ (i >> 8) ^ (i >> 16)) as u8;
+    let in_vmalloc = |v: &Vec<u8>| super::vmalloc::contains(v.as_ptr() as u64);
+    // Write the pattern at every STRIDE-th byte of `v[..len]`.
+    let stamp = |v: &mut Vec<u8>, from: usize, len: usize| {
+        for i in (from..len).step_by(STRIDE) {
+            if let Some(b) = v.get_mut(i) {
+                *b = pattern(i);
+            }
+        }
+    };
+    // The first sampled byte of `v[..len]` that lost its pattern.
+    let damaged = |v: &Vec<u8>, len: usize| {
+        (0..len)
+            .step_by(STRIDE)
+            .find(|&i| v.get(i) != Some(&pattern(i)))
+    };
+
+    // -- Test 1: one allocation larger than any buddy block ------------------
+    let before = stats();
+    {
+        let mut v: Vec<u8> = Vec::new();
+        v.try_reserve_exact(20 * MIB)
+            .map_err(|_| fail(format_args!("a 20 MiB Vec could not be allocated")))?;
+        if !in_vmalloc(&v) {
+            return Err(fail(format_args!(
+                "a 20 MiB allocation at {:#x} is not in the vmalloc region",
+                v.as_ptr() as u64
+            )));
+        }
+        v.resize(20 * MIB, 0);
+        stamp(&mut v, 0, 20 * MIB);
+        if let Some(i) = damaged(&v, 20 * MIB) {
+            return Err(fail(format_args!(
+                "byte {} of a 20 MiB Vec lost its value",
+                i
+            )));
+        }
+    }
+    let after = stats();
+    if after.virtual_allocs != before.virtual_allocs + 1
+        || after.virtual_frees != before.virtual_frees + 1
+    {
+        return Err(fail(format_args!(
+            "vmalloc-backed allocs/frees went {}/{} -> {}/{}; expected one of each",
+            before.virtual_allocs, before.virtual_frees, after.virtual_allocs, after.virtual_frees
+        )));
+    }
+    serial_println!("[heap]   20 MiB Vec (vmalloc-backed, allocated and freed): OK");
+
+    // -- Test 2: a Vec that grows out of the buddy allocator and back ---------
+    // realloc copies between the two backings; the contents must survive
+    // both crossings, and each size must land in the right one.
+    {
+        let mut v: Vec<u8> = Vec::new();
+        v.try_reserve_exact(6 * MIB)
+            .map_err(|_| fail(format_args!("a 6 MiB Vec could not be allocated")))?;
+        if in_vmalloc(&v) {
+            return Err(fail(format_args!(
+                "a 6 MiB allocation went to vmalloc; the buddy allocator should serve it"
+            )));
+        }
+        v.resize(6 * MIB, 0);
+        stamp(&mut v, 0, 6 * MIB);
+
+        // 6 MiB + 14 MiB + 1: above the 16 MiB buddy maximum.
+        v.try_reserve_exact(14 * MIB + 1)
+            .map_err(|_| fail(format_args!("growing a Vec to 20 MiB failed")))?;
+        if !in_vmalloc(&v) {
+            return Err(fail(format_args!(
+                "a Vec grown past 16 MiB is not in the vmalloc region"
+            )));
+        }
+        if let Some(i) = damaged(&v, 6 * MIB) {
+            return Err(fail(format_args!(
+                "byte {} was lost growing into vmalloc",
+                i
+            )));
+        }
+        v.resize(20 * MIB, 0);
+        stamp(&mut v, 6 * MIB, 20 * MIB);
+
+        v.truncate(2 * MIB);
+        v.shrink_to_fit();
+        if in_vmalloc(&v) {
+            return Err(fail(format_args!(
+                "a Vec shrunk to 2 MiB is still in the vmalloc region"
+            )));
+        }
+        if let Some(i) = damaged(&v, 2 * MIB) {
+            return Err(fail(format_args!(
+                "byte {} was lost shrinking out of vmalloc",
+                i
+            )));
+        }
+    }
+    serial_println!("[heap]   Vec grown from a buddy block into vmalloc and shrunk back: OK");
+
+    serial_println!("[heap] Large allocation self-test PASSED");
     Ok(())
 }
 

@@ -1,6 +1,34 @@
 //! Immutable and append-only file flags.
 //!
-//! Provides `chattr`-style file flags that restrict modifications:
+//! **NOTHING CONSULTS THESE FLAGS, AND THERE IS A WORKING IMMUTABLE
+//! ELSEWHERE.** Both halves matter, and the second is why this notice is
+//! first: a reader who finds this module concludes either that file
+//! immutability is unimplemented or that this is how to get it, and both
+//! conclusions are wrong.
+//!
+//! *What works:* `vfs::FileAttr::IMMUTABLE`, checked in `fs/vfs.rs`,
+//! honoured by FAT as `ATTR_READ_ONLY` in `fs/fat.rs`, and verified on
+//! every boot -- `[ext4] immutable: write, truncate and unlink are all
+//! refused, and allowed again once cleared: OK`. **Use that.**
+//!
+//! *What this module is:* a separate store with zero `vfs::` references.
+//! Its `check_write`/`check_delete`/`check_truncate`/`check_link`/
+//! `check_metadata` predicates are real and are called by `kshell` -- a
+//! human typing a command -- and by nothing else. No VFS write path asks
+//! them anything, so a program writing a file flagged here succeeds.
+//!
+//! *And the privilege claim was false.* This doc said "Only a privileged
+//! user can set/clear the flag"; `set_flags` contains no capability, uid
+//! or privilege check of any kind. That sentence came from the Design
+//! Reference below, which opens with **"Consider:"** -- a proposal,
+//! rendered here in the present tense.
+//!
+//! Which of the two models survives is a consolidation decision with a
+//! real caller on one side (`fat.rs`, ext4) and a `/proc` file on the
+//! other; see `known-issues.md`. The design below is kept because it is
+//! the shape of the missing work, not because it describes today.
+//!
+//! Intended: `chattr`-style file flags that restrict modifications:
 //! - **Immutable**: file cannot be modified, deleted, renamed, or linked.
 //!   Only a privileged user can set/clear the flag.
 //! - **Append-only**: file can only be appended to, not overwritten or
@@ -154,13 +182,53 @@ pub fn parse_flag_name(name: &str) -> Option<FlagBits> {
 /// Maximum files tracked.
 const MAX_FILES: usize = 65536;
 
+/// How an entry is identified.
+///
+/// `Id` is the real key: the immutable flag protects a FILE, and a file
+/// with two names must be protected under both. `Path` is the fallback for
+/// filesystems reporting `ino == 0` (devfs, procfs, sysfs), which cannot
+/// have two names for one object -- so there a name IS the identity and the
+/// fallback is exact rather than approximate.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum FlagKey {
+    Id(crate::fs::vfs::FileId),
+    Path(PathBuf),
+}
+
+/// Derive the key for a path.
+///
+/// Every call site that starts from a name uses this, and every key of any
+/// origin is built by [`key_from`]. The compiler catches a wrong value type
+/// but not a key derived one way at `insert` and another at `remove` -- that
+/// would leak entries and silently drop protection, so the derivation has
+/// exactly one home.
+fn flag_key(path: &Path) -> FlagKey {
+    key_from(crate::fs::Vfs::file_identity(path).unwrap_or(None), path)
+}
+
+/// The key for a file whose identity is already known: the one place a
+/// `FlagKey` is built, shared by [`flag_key`] and the file-lifecycle hooks,
+/// which run after the name is gone and are handed the identity the VFS read
+/// while it still resolved.
+fn key_from(id: Option<crate::fs::vfs::FileId>, path: &Path) -> FlagKey {
+    match id {
+        Some(id) => FlagKey::Id(id),
+        None => FlagKey::Path(path.to_path_buf()),
+    }
+}
+
 struct FlagTable {
     /// Path → flags.
     /// Keyed by `PathBuf`, not `String`. This table decides whether a
     /// write, truncate, delete, or link is refused, so a key type that
     /// cannot hold a legal filename is a file whose protection silently
     /// does not apply. See `design-decisions.md` §261.
-    entries: BTreeMap<PathBuf, FlagBits>,
+    /// Keyed by [`FlagKey`], valued by the path as DATA plus the flags.
+    ///
+    /// The path is kept so `list_flagged` can report a name without the key
+    /// type appearing in its signature -- the two external callers
+    /// (`procfs`, `kshell`) are unaffected by this change.
+    entries: BTreeMap<FlagKey, (PathBuf, FlagBits)>,
 }
 
 impl FlagTable {
@@ -187,14 +255,15 @@ pub fn set_flags(path: impl AsRef<Path>, flags: FlagBits) -> KernelResult<()> {
     }
     SET_COUNT.fetch_add(1, Ordering::Relaxed);
 
+    let key = flag_key(path);
     let mut table = TABLE.lock();
-    if let Some(existing) = table.entries.get_mut(path) {
-        *existing |= flags;
+    if let Some(existing) = table.entries.get_mut(&key) {
+        existing.1 |= flags;
     } else {
         if table.entries.len() >= MAX_FILES {
             return Err(KernelError::ResourceExhausted);
         }
-        table.entries.insert(path.to_path_buf(), flags);
+        table.entries.insert(key, (path.to_path_buf(), flags));
     }
     Ok(())
 }
@@ -202,11 +271,12 @@ pub fn set_flags(path: impl AsRef<Path>, flags: FlagBits) -> KernelResult<()> {
 /// Clear specific flags on a file.
 pub fn clear_flags(path: impl AsRef<Path>, flags: FlagBits) -> KernelResult<()> {
     let path = path.as_ref();
+    let key = flag_key(path);
     let mut table = TABLE.lock();
-    if let Some(existing) = table.entries.get_mut(path) {
-        *existing &= !flags;
-        if *existing == 0 {
-            table.entries.remove(path);
+    if let Some(existing) = table.entries.get_mut(&key) {
+        existing.1 &= !flags;
+        if existing.1 == 0 {
+            table.entries.remove(&key);
         }
         Ok(())
     } else {
@@ -222,31 +292,39 @@ pub fn replace_flags(path: impl AsRef<Path>, flags: FlagBits) -> KernelResult<()
     }
     SET_COUNT.fetch_add(1, Ordering::Relaxed);
 
+    // `replace_flags` has no `get_mut`, so it did not pick up a key from the
+    // pattern the other two follow. Derived here through the same helper --
+    // a key built differently in one function is how half a table ends up
+    // under a different kind of key.
+    let key = flag_key(path);
     let mut table = TABLE.lock();
     if flags == 0 {
-        table.entries.remove(path);
+        table.entries.remove(&key);
     } else {
-        if !table.entries.contains_key(path) && table.entries.len() >= MAX_FILES {
+        if !table.entries.contains_key(&key) && table.entries.len() >= MAX_FILES {
             return Err(KernelError::ResourceExhausted);
         }
-        table.entries.insert(path.to_path_buf(), flags);
+        table.entries.insert(key, (path.to_path_buf(), flags));
     }
     Ok(())
 }
 
 /// Get flags for a file (0 if none set).
 pub fn get_flags(path: impl AsRef<Path>) -> FlagBits {
+    // Derived before the lock: `flag_key` calls into the VFS, and holding
+    // a module-global across that inverts the kernel's
+    // filesystem-lock -> module-state order.
+    let key = flag_key(path.as_ref());
     let table = TABLE.lock();
-    table.entries.get(path.as_ref()).copied().unwrap_or(0)
+    table.entries.get(&key).map_or(0, |(_, f)| *f)
 }
 
 /// Remove all flags for a file.
 pub fn remove_flags(path: impl AsRef<Path>) -> KernelResult<()> {
+    // Derived before the lock; see `get_flags`.
+    let key = flag_key(path.as_ref());
     let mut table = TABLE.lock();
-    table
-        .entries
-        .remove(path.as_ref())
-        .ok_or(KernelError::NotFound)?;
+    table.entries.remove(&key).ok_or(KernelError::NotFound)?;
     Ok(())
 }
 
@@ -315,16 +393,112 @@ pub fn check_link(path: impl AsRef<Path>) -> KernelResult<()> {
 // Rename support
 // ---------------------------------------------------------------------------
 
-/// Update flag table when a file is renamed.
+/// Move the flags recorded under `old_path` (and, for a directory, under
+/// every name below it) to `new_path`.
+///
+/// The VFS does this itself on every rename, through [`PER_FILE_STATE`]
+/// (see [`super::perfile`]), so production code has no reason to call it; it
+/// stays public as the direct form of that one event, which is what this
+/// module's self-test exercises. For a row keyed by identity only the
+/// reported name moves -- the file is the same file -- and a row keyed by
+/// path (devfs, procfs, sysfs: `ino == 0`) moves its key, since there the
+/// name is the key.
+///
+/// This used to derive both keys by looking the names up, which could not be
+/// right at any moment: before the rename, `new_path` names nothing (or the
+/// file about to be replaced), and after it `old_path` names nothing.
+/// Rewriting stored names needs no lookup at all.
+///
+/// # Errors
+///
+/// Never; the `Result` is kept for the callers that already handle one. A
+/// name with no flags is not an error -- there is nothing to move.
 pub fn rename_path(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) -> KernelResult<()> {
+    let (old_path, new_path) = (old_path.as_ref(), new_path.as_ref());
+    rename_names(&|p: &Path| super::pathutil::rebase(p, old_path, new_path));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// File lifecycle (see `super::perfile`)
+// ---------------------------------------------------------------------------
+
+/// This table's part in the file lifecycle: flags end with their file, and
+/// move with it when it is renamed. See [`super::perfile`] for why a
+/// `FileId`-keyed row that outlived its file would flag a stranger.
+pub(crate) const PER_FILE_STATE: super::perfile::Table = super::perfile::Table {
+    name: "immutable",
+    forget: forget_file,
+    rename: rename_names,
+    unmounted: forget_filesystem,
+    plant: plant_for_test,
+    finds: finds_for_test,
+    reports: reports_for_test,
+};
+
+/// The file is gone: drop its flags.
+///
+/// Whatever they were. Nothing in the VFS consults this module (see the
+/// module docs), so no removal is refused on its account -- not even under
+/// `IMMUTABLE` or `NO_DELETE` -- and a row can reach here holding any flag.
+fn forget_file(id: Option<crate::fs::vfs::FileId>, path: &Path) {
+    let key = key_from(id, path);
+    TABLE.lock().entries.remove(&key);
+}
+
+/// Names moved: rewrite every stored name `rename` maps to a new one.
+///
+/// An identity key stays as it is and only the reported name changes; a path
+/// key IS the name (equal by construction in [`set_flags`]), so it moves.
+fn rename_names(rename: &super::perfile::NameMap<'_>) {
     let mut table = TABLE.lock();
-    if let Some(flags) = table.entries.remove(old_path.as_ref()) {
-        table.entries.insert(new_path.as_ref().to_path_buf(), flags);
-        Ok(())
-    } else {
-        // No flags on this file — nothing to do.
-        Ok(())
+    // Collected first: a map key cannot be changed in place.
+    let moved: Vec<(FlagKey, PathBuf)> = table
+        .entries
+        .iter()
+        .filter_map(|(key, (name, _))| rename(name).map(|new| (key.clone(), new)))
+        .collect();
+    for (key, new_name) in moved {
+        let Some((_, flags)) = table.entries.remove(&key) else {
+            continue;
+        };
+        let new_key = match key {
+            FlagKey::Id(id) => FlagKey::Id(id),
+            FlagKey::Path(_) => FlagKey::Path(new_name.clone()),
+        };
+        table.entries.insert(new_key, (new_name, flags));
     }
+}
+
+/// Self-test support: `NO_BACKUP`, a flag with no bearing on anything the
+/// lifecycle rungs do. None of this module's flags is consulted by the VFS
+/// yet (see the module docs), but a rung that planted `IMMUTABLE` or
+/// `NO_DELETE` would start failing the day one is.
+fn plant_for_test(path: &Path) -> KernelResult<()> {
+    set_flags(path, FileFlags::NO_BACKUP)
+}
+
+/// Self-test support: whether a lookup through `path` finds `NO_BACKUP`.
+fn finds_for_test(path: &Path) -> bool {
+    get_flags(path) & FileFlags::NO_BACKUP != 0
+}
+
+/// Self-test support: whether flags are reported under `name`.
+fn reports_for_test(name: &Path) -> bool {
+    TABLE
+        .lock()
+        .entries
+        .values()
+        .any(|(p, _)| p.as_path() == name)
+}
+
+/// A filesystem was unmounted: its mount id is never reused, so no identity
+/// on it can match again, and its rows are only garbage.
+fn forget_filesystem(fs_id: u64) {
+    TABLE
+        .lock()
+        .entries
+        .retain(|key, _| !matches!(key, FlagKey::Id(id) if id.fs_id == fs_id));
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +508,11 @@ pub fn rename_path(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) -> Ke
 /// List all files with any flags set.
 pub fn list_flagged() -> Vec<(PathBuf, FlagBits)> {
     let table = TABLE.lock();
-    table.entries.iter().map(|(p, f)| (p.clone(), *f)).collect()
+    table
+        .entries
+        .values()
+        .map(|(p, f)| (p.clone(), *f))
+        .collect()
 }
 
 /// List files with a specific flag set.
@@ -343,8 +521,8 @@ pub fn list_with_flag(flag: FlagBits) -> Vec<PathBuf> {
     table
         .entries
         .iter()
-        .filter(|(_, f)| **f & flag != 0)
-        .map(|(p, _)| p.clone())
+        .filter(|(_, (_, f))| *f & flag != 0)
+        .map(|(_, (p, _))| p.clone())
         .collect()
 }
 
@@ -391,7 +569,88 @@ pub fn clear_all() {
 /// then reported success.  The live state is moved aside for the duration and
 /// put back afterwards; `crate::fs::selftest` records why this shape rather
 /// than the alternatives.
+/// A file marked immutable under one name must be immutable under another.
+///
+/// **The only rung here that exercises identity keying.** The others use
+/// synthetic paths that do not exist, so `file_identity` returns `NotFound`,
+/// the key falls back to the name, and they pass exactly as they did before
+/// the 2026-09-21 conversion -- no evidence for it at all.
+/// This table decides whether a write, truncate, delete or link is refused,
+/// so a flag that reads as absent under a second name is protection lost.
+fn test_flags_follow_the_file() -> crate::error::KernelResult<()> {
+    use crate::fs::Vfs;
+    const A: &[u8] = b"/tmp/immutable-id-a";
+    const B: &[u8] = b"/tmp/immutable-id-b";
+
+    let _ = Vfs::remove(Path::new(A));
+    let _ = Vfs::remove(Path::new(B));
+    Vfs::write_file(Path::new(A), b"x")?;
+    match crate::fs::selftest::classify(Vfs::link(Path::new(A), Path::new(B))) {
+        crate::fs::selftest::Setup::Ready => {}
+        // Only NotSupported/ReadOnlyFilesystem/NoSuchDevice reach here.
+        crate::fs::selftest::Setup::Unsupported(e) => {
+            crate::serial_println!(
+                "immutable: identity rung SKIPPED -- link() unsupported here: {:?}",
+                e
+            );
+            let _ = Vfs::remove(Path::new(A));
+            return Ok(());
+        }
+        // The system was ASKED and REFUSED. Reporting that as 'no hard
+        // links here' would announce a cause never established.
+        crate::fs::selftest::Setup::Failed(e) => {
+            crate::serial_println!("immutable: FAIL: link() refused with {:?}, which is not", e);
+            crate::serial_println!("immutable:       'this system cannot'");
+            let _ = Vfs::remove(Path::new(A));
+            return Err(e);
+        }
+    }
+    let (ida, idb) = (
+        Vfs::file_identity(Path::new(A))?,
+        Vfs::file_identity(Path::new(B))?,
+    );
+    if ida.is_none() || ida != idb {
+        crate::serial_println!("immutable: identity rung SKIPPED -- {:?} vs {:?}", ida, idb);
+        let _ = Vfs::remove(Path::new(B));
+        let _ = Vfs::remove(Path::new(A));
+        return Ok(());
+    }
+
+    // A third file, NOT a link to A, for the negative control.
+    const C: &[u8] = b"/tmp/immutable-id-c";
+    let _ = Vfs::remove(Path::new(C));
+    Vfs::write_file(Path::new(C), b"x")?;
+
+    set_flags(Path::new(A), FileFlags::IMMUTABLE)?;
+    let seen = get_flags(Path::new(B));
+    let unrelated = get_flags(Path::new(C));
+    let _ = Vfs::remove(Path::new(C));
+
+    // NEGATIVE CONTROL, checked first: a key that collapses every path to
+    // one entry would report IMMUTABLE everywhere, passing the assertion
+    // below without identity keying existing (dd-954).
+    if unrelated & FileFlags::IMMUTABLE != 0 {
+        crate::serial_println!(
+            "immutable: ERROR: control failed -- an UNRELATED file reports A's flag"
+        );
+        let _ = remove_flags(Path::new(A));
+        return Err(crate::error::KernelError::InternalError);
+    }
+    let _ = remove_flags(Path::new(A));
+    let _ = Vfs::remove(Path::new(B));
+    let _ = Vfs::remove(Path::new(A));
+    if seen & FileFlags::IMMUTABLE == 0 {
+        crate::serial_println!(
+            "immutable: FAIL -- IMMUTABLE set on one name reads as {} on another",
+            seen
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("immutable: identity rung OK -- flags follow the file, not the name");
+    Ok(())
+}
 pub fn self_test() -> KernelResult<()> {
+    test_flags_follow_the_file()?;
     // These counters live outside the table, so `with_pristine` cannot
     // see them; save and restore them here so a run leaves no trace.
     let saved_set_count = SET_COUNT.load(Ordering::Relaxed);

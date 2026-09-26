@@ -1247,6 +1247,322 @@ def test_the_commit_wait_never_costs_more_than_it_saves():
           _budget(fragment, 60, bash, env_override="99999"), 99999)
 
 
+def _watchdog_line_re(source=None):
+    """The `WATCHDOG_LINE_RE=` assignment, lifted from `boot-test.sh` as is.
+
+    Lifted rather than restated, so a test cannot keep passing against a
+    pattern the script has stopped using.
+    """
+    if source is None:
+        with open(BOOT_TEST, "r", encoding="utf-8") as handle:
+            source = handle.read()
+    for line in source.splitlines():
+        if line.startswith("WATCHDOG_LINE_RE="):
+            return line
+    raise RuntimeError("boot-test.sh no longer assigns WATCHDOG_LINE_RE in "
+                       "column 0; update this extractor, do not drop the test")
+
+
+def _progress_harness(body):
+    """Run `body` beside the real progress functions; return its stdout.
+
+    `None` if it did not finish within the hang guard on a host with room.
+    """
+    tmp = new_fixture()
+    try:
+        with open(os.path.join(tmp, "harness.sh"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "set -euo pipefail\n"
+                "TIMEOUT=2400\nSTALL_SECS=150\nWAIT_MARKER=BOOT_OK\n"
+                "ELAPSED=0\nSTALL_LAST_GROWTH=0\n"
+                "OWN_LINES_SEEN=0\nOWN_LAST_GROWTH=0\nOWN_LAST_LINE=\"\"\n"
+                "OWN_LAST_SCAN=-100\nOWN_SCAN_EVERY=10\n"
+                + _watchdog_line_re() + "\n"
+                + extract_shell_function("scan_own_output") + "\n\n"
+                + extract_shell_function("timeout_progress_verdict") + "\n\n"
+                + extract_shell_function("stall_wedge_message") + "\n\n"
+                + extract_shell_function("scan_own_output_throttled") + "\n\n"
+                + extract_shell_function("own_output_stalled") + "\n\n"
+                + body)
+        proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the progress record")
+        return None if proc is None else proc.stdout
+    finally:
+        drop_fixture(tmp)
+
+
+def _append_steps(steps):
+    """Shell that appends each `(elapsed, text)` to serial.txt and scans it.
+
+    Written with printf's `%b`, so the texts may carry the `\n`, `\r` and
+    split lines the real serial log does.
+    """
+    out = []
+    for elapsed, text in steps:
+        escaped = text.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+        out.append(f"ELAPSED={elapsed}\n"
+                   f"printf '%b' {_sq(escaped)} >> serial.txt\n"
+                   "scan_own_output serial.txt\n")
+    return "".join(out) + (
+        'echo "SEEN=$OWN_LINES_SEEN GROWTH=$OWN_LAST_GROWTH LINE=[$OWN_LAST_LINE]"\n')
+
+
+BREADCRUMB = "[liveness] boot-window breadcrumb: {}s armed (deadline 2234s, heartbeat=9307)\n"
+
+
+def test_a_watchdog_breadcrumb_is_not_the_boots_own_output():
+    """Breadcrumbs prove the machine alive; they are not the boot progressing.
+
+    Lane C's boot of 1ef989906 printed a pty line at ~310 s and then nothing
+    but breadcrumbs until its 2400 s timeout, and the harness, which watched
+    the log's size, reported it as still producing output.
+    """
+    out = _progress_harness(_append_steps([
+        (5, "[pty] opened\n[ctest] pty: running\n"),
+        (40, BREADCRUMB.format(30)),
+        (70, BREADCRUMB.format(60)),
+    ]))
+    check("breadcrumbs after own output: the last own line and time stand",
+          (out or "").strip(),
+          "SEEN=4 GROWTH=5 LINE=[[ctest] pty: running]")
+
+    out = _progress_harness(_append_steps([
+        (5, "[a] one\n"),
+        (40, BREADCRUMB.format(30)),
+        (50, "[b] two\n"),
+    ]))
+    check("own output after a breadcrumb moves the record on",
+          (out or "").strip(), "SEEN=3 GROWTH=50 LINE=[[b] two]")
+
+
+def test_a_breadcrumb_split_across_two_writes_is_still_a_breadcrumb():
+    """Only complete lines are classified.
+
+    The log is read while the guest is writing it, so a scan can land in the
+    middle of a line. Classifying the fragment would read the back half of a
+    breadcrumb -- which does not start with `[liveness]` -- as output of the
+    boot's own, and a stuck boot would look live once a minute.
+    """
+    crumb = BREADCRUMB.format(30)
+    out = _progress_harness(_append_steps([
+        (5, "[own] line\n"),
+        (40, crumb[:19]),
+        (41, crumb[19:]),
+    ]))
+    check("a breadcrumb written in two halves does not count as own output",
+          (out or "").strip(), "SEEN=2 GROWTH=5 LINE=[[own] line]")
+
+
+def test_blank_lines_and_carriage_returns_are_not_output():
+    """A CR-LF log reports its lines without the CR, and a bare newline is not
+    progress -- the serial console emits both."""
+    out = _progress_harness(_append_steps([
+        (5, "[own] crlf\r\n"),
+        (40, "\r\n\n"),
+    ]))
+    check("CR stripped from the reported line; blank lines ignored",
+          (out or "").strip(), "SEEN=3 GROWTH=5 LINE=[[own] crlf]")
+
+
+def test_a_stuck_boot_is_not_called_a_budget_too_small():
+    """The timeout verdict for lane C's boot, and for its two neighbours."""
+    stuck = _progress_harness(
+        "ELAPSED=2400\nSTALL_LAST_GROWTH=2395\nOWN_LAST_GROWTH=310\n"
+        "OWN_LAST_LINE='[pty] master_TRY_write: VINTR entering the input ring'\n"
+        "timeout_progress_verdict\necho \"LABEL=$RIP_LABEL\"\n") or ""
+    check("stuck but alive is not 'STILL PRODUCING OUTPUT'",
+          "STILL PRODUCING OUTPUT" in stuck, False)
+    check("...it names how long the boot's own output has been quiet",
+          "last own output was 2090s ago" in stuck, True)
+    check("...and the line it stopped at, which is where to look",
+          "[pty] master_TRY_write: VINTR" in stuck, True)
+    check("...and the RIP label says the machine was alive",
+          "LABEL=RIP at timeout (machine alive, boot stuck)" in stuck, True)
+
+    live = _progress_harness(
+        "ELAPSED=2400\nSTALL_LAST_GROWTH=2398\nOWN_LAST_GROWTH=2398\n"
+        "OWN_LAST_LINE='[bench] still going'\ntimeout_progress_verdict\n") or ""
+    check("own output 2 s before the clock ran out is a budget too small",
+          "STILL PRODUCING OUTPUT (its own output grew 2s ago)" in live, True)
+
+    dead = _progress_harness(
+        "ELAPSED=2400\nSTALL_LAST_GROWTH=310\nOWN_LAST_GROWTH=310\n"
+        "OWN_LAST_LINE='[sched] Task 353 exiting'\ntimeout_progress_verdict\n") or ""
+    check("no output at all since: the plain 'serial last grew' verdict",
+          "serial last grew 2090s ago" in dead, True)
+    check("...not the breadcrumb one", "breadcrumbs" in dead, False)
+
+
+def test_the_stall_verdict_says_whether_the_machine_was_alive():
+    """--stall-secs now fires on a live-but-stuck boot; its message says so,
+    and keeps the `=== WEDGE: serial` prefix wedge-soak.sh greps for."""
+    alive = _progress_harness(
+        "ELAPSED=500\nSTALL_LAST_GROWTH=490\nOWN_LAST_GROWTH=300\n"
+        "OWN_LAST_LINE='[ctest] pty: running'\nstall_wedge_message\n") or ""
+    check("stuck but alive: the wedge-soak prefix is kept",
+          alive.startswith("=== WEDGE: serial"), True)
+    check("...and it says the machine is alive", "machine is alive" in alive, True)
+    check("...naming the last own line", "[ctest] pty: running" in alive, True)
+
+    silent = _progress_harness(
+        "ELAPSED=500\nSTALL_LAST_GROWTH=300\nOWN_LAST_GROWTH=300\n"
+        "OWN_LAST_LINE='[sched] Task 387 exiting'\nstall_wedge_message\n") or ""
+    check("no breadcrumbs either: the plain wedge message",
+          "kernel not progressing" in silent, True)
+
+
+def test_the_own_output_scan_is_throttled_but_no_verdict_is_stale():
+    """The wait loop scans for the boot's own output at most every
+    OWN_SCAN_EVERY seconds -- each scan starts five processes, and on a loaded
+    host that was the loop's main cost -- but the stall verdict rescans before
+    it fires, so a line the throttle has not read yet still saves the boot."""
+    def line(text):
+        return f"printf '%s\\n' {_sq(text)} >> serial.txt\n"
+
+    out = _progress_harness(
+        "ELAPSED=5\n" + line("[a] one") + "scan_own_output_throttled serial.txt\n"
+        "ELAPSED=8\n" + line("[b] two") + "scan_own_output_throttled serial.txt\n"
+        'echo "AT8 GROWTH=$OWN_LAST_GROWTH LINE=[$OWN_LAST_LINE]"\n'
+        "ELAPSED=15\nscan_own_output_throttled serial.txt\n"
+        'echo "AT15 GROWTH=$OWN_LAST_GROWTH LINE=[$OWN_LAST_LINE]"\n') or ""
+    check("throttled scan: a second scan inside the interval waits",
+          "AT8 GROWTH=5 LINE=[[a] one]" in out, True)
+    check("...and the next one reads every line since, the last one winning",
+          "AT15 GROWTH=15 LINE=[[b] two]" in out, True)
+
+    saved = _progress_harness(
+        "ELAPSED=100\n" + line("[a] one") + "scan_own_output serial.txt\n"
+        # Arrives after the last (throttled) scan, which read nothing new.
+        "ELAPSED=248\n" + line("[b] late but real") + "OWN_LAST_SCAN=245\n"
+        "ELAPSED=251\n"
+        "if own_output_stalled serial.txt; then echo STALLED; else echo LIVE; fi\n"
+        'echo "GROWTH=$OWN_LAST_GROWTH"\n') or ""
+    check("stall verdict: an unread line of the boot's own is found first",
+          saved.split(), ["LIVE", "GROWTH=251"])
+
+    stuck = _progress_harness(
+        "ELAPSED=100\n" + line("[a] one") + "scan_own_output serial.txt\n"
+        "ELAPSED=200\n" + line(BREADCRUMB.format(180).rstrip("\n"))
+        + "ELAPSED=251\n"
+        "if own_output_stalled serial.txt; then echo STALLED; else echo LIVE; fi\n") or ""
+    check("stall verdict: breadcrumbs alone are still a stall",
+          stuck.split(), ["STALLED"])
+
+    off = _progress_harness(
+        "STALL_SECS=0\nELAPSED=100000\n"
+        "if own_output_stalled serial.txt; then echo STALLED; else echo LIVE; fi\n") or ""
+    check("stall verdict: --stall-secs unset never stalls", off.split(), ["LIVE"])
+
+
+def test_the_qemu_priority_watcher_reads_back_and_reports_a_change():
+    """`raise_qemu_priority` raises QEMU, reads the class back, and says when
+    something on the host changes it -- which is how Process Lasso's
+    ProBalance was found undoing the raise (design-decisions.md §963).
+
+    Run against a stand-in process with the poll at one second. It pins two
+    things a reading of the code missed. Every field is free of the CR that a
+    Windows Python ends its lines with: the first live run logged "reads
+    back: AboveNormal<CR>) ===" and a seconds count with a CR in it, which
+    this harness's universal-newline decoding turns into a split line, so the
+    whole-line matches below fail on it. And the function returns once the
+    process it watches has gone, since the boot's exit path does not wait for
+    it and a watcher that outlived QEMU would hold the log's pipe open.
+    """
+    func = extract_shell_function("raise_qemu_priority")
+    if os.name != "nt":
+        # `uname -s` is not MSYS, so the function must return at once, quietly.
+        tmp = new_fixture()
+        try:
+            with open(os.path.join(tmp, "harness.sh"), "w", encoding="utf-8",
+                      newline="\n") as fh:
+                fh.write(f"{func}\nraise_qemu_priority\necho WATCHER-RETURNED\n")
+            proc = run_harness(tmp, HARNESS_HANG_GUARD_S,
+                               "the QEMU priority watcher")
+        finally:
+            drop_fixture(tmp)
+        check("priority watcher: off Windows it only returns",
+              proc.stdout if proc else None, "WATCHER-RETURNED\n")
+        return
+
+    import ctypes
+    import threading
+
+    kernel32 = ctypes.windll.kernel32
+    stand_in = subprocess.Popen([sys.executable, "-c",
+                                 "import time; time.sleep(3600)"])
+    tmp = new_fixture()
+    outcome: list = []
+    raised = False
+    try:
+        pidfile = os.path.join(tmp, "qemu.pid")
+        with open(pidfile, "w", encoding="ascii", newline="\n") as fh:
+            fh.write(f"{stand_in.pid}\n")
+        with open(os.path.join(tmp, "harness.sh"), "w", encoding="utf-8",
+                  newline="\n") as fh:
+            fh.write(f"PIDFILE={_sq(_shpath(pidfile))}\n"
+                     "BOOT_QEMU_PRIORITY_POLL_SECS=1\n"
+                     f"{func}\n"
+                     "raise_qemu_priority\n"
+                     "echo WATCHER-RETURNED\n")
+
+        def watch():
+            # Carried back rather than raised here: an exception in a thread
+            # is lost, and `HostStarved` has to reach `main` to be declined.
+            try:
+                outcome.append(run_harness(tmp, HARNESS_HANG_GUARD_S,
+                                           "the QEMU priority watcher"))
+            except BaseException as exc:  # noqa: BLE001 -- re-raised below
+                outcome.append(exc)
+
+        runner = threading.Thread(target=watch, daemon=True)
+        runner.start()
+        # PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION.
+        handle = kernel32.OpenProcess(0x0200 | 0x1000, False, stand_in.pid)
+        try:
+            deadline = time.monotonic() + HARNESS_HANG_GUARD_S
+            while runner.is_alive() and time.monotonic() < deadline:
+                if kernel32.GetPriorityClass(handle) == 0x8000:
+                    raised = True
+                    break
+                time.sleep(0.2)
+            # What ProBalance did: put it back to BelowNormal from outside.
+            kernel32.SetPriorityClass(handle, 0x4000)
+        finally:
+            kernel32.CloseHandle(handle)
+        time.sleep(5)          # five one-second polls
+        stand_in.kill()
+        stand_in.wait()
+        runner.join(HARNESS_HANG_GUARD_S)
+    finally:
+        if stand_in.poll() is None:
+            stand_in.kill()
+            stand_in.wait()
+        drop_fixture(tmp)
+
+    if outcome and isinstance(outcome[0], BaseException):
+        raise outcome[0]
+    proc = outcome[0] if outcome else None
+    check("priority watcher: finished (did not hang)", proc is not None, True)
+    if proc is None:
+        return
+    lines = proc.stdout.splitlines()
+    pid = stand_in.pid
+    check("priority watcher: the stand-in was raised to AboveNormal",
+          raised, True)
+    check("priority watcher: says the class it read back, whole",
+          f"=== QEMU (pid {pid}) raised to above-normal priority "
+          "(reads back: AboveNormal) ===" in lines, True)
+    changed = re.compile(
+        rf"^=== QEMU \(pid {pid}\) priority changed from AboveNormal to "
+        r"BelowNormal, \d+s after it was raised -- something on the host "
+        r"re-set it \(.*\) ===$")
+    if not check("priority watcher: reports the outside change, whole",
+                 any(changed.match(line) for line in lines), True):
+        print("      output was:\n" + proc.stdout)
+    check("priority watcher: returns once the process is gone",
+          lines[-1:] == ["WATCHER-RETURNED"], True)
+
+
 def _sq(text):
     """Single-quote for POSIX sh."""
     return "'" + text.replace("'", "'\\''") + "'"
@@ -1261,6 +1577,50 @@ def _shpath(path):
     Forward slashes work in both worlds, and this is a no-op on POSIX.
     """
     return path.replace(os.sep, "/")
+
+
+#: How long the boot-lock suite may take on a host with room before it counts
+#: as hung: it is about a hundred short bash subshells and one 5 s sleep, and
+#: takes seconds on an idle host. On a starved one `run_measured` declines it
+#: by name instead (on 2026-09-26, with the host at 100% CPU and its shells
+#: lowered by Process Lasso's ProBalance, it took 28 minutes).
+BOOT_LOCK_SUITE_GUARD_S = 900
+
+
+def test_the_boot_lock_suite_passes():
+    """`scripts/test-boot-lock.sh` is the only test of the boot lock and of the
+    monitor-port choice beside it -- the BOOT-LOCK-REGION and
+    MONITOR-PORT-REGION of `boot-test.sh`, extracted and run against lock
+    directories, tickets and port tables it controls.
+
+    It is run from here because nothing else ran it. The push hook's gate 20
+    pairs a changed script with `scripts/test-<stem>.py` by name, so a change
+    to `boot-test.sh` brings this file, and a shell suite with a different stem
+    is never reached; the boot test's own sweep globs `scripts/test-*.py` only.
+    The lock took two slots on 2026-09-26 (design-decisions.md §966) with this
+    suite as its whole test, and no gate would have noticed it failing.
+    """
+    suite = os.path.join("scripts", "test-boot-lock.sh")
+    try:
+        proc = hostload.run_measured(
+            [msysbash.bash(), suite], BOOT_LOCK_SUITE_GUARD_S,
+            "the boot-lock suite", cwd=REPO_ROOT,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    except subprocess.TimeoutExpired:
+        proc = None
+    if proc is None:
+        check("the boot-lock suite finishes", "hung", "finished")
+        return
+    failed = [line.strip() for line in proc.stdout.splitlines()
+              if line.startswith("  FAIL") or line.startswith("FAIL")]
+    check("the boot-lock suite passes",
+          ("exit 0" if proc.returncode == 0 else f"exit {proc.returncode}: "
+           + "; ".join(failed[:6])),
+          "exit 0")
+    # The suite's own banner, so a run that exited 0 without running its cases
+    # -- a region that failed to extract, say -- is not taken for a pass.
+    check("...and says it ran its cases",
+          "=== boot-lock tests PASSED ===" in proc.stdout, True)
 
 
 def main():

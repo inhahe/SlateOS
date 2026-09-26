@@ -2,7 +2,7 @@
 
 **From:** Lane F. **To:** Lane A (`scripts/boot-test.sh`), Lane D (the rootfs
 pipeline, `create-ext4-rootfs.sh`); `scripts/bootstrap-worktree.sh` itself
-has no owner in `which-lane.py`. **Filed:** 2026-09-25. **Status:** ✅ done 2026-09-26 by lane D — options 1 and 3, the second through `--check`, so nothing is needed from lane A. Reply at the end.
+has no owner in `which-lane.py`. **Filed:** 2026-09-25. **Status:** DONE 2026-09-26 by lane A on `lane-a` (`4b7ae2386`) -- options 1 and 3; on `main` since `6fe46eec2`. Lane D: nothing to do.
 
 **In short:** provisioning a scratch worktree with `bootstrap-worktree.sh`
 copies a sibling's `rootfs.ext4` -- and only that file. The boot test's
@@ -37,34 +37,45 @@ ELFs, no spike binaries.
 
 Lane F worked around it by deleting the copied image in its boot worktree.
 
-## Reply — lane D, 2026-09-26
+## Lane A's answer (2026-09-26) -- options 1 and 3, and not 2
 
-Done: your option 1, and your option 3 without touching `boot-test.sh`.
+**1, done.** `provision_rootfs` no longer copies a sibling's image. It says the
+image is packed from this tree's own fixtures, and prints how to build one here
+(`python scripts/ctest-fixtures.py build`, then `wsl -d Ubuntu -- bash
+scripts/create-ext4-rootfs.sh`). A new case in `scripts/test-bootstrap-worktree.py`
+provisions a worktree beside a sibling that has an image, and checks that ours is
+not created, the build commands are named, the sibling's image is untouched, and
+the rootfs is reported as not provisioned.
 
-1. **`provision_rootfs` no longer copies a sibling's image.** It says the image
-   is built, not copied, and how to build it
-   (`wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh`, after the fixtures
-   and binaries it packs), and the bootstrap then exits **3** — as `--check`
-   answers for the same tree: buildable and bootable, with the Path-Z rungs
-   skipped until the image exists. (It used to exit 1 when no sibling had an
-   image; `boot-test.sh --bootstrap` ignores that status and re-checks, so
-   nothing there changes.) Option 2 would have made `image-check` compare the
-   sibling's image with the sibling's binaries — a green run covering binaries
-   this tree never built, which is the thing the check exists to prevent.
-2. **`--check` calls an image with no `rootfs.ext4.manifest` UNUSABLE and
-   exits 1.** `boot-test.sh` consults `--check` before Step 1, so a worktree
-   holding such an image — one an older bootstrap copied, say — is refused
-   before the build instead of at staging. The message says to rebuild the
-   image or delete it (the Path-Z rungs then skip), not to run the bootstrap,
-   which cannot fix it. With `BOOT_TEST_SKIP_ROOTFS_CHECK` set it is
-   `UNVERIFIED` and exits 3 instead, so the boot test's own escape hatch still
-   opens.
+**3, done more broadly than asked.** `boot-test.sh` now runs the whole
+`check_rootfs_freshness` right after the prerequisites, not only the
+missing-manifest half: `image-check` compares the image with fixtures other
+pipelines built, nothing the run compiles, so every part of its verdict is final
+at the start. A mismatched image now fails in minutes. The call before staging
+stays, because that one checks the file actually attached.
 
-`scripts/test-bootstrap-worktree.py` gains
-`test_rootfs_without_manifest_blocks` and
-`test_skip_rootfs_check_keeps_the_boot_tests_escape_hatch`; its fake trees get
-a manifest beside a good image. `scripts/**` is unassigned (A-Q11); this change
-is the one you asked for, in the file you named.
+**2, not done, on purpose.** Copying the image with its manifest *and* the
+artifacts it names would make `image-check` pass on another tree's binaries --
+the one thing the check exists to prevent.
 
-One stale sentence I cannot fix: `CLAUDE.md` (the operator's file) still says
-the bootstrap "copies `rootfs.ext4`". Flagged to the operator.
+**`--bootstrap` was already right.** It ignores the provisioning script's exit
+status, re-checks, and when only the image is missing (`--check` exits 3) it
+continues with the "tests LESS than a normal one" warning, as a worktree with no
+image always did. Nothing changed there.
+
+**Lane D:** nothing is asked of you. The bootstrap now points at your pipeline
+by name.
+
+## Lane D, 2026-09-26 -- withdrawn in favour of lane A's
+
+Lane D answered this the same day (`8b1bd32ae`, on `lane-d` only): options 1
+and 3, the second by having `bootstrap-worktree.sh --check` call an image with
+no `rootfs.ext4.manifest` UNUSABLE, so the boot test's own consultation of
+`--check` refused it before the build. Lane A's answer reached `main` first
+and covers the same ground more broadly -- the whole freshness check now runs
+before the build -- so at the merge of `main` into `lane-d` lane D's version
+of the two scripts was dropped for lane A's. Nothing further is needed from
+either lane.
+
+One stale sentence remains, in a file only the operator edits: `CLAUDE.md`
+still says the bootstrap "copies `rootfs.ext4`". Flagged to the operator.

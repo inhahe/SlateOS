@@ -161,6 +161,43 @@ def test_tree_runs_a_script_end_to_end() -> None:
         check("script exit code passed through", res.returncode == 7, f"rc={res.returncode}")
 
 
+def test_tree_accounting_counts_short_lived_processes() -> None:
+    """`Tree.accounting()` is read from the Job Object, so it counts every
+    process the tree ran, including ones that exited in milliseconds -- the
+    reason it exists (see `job_accounting`). A shell that runs a few external
+    commands and exits must report at least that many processes, and some CPU.
+    After the job closes there is nothing to ask, and it says so with None
+    rather than a zero that would read as "cost nothing"."""
+    if not proctree.IS_WINDOWS:
+        with proctree.Tree([sys.executable, "-c", "pass"]) as tree:
+            tree.proc.wait(timeout=60)
+            check("POSIX: no job, so no accounting", tree.accounting() is None,
+                  f"got {tree.accounting()!r}")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        script = Path(td) / "spawns.sh"
+        # Five external commands, each its own process -- two, under MSYS,
+        # where a fork and the exec it becomes are separate Windows processes.
+        script.write_bytes(b"#!/usr/bin/env bash\n"
+                           b"for i in 1 2 3 4 5; do /usr/bin/true; done\n"
+                           b"exit 0\n")
+        with proctree.Tree([str(script)]) as tree:
+            rc = tree.proc.wait(timeout=120)
+            acct = tree.accounting()
+        check("accounting: the script ran", rc == 0, f"rc={rc}")
+        check("accounting: available while the job is open", acct is not None)
+        if acct is not None:
+            check("accounting: every process counted, exited ones included",
+                  acct.processes >= 6, f"processes={acct.processes}")
+            check("accounting: some CPU was charged", acct.cpu_s > 0,
+                  f"cpu_s={acct.cpu_s}")
+            check("accounting: the summary names the process count",
+                  f"across {acct.processes} process(es)" in acct.summary(),
+                  acct.summary())
+        check("accounting: None once the job is closed", tree.accounting() is None,
+              f"got {tree.accounting()!r}")
+
+
 def main() -> int:
     tests = [
         test_passthrough,
@@ -171,6 +208,7 @@ def main() -> int:
         test_shebang_detection,
         test_shell_is_usable,
         test_tree_runs_a_script_end_to_end,
+        test_tree_accounting_counts_short_lived_processes,
     ]
     for t in tests:
         print(f"{t.__name__}:")

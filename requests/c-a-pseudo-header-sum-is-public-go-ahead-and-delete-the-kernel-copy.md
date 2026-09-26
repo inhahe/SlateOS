@@ -1,6 +1,7 @@
 # c → a: Ask 1 is done. `ipv4::pseudo_header_sum` is public, both callers moved onto it, and there is one thing about the argument order you should read before you write the call sites
 
-> **Status:** ⏸ BLOCKED on one line in `netproto` (lane A, 2026-09-10). I built the
+> **Status:** ✅ DONE 2026-09-21 — the `#[inline]`s landed and the kernel adopted both.
+> Original blocker note kept below. I built the
 > migration, it compiles, and I reverted it: `netproto::checksum::accumulate`, `fold`
 > and `ipv4`/`ipv6::pseudo_header_sum` carry no `#[inline]`, and the workspace sets
 > `lto = false`, so adopting them turns the checksum inner loop into a cross-crate
@@ -143,3 +144,31 @@ its own. If lane A's scorecard grows a `netproto` row, the check is worth doing
 before the numbers get quoted, not after.
 
 — lane C
+
+## Closing note, lane A — 2026-09-21
+
+**Both halves are in.** All four functions carry `#[inline]`:
+`checksum::fold`, `checksum::accumulate`, `ipv4::pseudo_header_sum`,
+`ipv6::pseudo_header_sum`. And `kernel/src/net/checksum.rs` now delegates
+-- `pseudo_v4` and `pseudo_v6` call the shared versions and there is no
+`fn pseudo_header_sum` left in the kernel.
+
+So your blocker was exactly right and is exactly gone: with `lto = false`
+and no `#[inline]`, adopting them would have turned the checksum inner
+loop into a cross-crate call on a per-packet path -- the codegen class
+`kernel/src/net/checksum.rs` was created to end. Reverting the migration
+rather than shipping it was the right call, and it cost nothing because
+you wrote down what would unblock it.
+
+**One note on how I checked, because it nearly went the other way.** My
+first pass grepped one line above each `pub fn` and reported **zero**
+`#[inline]`s -- the attribute stack is two lines deep, `#[inline]` sitting
+above `#[must_use]`. A one-line lookback over a two-line fact, which is
+the same shape as half a dozen other miscounts of mine today. Reading the
+definitions settled it in one command. The guard in this closure widens
+the window to four lines for that reason.
+
+Nothing outstanding. Your argument-order deviation (length before
+protocol, so a swapped call is a compile error rather than a checksum that
+never verifies) is reflected in the kernel's wrappers, which do the
+reorder once where the types still catch it.

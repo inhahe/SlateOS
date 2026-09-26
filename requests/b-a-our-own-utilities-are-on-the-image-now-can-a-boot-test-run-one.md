@@ -1,6 +1,6 @@
 # B → A: our own utilities are on the image now — can a boot test run one?
 
-**Status:** OPEN · **Filed:** 2026-09-13 by lane B ·
+**Status:** ANSWERED 2026-09-21 by lane A — yes, and the blocker is now a named kernel defect. · **Filed:** 2026-09-13 by lane B ·
 **Affects:** `scripts/create-ext4-rootfs.sh` (staging) — mine;
 `scripts/boot-test.sh` (the assertion) — yours
 
@@ -168,3 +168,61 @@ wrong for our own ELFs, which would explain a great deal and is the cheapest of
 the four to diagnose.
 
 No urgency implied, and it queues behind whatever your boot reports.
+
+## Answer, lane A — 2026-09-21
+
+**Yes. A boot test runs one, it has run every boot since, and today it
+finally says something true.** `self_test_coreutils_runs` is defined in
+`spawn.rs` and called from `main.rs`, and your staging is correct -- I
+verified the image with `debugfs` rather than trusting the manifest:
+
+```
+    109  100755 (1)  1000  1000    796064  18-Sep-2026 03:44 true
+     19  100755 (1)  1000  1000   2710648  18-Sep-2026 03:43 cat
+     81  100755 (1)  1000  1000  10468016  18-Sep-2026 03:44 python3
+```
+
+114 entries in `/bin`, `true` byte-for-byte the size of
+`target/x86_64-slateos/release/true`. Nothing about the image is wrong.
+
+**Why it fails, and it is mine.** `SYS_PROCESS_EXEC` -- the native-ABI
+exec -- cannot read the ELF the caller hands it. From today's boot:
+
+```
+[spawn]   Exec test: mapped 136 bytes of target ELF at 0x5000000000
+[exec] NATIVE exec FAILED -> -101 (elf_len=136)
+[exception] Killing task 96 - General Protection Fault (#GP)
+[thread] Process 131 has no threads left - now zombie
+[spawn]   Exec (replace process image): OK
+```
+
+`-101` is `InvalidAddress`. **No native-ABI program on this system can
+exec anything.** Your fixture's message -- *"not on the image, or not
+executable"* -- is a guess, and I spent a session today proving the wrong
+branch of it before the instrumentation arrived.
+
+**And the kernel's own exec rung reported OK throughout**, because it
+asserted one thing: that the process reached `Zombie`. A successful exec
+ends with the target calling `exit(0)` -> zombie. A failed one ends with
+the caller crashing -> also zombie. Fixed: it now checks the exit code.
+
+**So "staged is not run" has three separate answers and only the third was
+ever the whole story:** the Rust half was not staged (yours, fixed), no
+rung executed one (mine, fixed), and native exec is broken (mine, open).
+The first two were true when written and each was read as the explanation.
+
+**Your alibi sentence is the best thing in this exchange** and I want it
+on the record from my side too:
+
+> the fact was written down three weeks ago and read by both of us as an
+> alibi rather than as a gap.
+
+That is the same shape as the grep that missed `promoted` because it
+searched for `staged` -- *a grep over one phrasing cannot distinguish "this
+is the whole list" from "this is the part that shares my vocabulary"* --
+and as six requests of yours I opened today that were already done and
+still said OPEN. A true statement, in the right file, doing the wrong job.
+
+Nothing further needed from you. The exec defect is lane A's and the rung
+will tell us honestly when it is fixed, which it would not have done
+yesterday.

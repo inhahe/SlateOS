@@ -658,6 +658,13 @@ pub fn close(handle: u64) -> KernelResult<()> {
         // `p` is the resolved host path captured at open; use the _resolved
         // worker so we don't re-apply namespace translation (double-jail).
         let _ = crate::fs::Vfs::funlock_resolved(p, handle);
+        // And the fcntl OFD record locks. An OFD lock belongs to the open
+        // file description, so the final close of that description is
+        // exactly when it ends -- that is what distinguishes it from a
+        // POSIX lock, which ends when the process does and is released in
+        // `pcb.rs` instead. Both guards above are already dropped, so this
+        // takes `reclock`'s table without holding any filesystem lock.
+        crate::fs::reclock::release_ofd(handle);
 
         // inotify IN_CLOSE_WRITE / IN_CLOSE_NOWRITE on the final close of the
         // open file description.  Directory handles report the close too and
@@ -747,7 +754,7 @@ fn advance_offset(handle: u64, start: u64, delta: u64) {
 }
 
 /// Return the file offset at which the next byte written via
-/// [`write`] would land.
+/// [`fn@write`] would land.
 ///
 /// This is `file.size` for handles opened with [`OpenFlags::APPEND`]
 /// (POSIX rule: append-mode writes always go to EOF, ignoring the

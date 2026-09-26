@@ -7,7 +7,7 @@
 //!
 //! ## Variants
 //!
-//! - [`warn_once`]: Records the warning only the first time it triggers.
+//! - `kwarn_once!`: Records the warning only the first time it triggers.
 //!   Subsequent triggers at the same call site are suppressed (uses a
 //!   static AtomicBool per call site via the macro).
 //! - [`warn`]: Records every occurrence (for recurring violations).

@@ -1142,7 +1142,16 @@ Known-issues (open, kernel-owned):
   ones freed). Fixed in `0ecd5ff03` by `sched::detach_address_space`, pinned by
   `proc::thread` test 11 (`test_exit_detaches_address_space`), and the WATCH was
   cleared after cycles 8/9/10 (`ab3d42901`, `b215b83c1`, `1422972ad`) each
-  reached `BOOT_OK` with a green `REAL glibc forkexec`.
+  reached `BOOT_OK` with a green `REAL glibc forkexec`. **It recurred on
+  2026-08-25 and 2026-09-15, on other rungs, with the same silence -- a second
+  cause, found and fixed 2026-09-25:** a stale run-queue entry, left by
+  removals that scanned only the level a task's priority computes (which the
+  anti-starvation booster invalidates), was picked by the exiting task itself
+  and resumed it in place, and `task_exit` then halted with interrupts off.
+  Removal is now by id, the pick refuses any task that cannot run, and
+  `task_exit` re-parks instead of halting; pinned by
+  `sched::test_stale_run_queue_entries` (design-decisions.md §964). WATCH
+  until a clean run of boots -- see `known-issues.md`.
 - ~~`BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES`~~ — found by lane B,
   **FIXED 2026-08-22** (`c58efa00d`). `fork_create` clones the parent's
   `cap_table`; `spawn_process` did not, and neither `SYS_PROCESS_SPAWN` nor
@@ -4107,7 +4116,7 @@ _Port ext4 first. Don't write a custom filesystem._
     - [~] **Still UTC:** an unset `TZ` (no `/etc/localtime`, no system default zone) and any zoneinfo name (`America/New_York` is not a POSIX `TZ` string — needs a TZif reader plus shipped tzdata, a packaging decision). Consistent across libc and shell, so nothing disagrees; tracked as `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`.
   - [x] system(): posix_spawnp("sh", "-c", command) + waitpid (was ENOSYS stub), NULL→stat /bin/sh check
   - [x] tmpnam: /tmp/tmp_NNNNNN name generation with monotonic counter, L_TMPNAM=20 (was null stub)
-  - [x] fcntl advisory locking: F_GETLK/F_SETLK/F_SETLKW commands, struct Flock (l_type/l_whence/l_start/l_len/l_pid), F_RDLCK/F_WRLCK/F_UNLCK constants; stubs (no kernel lock enforcement — F_GETLK returns F_UNLCK, F_SETLK/F_SETLKW always succeed)
+  - [x] fcntl advisory locking: F_GETLK/F_SETLK/F_SETLKW commands, struct Flock (l_type/l_whence/l_start/l_len/l_pid), F_RDLCK/F_WRLCK/F_UNLCK constants; **enforced for real 2026-09-21** — wired to `fs::reclock` (byte-range conflict detection, identity-keyed so a hard link cannot evade a lock, POSIX and OFD owners in separate spaces, POSIX locks released on process exit). Two known limits: F_SETLKW returns EAGAIN instead of blocking (no wait-queue hook for a lock table — same limitation `sys_flock` documents), and OFD locks have no release path yet (latent: only reachable once posix's fcntl_ops stub is wired). Was: stubs — F_GETLK returned F_UNLCK and F_SETLK always succeeded
   - [x] signal additions: sigaltstack (stack_t struct, SS_ONSTACK/SS_DISABLE/MINSIGSTKSZ/SIGSTKSZ constants, validates stack size), siginterrupt (stub — no SA_RESTART behavior to toggle)
   - [x] setgroups: stub succeeding silently (single-user OS)
   - [x] terminal control: cfmakeraw (raw mode for TUI apps), cfsetspeed, tcsendbreak/tcdrain/tcflow/tcflush stubs; BRKINT/INPCK/ISTRIP/IXON/PARENB constants

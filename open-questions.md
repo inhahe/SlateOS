@@ -3130,6 +3130,195 @@ anyone else's.
 
 
 
+## A-Q21 — [A] Seven security modules are built but nothing uses them. Staged for later, or believed to be working? — Status: OPEN
+
+**In short:** the kernel has seven pieces of code whose job is to say
+"no" — checking passwords, unlocking encrypted disks, deciding who may
+open a file. All seven are written and tested. None of them is called by
+anything except a command typed by hand into the kernel's own shell. So
+nothing in the running system currently asks permission from any of them.
+I cannot tell from the code whether that is the plan or an oversight, and
+the answer changes what should happen next.
+
+**The seven, and what reaches each.** "Reached from kshell only" means the
+single caller outside the module is the kernel's interactive shell — a
+person typing, not the system running.
+
+| module | its job | reached from |
+|---|---|---|
+| `authbroker` | authenticate a principal | kshell only |
+| `diskencrypt` | unlock an encrypted volume | kshell only |
+| `capsettings` | may this user reach this path | kshell only |
+| `secpolicy` | allow/deny by policy | kshell only |
+| `sealing` | refuse writes to a sealed file | kshell only |
+| `reclock` | byte-range file locks | **no longer latent -- wired to `fcntl(F_SETLK/F_GETLK/F_UNLCK)` on 2026-09-21** |
+| `vfs::flock` | whole-file advisory locks | **this row was wrong -- see the correction below** |
+| `secureboot` | enrol keys, verify a boot image | `kshell` and `/proc` only — **no syscall at all** |
+
+**Two rows corrected on 2026-09-21, because a decision queue with stale rows
+is not decidable.**
+
+- **`reclock` is now reachable.** It was accurate when filed -- the table had
+  zero callers outside its own module. It is wired to `fcntl` as of today, and
+  the kernel's reason for granting every lock unconditionally turned out to be
+  a comment asserting an invariant nothing enforced. So this one is answered by
+  events rather than by the operator.
+
+- **`vfs::flock` was never latent, and I should not have written that it was.**
+  `nr::FLOCK => sys_flock(args)` is in the Linux dispatch table at
+  `syscall/linux.rs:3505`, `sys_flock` calls `Vfs::flock_resolved`, and
+  `posix/src/sys_file.rs` re-exports `flock()` for programs to call. Any
+  Linux-ABI process can take a whole-file advisory lock and always could. The
+  claim "nothing takes one" described the kernel's *internal* callers and was
+  then written into a column headed "reached from", which is a different
+  question -- the one that matters here is whether a *program* can reach it,
+  and it can.
+
+**What this does and does not change about the question.** It does not dissolve
+it: five modules (`authbroker`, `diskencrypt`, `capsettings`, `secpolicy`,
+`sealing`) plus `secureboot` are still reachable only by a human typing into
+kshell, and that is still the thing worth deciding. It does narrow it from
+seven to six, and it removes the two entries where the answer was "wire it"
+rather than "decide the policy".
+
+**More of the same shape, measured today.** The pattern is wider than security
+modules. Of the eight tables holding per-file metadata (see `known-issues.md`
+2026-09-21 and `design-decisions.md` §957), the syscall layer reaches almost
+none of them:
+
+| module | syscall-layer callers | kshell callers |
+|---|---|---|
+| `acl` | 0 | all of them |
+| `fcomment` | 0 | 10 of 13 |
+| `queryable` | 0 | 45 of 49 |
+| `tags` | 0 | 18 of 28 |
+
+So a user-visible feature set -- file comments, tags, indexed attributes,
+POSIX ACLs -- exists, is tested, and cannot be used by any program. That is the
+same question as the one above with a different blast radius: for `secpolicy`
+the consequence is that nothing is enforced, and for `tags` it is that a
+feature the design promises is unreachable. Worth answering together.
+**The eighth one is worse than latent, and it arrived after this was
+filed.** `userspace/sbctl` reports creating secure-boot keys and signing
+kernel images and does neither — `fs::write` appears nowhere in the crate.
+It prints *"Keys created successfully."* The other seven are silent about
+being unwired; this one tells the operator their kernel image is signed.
+If the answer below is "staged", that is defensible for the seven and not
+for this one, which should stop claiming success whatever is decided.
+
+**One detail that decides how it reads.** `diskencrypt`'s unlock is
+`unlock_volume(id, _passphrase)` — the underscore means the passphrase is
+not used at all, and its comment says so plainly: *"Simulated passphrase
+check (in real implementation, derive key and verify)"*. Candid in the
+file; invisible to anyone reading the function's name.
+
+**And the same in `secureboot`, found 2026-09-25.** Its check of a boot
+image, `verify_image(image_name, hash)`, never looks at `hash` — the
+fingerprint of the file being checked. It passes every image unless secure
+boot is switched on, and when it is on, it passes every image as long as one
+trusted key is on file, which the default table always has. So it is not only
+unused; its answer is fixed in advance. That changes option **B** for this
+row: it cannot simply be connected, because the first user of it (`sbctl
+verify`, lane B's tool) would then report *verified* for any file at all. It
+would need a real check first — for instance an allow-list and a deny-list of
+image fingerprints (`db` and `dbx`, the two lists the PC firmware standard
+already defines), which needs no certificate code in the kernel. Lane B's
+`requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md` is parked on
+this question.
+
+| option | *What changes:* | cost |
+|---|---|---|
+| **A. It is staged — write that down** | nothing runs differently; each module gains a header saying it is not yet enforced, and one list tracks them | an hour. Stops the next person (me, twice already) re-deriving "nothing calls this" while judging how serious a bug is |
+| **B. It should be live — wire it up** | a wrong passphrase stops unlocking a volume; a sealed file stops accepting writes; `/proc` denial counts start moving | real work, module by module, and **each one activates its own latent defects on the day it is connected** — several key their tables by pathname, so two names for one file get two answers |
+| **C. Leave as is** | nothing changes | free, and the modules keep reading as finished when looked at individually |
+
+**Recommendation: A now, B per-module later.** A is cheap and removes the
+specific trap: these all currently look complete in isolation. B is the
+right destination but is not one decision — it is seven, each wanting its
+own fix-first-then-connect, because connecting one before fixing its keying
+turns a dormant bug into a live one.
+
+**If this is never answered:** nothing breaks today, and that is exactly the
+risk. The modules look finished, their `/proc` counters read zero, and a
+zero reads as *nothing was denied* rather than *nothing asked*. The cost
+arrives the first time someone wires one up believing it already worked.
+
+**Where it bites:** `kernel/src/fs/{authbroker,diskencrypt,capsettings,
+secpolicy,sealing,reclock}.rs` and `vfs.rs`'s `flock_resolved`. Full
+measurement, one grep per row, in `known-issues.md` 2026-09-21.
+
+## A-Q22 — [A] If you rename a file, should it keep its version history? — Status: OPEN
+
+**In short:** the system keeps old versions of files, so you can go back to
+yesterday's copy. Every saved version has to be filed under something, and
+there are two choices: the file's *name*, or the file itself. They differ the
+moment you rename something. Under one choice, renaming `budget.txt` to
+`budget-2026.txt` carries all its old versions along. Under the other, the
+renamed file starts with a blank history and the old versions stay filed under
+the name nobody uses any more. Both are defensible and real products ship each
+one, so I would rather you picked than have me pick silently.
+
+**One term, glossed:** an *inode* is the filesystem's internal identity for a
+file — a number that stays the same when you rename it, and is different for
+any other file, even one later given the same name.
+
+| option | *What changes:* | argues for it |
+|---|---|---|
+| **A. File it under the inode** (history follows the file) | you rename a document and its history comes with it. If you delete a file and later create a new one with the same name, the new one starts empty rather than inheriting a stranger's history | this is what Dropbox, Google Drive and macOS Versions do. It matches how people think about "this document" |
+| **B. File it under the path** (history belongs to the location) | you rename a document and its history stays behind under the old name. A config file at `/etc/app.conf` keeps one continuous history even if the file there is replaced wholesale | this is what someone watching *one important file* usually wants — the history of that slot, including "it was swapped out" |
+
+**Why it is not obvious.** The two options are each correct for a different
+job. B is right for an audit trail — you want to know the thing at this
+location changed, and a replacement is the most interesting change there is.
+That is exactly why integrity monitoring here is filed under the path, and why
+changing *it* to the inode would have broken it. A is right for a document you
+are working on, where a rename is not an event at all.
+
+**My recommendation: A**, weakly. The subsystem is called "file version
+history" and sits next to comments and tags, which are all about a document
+rather than a slot; and B's audit-trail job is already served by
+`fs::integrity`, which does exactly that and is staying path-filed. But I hold
+this loosely — if you picture the feature as "show me what happened to this
+config file", B is the better answer and I would change it.
+
+**If this is never answered:** nothing breaks and nothing degrades. Today the
+history is filed under the path (option B) by default, simply because that is
+how it was first written, not because it was chosen. The cost of leaving it is
+that five sibling tables — permissions, locks, seals, immutable flags, and as
+of today ACLs — have just been moved to the inode, so `history` is now the odd
+one out. Someone tidying later may "fix" it to match its neighbours without
+realising that is a user-visible behaviour change rather than a consistency
+cleanup. Answering it turns a silent default into a decision either way.
+
+**The same question arrives for tags, with one extra wrinkle -- added
+2026-09-21.** File *tags* (`kernel/src/fs/tags.rs`) face the identical choice:
+does a tag belong to the file or to the name? Answer A (the file) and renaming
+a tagged photo keeps its tags; answer B (the name) and it loses them. Whatever
+you decide for history, the same answer almost certainly wants to apply here,
+so this is one decision rather than two.
+
+The wrinkle is that tags are stored **twice**, once each way round:
+
+| index | maps | answers |
+|---|---|---|
+| `by_path` | name -> its tags | "what is this file tagged?" |
+| `by_tag` | tag -> the names carrying it | "what is tagged *holiday*?" |
+
+Change only one of them and the two stop being mirrors: a file with two names
+would be one entry in the first and two in the second, so the answers to those
+two questions would disagree about the same file. *What changes:* searching for
+a tag would list one file twice, under both its names.
+
+That is a consequence of the choice, not a separate decision, and it is mine to
+implement once you pick -- I mention it only so the cost is visible: option A
+here means re-keying both indices, not one, and resolving identities back to
+names when displaying a search result.
+
+**Where it bites:** `kernel/src/fs/history.rs`. The conversion itself is small
+and mechanical (the pattern is in `kernel/src/fs/immutable.rs`); it is the
+*behaviour* that needs your call, not the work. Background in
+`design-decisions.md` §957.
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,
@@ -3142,6 +3331,12 @@ answered question left in the body is pure cost — and, being older, it sorts
 
 ## Resolved — lane A
 
+- A-Q20 A lane may only publish work after a green test run, and lane A's has
+  been red for days on another lane's faults. What should a blocked lane do?
+  — resolved 2026-09-26 (968), the operator leaving it to Claude: **publish,
+  under three conditions, and only then** — every red rung is another lane's
+  tracked fault, `main` already fails it for the same image, and the lane's
+  own failures are zero; each publish that relies on this says so.
 - A-Q10 Saving a file costs twice what it needs to: keep the automatic undo
   history? — resolved 2026-09-13 (936): **opt-in per directory AND off the
   save path.** History is off by default and enabled per directory; where it is

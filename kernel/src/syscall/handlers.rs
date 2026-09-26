@@ -459,9 +459,7 @@ pub fn sys_exit(args: &SyscallArgs) -> SyscallResult {
     // (not owned by any process), this is a harmless no-op.
     crate::proc::thread::on_thread_exit(task_id);
 
-    sched::task_exit();
-    // Unreachable — task_exit never returns.
-    SyscallResult::ok(0)
+    sched::task_exit()
 }
 
 /// `SYS_TASK_ID` — get the current task's ID.
@@ -3390,7 +3388,7 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    spawn_ex_common(&spawn_args, CapInherit::All)
+    spawn_ex_common(&spawn_args, CapInherit::All, None)
 }
 
 /// The body shared by `SYS_PROCESS_SPAWN_EX` and `SYS_PROCESS_SPAWN_EX2`.
@@ -3411,6 +3409,7 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
 fn spawn_ex_common(
     spawn_args: &crate::proc::spawn::SpawnExArgs,
     cap_inherit: crate::proc::spawn::CapInherit<'_>,
+    cwd: Option<&[u8]>,
 ) -> SyscallResult {
     use crate::proc::spawn::{FdMapEntry, SpawnOptions, spawn_process_with_caps};
 
@@ -3514,11 +3513,16 @@ fn spawn_ex_common(
     //
     // `fork` was unaffected because it sets the parent on its own path,
     // which is why the fork→exec→reap tests passed throughout.
-    let options = SpawnOptions::new(name)
+    let mut options = SpawnOptions::new(name)
         .parent(caller_pid().unwrap_or(0))
         .fd_map(&fd_pairs)
         .argv(&argv_slices)
         .envp(&envp_slices);
+    // Without one the child inherits the parent's directory (spawn_process
+    // does that for every child with a parent); with one, it starts there.
+    if let Some(dir) = cwd {
+        options = options.cwd(dir);
+    }
 
     match spawn_process_with_caps(&elf_data, &options, cap_inherit) {
         Ok(result) =>
@@ -3652,8 +3656,29 @@ pub fn sys_process_spawn_ex2(args: &SyscallArgs) -> SyscallResult {
         envc: ex2.envc,
     };
 
+    // The child's working directory, when the caller named one (see the
+    // field's doc: zero length inherits the parent's). Read once, from the
+    // kernel copy of the struct, and refused rather than ignored if it is not
+    // canonical — a child started somewhere other than where it was asked to
+    // start is in the wrong directory without knowing it.
+    let cwd: Option<alloc::vec::Vec<u8>> = if ex2.cwd_len == 0 {
+        None
+    } else {
+        let Ok(len) = usize::try_from(ex2.cwd_len) else {
+            return SyscallResult::err(KernelError::InvalidArgument);
+        };
+        if ex2.cwd_ptr == 0 {
+            return SyscallResult::err(KernelError::InvalidArgument);
+        }
+        match crate::mm::user::read_user_vec(ex2.cwd_ptr, len, crate::proc::pcb::CWD_MAX_LEN) {
+            Ok(path) if crate::proc::pcb::is_canonical_path(&path) => Some(path),
+            Ok(_) => return SyscallResult::err(KernelError::InvalidArgument),
+            Err(e) => return SyscallResult::err(e),
+        }
+    };
+
     match ex2.cap_mode {
-        SPAWN_CAP_MODE_INHERIT_ALL => spawn_ex_common(&spawn_args, CapInherit::All),
+        SPAWN_CAP_MODE_INHERIT_ALL => spawn_ex_common(&spawn_args, CapInherit::All, cwd.as_deref()),
         SPAWN_CAP_MODE_SUBSET => {
             // A null pointer with a non-zero count is a caller bug, and is
             // refused rather than read as "no capabilities".
@@ -3708,7 +3733,7 @@ pub fn sys_process_spawn_ex2(args: &SyscallArgs) -> SyscallResult {
                 ));
             }
 
-            spawn_ex_common(&spawn_args, CapInherit::Subset(&requested))
+            spawn_ex_common(&spawn_args, CapInherit::Subset(&requested), cwd.as_deref())
         }
         // Not clamped and not defaulted — see the struct's `cap_mode` doc.
         _ => SyscallResult::err(KernelError::InvalidArgument),
@@ -5187,7 +5212,7 @@ fn rlimit_target(arg0: u64) -> KernelResult<Option<pcb::ProcessId>> {
 /// Decide whether the current caller may raise a hard resource limit.
 ///
 /// This kernel's `CAP_SYS_RESOURCE` is a [`ResourceType::ResourceLimit`]
-/// capability held with [`Rights::WRITE`] — a capability that *already
+/// capability held with [`crate::cap::rights::Rights::WRITE`] — a capability that *already
 /// existed* for this purpose (it landed 2026-08-21) rather than a new
 /// `Rights` bit, because the authority being asserted is "may write
 /// resource limits" and that is exactly what the pair already spells.
@@ -5373,6 +5398,63 @@ pub fn tty_set_termios_from_user(tty: crate::tty::TtyId, arg: u64) -> TtyCtlOutc
     }
     crate::tty::set_termios(tty, crate::tty::Termios::from_bytes(&bytes));
     TtyCtlOutcome::Done
+}
+
+/// `tcflush(3)` queue selectors — Linux's values, which both ABIs pass through.
+pub mod tcflush_queue {
+    /// Discard unread input.
+    pub const TCIFLUSH: u64 = 0;
+    /// Discard unsent output.
+    pub const TCOFLUSH: u64 = 1;
+    /// Discard both.
+    pub const TCIOFLUSH: u64 = 2;
+}
+
+/// Discard a terminal's unread input, its unsent output, or both
+/// (`tcflush(3)`), applying POSIX job control first.
+///
+/// Shared by the native [`sys_tty_flush`] and the Linux shim's `TCFLSH`, for
+/// the reason [`tty_set_termios_from_user`] is shared: one policy, one copy.
+///
+/// Job control comes before the selector check, in Linux's order —
+/// `tty_check_change` runs before `__tty_perform_flush` looks at the argument —
+/// so a background caller is stopped even when its request is malformed.
+pub fn tty_flush(tty: crate::tty::TtyId, queue: u64) -> TtyCtlOutcome {
+    match tty_job_control_check_for(tty, crate::proc::signal::SIGTTOU) {
+        TtyCtlOutcome::Done => {}
+        other => return other,
+    }
+    let (input, output) = match queue {
+        tcflush_queue::TCIFLUSH => (true, false),
+        tcflush_queue::TCOFLUSH => (false, true),
+        tcflush_queue::TCIOFLUSH => (true, true),
+        _ => return TtyCtlOutcome::Fail(KernelError::InvalidArgument),
+    };
+    if input {
+        crate::tty::flush_input(tty);
+    }
+    if output {
+        crate::tty::flush_output(tty);
+    }
+    TtyCtlOutcome::Done
+}
+
+/// `SYS_TTY_FLUSH` — discard a terminal's unread input and/or unsent output
+/// (`tcflush(3)`, and the flush half of `tcsetattr(TCSAFLUSH)`).
+///
+/// `arg0`: the terminal, under the [`resolve_tty_arg`] convention. `arg1`: the
+/// queue — [`tcflush_queue::TCIFLUSH`], [`tcflush_queue::TCOFLUSH`] or
+/// [`tcflush_queue::TCIOFLUSH`]. See [`tty_flush`].
+pub fn sys_tty_flush(args: &SyscallArgs) -> SyscallResult {
+    let tty = match resolve_tty_arg(args.arg0) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match tty_flush(tty, args.arg1) {
+        TtyCtlOutcome::Done => SyscallResult::ok(0),
+        TtyCtlOutcome::Restart(r) => r,
+        TtyCtlOutcome::Fail(e) => SyscallResult::err(e),
+    }
 }
 
 /// Hand the console to process group `pgid` on behalf of `pid`
@@ -5665,12 +5747,13 @@ pub fn tty_read_into_user(buf: u64, cap: u64) -> TtyReadOutcome {
 
 /// Send `sig` to every member of `tty`'s foreground process group.
 ///
-/// Split out from [`deliver_console_signal`] because not every terminal-
-/// generated signal interrupts a syscall: `SIGWINCH` from `TIOCSWINSZ` is
-/// delivered by a *writer* that has nothing to restart, while `^C` is
-/// delivered by the reader it aborts.  Sharing the loop keeps the
-/// "no foreground group ⇒ no signal" rule and the `SI_KERNEL` origin in one
-/// place instead of two.
+/// Split out from [`deliver_console_signal`] because most terminal-generated
+/// signals interrupt no syscall: `SIGWINCH` from `TIOCSWINSZ`, and every
+/// `^C`/`^\`/`^Z` typed into a pty, are delivered by a *writer* — the master's
+/// write is where a pty's input is received — which has nothing to restart.
+/// Only the console's are delivered by the reader they abort. Sharing the loop
+/// keeps the "no foreground group ⇒ no signal" rule and the `SI_KERNEL` origin
+/// in one place.
 ///
 /// A `pgid` of 0 means no foreground group is installed, which is not an
 /// error: Linux likewise generates no signal for a tty with no `tty->pgrp`.
@@ -5680,71 +5763,31 @@ pub fn signal_foreground_group(tty: crate::tty::TtyId, sig: u8) {
 
     let pgid = crate::tty::foreground_pgid(tty);
     if pgid == 0 {
-        // A terminal signal was DUE and nobody is registered to receive
-        // it, so it is dropped. Announced rather than returned silently,
-        // because the caller's very next move is
-        // `restart_result(ERESTARTSYS)`: the reader restarts, the byte
-        // that caused this is already consumed, and nothing will ever
-        // arrive. That is an unbounded restart loop with no signal, no
-        // data and no EOF -- and until this line existed it left no
-        // trace anywhere.
-        //
-        // Suspected cause of `ctest-pty` exit 45 on 2026-09-16, the
-        // rung's first real run, where the child never returned from its
-        // read on the pty slave. `foreground_pgid` is
-        // `pcb::ctty_fg_pgrp(id).unwrap_or(0)`, so 0 means no session
-        // holds this terminal -- which for a `forkpty` child means
-        // `login_tty`'s TIOCSCTTY/tcsetpgrp did not take effect.
-        //
-        // This print is the discriminator, and that is the whole point of
-        // adding it before changing any behaviour: if it appears naming
-        // the pty's id, the fault is in acquiring the terminal and NOT in
-        // the line discipline, which had already decided correctly that a
-        // signal was due. If it does not appear, the hypothesis is wrong
-        // and the child is blocked somewhere else entirely.
+        // Dropped, as Linux drops it: there is nobody to interrupt. Said out
+        // loud because it is rare and because the silent version of this
+        // branch once sent an investigation down a wrong path for a day
+        // (known-issues.md A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED).
         crate::serial_println!(
-            concat!(
-                "[tty] signal {} due on tty {:?} but NO foreground group ",
-                "is registered: DROPPED, and the reader will now restart. ",
-                "See known-issues ",
-                "A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED"
-            ),
+            "[tty] signal {} due on tty {:?}, which has no foreground process group: dropped",
             sig,
             tty
         );
         return;
     }
-    // ROUND-4 DISCRIMINATOR for ctest-pty exit 45. Rounds 1 and 3 settled
-    // that the byte reaches the discipline, that ISIG is on, that a signal is
-    // decided (at `canonical_try_read`/`step()`), and that `pgid != 0` so
-    // delivery is attempted. The child still never returns from its read.
-    //
-    // These counters exist because the per-member `let _ =` below cannot tell
-    // the benign case its own comment describes -- one member exited -- from
-    // the case that would explain the hang, which is NOT ONE send succeeding.
-    // A tolerated per-item failure hides a total failure, and a discarded
-    // Result reports both as silence.
-    // ROUND-8. Rounds 3 and 4 established that a signal is decided and that
-    // delivery SUCCEEDS -- and the ctest-pty trace shows the child never got
-    // it. Both are consistent: `delivered > 0` only says somebody received
-    // it, not that the right group did. The pty child is its own group leader
-    // (login_tty/setsid), and the serial shows its group is 205 while the
-    // parent gave up and exited BEFORE any SIGINT arrived.
-    //
-    // So the target is the thing to print, not the count. Terminal signals are
-    // rare, so this is quiet.
+    // One line per terminal signal, naming the terminal, the group and its
+    // members. Terminal signals are rare, and a line that says *whose* signal
+    // it was is what the ctest-pty investigation lacked for eleven rounds.
     let members = pcb::pids_in_group(pgid);
     crate::serial_println!(
-        "[tty] signal {} -> fg pgid {} on tty {:?}: {} member(s) {:?}",
+        "[tty] signal {} -> foreground group {} on tty {:?}: {:?}",
         sig,
         pgid,
         tty,
-        members.len(),
         members
     );
     let mut delivered = 0usize;
     let mut failed = 0usize;
-    for target in pcb::pids_in_group(pgid) {
+    for target in members {
         let send_args = SyscallArgs {
             arg0: target,
             arg1: u64::from(sig),
@@ -5757,26 +5800,21 @@ pub fn signal_foreground_group(tty: crate::tty::TtyId, sig: u8) {
         // snapshot and delivery just fails its own send and the rest still
         // receive it. Counted rather than discarded so the aggregate can be
         // judged even though no individual failure is worth reporting.
-        // `SyscallResult` is not a `Result`: it carries an i64 `value` whose
-        // negative range is the error code. Assuming the API from the name
-        // cost a compile here, which is the cheapest place to be wrong.
+        // (`SyscallResult` carries an i64 `value` whose negative range is the
+        // error code; it is not a `Result`.)
         if sys_signal_send_with_info(&send_args, SI_KERNEL, 0).value < 0 {
             failed = failed.saturating_add(1);
         } else {
             delivered = delivered.saturating_add(1);
         }
     }
-    // Deliberately silent unless NOTHING was delivered to a non-empty group.
-    // Printing each failure would bury this case in noise on a busy system and
-    // tell a reader nothing the discarded Result did not already tell them.
+    // Silent unless NOTHING was delivered to a non-empty group: one member
+    // exiting mid-delivery is benign, not one send succeeding is a fault, and
+    // printing every failure would bury the second in the first.
     if delivered == 0 && failed > 0 {
         crate::serial_println!(
-            concat!(
-                "[tty] signal {} decided for pgid {} on tty {:?}: {} member(s) ",
-                "and NOT ONE delivery succeeded. The line discipline was ",
-                "right and the delivery is the fault -- known-issues ",
-                "A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED"
-            ),
+            "[tty] signal {} for foreground group {} on tty {:?}: {} member(s) and NOT ONE \
+             delivery succeeded",
             sig,
             pgid,
             tty,
@@ -6025,8 +6063,20 @@ fn pty_master_write_common(args: &SyscallArgs, non_blocking: bool) -> SyscallRes
         crate::tty::pty::master_write(handle, &data)
     };
     match result {
-        #[allow(clippy::cast_possible_wrap)]
-        Ok(n) => SyscallResult::ok(n as i64),
+        Ok(w) => {
+            // A signal character in the input was acted on *by this write*:
+            // the line discipline runs when keystrokes arrive, so this is the
+            // moment `^C` becomes `SIGINT` — whether or not anything is reading
+            // the slave. The pty layer decided it; delivering to a process
+            // group is this layer's job, as for `close`'s hangups. See
+            // known-issues.md A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER for what
+            // happened while it waited for a reader instead.
+            for &sig in &w.signals {
+                signal_foreground_group(handle.id(), sig);
+            }
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(w.written as i64)
+        }
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -6516,6 +6566,100 @@ pub fn sys_process_get_credentials(args: &SyscallArgs) -> SyscallResult {
     let packed: u64 = (u64::from(gid) << 32) | u64::from(uid);
     #[allow(clippy::cast_possible_wrap)]
     SyscallResult::ok(packed as i64)
+}
+
+/// `SYS_PROCESS_SET_CWD` — record the caller's working directory.
+///
+/// See the number's doc for the contract: the path must already be
+/// canonical ([`crate::proc::pcb::is_canonical_path`]), and it is a record
+/// for inheritance and `/proc`, never a base any native lookup resolves
+/// against (design-decisions.md §960).
+pub fn sys_process_set_cwd(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::pcb;
+
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let Ok(len) = usize::try_from(args.arg1) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if len == 0 || args.arg0 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    // `read_user_vec` refuses a length above the bound before allocating.
+    let path = match crate::mm::user::read_user_vec(args.arg0, len, pcb::CWD_MAX_LEN) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if !pcb::is_canonical_path(&path) {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    match pcb::set_cwd(pid, path) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PROCESS_GET_CWD` — copy the caller's recorded working directory out.
+///
+/// Returns the length written. A buffer too small for the whole path is
+/// `BufferTooSmall` with nothing written: a truncated directory name is a
+/// different directory, so there is no useful partial answer.
+pub fn sys_process_get_cwd(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::pcb;
+
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let Some(cwd) = pcb::get_cwd(pid) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let Ok(cap) = usize::try_from(args.arg1) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if cwd.len() > cap {
+        return SyscallResult::err(KernelError::BufferTooSmall);
+    }
+    // SAFETY: `cwd` is a live kernel buffer of `cwd.len()` bytes;
+    // `copy_to_user` validates the user destination range itself.
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(cwd.as_ptr(), args.arg0, cwd.len()) } {
+        return SyscallResult::err(e);
+    }
+    #[allow(clippy::cast_possible_wrap)] // At most CWD_MAX_LEN (4095).
+    SyscallResult::ok(cwd.len() as i64)
+}
+
+/// Sentinel for [`sys_process_umask`]'s `arg0`: report the mask, change
+/// nothing.
+pub const UMASK_QUERY: u64 = u64::MAX;
+
+/// `SYS_PROCESS_UMASK` — set or query the caller's file-creation mask.
+///
+/// Reads and writes the same `linux_umask` record as the Linux shim's
+/// `umask`, so a native parent and a Linux child (or the reverse) agree on
+/// it. Returns the previous mask.
+pub fn sys_process_umask(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::pcb;
+
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    if args.arg0 == UMASK_QUERY {
+        return match pcb::get_umask(pid) {
+            Some(mask) => SyscallResult::ok(i64::from(mask)),
+            None => SyscallResult::err(KernelError::NoSuchProcess),
+        };
+    }
+    let Ok(mask) = u16::try_from(args.arg0) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if mask > 0o777 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    match pcb::set_umask(pid, mask) {
+        Some(old) => SyscallResult::ok(i64::from(old)),
+        None => SyscallResult::err(KernelError::NoSuchProcess),
+    }
 }
 
 /// `SYS_PROCESS_SET_CREDENTIALS` — mutate the caller's own real uid/gid.
@@ -7213,6 +7357,43 @@ pub fn sys_domainname_set(args: &SyscallArgs) -> SyscallResult {
 /// See `number.rs`'s
 /// [`SYS_KEYLAYOUT_SET`](crate::syscall::number::SYS_KEYLAYOUT_SET) for why
 /// this exists and why no getter is paired with it.
+/// `SYS_BRIGHTNESS_SET` -- set a display's backlight level.
+///
+/// `arg0`: display id. `arg1`: level, 0-100.
+///
+/// The capability is checked before either argument is validated, for the
+/// reason `name_set_gated` gives: an unprivileged caller must not be able to
+/// discover which display ids exist by watching which values change the
+/// error it gets back.
+pub fn sys_brightness_set(args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::ResourceType;
+    use crate::proc::thread;
+
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    if !pcb::has_capability_type(
+        pid,
+        ResourceType::Process,
+        crate::cap::Rights::SET_BRIGHTNESS,
+    ) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+
+    let (Ok(display_id), Ok(level)) = (u32::try_from(args.arg0), u32::try_from(args.arg1)) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+
+    // Range is `set_brightness`'s to enforce, not this layer's: it already
+    // clamps against the display's own minimum, which this handler does not
+    // know and must not duplicate.
+    match crate::fs::brightness::set_brightness(display_id, level) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 pub fn sys_keylayout_set(args: &SyscallArgs) -> SyscallResult {
     // The layout table has to exist before a name can be looked up in it. A
     // failure here is a kernel-side problem rather than anything the caller
@@ -8290,7 +8471,87 @@ pub fn sys_process_kill(args: &super::dispatch::SyscallArgs) -> super::dispatch:
 /// On failure: returns a negative error code.  If the failure happens
 /// after the old address space was torn down, the process is in a
 /// broken state and should be killed.
+/// Wrapper that reports WHY a native exec failed.
+///
+/// The Linux-ABI path got this in `fec0ab339`, after three theories cost
+/// three boots, with the reason: the fixture can only report *that* exec
+/// failed, and the kernel knows the errno and had never been asked. That
+/// wrapper is on `linux_exec_common`, so it covers only Linux-ABI callers.
+///
+/// `ctest-coreutils-runs` is a NATIVE-ABI process, so its `execl` arrives
+/// here instead and failed silently for four rounds. On 2026-09-21 a fifth
+/// round confirmed the Linux probe was present and working and still saw
+/// nothing -- which reads as "the syscall was never made" and may instead
+/// mean "the wrong instrument was watching". This closes that.
+///
+/// Wrapped rather than probed per site: five `return ...code() as i64`
+/// paths inside, so a probe per site is five chances to miss the one that
+/// fires, and a wrapper cannot miss a path including one added later.
+///
+/// Silent on success, and silent on the frame-modifying success path in
+/// particular: a successful exec returns 0 and must not add a line to a
+/// log that every boot reads.
 pub fn sys_process_exec_with_frame(frame: &mut super::entry::SyscallFrame) -> i64 {
+    let elf_len = frame.arg1 as usize;
+    // arg0 too: on 2026-09-21 this probe reported InvalidAddress (-101) for a
+    // 136-byte ELF the caller had demonstrably mapped, and the next question
+    // is whether the ADDRESS arrived intact. `build_exec_test_elf` plants it
+    // as a `movabs rdi, <imm64>`, so a bad immediate and a bad mapping look
+    // identical from here -- and guessing between them is what cost six
+    // rounds on the sibling bug.
+    let elf_ptr = frame.arg0;
+    // Captured before the call: `inner` takes `&mut frame`. These three are
+    // the argv/envp registers a user stub may never have set -- until the
+    // ring-3 trampoline began zeroing registers they held kernel residue,
+    // and a nonzero arg2 makes `inner` read argv from it.
+    let argv_ptr_seen = frame.arg2;
+    let argv_len_seen = frame.arg3;
+    let envp_ptr_seen = frame.arg4;
+    let rc = sys_process_exec_with_frame_inner(frame);
+    if rc < 0 {
+        // Count the probe firing so its control can ASSERT it fired.
+        // `test_exec_process_failure_is_reported` exists to license reading
+        // silence -- to prove an absent line means the syscall was not
+        // reached rather than that the probe is broken -- but it asserted
+        // only that the process became a Zombie, which happens whether exec
+        // was refused (the caller traps on int3) or wrongly succeeded (the
+        // target exits). So it reported OK without establishing its own
+        // premise. Same hole as the positive test had before 2026-09-21.
+        NATIVE_EXEC_FAIL_LOGS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        serial_println!(
+            "[exec] NATIVE exec FAILED -> {} (elf_ptr={:#x} elf_len={}) -- the bytes come \
+             from the caller, so this is after posix read the file and before \
+             the image was validated",
+            rc,
+            elf_ptr,
+            elf_len
+        );
+        serial_println!(
+            "[exec]   argv/envp regs as received: arg2(argv)={:#x} \
+             arg3(argv_len)={} arg4(envp)={:#x} -- a NONZERO argv with a \
+             garbage length is read as a user pointer and yields -101",
+            argv_ptr_seen,
+            argv_len_seen,
+            envp_ptr_seen
+        );
+    }
+    rc
+}
+
+/// How many times the native-exec failure probe has logged.
+///
+/// Read by `proc::spawn`'s exec-failure control, which must assert that the
+/// probe fired rather than infer it from the process having died -- death is
+/// ambiguous there, a logged line is not.
+pub static NATIVE_EXEC_FAIL_LOGS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Snapshot of [`NATIVE_EXEC_FAIL_LOGS`] for the control's before/after pair.
+pub fn native_exec_fail_logs() -> u64 {
+    NATIVE_EXEC_FAIL_LOGS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+fn sys_process_exec_with_frame_inner(frame: &mut super::entry::SyscallFrame) -> i64 {
     use crate::proc::spawn::exec_process;
     use crate::proc::thread;
 
@@ -8326,6 +8587,21 @@ pub fn sys_process_exec_with_frame(frame: &mut super::entry::SyscallFrame) -> i6
     // also makes the allocation fallible: `Vec::from(slice)` would abort the
     // kernel on OOM, and an ELF image is exactly the kind of large allocation
     // that can fail.
+    // Split the two ways this can return InvalidAddress, because they have
+    // different fixes and the code alone cannot tell them apart: the range
+    // check (validate_user_read walking the caller's PML4) and the copy
+    // itself. On 2026-09-21 this returned -101 for a 136-byte buffer the
+    // caller had mapped PRESENT|USER into its own PML4, at a 16 KiB-aligned
+    // user address, with no page-table isolation to put CR3 elsewhere --
+    // so every structural explanation checkable by reading was exhausted.
+    if let Err(e) = crate::mm::user::validate_user_read(frame.arg0, elf_len) {
+        serial_println!(
+            "[exec] NATIVE exec: range check REJECTED ptr={:#x} len={} -> {:?}",
+            frame.arg0,
+            elf_len,
+            e
+        );
+    }
     let elf_copy = match crate::mm::user::read_user_vec(frame.arg0, elf_len, usize::MAX) {
         Ok(d) => d,
         Err(e) => return e.code() as i64,
@@ -13963,6 +14239,57 @@ pub fn sys_dns_resolve(args: &SyscallArgs) -> SyscallResult {
         Ok(s) => s,
         Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
     };
+
+    // Cache and hosts file first. `fs::nameservice` declares the resolve
+    // order as Cache, Files, Dns and holds `127.0.0.1 localhost` from
+    // `init_defaults`, but nothing consulted it -- so `localhost` went out
+    // on the wire and failed. Requested in
+    // requests/b-a-sys-dns-resolve-never-consults-the-hosts-table.md.
+    // The hosts table has to exist before a name can be looked up in it, and
+    // nothing guarantees it does: `init_defaults`' other callers are a
+    // `/proc/nameservice` read (main.rs:4427) and a `kshell` command, both
+    // later in boot than `self_test_fs` (main.rs:1697). Without this the
+    // first caller finds an uninitialised table, gets `NotSupported`, and
+    // falls through to the wire -- which is the bug this whole change exists
+    // to fix, reintroduced one layer down.
+    //
+    // `sys_hostname_set` and `sys_domainname_set` open the same way for the
+    // same reason. It is idempotent: it returns at once if state exists.
+    crate::fs::nameservice::init_defaults();
+    if let Ok(found) = crate::fs::nameservice::resolve(name) {
+        // No indexing and no arithmetic: `indexing_slicing` and
+        // `arithmetic_side_effects` are both active in this crate, and this
+        // shape needs neither allow.
+        let mut octets = [0u8; 4];
+        let mut fields = found.address.split('.');
+        let mut parsed = true;
+        for slot in &mut octets {
+            let Some(field) = fields.next() else {
+                parsed = false;
+                break;
+            };
+            match field.parse::<u8>() {
+                Ok(v) => *slot = v,
+                Err(_) => {
+                    parsed = false;
+                    break;
+                }
+            }
+        }
+        // The trailing `fields.next().is_none()` rejects `1.2.3.4.5`. An
+        // IPv6 hit -- the table's own `::1` -- fails the u8 parse and falls
+        // through to DNS rather than being truncated into four bytes, which
+        // would answer with a different address than the one found.
+        if parsed && fields.next().is_none() {
+            // SAFETY: `validate_user_write(args.arg2, 4)` succeeded above and
+            // nothing has slept since, unlike the DNS path below which
+            // re-validates after its network round-trip.
+            match unsafe { crate::mm::user::copy_to_user(octets.as_ptr(), args.arg2, 4) } {
+                Ok(()) => return SyscallResult::ok(0),
+                Err(e) => return SyscallResult::err(e),
+            }
+        }
+    }
 
     match crate::net::dns::resolve(name) {
         Ok(ip) => {

@@ -3423,7 +3423,7 @@ struct StageBuild<'a> {
     spec: ImageSpec,
     /// Build-time variables: global ARGs seed each stage, then ARG/ENV extend.
     vars: Vec<(String, String)>,
-    /// Base-image layer blobs carried forward verbatim (FROM <dir>/<stage>).
+    /// Base-image layer blobs carried forward verbatim (FROM `<dir>`/`<stage>`).
     base_layer_descs: Vec<Descriptor>,
     /// The base image's uncompressed layer digests, 1:1 with `base_layer_descs`.
     base_diff_ids: Vec<String>,

@@ -96,6 +96,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-refusals-refuse.py` | Refuse a shell block that announces a refusal and then returns success. |
 | `scripts/check-release-staleness.py` | Gate: refuse to push when the release-profile boot test is stale. |
 | `scripts/check-requests-not-deleted.py` | Gate: a `requests/` file may be stamped, but not deleted. |
+| `scripts/check-ring3-entry-regs.py` | Every transition to ring 3 must leave the syscall-argument registers DEFINED. |
 | `scripts/check-roadmap-done.py` | Gate: a roadmap entry marked `[x]` must not name a crate that does not exist. |
 | `scripts/check-scratch-config.py` | Every test that can write a settings file runs inside a scratch directory. |
 | `scripts/check-self-tests-wired.py` | Fail if a kernel `self_test` exists that nothing ever calls. |
@@ -304,6 +305,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/scan-unwired.py` | Find work that no path from an entry point reaches, but a test does. |
 | `scripts/scan-unwrap.py` | Find `.unwrap()` / `.expect(...)` in *production* kernel code. |
 | `scripts/sed-diff.sh` | Differential test: our sed against GNU sed. |
+| `scripts/selftest-boot-gate-identity.py` | Self-test for boot-test.sh's `check_identity_rungs` gate. |
 | `scripts/selftestflag.py` | One spelling rule for `--self-test`, because the alternative reported success. |
 | `scripts/seq-cases.py` | Generate the case file for ``scripts/seq-diff.sh``. |
 | `scripts/seq-diff.sh` | Differential test: our `seq` against GNU's. |
@@ -361,6 +363,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-pre-push-gates.py` | Structural tests for `scripts/hooks/pre-push`. |
 | `scripts/test-pre-push-identity-gate.py` | Behavioural tests for pre-push gate 10 (fixture-identity refusal). |
 | `scripts/test-pre-push-run-checker.py` | Tests for `run_checker`, the shared checker-invocation helper. |
+| `scripts/test-pre-push-touches.py` | Tests for the pre-push hook's `touches` helper (scripts/hooks/pre-push). |
 | `scripts/test-pre-push-unixhalf-gate.py` | Behavioural tests for pre-push gate 12 (coreutils' unix half). |
 | `scripts/test-proctree.py` | test-proctree.py — tests for `proctree.resolve_command` and friends. |
 | `scripts/test-prune-build-cache.py` | Run `prune-build-cache.py`'s self-test under the boot test's tooling gate. |
@@ -397,4 +400,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_387 scripts._
+_390 scripts._

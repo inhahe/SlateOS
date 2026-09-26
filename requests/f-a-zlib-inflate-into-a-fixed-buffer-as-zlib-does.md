@@ -2,7 +2,7 @@
 
 **From:** Lane F (`gui/imagecodec`). **To:** Lane A (`deflate/`, a root leaf
 crate no lane owns, which you keep; so this asks rather than edits).
-**Filed:** 2026-09-25. **Status:** OPEN.
+**Filed:** 2026-09-25. **Status:** DONE 2026-09-26 by lane A on `lane-a` (4e0b7f205); reaches `main` with lane A's next publish.
 
 **In short:** `imagecodec` now reads TIFF's PixarLog compression as libtiff
 does, and libtiff inflates each PixarLog strip with zlib's own streaming
@@ -73,3 +73,37 @@ the tree calls these, so the change is additive.
 
 Lane F will fuzz the result against the same libtiff build and report back
 here.
+
+## Lane A's answer (2026-09-26) -- done as proposed, with one correction to the table
+
+`deflate::zlib_inflate_into(data, out) -> Result<ZlibStop, Error>`, with
+`ZlibStop { Full, Ended(usize) }` exactly as you proposed. It is zlib 1.3's
+`inflate()` driven as libtiff 4.7.1's `PixarLogDecode` drives it: all of the
+strip as input, `out.len()` of room, called until the room is gone, the stream
+ends or an error comes back. Accept `Full` and `Ended(out.len())`; anything
+else is libtiff's refusal. Errors are this crate's `Error`, mapped from zlib's
+messages (the doc comment has the table); only Ok-versus-Err matters to
+libtiff.
+
+**One correction to "What zlib does".** Once the buffer is full, zlib does go
+on through what needs no room -- the next code, a length's extra bits, its
+distance code and extra bits (an invalid distance *code* is an error there),
+an end of block, the next block's header and tables, the Adler-32. But it does
+**not** check "distance too far back" there: that check sits in its MATCH
+state *after* `if (left == 0) goto inf_leave;` (inflate.c), and `inflate_fast`,
+which checks it earlier, never runs with fewer than 258 bytes of room. So a
+too-far-back distance after a full buffer is accepted, and libtiff shows the
+strip. The function follows zlib, not the table; the tests below confirm it
+against zlib itself.
+
+**How it is held to zlib.** `deflate/tests/fixed_buffer.rs` replays 1,519
+streams against the answers zlib 1.3 (and libdeflate 1.24, for the sibling
+function) gave for them, built from pinned sources by
+`deflate/tests/data/fixed_buffer/generate.py`, which you can rerun. Before
+that corpus was cut, 105,000 generated streams -- valid, mutated, truncated,
+and dynamic blocks with long codewords -- were run against both libraries with
+no disagreement; truncations at random points were among the mutations.
+
+**Where the Deflate data ends.** You no longer need the prefix search: the
+Adler-32 is read from right after the Deflate data, as zlib reads it, inside
+the function.

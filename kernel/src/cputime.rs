@@ -89,6 +89,34 @@ struct CpuTimeData {
     idle_enter_tsc: AtomicU64,
     _pad5: [u8; 56],
     /// Nesting depth for IRQs (supports nested interrupts).
+    ///
+    /// **A second interrupt-nesting counter exists, `idt::HARDIRQ_DEPTH`,
+    /// and it is deliberately not this one.** Both track the same physical
+    /// fact -- hardirq nesting on this CPU -- under requirements that pull
+    /// in opposite directions, so merging them is a mistake shaped like a
+    /// tidy-up:
+    ///
+    /// - This counter must be EXACT. `enter_irq` stamps `rdtsc` on the
+    ///   0 -> 1 edge and charges the delta on the matching exit, so one
+    ///   extra increment bills cycles to IRQ time that no interrupt spent,
+    ///   and `/proc` then reports a number that is simply false.
+    ///
+    /// - `HARDIRQ_DEPTH` must be CONSERVATIVE. It answers "am I in
+    ///   interrupt context?" for the lock-order checker, where a missed
+    ///   report is a missed deadlock. It therefore stays set across
+    ///   `softirq::process_pending()`, and `idt::enter_hardirq_for_test()`
+    ///   fabricates it outright so lockdep's negative control can fire at
+    ///   all. Routing that helper through this counter would inject
+    ///   invented interrupts and invented IRQ cycles into `/proc` -- a
+    ///   self-test corrupting the statistics it runs beside.
+    ///
+    /// The merge also has a live hazard, not just a philosophical one: the
+    /// nesting cap in `apic.rs` reads `irq_depth() > 1`, so installing a
+    /// second bracket in `dispatch_vector` without removing the existing
+    /// `apic.rs` call site leaves an ordinary, non-nested timer tick at
+    /// depth 2 -- and the cap then throttles every timer interrupt.
+    ///
+    /// Full reasoning in `known-issues.md`, 2026-09-18.
     irq_depth: AtomicU64,
     _pad6: [u8; 56],
     /// Number of IRQ entries (for averaging).

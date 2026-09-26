@@ -89,7 +89,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 
 def make_tree(parent: str, name: str, services, *, limine=True, rootfs="good",
-              embeds=None, manifest=True):
+              embeds=None):
     """Build a fake worktree and return its root.
 
     `services` are the names to *embed* in the fake kernel.  `embeds`, when
@@ -98,8 +98,6 @@ def make_tree(parent: str, name: str, services, *, limine=True, rootfs="good",
     Artifacts are created for every service in `services` unless the caller
     removes them afterwards, which keeps "what the kernel wants" and "what the
     tree has" independently controllable, exactly as they are in reality.
-    A good `rootfs.ext4` gets the `rootfs.ext4.manifest` that
-    `create-ext4-rootfs.sh` writes beside it unless `manifest` is false.
     """
     root = os.path.join(parent, name)
     os.makedirs(os.path.join(root, "scripts"), exist_ok=True)
@@ -132,27 +130,16 @@ def make_tree(parent: str, name: str, services, *, limine=True, rootfs="good",
             blob[1080:1082] = b"\x53\xef"
         with open(os.path.join(root, "rootfs.ext4"), "wb") as fh:
             fh.write(blob)
-        if rootfs == "good" and manifest:
-            with open(os.path.join(root, "rootfs.ext4.manifest"), "w",
-                      newline="") as fh:
-                fh.write("# fake manifest for the bootstrap-worktree.sh tests\n")
 
     return root
 
 
-def run_check(root: str, *args, extra_env=None):
-    """Run `--check` in `root` and return (exit status, combined output).
-
-    `extra_env` adds variables to the child's environment; without it the
-    boot test's own switch is removed, so a developer who has it set in their
-    shell does not change what these tests see."""
-    env = dict(os.environ)
-    env.pop("BOOT_TEST_SKIP_ROOTFS_CHECK", None)
-    env.update(extra_env or {})
+def run_check(root: str, *args):
+    """Run `--check` in `root` and return (exit status, combined output)."""
     proc = subprocess.run(
         [BASH, os.path.join(root, "scripts", "bootstrap-worktree.sh"),
          "--check", *args],
-        cwd=root, capture_output=True, text=True, env=env,
+        cwd=root, capture_output=True, text=True,
     )
     return proc.returncode, proc.stdout + proc.stderr
 
@@ -242,36 +229,6 @@ def test_truncated_rootfs_is_not_treated_as_present(tmp):
     status, out = run_check(root)
     check("rootfs.ext4 without a superblock exits 3", status == DEGRADING,
           "got %d\n%s" % (status, out))
-
-
-def test_rootfs_without_manifest_blocks(tmp):
-    """An image with no `rootfs.ext4.manifest` is one the boot test refuses.
-
-    `ctest-fixtures.py image-check` fails closed on it, and the boot test
-    exits 1 at staging -- after the whole build, two hours and fifty minutes
-    into lane F's run on 2026-09-25, when the bootstrap had copied such an
-    image from a sibling.  `--check` runs before the build, so it says so
-    there; and since provisioning cannot fix it, it does not say to provision.
-    """
-    root = make_tree(tmp, "no-manifest", ["init"], manifest=False)
-    status, out = run_check(root)
-    check("rootfs.ext4 without a manifest exits 1", status == BLOCKING,
-          "got %d\n%s" % (status, out))
-    check("it is named as unusable", "UNUSABLE rootfs.ext4" in out, out)
-    check("it says how to rebuild it", "create-ext4-rootfs.sh" in out, out)
-    check("it does not send the reader to the bootstrap, which cannot fix it",
-          "./scripts/bootstrap-worktree.sh" not in out, out)
-
-
-def test_skip_rootfs_check_keeps_the_boot_tests_escape_hatch(tmp):
-    """`BOOT_TEST_SKIP_ROOTFS_CHECK=1` makes the boot test attach an image it
-    cannot verify, under a loud banner.  `--check` runs first; if it refused,
-    the hatch would be shut before the boot test reached it."""
-    root = make_tree(tmp, "no-manifest-skip", ["init"], manifest=False)
-    status, out = run_check(root, extra_env={"BOOT_TEST_SKIP_ROOTFS_CHECK": "1"})
-    check("unverified rootfs.ext4 with the switch set exits 3", status == DEGRADING,
-          "got %d\n%s" % (status, out))
-    check("it is named as unverified", "UNVERIFIED rootfs.ext4" in out, out)
 
 
 def test_no_embeds_at_all_is_an_error_not_a_pass(tmp):
@@ -388,6 +345,100 @@ def test_named_subset_checks_only_that_service(tmp):
     check("the unasked-for service is not reported", "hello" not in out, out)
 
 
+def _stub_cargo(tmp: str) -> tuple[str, str]:
+    """A `cargo` that records where it was run and with what, and builds
+    nothing. Returns (directory to put first on PATH, its log)."""
+    bindir = os.path.join(tmp, "stub-bin")
+    os.makedirs(bindir, exist_ok=True)
+    log = os.path.join(tmp, "stub-cargo.log")
+    with open(os.path.join(bindir, "cargo"), "w", encoding="utf-8",
+              newline="\n") as fh:
+        fh.write('#!/usr/bin/env bash\n'
+                 'printf "%s|%s\\n" "$(basename "$PWD")" "$*" >> "$STUB_CARGO_LOG"\n')
+    os.chmod(os.path.join(bindir, "cargo"), 0o755)
+    return bindir, log
+
+
+def test_services_builds_every_embedded_service_and_nothing_else(tmp):
+    """`--services` is what boot-test.sh runs before every kernel build: each
+    embedded service, and no limine, rootfs or sysroot -- which here are all
+    absent, so provisioning any of them would be seen (and would reach for the
+    network)."""
+    root = make_tree(tmp, "services-only", ["init", "netstack"], limine=False,
+                     rootfs=None)
+    bindir, log = _stub_cargo(tmp)
+    env = dict(os.environ)
+    env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+    env["STUB_CARGO_LOG"] = log
+    proc = subprocess.run(
+        [BASH, os.path.join(root, "scripts", "bootstrap-worktree.sh"),
+         "--services"],
+        cwd=root, capture_output=True, text=True, env=env,
+    )
+    out = proc.stdout + proc.stderr
+    check("--services exits 0 when every service builds", proc.returncode == OK,
+          "got %d\n%s" % (proc.returncode, out))
+    calls = []
+    if os.path.exists(log):
+        with open(log, encoding="utf-8") as fh:
+            calls = sorted(line.strip() for line in fh if line.strip())
+    check("--services runs `cargo build --release` once in each embedded "
+          "service's directory", calls == ["init|build --release",
+                                           "netstack|build --release"],
+          "calls: %r\n%s" % (calls, out))
+    check("--services provisions no limine",
+          not os.path.exists(os.path.join(root, "limine")), out)
+    check("--services provisions no rootfs",
+          not os.path.exists(os.path.join(root, "rootfs.ext4")), out)
+    check("--services does not build the sysroot", "sysroot" not in out, out)
+
+
+def test_services_takes_neither_names_nor_check(tmp):
+    root = make_tree(tmp, "services-misuse", ["init"])
+    for extra in (["init"], ["--check"]):
+        proc = subprocess.run(
+            [BASH, os.path.join(root, "scripts", "bootstrap-worktree.sh"),
+             "--services", *extra],
+            cwd=root, capture_output=True, text=True,
+        )
+        out = proc.stdout + proc.stderr
+        check("--services %s exits 2" % extra[0], proc.returncode == USAGE,
+              "got %d\n%s" % (proc.returncode, out))
+
+
+def test_provisioning_never_copies_a_siblings_rootfs(tmp):
+    """A copied image names fixtures this tree does not have, so the boot
+    test's freshness check refuses it -- lane F's provisioned worktree was
+    refused that way 2 h 50 min into a run. Provisioning says how to build
+    one instead, and leaves the sibling's alone."""
+    parent = os.path.join(tmp, "siblings")
+    os.makedirs(parent)
+    target = make_tree(parent, "target", ["init"], rootfs=None)
+    sibling = make_tree(parent, "sibling", ["init"], rootfs="good")
+    bindir, log = _stub_cargo(tmp)
+    # The sysroot step would run PowerShell on a script this fake tree lacks.
+    for name in ("powershell.exe", "pwsh.exe", "powershell", "pwsh"):
+        with open(os.path.join(bindir, name), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("#!/usr/bin/env bash\nexit 1\n")
+        os.chmod(os.path.join(bindir, name), 0o755)
+    env = dict(os.environ)
+    env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+    env["STUB_CARGO_LOG"] = log
+    proc = subprocess.run(
+        [BASH, os.path.join(target, "scripts", "bootstrap-worktree.sh")],
+        cwd=target, capture_output=True, text=True, env=env,
+    )
+    out = proc.stdout + proc.stderr
+    check("provisioning does not copy a sibling's rootfs.ext4",
+          not os.path.exists(os.path.join(target, "rootfs.ext4")), out)
+    check("...says how to build one here instead",
+          "create-ext4-rootfs.sh" in out and "ctest-fixtures.py build" in out, out)
+    check("...and leaves the sibling's image where it was",
+          os.path.exists(os.path.join(sibling, "rootfs.ext4")), out)
+    check("...and reports the rootfs as not provisioned",
+          proc.returncode != 0 and "rootfs.ext4" in out, "got %d\n%s" % (proc.returncode, out))
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="bootstrap-test-")
     print("bootstrap-worktree.sh tests (scratch: %s)" % tmp)
@@ -398,8 +449,6 @@ def main() -> int:
         test_missing_limine_blocks,
         test_missing_rootfs_degrades_but_does_not_block,
         test_truncated_rootfs_is_not_treated_as_present,
-        test_rootfs_without_manifest_blocks,
-        test_skip_rootfs_check_keeps_the_boot_tests_escape_hatch,
         test_no_embeds_at_all_is_an_error_not_a_pass,
         test_one_service_two_artifacts_is_refused,
         test_unknown_service_argument_is_rejected,
@@ -407,6 +456,9 @@ def main() -> int:
         test_need_scopes_the_question_to_what_a_run_uses,
         test_need_rejects_an_unknown_class,
         test_need_without_check_is_refused,
+        test_services_builds_every_embedded_service_and_nothing_else,
+        test_services_takes_neither_names_nor_check,
+        test_provisioning_never_copies_a_siblings_rootfs,
     )
     try:
         for test in tests:

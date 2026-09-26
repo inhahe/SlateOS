@@ -2380,9 +2380,12 @@ pub const SYS_TTY_GET_TERMIOS: u64 = 541;
 ///
 /// `arg0`: pointer to a 36-byte wire-format `struct termios` to install.
 ///
-/// `TCSETSW`/`TCSETSF` collapse onto this: we have no output queue to drain
-/// and no kernel-side input queue to flush, exactly as the Linux shim's
-/// three commands already collapse.
+/// `TCSETSW` collapses onto this: there is no output queue to drain.
+/// `TCSETSF` does not quite: since 2026-09-24 a terminal has a kernel-side
+/// input queue (the line discipline runs as input arrives), and the Linux
+/// shim's `TCSETSF` empties it. The native equivalent is this call followed by
+/// [`SYS_TTY_FLUSH`] with `TCIFLUSH`, which is how libc's
+/// `tcsetattr(TCSAFLUSH)` should compose it.
 ///
 /// This is what makes raw mode work for a native-ABI program.  libc's
 /// `tcsetattr` previously accepted the call and threw it away ("our console
@@ -4764,13 +4767,11 @@ pub const SYS_NET_RAW_CLOSE: u64 = 868;
 ///
 /// # What the number means
 ///
-/// Exact on a master and on a slave in raw mode; an **upper bound** on a slave
-/// in canonical mode, where the counted bytes have not been through the line
-/// editor yet and an erase will consume rather than deliver one.  **Zero is
-/// exact in every case**, so a caller testing for emptiness — which is what
-/// most `FIONREAD` callers are doing — is never misled. See
-/// [`crate::tty::pty::readable_bytes`] for why counting canonical input
-/// exactly would require running the editor twice against different input.
+/// Exact at both ends and in both modes. On a slave in canonical mode it
+/// counts the bytes of complete lines only: input is edited as it arrives, so
+/// the line still being typed is known not to be readable yet. (Until
+/// 2026-09-24 the editor ran inside the reader and this was an upper bound;
+/// see [`crate::tty::pty::readable_bytes`].)
 ///
 /// A hung-up end with nothing buffered answers 0, not an error: `FIONREAD`
 /// asks how many bytes there are, and the answer is none. That differs from
@@ -5164,12 +5165,12 @@ pub const SYS_WAIT_MULTIPLE: u64 = 1066;
 ///
 /// # Errors
 ///
-/// - [`KernelError::NoSuchProcess`] — the caller is a kernel task with no
+/// - [`crate::error::KernelError::NoSuchProcess`] — the caller is a kernel task with no
 ///   owning process.
-/// - [`KernelError::PermissionDenied`] — the caller does not hold
+/// - [`crate::error::KernelError::PermissionDenied`] — the caller does not hold
 ///   `(Process, SET_CREDENTIALS)`.
-/// - [`KernelError::InvalidArgument`] — `count > NGROUPS_MAX`.
-/// - [`KernelError::PageFault`] — `list_ptr` is null or unmapped when
+/// - [`crate::error::KernelError::InvalidArgument`] — `count > NGROUPS_MAX`.
+/// - [`crate::error::KernelError::PageFault`] — `list_ptr` is null or unmapped when
 ///   `count > 0`.
 ///
 /// Chosen number 1067, next free slot after 1066.
@@ -5204,13 +5205,13 @@ pub const SYS_PROCESS_SETGROUPS: u64 = 1067;
 ///
 /// # Errors
 ///
-/// - [`KernelError::NoSuchProcess`] — the caller is a kernel task.
-/// - [`KernelError::PermissionDenied`] — the caller does not hold
+/// - [`crate::error::KernelError::NoSuchProcess`] — the caller is a kernel task.
+/// - [`crate::error::KernelError::PermissionDenied`] — the caller does not hold
 ///   `(Process, SET_CREDENTIALS)`.
-/// - [`KernelError::NotFound`] — the path does not exist.
-/// - [`KernelError::InvalidArgument`] — the path is empty, too long, or
+/// - [`crate::error::KernelError::NotFound`] — the path does not exist.
+/// - [`crate::error::KernelError::InvalidArgument`] — the path is empty, too long, or
 ///   does not name a directory.
-/// - [`KernelError::PageFault`] — null or unmapped pointer.
+/// - [`crate::error::KernelError::PageFault`] — null or unmapped pointer.
 ///
 /// Chosen number 1068, next free slot after 1067.
 pub const SYS_PROCESS_CHROOT: u64 = 1068;
@@ -5248,12 +5249,12 @@ pub const SYS_PROCESS_CHROOT: u64 = 1068;
 ///
 /// # Errors
 ///
-/// - [`KernelError::InvalidArgument`] — `which` is not `ITIMER_REAL` (0).
+/// - [`crate::error::KernelError::InvalidArgument`] — `which` is not `ITIMER_REAL` (0).
 ///   `ITIMER_VIRTUAL` (1) and `ITIMER_PROF` (2) count CPU time consumed by the
 ///   process, which this kernel does not account for per-process. Refusing is
 ///   honest; accepting would reproduce, one layer down, the exact "reports
 ///   success and arms nothing" defect this call exists to remove.
-/// - [`KernelError::NoSuchProcess`] — the caller has no owning process.
+/// - [`crate::error::KernelError::NoSuchProcess`] — the caller has no owning process.
 ///
 /// No capability is required: the timer belongs to the calling process and
 /// affects nothing else, which is also why `syscall::linux`'s `setitimer` arm
@@ -5275,8 +5276,8 @@ pub const SYS_ITIMER_SET: u64 = 1069;
 ///
 /// # Errors
 ///
-/// - [`KernelError::InvalidArgument`] — `which` is not `ITIMER_REAL` (0).
-/// - [`KernelError::NoSuchProcess`] — the caller has no owning process.
+/// - [`crate::error::KernelError::InvalidArgument`] — `which` is not `ITIMER_REAL` (0).
+/// - [`crate::error::KernelError::NoSuchProcess`] — the caller has no owning process.
 ///
 /// Chosen number 1070, next free slot after 1069.
 pub const SYS_ITIMER_GET: u64 = 1070;
@@ -5316,9 +5317,9 @@ pub const SYS_ITIMER_GET: u64 = 1070;
 ///
 /// # Errors
 ///
-/// - [`KernelError::InvalidArgument`] -- `size` is non-zero but smaller than a
+/// - [`crate::error::KernelError::InvalidArgument`] -- `size` is non-zero but smaller than a
 ///   signal frame can use, or `sp + size` overflows.
-/// - [`KernelError::NoSuchProcess`] -- the caller has no owning process.
+/// - [`crate::error::KernelError::NoSuchProcess`] -- the caller has no owning process.
 ///
 /// No capability is required: the stack belongs to the calling process.
 ///
@@ -5345,15 +5346,15 @@ pub const SYS_SIGNAL_ALTSTACK: u64 = 1071;
 ///
 /// # Errors
 ///
-/// - [`KernelError::PermissionDenied`] -- the caller does not hold
+/// - [`crate::error::KernelError::PermissionDenied`] -- the caller does not hold
 ///   `(Process, SET_HOSTNAME)`. Deliberately distinct from `NoSuchSyscall`: an
 ///   unprivileged caller should learn that it is unprivileged, which is
 ///   permanent, rather than that the call is unimplemented, which is not.
-/// - [`KernelError::InvalidArgument`] -- `len` exceeds 64, or the bytes are not
+/// - [`crate::error::KernelError::InvalidArgument`] -- `len` exceeds 64, or the bytes are not
 ///   valid UTF-8.
-/// - [`KernelError::InvalidAddress`] -- `ptr` is not readable for `len` bytes,
+/// - [`crate::error::KernelError::InvalidAddress`] -- `ptr` is not readable for `len` bytes,
 ///   or is null with a non-zero `len`.
-/// - [`KernelError::NoSuchProcess`] -- the caller has no owning process.
+/// - [`crate::error::KernelError::NoSuchProcess`] -- the caller has no owning process.
 ///
 /// **No getter is paired with this, deliberately.** `/proc/sys/kernel/hostname`
 /// already serves reads, and it is what `osh` fills `$HOSTNAME` from and what
@@ -5394,6 +5395,99 @@ pub const SYS_DOMAINNAME_SET: u64 = 1073;
 ///
 /// Chosen number 1074, next free slot after 1073.
 pub const SYS_KEYLAYOUT_SET: u64 = 1074;
+
+/// `SYS_BRIGHTNESS_SET` -- set a display's backlight level.
+///
+/// `arg0`: display id. `arg1`: level, 0-100. Requires
+/// [`crate::cap::Rights::SET_BRIGHTNESS`] on `ResourceType::Process`.
+///
+/// **Why it exists.** `brightness::set_brightness` worked and was reachable
+/// only from `kshell`. The Power settings page offered a slider, read the
+/// percentage back at the operator, and changed nothing, because there was
+/// no call it could make. Found by lane C.
+///
+/// **No matching get, on purpose.** `/proc/brightness` publishes a row per
+/// display carrying the current level, exactly as `/proc/keylayout` does for
+/// [`SYS_KEYLAYOUT_SET`] above -- a second read path would give one value two
+/// sources that can disagree.
+///
+/// `_up`/`_down` are deliberately not exposed: they are derivable from this,
+/// and separate step arithmetic per caller is how `displaycal`,
+/// `energysaver` and `powerprofile` each ended up with a private
+/// `set_brightness` of their own.
+///
+/// Chosen number 1075, next free slot after 1074.
+pub const SYS_BRIGHTNESS_SET: u64 = 1075;
+
+/// Discard a terminal's unread input, its unsent output, or both
+/// (`tcflush(3)`, and the flush half of `tcsetattr(TCSAFLUSH)`).
+///
+/// `arg0`: the terminal, under the family's convention — `0` is the caller's
+/// controlling terminal, `>= 2` an owned pty handle. `arg1`: the queue, with
+/// Linux's values — `TCIFLUSH` 0 (input), `TCOFLUSH` 1 (output), `TCIOFLUSH`
+/// 2 (both). Anything else is `InvalidArgument`.
+///
+/// **Why it exists.** Since 2026-09-24 a terminal has a kernel-side input
+/// queue — the line discipline runs as input arrives — so "discard what was
+/// typed ahead" finally has something to discard. The Linux shim's `TCFLSH`
+/// and `TCSETSF` reach it; the native ABI had no way to ask, so a native
+/// password prompt calling `tcflush(0, TCIFLUSH)` read whatever had been typed
+/// before it. Output flushing drops what a pty slave wrote and its master has
+/// not read; the console has no output queue, so there it does nothing.
+///
+/// A **background** caller is stopped with `SIGTTOU`, as for any change to a
+/// terminal it does not own the foreground of.
+///
+/// Chosen number 1076, next free slot after 1075.
+pub const SYS_TTY_FLUSH: u64 = 1076;
+
+/// Record the calling process's working directory.
+///
+/// `arg0`: pointer to the path bytes; `arg1`: their length (no NUL). The
+/// path must already be canonical — absolute, no `.`/`..`/empty component,
+/// no trailing `/` except the root, no NUL, at most `pcb::CWD_MAX_LEN`
+/// bytes (`pcb::is_canonical_path`) — and anything else is
+/// `InvalidArgument`: libc's `chdir` resolves and `stat`s the directory
+/// first, and a kernel that rewrote the path would record one the caller
+/// never checked. Returns 0.
+///
+/// **A record, not a lookup base** (design-decisions.md §960, and why this
+/// does not reopen §648): no native call resolves a path against it — libc
+/// still turns every relative path into an absolute one itself, and each is
+/// checked against the caller's capabilities as before. The record exists so
+/// the working directory survives what the libc copy cannot: `exec`, which
+/// replaces libc's memory, and `spawn`, which starts a child from the
+/// parent's record (see `SYS_PROCESS_SPAWN_EX2`). It is also what
+/// `/proc/<pid>/cwd` shows and what a Linux image `exec`'d by a native
+/// process starts in. There is therefore no existence or capability check
+/// here: a name for a directory confers nothing a capability check at use
+/// does not already decide.
+///
+/// Chosen number 1077, next free slot after 1076.
+pub const SYS_PROCESS_SET_CWD: u64 = 1077;
+
+/// Read the calling process's recorded working directory.
+///
+/// `arg0`: destination buffer; `arg1`: its capacity. Writes the path bytes
+/// (no NUL) and returns their length, or `BufferTooSmall` if they do not fit
+/// (nothing is written then). libc's start-up calls it once, so a program
+/// begins in the directory its parent recorded rather than at `/`.
+///
+/// Chosen number 1078.
+pub const SYS_PROCESS_GET_CWD: u64 = 1078;
+
+/// Set or query the calling process's file-creation mask (`umask(2)`).
+///
+/// `arg0`: the new mask, `0..=0o777`, or `u64::MAX` to query without
+/// changing it. Returns the previous mask. A value above `0o777` (other than
+/// the query sentinel) is `InvalidArgument` rather than silently truncated
+/// as Linux's `umask` does, because the native ABI has no reason to accept a
+/// mask it will not store. The same record the Linux shim's `umask` reads
+/// and writes, inherited across `fork`, kept across `exec` and passed to a
+/// spawned child.
+///
+/// Chosen number 1079.
+pub const SYS_PROCESS_UMASK: u64 = 1079;
 
 // ---------------------------------------------------------------------------
 // Version info

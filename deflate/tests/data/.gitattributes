@@ -1,0 +1,2 @@
+# Test vectors are opaque bytes: never let a line-ending conversion touch them.
+*.bin binary

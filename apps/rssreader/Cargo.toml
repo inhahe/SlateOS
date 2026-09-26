@@ -12,5 +12,16 @@ oswindow = { path = "../../gui/window" }
 # truncates the target before writing it.
 safeio = { path = "../safeio" }
 
+# Where the subscriptions and the read and starred marks are kept -- the user's
+# configuration directory -- and the escaping of a marks line; the question
+# asked before a close would lose a change a save is failing to write.
+settingsfile = { path = "../../gui/settingsfile" }
+textfmt = { path = "../../textfmt" }
+unsaved = { path = "../unsaved" }
+
+[dev-dependencies]
+# `with_scratch_config`, so a test of what is kept keeps it somewhere of its own.
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
+
 [lints]
 workspace = true

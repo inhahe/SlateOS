@@ -165827,7 +165827,18 @@ that does it, not the next one written; the guard above is still the fix.
 (`a_window_made_by_new_keeps_nothing`).
 
 ### [E] The feed reader forgets its subscriptions, folders and marks at exit -- 2026-09-25
-**Status:** OPEN
+**Status:** FIXED (lane E, 2026-09-26) -- `design-decisions.md` §1212.
+
+**Fixed.** As the proper fix below says: the subscriptions and folders are kept
+as OPML (`rssreader/subscriptions.opml` in the settings folder), and each
+article's read and starred marks by its feed and link (`rssreader/marks.txt`),
+written after every change. A feed read from a file is read from it again at
+the next start, and its articles get their marks back. A kept file that
+cannot be read whole is left alone and the window says why; closing over a
+save that is failing asks first. Two things found on the way: an OPML list
+imported twice doubled every feed in it, and an empty folder -- which is how
+the reader's own export writes a folder with no feeds yet -- was dropped on
+import.
 
 **In short:** the feed reader keeps nothing between sessions. Feeds added by
 address or by an OPML list, the folders they are filed in, the articles read
@@ -166112,7 +166123,7 @@ what the last save did were drawn at the foot of the window, over the list's
 last row; they have lines in the strip under the header now.
 
 ### [E] The explorer's file-type columns showed the same invented values for every file -- 2026-09-25
-**Status:** FIXED for pictures, source files and zip archives (lane E, 2026-09-25) and for audio files (lane E, 2026-09-26); OPEN for a picture's colour depth, and tar, gzip, 7z and rar archives -- lane E's.
+**Status:** FIXED for pictures, source files and zip archives (lane E, 2026-09-25), and for audio files, video files, TAR and gzip archives (lane E, 2026-09-26); OPEN for a picture's colour depth, the count of files in a `.tar.gz`, and 7z and rar archives -- lane E's.
 
 **In short:** the file explorer's detail view can show extra columns for
 pictures (size, colour depth, shape), songs (length, bitrate, artist...),
@@ -166157,10 +166168,23 @@ file said. A playlist's tracks read their files now, and a relative M3U entry
 is taken from the playlist's folder, as M3U means it (it was taken from the
 player's working directory).
 
+**Fixed, 2026-09-26: video, TAR and gzip.** Video files had no columns at
+all; a new provider reads them through `apps/mediaprobe` into the Duration,
+Bitrate and Dimensions columns music and pictures already have (shared by id:
+one Duration column for everything that plays) and a new Frame Rate. A TAR's
+headers are read through `apps/tararchive` -- its files, their size, and a
+compression ratio of 0%, which a TAR honestly has. A gzip file's trailer gives
+the size it inflates to, so its ratio is read without inflating it; a plain
+`.gz` holds one file.
+
 **Still open, and blank rather than guessed:**
 - **Colour depth** -- `imagecodec` does not report a picture's bit depth; a
   header-only `info` beside `dimensions` would be lane F's.
-- **Tar, gzip, 7z, rar** -- `apps/explorer` reads no archive but zip.
+- **How many files a `.tar.gz` holds** -- counting them means inflating the
+  whole archive, synchronously, while the window draws the row. The proper
+  fix is a background reader for the columns (the thumbnails have one); until
+  then the cell is blank, not a guess.
+- **7z, rar** -- nothing in the tree reads them.
 
 **Where.** `apps/explorer/src/columns.rs`: `ImageColumns`, `AudioColumns`,
 `CodeColumns`, `ArchiveColumns`, `FactCache`, `image_size`, `line_count`,

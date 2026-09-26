@@ -25,6 +25,16 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "main.rs"
 
+EACH = "every_change_to_the_subscriptions_is_kept"
+MARKS = "every_mark_change_is_kept"
+REMOVED = "a_removed_feeds_marks_go_with_it"
+BACK = "subscriptions_folders_and_marks_come_back_next_time"
+TWICE = "an_opml_imported_twice_adds_nothing_and_an_empty_folder_survives"
+BROKEN = "a_kept_file_that_cannot_be_read_is_left_as_it_is"
+FAILING = "closing_while_a_save_fails_asks_first"
+DISCARD = "discard_leaves_and_cancel_stays"
+ROUND = "marks_read_back_as_they_were_written_whatever_the_text"
+
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
     (
@@ -158,6 +168,169 @@ MUTATIONS = [
         "                self.hover = over;\n                EventResult::Consumed",
         "                let _ = over;\n                EventResult::Consumed",
         ["the_pointer_lights_the_button_it_is_over"],
+    ),
+    # ---- what is kept between sessions ----
+    (
+        "a new folder is not counted",
+        "        self.folders.push(Folder::new(id, name));\n        self.subscriptions_changed();",
+        "        self.folders.push(Folder::new(id, name));",
+        [EACH],
+    ),
+    (
+        "a new feed is not counted",
+        "        self.feeds.push(feed);\n        self.subscriptions_changed();",
+        "        self.feeds.push(feed);",
+        [EACH],
+    ),
+    (
+        "a removed feed is not counted",
+        "        self.articles.retain(|a| a.feed_id != feed_id);\n        self.subscriptions_changed();",
+        "        self.articles.retain(|a| a.feed_id != feed_id);",
+        [EACH],
+    ),
+    (
+        "a removed feed's marks stay",
+        "        self.subscriptions_changed();\n        self.marks_revision = self.marks_revision.wrapping_add(1);\n    }",
+        "        self.subscriptions_changed();\n    }",
+        [REMOVED],
+    ),
+    (
+        "a rename is not counted",
+        "            feed.title = new_name.to_string();\n            self.subscriptions_changed();",
+        "            feed.title = new_name.to_string();",
+        [EACH],
+    ),
+    (
+        "a removed folder is not counted",
+        "        self.folders.retain(|f| f.id != folder_id);\n        self.subscriptions_changed();",
+        "        self.folders.retain(|f| f.id != folder_id);",
+        [EACH],
+    ),
+    (
+        "a move is not counted",
+        "            feed.folder_id = folder_id;\n            self.subscriptions_changed();",
+        "            feed.folder_id = folder_id;",
+        [EACH],
+    ),
+    (
+        "a feed's own title is not counted",
+        "        if renamed {\n            self.subscriptions_changed();\n        }",
+        "",
+        [EACH],
+    ),
+    (
+        "a read toggle is not kept",
+        "            article.is_read = !article.is_read;\n            self.remember_marks(idx);",
+        "            article.is_read = !article.is_read;",
+        [MARKS],
+    ),
+    (
+        "a star toggle is not kept",
+        "            article.is_starred = !article.is_starred;\n            self.remember_marks(idx);",
+        "            article.is_starred = !article.is_starred;",
+        [MARKS],
+    ),
+    (
+        "marking all read is not kept",
+        "                article.is_read = true;\n                self.remember_marks(idx);",
+        "                article.is_read = true;",
+        [MARKS],
+    ),
+    (
+        "marking all read counts what was read already",
+        "            if let Some(article) = self.articles.get_mut(idx)\n                && !article.is_read\n            {",
+        "            if let Some(article) = self.articles.get_mut(idx) {",
+        [MARKS],
+    ),
+    (
+        "a feed read again does not get its marks back",
+        "                    article.is_read = kept.read;\n                    article.is_starred = kept.starred;",
+        "",
+        [BACK],
+    ),
+    (
+        "an OPML list imported twice doubles its feeds",
+        "            if self.feeds.iter().any(|f| &f.url == url) {\n                return 0;\n            }",
+        "",
+        [TWICE],
+    ),
+    (
+        "an empty folder is not a folder",
+        "        } else if !outline.children.is_empty() || !outline.text.is_empty() {",
+        "        } else if !outline.children.is_empty() {",
+        [TWICE, BACK],
+    ),
+    (
+        "a feed read from a file is not read again at start",
+        "        for file in &files {\n            self.read_any_file(Path::new(file));\n        }",
+        "",
+        [BACK],
+    ),
+    (
+        "what was just read is written again at once",
+        "        self.kept_subs = self.subs_revision;\n        self.kept_marks = self.marks_revision;\n    }",
+        "    }",
+        [BACK],
+    ),
+    (
+        "a kept file that cannot be read is saved over",
+        "            Err(why) => {\n                self.persist = false;\n                self.store_error = Some(why);\n                return;\n            }",
+        "            Err(why) => {\n                self.store_error = Some(why);\n                return;\n            }",
+        [BROKEN],
+    ),
+    (
+        "unreadable marks are saved over",
+        "                Err(why) => {\n                    self.persist = false;\n                    self.store_error = Some(refused(marks, why));",
+        "                Err(why) => {\n                    self.store_error = Some(refused(marks, why));",
+        [BROKEN],
+    ),
+    (
+        "a failed save is not said",
+        "        self.store_error = failed;\n    }",
+        "        self.store_error = None;\n        let _ = failed;\n    }",
+        [FAILING],
+    ),
+    (
+        "why nothing is kept is not drawn",
+        "        } else if let Some(error) = &self.store_error {",
+        "        } else if let Some(error) = None::<&String> {",
+        [BROKEN, FAILING],
+    ),
+    (
+        "closing does not ask",
+        "        self.keep();\n        if !self.unkept() {\n            return true;\n        }",
+        "        self.keep();\n        if true {\n            return true;\n        }",
+        [FAILING],
+    ),
+    (
+        "a key under the question reaches the reader",
+        "            if let Some(choice) = question.handle(event) {\n                self.question = None;\n                self.answer(choice);\n            }\n            return EventResult::Consumed;",
+        "            if let Some(choice) = question.handle(event) {\n                self.question = None;\n                self.answer(choice);\n                return EventResult::Consumed;\n            }",
+        [FAILING],
+    ),
+    (
+        "Save leaves while the save still fails",
+        "                self.running = self.unkept();",
+        "                self.running = false;",
+        [FAILING],
+    ),
+    (
+        "Discard stays",
+        "            Choice::Discard => self.running = false,",
+        "            Choice::Discard => {}",
+        [DISCARD],
+    ),
+    (
+        "an unsubscribed feed's marks are written",
+        "        if !subscribed.iter().any(|f| &f.url == feed) {\n            continue;\n        }",
+        "",
+        [ROUND],
+    ),
+    (
+        "a marks file in a later format is read",
+        "        Some(first) if first.starts_with(\"slateos-feed-marks\\t\") => {",
+        "        Some(first) if first.starts_with(\"slateos-feed-marks-never\\t\") => {",
+        [ROUND],
     ),
 ]
 

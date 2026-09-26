@@ -13,6 +13,10 @@
 //!   unread or starred
 //! - Each feed's health, as far as reading its files has gone
 //! - OPML export of the subscriptions
+//! - Kept between sessions: the subscriptions and folders (as OPML, in the
+//!   user's configuration directory), each article's read and starred marks
+//!   (by its feed and its link), and a feed read from a file is read from it
+//!   again at the next start
 //! - An offline cache of what has been read
 //!
 //! Every control answers the pointer -- the renderer records a hit box where
@@ -32,8 +36,11 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, M
 use guitk::frame::{Frame, Rect};
 use guitk::render::RenderTree;
 use oswindow::app::{self, App, Response};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
+use textfmt::tsv;
+use unsaved::{Choice, Question};
 // The shared civil-date arithmetic. This app carried its own copy of Howard
 // Hinnant's `days_from_civil`/`civil_from_days` pair -- a third and fourth
 // transcription of an algorithm `guitk::date` already reaches through
@@ -1429,6 +1436,114 @@ pub fn parse_feed(xml_str: &str) -> Result<ParsedFeed, String> {
 // OPML Import/Export
 // ============================================================================
 
+// ============================================================================
+// What is kept between sessions
+// ============================================================================
+
+/// What the window says when there is nowhere to keep anything.
+const NO_HOME: &str = "Nothing is kept: no home directory is set";
+
+/// The first line of the marks file, and its version.
+const MARKS_FORMAT: &str = "slateos-feed-marks\t1";
+
+/// The most either kept file this reads. Subscriptions for thousands of feeds
+/// and marks for a hundred thousand articles are well inside it; a file past
+/// it is not a file this program wrote.
+const MAX_KEPT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Where the subscriptions and folders are kept, as OPML: the format this
+/// program already reads and writes, and one a person can take elsewhere.
+fn subscriptions_path() -> Option<PathBuf> {
+    settingsfile::config_dir().map(|dir| dir.join("rssreader").join("subscriptions.opml"))
+}
+
+/// Where the read and starred marks are kept.
+fn marks_path() -> Option<PathBuf> {
+    settingsfile::config_dir().map(|dir| dir.join("rssreader").join("marks.txt"))
+}
+
+/// An article's marks, as kept between sessions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Marks {
+    pub read: bool,
+    pub starred: bool,
+}
+
+/// Where an article's marks are kept within its feed: its link -- or, for a
+/// feed that gives none, its title, told apart from any link by a prefix no
+/// address has.
+fn mark_key(article: &Article) -> String {
+    if article.link.is_empty() {
+        format!("title:{}", article.title)
+    } else {
+        article.link.clone()
+    }
+}
+
+/// The marks as kept: a format line, then one line per article marked --
+/// `r`, `s` or `rs`, the feed's address and the article's key -- for the
+/// feeds in `subscribed` only, so a removed feed's marks go with it.
+fn marks_text(
+    marks: &std::collections::BTreeMap<(String, String), Marks>,
+    subscribed: &[Feed],
+) -> String {
+    let mut out = String::from(MARKS_FORMAT);
+    out.push('\n');
+    for ((feed, key), m) in marks {
+        if !subscribed.iter().any(|f| &f.url == feed) {
+            continue;
+        }
+        let flags = match (m.read, m.starred) {
+            (true, true) => "rs",
+            (true, false) => "r",
+            (false, true) => "s",
+            (false, false) => continue,
+        };
+        out.push_str(&[flags, &tsv::escape(feed), &tsv::escape(key)].join("\t"));
+        out.push('\n');
+    }
+    out
+}
+
+/// The marks read back from [`marks_text`]'s format, or why they cannot be:
+/// read whole or not at all -- marks read in part and kept again would lose
+/// what was not read. The refusal names the line.
+fn parse_marks(text: &str) -> Result<std::collections::BTreeMap<(String, String), Marks>, String> {
+    let mut lines = text.lines();
+    match lines.next() {
+        Some(first) if first == MARKS_FORMAT => {}
+        Some(first) if first.starts_with("slateos-feed-marks\t") => {
+            return Err(format!(
+                "it is written in a later format ({}) than this version reads",
+                first.trim_start_matches("slateos-feed-marks\t")
+            ));
+        }
+        _ => return Err(String::from("it is not a SlateOS feed marks file")),
+    }
+    let mut marks = std::collections::BTreeMap::new();
+    for (i, line) in lines.enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let n = i.saturating_add(2);
+        let fields: Vec<&str> = line.split('\t').collect();
+        let [flags, feed, key] = fields.as_slice() else {
+            return Err(format!("line {n}: it is not three fields"));
+        };
+        let (read, starred) = match *flags {
+            "r" => (true, false),
+            "s" => (false, true),
+            "rs" => (true, true),
+            other => return Err(format!("line {n}: {other:?} is not a mark")),
+        };
+        let unescape = |t: &str| {
+            tsv::unescape(t).ok_or_else(|| format!("line {n}: a field has a broken escape"))
+        };
+        marks.insert((unescape(feed)?, unescape(key)?), Marks { read, starred });
+    }
+    Ok(marks)
+}
+
 /// An OPML outline entry (represents one feed or folder).
 #[derive(Clone, Debug)]
 pub struct OpmlOutline {
@@ -2211,6 +2326,26 @@ pub struct RssReaderApp {
         reason = "a one-entry cache: the key, and the lines it was made for"
     )]
     wrapped: std::cell::RefCell<Option<((ArticleId, u32, u64), std::rc::Rc<Vec<String>>)>>,
+    /// Every article's marks by its feed's address and its key -- loaded or
+    /// not: a feed file opened next week finds its marks here.
+    marks: std::collections::BTreeMap<(String, String), Marks>,
+    /// Whether the subscriptions and marks are kept: set by `from_settings`,
+    /// never by `new`, so a window a test makes writes nothing.
+    persist: bool,
+    /// Bumped by every change to the feeds or folders a save would write.
+    subs_revision: u64,
+    /// `subs_revision` when the subscriptions were last written or read.
+    kept_subs: u64,
+    /// Bumped by every change to a mark.
+    marks_revision: u64,
+    /// `marks_revision` when the marks were last written or read.
+    kept_marks: u64,
+    /// Why what is kept is not being kept, when it is not.
+    store_error: Option<String>,
+    /// "Your latest changes are not saved", while it is being asked.
+    question: Option<Question<()>>,
+    /// Cleared when the window may close, which is what stops the loop.
+    pub running: bool,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -2261,6 +2396,15 @@ impl RssReaderApp {
             last_hits: Vec::new(),
             wheel: wheel::Accumulator::default(),
             wrapped: std::cell::RefCell::new(None),
+            marks: std::collections::BTreeMap::new(),
+            persist: false,
+            subs_revision: 0,
+            kept_subs: 0,
+            marks_revision: 0,
+            kept_marks: 0,
+            store_error: None,
+            question: None,
+            running: true,
         };
         // No articles. `populate_sample_data` built folders, feeds and
         // articles from `SAMPLE_RSS`, a constant fed through the real parser
@@ -2286,7 +2430,34 @@ impl RssReaderApp {
         let id = self.next_folder_id;
         self.next_folder_id = self.next_folder_id.saturating_add(1);
         self.folders.push(Folder::new(id, name));
+        self.subscriptions_changed();
         id
+    }
+
+    /// Count a change to the feeds or folders, for [`Self::keep`].
+    fn subscriptions_changed(&mut self) {
+        self.subs_revision = self.subs_revision.wrapping_add(1);
+    }
+
+    /// Keep article `idx`'s marks, for the day its feed is read again.
+    fn remember_marks(&mut self, idx: usize) {
+        let Some(article) = self.articles.get(idx) else {
+            return;
+        };
+        let Some(feed) = self.feeds.iter().find(|f| f.id == article.feed_id) else {
+            return;
+        };
+        let key = (feed.url.clone(), mark_key(article));
+        let marks = Marks {
+            read: article.is_read,
+            starred: article.is_starred,
+        };
+        if marks == Marks::default() {
+            self.marks.remove(&key);
+        } else {
+            self.marks.insert(key, marks);
+        }
+        self.marks_revision = self.marks_revision.wrapping_add(1);
     }
 
     /// Add a new feed and return its ID.
@@ -2296,25 +2467,31 @@ impl RssReaderApp {
         let mut feed = Feed::new(id, title, url);
         feed.folder_id = folder_id;
         self.feeds.push(feed);
+        self.subscriptions_changed();
         id
     }
 
-    /// Remove a feed by ID and all its articles.
+    /// Remove a feed by ID and all its articles -- and its marks, which the
+    /// next save leaves out.
     pub fn remove_feed(&mut self, feed_id: FeedId) {
         self.feeds.retain(|f| f.id != feed_id);
         self.articles.retain(|a| a.feed_id != feed_id);
+        self.subscriptions_changed();
+        self.marks_revision = self.marks_revision.wrapping_add(1);
     }
 
     /// Rename a feed.
     pub fn rename_feed(&mut self, feed_id: FeedId, new_name: &str) {
         if let Some(feed) = self.feeds.iter_mut().find(|f| f.id == feed_id) {
             feed.title = new_name.to_string();
+            self.subscriptions_changed();
         }
     }
 
     /// Remove a folder and optionally its feeds.
     pub fn remove_folder(&mut self, folder_id: FolderId, remove_feeds: bool) {
         self.folders.retain(|f| f.id != folder_id);
+        self.subscriptions_changed();
         if remove_feeds {
             let feed_ids: Vec<FeedId> = self
                 .feeds
@@ -2339,6 +2516,7 @@ impl RssReaderApp {
     pub fn move_feed_to_folder(&mut self, feed_id: FeedId, folder_id: Option<FolderId>) {
         if let Some(feed) = self.feeds.iter_mut().find(|f| f.id == feed_id) {
             feed.folder_id = folder_id;
+            self.subscriptions_changed();
         }
     }
 
@@ -2362,6 +2540,7 @@ impl RssReaderApp {
             && let Some(article) = self.articles.get_mut(idx)
         {
             article.is_read = !article.is_read;
+            self.remember_marks(idx);
         }
     }
 
@@ -2372,6 +2551,7 @@ impl RssReaderApp {
             && let Some(article) = self.articles.get_mut(idx)
         {
             article.is_starred = !article.is_starred;
+            self.remember_marks(idx);
         }
     }
 
@@ -2379,8 +2559,11 @@ impl RssReaderApp {
     pub fn mark_all_read(&mut self) {
         let indices = self.filtered_article_indices();
         for idx in indices {
-            if let Some(article) = self.articles.get_mut(idx) {
+            if let Some(article) = self.articles.get_mut(idx)
+                && !article.is_read
+            {
                 article.is_read = true;
+                self.remember_marks(idx);
             }
         }
     }
@@ -2730,7 +2913,11 @@ impl RssReaderApp {
         let mut count: usize = 0;
 
         if let Some(ref url) = outline.xml_url {
-            // This is a feed
+            // A feed -- one already subscribed to is not added twice, so an
+            // OPML list imported again adds only what is new in it.
+            if self.feeds.iter().any(|f| &f.url == url) {
+                return 0;
+            }
             let feed_id = self.add_feed(&outline.text, url, parent_folder);
             if let Some(ref html_url) = outline.html_url
                 && let Some(feed) = self.feeds.iter_mut().find(|f| f.id == feed_id)
@@ -2738,8 +2925,9 @@ impl RssReaderApp {
                 feed.link = html_url.clone();
             }
             count = count.saturating_add(1);
-        } else if !outline.children.is_empty() {
-            // This is a folder
+        } else if !outline.children.is_empty() || !outline.text.is_empty() {
+            // A folder -- an empty one too, which is what a folder with no
+            // feeds in it yet is written as.
             let folder_id = self.add_folder(&outline.text);
             for child in &outline.children {
                 count = count.saturating_add(self.import_opml_outline(child, Some(folder_id)));
@@ -2757,14 +2945,22 @@ impl RssReaderApp {
     /// Simulate refreshing a feed by ingesting parsed feed data.
     pub fn ingest_parsed_feed(&mut self, feed_id: FeedId, parsed: &ParsedFeed, timestamp: u64) {
         // Update feed metadata
+        let mut renamed = false;
+        let mut feed_url = String::new();
         if let Some(feed) = self.feeds.iter_mut().find(|f| f.id == feed_id) {
-            if feed.title.is_empty() || feed.title == feed.url {
+            if (feed.title.is_empty() || feed.title == feed.url) && feed.title != parsed.title {
                 feed.title = parsed.title.clone();
+                renamed = true;
             }
             feed.description = parsed.description.clone();
+            renamed |= feed.link != parsed.link;
             feed.link = parsed.link.clone();
             feed.format = parsed.format;
             feed.health.record_success(timestamp);
+            feed_url.clone_from(&feed.url);
+        }
+        if renamed {
+            self.subscriptions_changed();
         }
 
         // Add new articles (dedup by title+link)
@@ -2787,10 +2983,190 @@ impl RssReaderApp {
                 } else {
                     pa.summary.clone()
                 };
+                // The marks it had when this feed was last read.
+                if let Some(kept) = self.marks.get(&(feed_url.clone(), mark_key(&article))) {
+                    article.is_read = kept.read;
+                    article.is_starred = kept.starred;
+                }
                 self.cache
                     .cache_article(id, &article.cached_text, timestamp);
                 self.articles.push(article);
             }
+        }
+    }
+
+    // ====================================================================
+    // Keeping
+    // ====================================================================
+
+    /// The window's reader: the subscriptions, folders and marks kept last
+    /// time, every feed read from a file read from it again, and every change
+    /// kept from here on.
+    pub fn from_settings(width: f32, height: f32) -> Self {
+        let mut app = Self::new(width, height);
+        match (subscriptions_path(), marks_path()) {
+            (Some(subs), Some(marks)) => {
+                app.persist = true;
+                app.load_kept(&subs, &marks, MAX_KEPT_BYTES);
+            }
+            // Nowhere to keep anything, and never will be while this window
+            // is open: said once, and not asked about again at every close.
+            _ => app.store_error = Some(String::from(NO_HOME)),
+        }
+        app
+    }
+
+    /// Read what was kept at `subs` and `marks`; with neither there yet, this
+    /// is a first run. A file that cannot be read whole is left exactly as it
+    /// is: nothing is saved over either, and the window says so.
+    fn load_kept(&mut self, subs: &Path, marks: &Path, max_bytes: usize) {
+        let refused = |path: &Path, why: String| {
+            format!(
+                "{} was not read ({why}), so nothing is saved over it",
+                path.display()
+            )
+        };
+        let read = |path: &Path| match safeio::read_to_string_capped(path, max_bytes) {
+            Ok(read) if read.truncated => Err(refused(
+                path,
+                format!("it is larger than {} MiB", max_bytes / (1024 * 1024)),
+            )),
+            Ok(read) => Ok(Some(read.text)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(refused(path, err.to_string())),
+        };
+        let loaded = read(subs).and_then(|subs_text| Ok((subs_text, read(marks)?)));
+        let (subs_text, marks_text) = match loaded {
+            Ok(texts) => texts,
+            Err(why) => {
+                self.persist = false;
+                self.store_error = Some(why);
+                return;
+            }
+        };
+        if let Some(text) = marks_text {
+            match parse_marks(&text) {
+                Ok(kept) => self.marks = kept,
+                Err(why) => {
+                    self.persist = false;
+                    self.store_error = Some(refused(marks, why));
+                    return;
+                }
+            }
+        }
+        if let Some(text) = subs_text
+            && let Err(why) = self.import_opml(&text)
+        {
+            self.persist = false;
+            self.store_error = Some(refused(subs, why));
+            return;
+        }
+        // A feed read from a file is read from it again: its articles come
+        // back, and with them the marks just loaded.
+        let files: Vec<String> = self
+            .feeds
+            .iter()
+            .map(|f| f.url.clone())
+            .filter(|url| Path::new(url).is_absolute() && Path::new(url).is_file())
+            .collect();
+        for file in &files {
+            self.read_any_file(Path::new(file));
+        }
+        if !files.is_empty() {
+            self.status_message = format!("Read {} feed(s) again from their files", files.len());
+        }
+        // What was just read is what is kept: nothing to write until it
+        // changes.
+        self.kept_subs = self.subs_revision;
+        self.kept_marks = self.marks_revision;
+    }
+
+    /// The subscriptions and folders as kept: OPML.
+    fn subscriptions_text(&self) -> String {
+        generate_opml("Feeds", &self.feeds, &self.folders)
+    }
+
+    /// Write what has changed since it was last written, if this window keeps
+    /// anything. A failure is kept in `store_error`, drawn in the status bar,
+    /// and the next event tries again.
+    fn keep(&mut self) {
+        if !self.persist || !self.unkept() {
+            return;
+        }
+        let (Some(subs), Some(marks)) = (subscriptions_path(), marks_path()) else {
+            self.store_error = Some(String::from(NO_HOME));
+            return;
+        };
+        let write = |path: &Path, text: &str| {
+            path.parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| safeio::write_str_atomically(path, text))
+        };
+        let mut failed = None;
+        if self.subs_revision != self.kept_subs {
+            match write(&subs, &self.subscriptions_text()) {
+                Ok(()) => self.kept_subs = self.subs_revision,
+                Err(err) => {
+                    failed = Some(format!(
+                        "Your subscriptions were not saved to {}: {err}",
+                        subs.display()
+                    ));
+                }
+            }
+        }
+        if self.marks_revision != self.kept_marks {
+            match write(&marks, &marks_text(&self.marks, &self.feeds)) {
+                Ok(()) => self.kept_marks = self.marks_revision,
+                Err(err) => {
+                    failed = failed.or_else(|| {
+                        Some(format!(
+                            "Your read and starred marks were not saved to {}: {err}",
+                            marks.display()
+                        ))
+                    });
+                }
+            }
+        }
+        self.store_error = failed;
+    }
+
+    /// Whether a change is not written.
+    fn unkept(&self) -> bool {
+        self.persist
+            && (self.subs_revision != self.kept_subs || self.marks_revision != self.kept_marks)
+    }
+
+    /// Whether the window may close now: at once, unless a change a save is
+    /// failing to write would be lost.
+    fn request_close(&mut self) -> bool {
+        self.keep();
+        if !self.unkept() {
+            return true;
+        }
+        // The question replaces whatever is up: the picker would take the keys
+        // it needs, and be drawn over it.
+        self.picker.close();
+        self.show_help = false;
+        let detail = self.store_error.clone().unwrap_or_default();
+        self.question = Some(Question::new(
+            "Your latest changes to your feeds are not saved.",
+            &format!("{detail} -- try saving again before closing?"),
+            (),
+        ));
+        false
+    }
+
+    /// Act on the close question's answer.
+    fn answer(&mut self, choice: Choice) {
+        match choice {
+            // Leave only if the save now works; if it fails again the error is
+            // on screen and the window stays, which is what Save asked for.
+            Choice::Save => {
+                self.keep();
+                self.running = self.unkept();
+            }
+            Choice::Discard => self.running = false,
+            Choice::Cancel => {}
         }
     }
 
@@ -2802,8 +3178,35 @@ impl RssReaderApp {
     // doc lists.
     // ====================================================================
 
-    /// Handle one event from the window.
+    /// Handle one event from the window, and keep whatever it changed.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The close question has every key and click while it is up: a key
+        // that reached the reader under it would be a change made while being
+        // asked about the changes.
+        if let Some(question) = self.question.as_mut()
+            && matches!(event, Event::Key(_) | Event::Mouse(_))
+        {
+            if let Some(choice) = question.handle(event) {
+                self.question = None;
+                self.answer(choice);
+            }
+            return EventResult::Consumed;
+        }
+        // Closes at once unless the latest changes cannot be saved, which
+        // closing would lose; then the question is up and the window stays.
+        if matches!(event, Event::CloseRequested) {
+            if self.request_close() {
+                self.running = false;
+            }
+            return EventResult::Consumed;
+        }
+        let result = self.route_event(event);
+        self.keep();
+        result
+    }
+
+    /// Hand `event` to whatever has it: the picker, or the reader.
+    fn route_event(&mut self, event: &Event) -> EventResult {
         // The picker takes the event first while it is up, or a keystroke
         // meant for a filename lands in the search box behind it.
         match self.picker.handle(event, self.width, self.height) {
@@ -5311,6 +5714,18 @@ impl RssReaderApp {
                 overflow: TextOverflow::Ellipsis,
             });
             return;
+        } else if let Some(error) = &self.store_error {
+            // Before any passing message: it stays true until a save works.
+            cmds.push(RenderCommand::Text {
+                x: self.width / 2.0,
+                y: y + 7.0,
+                text: error.clone(),
+                font_size: 11.0,
+                color: self.palette.ink(self.palette.red),
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(self.width / 2.0 - 120.0),
+                overflow: TextOverflow::Ellipsis,
+            });
         } else if !self.status_message.is_empty() {
             cmds.push(RenderCommand::Text {
                 x: self.width / 2.0,
@@ -5926,10 +6341,14 @@ impl App for RssReaderApp {
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
-        if matches!(event, Event::CloseRequested) {
+        let result = self.handle_event(event);
+        if !self.running {
             return Response::Exit;
         }
-        match self.handle_event(event) {
+        if matches!(event, Event::CloseRequested) {
+            return Response::KeepOpen;
+        }
+        match result {
             EventResult::Consumed => Response::Redraw,
             EventResult::Ignored => Response::Idle,
         }
@@ -5947,12 +6366,16 @@ impl App for RssReaderApp {
         // Last, so it is above everything.
         tree.commands
             .extend(self.picker.render(&self.palette, width, height));
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
+        }
         tree
     }
 }
 
 fn main() -> ExitCode {
-    let mut app = RssReaderApp::new(1200.0, 800.0);
+    let mut app = RssReaderApp::from_settings(1200.0, 800.0);
     app::launch("rssreader", &mut app)
 }
 
@@ -9933,5 +10356,419 @@ mod tests {
         assert!(app.read_any_file(&plain).contains("links to no feed"));
         // Best effort: under the temporary directory.
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- what is kept between sessions ---
+
+    /// Select the article whose title starts with `title`.
+    fn select_titled(app: &mut RssReaderApp, title: &str) -> usize {
+        let idx = app
+            .articles
+            .iter()
+            .position(|a| a.title.starts_with(title))
+            .unwrap_or_else(|| panic!("no article {title:?}"));
+        app.selected_article_index = app
+            .filtered_article_indices()
+            .iter()
+            .position(|&i| i == idx)
+            .expect("the article is in the list");
+        idx
+    }
+
+    /// Subscriptions, folders -- an empty one too -- and marks outlive the
+    /// window; a feed read from a file is read from it again, its marks with
+    /// it. The reader kept nothing: the next start was empty.
+    #[test]
+    fn subscriptions_folders_and_marks_come_back_next_time() {
+        settingsfile::testing::with_scratch_config("rss-kept", |dir| {
+            let feed_file = dir.join("lobsters.xml");
+            std::fs::write(&feed_file, RssReaderApp::SAMPLE_RSS).unwrap();
+            let mut app = RssReaderApp::from_settings(1200.0, 800.0);
+            assert!(app.store_error.is_none(), "{:?}", app.store_error);
+            app.handle_event(&press(Key::Down));
+            assert!(
+                !subscriptions_path().unwrap().exists(),
+                "a first run wrote subscriptions nobody had made"
+            );
+            let news = app.add_folder("News");
+            app.add_feed("Example", "https://example.com/feed.xml", Some(news));
+            app.add_folder("Empty for now");
+            assert!(app.read_any_file(&feed_file).starts_with("Added "));
+            let idx = select_titled(&mut app, "Bits");
+            app.toggle_read();
+            app.toggle_star();
+            assert!(app.articles[idx].is_read && app.articles[idx].is_starred);
+            app.keep();
+            assert!(app.store_error.is_none(), "{:?}", app.store_error);
+
+            let again = RssReaderApp::from_settings(1200.0, 800.0);
+            assert!(again.store_error.is_none(), "{:?}", again.store_error);
+            let folders: Vec<&str> = again.folders.iter().map(|f| f.name.as_str()).collect();
+            assert_eq!(folders, ["News", "Empty for now"]);
+            let example = again
+                .feeds
+                .iter()
+                .find(|f| f.url == "https://example.com/feed.xml")
+                .expect("the feed added by address");
+            assert_eq!(example.title, "Example");
+            assert_eq!(example.folder_id, Some(again.folders[0].id), "its folder");
+            let from_file = again
+                .feeds
+                .iter()
+                .find(|f| f.url == feed_file.display().to_string())
+                .expect("the feed read from a file");
+            assert_eq!(from_file.title, "Lobsters");
+            let articles: Vec<(&str, bool, bool)> = again
+                .articles
+                .iter()
+                .map(|a| (a.title.as_str(), a.is_read, a.is_starred))
+                .collect();
+            assert_eq!(articles.len(), 2, "the file's articles were not read again");
+            assert!(
+                articles
+                    .iter()
+                    .any(|&(t, r, s)| t.starts_with("Bits") && r && s)
+            );
+            assert!(
+                articles
+                    .iter()
+                    .any(|&(t, r, s)| t.starts_with("A tour") && !r && !s)
+            );
+            assert!(again.status_message.contains("Read 1 feed(s) again"));
+            // What was read is what is kept: nothing is written until it
+            // changes, re-reading the file notwithstanding.
+            let mut again = again;
+            std::fs::remove_file(subscriptions_path().unwrap()).unwrap();
+            again.handle_event(&press(Key::Down));
+            assert!(
+                !subscriptions_path().unwrap().exists(),
+                "an unchanged reader wrote"
+            );
+        });
+    }
+
+    /// A window made by `new` -- every test's -- keeps nothing, and closes at
+    /// once.
+    #[test]
+    fn a_window_made_by_new_keeps_nothing() {
+        settingsfile::testing::with_scratch_config("rss-quiet", |dir| {
+            let mut app = RssReaderApp::new(1200.0, 800.0);
+            app.add_feed("Quiet", "https://example.com/q", None);
+            app.keep();
+            assert!(!dir.join("slateos").join("rssreader").exists());
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::Exit
+            ));
+        });
+    }
+
+    /// Kept marks that cannot be read whole are left as they are: nothing is
+    /// saved over them, or over the subscriptions beside them, and the window
+    /// says why.
+    #[test]
+    fn a_kept_file_that_cannot_be_read_is_left_as_it_is() {
+        settingsfile::testing::with_scratch_config("rss-broken", |_| {
+            let marks = marks_path().unwrap();
+            std::fs::create_dir_all(marks.parent().unwrap()).unwrap();
+            std::fs::write(&marks, "not a marks file\n").unwrap();
+            let mut app = RssReaderApp::from_settings(1200.0, 800.0);
+            let error = app.store_error.clone().expect("the refusal is said");
+            assert!(error.contains("was not read"), "{error}");
+            assert!(texts_of(&app).iter().any(|t| t == &error), "and drawn");
+            app.add_feed("New", "https://example.com/n", None);
+            app.keep();
+            assert_eq!(
+                std::fs::read_to_string(&marks).unwrap(),
+                "not a marks file\n"
+            );
+            assert!(!subscriptions_path().unwrap().exists());
+            // Too large to read whole is refused the same way.
+            let mut big = RssReaderApp::new(1200.0, 800.0);
+            big.persist = true;
+            std::fs::write(
+                &marks,
+                format!("{MARKS_FORMAT}\n{}", "r\ta\tb\n".repeat(200)),
+            )
+            .unwrap();
+            big.load_kept(&subscriptions_path().unwrap(), &marks, 100);
+            assert!(!big.persist);
+            assert!(big.store_error.unwrap().contains("larger than"));
+        });
+    }
+
+    /// A save that fails is on screen, and closing over it asks first.
+    #[test]
+    fn closing_while_a_save_fails_asks_first() {
+        settingsfile::testing::with_scratch_config("rss-failing", |_| {
+            let mut app = RssReaderApp::from_settings(1200.0, 800.0);
+            // A directory where the file goes: every write fails.
+            let subs = subscriptions_path().unwrap();
+            std::fs::create_dir_all(&subs).unwrap();
+            app.add_feed("Unkept", "https://example.com/u", None);
+            app.handle_event(&press(Key::Down));
+            let error = app.store_error.clone().expect("a failed save said nothing");
+            assert!(
+                error.starts_with("Your subscriptions were not saved to "),
+                "{error}"
+            );
+            assert!(texts_of(&app).iter().any(|t| t == &error), "not on screen");
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            let drawn: String = app
+                .render(1200.0, 800.0)
+                .commands
+                .into_iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                drawn.contains("Your latest changes to your feeds are not saved."),
+                "the question is not drawn: {drawn}"
+            );
+            // A key under the question reaches nothing: Ctrl+F opens no search.
+            app.on_event(&key_ev(Key::F, true, false));
+            assert!(!app.search_active, "a key reached the reader");
+            // Save while it still fails: the window stays.
+            assert!(matches!(app.on_event(&press(Key::S)), Response::Redraw));
+            assert!(app.running);
+            // Put right, then Save: it goes.
+            std::fs::remove_dir_all(&subs).unwrap();
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::Exit
+            ));
+            assert!(subs.is_file(), "the save that let it close wrote nothing");
+        });
+    }
+
+    /// Discard closes over a failing save; the question's Cancel keeps it
+    /// open with nothing done.
+    #[test]
+    fn discard_leaves_and_cancel_stays() {
+        settingsfile::testing::with_scratch_config("rss-discard", |_| {
+            let mut app = RssReaderApp::from_settings(1200.0, 800.0);
+            std::fs::create_dir_all(subscriptions_path().unwrap()).unwrap();
+            app.add_feed("Unkept", "https://example.com/u", None);
+            app.keep();
+            app.on_event(&Event::CloseRequested);
+            assert!(app.question.is_some());
+            app.on_event(&press(Key::Escape));
+            assert!(
+                app.question.is_none() && app.running,
+                "Cancel is not a close"
+            );
+            app.on_event(&Event::CloseRequested);
+            assert!(matches!(app.on_event(&press(Key::D)), Response::Exit));
+        });
+    }
+
+    #[test]
+    fn marks_read_back_as_they_were_written_whatever_the_text() {
+        let feeds = vec![Feed::new(1, "t", "file\tname\\with\nbreaks")];
+        let mut marks = std::collections::BTreeMap::new();
+        marks.insert(
+            (
+                feeds[0].url.clone(),
+                String::from("title:a \\ title\twith tabs"),
+            ),
+            Marks {
+                read: true,
+                starred: true,
+            },
+        );
+        marks.insert(
+            (feeds[0].url.clone(), String::from("https://x/1")),
+            Marks {
+                read: false,
+                starred: true,
+            },
+        );
+        marks.insert(
+            (
+                String::from("https://gone/feed"),
+                String::from("https://gone/1"),
+            ),
+            Marks {
+                read: true,
+                starred: false,
+            },
+        );
+        marks.insert(
+            (feeds[0].url.clone(), String::from("https://x/2")),
+            Marks::default(),
+        );
+        let text = marks_text(&marks, &feeds);
+        let back = parse_marks(&text).unwrap();
+        assert_eq!(
+            back.len(),
+            2,
+            "an unsubscribed feed's and an unmarked article's are left out"
+        );
+        for (k, v) in &back {
+            assert_eq!(marks.get(k), Some(v));
+        }
+        assert!(
+            parse_marks("slateos-feed-marks\t2\n")
+                .unwrap_err()
+                .contains("later format")
+        );
+        assert!(
+            parse_marks("something else\n")
+                .unwrap_err()
+                .contains("not a SlateOS")
+        );
+        assert!(
+            parse_marks(&format!("{MARKS_FORMAT}\nrx\ta\tb\n"))
+                .unwrap_err()
+                .contains("line 2")
+        );
+        assert!(
+            parse_marks(&format!("{MARKS_FORMAT}\nr\tonly two\n"))
+                .unwrap_err()
+                .contains("line 2")
+        );
+        assert!(
+            parse_marks(&format!("{MARKS_FORMAT}\nr\ta\\\tb\n")).is_err(),
+            "a broken escape"
+        );
+    }
+
+    /// An OPML list imported twice adds only what is new in it, and an empty
+    /// folder survives the round trip the subscriptions make.
+    #[test]
+    fn an_opml_imported_twice_adds_nothing_and_an_empty_folder_survives() {
+        let mut a = RssReaderApp::new(1200.0, 800.0);
+        let f = a.add_folder("Folder");
+        a.add_feed("One", "https://one/feed", Some(f));
+        a.add_feed("Two", "https://two/feed", None);
+        a.add_folder("Nothing here yet");
+        let opml = a.export_opml();
+        let mut b = RssReaderApp::new(1200.0, 800.0);
+        assert_eq!(b.import_opml(&opml), Ok(2));
+        assert_eq!(b.import_opml(&opml), Ok(0), "doubled");
+        assert_eq!(b.feeds.len(), 2);
+        let names: Vec<&str> = b.folders.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"Nothing here yet"), "{names:?}");
+    }
+
+    /// A feed removed takes its marks with it, and so does its file's next
+    /// read.
+    #[test]
+    fn a_removed_feeds_marks_go_with_it() {
+        settingsfile::testing::with_scratch_config("rss-removed", |dir| {
+            let file = dir.join("feed.xml");
+            std::fs::write(&file, RssReaderApp::SAMPLE_RSS).unwrap();
+            let mut app = RssReaderApp::from_settings(1200.0, 800.0);
+            app.read_any_file(&file);
+            select_titled(&mut app, "Bits");
+            app.toggle_star();
+            app.keep();
+            let kept = std::fs::read_to_string(marks_path().unwrap()).unwrap();
+            assert_eq!(kept.lines().count(), 2, "{kept}");
+            let id = app.feeds[0].id;
+            app.remove_feed(id);
+            app.keep();
+            let kept = std::fs::read_to_string(marks_path().unwrap()).unwrap();
+            assert_eq!(
+                kept.lines().count(),
+                1,
+                "the removed feed's mark stayed: {kept}"
+            );
+        });
+    }
+
+    /// Marking every article read, and each toggle, is counted as a change:
+    /// the keep after the event writes it.
+    #[test]
+    fn every_mark_change_is_kept() {
+        settingsfile::testing::with_scratch_config("rss-marks", |dir| {
+            let file = dir.join("feed.xml");
+            std::fs::write(&file, RssReaderApp::SAMPLE_RSS).unwrap();
+            let mut app = RssReaderApp::from_settings(1200.0, 800.0);
+            app.read_any_file(&file);
+            app.keep();
+            let before = app.marks_revision;
+            app.mark_all_read();
+            assert_ne!(app.marks_revision, before, "mark all read was not counted");
+            app.keep();
+            let kept = std::fs::read_to_string(marks_path().unwrap()).unwrap();
+            assert_eq!(
+                kept.lines().filter(|l| l.starts_with("r\t")).count(),
+                2,
+                "{kept}"
+            );
+            let again = app.marks_revision;
+            app.mark_all_read();
+            assert_eq!(
+                app.marks_revision, again,
+                "nothing changed and it was counted"
+            );
+            // Each toggle kept on its own, not only beside another change.
+            let flags = |app: &RssReaderApp| {
+                let kept = std::fs::read_to_string(marks_path().unwrap()).unwrap();
+                let bits = kept
+                    .lines()
+                    .find(|l| l.ends_with("https://lobste.rs/s/aaaaaa"))
+                    .map(|l| l.split('\t').next().unwrap().to_string());
+                assert!(app.store_error.is_none());
+                bits
+            };
+            select_titled(&mut app, "Bits");
+            app.toggle_read();
+            app.keep();
+            assert_eq!(flags(&app), None, "unread: no line");
+            app.toggle_star();
+            app.keep();
+            assert_eq!(flags(&app).as_deref(), Some("s"));
+            app.toggle_read();
+            app.keep();
+            assert_eq!(flags(&app).as_deref(), Some("rs"));
+        });
+    }
+
+    /// Every change to the feeds and folders is kept on its own: each is
+    /// counted, not only carried along by another in the same save.
+    #[test]
+    fn every_change_to_the_subscriptions_is_kept() {
+        settingsfile::testing::with_scratch_config("rss-each", |_| {
+            let mut app = RssReaderApp::from_settings(1200.0, 800.0);
+            let kept =
+                || std::fs::read_to_string(subscriptions_path().unwrap()).unwrap_or_default();
+            let folder = app.add_folder("Shelf");
+            app.keep();
+            assert!(kept().contains("text=\"Shelf\""), "a new folder");
+            let id = app.add_feed("Feed", "https://a/f", None);
+            app.keep();
+            assert!(kept().contains("https://a/f"), "a new feed");
+            app.rename_feed(id, "Renamed");
+            app.keep();
+            assert!(kept().contains("text=\"Renamed\""), "a rename");
+            app.move_feed_to_folder(id, Some(folder));
+            app.keep();
+            let moved = RssReaderApp::from_settings(1200.0, 800.0);
+            assert_eq!(
+                moved.feeds[0].folder_id,
+                Some(moved.folders[0].id),
+                "a move"
+            );
+            app.remove_folder(folder, false);
+            app.keep();
+            assert!(!kept().contains("text=\"Shelf\""), "a removed folder");
+            app.remove_feed(id);
+            app.keep();
+            assert!(!kept().contains("https://a/f"), "a removed feed");
+            // A feed read from a file takes the feed's own title: kept too.
+            let file = subscriptions_path().unwrap().with_file_name("feed.xml");
+            std::fs::write(&file, RssReaderApp::SAMPLE_RSS).unwrap();
+            app.read_any_file(&file);
+            app.keep();
+            assert!(kept().contains("text=\"Lobsters\""), "a feed's own title");
+        });
     }
 }

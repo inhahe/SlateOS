@@ -43,8 +43,8 @@ use alloc::vec::Vec;
 
 use super::fixed::{div_fix, mul_div, mul_fix, pix_floor, pix_round};
 use super::glyph::{
-    DIR_NONE, EDGE_DONE, EDGE_NEUTRAL, EDGE_ROUND, EDGE_SERIF, Edge, FLAG_CONTROL, Hints, Segment,
-    Units, font_unit,
+    DIR_NONE, Dim, EDGE_DONE, EDGE_NEUTRAL, EDGE_ROUND, EDGE_SERIF, Edge, FLAG_CONTROL, Hints,
+    Point, Segment, Units, font_unit, insertion_point,
 };
 use super::{Blue as BlueString, Glyphs};
 use crate::sfnt::{Tag, TaggedOutline};
@@ -66,8 +66,9 @@ const BLUE_ADJUSTMENT: u8 = 1 << 4;
 /// At most this many standard widths (`AF_LATIN_MAX_WIDTHS`).
 const MAX_WIDTHS: usize = 16;
 
-/// `c` units of a 2048 em in this face's units (`AF_LATIN_CONSTANT`).
-const fn constant(units_per_em: i64, c: i64) -> i64 {
+/// `c` units of a 2048 em in this face's units (`AF_LATIN_CONSTANT`, which
+/// the CJK system uses too).
+pub(super) const fn constant(units_per_em: i64, c: i64) -> i64 {
     c * units_per_em / 2048
 }
 
@@ -130,7 +131,8 @@ pub(super) struct Source<'a> {
 impl Metrics {
     /// Measure a Latin-system style: its standard widths from `standard`'s
     /// letters and its zones from `blues`'. `None` when not one zone could be
-    /// measured, which FreeType answers by not hinting the style at all.
+    /// measured, which FreeType answers by handing the style's glyphs to its
+    /// dummy style, which hints nothing.
     pub(super) fn new(
         units_per_em: i64,
         standard: &str,
@@ -237,47 +239,62 @@ impl Metrics {
 }
 
 /// The standard stems' heights, from the first of `standard`'s letters the
-/// face has: `af_latin_metrics_init_widths` for the vertical axis.
+/// face has: `af_latin_metrics_init_widths` for the vertical axis. Empty
+/// where nothing could be measured, which [`Metrics::new`] answers with a
+/// default width, as FreeType does.
 fn standard_widths(units_per_em: i64, standard: &str, source: &Source<'_>) -> Vec<i64> {
-    // The first cluster that is one glyph the face has.
-    let Some(gid) = standard
+    let Some(mut hints) = standard_glyph_hints(units_per_em, standard, source) else {
+        return Vec::new();
+    };
+    // `None` is FreeType's `goto Exit` before any width is kept: the same
+    // unmeasured answer as a missing glyph.
+    stem_widths(&mut hints, Dim::Vert, units_per_em).unwrap_or_default()
+}
+
+/// The first of `standard`'s letters that shapes to one glyph the face has,
+/// loaded unscaled for measuring: how `af_latin_metrics_init_widths` and
+/// `af_cjk_metrics_init_widths` both begin. `None` where no letter does, or
+/// its glyph has no points.
+pub(super) fn standard_glyph_hints(
+    units_per_em: i64,
+    standard: &str,
+    source: &Source<'_>,
+) -> Option<Hints> {
+    let gid = standard
         .split(' ')
         .filter(|c| !c.is_empty())
-        .find_map(|cluster| {
-            let glyphs = (source.shape)(cluster);
-            match glyphs.as_slice() {
-                [(gid, _)] if *gid != 0 => Some(*gid),
-                _ => None,
-            }
-        })
-    else {
-        return Vec::new();
-    };
-    let Some(outline) = (source.outline)(gid).filter(|o| !o.points.is_empty()) else {
-        return Vec::new();
-    };
+        .find_map(|cluster| match (source.shape)(cluster).as_slice() {
+            [(gid, _)] if *gid != 0 => Some(*gid),
+            _ => None,
+        })?;
+    let outline = (source.outline)(gid).filter(|o| !o.points.is_empty())?;
     // Unscaled: a 16.16 scale of one.
-    let Some(mut hints) = Hints::load(&outline, source.units, 0x10000, units_per_em) else {
-        return Vec::new();
-    };
+    Hints::load(&outline, source.units, 0x10000, 0x10000, units_per_em)
+}
+
+/// The widths of a standard glyph's stems across `dim`: its segments found
+/// and linked with no widths to go by, each pair linked both ways counted
+/// once, then sorted with near-equal widths merged. `None` where the
+/// segments could not be found.
+pub(super) fn stem_widths(hints: &mut Hints, dim: Dim, units_per_em: i64) -> Option<Vec<i64>> {
+    compute_segments(hints, dim)?;
+    link_segments(hints, &[], dim);
+    let segments = &hints.axis(dim).segments;
     let mut widths = Vec::new();
-    if compute_segments(&mut hints).is_some() {
-        link_segments(&mut hints, &[]);
-        for (i, seg) in hints.segments.iter().enumerate() {
-            let Some(j) = seg.link else {
-                continue;
-            };
-            let Some(link) = hints.segments.get(j) else {
-                continue;
-            };
-            // Stems only: segments linked both ways, each counted once.
-            if link.link == Some(i) && j > i && widths.len() < MAX_WIDTHS {
-                widths.push((seg.pos - link.pos).abs());
-            }
+    for (i, seg) in segments.iter().enumerate() {
+        let Some(j) = seg.link else {
+            continue;
+        };
+        let Some(link) = segments.get(j) else {
+            continue;
+        };
+        // Stems only: segments linked both ways, each counted once.
+        if link.link == Some(i) && j > i && widths.len() < MAX_WIDTHS {
+            widths.push((seg.pos - link.pos).abs());
         }
     }
     sort_and_quantize(&mut widths, units_per_em / 100);
-    widths
+    Some(widths)
 }
 
 /// Sort `widths` and replace each cluster of nearly equal ones with a mean:
@@ -743,29 +760,33 @@ pub(super) fn hint(
     scaled: &Scaled,
     nonbase: bool,
 ) -> Option<()> {
-    compute_segments(hints)?;
-    link_segments(hints, &metrics.widths);
+    compute_segments(hints, Dim::Vert)?;
+    link_segments(hints, &metrics.widths, Dim::Vert);
     compute_edges(hints, metrics)?;
     if !nonbase {
         compute_blue_edges(hints, metrics, scaled);
     }
     hint_edges(hints, metrics.top_to_bottom)?;
-    hints.align_edge_points()?;
-    hints.align_strong_points()?;
-    hints.align_weak_points()
+    hints.align_edge_points(Dim::Vert)?;
+    hints.align_strong_points(Dim::Vert)?;
+    hints.align_weak_points(Dim::Vert)
 }
 
 /// The glyph's horizontal segments: runs of points heading left or right,
 /// each with its height and extent: `af_latin_hints_compute_segments`.
-fn compute_segments(hints: &mut Hints) -> Option<()> {
-    let flat_threshold = hints.units_per_em / 14;
-    // For horizontal segments, `u` is the height and `v` the coordinate along.
-    for p in &mut hints.points {
-        p.u = p.fy;
-        p.v = p.fx;
+pub(super) fn compute_segments(hints: &mut Hints, dim: Dim) -> Option<()> {
+    let g = hints.view(dim);
+    let flat_threshold = g.units_per_em / 14;
+    // `u` is the position across the dimension and `v` the coordinate along
+    // it: for horizontal segments the height and the `x`.
+    for p in g.points.iter_mut() {
+        (p.u, p.v) = match dim {
+            Dim::Horz => (p.fx, p.fy),
+            Dim::Vert => (p.fy, p.fx),
+        };
     }
-    let major_dir = hints.major_dir.abs();
-    hints.segments.clear();
+    let major_dir = g.axis.major_dir.abs();
+    g.axis.segments.clear();
     let blank = |first: usize, dir: i8| Segment {
         flags: 0,
         dir,
@@ -779,15 +800,16 @@ fn compute_segments(hints: &mut Hints) -> Option<()> {
         link: None,
         serif: None,
         score: 32000,
+        len: 0,
         first,
         last: first,
     };
     // `FT_Short`, as FreeType stores a segment's measures.
     let short = |v: i64| i64::from(v as i16);
 
-    for c in 0..hints.contours.len() {
-        let mut point = *hints.contours.get(c)?;
-        let mut last = hints.points.get(point)?.prev;
+    for c in 0..g.contours.len() {
+        let mut point = *g.contours.get(c)?;
+        let mut last = g.points.get(point)?.prev;
         let mut on_edge = false;
         let (mut min_pos, mut max_pos) = (32000i64, -32000i64);
         let (mut min_coord, mut max_coord) = (32000i64, -32000i64);
@@ -802,18 +824,16 @@ fn compute_segments(hints: &mut Hints) -> Option<()> {
         let mut segment_dir = major_dir;
 
         // Starting in the middle of an edge: back up to its start.
-        let is_major = |h: &Hints, i: usize| {
-            h.points
-                .get(i)
-                .is_some_and(|p| p.out_dir.abs() == major_dir)
+        let is_major = |points: &[Point], i: usize| {
+            points.get(i).is_some_and(|p| p.out_dir.abs() == major_dir)
         };
-        if is_major(hints, last) && is_major(hints, point) {
+        if is_major(g.points, last) && is_major(g.points, point) {
             last = point;
-            let mut guard = hints.points.len();
+            let mut guard = g.points.len();
             loop {
-                point = hints.points.get(point)?.prev;
-                if !is_major(hints, point) {
-                    point = hints.points.get(point)?.next;
+                point = g.points.get(point)?.prev;
+                if !is_major(g.points, point) {
+                    point = g.points.get(point)?.next;
                     break;
                 }
                 if point == last {
@@ -824,11 +844,11 @@ fn compute_segments(hints: &mut Hints) -> Option<()> {
         }
         last = point;
         let mut passed = false;
-        let mut guard = 2 * hints.points.len() + 2;
+        let mut guard = 2 * g.points.len() + 2;
 
         loop {
             guard = guard.checked_sub(1)?;
-            let p = *hints.points.get(point)?;
+            let p = *g.points.get(point)?;
             if on_edge {
                 min_pos = min_pos.min(p.u);
                 max_pos = max_pos.max(p.u);
@@ -848,7 +868,7 @@ fn compute_segments(hints: &mut Hints) -> Option<()> {
                     let seg_i = segment?;
                     let same_start = match prev_segment {
                         Some(ps) => {
-                            hints.segments.get(seg_i)?.first == hints.segments.get(ps)?.last
+                            g.axis.segments.get(seg_i)?.first == g.axis.segments.get(ps)?.last
                         }
                         None => false,
                     };
@@ -857,7 +877,7 @@ fn compute_segments(hints: &mut Hints) -> Option<()> {
                     };
                     if !same_start {
                         // Leaving an edge: record the segment.
-                        let seg = hints.segments.get_mut(seg_i)?;
+                        let seg = g.axis.segments.get_mut(seg_i)?;
                         seg.last = point;
                         seg.pos = short((min_pos + max_pos) >> 1);
                         seg.delta = short((max_pos - min_pos) >> 1);
@@ -876,8 +896,8 @@ fn compute_segments(hints: &mut Hints) -> Option<()> {
                         // This segment starts where the last one ended (a
                         // spike, say): merge the two rather than keep both.
                         let ps = prev_segment?;
-                        let prev_last = hints.segments.get(ps)?.last;
-                        let same_dir = hints.points.get(prev_last)?.in_dir == p.in_dir;
+                        let prev_last = g.axis.segments.get(ps)?.last;
+                        let same_dir = g.points.get(prev_last)?.in_dir == p.in_dir;
                         if same_dir {
                             // A zig-zag along the axis: one segment.
                             min_pos = min_pos.min(prev_min_pos);
@@ -892,7 +912,7 @@ fn compute_segments(hints: &mut Hints) -> Option<()> {
                             }
                             min_on = min_on.min(prev_min_on);
                             max_on = max_on.max(prev_max_on);
-                            let seg = hints.segments.get_mut(ps)?;
+                            let seg = g.axis.segments.get_mut(ps)?;
                             seg.last = point;
                             seg.pos = short((min_pos + max_pos) >> 1);
                             seg.delta = short((max_pos - min_pos) >> 1);
@@ -911,7 +931,7 @@ fn compute_segments(hints: &mut Hints) -> Option<()> {
                             // previous one.
                             prev_min_pos = prev_min_pos.min(min_pos);
                             prev_max_pos = prev_max_pos.max(max_pos);
-                            let seg = hints.segments.get_mut(ps)?;
+                            let seg = g.axis.segments.get_mut(ps)?;
                             seg.last = point;
                             seg.pos = short((prev_min_pos + prev_max_pos) >> 1);
                             seg.delta = short((prev_max_pos - prev_min_pos) >> 1);
@@ -919,7 +939,7 @@ fn compute_segments(hints: &mut Hints) -> Option<()> {
                             // This one, in the previous one's place.
                             min_pos = min_pos.min(prev_min_pos);
                             max_pos = max_pos.max(prev_max_pos);
-                            let mut seg = *hints.segments.get(seg_i)?;
+                            let mut seg = *g.axis.segments.get(seg_i)?;
                             seg.last = point;
                             seg.pos = short((min_pos + max_pos) >> 1);
                             seg.delta = short((max_pos - min_pos) >> 1);
@@ -929,14 +949,14 @@ fn compute_segments(hints: &mut Hints) -> Option<()> {
                             seg.min_coord = short(min_coord);
                             seg.max_coord = short(max_coord);
                             seg.height = short(seg.max_coord - seg.min_coord);
-                            *hints.segments.get_mut(ps)? = seg;
+                            *g.axis.segments.get_mut(ps)? = seg;
                             (prev_min_pos, prev_max_pos) = (min_pos, max_pos);
                             (prev_min_coord, prev_max_coord) = (min_coord, max_coord);
                             (prev_min_flags, prev_max_flags) = (min_flags, max_flags);
                             (prev_min_on, prev_max_on) = (min_on, max_on);
                         }
                         // The current segment is the last one made; it goes.
-                        hints.segments.pop();
+                        g.axis.segments.pop();
                     }
                     on_edge = false;
                     segment = None;
@@ -950,12 +970,12 @@ fn compute_segments(hints: &mut Hints) -> Option<()> {
                 passed = true;
             }
 
-            let p = *hints.points.get(point)?;
+            let p = *g.points.get(point)?;
             if !on_edge && (p.out_dir.abs() == major_dir || p.prev == point) {
                 // FreeType gives up on a glyph of more than a thousand
                 // segments: no pixel grid could show them.
-                if hints.segments.len() > 1000 {
-                    hints.segments.clear();
+                if g.axis.segments.len() > 1000 {
+                    g.axis.segments.clear();
                     return Some(());
                 }
                 segment_dir = p.out_dir;
@@ -985,26 +1005,23 @@ fn compute_segments(hints: &mut Hints) -> Option<()> {
                     seg.max_coord = short(p.v);
                     seg.height = 0;
                     on_edge = false;
-                    hints.segments.push(seg);
+                    g.axis.segments.push(seg);
                     segment = None;
                 } else {
-                    hints.segments.push(seg);
-                    segment = Some(hints.segments.len() - 1);
+                    g.axis.segments.push(seg);
+                    segment = Some(g.axis.segments.len() - 1);
                 }
             }
-            point = hints.points.get(point)?.next;
+            point = g.points.get(point)?.next;
         }
     }
 
     // Lengthen a segment by half of what its neighbours add, the better to
     // tell a serif from a stem.
-    for i in 0..hints.segments.len() {
-        let seg = *hints.segments.get(i)?;
-        let (first, last) = (*hints.points.get(seg.first)?, *hints.points.get(seg.last)?);
-        let (before, after) = (
-            *hints.points.get(first.prev)?,
-            *hints.points.get(last.next)?,
-        );
+    for i in 0..g.axis.segments.len() {
+        let seg = *g.axis.segments.get(i)?;
+        let (first, last) = (*g.points.get(seg.first)?, *g.points.get(seg.last)?);
+        let (before, after) = (*g.points.get(first.prev)?, *g.points.get(last.next)?);
         // Each step truncated to 16 bits, as FreeType stores it.
         let mut height = seg.height;
         if first.v < last.v {
@@ -1022,7 +1039,7 @@ fn compute_segments(hints: &mut Hints) -> Option<()> {
                 height = short(height + ((last.v - after.v) >> 1));
             }
         }
-        hints.segments.get_mut(i)?.height = height;
+        g.axis.segments.get_mut(i)?.height = height;
     }
     Some(())
 }
@@ -1031,22 +1048,23 @@ fn compute_segments(hints: &mut Hints) -> Option<()> {
 /// best-scoring first, and mark the unpaired as serifs:
 /// `af_latin_hints_link_segments`. `widths` are the style's standard widths,
 /// empty when measuring them.
-fn link_segments(hints: &mut Hints, widths: &[i64]) {
+pub(super) fn link_segments(hints: &mut Hints, widths: &[i64], dim: Dim) {
+    let g = hints.view(dim);
     let max_width = widths.last().copied().unwrap_or(0);
-    let len_threshold = constant(hints.units_per_em, 8).max(1);
-    let len_score = constant(hints.units_per_em, 6000);
+    let len_threshold = constant(g.units_per_em, 8).max(1);
+    let len_score = constant(g.units_per_em, 6000);
     let dist_score = 3000;
-    let major = hints.major_dir;
-    let n = hints.segments.len();
+    let major = g.axis.major_dir;
+    let n = g.axis.segments.len();
     for i in 0..n {
-        let Some(&seg1) = hints.segments.get(i) else {
+        let Some(&seg1) = g.axis.segments.get(i) else {
             continue;
         };
         if seg1.dir != major {
             continue;
         }
         for j in 0..n {
-            let Some(&seg2) = hints.segments.get(j) else {
+            let Some(&seg2) = g.axis.segments.get(j) else {
                 continue;
             };
             let (pos1, pos2) = (seg1.pos, seg2.pos);
@@ -1077,13 +1095,13 @@ fn link_segments(hints: &mut Hints, widths: &[i64]) {
             let score = dist_demerit + len_score / len;
             // The segments' scores change as the loops run, so each is read
             // afresh.
-            if let Some(s1) = hints.segments.get_mut(i)
+            if let Some(s1) = g.axis.segments.get_mut(i)
                 && score < s1.score
             {
                 s1.score = score;
                 s1.link = Some(j);
             }
-            if let Some(s2) = hints.segments.get_mut(j)
+            if let Some(s2) = g.axis.segments.get_mut(j)
                 && score < s2.score
             {
                 s2.score = score;
@@ -1093,14 +1111,14 @@ fn link_segments(hints: &mut Hints, widths: &[i64]) {
     }
     // A segment whose partner prefers another is a serif of that one.
     for i in 0..n {
-        let Some(link) = hints.segments.get(i).and_then(|s| s.link) else {
+        let Some(link) = g.axis.segments.get(i).and_then(|s| s.link) else {
             continue;
         };
-        let Some(back) = hints.segments.get(link).map(|s| s.link) else {
+        let Some(back) = g.axis.segments.get(link).map(|s| s.link) else {
             continue;
         };
         if back != Some(i)
-            && let Some(s) = hints.segments.get_mut(i)
+            && let Some(s) = g.axis.segments.get_mut(i)
         {
             s.link = None;
             s.serif = back;
@@ -1111,8 +1129,9 @@ fn link_segments(hints: &mut Hints, widths: &[i64]) {
 /// Gather segments at one height into edges, sorted by height, and link the
 /// edges as their segments are linked: `af_latin_hints_compute_edges`.
 fn compute_edges(hints: &mut Hints, metrics: &Metrics) -> Option<()> {
-    let scale = hints.y_scale;
-    hints.edges.clear();
+    let g = hints.view(Dim::Vert);
+    let scale = g.axis.scale;
+    g.axis.edges.clear();
     // Segments wider than half a pixel are no edge.
     let width_threshold = div_fix(32, scale);
     // Joined into one edge within a fifth of the standard width, and a
@@ -1121,8 +1140,8 @@ fn compute_edges(hints: &mut Hints, metrics: &Metrics) -> Option<()> {
     let distance = div_fix(distance, scale);
     let top_to_bottom = metrics.top_to_bottom;
 
-    for s in 0..hints.segments.len() {
-        let seg = *hints.segments.get(s)?;
+    for s in 0..g.axis.segments.len() {
+        let seg = *g.axis.segments.get(s)?;
         // (Vertically there is no minimum segment length.)
         if seg.height < 0 || seg.delta > width_threshold || seg.dir == DIR_NONE {
             continue;
@@ -1130,7 +1149,8 @@ fn compute_edges(hints: &mut Hints, metrics: &Metrics) -> Option<()> {
         if seg.serif.is_some() && 2 * seg.height < 0 {
             continue;
         }
-        let found = hints
+        let found = g
+            .axis
             .edges
             .iter()
             .position(|e| (seg.pos - e.fpos).abs() < distance && e.dir == seg.dir);
@@ -1138,23 +1158,23 @@ fn compute_edges(hints: &mut Hints, metrics: &Metrics) -> Option<()> {
             Some(e) => {
                 // Into the edge's ring of segments.
                 let (first, last) = {
-                    let edge = hints.edges.get(e)?;
+                    let edge = g.axis.edges.get(e)?;
                     (edge.first, edge.last)
                 };
-                hints.segments.get_mut(s)?.edge_next = Some(first);
-                hints.segments.get_mut(last)?.edge_next = Some(s);
-                hints.edges.get_mut(e)?.last = s;
+                g.axis.segments.get_mut(s)?.edge_next = Some(first);
+                g.axis.segments.get_mut(last)?.edge_next = Some(s);
+                g.axis.edges.get_mut(e)?.last = s;
             }
             None => {
                 let at = insertion_point(
-                    &hints.edges,
+                    &g.axis.edges,
                     seg.pos,
                     seg.dir,
-                    hints.major_dir,
+                    g.axis.major_dir,
                     top_to_bottom,
                 );
                 let opos = mul_fix(seg.pos, scale);
-                hints.edges.insert(
+                g.axis.edges.insert(
                     at,
                     Edge {
                         fpos: seg.pos,
@@ -1169,17 +1189,18 @@ fn compute_edges(hints: &mut Hints, metrics: &Metrics) -> Option<()> {
                         last: s,
                     },
                 );
-                hints.segments.get_mut(s)?.edge_next = Some(s);
+                g.axis.segments.get_mut(s)?.edge_next = Some(s);
             }
         }
     }
     // One-point segments join an edge they are near, of either direction.
-    for s in 0..hints.segments.len() {
-        let seg = *hints.segments.get(s)?;
+    for s in 0..g.axis.segments.len() {
+        let seg = *g.axis.segments.get(s)?;
         if seg.dir != DIR_NONE {
             continue;
         }
-        let Some(e) = hints
+        let Some(e) = g
+            .axis
             .edges
             .iter()
             .position(|e| (seg.pos - e.fpos).abs() < distance)
@@ -1187,21 +1208,21 @@ fn compute_edges(hints: &mut Hints, metrics: &Metrics) -> Option<()> {
             continue;
         };
         let (first, last) = {
-            let edge = hints.edges.get(e)?;
+            let edge = g.axis.edges.get(e)?;
             (edge.first, edge.last)
         };
-        hints.segments.get_mut(s)?.edge_next = Some(first);
-        hints.segments.get_mut(last)?.edge_next = Some(s);
-        hints.edges.get_mut(e)?.last = s;
+        g.axis.segments.get_mut(s)?.edge_next = Some(first);
+        g.axis.segments.get_mut(last)?.edge_next = Some(s);
+        g.axis.edges.get_mut(e)?.last = s;
     }
 
     // Each segment learns its edge.
-    for e in 0..hints.edges.len() {
-        let first = hints.edges.get(e)?.first;
+    for e in 0..g.axis.edges.len() {
+        let first = g.axis.edges.get(e)?.first;
         let mut s = first;
-        let mut guard = hints.segments.len() + 1;
+        let mut guard = g.axis.segments.len() + 1;
         loop {
-            let seg = hints.segments.get_mut(s)?;
+            let seg = g.axis.segments.get_mut(s)?;
             seg.edge = Some(e);
             s = seg.edge_next?;
             if s == first {
@@ -1212,13 +1233,13 @@ fn compute_edges(hints: &mut Hints, metrics: &Metrics) -> Option<()> {
     }
 
     // Each edge's roundness and links, from its segments'.
-    for e in 0..hints.edges.len() {
+    for e in 0..g.axis.edges.len() {
         let (mut is_round, mut is_straight) = (0u32, 0u32);
-        let first = hints.edges.get(e)?.first;
+        let first = g.axis.edges.get(e)?.first;
         let mut s = first;
-        let mut guard = hints.segments.len() + 1;
+        let mut guard = g.axis.segments.len() + 1;
         loop {
-            let seg = *hints.segments.get(s)?;
+            let seg = *g.axis.segments.get(s)?;
             if seg.flags & EDGE_ROUND != 0 {
                 is_round += 1;
             } else {
@@ -1226,25 +1247,25 @@ fn compute_edges(hints: &mut Hints, metrics: &Metrics) -> Option<()> {
             }
             let serif_edge = seg
                 .serif
-                .and_then(|x| hints.segments.get(x))
+                .and_then(|x| g.axis.segments.get(x))
                 .and_then(|x| x.edge);
             let is_serif = serif_edge.is_some_and(|x| x != e);
             let link_edge = seg
                 .link
-                .and_then(|x| hints.segments.get(x))
+                .and_then(|x| g.axis.segments.get(x))
                 .and_then(|x| x.edge);
             if link_edge.is_some() || is_serif {
-                let edge = *hints.edges.get(e)?;
+                let edge = *g.axis.edges.get(e)?;
                 let (seg2, current) = if is_serif {
                     (seg.serif?, edge.serif)
                 } else {
                     (seg.link?, edge.link)
                 };
-                let seg2_edge = hints.segments.get(seg2)?.edge;
+                let seg2_edge = g.axis.segments.get(seg2)?.edge;
                 let edge2 = match current {
                     Some(c) => {
-                        let edge_delta = (edge.fpos - hints.edges.get(c)?.fpos).abs();
-                        let seg_delta = (seg.pos - hints.segments.get(seg2)?.pos).abs();
+                        let edge_delta = (edge.fpos - g.axis.edges.get(c)?.fpos).abs();
+                        let seg_delta = (seg.pos - g.axis.segments.get(seg2)?.pos).abs();
                         if seg_delta < edge_delta {
                             seg2_edge
                         } else {
@@ -1254,12 +1275,12 @@ fn compute_edges(hints: &mut Hints, metrics: &Metrics) -> Option<()> {
                     None => seg2_edge,
                 };
                 if is_serif {
-                    hints.edges.get_mut(e)?.serif = edge2;
+                    g.axis.edges.get_mut(e)?.serif = edge2;
                     if let Some(e2) = edge2 {
-                        hints.edges.get_mut(e2)?.flags |= EDGE_SERIF;
+                        g.axis.edges.get_mut(e2)?.flags |= EDGE_SERIF;
                     }
                 } else {
-                    hints.edges.get_mut(e)?.link = edge2;
+                    g.axis.edges.get_mut(e)?.link = edge2;
                 }
             }
             s = seg.edge_next?;
@@ -1268,7 +1289,7 @@ fn compute_edges(hints: &mut Hints, metrics: &Metrics) -> Option<()> {
             }
             guard = guard.checked_sub(1)?;
         }
-        let edge = hints.edges.get_mut(e)?;
+        let edge = g.axis.edges.get_mut(e)?;
         // Assigned, not or-ed: FreeType's serif mark on an edge already
         // processed survives, on one still to come it does not.
         edge.flags = if is_round > 0 && is_round >= is_straight {
@@ -1283,42 +1304,15 @@ fn compute_edges(hints: &mut Hints, metrics: &Metrics) -> Option<()> {
     Some(())
 }
 
-/// Where a new edge at `fpos` goes in the sorted list: after every edge below
-/// it (above, hinting top down), and, at an equal height, after the edges of
-/// the minor direction but before the major's: `af_axis_hints_new_edge`.
-fn insertion_point(
-    edges: &[Edge],
-    fpos: i64,
-    dir: i8,
-    major_dir: i8,
-    top_to_bottom: bool,
-) -> usize {
-    let mut at = edges.len();
-    while at > 0 {
-        let Some(prev) = edges.get(at - 1) else {
-            break;
-        };
-        let before = if top_to_bottom {
-            prev.fpos > fpos
-        } else {
-            prev.fpos < fpos
-        };
-        if before || (prev.fpos == fpos && dir == major_dir) {
-            break;
-        }
-        at -= 1;
-    }
-    at
-}
-
 /// Find the blue zone, if any, each edge snaps to:
 /// `af_latin_hints_compute_blue_edges`.
 fn compute_blue_edges(hints: &mut Hints, metrics: &Metrics, scaled: &Scaled) {
+    let g = hints.view(Dim::Vert);
     let scale = scaled.y_scale;
     // Within a fortieth of an em, and half a pixel at most.
     let threshold = mul_fix(metrics.units_per_em / 40, scale).min(64 / 2);
-    let major = hints.major_dir;
-    for edge in &mut hints.edges {
+    let major = g.axis.major_dir;
+    for edge in &mut g.axis.edges {
         let mut best: Option<i64> = None;
         let mut best_dist = threshold;
         let mut best_neutral = false;
@@ -1376,7 +1370,8 @@ fn align_linked_edge(edges: &mut [Edge], base: usize, stem: usize) -> Option<()>
 /// Place every edge: `af_latin_hint_edges` for the vertical dimension in light
 /// mode.
 fn hint_edges(hints: &mut Hints, top_to_bottom: bool) -> Option<()> {
-    let edges = &mut hints.edges;
+    let g = hints.view(Dim::Vert);
+    let edges = &mut g.axis.edges;
     let n = edges.len();
     let mut anchor: Option<usize> = None;
     let mut has_serifs = false;

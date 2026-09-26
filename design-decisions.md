@@ -11939,10 +11939,12 @@ TrueType bytecode interpreter.
 **In short:** with hinting on (the setting's default), small text is now
 fitted to the pixel grid the way Linux desktops fit it: every glyph's
 horizontal lines -- baseline, x-height, cap height, the bars of an `e` or an
-`H` -- are moved up or down so they land cleanly on pixel rows, while nothing
-moves sideways and no stroke changes thickness. The code is a translation of
-FreeType's own auto-hinter rather than a new design, so it makes the same
-choices FreeType does, and a tool compares the two glyph by glyph.
+`H` -- are moved up or down so they land cleanly on pixel rows, and no
+stroke changes thickness. Letters move only up and down; Chinese, Japanese
+and Korean characters, and symbols no script claims, move a little sideways
+too, as FreeType moves them. The code is a translation of FreeType's own
+auto-hinter rather than a new design, so it makes the same choices FreeType
+does, and a tool compares the two glyph by glyph.
 
 **Decision.**
 
@@ -11956,11 +11958,13 @@ choices FreeType does, and a tool compares the two glyph by glyph.
   does -- and there was no way to tell which of its hundreds of small choices
   were wrong. Hinting is a chain of rounding decisions: the only way to get
   FreeType's look is to make FreeType's decisions.
-* **Light mode only, vertical only.** Stems keep their designed width, thin
-  ones are centred on a pixel row, and the horizontal axis is untouched, so
-  advances and kerning are exactly the unhinted ones (fontconfig's
-  `hintslight`, most Linux desktops' default). The same for grey, LCD and
-  smoothing-off rendering.
+* **Light mode only.** Stems keep their designed width, and thin ones are
+  centred on a pixel row (fontconfig's `hintslight`, most Linux desktops'
+  default). For the Latin writing system that means the vertical axis only;
+  FreeType's CJK system hints both axes in light mode too, moving a stem by
+  at most 14/64 pixel, and so does the port. Advances and kerning are the
+  unhinted ones either way. The same for grey, LCD and smoothing-off
+  rendering.
 * **Every script FreeType's Latin writing system serves** -- most of them:
   Latin, Greek, Cyrillic, Arabic, Hebrew, Armenian, the Brahmic scripts, Thai
   and some fifty more, each measured from its own reference letters. Each
@@ -11973,15 +11977,33 @@ choices FreeType does, and a tool compares the two glyph by glyph.
   (less what it also positions) and measure their zones from reference
   letters shaped with the feature on: the shaper has optional features for
   that, off for every ordinary run.
+* **And the other writing systems, added 2026-09-26.** `cjk.rs` ports
+  `afcjk.c` (and `afindic.c`, the same without zones) for ideographs, the
+  four Indic-stub scripts and the *fallback style* -- the glyphs no script
+  claims: a Latin font's arrows, mathematical signs and `.notdef`, and every
+  glyph of a face without a Unicode `cmap`. FreeType's dummy system is
+  ported too, for what it does to a glyph it will not hint (a Latin style
+  whose zones cannot be measured): each point still goes from whole font
+  units to 1/64 pixel. So every glyph FreeType draws, this draws the same.
+  Where FreeType's code does something other than what it says, the port
+  follows what it does: its CJK pass that judges segments round never runs
+  (it reads the segment count before the Latin pass fills the table), so
+  the Latin roundness stands. Found by building FreeType with its
+  auto-hinter's debug dumps (`FT_DEBUG_AUTOFIT`) and comparing edge tables;
+  that single difference moved Malgun Gothic's stems 3/64 pixel on 2,925
+  glyphs.
 * **Checked against FreeType.** `tools/hint_oracle.py` runs FreeType (from
   `freetype-py`) and this crate over every glyph of a face at eleven sizes
   and compares every hinted point, both coordinates, to the 64th of a pixel,
   after comparing the sorting itself against FreeType's own glyph-to-style
   map. On Noto Sans, Open Sans, JetBrains Mono,
-  Segoe UI, Arial, Times New Roman, Calibri, Verdana and Georgia every glyph
-  lands in FreeType's style and every hinted glyph agrees exactly --
-  and so does every glyph of the CFF fonts David CLM and Frank Ruehl CLM,
-  whose coordinates are fractions of a unit. That last took reading a glyph's
+  Segoe UI, Segoe UI Symbol, Arial, Times New Roman, Calibri, Consolas,
+  Verdana and Georgia every glyph lands in FreeType's style and every glyph
+  agrees exactly, the fallback style's symbols included -- and so does every
+  glyph of the CFF fonts David CLM and Frank Ruehl CLM, whose coordinates are
+  fractions of a unit, and of the CJK fonts Malgun Gothic, Microsoft YaHei,
+  MS Gothic, SimSun, SimSun-ExtG, Yu Gothic, Microsoft JhengHei and Noto
+  Sans JP (CID-keyed CFF): over a million glyph renderings, none different. That last took reading a glyph's
   points as FreeType's loaders read them, not as its outline draws: a CFF
   coordinate kept exact (16.16 needs more than `f32` has) and floored to a
   whole unit, a line of no length in 1024ths of a unit dropped, a contour
@@ -11989,8 +12011,8 @@ choices FreeType does, and a tool compares the two glyph by glyph.
   composite placed by the component whose metrics it borrows. A generated
   fixture (`tools/gen_hint_fixture.py`: a synthetic face as TrueType and CFF,
   one glyph drawn in 16.16 fractions, small capitals and superscripts behind
-  `smcp` and `sups`, with FreeType's answers at eighteen sizes) keeps that in
-  `cargo test`.
+  `smcp` and `sups`, ideographs drawn for each rule of the CJK system, with
+  FreeType's answers at eighteen sizes) keeps that in `cargo test`.
 * **Robust before faithful.** Every index goes through `get` and a failure
   abandons the glyph to be drawn unhinted, coordinates beyond `i16` and
   absurd sizes are refused at the door (which is what makes the unchecked
@@ -12000,9 +12022,8 @@ choices FreeType does, and a tool compares the two glyph by glyph.
   licence and the credit are in `gui/font/licenses/`, and every ported file
   carries FreeType's copyright notice.
 
-**Not done** (each filed in `known-issues.md`): FreeType's CJK writing system
-(ideographs, and the fallback style unclaimed glyphs go to, are drawn
-unhinted); stem darkening (off by default in FreeType too). The oracle also
+**Not done:** stem darkening (off by default in FreeType too). The CJK
+writing system, first listed here, was ported the same day. The oracle also
 turned up a difference that was not hinting's: composites that borrow a
 component's metrics were placed a few units off FreeType horizontally, hinted
 or not -- fixed. The face-level analysis -- styles and zones, 2-9 ms on large

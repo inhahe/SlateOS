@@ -249,7 +249,47 @@ def glyphs():
     g["x.sups"] = (None, lambda p: poly(p, [(20, 0), (110, 200), (25, 400), (80, 400), (150, 253),
                                             (220, 400), (275, 400), (190, 200), (280, 0), (225, 0),
                                             (150, 147), (75, 0)]))
+
+    # The CJK writing system (`hani_dflt`), which hints both dimensions.
+    # Its standard glyph, 田: stems 60 units thick both ways.
+    g["uni7530"] = (0x7530, lambda p: (poly(p, [(100, -60), (100, 840), (900, 840), (900, -60)]),
+                                       *(rect_ccw(p, *c) for c in ((160, 0, 470, 360), (530, 0, 840, 360),
+                                                                   (160, 420, 470, 780),
+                                                                   (530, 420, 840, 780)))))
+    # Its zones' letters. Top: the first group (他) reaches 880, the second
+    # (军) 860 -- reference and overshoot. Bottom: 个 reaches -80 and 主 -60.
+    g["uni4ED6"] = (0x4ED6, lambda p: (rect(p, 120, 0, 880, 880), rect_ccw(p, 180, 60, 820, 820)))
+    g["uni519B"] = (0x519B, lambda p: (rect(p, 120, 0, 880, 860), rect_ccw(p, 180, 60, 820, 800)))
+    g["uni4E2A"] = (0x4E2A, lambda p: (rect(p, 120, -80, 880, 700), rect_ccw(p, 180, -20, 820, 640)))
+    g["uni4E3B"] = (0x4E3B, lambda p: (rect(p, 120, -60, 880, 700), rect_ccw(p, 180, 0, 820, 640)))
+    # 一: a stroke whose right end is wider, 380 to 480 against 400 to 460.
+    # The end is short, so its sides become serifs of the stroke's.
+    g["uni4E00"] = (0x4E00, lambda p: poly(p, [(100, 400), (100, 460), (800, 460), (800, 480),
+                                                 (900, 480), (900, 380), (800, 380), (800, 400)]))
+    # 亅: a stroke whose upper end is wider and longer than the rest -- the
+    # thin part is then no stem at all.
+    g["uni4E85"] = (0x4E85, lambda p: poly(p, [(470, 0), (470, 300), (450, 300), (450, 800),
+                                                 (550, 800), (550, 300), (530, 300), (530, 0)]))
+    # 川: three evenly spaced stems, six edges across -- the rule that keeps
+    # a lowercase m's stems even.
+    g["uni5DDD"] = (0x5DDD, lambda p: (rect(p, 150, 0, 210, 800), rect(p, 470, 0, 530, 800),
+                                       rect(p, 790, 0, 850, 800)))
+    # 三: three bars 100 units apart, which at small sizes come within a
+    # pixel of each other: a stem that close is interpolated, not placed.
+    g["uni4E09"] = (0x4E09, lambda p: (rect(p, 100, 100, 900, 160), rect(p, 150, 260, 850, 320),
+                                       rect(p, 100, 420, 900, 480)))
+    # 〇: a ring, whose segments are round by this system's rule.
+    g["uni3007"] = (0x3007, lambda p: ring(p, 500, 390, 380, 400, 60, 60))
+    # →: no script's, so the fallback style's -- CJK hinting too.
+    g["arrowright"] = (0x2192, lambda p: poly(p, [(100, 380), (100, 440), (700, 440), (600, 560),
+                                                    (680, 560), (820, 410), (680, 260), (600, 260),
+                                                    (700, 380)]))
     return g
+
+
+def rect_ccw(pen, x0, y0, x1, y1):
+    """A counter, wound against the outer contour: down the left side."""
+    poly(pen, [(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
 
 
 # The fixture's OpenType features: small capitals and superscripts, as a font

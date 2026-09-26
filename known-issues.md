@@ -168544,8 +168544,8 @@ Hebrew, Armenian and Devanagari glyph of six fonts checked at eleven sizes
 (`gui/font/tools/hint_oracle.py`), and on every glyph of two CFF fonts with
 fractional coordinates, both coordinates exact -- small capitals, superscripts
 and the other feature forms included, each sorted into FreeType's style for
-it -- bar the gap filed below: ideographs and the fallback style are left
-unhinted. (Composites with borrowed metrics, which sat a hair off
+it. The gap this first left -- ideographs and the fallback style unhinted --
+is closed too (the entry below). (Composites with borrowed metrics, which sat a hair off
 horizontally, were a placement bug rather than a hinting one, and are fixed:
 see the entry below.)
 
@@ -168574,11 +168574,24 @@ settings and says why not this one).
 **How to see it.** `target/fontcheck modes` draws a line in each rendering
 mode; compare a small size against the same text in Chrome.
 
-### [F] Ideographs, and glyphs no script claims, are drawn unhinted -- 2026-09-26
+### [F] Ideographs, and glyphs no script claims, are drawn unhinted -- 2026-09-26 -- **FIXED 2026-09-26**
 
-**Status:** OPEN — lane F's.
+**Status:** FIXED 2026-09-26 (lane F) — `gui/font/src/hint/cjk.rs` ports
+`afcjk.c` and `afindic.c`, and `mod.rs` FreeType's dummy system (a glyph it
+will not hint is still scaled from whole font units to 1/64 pixel, which is
+what it does to a Latin style with no measurable zone). The fix was not the
+one proposed below: FreeType's CJK system hints *both* axes in light mode
+(moving a stem by at most 14/64 pixel), so the port does too, which
+`glyph.rs`'s points and passes were made dimension-generic for. One
+FreeType quirk is ported as it behaves: its CJK roundness pass never runs.
+Checked with `hint_oracle.py`: every glyph of Malgun Gothic (10 sizes),
+Microsoft YaHei, MS Gothic, SimSun, Yu Gothic, Microsoft JhengHei,
+SimSun-ExtG and Noto Sans JP (CID-keyed CFF) agrees with FreeType, style,
+points and both coordinates, as do the Latin fonts' fallback-style glyphs;
+the fixture has CJK glyphs drawn for each rule (a wide stroke end, three
+even stems, bars too close together, a ring, a fallback arrow).
 
-**In short:** hinting (fitting text to the pixel grid) now works for nearly
+**In short (as filed):** hinting (fitting text to the pixel grid) now works for nearly
 every script, but not for Chinese, Japanese and Korean characters, nor for the
 odd glyph in any font that no character reaches directly. Those are drawn
 exactly as they were before hinting existed: correct, a little softer at small

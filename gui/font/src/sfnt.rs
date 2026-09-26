@@ -1740,6 +1740,14 @@ impl Face {
         None
     }
 
+    /// Whether the face has a Unicode `cmap`: the table
+    /// [`for_each_unicode_mapping`](Self::for_each_unicode_mapping) walks.
+    /// FreeType's auto-hinter, finding none, sorts every glyph into its
+    /// fallback style and measures nothing for it.
+    pub(crate) fn has_unicode_cmap(&self) -> bool {
+        self.cmap.is_some_and(|sub| !sub.symbol)
+    }
+
     /// Call `f` with every code point the Unicode `cmap` maps, and its glyph.
     ///
     /// For the auto-hinter, which sorts a face's glyphs by script the way

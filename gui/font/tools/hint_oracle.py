@@ -25,25 +25,26 @@ FreeType with `FT_LOAD_FORCE_AUTOHINT | FT_LOAD_TARGET_LIGHT`, and compares:
 * **the points themselves** -- how many, and which are on the curve -- which
   catch a glyph read into different points: a composite assembled
   differently, a CFF contour closed differently, a line of no length kept.
-* **y, exactly**, in 1/64 pixel. Light hinting moves nothing else, and a
-  single-unit difference is a different rounding decision somewhere -- the
-  thing a port gets wrong.
-* **x, exactly**, in 1/64 pixel. Light hinting does not move it, but FreeType
-  scales it from whole font units with `FT_MulFix`, and so does this crate: a
-  difference is a coordinate read differently (a CFF fraction floored
-  differently) or a glyph placed differently (a composite's metrics).
+* **y, exactly**, in 1/64 pixel. A single-unit difference is a different
+  rounding decision somewhere -- the thing a port gets wrong.
+* **x, exactly**, in 1/64 pixel. Light hinting moves it only for the CJK and
+  Indic writing systems (ideographs and the fallback style); elsewhere
+  FreeType scales it from whole font units with `FT_MulFix`, and so does this
+  crate, so a difference there is a coordinate read differently (a CFF
+  fraction floored differently) or a glyph placed differently (a composite's
+  metrics).
 
-A glyph this crate leaves unhinted is counted apart rather than as a
-mismatch: FreeType hints every glyph, including the ideographs and the
-fallback style, whose CJK hinting is not ported (see `src/hint/mod.rs`).
+A glyph this crate leaves unhinted where FreeType hints it is counted apart
+rather than as a mismatch: since the CJK system was ported, only a style
+FreeType would not hint either should leave any.
 
 Output
 ------
 
 Per size, how many glyphs agree and what differs in the rest -- the points,
 a y, or only an x; then, per style, the same totals, since most gaps are a
-style at a time (a script whose hinting is not ported, a feature style); and
-the first `--show` disagreements with their points side by side.
+style at a time (a writing system's rule, a feature style); and the first
+`--show` disagreements with their points side by side.
 """
 
 import argparse

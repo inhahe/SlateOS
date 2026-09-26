@@ -25,6 +25,7 @@ Machine-read constants and their locations:
     BASELINE_PATH  bench/last-release-boot.json   the SHA of the last release boot
     THRESHOLD      100                             max kernel commits before staleness
     PATHS          kernel/ bench/                  what counts as "kernel-touching"
+    RECORDS        bench/boot-history.jsonl etc.   ...except these, which record runs
 """
 from __future__ import annotations
 
@@ -45,6 +46,24 @@ BASELINE_PATH = os.path.join(
 # Subsystem paths whose commits count toward staleness.  A commit touching
 # only docs/ or scripts/ does not make the release binary stale.
 PATHS = ("kernel/", "bench/")
+
+# Files under PATHS that record runs rather than change what is run.  Every
+# boot test commits its row to boot-history.jsonl as a commit of its own, so
+# counting them made the gate count boots: on 2026-09-26, 29 of the 101
+# "kernel-touching" commits since the last release boot were boot records, the
+# 101st -- the one that tripped the gate on a publish -- was the row recording
+# the boot being published, and only 72 touched kernel/.  The baseline file is
+# a record too: recording a release boot must not count toward the next one.
+RECORDS = (
+    "bench/boot-history.jsonl",
+    "bench/history.jsonl",
+    "bench/last-release-boot.json",
+)
+
+
+def pathspecs():
+    """The pathspec `git rev-list` counts: PATHS, minus RECORDS."""
+    return list(PATHS) + [":(exclude)%s" % record for record in RECORDS]
 
 # The gate fires when kernel-touching commits since the baseline exceed this.
 # 100 is roughly "a day or two of active work" at this project's measured
@@ -70,11 +89,11 @@ def _repo_root():
         return None
 
 
-def _commit_count_since(sha, paths):
-    """Count commits touching *paths* since *sha* (exclusive)."""
+def _commit_count_since(sha, paths, cwd=None):
+    """Count commits touching *paths* (pathspecs) since *sha* (exclusive)."""
     cmd = ["git", "rev-list", "--count", "%s..HEAD" % sha, "--"]
     cmd.extend(paths)
-    out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
+    out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, cwd=cwd)
     return int(out.strip())
 
 
@@ -124,7 +143,7 @@ def check(quiet=False):
         return 2
 
     try:
-        count = _commit_count_since(sha, PATHS)
+        count = _commit_count_since(sha, pathspecs())
     except (subprocess.CalledProcessError, ValueError) as exc:
         if not quiet:
             print(
@@ -250,10 +269,70 @@ def _selftest():
             print("  FAIL zero SHA should not exist")
             fail += 1
 
+    # --- what counts: kernel and bench changes, not records of runs ---
+    counted = _records_selftest()
+    if counted is None:
+        print("  skip what-counts cases: no usable git")
+    else:
+        for name, got, want in counted:
+            if got == want:
+                print("  ok   %s (%d)" % (name, got))
+                ok += 1
+            else:
+                print("  FAIL %s: counted %d, want %d" % (name, got, want))
+                fail += 1
+
     print("")
     total = ok + fail
     print("%d self-test case(s), %d failed" % (total, fail))
     return 1 if fail else 0
+
+
+def _records_selftest():
+    """Count real commits in a scratch repository; None if git cannot run.
+
+    Returns (case, counted, wanted) triples.  Behavioural rather than a check
+    of the RECORDS tuple: what matters is what `git rev-list` counts through
+    `pathspecs()`, exclusion syntax included.
+    """
+    git = ["git", "-c", "user.name=staleness-selftest", "-c",
+           "user.email=staleness-selftest@localhost", "-c", "commit.gpgsign=false"]
+
+    def run(args, cwd):
+        return subprocess.check_output(git + args, cwd=cwd, text=True,
+                                       stderr=subprocess.DEVNULL).strip()
+
+    def commit(cwd, rel, text):
+        full = os.path.join(cwd, *rel.split("/"))
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "a", encoding="utf-8", newline="") as fh:
+            fh.write(text + "\n")
+        run(["add", rel], cwd)
+        run(["commit", "-q", "--no-verify", "-m", rel], cwd)
+
+    try:
+        with _tf.TemporaryDirectory(ignore_cleanup_errors=True) as repo:
+            run(["init", "-q"], repo)
+            commit(repo, "README", "base")
+            base = run(["rev-parse", "HEAD"], repo)
+            cases = []
+            commit(repo, "kernel/src/a.rs", "fn a() {}")
+            cases.append(("a kernel commit counts",
+                          _commit_count_since(base, pathspecs(), repo), 1))
+            commit(repo, "bench/boot-history.jsonl", "{}")
+            commit(repo, "bench/history.jsonl", "{}")
+            commit(repo, "bench/last-release-boot.json", "{}")
+            cases.append(("records of runs do not count",
+                          _commit_count_since(base, pathspecs(), repo), 1))
+            commit(repo, "bench/baselines.toml", "x = 1")
+            cases.append(("a bench change that is not a record counts",
+                          _commit_count_since(base, pathspecs(), repo), 2))
+            commit(repo, "scripts/x.py", "pass")
+            cases.append(("a scripts/ change does not count",
+                          _commit_count_since(base, pathspecs(), repo), 2))
+            return cases
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------

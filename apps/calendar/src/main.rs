@@ -622,23 +622,45 @@ impl CalendarEvent {
         }
     }
 
+    /// Whether the event is on `date`: the day it starts, a day it repeats
+    /// on, or -- for an all-day event of several days -- any day it covers.
+    ///
+    /// A timed event that runs past midnight is on the day it starts only:
+    /// the day and week views place an event by its times, which would be
+    /// wrong on the days after.
     pub fn occurs_on(&self, date: Date) -> bool {
-        if self.all_day && self.start.date == date {
-            return true;
-        }
-        if self.start.date == date {
-            return true;
-        }
-        self.recurrence.matches(self.start.date, date)
+        let span = if self.all_day {
+            i32::try_from(self.end.date.days_since(self.start.date).clamp(0, 366)).unwrap_or(0)
+        } else {
+            0
+        };
+        (0..=span).any(|back| {
+            let origin = date.add_days(back.wrapping_neg());
+            origin == self.start.date || self.recurrence.matches(self.start.date, origin)
+        })
     }
 
-    /// Format as ICS VEVENT.
+    /// The event as an iCalendar `VEVENT`, each line folded at 75 octets as
+    /// RFC 5545 asks.
+    ///
+    /// An all-day event is written as dates (`VALUE=DATE`, the end the day
+    /// after its last), as other calendars write one, rather than as a
+    /// midnight-to-23:59 appointment; a reminder as an alarm, so a calendar
+    /// that can raise one does.
     pub fn to_ics(&self) -> String {
-        let mut lines = Vec::new();
-        lines.push("BEGIN:VEVENT".to_string());
-        lines.push(format!("UID:{}-slateos@calendar", self.id));
-        lines.push(format!("DTSTART:{}", self.start.format_ics()));
-        lines.push(format!("DTEND:{}", self.end.format_ics()));
+        let date = |d: Date| format!("{:04}{:02}{:02}", d.year, d.month, d.day);
+        let mut lines = vec![
+            String::from("BEGIN:VEVENT"),
+            format!("UID:{}-slateos@calendar", self.id),
+        ];
+        if self.all_day {
+            lines.push(format!("DTSTART;VALUE=DATE:{}", date(self.start.date)));
+            let last = self.end.date.max(self.start.date);
+            lines.push(format!("DTEND;VALUE=DATE:{}", date(last.add_days(1))));
+        } else {
+            lines.push(format!("DTSTART:{}", self.start.format_ics()));
+            lines.push(format!("DTEND:{}", self.end.format_ics()));
+        }
         lines.push(format!("SUMMARY:{}", ics_escape(&self.title)));
         if !self.description.is_empty() {
             lines.push(format!("DESCRIPTION:{}", ics_escape(&self.description)));
@@ -652,16 +674,7 @@ impl CalendarEvent {
             RecurrenceRule::Weekly { days } => {
                 let day_strs: Vec<&str> = days
                     .iter()
-                    .filter_map(|d| match d {
-                        0 => Some("SU"),
-                        1 => Some("MO"),
-                        2 => Some("TU"),
-                        3 => Some("WE"),
-                        4 => Some("TH"),
-                        5 => Some("FR"),
-                        6 => Some("SA"),
-                        _ => None,
-                    })
+                    .filter_map(|d| ICS_DAYS.get(usize::try_from(*d).ok()?).copied())
                     .collect();
                 if day_strs.is_empty() {
                     lines.push("RRULE:FREQ=WEEKLY".to_string());
@@ -672,18 +685,62 @@ impl CalendarEvent {
             RecurrenceRule::Monthly => lines.push("RRULE:FREQ=MONTHLY".to_string()),
             RecurrenceRule::Yearly => lines.push("RRULE:FREQ=YEARLY".to_string()),
             RecurrenceRule::BiWeekly => lines.push("RRULE:FREQ=WEEKLY;INTERVAL=2".to_string()),
+            // Every no days is a repeat that never happens, and `INTERVAL=0`
+            // is not one the standard allows.
+            RecurrenceRule::Custom { interval_days: 0 } | RecurrenceRule::None => {}
             RecurrenceRule::Custom { interval_days } => {
                 lines.push(format!("RRULE:FREQ=DAILY;INTERVAL={interval_days}"));
             }
-            RecurrenceRule::None => {}
+        }
+        let trigger = match self.reminder {
+            Reminder::None => None,
+            Reminder::AtTime => Some(String::from("PT0M")),
+            Reminder::MinutesBefore(n) => Some(format!("-PT{n}M")),
+            Reminder::HoursBefore(n) => Some(format!("-PT{n}H")),
+            Reminder::DayBefore => Some(String::from("-P1D")),
+        };
+        if let Some(trigger) = trigger {
+            lines.push(String::from("BEGIN:VALARM"));
+            lines.push(String::from("ACTION:DISPLAY"));
+            lines.push(format!("DESCRIPTION:{}", ics_escape(&self.title)));
+            lines.push(format!("TRIGGER:{trigger}"));
+            lines.push(String::from("END:VALARM"));
         }
         lines.push("END:VEVENT".to_string());
-        lines.join("\r\n")
+        lines
+            .iter()
+            .map(|l| fold_ics_line(l))
+            .collect::<Vec<_>>()
+            .join("\r\n")
     }
 }
 
+/// The weekdays as iCalendar names them, Sunday first, as the model counts.
+const ICS_DAYS: [&str; 7] = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+
+/// A content line folded as RFC 5545 asks: no line longer than 75 octets,
+/// each continuation starting with a space, and never inside a character.
+fn fold_ics_line(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut width = 0_usize;
+    for c in line.chars() {
+        let len = c.len_utf8();
+        if width.saturating_add(len) > 75 {
+            out.push_str("\r\n ");
+            width = 1;
+        }
+        out.push(c);
+        width = width.saturating_add(len);
+    }
+    out
+}
+
+/// Text as an iCalendar value: backslash, semicolon, comma and line break
+/// escaped -- a carriage return, alone or before a line feed, as one break.
 fn ics_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
+    s.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\\', "\\\\")
         .replace(';', "\\;")
         .replace(',', "\\,")
         .replace('\n', "\\n")
@@ -693,74 +750,382 @@ fn ics_escape(s: &str) -> String {
 // ICS parser (basic)
 // ============================================================================
 
-pub fn parse_ics(content: &str) -> Vec<CalendarEvent> {
-    let mut events = Vec::new();
-    let mut in_event = false;
-    let mut title = String::new();
-    let mut description = String::new();
-    let mut location: Option<String> = None;
-    let mut dtstart: Option<DateTime> = None;
-    let mut dtend: Option<DateTime> = None;
-    let mut category = EventCategory::Personal;
-    let mut next_id: u64 = 1000;
+/// What an `.ics` import found: the events it could read, and what it had
+/// to leave out or keep in a simpler form -- so the import can say so, since
+/// a calendar missing an appointment looks exactly like one that never had
+/// it.
+#[derive(Debug, Default)]
+pub struct IcsImport {
+    pub events: Vec<CalendarEvent>,
+    /// Events with no start this could read, left out.
+    pub unreadable: usize,
+    /// Events whose times were written for a time zone, or in UTC, kept as
+    /// the clock time written: this calendar has no time zones.
+    pub zoned: usize,
+    /// Events whose repeat this calendar cannot keep as written -- one with
+    /// an end, or a rule it has no name for -- kept as the nearest it has.
+    pub simplified: usize,
+}
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line == "BEGIN:VEVENT" {
-            in_event = true;
-            title.clear();
-            description.clear();
-            location = None;
-            dtstart = None;
-            dtend = None;
-            category = EventCategory::Personal;
-        } else if line == "END:VEVENT" && in_event {
-            if let (Some(start), Some(end)) = (dtstart, dtend) {
-                events.push(CalendarEvent {
-                    id: next_id,
-                    title: ics_unescape(&title),
-                    description: ics_unescape(&description),
-                    category,
-                    start,
-                    end,
-                    all_day: false,
-                    recurrence: RecurrenceRule::None,
-                    reminder: Reminder::None,
-                    location: location.as_deref().map(ics_unescape),
-                    color_override: None,
-                });
-                next_id = next_id.saturating_add(1);
+/// The events in an iCalendar text, as [`import_ics`](parse_ics_report)
+/// reads them.
+pub fn parse_ics(content: &str) -> Vec<CalendarEvent> {
+    parse_ics_report(content).events
+}
+
+/// The logical lines of an iCalendar text: a line beginning with a space or
+/// a tab continues the one before it (RFC 5545's folding), and a line may
+/// end in a carriage return or not.
+fn unfold_ics(content: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in content.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if let Some(rest) = line.strip_prefix(' ').or_else(|| line.strip_prefix('\t'))
+            && let Some(last) = out.last_mut()
+        {
+            last.push_str(rest);
+            continue;
+        }
+        out.push(line.to_owned());
+    }
+    out
+}
+
+/// A content line split into its name (upper case), its parameters (names
+/// upper case, values unquoted) and its value:
+/// `DTSTART;TZID="Europe/Paris":20260926T090000`. The value starts after the
+/// first colon outside a quoted parameter.
+fn split_ics_line(line: &str) -> Option<(String, IcsParams, &str)> {
+    let mut in_quotes = false;
+    let mut cuts = Vec::new();
+    let mut colon = None;
+    for (i, c) in line.char_indices() {
+        match c {
+            '"' => in_quotes = !in_quotes,
+            ';' if !in_quotes => cuts.push(i),
+            ':' if !in_quotes => {
+                colon = Some(i);
+                break;
             }
-            in_event = false;
-        } else if in_event {
-            if let Some(val) = line.strip_prefix("SUMMARY:") {
-                title = val.to_string();
-            } else if let Some(val) = line.strip_prefix("DESCRIPTION:") {
-                description = val.to_string();
-            } else if let Some(val) = line.strip_prefix("LOCATION:") {
-                location = Some(val.to_string());
-            } else if let Some(val) = line.strip_prefix("DTSTART:") {
-                dtstart = parse_ics_datetime(val);
-            } else if let Some(val) = line.strip_prefix("DTEND:") {
-                dtend = parse_ics_datetime(val);
-            } else if let Some(val) = line.strip_prefix("CATEGORIES:") {
-                category = match val.to_ascii_lowercase().as_str() {
-                    "work" => EventCategory::Work,
-                    "health" => EventCategory::Health,
-                    "travel" => EventCategory::Travel,
-                    "birthday" => EventCategory::Birthday,
-                    "holiday" => EventCategory::Holiday,
-                    "meeting" => EventCategory::Meeting,
-                    "deadline" => EventCategory::Deadline,
-                    "social" => EventCategory::Social,
-                    "education" => EventCategory::Education,
-                    _ => EventCategory::Personal,
-                };
-            }
+            _ => {}
         }
     }
+    let colon = colon?;
+    let value = line.get(colon.saturating_add(1)..)?;
+    let name_end = cuts.first().copied().unwrap_or(colon);
+    let name = line.get(..name_end)?.trim().to_ascii_uppercase();
+    let mut params = Vec::new();
+    for (k, &at) in cuts.iter().enumerate() {
+        let until = cuts.get(k.saturating_add(1)).copied().unwrap_or(colon);
+        let Some(part) = line.get(at.saturating_add(1)..until) else {
+            continue;
+        };
+        if let Some((key, val)) = part.split_once('=') {
+            params.push((
+                key.trim().to_ascii_uppercase(),
+                val.trim().trim_matches('"').to_owned(),
+            ));
+        }
+    }
+    Some((name, params, value))
+}
 
-    events
+/// A content line's parameters: names in upper case, values unquoted.
+type IcsParams = Vec<(String, String)>;
+
+/// Parameter `key` of a content line.
+fn ics_param<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    params
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+}
+
+/// When a start or an end is: the date and time, whether only a date was
+/// written, and whether the time was written for a zone -- a `TZID`, or `Z`
+/// for UTC.
+fn parse_ics_when(value: &str, params: &[(String, String)]) -> Option<(DateTime, bool, bool)> {
+    let value = value.trim();
+    let date_only = ics_param(params, "VALUE") == Some("DATE")
+        || (value.len() == 8 && value.bytes().all(|b| b.is_ascii_digit()));
+    let zoned = !date_only && (ics_param(params, "TZID").is_some() || value.ends_with('Z'));
+    Some((parse_ics_datetime(value)?, date_only, zoned))
+}
+
+/// An iCalendar duration in minutes -- `PT1H30M`, `P1D`, `-P2W` -- with
+/// seconds dropped.
+fn parse_ics_duration(value: &str) -> Option<i64> {
+    let v = value.trim();
+    let (negative, v) = match v.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, v.strip_prefix('+').unwrap_or(v)),
+    };
+    let v = v.strip_prefix('P')?;
+    let mut minutes: i64 = 0;
+    let mut number = String::new();
+    let mut in_time = false;
+    for c in v.chars() {
+        if c.is_ascii_digit() {
+            number.push(c);
+            continue;
+        }
+        if c == 'T' && number.is_empty() {
+            in_time = true;
+            continue;
+        }
+        let n: i64 = number.parse().ok()?;
+        number.clear();
+        let add = match (c, in_time) {
+            ('W', false) => n.checked_mul(7 * 24 * 60)?,
+            ('D', false) => n.checked_mul(24 * 60)?,
+            ('H', true) => n.checked_mul(60)?,
+            ('M', true) => n,
+            ('S', true) => n.checked_div(60)?,
+            _ => return None,
+        };
+        minutes = minutes.checked_add(add)?;
+    }
+    if !number.is_empty() {
+        return None;
+    }
+    Some(if negative {
+        minutes.saturating_neg()
+    } else {
+        minutes
+    })
+}
+
+/// `at` moved by `minutes`, across midnight as far as it goes.
+fn add_minutes(at: DateTime, minutes: i64) -> DateTime {
+    let total = i64::from(at.time.to_minutes()).saturating_add(minutes);
+    let days = i32::try_from(total.div_euclid(24 * 60)).unwrap_or(0);
+    let minute = u32::try_from(total.rem_euclid(24 * 60)).unwrap_or(0);
+    DateTime::new(at.date.add_days(days), Time::from_minutes(minute))
+}
+
+/// A repeat read from an `RRULE`, and whether it had to be simplified to
+/// fit: this calendar has no repeat with an end (`COUNT`, `UNTIL`), none on
+/// "the second Tuesday", none every three months.
+fn parse_rrule(value: &str) -> (RecurrenceRule, bool) {
+    let mut freq = String::new();
+    let mut interval: u32 = 1;
+    let mut days: Vec<u32> = Vec::new();
+    let mut simplified = false;
+    for part in value.split(';') {
+        let Some((key, val)) = part.split_once('=') else {
+            simplified = true;
+            continue;
+        };
+        match key.trim().to_ascii_uppercase().as_str() {
+            "FREQ" => freq = val.trim().to_ascii_uppercase(),
+            "INTERVAL" => match val.trim().parse::<u32>() {
+                Ok(n) if n > 0 => interval = n,
+                _ => simplified = true,
+            },
+            "BYDAY" => {
+                for day in val.split(',') {
+                    let day = day.trim().to_ascii_uppercase();
+                    match ICS_DAYS.iter().position(|d| *d == day) {
+                        Some(i) => days.extend(u32::try_from(i).ok()),
+                        // "2TU", the second Tuesday: no such repeat here.
+                        None => simplified = true,
+                    }
+                }
+            }
+            "WKST" => {}
+            _ => simplified = true,
+        }
+    }
+    let rule = match (freq.as_str(), interval) {
+        ("DAILY", 1) => RecurrenceRule::Daily,
+        ("DAILY", n) => RecurrenceRule::Custom { interval_days: n },
+        ("WEEKLY", 1) => RecurrenceRule::Weekly { days },
+        ("WEEKLY", 2) if days.is_empty() => RecurrenceRule::BiWeekly,
+        ("WEEKLY", n) if days.is_empty() => RecurrenceRule::Custom {
+            interval_days: n.saturating_mul(7),
+        },
+        ("WEEKLY", _) => {
+            simplified = true;
+            RecurrenceRule::Weekly { days }
+        }
+        ("MONTHLY", n) => {
+            simplified |= n != 1 || !days.is_empty();
+            RecurrenceRule::Monthly
+        }
+        ("YEARLY", n) => {
+            simplified |= n != 1 || !days.is_empty();
+            RecurrenceRule::Yearly
+        }
+        _ => {
+            simplified = true;
+            RecurrenceRule::None
+        }
+    };
+    (rule, simplified)
+}
+
+/// A reminder read from an alarm's `TRIGGER`: how long before the start.
+fn reminder_from_trigger(value: &str) -> Option<Reminder> {
+    let before = parse_ics_duration(value)?.saturating_neg();
+    Some(match before {
+        ..=0 => Reminder::AtTime,
+        1440 => Reminder::DayBefore,
+        m if m % 60 == 0 && m < 1440 => Reminder::HoursBefore(u32::try_from(m / 60).ok()?),
+        m => Reminder::MinutesBefore(u32::try_from(m).ok()?),
+    })
+}
+
+/// One `VEVENT`, as its lines are read.
+#[derive(Default)]
+struct IcsEventDraft {
+    title: String,
+    description: String,
+    location: Option<String>,
+    start: Option<(DateTime, bool, bool)>,
+    end: Option<(DateTime, bool, bool)>,
+    duration: Option<i64>,
+    category: Option<EventCategory>,
+    rule: Option<(RecurrenceRule, bool)>,
+    reminder: Option<Reminder>,
+}
+
+/// The events in an iCalendar text, and what could not be read or kept as
+/// written.
+///
+/// What other calendars write, not only what this one does: folded lines,
+/// parameters (`DTSTART;TZID=...:`, `DTSTART;VALUE=DATE:`), an all-day event
+/// as dates with the day after it as its end, a `DURATION` instead of an end
+/// or neither, a repeat (`RRULE`), several categories, and an alarm -- whose
+/// own `DESCRIPTION` used to overwrite the event's. Before, every event whose
+/// start had a parameter, or had no `DTEND`, was left out without a word:
+/// most of what a phone's calendar exports.
+pub fn parse_ics_report(content: &str) -> IcsImport {
+    let mut report = IcsImport::default();
+    let mut stack: Vec<String> = Vec::new();
+    let mut draft: Option<IcsEventDraft> = None;
+    for line in unfold_ics(content) {
+        let Some((name, params, value)) = split_ics_line(&line) else {
+            continue;
+        };
+        match name.as_str() {
+            "BEGIN" => {
+                let component = value.trim().to_ascii_uppercase();
+                if component == "VEVENT" {
+                    draft = Some(IcsEventDraft::default());
+                }
+                stack.push(component);
+                continue;
+            }
+            "END" => {
+                let component = value.trim().to_ascii_uppercase();
+                if stack.last() == Some(&component) {
+                    stack.pop();
+                }
+                if component == "VEVENT"
+                    && let Some(done) = draft.take()
+                {
+                    match finish_ics_event(done) {
+                        Some((event, zoned, simplified)) => {
+                            report.zoned = report.zoned.saturating_add(usize::from(zoned));
+                            report.simplified =
+                                report.simplified.saturating_add(usize::from(simplified));
+                            report.events.push(event);
+                        }
+                        None => report.unreadable = report.unreadable.saturating_add(1),
+                    }
+                }
+                continue;
+            }
+            _ => {}
+        }
+        let Some(ev) = draft.as_mut() else {
+            continue;
+        };
+        match stack.last().map(String::as_str) {
+            Some("VEVENT") => match name.as_str() {
+                "SUMMARY" => ev.title = ics_unescape(value),
+                "DESCRIPTION" => ev.description = ics_unescape(value),
+                "LOCATION" => ev.location = Some(ics_unescape(value)),
+                "DTSTART" => ev.start = parse_ics_when(value, &params),
+                "DTEND" => ev.end = parse_ics_when(value, &params),
+                "DURATION" => ev.duration = parse_ics_duration(value),
+                "RRULE" => ev.rule = Some(parse_rrule(value)),
+                "CATEGORIES" if ev.category.is_none() => {
+                    ev.category = value.split(',').find_map(|c| {
+                        let c = ics_unescape(c.trim()).to_lowercase();
+                        EventCategory::all()
+                            .iter()
+                            .copied()
+                            .find(|k| k.label().to_lowercase() == c)
+                    });
+                }
+                _ => {}
+            },
+            Some("VALARM") if name == "TRIGGER" && ev.reminder.is_none() => {
+                // An alarm at a moment rather than before the start has no
+                // reminder here to be.
+                if ics_param(&params, "VALUE") != Some("DATE-TIME") {
+                    ev.reminder = reminder_from_trigger(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    report
+}
+
+/// The event a `VEVENT`'s lines describe -- with whether its times were
+/// zoned and its repeat simplified -- or `None` if it has no start.
+fn finish_ics_event(d: IcsEventDraft) -> Option<(CalendarEvent, bool, bool)> {
+    let (start, all_day, zoned) = d.start?;
+    let end = if all_day {
+        // An all-day event ends the day before its end date: DTEND is the
+        // first day it is not on.
+        let last = match (d.end, d.duration) {
+            (Some((end, _, _)), _) if end.date > start.date => end.date.add_days(-1),
+            (None, Some(minutes)) if minutes > 24 * 60 => {
+                add_minutes(start, minutes.saturating_sub(1)).date
+            }
+            _ => start.date,
+        };
+        DateTime::new(
+            last,
+            Time {
+                hour: 23,
+                minute: 59,
+            },
+        )
+    } else {
+        let end = match (d.end, d.duration) {
+            (Some((end, _, _)), _) => end,
+            (None, Some(minutes)) => add_minutes(start, minutes),
+            (None, None) => start,
+        };
+        end.max(start)
+    };
+    let start = if all_day {
+        DateTime::new(start.date, Time { hour: 0, minute: 0 })
+    } else {
+        start
+    };
+    let (recurrence, simplified) = d.rule.unwrap_or((RecurrenceRule::None, false));
+    Some((
+        CalendarEvent {
+            id: 0,
+            title: d.title,
+            description: d.description,
+            category: d.category.unwrap_or(EventCategory::Personal),
+            start,
+            end,
+            all_day,
+            recurrence,
+            reminder: d.reminder.unwrap_or(Reminder::None),
+            location: d.location.filter(|l| !l.is_empty()),
+            color_override: None,
+        },
+        zoned,
+        simplified,
+    ))
 }
 
 fn parse_ics_datetime(s: &str) -> Option<DateTime> {
@@ -818,7 +1183,10 @@ pub fn generate_ics(events: &[CalendarEvent], calendar_name: &str) -> String {
     lines.push("BEGIN:VCALENDAR".to_string());
     lines.push("VERSION:2.0".to_string());
     lines.push("PRODID:-//SlateOS//Calendar//EN".to_string());
-    lines.push(format!("X-WR-CALNAME:{calendar_name}"));
+    lines.push(fold_ics_line(&format!(
+        "X-WR-CALNAME:{}",
+        ics_escape(calendar_name)
+    )));
 
     for event in events {
         lines.push(event.to_ics());
@@ -974,7 +1342,11 @@ impl EventStore {
 
     /// Import events from ICS content.
     pub fn import_ics(&mut self, content: &str) -> usize {
-        let imported = parse_ics(content);
+        self.import_events(parse_ics(content))
+    }
+
+    /// Add `imported`, each under a new id. How many.
+    pub fn import_events(&mut self, imported: Vec<CalendarEvent>) -> usize {
         let count = imported.len();
         for mut event in imported {
             event.id = self.next_id;
@@ -4277,15 +4649,33 @@ impl CalendarApp {
         } else {
             text
         };
-        let added = self.store.import_ics(&body);
-        if truncated {
+        let report = parse_ics_report(&body);
+        let (unreadable, zoned, simplified) = (report.unreadable, report.zoned, report.simplified);
+        let added = self.store.import_events(report.events);
+        let mut said = if truncated {
             format!(
                 "INCOMPLETE: {added} event(s) from the first {MAX_ICS_BYTES} bytes of {}, which is {whole} bytes",
                 path.display()
             )
         } else {
             format!("Added {added} event(s) from {}", path.display())
+        };
+        if unreadable > 0 {
+            said.push_str(&format!(
+                "; {unreadable} had no start that could be read, and were left out"
+            ));
         }
+        if zoned > 0 {
+            said.push_str(&format!(
+                "; {zoned} had times for another time zone, kept as the clock time written"
+            ));
+        }
+        if simplified > 0 {
+            said.push_str(&format!(
+                "; {simplified} repeat in a way this calendar cannot keep exactly (an end, or a rule it has no name for), and repeat on"
+            ));
+        }
+        said
     }
 }
 
@@ -7845,5 +8235,247 @@ mod tests {
         let ics = generate_ics(&[awkward_event("Imported")], "Elsewhere");
         assert_eq!(store.import_ics(&ics), 1, "control: the import reads");
         assert_ne!(store.revision(), r3, "an import was not counted");
+    }
+
+    // ------------------------------------------------------------------
+    // .ics as other calendars write it
+    // ------------------------------------------------------------------
+
+    /// What a phone's or a web calendar's export looks like: a time zone
+    /// block, zoned and UTC times, an all-day event as dates, a DURATION, a
+    /// start with no end, folded lines, a repeat with an end, an alarm with
+    /// its own DESCRIPTION, several categories -- and one event with no start.
+    const FOREIGN_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//Somebody//Else//EN\r\n\
+BEGIN:VTIMEZONE\r\n\
+TZID:Europe/Paris\r\n\
+BEGIN:STANDARD\r\n\
+DTSTART:19701025T030000\r\n\
+TZOFFSETFROM:+0200\r\n\
+TZOFFSETTO:+0100\r\n\
+END:STANDARD\r\n\
+END:VTIMEZONE\r\n\
+BEGIN:VEVENT\r\n\
+UID:a@elsewhere\r\n\
+DTSTART;TZID=Europe/Paris:20260928T090000\r\n\
+DTEND;TZID=Europe/Paris:20260928T103000\r\n\
+SUMMARY:Standup with a very long name that goes on and on past the seventy-f\r\n\
+\x20ive octets a line may hold\r\n\
+CATEGORIES:Team,Meeting\r\n\
+RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=10\r\n\
+DESCRIPTION:The real notes\\, with a comma\r\n\
+BEGIN:VALARM\r\n\
+ACTION:DISPLAY\r\n\
+DESCRIPTION:Alarm text that is not the notes\r\n\
+TRIGGER:-PT15M\r\n\
+END:VALARM\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:b@elsewhere\r\n\
+DTSTART;VALUE=DATE:20261224\r\n\
+DTEND;VALUE=DATE:20261227\r\n\
+SUMMARY:Holidays\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:c@elsewhere\r\n\
+DTSTART:20261001T130000Z\r\n\
+DURATION:PT1H30M\r\n\
+SUMMARY:Call\r\n\
+RRULE:FREQ=DAILY;INTERVAL=3\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:d@elsewhere\r\n\
+DTSTART:20261002T080000\r\n\
+SUMMARY:A moment\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:e@elsewhere\r\n\
+SUMMARY:No start at all\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+    #[test]
+    fn an_ics_from_another_calendar_is_read_as_it_was_written() {
+        let report = parse_ics_report(FOREIGN_ICS);
+        assert_eq!(report.events.len(), 4, "{:?}", report.events);
+        assert_eq!(
+            report.unreadable, 1,
+            "the event with no start was not counted"
+        );
+        assert_eq!(report.zoned, 2, "a Paris time and a UTC time");
+        assert_eq!(report.simplified, 1, "the repeat with an end");
+
+        let standup = &report.events[0];
+        assert_eq!(
+            standup.title,
+            "Standup with a very long name that goes on and on past the seventy-five octets a line may hold",
+            "a folded line was not joined"
+        );
+        assert_eq!(
+            standup.description, "The real notes, with a comma",
+            "the alarm's text took the notes' place"
+        );
+        assert_eq!(
+            standup.category,
+            EventCategory::Meeting,
+            "the second category was not tried"
+        );
+        assert_eq!(
+            standup.recurrence,
+            RecurrenceRule::Weekly {
+                days: vec![1, 3, 5]
+            }
+        );
+        assert_eq!(standup.reminder, Reminder::MinutesBefore(15));
+        assert_eq!(standup.start.time, Time::new(9, 0).unwrap());
+        assert_eq!(standup.end.time, Time::new(10, 30).unwrap());
+
+        let holidays = &report.events[1];
+        assert!(holidays.all_day, "a DATE start is an all-day event");
+        assert_eq!(holidays.start.date, Date::new(2026, 12, 24).unwrap());
+        assert_eq!(
+            holidays.end.date,
+            Date::new(2026, 12, 26).unwrap(),
+            "DTEND is the day after the last"
+        );
+        for day in 24..=26 {
+            assert!(
+                holidays.occurs_on(Date::new(2026, 12, day).unwrap()),
+                "not on the {day}th"
+            );
+        }
+        assert!(!holidays.occurs_on(Date::new(2026, 12, 27).unwrap()));
+
+        let call = &report.events[2];
+        assert_eq!(
+            call.end,
+            DateTime::new(Date::new(2026, 10, 1).unwrap(), Time::new(14, 30).unwrap()),
+            "the DURATION was not the end"
+        );
+        assert_eq!(call.recurrence, RecurrenceRule::Custom { interval_days: 3 });
+
+        let moment = &report.events[3];
+        assert_eq!(moment.end, moment.start, "a start with no end is a moment");
+    }
+
+    #[test]
+    fn the_import_says_what_it_could_not_keep() {
+        let dir = std::env::temp_dir().join(format!("slateos-calendar-ics-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("elsewhere.ics");
+        std::fs::write(&path, FOREIGN_ICS).unwrap();
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+        let said = app.read_ics(&path);
+        assert!(said.starts_with("Added 4 event(s)"), "{said}");
+        assert!(said.contains("1 had no start that could be read"), "{said}");
+        assert!(said.contains("2 had times for another time zone"), "{said}");
+        assert!(
+            said.contains("1 repeat in a way this calendar cannot keep exactly"),
+            "{said}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_exported_calendar_reads_back_as_itself() {
+        let mut all_day = awkward_event("Three days off");
+        all_day.all_day = true;
+        all_day.start = DateTime::new(Date::new(2026, 12, 24).unwrap(), Time::new(0, 0).unwrap());
+        all_day.end = DateTime::new(Date::new(2026, 12, 26).unwrap(), Time::new(23, 59).unwrap());
+        all_day.reminder = Reminder::DayBefore;
+        let mut hours = awkward_event(
+            "A title long enough that its SUMMARY line must be folded somewhere in the middle, twice",
+        );
+        hours.reminder = Reminder::HoursBefore(2);
+        hours.recurrence = RecurrenceRule::BiWeekly;
+        let mut every = awkward_event("Every four days");
+        every.reminder = Reminder::AtTime;
+        every.recurrence = RecurrenceRule::Custom { interval_days: 4 };
+        let mut plain = awkward_event("Plain");
+        plain.reminder = Reminder::None;
+        plain.recurrence = RecurrenceRule::Monthly;
+        let events = [
+            awkward_event("Weekly on three days"),
+            all_day,
+            hours,
+            every,
+            plain,
+        ];
+
+        let ics = generate_ics(&events, "Mine");
+        for line in ics.split("\r\n") {
+            assert!(
+                line.len() <= 75,
+                "a line of {} octets: {line:?}",
+                line.len()
+            );
+        }
+        let back = parse_ics_report(&ics);
+        assert_eq!(back.zoned, 0);
+        assert_eq!(back.simplified, 0);
+        assert_eq!(back.unreadable, 0);
+        // The id and the colour are this calendar's own; the rest goes out
+        // and comes back.
+        let strip = |e: &CalendarEvent| {
+            let mut e = e.clone();
+            e.id = 0;
+            e.color_override = None;
+            describe(&e)
+        };
+        let want: Vec<String> = events.iter().map(strip).collect();
+        let got: Vec<String> = back.events.iter().map(strip).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn durations_and_repeats_are_read_as_the_standard_writes_them() {
+        assert_eq!(parse_ics_duration("PT1H30M"), Some(90));
+        assert_eq!(parse_ics_duration("P1D"), Some(1440));
+        assert_eq!(parse_ics_duration("-P2W"), Some(-20160));
+        assert_eq!(parse_ics_duration("PT45S"), Some(0));
+        assert_eq!(parse_ics_duration("P1DT2H"), Some(1560));
+        assert_eq!(parse_ics_duration("1H"), None);
+        assert_eq!(parse_ics_duration("PT1X"), None);
+        assert_eq!(parse_ics_duration("P1H"), None, "an hour needs its T");
+        assert_eq!(parse_rrule("FREQ=DAILY"), (RecurrenceRule::Daily, false));
+        assert_eq!(
+            parse_rrule("FREQ=WEEKLY;INTERVAL=2"),
+            (RecurrenceRule::BiWeekly, false)
+        );
+        assert_eq!(
+            parse_rrule("FREQ=WEEKLY;INTERVAL=3"),
+            (RecurrenceRule::Custom { interval_days: 21 }, false)
+        );
+        assert_eq!(
+            parse_rrule("FREQ=MONTHLY;BYDAY=2TU"),
+            (RecurrenceRule::Monthly, true)
+        );
+        assert_eq!(
+            parse_rrule("FREQ=YEARLY;UNTIL=20300101"),
+            (RecurrenceRule::Yearly, true)
+        );
+        assert_eq!(parse_rrule("FREQ=HOURLY"), (RecurrenceRule::None, true));
+        assert_eq!(
+            reminder_from_trigger("-PT30M"),
+            Some(Reminder::MinutesBefore(30))
+        );
+        assert_eq!(
+            reminder_from_trigger("-PT2H"),
+            Some(Reminder::HoursBefore(2))
+        );
+        assert_eq!(reminder_from_trigger("-P1D"), Some(Reminder::DayBefore));
+        assert_eq!(reminder_from_trigger("PT0S"), Some(Reminder::AtTime));
+    }
+
+    #[test]
+    fn a_quoted_parameter_may_hold_a_colon() {
+        let (name, params, value) =
+            split_ics_line("DTSTART;TZID=\"America/New_York\";X-NOTE=\"a:b;c\":20260101T090000")
+                .unwrap();
+        assert_eq!(name, "DTSTART");
+        assert_eq!(ics_param(&params, "TZID"), Some("America/New_York"));
+        assert_eq!(ics_param(&params, "X-NOTE"), Some("a:b;c"));
+        assert_eq!(value, "20260101T090000");
     }
 }

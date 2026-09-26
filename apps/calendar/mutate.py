@@ -42,6 +42,11 @@ SEARCH = "a_search_finds_accents_in_any_case_and_places"
 NOTICE = "the_warning_lines_are_not_painted_over"
 EMPTY = "a_fresh_calendar_holds_no_events_and_says_how_to_add_one"
 BUTTON = "the_new_event_button_gives_way_to_the_view_tabs"
+FOREIGN = "an_ics_from_another_calendar_is_read_as_it_was_written"
+SAID = "the_import_says_what_it_could_not_keep"
+EXPORTED = "an_exported_calendar_reads_back_as_itself"
+RULES = "durations_and_repeats_are_read_as_the_standard_writes_them"
+QUOTED = "a_quoted_parameter_may_hold_a_colon"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -339,6 +344,109 @@ MUTATIONS = [
         "        if self.store.is_empty() {\n            lines.push((String::from(NO_EVENTS_LINE), false));",
         "        if false {\n            lines.push((String::from(NO_EVENTS_LINE), false));",
         [EMPTY, NOTICE],
+    ),
+    # ---- .ics as other calendars write it, and as they read it ----
+    (
+        "folded lines are not joined",
+        "        if let Some(rest) = line.strip_prefix(' ').or_else(|| line.strip_prefix('\\t'))",
+        "        if let Some(rest) = None::<&str>",
+        [FOREIGN],
+    ),
+    (
+        "a colon in a quoted parameter ends the name",
+        "            '\"' => in_quotes = !in_quotes,",
+        "            '\"' => {}",
+        [QUOTED],
+    ),
+    (
+        "a date start is not an all-day event",
+        "    let (start, all_day, zoned) = d.start?;",
+        "    let (start, _, zoned) = d.start?;\n    let all_day = false;",
+        [FOREIGN, EXPORTED],
+    ),
+    (
+        "an all-day event runs to the day after its last",
+        "            (Some((end, _, _)), _) if end.date > start.date => end.date.add_days(-1),",
+        "            (Some((end, _, _)), _) if end.date > start.date => end.date,",
+        [FOREIGN, EXPORTED],
+    ),
+    (
+        "a UTC time is not counted as zoned",
+        "    let zoned = !date_only && (ics_param(params, \"TZID\").is_some() || value.ends_with('Z'));",
+        "    let zoned = !date_only && ics_param(params, \"TZID\").is_some();",
+        [FOREIGN, SAID],
+    ),
+    (
+        "a DURATION is not an end",
+        "            (None, Some(minutes)) => add_minutes(start, minutes),",
+        "            (None, Some(_)) => start,",
+        [FOREIGN],
+    ),
+    (
+        "a repeat is not read",
+        "                \"RRULE\" => ev.rule = Some(parse_rrule(value)),\n",
+        "",
+        [FOREIGN, EXPORTED],
+    ),
+    (
+        "a repeat with an end is not said to be simplified",
+        "            \"WKST\" => {}\n            _ => simplified = true,",
+        "            \"WKST\" => {}\n            _ => {}",
+        [FOREIGN, RULES],
+    ),
+    (
+        "the weekdays of a repeat are dropped",
+        "                        Some(i) => days.extend(u32::try_from(i).ok()),",
+        "                        Some(_) => {}",
+        [FOREIGN, EXPORTED],
+    ),
+    (
+        "an alarm's lines are read as the event's",
+        "        match stack.last().map(String::as_str) {",
+        "        match Some(\"VEVENT\") {",
+        [FOREIGN],
+    ),
+    (
+        "only the first category is tried",
+        "                    ev.category = value.split(',').find_map(|c| {",
+        "                    ev.category = value.split(',').take(1).find_map(|c| {",
+        [FOREIGN],
+    ),
+    (
+        "a day's warning is counted in minutes",
+        "        1440 => Reminder::DayBefore,",
+        "        1440 => Reminder::MinutesBefore(1440),",
+        [RULES, EXPORTED],
+    ),
+    (
+        "an all-day event is exported as an appointment",
+        "            lines.push(format!(\"DTSTART;VALUE=DATE:{}\", date(self.start.date)));",
+        "            lines.push(format!(\"DTSTART:{}\", self.start.format_ics()));",
+        [EXPORTED],
+    ),
+    (
+        "a reminder is not exported as an alarm",
+        "            lines.push(format!(\"TRIGGER:{trigger}\"));",
+        "            lines.push(format!(\"X-TRIGGER:{trigger}\"));",
+        [EXPORTED],
+    ),
+    (
+        "long lines are not folded",
+        "        if width.saturating_add(len) > 75 {",
+        "        if false {",
+        [EXPORTED],
+    ),
+    (
+        "an all-day event of several days is on its first day only",
+        "        let span = if self.all_day {",
+        "        let span = if false {",
+        [FOREIGN],
+    ),
+    (
+        "the import does not say what it left out",
+        "        if unreadable > 0 {",
+        "        if false {",
+        [SAID],
     ),
 ]
 

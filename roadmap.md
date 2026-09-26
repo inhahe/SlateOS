@@ -1837,6 +1837,9 @@ D's to act on once answered).
       queue, access modes, names judged as the kernel judges them, errors
       in its order, futex waits instead of spinning, and `mq_notify`.  Still
       one process's queues (D-Q3).
+    * thread-specific data in each thread's own storage (glibc's design): no
+      lock and no syscall per `pthread_getspecific`, 128 keys whose indices
+      are reused, no limit of 64 threads holding values.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

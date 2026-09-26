@@ -165903,7 +165903,17 @@ no overlap from aio. `SIGEV_SIGNAL` carries no value, since `sigqueue`
 delivers none yet (plain `raise` is glibc's own fallback without queued
 signals).
 
-### [D] TD-D-TSD-IS-A-GLOBAL-TABLE-KEYED-BY-TASK-ID — 2026-09-26 — OPEN
+### [D] TD-D-TSD-IS-A-GLOBAL-TABLE-KEYED-BY-TASK-ID — 2026-09-26 — FIXED 2026-09-26
+
+**Fixed 2026-09-26**, as proposed below: the keys are a table of 128
+(musl's `PTHREAD_KEYS_MAX`, and what `sysconf(_SC_THREAD_KEYS_MAX)` reports),
+each with a sequence number and a destructor; each thread's values are in
+blocks of 32 hanging off its per-thread block, allocated as it first sets a
+key in each and freed when it exits; `pthread_getspecific` is loads and a
+compare. A deleted key's index is reused, a value set under it before reads
+as NULL, and deleting a key not in use is `EINVAL`, as in glibc. The
+destructor sweep repeats only while destructors set values again, up to
+four times.
 
 **Where:** `posix/src/pthread.rs` — `TSD_TABLE` and `pthread_key_create`,
 `pthread_key_delete`, `pthread_getspecific`, `pthread_setspecific`.

@@ -156,7 +156,20 @@ pub struct PerThread {
     /// without looking itself up by an id its creator may not have published
     /// yet.
     pub thread_slot: usize,
+
+    /// This thread's thread-specific-data values: [`TSD_BLOCKS`] blocks of
+    /// `pthread`'s entries, each allocated (zeroed) when the thread first
+    /// sets a key in it and freed when it exits.
+    pub tsd: [*mut u8; TSD_BLOCKS],
+
+    /// A value was set since the last destructor sweep -- glibc's
+    /// `specific_used`, which decides whether a sweep repeats.
+    pub tsd_used: bool,
 }
+
+/// Blocks of thread-specific data a thread can have: with `pthread`'s 32
+/// values per block, 128 keys -- musl's `PTHREAD_KEYS_MAX`.
+pub const TSD_BLOCKS: usize = 4;
 
 impl PerThread {
     /// The initial state of a fresh thread's block.
@@ -178,6 +191,8 @@ impl PerThread {
         random: crate::random::RandomState::ZERO,
         tid: 0,
         thread_slot: 0,
+        tsd: [core::ptr::null_mut(); TSD_BLOCKS],
+        tsd_used: false,
     };
 }
 
@@ -299,6 +314,8 @@ mod tests {
         assert_eq!(zeroed.cancel_state, PerThread::ZERO.cancel_state);
         assert_eq!(zeroed.cancel_type, PerThread::ZERO.cancel_type);
         assert_eq!(zeroed.thread_slot, PerThread::ZERO.thread_slot);
+        assert_eq!(zeroed.tsd, PerThread::ZERO.tsd);
+        assert_eq!(zeroed.tsd_used, PerThread::ZERO.tsd_used);
     }
 
     /// A fresh thread must start cancellable and deferred, which POSIX

@@ -24279,6 +24279,20 @@ Ubuntu 24.04.
 - Beside them, the finding of the pass: the conversions themselves were not
   glibc's -- `B-D-ICONV-WAS-NOT-GLIBCS` (new, fixed with it).
 
+**Thirty-second pass, 2026-09-26 — `linux_io_uring.rs` (3 sites), lane D.**
+Against Linux 6.6's io_uring/io_uring.c and io_uring/sqpoll.c.
+
+- **`io_uring_setup(n, NULL)`** was `EFAULT` -- right, first, as
+  `copy_from_user` is -- and a block in the kernel half now is too.
+- **`io_uring_enter(fd, …, sig, sigsz)`** judged `sig` and `sigsz` before
+  the descriptor; Linux reads them only from a ring it has found, and there
+  is none, so a bad descriptor is `EBADF` whatever they are.
+- **`io_uring_register(fd, op, NULL, n)`** refused a NULL argument per
+  operation before the descriptor; the same holds -- the per-operation
+  checks come after the ring.
+- Beside them, the finding of the pass: the three calls validated in an
+  order of their own -- `B-D-IO-URING-WAS-NOT-LINUXS` (new, fixed with it).
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24292,16 +24306,16 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-thirty-one swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`, `sched.rs`,
+thirty-two swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`, `sched.rs`,
 `mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`, `linux_module.rs`,
 `sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs`, `sysv_sem.rs`, `linux_aio_abi.rs`,
-`linux_seccomp.rs`, `mman.rs`, `resource.rs`, `crypt.rs` and `iconv.rs`. That
-finishes the files the sweep had counted at four and at three: `pwd.rs`,
+`linux_seccomp.rs`, `mman.rs`, `resource.rs`, `crypt.rs`, `iconv.rs` and
+`linux_io_uring.rs`. That finishes every file the sweep counted at four and at
+three, the three the recount of 2026-09-26 added among them: `pwd.rs`,
 `dirent.rs` and `signal.rs` needed nothing at their NULLs -- `pwd.rs`'s
-database did (`B-D-PWD-KNEW-ONLY-ROOT`). A recount by the eleventh pass's rule
-on 2026-09-26 found three it had not listed: `crypt.rs` and `iconv.rs`, done
-by the thirtieth and thirty-first passes, and `linux_io_uring.rs` at three,
-which is next; then the files at two.
+database did (`B-D-PWD-KNEW-ONLY-ROOT`). Next are the files at two: `fts.rs`,
+`ftw.rs`, `linux_landlock.rs`, `sys_quota.rs`, `sys_timex.rs`, `sysv_shm.rs`
+and `xattr.rs` (walked by the fourth pass).
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
@@ -169804,6 +169818,35 @@ glibc has hundreds. The ones programs reach for first are UTF-16, UTF-32,
 UCS-2/UCS-4, `WCHAR_T` and CP1252; `todo.txt` (lane D) records what Ubuntu
 answered for each, byte orders and BOMs included. They are refused with
 `EINVAL` from `iconv_open`, as before.
+
+### [D] B-D-IO-URING-WAS-NOT-LINUXS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/linux_io_uring.rs` -- `io_uring_setup`,
+`io_uring_enter`, `io_uring_register`, and the `IORING_SETUP_*` constants.
+
+**In short:** SlateOS has no io_uring, and programs that can use it check
+for it at startup and fall back when it is missing. They tell "missing" from
+"called wrongly" by the error, so the error has to be Linux's. Ours checked
+arguments in an order of its own, refused combinations Linux accepts and
+accepted flags Linux 6.6 does not have -- and one flag constant had another
+flag's value.
+
+**What was wrong, against Linux 6.6:**
+
+| | was | now |
+|---|---|---|
+| `IORING_SETUP_SINGLE_ISSUER` | `1 << 8` -- the same bit as `IORING_SETUP_COOP_TASKRUN` | `1 << 12`, Linux's (the three other modules defining it had it right) |
+| accepted setup flags | `HYBRID_IOPOLL` (6.13's) in, `NO_MMAP` and `REGISTERED_FD_ONLY` (6.5's) out | bits 0 to 16, 6.6's set |
+| accepted enter flags, register opcodes | 6.12's `ABS_TIMER` and 6.13's `EXT_ARG_REG`; opcodes up to 31 | 6.6's: five flags, opcodes below 26 |
+| `SQPOLL` with `IOPOLL` | `EINVAL` | accepted (then `ENOSYS`) |
+| `SQPOLL` without `CAP_SYS_NICE` | `EPERM` | no capability is asked for, as in 6.6 |
+| `SQPOLL` with `COOP_TASKRUN`, `TASKRUN_FLAG` or `DEFER_TASKRUN`; `TASKRUN_FLAG` without `COOP_TASKRUN` or `DEFER_TASKRUN`; a CQ smaller than the SQ | accepted -- and the CQ compared before rounding, so a CQ of 5 for 8 entries was refused | `EINVAL` as Linux refuses them, the CQ compared after both round up to a power of two |
+| `io_uring_enter` | `min_complete`, `sig` and `sigsz` judged before the descriptor; every descriptor `EBADF` | flags, then the ring: not open `EBADF`, open `EOPNOTSUPP`, a registered-ring index `EINVAL` |
+| `io_uring_register` | per-operation argument shapes (and an invented `E2BIG`) before the descriptor | opcode, then the ring, as for `io_uring_enter` |
+
+`io_uring_setup` stops where Linux would allocate the rings and answers
+`ENOSYS`; the checks Linux makes afterwards (`ATTACH_WQ`'s descriptor,
+`SQ_AFF`'s CPU) are about rings that cannot exist here.
 
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 

@@ -19,7 +19,7 @@ connect to one.
 
 What a user sees: system log messages that go to four different places or
 nowhere, depending on which program wrote them — and `journalctl`, which
-reads only one of those places, shows almost none of them. What is being
+understands only one of those formats, shows almost none of them. What is being
 asked: path-bound `AF_UNIX` sockets — `SOCK_DGRAM` first, since that is what
 syslog uses, and `SOCK_STREAM` beside it, since most other users of
 Unix-domain sockets want that.
@@ -33,7 +33,7 @@ Unix-domain sockets want that.
 | `ntpdate -s` (`userspace/ntpd`) | `open("/dev/log")` as a *file*; the error is discarded, so the message is lost | B |
 | `syslogd log ...` | a JSON-lines record in `/var/log/syslog.jsonl` | B |
 | `syslogd daemon` | receives nothing: "for now, the daemon sits idle" | B |
-| `journalctl` | reads `/var/log/syslog.jsonl` (then `/var/log/syslog`) | B |
+| `journalctl` | reads `/var/log/syslog.jsonl` and `/var/log/syslog`, but parses only the JSON-lines records, so `logger`'s text lines never appear | B |
 
 Every POSIX program that logs does it the libc way — connect a datagram
 socket to `/dev/log` and send one frame per message — and so does util-linux's

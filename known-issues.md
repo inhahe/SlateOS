@@ -166444,9 +166444,10 @@ means. A program that logs the POSIX way sends a datagram to `/dev/log` and
 expects a daemon there to file it; here nothing listens on `/dev/log`, and
 nothing *can*, because a Unix-domain socket cannot be bound to a path
 (`socket(AF_UNIX, ...)` is `EAFNOSUPPORT`). So each writer does something
-different, and `journalctl` — which reads `/var/log/syslog.jsonl`, falling
-back to `/var/log/syslog` only when that yields nothing — sees almost none of
-it:
+different, and `journalctl` sees almost none of it: with nothing under
+`/var/log/journal/` it reads both `/var/log/syslog.jsonl` and `/var/log/syslog`,
+but it parses only JSON-lines records and skips every other line without a
+word (`read_all_entries` -> `JournalEntry::from_json_line`):
 
 | writer | where its messages go |
 |---|---|
@@ -166457,8 +166458,11 @@ it:
 | `syslogd log` | the same file |
 | `syslogd daemon` | receives nothing (`cmd_daemon`: "the daemon sits idle") |
 
-So `logger`'s lines are invisible to `journalctl` as soon as anything has
-written the JSON-lines file, and `ntpdate -s`'s are simply lost.
+So `logger`'s lines, which are RFC 3164 text, are never shown by
+`journalctl` at all, and `ntpdate -s`'s are simply lost. (Corrected
+2026-09-26: this entry first said `journalctl` fell back to
+`/var/log/syslog` only when the JSON-lines file yielded nothing. The code
+reads both; it is the parser that drops the text lines.)
 
 **The proper fix:**
 1. Lanes A and D: path-bound `AF_UNIX` sockets (the request above).
@@ -166484,3 +166488,28 @@ options, optional arguments). Only coreutils has one, as a module of its own
 crate; it is to be extracted into a shared crate first, which every
 standalone util-linux port here can then use — today they match long options
 whole, so `--pri` is refused where util-linux accepts it.
+
+## B-JOURNALCTL-SKIPS-A-WHOLE-LOG-FILE-OVER-ONE-BYTE-THAT-IS-NOT-UTF-8 (lane B, 2026-09-26) — **open**
+
+**In short:** `journalctl` reads each log file with `fs::read_to_string` and,
+if that fails, moves on to the next file without a word
+(`read_all_entries` in `userspace/journalctl/src/main.rs`). A single byte
+that is not valid UTF-8 anywhere in `/var/log/syslog.jsonl` therefore makes
+`journalctl` show *nothing* from that file -- every record in it, silently,
+with exit status 0. The same failure hides a file `journalctl` cannot open
+at all, where the user is told nothing either.
+
+**Reproduce:** append `printf '\xff\n'` to the log, then `journalctl`: the
+earlier records are gone from its output.
+
+**Where it comes from:** a writer that puts a message's raw bytes into the
+file (anything outside `journalrec::escape`, which takes `&str`), a torn
+write, or disk corruption -- the three things a log reader exists to survive.
+
+**The proper fix:** read the file as bytes and split on `\n`, so one bad
+record costs that record and no other; report a record that is not UTF-8,
+or not a record, as such (journald's own `journalctl` shows such data as
+`[N bytes blob data]` rather than dropping it); and report an unreadable
+file as an error naming it, with a non-zero status, instead of skipping it.
+Found while correcting TD-B-NOTHING-RECEIVES-SYSLOG-MESSAGES, which had
+misdescribed how `journalctl` chooses its files.

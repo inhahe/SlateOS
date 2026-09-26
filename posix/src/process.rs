@@ -694,18 +694,12 @@ pub extern "C" fn waitid(
     // the raw value.  Now that waitpid also rejects WEXITED/WNOWAIT/
     // etc (which are waitid-only bits), we must validate up-front
     // and then strip waitid-only bits before delegating.
-    if options & !WAITID_VALID_OPTIONS != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if options & (WEXITED | WSTOPPED | WCONTINUED) == 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
+    if options & !WAITID_VALID_OPTIONS != 0 || options & (WEXITED | WSTOPPED | WCONTINUED) == 0 {
+        return waitid_fail(infop, errno::EINVAL);
     }
 
     let Some(target) = waitid_target(idtype, id) else {
-        errno::set_errno(errno::EINVAL);
-        return -1;
+        return waitid_fail(infop, errno::EINVAL);
     };
     let kernel_options = waitid_kernel_options(options);
 
@@ -722,29 +716,67 @@ pub extern "C" fn waitid(
         if want_info { Some(&mut info) } else { None },
     );
     if ret < 0 {
-        // errno is already set.  Leave *infop alone: POSIX only specifies it
-        // on success, and a caller that inspects it after an error is reading
-        // its own uninitialised memory either way.
-        return -1;
+        // wait_common has set errno; the report is written all the same.
+        return waitid_fail(infop, errno::get_errno());
     }
     if want_info {
         let dst = infop.cast::<crate::signal::SiginfoT>();
-        let filled = if ret == 0 {
-            // WNOHANG miss.  Linux zeroes the whole structure so that
-            // `si_pid == 0` distinguishes this from a real state change,
-            // both of which return 0 from waitid.
-            crate::signal::SiginfoT::default()
+        if ret == 0 {
+            // WNOHANG miss: `si_pid == 0` is what tells it from a real state
+            // change, since both return 0 from waitid.
+            // SAFETY: the caller contract for `infop` is a writable
+            // `siginfo_t *` or NULL, and NULL was excluded by `want_info`.
+            unsafe { clear_waitid_report(dst) };
         } else {
-            siginfo_for_wait(ret, wstatus, &info)
-        };
-        // SAFETY: the caller contract for `infop` is a writable
-        // `siginfo_t *` (128 bytes) or NULL, and NULL was just excluded.
-        // `SiginfoT` is `repr(C)` and exactly that size and layout.
-        unsafe {
-            core::ptr::write(dst, filled);
+            // SAFETY: as above.  `SiginfoT` is `repr(C)` and exactly the
+            // 128-byte `siginfo_t` layout.
+            unsafe {
+                core::ptr::write(dst, siginfo_for_wait(ret, wstatus, &info));
+            }
         }
     }
     0
+}
+
+/// What `SYSCALL_DEFINE5(waitid)` (kernel/exit.c:1712) writes to `infop`
+/// when it reports no child — on a `WNOHANG` miss, and on *every* error:
+/// `si_signo`, `si_errno`, `si_code`, `si_pid`, `si_uid` and `si_status`,
+/// all zero (:1732-1737, from `signo = 0` and `info = {.status = 0}`).
+/// Those six fields and no others: the rest of the caller's structure is
+/// left as it was.
+///
+/// Until 2026-09-25 an error left `*infop` untouched, under a comment that
+/// POSIX only specifies it on success, and a miss zeroed all 128 bytes,
+/// under one saying Linux does.  Upstream does neither.
+///
+/// # Safety
+///
+/// `dst` must point to a writable `siginfo_t`.
+unsafe fn clear_waitid_report(dst: *mut crate::signal::SiginfoT) {
+    // SAFETY: caller contract.  Each write is to one field of a `repr(C)`
+    // struct through a raw pointer, so no reference to the caller's
+    // possibly-uninitialised memory is formed.
+    unsafe {
+        core::ptr::addr_of_mut!((*dst).si_signo).write(0);
+        core::ptr::addr_of_mut!((*dst).si_errno).write(0);
+        core::ptr::addr_of_mut!((*dst).si_code).write(0);
+        core::ptr::addr_of_mut!((*dst).si_pid).write(0);
+        core::ptr::addr_of_mut!((*dst).si_uid).write(0);
+        core::ptr::addr_of_mut!((*dst).si_status).write(0);
+    }
+}
+
+/// Fail a `waitid` call with `err`, having first written the empty report
+/// Linux writes on an error — see [`clear_waitid_report`].  A NULL `infop`
+/// receives nothing (`if (!infop) return err;`, kernel/exit.c:1726).
+fn waitid_fail(infop: *mut core::ffi::c_void, err: i32) -> i32 {
+    if !infop.is_null() {
+        // SAFETY: the caller contract for `infop` is a writable
+        // `siginfo_t *` or NULL, and NULL was just excluded.
+        unsafe { clear_waitid_report(infop.cast::<crate::signal::SiginfoT>()) };
+    }
+    errno::set_errno(err);
+    -1
 }
 
 /// Translate `waitid`'s `(idtype, id)` pair into the kernel's wait target.
@@ -1615,11 +1647,17 @@ pub const CLONE_FLAGS_VALID: u64 = crate::linux_clone_args::CLONE_VM
 /// layers here, in the order they fail on real Linux + glibc:
 ///
 /// 1. `fn == NULL`                                    → `EINVAL`
-///    (glibc's `clone.S` rejects this before the syscall)
-/// 2. `stack == NULL`                                 → `EINVAL`
-///    (glibc must initialise the child's stack pointer; the kernel
-///    also requires it whenever `CLONE_VM` is set because the child
-///    would otherwise share the parent's stack)
+/// 2. `stack & -16 == 0`                              → `EINVAL`
+///    Both are glibc's, not the kernel's, and come before the syscall:
+///    `sysdeps/unix/sysv/linux/x86_64/clone.S` loads `-EINVAL`, takes
+///    `SYSCALL_ERROR_LABEL` on `testq %rdi,%rdi`, then aligns the stack
+///    with `andq $-16, %rsi` and takes the same branch if the result is
+///    zero.  So a stack pointer below 16 is refused along with NULL, and
+///    neither can be `EFAULT`: nothing is dereferenced and no syscall is
+///    made.  (Both were `EFAULT` here, and three tests said so, until
+///    2026-09-25 — the blanket NULL-is-`EFAULT` sweep recorded in
+///    `known-issues.md` → `D-POSIX-NULL-POINTER-ERRNO-NEEDS-A-PER-FUNCTION-AUDIT`
+///    changed the code and the tests and left this list saying `EINVAL`.)
 /// 3. exit-signal byte `flags & CSIGNAL > 64`         → `EINVAL`
 /// 4. `flags & ~(CSIGNAL | CLONE_FLAGS_VALID)`        → `EINVAL`
 ///    (rejects clone3-only bits and any other reserved bits)
@@ -1652,16 +1690,14 @@ pub const CLONE_FLAGS_VALID: u64 = crate::linux_clone_args::CLONE_VM
 /// matter if the syscall actually reached the kernel.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clone(fn_ptr: *const u8, child_stack: *mut u8, flags: i32, _arg: *mut u8) -> i32 {
-    // (1) glibc rejects NULL fn before issuing the syscall.
+    // (1)/(2) glibc's clone.S, before the syscall: a NULL function, or a
+    // stack that is zero once aligned down to 16 bytes, is EINVAL.
     if fn_ptr.is_null() {
-        errno::set_errno(errno::EFAULT);
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // (2) child_stack is mandatory in the glibc wrapper (it has to
-    // arrange for the child to return into the user-provided fn) and
-    // in the kernel whenever CLONE_VM is set.
-    if child_stack.is_null() {
-        errno::set_errno(errno::EFAULT);
+    if (child_stack as usize) & !15 == 0 {
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
 
@@ -1932,109 +1968,255 @@ pub extern "C" fn setns(fd: i32, nstype: i32) -> i32 {
     -1
 }
 
-/// Maximum source/target path length accepted by `mount(2)`.
+/// Linux's `PATH_MAX`: 4096 bytes, *including* the terminating NUL.
 ///
-/// Matches Linux's `PATH_MAX` (4096 bytes including NUL).  Source and
-/// target paths longer than this are rejected with `ENAMETOOLONG`.
+/// Both of upstream's copies of a mount string stop after this many bytes.
+/// `getname_flags` copies a path with `strncpy_from_user(…, PATH_MAX)` and
+/// calls it too long when that fills the buffer (fs/namei.c:178-187), and
+/// `copy_mount_string` (fs/namespace.c:3568) uses `strndup_user(…,
+/// PATH_MAX)`, which refuses a string whose length *with* its NUL exceeds it
+/// (mm/util.c:253).  So 4095 bytes of name is the most either accepts.  The
+/// walk here accepted 4096 until 2026-09-25, because it was asked for
+/// `PATH_MAX` bytes *before* the NUL.
 pub const MOUNT_PATH_MAX: usize = 4096;
 
-/// Maximum filesystem-type name length accepted by `mount(2)`.
+/// The length of the NUL-terminated string at `s`, if its NUL is among the
+/// first `limit` bytes, and `None` if it is not.  Reads at most `limit`
+/// bytes.
 ///
-/// Linux's `copy_mount_string` caps the fstype copy at `PAGE_SIZE`
-/// (4096 on x86_64).  We use a tighter 256-byte cap which still
-/// accommodates every real-world fstype ("ext4", "xfs", "tmpfs",
-/// "overlay", "fuse.gocryptfs-1.7", "nfs4", "cifs", "9p", ...).
-pub const MOUNT_TYPE_MAX: usize = 256;
+/// That is the question both of upstream's bounded string copies ask —
+/// `strncpy_from_user(dst, s, limit)` returning `limit`, and
+/// `strnlen_user(s, limit)` returning more than `limit` — and it is all libc
+/// can learn about a caller's string short of faulting on it.
+///
+/// # Safety
+///
+/// `s` must be non-null and readable up to its first NUL or `limit` bytes,
+/// whichever comes first — the same contract as `strnlen_user`.
+#[inline]
+unsafe fn bounded_cstr_len(s: *const u8, limit: usize) -> Option<usize> {
+    (0..limit).find(|&i| {
+        // SAFETY: caller contract — readable up to the first NUL or `limit`
+        // bytes; `find` stops at the first NUL, so every byte read is at an
+        // index below `limit` with every earlier byte non-NUL.
+        let byte = unsafe { *s.add(i) };
+        byte == 0
+    })
+}
 
-/// All `MS_*` bits accepted by `mount(2)`.
+/// `copy_mount_string` (fs/namespace.c:3568), which `mount(2)` applies to the
+/// filesystem type and the source before it looks at anything else.
 ///
-/// Mirrors Linux's user-visible mount-flag set in `fs/namespace.c`.
-/// Any bit outside this mask is rejected with `EINVAL`.  Note that
-/// `MS_KERNMOUNT` is kernel-internal and not exposed here — passing
-/// it from userspace is rejected.
-pub const MOUNT_FLAGS_VALID: u64 = crate::sys_mount::MS_RDONLY
-    | crate::sys_mount::MS_NOSUID
-    | crate::sys_mount::MS_NODEV
-    | crate::sys_mount::MS_NOEXEC
-    | crate::sys_mount::MS_SYNCHRONOUS
-    | crate::sys_mount::MS_REMOUNT
-    | crate::sys_mount::MS_MANDLOCK
-    | crate::sys_mount::MS_DIRSYNC
-    | crate::sys_mount::MS_NOSYMFOLLOW
-    | crate::sys_mount::MS_NOATIME
-    | crate::sys_mount::MS_NODIRATIME
-    | crate::sys_mount::MS_BIND
-    | crate::sys_mount::MS_MOVE
-    | crate::sys_mount::MS_REC
-    | crate::sys_mount::MS_SILENT
-    | crate::sys_mount::MS_POSIXACL
-    | crate::sys_mount::MS_UNBINDABLE
-    | crate::sys_mount::MS_PRIVATE
-    | crate::sys_mount::MS_SLAVE
-    | crate::sys_mount::MS_SHARED
-    | crate::sys_mount::MS_RELATIME
-    | crate::sys_mount::MS_I_VERSION
-    | crate::sys_mount::MS_STRICTATIME
-    | crate::sys_mount::MS_LAZYTIME;
+/// A NULL string is *absent*, not an error — `data ? strndup_user(data,
+/// PATH_MAX) : NULL` — and whether an absent one is acceptable is decided
+/// later, by the operation.  A present one must end within `PATH_MAX` bytes
+/// or it is `EINVAL`: `strndup_user` (mm/util.c:253), not `ENAMETOOLONG`.
+///
+/// Returns the string's length, or `None` for an absent one.
+///
+/// # Safety
+///
+/// `s`, when non-NULL, must be readable up to its first NUL or
+/// [`MOUNT_PATH_MAX`] bytes.
+unsafe fn copy_mount_string(s: *const u8) -> Result<Option<usize>, i32> {
+    if s.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: `s` is non-null; the caller's contract covers the read.
+    match unsafe { bounded_cstr_len(s, MOUNT_PATH_MAX) } {
+        Some(len) => Ok(Some(len)),
+        None => Err(errno::EINVAL),
+    }
+}
 
-/// Bits that select the *mode* of the mount operation.
+/// The part of `user_path_at` that needs no filesystem: `getname_flags`
+/// (fs/namei.c:130).  NULL faults; no NUL within `PATH_MAX` bytes is
+/// `ENAMETOOLONG` (:184-187); the empty name is `ENOENT` (:193-198), since
+/// neither `mount` nor `umount2` passes `LOOKUP_EMPTY`.
 ///
-/// Linux's `do_mount` dispatches based on which of these bits is set:
-/// `MS_REMOUNT` → remount path, `MS_BIND` → bind path,
-/// `MS_MOVE` → move path, one of `MS_SHARED|MS_PRIVATE|MS_SLAVE|
-/// MS_UNBINDABLE` → propagation-type change, none → fresh mount.
+/// What comes after — walking the path, so that a missing one is `ENOENT`
+/// and a file in the middle of one `ENOTDIR` — is not modelled.
 ///
-/// Exactly **one** (or zero) of these bits may be set.  Combinations
-/// like `MS_BIND | MS_MOVE` or `MS_SHARED | MS_PRIVATE` are rejected
-/// with `EINVAL` (Linux's `do_mount` likewise checks this).  Note that
-/// `MS_REC` is **not** a mode bit — it modifies bind/propagation
-/// operations and may be combined with any of them.
-pub const MOUNT_MODE_BITS: u64 = crate::sys_mount::MS_REMOUNT
-    | crate::sys_mount::MS_BIND
-    | crate::sys_mount::MS_MOVE
-    | crate::sys_mount::MS_SHARED
+/// # Safety
+///
+/// `path`, when non-NULL, must be readable up to its first NUL or
+/// [`MOUNT_PATH_MAX`] bytes.
+unsafe fn getname_verdict(path: *const u8) -> Result<(), i32> {
+    if path.is_null() {
+        return Err(errno::EFAULT);
+    }
+    // SAFETY: `path` is non-null; the caller's contract covers the read.
+    match unsafe { bounded_cstr_len(path, MOUNT_PATH_MAX) } {
+        None => Err(errno::ENAMETOOLONG),
+        Some(0) => Err(errno::ENOENT),
+        Some(_) => Ok(()),
+    }
+}
+
+/// The four propagation types, of which `do_change_type` accepts exactly
+/// one.
+const MOUNT_PROPAGATION_BITS: u64 = crate::sys_mount::MS_SHARED
     | crate::sys_mount::MS_PRIVATE
     | crate::sys_mount::MS_SLAVE
     | crate::sys_mount::MS_UNBINDABLE;
+
+/// `flags_to_propagation_type` (fs/namespace.c:2527): the only flags that may
+/// accompany a propagation type are `MS_REC` and `MS_SILENT`, and there must
+/// be one type exactly.
+///
+/// Upstream receives the flag word as an `int` (`do_change_type(path,
+/// flags)`, :3658, into `int ms_flags`), so only its low 32 bits take part;
+/// that truncation is reproduced here.
+fn propagation_type_is_valid(flags: u64) -> bool {
+    // All three are below bit 32, so the casts are exact.
+    let others = (crate::sys_mount::MS_REC | crate::sys_mount::MS_SILENT) as u32;
+    let types = MOUNT_PROPAGATION_BITS as u32;
+    let t = (flags as u32) & !others;
+    t & !types == 0 && t.is_power_of_two()
+}
+
+/// Everything `mount(2)` decides that libc can decide too, in upstream's
+/// order; see [`mount`].  `Ok(())` means the call reached the point where
+/// only a mount table could answer.
+///
+/// # Safety
+///
+/// As for [`mount`].
+unsafe fn mount_verdict(
+    source: *const u8,
+    target: *const u8,
+    fstype: *const u8,
+    flags: u64,
+) -> Result<(), i32> {
+    use crate::linux_mount_user_types::{MS_MGC_MSK, MS_MGC_VAL};
+    use crate::sys_mount::{MS_BIND, MS_MOVE, MS_NOUSER, MS_REMOUNT};
+
+    // 1. `SYSCALL_DEFINE5(mount)` (fs/namespace.c:3861) copies the type,
+    //    then the source, before it reads the target.
+    // SAFETY: caller contract for `fstype` and `source`.
+    let fstype_len = unsafe { copy_mount_string(fstype) }?;
+    // SAFETY: as above.
+    let source_len = unsafe { copy_mount_string(source) }?;
+
+    // 2. `do_mount` → `user_path_at(dir_name)` (:3672).
+    // SAFETY: caller contract for `target`.
+    unsafe { getname_verdict(target) }?;
+
+    // 3. `path_mount` (:3587): discard the pre-0.97 magic (:3594), refuse
+    //    `MS_NOUSER` (:3601).  No other bit is refused anywhere on the path.
+    let flags = if flags & MS_MGC_MSK == MS_MGC_VAL {
+        flags & !MS_MGC_MSK
+    } else {
+        flags
+    };
+    if flags & MS_NOUSER != 0 {
+        return Err(errno::EINVAL);
+    }
+
+    // 4. `may_mount()` (:3607), before the operation is chosen.
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN) {
+        return Err(errno::EPERM);
+    }
+
+    // 5. The operation: the first test that matches (:3651-3662).
+    let source_given = matches!(source_len, Some(len) if len > 0);
+    if flags & MS_REMOUNT != 0 {
+        // `do_reconfigure_mnt` (with MS_BIND) or `do_remount`: both act on
+        // the mount already at the target.
+        return Ok(());
+    }
+    if flags & MS_BIND != 0 {
+        // `do_loopback` (:2602): `if (!old_name || !*old_name) return -EINVAL;`
+        return if source_given {
+            Ok(())
+        } else {
+            Err(errno::EINVAL)
+        };
+    }
+    if flags & MOUNT_PROPAGATION_BITS != 0 {
+        // `do_change_type` (:2543).  Its first refusal, a target that is not
+        // a mount point, is `EINVAL` too, so this one is decidable alone.
+        return if propagation_type_is_valid(flags) {
+            Ok(())
+        } else {
+            Err(errno::EINVAL)
+        };
+    }
+    if flags & MS_MOVE != 0 {
+        // `do_move_mount_old` (:3200): the same test as `do_loopback`.
+        return if source_given {
+            Ok(())
+        } else {
+            Err(errno::EINVAL)
+        };
+    }
+    // `do_new_mount` (:3294): no type is `EINVAL` (:3302); an unregistered
+    // one is `ENODEV` (:3305-3307).  `get_fs_type` looks up the part before
+    // the first `.`, so an empty name — or one that starts with a dot —
+    // matches no filesystem; any other name needs the registry.  A NULL
+    // source is fine here: filesystems without a device, such as `proc` and
+    // `tmpfs`, take none.
+    if fstype_len.is_none() {
+        return Err(errno::EINVAL);
+    }
+    // SAFETY: `copy_mount_string` found the type's NUL, so the type is
+    // non-NULL and at least its first byte is readable.
+    let first = unsafe { *fstype };
+    if first == 0 || first == b'.' {
+        return Err(errno::ENODEV);
+    }
+    Ok(())
+}
 
 /// Mount a filesystem.
 ///
 /// # Linux behaviour
 ///
 /// `mount(const char *source, const char *target, const char *fstype,
-///        unsigned long flags, const void *data)`.  Argument-domain
-/// checks performed before reaching kernel mount code, in the order
-/// Linux executes them:
+///        unsigned long flags, const void *data)` is a bare syscall in glibc,
+/// so every verdict is the kernel's, in this order (fs/namespace.c:
+/// `SYSCALL_DEFINE5(mount)` :3861 → `do_mount` :3666 → `path_mount` :3587):
 ///
-/// 1. `target == NULL`                                  → `EFAULT`
-/// 2. empty target string                               → `ENOENT`
-/// 3. target not NUL-terminated within `PATH_MAX`       → `ENAMETOOLONG`
-/// 4. `flags & ~MOUNT_FLAGS_VALID`                      → `EINVAL`
-/// 5. more than one of `MOUNT_MODE_BITS` set            → `EINVAL`
-/// 6. modes requiring a source (`MS_BIND`, `MS_MOVE`, fresh mount)
-///    validate the source pointer:
-///    * `source == NULL`                                → `EFAULT`
-///    * empty source string                             → `ENOENT`
-///    * source overflows `PATH_MAX`                     → `ENAMETOOLONG`
-/// 7. modes requiring a filesystem type (fresh mount only) validate
-///    the fstype pointer:
-///    * `fstype == NULL`                                → `EFAULT`
-///    * empty fstype string                             → `EINVAL`
-///      (matches Linux's "no such filesystem" path)
-///    * fstype overflows `MOUNT_TYPE_MAX`               → `ENAMETOOLONG`
+/// 1. `fstype`, then `source`, through [`copy_mount_string`]: NULL is
+///    absent, not an error; one with no NUL in `PATH_MAX` bytes → `EINVAL`.
+/// 2. `target`, through `user_path_at`: NULL → `EFAULT`, empty → `ENOENT`,
+///    no NUL in `PATH_MAX` bytes → `ENAMETOOLONG`.
+/// 3. `flags`: `MS_MGC_VAL` in bits 16-31 is discarded, then `MS_NOUSER` →
+///    `EINVAL`.  No other bit is refused — the per-mount bits are
+///    translated, the superblock bits masked, and the rest ignored.
+/// 4. `may_mount()` (CAP_SYS_ADMIN) → `EPERM`.
+/// 5. The operation, by the first test that matches:
+///    * `MS_REMOUNT` (with or without `MS_BIND`) — reconfigure or remount;
+///    * `MS_BIND` — NULL or empty `source` → `EINVAL`;
+///    * a propagation type (`MS_SHARED`, `MS_PRIVATE`, `MS_SLAVE`,
+///      `MS_UNBINDABLE`) — any flag besides `MS_REC`/`MS_SILENT`, or more
+///      than one type, → `EINVAL`;
+///    * `MS_MOVE` — NULL or empty `source` → `EINVAL`;
+///    * otherwise a new mount — NULL `fstype` → `EINVAL`, an unregistered
+///      one → `ENODEV`, which an empty name always is.
 ///
-/// After all argument-domain checks pass we return `ENOSYS`: there is
-/// no VFS/mount-namespace subsystem in this microkernel — filesystem
-/// services live in userspace and are reached via capability handles,
-/// not via the legacy `mount(2)` syscall.
+/// A call that gets through all of that is `ENOSYS`: there is no mount
+/// table here to change — filesystem services live in userspace and are
+/// reached through capability handles, not the legacy `mount(2)` call.  The
+/// verdicts that need the table are therefore never given: a target that is
+/// not a mount point, a type we cannot look up, a source the filesystem
+/// refuses — and the target is not walked, so a missing one reaches
+/// `EPERM`/`ENOSYS` where Linux says `ENOENT`.
+///
+/// Until 2026-09-25 the target came first, which is not upstream's order
+/// only for over-long type and source strings, but then: flag bits outside a
+/// whitelist were refused and so were any two "mode" bits together, neither
+/// of which upstream does — the second refused `MS_REMOUNT | MS_BIND`, the
+/// usual way to make a bind mount read-only; `source` and `fstype` were
+/// `EFAULT` where upstream has `EINVAL`; a NULL source was refused for a
+/// new mount; type names were capped at an invented 256 bytes; and privilege
+/// was asked last, after the operation's own checks.
 ///
 /// # Safety
 ///
-/// When non-NULL, `target` and `source` must each point to a
-/// NUL-terminated byte string or to at least `MOUNT_PATH_MAX + 1`
-/// readable bytes.  `fstype`, when non-NULL, must point to a
-/// NUL-terminated byte string or at least `MOUNT_TYPE_MAX + 1`
-/// readable bytes.  `data` is never dereferenced.
+/// Each of `source`, `target` and `fstype`, when non-NULL, must point to a
+/// NUL-terminated byte string or to at least [`MOUNT_PATH_MAX`] readable
+/// bytes.  `data` is never dereferenced.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mount(
     source: *const u8,
@@ -2043,104 +2225,19 @@ pub extern "C" fn mount(
     flags: u64,
     _data: *const u8,
 ) -> i32 {
-    // (1)–(3) Target: required, non-NULL, non-empty, NUL-terminated
-    // within PATH_MAX.
-    if target.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    // SAFETY: target is non-null; caller contract guarantees
-    // NUL-terminated string or PATH_MAX+1 readable bytes.
-    let tlen = unsafe { umount_cstr_len(target, MOUNT_PATH_MAX) };
-    match tlen {
-        None => {
-            errno::set_errno(errno::ENAMETOOLONG);
-            return -1;
+    // SAFETY: the caller's contract is `mount_verdict`'s.
+    match unsafe { mount_verdict(source, target, fstype, flags) } {
+        Err(e) => {
+            errno::set_errno(e);
+            -1
         }
-        Some(0) => {
-            errno::set_errno(errno::ENOENT);
-            return -1;
-        }
-        Some(_) => {}
-    }
-
-    // (4) Reject unknown MS_* bits.
-    if (flags & !MOUNT_FLAGS_VALID) != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
-    // (5) At most one mode bit may be set.
-    let mode_bits = flags & MOUNT_MODE_BITS;
-    if mode_bits != 0 && !mode_bits.is_power_of_two() {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
-    // (6) Source required for: fresh mount, MS_BIND, MS_MOVE.
-    // Not required for MS_REMOUNT or any propagation-type change.
-    let source_required = mode_bits == 0
-        || mode_bits == crate::sys_mount::MS_BIND
-        || mode_bits == crate::sys_mount::MS_MOVE;
-    if source_required {
-        if source.is_null() {
-            errno::set_errno(errno::EFAULT);
-            return -1;
-        }
-        // SAFETY: source non-null per caller contract.
-        let slen = unsafe { umount_cstr_len(source, MOUNT_PATH_MAX) };
-        match slen {
-            None => {
-                errno::set_errno(errno::ENAMETOOLONG);
-                return -1;
-            }
-            Some(0) => {
-                errno::set_errno(errno::ENOENT);
-                return -1;
-            }
-            Some(_) => {}
+        Ok(()) => {
+            // Every argument upstream can refuse without a mount table has
+            // been checked, and the caller is privileged.
+            errno::set_errno(errno::ENOSYS);
+            -1
         }
     }
-
-    // (7) fstype required only for fresh mount.  Bind/move/remount/
-    // propagation ignore fstype on Linux.
-    let fstype_required = mode_bits == 0;
-    if fstype_required {
-        if fstype.is_null() {
-            errno::set_errno(errno::EFAULT);
-            return -1;
-        }
-        // SAFETY: fstype non-null per caller contract.
-        let flen = unsafe { umount_cstr_len(fstype, MOUNT_TYPE_MAX) };
-        match flen {
-            None => {
-                errno::set_errno(errno::ENAMETOOLONG);
-                return -1;
-            }
-            Some(0) => {
-                // Linux returns ENODEV for empty/unknown fstype after
-                // module-load failure; we collapse to EINVAL since we
-                // never reach fstype lookup.
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-            Some(_) => {}
-        }
-    }
-
-    // (8) may_mount → EPERM (Phase 165).  Linux's path_mount checks
-    //     this *after* path resolution and the MS_NOUSER / security
-    //     hook, so an unprivileged caller with bad path or unknown
-    //     flag bits still sees the argument errno — only well-formed
-    //     calls trip EPERM.
-    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN) {
-        errno::set_errno(errno::EPERM);
-        return -1;
-    }
-    // All arguments validated and caller is privileged; VFS/mount
-    // subsystem not implemented.
-    errno::set_errno(errno::ENOSYS);
-    -1
 }
 
 /// All flag bits accepted by `umount2(2)`.
@@ -2153,166 +2250,76 @@ pub const UMOUNT2_FLAGS_VALID: i32 = crate::sys_mount::MNT_FORCE
     | crate::sys_mount::MNT_EXPIRE
     | crate::sys_mount::UMOUNT_NOFOLLOW;
 
-/// Maximum path length accepted by `umount`/`umount2` (matches
-/// `PATH_MAX` on Linux — 4096 bytes including NUL).
-pub const UMOUNT_PATH_MAX: usize = 4096;
-
-/// Walk a NUL-terminated byte string up to `max` bytes (excluding NUL).
-///
-/// Returns `Some(len)` if a NUL byte is found, where `len` is the number
-/// of bytes before the NUL.  Returns `None` if no NUL appears in the
-/// first `max + 1` bytes — the path is treated as "too long."
-///
-/// # Safety
-///
-/// `s` must be non-null and point to at least one readable byte; the
-/// walk stops as soon as a NUL is found or after reading `max + 1` bytes.
-/// Caller must ensure the buffer is at least `max + 1` bytes large or
-/// terminated within that range — same contract as Linux's `strnlen_user`.
-#[inline]
-unsafe fn umount_cstr_len(s: *const u8, max: usize) -> Option<usize> {
-    let mut i = 0usize;
-    while i <= max {
-        // SAFETY: caller contract — readable up to first NUL or max+1.
-        let b = unsafe { *s.add(i) };
-        if b == 0 {
-            return Some(i);
-        }
-        // `i <= max < usize::MAX` — increment cannot overflow.
-        i = i.wrapping_add(1);
-    }
-    None
-}
+/// Maximum path length accepted by `umount`/`umount2`: Linux's `PATH_MAX`,
+/// 4096 bytes including the NUL.  See [`MOUNT_PATH_MAX`].
+pub const UMOUNT_PATH_MAX: usize = MOUNT_PATH_MAX;
 
 /// Unmount a filesystem.
 ///
-/// # Linux behaviour
-///
-/// `umount(const char *target)` (Linux's old single-arg form, kept for
-/// backward compat with libc; `umount(8)` actually calls `umount2`).
-/// Linux dispatches this through `ksys_umount(target, 0)`, where the
-/// flag-mask check passes vacuously and `may_mount()` runs *before*
-/// the user-pointer is dereferenced.
-///
-/// Argument checks, in Linux order:
-///
-/// 1. `!may_mount()` (CAP_SYS_ADMIN)          → `EPERM`  (Phase 165)
-/// 2. `target == NULL`                         → `EFAULT`
-/// 3. `*target == 0` (empty path)              → `ENOENT`
-/// 4. not NUL-terminated within `PATH_MAX`     → `ENAMETOOLONG`
-///
-/// After argument and capability validation we return `ENOSYS`
-/// because no filesystem-namespace subsystem is wired up here.
+/// glibc's `umount` is `__umount2 (name, 0)`
+/// (sysdeps/unix/sysv/linux/umount.c) — x86-64 has no one-argument umount
+/// syscall — so this is [`umount2`] with no flags, and has exactly its
+/// verdicts.
 ///
 /// # Safety
 ///
 /// `target`, when non-NULL, must point to a NUL-terminated byte string
-/// or to at least `UMOUNT_PATH_MAX + 1` readable bytes.
+/// or to at least `UMOUNT_PATH_MAX` readable bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn umount(target: *const u8) -> i32 {
-    // 1. may_mount → EPERM.  Phase 165: Linux performs this before
-    //    user_path_at, so an unprivileged caller never learns whether
-    //    `target` is mapped or empty.
-    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN) {
-        errno::set_errno(errno::EPERM);
-        return -1;
-    }
-    if target.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    // SAFETY: target is non-null; caller contract gives us a NUL-
-    // terminated string or at least UMOUNT_PATH_MAX+1 readable bytes.
-    let len = unsafe { umount_cstr_len(target, UMOUNT_PATH_MAX) };
-    match len {
-        None => {
-            // No NUL in PATH_MAX+1 bytes — path is too long.
-            errno::set_errno(errno::ENAMETOOLONG);
-            -1
-        }
-        Some(0) => {
-            // Empty path string.
-            errno::set_errno(errno::ENOENT);
-            -1
-        }
-        Some(_) => {
-            // Path is well-formed; mount subsystem not wired up.
-            errno::set_errno(errno::ENOSYS);
-            -1
-        }
-    }
+    umount2(target, 0)
 }
 
 /// Unmount a filesystem with flags.
 ///
 /// # Linux behaviour
 ///
-/// `umount2(const char *target, int flags)` (the syscall `umount(8)`
-/// actually invokes).  Argument checks, in the order Linux performs
-/// them in `fs/namespace.c::ksys_umount` / `path_umount`:
+/// `umount2(const char *target, int flags)` is a bare syscall, and its
+/// verdicts come in this order (fs/namespace.c):
 ///
-/// 1. `flags & ~UMOUNT2_FLAGS_VALID`                   → `EINVAL`
-///    Linux performs this check *before* `may_mount`, so an unknown
-///    flag bit beats every other error (including EPERM).
-/// 2. `!may_mount()` (CAP_SYS_ADMIN)                   → `EPERM`
-///    (Phase 165.)  Linux's `ksys_umount` checks this between the
-///    flag mask and `user_path_at`, so an unprivileged caller with
-///    a well-formed flag word gets EPERM regardless of the target
-///    pointer.
-/// 3. `target == NULL`                                 → `EFAULT`
-///    Linux: `user_path_at → getname → strncpy_from_user` on a NULL
-///    user pointer returns `-EFAULT`.
-/// 4. `*target == 0`                                   → `ENOENT`
-///    Linux: empty path string fails name resolution with `-ENOENT`.
-/// 5. not NUL-terminated within `PATH_MAX`             → `ENAMETOOLONG`
-///    Linux: `getname` enforces the `PATH_MAX` bound.
-/// 6. `MNT_EXPIRE` combined with `MNT_FORCE | MNT_DETACH`→ `EINVAL`
-///    Linux: `do_umount` rejects this combo *after* path resolution,
-///    because an expiry mark can't coexist with a force/detach action.
-///    We surface it as an extra validation step before `ENOSYS`.
+/// 1. `flags & ~UMOUNT2_FLAGS_VALID` → `EINVAL` — `ksys_umount` (:1909),
+///    "basic validity checks done first".
+/// 2. `target`, through `user_path_at` (:1914): NULL → `EFAULT`, empty →
+///    `ENOENT`, no NUL in `PATH_MAX` bytes → `ENAMETOOLONG`.
+/// 3. `may_mount()` (CAP_SYS_ADMIN) → `EPERM` — in `can_umount` (:1873),
+///    *after* the path has resolved.
+/// 4. `MNT_EXPIRE` with `MNT_FORCE` or `MNT_DETACH` → `EINVAL` — `do_umount`
+///    (:1722).  Between 3 and 4 upstream refuses a target that is not a
+///    mount point, also with `EINVAL`, so this one is decidable without the
+///    table.
 ///
-/// After arguments are validated we return `ENOSYS`.
+/// Everything else is `ENOSYS`; see [`mount`] for why.
+///
+/// The privilege check sat before the path until 2026-09-25, with comments
+/// saying that `ksys_umount` makes it "between the flag mask and
+/// `user_path_at`" and that this kept an unprivileged caller from learning
+/// whether its target was mapped or empty.  That was true of kernels before
+/// 5.9; since the check moved into `can_umount` it is not, and an
+/// unprivileged `umount2(NULL, 0)` is `EFAULT`.
 ///
 /// # Safety
 ///
 /// `target`, when non-NULL, must point to a NUL-terminated byte string
-/// or to at least `UMOUNT_PATH_MAX + 1` readable bytes.
+/// or to at least `UMOUNT_PATH_MAX` readable bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn umount2(target: *const u8, flags: i32) -> i32 {
-    // 1. Reject unknown flag bits.  Linux performs this check at the
-    //    very top of `ksys_umount`, before any path resolution.
+    // 1. The flag mask, ahead of everything (ksys_umount, :1909).
     if (flags & !UMOUNT2_FLAGS_VALID) != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // 2. may_mount → EPERM (Phase 165).  Linux's ksys_umount checks
-    //    this between the flag mask and user_path_at, so a clean
-    //    flag word + unprivileged caller short-circuits to EPERM
-    //    before the target pointer is inspected.
+    // 2. The path (user_path_at, :1914).
+    // SAFETY: the caller's contract for `target`.
+    if let Err(e) = unsafe { getname_verdict(target) } {
+        errno::set_errno(e);
+        return -1;
+    }
+    // 3. may_mount, in can_umount (:1873).
     if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
-    // 3. NULL target → EFAULT (Linux: getname/strncpy_from_user).
-    if target.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    // 4. Path string validation.  SAFETY: same contract as umount above.
-    let len = unsafe { umount_cstr_len(target, UMOUNT_PATH_MAX) };
-    match len {
-        None => {
-            errno::set_errno(errno::ENAMETOOLONG);
-            return -1;
-        }
-        Some(0) => {
-            errno::set_errno(errno::ENOENT);
-            return -1;
-        }
-        Some(_) => {}
-    }
-    // 5. MNT_EXPIRE is mutually exclusive with MNT_FORCE and MNT_DETACH
-    //    (Linux's `do_umount`, after path resolution).
+    // 4. MNT_EXPIRE excludes MNT_FORCE and MNT_DETACH (do_umount, :1722).
     if (flags & crate::sys_mount::MNT_EXPIRE) != 0
         && (flags & (crate::sys_mount::MNT_FORCE | crate::sys_mount::MNT_DETACH)) != 0
     {
@@ -3319,11 +3326,18 @@ pub const CLONE3_SIZE_MAX: usize = 4096;
 /// kernel's `kernel/fork.c::sys_clone3` performs the following
 /// argument-domain checks before any process state is touched:
 ///
-/// 1. `cl_args == NULL`                          → `EFAULT`
-/// 2. `size > PAGE_SIZE`                         → `E2BIG`
-/// 3. `size < CLONE_ARGS_SIZE_VER0`              → `EINVAL`
+/// 1. `size > PAGE_SIZE`                         → `E2BIG`
+/// 2. `size < CLONE_ARGS_SIZE_VER0`              → `EINVAL`
+/// 3. `cl_args == NULL`                          → `EFAULT`
 /// 4. trailing bytes beyond the largest known struct version are
 ///    non-zero (forward-compat guard)            → `E2BIG`
+///
+/// The two size tests come first because `copy_clone_args_from_user`
+/// (kernel/fork.c:3074-3077) makes them on `usize` alone, before
+/// `copy_struct_from_user` (:3079) reads a byte of the struct.  So
+/// `clone3(NULL, 8)` is `EINVAL` and `clone3(NULL, 8192)` is `E2BIG`.
+/// Until 2026-09-25 the NULL test sat first here, under a comment calling
+/// that "Linux order"; it is the reverse of it.
 /// 5. `flags & CSIGNAL`                          → `EINVAL`
 ///    (clone3 uses `exit_signal`, not the low byte of flags)
 /// 6. `flags & ~CLONE3_FLAGS_VALID`              → `EINVAL`
@@ -3366,20 +3380,21 @@ pub const CLONE3_SIZE_MAX: usize = 4096;
 /// dereference).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clone3(args: *const CloneArgs, size: usize) -> i64 {
-    // (1) NULL pointer rejected before size check (Linux order).
-    if args.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    // (2) Cap total struct size at one page.
+    // (1) Cap total struct size at one page — kernel/fork.c:3074, on the
+    // size alone, before the struct is read.
     if size > CLONE3_SIZE_MAX {
         errno::set_errno(errno::E2BIG);
         return -1;
     }
-    // (3) Below the V0 floor — too small to even hold flags+pidfd+
-    // child_tid+parent_tid+exit_signal+stack+stack_size+tls.
+    // (2) Below the V0 floor — too small to even hold flags+pidfd+
+    // child_tid+parent_tid+exit_signal+stack+stack_size+tls (:3076).
     if size < crate::linux_clone_args::CLONE_ARGS_SIZE_VER0 as usize {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // (3) Only now is the pointer used: `copy_struct_from_user` (:3079).
+    if args.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -3563,39 +3578,150 @@ pub extern "C" fn clone3(args: *const CloneArgs, size: usize) -> i64 {
 /// with `EINVAL` regardless of actual array contents.
 pub const PROCESS_VM_UIO_MAXIOV: u64 = 1024;
 
-/// Maximum total byte count summable across an iovec array.
+/// The largest `iov_len` one segment may carry.
 ///
-/// Linux uses `SSIZE_MAX` (`i64::MAX` on x86_64) as the per-direction
-/// transfer limit; total `iov_len` summed across the array must not
-/// exceed this, otherwise the syscall reports `EINVAL`.
+/// Not a bound on the *sum*.  `copy_iovec_from_user` (lib/iov_iter.c:1380,
+/// "check for size_t not fitting in ssize_t") refuses any single segment whose
+/// length is negative as an `ssize_t`, with `EINVAL`; the total is then capped
+/// at `MAX_RW_COUNT` (:1491) rather than refused.  The man page's "the sum of
+/// the `iov_len` values … overflows a `ssize_t`" does not describe the code.
 pub const PROCESS_VM_SSIZE_MAX: u64 = i64::MAX as u64;
+
+/// Linux's `MAX_RW_COUNT` (include/linux/fs.h:2399), `INT_MAX & PAGE_MASK`
+/// with Linux's 4 KiB page: the most one read or write transfers.  Only
+/// `import_ubuf`'s truncation uses it here.
+const LINUX_MAX_RW_COUNT: usize = 0x7FFF_F000;
+
+/// `access_ok` on x86-64 (arch/x86/include/asm/uaccess_64.h:85-93) for a
+/// run-time size: the range must not wrap and must end in the user half,
+/// which `valid_user_address` (:57) tests as `(long)(x) >= 0`.
+///
+/// It admits NULL.  A NULL buffer is caught where it is dereferenced, not
+/// here.
+fn access_ok_x86_64(base: usize, len: usize) -> bool {
+    let (end, wrapped) = base.overflowing_add(len);
+    !wrapped && end.cast_signed() >= 0
+}
+
+/// Which vector of the pair [`process_vm_vector_bytes`] is reading.
+///
+/// Only the local one is range-checked: it names the caller's memory, which
+/// `import_iovec` passes through `access_ok`, while the remote one is
+/// addresses in *another* process and goes through `iovec_from_user` alone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PvmSide {
+    Local,
+    Remote,
+}
+
+/// One vector's share of `process_vm_rw`: `iovec_from_user`
+/// (lib/iov_iter.c:1397) and the per-segment test inside
+/// `copy_iovec_from_user` (:1365), in that order, then — for the local
+/// vector — the `access_ok` that `import_iovec` adds.
+///
+/// Returns the vector's byte count, or the errno upstream refuses it with:
+///
+/// ```text
+///   count == 0             -> an empty vector, 0 bytes (:1409) -- iov unread
+///   count > UIO_MAXIOV     -> EINVAL (:1411)
+///   iov == NULL            -> EFAULT (the copy)
+///   iov_len > SSIZE_MAX    -> EINVAL (:1380), any one segment
+///   local, !access_ok      -> EFAULT (:1484), segment by segment
+/// ```
+///
+/// The local range test has upstream's two shapes.  One segment goes
+/// through `__import_iovec_ubuf` (:1435) → `import_ubuf` (:1550), which caps
+/// the length at `MAX_RW_COUNT` *before* `access_ok`; several go through
+/// the loop at :1481, which tests each segment's full length and caps only
+/// afterwards.  So one segment of `SSIZE_MAX` bytes is accepted and two are
+/// not.
+///
+/// The count is saturated rather than capped at `MAX_RW_COUNT`: the only
+/// question asked of it is whether it is zero.
+///
+/// # Safety
+///
+/// When `count` is non-zero and `iov` is non-NULL, `iov` must point to at
+/// least `count` readable `Iovec` structures.
+unsafe fn process_vm_vector_bytes(
+    iov: *const crate::file::Iovec,
+    count: u64,
+    side: PvmSide,
+) -> Result<u64, i32> {
+    if count == 0 {
+        return Ok(0);
+    }
+    if count > PROCESS_VM_UIO_MAXIOV {
+        return Err(errno::EINVAL);
+    }
+    if iov.is_null() {
+        return Err(errno::EFAULT);
+    }
+    // `count <= UIO_MAXIOV` from here, so it fits a usize.
+    let n = count as usize;
+    // SAFETY: caller contract -- `iov` covers `count` entries.
+    let segs = unsafe { core::slice::from_raw_parts(iov, n) };
+    // `copy_iovec_from_user` reads every segment before anything else
+    // looks at one, so a bad length anywhere outranks a bad range anywhere.
+    if segs
+        .iter()
+        .any(|seg| seg.iov_len as u64 > PROCESS_VM_SSIZE_MAX)
+    {
+        return Err(errno::EINVAL);
+    }
+    if side == PvmSide::Local {
+        let in_range =
+            |seg: &crate::file::Iovec, len: usize| access_ok_x86_64(seg.iov_base as usize, len);
+        let all_in_range = match segs {
+            [one] => in_range(one, one.iov_len.min(LINUX_MAX_RW_COUNT)),
+            _ => segs.iter().all(|seg| in_range(seg, seg.iov_len)),
+        };
+        if !all_in_range {
+            return Err(errno::EFAULT);
+        }
+    }
+    Ok(segs
+        .iter()
+        .fold(0u64, |total, seg| total.saturating_add(seg.iov_len as u64)))
+}
 
 /// Shared validator for both `process_vm_readv` and `process_vm_writev`.
 ///
-/// Returns `Ok(())` if every argument-domain check passes (in which
-/// case the caller should set `ENOSYS`), `Err(errno)` otherwise.
-/// Both syscalls share identical argument semantics — only the
-/// direction of data transfer differs.
+/// Returns `Err(errno)` for an argument upstream refuses, and `Ok(())` when
+/// upstream would go on to transfer -- or would stop with nothing to
+/// transfer.  Either way the caller then reports `ENOSYS`.  Both calls share
+/// one argument path, `process_vm_rw` (mm/process_vm_access.c:253), and
+/// differ only in the direction of the copy.
 ///
 /// # Linux behaviour
 ///
-/// In the order the kernel performs them in `fs/read_write.c`'s
-/// `process_vm_rw`:
+/// In upstream's order:
 ///
-/// 1. `flags != 0`                                  → `EINVAL`
-///    (reserved arg; Linux requires zero)
-/// 2. `pid <= 0`                                    → `ESRCH`
-///    (no such task — Linux's `find_get_task_by_vpid` returns NULL
-///    for non-positive pids, surfaced as ESRCH)
-/// 3. `liovcnt > UIO_MAXIOV`                        → `EINVAL`
-/// 4. `riovcnt > UIO_MAXIOV`                        → `EINVAL`
-/// 5. `liovcnt > 0` and `local_iov == NULL`         → `EFAULT`
-/// 6. `riovcnt > 0` and `remote_iov == NULL`        → `EFAULT`
-/// 7. Σ `local_iov[i].iov_len > SSIZE_MAX`          → `EINVAL`
-/// 8. Σ `remote_iov[i].iov_len > SSIZE_MAX`         → `EINVAL`
+/// 1. `flags != 0`                                   → `EINVAL` (:268)
+/// 2. the local vector, through `import_iovec` (:272) — see
+///    [`process_vm_vector_bytes`] for its three verdicts.
+/// 3. no local bytes at all: upstream returns 0 (:275), before it reads
+///    `remote_iov` or looks the pid up.
+/// 4. the remote vector, through `iovec_from_user` (:277) — the same three
+///    verdicts in the same order.
+/// 5. no remote bytes at all: `process_vm_rw_core` returns 0 (:181), still
+///    before the pid lookup.
+/// 6. `find_get_task_by_vpid(pid)` (:196) → `ESRCH`, which a non-positive
+///    pid always is.
 ///
-/// The local/remote sums are *not* required to match — Linux
-/// transfers `min(local_sum, remote_sum)` bytes and reports the count.
+/// At 3 and 5, where upstream returns 0, the caller reports `ENOSYS` instead:
+/// this ABI performs no transfer, and a zero-length call is exactly the shape
+/// of a feature probe, which a 0 would tell that the call exists.  What the
+/// early returns do decide is that nothing after them is checked — so a
+/// zero-length local vector with a bad pid is `ENOSYS`, never `ESRCH`.
+///
+/// Until 2026-09-25 this ran flags, pid, both counts, both pointers, and then
+/// a rule that each vector's *summed* lengths fit `ssize_t` (the man page's
+/// wording; see [`PROCESS_VM_SSIZE_MAX`]).  The pid second made
+/// `process_vm_readv(0, NULL, 1, …)` `ESRCH` where Linux says `EFAULT`, and
+/// both counts before either pointer made a NULL local vector with a
+/// too-long remote one `EINVAL` where Linux says `EFAULT`.  The doc comment
+/// here also placed `process_vm_rw` in fs/read_write.c.
 ///
 /// # Safety
 ///
@@ -3609,48 +3735,24 @@ unsafe fn process_vm_validate(
     riovcnt: u64,
     flags: u64,
 ) -> Result<(), i32> {
-    // (1) flags is a reserved field — must be zero.
+    // (1) flags is a reserved field -- must be zero.
     if flags != 0 {
         return Err(errno::EINVAL);
     }
-    // (2) Non-positive pid never names a real task.
+    // (2)/(3) The local vector, and upstream's early return when it
+    // describes no bytes.
+    // SAFETY: caller contract for `local_iov`/`liovcnt`.
+    if unsafe { process_vm_vector_bytes(local_iov, liovcnt, PvmSide::Local) }? == 0 {
+        return Ok(());
+    }
+    // (4)/(5) The remote vector, and the second early return.
+    // SAFETY: caller contract for `remote_iov`/`riovcnt`.
+    if unsafe { process_vm_vector_bytes(remote_iov, riovcnt, PvmSide::Remote) }? == 0 {
+        return Ok(());
+    }
+    // (6) Non-positive pid never names a task.
     if pid <= 0 {
         return Err(errno::ESRCH);
-    }
-    // (3)/(4) iovec-count caps.
-    if liovcnt > PROCESS_VM_UIO_MAXIOV {
-        return Err(errno::EINVAL);
-    }
-    if riovcnt > PROCESS_VM_UIO_MAXIOV {
-        return Err(errno::EINVAL);
-    }
-    // (5)/(6) non-empty array requires a non-NULL pointer.
-    if liovcnt > 0 && local_iov.is_null() {
-        return Err(errno::EFAULT);
-    }
-    if riovcnt > 0 && remote_iov.is_null() {
-        return Err(errno::EFAULT);
-    }
-    // (7)/(8) per-direction byte-count cap.  Sum with saturating_add
-    // so a malicious per-vec u64 length doesn't wrap into the valid
-    // range — once we cross SSIZE_MAX we fail-fast.
-    let mut lsum: u64 = 0;
-    for i in 0..liovcnt {
-        // SAFETY: caller contract — local_iov covers liovcnt entries.
-        let iov = unsafe { *local_iov.add(i as usize) };
-        lsum = lsum.saturating_add(iov.iov_len as u64);
-        if lsum > PROCESS_VM_SSIZE_MAX {
-            return Err(errno::EINVAL);
-        }
-    }
-    let mut rsum: u64 = 0;
-    for i in 0..riovcnt {
-        // SAFETY: caller contract — remote_iov covers riovcnt entries.
-        let iov = unsafe { *remote_iov.add(i as usize) };
-        rsum = rsum.saturating_add(iov.iov_len as u64);
-        if rsum > PROCESS_VM_SSIZE_MAX {
-            return Err(errno::EINVAL);
-        }
     }
     Ok(())
 }
@@ -3706,7 +3808,10 @@ unsafe fn process_vm_validate(
 ///
 /// Argument validation is unaffected and still runs first: a caller passing
 /// bad flags or a bad pid sees `EINVAL`/`ESRCH`, because those are questions
-/// about its own arguments rather than about authority.
+/// about its own arguments rather than about authority.  It runs in
+/// upstream's order, including upstream's two early returns for a transfer
+/// with no bytes in it.  Upstream answers those with 0 before it looks the
+/// pid up; we answer `ENOSYS` there too (see [`process_vm_validate`]).
 ///
 /// # Safety
 ///
@@ -4063,15 +4168,20 @@ mod tests {
 
     #[test]
     fn test_clone_returns_enosys() {
+        // A function and a stack that pass glibc's clone.S checks, so the
+        // -1 is the stub's and not the argument check's.  (This passed two
+        // NULLs until 2026-09-25 and so never reached the stub it is named
+        // for.)
         assert_eq!(
             clone(
-                core::ptr::null(),
-                core::ptr::null_mut(),
+                0x2_0000_usize as *const u8,
+                0x1_0000_usize as *mut u8,
                 0,
                 core::ptr::null_mut()
             ),
             -1
         );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]
@@ -5248,6 +5358,49 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EINVAL);
         assert_eq!(rusage.ru_utime.tv_sec, 7777);
         assert_eq!(rusage.ru_maxrss, 6543);
+    }
+
+    /// On an error Linux still writes the six report fields, as zeros
+    /// (kernel/exit.c:1726-1737: the write follows `if (!infop) return err;`
+    /// whatever `err` is), and touches nothing else in the structure.
+    #[test]
+    fn test_waitid_error_clears_the_six_report_fields_only() {
+        let mut si = crate::signal::SiginfoT::default();
+        si.si_signo = 1;
+        si.si_errno = 2;
+        si.si_code = 3;
+        si.si_pid = 4;
+        si.si_uid = 5;
+        si.si_status = 6;
+        si.si_utime = 77;
+        si.si_stime = 88;
+        errno::set_errno(0);
+        let ret = waitid(99, 0, (&raw mut si).cast(), WEXITED);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(
+            (
+                si.si_signo,
+                si.si_errno,
+                si.si_code,
+                si.si_pid,
+                si.si_uid,
+                si.si_status
+            ),
+            (0, 0, 0, 0, 0, 0)
+        );
+        assert_eq!(
+            (si.si_utime, si.si_stime),
+            (77, 88),
+            "not upstream's to write"
+        );
+
+        // The options prologue is an error like any other.
+        si.si_pid = 9;
+        errno::set_errno(0);
+        assert_eq!(waitid(P_ALL, 0, (&raw mut si).cast(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(si.si_pid, 0);
     }
 
     #[test]
@@ -7881,15 +8034,26 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
+    /// `copy_clone_args_from_user` (kernel/fork.c:3074-3079) tests the size
+    /// before `copy_struct_from_user` reads the struct, so a NULL pointer is
+    /// only `EFAULT` once the size is in range.  Size 0 is below
+    /// `CLONE_ARGS_SIZE_VER0`, which makes this `EINVAL`.  It asserted
+    /// `EFAULT` until 2026-09-25, when the NULL test sat above the size tests.
     #[test]
     fn test_clone3_null_args() {
-        // Phase 55: clone3 now rejects NULL args with EFAULT (matches
-        // Linux's `copy_struct_from_user` semantics) before reaching
-        // the not-implemented ENOSYS path.
         crate::errno::set_errno(0);
         let ret = clone3(core::ptr::null(), 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// The other size verdict outranks a NULL pointer the same way.
+    #[test]
+    fn test_clone3_null_args_with_oversize_is_e2big() {
+        crate::errno::set_errno(0);
+        let ret = clone3(core::ptr::null(), CLONE3_SIZE_MAX + 1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::E2BIG);
     }
 
     #[test]
@@ -7958,21 +8122,25 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Phase 53 — mount(2) validator
+    // Phase 53 — mount(2) validator, reordered 2026-09-25 to Linux 6.6
     //
-    // Argument-domain checks performed before reaching kernel mount code:
-    //   target NULL                 → EFAULT
-    //   empty target                → ENOENT
-    //   target overflows PATH_MAX   → ENAMETOOLONG
-    //   unknown MS_* bits           → EINVAL
-    //   multiple mode bits          → EINVAL
-    //   source NULL when required   → EFAULT
-    //   empty source when required  → ENOENT
-    //   source overflows PATH_MAX   → ENAMETOOLONG
-    //   fstype NULL on new mount    → EFAULT
-    //   empty fstype on new mount   → EINVAL
-    //   fstype overflows TYPE_MAX   → ENAMETOOLONG
-    //   otherwise                   → ENOSYS
+    // In upstream's order (fs/namespace.c; see `mount`'s doc comment):
+    //   fstype, then source, not ending in PATH_MAX → EINVAL
+    //   target NULL / empty / too long              → EFAULT / ENOENT / ENAMETOOLONG
+    //   MS_NOUSER (and no other bit)                → EINVAL
+    //   no CAP_SYS_ADMIN                            → EPERM
+    //   MS_REMOUNT (± MS_BIND)                      → ENOSYS
+    //   MS_BIND, NULL or empty source               → EINVAL
+    //   propagation type, not exactly one / extras  → EINVAL
+    //   MS_MOVE, NULL or empty source               → EINVAL
+    //   new mount, NULL fstype                      → EINVAL
+    //   new mount, empty or dot-led fstype          → ENODEV
+    //   otherwise                                   → ENOSYS
+    //
+    // Several tests below were written to the old lattice, which refused
+    // flags outside a whitelist, refused two "mode" bits together, and
+    // used EFAULT for a NULL source or type.  Each one that changed says
+    // what it used to assert.
     // ------------------------------------------------------------------
 
     // --- target validation ---
@@ -8040,10 +8208,12 @@ mod tests {
 
     // --- flag mask ---
 
+    /// Bit 31 is `MS_NOUSER`, the one flag `path_mount` refuses
+    /// (fs/namespace.c:3601).  This test used to call it an "unknown" bit
+    /// outside a whitelist; upstream has no whitelist.
     #[test]
-    fn test_mount_unknown_flag_einval() {
+    fn test_mount_ms_nouser_einval() {
         crate::errno::set_errno(0);
-        // Bit 1<<31 is well outside MOUNT_FLAGS_VALID.
         let ret = mount(
             b"/dev/sda1\0".as_ptr(),
             b"/mnt\0".as_ptr(),
@@ -8055,10 +8225,12 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    /// Upstream refuses no bit but `MS_NOUSER`: the rest are translated,
+    /// masked into the superblock flags, or ignored.  Bit 63 is ignored, so
+    /// this is a new ext4 mount.  (It asserted `EINVAL` until 2026-09-25.)
     #[test]
-    fn test_mount_high_bit_einval() {
+    fn test_mount_high_bit_is_ignored() {
         crate::errno::set_errno(0);
-        // Top bit must be rejected.
         let ret = mount(
             b"/dev/sda1\0".as_ptr(),
             b"/mnt\0".as_ptr(),
@@ -8067,13 +8239,15 @@ mod tests {
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
+    /// `MS_KERNMOUNT` is kernel-internal, but `mount(2)` does not refuse it:
+    /// `path_mount` builds `sb_flags` from an explicit list of `SB_*` bits
+    /// (fs/namespace.c:3642) that does not include it, so from userspace it
+    /// simply vanishes.  (It asserted `EINVAL` until 2026-09-25.)
     #[test]
-    fn test_mount_kernmount_rejected() {
-        // MS_KERNMOUNT is kernel-internal and must not be settable
-        // from userspace.
+    fn test_mount_kernmount_is_ignored() {
         crate::errno::set_errno(0);
         let ret = mount(
             b"/dev/sda1\0".as_ptr(),
@@ -8083,13 +8257,17 @@ mod tests {
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     // --- mode-bit exclusion ---
 
+    /// `path_mount` picks the operation by the first test that matches
+    /// (fs/namespace.c:3651-3662), and `MS_BIND` is tested before `MS_MOVE`, so
+    /// this is a bind with a source.  There is no "one mode bit" rule
+    /// upstream; this asserted one until 2026-09-25.
     #[test]
-    fn test_mount_bind_and_move_einval() {
+    fn test_mount_bind_and_move_is_a_bind() {
         crate::errno::set_errno(0);
         let ret = mount(
             b"/src\0".as_ptr(),
@@ -8099,11 +8277,14 @@ mod tests {
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
+    /// `MS_REMOUNT | MS_BIND` is `do_reconfigure_mnt` (fs/namespace.c:3651) —
+    /// how a bind mount is made read-only — and it needs the mount table.  It
+    /// was refused as two mode bits until 2026-09-25.
     #[test]
-    fn test_mount_remount_and_bind_einval() {
+    fn test_mount_remount_and_bind_is_a_reconfigure() {
         crate::errno::set_errno(0);
         let ret = mount(
             b"/src\0".as_ptr(),
@@ -8113,9 +8294,11 @@ mod tests {
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
+    /// Two propagation types: `flags_to_propagation_type`'s `is_power_of_2`
+    /// (fs/namespace.c:2535).
     #[test]
     fn test_mount_shared_and_private_einval() {
         crate::errno::set_errno(0);
@@ -8147,6 +8330,9 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    /// A propagation type is tested before `MS_MOVE` (fs/namespace.c:3657), so
+    /// this is a propagation change carrying a non-propagation flag, which
+    /// `flags_to_propagation_type` refuses (:2532).
     #[test]
     fn test_mount_move_and_unbindable_einval() {
         crate::errno::set_errno(0);
@@ -8193,8 +8379,12 @@ mod tests {
 
     // --- source validation ---
 
+    /// A NULL source is an absent one to `copy_mount_string`
+    /// (fs/namespace.c:3570), and `do_new_mount` only passes it on when present
+    /// (:3328): `proc` and `tmpfs` take none.  Whether ext4 minds is ext4's
+    /// question, which needs the filesystem.  (`EFAULT` until 2026-09-25.)
     #[test]
-    fn test_mount_null_source_for_new_mount_efault() {
+    fn test_mount_null_source_for_new_mount_passes() {
         crate::errno::set_errno(0);
         let ret = mount(
             core::ptr::null(),
@@ -8204,11 +8394,13 @@ mod tests {
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
+    /// `do_loopback` (fs/namespace.c:2609): `if (!old_name || !*old_name)
+    /// return -EINVAL;`.  (`EFAULT` until 2026-09-25.)
     #[test]
-    fn test_mount_null_source_for_bind_efault() {
+    fn test_mount_null_source_for_bind_einval() {
         crate::errno::set_errno(0);
         let ret = mount(
             core::ptr::null(),
@@ -8218,11 +8410,13 @@ mod tests {
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    /// `do_move_mount_old` (fs/namespace.c:3205), the same test as
+    /// `do_loopback`.  (`EFAULT` until 2026-09-25.)
     #[test]
-    fn test_mount_null_source_for_move_efault() {
+    fn test_mount_null_source_for_move_einval() {
         crate::errno::set_errno(0);
         let ret = mount(
             core::ptr::null(),
@@ -8232,7 +8426,7 @@ mod tests {
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
@@ -8306,8 +8500,12 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
+    /// An empty source reaches the filesystem as its `source` parameter
+    /// (fs/namespace.c:3328); a device filesystem then fails to look it up,
+    /// a nodev one ignores it.  Only the filesystem can say which, so this is
+    /// past what libc decides.  (`ENOENT` until 2026-09-25.)
     #[test]
-    fn test_mount_empty_source_enoent() {
+    fn test_mount_empty_source_for_new_mount_passes() {
         crate::errno::set_errno(0);
         let ret = mount(
             b"\0".as_ptr(),
@@ -8317,11 +8515,14 @@ mod tests {
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
+    /// The source is copied by `strndup_user(…, PATH_MAX)`, whose verdict for
+    /// a string that does not end in time is `EINVAL` (mm/util.c:253) — not
+    /// the `ENAMETOOLONG` a path lookup gives.  (Until 2026-09-25 it was.)
     #[test]
-    fn test_mount_source_too_long_enametoolong() {
+    fn test_mount_source_too_long_einval() {
         let huge = vec![b'a'; MOUNT_PATH_MAX + 1];
         crate::errno::set_errno(0);
         let ret = mount(
@@ -8332,13 +8533,15 @@ mod tests {
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENAMETOOLONG);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     // --- fstype validation ---
 
+    /// `do_new_mount` (fs/namespace.c:3302): `if (!fstype) return -EINVAL;`.
+    /// (`EFAULT` until 2026-09-25.)
     #[test]
-    fn test_mount_null_fstype_for_new_mount_efault() {
+    fn test_mount_null_fstype_for_new_mount_einval() {
         crate::errno::set_errno(0);
         let ret = mount(
             b"/dev/sda1\0".as_ptr(),
@@ -8348,7 +8551,7 @@ mod tests {
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
@@ -8408,8 +8611,12 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
+    /// `get_fs_type("")` matches no filesystem, so `do_new_mount` is
+    /// `ENODEV` (fs/namespace.c:3305-3307).  This was collapsed to `EINVAL`
+    /// until 2026-09-25, on the ground that the lookup never happens here;
+    /// for the empty name its answer is known without it.
     #[test]
-    fn test_mount_empty_fstype_einval() {
+    fn test_mount_empty_fstype_enodev() {
         crate::errno::set_errno(0);
         let ret = mount(
             b"/dev/sda1\0".as_ptr(),
@@ -8419,12 +8626,15 @@ mod tests {
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENODEV);
     }
 
+    /// The type is copied by `strndup_user(…, PATH_MAX)` like the source, so
+    /// the limit is `PATH_MAX` and the verdict `EINVAL` (mm/util.c:253).  It
+    /// was an invented 256-byte cap and `ENAMETOOLONG` until 2026-09-25.
     #[test]
-    fn test_mount_fstype_too_long_enametoolong() {
-        let huge = vec![b'a'; MOUNT_TYPE_MAX + 1];
+    fn test_mount_fstype_too_long_einval() {
+        let huge = vec![b'a'; MOUNT_PATH_MAX + 1];
         crate::errno::set_errno(0);
         let ret = mount(
             b"/dev/sda1\0".as_ptr(),
@@ -8434,13 +8644,32 @@ mod tests {
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENAMETOOLONG);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// The type and the source are copied before the target is looked at
+    /// (fs/namespace.c:3869-3876), so an over-long one outranks a NULL
+    /// target.
+    #[test]
+    fn test_mount_string_copies_precede_the_target() {
+        let huge = vec![b'a'; MOUNT_PATH_MAX + 1];
+        for (source, fstype) in [
+            (b"/dev/sda1\0".as_ptr(), huge.as_ptr()),
+            (huge.as_ptr(), b"ext4\0".as_ptr()),
+        ] {
+            crate::errno::set_errno(0);
+            let ret = mount(source, core::ptr::null(), fstype, 0, core::ptr::null());
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
     }
 
     #[test]
     fn test_mount_max_length_fstype_passes() {
-        let mut buf = vec![b'a'; MOUNT_TYPE_MAX];
-        buf[MOUNT_TYPE_MAX - 1] = 0;
+        // 4095 bytes + NUL: the longest string `strndup_user(…, PATH_MAX)`
+        // accepts.
+        let mut buf = vec![b'a'; MOUNT_PATH_MAX];
+        buf[MOUNT_PATH_MAX - 1] = 0;
         crate::errno::set_errno(0);
         let ret = mount(
             b"/dev/sda1\0".as_ptr(),
@@ -8511,7 +8740,7 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
-    // --- ordering: target check happens BEFORE flag/mode checks ---
+    // --- ordering: the target before the flags and the operation ---
 
     #[test]
     fn test_mount_target_check_before_flag_check() {
@@ -8530,7 +8759,7 @@ mod tests {
 
     #[test]
     fn test_mount_target_check_before_mode_check() {
-        // NULL target + BIND|MOVE conflict → must be EFAULT.
+        // NULL target + a bind: the target is resolved before the operation.
         crate::errno::set_errno(0);
         let ret = mount(
             b"/src\0".as_ptr(),
@@ -8545,7 +8774,9 @@ mod tests {
 
     #[test]
     fn test_mount_flag_check_before_source_check() {
-        // Unknown flag + NULL source → EINVAL (flag check first).
+        // MS_NOUSER + NULL source → EINVAL: `path_mount` refuses the flag
+        // (:3601) before it chooses an operation that could look at the
+        // source.
         crate::errno::set_errno(0);
         let ret = mount(
             core::ptr::null(),
@@ -8558,9 +8789,11 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    /// `MS_BIND | MS_MOVE` is a bind, whose NULL source is `EINVAL`
+    /// (`do_loopback`, fs/namespace.c:2609).  The errno is unchanged since
+    /// 2026-09-25; the reason is not — it used to be a "mode conflict".
     #[test]
-    fn test_mount_mode_check_before_source_check() {
-        // BIND|MOVE conflict + NULL source → EINVAL (mode check first).
+    fn test_mount_bind_and_move_null_source_einval() {
         crate::errno::set_errno(0);
         let ret = mount(
             core::ptr::null(),
@@ -8573,9 +8806,11 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    /// A new mount with neither: the NULL source is allowed, the NULL type
+    /// is not (`do_new_mount`, fs/namespace.c:3302).  This used to assert
+    /// the source's `EFAULT`, first.
     #[test]
-    fn test_mount_source_check_before_fstype_check() {
-        // NULL source + NULL fstype on new mount → EFAULT (source first).
+    fn test_mount_new_mount_null_source_and_fstype_einval() {
         crate::errno::set_errno(0);
         let ret = mount(
             core::ptr::null(),
@@ -8585,7 +8820,7 @@ mod tests {
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     // --- constants self-consistency ---
@@ -8596,29 +8831,49 @@ mod tests {
         assert_eq!(MOUNT_PATH_MAX, UMOUNT_PATH_MAX);
     }
 
+    /// `PATH_MAX` counts the NUL: a string ending at byte 4095 fits, one
+    /// that would end at byte 4096 does not, and the walk never reads a byte
+    /// past the limit.  (The old walk accepted 4096 bytes of name.)
     #[test]
-    fn test_mount_type_max_reasonable() {
-        // MOUNT_TYPE_MAX should accommodate every real-world fstype.
-        assert!(MOUNT_TYPE_MAX >= 64);
-        assert!(MOUNT_TYPE_MAX <= MOUNT_PATH_MAX);
+    fn test_mount_string_limit_counts_the_nul() {
+        let mut fits = vec![b'a'; MOUNT_PATH_MAX];
+        fits[MOUNT_PATH_MAX - 1] = 0;
+        // SAFETY: `fits` is MOUNT_PATH_MAX readable bytes.
+        assert_eq!(
+            unsafe { bounded_cstr_len(fits.as_ptr(), MOUNT_PATH_MAX) },
+            Some(MOUNT_PATH_MAX - 1)
+        );
+        // Exactly MOUNT_PATH_MAX bytes with no NUL: the walk must stop at
+        // the limit rather than read the next byte.
+        let no_nul = vec![b'a'; MOUNT_PATH_MAX];
+        // SAFETY: `no_nul` is MOUNT_PATH_MAX readable bytes, and the walk
+        // reads at most that many.
+        assert_eq!(
+            unsafe { bounded_cstr_len(no_nul.as_ptr(), MOUNT_PATH_MAX) },
+            None
+        );
+        crate::errno::set_errno(0);
+        assert_eq!(umount2(no_nul.as_ptr(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENAMETOOLONG);
     }
 
+    /// `flags_to_propagation_type` (fs/namespace.c:2527): one type, and
+    /// nothing with it but `MS_REC` and `MS_SILENT`.
     #[test]
-    fn test_mount_mode_bits_subset_of_valid() {
-        // Every mode bit must also be in MOUNT_FLAGS_VALID.
-        assert_eq!(MOUNT_MODE_BITS & MOUNT_FLAGS_VALID, MOUNT_MODE_BITS);
-    }
-
-    #[test]
-    fn test_mount_rec_not_a_mode_bit() {
-        // MS_REC is a modifier, not a mode bit.
-        assert_eq!(MOUNT_MODE_BITS & crate::sys_mount::MS_REC, 0);
-    }
-
-    #[test]
-    fn test_mount_kernmount_not_in_valid_mask() {
-        // MS_KERNMOUNT is kernel-internal and rejected from userspace.
-        assert_eq!(MOUNT_FLAGS_VALID & crate::sys_mount::MS_KERNMOUNT, 0);
+    fn test_mount_propagation_type_rule() {
+        use crate::sys_mount::{
+            MS_NOSUID, MS_PRIVATE, MS_RDONLY, MS_REC, MS_SHARED, MS_SILENT, MS_SLAVE, MS_UNBINDABLE,
+        };
+        for t in [MS_SHARED, MS_PRIVATE, MS_SLAVE, MS_UNBINDABLE] {
+            assert!(propagation_type_is_valid(t));
+            assert!(propagation_type_is_valid(t | MS_REC));
+            assert!(propagation_type_is_valid(t | MS_SILENT | MS_REC));
+            assert!(!propagation_type_is_valid(t | MS_RDONLY));
+            assert!(!propagation_type_is_valid(t | MS_NOSUID));
+        }
+        assert!(!propagation_type_is_valid(MS_SHARED | MS_SLAVE));
+        // Upstream takes the word as an `int`, so bits above 31 vanish.
+        assert!(propagation_type_is_valid(MS_PRIVATE | (1 << 40)));
     }
 
     // --- errno-preservation on no-op error legs ---
@@ -8822,15 +9077,13 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
-    /// Buggy caller from a real bug report (Go's `syscall.Mount`
-    /// wrapper before Go 1.18): passes `MS_BIND | MS_REMOUNT` to apply
-    /// `nosuid` to a bind-mounted directory.  Linux requires two
-    /// separate calls — the first to bind, the second to remount with
-    /// the new flags.  Our validator rejects the combo with EINVAL,
-    /// matching what Linux returns from `do_mount`'s mode-conflict
-    /// check.  Fixed in Go 1.18 by splitting into two calls.
+    /// `mount -o remount,bind,nosuid /dst`: `MS_BIND | MS_REMOUNT` is how the
+    /// per-mount flags of an existing bind mount are changed — upstream's
+    /// `do_reconfigure_mnt` (fs/namespace.c:3651).  This test used to tell a
+    /// story in which Linux refuses the pair as a "mode conflict"; it has no
+    /// such check, and the pair reaches the stub.
     #[test]
-    fn test_mount_workflow_buggy_go_bind_remount_combo() {
+    fn test_mount_workflow_bind_remount_changes_a_bind_mounts_flags() {
         crate::errno::set_errno(0);
         let ret = mount(
             b"/src\0".as_ptr(),
@@ -8840,13 +9093,13 @@ mod tests {
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     /// Buggy caller: bash one-liner `mount -t '' /dev/sda1 /mnt`
     /// (empty fstype from a `$FS` variable that wasn't set).  Linux
-    /// fails this in `get_fs_type` with ENODEV; we collapse to EINVAL
-    /// at validation time since the fstype lookup never happens.
+    /// fails this in `get_fs_type` with ENODEV, and so do we: no
+    /// filesystem has the empty name, so the lookup's answer is known.
     #[test]
     fn test_mount_workflow_buggy_empty_fstype_var() {
         crate::errno::set_errno(0);
@@ -8858,16 +9111,18 @@ mod tests {
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENODEV);
     }
 
-    /// Buggy caller: Java 11 ProcessBuilder issuing
-    /// `mount("/dev/sda1", "/mnt", "ext4", 1<<30, NULL)` because
-    /// `MountFlag.READ_ONLY.bits()` was set to a stale constant
-    /// from kernel 2.4.  Our validator rejects with EINVAL just as
-    /// Linux's user-flag whitelist would.
+    /// A caller passing a stale bit, `1 << 30`, meaning to ask for a
+    /// read-only mount.  Linux has no user-flag whitelist: the bit is not
+    /// among the `SB_*` flags `path_mount` keeps (fs/namespace.c:3642), so it
+    /// is dropped and the call is an ordinary read-write mount.  That is the
+    /// hazard of a stale constant, and a libc cannot catch it for the caller
+    /// without refusing calls Linux accepts.  (This asserted `EINVAL` until
+    /// 2026-09-25.)
     #[test]
-    fn test_mount_workflow_buggy_stale_kernel_flag() {
+    fn test_mount_workflow_stale_flag_bit_is_ignored() {
         crate::errno::set_errno(0);
         let ret = mount(
             b"/dev/sda1\0".as_ptr(),
@@ -8877,18 +9132,22 @@ mod tests {
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     // -----------------------------------------------------------------
     // Phase 165: mount / umount / umount2 — may_mount CAP_SYS_ADMIN gate
     //
-    // Linux's `fs/namespace.c::ksys_umount` checks `may_mount()`
-    // (which is `ns_capable(mnt_ns->user_ns, CAP_SYS_ADMIN)`) between
-    // the flag-mask check and `user_path_at` — i.e. EINVAL beats
-    // EPERM beats every path-related errno.  `mount(2)` resolves the
-    // target path *before* checking `may_mount` in `path_mount`, so
-    // EPERM follows all argument-domain errors but precedes ENOSYS.
+    // `may_mount()` is `ns_capable(mnt_ns->user_ns, CAP_SYS_ADMIN)`.  In
+    // Linux 6.6 both calls ask it only once the path has resolved: `umount2`
+    // in `can_umount` (fs/namespace.c:1873), after `ksys_umount`'s flag mask
+    // and `user_path_at`; `mount` in `path_mount` (:3607), after the string
+    // copies, the target and `MS_NOUSER`, and before the operation is
+    // chosen.  So for both, the path's EFAULT/ENOENT/ENAMETOOLONG beat EPERM.
+    //
+    // Until 2026-09-25 `umount`/`umount2` asked first, on the reading of
+    // kernels before 5.9, when `ksys_umount` called `may_mount` between the
+    // flag mask and the lookup; four tests below asserted that order.
     //
     // Pre-Phase-165 these stubs skipped the cap check entirely (the
     // doc comments said "skipped — no cred model yet"), so a process
@@ -8986,10 +9245,10 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
         }
 
-        /// `mount(...)` with no CAP_SYS_ADMIN must return EPERM once
-        /// all arguments validate.  Linux checks `may_mount` after
-        /// path resolution — our stub mirrors that by checking after
-        /// every argument check.
+        /// `mount(...)` with no CAP_SYS_ADMIN must return EPERM once the
+        /// strings, the target and the flag word pass.  Linux checks
+        /// `may_mount` after path resolution and before the operation
+        /// (fs/namespace.c:3607).
         #[test]
         fn test_mount_phase165_no_cap_returns_eperm() {
             let _g = CapGuard::snapshot();
@@ -9008,25 +9267,26 @@ mod tests {
 
         // -- Ordering matrix --------------------------------------------------
 
-        /// `umount` with no cap: EPERM beats EFAULT for a NULL path
-        /// (Linux: may_mount runs before user_path_at).
+        /// No cap and a bad path: EFAULT, because the lookup (fs/namespace.c:1914) precedes `can_umount`'s `may_mount` (:1873).
+        /// It asserted EPERM until 2026-09-25 (see the note above the module).
         #[test]
-        fn test_umount_phase165_eperm_beats_efault_null_path() {
+        fn test_umount_phase165_efault_beats_eperm_null_path() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             crate::errno::set_errno(0);
             assert_eq!(umount(core::ptr::null()), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
         }
 
-        /// `umount` with no cap: EPERM beats ENOENT for an empty path.
+        /// No cap and a bad path: ENOENT, because the empty name fails in `getname` (fs/namei.c:193), before `can_umount`.
+        /// It asserted EPERM until 2026-09-25 (see the note above the module).
         #[test]
-        fn test_umount_phase165_eperm_beats_enoent_empty_path() {
+        fn test_umount_phase165_enoent_beats_eperm_empty_path() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             crate::errno::set_errno(0);
             assert_eq!(umount(b"\0".as_ptr()), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
         }
 
         /// `umount2` with no cap and bad flag bit: EINVAL beats
@@ -9052,32 +9312,32 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         }
 
-        /// `umount2` with no cap, clean flags, NULL path: EPERM beats
-        /// EFAULT (the cap check runs between the flag mask and the
-        /// path lookup).
+        /// No cap and a bad path: EFAULT, because the lookup (fs/namespace.c:1914) precedes `can_umount`'s `may_mount` (:1873).
+        /// It asserted EPERM until 2026-09-25 (see the note above the module).
         #[test]
-        fn test_umount2_phase165_eperm_beats_efault_null_path() {
+        fn test_umount2_phase165_efault_beats_eperm_null_path() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             crate::errno::set_errno(0);
             assert_eq!(umount2(core::ptr::null(), 0), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
         }
 
-        /// `umount2` with no cap, clean flags, empty path: EPERM
-        /// beats ENOENT.
+        /// No cap and a bad path: ENOENT, because the empty name fails in `getname` (fs/namei.c:193), before `can_umount`.
+        /// It asserted EPERM until 2026-09-25 (see the note above the module).
         #[test]
-        fn test_umount2_phase165_eperm_beats_enoent_empty_path() {
+        fn test_umount2_phase165_enoent_beats_eperm_empty_path() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             crate::errno::set_errno(0);
             assert_eq!(umount2(b"\0".as_ptr(), MNT_DETACH), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
         }
 
         /// `umount2` no cap + clean flags + MNT_EXPIRE+MNT_FORCE
-        /// combo: EPERM still beats the late EINVAL combo check
-        /// because may_mount runs before path resolution.
+        /// combo: EPERM still beats the late EINVAL combo check,
+        /// because `can_umount`'s `may_mount` (fs/namespace.c:1873)
+        /// runs before `do_umount`'s combination test (:1722).
         #[test]
         fn test_umount2_phase165_eperm_beats_late_einval_combo() {
             let _g = CapGuard::snapshot();
@@ -9087,11 +9347,30 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
         }
 
-        /// `mount` no cap + bad flag bit: EINVAL beats EPERM (flag
-        /// check runs first in our stub, matching Linux's MS_NOUSER /
-        /// path_mount basic-sanity ordering).
+        /// `mount` no cap + `MS_NOUSER`: EINVAL beats EPERM — `path_mount`
+        /// refuses the flag (fs/namespace.c:3601) before `may_mount`
+        /// (:3607).  This passed bit 30 until 2026-09-25, which upstream
+        /// does not refuse at all; see the next test.
         #[test]
         fn test_mount_phase165_einval_beats_eperm_bad_flag() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            let ret = mount(
+                b"/dev/sda1\0".as_ptr(),
+                b"/mnt\0".as_ptr(),
+                b"ext4\0".as_ptr(),
+                crate::sys_mount::MS_NOUSER,
+                core::ptr::null(),
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+
+        /// `mount` no cap + an ignored bit: EPERM, since only `MS_NOUSER` is
+        /// refused and the privilege check comes next.
+        #[test]
+        fn test_mount_phase165_ignored_bit_reaches_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             crate::errno::set_errno(0);
@@ -9103,7 +9382,45 @@ mod tests {
                 core::ptr::null(),
             );
             assert_eq!(ret, -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// `mount` no cap + a bind with no source: EPERM.  `may_mount`
+        /// (fs/namespace.c:3607) is asked before the operation is chosen,
+        /// so `do_loopback`'s EINVAL (:2609) is never reached.  The old
+        /// lattice asked for privilege last and said EFAULT here.
+        #[test]
+        fn test_mount_phase165_eperm_beats_the_operations_own_checks() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            for (source, fstype, flags) in [
+                (
+                    core::ptr::null(),
+                    core::ptr::null(),
+                    crate::sys_mount::MS_BIND,
+                ),
+                (
+                    core::ptr::null(),
+                    core::ptr::null(),
+                    crate::sys_mount::MS_MOVE,
+                ),
+                (b"/dev/sda1\0".as_ptr(), core::ptr::null(), 0),
+                (b"/dev/sda1\0".as_ptr(), b"\0".as_ptr(), 0),
+                (
+                    core::ptr::null(),
+                    core::ptr::null(),
+                    crate::sys_mount::MS_SHARED | crate::sys_mount::MS_SLAVE,
+                ),
+            ] {
+                crate::errno::set_errno(0);
+                let ret = mount(source, b"/mnt\0".as_ptr(), fstype, flags, core::ptr::null());
+                assert_eq!(ret, -1, "flags {flags:#x}");
+                assert_eq!(
+                    crate::errno::get_errno(),
+                    crate::errno::EPERM,
+                    "flags {flags:#x}"
+                );
+            }
         }
 
         /// `mount` no cap + NULL target: EFAULT beats EPERM (target
@@ -9393,8 +9710,12 @@ mod tests {
         );
     }
 
+    /// glibc's `x86_64/clone.S`: `movq $-EINVAL,%rax; testq %rdi,%rdi;
+    /// jz SYSCALL_ERROR_LABEL`.  Userspace's own check, before any syscall,
+    /// so `EINVAL` and not `EFAULT` (which this test asserted until
+    /// 2026-09-25).
     #[test]
-    fn test_clone_null_fn_efault() {
+    fn test_clone_null_fn_einval() {
         crate::errno::set_errno(0);
         let ret = clone(
             core::ptr::null(),
@@ -9403,11 +9724,13 @@ mod tests {
             core::ptr::null_mut(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    /// The same file: `andq $-16, %rsi; jz SYSCALL_ERROR_LABEL`, with
+    /// `%rax` still holding `-EINVAL`.
     #[test]
-    fn test_clone_null_stack_efault() {
+    fn test_clone_null_stack_einval() {
         crate::errno::set_errno(0);
         let ret = clone(
             clone_dummy_fn(),
@@ -9416,21 +9739,37 @@ mod tests {
             core::ptr::null_mut(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    /// The stack test is on the *aligned* pointer, so anything below 16 is
+    /// refused as NULL is, and 16 itself is the first stack that passes.
+    /// The old `is_null()` check accepted 1..=15.
     #[test]
-    fn test_clone_null_fn_takes_precedence_over_null_stack() {
-        // (1) is checked before (2): NULL fn always reports first.
+    fn test_clone_stack_that_aligns_to_zero_einval() {
+        for stack in [1_usize, 8, 15] {
+            crate::errno::set_errno(0);
+            let ret = clone(clone_dummy_fn(), stack as *mut u8, 0, core::ptr::null_mut());
+            assert_eq!(ret, -1, "stack {stack}");
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EINVAL,
+                "stack {stack}"
+            );
+        }
         crate::errno::set_errno(0);
         let ret = clone(
-            core::ptr::null(),
-            core::ptr::null_mut(),
+            clone_dummy_fn(),
+            16_usize as *mut u8,
             0,
             core::ptr::null_mut(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::ENOSYS,
+            "a 16-byte stack passes glibc's test and reaches the stub"
+        );
     }
 
     #[test]
@@ -10405,20 +10744,112 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    /// The pid is looked up last, by `find_get_task_by_vpid`
+    /// (mm/process_vm_access.c:196), and only for a transfer of at least one
+    /// byte each way.  These passed empty vectors until 2026-09-25, which
+    /// upstream answers with 0 before it reaches the pid.
     #[test]
     fn test_process_vm_readv_pid_zero_esrch() {
+        let local = [pvm_iov(0x1000, 4096)];
+        let remote = [pvm_iov(0x2000, 4096)];
         crate::errno::set_errno(0);
-        let ret = process_vm_readv(0, core::ptr::null(), 0, core::ptr::null(), 0, 0);
+        let ret = process_vm_readv(0, local.as_ptr(), 1, remote.as_ptr(), 1, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
     #[test]
     fn test_process_vm_readv_negative_pid_esrch() {
+        let local = [pvm_iov(0x1000, 4096)];
+        let remote = [pvm_iov(0x2000, 4096)];
         crate::errno::set_errno(0);
-        let ret = process_vm_readv(-42, core::ptr::null(), 0, core::ptr::null(), 0, 0);
+        let ret = process_vm_readv(-42, local.as_ptr(), 1, remote.as_ptr(), 1, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    /// `process_vm_rw` returns 0 at :275 when the local vector holds no
+    /// bytes, before it reads the remote vector or looks the pid up.  So a bad
+    /// pid is not reported, and neither is a remote count past `UIO_MAXIOV`.
+    /// Where upstream returns 0 we return `ENOSYS`: see `process_vm_validate`.
+    #[test]
+    fn test_process_vm_readv_empty_local_vector_stops_before_pid_and_remote() {
+        let zero_len = [pvm_iov(0x1000, 0), pvm_iov(0x2000, 0)];
+        for (local, count) in [(core::ptr::null(), 0), (zero_len.as_ptr(), 2)] {
+            crate::errno::set_errno(0);
+            let ret = process_vm_readv(0, local, count, core::ptr::null(), 5000, 0);
+            assert_eq!(ret, -1, "local count {count}");
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::ENOSYS,
+                "local count {count}: neither the remote count nor the pid is examined"
+            );
+        }
+    }
+
+    /// And `process_vm_rw_core` returns 0 at :181 when no remote segment has
+    /// a length, still before `find_get_task_by_vpid`.
+    #[test]
+    fn test_process_vm_readv_empty_remote_vector_stops_before_pid() {
+        let local = [pvm_iov(0x1000, 4096)];
+        let remote = [pvm_iov(0x2000, 0)];
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(-1, local.as_ptr(), 1, remote.as_ptr(), 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// The local vector is validated completely before the remote one is
+    /// read, so a NULL local vector outranks an oversized remote count.
+    /// Both counts used to be checked before either pointer.
+    #[test]
+    fn test_process_vm_readv_local_vector_before_remote_count() {
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            1,
+            core::ptr::null(),
+            1,
+            core::ptr::null(),
+            PROCESS_VM_UIO_MAXIOV + 1,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// A segment length that is negative as an `ssize_t` is `EINVAL`
+    /// (`copy_iovec_from_user`, lib/iov_iter.c:1380), on either side.
+    #[test]
+    fn test_process_vm_readv_segment_length_past_ssize_max_einval() {
+        let fine = [pvm_iov(0x1000, 4096)];
+        let bad = [
+            pvm_iov(0x1000, 4096),
+            pvm_iov(0x2000, (i64::MAX as usize) + 1),
+        ];
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(1, bad.as_ptr(), 2, fine.as_ptr(), 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL, "local");
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(1, fine.as_ptr(), 1, bad.as_ptr(), 2, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL, "remote");
+    }
+
+    /// Every segment's length is read before any segment's range is tested,
+    /// so a bad length in the second segment outranks a bad range in the
+    /// first.
+    #[test]
+    fn test_process_vm_readv_segment_length_outranks_range() {
+        let local = [
+            pvm_iov(0x1000, i64::MAX as usize),
+            pvm_iov(0x2000, (i64::MAX as usize) + 1),
+        ];
+        let remote = [pvm_iov(0x3000, 4096)];
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(1, local.as_ptr(), 2, remote.as_ptr(), 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
@@ -10523,9 +10954,12 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
+    /// Two local segments of `SSIZE_MAX` bytes: each length is a valid
+    /// `ssize_t`, so there is no `EINVAL`, but `access_ok(0x1000, SSIZE_MAX)`
+    /// (lib/iov_iter.c:1484) ends past the user half and faults.  This was an
+    /// `EINVAL` "sum overflow" test until 2026-09-25; upstream has no sum rule.
     #[test]
-    fn test_process_vm_readv_local_sum_overflow_einval() {
-        // Two iovs each claiming SSIZE_MAX bytes — sum overflows.
+    fn test_process_vm_readv_huge_local_segments_efault() {
         let iov = [
             pvm_iov(0x1000, i64::MAX as usize),
             pvm_iov(0x2000, i64::MAX as usize),
@@ -10534,11 +10968,15 @@ mod tests {
         crate::errno::set_errno(0);
         let ret = process_vm_readv(1, iov.as_ptr(), 2, remote.as_ptr(), 1, 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
+    /// The same two segments on the *remote* side are not range-checked at
+    /// all — they are another process's addresses, read through
+    /// `iovec_from_user` (mm/process_vm_access.c:277) without `access_ok` —
+    /// so they pass validation and reach the stub.
     #[test]
-    fn test_process_vm_readv_remote_sum_overflow_einval() {
+    fn test_process_vm_readv_huge_remote_segments_pass_validation() {
         let local = [pvm_iov(0x1000, 4096)];
         let iov = [
             pvm_iov(0x1000, i64::MAX as usize),
@@ -10547,7 +10985,21 @@ mod tests {
         crate::errno::set_errno(0);
         let ret = process_vm_readv(1, local.as_ptr(), 1, iov.as_ptr(), 2, 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// `access_ok` admits NULL: it is a range test, and `valid_user_address`
+    /// is a sign test on the end (arch/x86/include/asm/uaccess_64.h:57,85).
+    #[test]
+    fn test_access_ok_x86_64_matches_upstream() {
+        assert!(
+            access_ok_x86_64(0, 4096),
+            "NULL is in range; it faults on use"
+        );
+        assert!(access_ok_x86_64(0x1000, i64::MAX as usize - 0x1000));
+        assert!(!access_ok_x86_64(0x1000, i64::MAX as usize - 0xFFF));
+        assert!(!access_ok_x86_64(usize::MAX, 2), "a wrapping range");
+        assert!(!access_ok_x86_64(1 << 63, 0), "a kernel-half start");
     }
 
     #[test]
@@ -10563,11 +11015,17 @@ mod tests {
 
     #[test]
     fn test_process_vm_writev_same_validation_as_readv() {
-        // writev share validator — verify they behave identically.
+        // writev shares the validator — verify they behave identically.
+        let local = [pvm_iov(0x1000, 4096)];
+        let remote = [pvm_iov(0x2000, 4096)];
+        crate::errno::set_errno(0);
+        let ret = process_vm_writev(0, local.as_ptr(), 1, remote.as_ptr(), 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
         crate::errno::set_errno(0);
         let ret = process_vm_writev(0, core::ptr::null(), 0, core::ptr::null(), 0, 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]
@@ -10833,18 +11291,22 @@ mod tests {
         );
     }
 
-    /// Bad pid + no cap → ESRCH (pid check runs first).
+    /// Bad pid + no cap → ESRCH: a question about the caller's own argument,
+    /// not about authority.  (The vectors must carry bytes, or upstream stops
+    /// before the pid — see `test_process_vm_readv_empty_local_vector_stops_before_pid_and_remote`.)
     #[test]
     fn test_phase200_process_vm_readv_bad_pid_esrch_precedes_everything() {
         let _g = phase200_pvm_cap::CapGuard::snapshot();
         phase200_pvm_cap::drop_cap_sys_ptrace();
+        let local = [pvm_iov(0x1000, 4096)];
+        let remote = [pvm_iov(0x2000, 4096)];
         crate::errno::set_errno(0);
         let ret = process_vm_readv(
             0, // bad pid
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            0,
+            local.as_ptr(),
+            1,
+            remote.as_ptr(),
+            1,
             0,
         );
         assert_eq!(ret, -1);
@@ -13723,9 +14185,11 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
         }
 
-        /// EFAULT (NULL fn) takes priority over EPERM.
+        /// A NULL fn takes priority over EPERM: glibc's clone.S refuses it
+        /// with EINVAL before the syscall, where the privilege question
+        /// arises.  (This was EFAULT, and named for it, until 2026-09-25.)
         #[test]
-        fn test_clone_efault_before_eperm() {
+        fn test_clone_null_fn_einval_before_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             crate::errno::set_errno(0);
@@ -13736,7 +14200,7 @@ mod tests {
                 core::ptr::null_mut(),
             );
             assert_eq!(r, -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         }
 
         /// Parity with unshare: same flags, same cap state → same errno.

@@ -1769,6 +1769,11 @@ D's to act on once answered).
     * `libc.a` is built for its own hard-float target with `-Zbuild-std`
       (§1106), so a future rustc cannot break the sysroot and the archive has
       one float ABI; compiler-rt's C-only builtins are ported into posix.
+    * the tenth NULL-pointer pass (`process.rs`, `epoll.rs`): `clone`,
+      `clone3`, `mount`/`umount2`, `process_vm_readv`, `waitid`, `epoll_ctl`,
+      `epoll_wait`, the eventfd wrappers, `signalfd` and `inotify_add_watch`
+      now refuse bad arguments with Linux 6.6's errno, in its order (§1107;
+      the kernel's `inotify_add_watch` half is requested of lane A).
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

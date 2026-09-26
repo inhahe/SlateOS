@@ -23641,20 +23641,124 @@ predicate upstream before you write one** — and then check whether the
 upstream predicate is glibc's or the kernel's, because the two disagree and
 the disagreement is load-bearing.
 
+**Tenth pass, 2026-09-25 — `process.rs` and `epoll.rs` (19 sites), lane D.**
+The two files the ninth pass named as the last clusters. Eleven functions were
+wrong, two were right, and the pass turned up a fact about the kernel that
+changes how the NULL test should be placed everywhere.
+
+- **`clone` was this entry's founding bug in miniature.** glibc's
+  `x86_64/clone.S` loads `-EINVAL` and refuses a NULL function, then a stack
+  that is zero once aligned down to 16 (`andq $-16, %rsi`) — so a stack of
+  1-15 as well. The doc comment above `clone` said `EINVAL` throughout; the
+  code and three tests said `EFAULT`. That is the blanket sweep's signature
+  exactly: code and tests edited to agree, the one sentence that was right
+  left behind.
+- **`clone3` had a comment claiming "Linux order" for the reverse of it.**
+  `copy_clone_args_from_user` (kernel/fork.c:3074-3077) tests the size before
+  `copy_struct_from_user` reads the struct, so `clone3(NULL, 8)` is `EINVAL`.
+- **`process_vm_readv`/`writev` had four faults.** The pid came second;
+  upstream looks it up last, after both vectors (mm/process_vm_access.c:196).
+  Both counts came before either pointer; upstream validates the local vector
+  completely before it reads the remote one. A rule that each vector's *summed*
+  lengths fit `ssize_t` came from the man page; the code tests each length
+  alone (lib/iov_iter.c:1380) and caps the total. And the local vector's range
+  test (`access_ok`, :1484 — once per segment, or once on the truncated length
+  for a single segment) was missing, so a local range running into the kernel
+  half was accepted. The doc comment also placed `process_vm_rw` in
+  fs/read_write.c. Upstream's two zero-byte early returns are honoured but
+  answered `ENOSYS` rather than 0 (design-decisions §1107).
+- **`mount` was reworked against fs/namespace.c.** It refused flag bits
+  outside a whitelist (upstream refuses only `MS_NOUSER`), refused any two
+  "mode" bits together (refusing `MS_REMOUNT | MS_BIND`, the usual way to make
+  a bind mount read-only), gave `EFAULT` for a NULL source or type (upstream:
+  `EINVAL` from the operation, and a NULL source is legal for a new mount),
+  collapsed an empty type to `EINVAL` (upstream: `ENODEV`), capped the type at
+  an invented 256 bytes, and asked for privilege last (upstream asks before the
+  operation is chosen). The string limits were off by one — 4096 bytes of name
+  were accepted where `PATH_MAX` counts the NUL — and a too-long type or source
+  is `EINVAL` (`strndup_user`), not `ENAMETOOLONG`, and outranks the target.
+- **`umount`/`umount2` described a kernel older than the reference.** They
+  asked for privilege before the path, citing `ksys_umount`. That was true
+  before 5.9; since then `may_mount` is in `can_umount` (fs/namespace.c:1873),
+  after `user_path_at`. `umount` is now `umount2(name, 0)`, as glibc's is.
+- **`waitid` wrote the wrong amount.** Linux writes six fields of `*infop` —
+  zeros — on a `WNOHANG` miss *and on every error* (kernel/exit.c:1726-1737).
+  We wrote nothing on an error and zeroed all 128 bytes on a miss, each under a
+  comment giving a reason.
+- **`epoll_ctl`** copied the event only for ADD and MOD; upstream copies it for
+  every op but DEL (`ep_op_has_event`), so an unknown op with a NULL event is
+  `EFAULT`. It had no `EPERM` for a target without `poll` — a regular file was
+  accepted and then reported ready on every wait — and compared descriptor
+  numbers where upstream compares files, so a `dup` of the epoll fd could be
+  added to itself.
+- **`epoll_wait` had been "fixed" away from upstream.** A comment said the
+  order before it — `maxevents`, `access_ok`, `fdget` — had been a bug, and
+  moved the lookup first. That order *is* `do_epoll_wait`'s (:2291-2299).
+- **`eventfd_read`/`eventfd_write`** refused a descriptor of another kind with
+  an `EINVAL` attributed to the kernel's read. glibc's are `read`/`write` of
+  eight bytes and nothing else; they are that now.
+- **`signalfd`** sent an open descriptor to `ENOSYS` behind a `TODO` (with no
+  `todo.txt` entry) saying the kind could not be told. It can: nothing libc
+  holds is a signalfd, so an open one is `EINVAL`, as `do_signalfd4` says.
+- **`inotify_add_watch`** tested for one of the twelve event bits, which is
+  wrong both ways: upstream refuses a bit outside `ALL_INOTIFY_BITS` and a zero
+  mask, and accepts a mask of flags alone. The `IN_MASK_ADD | IN_MASK_CREATE`
+  refusal was missing.
+- **Right already:** `timerfd_settime`/`timerfd_gettime`, cited and checked
+  against fs/timerfd.c:454-578; `wait4`'s and `waitid`'s optional pointers.
+- Every descriptor lookup in `epoll.rs` now goes through an `fdget` that, like
+  upstream's (fs/file.c:1030), cannot see an `O_PATH` descriptor.
+
+**The habit this pass adds: on x86-64, `access_ok` admits NULL.**
+`valid_user_address` is `(long)(x) >= 0` (arch/x86/include/asm/uaccess_64.h:57)
+and `__access_ok` a range test on the end (:85), so a NULL buffer passes it and
+faults at its first *use*. Earlier passes put the NULL test where `access_ok`
+sits. That keeps the `EBADF` ordering right when a descriptor lookup precedes
+the range check — `ksys_read` looks up first — but answers `EFAULT` where the
+call would have copied nothing, and it is wrong outright when the lookup comes
+second: `do_epoll_wait` runs `access_ok` *before* `fdget`, so NULL there must
+not outrank `EBADF`, and does not fault at all when nothing is ready. **Put the
+NULL test where the copy is, not where the range check is.** (The x86 headers were added to the
+`D:\refsrc\linux-6.6` sparse checkout for this: `git -c
+core.protectNTFS=false sparse-checkout add arch/x86/include`.)
+
+And the defect-marker habit held again: `clone3`'s "Linux order", `epoll_wait`'s
+"previously … a bug", `eventfd_read`'s kernel `EINVAL`, `umount`'s
+unprivileged caller who "never learns" about its path, and two `mount` test
+stories — one in which Linux refuses a stale flag through a whitelist it does
+not have, one in which it "requires two separate calls" for a bind remount it
+performs in one. Nine for nine across four passes. One refinement: `umount`'s
+comment was *true of an older kernel*. Before trusting a cited order, check
+which kernel it describes.
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
-`pthread.rs` looks like the largest concentration in a raw `rg` count (~48
+`pthread.rs` looks like the largest concentration in a raw `rg` count (~51
 sites), but it is not open work: design-decisions.md §303 already walked it,
 fixed its nine ordering bugs, and settled the pointer sites wholesale —
 NPTL has no NULL checks at all, so there is no upstream errno to look up and
-`EFAULT` is the adopted substitute. Do not re-open it by grep count. After
-`file.rs`, the largest genuinely-unclassified files are `process.rs` (10) and
-`epoll.rs` (9), and everything below that is a long tail of eight or fewer per
-file — a shape that argues for retiring this entry by sampling rather than by
-another file-at-a-time sweep.
+`EFAULT` is the adopted substitute. Do not re-open it by grep count. The same
+goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
+`epoll.rs`, walked by passes five to ten. What is left is a long tail — on
+2026-09-25, `time.rs`, `semaphore.rs`, `sched.rs`, `ioctl.rs` and `dirent.rs`
+at eight sites each (the last two partly walked by the second pass),
+`mqueue.rs` and `crypt.rs` at seven, `aio.rs` at six, and about forty files at
+five or fewer — which argues for retiring this entry by sampling rather than by
+another file-at-a-time sweep: classify a random twenty of the tail, and close
+the entry if they come back clean, reopening per function thereafter.
 
-Four habits carry forward, one per pass that produced one. From `socket.rs`:
+One item is not a site count: `read`, `write`, `pread` and `pwrite`
+(`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
+read at end of file, of an empty non-blocking pipe or of a directory says
+`EFAULT` where Linux says 0, `EAGAIN` or `EISDIR`. The fix is the tenth pass's
+habit — test at each per-kind copy — and it has to be done arm by arm, because
+several arms (eventfd, timerfd, inotify) dereference the buffer themselves
+(design-decisions §1107, point 2).
+
+Five habits carry forward, one per pass that produced one. From the tenth
+pass: **the NULL test belongs where the copy is, not where `access_ok` is**,
+because on x86-64 `access_ok` admits NULL. From `socket.rs`:
 **do not generalise a rule from one sibling call to the next** — `bind` and
 `connect` order `ENOTSOCK` oppositely, and `sendmsg` and `sendto` order
 `EBADF` oppositely, in the same file. From `spawn.rs`: **when sibling
@@ -165300,6 +165404,65 @@ System V again, with the note in a PT_NOTE of their own (`readelf -h`, `-l`,
 **Lesson:** a `#[used]` static on an ELF target changes the object's OS/ABI
 byte, which this kernel reads as an ABI decision. Emit marker notes with
 assembler directives, never with `#[used]`.
+
+### [D] B-D-EPOLL-DOES-NOT-FORGET-A-CLOSED-DESCRIPTOR — 2026-09-25 — OPEN
+
+**Where:** `posix/src/epoll.rs` — `EpollEntry` is keyed by descriptor number,
+and `compute_revents` looks the number up at wait time; `posix/src/file.rs`
+`close()` does not tell epoll.
+
+**What.** Linux removes a file from every epoll interest list when its last
+reference is closed (`eventpoll_release`, fs/eventpoll.c). Here the entry
+stays, with two results:
+
+- `epoll_wait` reports it as `EPOLLERR | EPOLLHUP` on every call from then
+  on, with the caller's `data` — typically a pointer to the state the caller
+  freed along with the descriptor. An event loop that closes before it
+  deletes (legal, and common, on Linux) is handed a dangling pointer.
+- If the number is reused by a later `open`, the stale entry reports the
+  *new* file's readiness under the old registration's `data` and mask, and
+  `EPOLL_CTL_ADD` of the new file is refused with `EEXIST` because the number
+  is "already present". Linux keys an entry by (file, descriptor), so the new
+  file is a new entry.
+
+`epoll_ctl`'s one kept deviation — `EPOLL_CTL_DEL` of a closed descriptor
+succeeds, where Linux says `EBADF` — exists only to let a caller clean up after
+this.
+
+**Reproduce.** `e = eventfd(0,0); ADD e with data p; close(e); epoll_wait` →
+1 event, `EPOLLERR|EPOLLHUP`, data `p` (Linux: none). Then `f = open(...)`
+returning the same number, `ADD f` → `EEXIST` (Linux: 0).
+
+**Proper fix.** Key entries by the open file: record the target's
+`(kind, handle)` at `EPOLL_CTL_ADD`, compute readiness from that rather than
+from the number, and treat `(descriptor, kind, handle)` as the entry's
+identity, as upstream's `epitem` is `(file, fd)`. In `close()`, once the
+handle has no descriptor left (`fdtable::is_handle_referenced`), purge every
+entry naming it from every instance. A `dup` then keeps the entry alive as it
+does upstream, and the `EPOLL_CTL_DEL` deviation can go.
+
+### [D] TD-D-INOTIFY-SHIM-IGNORES-ITS-CONTROL-FLAGS — 2026-09-25 — OPEN
+
+**Where:** `posix/src/epoll.rs`, `inotify_add_watch` and the event pump
+(`IN_KNOWN_EVENTS`'s doc comment says so outright).
+
+**What.** The mask is validated as Linux 6.6 validates it (tenth NULL-pointer
+pass), but of the control flags only the validation is real. `IN_MASK_ADD`
+should OR the new mask into an existing watch's and replaces it instead;
+`IN_MASK_CREATE` should refuse an existing watch with `EEXIST`; `IN_ONLYDIR`
+should refuse a non-directory with `ENOTDIR`; `IN_ONESHOT` should remove the
+watch (queuing `IN_IGNORED`) after its first event; `IN_DONT_FOLLOW` should
+not follow a final symlink; `IN_EXCL_UNLINK` should drop events for unlinked
+children. All six are accepted and ignored, which is a silent failure: a
+caller asking for "only if it is a directory" gets a watch on a file.
+
+**Proper fix.** The first four are libc's to do: the existing-watch search in
+`inotify_add_watch` already finds the slot `IN_MASK_ADD`/`IN_MASK_CREATE`
+need, `stat_self` already returns whether the path is a directory, and the pump
+can retire a oneshot watch as it queues the event. `IN_DONT_FOLLOW` needs an
+`lstat`-based resolution. `IN_EXCL_UNLINK` needs the kernel's watch to know
+which children are unlinked; check what lane A's `fs::notify` records before
+deciding whose change that is.
 
 ### [F] A partial frame was not the frame a full redraw draws: four faults, found by one comparison -- 2026-09-24
 

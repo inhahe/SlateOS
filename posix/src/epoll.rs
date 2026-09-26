@@ -304,6 +304,26 @@ fn compute_revents(fd: i32, mask: u32) -> u32 {
     revents
 }
 
+/// Upstream's `fdget` (fs/file.c:1030): the descriptor's entry, unless it is
+/// not open — or is an `O_PATH` descriptor, which `__fget_light(fd,
+/// FMODE_PATH)` refuses to return.  Every call here that upstream begins
+/// with `fdget` begins with this, so an `O_PATH` descriptor is `EBADF` in
+/// each of them.
+fn fdget(fd: i32) -> Option<fdtable::FdEntry> {
+    fdtable::get_fd(fd).filter(|entry| !crate::file::is_path_fd_entry(entry))
+}
+
+/// Upstream's `file_can_poll` (include/linux/poll.h): whether the file has a
+/// `poll` operation, which `epoll_ctl` requires of its target.
+///
+/// Everything here does except a filesystem file.  Regular files and
+/// directories have no `poll` on Linux (ext4's `file_operations` define
+/// none), so `epoll_ctl` refuses them with `EPERM`, even though `poll(2)`
+/// calls them always ready.
+fn kind_can_poll(kind: HandleKind) -> bool {
+    kind != HandleKind::File
+}
+
 /// Create an epoll file descriptor.
 ///
 /// `size` was a hint in early Linux versions; modern kernels ignore it.
@@ -357,45 +377,63 @@ fn create_internal(flags: i32) -> i32 {
 /// For ADD/MOD, `event` must be a valid pointer; for DEL it is ignored.
 ///
 /// Returns 0 on success, -1 with `errno` on failure.
+///
+/// # Linux behaviour
+///
+/// `SYSCALL_DEFINE4(epoll_ctl)` (fs/eventpoll.c:2267) copies the event and
+/// then calls `do_epoll_ctl` (:2111), so the order is:
+///
+/// 1. `EFAULT` — the event is copied for **every op but `EPOLL_CTL_DEL`**:
+///    `ep_op_has_event` is `op != EPOLL_CTL_DEL`
+///    (include/linux/eventpoll.h:60), so an unknown op copies it too.
+///    Until 2026-09-25 only ADD and MOD did, and an unknown op with a NULL
+///    event said `EINVAL`.
+/// 2. `EBADF` — `fdget(epfd)` (:2122), then `fdget(fd)` (:2127).  Neither
+///    sees an `O_PATH` descriptor.
+/// 3. `EPERM` — the target has no `poll` (:2133): a regular file or a
+///    directory.  This was not checked until 2026-09-25, so such a file was
+///    accepted and then reported ready on every wait.
+/// 4. `EINVAL` — the target is the epoll file itself, or `epfd` is not an
+///    epoll file (:2146).  Upstream compares *files*, so a `dup` of `epfd`
+///    is refused as `epfd` is; this compared descriptor numbers until
+///    2026-09-25.
+/// 5. The op: ADD of a present fd → `EEXIST`; MOD or DEL of an absent one
+///    → `ENOENT`; any other op → `EINVAL`.
+///
+/// One deviation is kept: `EPOLL_CTL_DEL` tolerates a closed target fd,
+/// where Linux says `EBADF`.  Upstream never needs to be asked, because
+/// closing a file removes it from every interest list; this interest list
+/// is keyed by descriptor number and does not hear about the close, so the
+/// `DEL` is how a caller removes the entry (see `known-issues.md` →
+/// `B-D-EPOLL-DOES-NOT-FORGET-A-CLOSED-DESCRIPTOR`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut EpollEvent) -> i32 {
-    // Linux validation order (fs/eventpoll.c::do_epoll_ctl, paraphrased):
-    //   1. EFAULT: `ep_op_has_event(op) && copy_from_user(event)` fails.
-    //   2. EBADF:  `fdget(epfd)`  — epfd must be open.
-    //   3. EBADF:  `fdget(fd)`    — target fd must be open.
-    //   4. EINVAL: `!is_file_epoll(epfd)` — epfd must be an epoll fd.
-    //   5. EINVAL: `epfd == fd`   — can't epoll oneself (checked after
-    //                               the kind check).
-    //   6. EINVAL: unknown `op`   — switch-statement default.
-    //
-    // Deviations from Linux that we keep:
-    //   * `EPOLL_CTL_DEL` tolerates a closed target fd, so applications
-    //     can clean up after a race where the fd was closed out from
-    //     under them.  Linux returns EBADF in that case.
-
-    // 1. EFAULT — null event for ADD/MOD, BEFORE any fd lookup.
-    let needs_event = op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD;
-    if needs_event && event.is_null() {
+    // 1. EFAULT — the event, for every op but DEL, before any fd lookup.
+    if op != EPOLL_CTL_DEL && event.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    // 2. epfd must be a valid open fd.
-    let Some(ep_entry) = fdtable::get_fd(epfd) else {
+    // 2. epfd, then the target, must be open (the DEL deviation aside).
+    let Some(ep_entry) = fdget(epfd) else {
         errno::set_errno(errno::EBADF);
         return -1;
     };
-    // 3. target fd must be a valid open fd (DEL deviation aside).
-    if op != EPOLL_CTL_DEL && fdtable::get_fd(fd).is_none() {
+    let target = fdget(fd);
+    if op != EPOLL_CTL_DEL && target.is_none() {
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    // 4. epfd must be an epoll fd, not (e.g.) a regular file.
-    if ep_entry.kind != HandleKind::Epoll {
-        errno::set_errno(errno::EINVAL);
+    // 3. EPERM — the target must support poll.
+    if target.as_ref().is_some_and(|t| !kind_can_poll(t.kind)) {
+        errno::set_errno(errno::EPERM);
         return -1;
     }
-    // 5. Can't epoll yourself.  Linux checks this AFTER the kind check.
-    if fd == epfd {
+    // 4. EINVAL — epfd must be an epoll fd, and not the target's own file.
+    if ep_entry.kind != HandleKind::Epoll
+        || target
+            .as_ref()
+            .is_some_and(|t| t.kind == HandleKind::Epoll && t.handle == ep_entry.handle)
+    {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -404,8 +442,8 @@ pub extern "C" fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut EpollEvent)
 
     match op {
         EPOLL_CTL_ADD => {
-            // SAFETY: caller asserts validity of `event` for ADD/MOD.
-            // Null was rejected upfront with EFAULT.
+            // SAFETY: caller asserts validity of `event` for every op but
+            // DEL.  Null was rejected upfront with EFAULT.
             let ev = unsafe { core::ptr::read_unaligned(event) };
             // Unaligned read because of #[repr(packed)] — copy fields
             // through stack locals to avoid taking references to packed
@@ -526,10 +564,31 @@ pub extern "C" fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut EpollEvent)
 /// Returns the number of events written into `events` (0..=maxevents),
 /// or -1 with `errno` set on error.
 ///
+/// # Linux behaviour
+///
+/// `do_epoll_wait` (fs/eventpoll.c:2283), in order:
+///
+/// 1. `maxevents <= 0 || maxevents > EP_MAX_EVENTS` → `EINVAL` (:2291).
+/// 2. `access_ok(events, …)` → `EFAULT` (:2295) — which admits NULL:
+///    on x86-64 it is a range test whose `valid_user_address` is a sign
+///    test on the end (arch/x86/include/asm/uaccess_64.h:57,85).
+/// 3. `fdget(epfd)` → `EBADF` (:2299).
+/// 4. not an epoll file → `EINVAL` (:2308).
+/// 5. the wait.  A NULL `events` faults only when an event is to be
+///    written into it: `ep_send_events` then returns `EFAULT` if nothing was
+///    written yet (:1736-1740) and puts the event back, so a NULL buffer
+///    with nothing ready waits out its timeout and returns 0.
+///
+/// Until 2026-09-25 this looked `epfd` up first, under a comment saying
+/// that the order before it — upstream's — had been a bug, and refused a
+/// NULL `events` at once, so a bad `maxevents` with a bad `epfd` said
+/// `EBADF` where Linux says `EINVAL`, and a NULL buffer said `EFAULT` where
+/// Linux waits.
+///
 /// # Safety
 ///
-/// `events` must point to an array of at least `maxevents` `EpollEvent`
-/// entries.
+/// `events` must be NULL or point to an array of at least `maxevents`
+/// `EpollEvent` entries.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn epoll_wait(
     epfd: i32,
@@ -540,28 +599,17 @@ pub unsafe extern "C" fn epoll_wait(
     // Sleep interval for the poll loop: 10ms.  Matches poll()/select().
     const POLL_INTERVAL_NS: u64 = 10_000_000;
 
-    // Validation order matches Linux's do_epoll_wait + ep_check_params
-    // (fs/eventpoll.c):
-    //   1. EBADF:  fdget(epfd) — epfd must be open.
-    //   2. EINVAL: maxevents <= 0 || maxevents > EP_MAX_EVENTS.
-    //   3. EFAULT: !access_ok(events, maxevents * sizeof(epoll_event)).
-    //   4. EINVAL: !is_file_epoll(epfd) — epfd must be an epoll fd.
-    //
-    // Previously we checked maxevents and events before the fdget, so
-    // a bad epfd combined with bad maxevents returned EINVAL instead
-    // of EBADF.
-    let Some(ep_entry) = fdtable::get_fd(epfd) else {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    };
+    // Upstream's order; see the doc comment.  `access_ok` (step 2) has
+    // nothing to refuse here, since the one bad pointer libc can recognise
+    // is NULL and it admits that.
     if maxevents <= 0 || maxevents > EP_MAX_EVENTS {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if events.is_null() {
-        errno::set_errno(errno::EFAULT);
+    let Some(ep_entry) = fdget(epfd) else {
+        errno::set_errno(errno::EBADF);
         return -1;
-    }
+    };
     if ep_entry.kind != HandleKind::Epoll {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -580,6 +628,7 @@ pub unsafe extern "C" fn epoll_wait(
 
     loop {
         // Scan the interest list and collect up to maxevents ready entries.
+        let mut faulted = false;
         let n = with_instance_mut(idx, |inst| {
             let mut count: i32 = 0;
             let limit = maxevents;
@@ -590,6 +639,13 @@ pub unsafe extern "C" fn epoll_wait(
                     && !watched.oneshot_fired
                 {
                     let revents = compute_revents(watched.fd, watched.events);
+                    if revents != 0 && events.is_null() {
+                        // `ep_send_events` could not write the first event:
+                        // EFAULT, with the event left pending and a oneshot
+                        // not disarmed (fs/eventpoll.c:1736-1740).
+                        faulted = true;
+                        break;
+                    }
                     if revents != 0 {
                         // Write event into the caller's buffer.
                         // SAFETY: caller asserts events is valid
@@ -616,6 +672,10 @@ pub unsafe extern "C" fn epoll_wait(
             count
         });
 
+        if faulted {
+            errno::set_errno(errno::EFAULT);
+            return -1;
+        }
         let ready = n.unwrap_or(0);
         if ready > 0 {
             return ready;
@@ -983,60 +1043,46 @@ pub extern "C" fn eventfd(initval: u32, flags: i32) -> i32 {
 
 /// Read from an eventfd (glibc convenience wrapper).
 ///
-/// Stores the counter value at `*value` and returns 0 on success.
-/// Returns -1 with `errno` set on error (EBADF, EINVAL, EAGAIN if
-/// non-blocking with zero counter).
+/// Stores the counter value at `*value` and returns 0 on success, or -1.
 ///
-/// Equivalent to `read(fd, value, 8) == 8 ? 0 : -1`.
+/// This is glibc's `eventfd_read` exactly
+/// (sysdeps/unix/sysv/linux/eventfd_read.c):
+/// `__read (fd, value, sizeof (eventfd_t)) != sizeof (eventfd_t) ? -1 : 0`.
+/// Every verdict is `read`'s: `EBADF` for a bad descriptor, `EFAULT` for a
+/// NULL `value`, and whatever a read of that kind of file gives.
 ///
-/// Validation order (Phase 144) matches the glibc wrapper composed
-/// with Linux's `sys_read`:
-///   1. `fdget(fd)`                    → EBADF
-///   2. `f.file->f_op->read`           → EINVAL on non-eventfd
-///   3. `copy_to_user(value, ...)`     → EFAULT
-///
-/// Pre-Phase-144 we checked the NULL pointer first, so
-/// `eventfd_read(-1, NULL)` returned EFAULT instead of Linux's
-/// EBADF, hiding the fd bug behind a misdirected pointer error.
+/// Until 2026-09-25 this refused a descriptor that is not an eventfd with
+/// `EINVAL`, under a comment attributing the refusal to the kernel's read.
+/// glibc reads 8 bytes from whatever `fd` is.  Two consequences carry over
+/// from upstream deliberately: a descriptor of another kind is read from,
+/// and a short read — possible only from one of those — returns -1 with
+/// `errno` untouched, since `read` itself succeeded.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn eventfd_read(fd: i32, value: *mut u64) -> i32 {
-    // Phase 144: fd resolution precedes NULL-pointer check.  A bad
-    // fd is the higher-information error and Linux reports it first.
-    let Some(entry) = fdtable::get_fd(fd) else {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    };
-    if entry.kind != HandleKind::Eventfd {
-        errno::set_errno(errno::EINVAL);
-        return -1;
+    if crate::file::read(fd, value.cast::<u8>(), EVENTFD_WORD) == EVENTFD_WORD_READ {
+        0
+    } else {
+        -1
     }
-    if value.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
-    let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
-    let r = eventfd_kernel_read(entry.handle, is_nb);
-    if r < 0 {
-        let _ = errno::translate(r);
-        return -1;
-    }
-
-    // SAFETY: `value` is non-null (checked above); caller guarantees it
-    // points to a writable u64.  We write the kernel counter result.
-    #[allow(clippy::cast_sign_loss)]
-    unsafe {
-        core::ptr::write_unaligned(value, r as u64);
-    }
-    0
 }
+
+/// `sizeof (eventfd_t)`: the one transfer size the eventfd wrappers ask for.
+const EVENTFD_WORD: usize = core::mem::size_of::<u64>();
+
+/// [`EVENTFD_WORD`] as the byte count `read`/`write` report for a whole one.
+const EVENTFD_WORD_READ: crate::types::SsizeT = EVENTFD_WORD as crate::types::SsizeT;
 
 /// Write to an eventfd (glibc convenience wrapper).
 ///
 /// Adds `value` to the kernel counter.  Returns 0 on success, -1 with
 /// `errno` set on error (EBADF, EINVAL if `value` is `u64::MAX`).
 ///
-/// Equivalent to `write(fd, &value, 8) == 8 ? 0 : -1`.
+/// This is glibc's `eventfd_write` exactly
+/// (sysdeps/unix/sysv/linux/eventfd_write.c):
+/// `__write (fd, &value, sizeof (eventfd_t)) != sizeof (eventfd_t) ? -1 : 0`.
+/// As with [`eventfd_read`], a descriptor of another kind is written to,
+/// not refused — the `EINVAL` this used to give for one until 2026-09-25 is
+/// not upstream's.
 ///
 /// Validation order (Phase 144) matches the glibc wrapper composed
 /// with Linux's `sys_write`:
@@ -1052,27 +1098,12 @@ pub extern "C" fn eventfd_read(fd: i32, value: *mut u64) -> i32 {
 /// was the fd.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn eventfd_write(fd: i32, value: u64) -> i32 {
-    // Phase 144: fd resolution precedes value validation, matching
-    // the kernel's `sys_write` → `eventfd_write` flow.
-    let Some(entry) = fdtable::get_fd(fd) else {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    };
-    if entry.kind != HandleKind::Eventfd {
-        errno::set_errno(errno::EINVAL);
-        return -1;
+    let bytes = value.to_ne_bytes();
+    if crate::file::write(fd, bytes.as_ptr(), EVENTFD_WORD) == EVENTFD_WORD_READ {
+        0
+    } else {
+        -1
     }
-    if value == u64::MAX {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
-    let r = eventfd_kernel_write(entry.handle, value);
-    if r < 0 {
-        let _ = errno::translate(r);
-        return -1;
-    }
-    0
 }
 
 // ===========================================================================
@@ -1625,13 +1656,13 @@ pub const SFD_FLAGS_VALID: i32 = SFD_CLOEXEC | SFD_NONBLOCK;
 ///    `EFAULT` regardless of whether `flags` would also be invalid.
 /// 2. Unknown flag bits → `EINVAL`.  This is the first check inside
 ///    `do_signalfd4` itself.
-/// 3. `fd != -1`: must be a valid open fd → `EBADF`.  Linux additionally
-///    requires the fd to already be a signalfd → `EINVAL` if not, but
-///    since we have no signalfds in the fdtable yet we cannot tell
-///    "wrong-kind fd" from "no fd" — we report `EBADF` for both,
-///    documenting the gap.  When signalfd state is added, this will
-///    refine to `EINVAL` for non-signalfd kinds.
-/// 4. All validated → `ENOSYS`.
+/// 3. `fd != -1`: `fdget(fd)` → `EBADF` for a descriptor that is not open
+///    (or is `O_PATH`), then `EINVAL` for one that is not a signalfd
+///    (fs/signalfd.c, `do_signalfd4`).  No descriptor in this table can be
+///    a signalfd — libc cannot create one — so every open one is `EINVAL`.
+///    Until 2026-09-25 an open descriptor reached `ENOSYS` instead, behind a
+///    `TODO` saying the kind could not be told; it can.
+/// 4. `fd == -1`, all validated → `ENOSYS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn signalfd(fd: i32, mask: *const u64, flags: i32) -> i32 {
     // Step 1: copy_from_user(mask) in sys_signalfd4 — must precede
@@ -1647,16 +1678,15 @@ pub extern "C" fn signalfd(fd: i32, mask: *const u64, flags: i32) -> i32 {
         return -1;
     }
     if fd != -1 {
-        if fd < 0 {
+        // Step 3: an existing signalfd to modify.  A negative descriptor
+        // other than -1 is simply not open.
+        if fdget(fd).is_none() {
             errno::set_errno(errno::EBADF);
             return -1;
         }
-        if fdtable::get_fd(fd).is_none() {
-            errno::set_errno(errno::EBADF);
-            return -1;
-        }
-        // TODO(signalfd): once signalfd state is tracked, refine the
-        // wrong-kind-of-fd case to EINVAL (matches Linux exactly).
+        // Open, so not a signalfd: nothing in this table is one.
+        errno::set_errno(errno::EINVAL);
+        return -1;
     }
     errno::set_errno(errno::ENOSYS);
     -1
@@ -1765,6 +1795,22 @@ pub const IN_NONBLOCK: i32 = 0o4000;
 /// `IN_EXCL_UNLINK`, `IN_MASK_CREATE`) is accepted by the call but
 /// silently ignored on the polling fast path.
 const IN_KNOWN_EVENTS: u32 = IN_ALL_EVENTS;
+
+/// Linux's `ALL_INOTIFY_BITS` (include/linux/inotify.h:12): every bit
+/// `inotify_add_watch` accepts — the twelve events, `IN_UNMOUNT`,
+/// `IN_Q_OVERFLOW`, `IN_IGNORED`, and the control flags.  A bit outside it
+/// is `EINVAL`.
+const ALL_INOTIFY_BITS: u32 = IN_ALL_EVENTS
+    | crate::linux_fsnotify_user_types::IN_UNMOUNT
+    | IN_Q_OVERFLOW
+    | IN_IGNORED
+    | crate::linux_fsnotify_user_types::IN_ONLYDIR
+    | crate::linux_fsnotify_user_types::IN_DONT_FOLLOW
+    | crate::linux_fsnotify_user_types::IN_EXCL_UNLINK
+    | crate::linux_fsnotify_user_types::IN_MASK_ADD
+    | crate::linux_fsnotify_user_types::IN_MASK_CREATE
+    | IN_ISDIR
+    | crate::linux_fsnotify_user_types::IN_ONESHOT;
 
 /// Event queue overflow indicator — also surfaced via `IN_Q_OVERFLOW`
 /// in `<sys/inotify.h>`.
@@ -2689,43 +2735,48 @@ pub extern "C" fn inotify_init1(flags: i32) -> i32 {
 /// watch's mask is overwritten (matching Linux without `IN_MASK_ADD`)
 /// and the existing wd is returned.
 ///
-/// Validation order matches Linux's `sys_inotify_add_watch`
-/// (`fs/notify/inotify/inotify_user.c`):
+/// Validation order matches Linux 6.6's `inotify_add_watch`
+/// (fs/notify/inotify/inotify_user.c:730):
 ///
-/// 1. `inotify_arg_to_mask(mask)` masked against `ALL_INOTIFY_BITS` —
-///    must have at least one event bit set after masking → EINVAL.
-/// 2. `fdget(fd)` — invalid fd → EBADF; fd not an inotify
-///    instance → EINVAL.
-/// 3. `user_path_at(pathname, ...)` — NULL pointer → EFAULT; empty or
-///    too-long → ENOENT/ENAMETOOLONG; missing file → ENOENT.
+/// 1. a bit outside `ALL_INOTIFY_BITS` → `EINVAL` (:746);
+/// 2. no bit at all → `EINVAL` (:753);
+/// 3. `fdget(fd)` → `EBADF` (:756), including for an `O_PATH` descriptor;
+/// 4. `IN_MASK_ADD` with `IN_MASK_CREATE` → `EINVAL` (:761);
+/// 5. `fd` not an inotify instance → `EINVAL` (:767);
+/// 6. `user_path_at(pathname, …)` (:777) — NULL → `EFAULT`; empty →
+///    `ENOENT`; too long → `ENAMETOOLONG`; missing → `ENOENT`.
 ///
-/// Phase 139 fix: pre-Phase 139 we checked `pathname.is_null()` first
-/// and returned EFAULT, so a caller passing both NULL pathname AND a
-/// zero (no-event-bits) mask saw EFAULT.  Linux returns EINVAL for
-/// that input because the mask check fires before any user pointer is
-/// touched.  Userspace probes (inotify-tools, fswatch's Linux backend)
-/// rely on the Linux ordering to bisect "is my mask wrong" from "is
-/// my pathname wrong."
+/// Until 2026-09-25 steps 1-2 were a single test that the mask held one of
+/// the twelve *event* bits, which was wrong both ways: it accepted unknown
+/// bits alongside an event, and refused masks upstream accepts, such as one
+/// holding only `IN_ONLYDIR` or `IN_MASK_ADD` — a watch that reports
+/// nothing but `IN_IGNORED` and `IN_UNMOUNT`.  Step 4 was missing.
+///
+/// Phase 139 fix, kept: pre-Phase 139 we checked `pathname.is_null()`
+/// first and returned EFAULT, so a caller passing both a NULL pathname and
+/// a zero mask saw EFAULT.  Linux returns EINVAL for that input because the
+/// mask check fires before any user pointer is touched.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn inotify_add_watch(fd: i32, pathname: *const u8, mask: u32) -> i32 {
-    // Step 1: mask validation — Linux's first check, before any user
-    // pointer or fd is touched.
-    if mask & IN_KNOWN_EVENTS == 0 {
-        // Linux: at least one event bit must be set.
+    use crate::linux_fsnotify_user_types::{IN_MASK_ADD, IN_MASK_CREATE};
+
+    // Steps 1-2: the mask, before any user pointer or fd is touched.
+    if mask & !ALL_INOTIFY_BITS != 0 || mask == 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // Step 2: fd validation — `fdget(fd)` happens before user_path_at.
-    let Some(entry) = fdtable::get_fd(fd) else {
+    // Step 3: `fdget(fd)`.
+    let Some(entry) = fdget(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
     };
-    if entry.kind != HandleKind::Inotify {
+    // Steps 4-5: the two flags that cannot go together, then the kind.
+    if mask & IN_MASK_ADD != 0 && mask & IN_MASK_CREATE != 0 || entry.kind != HandleKind::Inotify {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
     let idx = entry.handle;
-    // Step 3: pathname validation — `user_path_at` runs last; NULL or
+    // Step 6: pathname validation — `user_path_at` runs last; NULL or
     // unreadable pointer faults here.
     if pathname.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -3774,20 +3825,73 @@ mod tests {
 
     #[test]
     fn test_inotify_add_watch_phase139_buggy_caller_mask_is_only_unknown_bits() {
-        // Caller passes only unknown/flag bits (e.g. IN_MASK_ADD-only
-        // without any event); mask & IN_KNOWN_EVENTS == 0 → EINVAL.
+        // A mask holding a bit outside ALL_INOTIFY_BITS is EINVAL
+        // (fs/notify/inotify/inotify_user.c:746) — even alongside an event.
         let fd = inotify_init();
         if fd < 0 {
             return;
         }
-        // 0x4000_0000 is outside IN_KNOWN_EVENTS.
-        let only_flag_bits: u32 = 0x4000_0000;
-        assert_eq!(only_flag_bits & IN_KNOWN_EVENTS, 0);
-        errno::set_errno(0);
-        let ret = inotify_add_watch(fd, b"/tmp\0".as_ptr(), only_flag_bits);
-        assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        for mask in [
+            0x0000_1000_u32,
+            0x0080_0000,
+            0x0800_0000,
+            IN_MODIFY | 0x0000_1000,
+        ] {
+            assert_ne!(mask & !ALL_INOTIFY_BITS, 0);
+            errno::set_errno(0);
+            let ret = inotify_add_watch(fd, b"/tmp\0".as_ptr(), mask);
+            assert_eq!(ret, -1, "mask {mask:#x}");
+            assert_eq!(errno::get_errno(), errno::EINVAL, "mask {mask:#x}");
+        }
         crate::file::close(fd);
+    }
+
+    /// A mask of control or status bits alone is *accepted* upstream: the
+    /// only test is that some bit of ALL_INOTIFY_BITS is set (:753), and the
+    /// watch then reports just IN_IGNORED and IN_UNMOUNT.  This test's
+    /// predecessor asserted EINVAL for IN_ISDIR alone until 2026-09-25, when
+    /// the check was "one of the twelve event bits".  The mask being fine,
+    /// whatever follows is about the path.
+    #[test]
+    fn test_inotify_add_watch_flag_only_mask_passes_the_mask_checks() {
+        use crate::linux_fsnotify_user_types::{IN_MASK_ADD, IN_ONLYDIR};
+        let fd = inotify_init();
+        if fd < 0 {
+            return;
+        }
+        for mask in [IN_ISDIR, IN_ONLYDIR, IN_MASK_ADD, IN_IGNORED] {
+            errno::set_errno(0);
+            let ret = inotify_add_watch(fd, b"/tmp\0".as_ptr(), mask);
+            if ret < 0 {
+                assert_ne!(errno::get_errno(), errno::EINVAL, "mask {mask:#x}");
+            }
+        }
+        crate::file::close(fd);
+    }
+
+    /// IN_MASK_ADD with IN_MASK_CREATE is EINVAL, but only once the fd has
+    /// been looked up (:756 then :761): with a bad fd it is EBADF.
+    #[test]
+    fn test_inotify_add_watch_mask_add_with_mask_create() {
+        use crate::linux_fsnotify_user_types::{IN_MASK_ADD, IN_MASK_CREATE};
+        let both = IN_MODIFY | IN_MASK_ADD | IN_MASK_CREATE;
+        errno::set_errno(0);
+        assert_eq!(inotify_add_watch(99_999, b"/tmp\0".as_ptr(), both), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+        let fd = inotify_init();
+        if fd < 0 {
+            return;
+        }
+        errno::set_errno(0);
+        assert_eq!(inotify_add_watch(fd, core::ptr::null(), both), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL, "outranks the NULL path");
+        crate::file::close(fd);
+    }
+
+    /// `ALL_INOTIFY_BITS` is 0xF700_EFFF (include/linux/inotify.h:12).
+    #[test]
+    fn test_all_inotify_bits_value() {
+        assert_eq!(ALL_INOTIFY_BITS, 0xF700_EFFF);
     }
 
     // --- workflow + recovery -----------------------------------------
@@ -4114,14 +4218,18 @@ mod tests {
 
     #[test]
     fn test_signalfd_positive_fd() {
-        // fd 3 is unlikely to be open in the test fdtable, so the new
-        // validator rejects it with EBADF before reaching ENOSYS.  This
-        // exercises the existing-fd path which previously returned
-        // ENOSYS without validation.
+        // An open descriptor passed to signalfd must be a signalfd, or
+        // `do_signalfd4` says EINVAL (fs/signalfd.c).  No descriptor libc
+        // holds can be one, so every open one is EINVAL.  (Until 2026-09-25
+        // an open one reached ENOSYS, and this test relied on fd 3 happening
+        // to be closed to see EBADF instead.)
+        let efd = eventfd(0, 0);
+        assert!(efd >= 0);
         let mask: u64 = 0;
         errno::set_errno(0);
-        assert_eq!(signalfd(3, &raw const mask, 0), -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
+        assert_eq!(signalfd(efd, &raw const mask, 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(efd);
     }
 
     // -- timerfd_create with clock IDs --
@@ -5559,14 +5667,26 @@ mod tests {
         crate::file::close(epfd);
     }
 
+    /// An unknown op copies the event: `ep_op_has_event` is
+    /// `op != EPOLL_CTL_DEL` (include/linux/eventpoll.h:60), so with a NULL
+    /// event the answer is EFAULT before anything is looked up.  With an
+    /// event, epfd is looked up before the op is dispatched, so a bad epfd
+    /// is EBADF rather than the op's EINVAL.  (This test used to say the
+    /// event check was skipped for an unknown op, and asserted EBADF for the
+    /// NULL case.)
     #[test]
-    fn test_epoll_ctl_phase106_unknown_op_with_bad_epfd_is_ebadf() {
-        // Unknown op + bad epfd: Linux looks up epfd before
-        // dispatching on op, so EBADF wins over EINVAL.
-        // Note: with op=99 (not ADD/MOD/DEL), the event-null check is
-        // skipped, so we don't trip the EFAULT branch first.
+    fn test_epoll_ctl_phase106_unknown_op_copies_the_event_then_looks_up_epfd() {
         errno::set_errno(0);
         let ret = epoll_ctl(99999, 99, 4, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+
+        let mut ev = EpollEvent {
+            events: EPOLLIN,
+            data: 0,
+        };
+        errno::set_errno(0);
+        let ret = epoll_ctl(99999, 99, 4, &raw mut ev);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
     }
@@ -5697,41 +5817,46 @@ mod tests {
         crate::file::close(epfd);
     }
 
+    /// `do_epoll_wait` tests `maxevents` first (fs/eventpoll.c:2291) and
+    /// looks `epfd` up only after (:2299), so a bad count outranks a bad
+    /// descriptor.  This asserted the reverse until 2026-09-25.
     #[test]
-    fn test_epoll_wait_phase107_ebadf_wins_over_einval_maxevents() {
-        // Bad epfd + maxevents=0: Linux looks up epfd FIRST, so we get
-        // EBADF, not EINVAL.
+    fn test_epoll_wait_phase107_einval_maxevents_wins_over_ebadf() {
         let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
         errno::set_errno(0);
         let r = unsafe { epoll_wait(99999, ev.as_mut_ptr(), 0, 0) };
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
+    /// `do_epoll_wait` tests `maxevents` first (fs/eventpoll.c:2291) and
+    /// looks `epfd` up only after (:2299), so a bad count outranks a bad
+    /// descriptor.  This asserted the reverse until 2026-09-25.
     #[test]
-    fn test_epoll_wait_phase107_ebadf_wins_over_einval_negative_maxevents() {
-        // Same, with negative maxevents.
+    fn test_epoll_wait_phase107_einval_negative_maxevents_wins_over_ebadf() {
         let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
         errno::set_errno(0);
         let r = unsafe { epoll_wait(99999, ev.as_mut_ptr(), -1, 0) };
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
+    /// `do_epoll_wait` tests `maxevents` first (fs/eventpoll.c:2291) and
+    /// looks `epfd` up only after (:2299), so a bad count outranks a bad
+    /// descriptor.  This asserted the reverse until 2026-09-25.
     #[test]
-    fn test_epoll_wait_phase107_ebadf_wins_over_einval_overbound_maxevents() {
-        // Bad epfd + maxevents past EP_MAX_EVENTS: still EBADF.
+    fn test_epoll_wait_phase107_einval_overbound_maxevents_wins_over_ebadf() {
         let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
         errno::set_errno(0);
         let r = unsafe { epoll_wait(99999, ev.as_mut_ptr(), i32::MAX, 0) };
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
     fn test_epoll_wait_phase107_ebadf_wins_over_efault_null_events() {
-        // Bad epfd + null events: Linux returns EBADF (epfd lookup
-        // before access_ok).
+        // Bad epfd + null events: EBADF.  `access_ok` (:2295) comes before
+        // the lookup, but it admits NULL on x86-64, so the lookup decides.
         errno::set_errno(0);
         let r = unsafe { epoll_wait(99999, core::ptr::null_mut(), 1, 0) };
         assert_eq!(r, -1);
@@ -5752,17 +5877,67 @@ mod tests {
         crate::file::close(epfd);
     }
 
+    /// Non-epoll epfd + NULL events: EINVAL.  `access_ok` does run before
+    /// `is_file_epoll`, but it admits NULL (valid_user_address is a sign
+    /// test, arch/x86/include/asm/uaccess_64.h:57), so the kind decides.
+    /// This asserted EFAULT until 2026-09-25.
     #[test]
-    fn test_epoll_wait_phase107_efault_null_events_wins_over_einval_kind() {
-        // Non-epoll epfd + valid maxevents + null events: Linux's
-        // access_ok runs BEFORE is_file_epoll, so EFAULT wins.
+    fn test_epoll_wait_phase107_null_events_does_not_outrank_the_kind() {
         let not_epoll = eventfd(0, 0);
         assert!(not_epoll >= 0);
         errno::set_errno(0);
         let r = unsafe { epoll_wait(not_epoll, core::ptr::null_mut(), 1, 0) };
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
         crate::file::close(not_epoll);
+    }
+
+    /// A NULL buffer faults only when there is an event to write into it
+    /// (`ep_send_events`, fs/eventpoll.c:1736-1740).  With nothing ready the
+    /// wait simply times out.
+    #[test]
+    fn test_epoll_wait_null_events_with_nothing_ready_times_out() {
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        errno::set_errno(0);
+        let r = unsafe { epoll_wait(epfd, core::ptr::null_mut(), 4, 0) };
+        assert_eq!(r, 0);
+        assert_eq!(errno::get_errno(), 0);
+        crate::file::close(epfd);
+    }
+
+    /// With an event ready, the NULL buffer is EFAULT — and the event is not
+    /// consumed: upstream puts it back on the ready list, and a oneshot
+    /// watch stays armed, so the next wait with a real buffer reports it.
+    #[test]
+    fn test_epoll_wait_null_events_with_an_event_ready_is_efault_and_keeps_it() {
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        // An eventfd is always writable, so EPOLLOUT is ready at once.
+        let efd = eventfd(0, 0);
+        assert!(efd >= 0);
+        let mut ev = EpollEvent {
+            events: EPOLLOUT | EPOLLONESHOT,
+            data: 42,
+        };
+        assert_eq!(epoll_ctl(epfd, EPOLL_CTL_ADD, efd, &raw mut ev), 0);
+
+        errno::set_errno(0);
+        let r = unsafe { epoll_wait(epfd, core::ptr::null_mut(), 4, 0) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+
+        let mut out = [EpollEvent { events: 0, data: 0 }; 4];
+        let r = unsafe { epoll_wait(epfd, out.as_mut_ptr(), 4, 0) };
+        assert_eq!(
+            r, 1,
+            "the failed delivery must not have disarmed the oneshot"
+        );
+        let (events, data) = (out[0].events, out[0].data);
+        assert_eq!((events & EPOLLOUT, data), (EPOLLOUT, 42));
+
+        crate::file::close(efd);
+        crate::file::close(epfd);
     }
 
     #[test]
@@ -6397,16 +6572,18 @@ mod tests {
     }
 
     #[test]
-    fn test_eventfd_read_phase144_wrong_kind_fd_null_ptr_is_einval() {
-        // Wrong-kind real fd: get a timerfd, pass to eventfd_read
-        // with NULL.  Linux returns EINVAL (kind mismatch) BEFORE
-        // EFAULT (pointer); we match.
+    fn test_eventfd_read_phase144_wrong_kind_fd_null_ptr_is_efault() {
+        // Wrong-kind real fd with NULL: glibc's eventfd_read is
+        // `read(fd, value, 8)`, which does not care what kind of file fd
+        // is, so the verdict is read's own for a NULL buffer.  This
+        // asserted an EINVAL "kind mismatch" until 2026-09-25, attributed
+        // to the kernel; no such check exists.
         let tfd = timerfd_create(crate::time::CLOCK_MONOTONIC, 0);
         assert!(tfd >= 0);
         errno::set_errno(0);
         let ret = eventfd_read(tfd, core::ptr::null_mut());
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
         crate::file::close(tfd);
     }
 
@@ -6572,8 +6749,11 @@ mod tests {
     #[test]
     fn test_eventfd_read_phase144_ordering_matrix() {
         // Full 2x3 matrix: {bad fd, wrong-kind fd, eventfd} ×
-        // {NULL ptr, valid ptr}.  Pins every outcome.
-        let tfd = timerfd_create(crate::time::CLOCK_MONOTONIC, 0);
+        // {NULL ptr, valid ptr}.  Pins every outcome.  Every one of them is
+        // read(2)'s, since glibc's eventfd_read is a read of 8 bytes.  The
+        // timerfd is non-blocking so the wrong-kind read cannot wait for an
+        // expiry that never comes.
+        let tfd = timerfd_create(crate::time::CLOCK_MONOTONIC, TFD_NONBLOCK);
         assert!(tfd >= 0);
         let efd = eventfd(0, 0);
         assert!(efd >= 0);
@@ -6591,17 +6771,18 @@ mod tests {
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
 
-        // wrong-kind × NULL → EINVAL (kind beats EFAULT)
+        // wrong-kind × NULL → EFAULT: read's NULL-buffer verdict
         errno::set_errno(0);
         let r = eventfd_read(tfd, core::ptr::null_mut());
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
 
-        // wrong-kind × valid → EINVAL
+        // wrong-kind × valid → the read happens: an unarmed non-blocking
+        // timerfd has no expiry to report, so EAGAIN (not a refusal)
         errno::set_errno(0);
         let r = eventfd_read(tfd, &raw mut val);
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EAGAIN);
 
         // eventfd × NULL → EFAULT
         errno::set_errno(0);
@@ -6643,12 +6824,13 @@ mod tests {
         assert_eq!(eventfd_write(-1, 1), -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
 
-        // wrong-kind × U64_MAX → EINVAL (kind beats value)
+        // wrong-kind × U64_MAX → EINVAL: write(2) on a timerfd, which has
+        // no write operation — not a kind check of eventfd_write's own
         errno::set_errno(0);
         assert_eq!(eventfd_write(tfd, u64::MAX), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
-        // wrong-kind × valid value → EINVAL
+        // wrong-kind × valid value → EINVAL, the same way
         errno::set_errno(0);
         assert_eq!(eventfd_write(tfd, 1), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);

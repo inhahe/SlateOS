@@ -90,6 +90,11 @@ pub const MS_STRICTATIME: u64 = 1 << 24;
 /// Change to lazy time.
 pub const MS_LAZYTIME: u64 = 1 << 25;
 
+/// A filesystem that may not be mounted from userspace.  It is the one flag
+/// `mount(2)` refuses outright: `path_mount` returns `EINVAL` for it
+/// (fs/namespace.c:3601) before anything but the target has been examined.
+pub const MS_NOUSER: u64 = 1 << 31;
+
 // ---------------------------------------------------------------------------
 // Umount2 flags (MNT_*)
 // ---------------------------------------------------------------------------
@@ -175,6 +180,7 @@ mod tests {
             MS_SLAVE,
             MS_SHARED,
             MS_RELATIME,
+            MS_NOUSER,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

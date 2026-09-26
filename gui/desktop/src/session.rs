@@ -242,8 +242,20 @@ pub struct ShellSession<T: Transport> {
     /// The tray revision this session has folded in, so a frame that says
     /// nothing new does not repaint.
     tray_revision: u64,
-    /// Whether the chrome needs repainting before the next block.
+    /// Whether anything the shell draws may have changed since the last paint.
+    ///
+    /// The chrome is repainted before the next block, and the background too
+    /// when its frame is no longer the one it last sent -- see
+    /// [`refresh_background`](Self::refresh_background).
     dirty: bool,
+    /// The background frame last sent, exactly as sent (localized), or `None`
+    /// when there is none this session can vouch for: nothing painted yet, or
+    /// a paint asked for outright.
+    ///
+    /// What [`refresh_background`](Self::refresh_background) compares against,
+    /// so a repaint sends the full-screen surface only when the wallpaper, the
+    /// icons or the widgets on it changed.
+    background_drawn: Option<RenderTree>,
     running: bool,
     launches: Vec<crate::hotkeys::Launch>,
     /// Whether this session can be locked at all.
@@ -626,6 +638,7 @@ impl<T: Transport> ShellSession<T> {
             revision: 0,
             tray_revision: 0,
             dirty: false,
+            background_drawn: None,
             running: false,
             launches: Vec::new(),
             lockable: true,
@@ -966,22 +979,65 @@ impl<T: Transport> ShellSession<T> {
         self.paint_login()
     }
 
-    /// Paint the wallpaper.
+    /// Paint the background -- the wallpaper, the desktop's icons and its
+    /// widgets -- whether or not it has changed.
     ///
-    /// Separate from the chrome because it is the one surface whose picture
-    /// does not depend on anything an input event changes; repainting it on
-    /// every click would re-encode a full-screen image to say nothing new.
+    /// For the paints that must happen: the first, and after the display
+    /// changes size. Everything else goes through
+    /// [`refresh_background`](Self::refresh_background), which sends the
+    /// surface only when something on it changed.
     ///
     /// # Errors
     ///
     /// As [`EventLoop::submit`].
     pub fn paint_background(&mut self) -> Result<(), Error<T>> {
+        self.background_drawn = None;
+        self.refresh_background()
+    }
+
+    /// Send the background again if what it draws is not what it last sent.
+    ///
+    /// A surface of its own, apart from the chrome, because it covers the
+    /// whole screen and most of what changes the chrome -- a taskbar button
+    /// pressed, a menu opened -- leaves it alone. But plenty changes *it*: an
+    /// icon selected, dragged or renamed; a widget added or moved, or its
+    /// clock turning a minute; a wallpaper chosen in Settings, a slideshow's
+    /// next picture; a theme's colours. Until 2026-09-26 it was painted at
+    /// start and when the display changed size, and at no other time: every
+    /// one of those changed the shell's model, passed every test that read the
+    /// model, and never reached the screen.
+    ///
+    /// The frame is compared rather than each cause flagged, because the
+    /// causes are many and spread over three objects, and a flag is one more
+    /// place each new cause has to be taught about -- the first forgotten is a
+    /// change the user never sees, with every test of the model still green.
+    /// Building the frame is a few dozen commands; an unchanged one is not
+    /// sent, which is what keeps a click on the taskbar from re-compositing
+    /// the screen.
+    ///
+    /// # Errors
+    ///
+    /// As [`EventLoop::submit`].
+    fn refresh_background(&mut self) -> Result<(), Error<T>> {
         // Before the picture, the pixels the picture refers to. `render_image`
         // emits an `Image` command naming `current_image_id`, and the
         // compositor draws *nothing, silently* for an id it has never been
         // given bytes for — so an upload that has not happened is a wallpaper
         // that does not appear and says nothing about why.
         self.refresh_wallpaper_image()?;
+        let tree = self.background.localize(&self.background_tree());
+        if self.background_drawn.as_ref() == Some(&tree) {
+            return Ok(());
+        }
+        self.events.submit(self.background.window, &tree)?;
+        // Only once it is sent: a refused frame is one to send again.
+        self.background_drawn = Some(tree);
+        Ok(())
+    }
+
+    /// What the background draws now: the wallpaper, the desktop's icons on
+    /// it, and the widgets over those.
+    fn background_tree(&self) -> RenderTree {
         let width = self.shell.screen_width as f32;
         let height = self.shell.screen_height as f32;
         // The same zone the taskbar clock reads in — see
@@ -1003,8 +1059,7 @@ impl<T: Transport> ShellSession<T> {
         // surface, so windows cover the widgets -- which is what makes them
         // desktop widgets rather than an always-on-top overlay.
         tree.commands.extend(self.shell.render_widgets());
-        self.events
-            .submit(self.background.window, &self.background.localize(&tree))
+        tree
     }
 
     /// Why the wallpaper is not on screen, if it is not.
@@ -1644,6 +1699,10 @@ impl<T: Transport> ShellSession<T> {
 
         if self.dirty {
             self.dirty = false;
+            // The background first, as `repaint` orders them -- and sent only
+            // if it changed, since most of what marks the frame dirty is the
+            // taskbar's.
+            self.refresh_background()?;
             self.paint_chrome()?;
         }
 

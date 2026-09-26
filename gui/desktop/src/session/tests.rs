@@ -1053,8 +1053,13 @@ fn run_returns_when_the_compositor_hangs_up() {
     assert_eq!(session.shell().taskbar_windows().len(), 1);
 }
 
+/// **The background is sent again only when what it draws has changed** --
+/// here, a click on the taskbar, which changes the taskbar and not the
+/// wallpaper. The tests under "the background follows what it draws" are the
+/// other half: an icon, a widget and a wallpaper that do change it, and are
+/// drawn.
 #[test]
-fn the_background_is_painted_once_and_the_chrome_on_every_change() {
+fn a_click_on_the_taskbar_sends_the_chrome_and_not_the_background() {
     let (mut session, desktop, _turn) = session();
     let (background, panel) = (session.background().window(), session.panel().window());
     let after_start = desktop.borrow_mut().drawn();
@@ -1120,6 +1125,125 @@ fn a_press_the_shell_does_not_want_repaints_nothing() {
     press_at(&desktop, session.background(), 400.0, 400.0);
     session.pump().expect("pump");
     assert_eq!(desktop.borrow_mut().drawn().len(), before);
+}
+
+// ---- the background follows what it draws ----
+//
+// It was painted at start and when the display changed size, and never
+// otherwise, until 2026-09-26: an icon clicked was selected in the model and
+// in every test that read the model, and not on the screen. Each test here
+// goes through the real input path and asserts on the frame the compositor
+// was sent.
+
+/// How many frames have been drawn on `window` so far.
+fn frames_on(desktop: &Desktop, window: u64) -> usize {
+    desktop
+        .borrow_mut()
+        .drawn()
+        .iter()
+        .filter(|(w, _)| *w == window)
+        .count()
+}
+
+/// Whether the background frame last sent is the one the shell would draw
+/// now -- so what is on the screen is the model, not an older picture of it.
+fn background_is_current(session: &Session) -> bool {
+    session.background_drawn.as_ref()
+        == Some(&session.background.localize(&session.background_tree()))
+}
+
+#[test]
+fn a_desktop_icon_clicked_is_drawn_selected() {
+    let (mut session, desktop, _turn) = session();
+    let background = session.background().window();
+    let id = session.shell_mut().icons.add_icon(
+        "notes.txt",
+        crate::icons::IconType::File,
+        crate::icons::IconAction::Custom("notes".into()),
+        0,
+        0,
+    );
+    // Added past the event loop, so painted by hand: what is under test is
+    // the click, not the adding.
+    session.paint_background().expect("paint");
+    let before = frames_on(&desktop, background);
+    let icon = session.shell().icons.get_icon(id).expect("the icon");
+    let (x, y) = (icon.x as f32 + 20.0, icon.y as f32 + 20.0);
+
+    press_at(&desktop, session.background(), x, y);
+    session.pump().expect("pump");
+
+    assert!(
+        session.shell().icons.selected_ids().contains(&id),
+        "the press did not select the icon"
+    );
+    assert_eq!(
+        frames_on(&desktop, background),
+        before + 1,
+        "the icon was selected in the model and not on the screen"
+    );
+    assert!(background_is_current(&session), "the frame sent is stale");
+}
+
+#[test]
+fn a_widget_dragged_is_drawn_where_it_went() {
+    settingsfile::testing::with_scratch_config("session-widget-drawn", |_root| {
+        let (mut session, desktop, _turn) = session();
+        let background = session.background().window();
+        session
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+        session.paint_background().expect("paint");
+        let before = frames_on(&desktop, background);
+        let id = session.shell().widgets.all_widgets()[0].id;
+        let (wx, wy) = widget_origin(session.shell(), id);
+        let g = &session.shell().widgets.grid;
+        let dx = 3.0 * (g.cell_width + g.gap);
+
+        drag(
+            &desktop,
+            session.background(),
+            (wx + 8.0, wy + 8.0),
+            (wx + 8.0 + dx, wy + 8.0),
+        );
+        session.pump().expect("pump");
+
+        assert_ne!(
+            widget_origin(session.shell(), id),
+            (wx, wy),
+            "the widget did not move"
+        );
+        assert!(
+            frames_on(&desktop, background) > before,
+            "the widget moved in the model and not on the screen"
+        );
+        assert!(background_is_current(&session), "the frame sent is stale");
+    });
+}
+
+#[test]
+fn painting_the_background_outright_sends_it_even_unchanged() {
+    // `paint_background` is the paint that must happen -- the first, the one
+    // after the display changes size -- and a caller asking for it is told it
+    // happened. Only the pump's repaint is conditional.
+    let (mut session, desktop, _turn) = session();
+    let background = session.background().window();
+    let before = frames_on(&desktop, background);
+    session.paint_background().expect("paint");
+    assert_eq!(frames_on(&desktop, background), before + 1);
+}
+
+#[test]
+fn a_pump_that_changed_nothing_on_the_desktop_sends_no_background() {
+    // The other side of the comparison: a frame identical to the last is not
+    // sent, or every taskbar hover would re-composite the whole screen.
+    let (mut session, desktop, _turn) = session();
+    let background = session.background().window();
+    let before = frames_on(&desktop, background);
+    session.dirty = true;
+    session.pump().expect("pump");
+    assert_eq!(frames_on(&desktop, background), before);
+    assert!(background_is_current(&session));
 }
 
 // ---- the keyboard-layout switcher, which is a modifier-only chord ----
@@ -1366,6 +1490,26 @@ fn a_wallpaper_chosen_while_running_is_adopted_without_a_restart() {
             Some(picture.as_path()),
             "the desktop did not adopt the picture until a restart"
         );
+        // And it is on the screen, which is what "adopted" means to the user:
+        // the picture went up on the background surface, and the frame sent
+        // after it names it. Until 2026-09-26 only the manager's state was
+        // asserted here, and the background was never painted again after
+        // start -- so the picture was adopted, uploaded, and not shown.
+        let background = session.background().window();
+        let id = session.wallpaper_mut().current_image_id();
+        assert!(
+            uploads(&desktop)
+                .iter()
+                .any(|u| u.0 == background && u.1 == id),
+            "the picture was not sent to the background surface"
+        );
+        let named = session.background_drawn.as_ref().is_some_and(|tree| {
+            tree.commands
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Image { image_id, .. } if *image_id == id))
+        });
+        assert!(named, "no background frame since names the picture");
+        assert!(background_is_current(&session), "the frame sent is stale");
     });
 }
 

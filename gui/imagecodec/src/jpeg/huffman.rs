@@ -46,7 +46,17 @@ pub(super) struct Derived {
     /// code is longer than eight bits.
     lookup: [u16; 256],
     values: [u8; 256],
+    /// For an AC table, by the next [`FAST_BITS`] bits: a coefficient whose
+    /// code and extra bits both lie within them, decoded whole --
+    /// `value << 16 | run << 8 | bits used` -- or 0 for anything else (an
+    /// end of block, a run of sixteen zeros, a longer code or value). See
+    /// [`Sequential::decode_mcu`] for why this reads what libjpeg reads.
+    fast_ac: [i32; 1 << FAST_BITS],
 }
+
+/// How many bits [`Derived::fast_ac`] looks at: a code and its value
+/// together in this many bits or fewer is one lookup.
+const FAST_BITS: u32 = 10;
 
 /// `jpeg_make_d_derived_tbl`, with its validation.
 pub(super) fn derive(
@@ -133,12 +143,52 @@ pub(super) fn derive(
             return Err(jerr::BAD_HUFF_TABLE);
         }
     }
+    let fast_ac = if is_dc || lossless {
+        [0; 1 << FAST_BITS]
+    } else {
+        fast_ac_table(&spec.bits, &spec.values, &codes)
+    };
     Ok(Derived {
         maxcode,
         valoffset,
         lookup,
         values: spec.values,
+        fast_ac,
     })
+}
+
+/// [`Derived::fast_ac`] from the table's code lengths (`bits`), its symbols
+/// in code order, and their codes (Figure C.2's `huffcode`).
+fn fast_ac_table(bits: &[u8; 17], values: &[u8; 256], codes: &[u32; 257]) -> [i32; 1 << FAST_BITS] {
+    let mut table = [0i32; 1 << FAST_BITS];
+    let mut p = 0usize;
+    for (length, &n) in (0u32..).zip(bits.iter()).skip(1) {
+        for _ in 0..n {
+            let code = codes.get(p).copied().unwrap_or(0);
+            let symbol = values.get(p).copied().unwrap_or(0);
+            p = p.saturating_add(1);
+            let run = i32::from(symbol >> 4);
+            let size = u32::from(symbol & 15);
+            let used = length.saturating_add(size);
+            if size == 0 || used > FAST_BITS {
+                continue;
+            }
+            // Every value the `size` extra bits can hold, and every way the
+            // bits after them can go.
+            for extra in 0..(1u32 << size) {
+                let value = extend(extra as i32, size as i32);
+                let entry = (value << 16) | (run << 8) | used as i32;
+                // `used` is at most `FAST_BITS`, checked above.
+                let spare = FAST_BITS.wrapping_sub(used);
+                let first = ((code << size) | extra) << spare;
+                let count = 1usize << spare;
+                for slot in table.iter_mut().skip(first as usize).take(count) {
+                    *slot = entry;
+                }
+            }
+        }
+    }
+    table
 }
 
 /// The bit buffer and the out-of-data flag: libjpeg's `bitread_perm_state`
@@ -346,6 +396,30 @@ impl Window {
         self.left = self.left.wrapping_sub(n);
         let mask = 1u64.wrapping_shl(n as u32).wrapping_sub(1);
         (self.buffer.wrapping_shr(self.left as u32) & mask) as i32
+    }
+
+    /// An AC coefficient decoded whole from [`Derived::fast_ac`] -- its run
+    /// of zeros and its value -- when the buffer holds at least
+    /// [`FAST_BITS`] bits and the next code and its value lie within them.
+    ///
+    /// libjpeg reads such a coefficient with no fill: `HUFF_DECODE` fills
+    /// only below eight bits, `jpeg_huff_decode`'s reads of a longer code
+    /// and the value's `GET_BITS` only when the buffer holds fewer bits than
+    /// they take, and it holds all of them. So it takes the same bits and
+    /// nothing else, and taking them at once changes nothing it could show.
+    #[inline(always)]
+    fn fast_ac(&mut self, table: &Derived) -> Option<(usize, i16)> {
+        let spare = self.left.wrapping_sub(FAST_BITS as i32);
+        if spare < 0 {
+            return None;
+        }
+        let look = (self.buffer.wrapping_shr(spare as u32) & ((1 << FAST_BITS) - 1)) as usize;
+        let entry = table.fast_ac.get(look).copied().unwrap_or(0);
+        if entry == 0 {
+            return None;
+        }
+        self.left = self.left.wrapping_sub(entry & 0xFF);
+        Some((((entry >> 8) & 0xFF) as usize, (entry >> 16) as i16))
     }
 
     /// [`Bits::decode`].
@@ -558,6 +632,14 @@ impl Sequential {
                 let mut k = 1usize;
                 if member.ac_wanted {
                     while k < 64 {
+                        if let Some((run, value)) = w.fast_ac(ac) {
+                            k = k.wrapping_add(run);
+                            if let Some(cell) = block.get_mut(natural(k) & 63) {
+                                *cell = value;
+                            }
+                            k = k.wrapping_add(1);
+                            continue;
+                        }
                         let symbol = w.decode(bits, input, ac);
                         let run = (symbol >> 4) as usize;
                         let size = symbol & 15;
@@ -579,6 +661,10 @@ impl Sequential {
                     }
                 } else {
                     while k < 64 {
+                        if let Some((run, _)) = w.fast_ac(ac) {
+                            k = k.wrapping_add(run).wrapping_add(1);
+                            continue;
+                        }
                         let symbol = w.decode(bits, input, ac);
                         let run = (symbol >> 4) as usize;
                         let size = symbol & 15;

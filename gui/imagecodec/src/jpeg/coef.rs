@@ -324,7 +324,7 @@ pub(super) struct Smoothing<'a> {
 }
 
 /// `decompress_smooth_data` for one component and one iMCU row, into
-/// `plane` (`stride` samples a row) at the row's first sample row.
+/// `plane`: that iMCU row's samples, `stride` a row.
 #[allow(
     clippy::many_single_char_names,
     reason = "libjpeg's own names for the 25 DC registers are clearer as they are"
@@ -409,7 +409,7 @@ pub(super) fn smooth_row(s: &Smoothing<'_>, plane: &mut [u8], stride: usize) {
                 [q01, q10, q20, q11, q02],
                 [q03, q12, q21, q30],
             );
-            let at = here
+            let at = block_row
                 .saturating_mul(s.size)
                 .saturating_mul(stride)
                 .saturating_add(bx.saturating_mul(s.size));

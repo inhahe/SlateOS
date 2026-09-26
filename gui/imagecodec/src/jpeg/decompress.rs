@@ -20,7 +20,9 @@
 //! or sequential with the components in separate scans) is read whole into
 //! [`Store`]s when the decode starts, as `jpeg_start_decompress` does, and
 //! reconstructed a row at a time from there, with block smoothing where
-//! libjpeg would smooth.
+//! libjpeg would smooth. Either way the samples go into planes that keep only
+//! the last three iMCU rows ([`Samples`], libjpeg's main buffer): a picture
+//! is never held at its own size before it is handed out.
 //!
 //! A lossless image ([`lossless`]) goes the same way with samples in place of
 //! coefficients: a single-scan one is decoded an iMCU row at a time into the
@@ -694,7 +696,7 @@ impl<'d, 't> Decompress<'d, 't> {
                 down: (component.v * size, max_v * min),
             };
             self.rows.push(Rows::new(&shape, self.output_width, fancy));
-            self.planes.push(Samples::new(shape));
+            self.planes.push(self.plane(shape, component.v * size));
         }
         self.out_row = vec![0u8; self.output_width * self.out_components];
         Ok(())
@@ -712,14 +714,26 @@ impl<'d, 't> Decompress<'d, 't> {
         self.rows.clear();
         for component in &self.header.components {
             let size = component.dct_scaled_size;
-            self.planes.push(Samples::new(Shape {
+            let shape = Shape {
                 stride: component.width_in_blocks * size,
                 rows: self.total_imcu_rows * component.v * size,
                 width: component.downsampled_width,
                 height: component.downsampled_height,
                 across: (component.h * size, max_h * min),
                 down: (component.v * size, max_v * min),
-            }));
+            };
+            self.planes.push(self.plane(shape, component.v * size));
+        }
+    }
+
+    /// A component's plane: the last few iMCU rows (`imcu_rows` rows each),
+    /// or -- for a multi-scan lossless image, whose scans each add to the
+    /// samples, as libjpeg's whole-image array holds them -- every row.
+    fn plane(&self, shape: Shape, imcu_rows: usize) -> Samples {
+        if self.header.lossless && self.has_multiple_scans {
+            Samples::new(shape, shape.rows)
+        } else {
+            Samples::ring(shape, imcu_rows)
         }
     }
 
@@ -743,7 +757,9 @@ impl<'d, 't> Decompress<'d, 't> {
         };
         let mut bytes = 0u64;
         for (component, plane) in self.header.components.iter().zip(&self.planes) {
-            let rows = (imcu_rows * component.v * component.dct_scaled_size).min(plane.shape.rows);
+            let rows = (imcu_rows * component.v * component.dct_scaled_size)
+                .min(plane.shape.rows)
+                .min(plane.kept());
             bytes = bytes.saturating_add((rows as u64).saturating_mul(plane.shape.stride as u64));
             if self.has_multiple_scans && !lossless {
                 let blocks = component.width_in_blocks.next_multiple_of(component.h)
@@ -1115,9 +1131,15 @@ impl<'d, 't> Decompress<'d, 't> {
                     } else {
                         component.last_col_width
                     };
-                    let row0 = row * component.v * size + yoffset * size;
+                    // Offsets from the start of this iMCU row, which the
+                    // plane keeps as one run of rows.
+                    let row0 = yoffset * size;
                     let start_col = mcu_col * component.mcu_sample_width;
                     let stride = plane.shape.stride;
+                    let Some(out) = plane.rows_mut(row * component.v * size, component.v * size)
+                    else {
+                        continue;
+                    };
                     for yindex in 0..component.mcu_height {
                         if row < last_imcu_row || yoffset + yindex < component.last_row_height {
                             for xindex in 0..useful_width {
@@ -1131,7 +1153,7 @@ impl<'d, 't> Decompress<'d, 't> {
                                     block,
                                     &quant,
                                     &mut Target {
-                                        out: &mut plane.data,
+                                        out: &mut *out,
                                         at,
                                         stride,
                                     },
@@ -1197,6 +1219,10 @@ impl<'d, 't> Decompress<'d, 't> {
             };
             let quant = component.quant_table.unwrap_or([0; 64]);
             let stride = plane.shape.stride;
+            // This iMCU row's run of rows, which the offsets below start from.
+            let Some(out) = plane.rows_mut(row * v * size, v * size) else {
+                continue;
+            };
             if let Some(latches) = self.smoothing.as_ref().and_then(|l| l.get(ci)) {
                 let bits = if row > self.last_good_imcu_row {
                     &latches.1
@@ -1215,7 +1241,7 @@ impl<'d, 't> Decompress<'d, 't> {
                         total_imcu_rows: self.total_imcu_rows,
                         size,
                     },
-                    &mut plane.data,
+                    out,
                     stride,
                 );
                 continue;
@@ -1229,8 +1255,8 @@ impl<'d, 't> Decompress<'d, 't> {
                         &block,
                         &quant,
                         &mut Target {
-                            out: &mut plane.data,
-                            at: by * size * stride + bx * size,
+                            out: &mut *out,
+                            at: block_row * size * stride + bx * size,
                             stride,
                         },
                     );
@@ -1472,11 +1498,9 @@ impl<'d, 't> Decompress<'d, 't> {
                 v
             };
             let width = component.width_in_blocks * size;
-            let stride = plane.shape.stride;
             for r in 0..block_rows * size {
-                let from = (row * v * size + r) * stride;
                 let (Some(src), Some(dst)) = (
-                    plane.data.get(from..from + width),
+                    plane.padded_line(row * v * size + r).get(..width),
                     raw.data.get_mut(
                         r * raw.stride..(r * raw.stride + width).min((r + 1) * raw.stride),
                     ),

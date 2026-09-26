@@ -165556,36 +165556,40 @@ here), which is the `crc32` crate's to speed up.
 minimum of N), Pillow's `Image.open(...).load()` measured the same way, and
 `target/inflatebench` for the inflate alone.
 
-### [F] A JPEG decodes at about 1.4 times libjpeg-turbo's cost -- 2026-09-26
+### [F] A JPEG decodes at about 1.2 times libjpeg-turbo's cost, a progressive one 1.4 -- 2026-09-26
 
 **Status:** OPEN — lane F's; tech debt, not a bug. Mostly paid on 2026-09-26
 (it was 2.9 to 3.2 times).
 
-**In short:** a photograph opens here in about 1.4 times the processor work
-a browser spends on it: a 21-megapixel JPEG in 0.84 billion cycles of the
+**In short:** a photograph opens here in about 1.2 times the processor work
+a browser spends on it: a 21-megapixel JPEG in 0.73 billion cycles of the
 decoding thread against libjpeg-turbo's 0.62 (Pillow, measured the same
-way); a 4:2:2 one 1.05 against 0.77; a progressive one 2.38 against 1.71.
+way); a 4:2:2 one 0.94 against 0.77; a progressive one 2.4 against 1.7.
 The pixels are libjpeg-turbo's to the bit, damaged files included.
 
 **Where the rest is** (a 4:2:0 photograph): the Huffman decoding is about
-45%, the inverse DCT and its per-block bookkeeping about 22%, colour
-conversion 15%, upsampling 4%.
+45%, the inverse DCT and its per-block bookkeeping about 25%, colour
+conversion 20%, upsampling 5%.
 
 **Done** (design-decisions §1319): the bit reader's fills take a run of data
-bytes at once and the sequential decoder keeps its bit buffer in locals, the
-same bytes read at the same moments; the full-size inverse DCT and the
+bytes at once and the sequential decoder keeps its bit buffer in locals,
+the same bytes read at the same moments; an AC coefficient whose code and
+value fit in ten bits is one lookup; the full-size inverse DCT and the
 YCbCr conversion in SSE2, each held to libjpeg's C arithmetic; the
-conversion writes the finished `0xAARRGGBB` pixels.
+conversion writes the finished `0xAARRGGBB` pixels; and the planes keep
+only their last three iMCU rows, as libjpeg's main buffer does, instead of
+growing to the whole picture -- whose fresh pages cost a seventh of the
+decode in faults alone.
 
 **The proper fix, the rest:**
-1. The Huffman decoder's inner loop still spills its state under register
-   pressure; libjpeg-turbo's fast path keeps everything in registers and
-   reads six bytes per fill. A lookahead wider than eight bits (so fewer
-   codes take the bit-at-a-time path) must keep the fills where libjpeg's
-   are -- the input position is visible to old-style JPEG in TIFF.
-2. The progressive decoders (`ac_first`, `ac_refine`) still read through
-   `Bits` rather than a `Window`; a progressive photograph is where the
-   entropy decoding costs the most.
+1. Progressive: the AC decoders (`ac_first`, `ac_refine`) still read
+   through `Bits` rather than a `Window`, and the coefficient store is
+   visited block by block through several indirections; a progressive
+   photograph is where the entropy decoding costs the most.
+2. The Huffman decoder's inner loop still spills its state under register
+   pressure; libjpeg-turbo's fast path keeps everything in registers. Any
+   change must keep the fills where libjpeg's are -- the input position is
+   visible to old-style JPEG in TIFF.
 3. `decompress_onepass` copies each component's quantisation table per MCU
    and builds a `Target` per block.
 4. Fancy upsampling (`jdsample.c`'s `h2v1`/`h2v2`) has an SSE2 form in

@@ -3215,6 +3215,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "randrange",
  "safeio",
  "sha1",
  "textline",

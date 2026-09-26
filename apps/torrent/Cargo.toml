@@ -22,5 +22,9 @@ safeio = { path = "../safeio" }
 # than a copy of it here.
 sha1 = { path = "../../sha1" }
 
+# Transaction numbers for UDP trackers and this client's peer id: seeded
+# from the system, so a forged reply cannot guess them.
+randrange = { path = "../../randrange" }
+
 [lints]
 workspace = true

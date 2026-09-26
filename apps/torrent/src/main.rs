@@ -55,9 +55,20 @@ use std::fmt;
 // `allow`, so this goes the moment something uses them.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "used by the download session, which lands after it")
+    expect(
+        dead_code,
+        reason = "used by the download session, which lands after it"
+    )
 )]
 mod storage;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "used by the download session, which lands after it"
+    )
+)]
+mod tracker;
 
 // ─── Bencode ─────────────────────────────────────────────────────────
 

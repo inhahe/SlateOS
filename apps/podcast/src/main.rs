@@ -20,6 +20,7 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+use pathtext::ShowPath;
 use std::collections::HashMap;
 
 // The toolkit's rectangle rather than a private copy: this crate had
@@ -2196,9 +2197,9 @@ impl PodcastApp {
             Ok(()) => format!(
                 "Wrote {} subscription(s) to {}",
                 self.podcasts.len(),
-                path.display()
+                path.shown()
             ),
-            Err(err) => format!("Could not write {}: {err}", path.display()),
+            Err(err) => format!("Could not write {}: {err}", path.shown()),
         }
     }
 
@@ -2220,7 +2221,7 @@ impl PodcastApp {
     pub fn read_opml(&mut self, path: &std::path::Path) -> String {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
-            Err(err) => return format!("Could not read {}: {err}", path.display()),
+            Err(err) => return format!("Could not read {}: {err}", path.shown()),
         };
         let whole = text.len();
         let truncated = whole > MAX_OPML_BYTES;
@@ -2243,18 +2244,18 @@ impl PodcastApp {
         if added > 0 {
             return format!(
                 "{cut_note}Subscribed to {added} show(s) from {}. No episodes came with them -- an OPML file holds addresses, and nothing here can fetch one.",
-                path.display()
+                path.shown()
             );
         }
         if body.to_ascii_lowercase().contains("<opml") {
             format!(
                 "{cut_note}{} lists no shows this app was not already subscribed to",
-                path.display()
+                path.shown()
             )
         } else {
             format!(
                 "{cut_note}{} is not an OPML subscription list, so nothing was added",
-                path.display()
+                path.shown()
             )
         }
     }

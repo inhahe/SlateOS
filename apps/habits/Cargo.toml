@@ -20,6 +20,8 @@ yamldoc = { path = "../../yamldoc" }
 tzrules = { path = "../../tzrules" }
 
 [dev-dependencies]
+# A test names a path in its failure message the way the window would.
+pathtext = { path = "../pathtext" }
 settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
 
 [lints]

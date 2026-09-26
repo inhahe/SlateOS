@@ -45,6 +45,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, M
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use pathtext::ShowPath;
 
 use oswindow::app::{self, App, Response};
 use std::collections::{HashMap, VecDeque};
@@ -2501,10 +2502,10 @@ impl MindMapApp {
                 format!(
                     "Wrote {} node(s) to {}{note}. An outline keeps the words and the branches, not the colours, shapes or folds -- Ctrl+S saves those.",
                     map.nodes.len(),
-                    path.display()
+                    path.shown()
                 )
             }
-            Err(err) => format!("Could not write {}: {err}", path.display()),
+            Err(err) => format!("Could not write {}: {err}", path.shown()),
         }
     }
 
@@ -2529,11 +2530,11 @@ impl MindMapApp {
                 .is_some_and(|p| same_file(p, path))
         }) {
             self.switch_map(index);
-            return format!("{} is open already -- this is it", path.display());
+            return format!("{} is open already -- this is it", path.shown());
         }
         let read = match safeio::read_to_string_capped(path, max) {
             Ok(read) => read,
-            Err(err) => return format!("Could not open {}: {err}", path.display()),
+            Err(err) => return format!("Could not open {}: {err}", path.shown()),
         };
         let doc = yamldoc::Document::parse(&read.text);
         if !doc.contains(&["slateos-mindmap"]) {
@@ -2542,7 +2543,7 @@ impl MindMapApp {
         if read.truncated {
             return format!(
                 "Could not open {}: at {} bytes it is larger than the {max} this reads",
-                path.display(),
+                path.shown(),
                 read.whole
             );
         }
@@ -2557,9 +2558,9 @@ impl MindMapApp {
                 }
                 map.document_path = Some(path.to_path_buf());
                 self.push_map(map);
-                format!("Opened {}", path.display())
+                format!("Opened {}", path.shown())
             }
-            Err(why) => format!("Could not open {}: {why}", path.display()),
+            Err(why) => format!("Could not open {}: {why}", path.shown()),
         }
     }
 
@@ -2580,7 +2581,7 @@ impl MindMapApp {
         let Some(mut map) = MindMap::from_outline(&title, &read.text, &mut self.id_gen) else {
             return format!(
                 "{note}{} has no outline in it -- every line was blank",
-                path.display()
+                path.shown()
             );
         };
         let count = map.nodes.len();
@@ -2588,7 +2589,7 @@ impl MindMapApp {
         self.push_map(map);
         format!(
             "{note}Opened {count} node(s) from {} as a new map. Colours, shapes and folded branches are not in an outline.",
-            path.display()
+            path.shown()
         )
     }
 
@@ -2602,9 +2603,9 @@ impl MindMapApp {
             Ok(()) => {
                 map.document_path = Some(path.to_path_buf());
                 map.dirty = false;
-                Ok(format!("Saved {}", path.display()))
+                Ok(format!("Saved {}", path.shown()))
             }
-            Err(err) => Err(format!("Could not save {}: {err}", path.display())),
+            Err(err) => Err(format!("Could not save {}: {err}", path.shown())),
         }
     }
 
@@ -6441,7 +6442,7 @@ mod tests {
 
         let mut other = MindMapApp::new();
         let said = other.open_file(&path);
-        assert_eq!(said, format!("Opened {}", path.display()));
+        assert_eq!(said, format!("Opened {}", path.shown()));
         assert_eq!(
             other.maps.len(),
             2,
@@ -6496,7 +6497,7 @@ mod tests {
         assert!(!app.active_map_ref().dirty);
         assert_eq!(
             app.last_file_action.as_deref(),
-            Some(format!("Saved {}", path.display()).as_str())
+            Some(format!("Saved {}", path.shown()).as_str())
         );
 
         app.handle_event(&press(Key::Tab));
@@ -6859,7 +6860,7 @@ mod tests {
         );
         assert!(!other.active_map_ref().dirty);
         let said = other.open_file(&map);
-        assert_eq!(said, format!("Opened {}", map.display()));
+        assert_eq!(said, format!("Opened {}", map.shown()));
         assert_eq!(other.active_map_ref().node_count(), 4);
         drop(std::fs::remove_dir_all(&dir));
     }

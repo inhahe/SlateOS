@@ -38,6 +38,7 @@ use guitk::textedit;
 use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -1486,9 +1487,9 @@ impl LibraryEntry {
     ///
     /// When it cannot be read at all.
     pub fn read(path: &Path) -> Result<Self, String> {
-        let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.shown()))?;
         let head = safeio::read_capped(path, HEADER_BYTES)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+            .map_err(|e| format!("{}: {e}", path.shown()))?;
         Ok(Self {
             path: path.to_path_buf(),
             name: shown_name(path),
@@ -1518,7 +1519,7 @@ impl LibraryEntry {
 ///
 /// When the folder cannot be listed.
 pub fn scan(dir: &Path) -> Result<Vec<LibraryEntry>, String> {
-    let listing = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let listing = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.shown()))?;
     let mut out = Vec::new();
     for entry in listing {
         // An entry the listing cannot describe is not a recording this could
@@ -1544,8 +1545,8 @@ pub fn scan(dir: &Path) -> Result<Vec<LibraryEntry>, String> {
 /// A file's name as the window shows it.
 fn shown_name(path: &Path) -> String {
     path.file_name().map_or_else(
-        || path.display().to_string(),
-        |n| Path::new(n).display().to_string(),
+        || path.shown().to_string(),
+        |n| Path::new(n).shown().to_string(),
     )
 }
 
@@ -1641,7 +1642,7 @@ struct Stamp {
 
 impl Stamp {
     fn of(path: &Path) -> Result<Self, String> {
-        let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.shown()))?;
         Ok(Self {
             len: meta.len(),
             modified: meta.modified().ok(),
@@ -1683,7 +1684,7 @@ impl OpenRecording {
     pub fn open(path: &Path) -> Result<Self, String> {
         let stamp = Stamp::of(path)?;
         let read = safeio::read_capped(path, MAX_RECORDING_BYTES)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+            .map_err(|e| format!("{}: {e}", path.shown()))?;
         if read.truncated {
             return Err(format!(
                 "{} is larger than 1 GiB, more than this opens",
@@ -1891,7 +1892,7 @@ impl OpenRecording {
         let part =
             wavpcm::cut(&current, self.kept.start_frame, self.kept.end_frame).map_err(fail)?;
         safeio::write_atomically(to, &part)
-            .map_err(|e| format!("could not write {}: {e}", to.display()))?;
+            .map_err(|e| format!("could not write {}: {e}", to.shown()))?;
         Ok(u64::try_from(part.len()).unwrap_or(u64::MAX))
     }
 }
@@ -2201,7 +2202,7 @@ impl SoundRecorderApp {
             .recordings_dir
             .clone()
             .ok_or_else(|| String::from("there is no recordings folder (no home folder is set)"))?;
-        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.shown()))?;
         let bytes = self.wav.to_wav(&self.markers).map_err(|e| e.to_string())?;
         let stem = take_name(SystemTime::now());
         for n in 1..=999_u32 {
@@ -2214,12 +2215,12 @@ impl SoundRecorderApp {
             match safeio::write_new_atomically(&path, &bytes) {
                 Ok(()) => return Ok(path),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(format!("{}: {e}", path.display())),
+                Err(e) => return Err(format!("{}: {e}", path.shown())),
             }
         }
         Err(format!(
             "every name for this take in {} is taken",
-            dir.display()
+            dir.shown()
         ))
     }
 
@@ -2330,7 +2331,7 @@ impl SoundRecorderApp {
                 self.library.clear();
                 self.library_note = Some(format!(
                     "{} does not exist yet; the first take will make it.",
-                    dir.display()
+                    dir.shown()
                 ));
             }
             Err(why) => {
@@ -2449,9 +2450,11 @@ impl SoundRecorderApp {
             self.status_line = String::from("Nothing is open to keep a part of");
             return;
         };
+        // The suggested name is used, not only read: the recording's own
+        // stem exactly, whenever it is text.
         let stem = open.path.file_stem().map_or_else(
             || String::from("recording"),
-            |s| Path::new(s).display().to_string(),
+            |s| s.text_or_shown().into_owned(),
         );
         let folder = open.path.parent().map(Path::to_path_buf);
         let mut dialog = FileDialog::save().with_filename(format!("{stem} (part).wav"));
@@ -2493,7 +2496,7 @@ impl SoundRecorderApp {
                 self.rescan();
                 self.status_line = format!(
                     "Listing {}; takes are saved there too, until the window closes",
-                    path.display()
+                    path.shown()
                 );
             }
             PickerFor::SaveKept => {
@@ -3121,7 +3124,7 @@ impl SoundRecorderApp {
         let folder = self
             .recordings_dir
             .as_ref()
-            .map_or_else(|| String::from("No folder"), |d| d.display().to_string());
+            .map_or_else(|| String::from("No folder"), |d| d.shown().to_string());
         self.text(
             f,
             16.0,
@@ -5062,7 +5065,7 @@ mod tests {
                 std::fs::read(path).unwrap(),
                 b"somebody's",
                 "a take replaced {}",
-                path.display()
+                path.shown()
             );
         }
         let bytes = std::fs::read(&open.path).unwrap();

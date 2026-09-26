@@ -27,6 +27,7 @@
 use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use pathtext::ShowPath;
 // The toolkit's rectangle rather than one of this crate's own. See
 // `known-issues.md` `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`: eight
 // crates declared the same four floats under two spellings, and every
@@ -557,15 +558,15 @@ fn check_nested_drop(sources: &[PathBuf], target_dir: &Path) -> Option<String> {
 
         // Exact self-drop: can't drop /foo into /foo.
         if real_src == real_target {
-            return Some(format!("Cannot drop '{}' into itself", src.display()));
+            return Some(format!("Cannot drop '{}' into itself", src.shown()));
         }
 
         // Ancestor check: can't drop /foo into /foo/bar/baz.
         if real_target.starts_with(&real_src) {
             return Some(format!(
                 "Cannot drop '{}' into its own subdirectory '{}'",
-                src.display(),
-                target_dir.display()
+                src.shown(),
+                target_dir.shown()
             ));
         }
     }
@@ -646,7 +647,10 @@ fn operation_label(operation: DropOperation, zone: &DropZone) -> String {
             // Show just the last component for brevity, as its bytes when it
             // is not text: drawn for a human, and a byte shown as an escape
             // tells two such folders apart where U+FFFD made them one.
-            crate::shown_name(path.file_name().unwrap_or(path.as_os_str()))
+            path.file_name()
+                .unwrap_or(path.as_os_str())
+                .shown()
+                .to_string()
         }
         DropZone::None => return String::new(),
     };

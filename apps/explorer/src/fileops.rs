@@ -38,6 +38,7 @@
 // See known-issues TD-C-THE-FILE-OPERATIONS-MODULE-ADVERTISES-POLICIES-NOTHING-SELECTS.
 #![allow(dead_code)]
 
+use pathtext::ShowPath;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
@@ -979,7 +980,7 @@ impl OperationExecutor {
         self.progress.current_file = action
             .src
             .file_name()
-            .map_or_else(|| action.src.display().to_string(), crate::shown_name);
+            .map_or_else(|| action.src.shown().to_string(), |n| n.shown().to_string());
 
         let result = match operation {
             FileOperation::Copy | FileOperation::Move => {

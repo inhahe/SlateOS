@@ -52,6 +52,7 @@ use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
 use unsaved::{Choice, Question};
@@ -2210,9 +2211,9 @@ impl DiagramApp {
             Ok(()) => {
                 self.document_path = Some(path.to_path_buf());
                 self.dirty = false;
-                format!("Saved {}", path.display())
+                format!("Saved {}", path.shown())
             }
-            Err(err) => format!("Could not save {}: {err}", path.display()),
+            Err(err) => format!("Could not save {}: {err}", path.shown()),
         }
     }
 
@@ -2226,12 +2227,12 @@ impl DiagramApp {
     fn read_native_within(&mut self, path: &std::path::Path, max: usize) -> String {
         let read = match safeio::read_to_string_capped(path, max) {
             Ok(read) => read,
-            Err(err) => return format!("Could not open {}: {err}", path.display()),
+            Err(err) => return format!("Could not open {}: {err}", path.shown()),
         };
         if read.truncated {
             return format!(
                 "Could not open {}: at {} bytes it is larger than the {max} this reads",
-                path.display(),
+                path.shown(),
                 read.whole
             );
         }
@@ -2260,15 +2261,15 @@ impl DiagramApp {
                 // Said, not hidden: saving now would write the diagram
                 // without what was left out.
                 if left_out == 0 {
-                    format!("Opened {}", path.display())
+                    format!("Opened {}", path.shown())
                 } else {
                     format!(
                         "Opened {}, leaving out {left_out} thing(s) this version cannot read",
-                        path.display()
+                        path.shown()
                     )
                 }
             }
-            Err(why) => format!("Could not open {}: {why}", path.display()),
+            Err(why) => format!("Could not open {}: {why}", path.shown()),
         }
     }
 
@@ -2411,9 +2412,9 @@ impl DiagramApp {
             Ok(()) => format!(
                 "Wrote {} node(s) as {what} to {}",
                 self.nodes.len(),
-                path.display()
+                path.shown()
             ),
-            Err(err) => format!("Could not write {}: {err}", path.display()),
+            Err(err) => format!("Could not write {}: {err}", path.shown()),
         }
     }
 

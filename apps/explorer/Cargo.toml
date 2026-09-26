@@ -4,11 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS File Explorer — graphical file manager with tree view"
 [dependencies]
-
-# A name that is not text is shown by its bytes, as escapes -- the tree's one
-# renderer for an untrusted name -- never as a lossy decode.
-quoting = { path = "../../userspace/quoting" }
-
+# Names are shown through `pathtext`: a byte that is not text, or a control
+# character, as an escape -- never as a lossy decode.
+pathtext = { path = "../pathtext" }
 
 # Which program opens which kind of file. This crate is the one that *obeys*
 # the associations, so it reads them through the shared model rather than

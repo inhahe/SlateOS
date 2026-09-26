@@ -27,6 +27,7 @@ use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -118,8 +119,8 @@ pub use audiotags::AudioFormat;
 pub struct M3uExport {
     /// The playlist file's contents.
     pub text: String,
-    /// Tracks omitted because their path contains a line break and therefore
-    /// has no M3U representation.
+    /// Tracks omitted because their path has no M3U representation: it
+    /// contains a line break, or bytes that are not text.
     pub skipped: Vec<PathBuf>,
 }
 
@@ -345,11 +346,11 @@ pub struct PlayerState {
     pub status_message: String,
     /// The playlist picker.
     ///
-    /// `load_m3u` and `export_m3u` were both written, both tested, and
+    /// `load_m3u_from` and `export_m3u` were both written, both tested, and
     /// neither had a caller outside the tests: a playlist editor that could
     /// not open or save a playlist. `export_m3u` in particular handles a real
     /// hazard -- an ID3 title containing a newline emits an extra line that
-    /// `load_m3u` reads back as a *file path*, so a downloaded file could
+    /// `load_m3u_from` reads back as a *file path*, so a downloaded file could
     /// inject entries into the user's playlist -- and none of that care could
     /// be reached.
     pub picker: FilePicker,
@@ -922,45 +923,46 @@ impl PlayerState {
     /// ours: `artist`/`title` come verbatim from the file's ID3 tags (see
     /// [`Track::update_from_data`]), and this OS permits every byte except
     /// `/` and NUL in a path. Written naively, a track whose ID3 title
-    /// contained a newline emitted an extra line that [`Self::load_m3u`] then
+    /// contained a newline emitted an extra line that [`Self::load_m3u_from`] then
     /// read back as a *file path*, so a downloaded file could inject
     /// arbitrary entries into the user's playlist.
     pub fn export_m3u(&self) -> M3uExport {
         let mut text = String::from("#EXTM3U\n");
         let mut skipped = Vec::new();
         for track in &self.playlist {
-            let path = track.path.display().to_string();
-            // A path containing a line break has no M3U representation at
-            // all. Emitting it anyway would silently point the entry at a
-            // different file, so the track is omitted and reported instead.
-            if path.contains(['\n', '\r']) {
-                skipped.push(track.path.clone());
-                continue;
-            }
+            // The path exactly as it is, or not at all. A path containing a
+            // line break has no M3U representation, and neither has one that
+            // is not text: the file is text, and `load_m3u_from` reads it as such.
+            // Emitting either anyway -- the second with U+FFFD for its odd
+            // bytes, which is what `Path::display` wrote here -- would
+            // silently point the entry at a different file, so the track is
+            // omitted and reported instead.
+            let path = match track.path.to_str() {
+                Some(path) if !path.contains(['\n', '\r']) => path,
+                _ => {
+                    skipped.push(track.path.clone());
+                    continue;
+                }
+            };
             text.push_str(&format!(
                 "#EXTINF:{},{} - {}\n",
                 track.duration_secs as i32,
                 m3u_field(&track.artist),
                 m3u_field(&track.title)
             ));
-            text.push_str(&path);
+            text.push_str(path);
             text.push('\n');
         }
         M3uExport { text, skipped }
     }
 
-    /// Load tracks from M3U content.
+    /// Load tracks from M3U content, replacing the playlist: a relative
+    /// entry taken from `folder` -- the playlist's own, as M3U means it --
+    /// and each track's tags and length read from its file.
     ///
     /// Note that this reads every non-`#` line as a file path, which is what
     /// makes an unsanitised [`Self::export_m3u`] a real injection vector
     /// rather than a cosmetic problem.
-    pub fn load_m3u(&mut self, content: &str) {
-        self.load_m3u_from(content, None);
-    }
-
-    /// [`load_m3u`](Self::load_m3u), a relative entry taken from `folder` --
-    /// the playlist's own, as M3U means it -- and each track's tags and
-    /// length read from its file.
     pub fn load_m3u_from(&mut self, content: &str, folder: Option<&std::path::Path>) {
         self.clear_playlist();
         self.add_m3u_from(content, folder);
@@ -1989,10 +1991,10 @@ pub fn open_playlist(state: &mut PlayerState, path: &std::path::Path) -> String 
             format!(
                 "{note}Opened {} track(s) from {}",
                 state.playlist.len(),
-                path.display()
+                path.shown()
             )
         }
-        Err(err) => format!("Could not read {}: {err}", path.display()),
+        Err(err) => format!("Could not read {}: {err}", path.shown()),
     }
 }
 
@@ -2013,7 +2015,7 @@ fn is_playlist(path: &std::path::Path) -> bool {
 /// listed by its name.
 pub fn add_song(state: &mut PlayerState, path: &std::path::Path) -> String {
     match std::fs::metadata(path) {
-        Ok(md) if md.is_dir() => format!("Could not add {}: it is a folder", path.display()),
+        Ok(md) if md.is_dir() => format!("Could not add {}: it is a folder", path.shown()),
         Ok(_) => {
             let mut track = Track::from_path(path.to_path_buf());
             track.read_facts();
@@ -2022,7 +2024,7 @@ pub fn add_song(state: &mut PlayerState, path: &std::path::Path) -> String {
             state.show_from(state.playlist.len().saturating_sub(1));
             format!("Added {title}")
         }
-        Err(err) => format!("Could not add {}: {err}", path.display()),
+        Err(err) => format!("Could not add {}: {err}", path.shown()),
     }
 }
 
@@ -2035,9 +2037,9 @@ pub fn add_playlist(state: &mut PlayerState, path: &std::path::Path) -> String {
             let first = state.playlist.len();
             let added = state.add_m3u_from(&read.text, path.parent());
             state.show_from(first);
-            format!("{note}Added {added} track(s) from {}", path.display())
+            format!("{note}Added {added} track(s) from {}", path.shown())
         }
-        Err(err) => format!("Could not read {}: {err}", path.display()),
+        Err(err) => format!("Could not read {}: {err}", path.shown()),
     }
 }
 
@@ -2076,25 +2078,25 @@ pub fn save_playlist(state: &PlayerState, path: &std::path::Path) -> String {
         Ok(()) => {
             let saved = state.playlist.len().saturating_sub(export.skipped.len());
             if export.skipped.is_empty() {
-                format!("Saved {saved} track(s) to {}", path.display())
+                format!("Saved {saved} track(s) to {}", path.shown())
             } else {
                 // Named, not counted: the user needs to know WHICH tracks are
                 // missing from the file they just wrote, and a count tells
                 // them only that something is.
                 format!(
-                    "Saved {saved} track(s) to {}; left out {} whose path contains a line break: {}",
-                    path.display(),
+                    "Saved {saved} track(s) to {}; left out {} whose path M3U cannot hold (a line break, or bytes that are not text): {}",
+                    path.shown(),
                     export.skipped.len(),
                     export
                         .skipped
                         .iter()
-                        .map(|p| p.display().to_string())
+                        .map(|p| p.shown().to_string())
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
             }
         }
-        Err(err) => format!("Could not write {}: {err}", path.display()),
+        Err(err) => format!("Could not write {}: {err}", path.shown()),
     }
 }
 
@@ -3887,7 +3889,7 @@ mod tests {
 
     /// A playlist survives a save and an open.
     ///
-    /// `load_m3u` and `export_m3u` were both written, both tested, and neither
+    /// `load_m3u_from` and `export_m3u` were both written, both tested, and neither
     /// had a caller outside the tests: **a playlist editor that could not open
     /// or save a playlist.**
     #[test]
@@ -3907,7 +3909,7 @@ mod tests {
         let paths: Vec<String> = back
             .playlist
             .iter()
-            .map(|t| t.path.display().to_string())
+            .map(|t| t.path.shown().to_string())
             .collect();
         assert_eq!(paths, vec!["/music/one.mp3", "/music/two.mp3"]);
 
@@ -3984,7 +3986,7 @@ mod tests {
     ///
     /// M3U has no quoting of any kind, so a path containing a line break
     /// cannot be written -- `export_m3u` omits it rather than emitting a line
-    /// that `load_m3u` would read back as a *different file*. The user needs
+    /// that `load_m3u_from` would read back as a *different file*. The user needs
     /// to know WHICH track is missing from the file they just wrote; a count
     /// tells them only that something is.
     #[test]
@@ -4223,7 +4225,7 @@ mod tests {
         state.playlist.push(track);
 
         let m3u = state.export_m3u();
-        // One track in, one track out: `load_m3u` reads every non-`#` line as
+        // One track in, one track out: `load_m3u_from` reads every non-`#` line as
         // a path, so counting them is exactly counting forged entries.
         let paths: Vec<&str> = m3u
             .text
@@ -4234,8 +4236,27 @@ mod tests {
 
         // And the round trip through the reader agrees.
         let mut back = PlayerState::new();
-        back.load_m3u(&m3u.text);
+        back.load_m3u_from(&m3u.text, None);
         assert_eq!(back.playlist.len(), 1);
+    }
+
+    /// A path that is not text is left out and reported like one with a
+    /// line break: written with U+FFFD for its odd bytes, as `display()`
+    /// wrote it, the entry named a file that does not exist.
+    #[cfg(unix)]
+    #[test]
+    fn a_track_whose_path_is_not_text_is_reported_not_silently_wrong() {
+        use std::os::unix::ffi::OsStrExt;
+        let odd = PathBuf::from(std::ffi::OsStr::from_bytes(b"/music/caf\xe9.mp3"));
+        let mut state = PlayerState::new();
+        state.playlist.push(Track::from_path(odd.clone()));
+        state
+            .playlist
+            .push(Track::from_path(PathBuf::from("/music/fine.mp3")));
+        let m3u = state.export_m3u();
+        assert_eq!(m3u.skipped, [odd]);
+        assert!(!m3u.text.contains('\u{fffd}'), "{}", m3u.text);
+        assert!(!m3u.text.contains("caf"), "{}", m3u.text);
     }
 
     #[test]
@@ -4253,7 +4274,7 @@ mod tests {
         let m3u = state.export_m3u();
         assert_eq!(m3u.skipped, [PathBuf::from("/music/od\nd.mp3")]);
         let mut back = PlayerState::new();
-        back.load_m3u(&m3u.text);
+        back.load_m3u_from(&m3u.text, None);
         assert_eq!(back.playlist.len(), 1);
         assert_eq!(back.playlist[0].path, PathBuf::from("/music/fine.mp3"));
     }
@@ -4262,7 +4283,7 @@ mod tests {
     fn test_m3u_load() {
         let mut state = PlayerState::new();
         let content = "#EXTM3U\n#EXTINF:180,Artist - Song\n/music/song.mp3\n/music/song2.flac\n";
-        state.load_m3u(content);
+        state.load_m3u_from(content, None);
         assert_eq!(state.playlist.len(), 2);
         assert_eq!(state.playlist[0].path, PathBuf::from("/music/song.mp3"));
         assert_eq!(state.playlist[1].path, PathBuf::from("/music/song2.flac"));

@@ -30,6 +30,7 @@ use guitk::textedit;
 use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use textfmt::tsv;
@@ -717,7 +718,7 @@ impl FinanceApp {
         let refused = |why: String| {
             format!(
                 "{} was not read ({why}), so nothing is saved over it",
-                path.display()
+                path.shown()
             )
         };
         let read = match safeio::read_to_string_capped(path, MAX_LEDGER_BYTES) {
@@ -779,7 +780,7 @@ impl FinanceApp {
             .and_then(|()| safeio::write_str_atomically(&path, &text));
         self.ledger_error = match written {
             Ok(()) => None,
-            Err(err) => Some(format!("Not saved to {}: {err}", path.display())),
+            Err(err) => Some(format!("Not saved to {}: {err}", path.shown())),
         };
     }
 
@@ -787,7 +788,7 @@ impl FinanceApp {
     fn keeping_line(&self) -> String {
         match ledger_path() {
             Some(path) if self.persist && self.ledger_error.is_none() => {
-                format!("What you enter is kept in {}.", path.display())
+                format!("What you enter is kept in {}.", path.shown())
             }
             _ => String::from("Nothing you enter here is kept."),
         }

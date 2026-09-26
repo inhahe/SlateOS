@@ -25,20 +25,17 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::theme::with_alpha;
 use guitk::wheel;
+use pathtext::ShowPath;
 
 use std::path::{Path, PathBuf};
 
 mod player;
 
-/// `path`'s file name as the window shows it: the name itself when it is
-/// text, its bytes as escapes (`quoting::escape_unprintable`) when it is not
-/// -- never a lossy decode, which shows two such names alike.
+/// `path`'s file name as the window shows it (`pathtext`): a byte that is
+/// not text, or a control character, as an escape -- never a lossy decode,
+/// which shows two such names alike.
 fn shown_file_name(path: &std::path::Path) -> Option<String> {
-    let name = path.file_name()?;
-    Some(name.to_str().map_or_else(
-        || quoting::escape_unprintable(name.as_encoded_bytes()),
-        str::to_owned,
-    ))
+    Some(path.file_name()?.shown().to_string())
 }
 use std::process::ExitCode;
 
@@ -2472,14 +2469,9 @@ fn toolbar_buttons() -> Vec<ToolbarButton> {
 /// hundred thousand units is drawn at 2048 too rather than as 40 GB.
 const SVG_DRAWN_AT: f32 = 2048.0;
 
-/// `path` as the viewer shows it: its bytes as escapes where they are not
-/// text (`quoting::escape_unprintable`), never a lossy decode.
+/// `path` as the viewer shows it (`pathtext`), never a lossy decode.
 fn shown_path(path: &Path) -> String {
-    let os = path.as_os_str();
-    os.to_str().map_or_else(
-        || quoting::escape_unprintable(os.as_encoded_bytes()),
-        str::to_owned,
-    )
+    path.shown().to_string()
 }
 
 /// Whether `data` begins as an SVG drawing does: an `<svg` element, or an XML

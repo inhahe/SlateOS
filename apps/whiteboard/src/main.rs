@@ -26,6 +26,7 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
+use pathtext::ShowPath;
 
 use std::collections::VecDeque;
 use std::process::ExitCode;
@@ -2390,9 +2391,9 @@ impl WhiteboardApp {
             Ok(()) => {
                 self.document_path = Some(path.to_path_buf());
                 self.dirty = false;
-                format!("Saved {}", path.display())
+                format!("Saved {}", path.shown())
             }
-            Err(err) => format!("Could not save {}: {err}", path.display()),
+            Err(err) => format!("Could not save {}: {err}", path.shown()),
         }
     }
 
@@ -2406,12 +2407,12 @@ impl WhiteboardApp {
     fn read_board_within(&mut self, path: &std::path::Path, max: usize) -> String {
         let read = match safeio::read_to_string_capped(path, max) {
             Ok(read) => read,
-            Err(err) => return format!("Could not open {}: {err}", path.display()),
+            Err(err) => return format!("Could not open {}: {err}", path.shown()),
         };
         if read.truncated {
             return format!(
                 "Could not open {}: at {} bytes it is larger than the {max} this reads",
-                path.display(),
+                path.shown(),
                 read.whole
             );
         }
@@ -2427,15 +2428,15 @@ impl WhiteboardApp {
                 // Said, not hidden: saving now would write the board
                 // without what was left out.
                 if left_out == 0 {
-                    format!("Opened {}", path.display())
+                    format!("Opened {}", path.shown())
                 } else {
                     format!(
                         "Opened {}, leaving out {left_out} thing(s) this version cannot read",
-                        path.display()
+                        path.shown()
                     )
                 }
             }
-            Err(why) => format!("Could not open {}: {why}", path.display()),
+            Err(why) => format!("Could not open {}: {why}", path.shown()),
         }
     }
 
@@ -2552,9 +2553,9 @@ impl WhiteboardApp {
             Ok(()) => format!(
                 "Saved {} shape(s) to {}",
                 self.current_page().shapes.len(),
-                path.display()
+                path.shown()
             ),
-            Err(err) => format!("Could not write {}: {err}", path.display()),
+            Err(err) => format!("Could not write {}: {err}", path.shown()),
         }
     }
 

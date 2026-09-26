@@ -36,6 +36,7 @@ use appearance::Palette;
 use guitk::color::Color;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::frame::{Frame, Rect};
+use pathtext::ShowPath;
 // The shared civil-date arithmetic. This app's own copy was *correct* --
 // unlike the calendar's, whose ISO week number was wrong on 38.5% of all
 // dates -- but correct-and-duplicated is still two sources of truth for one
@@ -4797,9 +4798,9 @@ impl ContactsApp {
             Ok(()) => format!(
                 "Wrote {} contact(s) to {}",
                 self.store.contacts.len(),
-                path.display()
+                path.shown()
             ),
-            Err(err) => format!("{FILE_FAILED_PREFIX} write {}: {err}", path.display()),
+            Err(err) => format!("{FILE_FAILED_PREFIX} write {}: {err}", path.shown()),
         }
     }
 
@@ -4819,17 +4820,17 @@ impl ContactsApp {
     pub fn read_vcards(&mut self, path: &std::path::Path) -> String {
         let read = match safeio::read_to_string_capped(path, MAX_VCARD_BYTES) {
             Ok(read) => read,
-            Err(err) => return format!("{FILE_FAILED_PREFIX} read {}: {err}", path.display()),
+            Err(err) => return format!("{FILE_FAILED_PREFIX} read {}: {err}", path.shown()),
         };
         let now = self.stamp();
         let added = self.store.import_vcards(&read.text, now);
         if read.truncated {
             format!(
                 "INCOMPLETE: {added} contact(s) from the first {MAX_VCARD_BYTES} bytes of {}, which is larger",
-                path.display()
+                path.shown()
             )
         } else {
-            format!("Added {added} contact(s) from {}", path.display())
+            format!("Added {added} contact(s) from {}", path.shown())
         }
     }
 
@@ -5114,7 +5115,7 @@ impl ContactsApp {
         let refused = |why: String| {
             format!(
                 "{} was not read ({why}), so nothing is saved over it",
-                path.display()
+                path.shown()
             )
         };
         let read = match safeio::read_to_string_capped(path, max_bytes) {
@@ -5184,7 +5185,7 @@ impl ContactsApp {
                 self.store_error = None;
             }
             Err(err) => {
-                self.store_error = Some(format!("Not saved to {}: {err}", path.display()));
+                self.store_error = Some(format!("Not saved to {}: {err}", path.shown()));
             }
         }
     }
@@ -5210,7 +5211,7 @@ impl ContactsApp {
         }
         book_path().map_or_else(
             || String::from(NO_HOME),
-            |path| format!("Everyone added is kept in {}.", path.display()),
+            |path| format!("Everyone added is kept in {}.", path.shown()),
         )
     }
 

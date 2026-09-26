@@ -57,6 +57,7 @@ use guitk::tabs::Tabs;
 use guitk::text;
 use guitk::textfind::{self, Case};
 use guitk::wheel;
+use pathtext::ShowPath;
 
 use diffcore::{
     ConflictChoice, DiskChange, FileSync, MergeOutcome, MergeReview, ThreeWayMerge,
@@ -67,15 +68,15 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
 
-/// `path`'s file name as the window shows it: the name itself when it is
-/// text, its bytes as escapes (`quoting::escape_unprintable`) when it is not
-/// -- never a lossy decode, which shows two such names alike.
+/// `path`'s file name for the document: the name exactly when it is text,
+/// and as `pathtext` shows it when it is not -- never a lossy decode, which
+/// shows two such names alike.
+///
+/// Exact, not escaped, because the name is used as well as shown: it is
+/// what Save As suggests, so escaping a control character in it would
+/// suggest a different name.
 fn shown_file_name(path: &std::path::Path) -> Option<String> {
-    let name = path.file_name()?;
-    Some(name.to_str().map_or_else(
-        || quoting::escape_unprintable(name.as_encoded_bytes()),
-        str::to_owned,
-    ))
+    Some(path.file_name()?.text_or_shown().into_owned())
 }
 use unsaved::{Choice, Question};
 
@@ -5390,10 +5391,8 @@ impl App {
                     self.write_chosen(&path);
                 } else {
                     self.file_status = Some(match self.open_file(&path) {
-                        Ok(()) => FileNote::Done(format!("Opened {}", path.display())),
-                        Err(e) => {
-                            FileNote::Failed(format!("Could not open {}: {e}", path.display()))
-                        }
+                        Ok(()) => FileNote::Done(format!("Opened {}", path.shown())),
+                        Err(e) => FileNote::Failed(format!("Could not open {}: {e}", path.shown())),
                     });
                 }
                 true
@@ -5429,12 +5428,12 @@ impl App {
                 match safeio::write_str_atomically(path, &html) {
                     Ok(()) => {
                         self.file_status =
-                            Some(FileNote::Done(format!("Exported {}", path.display())));
+                            Some(FileNote::Done(format!("Exported {}", path.shown())));
                     }
                     Err(e) => {
                         self.file_status = Some(FileNote::Failed(format!(
                             "Could not export {}: {e}",
-                            path.display()
+                            path.shown()
                         )));
                     }
                 }
@@ -5449,7 +5448,7 @@ impl App {
         match doc.save_as(path) {
             Ok(()) => {
                 self.save_error = None;
-                self.file_status = Some(FileNote::Done(format!("Saved as {}", path.display())));
+                self.file_status = Some(FileNote::Done(format!("Saved as {}", path.shown())));
                 match purpose {
                     SavePurpose::DocumentThenClose(tab) => self.close_document(tab),
                     SavePurpose::DocumentThenQuit(_) => self.continue_quitting(),
@@ -5457,7 +5456,7 @@ impl App {
                 }
             }
             Err(e) => {
-                self.save_error = Some(format!("Could not save {}: {e}", path.display()));
+                self.save_error = Some(format!("Could not save {}: {e}", path.shown()));
             }
         }
     }

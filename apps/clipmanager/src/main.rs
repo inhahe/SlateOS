@@ -21,6 +21,7 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+use pathtext::ShowPath;
 use std::collections::{HashSet, VecDeque};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -2692,9 +2693,9 @@ impl AppState {
             Ok(()) => format!(
                 "Saved {} entries to {}",
                 self.store.total_entries(),
-                path.display()
+                path.shown()
             ),
-            Err(err) => format!("Could not write {}: {err}", path.display()),
+            Err(err) => format!("Could not write {}: {err}", path.shown()),
         }
     }
 
@@ -2710,12 +2711,12 @@ impl AppState {
                 let count = self.store.import_text(&read.text, now);
                 self.refresh_filter();
                 if count == 0 {
-                    format!("{note}{} holds no entries this can read", path.display())
+                    format!("{note}{} holds no entries this can read", path.shown())
                 } else {
-                    format!("{note}Read {count} entries from {}", path.display())
+                    format!("{note}Read {count} entries from {}", path.shown())
                 }
             }
-            Err(err) => format!("Could not read {}: {err}", path.display()),
+            Err(err) => format!("Could not read {}: {err}", path.shown()),
         }
     }
 

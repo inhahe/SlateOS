@@ -5,6 +5,7 @@ edition = "2024"
 description = "SlateOS Contacts — address book and contact manager"
 
 [dependencies]
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }

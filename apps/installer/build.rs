@@ -61,6 +61,18 @@ fn main() {
         && let Some(out_dir) = std::env::var_os("OUT_DIR")
     {
         let obj = PathBuf::from(out_dir).join("embed-manifest.o");
-        println!("cargo:rustc-link-arg={}", obj.display());
+        // Passed to the linker as it is: Cargo reads a build script's
+        // instructions as text, so a path that is not text cannot be passed
+        // on at all -- and shown with its odd bytes escaped, or decoded
+        // lossily, it would name some other file. `OUT_DIR` is Cargo's own
+        // choice under `target/`, so this does not happen in practice; if it
+        // does, the build stops and says why rather than linking without the
+        // manifest.
+        match obj.to_str() {
+            Some(obj) => println!("cargo:rustc-link-arg={obj}"),
+            None => println!(
+                "cargo::error=OUT_DIR is not text, so the manifest object in it cannot be passed to the linker"
+            ),
+        }
     }
 }

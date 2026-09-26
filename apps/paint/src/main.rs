@@ -32,6 +32,7 @@ use guitk::rng::{RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use unsaved::{Choice, Question};
@@ -2593,7 +2594,7 @@ impl PaintApp {
                 self.document_path = Some(path.to_path_buf());
                 // The picture is the file's, as it is on disk.
                 self.dirty = false;
-                format!("Opened {}", path.display())
+                format!("Opened {}", path.shown())
             }
             Err(e) => e,
         }
@@ -2618,7 +2619,7 @@ impl PaintApp {
             Ok(()) => {
                 self.document_path = Some(path.to_path_buf());
                 self.dirty = false;
-                format!("Saved {}", path.display())
+                format!("Saved {}", path.shown())
             }
             Err(e) => e,
         }

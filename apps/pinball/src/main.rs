@@ -42,6 +42,7 @@ use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use randrange::{RandomSource, SeededRng, seeded_from_system};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -831,7 +832,7 @@ impl Pinball {
     /// sidebar says so: saving over it would keep only what was understood.
     fn load_scores(&mut self, path: &Path) {
         let refused =
-            |why: String| format!("{} not read ({why}); scores are not kept.", path.display());
+            |why: String| format!("{} not read ({why}); scores are not kept.", path.shown());
         let read = match safeio::read_to_string_capped(path, MAX_SCORES_BYTES) {
             Ok(read) => read,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
@@ -869,7 +870,7 @@ impl Pinball {
             .and_then(|()| safeio::write_str_atomically(&path, &scores_text(&self.high_scores)));
         self.scores_note = match written {
             Ok(()) => None,
-            Err(err) => Some(format!("Scores not saved to {}: {err}", path.display())),
+            Err(err) => Some(format!("Scores not saved to {}: {err}", path.shown())),
         };
     }
 
@@ -4359,7 +4360,7 @@ mod tests {
             // Where a kept table would be -- the settings directory is not the
             // scratch root, so this asks the function that decides.
             let path = scores_path().expect("a scratch settings directory");
-            assert!(!path.exists(), "{} was written", path.display());
+            assert!(!path.exists(), "{} was written", path.shown());
             assert!(
                 !path.parent().is_some_and(Path::exists),
                 "nor its directory made"

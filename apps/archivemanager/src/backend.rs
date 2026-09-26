@@ -34,6 +34,7 @@
 //! quietly, because an extraction that silently drops members is worse than one
 //! that says what it would not do.
 
+use pathtext::ShowPath;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
@@ -92,7 +93,7 @@ pub enum ArchiveError {
 impl fmt::Display for ArchiveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io { path, source } => write!(f, "cannot read {}: {source}", path.display()),
+            Self::Io { path, source } => write!(f, "cannot read {}: {source}", path.shown()),
             Self::TooLarge { bytes } => write!(
                 f,
                 "the archive is {} and this program reads archives up to {}",
@@ -326,7 +327,7 @@ pub fn open(path: &Path) -> Result<ArchiveModel, ArchiveError> {
     let Some(format) = ArchiveFormat::from_path(path) else {
         return Err(ArchiveError::UnknownFormat {
             name: path.file_name().map_or_else(
-                || path.display().to_string(),
+                || path.shown().to_string(),
                 |n| {
                     n.to_str().map_or_else(
                         || quoting::escape_unprintable(n.as_encoded_bytes()),
@@ -844,7 +845,7 @@ impl ExtractReport {
             None => format!(
                 "Extracted {files} ({}) to {}",
                 guitk::bytes::iec(self.bytes),
-                dest.display()
+                dest.shown()
             ),
             // The first refusal is named in full and the rest are counted. A
             // status line that said "3 problems" would send the user looking
@@ -1281,7 +1282,7 @@ impl fmt::Display for SaveError {
                  ({name} is listed but not in it); nothing was changed. \
                  Re-open the archive"
             ),
-            Self::Io { path, source } => write!(f, "cannot write {}: {source}", path.display()),
+            Self::Io { path, source } => write!(f, "cannot write {}: {source}", path.shown()),
             Self::Unwritable { format } => write!(
                 f,
                 "this build writes ZIP, TAR and TAR.GZ, and not {}",
@@ -1320,7 +1321,7 @@ impl SaveReport {
         };
         format!(
             "Saved {} — {} member{}{added}, {}",
-            path.display(),
+            path.shown(),
             self.members,
             if self.members == 1 { "" } else { "s" },
             guitk::bytes::iec(self.bytes),

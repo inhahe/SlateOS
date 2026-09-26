@@ -37,6 +37,7 @@ use guitk::text;
 use guitk::textfind;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 
 use std::collections::{BTreeMap, HashMap};
 use std::process::ExitCode;
@@ -4185,9 +4186,9 @@ impl SpreadsheetApp {
             Ok(()) => {
                 self.document_path = Some(path.to_path_buf());
                 self.mark_saved();
-                format!("Saved {}", path.display())
+                format!("Saved {}", path.shown())
             }
-            Err(err) => format!("{FILE_FAILED_PREFIX} save {}: {err}", path.display()),
+            Err(err) => format!("{FILE_FAILED_PREFIX} save {}: {err}", path.shown()),
         }
     }
 
@@ -4202,12 +4203,12 @@ impl SpreadsheetApp {
     fn open_path_within(&mut self, path: &std::path::Path, max: usize) -> String {
         let read = match safeio::read_to_string_capped(path, max) {
             Ok(read) => read,
-            Err(err) => return format!("{FILE_FAILED_PREFIX} open {}: {err}", path.display()),
+            Err(err) => return format!("{FILE_FAILED_PREFIX} open {}: {err}", path.shown()),
         };
         if read.truncated {
             return format!(
                 "{FILE_FAILED_PREFIX} open {}: at {} bytes it is larger than the {max} this reads",
-                path.display(),
+                path.shown(),
                 read.whole
             );
         }
@@ -4216,9 +4217,9 @@ impl SpreadsheetApp {
                 Ok((sheets, active)) => {
                     self.replace_book(sheets, active);
                     self.document_path = Some(path.to_path_buf());
-                    format!("Opened {}", path.display())
+                    format!("Opened {}", path.shown())
                 }
-                Err(why) => format!("{FILE_FAILED_PREFIX} open {}: {why}", path.display()),
+                Err(why) => format!("{FILE_FAILED_PREFIX} open {}: {why}", path.shown()),
             };
         }
         // Anything else is taken as CSV: the values of one sheet. It is not a
@@ -4229,7 +4230,7 @@ impl SpreadsheetApp {
         recalculate_sheet(&mut sheet);
         self.replace_book(vec![sheet], 0);
         self.document_path = None;
-        format!("Opened {} as a new workbook", path.display())
+        format!("Opened {} as a new workbook", path.shown())
     }
 
     /// The name a sheet made from `path` is given.
@@ -4375,8 +4376,8 @@ impl SpreadsheetApp {
     pub fn write_csv(&mut self, path: &std::path::Path) -> String {
         let csv = self.sheets.active().export_csv();
         match safeio::write_str_atomically(path, &csv) {
-            Ok(()) => format!("Wrote {}", path.display()),
-            Err(err) => format!("{FILE_FAILED_PREFIX} write {}: {err}", path.display()),
+            Ok(()) => format!("Wrote {}", path.shown()),
+            Err(err) => format!("{FILE_FAILED_PREFIX} write {}: {err}", path.shown()),
         }
     }
 

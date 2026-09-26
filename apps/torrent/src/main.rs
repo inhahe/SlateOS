@@ -47,6 +47,7 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+use pathtext::ShowPath;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -2438,7 +2439,7 @@ fn delete_downloaded(torrent: &ManagedTorrent) -> Result<(), String> {
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("could not delete {}: {e}", path.display())),
+            Err(e) => return Err(format!("could not delete {}: {e}", path.shown())),
         }
         let mut up = path.parent();
         while let Some(folder) = up {
@@ -2944,7 +2945,7 @@ impl TorrentApp {
     pub fn open_torrent_file(&mut self, path: &std::path::Path) -> String {
         let read = match safeio::read_capped(path, MAX_TORRENT_BYTES) {
             Ok(read) => read,
-            Err(err) => return format!("Could not read {}: {err}", path.display()),
+            Err(err) => return format!("Could not read {}: {err}", path.shown()),
         };
         // Front-loaded: a cut bencode document fails to parse, so without this
         // the user is told their file is malformed when it is merely long.
@@ -2955,13 +2956,13 @@ impl TorrentApp {
                 let files = meta.files.len().max(1);
                 let id = self.add_torrent(meta, None);
                 self.start_torrent(id);
-                let into = self.settings.default_save_path.display();
+                let into = self.settings.default_save_path.shown();
                 format!("{note}Opened {name}: {files} file(s), fetching into {into}")
             }
             // The parser's own reason, not one invented here: "missing 'info'
             // dict" and "missing torrent name" say which part is absent, and
             // replacing them with "not a torrent" would throw that away.
-            Err(why) => format!("{note}Could not read {}: {why}", path.display()),
+            Err(why) => format!("{note}Could not read {}: {why}", path.shown()),
         }
     }
 
@@ -4189,7 +4190,7 @@ impl TorrentApp {
 
         let fields: Vec<(&str, String, Option<Target>)> = vec![
             ("Name:", torrent.name.clone(), None),
-            ("Save Path:", torrent.save_path.display().to_string(), None),
+            ("Save Path:", torrent.save_path.shown().to_string(), None),
             ("Total Size:", format_size(torrent.total_size), None),
             ("Downloaded:", format_size(torrent.downloaded), None),
             ("Uploaded:", format_size(torrent.uploaded), None),
@@ -4580,7 +4581,7 @@ impl TorrentApp {
             ),
             (
                 "Default Save Path:",
-                self.settings.default_save_path.display().to_string(),
+                self.settings.default_save_path.shown().to_string(),
             ),
             ("Encryption:", self.settings.encryption_mode.to_string()),
             ("DHT:", on_off(self.settings.dht_enabled)),
@@ -4714,7 +4715,7 @@ impl TorrentApp {
             None => (
                 format!(
                     "Saved to {} once its files are known -- which this client cannot learn yet.",
-                    self.add_save_path.display()
+                    self.add_save_path.shown()
                 ),
                 self.palette.subtext0,
             ),

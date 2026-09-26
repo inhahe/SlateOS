@@ -62,6 +62,7 @@ use guitk::text;
 use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -1164,7 +1165,7 @@ impl RenamerApp {
     fn load_folder(&mut self, dir: &Path) -> String {
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
-            Err(err) => return format!("Could not read {}: {err}", dir.display()),
+            Err(err) => return format!("Could not read {}: {err}", dir.shown()),
         };
 
         self.files.clear();
@@ -1215,7 +1216,7 @@ impl RenamerApp {
         self.apply_operations();
 
         let unrenameable = self.files.iter().filter(|f| !f.renameable).count();
-        let mut said = format!("{} file(s) in {}", self.files.len(), dir.display());
+        let mut said = format!("{} file(s) in {}", self.files.len(), dir.shown());
         if skipped_dirs > 0 {
             said.push_str(&format!(", {skipped_dirs} folder(s) skipped"));
         }

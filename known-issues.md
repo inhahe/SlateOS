@@ -170234,8 +170234,41 @@ line, the caret kept on screen, the parse re-run as the text changes -- and
 Escape returns to the formatted view. `guitk` has no multi-line editor to lend
 (`textedit` is single-line), so the editing stays in this crate.
 
+### [E] The two text editors draw a file name's control characters raw in the tab and title -- 2026-09-26
+**Status:** OPEN -- `apps/editor/src/main.rs` and `apps/markdowneditor/src/main.rs`,
+`shown_file_name` and every use of `Document::name` / the document's `name`.
+
+**In short:** a document's name is one string doing two jobs. It is *used* --
+Save As suggests it, and a merge conflict writes it into the text as a marker
+-- so it is the file's name exactly whenever that is text
+(`pathtext::ShowPath::text_or_shown`). It is also *drawn*, in the tab and the
+window title, where a name holding a control character (a tab, a line break;
+legal in a SlateOS name) is drawn raw rather than as an escape. Nothing is
+lost or misnamed; the label only looks wrong for such a name.
+
+**The proper fix:** keep the exact name as the document's name and render it
+at each drawing site with `Path::new(&name).shown()` (or keep a second,
+shown label beside it). Every other lane E program already draws names
+through `shown`; these two were left because their name also feeds Save As
+and the conflict markers, which must stay exact.
+
 ### [E] Applications show paths through `Path::display`, which decodes lossily -- 2026-09-26
-**Status:** OPEN -- 449 uses in 73 files under `apps/` (measured with
+**Status:** FIXED (lane E, 2026-09-26). Every `Path::display` / `OsStr::display`
+under `apps/` -- 368 calls in 68 files, found by clippy itself rather than by
+pattern (the fourteen application types with a `display()` of their own are
+not paths) -- now calls `pathtext::ShowPath::shown` (new crate `apps/pathtext`),
+which renders through `quoting::escape_unprintable`. `apps/clippy.toml` names
+both methods in `disallowed-methods`, and the workspace denies `clippy::all`,
+so a new one fails the boot test's clippy gate. design-decisions.md §1213.
+Every site was then read, because a dozen were not displays at all but uses
+-- an M3U line, a persisted key, a feed address read back as a path, a path
+box, a linker argument, suggested file names -- and those now keep the name
+exactly (see §1213's table). `pathtext` gained `text_or_shown` for them, and
+ten per-application name helpers now go through `pathtext`.
+
+The original entry, for the record:
+
+**Was:** 449 uses in 73 files under `apps/` (measured with
 `git grep -c "\.display()" -- 'apps/*/src/*.rs'`), most in status lines and
 error messages. Fixed where it is a window's own name: the file manager's
 title (2026-09-26), the image viewer's error messages (`shown_path`).

@@ -46,6 +46,7 @@ use guitk::event::EventResult;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::menu::MenuItemId;
 use guitk::menubar::{MenuBarEntry, MenuBarEvent, MenuBarItem};
+use pathtext::ShowPath;
 // The verdict every handler below returns. Until the editor was moved onto the
 // shared harness this was `EditorResponse`, declared in this file, with the same
 // three variants and the same meanings -- a second name for a concept the loop
@@ -678,12 +679,12 @@ impl EditorState {
     fn dialog_chose(&mut self, path: &std::path::Path) -> String {
         match self.dialog_purpose {
             crate::DialogPurpose::Open => match self.open_file(path) {
-                Ok(()) => format!("Opened {}", path.display()),
-                Err(e) => format!("Could not open {}: {e}", path.display()),
+                Ok(()) => format!("Opened {}", path.shown()),
+                Err(e) => format!("Could not open {}: {e}", path.shown()),
             },
             crate::DialogPurpose::SaveAs => match self.active_document_mut().save_as(path) {
-                Ok(()) => format!("Saved as {}", path.display()),
-                Err(e) => format!("Could not save to {}: {e}", path.display()),
+                Ok(()) => format!("Saved as {}", path.shown()),
+                Err(e) => format!("Could not save to {}: {e}", path.shown()),
             },
             // Saved where the user said, then the close it was asked for
             // carries on. A save that fails leaves everything open.
@@ -692,11 +693,11 @@ impl EditorState {
                 match self.active_document_mut().save_as(path) {
                     Ok(()) => {
                         self.tabs.close_active();
-                        format!("Saved as {} and closed", path.display())
+                        format!("Saved as {} and closed", path.shown())
                     }
                     Err(e) => format!(
                         "Could not save to {}, so it is still open: {e}",
-                        path.display()
+                        path.shown()
                     ),
                 }
             }
@@ -705,11 +706,11 @@ impl EditorState {
                 match self.active_document_mut().save_as(path) {
                     Ok(()) => {
                         self.continue_quitting();
-                        format!("Saved as {}", path.display())
+                        format!("Saved as {}", path.shown())
                     }
                     Err(e) => format!(
                         "Could not save to {}, so the window stays open: {e}",
-                        path.display()
+                        path.shown()
                     ),
                 }
             }

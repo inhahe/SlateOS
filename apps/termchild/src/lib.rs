@@ -49,6 +49,7 @@
 //! no waker, or one that cannot wake anyone, says so, and the terminal goes on
 //! asking it on a clock.
 
+use pathtext::ShowPath;
 use std::fmt;
 use std::path::PathBuf;
 use std::task::Waker;
@@ -215,7 +216,7 @@ impl fmt::Display for SpawnError {
             write!(
                 f,
                 "{} could not be started: {}.",
-                self.program.display(),
+                self.program.shown(),
                 describe_errno(self.errno)
             )
         }

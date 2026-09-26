@@ -13,6 +13,7 @@
 //!   backup diff <BACKUP_ID1> <BACKUP_ID2>
 //!   backup info <BACKUP_ID>
 
+use pathtext::ShowPath;
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
@@ -1541,7 +1542,7 @@ fn scan_dir_recursive(
     let read_dir = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(e) => {
-            eprintln!("warning: cannot read directory {}: {}", dir.display(), e);
+            eprintln!("warning: cannot read directory {}: {}", dir.shown(), e);
             return Ok(());
         }
     };
@@ -1567,7 +1568,7 @@ fn scan_dir_recursive(
             match fs::metadata(&path) {
                 Ok(m) => m,
                 Err(e) => {
-                    eprintln!("warning: cannot stat {}: {}", path.display(), e);
+                    eprintln!("warning: cannot stat {}: {}", path.shown(), e);
                     continue;
                 }
             }
@@ -1575,7 +1576,7 @@ fn scan_dir_recursive(
             match fs::symlink_metadata(&path) {
                 Ok(m) => m,
                 Err(e) => {
-                    eprintln!("warning: cannot stat {}: {}", path.display(), e);
+                    eprintln!("warning: cannot stat {}: {}", path.shown(), e);
                     continue;
                 }
             }
@@ -1594,7 +1595,7 @@ fn scan_dir_recursive(
             let hash = match sha256_file(&path) {
                 Ok(h) => h,
                 Err(e) => {
-                    eprintln!("warning: cannot hash {}: {}", path.display(), e);
+                    eprintln!("warning: cannot hash {}: {}", path.shown(), e);
                     continue;
                 }
             };
@@ -1605,7 +1606,7 @@ fn scan_dir_recursive(
             // to zero mid-backup reads as "nothing has been copied yet".
             progress.processed_files = progress.processed_files.saturating_add(1);
             progress.processed_bytes = progress.processed_bytes.saturating_add(meta.len());
-            progress.current_file = rel.display().to_string();
+            progress.current_file = rel.shown().to_string();
 
             // Report progress every 100 files
             if progress.processed_files.is_multiple_of(100) {
@@ -1811,7 +1812,7 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
     let source = opts.source.canonicalize().map_err(|e| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            format!("source path {}: {}", opts.source.display(), e),
+            format!("source path {}: {}", opts.source.shown(), e),
         )
     })?;
 
@@ -1855,8 +1856,8 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
     println!(
         "Creating {} backup of {} -> {}",
         effective_type,
-        source.display(),
-        opts.dest.display()
+        source.shown(),
+        opts.dest.shown()
     );
 
     // Estimate for progress
@@ -1907,7 +1908,7 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
             Ok(true) => new_blobs = new_blobs.saturating_add(1),
             Ok(false) => dedup_blobs = dedup_blobs.saturating_add(1),
             Err(e) => {
-                eprintln!("warning: failed to store {}: {}", entry.path.display(), e);
+                eprintln!("warning: failed to store {}: {}", entry.path.shown(), e);
                 continue;
             }
         }
@@ -2001,7 +2002,7 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
     println!(
         "Restoring backup {} to {}",
         opts.backup_id,
-        opts.restore_dest.display()
+        opts.restore_dest.shown()
     );
     println!("  Type: {}", meta.backup_type);
     println!("  Files in manifest: {}", manifest.files.len());
@@ -2038,8 +2039,8 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
         let Some(dest_path) = restore_path_within(&opts.restore_dest, &entry.path) else {
             eprintln!(
                 "error: refusing to restore {}: it names a location outside {}",
-                entry.path.display(),
-                opts.restore_dest.display()
+                entry.path.shown(),
+                opts.restore_dest.shown()
             );
             errors = errors.saturating_add(1);
             continue;
@@ -2050,7 +2051,7 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
         {
             // Counted rather than propagated: one directory the user cannot
             // write must not strand the other several thousand files.
-            eprintln!("error: cannot create {}: {}", parent.display(), e);
+            eprintln!("error: cannot create {}: {}", parent.shown(), e);
             errors = errors.saturating_add(1);
             continue;
         }
@@ -2059,7 +2060,7 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
             let Some(ref target) = entry.link_target else {
                 eprintln!(
                     "error: {} is recorded as a symlink but the manifest gives no target",
-                    entry.path.display()
+                    entry.path.shown()
                 );
                 errors = errors.saturating_add(1);
                 continue;
@@ -2080,7 +2081,7 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
                 Err(e) => {
                     eprintln!(
                         "error: cannot restore symlink {}: {}",
-                        entry.path.display(),
+                        entry.path.shown(),
                         e
                     );
                     errors = errors.saturating_add(1);
@@ -2097,7 +2098,7 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
                 if actual_hash != entry.hash {
                     eprintln!(
                         "error: hash mismatch for {}: expected {}, got {}",
-                        entry.path.display(),
+                        entry.path.shown(),
                         entry.hash,
                         actual_hash
                     );
@@ -2110,18 +2111,14 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
                 // the replacement — the one outcome a restore must never
                 // produce.
                 if let Err(e) = safeio::write_atomically(&dest_path, &data) {
-                    eprintln!("error: cannot write {}: {}", dest_path.display(), e);
+                    eprintln!("error: cannot write {}: {}", dest_path.shown(), e);
                     errors = errors.saturating_add(1);
                 } else {
                     restored = restored.saturating_add(1);
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "error: cannot read blob for {}: {}",
-                    entry.path.display(),
-                    e
-                );
+                eprintln!("error: cannot read blob for {}: {}", entry.path.shown(), e);
                 errors = errors.saturating_add(1);
             }
         }
@@ -2298,7 +2295,7 @@ fn cmd_verify(dest: &Path, backup_id: &str) -> io::Result<()> {
         }
 
         if !store.has_blob(&entry.hash) {
-            eprintln!("  MISSING: {} (hash: {})", entry.path.display(), entry.hash);
+            eprintln!("  MISSING: {} (hash: {})", entry.path.shown(), entry.hash);
             missing = missing.saturating_add(1);
             continue;
         }
@@ -2306,11 +2303,11 @@ fn cmd_verify(dest: &Path, backup_id: &str) -> io::Result<()> {
         match store.verify_blob(&entry.hash) {
             Ok(true) => ok = ok.saturating_add(1),
             Ok(false) => {
-                eprintln!("  CORRUPT: {} (hash: {})", entry.path.display(), entry.hash);
+                eprintln!("  CORRUPT: {} (hash: {})", entry.path.shown(), entry.hash);
                 corrupt = corrupt.saturating_add(1);
             }
             Err(e) => {
-                eprintln!("  ERROR: {} — {}", entry.path.display(), e);
+                eprintln!("  ERROR: {} — {}", entry.path.shown(), e);
                 corrupt = corrupt.saturating_add(1);
             }
         }
@@ -2385,7 +2382,7 @@ fn cmd_prune(opts: PruneOptions) -> io::Result<()> {
         for (child, parent) in &retention.broken_chains {
             eprintln!(
                 "  ! {child} refers to parent {parent}, which is not in {}",
-                opts.dest.display()
+                opts.dest.shown()
             );
         }
     }
@@ -2669,7 +2666,7 @@ fn cmd_schedule(dest: &Path, source: &str, interval: &str) -> io::Result<()> {
     println!(
         "Schedule saved: {} -> {} ({})",
         source,
-        dest.display(),
+        dest.shown(),
         interval
     );
     // Said plainly, because the command otherwise reads as a promise. Nothing
@@ -2715,7 +2712,7 @@ fn cmd_diff(dest: &Path, id1: &str, id2: &str) -> io::Result<()> {
     if !diff.added.is_empty() {
         println!("Added ({}):", diff.added.len());
         for f in &diff.added {
-            println!("  + {} ({})", f.path.display(), format_size(f.size));
+            println!("  + {} ({})", f.path.shown(), format_size(f.size));
         }
         println!();
     }
@@ -2734,7 +2731,7 @@ fn cmd_diff(dest: &Path, id1: &str, id2: &str) -> io::Result<()> {
             } else {
                 ("-", old.size.abs_diff(new.size))
             };
-            println!("  ~ {} ({}{} bytes)", new.path.display(), sign, size_change);
+            println!("  ~ {} ({}{} bytes)", new.path.shown(), sign, size_change);
         }
         println!();
     }
@@ -2742,7 +2739,7 @@ fn cmd_diff(dest: &Path, id1: &str, id2: &str) -> io::Result<()> {
     if !diff.deleted.is_empty() {
         println!("Deleted ({}):", diff.deleted.len());
         for f in &diff.deleted {
-            println!("  - {} ({})", f.path.display(), format_size(f.size));
+            println!("  - {} ({})", f.path.shown(), format_size(f.size));
         }
         println!();
     }
@@ -2785,7 +2782,7 @@ fn cmd_info(dest: &Path, backup_id: &str) -> io::Result<()> {
     println!("Backup: {}", meta.id);
     println!("  Type:       {}", meta.backup_type);
     println!("  Created:    {}", format_timestamp(meta.timestamp));
-    println!("  Source:     {}", meta.source.display());
+    println!("  Source:     {}", meta.source.shown());
     println!(
         "  Parent:     {}",
         meta.parent_id.as_deref().unwrap_or("(none)")

@@ -84,6 +84,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use textfmt::tsv;
@@ -1614,7 +1615,7 @@ impl NotesApp {
         let refused = |why: String| {
             format!(
                 "{} was not read ({why}), so nothing is saved over it",
-                path.display()
+                path.shown()
             )
         };
         let read = match safeio::read_to_string_capped(path, max_bytes) {
@@ -1694,7 +1695,7 @@ impl NotesApp {
                 self.store_error = None;
             }
             Err(err) => {
-                self.store_error = Some(format!("Not saved to {}: {err}", path.display()));
+                self.store_error = Some(format!("Not saved to {}: {err}", path.shown()));
             }
         }
     }
@@ -1713,7 +1714,7 @@ impl NotesApp {
         }
         library_path().map_or_else(
             || String::from(NO_HOME),
-            |path| format!("What you write is kept in {}.", path.display()),
+            |path| format!("What you write is kept in {}.", path.shown()),
         )
     }
 
@@ -2719,11 +2720,11 @@ impl NotesApp {
             format!("# {}\n\n{}\n", note.title, note.content)
         };
         match safeio::write_str_atomically(path, &body) {
-            Ok(()) => format!("Wrote {}", path.display()),
+            Ok(()) => format!("Wrote {}", path.shown()),
             // Named, not swallowed. The user needs to know which of the two
             // happened: a note that was not written and a note that was are
             // opposite states and only one of them is safe to close on.
-            Err(err) => format!("{SAVE_FAILED_PREFIX} {}: {err}", path.display()),
+            Err(err) => format!("{SAVE_FAILED_PREFIX} {}: {err}", path.shown()),
         }
     }
 

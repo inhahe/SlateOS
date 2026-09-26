@@ -7,6 +7,7 @@ edition = "2024"
 # what `[a-z]` means: this crate and `apps/indexer` each had their own matcher
 # and their own bugs, and both are user-facing.
 [dependencies]
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 globmatch = { path = "../../gui/globmatch" }

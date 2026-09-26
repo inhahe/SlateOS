@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# A stored message's flag key names its file exactly (design-decisions §426).
+pathcodec = { path = "../../gui/pathcodec" }
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }

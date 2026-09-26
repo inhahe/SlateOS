@@ -96,6 +96,7 @@ use guitk::style::CornerRadii;
 use guitk::textinput::TextInput;
 use guitk::{scroll_window, text, textedit, wheel};
 use oswindow::app::{self, App as WindowApp, Response};
+use pathtext::ShowPath;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -5151,12 +5152,13 @@ fn clamp_scroll(offset: usize, rows: isize, total: usize, capacity: usize) -> us
     scroll_window::shift(offset, rows).min(total.saturating_sub(capacity))
 }
 
-/// A path as it goes on the status line.
+/// A path as it goes on the status line: a byte that is not text, or a
+/// control character, escaped (`pathtext`), never replaced.
 ///
-/// Lossy on purpose and only here: a path is bytes and this is the one place
-/// one is shown to a human rather than used.
+/// Only for showing: a path is bytes, and this is the one place one is shown
+/// to a person rather than used.
 fn show_path(path: &Path) -> String {
-    path.display().to_string()
+    path.shown().to_string()
 }
 
 fn format_size(bytes: usize) -> String {

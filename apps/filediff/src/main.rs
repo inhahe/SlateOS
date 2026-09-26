@@ -33,6 +33,7 @@ use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
+use pathtext::ShowPath;
 // Only the tests build a modifier set by hand; the handlers read the one on
 // the event they were given. `MouseButton` went with it -- it had no reader at
 // all, in either build.
@@ -1192,7 +1193,7 @@ impl FileDiffApp {
         match safeio::read_to_string_capped(path, MAX_DIFF_BYTES) {
             Ok(read) => {
                 let note = read.note(MAX_DIFF_BYTES);
-                let name = path.display().to_string();
+                let name = path.shown().to_string();
                 match side {
                     Side::Left => {
                         self.left_path.clone_from(&name);
@@ -1208,7 +1209,7 @@ impl FileDiffApp {
                 self.recompute_diff();
                 format!("{note}Opened {name}")
             }
-            Err(err) => format!("Could not read {}: {err}", path.display()),
+            Err(err) => format!("Could not read {}: {err}", path.shown()),
         }
     }
 

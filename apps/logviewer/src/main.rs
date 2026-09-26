@@ -51,6 +51,7 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::wheel;
 use oswindow::app::{self, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -799,10 +800,10 @@ impl LogFile {
             start = start.saturating_add(u64::try_from(cut).unwrap_or(0));
         }
         let name = path.file_name().map_or_else(
-            || path.display().to_string(),
+            || path.shown().to_string(),
             |n| n.to_string_lossy().into_owned(),
         );
-        let mut log = Self::new(&name, &path.display().to_string());
+        let mut log = Self::new(&name, &path.shown().to_string());
         log.parse_bytes(&bytes);
         log.start_offset = start;
         log.read_len = start.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
@@ -3336,7 +3337,7 @@ impl App {
         {
             self.active_file = open;
             self.show_tab();
-            self.status = format!("{} is already open", path.display());
+            self.status = format!("{} is already open", path.shown());
             return;
         }
         match LogFile::open(path) {
@@ -3352,7 +3353,7 @@ impl App {
                 } else {
                     String::new()
                 };
-                self.status = format!("Opened {} -- {count} entries{note}", path.display());
+                self.status = format!("Opened {} -- {count} entries{note}", path.shown());
                 self.files.push(log);
                 self.active_file = self.files.len().saturating_sub(1);
                 self.selected_entry = None;
@@ -3363,7 +3364,7 @@ impl App {
                     self.select_edge(false);
                 }
             }
-            Err(e) => self.status = format!("Could not open {}: {e}", path.display()),
+            Err(e) => self.status = format!("Could not open {}: {e}", path.shown()),
         }
     }
 
@@ -3416,7 +3417,7 @@ impl App {
         {
             self.status = format!(
                 "{} is the log being exported -- choose another name",
-                path.display()
+                path.shown()
             );
             return;
         }
@@ -3424,8 +3425,8 @@ impl App {
             .exact_lines(&keep)
             .and_then(|bytes| safeio::write_atomically(path, &bytes));
         self.status = match written {
-            Ok(()) => format!("Wrote {} entries to {}", keep.len(), path.display()),
-            Err(e) => format!("Could not write {}: {e}", path.display()),
+            Ok(()) => format!("Wrote {} entries to {}", keep.len(), path.shown()),
+            Err(e) => format!("Could not write {}: {e}", path.shown()),
         };
     }
 

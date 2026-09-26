@@ -23,6 +23,7 @@ use guitk::text;
 use guitk::theme::with_alpha;
 #[allow(unused_imports)]
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -541,7 +542,7 @@ fn write_first_free(
         last = Some(name);
     }
     let why = match last {
-        Some(last) => format!("every name up to {} is in use", last.display()),
+        Some(last) => format!("every name up to {} is in use", last.shown()),
         None => String::from("there is no name to save under"),
     };
     Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, why))
@@ -967,7 +968,7 @@ impl ScreenshotApp {
             Ok(path) => {
                 if self.settings.show_notification {
                     self.notification = Some(Notification {
-                        message: format!("Screenshot saved to {}", path.display()),
+                        message: format!("Screenshot saved to {}", path.shown()),
                         file_path: Some(path.clone()),
                         remaining_ms: 4000,
                     });
@@ -1688,7 +1689,7 @@ impl ScreenshotApp {
         let status_text = format!(
             "Mode: {}  |  Save to: {}",
             self.mode.label(),
-            self.settings.save_directory.display()
+            self.settings.save_directory.shown()
         );
         tree.text(
             10.0,
@@ -1912,7 +1913,7 @@ impl ScreenshotApp {
         tree.text(nx + 12.0, ny + 8.0, &notif.message, self.palette.text, 12.0);
 
         if let Some(ref path) = notif.file_path {
-            let path_str = format!("{}", path.display());
+            let path_str = format!("{}", path.shown());
             tree.text(nx + 12.0, ny + 26.0, &path_str, self.palette.subtext0, 11.0);
         }
     }
@@ -3454,7 +3455,7 @@ mod tests {
         assert!(
             path.exists(),
             "notification named {} which does not exist",
-            path.display()
+            path.shown()
         );
         assert!(
             notif.message.contains("saved"),
@@ -3678,7 +3679,7 @@ mod tests {
     #[test]
     fn the_default_folder_is_under_home() {
         let dir = Settings::default().save_directory;
-        assert!(!dir.starts_with("~"), "{}", dir.display());
+        assert!(!dir.starts_with("~"), "{}", dir.shown());
         assert!(dir.ends_with(Path::new("Pictures").join("Screenshots")));
     }
 

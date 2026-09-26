@@ -44,6 +44,7 @@ use guitk::modal::{AlertDialog, DialogResult};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use pathtext::ShowPath;
 
 use oswindow::app::Response;
 
@@ -1978,7 +1979,7 @@ impl CleanupUI {
                 tree.push(RenderCommand::Text {
                     x: PADDING,
                     y,
-                    text: item.path.display().to_string(),
+                    text: item.path.shown().to_string(),
                     color: self.palette.text,
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
@@ -2185,7 +2186,7 @@ impl CleanupUI {
                 tree.push(RenderCommand::Text {
                     x: PADDING * 2.0,
                     y,
-                    text: format!("{}: {msg}", path.display()),
+                    text: format!("{}: {msg}", path.shown()),
                     color: self.palette.ink(self.palette.red),
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,

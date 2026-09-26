@@ -31,6 +31,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::{scroll_window, wheel};
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1645,8 +1646,8 @@ impl SysInfoState {
     pub fn write_report(&mut self, path: &std::path::Path) -> String {
         let text = self.export_text();
         match safeio::write_str_atomically(path, &text) {
-            Ok(()) => format!("Wrote {} bytes to {}", text.len(), path.display()),
-            Err(err) => format!("Could not write {}: {err}", path.display()),
+            Ok(()) => format!("Wrote {} bytes to {}", text.len(), path.shown()),
+            Err(err) => format!("Could not write {}: {err}", path.shown()),
         }
     }
 

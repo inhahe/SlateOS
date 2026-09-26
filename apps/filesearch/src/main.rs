@@ -42,6 +42,7 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+use pathtext::ShowPath;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -3387,7 +3388,7 @@ impl SearchMode {
 /// A folder, for a message or a label: its path as the system would print
 /// it. Display only -- nothing is ever looked up by this string.
 fn entry_folder_label(folder: &std::path::Path) -> String {
-    folder.display().to_string()
+    folder.shown().to_string()
 }
 
 /// The program the user has chosen for this kind of file, read from the File

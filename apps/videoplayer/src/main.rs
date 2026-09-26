@@ -8,6 +8,7 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+use pathtext::ShowPath;
 // The toolkit's rectangle rather than a private copy: this crate had
 // the same four floats under `width`/`height`, with the same half-open
 // `contains`. See `known-issues.md`
@@ -746,7 +747,7 @@ impl MediaFile {
     /// A message fit to show: the file cannot be read, is a folder, or is not
     /// a video this player knows by its bytes or, failing those, its name.
     pub fn open(path: &Path) -> Result<Self, String> {
-        let shown = path.display();
+        let shown = path.shown();
         let md = std::fs::metadata(path).map_err(|e| format!("Could not open {shown}: {e}"))?;
         if md.is_dir() {
             return Err(format!("Could not open {shown}: it is a folder"));
@@ -2094,25 +2095,19 @@ impl Default for ScreenshotConfig {
     }
 }
 
-/// A file's name as the window shows it: its bytes as text, with every byte
-/// that is not UTF-8 written as `\xNN`.
+/// A file's name as the window shows it (`pathtext`): a byte that is not
+/// text, or a control character, as an escape -- `caf\351.mp4` -- the one
+/// rendering every application uses. It wrote `\xNN` of its own.
 ///
 /// For showing only -- the path is kept whole beside it, and that is what is
 /// opened. A lossy decode would show both of two names that differ only in
 /// such a byte as the same `\u{FFFD}`, which is the name a user would then
 /// hunt for and not find; this shows each as it is.
 fn shown_name(path: &Path) -> String {
-    use std::fmt::Write as _;
-    let name = path.file_name().unwrap_or(path.as_os_str());
-    let mut out = String::new();
-    for chunk in name.as_encoded_bytes().utf8_chunks() {
-        out.push_str(chunk.valid());
-        for byte in chunk.invalid() {
-            // Writing to a String cannot fail.
-            let _ = write!(out, "\\x{byte:02X}");
-        }
-    }
-    out
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .shown()
+        .to_string()
 }
 
 // ============================================================================
@@ -4260,7 +4255,7 @@ impl VideoPlayerApp {
             cmds.push(RenderCommand::Text {
                 x: 56.0,
                 y: ey + 22.0,
-                text: entry.path.display().to_string(),
+                text: entry.path.shown().to_string(),
                 font_size: 10.0,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
@@ -5723,6 +5718,11 @@ test to be about anything -- it drew {} text command(s)",
         );
     }
 
+    /// A scratch path as a command-line argument: its exact text.
+    fn text(path: &std::path::Path) -> String {
+        path.to_str().expect("a scratch path is text").to_owned()
+    }
+
     /// Stepping through the playlist opens each entry's file: it said "Now
     /// playing" and changed nothing but the clock.
     #[test]
@@ -5733,7 +5733,8 @@ test to be about anything -- it drew {} text command(s)",
         let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         let failed = open_arguments(
             &mut app,
-            &[first.display().to_string(), second.display().to_string()],
+            // Arguments are opened, not shown: each path's exact text.
+            &[text(&first), text(&second)],
         );
         assert!(failed.is_empty(), "{failed:?}");
         assert_eq!(app.playlist.len(), 2);
@@ -5768,13 +5769,7 @@ test to be about anything -- it drew {} text command(s)",
         let dir = Scratch::new("args");
         let good = dir.file("good.avi", &mediaprobe::testing::avi(320, 240, 4, 25));
         let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
-        let failed = open_arguments(
-            &mut app,
-            &[
-                dir.0.join("missing.mp4").display().to_string(),
-                good.display().to_string(),
-            ],
-        );
+        let failed = open_arguments(&mut app, &[text(&dir.0.join("missing.mp4")), text(&good)]);
         assert_eq!(failed.len(), 1);
         assert!(failed[0].contains("missing.mp4"), "{failed:?}");
         assert_eq!(app.current_file.as_ref().unwrap().file_name, "good.avi");
@@ -6491,15 +6486,16 @@ test to be about anything -- it drew {} text command(s)",
         assert!(adj.is_default());
     }
 
-    /// A name is shown as its bytes: what is not UTF-8 is written `\xNN`,
-    /// not replaced, so two names differing only there look different.
+    /// A name is shown as its bytes: what is not UTF-8 is written as an octal
+    /// escape (`pathtext`, as every application writes it), not replaced, so
+    /// two names differing only there look different.
     #[cfg(unix)]
     #[test]
     fn a_name_that_is_not_utf8_is_shown_as_its_bytes() {
         use std::os::unix::ffi::OsStrExt;
         let a = Path::new(std::ffi::OsStr::from_bytes(b"/v/clip\xFF.mp4"));
         let b = Path::new(std::ffi::OsStr::from_bytes(b"/v/clip\xFE.mp4"));
-        assert_eq!(shown_name(a), "clip\\xFF.mp4");
+        assert_eq!(shown_name(a), r"clip\377.mp4");
         assert_ne!(shown_name(a), shown_name(b));
     }
 

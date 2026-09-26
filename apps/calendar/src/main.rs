@@ -13,6 +13,7 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
 use guitk::dialog::{FilePicker, Picked};
+use pathtext::ShowPath;
 // The shared civil-date arithmetic. This app used to carry its own: a Zeller's
 // congruence for the weekday, a *separate* Julian day number for differences,
 // its own leap rule, and an ISO week number its own comment admitted was "a
@@ -1340,11 +1341,6 @@ impl EventStore {
         upcoming
     }
 
-    /// Import events from ICS content.
-    pub fn import_ics(&mut self, content: &str) -> usize {
-        self.import_events(parse_ics(content))
-    }
-
     /// Add `imported`, each under a new id. How many.
     pub fn import_events(&mut self, imported: Vec<CalendarEvent>) -> usize {
         let count = imported.len();
@@ -2464,7 +2460,7 @@ impl CalendarApp {
         let refused = |why: String| {
             format!(
                 "{} was not read ({why}), so nothing is saved over it",
-                path.display()
+                path.shown()
             )
         };
         let read = match safeio::read_to_string_capped(path, max_bytes) {
@@ -2523,7 +2519,7 @@ impl CalendarApp {
             Err(err) => {
                 self.store_error = Some(format!(
                     "Your calendar was not saved to {}: {err}",
-                    path.display()
+                    path.shown()
                 ));
             }
         }
@@ -4624,8 +4620,8 @@ impl CalendarApp {
         }
         let text = self.store.export_ics("SlateOS Calendar");
         match safeio::write_str_atomically(path, &text) {
-            Ok(()) => format!("Wrote {} event(s) to {}", self.store.len(), path.display()),
-            Err(err) => format!("{FILE_FAILED_PREFIX} write {}: {err}", path.display()),
+            Ok(()) => format!("Wrote {} event(s) to {}", self.store.len(), path.shown()),
+            Err(err) => format!("{FILE_FAILED_PREFIX} write {}: {err}", path.shown()),
         }
     }
 
@@ -4634,31 +4630,23 @@ impl CalendarApp {
     /// Adds rather than replaces: importing a colleague's calendar should not
     /// discard your own.
     pub fn read_ics(&mut self, path: &std::path::Path) -> String {
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(err) => return format!("{FILE_FAILED_PREFIX} read {}: {err}", path.display()),
+        // Under the cap as it reads: `fs::read_to_string` read the whole file
+        // first, however large, and only then cut it to `MAX_ICS_BYTES`.
+        let read = match safeio::read_to_string_capped(path, MAX_ICS_BYTES) {
+            Ok(read) => read,
+            Err(err) => return format!("{FILE_FAILED_PREFIX} read {}: {err}", path.shown()),
         };
-        let whole = text.len();
-        let truncated = whole > MAX_ICS_BYTES;
-        let body = if truncated {
-            let mut cut = MAX_ICS_BYTES;
-            while cut > 0 && !text.is_char_boundary(cut) {
-                cut = cut.saturating_sub(1);
-            }
-            text.get(..cut).unwrap_or("").to_string()
-        } else {
-            text
-        };
+        let (whole, truncated, body) = (read.whole, read.truncated, read.text);
         let report = parse_ics_report(&body);
         let (unreadable, zoned, simplified) = (report.unreadable, report.zoned, report.simplified);
         let added = self.store.import_events(report.events);
         let mut said = if truncated {
             format!(
                 "INCOMPLETE: {added} event(s) from the first {MAX_ICS_BYTES} bytes of {}, which is {whole} bytes",
-                path.display()
+                path.shown()
             )
         } else {
-            format!("Added {added} event(s) from {}", path.display())
+            format!("Added {added} event(s) from {}", path.shown())
         };
         if unreadable > 0 {
             said.push_str(&format!(
@@ -6424,7 +6412,7 @@ mod tests {
     fn test_store_import_ics() {
         let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nDTSTART:20240615T100000\r\nDTEND:20240615T110000\r\nSUMMARY:Imported Event\r\nEND:VEVENT\r\nEND:VCALENDAR";
         let mut store = EventStore::new();
-        let count = store.import_ics(ics);
+        let count = store.import_events(parse_ics(ics));
         assert_eq!(count, 1);
         assert_eq!(store.len(), 1);
         assert_eq!(store.all()[0].title, "Imported Event");
@@ -8230,10 +8218,14 @@ mod tests {
         assert!(store.remove(id));
         assert_ne!(store.revision(), r2, "a remove was not counted");
         let r3 = store.revision();
-        assert_eq!(store.import_ics("nothing here"), 0);
+        assert_eq!(store.import_events(parse_ics("nothing here")), 0);
         assert_eq!(store.revision(), r3, "an import of nothing counted");
         let ics = generate_ics(&[awkward_event("Imported")], "Elsewhere");
-        assert_eq!(store.import_ics(&ics), 1, "control: the import reads");
+        assert_eq!(
+            store.import_events(parse_ics(&ics)),
+            1,
+            "control: the import reads"
+        );
         assert_ne!(store.revision(), r3, "an import was not counted");
     }
 

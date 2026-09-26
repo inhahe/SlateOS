@@ -51,6 +51,7 @@ use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::RenderTree;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use textfmt::tsv;
@@ -2418,7 +2419,7 @@ impl RemindersApp {
         let refused = |why: String| {
             format!(
                 "{} was not read ({why}), so nothing is saved over it",
-                path.display()
+                path.shown()
             )
         };
         let read = match safeio::read_to_string_capped(path, max_bytes) {
@@ -2475,7 +2476,7 @@ impl RemindersApp {
             Err(err) => {
                 self.store_error = Some(format!(
                     "Your reminders were not saved to {}: {err}",
-                    path.display()
+                    path.shown()
                 ));
             }
         }
@@ -2847,9 +2848,9 @@ impl RemindersApp {
             Ok(()) => format!(
                 "Wrote {} reminder(s) to {}",
                 self.store.tasks.len(),
-                path.display()
+                path.shown()
             ),
-            Err(err) => format!("Could not write {}: {err}", path.display()),
+            Err(err) => format!("Could not write {}: {err}", path.shown()),
         }
     }
 
@@ -2867,7 +2868,7 @@ impl RemindersApp {
     pub fn read_json(&mut self, path: &std::path::Path) -> String {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
-            Err(err) => return format!("Could not read {}: {err}", path.display()),
+            Err(err) => return format!("Could not read {}: {err}", path.shown()),
         };
         let whole = text.len();
         let truncated = whole > MAX_JSON_BYTES;
@@ -2889,17 +2890,14 @@ impl RemindersApp {
         let now = self.now;
         let added = self.store.import_json(body, now);
         if added > 0 {
-            return format!(
-                "{cut_note}Added {added} reminder(s) from {}",
-                path.display()
-            );
+            return format!("{cut_note}Added {added} reminder(s) from {}", path.shown());
         }
         if body.contains("\"tasks\"") {
-            format!("{cut_note}{} holds no reminders", path.display())
+            format!("{cut_note}{} holds no reminders", path.shown())
         } else {
             format!(
                 "{cut_note}{} is not a reminders export -- nothing in it looks like this app's own format, so nothing was added",
-                path.display()
+                path.shown()
             )
         }
     }

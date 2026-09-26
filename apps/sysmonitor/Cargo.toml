@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS System Monitor — graphical dashboard for CPU, memory, disk, network, and process monitoring"
 [dependencies]
+pathtext = { path = "../pathtext" }
 # Text from outside -- a name, a path, what the kernel reports -- shown by its
 # bytes, as escapes where it is not printable text, never lossily.
 quoting = { path = "../../userspace/quoting" }

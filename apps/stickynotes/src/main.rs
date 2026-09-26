@@ -21,6 +21,7 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+use pathtext::ShowPath;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -2117,7 +2118,7 @@ impl StickyNotesApp {
             return Action::None;
         };
         match write_bytes(&path, export_notes_as_text(&self.store).as_bytes()) {
-            Ok(()) => self.status = format!("Exported to {}", path.display()),
+            Ok(()) => self.status = format!("Exported to {}", path.shown()),
             Err(err) => self.status = format!("Export failed: {err}"),
         }
         Action::Redraw

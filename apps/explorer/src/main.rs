@@ -43,6 +43,7 @@ use guitk::scrollbar;
 use guitk::splitter;
 use guitk::theme::with_alpha;
 use guitk::wheel::Accumulator as WheelAccumulator;
+use pathtext::ShowPath;
 
 use columns::{ColumnId, ColumnManager, ColumnValue, SortOrder};
 use drives::DriveSet;
@@ -68,19 +69,6 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// A file name as the window shows it: the name itself when it is text, and
-/// its bytes as escapes (`quoting::escape_unprintable`) when it is not.
-///
-/// Never a lossy decode, which showed two names that differ only in a byte
-/// that is not text as the same row of replacement characters -- and, handed
-/// to the rename box, renamed the file to that row when it was accepted
-/// unchanged.
-fn shown_name(name: &OsStr) -> String {
-    name.to_str().map_or_else(
-        || quoting::escape_unprintable(name.as_encoded_bytes()),
-        str::to_owned,
-    )
-}
 use std::time::SystemTime;
 
 // ============================================================================
@@ -1108,7 +1096,7 @@ impl ExplorerState {
     /// another there. `None` when the path has no final component, which is
     /// the root, and the root is never a row in its own listing.
     fn entry_for(path: PathBuf) -> Option<FileEntry> {
-        let name = shown_name(path.file_name()?);
+        let name = path.file_name()?.shown().to_string();
         let meta = fs::metadata(&path).ok();
         let is_dir = meta.as_ref().is_some_and(std::fs::Metadata::is_dir);
         let size = meta.as_ref().map_or(0, std::fs::Metadata::len);
@@ -3032,7 +3020,7 @@ impl ExplorerState {
                     Ok(id) => recycled.push((path.clone(), UndoTarget::Recycled(id))),
                     Err(e) => {
                         if first_error.is_none() {
-                            first_error = Some(format!("{}: {e}", path.display()));
+                            first_error = Some(format!("{}: {e}", path.shown()));
                         }
                     }
                 }
@@ -3108,11 +3096,11 @@ impl ExplorerState {
         // the count, so nothing is lost.
         let detail = match errors.first() {
             Some(first) => {
-                msg.push_str(&format!(" — {}: {}", first.path.display(), first.message));
+                msg.push_str(&format!(" — {}: {}", first.path.shown(), first.message));
                 format!(
                     "{failed} of {} could not be done.\n\n{}: {}",
                     succeeded.saturating_add(*failed),
-                    first.path.display(),
+                    first.path.shown(),
                     first.message
                 )
             }
@@ -3770,7 +3758,7 @@ impl ExplorerState {
                         // `display()` only because this is a sentence for a
                         // human; the path itself was carried here as bytes and
                         // is never rebuilt from this string.
-                        self.status_message = format!("No such folder: {}", target.display());
+                        self.status_message = format!("No such folder: {}", target.shown());
                     }
                 }
                 PathBarEvent::RequestAutoComplete { prefix } => {
@@ -4979,13 +4967,13 @@ impl oswindow::app::App for ExplorerState {
     /// buttons is elided from the right, so leading with the application name
     /// would give every open folder the same visible label.
     fn title(&self) -> String {
-        // By `shown_name`, not `Path::display`, which decodes lossily: two
+        // By `pathtext`'s `shown`, not `Path::display`, which decodes lossily: two
         // folders whose names differ only in bytes that are not text would
         // have had the same title.
         match self.current_path.file_name() {
-            Some(name) => format!("{} — Files", shown_name(name)),
+            Some(name) => format!("{} — Files", name.shown()),
             // The root of the tree has no file name of its own.
-            None => format!("{} — Files", shown_name(self.current_path.as_os_str())),
+            None => format!("{} — Files", self.current_path.shown()),
         }
     }
 
@@ -5534,7 +5522,7 @@ impl ExplorerState {
         let name = first
             .path
             .file_name()
-            .map_or_else(|| first.path.display().to_string(), shown_name);
+            .map_or_else(|| first.path.shown().to_string(), |n| n.shown().to_string());
         Some((rest.saturating_add(1), name))
     }
 
@@ -5587,7 +5575,12 @@ impl ExplorerState {
             return false;
         };
         let target = entry.path.clone();
-        let current = target.file_name().map_or_else(String::new, shown_name);
+        // The box's text is edited and used, so it starts as the name exactly
+        // whenever the name is text -- a control character included, which
+        // `shown` would turn into escapes the rename would then write.
+        let current = target
+            .file_name()
+            .map_or_else(String::new, |n| n.text_or_shown().into_owned());
         // A name that is not text starts the box as its escapes; accepted as
         // it stands, that text is not the name, and renaming to it would
         // rename the file. So it is remembered, and answering with it
@@ -10833,7 +10826,7 @@ mod tests {
     /// names never look the same; a name that is text is shown as it is.
     #[test]
     fn a_name_that_is_not_text_is_shown_by_its_bytes() {
-        assert_eq!(shown_name(OsStr::new("notes.txt")), "notes.txt");
+        assert_eq!(OsStr::new("notes.txt").shown().to_string(), "notes.txt");
         #[cfg(windows)]
         let (a, b) = {
             use std::os::windows::ffi::OsStringExt;
@@ -10851,7 +10844,7 @@ mod tests {
                 std::ffi::OsString::from_vec(vec![b'f', 0xFF]),
             )
         };
-        let (shown_a, shown_b) = (shown_name(&a), shown_name(&b));
+        let (shown_a, shown_b) = (a.shown().to_string(), b.shown().to_string());
         assert!(!shown_a.contains('\u{FFFD}'), "{shown_a:?}");
         assert!(
             shown_a.starts_with('f') && shown_a.contains('\\'),

@@ -49,6 +49,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
 use unsaved::{Choice, Question};
@@ -2431,9 +2432,9 @@ impl SlidesApp {
             Ok(()) => {
                 self.deck_path = Some(path.to_path_buf());
                 self.dirty = false;
-                format!("Saved {}", path.display())
+                format!("Saved {}", path.shown())
             }
-            Err(err) => format!("Could not save {}: {err}", path.display()),
+            Err(err) => format!("Could not save {}: {err}", path.shown()),
         }
     }
 
@@ -2442,10 +2443,10 @@ impl SlidesApp {
     pub fn read_deck(&mut self, path: &std::path::Path) -> String {
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
-            Err(err) => return format!("Could not open {}: {err}", path.display()),
+            Err(err) => return format!("Could not open {}: {err}", path.shown()),
         };
         let Ok(text) = String::from_utf8(bytes) else {
-            return format!("Could not open {}: it is not a text file", path.display());
+            return format!("Could not open {}: it is not a text file", path.shown());
         };
         let doc = yamldoc::Document::parse(&text);
         match deck_from_document(&doc, &self.palette, &mut self.id_gen) {
@@ -2462,9 +2463,9 @@ impl SlidesApp {
                 self.view = ViewMode::Edit;
                 self.sidebar_scroll = 0.0;
                 self.sorter_scroll = 0.0;
-                format!("Opened {}", path.display())
+                format!("Opened {}", path.shown())
             }
-            Err(why) => format!("Could not open {}: {why}", path.display()),
+            Err(why) => format!("Could not open {}: {why}", path.shown()),
         }
     }
 
@@ -2556,9 +2557,9 @@ impl SlidesApp {
             Ok(()) => format!(
                 "Exported {} slide(s) to {}",
                 self.slides.len(),
-                path.display()
+                path.shown()
             ),
-            Err(err) => format!("Could not write {}: {err}", path.display()),
+            Err(err) => format!("Could not write {}: {err}", path.shown()),
         }
     }
 

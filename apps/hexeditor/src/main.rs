@@ -41,6 +41,7 @@ use guitk::wheel;
 #[allow(unused_imports)]
 use guitk::widget::{Widget, WidgetId, WidgetTree};
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -625,7 +626,7 @@ impl HexDocument {
     pub fn display_name(&self) -> String {
         self.path.as_deref().and_then(Path::file_name).map_or_else(
             || String::from("Untitled"),
-            |n| Path::new(n).display().to_string(),
+            |n| Path::new(n).shown().to_string(),
         )
     }
 
@@ -1733,7 +1734,7 @@ impl HexEditor {
     pub fn open_tab(&mut self, doc: HexDocument) {
         // Track in recent files.
         if let Some(path) = doc.path.as_deref() {
-            self.add_recent_file(&path.display().to_string());
+            self.add_recent_file(&path.shown().to_string());
         }
         self.documents.push(doc);
         self.active_tab = self.documents.len().saturating_sub(1);
@@ -2641,15 +2642,15 @@ impl HexEditor {
             return format!(
                 "Not saved: only the first {} of its {whole} bytes were read, and writing them over {} would cut it short -- save as a new file instead",
                 doc.data.len(),
-                path.display()
+                path.shown()
             );
         }
         match safeio::write_atomically(&path, &doc.data) {
             Ok(()) => {
                 doc.modified = false;
-                format!("Saved {} bytes to {}", doc.data.len(), path.display())
+                format!("Saved {} bytes to {}", doc.data.len(), path.shown())
             }
-            Err(err) => format!("Could not save {}: {err}", path.display()),
+            Err(err) => format!("Could not save {}: {err}", path.shown()),
         }
     }
 
@@ -2667,10 +2668,10 @@ impl HexEditor {
                 Ok(format!(
                     "Saved {} bytes to {}",
                     doc.data.len(),
-                    path.display()
+                    path.shown()
                 ))
             }
-            Err(err) => Err(format!("Could not save to {}: {err}", path.display())),
+            Err(err) => Err(format!("Could not save to {}: {err}", path.shown())),
         }
     }
 
@@ -2845,7 +2846,7 @@ impl HexEditor {
     /// mentioning it is worse than one that refuses: every offset past the cut
     /// is a real offset in a file that has different bytes there.
     pub fn open_path(&mut self, path: &std::path::Path) -> String {
-        let shown = path.display().to_string();
+        let shown = path.shown().to_string();
         // Read only as far as the cap. `std::fs::read` took the whole file and
         // cut it afterwards, so the four-gigabyte file the cap exists for was
         // read into memory in full before a byte of it was thrown away.

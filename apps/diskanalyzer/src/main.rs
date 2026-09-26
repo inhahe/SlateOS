@@ -42,6 +42,7 @@ use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::{scroll_window, text, wheel};
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -1272,7 +1273,7 @@ impl DiskAnalyzerUI {
     #[must_use]
     pub fn new() -> Self {
         let config = AnalyzerConfig::default();
-        let path_input = config.scan_path.display().to_string();
+        let path_input = config.scan_path.shown().to_string();
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             view_mode: ViewMode::Treemap,
@@ -1346,6 +1347,21 @@ impl DiskAnalyzerUI {
 
     // -- scanning --------------------------------------------------------------
 
+    /// The folder the path field names: the one being shown, exactly, while
+    /// the field still reads as it was shown; what was typed otherwise.
+    ///
+    /// A name that is not text -- or holds a control character -- is shown
+    /// with those bytes escaped (`pathtext`), and the escapes read back as a
+    /// path would name some other folder. So an unedited field means the
+    /// folder it was filled from, not the text it shows.
+    fn path_field_target(&self) -> PathBuf {
+        if self.path_input == self.config.scan_path.shown().to_string() {
+            self.config.scan_path.clone()
+        } else {
+            PathBuf::from(&self.path_input)
+        }
+    }
+
     /// Begin walking `root` on a background thread.
     ///
     /// Any scan already running is cancelled first: two walks writing two trees
@@ -1354,7 +1370,7 @@ impl DiskAnalyzerUI {
     pub fn start_scan(&mut self, root: PathBuf) {
         self.cancel_scan();
         self.config.scan_path.clone_from(&root);
-        self.path_input = root.display().to_string();
+        self.path_input = root.shown().to_string();
         self.scan_error = None;
         self.unreadable.clear();
         self.unreadable_count = 0;
@@ -1516,7 +1532,7 @@ impl DiskAnalyzerUI {
         if let Some(idx) = self.hovered_rect {
             if let Some(rect) = self.treemap_rects.get(idx) {
                 self.tooltip_text =
-                    format!("{}\n{}", rect.path.display(), format_size(rect.size_bytes));
+                    format!("{}\n{}", rect.path.shown(), format_size(rect.size_bytes));
                 self.tooltip_x = mx;
                 self.tooltip_y = my;
             }
@@ -2251,7 +2267,7 @@ impl DiskAnalyzerUI {
                 p.dirs,
                 p.files,
                 format_size(p.bytes),
-                p.current.display(),
+                p.current.shown(),
             );
         }
         let Some(tree) = &self.dir_tree else {
@@ -2278,7 +2294,7 @@ impl DiskAnalyzerUI {
             let plural = if n == 1 { "" } else { "s" };
             text.push_str(&format!(" | {n} path{plural} unreadable"));
             if let Some(first) = self.unreadable.first() {
-                text.push_str(&format!(" (e.g. {})", first.display()));
+                text.push_str(&format!(" (e.g. {})", first.shown()));
             }
         }
         text
@@ -2362,7 +2378,7 @@ impl DiskAnalyzerUI {
                 if self.scanning() {
                     self.cancel_scan();
                 } else {
-                    self.start_scan(PathBuf::from(&self.path_input));
+                    self.start_scan(self.path_field_target());
                 }
                 Action::Redraw
             }
@@ -2549,7 +2565,7 @@ impl DiskAnalyzerUI {
             Key::Escape => {
                 // Put back what is actually being shown, rather than leaving a
                 // half-typed path in a field that no longer describes anything.
-                self.path_input = self.config.scan_path.display().to_string();
+                self.path_input = self.config.scan_path.shown().to_string();
                 self.path_focused = false;
                 Action::Redraw
             }
@@ -2558,7 +2574,7 @@ impl DiskAnalyzerUI {
                 if self.path_input.is_empty() {
                     return Action::Redraw;
                 }
-                self.start_scan(PathBuf::from(&self.path_input));
+                self.start_scan(self.path_field_target());
                 Action::Redraw
             }
             Key::Backspace => {
@@ -2804,7 +2820,7 @@ fn main() -> ExitCode {
     // scan to a directory that is not the one named on the command line.
     if let Some(root) = std::env::args_os().nth(1) {
         ui.config.scan_path = PathBuf::from(root);
-        ui.path_input = ui.config.scan_path.display().to_string();
+        ui.path_input = ui.config.scan_path.shown().to_string();
     }
 
     // Start scanning immediately rather than opening on an empty window with a
@@ -4468,6 +4484,22 @@ mod tests {
         assert_eq!(ui.path_input.len(), MAX_PATH_INPUT);
     }
 
+    /// An unedited path field scans the folder it was filled from, exactly:
+    /// a name with a byte that is not text, or a control character, is
+    /// shown escaped, and those escapes read back as a path name some other
+    /// folder. An edited field scans what was typed.
+    #[test]
+    fn an_unedited_path_field_means_the_folder_it_shows() {
+        let mut ui = loaded();
+        let odd = PathBuf::from("/data/tab\there");
+        ui.config.scan_path.clone_from(&odd);
+        ui.path_input = odd.shown().to_string();
+        assert_eq!(ui.path_input, r"/data/tab\011here");
+        assert_eq!(ui.path_field_target(), odd);
+        ui.path_input = String::from("/data/typed");
+        assert_eq!(ui.path_field_target(), PathBuf::from("/data/typed"));
+    }
+
     #[test]
     fn backspace_in_the_path_field_deletes_a_whole_character_not_a_byte() {
         // `String::pop` is by char, which is what makes this safe; a byte-wise
@@ -4829,7 +4861,7 @@ mod tests {
     fn clicking_scan_starts_a_scan_of_whatever_the_path_field_says() {
         let dir = scratchdir::ScratchDir::new("diskanalyzer-start");
         let mut ui = DiskAnalyzerUI::new();
-        ui.path_input = dir.dir().display().to_string();
+        ui.path_input = dir.dir().shown().to_string();
         assert_eq!(probe::click(&mut ui, Target::Scan), Action::Redraw);
         assert!(ui.scanning());
         assert_eq!(ui.config.scan_path, dir.dir());

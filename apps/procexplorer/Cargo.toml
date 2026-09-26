@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Process Explorer — graphical system monitor and task manager"
 [dependencies]
+pathtext = { path = "../pathtext" }
 # The keys that edit the New Task box's command line.
 textline = { path = "../textline" }
 # An environment variable or a mapped file's name that is not text is shown

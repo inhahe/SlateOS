@@ -52,6 +52,7 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -1114,13 +1115,13 @@ impl SourceFile {
     pub fn from_file(id: u64, path: &Path) -> Result<Self, String> {
         let name = path.file_name().unwrap_or(path.as_os_str());
         let category = MediaConvertApp::detect_category_os(name)
-            .ok_or_else(|| format!("{} is not a media file by its name", path.display()))?;
+            .ok_or_else(|| format!("{} is not a media file by its name", path.shown()))?;
         let meta = std::fs::metadata(path)
-            .map_err(|err| format!("could not read {}: {err}", path.display()))?;
+            .map_err(|err| format!("could not read {}: {err}", path.shown()))?;
         let mut source = Self {
             id,
             path: path.to_path_buf(),
-            file_name: Path::new(name).display().to_string(),
+            file_name: Path::new(name).shown().to_string(),
             file_size: meta.len(),
             category,
             duration_secs: None,
@@ -1659,7 +1660,7 @@ impl MediaConvertApp {
     /// list, or it is not media by its name.
     pub fn add_file(&mut self, path: &Path) -> Result<u64, String> {
         if self.sources.iter().any(|s| s.path == path) {
-            return Err(format!("{} is already in the list", path.display()));
+            return Err(format!("{} is already in the list", path.shown()));
         }
         let id = self.id_gen.next_id();
         let source = SourceFile::from_file(id, path)?;
@@ -1672,7 +1673,7 @@ impl MediaConvertApp {
     /// many were added.
     pub fn add_folder(&mut self, folder: &Path) -> Result<usize, String> {
         let entries = std::fs::read_dir(folder)
-            .map_err(|err| format!("could not read {}: {err}", folder.display()))?;
+            .map_err(|err| format!("could not read {}: {err}", folder.shown()))?;
         let mut paths: Vec<PathBuf> = entries
             .filter_map(Result::ok)
             .map(|e| e.path())
@@ -1911,20 +1912,20 @@ impl MediaConvertApp {
         match self.picker_for {
             PickerFor::Files => {
                 self.status_line = match self.add_file(path) {
-                    Ok(_) => format!("Added {}", path.display()),
+                    Ok(_) => format!("Added {}", path.shown()),
                     Err(why) => why,
                 };
             }
             PickerFor::Folder => {
                 self.status_line = match self.add_folder(path) {
-                    Ok(0) => format!("No media files in {}", path.display()),
-                    Ok(n) => format!("Added {n} file(s) from {}", path.display()),
+                    Ok(0) => format!("No media files in {}", path.shown()),
+                    Ok(n) => format!("Added {n} file(s) from {}", path.shown()),
                     Err(why) => why,
                 };
             }
             PickerFor::OutputFolder => {
                 self.output_dir = Some(path.to_path_buf());
-                self.status_line = format!("Outputs go to {}", path.display());
+                self.status_line = format!("Outputs go to {}", path.shown());
             }
         }
     }
@@ -2267,7 +2268,7 @@ impl MediaConvertApp {
         let id = self.id_gen.next_id();
         let output_name = output_path
             .file_name()
-            .map_or_else(String::new, |n| Path::new(n).display().to_string());
+            .map_or_else(String::new, |n| Path::new(n).shown().to_string());
         self.jobs.push(ConversionJob::new(
             id,
             src,
@@ -2333,7 +2334,7 @@ impl MediaConvertApp {
                 duration_secs: 0.0,
                 success: true,
             });
-            self.status_line = format!("Wrote {}", job.output_path.display());
+            self.status_line = format!("Wrote {}", job.output_path.shown());
             true
         } else {
             false
@@ -3051,7 +3052,7 @@ impl MediaConvertApp {
             cy,
             self.output_dir.as_ref().map_or_else(
                 || String::from("Beside each source"),
-                |d| d.display().to_string(),
+                |d| d.shown().to_string(),
             ),
             max_w,
         );

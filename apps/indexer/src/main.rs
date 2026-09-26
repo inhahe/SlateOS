@@ -13,6 +13,7 @@
 //!   indexer config set <KEY> <VALUE>  Set a config option
 
 use globmatch::glob_match;
+use pathtext::ShowPath;
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
@@ -905,7 +906,7 @@ impl fmt::Display for SearchResult {
             "{} {:>10}  {}",
             type_char,
             format_size(self.entry.size),
-            self.entry.path.display()
+            self.entry.path.shown()
         )
     }
 }
@@ -1581,7 +1582,7 @@ impl ServiceControl {
             if let Err(e) = fs::remove_file(&path)
                 && e.kind() != io::ErrorKind::NotFound
             {
-                eprintln!("warning: could not remove {}: {}", path.display(), e);
+                eprintln!("warning: could not remove {}: {}", path.shown(), e);
             }
         }
     }

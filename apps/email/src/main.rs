@@ -50,6 +50,7 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+use pathtext::ShowPath;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -2467,7 +2468,7 @@ impl EmailApp {
                     Err(why) => {
                         app.status_message = format!(
                             "{} is not a marks file this reads ({why}); marks are kept for this session only.",
-                            path.display()
+                            path.shown()
                         );
                     }
                 },
@@ -2824,7 +2825,7 @@ impl EmailApp {
             return;
         };
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.status_message = format!("Draft not saved: {}: {e}", dir.display());
+            self.status_message = format!("Draft not saved: {}: {e}", dir.shown());
             return;
         }
         let result = match &compose.saved_as {
@@ -2859,7 +2860,7 @@ impl EmailApp {
                 compose.saved_as = Some(path.clone());
                 compose.saved = compose.fingerprint();
                 compose.confirm_close = false;
-                self.status_message = format!("Draft saved as {}", path.display());
+                self.status_message = format!("Draft saved as {}", path.shown());
                 self.reload_folder(store::DRAFTS);
             }
             Err(e) => self.status_message = format!("Draft not saved: {e}"),
@@ -2907,10 +2908,14 @@ impl EmailApp {
                     })
                     .unwrap_or_else(|| String::from("attachment"));
                 // A name out of a message is a stranger's: only its last part
-                // is used, so it cannot name a place outside the folder chosen.
+                // is used, so it cannot name a place outside the folder chosen,
+                // and it is escaped as it is shown, so a control character or
+                // a bidirectional override in it cannot hide the name's true
+                // end -- `photo<U+202E>gpj.exe` is suggested as
+                // `photo\342\200\256gpj.exe`, not as a picture.
                 let name = Path::new(&name).file_name().map_or_else(
                     || String::from("attachment"),
-                    |n| Path::new(n).display().to_string(),
+                    |n| Path::new(n).shown().to_string(),
                 );
                 self.picker.open_to_write(name);
             }
@@ -2926,13 +2931,13 @@ impl EmailApp {
                 }
                 self.rescan();
                 self.select_mailbox("Opened");
-                self.status_message = format!("Opened {}", path.display());
+                self.status_message = format!("Opened {}", path.shown());
             }
             PickerFor::SaveAs => match self.built() {
                 Ok(built) => {
                     self.status_message = match safeio::write_str_atomically(path, &built.text) {
-                        Ok(()) => format!("Saved as {}", path.display()),
-                        Err(e) => format!("Could not save {}: {e}", path.display()),
+                        Ok(()) => format!("Saved as {}", path.shown()),
+                        Err(e) => format!("Could not save {}: {e}", path.shown()),
                     };
                 }
                 Err(why) => self.status_message = format!("Not saved: {why}"),
@@ -2941,14 +2946,16 @@ impl EmailApp {
                 Ok(read) if read.truncated => {
                     self.status_message = format!(
                         "{} is larger than {} MiB, more than a message here attaches",
-                        path.display(),
+                        path.shown(),
                         MAX_ATTACHMENT_BYTES >> 20
                     );
                 }
                 Ok(read) => {
+                    // The user's own file: its name goes with it exactly,
+                    // whenever it is text.
                     let name = path.file_name().map_or_else(
                         || String::from("attachment"),
-                        |n| Path::new(n).display().to_string(),
+                        |n| n.text_or_shown().into_owned(),
                     );
                     let mime = mime_for(&name);
                     if let Some(compose) = self.compose.as_mut() {
@@ -2959,7 +2966,7 @@ impl EmailApp {
                     }
                     self.status_message = format!("Attached {name}");
                 }
-                Err(e) => self.status_message = format!("Could not attach {}: {e}", path.display()),
+                Err(e) => self.status_message = format!("Could not attach {}: {e}", path.shown()),
             },
             PickerFor::SaveAttachment(i) => {
                 let bytes = self
@@ -2968,8 +2975,8 @@ impl EmailApp {
                     .and_then(|s| s.message.attachments().get(i).map(|p| p.body.clone()));
                 self.status_message = match bytes {
                     Some(bytes) => match safeio::write_atomically(path, &bytes) {
-                        Ok(()) => format!("Saved {}", path.display()),
-                        Err(e) => format!("Could not save {}: {e}", path.display()),
+                        Ok(()) => format!("Saved {}", path.shown()),
+                        Err(e) => format!("Could not save {}: {e}", path.shown()),
                     },
                     None => String::from("That attachment is no longer on screen"),
                 };
@@ -4073,7 +4080,7 @@ impl EmailApp {
                 .and_then(|id| self.accounts.iter().find(|a| a.id == id)),
         ) {
             (_, Some(account)) => account.email.clone(),
-            (Some(dir), None) => dir.display().to_string(),
+            (Some(dir), None) => dir.shown().to_string(),
             (None, None) => String::from("No mail folder"),
         };
         self.line(

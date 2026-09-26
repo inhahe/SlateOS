@@ -17,6 +17,7 @@
 //! is a symbolic link -- one planted in the save folder would otherwise carry
 //! the write wherever it points.
 
+use pathtext::ShowPath;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -61,6 +62,9 @@ pub struct Storage {
 /// On SlateOS (and any Unix) a name is bytes, and any bytes the torrent
 /// checker let through will do. Elsewhere -- the Windows host the tests run
 /// on -- a name must be text, and a part that is not UTF-8 cannot be written.
+// The `Result` is the non-Unix arm's: on Unix every part is a name, so clippy
+// sees a function that cannot fail -- in that build only.
+#[cfg_attr(unix, allow(clippy::unnecessary_wraps))]
 fn os_part(bytes: &[u8]) -> Result<OsString, String> {
     #[cfg(unix)]
     {
@@ -190,7 +194,7 @@ impl Storage {
                 .get(at..at.saturating_add(len))
                 .ok_or("a piece shorter than its spans")?;
             self.write_at(&file.path, span.offset, bytes)
-                .map_err(|e| format!("could not write {}: {e}", file.path.display()))?;
+                .map_err(|e| format!("could not write {}: {e}", file.path.shown()))?;
             at = at.saturating_add(len);
         }
         Ok(())
@@ -213,7 +217,7 @@ impl Storage {
             let mut handle = match File::open(&file.path) {
                 Ok(handle) => handle,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(e) => return Err(format!("could not read {}: {e}", file.path.display())),
+                Err(e) => return Err(format!("could not read {}: {e}", file.path.shown())),
             };
             let len = usize::try_from(span.length).map_err(|_| "a span too long to hold")?;
             let start = out.len();
@@ -224,7 +228,7 @@ impl Storage {
             match read {
                 Ok(n) if n == len => {}
                 Ok(_) => return Ok(None),
-                Err(e) => return Err(format!("could not read {}: {e}", file.path.display())),
+                Err(e) => return Err(format!("could not read {}: {e}", file.path.shown())),
             }
         }
         Ok(Some(out))
@@ -297,7 +301,7 @@ fn refuse_link(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(md) if md.file_type().is_symlink() => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("{} is a link, and is not written through", path.display()),
+            format!("{} is a link, and is not written through", path.shown()),
         )),
         _ => Ok(()),
     }

@@ -43,6 +43,7 @@
 //! report. [`Job`]'s `Drop` cancels and joins, so the thread cannot outlive the
 //! window it is reporting to.
 
+use pathtext::ShowPath;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -292,16 +293,13 @@ pub fn walk(root: &Path, limits: Limits, shared: &Shared) -> Outcome {
 /// showed two such folders as the same row.
 fn display_name(path: &Path) -> String {
     path.file_name()
-        .map_or_else(|| path.display().to_string(), shown)
+        .map_or_else(|| path.shown().to_string(), shown)
 }
 
-/// `name` as the window shows it: itself when it is text, its bytes as escapes
-/// when it is not.
+/// `name` as the window shows it (`pathtext`): a byte that is not text, or a
+/// control character, as an escape.
 fn shown(name: &std::ffi::OsStr) -> String {
-    name.to_str().map_or_else(
-        || quoting::escape_unprintable(name.as_encoded_bytes()),
-        str::to_owned,
-    )
+    name.shown().to_string()
 }
 
 struct Walker<'a> {
@@ -432,7 +430,7 @@ impl Walker<'_> {
             unreadable_count: self.unreadable_count,
             truncated: false,
             cancelled: false,
-            root_error: Some(format!("{}: {err}", root.display())),
+            root_error: Some(format!("{}: {err}", root.shown())),
         }
     }
 }

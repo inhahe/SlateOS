@@ -15,6 +15,7 @@
 //! deleting one is refused. A draft it saved is its own to replace and to
 //! delete.
 
+use pathtext::ShowPath;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -68,10 +69,21 @@ pub struct Stored {
 impl Stored {
     /// What its flags are kept under: its `Message-ID`, which follows it
     /// between files, or where it is when it has none.
+    ///
+    /// Where it is is written with `pathcodec` (design-decisions.md §426),
+    /// which gives every path a text of its own: shown instead -- escaped for
+    /// a person, or decoded lossily as `display()` did -- two files could
+    /// share a key, and one's marks would be read as the other's.
     #[must_use]
     pub fn key(&self) -> String {
         self.message.message_id.clone().map_or_else(
-            || format!("file:{}#{}", self.origin.display(), self.index),
+            || {
+                format!(
+                    "file:{}#{}",
+                    pathcodec::encode_path(&self.origin),
+                    self.index
+                )
+            },
             |id| format!("id:{id}"),
         )
     }
@@ -113,8 +125,8 @@ fn is_eml(path: &Path) -> bool {
 /// A file's name, as the list shows it.
 fn shown(path: &Path) -> String {
     path.file_name().map_or_else(
-        || path.display().to_string(),
-        |n| Path::new(n).display().to_string(),
+        || path.shown().to_string(),
+        |n| Path::new(n).shown().to_string(),
     )
 }
 
@@ -127,7 +139,7 @@ fn shown(path: &Path) -> String {
 pub fn folders(root: &Path) -> Result<Vec<Folder>, String> {
     let mut found = Vec::new();
     if root.exists() {
-        let listing = std::fs::read_dir(root).map_err(|e| format!("{}: {e}", root.display()))?;
+        let listing = std::fs::read_dir(root).map_err(|e| format!("{}: {e}", root.shown()))?;
         for entry in listing {
             // An entry the listing cannot describe is not a folder this could
             // read; the rest are still worth listing.
@@ -148,7 +160,7 @@ pub fn folders(root: &Path) -> Result<Vec<Folder>, String> {
             } else if path.is_file() && is_mbox(&path) {
                 let name = path
                     .file_stem()
-                    .map_or_else(|| shown(&path), |s| Path::new(s).display().to_string());
+                    .map_or_else(|| shown(&path), |s| Path::new(s).shown().to_string());
                 found.push(Folder {
                     name,
                     source: FolderSource::Mbox(path),
@@ -449,6 +461,30 @@ mod tests {
         let none = folders(&dir.0.join("missing")).unwrap();
         assert_eq!(none.len(), 1);
         assert!(none[0].own);
+    }
+
+    /// A message with no Message-ID is keyed by its file's path exactly: two
+    /// files whose names only look alike -- one holding a tab, one holding
+    /// the four characters a tab is shown as -- keep their marks apart.
+    #[test]
+    fn two_files_that_look_alike_keep_their_marks_apart() {
+        let message = EmailMessage::parse_bytes(b"Subject: hello\r\n\r\nbody\r\n").unwrap();
+        assert!(message.message_id.is_none(), "the fixture must have no id");
+        let at = |origin: &str| Stored {
+            message: message.clone(),
+            origin: PathBuf::from(origin),
+            index: 0,
+            size: 0,
+        };
+        let tab = at("/mail/a\tb.eml");
+        let lookalike = at(r"/mail/a\011b.eml");
+        assert_eq!(
+            tab.origin.shown().to_string(),
+            lookalike.origin.shown().to_string(),
+            "control: the two are shown alike"
+        );
+        assert_ne!(tab.key(), lookalike.key());
+        assert_eq!(at("/mail/plain.eml").key(), "file:/mail/plain.eml#0");
     }
 
     /// An mbox is read message by message, and a key is its Message-ID when

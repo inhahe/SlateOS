@@ -101,6 +101,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 
 // ── Catppuccin Mocha palette ───────────────────────────────────────────────
@@ -3010,9 +3011,9 @@ pub fn save_lists(app: &Dictionary, path: &std::path::Path) -> String {
             "Saved {} favourite(s) and {} looked-up word(s) to {}",
             app.favorites().len(),
             app.history().len(),
-            path.display()
+            path.shown()
         ),
-        Err(err) => format!("Could not write {}: {err}", path.display()),
+        Err(err) => format!("Could not write {}: {err}", path.shown()),
     }
 }
 
@@ -3050,12 +3051,12 @@ pub fn load_lists(app: &mut Dictionary, path: &std::path::Path) -> String {
                 "{note}Read {} favourite(s) and {} looked-up word(s) from {}",
                 favs.len(),
                 hist.len(),
-                path.display()
+                path.shown()
             );
             app.replace_lists(favs, hist);
             said
         }
-        Err(err) => format!("Could not read {}: {err}", path.display()),
+        Err(err) => format!("Could not read {}: {err}", path.shown()),
     }
 }
 

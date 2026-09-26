@@ -62,6 +62,7 @@
 //! nothing; see `known-issues.md` ->
 //! `C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY`.
 
+use pathtext::ShowPath;
 use std::process::ExitCode;
 
 /// Reading the PDF file format. See [`pdf`].
@@ -4041,14 +4042,14 @@ impl PdfViewerApp {
         let read = match safeio::read_capped(path, Self::MAX_PDF_BYTES) {
             Ok(read) => read,
             Err(err) => {
-                self.open_error = Some(format!("Could not read {}: {err}", path.display()));
+                self.open_error = Some(format!("Could not read {}: {err}", path.shown()));
                 return false;
             }
         };
         if read.truncated {
             self.open_error = Some(format!(
                 "{} is larger than {} MiB, and a PDF cut short loses the table that says where its pages are",
-                path.display(),
+                path.shown(),
                 Self::MAX_PDF_BYTES / (1024 * 1024)
             ));
             return false;
@@ -4056,7 +4057,7 @@ impl PdfViewerApp {
         let parsed = match pdf::read(&read.bytes) {
             Ok(parsed) => parsed,
             Err(err) => {
-                self.open_error = Some(format!("{}: {err}", path.display()));
+                self.open_error = Some(format!("{}: {err}", path.shown()));
                 return false;
             }
         };

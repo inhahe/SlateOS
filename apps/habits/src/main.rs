@@ -3395,6 +3395,7 @@ mod tests {
     )]
 
     use super::*;
+    use pathtext::ShowPath;
 
     /// An empty tracker says so where the habits would be, and says how to
     /// start one.
@@ -6061,7 +6062,7 @@ mod tests {
             app.archive_habit(0);
             app.delete_habit(0);
             let path = settingsfile::path_for(CONFIG_NAME).unwrap();
-            assert!(!path.exists(), "{} was written", path.display());
+            assert!(!path.exists(), "{} was written", path.shown());
         });
     }
 

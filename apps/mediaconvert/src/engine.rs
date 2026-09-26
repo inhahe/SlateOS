@@ -12,6 +12,7 @@
 //! half a file. [`output_path`] never names a file that exists -- the source
 //! included -- so nothing is ever written over.
 
+use pathtext::ShowPath;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -214,9 +215,9 @@ pub fn run(
     let set = |fraction: f32| progress.store(fraction.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     set(0.0);
     let read = safeio::read_capped(input, MAX_SOURCE_BYTES)
-        .map_err(|err| format!("could not read {}: {err}", input.display()))?;
+        .map_err(|err| format!("could not read {}: {err}", input.shown()))?;
     if read.truncated {
-        return Err(format!("{} is larger than 1 GiB", input.display()));
+        return Err(format!("{} is larger than 1 GiB", input.shown()));
     }
     set(0.1);
     let bytes = match recipe {
@@ -226,7 +227,7 @@ pub fn run(
             format,
         } => {
             let audio =
-                wavpcm::decode(&read.bytes).map_err(|err| format!("{}: {err}", input.display()))?;
+                wavpcm::decode(&read.bytes).map_err(|err| format!("{}: {err}", input.shown()))?;
             let mixed = wavpcm::to_channels(&audio, *channels);
             if cancel.load(Ordering::Relaxed) {
                 return Err(String::from("cancelled"));
@@ -254,7 +255,7 @@ pub fn run(
                     h.unwrap_or(u32::MAX),
                 ),
             }
-            .map_err(|err| format!("{}: {err}", input.display()))?;
+            .map_err(|err| format!("{}: {err}", input.shown()))?;
             set(0.7);
             if cancel.load(Ordering::Relaxed) {
                 return Err(String::from("cancelled"));
@@ -272,10 +273,10 @@ pub fn run(
         if err.kind() == std::io::ErrorKind::AlreadyExists {
             format!(
                 "{} appeared while this waited; nothing was written over it",
-                output.display()
+                output.shown()
             )
         } else {
-            format!("could not write {}: {err}", output.display())
+            format!("could not write {}: {err}", output.shown())
         }
     })?;
     set(1.0);

@@ -37,6 +37,7 @@ use guitk::text;
 use highlight::{HighlightState, StyledToken, Theme, Token};
 use input::FindField;
 use oswindow::app::Response;
+use pathtext::ShowPath;
 use syntree::{Pos, SyntaxTree};
 
 use diffcore::{
@@ -49,15 +50,15 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
 
-/// `path`'s file name as the window shows it: the name itself when it is
-/// text, its bytes as escapes (`quoting::escape_unprintable`) when it is not
-/// -- never a lossy decode, which shows two such names alike.
+/// `path`'s file name for the document: the name exactly when it is text,
+/// and as `pathtext` shows it when it is not -- never a lossy decode, which
+/// shows two such names alike.
+///
+/// Exact, not escaped, because the name is used as well as shown: it is
+/// what Save As suggests, so escaping a control character in it would
+/// suggest a different name.
 fn shown_file_name(path: &std::path::Path) -> Option<String> {
-    let name = path.file_name()?;
-    Some(name.to_str().map_or_else(
-        || quoting::escape_unprintable(name.as_encoded_bytes()),
-        str::to_owned,
-    ))
+    Some(path.file_name()?.text_or_shown().into_owned())
 }
 use std::process::ExitCode;
 use unsaved::{Choice, Question};
@@ -2979,7 +2980,7 @@ fn main() -> ExitCode {
 
     let mut editor = EditorState::new();
     for (path, why) in open_all(&mut editor, &args.rest) {
-        eprintln!("editor: cannot open {}: {why}", path.display());
+        eprintln!("editor: cannot open {}: {why}", path.shown());
     }
 
     // The editor names `oswindow` and never TCP — see `design-decisions.md`

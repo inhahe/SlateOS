@@ -17,6 +17,7 @@
 //! recycled; `~/.recycle/<id>/data` is the file or directory itself. See
 //! [`RecycleBin`].
 
+use pathtext::ShowPath;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write as _};
@@ -25,14 +26,11 @@ use std::time::{Duration, SystemTime};
 
 use pathcodec::{decode_path, encode_path};
 
-/// `name` as the user reads it: the name itself when it is text, its bytes
-/// as escapes (`quoting::escape_unprintable`) when it is not -- never a lossy
-/// decode, which shows two such names alike.
+/// `name` as the user reads it (`pathtext`): a byte that is not text, or a
+/// control character, as an escape -- never a lossy decode, which shows two
+/// such names alike.
 fn shown(name: &OsStr) -> String {
-    name.to_str().map_or_else(
-        || quoting::escape_unprintable(name.as_encoded_bytes()),
-        str::to_owned,
-    )
+    name.shown().to_string()
 }
 
 /// Marker on the first line of a `meta.txt` whose path line is escaped.
@@ -356,8 +354,8 @@ impl RecycleBin {
             {
                 eprintln!(
                     "warning: restored {} but could not clear its recycle bin entry {}: {}",
-                    dest.display(),
-                    path.display(),
+                    dest.shown(),
+                    path.shown(),
                     e
                 );
             }

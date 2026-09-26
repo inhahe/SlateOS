@@ -6,6 +6,7 @@ edition = "2024"
 # description was the only place in the repository the word appeared.
 description = "SlateOS Playlist Editor — build and save .m3u playlists"
 [dependencies]
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }

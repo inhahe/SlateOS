@@ -37,6 +37,7 @@ use guitk::textinput::TextInput;
 use guitk::wheel;
 use inputsettings::{InputFile, MAX_DOUBLE_CLICK_MS, MIN_DOUBLE_CLICK_MS};
 use oswindow::app::{Reloads, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 
 // ============================================================================
@@ -3616,7 +3617,7 @@ impl SettingsState {
                 // `display()` because this is the line of text under the
                 // heading, and a label is text by definition. The path itself
                 // is held exactly; nothing is rebuilt from this string.
-                s.note(&path.display().to_string(), 28.0);
+                s.note(&path.shown().to_string(), 28.0);
             }
             None => {
                 s.note(
@@ -3636,7 +3637,7 @@ impl SettingsState {
 
         s.section("Rotation");
         match self.appearance.settings.wallpaper_folder.as_deref() {
-            Some(folder) => s.note(&folder.display().to_string(), 28.0),
+            Some(folder) => s.note(&folder.shown().to_string(), 28.0),
             None => s.note(
                 "No folder. The desktop shows the single picture above.",
                 28.0,
@@ -3744,7 +3745,7 @@ impl SettingsState {
                 28.0,
             ),
             appearance::LoginBackground::CustomImage(path) => {
-                s.note(&path.display().to_string(), 28.0);
+                s.note(&path.shown().to_string(), 28.0);
                 s.button_row(
                     "Login picture",
                     "Choose...",

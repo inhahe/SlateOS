@@ -5,6 +5,7 @@ edition = "2024"
 description = "SlateOS: the program on the far side of a terminal -- a shell on a kernel pseudo-terminal, as a link a terminal emulator drives."
 
 [dependencies]
+pathtext = { path = "../pathtext" }
 # `forkpty` and `TIOCSWINSZ` are the C library's and keep state, so a program
 # reaches them through the C ABI and never by depending on `posix`
 # (design-decisions 768). This is that door.

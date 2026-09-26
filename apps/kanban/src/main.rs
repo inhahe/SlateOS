@@ -26,6 +26,7 @@ use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -2095,7 +2096,7 @@ impl KanbanApp {
         let refused = |why: String| {
             format!(
                 "{} was not read ({why}), so nothing is saved over it",
-                path.display()
+                path.shown()
             )
         };
         let read = match safeio::read_to_string_capped(path, max_bytes) {
@@ -2167,7 +2168,7 @@ impl KanbanApp {
                 self.store_error = None;
             }
             Err(err) => {
-                self.store_error = Some(format!("Not saved to {}: {err}", path.display()));
+                self.store_error = Some(format!("Not saved to {}: {err}", path.shown()));
             }
         }
     }
@@ -2190,7 +2191,7 @@ impl KanbanApp {
         }
         boards_path().map_or_else(
             || String::from(NO_HOME),
-            |path| format!("The boards are kept in {}.", path.display()),
+            |path| format!("The boards are kept in {}.", path.shown()),
         )
     }
 
@@ -2242,8 +2243,8 @@ impl KanbanApp {
         let text = JsonExporter::export_board(board);
         let (name, cards) = (board.name.clone(), board.cards.len());
         match safeio::write_str_atomically(path, &text) {
-            Ok(()) => format!("Wrote {cards} card(s) from {name} to {}", path.display()),
-            Err(err) => format!("Could not write {}: {err}", path.display()),
+            Ok(()) => format!("Wrote {cards} card(s) from {name} to {}", path.shown()),
+            Err(err) => format!("Could not write {}: {err}", path.shown()),
         }
     }
 
@@ -2255,7 +2256,7 @@ impl KanbanApp {
     fn read_board(&mut self, path: &std::path::Path) -> String {
         let read = match safeio::read_to_string_capped(path, MAX_BOARD_BYTES) {
             Ok(read) => read,
-            Err(err) => return format!("Could not read {}: {err}", path.display()),
+            Err(err) => return format!("Could not read {}: {err}", path.shown()),
         };
         let note = read.note(MAX_BOARD_BYTES);
         match JsonImporter::import_board(&read.text) {
@@ -2265,7 +2266,7 @@ impl KanbanApp {
                 self.active_board_idx = self.boards.len().saturating_sub(1);
                 format!("{note}Opened {name} with {cards} card(s)")
             }
-            Err(why) => format!("{note}Could not open {}: {why}", path.display()),
+            Err(why) => format!("{note}Could not open {}: {why}", path.shown()),
         }
     }
 

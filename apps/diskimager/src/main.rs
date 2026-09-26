@@ -52,6 +52,7 @@ use guitk::text;
 #[allow(unused_imports)]
 use guitk::widget::{Widget, WidgetId, WidgetTree};
 use guitk::{scroll_window, wheel};
+use pathtext::ShowPath;
 
 use oswindow::app::Response;
 
@@ -1995,11 +1996,11 @@ impl DiskImagerApp {
         match fs::read(path) {
             Ok(data) => {
                 self.load_image(path, &data);
-                self.status_message = format!("Loaded {}", path.display());
+                self.status_message = format!("Loaded {}", path.shown());
                 self.status_is_error = false;
             }
             Err(e) => {
-                self.status_message = format!("Cannot read {}: {e}", path.display());
+                self.status_message = format!("Cannot read {}: {e}", path.shown());
                 self.status_is_error = true;
             }
         }
@@ -2059,7 +2060,7 @@ impl DiskImagerApp {
         // Add to recent images
         self.add_recent(path, format, info.file_size);
         self.loaded_image = Some(info);
-        self.status_message = format!("Loaded: {}", path.display());
+        self.status_message = format!("Loaded: {}", path.shown());
         self.status_is_error = false;
     }
 
@@ -2159,7 +2160,7 @@ impl DiskImagerApp {
             drive.size_bytes,
         );
         let job = CopyJob::open(Path::new(&node), output_path)
-            .map_err(|e| format!("Cannot copy {node} to {}: {e}", output_path.display()))?;
+            .map_err(|e| format!("Cannot copy {node} to {}: {e}", output_path.shown()))?;
 
         self.create_options.source_drive_id = drive_id.clone();
         self.create_options.output_path = output_path.to_path_buf();
@@ -2205,7 +2206,7 @@ impl DiskImagerApp {
             .ok_or_else(|| "No image loaded".to_string())?;
         let path = image.path.clone();
         let job = HashJob::open(&path, self.hash_algorithm)
-            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+            .map_err(|e| format!("Cannot read {}: {e}", path.shown()))?;
 
         // The length the file has *now*, not the length it had when it was
         // loaded: the bar is drawn against how far the read has got, and a
@@ -2305,10 +2306,7 @@ impl DiskImagerApp {
             }
             Operation::VerifyingWrite => "Write verified successfully".to_string(),
             Operation::CreatingImage => {
-                format!(
-                    "Image created: {}",
-                    self.create_options.output_path.display()
-                )
+                format!("Image created: {}", self.create_options.output_path.shown())
             }
             Operation::ComputingHash => {
                 if let Some(Job::Hash(mut job)) = finished {
@@ -6846,7 +6844,11 @@ mod tests {
 
         let mut usb = test_drive("disk1");
         usb.name = "USB Flash Drive".to_string();
-        usb.node = device_path.display().to_string();
+        // The node is opened, not shown: the path exactly, as text.
+        usb.node = device_path
+            .to_str()
+            .expect("a scratch path is text")
+            .to_owned();
 
         let mut app = DiskImagerApp::new();
         app.drives = vec![test_drive("disk0"), usb];

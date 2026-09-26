@@ -37,6 +37,7 @@ use guitk::textedit;
 use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1269,7 +1270,7 @@ impl FlashcardsApp {
         if unreadable > 0 {
             self.status_msg = format!(
                 "{unreadable} kept deck file(s) in {} could not be read, and were left alone",
-                dir.display()
+                dir.shown()
             );
         }
     }
@@ -1290,7 +1291,7 @@ impl FlashcardsApp {
             return;
         };
         if let Err(err) = std::fs::create_dir_all(&dir) {
-            self.status_msg = format!("Could not keep your decks in {}: {err}", dir.display());
+            self.status_msg = format!("Could not keep your decks in {}: {err}", dir.shown());
             return;
         }
         let which: Vec<usize> = if self.library {
@@ -1333,7 +1334,7 @@ impl FlashcardsApp {
         if let Err(err) = std::fs::remove_file(&file)
             && err.kind() != std::io::ErrorKind::NotFound
         {
-            self.status_msg = format!("Could not remove {}: {err}", file.display());
+            self.status_msg = format!("Could not remove {}: {err}", file.shown());
         }
     }
 
@@ -1940,9 +1941,9 @@ impl FlashcardsApp {
                 "Wrote {} card(s) from {} to {}",
                 deck.cards.len(),
                 deck.name,
-                path.display()
+                path.shown()
             ),
-            Err(err) => format!("Could not write {}: {err}", path.display()),
+            Err(err) => format!("Could not write {}: {err}", path.shown()),
         }
     }
 
@@ -1955,14 +1956,14 @@ impl FlashcardsApp {
     pub fn read_deck(&mut self, path: &std::path::Path) -> String {
         let read = match safeio::read_to_string_capped(path, MAX_DECK_BYTES) {
             Ok(read) => read,
-            Err(err) => return format!("Could not read {}: {err}", path.display()),
+            Err(err) => return format!("Could not read {}: {err}", path.shown()),
         };
         let note = read.note(MAX_DECK_BYTES);
         let (deck, done) = Deck::from_text(&read.text, &deck_name_of(path));
         if done.cards == 0 {
             return format!(
                 "{note}{} holds no cards this program can read",
-                path.display()
+                path.shown()
             );
         }
         self.decks.push(deck);

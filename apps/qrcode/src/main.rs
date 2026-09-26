@@ -41,6 +41,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use core::num::NonZeroUsize;
+use pathtext::ShowPath;
 
 use guitk::Color;
 use guitk::colorpicker::{ColorPickerDialog, ColorPickerEvent};
@@ -2198,8 +2199,8 @@ impl QrApp {
             return String::from("Nothing to save: there is no code");
         };
         match safeio::write_str_atomically(path, &svg) {
-            Ok(()) => format!("Saved {}", path.display()),
-            Err(err) => format!("Could not save {}: {err}", path.display()),
+            Ok(()) => format!("Saved {}", path.shown()),
+            Err(err) => format!("Could not save {}: {err}", path.shown()),
         }
     }
 

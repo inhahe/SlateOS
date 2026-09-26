@@ -54,6 +54,7 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -2929,10 +2930,10 @@ impl AppState {
             // that would leave the window empty with a success on the status
             // line, which reads as "the new archive is open" and is not.
             Ok(()) if self.open_path(path) => {
-                self.status_message = format!("Created {}", path.display());
+                self.status_message = format!("Created {}", path.shown());
             }
             Ok(()) => {}
-            Err(e) => self.status_message = format!("Cannot create {}: {e}", path.display()),
+            Err(e) => self.status_message = format!("Cannot create {}: {e}", path.shown()),
         }
     }
 
@@ -2941,7 +2942,7 @@ impl AppState {
         let add = match backend::read_for_add(path) {
             Ok(a) => a,
             Err(e) => {
-                self.status_message = format!("Cannot add {}: {e}", path.display());
+                self.status_message = format!("Cannot add {}: {e}", path.shown());
                 return;
             }
         };
@@ -3057,7 +3058,7 @@ impl AppState {
                 true
             }
             Err(e) => {
-                self.status_message = format!("Cannot open {}: {e}", path.display());
+                self.status_message = format!("Cannot open {}: {e}", path.shown());
                 false
             }
         }
@@ -3518,7 +3519,7 @@ impl App for AppState {
             Some(archive) => format!(
                 "{} — Archive Manager",
                 archive.path.file_name().map_or_else(
-                    || archive.path.display().to_string(),
+                    || archive.path.shown().to_string(),
                     |n| n.to_string_lossy().into_owned()
                 )
             ),

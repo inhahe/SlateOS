@@ -100,6 +100,7 @@ mod library;
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+use pathtext::ShowPath;
 // The toolkit's rectangle rather than a private copy: this crate had
 // the same four floats under `width`/`height`, with the same half-open
 // `contains`. See `known-issues.md`
@@ -2698,7 +2699,7 @@ impl PhotoApp {
     /// window over a library that was never read from anywhere, and "nothing
     /// visibly happened" is exactly how that survived.
     fn import_from_disk(&mut self, path: &std::path::Path) -> String {
-        let name = shown_file_name(path).unwrap_or_else(|| path.display().to_string());
+        let name = shown_file_name(path).unwrap_or_else(|| path.shown().to_string());
         // Under the same cap as opening a picture: it read the whole file
         // first, however large, before anything could refuse it.
         let bytes = match safeio::read_capped(path, Self::MAX_PICTURE_BYTES) {
@@ -4759,15 +4760,11 @@ impl App for PhotoApp {
     }
 }
 
-/// `path`'s file name as the window shows it: the name itself when it is
-/// text, its bytes as escapes (`quoting::escape_unprintable`) when it is not
-/// -- never a lossy decode, which shows two such names alike.
+/// `path`'s file name as the window shows it (`pathtext`): a byte that is
+/// not text, or a control character, as an escape -- never a lossy decode,
+/// which shows two such names alike.
 fn shown_file_name(path: &std::path::Path) -> Option<String> {
-    let name = path.file_name()?;
-    Some(name.to_str().map_or_else(
-        || quoting::escape_unprintable(name.as_encoded_bytes()),
-        str::to_owned,
-    ))
+    Some(path.file_name()?.shown().to_string())
 }
 
 fn main() -> ExitCode {

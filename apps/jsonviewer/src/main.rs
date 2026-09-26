@@ -59,6 +59,7 @@ use guitk::table::{Column, Fit, Table};
 use guitk::text;
 use guitk::wheel;
 use oswindow::app::{self, Response};
+use pathtext::ShowPath;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -3444,15 +3445,15 @@ impl App {
         if let Some(whole) = doc.whole_len {
             return format!(
                 "Not saved: only part of {} was read ({whole} bytes is over the {MAX_OPEN_BYTES} read), and writing it back would cut the file short -- save as a new file instead",
-                path.display()
+                path.shown()
             );
         }
         match safeio::write_atomically(&path, doc.input.as_bytes()) {
             Ok(()) => {
                 doc.dirty = false;
-                format!("Saved {}", path.display())
+                format!("Saved {}", path.shown())
             }
-            Err(err) => format!("Not saved: could not write {}: {err}", path.display()),
+            Err(err) => format!("Not saved: could not write {}: {err}", path.shown()),
         }
     }
 
@@ -3471,11 +3472,11 @@ impl App {
                     // The tab's label only; the real name is `path`.
                     doc.title = name.to_string_lossy().into_owned();
                 }
-                Ok(format!("Saved {}", path.display()))
+                Ok(format!("Saved {}", path.shown()))
             }
             Err(err) => Err(format!(
                 "Not saved: could not write {}: {err}",
-                path.display()
+                path.shown()
             )),
         }
     }
@@ -3649,7 +3650,7 @@ impl App {
     /// would show a parse error that is about this cap rather than about the
     /// file -- the worst kind, because it accuses the user's data.
     pub fn open_path(&mut self, path: &std::path::Path) -> String {
-        let shown = path.display().to_string();
+        let shown = path.shown().to_string();
         // Bounded before it is read, not after: `read_to_string` then a cut
         // held the whole file first, so the cap stopped nothing a cap is for.
         let read = match safeio::read_to_string_capped(path, MAX_OPEN_BYTES) {

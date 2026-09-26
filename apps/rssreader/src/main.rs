@@ -28,6 +28,7 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+use pathtext::ShowPath;
 use std::collections::HashMap;
 
 use guitk::color::Color;
@@ -3023,7 +3024,7 @@ impl RssReaderApp {
         let refused = |path: &Path, why: String| {
             format!(
                 "{} was not read ({why}), so nothing is saved over it",
-                path.display()
+                path.shown()
             )
         };
         let read = |path: &Path| match safeio::read_to_string_capped(path, max_bytes) {
@@ -3109,7 +3110,7 @@ impl RssReaderApp {
                 Err(err) => {
                     failed = Some(format!(
                         "Your subscriptions were not saved to {}: {err}",
-                        subs.display()
+                        subs.shown()
                     ));
                 }
             }
@@ -3121,7 +3122,7 @@ impl RssReaderApp {
                     failed = failed.or_else(|| {
                         Some(format!(
                             "Your read and starred marks were not saved to {}: {err}",
-                            marks.display()
+                            marks.shown()
                         ))
                     });
                 }
@@ -3269,8 +3270,8 @@ impl RssReaderApp {
         }
         let text = self.export_opml();
         match safeio::write_str_atomically(path, &text) {
-            Ok(()) => format!("Wrote {} feed(s) to {}", self.feeds.len(), path.display()),
-            Err(err) => format!("{FILE_FAILED_PREFIX} write {}: {err}", path.display()),
+            Ok(()) => format!("Wrote {} feed(s) to {}", self.feeds.len(), path.shown()),
+            Err(err) => format!("{FILE_FAILED_PREFIX} write {}: {err}", path.shown()),
         }
     }
 
@@ -3292,7 +3293,7 @@ impl RssReaderApp {
     pub fn read_any_file(&mut self, path: &std::path::Path) -> String {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
-            Err(err) => return format!("{FILE_FAILED_PREFIX} read {}: {err}", path.display()),
+            Err(err) => return format!("{FILE_FAILED_PREFIX} read {}: {err}", path.shown()),
         };
         let whole = text.len();
         let truncated = whole > MAX_FEED_BYTES;
@@ -3324,7 +3325,7 @@ impl RssReaderApp {
             if found.is_empty() {
                 return format!(
                     "{cut_note}{} is a web page that links to no feed",
-                    path.display()
+                    path.shown()
                 );
             }
             let mut added = 0usize;
@@ -3338,7 +3339,7 @@ impl RssReaderApp {
             return format!(
                 "{cut_note}Subscribed to {added} feed(s) {} links to. No articles came with \
                  them -- nothing here can fetch one.",
-                path.display()
+                path.shown()
             );
         }
 
@@ -3348,7 +3349,7 @@ impl RssReaderApp {
                     "{cut_note}Subscribed to {added} feed(s) from {}. \
                      No articles came with them -- an OPML file holds addresses, \
                      and nothing here can fetch one.",
-                    path.display()
+                    path.shown()
                 ),
                 Err(err) => {
                     format!("{cut_note}{FILE_FAILED_PREFIX} read that OPML: {err}")
@@ -3361,14 +3362,24 @@ impl RssReaderApp {
             Err(err) => {
                 return format!(
                     "{cut_note}{FILE_FAILED_PREFIX} read {} as a feed or an OPML list: {err}",
-                    path.display()
+                    path.shown()
                 );
             }
         };
         // Re-opening an updated download of the same file merges into the feed
         // already there rather than making a second copy of it;
         // `ingest_parsed_feed` de-duplicates the articles by title and link.
-        let key = path.display().to_string();
+        //
+        // The feed's address is the file's path, and `load_kept` reads the
+        // file again from it at the next start -- so it is the path's exact
+        // text, never how the path is shown (which escapes a control
+        // character, and would name some other file). A path that is not text
+        // has no exact text: it is kept by how it is shown, is not read again,
+        // and the status line says so.
+        let (key, not_text) = match path.to_str() {
+            Some(text) => (text.to_owned(), false),
+            None => (path.shown().to_string(), true),
+        };
         let feed_id = match self.feeds.iter().find(|f| f.url == key) {
             Some(feed) => feed.id,
             None => self.add_feed(&key, &key, None),
@@ -3376,13 +3387,21 @@ impl RssReaderApp {
         let before = self.articles.len();
         self.ingest_parsed_feed(feed_id, &parsed, now_unix());
         let added = self.articles.len().saturating_sub(before);
+        let not_again = if not_text {
+            "; its name is not text, so it will not be read again at the next start"
+        } else {
+            ""
+        };
         if added == 0 {
             format!(
-                "{cut_note}{} holds no articles this feed did not already have",
-                path.display()
+                "{cut_note}{} holds no articles this feed did not already have{not_again}",
+                path.shown()
             )
         } else {
-            format!("{cut_note}Added {added} article(s) from {}", path.display())
+            format!(
+                "{cut_note}Added {added} article(s) from {}{not_again}",
+                path.shown()
+            )
         }
     }
 
@@ -6471,6 +6490,36 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// A feed read from a file is addressed by the file's exact path, which
+    /// `load_kept` reads again at the next start -- not by how the path is
+    /// shown, which escapes a control character and would name another file.
+    /// A path that is not text has no exact text: the window says it will
+    /// not be read again.
+    #[cfg(unix)]
+    #[test]
+    fn a_feed_file_is_addressed_by_its_exact_path() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = std::env::temp_dir().join(format!("slateos-rss-exact-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let tabbed = dir.join("tab\there.xml");
+        std::fs::write(&tabbed, RssReaderApp::SAMPLE_RSS).expect("write feed");
+        let odd = dir.join(std::ffi::OsStr::from_bytes(b"caf\xe9.xml"));
+        std::fs::write(&odd, RssReaderApp::SAMPLE_RSS).expect("write feed");
+
+        let mut app = RssReaderApp::new(1024.0, 768.0);
+        let said = app.read_any_file(&tabbed);
+        assert!(!said.contains("not be read again"), "{said}");
+        assert!(
+            app.feeds
+                .iter()
+                .any(|f| Some(f.url.as_str()) == tabbed.to_str()),
+            "no feed has the exact path as its address"
+        );
+        let said = app.read_any_file(&odd);
+        assert!(said.contains("not be read again"), "{said}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The feed records when it was *actually* read.
     ///
     /// `ingest_feed_xml` used to pass a literal `1_700_000_000`, so every feed
@@ -6490,7 +6539,7 @@ mod tests {
         let opened = app
             .feeds
             .iter()
-            .find(|f| f.url == path.display().to_string())
+            .find(|f| Some(f.url.as_str()) == path.to_str())
             .expect("the opened feed");
         let ts = opened.health.last_success.expect("a success was recorded");
         assert!(
@@ -10415,7 +10464,7 @@ mod tests {
             let from_file = again
                 .feeds
                 .iter()
-                .find(|f| f.url == feed_file.display().to_string())
+                .find(|f| Some(f.url.as_str()) == feed_file.to_str())
                 .expect("the feed read from a file");
             assert_eq!(from_file.title, "Lobsters");
             let articles: Vec<(&str, bool, bool)> = again

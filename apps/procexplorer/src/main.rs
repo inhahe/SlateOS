@@ -23,6 +23,7 @@ use guitk::table::{Column, Fit, Table};
 use guitk::text;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -1151,7 +1152,7 @@ impl ProcessExplorerState {
         if self.proc_unreadable && self.processes.is_empty() {
             self.status_message = format!(
                 "Cannot read {} -- nothing here is a measurement of this machine",
-                procinfo::ProcFs::new().root().display()
+                procinfo::ProcFs::new().root().shown()
             );
             self.system_info.process_count = 0;
             self.system_info.running_count = 0;

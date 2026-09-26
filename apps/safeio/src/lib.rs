@@ -29,6 +29,7 @@
 //! matters and is the right trade: losing an edit is recoverable by redoing
 //! it, whereas losing the file that existed before the save is not.
 
+use pathtext::ShowPath;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -471,7 +472,7 @@ fn create_temp_in(dir: &Path, target: &Path) -> io::Result<(fs::File, PathBuf)> 
         io::ErrorKind::AlreadyExists,
         format!(
             "could not create a temporary file next to {}",
-            target.display()
+            target.shown()
         ),
     ))
 }

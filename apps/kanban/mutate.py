@@ -155,7 +155,7 @@ MUTATIONS = [
     (
         "an import keeps a card in two columns",
         "                .retain(|id| board.cards.contains_key(id) && placed.insert(*id));",
-        "                .retain(|_| true);",
+        "                .retain(|id| board.cards.contains_key(id) && (placed.insert(*id) || true));",
         ["an_import_leaves_a_board_that_can_be_kept"],
     ),
     (

@@ -53,7 +53,6 @@ findmnt:mountpoint
 fio:fio-verify
 firejail:firecfg
 firejail:firemon
-flock:lockfile
 fwupd:fwupdtool
 getty:mingetty
 grub2:grub-editenv

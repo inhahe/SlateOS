@@ -228,6 +228,18 @@ pub fn stderr_write(data: &[u8]) {
     }
 }
 
+/// `write(STDERR_FILENO, ...)` -- or `writev` -- bypassing stdio, as `logger
+/// -s` copies each message to stderr: a failure sets no stream's error flag,
+/// so it never reaches `close_stdout`'s verdict. The result is the caller's
+/// to ignore, as upstream's `ignore_result` does.
+///
+/// # Errors
+///
+/// The write's own failure.
+pub fn stderr_raw(data: &[u8]) -> io::Result<()> {
+    sys::write_all(sys::STDERR, data)
+}
+
 /// `warnx(msg)`: `NAME: MSG`, the name with its unprintable bytes escaped
 /// (design-decisions §370).
 pub fn warnx(short: &[u8], msg: &str) {

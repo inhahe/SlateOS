@@ -340,6 +340,7 @@ pub mod ar;
 pub mod arpa_inet;
 pub mod arpa_nameser;
 pub mod assert;
+pub mod compiler_rt;
 pub mod cpio;
 pub mod crt;
 pub mod crypt;

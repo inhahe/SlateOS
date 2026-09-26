@@ -37002,6 +37002,67 @@ never does.
 
 ---
 
+## 1106. `libc.a` is built for a hard-float bare-metal target of its own, with `-Zbuild-std`, and compiler-rt's C-only builtins are ported into it
+
+**Date:** 2026-09-25
+**Lane:** D
+**Decided by:** Claude (autonomous)
+
+**In short:** the C library is compiled for a bare-metal target, because that
+is what its code is written against. But the programs that use it pass floating-point values in
+the SSE registers, which the stock bare-metal target does not. Until now the
+build patched that with a compiler switch that rustc says it will stop
+accepting. On the day it does, no C program, fixture or disk image could be
+built. The build now uses a small target description of its own: bare metal,
+but with the SSE calling convention. It compiles the compiler's own runtime
+pieces for it too, so the whole library agrees about how a float is passed.
+
+**What was wrong.** `toolchain/build-sysroot.ps1` built for
+`x86_64-unknown-none` (soft-float: `rustc-abi: softfloat`, `+soft-float`)
+with `-C target-feature=+sse,+sse2,-soft-float`. rustc answers that on every
+sysroot build with "target feature `soft-float` cannot be disabled ... it will
+become a hard error in a future release" (known-issues.md
+`TD-D-THE-SYSROOT-FIX-RESTS-ON-A-FLAG-RUSTC-IS-PHASING-OUT`). It also linked the
+*precompiled* `core` and `compiler_builtins` for unknown-none, which are
+soft-float, into a hard-float libc. No posix code outside host tests passes a
+float by value into them today (checked with `nm` and by reading), so this was
+latent. But it would have become a silent wrong answer the first time one did.
+
+**The decision.**
+
+- `posix/x86_64-slateos-libc.json` is `x86_64-unknown-none`'s specification
+  with only the ABI changed: `+sse,+sse2`, no `rustc-abi: softfloat`, code
+  model large, relocation model static and PIE off, which were previously
+  RUSTFLAGS. `target_os` stays `none`, so every `cfg` in posix sees what it
+  always did, and the red zone stays off.
+- `-Zbuild-std=core,compiler_builtins` compiles those two for the spec, so the
+  archive has one ABI throughout. The build no longer emits a soft-float warning.
+- The precompiled `compiler_builtins` has its `c` feature and a source build
+  does not, so 35 compiler-rt functions that exist only in C disappeared:
+  `_Complex` multiplication and division, `-ftrapv` arithmetic, and some bit
+  helpers. CMake's binary uses some of them. They are ported to Rust in
+  `posix/src/compiler_rt.rs`, and the list is exactly the old archive's symbols
+  minus the new one's.
+
+**The alternatives.**
+
+| | why not |
+|---|---|
+| Keep the flag | it breaks on a future rustc, and the archive mixes two float ABIs |
+| Build `compiler_builtins` with its `c` feature | it needs compiler-rt's C sources, which `rust-src` does not ship, plus a C cross-compiler wired through the `cc` crate on a Windows host. That is a download and a toolchain dependency for every sysroot build, for 35 small functions |
+| Build posix for `x86_64-slateos.json` | that target is `target_os = "linux"`, which flips every `cfg(target_os = "none")` in posix. It would be a rewrite, and it would make the libc believe it is on Linux |
+
+**Cost.** The sysroot build needs nightly, as the userland builds already do.
+A clean build compiles `core` and `compiler_builtins` from source, about two
+minutes more. Thirty-five small functions are ours to maintain, all with host
+tests.
+
+**Revisit when** `compiler_builtins` gains Rust implementations of these, and
+they can then go, or when a hard-float bare-metal x86_64 target ships with
+rustc, which would replace the spec.
+
+---
+
 ## 523. Settings tells the compositor the *file changed*, not that an *event was consumed* — and the change is in force before anyone is told
 
 **Date:** 2026-08-22

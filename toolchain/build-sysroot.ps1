@@ -1,7 +1,8 @@
 # build-sysroot.ps1 — Build the sysroot for Rust std userspace programs.
 #
 # This script:
-# 1. Builds the posix crate as a staticlib with code-model=large
+# 1. Builds the posix crate as a staticlib for its own hard-float target,
+#    posix/x86_64-slateos-libc.json, with -Zbuild-std
 # 2. Builds the stubs crate (symbols std needs that posix doesn't provide)
 # 3. Assembles the sysroot directory (libc.a, libstubs.a, libunwind.a)
 #
@@ -15,31 +16,40 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $sysroot = Join-Path $PSScriptRoot "sysroot\lib"
 
-# The sysroot is compiled for `x86_64-unknown-none` but *linked into*
-# `x86_64-slateos` programs, so its codegen options must match that target's
-# ABI (toolchain/x86_64-slateos.json), not unknown-none's defaults.  Setting
-# $env:RUSTFLAGS replaces the `[target.x86_64-unknown-none]` rustflags in
-# .cargo/config.toml wholesale, which is what we want here — those are tuned
-# for the kernel and the bare-metal services, which really are soft-float.
+# The sysroot is compiled for its own target, posix\x86_64-slateos-libc.json,
+# and *linked into* `x86_64-slateos` programs and `zig cc` objects, so its ABI
+# must be theirs. The spec says so once, instead of RUSTFLAGS patching a
+# kernel target:
 #
-#   code-model=large        unknown-none defaults to `kernel`; our programs
-#                           are loaded high, so they need `large`.
-#   relocation-model=static unknown-none is PIE-by-default, so libc.a came
-#                           out PIC and only linked because lld happened to
-#                           relax the GOT/TLS accesses at static-link time.
-#                           x86_64-slateos is `relocation-model: static`
-#                           with PIE off; match it rather than rely on that.
-#   +sse,+sse2,-soft-float  THE IMPORTANT ONE.  `x86_64-unknown-none` is
-#                           `-sse,+soft-float`, so every libc function with a
-#                           float in its signature was compiled to the
-#                           soft-float ABI: `strtod`/`strtof`/`atof`/
-#                           `difftime` returned their result in %rax and
-#                           printf's `%f` read varargs from the wrong place.
-#                           Callers are x86_64-slateos (`+sse,+sse2`) and C
-#                           fixtures built by `zig cc` (SSE2 is x86-64
-#                           baseline), which all read %xmm0 — so every one of
-#                           those calls silently returned garbage.  See
-#                           BUG-SYSROOT-SOFT-FLOAT-ABI in known-issues.md.
+#   hard-float, +sse,+sse2  THE IMPORTANT ONE.  Every libc function with a
+#                           float in its signature must take and return it
+#                           in %xmm registers, as its callers do (SSE2 is
+#                           x86-64 baseline). Built for the soft-float
+#                           `x86_64-unknown-none` instead, `strtod`/`strtof`/
+#                           `atof`/`difftime` returned their result in %rax
+#                           and printf's `%f` read varargs from the wrong
+#                           place -- BUG-SYSROOT-SOFT-FLOAT-ABI in
+#                           known-issues.md.
+#   code-model large        our programs are loaded high.
+#   relocation-model static x86_64-slateos is static with PIE off; unknown-none
+#                           is PIE by default, and libc.a only linked because
+#                           lld relaxed the GOT/TLS accesses at link time.
+#   target_os "none"        unchanged: every `cfg` in posix is written against
+#                           it, so the code sees the same bare-metal target.
+#   red zone off            as unknown-none. The move changes the float ABI
+#                           and nothing else about the code generated.
+#
+# `-Zbuild-std=core,compiler_builtins` compiles those two for the spec as well,
+# so the whole archive has one ABI. Until 2026-09-25 this built for
+# `x86_64-unknown-none` with `-C target-feature=+sse,+sse2,-soft-float`, which
+# switched off the ABI feature of a soft-float target (rustc: "being phased
+# out; it will become a hard error in a future release") and linked the
+# precompiled soft-float `core` and `compiler_builtins` into a hard-float libc
+# (known-issues.md TD-D-THE-SYSROOT-FIX-RESTS-ON-A-FLAG-RUSTC-IS-PHASING-OUT;
+# design-decisions.md §1106). The one thing the precompiled `compiler_builtins`
+# had that a source build lacks -- compiler-rt's C-only builtins, `__muldc3` and
+# the rest -- is `posix/src/compiler_rt.rs`.
+#
 #   codegen-units=4096      THE OTHER IMPORTANT ONE, and it is about the
 #                           *archive*, not the code.  A libc archive is not
 #                           just a bag of functions: the linker extracts a
@@ -66,15 +76,15 @@ $sysroot = Join-Path $PSScriptRoot "sysroot\lib"
 #                           family), and the duplicate count went to 0.
 #                           See design-decisions.md §339 and
 #                           scripts/make-spike/README.md.
-$sysrootFlags = "-C code-model=large " +
-                "-C relocation-model=static " +
-                "-C codegen-units=4096 " +
-                "-C target-feature=+sse,+sse2,-soft-float"
+$spec = Join-Path $root "posix\x86_64-slateos-libc.json"
+$sysrootFlags = "-C codegen-units=4096"
+$env:CARGO_UNSTABLE_JSON_TARGET_SPEC = "true"
+$buildStd = "-Zbuild-std=core,compiler_builtins"
 
 Write-Host "=== Building POSIX library ($sysrootFlags) ===" -ForegroundColor Cyan
 Push-Location (Join-Path $root "posix")
 $env:RUSTFLAGS = $sysrootFlags
-cargo build --release
+cargo +nightly build --release --target $spec $buildStd
 if ($LASTEXITCODE -ne 0) { throw "posix build failed" }
 Pop-Location
 
@@ -85,7 +95,7 @@ Write-Host ""
 Write-Host "=== Building stubs library ===" -ForegroundColor Cyan
 Push-Location (Join-Path $PSScriptRoot "stubs")
 $env:RUSTFLAGS = $sysrootFlags
-cargo build --release
+cargo +nightly build --release --target $spec $buildStd
 if ($LASTEXITCODE -ne 0) { throw "stubs build failed" }
 Pop-Location
 
@@ -98,7 +108,7 @@ New-Item -ItemType Directory -Force -Path $sysroot | Out-Null
 # `posix\target` / `toolchain\stubs\target`.  (This changed when the crates
 # were folded into the root workspace; the old per-crate paths silently
 # copied a stale libc.a.)  Anchor both copies at the root target dir.
-$rootTarget = Join-Path $root "target\x86_64-unknown-none\release"
+$rootTarget = Join-Path $root "target\x86_64-slateos-libc\release"
 
 # libc.a = posix staticlib (provides all POSIX/libc functions)
 Copy-Item (Join-Path $rootTarget "libposix.a") `

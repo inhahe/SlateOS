@@ -9537,9 +9537,26 @@ tolerance that `math.rs` cannot meet can't masquerade as an ABI break.
 still cached may hold the old soft-float `libc.a`; a full sysroot + fixture +
 rootfs rebuild is required to be sure.
 
-### [D] TD-D-THE-SYSROOT-FIX-RESTS-ON-A-FLAG-RUSTC-IS-PHASING-OUT — 2026-09-22 — OPEN
+### [D] TD-D-THE-SYSROOT-FIX-RESTS-ON-A-FLAG-RUSTC-IS-PHASING-OUT — 2026-09-22 — FIXED 2026-09-25
 
-**Status:** OPEN — found while provisioning `os-lane-f`; lane D's (`toolchain/build-sysroot.ps1`).
+**Status:** FIXED 2026-09-25 (lane D), by the proper fix below, plus one thing
+it had not foreseen. `libc.a` is built for `posix/x86_64-slateos-libc.json`,
+which is `x86_64-unknown-none` with the hard-float ABI, the large code model
+and a static relocation model. It uses `-Zbuild-std=core,compiler_builtins`,
+so `core` and `compiler_builtins` are compiled for it too, and the archive no
+longer mixes a soft-float `core` into a hard-float libc. The build emits no
+soft-float warning. The unforeseen part: the precompiled `compiler_builtins`
+carried compiler-rt's C-only builtins (its `c` feature) and a source build does
+not. Diffing the two archives with `nm` found 35 missing, among them
+`__muldc3`/`__divdc3`, the `-ftrapv` family, `__popcount*` and `__cmp*`.
+CMake's binary uses some of them, so they are ported to Rust in
+`posix/src/compiler_rt.rs`. After that, the new archive defines every
+C-visible symbol the old one did, and all 19 C fixtures link against it with
+nothing undefined. The sysroot stamp hashes the spec
+(`scripts/ctest-fixtures.py`, one additive line). design-decisions.md §1106
+records the alternatives.
+
+*(As filed:)* found while provisioning `os-lane-f`; lane D's (`toolchain/build-sysroot.ps1`).
 
 **What.** The fix for BUG-SYSROOT-SOFT-FLOAT-ABI, directly above, builds `posix`
 and the stubs for `x86_64-unknown-none` with `-C

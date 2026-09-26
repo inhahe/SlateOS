@@ -242,6 +242,8 @@ LIBC = SYSROOT / "lib" / "libc.a"
 _STATIC_SYSROOT_ROOTS = (
     "posix/src",
     "posix/Cargo.toml",
+    # The target libc.a is compiled for (build-sysroot.ps1): its ABI.
+    "posix/x86_64-slateos-libc.json",
     "toolchain/stubs",
     "toolchain/build-sysroot.ps1",
 )

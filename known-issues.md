@@ -168512,11 +168512,20 @@ cycles, the minimum of N) and Pillow's `Image.open(...).load()` measured
 with `QueryThreadCycleTime`; `target/jpeg_wip/jpeg_fuzz.py` holds any change
 to libjpeg-turbo's C build.
 
-### [F] Colour glyphs: a dark-mode palette is never chosen -- 2026-09-26
+### [F] Colour glyphs: a dark-mode palette is never chosen -- 2026-09-26 -- **FIXED 2026-09-26**
 
-**Status:** OPEN — lane F's.
+**Status:** FIXED 2026-09-26 (lane F) — both parts. `colr::ColourPalette`
+chooses a palette as CSS's `font-palette` does (`palette_index`: the first
+palette `CPAL` version 1 marks for a light or a dark background, the first
+palette where none is marked), `render` paints with it, and it rides in
+`Rendering`, so `ScaledFont` repaints its colour glyphs -- and only those --
+when it changes. The compositor, which draws every process's text, sets it
+from the theme: `Light` on a light theme, `Dark` on a dark one
+(design-decisions §1327). A `PaintColrGlyph` now cuts the glyph it names to
+that glyph's clip box, under the transform in force, and bounds its canvas by
+it.
 
-**In short:** emoji are drawn in colour whichever way their font stores them
+**In short (as filed):** emoji are drawn in colour whichever way their font stores them
 -- a recipe (`COLR`, variable ones included) or pictures (`CBDT`, `sbix`) --
 and match Chrome. What is not yet honoured is a font's *second* palette: the
 dark-mode colours some colour fonts carry for text on a dark background.

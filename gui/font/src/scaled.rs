@@ -410,17 +410,27 @@ impl ScaledFont {
     }
 
     /// Rasterize glyphs `rendering`'s way from now on -- the appearance
-    /// settings' smoothing and subpixel order. Every cached mask is dropped,
-    /// since each was made the other way; asking for the mode the font is
-    /// already in drops nothing.
+    /// settings' smoothing, subpixel order and hinting, and the palette colour
+    /// glyphs are painted with. What was made the other way is dropped: every
+    /// cached mask when the rasterizing changes, every colour glyph when the
+    /// palette does, and nothing when the font is already in that mode.
     pub fn set_rendering(&mut self, rendering: Rendering) {
-        if self.rendering == rendering {
-            return;
+        let old = core::mem::replace(&mut self.rendering, rendering);
+        if old.palette != rendering.palette {
+            self.colour.clear();
+            self.colour_order.clear();
+            self.colour_pixels = 0;
         }
-        self.rendering = rendering;
-        self.cache.clear();
-        self.order.clear();
-        self.refit_hinter();
+        // The masks care about everything but the palette.
+        let masks = Rendering {
+            palette: rendering.palette,
+            ..old
+        };
+        if masks != rendering {
+            self.cache.clear();
+            self.order.clear();
+            self.refit_hinter();
+        }
     }
 
     /// Forget the face's hinting measurements: they are taken again, at the
@@ -779,7 +789,16 @@ impl ScaledFont {
         });
         if stale {
             let image = recipes
-                .then(|| colr::render(&self.face, gid, self.scale, &self.coords, foreground))
+                .then(|| {
+                    colr::render(
+                        &self.face,
+                        gid,
+                        self.scale,
+                        &self.coords,
+                        foreground,
+                        self.rendering.palette,
+                    )
+                })
                 .flatten()
                 .or_else(|| {
                     pictures
@@ -3942,6 +3961,40 @@ mod tests {
         font.clear_cache();
         assert!(font.colour.is_empty() && font.colour_order.is_empty());
         assert_eq!(font.colour_pixels, 0);
+    }
+
+    #[test]
+    fn a_palette_change_repaints_colour_glyphs_and_keeps_the_masks() {
+        use crate::colr::ColourPalette;
+        use crate::colr::tests::{colr_v0, cpal_v1};
+        let face = Arc::new(
+            Face::parse(crate::sfnt::tests::build_test_font_with(vec![
+                (*b"COLR", colr_v0(&[(1, 0, 1)], &[(1, 0)])),
+                (
+                    *b"CPAL",
+                    cpal_v1(&[&[0xFFFF_0000], &[0xFF00_00FF]], &[1, 2]),
+                ),
+            ]))
+            .unwrap(),
+        );
+        let mut font = ScaledFont::shared(face, 100.0).unwrap();
+        let pixel = |font: &mut ScaledFont| font.colour_glyph(1, 0xFF00_0000).unwrap().pixels[55];
+        assert_eq!(pixel(&mut font), 0xFFFF_0000, "palette 0 by default");
+        let _ = font.glyph(1);
+        assert_eq!(font.cache.len(), 1);
+        font.set_rendering(Rendering {
+            palette: ColourPalette::Dark,
+            ..font.rendering()
+        });
+        assert_eq!(pixel(&mut font), 0xFF00_00FF, "the dark palette");
+        assert_eq!(font.cache.len(), 1, "the masks do not depend on it");
+        // Anything else changing drops the masks, and keeps the colour.
+        font.set_rendering(Rendering {
+            smoothing: false,
+            ..font.rendering()
+        });
+        assert!(font.cache.is_empty());
+        assert_eq!(font.colour.len(), 1);
     }
 
     #[test]

@@ -63,8 +63,13 @@
 //! units: whole font units for a coordinate, 1/16384 for an `F2DOT14`, 1/65536
 //! for a `Fixed`. At the default instance nothing is read.
 //!
-//! Not modelled: only the first palette is used, and a `PaintColrGlyph` does
-//! not apply the clip box of the glyph it names.
+//! # Palettes
+//!
+//! A face may carry several palettes, and since `CPAL` version 1 mark which
+//! suit a light background and which a dark one. [`render`] paints with the
+//! one a [`ColourPalette`] chooses, as CSS's `font-palette` chooses it
+//! ([`palette_index`]): the theme picks light or dark, and a face that marks
+//! neither paints with its first palette either way.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -124,7 +129,8 @@ pub fn has_colour(face: &Face, gid: u16) -> bool {
 
 /// Glyph `gid` of `face` painted in colour at `scale` pixels per font unit,
 /// at variation instance `coords`, with `foreground` (straight `0xAARRGGBB`)
-/// as the text colour.
+/// as the text colour and the palette `palette` chooses
+/// ([`palette_index`]).
 ///
 /// `None` if the face has no colour recipe for the glyph, or the glyph would
 /// be bigger than [`MAX_COLOUR_PIXELS`] -- the caller's cue to draw its
@@ -136,6 +142,7 @@ pub fn render(
     scale: f32,
     coords: &Coords,
     foreground: u32,
+    palette: ColourPalette,
 ) -> Option<ColourImage> {
     if !scale.is_finite() || scale <= 0.0 {
         return None;
@@ -150,7 +157,10 @@ pub fn render(
         t: &tables,
         face,
         coords,
-        palette: tables.cpal.and_then(Palette::zero).unwrap_or_default(),
+        palette: tables
+            .cpal
+            .and_then(|cpal| Palette::nth(cpal, cpal_palette_index(cpal, palette)))
+            .unwrap_or_default(),
         foreground: premultiply(unpack(foreground)),
         used_foreground: false,
         visited: 0,
@@ -663,7 +673,80 @@ enum Node {
     },
 }
 
-/// `CPAL`'s first palette, read an entry at a time as the glyph asks for it.
+/// Which of a colour font's palettes (`CPAL`) its colour glyphs are painted
+/// with -- the choice CSS's `font-palette` makes.
+///
+/// A colour font may carry several palettes, the same drawings in other
+/// colours, and since `CPAL` version 1 may mark which suit a light background
+/// and which a dark one: an outline drawn black for a light page and white
+/// for a dark one, say. Most carry one palette and mark nothing, and then
+/// every choice paints the same.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ColourPalette {
+    /// The font's first palette, its default (CSS `normal`).
+    #[default]
+    Normal,
+    /// The first palette the font marks usable on a light background, or
+    /// its first palette if it marks none (CSS `light`).
+    Light,
+    /// The first palette the font marks usable on a dark background, or its
+    /// first palette if it marks none (CSS `dark`).
+    Dark,
+    /// Palette `n`, or the first if the font has no palette `n` (CSS
+    /// `@font-palette-values`' `base-palette`).
+    Index(u16),
+}
+
+/// `CPAL` version 1's palette-type flags (a `u32` in the file, read as the
+/// `usize` this module reads every 32-bit field as).
+const USABLE_WITH_LIGHT_BACKGROUND: usize = 0x1;
+const USABLE_WITH_DARK_BACKGROUND: usize = 0x2;
+
+/// Which palette of `face` `choice` names: its index in the face's `CPAL`.
+///
+/// 0 for a face with no `CPAL`, for a `choice` of [`ColourPalette::Light`]
+/// or [`ColourPalette::Dark`] the face marks no palette for (a version-0
+/// `CPAL` marks none), and for an [`ColourPalette::Index`] past the face's
+/// palettes -- as a browser falls back to the default palette in each case.
+#[must_use]
+pub fn palette_index(face: &Face, choice: ColourPalette) -> u16 {
+    face.colour_tables()
+        .and_then(|(_, cpal)| cpal)
+        .map_or(0, |cpal| cpal_palette_index(cpal, choice))
+}
+
+/// [`palette_index`] on the `CPAL` table itself.
+fn cpal_palette_index(cpal: &[u8], choice: ColourPalette) -> u16 {
+    let count = u16_at(cpal, 4).unwrap_or(0);
+    let marked = |flag: usize| -> Option<u16> {
+        if u16_at(cpal, 0)? < 1 {
+            return None;
+        }
+        // Version 1's three offsets follow the colour-record indices.
+        let types_at = usize::from(count).checked_mul(2)?.checked_add(12)?;
+        let types = u32_at(cpal, types_at)?;
+        if types == 0 {
+            return None;
+        }
+        (0..count).find(|&i| {
+            usize::from(i)
+                .checked_mul(4)
+                .and_then(|o| types.checked_add(o))
+                .and_then(|at| u32_at(cpal, at))
+                .is_some_and(|t| t & flag != 0)
+        })
+    };
+    match choice {
+        ColourPalette::Normal => 0,
+        ColourPalette::Light => marked(USABLE_WITH_LIGHT_BACKGROUND).unwrap_or(0),
+        ColourPalette::Dark => marked(USABLE_WITH_DARK_BACKGROUND).unwrap_or(0),
+        ColourPalette::Index(n) if n < count => n,
+        ColourPalette::Index(_) => 0,
+    }
+}
+
+/// One of `CPAL`'s palettes, read an entry at a time as the glyph asks for
+/// it.
 ///
 /// Not converted up front: Segoe UI Emoji's palette has 65,429 entries and a
 /// glyph uses a few dozen, so building the whole palette for every glyph drawn
@@ -671,19 +754,24 @@ enum Node {
 #[derive(Clone, Copy, Default)]
 struct Palette<'a> {
     cpal: &'a [u8],
-    /// Where palette 0's first colour record is.
+    /// Where the palette's first colour record is.
     records: usize,
     /// How many entries a palette has.
     entries: usize,
 }
 
 impl<'a> Palette<'a> {
-    fn zero(cpal: &'a [u8]) -> Option<Self> {
+    /// Palette `index` -- the first, for an index the table does not have;
+    /// `None` for a table with no palettes at all.
+    fn nth(cpal: &'a [u8], index: u16) -> Option<Self> {
         let entries = usize::from(u16_at(cpal, 2)?);
-        if u16_at(cpal, 4)? == 0 {
+        let count = u16_at(cpal, 4)?;
+        if count == 0 {
             return None;
         }
-        let first = usize::from(u16_at(cpal, 12)?);
+        let index = if index < count { index } else { 0 };
+        let first_at = usize::from(index).checked_mul(2)?.checked_add(12)?;
+        let first = usize::from(u16_at(cpal, first_at)?);
         let records = u32_at(cpal, 8)?.checked_add(first.checked_mul(4)?)?;
         Some(Self {
             cpal,
@@ -844,6 +932,33 @@ impl Rect {
             min_y: self.min_y.min(other.min_y),
             max_x: self.max_x.max(other.max_x),
             max_y: self.max_y.max(other.max_y),
+        }
+    }
+
+    /// The part of this box inside `other` -- [`Rect::EMPTY`] when they do
+    /// not overlap.
+    fn intersect(self, other: Self) -> Self {
+        let b = Self {
+            min_x: self.min_x.max(other.min_x),
+            min_y: self.min_y.max(other.min_y),
+            max_x: self.max_x.min(other.max_x),
+            max_y: self.max_y.min(other.max_y),
+        };
+        if b.is_empty() { Self::EMPTY } else { b }
+    }
+
+    /// The box as a closed outline, for cutting a painting to it as a
+    /// `PaintGlyph` cuts one to a glyph.
+    fn outline(self) -> Outline {
+        let corner = |x, y| Point::new(x, y);
+        Outline {
+            commands: vec![
+                PathCmd::MoveTo(corner(self.min_x, self.min_y)),
+                PathCmd::LineTo(corner(self.max_x, self.min_y)),
+                PathCmd::LineTo(corner(self.max_x, self.max_y)),
+                PathCmd::LineTo(corner(self.min_x, self.max_y)),
+                PathCmd::Close,
+            ],
         }
     }
 
@@ -1718,7 +1833,13 @@ impl Renderer<'_> {
     /// the region its box touches.
     fn coverage(&mut self, gid: u16, m: Affine) -> Option<(Region, Vec<f32>)> {
         let outline = self.outline(gid)?;
-        let region = self.region(outline_rect(&outline).map(m))?;
+        self.coverage_of(&outline, m)
+    }
+
+    /// How much of each pixel `outline` covers under `m`, over the region its
+    /// box touches.
+    fn coverage_of(&mut self, outline: &Outline, m: Affine) -> Option<(Region, Vec<f32>)> {
+        let region = self.region(outline_rect(outline).map(m))?;
         if !self.charge(region.area()) {
             return None;
         }
@@ -1727,7 +1848,7 @@ impl Renderer<'_> {
         let corner = centre(region.x0, region.y0);
         let shift = Affine::translate(0.5 - corner.x, 0.5 - corner.y).then(m);
         let cover = coverage_on(
-            &outline,
+            outline,
             &|p| shift.apply(p),
             region.width(),
             region.height(),
@@ -1750,6 +1871,37 @@ impl Renderer<'_> {
                 fill.blend_row(region.x0, y, cover, span);
             }
         }
+    }
+
+    /// Paint the paint at `at` whole, into a scratch canvas, and lay it onto
+    /// `canvas` through `cut` -- the region and coverage of what it is cut to.
+    fn paint_cut(
+        &mut self,
+        at: usize,
+        m: Affine,
+        (region, cover): (Region, Vec<f32>),
+        canvas: &mut Canvas,
+        depth: u32,
+    ) {
+        let Some(mut layer) = self.canvas() else {
+            return;
+        };
+        self.paint(at, m, &mut layer, depth);
+        let rows = cover.chunks_exact(region.width());
+        for (y, cover) in (region.y0..region.y1).zip(rows) {
+            let (Some(dst), Some(src)) = (
+                canvas.span_mut(y, region.x0, region.x1),
+                layer.span(y, region.x0, region.x1),
+            ) else {
+                continue;
+            };
+            for ((dst, &src), &k) in dst.iter_mut().zip(src).zip(cover) {
+                if k > 0.0 {
+                    *dst = over(scale_rgba(src, k), *dst);
+                }
+            }
+        }
+        self.release(layer);
     }
 
     /// Paint the paint at `at` onto `canvas`, under `m` (its space to canvas
@@ -1787,32 +1939,24 @@ impl Renderer<'_> {
                     return;
                 }
                 // Anything else is painted whole, then cut to the outline.
-                let Some((region, cover)) = self.coverage(gid, m) else {
-                    return;
-                };
-                let Some(mut layer) = self.canvas() else {
-                    return;
-                };
-                self.paint(paint, m, &mut layer, deeper);
-                let rows = cover.chunks_exact(region.width());
-                for (y, cover) in (region.y0..region.y1).zip(rows) {
-                    let (Some(dst), Some(src)) = (
-                        canvas.span_mut(y, region.x0, region.x1),
-                        layer.span(y, region.x0, region.x1),
-                    ) else {
-                        continue;
-                    };
-                    for ((dst, &src), &k) in dst.iter_mut().zip(src).zip(cover) {
-                        if k > 0.0 {
-                            *dst = over(scale_rgba(src, k), *dst);
-                        }
-                    }
+                if let Some(cut) = self.coverage(gid, m) {
+                    self.paint_cut(paint, m, cut, canvas, deeper);
                 }
-                self.release(layer);
             }
             Node::ColrGlyph { gid } => {
-                if let Some(paint) = self.t.base_v1(gid) {
-                    self.paint(paint, m, canvas, deeper);
+                let Some(paint) = self.t.base_v1(gid) else {
+                    return;
+                };
+                // The glyph named brings its clip box with it, as it would
+                // drawn on its own: its painting is cut to the box, under the
+                // transform in force here.
+                match self.t.clip_box(gid) {
+                    None => self.paint(paint, m, canvas, deeper),
+                    Some(clip) => {
+                        if let Some(cut) = self.coverage_of(&clip.outline(), m) {
+                            self.paint_cut(paint, m, cut, canvas, deeper);
+                        }
+                    }
                 }
             }
             Node::Transform { paint, transform } => {
@@ -1864,7 +2008,21 @@ impl Renderer<'_> {
             }
             Node::ColrGlyph { gid } => {
                 if let Some(paint) = self.t.base_v1(gid) {
-                    self.bounds(paint, m, b, deeper);
+                    let mut inner = Rect::EMPTY;
+                    self.bounds(paint, m, &mut inner, deeper);
+                    // A fill with no outline over it reaches as far as the
+                    // clip box, and so does nothing further than it.
+                    *b = b.union(match self.t.clip_box(gid) {
+                        Some(clip) => {
+                            let clip = clip.map(m);
+                            if inner.is_empty() {
+                                clip
+                            } else {
+                                inner.intersect(clip)
+                            }
+                        }
+                        None => inner,
+                    });
                 }
             }
             Node::Transform { paint, transform } => {
@@ -2168,6 +2326,38 @@ pub(crate) mod tests {
         out
     }
 
+    /// A version-1 `CPAL`: palettes of the same number of colours each
+    /// (`0xAARRGGBB`), and each palette's type flags -- no palette-types
+    /// array at all when `types` is empty.
+    pub(crate) fn cpal_v1(palettes: &[&[u32]], types: &[u32]) -> Vec<u8> {
+        let entries = palettes[0].len();
+        let count = palettes.len();
+        let mut out = Vec::new();
+        for v in [1, entries, count, entries * count] {
+            out.extend_from_slice(&(v as u16).to_be_bytes());
+        }
+        // Header, record indices, then version 1's three offsets.
+        let records = 12 + 2 * count + 12;
+        out.extend_from_slice(&(records as u32).to_be_bytes());
+        for i in 0..count {
+            out.extend_from_slice(&((i * entries) as u16).to_be_bytes());
+        }
+        let types_at = records + 4 * entries * count;
+        let types_offset = if types.is_empty() { 0 } else { types_at };
+        out.extend_from_slice(&(types_offset as u32).to_be_bytes());
+        out.extend_from_slice(&[0; 8]);
+        for palette in palettes {
+            for c in *palette {
+                let [a, r, g, b] = c.to_be_bytes();
+                out.extend_from_slice(&[b, g, r, a]);
+            }
+        }
+        for t in types {
+            out.extend_from_slice(&t.to_be_bytes());
+        }
+        out
+    }
+
     /// The fixture face with glyph 1 (`A`) painted as a red square and
     /// glyph 2 (`B`) as its triangle in the text colour, both version-0
     /// layers; glyph 3 (`C`) has no colour recipe and is drawn as an outline.
@@ -2198,7 +2388,15 @@ pub(crate) mod tests {
     /// Glyph `gid` at 100 px to the em -- a tenth of a pixel per font unit
     /// -- in black text.
     fn draw(face: &Face, gid: u16) -> ColourImage {
-        render(face, gid, 0.1, &Coords::default(), 0xFF00_0000).expect("a colour glyph")
+        render(
+            face,
+            gid,
+            0.1,
+            &Coords::default(),
+            0xFF00_0000,
+            ColourPalette::Normal,
+        )
+        .expect("a colour glyph")
     }
 
     fn at(img: &ColourImage, x: u32, y: u32) -> u32 {
@@ -2245,7 +2443,7 @@ pub(crate) mod tests {
         ));
         assert!(has_colour(&face, 1) && has_colour(&face, 2));
         assert!(!has_colour(&face, 3));
-        assert!(render(&face, 3, 0.1, &Coords::default(), 0).is_none());
+        assert!(render(&face, 3, 0.1, &Coords::default(), 0, ColourPalette::Normal).is_none());
         // The square, 10 pixels a side, its top-left corner 10 pixels right
         // of the pen and 10 above the baseline; solid red throughout.
         let img = draw(&face, 1);
@@ -2254,7 +2452,15 @@ pub(crate) mod tests {
         assert!(!img.uses_foreground);
         // The triangle in the text colour, then the square beside it in
         // green: one canvas around both.
-        let img = render(&face, 2, 0.1, &Coords::default(), 0x8000_00FF).unwrap();
+        let img = render(
+            &face,
+            2,
+            0.1,
+            &Coords::default(),
+            0x8000_00FF,
+            ColourPalette::Normal,
+        )
+        .unwrap();
         assert!(img.uses_foreground);
         assert_eq!(place(&img), (0, -20, 20, 20));
         // Inside the triangle, near its base: half-transparent blue,
@@ -2279,7 +2485,15 @@ pub(crate) mod tests {
     #[test]
     fn the_text_colour_is_palette_entry_ffff_and_is_reported() {
         let face = one(P::Glyph(1, solid(FOREGROUND)));
-        let img = render(&face, 1, 0.1, &Coords::default(), 0xFF12_3456).unwrap();
+        let img = render(
+            &face,
+            1,
+            0.1,
+            &Coords::default(),
+            0xFF12_3456,
+            ColourPalette::Normal,
+        )
+        .unwrap();
         assert!(img.uses_foreground);
         assert!(img.pixels.iter().all(|&p| p == 0xFF12_3456));
         // In a gradient's stops too.
@@ -2558,8 +2772,97 @@ pub(crate) mod tests {
             &[],
             &[(1, 1, [-32768, -32768, 32767, 32767])],
         ));
-        assert!(render(&face, 1, 0.1, &Coords::default(), 0).is_none());
-        assert!(render(&face, 1, 0.01, &Coords::default(), 0).is_some());
+        assert!(render(&face, 1, 0.1, &Coords::default(), 0, ColourPalette::Normal).is_none());
+        assert!(render(&face, 1, 0.01, &Coords::default(), 0, ColourPalette::Normal).is_some());
+    }
+
+    #[test]
+    fn a_colr_glyph_named_by_another_is_cut_to_its_own_clip_box() {
+        // Glyph 1 is a red square, 100..200 by 0..100, clipped to its left
+        // half. Glyph 2 lays a blue square and then glyph 1 over it: glyph
+        // 1 brings its clip box, so the right half stays blue.
+        let face = face_with(colr_v1(
+            &[(1, P::Glyph(1, solid(RED))), (2, P::Layers(2, 0))],
+            &[P::Glyph(1, solid(BLUE)), P::ColrGlyph(1)],
+            &[(1, 1, [100, 0, 150, 100])],
+        ));
+        let img = draw(&face, 2);
+        assert_eq!(place(&img), (10, -10, 10, 10));
+        assert_eq!(argb(&img, 2, 5), [255, 255, 0, 0], "inside the clip");
+        assert_eq!(argb(&img, 7, 5), [255, 0, 0, 255], "outside it");
+        // Moved, the clip moves with the glyph.
+        let face = face_with(colr_v1(
+            &[
+                (1, P::Glyph(1, solid(RED))),
+                (2, P::Translate(-100, 0, Box::new(P::ColrGlyph(1)))),
+            ],
+            &[],
+            &[(1, 1, [100, 0, 150, 100])],
+        ));
+        assert_eq!(place(&draw(&face, 2)), (0, -10, 5, 10));
+    }
+
+    #[test]
+    fn a_clip_box_bounds_a_fill_that_nothing_else_does() {
+        // Glyph 1 is a bare fill, which reaches as far as its canvas; its
+        // clip box is what gives it one when another glyph names it.
+        let face = face_with(colr_v1(
+            &[(1, P::Solid(GREEN, 1.0)), (2, P::ColrGlyph(1))],
+            &[],
+            &[(1, 1, [0, 0, 300, 200])],
+        ));
+        let img = draw(&face, 2);
+        assert_eq!(place(&img), (0, -20, 30, 20));
+        assert!(img.pixels.iter().all(|&p| p == 0xFF00_FF00));
+    }
+
+    #[test]
+    fn a_palette_is_chosen_as_css_chooses_one() {
+        let three = cpal_v1(
+            &[&[0xFFFF_0000], &[0xFF00_FF00], &[0xFF00_00FF]],
+            &[0, 1, 2],
+        );
+        let pick = |cpal: &[u8], choice| cpal_palette_index(cpal, choice);
+        assert_eq!(pick(&three, ColourPalette::Normal), 0);
+        assert_eq!(pick(&three, ColourPalette::Light), 1);
+        assert_eq!(pick(&three, ColourPalette::Dark), 2);
+        assert_eq!(pick(&three, ColourPalette::Index(2)), 2);
+        assert_eq!(pick(&three, ColourPalette::Index(3)), 0, "no palette 3");
+        // The first palette marked answers, and one may be marked both ways.
+        let both = cpal_v1(&[&[0xFFFF_0000], &[0xFF00_FF00]], &[3, 3]);
+        assert_eq!(pick(&both, ColourPalette::Light), 0);
+        assert_eq!(pick(&both, ColourPalette::Dark), 0);
+        // Nothing marked, or no way to mark (version 0): the first palette.
+        let unmarked = cpal_v1(&[&[0xFFFF_0000], &[0xFF00_FF00]], &[]);
+        assert_eq!(pick(&unmarked, ColourPalette::Dark), 0);
+        assert_eq!(pick(&unmarked, ColourPalette::Index(1)), 1);
+        assert_eq!(pick(&cpal(&[0xFFFF_0000]), ColourPalette::Dark), 0);
+        // A truncated table answers the first palette too.
+        assert_eq!(pick(&three[..14], ColourPalette::Dark), 0);
+    }
+
+    #[test]
+    fn a_glyph_is_painted_from_the_palette_chosen() {
+        let face = Face::parse(build_test_font_with(vec![
+            (*b"COLR", colr_v0(&[(1, 0, 1)], &[(1, 0)])),
+            (
+                *b"CPAL",
+                cpal_v1(&[&[0xFFFF_0000], &[0xFF00_00FF]], &[1, 2]),
+            ),
+        ]))
+        .unwrap();
+        let at = |palette| {
+            let img = render(&face, 1, 0.1, &Coords::default(), 0xFF00_0000, palette).unwrap();
+            argb(&img, 5, 5)
+        };
+        assert_eq!(at(ColourPalette::Normal), [255, 255, 0, 0]);
+        assert_eq!(at(ColourPalette::Light), [255, 255, 0, 0]);
+        assert_eq!(at(ColourPalette::Dark), [255, 0, 0, 255]);
+        assert_eq!(at(ColourPalette::Index(1)), [255, 0, 0, 255]);
+        assert_eq!(palette_index(&face, ColourPalette::Dark), 1);
+        // A face with no colour tables at all has only palette 0 to name.
+        let plain = Face::parse(build_test_font_with(vec![])).unwrap();
+        assert_eq!(palette_index(&plain, ColourPalette::Dark), 0);
     }
 
     #[test]
@@ -2618,7 +2921,7 @@ pub(crate) mod tests {
             paint = P::Composite(3, Box::new(paint), solid(BLUE));
         }
         let face = face_with(colr_v1(&[(1, paint)], &[], &[(1, 1, [0, 0, 1000, 1000])]));
-        let img = render(&face, 1, 1.0, &Coords::default(), 0).unwrap();
+        let img = render(&face, 1, 1.0, &Coords::default(), 0, ColourPalette::Normal).unwrap();
         assert_eq!((img.width, img.height), (1000, 1000));
     }
 
@@ -2656,7 +2959,17 @@ pub(crate) mod tests {
             Some(store.clone()),
             None,
         ));
-        let draw_at = |wght: f32| render(&face, 1, 0.1, &at_weight(&face, wght), 0).unwrap();
+        let draw_at = |wght: f32| {
+            render(
+                &face,
+                1,
+                0.1,
+                &at_weight(&face, wght),
+                0,
+                ColourPalette::Normal,
+            )
+            .unwrap()
+        };
         // The default instance: where the recipe says, opaque.
         let img = draw_at(400.0);
         assert_eq!(place(&img), (10, -10, 10, 10));
@@ -2683,7 +2996,17 @@ pub(crate) mod tests {
             Some(map),
         ));
         assert_eq!(
-            place(&render(&face, 1, 0.1, &at_weight(&face, 700.0), 0).unwrap()),
+            place(
+                &render(
+                    &face,
+                    1,
+                    0.1,
+                    &at_weight(&face, 700.0),
+                    0,
+                    ColourPalette::Normal
+                )
+                .unwrap()
+            ),
             (15, -10, 10, 10)
         );
         // A base of 0xFFFFFFFF varies nothing.
@@ -2696,7 +3019,17 @@ pub(crate) mod tests {
             None,
         ));
         assert_eq!(
-            place(&render(&face, 1, 0.1, &at_weight(&face, 700.0), 0).unwrap()),
+            place(
+                &render(
+                    &face,
+                    1,
+                    0.1,
+                    &at_weight(&face, 700.0),
+                    0,
+                    ColourPalette::Normal
+                )
+                .unwrap()
+            ),
             (10, -10, 10, 10)
         );
     }
@@ -2748,7 +3081,15 @@ pub(crate) mod tests {
         let good = everything();
         let face = face_with(good.clone());
         for gid in 1..=3 {
-            let img = render(&face, gid, 0.05, &Coords::default(), 0xFF00_0000).unwrap();
+            let img = render(
+                &face,
+                gid,
+                0.05,
+                &Coords::default(),
+                0xFF00_0000,
+                ColourPalette::Normal,
+            )
+            .unwrap();
             assert!(img.pixels.iter().any(|&p| p != 0), "glyph {gid}");
         }
         let mut seed = 0x2545_F491_4F6C_DD1Du64;
@@ -2766,14 +3107,28 @@ pub(crate) mod tests {
             }
             let face = face_with(bytes);
             for gid in 0..=4 {
-                let _ = render(&face, gid, 0.02, &Coords::default(), 0xFF00_0000);
+                let _ = render(
+                    &face,
+                    gid,
+                    0.02,
+                    &Coords::default(),
+                    0xFF00_0000,
+                    ColourPalette::Normal,
+                );
                 let _ = has_colour(&face, gid);
             }
         }
         for len in 0..good.len() {
             let face = face_with(good[..len].to_vec());
             for gid in 1..=3 {
-                let _ = render(&face, gid, 0.02, &Coords::default(), 0xFF00_0000);
+                let _ = render(
+                    &face,
+                    gid,
+                    0.02,
+                    &Coords::default(),
+                    0xFF00_0000,
+                    ColourPalette::Normal,
+                );
             }
         }
         // A version-0 table too.
@@ -2787,7 +3142,14 @@ pub(crate) mod tests {
             bytes[i] = next() as u8;
             let face = face_with(bytes);
             for gid in 0..=3 {
-                let _ = render(&face, gid, 0.02, &Coords::default(), 0xFF00_0000);
+                let _ = render(
+                    &face,
+                    gid,
+                    0.02,
+                    &Coords::default(),
+                    0xFF00_0000,
+                    ColourPalette::Normal,
+                );
             }
         }
     }

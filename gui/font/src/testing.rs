@@ -178,10 +178,28 @@ mod tests {
         assert_eq!(face.units_per_em(), 1000);
         assert_eq!(face.glyph_index('A'), Some(1));
         assert_eq!(face.glyph_index('B'), Some(2));
-        let a = colr::render(&face, 1, 0.1, &Coords::default(), 0xFF00_0000).unwrap();
+        let a = colr::render(
+            &face,
+            1,
+            0.1,
+            &Coords::default(),
+            0xFF00_0000,
+            colr::ColourPalette::Normal,
+        )
+        .unwrap();
         assert_eq!((a.left, a.top, a.width, a.height), (10, -10, 10, 10));
         assert!(a.pixels.iter().all(|&p| p == COLOUR_FACE_RED));
-        assert!(colr::render(&face, 2, 0.1, &Coords::default(), 0xFF00_0000).is_none());
+        assert!(
+            colr::render(
+                &face,
+                2,
+                0.1,
+                &Coords::default(),
+                0xFF00_0000,
+                colr::ColourPalette::Normal
+            )
+            .is_none()
+        );
         assert!(!face.outline(2).unwrap().is_empty());
     }
 }

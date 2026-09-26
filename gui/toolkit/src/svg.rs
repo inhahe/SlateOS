@@ -8,8 +8,11 @@
 //! - Basic shapes: rect, circle, ellipse, line, polyline, polygon
 //! - Path element with full command set (M, L, H, V, C, S, Q, T, A, Z)
 //! - Styling: fill, fill-rule, stroke, stroke-width, stroke-linecap,
-//!   stroke-linejoin, stroke-miterlimit, opacity, transforms -- as presentation
-//!   attributes; a `style` attribute or a stylesheet is not read
+//!   stroke-linejoin, stroke-miterlimit, opacity, display, transforms -- as
+//!   presentation attributes or in a `style` attribute, which wins; a
+//!   `<style>` sheet's rules are not applied
+//! - Definitions (`defs`, `symbol`, gradients, clip paths, masks, `style`) are
+//!   not drawn; nothing that refers to them (`use`, `url(#...)`) is supported
 //! - Container elements: svg (with viewBox), g (with inheritance)
 //! - Color parsing: hex, named colors, rgb(), rgba(), none, transparent, currentColor
 //!
@@ -1444,7 +1447,44 @@ fn parse_attr_value(c: &mut XmlCursor) -> Result<String, SvgError> {
 
 // ─── Node Builder ────────────────────────────────────────────────────────────
 
+/// Elements whose contents are definitions for something else to use, or not
+/// graphics at all: drawn directly, a `<symbol>`'s shapes or a `<defs>`' would
+/// appear where nothing placed them, and a `<style>` sheet's text is not a
+/// shape. Nothing here draws what refers to them, so they draw nothing.
+const NOT_DRAWN: &[&str] = &[
+    "defs",
+    "symbol",
+    "clipPath",
+    "mask",
+    "marker",
+    "pattern",
+    "linearGradient",
+    "radialGradient",
+    "filter",
+    "style",
+    "script",
+    "metadata",
+    "title",
+    "desc",
+];
+
+/// An element that draws nothing.
+fn nothing() -> SvgNode {
+    SvgNode::Group {
+        transform: Transform::IDENTITY,
+        style: SvgStyle::default(),
+        children: Vec::new(),
+    }
+}
+
 fn build_node(elem: &XmlElement) -> Result<SvgNode, SvgError> {
+    // `display: none` takes the element and everything in it out of the
+    // drawing, and a definition is not drawn where it stands.
+    if NOT_DRAWN.contains(&elem.tag.as_str())
+        || property(elem, "display").is_some_and(|value| value == "none")
+    {
+        return Ok(nothing());
+    }
     match elem.tag.as_str() {
         "svg" => build_svg(elem),
         "g" => build_group(elem),
@@ -1632,24 +1672,82 @@ fn build_path(elem: &XmlElement) -> Result<SvgNode, SvgError> {
     })
 }
 
+/// The value of the style property `name` on `elem`: its declaration in the
+/// element's `style` attribute, which CSS ranks above the presentation
+/// attribute of the same name, or else that attribute.
+///
+/// Inkscape writes every property in `style`, and so does most of what is
+/// drawn with it -- Breeze's icons among them -- so a renderer that read the
+/// attributes alone drew those icons as solid black shapes.
+fn property<'e>(elem: &'e XmlElement, name: &str) -> Option<&'e str> {
+    elem.attr("style")
+        .and_then(|style| declared(style, name))
+        .or_else(|| elem.attr(name).map(str::trim))
+}
+
+/// The value the CSS declarations in `style` give `name` -- the last one, as a
+/// later declaration overrides an earlier -- without its `!important`.
+fn declared<'s>(style: &'s str, name: &str) -> Option<&'s str> {
+    style
+        .split(';')
+        .filter_map(|declaration| {
+            let (property, value) = declaration.split_once(':')?;
+            (property.trim() == name).then(|| {
+                let value = value.trim();
+                value.strip_suffix("!important").unwrap_or(value).trim()
+            })
+        })
+        .rfind(|value| !value.is_empty())
+}
+
+/// A length in user units: a number, in `px` or with no unit. Other units say
+/// nothing this renderer can measure, and are not said.
+fn length(value: &str) -> Option<f32> {
+    let value = value.trim();
+    value
+        .strip_suffix("px")
+        .unwrap_or(value)
+        .trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|n| n.is_finite())
+}
+
+/// A paint the element says, if it says one.
+///
+/// A presentation attribute this renderer cannot read is an error, as it has
+/// always been. A declaration in `style` that it cannot read -- a gradient's
+/// `url(#...)`, a colour function it does not know -- is ignored, as a browser
+/// ignores it, and the property is inherited: one unreadable declaration among
+/// the dozen Inkscape writes should not cost the whole drawing.
+fn paint_property(elem: &XmlElement, name: &str) -> Result<Option<SvgPaint>, SvgError> {
+    if let Some(value) = elem.attr("style").and_then(|style| declared(style, name)) {
+        if let Ok(paint) = parse_color(value) {
+            return Ok(Some(paint));
+        }
+    }
+    elem.attr(name).map(parse_color).transpose()
+}
+
 fn parse_style_attrs(elem: &XmlElement) -> Result<SvgStyle, SvgError> {
-    let fill = elem.attr("fill").map(parse_color).transpose()?;
-    let stroke = elem.attr("stroke").map(parse_color).transpose()?;
-    let stroke_width = elem.attr_f32("stroke-width");
-    let opacity = elem.attr_f32("opacity").unwrap_or(1.0);
-    let fill_opacity = elem.attr_f32("fill-opacity").unwrap_or(1.0);
-    let stroke_opacity = elem.attr_f32("stroke-opacity").unwrap_or(1.0);
+    let fill = paint_property(elem, "fill")?;
+    let stroke = paint_property(elem, "stroke")?;
+    let stroke_width = property(elem, "stroke-width").and_then(length);
+    let number = |name: &str| property(elem, name).and_then(|v| v.parse::<f32>().ok());
+    let opacity = number("opacity").unwrap_or(1.0);
+    let fill_opacity = number("fill-opacity").unwrap_or(1.0);
+    let stroke_opacity = number("stroke-opacity").unwrap_or(1.0);
     // Keywords a renderer does not know are ignored, as browsers ignore them:
     // the property is then not said here and is inherited.
     let fill_rule = keyword(
-        elem.attr("fill-rule"),
+        property(elem, "fill-rule"),
         &[
             ("nonzero", FillRule::NonZero),
             ("evenodd", FillRule::EvenOdd),
         ],
     );
     let stroke_linecap = keyword(
-        elem.attr("stroke-linecap"),
+        property(elem, "stroke-linecap"),
         &[
             ("butt", LineCap::Butt),
             ("round", LineCap::Round),
@@ -1657,7 +1755,7 @@ fn parse_style_attrs(elem: &XmlElement) -> Result<SvgStyle, SvgError> {
         ],
     );
     let stroke_linejoin = keyword(
-        elem.attr("stroke-linejoin"),
+        property(elem, "stroke-linejoin"),
         &[
             ("miter", LineJoin::Miter),
             // SVG 2's clipped miter: the nearest this renderer draws.
@@ -1666,9 +1764,8 @@ fn parse_style_attrs(elem: &XmlElement) -> Result<SvgStyle, SvgError> {
             ("bevel", LineJoin::Bevel),
         ],
     );
-    let stroke_miterlimit = elem
-        .attr_f32("stroke-miterlimit")
-        .filter(|limit| limit.is_finite() && *limit >= 1.0);
+    let stroke_miterlimit =
+        number("stroke-miterlimit").filter(|limit| limit.is_finite() && *limit >= 1.0);
 
     Ok(SvgStyle {
         fill,
@@ -3741,6 +3838,63 @@ mod tests {
             for polygon in &polygons {
                 assert!(signed_area(polygon) <= 0.0, "{join:?}: {polygon:?}");
             }
+        }
+    }
+
+    /// **A property in the `style` attribute is read, and wins over the
+    /// attribute of the same name** -- how Inkscape writes every property,
+    /// and so most icon sets drawn with it.
+    #[test]
+    fn a_property_in_the_style_attribute_is_read_and_wins() {
+        let doc = SvgDocument::parse(
+            r##"<svg viewBox="0 0 10 10"><rect x="2" y="2" width="6" height="6" fill="#ff0000" style="fill:none; stroke: #00ff00 !important; stroke-width:2px"/></svg>"##,
+        )
+        .unwrap();
+        let px = doc.render(10, 10);
+        let at = |x: usize, y: usize| &px[(y * 10 + x) * 4..(y * 10 + x) * 4 + 4];
+        assert_eq!(at(5, 5)[3], 0, "the style's fill:none lost to fill=red");
+        let edge = at(2, 5);
+        assert!(edge[1] > 200 && edge[0] < 50 && edge[3] == 255, "{edge:?}");
+
+        // A later declaration overrides an earlier one, as in any CSS.
+        let later = SvgDocument::parse(
+            r#"<svg viewBox="0 0 4 4"><rect width="4" height="4" style="fill:red; fill:blue"/></svg>"#,
+        )
+        .unwrap();
+        assert_eq!(&later.render(4, 4)[..4], &[0, 0, 255, 255]);
+    }
+
+    /// A declaration the renderer cannot read is ignored, as a browser
+    /// ignores it -- the property inherits -- while an attribute it cannot
+    /// read is still an error.
+    #[test]
+    fn an_unreadable_style_declaration_is_ignored() {
+        let doc = SvgDocument::parse(
+            r#"<svg viewBox="0 0 10 10" fill="blue"><rect width="10" height="10" style="fill:url(#g)"/></svg>"#,
+        )
+        .unwrap();
+        assert_eq!(&doc.render(10, 10)[..4], &[0, 0, 255, 255]);
+        assert!(
+            SvgDocument::parse(
+                r#"<svg viewBox="0 0 10 10"><rect width="10" height="10" fill="url(#g)"/></svg>"#
+            )
+            .is_err()
+        );
+    }
+
+    /// **Definitions are not drawn where they stand**, and neither is
+    /// anything set `display: none`.
+    #[test]
+    fn definitions_and_hidden_elements_are_not_drawn() {
+        for svg in [
+            r#"<svg viewBox="0 0 10 10"><defs><rect width="10" height="10"/></defs></svg>"#,
+            r#"<svg viewBox="0 0 10 10"><symbol id="s"><rect width="10" height="10"/></symbol></svg>"#,
+            r#"<svg viewBox="0 0 10 10"><rect width="10" height="10" display="none"/></svg>"#,
+            r#"<svg viewBox="0 0 10 10"><g style="display:none"><rect width="10" height="10"/></g></svg>"#,
+            r#"<svg viewBox="0 0 10 10"><style>.a { fill: red; }</style></svg>"#,
+        ] {
+            let px = SvgDocument::parse(svg).unwrap().render(10, 10);
+            assert!(px.iter().all(|b| *b == 0), "{svg} drew something");
         }
     }
 

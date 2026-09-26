@@ -79978,6 +79978,12 @@ to use them.
   application registry's to say (`open-questions.md`).
 - A change to an icon file while its theme stays chosen is not noticed until
   the settings change, as with colour themes.
+- What of SVG an icon may use is the toolkit renderer's subset: shapes and
+  paths, fill and stroke with their joins, caps and fill rules, presentation
+  attributes and (since later the same day) the `style` attribute, which is
+  how Inkscape and Breeze write them. A `<style>` sheet's rules, `<use>`,
+  gradients and clip paths are not drawn -- an icon relying on them draws
+  without them.
 
 ## 881. The shell's pictograms are icons from the icon theme, not emoji
 

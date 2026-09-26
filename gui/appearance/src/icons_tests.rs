@@ -129,6 +129,33 @@ fn the_users_icon_comes_before_the_systems_and_both_before_the_built_in() {
     assert_eq!(theme.source("folder").unwrap(), SQUARE);
 }
 
+/// **An icon written as Breeze and Inkscape write them draws in the colour
+/// asked for**: its paint in a `style` attribute, a stylesheet in `<defs>`
+/// that sets the colour `currentColor` means. The renderer read presentation
+/// attributes only, so such an icon drew as a solid black square -- the
+/// default fill -- and a set drawn for another desktop did not drop in.
+#[test]
+fn an_icon_styled_as_breeze_writes_them_draws_in_the_colour_asked_for() {
+    const BREEZE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <defs id="defs3051">
+    <style type="text/css" id="current-color-scheme">
+      .ColorScheme-Text {
+        color:#232629;
+      }
+    </style>
+  </defs>
+  <path style="fill:currentColor;fill-opacity:1;stroke:none" d="M2 2h12v12H2z" class="ColorScheme-Text"/>
+</svg>"##;
+    let fx = Fixture::new("breeze");
+    fx.put("system", "breeze", "folder", BREEZE.as_bytes());
+    let theme = IconTheme::named(OsStr::new("breeze"), fx.dirs());
+    let icon = theme.render("folder", 16, INK).expect("draws");
+    // The middle of the square, in the colour asked for.
+    assert_eq!(icon.argb[(8 * 16 + 8) as usize], 0xFF20_80C0);
+    // And its corner clear: the square is inset by two units.
+    assert_eq!(icon.argb[0] >> 24, 0);
+}
+
 /// A name the theme lacks falls back to shorter names -- in the theme first,
 /// then built in -- as the naming specification says.
 #[test]

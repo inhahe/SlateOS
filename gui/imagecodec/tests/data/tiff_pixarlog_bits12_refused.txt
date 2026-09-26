@@ -1,0 +1,1 @@
+REFUSED not OK: Sorry, can not handle images with 12-bit samples

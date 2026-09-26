@@ -167,6 +167,13 @@ pub(super) struct Rows {
 }
 
 impl Rows {
+    /// Whether the filter reads the rows above and below
+    /// (`need_context_rows`): libjpeg's main controller then waits for the
+    /// next iMCU row before handing out the last row group of this one.
+    pub(super) const fn needs_context(&self) -> bool {
+        matches!(self.filter, Filter::Down | Filter::Both)
+    }
+
     /// Rows `width` samples long from a plane of `shape`, filtered if `fancy`.
     pub(super) fn new(shape: &Shape, width: usize, fancy: bool) -> Self {
         let filter = Filter::choose(shape, fancy);

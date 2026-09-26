@@ -2068,7 +2068,6 @@ impl ManagedTorrent {
             E::Tracker { url, result } => {
                 if let Some(t) = self.trackers.iter_mut().find(|t| t.url == url) {
                     t.announce_count = t.announce_count.saturating_add(1);
-                    t.last_announce = Some(now_secs());
                     match result {
                         Ok(answer) => {
                             t.status = TrackerStatus::Working;

@@ -1457,6 +1457,7 @@ fn cat_records(
             service: opts.identifier.clone(),
             msg: line,
             pid: Some(opts.pid),
+            extra: Vec::new(),
         };
         writeln!(sink, "{}", record.to_json_line())?;
     }

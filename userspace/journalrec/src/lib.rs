@@ -93,6 +93,14 @@ pub struct Record {
     pub msg: String,
     /// The process the line is attributed to, when one is known.
     pub pid: Option<u32>,
+    /// Further fields, in order, as `"key":"value"` after the ones above --
+    /// a syslog message's facility, or the fields `logger --journald` was
+    /// given. `journalctl` keeps and shows keys it does not interpret.
+    ///
+    /// A key that repeats one of the fields above would make the record
+    /// ambiguous, so the writer is expected not to supply one; `to_json_line`
+    /// writes what it is given.
+    pub extra: Vec<(String, String)>,
 }
 
 impl Record {
@@ -107,6 +115,9 @@ impl Record {
         if let Some(pid) = self.pid {
             parts.push(format!("\"pid\":{pid}"));
         }
+        for (key, value) in &self.extra {
+            parts.push(format!("\"{}\":\"{}\"", escape(key), escape(value)));
+        }
         let mut out = String::from("{");
         out.push_str(&parts.join(","));
         out.push('}');
@@ -118,6 +129,7 @@ impl Record {
 mod tests {
     use super::*;
     use alloc::string::ToString;
+    use alloc::vec;
 
     /// The reason this is one function and not two. A message is
     /// attacker-shaped text: a bare quote ends the field and a bare newline
@@ -153,6 +165,7 @@ mod tests {
             service: "net.dhcp".to_string(),
             msg: "lease renewed".to_string(),
             pid: Some(42),
+            extra: Vec::new(),
         };
         assert_eq!(
             r.to_json_line(),
@@ -203,7 +216,28 @@ mod tests {
             service: "x".to_string(),
             msg: "y".to_string(),
             pid: None,
+            extra: Vec::new(),
         };
         assert!(!r.to_json_line().contains("pid"));
+    }
+
+    /// Extra fields follow the known ones, in order, escaped like them.
+    #[test]
+    fn extra_fields_follow_in_order_and_are_escaped() {
+        let r = Record {
+            ts: 1,
+            level: "err".to_string(),
+            service: "logger".to_string(),
+            msg: "m".to_string(),
+            pid: Some(7),
+            extra: vec![
+                ("facility".to_string(), "user".to_string()),
+                ("CODE_LINE".to_string(), "a\"b\nc".to_string()),
+            ],
+        };
+        assert_eq!(
+            r.to_json_line(),
+            r#"{"ts":1,"level":"err","service":"logger","msg":"m","pid":7,"facility":"user","CODE_LINE":"a\"b\nc"}"#
+        );
     }
 }

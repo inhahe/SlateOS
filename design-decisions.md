@@ -80339,6 +80339,46 @@ boost takes it two classes up, to 0x8000.
 | HIGH or REALTIME priority | no measured need, and HIGH can starve the desktop; above normal is enough to win against normal-priority throughput work |
 | Leave it, and let the harness decline starved runs | the harness's suites now do decline them honestly (`scripts/hostload.py`), but a declined boot is still a boot that verified nothing |
 
+**Corroborated on a live boot (lane D, 2026-09-25).** Lane D's boot of
+`506a50749` -- a debug build, before this change reached lane D -- had its
+QEMU (pid 74596) at BelowNormal on a host pinned at 100% of its twelve logical
+CPUs. Between the liveness breadcrumbs at 2310 s and 2340 s the guest's
+heartbeat advanced by 434; lane D then set that one process to AboveNormal by
+hand at about 2350 s, and the next two 30-second windows advanced it by 2,973
+and 3,016 -- about seven times as much. The boot's self-test rungs went from
+359 to 390 in some 90 seconds, and to 443 by 2550 s, after minutes between
+rungs before. Lane D also observed that every debug boot recorded since
+2026-09-22 printed about 3,000 serial lines against about 47,000 for the last
+passing one (2026-09-16): starvation, not a kernel regression, and the right
+reading of lane A's 2026-09-22 TIMEOUT (2419 s wall) too. Quoted with lane
+D's agreement.
+
+**Process Lasso was undoing it (found 2026-09-25; fixed by operator decision).**
+Lane B's watcher raised its QEMU to AboveNormal and minutes later found it at
+BelowNormal. The cause is on the host, not in the harness: Process Lasso runs
+here (its `ProcessGovernor` service), and its ProBalance restrains -- lowers
+to BelowNormal -- any process above 7% of total CPU once the system is over
+10% busy, after 0.9 s over quota (`C:\ProgramData\ProcessLasso\config\
+prolasso.ini`, `[OutOfControlProcessRestraint]`), with no exclusions. A TCG
+QEMU uses about one of the twelve logical CPUs, 8%, so on a loaded host every
+boot's QEMU qualified within a second. Its log showed one QEMU (pid 46812)
+restrained almost continuously: each restraint lasted about 70 s and the next
+began one second after it ended (18:28:42, 18:29:57, 18:30:04). The raise
+above could not survive that, and the load it exists for is exactly when
+ProBalance acts.
+
+**Decided by:** Operator (Claude proposed the exclusion; the operator chose it
+over changing the setting by hand or leaving ProBalance as it was). At 18:30
+`qemu-system-x86_64.exe` was added to `OocExclusions` -- the file backed up
+beside itself as `prolasso.ini.bak-2026-09-25-before-qemu-exclusion`, its
+UTF-16 encoding and line endings kept, that one line changed -- and the
+service restarted. ProBalance has restrained the lanes' `bash.exe`,
+`python.exe` and `rustc.exe` since, and no QEMU. The exclusion is host
+configuration, not in this repository: a rebuilt machine needs it again, and
+`raise_qemu_priority` now reads the class back after raising it and every
+30 s after that for as long as QEMU runs, so that a return of the problem is a
+line in the boot log rather than a mysteriously starved boot.
+
 **What it changes for measurement.** The kernel benchmarks inside a boot now
 run with less host interference, so their noise should drop from this date;
 a step in `bench/history.jsonl` around 2026-09-25 may be this, not the code.

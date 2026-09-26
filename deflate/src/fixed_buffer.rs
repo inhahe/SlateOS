@@ -89,8 +89,8 @@ pub enum Filled {
 // ---------------------------------------------------------------------------
 
 const LENGTH_BASE: [u16; 29] = [
-    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
-    131, 163, 195, 227, 258,
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
+    163, 195, 227, 258,
 ];
 const LENGTH_EXTRA: [u8; 29] = [
     0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
@@ -104,7 +104,9 @@ const DIST_EXTRA: [u8; 30] = [
     13,
 ];
 /// The order the code-length code's lengths are stored in.
-const PRECODE_ORDER: [u8; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+const PRECODE_ORDER: [u8; 19] = [
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+];
 /// The most symbols any code here has: 288 litlen + 32 distance, decoded into
 /// one array, plus libdeflate's worst repeat overrun (138 - 1).
 const LENS_CAPACITY: usize = 288 + 32 + 137;
@@ -161,7 +163,9 @@ fn build(lengths: &[u8], role: CodeRole, oracle: Oracle) -> Option<Code> {
             *c = c.saturating_add(1);
         }
     }
-    let max = (1..16usize).rev().find(|&l| counts.get(l).copied().unwrap_or(0) != 0);
+    let max = (1..16usize)
+        .rev()
+        .find(|&l| counts.get(l).copied().unwrap_or(0) != 0);
     let first_symbol = || {
         lengths
             .iter()
@@ -229,7 +233,8 @@ fn build(lengths: &[u8], role: CodeRole, oracle: Oracle) -> Option<Code> {
                 continue;
             }
             if let Some(o) = offs.get_mut(usize::from(len)) {
-                if let (Some(slot), Ok(sym16)) = (symbols.get_mut(usize::from(*o)), u16::try_from(sym))
+                if let (Some(slot), Ok(sym16)) =
+                    (symbols.get_mut(usize::from(*o)), u16::try_from(sym))
                 {
                     *slot = sym16;
                 }
@@ -238,7 +243,12 @@ fn build(lengths: &[u8], role: CodeRole, oracle: Oracle) -> Option<Code> {
         }
     }
     let max_len = max.and_then(|m| u8::try_from(m).ok()).unwrap_or(1);
-    Some(Code { counts, symbols, shape, max_len })
+    Some(Code {
+        counts,
+        symbols,
+        shape,
+        max_len,
+    })
 }
 
 /// One decoded symbol, or what stopped it.
@@ -273,12 +283,24 @@ fn decode(code: &Code, role: CodeRole, src: &mut impl Bits) -> Option<(Sym, u8)>
             src.bit()?;
             Some((Sym::Symbol(sym), 1))
         }
-        Shape::ZeroOnly(sym) => {
-            Some((if src.bit()? == 0 { Sym::Symbol(sym) } else { Sym::Invalid }, 1))
-        }
+        Shape::ZeroOnly(sym) => Some((
+            if src.bit()? == 0 {
+                Sym::Symbol(sym)
+            } else {
+                Sym::Invalid
+            },
+            1,
+        )),
         Shape::Empty => {
             src.bit()?;
-            Some((if role == CodeRole::Precode { Sym::Symbol(0) } else { Sym::Invalid }, 1))
+            Some((
+                if role == CodeRole::Precode {
+                    Sym::Symbol(0)
+                } else {
+                    Sym::Invalid
+                },
+                1,
+            ))
         }
         Shape::Complete => {
             // puff.c's decode(): canonical codes read MSB-first per codeword.
@@ -290,7 +312,10 @@ fn decode(code: &Code, role: CodeRole, src: &mut impl Bits) -> Option<(Sym, u8)>
                 let count = i32::from(code.counts.get(len).copied().unwrap_or(0));
                 if code_v.saturating_sub(count) < first {
                     let at = index.saturating_add(code_v.saturating_sub(first));
-                    let sym = usize::try_from(at).ok().and_then(|i| code.symbols.get(i)).copied();
+                    let sym = usize::try_from(at)
+                        .ok()
+                        .and_then(|i| code.symbols.get(i))
+                        .copied();
                     let cw = u8::try_from(len).unwrap_or(15);
                     return Some((sym.map_or(Sym::Invalid, Sym::Symbol), cw));
                 }
@@ -481,8 +506,16 @@ fn zlib_run(z: &mut ZlibBits<'_>, out: &mut [u8], written: &mut usize) -> Result
             }
             1 => {
                 let (Some(lit), Some(dist)) = (
-                    build(fixed.get(..288).unwrap_or(&[]), CodeRole::Litlen, Oracle::Zlib),
-                    build(fixed.get(288..).unwrap_or(&[]), CodeRole::Distance, Oracle::Zlib),
+                    build(
+                        fixed.get(..288).unwrap_or(&[]),
+                        CodeRole::Litlen,
+                        Oracle::Zlib,
+                    ),
+                    build(
+                        fixed.get(288..).unwrap_or(&[]),
+                        CodeRole::Distance,
+                        Oracle::Zlib,
+                    ),
                 ) else {
                     return Err(Error::InvalidHuffmanTable); // unreachable: fixed codes are complete
                 };
@@ -492,9 +525,15 @@ fn zlib_run(z: &mut ZlibBits<'_>, out: &mut [u8], written: &mut usize) -> Result
             }
             2 => {
                 // TABLE: NEEDBITS(14).
-                let nlen = usize::try_from(need!(z.bits(5))).unwrap_or(0).saturating_add(257);
-                let ndist = usize::try_from(need!(z.bits(5))).unwrap_or(0).saturating_add(1);
-                let ncode = usize::try_from(need!(z.bits(4))).unwrap_or(0).saturating_add(4);
+                let nlen = usize::try_from(need!(z.bits(5)))
+                    .unwrap_or(0)
+                    .saturating_add(257);
+                let ndist = usize::try_from(need!(z.bits(5)))
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                let ncode = usize::try_from(need!(z.bits(4)))
+                    .unwrap_or(0)
+                    .saturating_add(4);
                 if nlen > 286 || ndist > 30 {
                     return Err(Error::InvalidHuffmanTable); // "too many length or distance symbols"
                 }
@@ -534,10 +573,19 @@ fn zlib_run(z: &mut ZlibBits<'_>, out: &mut [u8], written: &mut usize) -> Result
                                 return Err(Error::InvalidHuffmanTable); // "invalid bit length repeat"
                             }
                             let prev = lens.get(have.saturating_sub(1)).copied().unwrap_or(0);
-                            (prev, 3usize.saturating_add(usize::try_from(extra).unwrap_or(0)))
+                            (
+                                prev,
+                                3usize.saturating_add(usize::try_from(extra).unwrap_or(0)),
+                            )
                         }
-                        17 => (0, 3usize.saturating_add(usize::try_from(need!(z.bits(3))).unwrap_or(0))),
-                        _ => (0, 11usize.saturating_add(usize::try_from(need!(z.bits(7))).unwrap_or(0))),
+                        17 => (
+                            0,
+                            3usize.saturating_add(usize::try_from(need!(z.bits(3))).unwrap_or(0)),
+                        ),
+                        _ => (
+                            0,
+                            11usize.saturating_add(usize::try_from(need!(z.bits(7))).unwrap_or(0)),
+                        ),
                     };
                     if have.saturating_add(copy) > total {
                         return Err(Error::InvalidHuffmanTable); // "invalid bit length repeat"
@@ -550,13 +598,18 @@ fn zlib_run(z: &mut ZlibBits<'_>, out: &mut [u8], written: &mut usize) -> Result
                 if lens.get(256).copied().unwrap_or(0) == 0 {
                     return Err(Error::InvalidHuffmanTable); // "invalid code -- missing end-of-block"
                 }
-                let Some(lit) = build(lens.get(..nlen).unwrap_or(&[]), CodeRole::Litlen, Oracle::Zlib)
-                else {
+                let Some(lit) = build(
+                    lens.get(..nlen).unwrap_or(&[]),
+                    CodeRole::Litlen,
+                    Oracle::Zlib,
+                ) else {
                     return Err(Error::InvalidHuffmanTable); // "invalid literal/lengths set"
                 };
-                let Some(dist) =
-                    build(lens.get(nlen..total).unwrap_or(&[]), CodeRole::Distance, Oracle::Zlib)
-                else {
+                let Some(dist) = build(
+                    lens.get(nlen..total).unwrap_or(&[]),
+                    CodeRole::Distance,
+                    Oracle::Zlib,
+                ) else {
                     return Err(Error::InvalidHuffmanTable); // "invalid distances set"
                 };
                 if let Some(halt) = zlib_codes(z, out, written, &lit, &dist)? {
@@ -625,7 +678,8 @@ fn zlib_codes(
             return Err(Error::InvalidSymbol); // 286, 287: "invalid literal/length code"
         };
         // LENEXT
-        let length = usize::from(base).saturating_add(usize::try_from(need!(z.bits(extra))).unwrap_or(0));
+        let length =
+            usize::from(base).saturating_add(usize::try_from(need!(z.bits(extra))).unwrap_or(0));
         // DIST
         let dsym = match need!(decode(dist, CodeRole::Distance, z)).0 {
             Sym::Symbol(s) => usize::from(s),
@@ -763,7 +817,11 @@ pub fn zlib_decompress_into(input: &[u8], out: &mut [u8]) -> Result<Filled> {
         return Err(Error::PresetDictionary); // FDICT
     }
     let deflate = input.get(2..input.len().saturating_sub(4)).unwrap_or(&[]);
-    let mut d = LdBits { data: deflate, pos: 0, loaded: 0 };
+    let mut d = LdBits {
+        data: deflate,
+        pos: 0,
+        loaded: 0,
+    };
     let mut written = 0usize;
     match libdeflate_run(&mut d, out, &mut written)? {
         Some(n) => Ok(Filled::Full(n)),
@@ -785,7 +843,11 @@ pub fn zlib_decompress_into(input: &[u8], out: &mut [u8]) -> Result<Filled> {
 
 /// The Deflate decoder. `Ok(Some(n))`: insufficient space after `n` bytes.
 /// `Ok(None)`: the stream ended with the buffer exactly full.
-fn libdeflate_run(d: &mut LdBits<'_>, out: &mut [u8], written: &mut usize) -> Result<Option<usize>> {
+fn libdeflate_run(
+    d: &mut LdBits<'_>,
+    out: &mut [u8],
+    written: &mut usize,
+) -> Result<Option<usize>> {
     let fixed = fixed_lengths();
     let mut lens = [0u8; LENS_CAPACITY];
     loop {
@@ -796,9 +858,15 @@ fn libdeflate_run(d: &mut LdBits<'_>, out: &mut [u8], written: &mut usize) -> Re
         let btype = d.bits(2).unwrap_or(0);
         match btype {
             2 => {
-                let nlit = usize::try_from(d.bits(5).unwrap_or(0)).unwrap_or(0).saturating_add(257);
-                let ndist = usize::try_from(d.bits(5).unwrap_or(0)).unwrap_or(0).saturating_add(1);
-                let npre = usize::try_from(d.bits(4).unwrap_or(0)).unwrap_or(0).saturating_add(4);
+                let nlit = usize::try_from(d.bits(5).unwrap_or(0))
+                    .unwrap_or(0)
+                    .saturating_add(257);
+                let ndist = usize::try_from(d.bits(5).unwrap_or(0))
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                let npre = usize::try_from(d.bits(4).unwrap_or(0))
+                    .unwrap_or(0)
+                    .saturating_add(4);
                 // The first precode length rides in the header's 20 bits;
                 // then one refill; then the rest without one.
                 let mut pre = [0u8; 19];
@@ -838,10 +906,25 @@ fn libdeflate_run(d: &mut LdBits<'_>, out: &mut [u8], written: &mut usize) -> Re
                                 return Err(Error::InvalidHuffmanTable); // SAFETY_CHECK(i != 0)
                             }
                             let prev = lens.get(i.saturating_sub(1)).copied().unwrap_or(0);
-                            (prev, 3usize.saturating_add(usize::try_from(d.bits(2).unwrap_or(0)).unwrap_or(0)))
+                            (
+                                prev,
+                                3usize.saturating_add(
+                                    usize::try_from(d.bits(2).unwrap_or(0)).unwrap_or(0),
+                                ),
+                            )
                         }
-                        17 => (0, 3usize.saturating_add(usize::try_from(d.bits(3).unwrap_or(0)).unwrap_or(0))),
-                        _ => (0, 11usize.saturating_add(usize::try_from(d.bits(7).unwrap_or(0)).unwrap_or(0))),
+                        17 => (
+                            0,
+                            3usize.saturating_add(
+                                usize::try_from(d.bits(3).unwrap_or(0)).unwrap_or(0),
+                            ),
+                        ),
+                        _ => (
+                            0,
+                            11usize.saturating_add(
+                                usize::try_from(d.bits(7).unwrap_or(0)).unwrap_or(0),
+                            ),
+                        ),
                     };
                     // Overrun is allowed here and refused after the loop.
                     for l in lens.iter_mut().skip(i).take(count) {
@@ -853,13 +936,18 @@ fn libdeflate_run(d: &mut LdBits<'_>, out: &mut [u8], written: &mut usize) -> Re
                     return Err(Error::InvalidHuffmanTable); // SAFETY_CHECK(i == total)
                 }
                 // Offset table first, then litlen -- as libdeflate builds them.
-                let Some(dist) =
-                    build(lens.get(nlit..total).unwrap_or(&[]), CodeRole::Distance, Oracle::Libdeflate)
-                else {
+                let Some(dist) = build(
+                    lens.get(nlit..total).unwrap_or(&[]),
+                    CodeRole::Distance,
+                    Oracle::Libdeflate,
+                ) else {
                     return Err(Error::InvalidHuffmanTable);
                 };
-                let Some(lit) = build(lens.get(..nlit).unwrap_or(&[]), CodeRole::Litlen, Oracle::Libdeflate)
-                else {
+                let Some(lit) = build(
+                    lens.get(..nlit).unwrap_or(&[]),
+                    CodeRole::Litlen,
+                    Oracle::Libdeflate,
+                ) else {
                     return Err(Error::InvalidHuffmanTable);
                 };
                 let tablebits = lit.max_len.min(11);
@@ -874,7 +962,10 @@ fn libdeflate_run(d: &mut LdBits<'_>, out: &mut [u8], written: &mut usize) -> Re
                     return Err(Error::UnexpectedEnd);
                 }
                 let mut at = d.pos.div_ceil(8);
-                let header = d.data.get(at..at.saturating_add(4)).ok_or(Error::UnexpectedEnd)?;
+                let header = d
+                    .data
+                    .get(at..at.saturating_add(4))
+                    .ok_or(Error::UnexpectedEnd)?;
                 let len = u16::from_le_bytes([
                     header.first().copied().unwrap_or(0),
                     header.get(1).copied().unwrap_or(0),
@@ -891,7 +982,10 @@ fn libdeflate_run(d: &mut LdBits<'_>, out: &mut [u8], written: &mut usize) -> Re
                 if len > out.len().saturating_sub(*written) {
                     return Ok(Some(*written)); // INSUFFICIENT_SPACE, nothing copied
                 }
-                let src = d.data.get(at..at.saturating_add(len)).ok_or(Error::UnexpectedEnd)?;
+                let src = d
+                    .data
+                    .get(at..at.saturating_add(len))
+                    .ok_or(Error::UnexpectedEnd)?;
                 let dst = out
                     .get_mut(*written..written.saturating_add(len))
                     .ok_or(Error::UnexpectedEnd)?;
@@ -904,8 +998,16 @@ fn libdeflate_run(d: &mut LdBits<'_>, out: &mut [u8], written: &mut usize) -> Re
             }
             1 => {
                 let (Some(lit), Some(dist)) = (
-                    build(fixed.get(..288).unwrap_or(&[]), CodeRole::Litlen, Oracle::Libdeflate),
-                    build(fixed.get(288..).unwrap_or(&[]), CodeRole::Distance, Oracle::Libdeflate),
+                    build(
+                        fixed.get(..288).unwrap_or(&[]),
+                        CodeRole::Litlen,
+                        Oracle::Libdeflate,
+                    ),
+                    build(
+                        fixed.get(288..).unwrap_or(&[]),
+                        CodeRole::Distance,
+                        Oracle::Libdeflate,
+                    ),
                 ) else {
                     return Err(Error::InvalidHuffmanTable);
                 };
@@ -1086,7 +1188,11 @@ fn fastloop_iteration(
     let at = d.pos;
     let left = d.bits_left();
     let (distance, dcw) = libdeflate_distance(d, dist);
-    let threshold = if dcw > 8 { 28 + 11 - 1 } else { 13 + 8 + 11 - 1 };
+    let threshold = if dcw > 8 {
+        28 + 11 - 1
+    } else {
+        13 + 8 + 11 - 1
+    };
     if left < threshold {
         d.refill_at(at);
     }
@@ -1227,7 +1333,10 @@ mod tests {
         let data: Vec<u8> = (0..5000u32).map(|i| (i * 7 % 251) as u8).collect();
         let stream = crate::zlib_deflate(&data);
         let mut a = vec![0u8; data.len()];
-        assert_eq!(zlib_inflate_into(&stream, &mut a), Ok(ZlibStop::Ended(data.len())));
+        assert_eq!(
+            zlib_inflate_into(&stream, &mut a),
+            Ok(ZlibStop::Ended(data.len()))
+        );
         assert_eq!(a, data);
         let mut b = vec![0u8; data.len()];
         assert_eq!(zlib_decompress_into(&stream, &mut b), Ok(Filled::Complete));
@@ -1239,10 +1348,15 @@ mod tests {
         let data = b"a short stream";
         let stream = crate::zlib_deflate(data);
         let mut out = [0u8; 20];
-        assert_eq!(zlib_inflate_into(&stream, &mut out), Ok(ZlibStop::Ended(data.len())));
+        assert_eq!(
+            zlib_inflate_into(&stream, &mut out),
+            Ok(ZlibStop::Ended(data.len()))
+        );
         assert_eq!(
             zlib_decompress_into(&stream, &mut out),
-            Err(Error::ShortOutput { produced: data.len() })
+            Err(Error::ShortOutput {
+                produced: data.len()
+            })
         );
     }
 
@@ -1261,7 +1375,10 @@ mod tests {
 
         let mut out = [0xEEu8; 50];
         assert_eq!(zlib_decompress_into(&stream, &mut out), Ok(Filled::Full(0)));
-        assert!(out.iter().all(|&b| b == 0xEE), "libdeflate copies none of it");
+        assert!(
+            out.iter().all(|&b| b == 0xEE),
+            "libdeflate copies none of it"
+        );
     }
 
     #[test]
@@ -1279,9 +1396,15 @@ mod tests {
         let stream = zlib(&bw.bytes(), &content);
 
         let mut out = vec![0u8; content.len()];
-        assert_eq!(zlib_inflate_into(&stream, &mut out), Err(Error::InvalidSymbol));
+        assert_eq!(
+            zlib_inflate_into(&stream, &mut out),
+            Err(Error::InvalidSymbol)
+        );
         let mut out = vec![0u8; content.len()];
-        assert_eq!(zlib_decompress_into(&stream, &mut out), Ok(Filled::Complete));
+        assert_eq!(
+            zlib_decompress_into(&stream, &mut out),
+            Ok(Filled::Complete)
+        );
         assert_eq!(out, content);
     }
 
@@ -1304,7 +1427,10 @@ mod tests {
         assert_eq!(zlib_inflate_into(&stream, &mut out), Ok(ZlibStop::Full));
         // With a byte to spare it reaches the check.
         let mut out = [0u8; 2];
-        assert_eq!(zlib_inflate_into(&stream, &mut out), Err(Error::DistanceTooFar));
+        assert_eq!(
+            zlib_inflate_into(&stream, &mut out),
+            Err(Error::DistanceTooFar)
+        );
         // libdeflate checks room before it decodes the distance at all.
         let mut out = [0u8; 2];
         assert_eq!(zlib_decompress_into(&stream, &mut out), Ok(Filled::Full(1)));
@@ -1324,10 +1450,16 @@ mod tests {
         // read from past the end (as zeros, which is what they were).
         let stream = zlib(&deflate[..2], b"A");
         let mut out = [0u8; 1];
-        assert_eq!(zlib_decompress_into(&stream, &mut out), Err(Error::UnexpectedEnd));
+        assert_eq!(
+            zlib_decompress_into(&stream, &mut out),
+            Err(Error::UnexpectedEnd)
+        );
         // Whole, it is fine.
         let stream = zlib(&deflate, b"A");
-        assert_eq!(zlib_decompress_into(&stream, &mut out), Ok(Filled::Complete));
+        assert_eq!(
+            zlib_decompress_into(&stream, &mut out),
+            Ok(Filled::Complete)
+        );
     }
 
     #[test]
@@ -1356,9 +1488,16 @@ mod tests {
         let stream = zlib(&d, b"");
 
         let mut out = [0xEEu8; 400];
-        assert_eq!(zlib_decompress_into(&stream, &mut out), Ok(Filled::Full(20)));
+        assert_eq!(
+            zlib_decompress_into(&stream, &mut out),
+            Ok(Filled::Full(20))
+        );
         let pattern: Vec<u8> = b"0123456789".iter().copied().cycle().take(50).collect();
-        assert_eq!(&out[..50], &pattern[..], "20 bytes decoded, 30 more overrun");
+        assert_eq!(
+            &out[..50],
+            &pattern[..],
+            "20 bytes decoded, 30 more overrun"
+        );
         assert!(out[50..].iter().all(|&b| b == 0xEE), "and nothing beyond");
 
         // zlib copies the stored block as far as it fits.
@@ -1380,11 +1519,17 @@ mod tests {
         bw.put(3, 2);
         let stream = zlib(&bw.bytes(), b"x");
         let mut out = [0u8; 1];
-        assert_eq!(zlib_inflate_into(&stream, &mut out), Err(Error::ReservedBlockType));
+        assert_eq!(
+            zlib_inflate_into(&stream, &mut out),
+            Err(Error::ReservedBlockType)
+        );
         // ...but running out of input after the buffer is full is fine: two
         // bytes hold the 'x' and part of the end-of-block code after it.
         let stream = zlib(&bw.bytes()[..2], b"x");
-        assert_eq!(zlib_inflate_into(&stream[..4], &mut out), Ok(ZlibStop::Full));
+        assert_eq!(
+            zlib_inflate_into(&stream[..4], &mut out),
+            Ok(ZlibStop::Full)
+        );
     }
 
     #[test]
@@ -1393,15 +1538,30 @@ mod tests {
         for bad in [&[0x78u8, 0x9d][..], &[0x79, 0x9c], &[0x88, 0x98]] {
             let mut s = bad.to_vec();
             s.extend_from_slice(&[3, 0, 0, 0, 0, 1]);
-            assert_eq!(zlib_inflate_into(&s, &mut out), Err(Error::BadWrapperHeader));
-            assert_eq!(zlib_decompress_into(&s, &mut out), Err(Error::BadWrapperHeader));
+            assert_eq!(
+                zlib_inflate_into(&s, &mut out),
+                Err(Error::BadWrapperHeader)
+            );
+            assert_eq!(
+                zlib_decompress_into(&s, &mut out),
+                Err(Error::BadWrapperHeader)
+            );
         }
         // FDICT: a dictionary id, then zlib asks for the dictionary.
         let s = [0x78u8, 0xbb, 0, 0, 0, 1, 3, 0, 0, 0, 0, 1];
-        assert_eq!(zlib_inflate_into(&s, &mut out), Err(Error::PresetDictionary));
-        assert_eq!(zlib_decompress_into(&s, &mut out), Err(Error::PresetDictionary));
+        assert_eq!(
+            zlib_inflate_into(&s, &mut out),
+            Err(Error::PresetDictionary)
+        );
+        assert_eq!(
+            zlib_decompress_into(&s, &mut out),
+            Err(Error::PresetDictionary)
+        );
         // Fewer than six bytes is libdeflate's bad data; to zlib, no input.
-        assert_eq!(zlib_decompress_into(&[0x78, 0x9c, 3, 0], &mut out), Err(Error::UnexpectedEnd));
+        assert_eq!(
+            zlib_decompress_into(&[0x78, 0x9c, 3, 0], &mut out),
+            Err(Error::UnexpectedEnd)
+        );
         assert_eq!(zlib_inflate_into(&[], &mut out), Err(Error::UnexpectedEnd));
     }
 }

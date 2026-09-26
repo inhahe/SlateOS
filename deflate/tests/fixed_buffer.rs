@@ -43,7 +43,10 @@ fn libdeflate_line(input: &[u8], size: usize) -> String {
     match zlib_decompress_into(input, &mut out) {
         Ok(Filled::Complete) => format!("D COMPLETE {size} {:016x}", fnv(&out)),
         Ok(Filled::Full(_)) => {
-            assert!(matches!(second, Ok(Filled::Full(_))), "same input, same verdict");
+            assert!(
+                matches!(second, Ok(Filled::Full(_))),
+                "same input, same verdict"
+            );
             format!("D FULL {:016x} {:016x}", fnv(&out), fnv(&out_ff))
         }
         Err(Error::ShortOutput { .. }) => "D SHORT".to_owned(),
@@ -87,15 +90,30 @@ fn every_vector_is_answered_as_zlib_and_libdeflate_answered_it() {
             if got != want {
                 disagree += 1;
                 if disagree <= 20 {
-                    let _ = writeln!(failures, "#{i} {} (out {size}): want `{want}`, got `{got}`", names[i]);
+                    let _ = writeln!(
+                        failures,
+                        "#{i} {} (out {size}): want `{want}`, got `{got}`",
+                        names[i]
+                    );
                 }
             }
         }
     }
-    assert!(disagree == 0, "{disagree} answer(s) disagree with the libraries:\n{failures}");
+    assert!(
+        disagree == 0,
+        "{disagree} answer(s) disagree with the libraries:\n{failures}"
+    );
     // Every outcome each library can give is represented, so the corpus
     // cannot quietly stop testing one of them.
-    for class in ["Z FULL", "Z ENDED", "Z ERR", "D COMPLETE", "D FULL", "D SHORT", "D BAD"] {
+    for class in [
+        "Z FULL",
+        "Z ENDED",
+        "Z ERR",
+        "D COMPLETE",
+        "D FULL",
+        "D SHORT",
+        "D BAD",
+    ] {
         let n = outcomes.get(class).copied().unwrap_or(0);
         assert!(n >= 20, "only {n} vector(s) answered `{class}`");
     }

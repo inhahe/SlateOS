@@ -2164,7 +2164,8 @@ mod tests {
         for family in &installed {
             assert!(
                 rest.any(|r| r == family),
-                "{family} is a fallback here but not where the directories put                  it: {installed:?} against {resolved:?}"
+                "{family} is a fallback here but not where the directories put it: \
+                 {installed:?} against {resolved:?}"
             );
         }
     }

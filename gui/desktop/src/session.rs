@@ -1902,7 +1902,13 @@ impl<T: Transport> ShellSession<T> {
                 continue;
             }
             self.icons_uploaded.insert((window, id));
-            let Some(request) = self.shell.icon_request(id) else {
+            // The shell's parts, then the login screen, which the session
+            // holds rather than the shell.
+            let Some(request) = self.shell.icon_request(id).or_else(|| {
+                self.login
+                    .as_ref()
+                    .and_then(|screen| screen.icon_request(id))
+            }) else {
                 continue;
             };
             let Some(icon) =
@@ -1945,6 +1951,9 @@ impl<T: Transport> ShellSession<T> {
     /// again and sends the frame after them.
     fn drop_icons(&mut self) {
         self.background_drawn = None;
+        if let Some(screen) = &self.login {
+            screen.clear_icon_requests();
+        }
         for (window, id) in std::mem::take(&mut self.icons_uploaded) {
             if let Some(mut handle) = self.events.window_mut(window) {
                 // Dropping an id that was never stored succeeds; a connection

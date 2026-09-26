@@ -4314,6 +4314,64 @@ fn session_with_login() -> (
     (session, desktop, dir, turn)
 }
 
+/// **The login screen's icons reach its surface before its frame does** --
+/// the account's picture, the eye, the bar's buttons.
+#[test]
+fn the_login_screens_icons_go_up_before_the_frame_that_names_them() {
+    let (session, desktop, _dir, _turn) = session_with_login();
+    let login = session.login_surface.window;
+    let screen = session.login.as_ref().expect("a login screen");
+    let palette = appearance::Palette::from_settings(&session.shell().appearance);
+    let mut tree = guitk::render::RenderTree::new();
+    tree.extend(screen.render(&palette));
+    let wanted = icon_ids(&tree);
+    assert!(
+        wanted.iter().any(|(id, _)| screen
+            .icon_request(*id)
+            .is_some_and(|r| r.name == "avatar-default")),
+        "the account's picture is not an icon"
+    );
+    let sent = icon_uploads(&desktop);
+    for (id, px) in &wanted {
+        assert!(
+            sent.iter()
+                .any(|u| u.0 == login && u.1 == *id && u.2 == *px),
+            "icon {id:x} did not go up to the login surface: {sent:?}"
+        );
+    }
+    // The last thing start sent: the uploads were answered, the frame is
+    // still unread in the pipe.
+    assert!(
+        !desktop
+            .borrow()
+            .submitted
+            .iter()
+            .any(|(window, _)| *window == login),
+        "the login screen's frame overtook its icons"
+    );
+}
+
+/// Dropping the icons -- what a change of appearance does -- forgets the login
+/// screen's too, which the session holds rather than the shell.
+#[test]
+fn dropping_the_icons_forgets_the_login_screens() {
+    let (mut session, _desktop, _dir, _turn) = session_with_login();
+    let screen = session.login.as_ref().expect("a login screen");
+    let palette = appearance::Palette::from_settings(&session.shell().appearance);
+    let mut tree = guitk::render::RenderTree::new();
+    tree.extend(screen.render(&palette));
+    let (id, _) = *icon_ids(&tree).first().expect("the screen drew an icon");
+    assert!(screen.icon_request(id).is_some());
+
+    session.drop_icons();
+
+    let screen = session.login.as_ref().expect("still a login screen");
+    assert!(
+        screen.icon_request(id).is_none(),
+        "the login screen's icon outlived the drop"
+    );
+}
+
 /// A login screen backed by an account with **no** password.
 ///
 /// The other half of `session_with_login`: same shape, no `password_hash`

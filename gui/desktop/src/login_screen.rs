@@ -152,7 +152,10 @@ pub struct LoginUser {
     pub display_name: String,
     /// Username (for authentication).
     pub username: String,
-    /// Avatar icon character (placeholder for real avatar images).
+    /// A character the account chose to be shown as, or empty for none: an
+    /// account with no avatar of its own is drawn with the icon theme's
+    /// `avatar-default`. It was a person emoji for everyone, which no font the
+    /// desktop has can draw (design-decisions.md §881).
     pub avatar: String,
     /// Whether autologin is enabled for this user.
     pub autologin: bool,
@@ -175,7 +178,7 @@ impl LoginUser {
             uid,
             display_name: display_name.to_string(),
             username: username.to_string(),
-            avatar: "\u{1F464}".to_string(),
+            avatar: String::new(),
             autologin: false,
             has_password: true,
             last_login: false,
@@ -454,11 +457,14 @@ const USER_ROW_PITCH: f32 = 80.0;
 /// labels inline in `render_power_menu` and no actions at all, which is how a
 /// menu with four visible rows had nothing behind any of them.
 const POWER_MENU_LABELS: [(&str, &str); 4] = [
-    ("\u{23FB}", "Shut Down"),
-    ("\u{1F504}", "Restart"),
-    ("\u{1F4A4}", "Sleep"),
-    ("\u{1F4BE}", "Hibernate"),
+    ("system-shutdown", "Shut Down"),
+    ("system-reboot", "Restart"),
+    ("system-suspend", "Sleep"),
+    ("system-suspend-hibernate", "Hibernate"),
 ];
+
+/// The icon an account with no avatar of its own is drawn with.
+const AVATAR_ICON: &str = "avatar-default";
 
 /// What each row of `POWER_MENU_LABELS` does, in the same order.
 pub const POWER_MENU_ACTIONS: [LoginPowerAction; POWER_MENU_LABELS.len()] = [
@@ -595,9 +601,45 @@ pub struct LoginScreen {
     /// rectangle. The desktop's wallpaper did precisely that for three days.
     background_image_w: f32,
     background_image_h: f32,
+    /// The icons this screen drew, by image id, for the session to upload.
+    icon_registry: crate::IconRegistry,
 }
 
 impl LoginScreen {
+    /// What the icon this screen drew under `id` is, if it drew one.
+    #[must_use]
+    pub fn icon_request(&self, id: u64) -> Option<crate::IconRequest> {
+        self.icon_registry.request(id)
+    }
+
+    /// Forget the icons drawn: the appearance changed, and they are drawn
+    /// again in new colours under new ids.
+    pub fn clear_icon_requests(&self) {
+        self.icon_registry.clear();
+    }
+
+    /// The icon `name`, `side` pixels square at `(x, y)`, in `color`.
+    fn icon(
+        &self,
+        commands: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        side: f32,
+        name: &'static str,
+        color: Color,
+    ) {
+        // A few dozen pixels; `as` saturates rather than wrapping.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let px = side.round().max(1.0) as u32;
+        commands.push(RenderCommand::Image {
+            x,
+            y,
+            width: side,
+            height: side,
+            image_id: self.icon_registry.icon(name, px, color),
+        });
+    }
+
     /// Adopt the picture uploaded to this screen's own surface under `id`.
     ///
     /// Takes the picture's size and fit alongside it because the three are one
@@ -670,6 +712,7 @@ impl LoginScreen {
             background_fit: ImageFit::Fill,
             background_image_w: 0.0,
             background_image_h: 0.0,
+            icon_registry: crate::IconRegistry::default(),
         }
     }
 
@@ -1271,20 +1314,32 @@ impl LoginScreen {
             });
 
             // Avatar. The accent marks which row you are on — judgement 2.
-            commands.push(RenderCommand::Text {
-                x: row_x + 12.0,
-                y: uy + 14.0,
-                text: user.avatar.clone(),
-                font_size: 28.0,
-                color: if selected {
-                    p.ink(p.accent)
-                } else {
-                    p.subtext0
-                },
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            let avatar_ink = if selected {
+                p.ink(p.accent)
+            } else {
+                p.subtext0
+            };
+            if user.avatar.is_empty() {
+                self.icon(
+                    commands,
+                    row_x + 12.0,
+                    uy + 18.0,
+                    28.0,
+                    AVATAR_ICON,
+                    avatar_ink,
+                );
+            } else {
+                commands.push(RenderCommand::Text {
+                    x: row_x + 12.0,
+                    y: uy + 14.0,
+                    text: user.avatar.clone(),
+                    font_size: 28.0,
+                    color: avatar_ink,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
+                    overflow: TextOverflow::Clip,
+                });
+            }
 
             // Name.
             commands.push(RenderCommand::Text {
@@ -1321,20 +1376,41 @@ impl LoginScreen {
             // selection carried forward from the row list — so it keeps the
             // accent it had there. It floats on the background, so it also
             // gets the shadow pass.
-            push_on_background(
-                commands,
-                p,
-                RenderCommand::Text {
-                    x: cx - 24.0,
-                    y: cy - 80.0,
-                    text: user.avatar.clone(),
-                    font_size: 48.0,
-                    color: p.ink(p.accent),
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                },
-            );
+            if user.avatar.is_empty() {
+                // On the background as the text is: a shadow one pixel
+                // down-right of the ink, so it reads on any wallpaper.
+                self.icon(
+                    commands,
+                    cx - 24.0 + 1.0,
+                    cy - 80.0 + 1.0,
+                    48.0,
+                    AVATAR_ICON,
+                    p.text_shadow(),
+                );
+                self.icon(
+                    commands,
+                    cx - 24.0,
+                    cy - 80.0,
+                    48.0,
+                    AVATAR_ICON,
+                    p.ink(p.accent),
+                );
+            } else {
+                push_on_background(
+                    commands,
+                    p,
+                    RenderCommand::Text {
+                        x: cx - 24.0,
+                        y: cy - 80.0,
+                        text: user.avatar.clone(),
+                        font_size: 48.0,
+                        color: p.ink(p.accent),
+                        font_weight: FontWeightHint::Regular,
+                        max_width: None,
+                        overflow: TextOverflow::Clip,
+                    },
+                );
+            }
 
             // Name.
             push_on_background(
@@ -1403,22 +1479,20 @@ impl LoginScreen {
                 overflow: TextOverflow::Ellipsis,
             });
 
-            // Show/hide toggle.
-            commands.push(RenderCommand::Text {
-                x: field_x + field_w - 28.0,
-                y: field_y + 8.0,
-                text: if self.show_password {
-                    "\u{1F441}"
+            // Show/hide toggle: an open eye while the password shows, a
+            // struck one while it is hidden.
+            self.icon(
+                commands,
+                field_x + field_w - 28.0,
+                field_y + (field_h - 14.0) / 2.0,
+                14.0,
+                if self.show_password {
+                    "view-reveal"
                 } else {
-                    "\u{1F576}"
-                }
-                .to_string(),
-                font_size: 14.0,
-                color: p.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+                    "view-conceal"
+                },
+                p.subtext0,
+            );
 
             // Submit button — the screen's default action, so it takes the
             // accent, and its label is derived from that accent rather than
@@ -1574,46 +1648,38 @@ impl LoginScreen {
             });
         }
 
-        // Power button (right).
+        // Power button (right), accessibility before it, the on-screen
+        // keyboard before that: icons centred in the bar.
+        let icon_y = bar_y + (40.0 - 16.0) / 2.0;
         if self.config.show_power {
-            commands.push(RenderCommand::Text {
-                x: self.screen_width - 40.0,
-                y: bar_y + 10.0,
-                text: "\u{23FB}".to_string(),
-                font_size: 16.0,
-                color: p.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            self.icon(
+                commands,
+                self.screen_width - 40.0,
+                icon_y,
+                16.0,
+                "system-shutdown",
+                p.subtext0,
+            );
         }
-
-        // Accessibility (before power).
         if self.config.show_accessibility {
-            commands.push(RenderCommand::Text {
-                x: self.screen_width - 80.0,
-                y: bar_y + 10.0,
-                text: "\u{267F}".to_string(),
-                font_size: 16.0,
-                color: p.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            self.icon(
+                commands,
+                self.screen_width - 80.0,
+                icon_y,
+                16.0,
+                "preferences-desktop-accessibility",
+                p.subtext0,
+            );
         }
-
-        // On-screen keyboard.
         if self.config.show_osk_button {
-            commands.push(RenderCommand::Text {
-                x: self.screen_width - 120.0,
-                y: bar_y + 10.0,
-                text: "\u{2328}".to_string(),
-                font_size: 16.0,
-                color: p.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            self.icon(
+                commands,
+                self.screen_width - 120.0,
+                icon_y,
+                16.0,
+                "input-keyboard",
+                p.subtext0,
+            );
         }
     }
 
@@ -1631,16 +1697,7 @@ impl LoginScreen {
 
         for (i, (icon, label)) in POWER_MENU_LABELS.iter().enumerate() {
             let iy = self.power_menu_row_rect(i).y;
-            commands.push(RenderCommand::Text {
-                x: mx + 12.0,
-                y: iy + 6.0,
-                text: icon.to_string(),
-                font_size: 14.0,
-                color: p.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            self.icon(commands, mx + 12.0, iy + 8.0, 14.0, icon, p.subtext0);
             commands.push(RenderCommand::Text {
                 x: mx + 36.0,
                 y: iy + 7.0,
@@ -2115,8 +2172,62 @@ mod tests {
     /// converted one.
     const OFF_PALETTE: Color = Color::from_hex(0x00FF_8C1A);
 
-    /// The avatar glyph `LoginUser::new` gives everyone.
-    const AVATAR: &str = "\u{1F464}";
+    /// Every icon `screen` drew in `cmds` named `name` at `size` pixels, as
+    /// `(x, y, colour)`.
+    fn icons(
+        screen: &LoginScreen,
+        cmds: &[RenderCommand],
+        name: &str,
+        size: f32,
+    ) -> Vec<(f32, f32, Color)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Image {
+                    x,
+                    y,
+                    width,
+                    image_id,
+                    ..
+                } if *width == size => screen
+                    .icon_request(*image_id)
+                    .filter(|r| r.name == name)
+                    .map(|r| (*x, *y, r.color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The colour of the one icon `name` at `size` -- mounted on a panel, so
+    /// drawn once.
+    fn panel_icon(screen: &LoginScreen, cmds: &[RenderCommand], name: &str, size: f32) -> Color {
+        let hits = icons(screen, cmds, name, size);
+        assert_eq!(
+            hits.len(),
+            1,
+            "{name} at {size}px: one icon, found {}",
+            hits.len()
+        );
+        hits[0].2
+    }
+
+    /// The `(shadow, ink)` pair of an icon on the login background, as
+    /// [`floating_text`] is for text.
+    fn floating_icon(
+        screen: &LoginScreen,
+        cmds: &[RenderCommand],
+        name: &str,
+        size: f32,
+    ) -> (Color, Color) {
+        let hits = icons(screen, cmds, name, size);
+        assert_eq!(hits.len(), 2, "{name} at {size}px: a shadow and an ink");
+        let (sx, sy, shadow) = hits[0];
+        let (ix, iy, ink) = hits[1];
+        assert!(
+            (sx - ix - 1.0).abs() < 0.001 && (sy - iy - 1.0).abs() < 0.001,
+            "{name}: the shadow must sit one pixel down-right of the ink"
+        );
+        (shadow, ink)
+    }
 
     /// Both modes, each with an accent no palette contains.
     fn table_palettes() -> Vec<(String, Palette)> {
@@ -2405,6 +2516,40 @@ mod tests {
     /// pixel values: the raw one on fills and the inked one on text. A count
     /// of "how many things carry the accent" means both, and counting only one
     /// would report half the answer while looking exactly as authoritative.
+    /// `screen`'s render in `p`, each icon it drew stood in for by a text of
+    /// the icon's name at the icon's size and in its colour -- so a sweep or a
+    /// count over the colours drawn sees the icons' colours too.
+    fn rendered(screen: &LoginScreen, p: &Palette) -> Vec<RenderCommand> {
+        screen
+            .render(p)
+            .into_iter()
+            .map(|command| {
+                if let RenderCommand::Image {
+                    x,
+                    y,
+                    width,
+                    image_id,
+                    ..
+                } = command
+                {
+                    if let Some(icon) = screen.icon_request(image_id) {
+                        return RenderCommand::Text {
+                            x,
+                            y,
+                            text: icon.name.to_string(),
+                            color: icon.color,
+                            font_size: width,
+                            font_weight: FontWeightHint::Regular,
+                            max_width: None,
+                            overflow: TextOverflow::Clip,
+                        };
+                    }
+                }
+                command
+            })
+            .collect()
+    }
+
     fn count_of(p: &Palette, cmds: &[RenderCommand], c: Color) -> usize {
         // Against the palette in use, not a fixed one: the inked form of a
         // colour depends on the theme's grounds, so asking a dark palette
@@ -2422,7 +2567,7 @@ mod tests {
     fn every_colour_the_login_screen_draws_comes_from_its_palette() {
         for (mode, p) in table_palettes() {
             for (what, s) in screens(&p) {
-                let cmds = s.render(&p);
+                let cmds = rendered(&s, &p);
                 // The three computed inks: the pale extreme the wallpaper
                 // labels take in both modes (see note 8), and the lettering
                 // on the accent-filled sign-in button.
@@ -2507,7 +2652,8 @@ mod tests {
     #[test]
     fn every_colour_in_the_user_list_is_in_the_role_it_claims() {
         for (mode, p) in table_palettes() {
-            let cmds = base().render(&p);
+            let screen = base();
+            let cmds = screen.render(&p);
 
             // Two rows, in index order: alice is selected, bob is not.
             let rows = fills_of_size(&cmds, 280.0, 64.0);
@@ -2519,8 +2665,8 @@ mod tests {
                 "{mode}: an unselected row is `base` at the module's panel alpha"
             );
 
-            // The avatars, same glyph and size, distinguished by row order.
-            let avatars = texts(&cmds, AVATAR, 28.0);
+            // The avatars, the same icon and size, distinguished by row order.
+            let avatars = icons(&screen, &cmds, super::AVATAR_ICON, 28.0);
             assert_eq!(avatars.len(), 2, "{mode}: two avatars");
             assert_eq!(
                 avatars[0].2,
@@ -2550,10 +2696,11 @@ mod tests {
         for (mode, p) in table_palettes() {
             // The failed render: error border, error message, lockout notice,
             // a typed password, and two users so the back arrow is drawn.
-            let cmds = everything().render(&p);
+            let screen = everything();
+            let cmds = screen.render(&p);
 
             assert_eq!(
-                floating_text(&cmds, AVATAR, 48.0).1,
+                floating_icon(&screen, &cmds, super::AVATAR_ICON, 48.0).1,
                 p.ink(p.accent),
                 "{mode}: the avatar of the user you are signing in as"
             );
@@ -2585,7 +2732,7 @@ mod tests {
                 "{mode}: a typed password"
             );
             assert_eq!(
-                panel_text(&cmds, "\u{1F576}", 14.0),
+                panel_icon(&screen, &cmds, "view-conceal", 14.0),
                 p.subtext0,
                 "{mode}: the reveal toggle"
             );
@@ -2639,7 +2786,7 @@ mod tests {
             s.show_password = true;
             let cmds = s.render(&p);
             assert_eq!(
-                panel_text(&cmds, "\u{1F441}", 14.0),
+                panel_icon(&s, &cmds, "view-reveal", 14.0),
                 p.subtext0,
                 "{mode}: the reveal toggle, showing"
             );
@@ -2661,17 +2808,17 @@ mod tests {
             );
             assert_eq!(panel_text(&cmds, "US", 12.0), p.subtext0, "{mode}: layout");
             assert_eq!(
-                panel_text(&cmds, "\u{23FB}", 16.0),
+                panel_icon(&s, &cmds, "system-shutdown", 16.0),
                 p.subtext0,
                 "{mode}: the bar's power button"
             );
             assert_eq!(
-                panel_text(&cmds, "\u{267F}", 16.0),
+                panel_icon(&s, &cmds, "preferences-desktop-accessibility", 16.0),
                 p.subtext0,
                 "{mode}: accessibility"
             );
             assert_eq!(
-                panel_text(&cmds, "\u{2328}", 16.0),
+                panel_icon(&s, &cmds, "input-keyboard", 16.0),
                 p.subtext0,
                 "{mode}: the on-screen keyboard button"
             );
@@ -2691,7 +2838,7 @@ mod tests {
                 "{mode}: its border"
             );
             assert_eq!(
-                panel_text(&cmds, "\u{23FB}", 14.0),
+                panel_icon(&s, &cmds, "system-shutdown", 14.0),
                 p.subtext0,
                 "{mode}: a menu icon"
             );
@@ -2858,7 +3005,7 @@ mod tests {
     #[test]
     fn exactly_two_things_in_the_password_panel_carry_the_accent() {
         for (mode, p) in table_palettes() {
-            let cmds = everything().render(&p);
+            let cmds = rendered(&everything(), &p);
             assert_eq!(
                 count_of(&p, &cmds, OFF_PALETTE),
                 2,
@@ -2871,7 +3018,7 @@ mod tests {
             let mut s = base();
             s.power_menu_open = true;
             assert_eq!(
-                count_of(&p, &s.render(&p), OFF_PALETTE),
+                count_of(&p, &rendered(&s, &p), OFF_PALETTE),
                 1,
                 "{mode}: in the user list only the selected avatar is accented"
             );
@@ -2891,7 +3038,7 @@ mod tests {
         const SHADOW: Color = Color::rgba(0, 0, 0, 180);
 
         for (mode, p) in table_palettes() {
-            let cmds = everything().render(&p);
+            let cmds = rendered(&everything(), &p);
             assert_eq!(
                 count_of(&p, &cmds, SHADOW),
                 7,

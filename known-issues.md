@@ -24343,8 +24343,9 @@ fill by its bounding box and which nothing called.
 **Status:** PARTLY FIXED 2026-09-26 -- the taskbar's start button, bell and
 tray chevron are icons (design-decisions §881), and so is every overlay's
 picture (volume, brightness, media, lock keys, devices, screenshots,
-microphone, network, battery, and the ten generic ones); the login screen and
-the widgets are next.
+microphone, network, battery, and the ten generic ones), and the login
+screen's (an account's default picture, the password eye, the bar's power,
+accessibility and keyboard buttons, the power menu); the widgets are next.
 
 **In short:** the shell drew its small pictures as characters -- a bell, a
 speaker, a sun, a padlock, a person, a power symbol, the start button's `≡` --

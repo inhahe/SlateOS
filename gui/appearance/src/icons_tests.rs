@@ -61,7 +61,7 @@ fn opaque_pixels(icon: &Icon) -> Vec<u32> {
 /// and draws it in the colour asked for -- they are all `currentColor`.
 #[test]
 fn every_built_in_icon_draws_in_the_colour_it_is_asked_for() {
-    let theme = IconTheme::named("no-such-theme", Fixture::new("builtin").dirs());
+    let theme = IconTheme::named(OsStr::new("no-such-theme"), Fixture::new("builtin").dirs());
     for name in built_in_names() {
         for size in [16, 24, 48] {
             let icon = theme
@@ -111,7 +111,7 @@ fn current_color_is_the_colour_asked_for() {
 #[test]
 fn the_users_icon_comes_before_the_systems_and_both_before_the_built_in() {
     let fx = Fixture::new("order");
-    let theme = IconTheme::named("mine", fx.dirs());
+    let theme = IconTheme::named(OsStr::new("mine"), fx.dirs());
     let built_in = theme.source("folder").expect("built in");
     assert!(matches!(built_in, Cow::Borrowed(_)));
 
@@ -126,7 +126,7 @@ fn the_users_icon_comes_before_the_systems_and_both_before_the_built_in() {
 #[test]
 fn a_missing_name_falls_back_to_a_shorter_one() {
     let fx = Fixture::new("fallback");
-    let theme = IconTheme::named("mine", fx.dirs());
+    let theme = IconTheme::named(OsStr::new("mine"), fx.dirs());
     // Built in: folder-documents is its own picture; folder-documents-work is
     // not drawn anywhere and falls back to it.
     assert_eq!(
@@ -146,7 +146,7 @@ fn a_missing_name_falls_back_to_a_shorter_one() {
 #[test]
 fn a_path_is_not_a_name() {
     let fx = Fixture::new("names");
-    let theme = IconTheme::named("mine", fx.dirs());
+    let theme = IconTheme::named(OsStr::new("mine"), fx.dirs());
     for bad in [
         "",
         "../folder",
@@ -163,7 +163,7 @@ fn a_path_is_not_a_name() {
     assert!(is_valid_name("x_2"));
     // Nor is a theme id with a path in it looked in.
     fx.put("user", "mine", "folder", SQUARE.as_bytes());
-    let escaping = IconTheme::named("../user/mine", fx.dirs());
+    let escaping = IconTheme::named(OsStr::new("../user/mine"), fx.dirs());
     assert!(matches!(escaping.source("folder"), Some(Cow::Borrowed(_))));
 }
 
@@ -172,7 +172,7 @@ fn a_path_is_not_a_name() {
 #[test]
 fn a_file_that_is_not_an_icon_is_passed_over() {
     let fx = Fixture::new("bad-files");
-    let theme = IconTheme::named("mine", fx.dirs());
+    let theme = IconTheme::named(OsStr::new("mine"), fx.dirs());
     let built_in = theme.source("folder").unwrap();
 
     fx.put("user", "mine", "folder", b"this is not an svg");
@@ -193,7 +193,7 @@ fn a_file_that_is_not_an_icon_is_passed_over() {
 fn nothing_drawn_is_no_icon_and_sizes_are_capped() {
     let empty = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"></svg>"#;
     assert_eq!(render_svg(empty, 16, INK), None);
-    let theme = IconTheme::named("x", Fixture::new("sizes").dirs());
+    let theme = IconTheme::named(OsStr::new("x"), Fixture::new("sizes").dirs());
     assert_eq!(theme.render("folder", 0, INK), None);
     let big = theme
         .render("folder", 100_000, INK)
@@ -205,7 +205,7 @@ fn nothing_drawn_is_no_icon_and_sizes_are_capped() {
 /// places are drawn as what they hold.
 #[test]
 fn the_start_menus_places_each_have_an_icon() {
-    let theme = IconTheme::named("x", Fixture::new("places").dirs());
+    let theme = IconTheme::named(OsStr::new("x"), Fixture::new("places").dirs());
     let places = [
         "user-home",
         "folder-documents",

@@ -1414,6 +1414,13 @@ pub struct AppearanceSettings {
     /// name and a set of colours, so the two cannot disagree; see
     /// [`themes::ColorTheme`].
     pub color_theme: themes::ColorTheme,
+    /// The theme the icons come from: the built-in one unless the user chose
+    /// another. `theme.icons` in the file, by the theme's folder name -- which
+    /// may name a different theme from `theme.colors`, since a theme's icons
+    /// and its colours are separate axes (`roadmap-detailed.md` §3.4:
+    /// "mix-and-match"). Nothing is read until an icon is drawn; see
+    /// [`icons::IconTheme`].
+    pub icon_theme: icons::IconTheme,
     /// The hours `System (Auto)` is light, local time: from the window's start
     /// until its end, and dark the rest of the day. `theme.auto.light_from`
     /// and `theme.auto.dark_from` in the file; 07:00 until 19:00 unless the
@@ -1622,6 +1629,7 @@ impl Default for AppearanceSettings {
             login_background: LoginBackground::Theme,
             theme_mode: ThemeMode::Dark,
             color_theme: themes::ColorTheme::built_in(),
+            icon_theme: icons::IconTheme::built_in(),
             auto_light_hours: DEFAULT_AUTO_LIGHT_HOURS,
             auto_is_light: false,
             // Borders, per §829. The `Default` impl is what a machine with no
@@ -2214,6 +2222,15 @@ impl AppearanceSettings {
         if let Some(name) = color_theme_name(doc) {
             s.color_theme = themes::ColorTheme::load(&name);
         }
+        // The icon theme, spelled as the colour theme is. Nothing to load yet:
+        // an icon is looked up when it is drawn.
+        if let Some(name) = doc
+            .get_str(&["theme", "icons"])
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+        {
+            s.icon_theme = icons::IconTheme::load(&pathcodec::decode_path(&name).into_os_string());
+        }
         read_into!(
             s.theme_mode,
             doc.get_str(&["theme", "mode"])
@@ -2475,6 +2492,10 @@ impl AppearanceSettings {
         doc.set_str(
             &["theme", "colors"],
             &pathcodec::encode_path(std::path::Path::new(self.color_theme.id())),
+        );
+        doc.set_str(
+            &["theme", "icons"],
+            &pathcodec::encode_path(std::path::Path::new(self.icon_theme.id())),
         );
         doc.set_str(
             &["theme", "surface_style"],
@@ -3114,6 +3135,9 @@ mod tests {
                 ROUND_TRIP_THEME,
                 themes::parse(ROUND_TRIP_THEME_FILE).colors,
             ),
+            // A theme of its own, not the colour theme's, so a round trip that
+            // wrote one axis into the other would be caught.
+            icon_theme: icons::IconTheme::load(std::ffi::OsStr::new("line-icons")),
             // Every one of these differs from the default, which is what the
             // fixture is for: the defaults are `None`, 600 and `true`.
             wallpaper_folder: Some(PathBuf::from("/home/u/Pictures/rotation")),
@@ -3248,6 +3272,42 @@ mod tests {
             let mut saved = doc.clone();
             s.write_into(&mut saved);
             assert_eq!(saved.get_str(&["theme", "colors"]).as_deref(), Some("gone"));
+        });
+    }
+
+    /// The icon theme is its own setting: read from `theme.icons`, written
+    /// back there, independent of the colour theme, and the built-in one when
+    /// the file names none or a blank. A folder name that is not text comes
+    /// back byte for byte.
+    #[test]
+    fn the_icon_theme_is_its_own_setting_and_survives_a_save() {
+        config::testing::with_scratch_config("icon-theme", |_| {
+            let s = AppearanceSettings::read_from(&Document::parse(""));
+            assert_eq!(s.icon_theme, icons::IconTheme::built_in());
+
+            let doc = Document::parse("theme:\n  colors: nord\n  icons: papirus\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.icon_theme.id(), "papirus");
+            assert_eq!(s.color_theme.id(), "nord");
+            let mut saved = Document::parse("");
+            s.write_into(&mut saved);
+            assert_eq!(
+                saved.get_str(&["theme", "icons"]).as_deref(),
+                Some("papirus")
+            );
+
+            let blank = AppearanceSettings::read_from(&Document::parse("theme:\n  icons: \" \"\n"));
+            assert_eq!(blank.icon_theme, icons::IconTheme::built_in());
+
+            let odd = std::path::Path::new(&pathcodec::decode_path("caf%E9"))
+                .as_os_str()
+                .to_os_string();
+            let mut settings = AppearanceSettings::default();
+            settings.icon_theme = icons::IconTheme::load(&odd);
+            let mut written = Document::parse("");
+            settings.write_into(&mut written);
+            let back = AppearanceSettings::read_from(&written);
+            assert_eq!(back.icon_theme.id(), odd.as_os_str());
         });
     }
 

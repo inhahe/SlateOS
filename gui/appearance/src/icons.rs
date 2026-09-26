@@ -32,7 +32,7 @@
 //! and an icon is never rendered larger than [`MAX_ICON_PX`] square.
 
 use std::borrow::Cow;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use guitk::color::Color;
@@ -159,10 +159,22 @@ pub struct Icon {
 }
 
 /// A theme's icons.
-#[derive(Clone, Debug)]
+///
+/// The theme is named by its folder, which need not be text
+/// (`design-decisions.md` §426) -- an `OsString`, as a colour theme's is.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IconTheme {
-    id: String,
-    dirs: ThemeDirs,
+    id: OsString,
+    /// Where to look, or `None` for the standard directories -- read when an
+    /// icon is looked up, not when the theme is named, so that the setting
+    /// is the name alone and two readings of one file compare equal.
+    dirs: Option<ThemeDirs>,
+}
+
+impl Default for IconTheme {
+    fn default() -> Self {
+        Self::built_in()
+    }
 }
 
 impl IconTheme {
@@ -171,21 +183,30 @@ impl IconTheme {
     /// edited is the one drawn.
     #[must_use]
     pub fn built_in() -> Self {
-        Self::named(themes::BUILT_IN, ThemeDirs::standard())
+        Self::load(OsStr::new(themes::BUILT_IN))
     }
 
     /// The theme `id`, looked for in `dirs`.
     #[must_use]
-    pub fn named(id: &str, dirs: ThemeDirs) -> Self {
+    pub fn named(id: &OsStr, dirs: ThemeDirs) -> Self {
         Self {
-            id: id.to_string(),
-            dirs,
+            id: id.to_os_string(),
+            dirs: Some(dirs),
+        }
+    }
+
+    /// The theme `id`, looked for in the standard theme directories.
+    #[must_use]
+    pub fn load(id: &OsStr) -> Self {
+        Self {
+            id: id.to_os_string(),
+            dirs: None,
         }
     }
 
     /// The theme's name -- its folder's.
     #[must_use]
-    pub fn id(&self) -> &str {
+    pub fn id(&self) -> &OsStr {
         &self.id
     }
 
@@ -214,11 +235,12 @@ impl IconTheme {
     /// The first readable, parseable file for exactly `name` in the theme's
     /// folders, user's first.
     fn theme_file(&self, name: &str) -> Option<String> {
-        if !themes::is_valid_id(OsStr::new(&self.id)) {
+        if !themes::is_valid_id(&self.id) {
             return None;
         }
         let file = format!("{name}.svg");
-        self.dirs.roots().into_iter().find_map(|(root, _)| {
+        let dirs = self.dirs.clone().unwrap_or_else(ThemeDirs::standard);
+        dirs.roots().into_iter().find_map(|(root, _)| {
             let path: PathBuf = root.join(&self.id).join(ICONS_DIR).join(&file);
             read_icon(&path)
         })

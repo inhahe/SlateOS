@@ -13,7 +13,9 @@
 //! # A theme on disk
 //!
 //! A directory named for the theme, holding `theme.yaml` and whatever the file
-//! refers to (screenshots, so far):
+//! refers to (screenshots, so far), and its icons in an `icons` folder beside
+//! it -- the icons axis, [`crate::icons`]. A folder with icons and no
+//! `theme.yaml` is an icon pack, a theme for that axis alone:
 //!
 //! ```text
 //! /usr/share/slateos/themes/<name>/theme.yaml          installed with the system
@@ -745,6 +747,11 @@ pub struct ThemeInfo {
     pub has_dark: bool,
     /// Whether it sets light-mode colours.
     pub has_light: bool,
+    /// Whether it draws icons: its folder holds an [`icons`](crate::icons)
+    /// directory. Always true of the built-in theme, whose icons are compiled
+    /// in. A folder with icons and no `theme.yaml` -- an icon pack -- is a
+    /// theme for the icons axis alone.
+    pub has_icons: bool,
     /// What in its file was ignored.
     pub warnings: Vec<String>,
     /// Why it could not be read, if it could not. A theme that cannot be read
@@ -795,12 +802,18 @@ pub fn available_in(dirs: &ThemeDirs) -> Vec<ThemeInfo> {
             }
             let dir = entry.path();
             let file = dir.join(FILE_NAME);
-            // A directory without the file is not a theme -- a half-copied
-            // download, or something else entirely -- and is left out.
-            if !file.is_file() {
+            // A directory with neither a theme file nor icons is not a theme --
+            // a half-copied download, or something else entirely -- and is
+            // left out. One with icons alone is an icon pack: a theme for the
+            // icons axis, with no colours and nothing wrong with it.
+            let read = if file.is_file() {
+                read_theme_file(&file)
+            } else if dir.join(crate::icons::ICONS_DIR).is_dir() {
+                Ok(ThemeFile::default())
+            } else {
                 continue;
-            }
-            let info = describe(&id, dir, origin, read_theme_file(&file));
+            };
+            let info = describe(&id, dir, origin, read);
             found.insert(id, info);
         }
     }
@@ -838,14 +851,17 @@ fn built_in_info(dirs: &ThemeDirs) -> ThemeInfo {
             screenshots: Vec::new(),
             has_dark: true,
             has_light: true,
+            has_icons: true,
             warnings: Vec::new(),
             problem: None,
         }
     };
-    // Whatever its file says, the built-in theme's colours are compiled in:
-    // it covers both modes and cannot fail to load.
+    // Whatever its file says, the built-in theme's colours and icons are
+    // compiled in: it covers both modes, draws every icon, and cannot fail to
+    // load.
     info.has_dark = true;
     info.has_light = true;
+    info.has_icons = true;
     info.problem = None;
     info
 }
@@ -858,6 +874,7 @@ fn describe(
     read: Result<ThemeFile, ThemeError>,
 ) -> ThemeInfo {
     let shown = pathcodec::display_os(id);
+    let has_icons = dir.join(crate::icons::ICONS_DIR).is_dir();
     match read {
         Ok(file) => {
             let mut warnings = file.warnings;
@@ -878,6 +895,7 @@ fn describe(
                 dir: Some(dir),
                 has_dark: !file.colors.dark.is_empty(),
                 has_light: !file.colors.light.is_empty(),
+                has_icons,
                 meta: file.meta,
                 screenshots,
                 warnings,
@@ -893,6 +911,7 @@ fn describe(
             screenshots: Vec::new(),
             has_dark: false,
             has_light: false,
+            has_icons,
             warnings: Vec::new(),
             problem: Some(err),
         },
@@ -1200,6 +1219,33 @@ colors:
         let nord = &list[3];
         assert_eq!(nord.origin, Origin::User);
         assert_eq!((nord.has_dark, nord.has_light), (true, false));
+    }
+
+    /// A folder of icons without a theme file is an icon pack: listed, for the
+    /// icons axis alone -- no colours, and nothing wrong with it. A theme with
+    /// both says so; the built-in theme always draws icons.
+    #[test]
+    fn an_icon_pack_is_listed_for_its_icons_alone() {
+        let fx = Fixture::new("icon-packs");
+        let pack = fx.dirs().system.join("lines");
+        fs::create_dir_all(pack.join(crate::icons::ICONS_DIR)).unwrap();
+        let both = fx.install(Origin::User, "nord", "colors:\n  base: \"#000000\"\n");
+        fs::create_dir_all(both.join(crate::icons::ICONS_DIR)).unwrap();
+        fx.install(Origin::User, "plain", "colors:\n  base: \"#101010\"\n");
+
+        let list = available_in(&fx.dirs());
+        let by_id = |id: &str| {
+            list.iter()
+                .find(|t| t.id == OsStr::new(id))
+                .unwrap_or_else(|| panic!("{id} is not listed"))
+        };
+        let lines = by_id("lines");
+        assert!(lines.has_icons);
+        assert!(!lines.provides_colors());
+        assert_eq!(lines.problem, None, "an icon pack is not a broken theme");
+        assert!(by_id("nord").has_icons && by_id("nord").provides_colors());
+        assert!(!by_id("plain").has_icons);
+        assert!(list[0].has_icons, "the built-in theme draws icons");
     }
 
     /// A screenshot is a path inside the theme's folder or it is nothing: a

@@ -23919,6 +23919,26 @@ rest:
   outcomes evicted after 16 requests, notification ignored —
   `B-D-AIO-OUTCOMES-EVICTED-AND-NEVER-NOTIFIED` (new, fixed with it).
 
+**Sixteenth pass, 2026-09-26 — `sched.rs` (6 sites), lane D.** Against Linux
+6.6's kernel/sched/core.c and glibc 2.39's `sched_getaffinity` wrapper.
+`sched_rr_get_interval` was right, and `sched_setaffinity` was the eleventh
+pass's.
+
+- **`sched_setscheduler`, `sched_setparam`, `sched_getparam`** answered a NULL
+  `param` with `EFAULT`; Linux's `if (!param || pid < 0) return -EINVAL;`
+  answers `EINVAL`, before any copy. They had been `EINVAL` until "Phase
+  210" changed them, reasoning from `copy_from_user` without reading the line
+  above it -- the defect marker again, this time as a phase header.
+- **`sched_getaffinity`** refused every mask shorter than the whole 128-byte
+  `cpu_set_t`, though Linux takes any whole number of `unsigned long`s that
+  covers the CPUs -- 8 bytes on a machine of up to 64 -- and it did not
+  refuse a length that is not such a number. A mask longer than 128 bytes
+  kept its old tail, which glibc's wrapper zeroes.
+- Beside them: `SCHED_RESET_ON_FORK` made any policy unknown, where Linux
+  strips it; and `sched_setscheduler(SCHED_DEADLINE)` was accepted, or
+  `EPERM`, where Linux says `EINVAL` -- a deadline task's parameters come only
+  from `sched_setattr`, and through this call they are zero.
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -23932,9 +23952,9 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-fifteen swept `ioctl.rs`, `semaphore.rs`, `time.rs` and `aio.rs`; next is
-`sched.rs` at six, then `mqueue.rs` and `resolv.rs` at five, and twelve files
-at four, in that order.
+sixteen swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs` and `sched.rs`;
+next are `mqueue.rs` and `resolv.rs` at five, and twelve files at four, in
+that order.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL

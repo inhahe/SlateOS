@@ -1828,6 +1828,10 @@ D's to act on once answered).
       outcomes; errors are reported where glibc reports them; completion is
       notified as `aio_sigevent` asks; `aio_suspend` waits and `aio_cancel`
       checks its descriptor; `O_DSYNC` is `fdatasync`.
+    * the sixteenth pass (`sched.rs`): a NULL `sched_param` is `EINVAL`, as
+      on Linux; `sched_getaffinity` takes any mask length Linux takes and
+      clears the rest; `SCHED_RESET_ON_FORK` is accepted, and
+      `SCHED_DEADLINE` through `sched_setscheduler` is `EINVAL`.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

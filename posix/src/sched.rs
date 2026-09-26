@@ -38,6 +38,11 @@ pub const SCHED_BATCH: i32 = 3;
 pub const SCHED_IDLE: i32 = 5;
 /// Deadline scheduling policy (Linux extension).
 pub const SCHED_DEADLINE: i32 = 6;
+/// Or'd into a policy: the task's children start as `SCHED_OTHER` (Linux's
+/// `<linux/sched.h>`).  `sched_setscheduler` accepts and strips it, as
+/// `_sched_setscheduler` does; this scheduler has no children's policy to
+/// reset.
+pub const SCHED_RESET_ON_FORK: i32 = 0x4000_0000;
 
 // ---------------------------------------------------------------------------
 // sched_param
@@ -125,18 +130,25 @@ pub extern "C" fn sched_getscheduler(pid: i32) -> i32 {
 
 /// Set the scheduling policy and parameters of a process.
 ///
-/// Linux validation order (`kernel/sched/syscalls.c::__sched_setscheduler`):
-///   1. `pid < 0` → `EINVAL`.
-///   2. Unknown policy → `EINVAL`.
-///   3. `param == NULL` → `EFAULT` (Linux: `copy_from_user` returns
-///      `-EFAULT` for an invalid user pointer).
-///   4. `sched_priority` outside `[min(policy), max(policy)]` → `EINVAL`.
-///   5. **Phase 170 / §314**: switching to a real-time policy (`SCHED_FIFO`,
+/// Linux 6.6's order (kernel/sched/core.c: `SYSCALL_DEFINE3(sched_setscheduler)`,
+/// then `do_sched_setscheduler`, `_sched_setscheduler` and
+/// `__sched_setscheduler`):
+///   1. `policy < 0` → `EINVAL`.
+///   2. `param == NULL` or `pid < 0` → `EINVAL`.  A NULL `param` is not a
+///      fault: `do_sched_setscheduler` tests `!param` before it copies.  (It
+///      was `EFAULT` here until 2026-09-26.)
+///   3. `SCHED_RESET_ON_FORK` is stripped from `policy`.  (It made any
+///      policy unknown until 2026-09-26.)
+///   4. Unknown policy → `EINVAL`.
+///   5. `sched_priority` outside `[min(policy), max(policy)]` → `EINVAL`.
+///   6. `SCHED_DEADLINE` → `EINVAL`: a deadline task's runtime, deadline and
+///      period come only from `sched_setattr`; through this call they are
+///      zero, which `__checkparam_dl` refuses before any permission check.
+///      (It was accepted, or `EPERM`, until 2026-09-26.)
+///   7. **Phase 170 / §314**: switching to a real-time policy (`SCHED_FIFO`,
 ///      `SCHED_RR`) is permitted when the requested `sched_priority` is
 ///      within a non-zero `RLIMIT_RTPRIO` **or** the caller holds
-///      `CAP_SYS_NICE`; otherwise `EPERM`.  `SCHED_DEADLINE` has no rlimit
-///      alternative in Linux — `user_check_sched_setscheduler` refuses it
-///      for any unprivileged caller — so it stays a pure capability test.
+///      `CAP_SYS_NICE`; otherwise `EPERM`.
 ///
 ///      The rlimit half is not a formality.  Linux's `RLIMIT_RTPRIO` is the
 ///      *reason* `CAP_SYS_NICE` is only sometimes needed, and it is the
@@ -154,16 +166,13 @@ pub extern "C" fn sched_getscheduler(pid: i32) -> i32 {
 /// `SCHED_*` constant.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedParam) -> i32 {
-    if pid < 0 {
+    if policy < 0 || param.is_null() || pid < 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    let policy = policy & !SCHED_RESET_ON_FORK;
     if !is_valid_policy(policy) {
         errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if param.is_null() {
-        errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: param non-null per the check above; SchedParam is repr(C)
@@ -177,6 +186,12 @@ pub extern "C" fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedP
         return -1;
     };
     if prio < lo || prio > hi {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // `__checkparam_dl`: this call leaves a deadline task's parameters zero,
+    // and a zero deadline is refused.
+    if policy == SCHED_DEADLINE {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -196,14 +211,9 @@ pub extern "C" fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedP
     // Our task is always SCHED_OTHER with rt_priority 0, so `policy !=
     // p->policy` holds for every RT switch and `p->rt_priority` is 0.  Both
     // RT clauses therefore reduce to: the capability is required unless the
-    // limit is non-zero *and* covers the requested priority.
-    let is_rt = matches!(policy, SCHED_FIFO | SCHED_RR);
-    let is_deadline = policy == SCHED_DEADLINE;
-    // SCHED_DEADLINE first: it has no rlimit alternative at all, so an
-    // rlimit that would have covered an RT priority must not leak into it.
-    let needs_cap = if is_deadline {
-        true
-    } else if is_rt {
+    // limit is non-zero *and* covers the requested priority.  (The
+    // `dl_policy` arm is unreachable from this call: step 6 refused it.)
+    let needs_cap = if matches!(policy, SCHED_FIFO | SCHED_RR) {
         let rlim_rtprio = current_rtprio_limit();
         // `prio` passed the [lo, hi] range check above and every RT policy's
         // `lo` is 1, so it is strictly positive here — `unsigned_abs` is an
@@ -248,16 +258,13 @@ fn current_rtprio_limit() -> u64 {
 
 /// Get the scheduling parameters of a process.
 ///
-/// Returns priority 0 (default).  A negative pid is rejected with
-/// `EINVAL` to match Linux's prologue.
+/// Returns priority 0 (default).  A NULL `param` or a negative pid is
+/// `EINVAL`: Linux's prologue is `if (!param || pid < 0) return -EINVAL;`
+/// (a NULL `param` was `EFAULT` until 2026-09-26).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_getparam(pid: i32, param: *mut SchedParam) -> i32 {
-    if pid < 0 {
+    if param.is_null() || pid < 0 {
         errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if param.is_null() {
-        errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: param verified non-null.
@@ -272,15 +279,13 @@ pub extern "C" fn sched_getparam(pid: i32, param: *mut SchedParam) -> i32 {
 /// Linux's `sched_setparam` keeps the current policy and adjusts the
 /// priority.  Because we report every task as `SCHED_OTHER`, the
 /// priority must be 0 (the only valid value for that policy).
-/// A negative pid is rejected with `EINVAL`.
+/// A NULL `param` or a negative pid is `EINVAL`, from
+/// `do_sched_setscheduler`, which `sched_setparam` shares with
+/// `sched_setscheduler` (a NULL `param` was `EFAULT` until 2026-09-26).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_setparam(pid: i32, param: *const SchedParam) -> i32 {
-    if pid < 0 {
+    if param.is_null() || pid < 0 {
         errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if param.is_null() {
-        errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: param non-null per the check above.
@@ -436,24 +441,30 @@ pub extern "C" fn __sched_cpucount(setsize: usize, setp: *const CpuSetT) -> i32 
     i32::try_from(count).unwrap_or(i32::MAX)
 }
 
-/// Get the CPU affinity mask for a process.
+/// Get the CPU affinity mask for a process: every online CPU, since this
+/// scheduler has no per-thread affinity yet.
 ///
-/// Populates `mask` with bits 0..N set, where N is the number of online CPUs
-/// (capped at `CPU_SETSIZE`).  Our scheduler doesn't yet support per-thread
-/// affinity restriction, so every thread can be dispatched to any online CPU.
+/// Linux 6.6's `SYSCALL_DEFINE3(sched_getaffinity)` and glibc 2.39's wrapper
+/// (sysdeps/unix/sysv/linux/sched_getaffinity.c), in their order:
+///   1. A mask too short for the CPUs (`len * 8 < nr_cpu_ids`), or not a
+///      whole number of `unsigned long`s → `EINVAL`.
+///   2. `pid` not found → `ESRCH` (negative pids fall into this case, as
+///      `find_task_by_vpid` cannot resolve them).
+///   3. The kernel writes `min(len, cpumask_size())` bytes -- a NULL mask
+///      faults, `EFAULT` -- and glibc zeroes the rest of the caller's
+///      `cpusetsize` bytes.
 ///
-/// Validation order matches Linux's `SYSCALL_DEFINE3(sched_getaffinity)`
-/// in `kernel/sched/syscalls.c`:
-///   1. `cpusetsize` too small → `EINVAL` (Linux: `len*8 < nr_cpu_ids`)
-///   2. `pid` not found → `ESRCH` (Linux: `find_process_by_pid` returns NULL,
-///      which `sched_getaffinity` maps to `-ESRCH`; negative pids fall into
-///      this case because `find_task_by_vpid` cannot resolve them).
-///   3. `mask` unwritable → `EFAULT` (Linux: late `copy_to_user` failure).
-///      Our stub checks for NULL up front; a real implementation would
-///      catch this on the write.
+/// Until 2026-09-26 anything shorter than the whole 128-byte `cpu_set_t` was
+/// `EINVAL`, though Linux takes 8 bytes on a machine of up to 64 CPUs (what
+/// `CPU_ALLOC_SIZE(n)` gives for small `n`), and a longer mask had its tail
+/// left as it was.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_getaffinity(pid: i32, cpusetsize: usize, mask: *mut CpuSetT) -> i32 {
-    if cpusetsize < core::mem::size_of::<CpuSetT>() {
+    // glibc passes `MIN (INT_MAX, cpusetsize)` as the kernel's `unsigned int
+    // len`.
+    let len = cpusetsize.min(i32::MAX as usize);
+    let ncpus = online_cpu_count().min(CPU_SETSIZE_BITS);
+    if len.saturating_mul(8) < ncpus || len % 8 != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -462,34 +473,31 @@ pub extern "C" fn sched_getaffinity(pid: i32, cpusetsize: usize, mask: *mut CpuS
         errno::set_errno(errno::ESRCH);
         return -1;
     }
+    // `len` is at least 8 here (a positive multiple of 8, since there is at
+    // least one CPU), so the kernel's copy would touch the mask.
     if mask.is_null() {
-        // Linux: copy_to_user with bad user pointer → -EFAULT.
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-
-    let ncpus = online_cpu_count().min(CPU_SETSIZE_BITS);
-
-    // SAFETY: mask is non-null and cpusetsize is large enough.
-    unsafe {
-        // Zero the mask first.
-        let bytes = mask.cast::<u8>();
-        let mut i: usize = 0;
-        while i < core::mem::size_of::<CpuSetT>() {
-            *bytes.add(i) = 0;
-            i = i.wrapping_add(1);
-        }
-        // Set bits 0..ncpus.
-        let mut cpu: usize = 0;
-        while cpu < ncpus {
-            let word = cpu / 64;
-            let bit = cpu % 64;
-            (*mask).bits[word] |= 1u64 << bit;
-            cpu = cpu.wrapping_add(1);
-        }
+    let out = mask.cast::<u8>();
+    for i in 0..cpusetsize {
+        // SAFETY: the caller's contract makes `mask` writable for
+        // `cpusetsize` bytes, which may be more or fewer than a `CpuSetT`.
+        unsafe { out.add(i).write(affinity_byte(i, ncpus)) };
     }
-
     0
+}
+
+/// Byte `i` of a mask holding CPUs `0..ncpus`.
+fn affinity_byte(i: usize, ncpus: usize) -> u8 {
+    let first = i.saturating_mul(8);
+    if first >= ncpus {
+        0
+    } else if ncpus - first >= 8 {
+        0xFF
+    } else {
+        (1u8 << (ncpus - first)) - 1
+    }
 }
 
 /// Set the CPU affinity mask for a process.
@@ -858,14 +866,50 @@ mod tests {
         assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const param), 0);
     }
 
+    /// `do_sched_setscheduler` tests `!param` before it copies: `EINVAL`,
+    /// not a fault -- ahead of the policy too, and alongside a bad pid.
     #[test]
     fn test_sched_setscheduler_null_param() {
-        assert_eq!(sched_setscheduler(0, SCHED_RR, core::ptr::null()), -1);
+        for (pid, policy) in [(0, SCHED_RR), (0, 99), (-1, SCHED_OTHER)] {
+            errno::set_errno(0);
+            assert_eq!(sched_setscheduler(pid, policy, core::ptr::null()), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
     }
 
     #[test]
     fn test_sched_setparam_null_param() {
+        errno::set_errno(0);
         assert_eq!(sched_setparam(0, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// `SCHED_RESET_ON_FORK` rides on a policy and is stripped; it is not a
+    /// policy of its own, and `sched_get_priority_*` do not know it.
+    #[test]
+    fn test_sched_setscheduler_reset_on_fork() {
+        let zero = SchedParam::default();
+        assert_eq!(
+            sched_setscheduler(0, SCHED_OTHER | SCHED_RESET_ON_FORK, &raw const zero),
+            0
+        );
+        errno::set_errno(0);
+        assert_eq!(
+            sched_setscheduler(0, 4 | SCHED_RESET_ON_FORK, &raw const zero),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(sched_get_priority_max(SCHED_RR | SCHED_RESET_ON_FORK), -1);
+    }
+
+    /// Through `sched_setscheduler` a deadline task's parameters are zero,
+    /// which `__checkparam_dl` refuses before any permission check.
+    #[test]
+    fn test_sched_setscheduler_deadline_is_einval() {
+        let zero = SchedParam::default();
+        errno::set_errno(0);
+        assert_eq!(sched_setscheduler(0, SCHED_DEADLINE, &raw const zero), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     // -- sched_getparam --
@@ -883,8 +927,10 @@ mod tests {
 
     #[test]
     fn test_sched_getparam_null() {
+        errno::set_errno(0);
         let ret = sched_getparam(0, core::ptr::null_mut());
         assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     // -- sched_setparam --
@@ -981,6 +1027,42 @@ mod tests {
         let ret = sched_getaffinity(0, 128, core::ptr::null_mut());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// Linux takes any whole number of `unsigned long`s that covers the
+    /// CPUs: 8 bytes here (`CPU_ALLOC_SIZE(1)`), written and no further.
+    #[test]
+    fn test_sched_getaffinity_takes_a_short_mask() {
+        let mut buf = [0xAAu8; 16];
+        assert_eq!(sched_getaffinity(0, 8, buf.as_mut_ptr().cast()), 0);
+        assert_eq!(buf[0], 1, "CPU 0, the host's only one");
+        assert!(buf[1..8].iter().all(|&b| b == 0));
+        assert!(
+            buf[8..].iter().all(|&b| b == 0xAA),
+            "nothing past the 8 bytes"
+        );
+        errno::set_errno(0);
+        assert_eq!(sched_getaffinity(0, 12, buf.as_mut_ptr().cast()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL, "not a whole u64");
+    }
+
+    /// A mask longer than a `cpu_set_t` (`CPU_ALLOC` of many CPUs) is zeroed
+    /// to its end, as glibc's wrapper zeroes what the kernel did not write.
+    #[test]
+    fn test_sched_getaffinity_clears_a_long_mask() {
+        let mut buf = [0xFFu8; 256];
+        assert_eq!(sched_getaffinity(0, 256, buf.as_mut_ptr().cast()), 0);
+        assert_eq!(buf[0], 1);
+        assert!(buf[1..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_affinity_byte() {
+        assert_eq!(affinity_byte(0, 1), 0x01);
+        assert_eq!(affinity_byte(0, 8), 0xFF);
+        assert_eq!(affinity_byte(1, 12), 0x0F);
+        assert_eq!(affinity_byte(1, 8), 0);
+        assert_eq!(affinity_byte(usize::MAX, 8), 0);
     }
 
     #[test]
@@ -1977,7 +2059,7 @@ mod tests {
     fn test_sched_setscheduler_workflow_each_policy_valid_priority() {
         // For each recognised policy, the lowest and highest in-range
         // priorities must succeed.
-        for &p in &[SCHED_OTHER, SCHED_BATCH, SCHED_IDLE, SCHED_DEADLINE] {
+        for &p in &[SCHED_OTHER, SCHED_BATCH, SCHED_IDLE] {
             // Range [0, 0] → only 0.
             let param = SchedParam {
                 sched_priority: 0,
@@ -2303,10 +2385,11 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
-        /// SCHED_DEADLINE requires CAP_SYS_NICE unconditionally on
-        /// Linux (no rlim fallback).
+        /// SCHED_DEADLINE through `sched_setscheduler` is EINVAL before
+        /// the capability is looked at (`__checkparam_dl`).  This asserted
+        /// EPERM until 2026-09-26.
         #[test]
-        fn test_sched_setscheduler_phase170_deadline_no_cap_eperm() {
+        fn test_sched_setscheduler_phase170_deadline_no_cap_einval() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_nice();
             // SCHED_DEADLINE's priority range is (0, 0).
@@ -2316,7 +2399,7 @@ mod tests {
             };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_DEADLINE, &raw const p), -1,);
-            assert_eq!(errno::get_errno(), errno::EPERM);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
         // -- Ordering matrix ----------------------------------------------
@@ -2351,15 +2434,15 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
-        /// EFAULT on NULL param beats EPERM (Linux: copy_from_user
-        /// fails before the cap check runs).
+        /// A NULL param is EINVAL, and beats EPERM: `do_sched_setscheduler`
+        /// tests `!param` before anything else.  (EFAULT until 2026-09-26.)
         #[test]
-        fn test_sched_setscheduler_phase170_efault_null_beats_eperm() {
+        fn test_sched_setscheduler_phase170_null_param_einval_beats_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_nice();
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_FIFO, core::ptr::null()), -1,);
-            assert_eq!(errno::get_errno(), errno::EFAULT);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
         /// EINVAL on out-of-range priority beats EPERM (Linux
@@ -2513,7 +2596,8 @@ mod tests {
                 sched_priority: 0,
                 ..SchedParam::default()
             };
-            assert_eq!(sched_setscheduler(0, SCHED_DEADLINE, &raw const p_dl), 0,);
+            // The capability does not make a zero deadline valid.
+            assert_eq!(sched_setscheduler(0, SCHED_DEADLINE, &raw const p_dl), -1,);
         }
 
         // -- Cross-checks -------------------------------------------------
@@ -2641,9 +2725,9 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
-        /// `SCHED_DEADLINE` has no rlimit alternative in Linux
-        /// (`dl_policy(policy)` jumps straight to the capability test), so a
-        /// generous `RLIMIT_RTPRIO` must not leak into it.
+        /// A generous `RLIMIT_RTPRIO` does not make `SCHED_DEADLINE`
+        /// acceptable through this call: it is refused as a parameter error
+        /// before either the limit or the capability is consulted.
         #[test]
         fn test_sched_setscheduler_deadline_ignores_the_rtprio_rlimit() {
             let _g = CapGuard::snapshot();
@@ -2657,10 +2741,10 @@ mod tests {
             assert_eq!(
                 sched_setscheduler(0, SCHED_DEADLINE, &raw const p),
                 -1,
-                "SCHED_DEADLINE is capability-only on Linux however high \
-                 RLIMIT_RTPRIO is",
+                "SCHED_DEADLINE through sched_setscheduler is EINVAL however \
+                 high RLIMIT_RTPRIO is",
             );
-            assert_eq!(errno::get_errno(), errno::EPERM);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
         /// The cold-start limit is `0`, which leaves the capability as the
@@ -2938,41 +3022,41 @@ mod tests {
     }
 
     // =================================================================
-    // Phase 210 — NULL-pointer errno: EINVAL → EFAULT cleanup
+    // Phase 210 — NULL-pointer errno, and its reversal on 2026-09-26
     //
-    // Linux returns EFAULT for NULL user-space pointers via
-    // `copy_from_user` / `copy_to_user`.  Our stubs originally used
-    // EINVAL because the rest of the sched module did so.  Phase 210
-    // corrects these four functions to match Linux:
-    //   sched_setscheduler, sched_getparam, sched_setparam,
-    //   sched_rr_get_interval.
-    //
-    // sched_getaffinity / sched_setaffinity already used EFAULT since
-    // Phase 118.
+    // Phase 210 turned these functions' EINVAL for a NULL pointer into
+    // EFAULT, reasoning that Linux's `copy_from_user`/`copy_to_user`
+    // would fault.  For three of the four, Linux never gets that far:
+    // `do_sched_setscheduler` (sched_setscheduler, sched_setparam) and
+    // `sched_getparam` open with `if (!param || pid < 0) return
+    // -EINVAL;`.  So a NULL `param` is EINVAL, as it was before Phase
+    // 210.  `sched_rr_get_interval` really does reach `put_timespec64`,
+    // and keeps its EFAULT.
     // =================================================================
 
-    /// sched_setscheduler: NULL param → EFAULT (not EINVAL).
+    /// sched_setscheduler: NULL param → EINVAL, as Linux's
+    /// `do_sched_setscheduler` answers it.
     #[test]
-    fn test_phase210_setscheduler_null_param_efault() {
+    fn test_phase210_setscheduler_null_param_einval() {
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, SCHED_RR, core::ptr::null()), -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
-    /// sched_getparam: NULL param → EFAULT.
+    /// sched_getparam: NULL param → EINVAL.
     #[test]
-    fn test_phase210_getparam_null_param_efault() {
+    fn test_phase210_getparam_null_param_einval() {
         errno::set_errno(0);
         assert_eq!(sched_getparam(0, core::ptr::null_mut()), -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
-    /// sched_setparam: NULL param → EFAULT.
+    /// sched_setparam: NULL param → EINVAL.
     #[test]
-    fn test_phase210_setparam_null_param_efault() {
+    fn test_phase210_setparam_null_param_einval() {
         errno::set_errno(0);
         assert_eq!(sched_setparam(0, core::ptr::null()), -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     /// sched_rr_get_interval: NULL tp → EFAULT.
@@ -3029,10 +3113,10 @@ mod tests {
     /// state from the failed NULL-pointer path.
     #[test]
     fn test_phase210_recovery_after_efault() {
-        // sched_getparam: EFAULT then success.
+        // sched_getparam: EINVAL then success.
         errno::set_errno(0);
         assert_eq!(sched_getparam(0, core::ptr::null_mut()), -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
         let mut param = SchedParam {
             sched_priority: 99,
             ..SchedParam::default()
@@ -3041,10 +3125,10 @@ mod tests {
         assert_eq!(sched_getparam(0, &raw mut param), 0);
         assert_eq!(param.sched_priority, 0);
 
-        // sched_setparam: EFAULT then success.
+        // sched_setparam: EINVAL then success.
         errno::set_errno(0);
         assert_eq!(sched_setparam(0, core::ptr::null()), -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
         let p = SchedParam {
             sched_priority: 0,
             ..SchedParam::default()

@@ -2315,6 +2315,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pngwrite"
+version = "0.1.0"
+dependencies = [
+ "crc32",
+ "deflate",
+ "imagecodec",
+]
+
+[[package]]
 name = "podcast"
 version = "0.1.0"
 dependencies = [

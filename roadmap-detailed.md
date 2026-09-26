@@ -1713,7 +1713,7 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
       asking for the same transition needs the matching `power.*` capability —
       §1.5 → Capability Types — Power / Session Control)_
 - [x] Input field for finding and running apps — 2026-09-25: typing with the start menu open searches it (the launcher's ranking), arrows and Enter choose, and Enter with nothing found runs the text as the Run box would.
-- [ ] Start menu icon: round, shrunken version of the XOR logo (`xor2.png`)
+- [~] Start menu icon: round, shrunken version of the XOR logo (`xor2.png`) — *blocked 2026-09-26: `xor2.png` is not in the repository (`open-questions.md` C-Q27). The start button draws the icon theme's `start-here`, a plain four-square stand-in in the built-in set, which a theme can replace.*
 
 _Kexec-style OS reboot without rebooting the PC, available as a power menu option.
 Gated for programs by `power.reload` (§1.5), which is deliberately not implied by

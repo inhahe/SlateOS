@@ -308,6 +308,27 @@ costs the other two lanes their merges.
 the head-of-line witness entry: `socket.rs:356`, `netstack_client.rs:158`, and
 `services/netstack/src/main.rs:2594`.*
 
+## C-Q27 — [C] The start button should be the XOR logo, but the logo is not in the repository. Can you add it? — Status: OPEN (raised 2026-09-26)
+
+**In short:** the design says the start button is "a round, shrunken version
+of the XOR logo (`xor2.png`)". No file of that name is in the repository, on
+any branch, so the start button draws a stand-in: a plain four-square picture
+from the built-in icon set. It is not a decision to make so much as a file to
+supply.
+
+**What would happen with it:** the logo would be drawn once as a small SVG
+(a vector picture, so it stays sharp at every size) and shipped as the
+built-in theme's `start-here` icon -- the name icon sets use for "the start
+menu" -- so any theme can still draw its own instead.
+
+| Option | What changes |
+|---|---|
+| **A. You add `xor2.png` (or an SVG of it) to the repository root** | The start button becomes the logo, drawn to match. |
+| **B. The four squares stay** | Nothing: the stand-in remains the start button. |
+
+**If this is never answered:** nothing breaks and nothing gets worse. The start
+button works and looks like a start button, just not like this system's own.
+
 ## C-Q26 — [C] Four programs have a preference with nowhere to keep it. Where do user settings live? — Status: OPEN (raised 2026-09-18)
 
 **In short:** several programs have a setting that ought to be yours to

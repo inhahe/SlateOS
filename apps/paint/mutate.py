@@ -29,6 +29,12 @@ CLOSE = "closing_over_unsaved_changes_asks_and_each_answer_is_kept"
 REPLACE = "new_and_open_ask_before_replacing_the_picture"
 
 # (name, old, new, [tests that must fail])
+JPEG = "a_jpeg_is_never_saved_over"
+NAMED = "a_save_is_the_format_its_name_says"
+TRANSPARENT = "a_saved_bmp_keeps_its_transparency"
+CROPPED = "a_picture_wider_than_any_canvas_is_cropped"
+LISTS = "the_open_dialog_lists_pictures"
+
 MUTATIONS = [
     (
         "an edit does not mark the picture",
@@ -53,8 +59,8 @@ MUTATIONS = [
     ),
     (
         "Ctrl+S asks where every time",
-        "            Some(path) => self.file_status = Some(self.save_file(&path)),",
-        "            Some(_) => self.ask_where_to_save(PickerFor::Save),",
+        "                self.file_status = Some(self.save_file(&path));\n            }",
+        "                let _ = &path;\n                self.ask_where_to_save(PickerFor::Save);\n            }",
         [MARKS],
     ),
     (
@@ -113,6 +119,61 @@ MUTATIONS = [
         "                self.dirty = false;\n",
         "                // is still one undo away, and undoing marks it again.\n",
         [REPLACE],
+    ),
+    # -- pictures of every format --------------------------------------------
+    (
+        "a picture Paint cannot write is saved over",
+        "            Some(path) if SaveAs::of(&path).is_some() => {",
+        "            Some(path) => {",
+        [JPEG],
+    ),
+    (
+        "the offered name keeps a format Paint cannot write",
+        "                    file.with_extension(\"png\").into_os_string()",
+        "                    file.as_os_str().to_owned()",
+        [JPEG],
+    ),
+    (
+        "a name with no extension is refused",
+        "        let path = if path.extension().is_none() {",
+        "        let path = if false {",
+        [NAMED],
+    ),
+    (
+        "any extension is written",
+        "        let Some(format) = SaveAs::of(&path) else {\n            return String::from(\"Paint saves PNG and BMP files: name it .png or .bmp\");\n        };",
+        "        let format = SaveAs::of(&path).unwrap_or(SaveAs::Png);",
+        [NAMED],
+    ),
+    (
+        "a BMP is written as a PNG",
+        "            SaveAs::Bmp => encode_bmp(&flat),",
+        "            SaveAs::Bmp => pngwrite::encode(flat.width(), flat.height(), &argb_of(&flat))\n                .unwrap_or_default(),",
+        [NAMED],
+    ),
+    (
+        "a BMP's alpha mask is empty",
+        "    for mask in [0x00FF_0000_u32, 0x0000_FF00, 0x0000_00FF, 0xFF00_0000] {",
+        "    for mask in [0x00FF_0000_u32, 0x0000_FF00, 0x0000_00FF, 0] {",
+        [TRANSPARENT],
+    ),
+    (
+        "a BMP's colours are written red first",
+        "                out.extend_from_slice(&[c.b, c.g, c.r, c.a]);",
+        "                out.extend_from_slice(&[c.r, c.g, c.b, c.a]);",
+        [TRANSPARENT, "test_bmp_encode_decode_roundtrip"],
+    ),
+    (
+        "a picture wider than any canvas is not cropped",
+        "            full.copy_region(0, 0, w, h)",
+        "            full",
+        [CROPPED],
+    ),
+    (
+        "the open dialog lists every file",
+        "                        .with_initial_path(guitk::dialog::FilePicker::default_start())\n                        .with_filter(\"Pictures\", &patterns),",
+        "                        .with_initial_path(guitk::dialog::FilePicker::default_start()),",
+        [LISTS],
     ),
     (
         "what a save did is drawn nowhere",

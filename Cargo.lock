@@ -2178,9 +2178,10 @@ name = "paint"
 version = "0.1.0"
 dependencies = [
  "appearance",
- "byteread",
  "guitk",
+ "imagecodec",
  "oswindow",
+ "pngwrite",
  "safeio",
  "scratchdir",
  "unsaved",
@@ -2656,7 +2657,9 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "guitk",
+ "imagecodec",
  "oswindow",
+ "pngwrite",
  "safeio",
  "scratchdir",
 ]

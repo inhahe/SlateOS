@@ -62,3 +62,14 @@ displays BMPs as soon as this reaches `main`.
   opens any BMP (and PNG, JPEG, GIF, WebP) as straight-alpha `0xAARRGGBB`
   pixels, row by row. `encode_bmp` is unaffected: `imagecodec` does not write
   files.
+
+**Lane E, 2026-09-26: done.** The image viewer's two items were done earlier
+(`decode_failure` names what `imagecodec` says; sizes come from
+`imagecodec::dimensions`). Paint's private reader is gone: it opens every
+picture `imagecodec` decodes, cropped past its widest canvas, and saves PNG
+(the new `apps/pngwrite`) or BMP by the name's extension -- never over a
+format it does not write. One thing `encode_bmp` was *not* unaffected by:
+it wrote the alpha into a 40-byte header's fourth byte, which `imagecodec`
+(following Chrome) rightly shows opaque, so a transparent background came
+back black. It writes a `BITMAPV5HEADER` with an alpha mask now, as GIMP and
+Windows do, and a saved BMP reads back through `imagecodec` pixel for pixel.

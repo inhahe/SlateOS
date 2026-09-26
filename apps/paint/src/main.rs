@@ -1086,113 +1086,112 @@ pub fn default_palette() -> Vec<Color> {
 }
 
 // ============================================================================
-// BMP file format (32-bit BGRA)
+// Picture files
 // ============================================================================
 
-/// Encodes a pixel buffer as a 32-bit BMP file.
+/// The formats Paint writes, chosen by a file name's extension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveAs {
+    /// PNG: compressed, lossless, with transparency -- the default.
+    Png,
+    /// BMP: uncompressed, 32 bits a pixel, with transparency.
+    Bmp,
+}
+
+impl SaveAs {
+    /// The format `path` names, if it is one Paint writes: `.png` or `.bmp`,
+    /// in any case.
+    #[must_use]
+    pub fn of(path: &Path) -> Option<Self> {
+        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+        match ext.as_str() {
+            "png" => Some(Self::Png),
+            "bmp" => Some(Self::Bmp),
+            _ => None,
+        }
+    }
+}
+
+/// The extensions of the pictures Paint opens: everything `imagecodec`
+/// decodes.
+const OPENS: &[&str] = &[
+    "png", "bmp", "jpg", "jpeg", "gif", "webp", "ico", "cur", "tif", "tiff",
+];
+
+/// The most bytes of picture file read to open one.
+const MAX_PICTURE_BYTES: usize = 256 * 1024 * 1024;
+
+/// A canvas's pixels as `0xAARRGGBB`, straight alpha, row by row: what
+/// `pngwrite` takes and `imagecodec` gives.
+fn argb_of(buf: &Canvas) -> Vec<u32> {
+    buf.pixels()
+        .iter()
+        .map(|c| u32::from_be_bytes([c.a, c.r, c.g, c.b]))
+        .collect()
+}
+
+/// Encodes a canvas as a 32-bit BMP file, transparency and all.
+///
+/// A `BITMAPV5HEADER` with bit fields and an alpha mask, as GIMP and Windows
+/// write one. It was a 40-byte `BITMAPINFOHEADER` with the alpha in the
+/// fourth byte -- which every reader that follows Chrome, `imagecodec`
+/// included, shows opaque, since most files that fill that byte did not mean
+/// it as alpha. A picture saved with a transparent background came back with
+/// a black one.
 pub fn encode_bmp(buf: &Canvas) -> Vec<u8> {
+    const FILE_HEADER: usize = 14;
+    const V5_HEADER: u32 = 124;
     let w = buf.width();
     let h = buf.height();
-    let row_size = (w as usize).saturating_mul(4);
-    let pixel_data_size = row_size.saturating_mul(h as usize);
-    let file_size = pixel_data_size.saturating_add(54);
+    let pixel_data_size = (w as usize).saturating_mul(4).saturating_mul(h as usize);
+    let offset = FILE_HEADER.saturating_add(V5_HEADER as usize);
+    let file_size = pixel_data_size.saturating_add(offset);
 
     let mut out = Vec::with_capacity(file_size);
 
-    // BMP file header (14 bytes)
-    out.push(b'B');
-    out.push(b'M');
-    out.extend_from_slice(&(file_size as u32).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes()); // reserved1
-    out.extend_from_slice(&0u16.to_le_bytes()); // reserved2
-    out.extend_from_slice(&54u32.to_le_bytes()); // pixel data offset
+    // File header.
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&u32::try_from(file_size).unwrap_or(u32::MAX).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // reserved
+    out.extend_from_slice(&u32::try_from(offset).unwrap_or(u32::MAX).to_le_bytes());
 
-    // DIB header (BITMAPINFOHEADER, 40 bytes)
-    out.extend_from_slice(&40u32.to_le_bytes()); // header size
-    out.extend_from_slice(&(w as i32).to_le_bytes()); // width
-    out.extend_from_slice(&(h as i32).to_le_bytes()); // height (positive = bottom-up)
+    // BITMAPV5HEADER.
+    out.extend_from_slice(&V5_HEADER.to_le_bytes());
+    out.extend_from_slice(&i32::try_from(w).unwrap_or(i32::MAX).to_le_bytes());
+    // Positive: bottom row first.
+    out.extend_from_slice(&i32::try_from(h).unwrap_or(i32::MAX).to_le_bytes());
     out.extend_from_slice(&1u16.to_le_bytes()); // planes
     out.extend_from_slice(&32u16.to_le_bytes()); // bits per pixel
-    out.extend_from_slice(&0u32.to_le_bytes()); // compression (BI_RGB)
-    out.extend_from_slice(&(pixel_data_size as u32).to_le_bytes());
-    out.extend_from_slice(&2835u32.to_le_bytes()); // h resolution (72 DPI)
-    out.extend_from_slice(&2835u32.to_le_bytes()); // v resolution
-    out.extend_from_slice(&0u32.to_le_bytes()); // palette colors
-    out.extend_from_slice(&0u32.to_le_bytes()); // important colors
+    out.extend_from_slice(&3u32.to_le_bytes()); // BI_BITFIELDS
+    out.extend_from_slice(
+        &u32::try_from(pixel_data_size)
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(&2835u32.to_le_bytes()); // 72 dpi across
+    out.extend_from_slice(&2835u32.to_le_bytes()); // and down
+    out.extend_from_slice(&0u32.to_le_bytes()); // palette colours
+    out.extend_from_slice(&0u32.to_le_bytes()); // important colours
+    // Red, green, blue and alpha masks over the little-endian word.
+    for mask in [0x00FF_0000_u32, 0x0000_FF00, 0x0000_00FF, 0xFF00_0000] {
+        out.extend_from_slice(&mask.to_le_bytes());
+    }
+    out.extend_from_slice(b"BGRs"); // LCS_sRGB, written as a little-endian word
+    out.extend_from_slice(&[0; 36]); // endpoints, unused for sRGB
+    out.extend_from_slice(&[0; 12]); // gamma, likewise
+    out.extend_from_slice(&4u32.to_le_bytes()); // LCS_GM_IMAGES
+    out.extend_from_slice(&[0; 12]); // no profile; reserved
 
-    // Pixel data (bottom-up, BGRA)
+    // Pixel data, bottom-up, blue-green-red-alpha.
     for y in (0..h).rev() {
         for x in 0..w {
             if let Some(c) = buf.get(x, y) {
-                out.push(c.b);
-                out.push(c.g);
-                out.push(c.r);
-                out.push(c.a);
+                out.extend_from_slice(&[c.b, c.g, c.r, c.a]);
             }
         }
     }
 
     out
-}
-
-/// Decodes a 32-bit BMP file into a pixel buffer. Returns None on invalid data.
-///
-/// Every field here sits at a fixed offset in the first 54 bytes, and the old
-/// code established that with one `data.len() < 54` check and then restated it
-/// at each of the twenty-two byte indexes that followed. `byteread` states the
-/// bound where the read happens, which is the only place it can be wrong.
-pub fn decode_bmp(data: &[u8]) -> Option<Canvas> {
-    if !byteread::starts_with(data, b"BM") {
-        return None;
-    }
-
-    let pixel_offset = byteread::u32_le_at(data, 10)? as usize;
-    let width = byteread::i32_le_at(data, 18)?;
-    let height = byteread::i32_le_at(data, 22)?;
-    let bpp = byteread::u16_le_at(data, 28)?;
-
-    if width <= 0 || bpp != 32 {
-        return None;
-    }
-
-    let w = width.unsigned_abs();
-    let bottom_up = height > 0;
-    let h = height.unsigned_abs();
-
-    // Width, height and the pixel-data offset are read straight out of the
-    // file, so a crafted BMP picks all three, and `offset + w * 4 * h` is the
-    // bound that every read below depends on. That product does not in fact
-    // wrap on this target — three 32-bit fields cannot exceed a 64-bit `usize`
-    // — but that is an accident of `usize` being twice the width of the fields,
-    // not something the expression says, and it stops being true the moment
-    // this is built for a 32-bit target, where a wrapped `needed` is *small*
-    // and sails through the length check that exists to reject it. Checked
-    // arithmetic states the requirement instead of relying on the coincidence.
-    let row_bytes = (w as usize).checked_mul(4)?;
-    let needed = row_bytes
-        .checked_mul(h as usize)?
-        .checked_add(pixel_offset)?;
-    if data.len() < needed {
-        return None;
-    }
-
-    let mut buf = Canvas::transparent(w, h);
-
-    for row in 0..h {
-        let src_row = if bottom_up {
-            h.saturating_sub(1).saturating_sub(row)
-        } else {
-            row
-        };
-        let row_start = pixel_offset.checked_add((src_row as usize).checked_mul(row_bytes)?)?;
-        for col in 0..w {
-            let off = row_start.checked_add((col as usize).checked_mul(4)?)?;
-            let [b, g_val, r, a] = byteread::array_at::<4>(data, off)?;
-            buf.set(col, row, Color::rgba(r, g_val, b, a));
-        }
-    }
-
-    Some(buf)
 }
 
 // ============================================================================
@@ -2016,10 +2015,10 @@ impl PaintApp {
     /// that [`MAX_CANVAS_DIMENSION`] documents holds for all of them rather
     /// than for the ones someone remembered.
     ///
-    /// The BMP path is why this is not merely tidiness: `decode_bmp` bounds its
-    /// dimensions against the file's own length, which is correct for the
-    /// decoder and still admits a very wide canvas from a very large file. A
-    /// 1 GB file can legitimately claim to be 256 million pixels across.
+    /// Opening a picture is why this is not merely tidiness: `imagecodec`
+    /// refuses one past [`MAX_CANVAS_PIXELS`], and still admits one wider
+    /// than [`MAX_CANVAS_DIMENSION`] -- a panorama 20,000 pixels across and
+    /// 1,000 high is 20 megapixels -- which `load_picture` then crops.
     ///
     /// Clamps rather than refuses: a canvas is not data the user typed, it is a
     /// picture they are trying to open, and cropping it is a better answer than
@@ -2499,29 +2498,71 @@ impl PaintApp {
     // File I/O
     // ========================================================================
 
-    /// Saves the flattened image as a BMP to the given path.
+    /// Saves the flattened picture to `path` as `format`.
     ///
     /// Written through [`safeio::write_atomically`], not `fs::write`, which
     /// truncates first: a save interrupted part-way used to leave the image on
     /// disk as a fragment. An image is one blob behind a header, so a partial
     /// write is not a partially-recovered picture — it is an unopenable file.
-    pub fn save_bmp(&self, path: &Path) -> Result<(), String> {
+    pub fn save_picture(&self, path: &Path, format: SaveAs) -> Result<(), String> {
         let flat = self.flatten();
-        let data = encode_bmp(&flat);
-        safeio::write_atomically(path, &data).map_err(|e| format!("Failed to save BMP: {e}"))
+        let data = match format {
+            SaveAs::Bmp => encode_bmp(&flat),
+            SaveAs::Png => pngwrite::encode(flat.width(), flat.height(), &argb_of(&flat))
+                .map_err(|e| format!("Failed to save PNG: {e}"))?,
+        };
+        safeio::write_atomically(path, &data).map_err(|e| format!("Failed to save: {e}"))
     }
 
-    /// Loads a BMP file into the active layer (replaces its content).
-    pub fn load_bmp(&mut self, path: &Path) -> Result<(), String> {
-        let data = std::fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
-        let buf = decode_bmp(&data).ok_or_else(|| "Invalid BMP format".to_string())?;
+    /// Saves the flattened image as a BMP to the given path.
+    pub fn save_bmp(&self, path: &Path) -> Result<(), String> {
+        self.save_picture(path, SaveAs::Bmp)
+    }
 
-        self.push_history("load BMP");
-        self.set_canvas_size(buf.width(), buf.height());
+    /// Opens the picture at `path` -- any format `imagecodec` decodes -- as
+    /// the only layer, in place of the picture that was here.
+    ///
+    /// It read only BMP, and only its own kind: 32 bits a pixel, uncompressed,
+    /// the fourth byte taken as alpha. Everything else said "Invalid BMP
+    /// format", a photograph included.
+    pub fn load_picture(&mut self, path: &Path) -> Result<(), String> {
+        let read = safeio::read_capped(path, MAX_PICTURE_BYTES)
+            .map_err(|e| format!("Failed to read file: {e}"))?;
+        if read.truncated {
+            return Err(format!(
+                "The file is larger than {} MiB",
+                MAX_PICTURE_BYTES / (1024 * 1024)
+            ));
+        }
+        let limits = imagecodec::Limits {
+            max_pixels: MAX_CANVAS_PIXELS,
+            ..imagecodec::Limits::default()
+        };
+        let image = imagecodec::decode(&read.bytes, limits).map_err(|e| e.to_string())?;
+        let pixels: Vec<Color> = image
+            .pixels
+            .iter()
+            .map(|p| {
+                let [a, r, g, b] = p.to_be_bytes();
+                Color::rgba(r, g, b, a)
+            })
+            .collect();
+        let full = Canvas::from_pixels(image.width, image.height, pixels)
+            .ok_or_else(|| String::from("The picture's size and its pixels disagree"))?;
+
+        self.push_history("open picture");
+        // Past the widest canvas, the picture is cropped to it rather than
+        // refused (see `set_canvas_size`).
+        let (w, h) = self.set_canvas_size(image.width, image.height);
+        let buf = if (w, h) == (image.width, image.height) {
+            full
+        } else {
+            full.copy_region(0, 0, w, h)
+        };
 
         // Replace all layers with a single background layer
         self.layers.clear();
-        let mut layer = Layer::new("Background".to_string(), buf.width(), buf.height());
+        let mut layer = Layer::new("Background".to_string(), w, h);
         layer.pixels = buf;
         self.layers.push(layer);
         self.active_layer = 0;
@@ -2547,7 +2588,7 @@ impl PaintApp {
 
     /// Open `path` in place of this picture. What to say about it.
     fn open_file(&mut self, path: &Path) -> String {
-        match self.load_bmp(path) {
+        match self.load_picture(path) {
             Ok(()) => {
                 self.document_path = Some(path.to_path_buf());
                 // The picture is the file's, as it is on disk.
@@ -2559,8 +2600,21 @@ impl PaintApp {
     }
 
     /// Save to `path`, which becomes this picture's file. What to say.
+    ///
+    /// The format is the name's: `.png` or `.bmp`. A name with no extension
+    /// is saved as a PNG, with `.png` added; one naming a format Paint does
+    /// not write is refused, rather than written as something it is not.
     fn save_file(&mut self, path: &Path) -> String {
-        match self.save_bmp(path) {
+        let path = if path.extension().is_none() {
+            path.with_extension("png")
+        } else {
+            path.to_path_buf()
+        };
+        let Some(format) = SaveAs::of(&path) else {
+            return String::from("Paint saves PNG and BMP files: name it .png or .bmp");
+        };
+        let path = path.as_path();
+        match self.save_picture(path, format) {
             Ok(()) => {
                 self.document_path = Some(path.to_path_buf());
                 self.dirty = false;
@@ -2575,10 +2629,16 @@ impl PaintApp {
     /// It asked every time, offering `untitled.bmp` in the home directory,
     /// so saving a picture twice meant finding it and confirming the
     /// overwrite twice.
+    ///
+    /// A picture opened from a format Paint does not write -- a photograph's
+    /// JPEG -- is not saved over its file: Ctrl+S asks where, offering the
+    /// same name as a PNG beside it.
     pub fn save(&mut self) {
         match self.document_path.clone() {
-            Some(path) => self.file_status = Some(self.save_file(&path)),
-            None => self.ask_where_to_save(PickerFor::Save),
+            Some(path) if SaveAs::of(&path).is_some() => {
+                self.file_status = Some(self.save_file(&path));
+            }
+            _ => self.ask_where_to_save(PickerFor::Save),
         }
     }
 
@@ -2591,14 +2651,20 @@ impl PaintApp {
             .and_then(Path::parent)
             .filter(|dir| !dir.as_os_str().is_empty())
             .map_or_else(guitk::dialog::FilePicker::default_start, Path::to_path_buf);
+        // The picture's own name when Paint writes its format; its name as a
+        // PNG when it does not; `untitled.png` for a picture with no file.
         let name = self
             .document_path
             .as_deref()
-            .and_then(Path::file_name)
-            .map_or_else(
-                || std::ffi::OsString::from("untitled.bmp"),
-                std::ffi::OsString::from,
-            );
+            .and_then(|path| {
+                let file = Path::new(path.file_name()?);
+                Some(if SaveAs::of(file).is_some() {
+                    file.as_os_str().to_owned()
+                } else {
+                    file.with_extension("png").into_os_string()
+                })
+            })
+            .unwrap_or_else(|| std::ffi::OsString::from("untitled.png"));
         self.picker_for = purpose;
         self.picker.put_up(
             guitk::dialog::FileDialog::save()
@@ -2656,7 +2722,14 @@ impl PaintApp {
             }
             Pending::Open => {
                 self.picker_for = PickerFor::Open;
-                self.picker.open_to_read();
+                let patterns: Vec<String> = OPENS.iter().map(|e| format!("*.{e}")).collect();
+                let patterns: Vec<&str> = patterns.iter().map(String::as_str).collect();
+                self.picker.put_up(
+                    guitk::dialog::FileDialog::open()
+                        .with_initial_path(guitk::dialog::FilePicker::default_start())
+                        .with_filter("Pictures", &patterns),
+                    false,
+                );
             }
             Pending::Close => self.quit = true,
         }
@@ -4875,6 +4948,128 @@ mod tests {
         app
     }
 
+    /// **Paint opens a photograph** -- any picture `imagecodec` decodes -- and
+    /// saves a PNG that reads back as the same picture. It read only its own
+    /// kind of BMP.
+    #[test]
+    fn a_png_opens_and_saves_as_the_same_picture() {
+        let scratch = scratchdir::ScratchDir::new("slate_paint_png");
+        let source = scratch.path("art.png");
+        let mut pixels: Vec<u32> = (0..6 * 4).map(|i| 0xFF00_0000 | (i * 9_999)).collect();
+        pixels[5] = 0x4011_2233;
+        std::fs::write(&source, pngwrite::encode(6, 4, &pixels).unwrap()).unwrap();
+        let mut app = PaintApp::new(800.0, 600.0);
+        assert!(
+            app.open_file(&source).starts_with("Opened"),
+            "{:?}",
+            app.file_status
+        );
+        assert_eq!((app.canvas_width, app.canvas_height), (6, 4));
+        assert_eq!(argb_of(&app.layers[0].pixels), pixels);
+        let copy = scratch.path("copy.png");
+        assert!(app.save_file(&copy).starts_with("Saved"));
+        let written = std::fs::read(&copy).unwrap();
+        assert!(written.starts_with(b"\x89PNG"), "not a PNG");
+        let back = imagecodec::decode(&written, imagecodec::Limits::default()).unwrap();
+        assert_eq!((back.width, back.height), (6, 4));
+    }
+
+    /// **A photograph is never saved over.** Paint does not write JPEG, so
+    /// Ctrl+S asks where, offering the name as a PNG; the JPEG is untouched.
+    #[test]
+    fn a_jpeg_is_never_saved_over() {
+        let scratch = scratchdir::ScratchDir::new("slate_paint_jpeg");
+        let photo = scratch.path("photo.JPG");
+        std::fs::write(&photo, imagecodec::testing::SMALL_JPEG).unwrap();
+        let mut app = PaintApp::new(800.0, 600.0);
+        assert!(app.open_file(&photo).starts_with("Opened"));
+        dot(&mut app, 1, 1);
+        app.on_event(&key(Key::S, true, false));
+        assert!(
+            app.picker.is_saving(),
+            "it wrote over the JPEG instead of asking"
+        );
+        let offered = app
+            .picker
+            .dialog()
+            .map(|d| d.confirm().unwrap_or_default())
+            .unwrap_or_default();
+        assert_eq!(offered.file_name(), Some(std::ffi::OsStr::new("photo.png")));
+        assert_eq!(
+            std::fs::read(&photo).unwrap(),
+            imagecodec::testing::SMALL_JPEG
+        );
+    }
+
+    /// A picture wider than the widest canvas is opened cropped to it, the
+    /// canvas and its layer the same size.
+    #[test]
+    fn a_picture_wider_than_any_canvas_is_cropped() {
+        let scratch = scratchdir::ScratchDir::new("slate_paint_wide");
+        let wide = scratch.path("panorama.png");
+        let w = MAX_CANVAS_DIMENSION + 100;
+        std::fs::write(
+            &wide,
+            pngwrite::encode(w, 1, &vec![0xFF11_2233; w as usize]).unwrap(),
+        )
+        .unwrap();
+        let mut app = PaintApp::new(800.0, 600.0);
+        assert!(app.open_file(&wide).starts_with("Opened"));
+        assert_eq!(
+            (app.canvas_width, app.canvas_height),
+            (MAX_CANVAS_DIMENSION, 1)
+        );
+        let layer = &app.layers[0].pixels;
+        assert_eq!((layer.width(), layer.height()), (MAX_CANVAS_DIMENSION, 1));
+    }
+
+    /// The Open dialog lists the pictures Paint opens, and not other files.
+    #[test]
+    fn the_open_dialog_lists_pictures() {
+        let scratch = scratchdir::ScratchDir::new("slate_paint_open_list");
+        std::fs::write(
+            scratch.path("a.png"),
+            pngwrite::encode(1, 1, &[0xFF00_0000]).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(scratch.path("b.jpg"), imagecodec::testing::SMALL_JPEG).unwrap();
+        std::fs::write(scratch.path("notes.txt"), b"not a picture").unwrap();
+        let mut app = PaintApp::new(800.0, 600.0);
+        app.go_on(Pending::Open);
+        app.picker.navigate_to(scratch.dir());
+        let listed: Vec<_> = app
+            .picker
+            .dialog()
+            .expect("the dialog is up")
+            .entries()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
+        assert_eq!(listed, ["a.png", "b.jpg"], "pictures only");
+    }
+
+    /// A name with no extension is saved as a PNG; one naming a format Paint
+    /// does not write is refused, and nothing is written.
+    #[test]
+    fn a_save_is_the_format_its_name_says() {
+        let scratch = scratchdir::ScratchDir::new("slate_paint_names");
+        let mut app = PaintApp::new(800.0, 600.0);
+        dot(&mut app, 2, 2);
+        assert!(app.save_file(&scratch.path("drawing")).starts_with("Saved"));
+        let png = scratch.path("drawing.png");
+        assert!(std::fs::read(&png).unwrap().starts_with(b"\x89PNG"));
+        assert_eq!(app.document_path.as_deref(), Some(png.as_path()));
+        assert!(app.save_file(&scratch.path("old.BMP")).starts_with("Saved"));
+        assert!(
+            std::fs::read(scratch.path("old.BMP"))
+                .unwrap()
+                .starts_with(b"BM")
+        );
+        let said = app.save_file(&scratch.path("wrong.gif"));
+        assert!(said.contains("PNG and BMP"), "{said}");
+        assert!(!scratch.path("wrong.gif").exists());
+    }
+
     /// An edit marks the picture, a save clears the mark, and Ctrl+S writes
     /// over the picture's own file once it has one. It asked where every
     /// time, and nothing recorded whether the picture had changed at all.
@@ -5032,7 +5227,7 @@ mod tests {
         choose(&mut app, &scratch.path("missing").join("drawing.bmp"));
         assert!(app.dirty, "a failed save is not a save");
         assert!(
-            drawn_text(&mut app).contains("Failed to save BMP"),
+            drawn_text(&mut app).contains("Failed to save"),
             "the failure is not shown: {:?}",
             app.file_status
         );
@@ -5488,19 +5683,44 @@ mod tests {
 
     // ---- BMP tests ----
 
+    /// A picture file's pixels as a canvas, read the way Paint opens one.
+    fn read_back(bytes: &[u8]) -> Canvas {
+        let image = imagecodec::decode(bytes, imagecodec::Limits::default()).unwrap();
+        let pixels = image
+            .pixels
+            .iter()
+            .map(|p| {
+                let [a, r, g, b] = p.to_be_bytes();
+                Color::rgba(r, g, b, a)
+            })
+            .collect();
+        Canvas::from_pixels(image.width, image.height, pixels).unwrap()
+    }
+
     #[test]
     fn test_bmp_encode_decode_roundtrip() {
         let mut buf = Canvas::filled(4, 4, Color::WHITE);
         buf.set(0, 0, Color::RED);
         buf.set(3, 3, Color::BLUE);
 
-        let encoded = encode_bmp(&buf);
-        let decoded = decode_bmp(&encoded).unwrap();
+        let decoded = read_back(&encode_bmp(&buf));
 
         assert_eq!(decoded.width(), 4);
         assert_eq!(decoded.height(), 4);
         assert_eq!(decoded.get(0, 0).unwrap(), Color::rgba(220, 50, 50, 255));
         assert_eq!(decoded.get(3, 3).unwrap(), Color::rgba(50, 100, 220, 255));
+    }
+
+    /// **A BMP keeps its transparency.** Written with the alpha in a 40-byte
+    /// header's fourth byte, it came back opaque from every reader that
+    /// follows Chrome: a transparent background turned black.
+    #[test]
+    fn a_saved_bmp_keeps_its_transparency() {
+        let mut buf = Canvas::transparent(3, 2);
+        buf.set(1, 0, Color::rgba(10, 20, 30, 128));
+        buf.set(2, 1, Color::rgba(200, 100, 50, 255));
+        let back = read_back(&encode_bmp(&buf));
+        assert_eq!(back.pixels(), buf.pixels());
     }
 
     #[test]
@@ -5511,22 +5731,6 @@ mod tests {
         assert_eq!(encoded[1], b'M');
         // 32bpp
         assert_eq!(encoded[28], 32);
-    }
-
-    #[test]
-    fn test_bmp_decode_invalid() {
-        assert!(decode_bmp(&[]).is_none());
-        assert!(decode_bmp(&[0; 10]).is_none());
-        assert!(decode_bmp(b"XX").is_none());
-    }
-
-    #[test]
-    fn test_bmp_decode_too_short() {
-        let mut data = vec![0u8; 54];
-        data[0] = b'B';
-        data[1] = b'M';
-        // width = 0 should fail
-        assert!(decode_bmp(&data).is_none());
     }
 
     // ---- Layer tests ----

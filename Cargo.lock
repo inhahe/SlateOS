@@ -604,6 +604,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "desktopentry"
+version = "0.1.0"
+dependencies = [
+ "scratchdir",
+]
+
+[[package]]
 name = "devicemanager"
 version = "0.1.0"
 dependencies = [

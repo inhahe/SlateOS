@@ -615,6 +615,10 @@ enum PinTarget {
     StartMenuRow(usize),
     /// An application already pinned, by index into the pinned list.
     Pinned(usize),
+    /// A window's tile: the program the window says it is, when the desktop
+    /// knows it (`program_for_app_id`) -- and the window itself, which can be
+    /// asked to close.
+    Window(WindowId),
 }
 
 /// What a tooltip on the taskbar names, kept beside it so that sliding along a
@@ -4794,11 +4798,11 @@ impl DesktopShell {
             return ShellAction::Consumed;
         }
 
-        // A right-click on a start-menu row offers to pin it. This is the one
-        // place pinning can be offered from: pinning needs an executable path,
-        // a window carries only the `app_id` its program declares, and nothing
-        // in the tree maps one to the other -- so the taskbar itself cannot
-        // say "pin this", however much that is where the button ends up.
+        // A right-click on a program -- a start-menu row, a pin, or a window
+        // whose program the desktop knows -- offers that program's menu:
+        // its jump list, pinning it, a shortcut to it. A window's tile adds
+        // closing the window, and offers only that when its program is one
+        // the desktop cannot name (see `program_for_app_id`).
         if button == MouseButton::Right {
             match hit {
                 Hit::StartMenuEntry(index) => {
@@ -4815,6 +4819,10 @@ impl DesktopShell {
                 // `TD-C-NOTHING-CONNECTS-A-LAUNCHER-ENTRY-TO-THE-WINDOWS-IT-OPENS`.
                 Hit::TaskbarPinned(index) => {
                     self.open_pin_menu(PinTarget::Pinned(index), x, y);
+                    return ShellAction::Consumed;
+                }
+                Hit::TaskbarButton(id) => {
+                    self.open_pin_menu(PinTarget::Window(id), x, y);
                     return ShellAction::Consumed;
                 }
                 // The bar itself, between its tiles and its tray: the bar's
@@ -5816,10 +5824,14 @@ impl DesktopShell {
                 Some(Some(MenuAction::Selected(id))) => {
                     let target = self.pin_menu.as_ref().map(|(_, target)| *target);
                     self.pin_menu = None;
-                    if let Some(launch) =
-                        target.and_then(|target| self.activate_pin_menu_item(id, target))
-                    {
-                        return HotkeyOutcome::start(vec![launch]);
+                    match target.map(|target| self.activate_pin_menu_item(id, target)) {
+                        Some(ShellAction::Launch(launch)) => {
+                            return HotkeyOutcome::start(vec![launch]);
+                        }
+                        Some(ShellAction::Control(request)) => {
+                            return HotkeyOutcome::ask(Some(request));
+                        }
+                        _ => {}
                     }
                 }
                 Some(Some(MenuAction::Closed)) => self.pin_menu = None,
@@ -7953,36 +7965,55 @@ impl DesktopShell {
         self.tray_overflow_menu = Some((menu, keys));
     }
 
-    /// Offer to pin or unpin the start-menu row at `index`.
+    /// Open the menu of the program `target` names -- a start-menu row, a pin,
+    /// or a window's tile.
     ///
-    /// One item, and its label is the *action*, not the state: "Pin to
-    /// taskbar" when it is not pinned and "Unpin from taskbar" when it is. A
-    /// menu that said "Pinned" with a tick would be a second way of saying
-    /// what the taskbar already shows, and would leave the user to work out
-    /// that clicking it reverses the thing.
+    /// The program's jump list first, as a taskbar's is: what it can be
+    /// started to do, above what can be done with it. Then pinning it, to the
+    /// taskbar and to the start menu, and a shortcut to it on the desktop. A
+    /// pin's label is the *action*, not the state -- "Pin to taskbar" when it
+    /// is not pinned, "Unpin from taskbar" when it is -- because a tick beside
+    /// "Pinned" would be a second way of saying what the taskbar already shows,
+    /// and would leave the user to work out that clicking it reverses the
+    /// thing.
+    ///
+    /// A window's tile heads the program's rows with the program's name, which
+    /// starts another copy, and ends with closing the window -- the rows every
+    /// taskbar's window menu has. A window whose program the desktop cannot
+    /// name offers only to close it; any other target that names no program
+    /// opens nothing.
     fn open_pin_menu(&mut self, target: PinTarget, x: f32, y: f32) {
-        let Some(exec) = self.exec_of(target) else {
-            return;
+        let window = match target {
+            PinTarget::Window(id) => Some(id),
+            PinTarget::StartMenuRow(_) | PinTarget::Pinned(_) => None,
         };
-        // The program's jump list first, as a taskbar's is: what it can be
-        // started to do, above what can be done with it. An action with no
-        // command line is started by D-Bus, which this system does not have,
-        // so it is not offered.
+        let exec = self.exec_of(target);
+        if exec.is_none() && window.is_none() {
+            return;
+        }
+        let action = |id: u64, label: String| guitk::menu::MenuItem::Action {
+            id,
+            label,
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: None,
+        };
+        // An action with no command line is started by D-Bus, which this
+        // system does not have, so it is not offered.
         let mut items: Vec<guitk::menu::MenuItem> = self
             .program_of(target)
             .map(|app| {
                 app.actions
                     .iter()
                     .enumerate()
-                    .filter(|(_, action)| action.exec.is_some())
-                    .map(|(index, action)| guitk::menu::MenuItem::Action {
-                        id: Self::MENU_JUMP_LIST_BASE
-                            .saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
-                        label: action.name.clone(),
-                        shortcut: None,
-                        icon: None,
-                        enabled: true,
-                        checked: None,
+                    .filter(|(_, a)| a.exec.is_some())
+                    .map(|(index, a)| {
+                        action(
+                            Self::MENU_JUMP_LIST_BASE
+                                .saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
+                            a.name.clone(),
+                        )
                     })
                     .collect()
             })
@@ -7990,46 +8021,38 @@ impl DesktopShell {
         if !items.is_empty() {
             items.push(guitk::menu::MenuItem::Separator);
         }
-        let label = if self.is_pinned(&exec) {
-            "Unpin from taskbar"
-        } else {
-            "Pin to taskbar"
-        };
-        let start_label = if self.is_pinned_to_start(&exec) {
-            "Unpin from Start menu"
-        } else {
-            "Pin to Start menu"
-        };
-        items.extend([
-            guitk::menu::MenuItem::Action {
-                id: Self::MENU_PIN_TOGGLE,
-                label: label.to_string(),
-                shortcut: None,
-                icon: None,
-                enabled: true,
-                checked: None,
-            },
-            guitk::menu::MenuItem::Action {
-                id: Self::MENU_START_PIN_TOGGLE,
-                label: start_label.to_string(),
-                shortcut: None,
-                icon: None,
-                enabled: true,
-                checked: None,
-            },
-            guitk::menu::MenuItem::Action {
-                id: Self::MENU_ADD_TO_DESKTOP,
-                label: "Add to desktop".to_string(),
-                shortcut: None,
-                icon: None,
-                enabled: true,
-                checked: None,
-            },
-        ]);
+        if let Some(exec) = &exec {
+            if window.is_some()
+                && let Some(program) = self.program_of(target)
+            {
+                items.push(action(Self::MENU_START_ANOTHER, program.name.clone()));
+            }
+            let pin = if self.is_pinned(exec) {
+                "Unpin from taskbar"
+            } else {
+                "Pin to taskbar"
+            };
+            let start_pin = if self.is_pinned_to_start(exec) {
+                "Unpin from Start menu"
+            } else {
+                "Pin to Start menu"
+            };
+            items.extend([
+                action(Self::MENU_PIN_TOGGLE, pin.to_string()),
+                action(Self::MENU_START_PIN_TOGGLE, start_pin.to_string()),
+                action(Self::MENU_ADD_TO_DESKTOP, "Add to desktop".to_string()),
+            ]);
+        }
+        if window.is_some() {
+            if !items.is_empty() {
+                items.push(guitk::menu::MenuItem::Separator);
+            }
+            items.push(action(Self::MENU_CLOSE_WINDOW, "Close window".to_string()));
+        }
         let mut menu = guitk::menu::ContextMenu::new(items);
         // The real screen, not the toolkit's assumed one -- the same reason
         // the overflow list passes it: this opens from wherever the start menu
-        // is, which is near the bottom edge.
+        // or the taskbar is, which is near the bottom edge.
         menu.show(x, y, self.viewport());
         self.pin_menu = Some((menu, target));
     }
@@ -8048,16 +8071,12 @@ impl DesktopShell {
         };
         self.pin_menu = None;
         self.activate_pin_menu_item(id, target)
-            .map_or(ShellAction::Consumed, ShellAction::Launch)
     }
 
-    /// One row of the pin menu, chosen by click or by key: the program to
-    /// start, for a row of its jump list.
-    fn activate_pin_menu_item(
-        &mut self,
-        id: MenuItemId,
-        target: PinTarget,
-    ) -> Option<hotkeys::Launch> {
+    /// One row of the pin menu, chosen by click or by key: what it asks for
+    /// -- a program to start, for the program's own row and its jump list; a
+    /// window to close; or nothing further, for the rows that pin and add.
+    fn activate_pin_menu_item(&mut self, id: MenuItemId, target: PinTarget) -> ShellAction {
         match id {
             Self::MENU_PIN_TOGGLE => self.toggle_pin(target),
             Self::MENU_START_PIN_TOGGLE => {
@@ -8066,22 +8085,43 @@ impl DesktopShell {
                 }
             }
             Self::MENU_ADD_TO_DESKTOP => self.add_to_desktop(target),
+            Self::MENU_START_ANOTHER => {
+                return self.exec_of(target).map_or(ShellAction::Consumed, |exec| {
+                    ShellAction::Launch(self.launch_for(&exec))
+                });
+            }
+            // Asked, not done: the window's program is told, and one with
+            // unsaved work gets to put up its dialog -- the request its own
+            // close button makes.
+            Self::MENU_CLOSE_WINDOW => {
+                if let PinTarget::Window(window) = target {
+                    return ShellAction::Control(ShellRequest::window(
+                        window,
+                        ShellControlAction::Close,
+                    ));
+                }
+            }
             _ => {
-                let index = usize::try_from(id.checked_sub(Self::MENU_JUMP_LIST_BASE)?).ok()?;
-                let launch = {
-                    let app = self.program_of(target)?;
-                    let action = app.actions.get(index)?;
-                    app.launch_action(&action.id)?
+                let Some(launch) = id
+                    .checked_sub(Self::MENU_JUMP_LIST_BASE)
+                    .and_then(|index| usize::try_from(index).ok())
+                    .and_then(|index| {
+                        let app = self.program_of(target)?;
+                        let action = app.actions.get(index)?;
+                        app.launch_action(&action.id)
+                    })
+                else {
+                    return ShellAction::Consumed;
                 };
                 // Chosen from the start menu, it gets out of the way of the
                 // window it is about to open, as starting the program does.
                 if matches!(target, PinTarget::StartMenuRow(_)) {
                     self.close_start_menu();
                 }
-                return Some(launch);
+                return ShellAction::Launch(launch);
             }
         }
-        None
+        ShellAction::Consumed
     }
 
     /// The program a pin menu target names, as the launcher knows it -- for
@@ -8121,6 +8161,7 @@ impl DesktopShell {
                 .pinned_apps()
                 .get(index)
                 .map(|app| app.display_name.clone()),
+            PinTarget::Window(_) => self.program_of(target).map(|app| app.name.clone()),
         }
         .unwrap_or_else(|| exec.clone());
         let (_, added) = self.icons.add_shortcut(
@@ -8146,6 +8187,11 @@ impl DesktopShell {
                 .pinned_apps()
                 .get(index)
                 .map(|app| app.exec_path.clone()),
+            PinTarget::Window(id) => self
+                .windows
+                .get(&id)
+                .and_then(|window| self.program_for_app_id(&window.app_id))
+                .map(|app| app.executable_path.clone()),
         }
     }
 
@@ -8167,9 +8213,11 @@ impl DesktopShell {
             PinTarget::StartMenuRow(index) => {
                 self.start_program_at(index).map(|entry| entry.name.clone())
             }
-            // Already pinned by construction, so this arm is unreachable in
-            // practice; the name it would use is the launcher's.
-            PinTarget::Pinned(_) => None,
+            // A pin is already pinned by construction, so its arm is
+            // unreachable in practice. A window's program is one the launcher
+            // knows -- that is how its path was found -- so the launcher's
+            // name, below, is the program's.
+            PinTarget::Pinned(_) | PinTarget::Window(_) => None,
         }
         .unwrap_or_else(|| self.app_name_for(&exec));
         self.pin_app(&exec, &name);
@@ -9373,6 +9421,10 @@ impl DesktopShell {
     const MENU_ADD_TO_DESKTOP: u64 = 901;
     /// The pin menu's "Pin to Start menu" / "Unpin from Start menu".
     const MENU_START_PIN_TOGGLE: u64 = 902;
+    /// A window's menu: its program's name, which starts another copy.
+    const MENU_START_ANOTHER: u64 = 903;
+    /// A window's menu: "Close window".
+    const MENU_CLOSE_WINDOW: u64 = 904;
     /// The first of the jump list's rows: the program's `n`-th desktop action
     /// is this plus `n`.
     const MENU_JUMP_LIST_BASE: u64 = 1000;
@@ -18911,24 +18963,144 @@ mod taskbar_pin_tests {
         });
     }
 
-    /// A right-click on a *window's* button offers nothing, because pinning
-    /// one is not possible: a window carries no executable path.
+    /// **A window's tile offers its program's menu, and to close the
+    /// window**: the program's name, which starts another copy; pinning it,
+    /// which the taskbar could not offer until a window could be known as its
+    /// program's; and "Close window", which asks rather than destroys.
     #[test]
-    fn a_window_button_offers_no_pin_menu() {
-        with_scratch_config("shell-unpin-window", |_root| {
+    fn a_windows_tile_offers_its_programs_menu_and_to_close_it() {
+        use super::{ShellControlAction, ShellRequest, WindowId};
+        with_scratch_config("shell-window-menu", |_root| {
+            let mut shell = shell();
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![window_of(1, "terminal", "~ : bash")],
+            ));
+            let (x, y) = button_centre(&shell, 0);
+            shell.handle_press(x, y, MouseButton::Right);
+            let labels = format!(
+                "{:?}",
+                shell
+                    .render_pin_menu()
+                    .expect("a window's tile offered nothing")
+            );
+            for want in [
+                "Terminal",
+                "Pin to taskbar",
+                "Add to desktop",
+                "Close window",
+            ] {
+                assert!(labels.contains(want), "no {want:?} in {labels}");
+            }
+
+            let target = super::PinTarget::Window(WindowId(1));
+            assert_eq!(
+                shell.activate_pin_menu_item(DesktopShell::MENU_START_ANOTHER, target),
+                ShellAction::Launch(shell.launch_for(super::launcher::TERMINAL))
+            );
+            assert_eq!(
+                shell.activate_pin_menu_item(DesktopShell::MENU_CLOSE_WINDOW, target),
+                ShellAction::Control(ShellRequest::window(WindowId(1), ShellControlAction::Close))
+            );
+            assert_eq!(
+                shell.activate_pin_menu_item(DesktopShell::MENU_PIN_TOGGLE, target),
+                ShellAction::Consumed
+            );
+            assert!(
+                shell.is_pinned(super::launcher::TERMINAL),
+                "\"Pin to taskbar\" did not pin the window's program"
+            );
+            assert_eq!(
+                shell
+                    .pinned_apps()
+                    .first()
+                    .map(|app| app.display_name.as_str()),
+                Some("Terminal"),
+                "pinned under the wrong name"
+            );
+            drop(shell.activate_pin_menu_item(DesktopShell::MENU_ADD_TO_DESKTOP, target));
+            let shortcut = shell
+                .icons
+                .icon_ids()
+                .into_iter()
+                .filter_map(|id| shell.icons.get_icon(id))
+                .find(|icon| {
+                    icon.action
+                        == super::icons::IconAction::OpenPath(std::path::PathBuf::from(
+                            super::launcher::TERMINAL,
+                        ))
+                })
+                .map(|icon| icon.label.clone());
+            assert_eq!(
+                shortcut.as_deref(),
+                Some("Terminal"),
+                "the shortcut is not named for the program"
+            );
+        });
+    }
+
+    /// **A window of a program the desktop cannot name offers only to close
+    /// it** -- nothing to pin, and no name to start another copy by.
+    #[test]
+    fn a_window_of_an_unknown_program_offers_only_to_close_it() {
+        with_scratch_config("shell-window-menu-unknown", |_root| {
             let mut shell = shell();
             shell.apply_window_list(&WindowList::new(
                 0,
                 vec![WindowInfo::new(1, 1, "A window".to_string())],
             ));
-            let button = shell.taskbar_button_rect(0);
-            let (cx, cy) = (button.x + button.w / 2.0, button.y + button.h / 2.0);
-
-            shell.handle_press(cx, cy, MouseButton::Right);
-
+            let (x, y) = button_centre(&shell, 0);
+            shell.handle_press(x, y, MouseButton::Right);
+            let labels = format!("{:?}", shell.render_pin_menu().expect("no menu at all"));
+            assert!(labels.contains("Close window"), "{labels}");
             assert!(
-                shell.render_pin_menu().is_none(),
-                "a window's button offered to pin something"
+                !labels.contains("Pin to") && !labels.contains("Add to desktop"),
+                "offered to pin a program nobody can name: {labels}"
+            );
+            // And by key: its one row, chosen with Down and Enter, asks the
+            // window to close.
+            drop(shell.handle_hotkey(&press(Key::Down)));
+            let outcome = shell.handle_hotkey(&press(Key::Enter));
+            assert_eq!(
+                outcome.requests,
+                vec![super::ShellRequest::window(
+                    super::WindowId(1),
+                    super::ShellControlAction::Close
+                )],
+                "Enter on \"Close window\" did not ask the window to close"
+            );
+        });
+    }
+
+    /// **A window's menu starts with its program's jump list**, as a pin's
+    /// does, and Enter on a row of it starts that action.
+    #[test]
+    fn a_windows_menu_has_its_programs_jump_list() {
+        with_scratch_config("shell-window-jump-list", |_root| {
+            let mut shell = shell();
+            let entry = desktopentry::DesktopEntry::parse(
+                b"[Desktop Entry]\nType=Application\nName=Sketchpad\nExec=sketch %U\nActions=new;\n[Desktop Action new]\nName=New Drawing\nExec=sketch --new\n",
+            )
+            .expect("parses");
+            let app = desktopentry::App::from_entry(&entry, "sketch.desktop", None).expect("valid");
+            shell.set_installed_apps(vec![
+                super::launcher::AppEntry::from_desktop(app).expect("startable"),
+            ]);
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![window_of(1, "sketch", "a drawing")],
+            ));
+            let (x, y) = button_centre(&shell, 0);
+            shell.handle_press(x, y, MouseButton::Right);
+            let labels = format!("{:?}", shell.render_pin_menu().expect("no menu"));
+            assert!(labels.contains("New Drawing"), "{labels}");
+
+            drop(shell.handle_hotkey(&press(Key::Down)));
+            let outcome = shell.handle_hotkey(&press(Key::Enter));
+            assert_eq!(
+                outcome.launches.first().map(|l| l.args.clone()),
+                Some(vec!["--new".into()]),
+                "Enter on the jump list's row did not start its action"
             );
         });
     }
@@ -19643,10 +19815,10 @@ mod icon_menu_tests {
     /// the way a right-click would reach it. Answers the new icon.
     fn add_first_entry(shell: &mut DesktopShell) -> icons::IconId {
         let (exec, _) = first_entry(shell);
-        shell.activate_pin_menu_item(
+        drop(shell.activate_pin_menu_item(
             DesktopShell::MENU_ADD_TO_DESKTOP,
             PinTarget::StartMenuRow(shell.start_row_of_program(0).expect("a program")),
-        );
+        ));
         shell
             .icons
             .icon_ids()
@@ -20001,10 +20173,10 @@ mod rename_tests {
     #[test]
     fn delete_while_renaming_edits_the_name() {
         let mut shell = DesktopShell::new(1920, 1080);
-        shell.activate_pin_menu_item(
+        drop(shell.activate_pin_menu_item(
             DesktopShell::MENU_ADD_TO_DESKTOP,
             super::PinTarget::StartMenuRow(shell.start_row_of_program(0).expect("a program")),
-        );
+        ));
         let id = shell.icons.selected_ids()[0];
         assert!(
             shell.icons.get_icon(id).unwrap().added,
@@ -21789,7 +21961,7 @@ mod start_search_tests {
         let blank = super::DesktopShell::MENU_JUMP_LIST_BASE + 2;
         assert_eq!(
             shell.activate_pin_menu_item(blank, super::PinTarget::StartMenuRow(row)),
-            Some(launch("sketch", &["--blank"]))
+            super::ShellAction::Launch(launch("sketch", &["--blank"]))
         );
         assert!(
             !shell.start_menu_open,

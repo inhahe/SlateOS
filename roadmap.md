@@ -1859,6 +1859,14 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **A window's tile offers its program's menu** -- done 2026-09-26. A
+  right-click on a window's tile offered nothing: pinning needs a program, and
+  nothing knew which program a window was. Now that a window is known as its
+  program's (§885), its menu is the program's -- jump list, the program's name
+  to start another copy, Pin to taskbar, Pin to Start menu, Add to desktop --
+  and then "Close window", which asks the window rather than destroying it. A
+  window whose program the desktop cannot name offers only to close it.
+
 - `[C]` **Windows' titles on the taskbar are an option** -- done 2026-09-26
   (`design-decisions.md` §1401). `appearance.yaml`'s `taskbar.labels`, on by
   default; off, a window's tile is its picture alone. Switched from the bar's

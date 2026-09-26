@@ -34,6 +34,16 @@ import os
 import subprocess
 import sys
 
+# `gitenv.clean_env()` is load-bearing in the self-test's scratch repository,
+# not hygiene: `pre-push` runs `--selftest`, git exports GIT_DIR into a hook's
+# environment, and GIT_DIR outranks `cwd`. On 2026-09-26 the first version of
+# that self-test, without it, wrote seven commits of fixture files -- `{}` over
+# bench/boot-history.jsonl and last-release-boot.json among them -- onto the
+# branch being pushed. The push had already resolved its ref, so nothing was
+# published; see scripts/gitenv.py for the 2026-08-29 accident that was.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gitenv  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -90,10 +100,17 @@ def _repo_root():
 
 
 def _commit_count_since(sha, paths, cwd=None):
-    """Count commits touching *paths* (pathspecs) since *sha* (exclusive)."""
+    """Count commits touching *paths* (pathspecs) since *sha* (exclusive).
+
+    With no *cwd*, in the ambient repository -- under `pre-push` that is the
+    one named by the hook's GIT_DIR, which is the one to check.  With a *cwd*
+    (the self-test's scratch repository), with the environment's repository
+    bindings removed, so that *cwd* is the repository actually counted.
+    """
     cmd = ["git", "rev-list", "--count", "%s..HEAD" % sha, "--"]
     cmd.extend(paths)
-    out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, cwd=cwd)
+    env = gitenv.clean_env() if cwd is not None else None
+    out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, cwd=cwd, env=env)
     return int(out.strip())
 
 
@@ -270,7 +287,13 @@ def _selftest():
             fail += 1
 
     # --- what counts: kernel and bench changes, not records of runs ---
-    counted = _records_selftest()
+    try:
+        counted = _records_selftest()
+    except _Escaped as escaped:
+        print("  FAIL the scratch repository resolved to %s, not itself -- "
+              "refused before writing anything" % escaped)
+        fail += 1
+        counted = []
     if counted is None:
         print("  skip what-counts cases: no usable git")
     else:
@@ -288,19 +311,32 @@ def _selftest():
     return 1 if fail else 0
 
 
+class _Escaped(Exception):
+    """The scratch repository resolved to some other repository."""
+
+
 def _records_selftest():
     """Count real commits in a scratch repository; None if git cannot run.
 
     Returns (case, counted, wanted) triples.  Behavioural rather than a check
     of the RECORDS tuple: what matters is what `git rev-list` counts through
     `pathspecs()`, exclusion syntax included.
+
+    Raises `_Escaped` -- before anything is written -- if git does not resolve
+    the scratch directory as its own repository.  Every git call here carries
+    `gitenv.clean_env()`; the check is the second line, because the first line
+    was once missing and the result was commits on the branch being pushed.
     """
     git = ["git", "-c", "user.name=staleness-selftest", "-c",
            "user.email=staleness-selftest@localhost", "-c", "commit.gpgsign=false"]
 
     def run(args, cwd):
         return subprocess.check_output(git + args, cwd=cwd, text=True,
-                                       stderr=subprocess.DEVNULL).strip()
+                                       stderr=subprocess.DEVNULL,
+                                       env=gitenv.clean_env()).strip()
+
+    def same_path(a, b):
+        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
 
     def commit(cwd, rel, text):
         full = os.path.join(cwd, *rel.split("/"))
@@ -313,6 +349,13 @@ def _records_selftest():
     try:
         with _tf.TemporaryDirectory(ignore_cleanup_errors=True) as repo:
             run(["init", "-q"], repo)
+            # The git directory, not the toplevel: with GIT_DIR set and no
+            # GIT_WORK_TREE, git takes the *current directory* as the top of
+            # the worktree, so --show-toplevel names the scratch directory
+            # while every write goes to GIT_DIR's repository.
+            git_dir = run(["rev-parse", "--absolute-git-dir"], repo)
+            if not same_path(git_dir, os.path.join(repo, ".git")):
+                raise _Escaped(git_dir)
             commit(repo, "README", "base")
             base = run(["rev-parse", "HEAD"], repo)
             cases = []

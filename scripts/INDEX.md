@@ -344,6 +344,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-check-boot-skips.py` | Regression tests for the never-running-self-test gate. |
 | `scripts/test-check-design-decisions-bands.py` | Regression tests for `scripts/check-design-decisions-bands.py`. |
 | `scripts/test-check-gated-selftests.py` | Regression tests for the never-ran-gated-self-test gate. |
+| `scripts/test-check-release-staleness.py` | Regression tests for `scripts/check-release-staleness.py`. |
 | `scripts/test-check-requests-not-deleted.py` | Regression tests for `scripts/check-requests-not-deleted.py`. |
 | `scripts/test-check-self-tests-wired.py` | Regression tests for the self-test wiring gate's `RAN-IF` markers. |
 | `scripts/test-checkers-honour-head.py` | Do the push gates' checkers judge the commit, or whatever is on the disk? |
@@ -400,4 +401,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_390 scripts._
+_391 scripts._

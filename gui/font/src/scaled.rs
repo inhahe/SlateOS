@@ -30,12 +30,14 @@ use alloc::vec::Vec;
 
 use crate::FontMetrics;
 use crate::bidi::{self, Base, Level};
+use crate::bitmap;
 use crate::colr::{self, ColourImage};
 use crate::device::Corrections;
 use crate::fallback::{self, Extents};
 use crate::gpos::{Adjust, Run};
 use crate::gsub::SubGlyph;
 use crate::hangul;
+use crate::hint::{FaceHints, Glyphs, Hinter};
 use crate::indic::Char;
 use crate::indic_shape::{Script, continues_word};
 use crate::joining::{self, Form};
@@ -43,7 +45,7 @@ use crate::lang::Lang;
 use crate::norm;
 use crate::norm::{Ignorable, Piece};
 use crate::phase::{Phase, Timer};
-use crate::raster::{GlyphMask, rasterize};
+use crate::raster::{GlyphMask, Rendering, rasterize_with};
 use crate::script::{self, ScriptTags};
 use crate::sfnt::{Face, PathCmd, SfntError};
 use crate::shape::{GlyphKey, ShapedGlyph, ShapedRun, TAB_WIDTH_IN_SPACES};
@@ -115,6 +117,52 @@ pub struct Glyph {
     pub advance: f32,
 }
 
+/// Optional features a run asks for, besides the ones shaping turns on by
+/// itself: bits of the optional tails of [`gsub::FEATURES`](crate::gsub::FEATURES)
+/// and [`gpos::FEATURES`](crate::gpos::FEATURES), which list the same
+/// features at different positions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Extra {
+    gsub: u64,
+    gpos: u64,
+}
+
+impl Extra {
+    /// Nothing besides the defaults.
+    pub(crate) const NONE: Self = Self { gsub: 0, gpos: 0 };
+
+    /// The optional feature `tag` on. Nothing for any other tag: a feature
+    /// shaping decides on by itself -- a positional form, an Indic one --
+    /// cannot be forced onto every glyph from here.
+    pub(crate) fn feature(tag: &[u8; 4]) -> Self {
+        let optional = |features: &[&[u8; 4]], from: usize| {
+            features
+                .iter()
+                .position(|want| *want == tag)
+                .filter(|&i| i >= from)
+                .and_then(|i| u32::try_from(i).ok())
+                .and_then(|i| 1u64.checked_shl(i))
+                .unwrap_or(0)
+        };
+        Self {
+            gsub: optional(crate::gsub::FEATURES, crate::gsub::OPTIONAL_FROM),
+            gpos: optional(&crate::gpos::FEATURES, crate::gpos::OPTIONAL_FROM),
+        }
+    }
+}
+
+/// Where a font's auto-hinter stands.
+#[derive(Clone, Debug)]
+enum Hinting {
+    /// Hinting is off.
+    Off,
+    /// On, but the face not yet measured: that happens on the first glyph
+    /// drawn, so that switching hinting on costs nothing up front.
+    Unmeasured,
+    /// On and measured; `None` for a face the hinter cannot use.
+    Ready(Option<Hinter>),
+}
+
 /// A face pinned to a pixel size, caching the glyphs it has drawn.
 pub struct ScaledFont {
     /// Shared because a UI wants the same face at several sizes at once — a
@@ -137,6 +185,17 @@ pub struct ScaledFont {
     /// the default instance, so nothing downstream needs to special-case a
     /// static font.
     coords: var::Coords,
+    /// How glyphs are turned into pixels: anti-aliased or not, subpixel or
+    /// grey, hinted or not. A property of the font rather than of each draw
+    /// because every cached glyph was rasterized under it.
+    rendering: Rendering,
+    /// The auto-hinter fitted to this size, while hinting is on: every
+    /// glyph's script and each script's alignment zones, measured from the
+    /// face's own letters. Measured when the first glyph is drawn rather than
+    /// when hinting is switched on -- a few milliseconds a face, which a
+    /// fallback face that never draws a glyph should not pay -- and again
+    /// after the instance changes, since the zones move with the axes.
+    hinting: Hinting,
     metrics: FontMetrics,
     /// Keyed by glyph id, not character: two characters that map to the same
     /// glyph (and there are many — the space-like codepoints, the various
@@ -306,6 +365,8 @@ impl ScaledFont {
             px_per_em,
             scale,
             coords,
+            rendering: Rendering::default(),
+            hinting: Hinting::Off,
             metrics,
             cache: BTreeMap::new(),
             order: Vec::new(),
@@ -338,6 +399,128 @@ impl ScaledFont {
         self.coords = coords;
         self.clear_cache();
         self.metrics = Self::derive_metrics(&self.face, self.scale, &self.coords);
+        self.refit_hinter();
+    }
+
+    /// How this font's glyphs are rasterized.
+    #[must_use]
+    pub fn rendering(&self) -> Rendering {
+        self.rendering
+    }
+
+    /// Rasterize glyphs `rendering`'s way from now on -- the appearance
+    /// settings' smoothing and subpixel order. Every cached mask is dropped,
+    /// since each was made the other way; asking for the mode the font is
+    /// already in drops nothing.
+    pub fn set_rendering(&mut self, rendering: Rendering) {
+        if self.rendering == rendering {
+            return;
+        }
+        self.rendering = rendering;
+        self.cache.clear();
+        self.order.clear();
+        self.refit_hinter();
+    }
+
+    /// Forget the face's hinting measurements: they are taken again, at the
+    /// current instance, when the next glyph is drawn -- if hinting is on.
+    fn refit_hinter(&mut self) {
+        self.hinting = if self.rendering.hinting {
+            Hinting::Unmeasured
+        } else {
+            Hinting::Off
+        };
+    }
+
+    /// The hinter, measuring the face first if that has not been done since
+    /// hinting was switched on or the instance changed. `None` while hinting
+    /// is off, and for a face the hinter cannot use.
+    fn hinter(&mut self) -> Option<&Hinter> {
+        if matches!(self.hinting, Hinting::Unmeasured) {
+            let shape = |cluster: &str, feature| self.reference_glyphs(cluster, feature);
+            let hinter = Hinter::new(
+                FaceHints::new(&self.face, &self.coords, &shape),
+                self.px_per_em,
+            );
+            self.hinting = Hinting::Ready(hinter);
+        }
+        match &self.hinting {
+            Hinting::Ready(hinter) => hinter.as_ref(),
+            Hinting::Off | Hinting::Unmeasured => None,
+        }
+    }
+
+    /// Where the auto-hinter puts `gid`'s stored points at this size, in
+    /// pixels (y up, origin on the baseline), each with whether it lies on the
+    /// curve -- or `None` when the glyph is drawn unhinted: hinting is off,
+    /// its script is not one the hinter hints, or it has no outline.
+    ///
+    /// **For diagnostics only.** Drawing never needs it; it is the half of the
+    /// check against FreeType's auto-hinter (`tools/hint_oracle.py`) that this
+    /// crate answers, and FreeType answers in stored points, not paths.
+    pub fn hinted_points(&mut self, gid: u16) -> Option<Vec<(f64, f64, bool)>> {
+        self.hinter()?;
+        let Hinting::Ready(Some(hinter)) = &self.hinting else {
+            return None;
+        };
+        let points = hinter.hint_points(&self.face, &self.coords, gid)?;
+        Some(
+            points
+                .points
+                .iter()
+                .zip(&points.tags)
+                .map(|(p, &t)| (p.x, p.y, t == crate::sfnt::Tag::On))
+                .collect(),
+        )
+    }
+
+    /// Which of FreeType's auto-hinter styles `gid` was sorted into -- its
+    /// name, `latn_dflt`, `hani_dflt` -- and whether it is a non-base glyph,
+    /// never snapped to a zone. `None` while hinting is off. **For
+    /// diagnostics only**, as [`hinted_points`](Self::hinted_points) is.
+    pub fn hint_style(&mut self, gid: u16) -> Option<(&'static str, bool)> {
+        self.hinter()?.style_of_glyph(gid)
+    }
+
+    /// What one cluster of the hinter's reference letters shapes to: each
+    /// glyph and its vertical offset in font units.
+    ///
+    /// Shaped exactly as text is, so that a reference letter is measured in
+    /// the form the face draws it -- FreeType's auto-hinter has HarfBuzz shape
+    /// its reference letters for the same reason. A glyph from anywhere but
+    /// this face (the built-in bitmap face) is left out.
+    ///
+    /// With `feature`, the cluster is shaped with that optional feature on as
+    /// well -- a feature style's letters -- and comes back empty when the
+    /// feature changes none of its glyphs.
+    fn reference_glyphs(&self, cluster: &str, feature: Option<[u8; 4]>) -> Glyphs {
+        let glyphs = |run: ShapedRun| -> Glyphs {
+            run.glyphs()
+                .iter()
+                .filter(|g| g.key.face() == 0)
+                .map(|g| {
+                    // Pixels back to font units: the offsets are whole units
+                    // scaled, so the rounding recovers them.
+                    let units = (g.offset.1 / self.scale).round();
+                    #[allow(clippy::cast_possible_truncation, reason = "a GPOS offset fits i32")]
+                    let units = if units.is_finite() { units as i32 } else { 0 };
+                    (g.key.gid(), units)
+                })
+                .collect()
+        };
+        let Some(tag) = feature else {
+            return glyphs(self.shape(cluster));
+        };
+        let with = glyphs(self.shape_extra(cluster, Extra::feature(&tag)));
+        // A cluster the feature leaves as it was is not one of the feature's
+        // letters, and FreeType drops it (`af_shaper_get_cluster`) -- comparing
+        // the glyphs only, so a feature that just moves them drops it too.
+        let plain = glyphs(self.shape(cluster));
+        if with.iter().map(|g| g.0).eq(plain.iter().map(|g| g.0)) {
+            Glyphs::new()
+        } else {
+            with
+        }
     }
 
     /// Move to the instance named by `(tag, value)` pairs, leaving axes the
@@ -536,6 +719,9 @@ impl ScaledFont {
     /// not an error — it yields an empty mask.
     pub fn glyph(&mut self, gid: u16) -> Result<&Glyph, ScaledFontError> {
         if !self.cache.contains_key(&gid) {
+            // Measure the face now if hinting was switched on since the last
+            // glyph; `rasterize_glyph` only reads the result.
+            self.hinter();
             let entry = self.rasterize_glyph(gid)?;
             self.insert(gid, entry);
         }
@@ -561,12 +747,15 @@ impl ScaledFont {
         Some(&self.glyph(key.gid()).ok()?.mask)
     }
 
-    /// Glyph `gid` in colour, if the face paints it in colour -- an emoji
-    /// from a face with a `COLR` table -- drawn with `foreground`
-    /// (`0xAARRGGBB`) as the text colour. `None` for a glyph the face draws
-    /// as an outline, which [`glyph`](Self::glyph) then draws in the text
-    /// colour; and for a colour glyph too big to paint
+    /// Glyph `gid` in colour, if the face has it in colour -- an emoji from
+    /// a face with a `COLR` recipe for it, or a `CBDT` or `sbix` picture --
+    /// drawn with `foreground` (`0xAARRGGBB`) as the text colour. `None` for a
+    /// glyph the face draws as an outline, which [`glyph`](Self::glyph) then
+    /// draws in the text colour; and for a colour glyph too big to paint
     /// ([`colr::MAX_COLOUR_PIXELS`]), which the outline stands in for.
+    ///
+    /// A recipe is preferred to a picture where a face has both: it is drawn
+    /// at the size asked for, where a picture is resampled from its strike's.
     ///
     /// A colour glyph that paints nothing is an empty image, not `None`: the
     /// glyph is drawn, and it is blank.
@@ -575,14 +764,27 @@ impl ScaledFont {
     /// again when asked for in another; one that did not -- most emoji -- is
     /// drawn once for every colour of text.
     pub fn colour_glyph(&mut self, gid: u16, foreground: u32) -> Option<&ColourImage> {
-        self.face.colour_tables()?;
+        let (recipes, pictures) = (
+            self.face.colour_tables().is_some(),
+            self.face.has_bitmap_glyphs(),
+        );
+        if !recipes && !pictures {
+            return None;
+        }
         let stale = self.colour.get(&gid).is_none_or(|c| {
             c.image
                 .as_ref()
                 .is_some_and(|i| i.uses_foreground && c.foreground != foreground)
         });
         if stale {
-            let image = colr::render(&self.face, gid, self.scale, &self.coords, foreground);
+            let image = recipes
+                .then(|| colr::render(&self.face, gid, self.scale, &self.coords, foreground))
+                .flatten()
+                .or_else(|| {
+                    pictures
+                        .then(|| bitmap::render(&self.face, gid, self.px_per_em))
+                        .flatten()
+                });
             self.insert_colour(gid, Colour { image, foreground });
         }
         self.colour.get(&gid)?.image.as_ref()
@@ -610,7 +812,6 @@ impl ScaledFont {
     }
 
     fn rasterize_glyph(&self, gid: u16) -> Result<Glyph, ScaledFontError> {
-        let outline = self.face.outline_at(gid, &self.coords)?;
         // The advance varies through `HVAR`, not through `gvar`'s phantom
         // points. Both know the number; letting two tables be the source of
         // truth for one value is how a face ends up drawn at one width and
@@ -621,7 +822,22 @@ impl ScaledFont {
         // advance, or every following glyph on the line shifts left. Draw
         // nothing, keep the space — exactly what a blank glyph does.
         // (`InvalidScale` cannot occur at all here; `new` validated it.)
-        let mask = rasterize(&outline, self.scale).unwrap_or_default();
+        //
+        // A hinted glyph comes back in pixels already. One the hinter leaves
+        // alone -- hinting off, a script it does not hint, a glyph it will not
+        // take on -- is drawn from its outline as the designer placed it.
+        let hinted = match &self.hinting {
+            Hinting::Ready(Some(h)) => h.hint(&self.face, &self.coords, gid),
+            Hinting::Ready(None) | Hinting::Unmeasured | Hinting::Off => None,
+        };
+        let mask = match hinted {
+            Some(pixels) => rasterize_with(&pixels, 1.0, self.rendering),
+            None => {
+                let outline = self.face.outline_at(gid, &self.coords)?;
+                rasterize_with(&outline, self.scale, self.rendering)
+            }
+        }
+        .unwrap_or_default();
         Ok(Glyph { mask, advance })
     }
 
@@ -783,7 +999,16 @@ impl ScaledFont {
             let _t = Timer::start(Phase::ByteLevels);
             byte_levels(text, base)
         };
-        self.shape_leveled(text, lang, levels)
+        self.shape_leveled(text, lang, levels, Extra::NONE)
+    }
+
+    /// [`shape`](Self::shape) with optional features on besides the ones
+    /// shaping turns on by itself -- today only for the auto-hinter, which
+    /// measures each of FreeType's feature styles from reference letters
+    /// shaped with that style's feature, as FreeType has HarfBuzz shape them.
+    pub(crate) fn shape_extra(&self, text: &str, extra: Extra) -> ShapedRun {
+        let levels = byte_levels(text, Base::Auto);
+        self.shape_leveled(text, None, levels, extra)
     }
 
     /// [`shape_with`](Self::shape_with) with the bidi levels already
@@ -801,6 +1026,7 @@ impl ScaledFont {
         text: &str,
         lang: Option<Lang>,
         levels: Vec<Level>,
+        extra: Extra,
     ) -> ShapedRun {
         // Six passes, because each one needs all of the previous one's
         // output. Bidi settles which characters are mirrored and where the
@@ -1103,6 +1329,14 @@ impl ScaledFont {
             tabs.push(tab);
         }
         drop(build);
+        // The optional features the caller asked for, on every glyph: HarfBuzz
+        // gives a feature a caller turns on for the whole buffer the global
+        // mask, which every glyph starts with and no shaper takes away.
+        if extra.gsub != 0 {
+            for glyph in &mut glyphs {
+                glyph.mask |= extra.gsub;
+            }
+        }
 
         let segments = {
             let _t = Timer::start(Phase::Gsub);
@@ -1149,7 +1383,11 @@ impl ScaledFont {
         for segment in &segments {
             let applies = self.applies_gpos(segment.script);
             let answer = !applies;
-            let kern = legacy && (!applies || !self.face.gpos_kerns(segment.script, lang));
+            let kern = legacy
+                && (!applies
+                    || !self
+                        .face
+                        .gpos_kerns(segment.script, lang, self.coords.as_slice()));
             let zero = self.zeroes_marks(segment.script);
             for slot in synth_at
                 .get_mut(segment.start..segment.end)
@@ -1239,7 +1477,7 @@ impl ScaledFont {
         // instead left every Myanmar mark in it a missing-glyph box wide.
         let (adjusted, kept_at) = {
             let _t = Timer::start(Phase::Gpos);
-            self.position_segments(&segments, lang, &glyphs, &advances, &marks, &levels)
+            self.position_segments(&segments, lang, &glyphs, &advances, &marks, &levels, extra)
         };
         let tail = Timer::start(Phase::Tail);
         // Whether pairs still have to be kerned one at a time here. They do
@@ -1541,7 +1779,8 @@ impl ScaledFont {
             if run.is_empty() {
                 return;
             }
-            font.face.substitute(script, lang, run);
+            font.face
+                .substitute_at(script, lang, run, font.coords.as_slice());
             let start = out.len();
             segments.push(Segment {
                 start,
@@ -1683,6 +1922,10 @@ impl ScaledFont {
     /// zeroed that segment's marks *before* its lookups, so that whatever a
     /// lookup then charged back on is the final word and must not be zeroed a
     /// second time. True only where the pass actually ran — see the call site.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each is one of the shaping pass's own products, passed on rather than bundled for one call"
+    )]
     fn position_segments(
         &self,
         segments: &[Segment],
@@ -1691,6 +1934,7 @@ impl ScaledFont {
         advances: &[i32],
         marks: &[bool],
         levels: &[Level],
+        extra: Extra,
     ) -> (Vec<Adjust>, Vec<bool>) {
         let mut out: Vec<Adjust> = advances.iter().copied().map(Adjust::plain).collect();
         let mut kept: Vec<bool> = alloc::vec![false; advances.len()];
@@ -1724,16 +1968,20 @@ impl ScaledFont {
                     .is_some_and(|level| !level.is_multiple_of(2))
             });
             let first = self.zeroes_marks_first(segment.script);
-            let Some(done) = self.face.position(&Run {
-                glyphs: run,
-                advances: widths,
-                marks: is_mark,
-                zero_marks_first: first,
-                rtl,
-                script: segment.script,
-                lang,
-                corrections: self.corrections(),
-            }) else {
+            let Some(done) = self.face.position_at(
+                &Run {
+                    glyphs: run,
+                    advances: widths,
+                    marks: is_mark,
+                    zero_marks_first: first,
+                    rtl,
+                    script: segment.script,
+                    lang,
+                    features: crate::gpos::DEFAULT_FEATURES | extra.gpos,
+                    corrections: self.corrections(),
+                },
+                self.coords.as_slice(),
+            ) else {
                 continue;
             };
             for (offset, adjust) in done.into_iter().enumerate() {
@@ -2530,12 +2778,6 @@ pub fn blit_mask(mask: &GlyphMask, target: &mut Target<'_>, x: i32, y: i32) {
             if px < 0 || px >= max_x {
                 continue;
             }
-            // Coverage scales the colour's own alpha: a 50%-covered pixel of
-            // a 50%-transparent colour is 25% opaque.
-            let alpha = src_alpha.saturating_mul(coverage) / 255;
-            if alpha == 0 {
-                continue;
-            }
             let (Ok(px), Ok(py)) = (u32::try_from(px), u32::try_from(py)) else {
                 continue;
             };
@@ -2550,10 +2792,16 @@ pub fn blit_mask(mask: &GlyphMask, target: &mut Target<'_>, x: i32, y: i32) {
                 continue;
             };
             let under = Channels::from_argb(*dest);
+            // Coverage scales the colour's own alpha: a 50%-covered pixel of
+            // a 50%-transparent colour is 25% opaque. An LCD mask covers each
+            // of the pixel's three stripes by its own amount, so each channel
+            // blends at its own alpha -- the whole point of the planes.
+            let [r, g, b] = mask.lcd_at(col, row);
+            let alpha = |c: u8| src_alpha.saturating_mul(u32::from(c)) / 255;
             *dest = 0xFF00_0000
-                | (blend_channel(src.red, under.red, alpha) << 16)
-                | (blend_channel(src.green, under.green, alpha) << 8)
-                | blend_channel(src.blue, under.blue, alpha);
+                | (blend_channel(src.red, under.red, alpha(r)) << 16)
+                | (blend_channel(src.green, under.green, alpha(g)) << 8)
+                | blend_channel(src.blue, under.blue, alpha(b));
         }
     }
 }
@@ -2696,6 +2944,33 @@ mod tests {
         // And going back gets the original shape, not a second new one.
         f.set_axes(&[(*b"wght", 400.0)]);
         assert_eq!(f.glyph(1).unwrap().mask.width, plain.width);
+    }
+
+    #[test]
+    fn the_hinter_measures_the_face_only_once_a_glyph_is_drawn() {
+        // Measuring costs milliseconds a face, and a fallback face may never
+        // draw a glyph: switching hinting on must not pay it up front.
+        let hinted = Rendering {
+            hinting: true,
+            ..Rendering::default()
+        };
+        let mut f = variable_font(20.0);
+        assert!(matches!(f.hinting, Hinting::Off));
+        f.set_rendering(hinted);
+        assert!(matches!(f.hinting, Hinting::Unmeasured));
+        f.glyph(1).unwrap();
+        assert!(matches!(f.hinting, Hinting::Ready(Some(_))));
+        // A new instance moves the zones, so they are measured again -- once
+        // a glyph is drawn there.
+        f.set_axes(&[(*b"wght", 700.0)]);
+        assert!(matches!(f.hinting, Hinting::Unmeasured));
+        f.glyph(1).unwrap();
+        assert!(matches!(f.hinting, Hinting::Ready(Some(_))));
+        // Switching hinting off drops the measurements.
+        f.set_rendering(Rendering::default());
+        assert!(matches!(f.hinting, Hinting::Off));
+        f.glyph(1).unwrap();
+        assert!(matches!(f.hinting, Hinting::Off));
     }
 
     #[test]
@@ -3514,6 +3789,7 @@ mod tests {
             left: 0,
             top: 0,
             coverage: alloc::vec![128],
+            lcd: None,
         };
         let mut buf = alloc::vec![0xFF00_0000_u32; 4];
         let mut target = Target {

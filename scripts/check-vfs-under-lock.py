@@ -81,23 +81,50 @@ VFS_CALL = re.compile(r"\bVfs\s*::\s*([a-z_][a-z0-9_]*)\s*\(")
 # mount table is inside the filesystem lock order rather than outside it.
 EXEMPT_LOCKS = frozenset({"VFS"})
 
-# Files whose whole purpose is to implement the VFS or a filesystem: inside
-# them the "filesystem lock" is not an outer lock being inverted, it is the
-# subject. Listing them explicitly is better than a path heuristic, because
-# the exemption is a claim about each file and should be re-argued if the file
-# changes role.
-EXEMPT_FILES = frozenset({"fs/vfs.rs", "fs/mount.rs"})
+# No file is exempt any more. `fs/vfs.rs` used to be -- "inside it the
+# filesystem lock is not an outer lock being inverted, it is the subject" --
+# and that was true of the mount table and false of the file's other module
+# locks. `LOCK_TABLE` (advisory locks) ranks *below* every filesystem lock,
+# because procfs's `/proc/locks` takes it with the procfs lock held; and
+# `flock`/`funlock`/`lock_query` held it while resolving a path's identity,
+# which locks the mounted filesystem. Lockdep caught that AB/BA on the
+# 2026-09-26 integration boot, in a file this gate never read. (`fs/mount.rs`
+# was exempt too, and no longer exists; an exemption for a missing file only
+# waits to hide the next one given that name.)
+EXEMPT_FILES: frozenset[str] = frozenset()
+
+# Inside the VFS implementation the VFS is entered differently from outside it.
+# Its helpers are called as `Self::name(` -- which the shared call pattern
+# deliberately skips, as it skips every `::`-qualified name -- and every path
+# into a mounted filesystem goes through `resolve_mount(`, which returns the
+# filesystem whose lock the caller then takes. So in this file "a call into
+# the VFS" is a call to `resolve_mount`, and `Self::`/`Vfs::` calls are
+# followed to their same-file bodies.
+VFS_IMPL = "fs/vfs.rs"
+RESOLVE_MOUNT = re.compile(r"(?<![\w:.])(resolve_mount)\s*\(")
+SELF_CALL = re.compile(r"\b(?:Self|Vfs)\s*::\s*([a-z_][a-z0-9_]*)\s*\(")
 
 
 def analyse(path: Path, rel: str) -> list[str]:
-    raw = path.read_text(encoding="utf-8", errors="replace")
+    return analyse_text(path.read_text(encoding="utf-8", errors="replace"), rel)
+
+
+def analyse_text(raw: str, rel: str) -> list[str]:
+    """Findings for one file's source text; `rel` is its path under kernel/src."""
+    in_vfs = rel == VFS_IMPL
+    entry = RESOLVE_MOUNT if in_vfs else VFS_CALL
     src = _rl.strip_noise(raw)
     bodies = _rl.find_bodies(src)
     if not bodies:
         return []
     known = set(bodies)
-    memo: dict[str, set[str]] = {}
     findings: list[str] = []
+
+    def callees(text: str) -> set[str]:
+        names = _rl.called_names(text, known)
+        if in_vfs:
+            names |= {m.group(1) for m in SELF_CALL.finditer(text) if m.group(1) in known}
+        return names
 
     def reaches_vfs(fn: str, stack: tuple[str, ...] = ()) -> bool:
         """Does `fn` call the VFS, directly or via a same-file callee?"""
@@ -105,11 +132,11 @@ def analyse(path: Path, rel: str) -> list[str]:
         if span is None or fn in stack:
             return False
         body = src[span[0] : span[1]]
-        if VFS_CALL.search(body):
+        if entry.search(body):
             return True
         return any(
             reaches_vfs(callee, stack + (fn,))
-            for callee in _rl.called_names(body, known)
+            for callee in callees(body)
             if callee != fn
         )
 
@@ -130,10 +157,10 @@ def analyse(path: Path, rel: str) -> list[str]:
             if d and d.group(1) == guard:
                 region = region[: d.start()]
 
-            direct = VFS_CALL.search(region)
+            direct = entry.search(region)
             via = None
             if direct is None:
-                for callee in sorted(_rl.called_names(region, known)):
+                for callee in sorted(callees(region)):
                     if callee != fn and reaches_vfs(callee):
                         via = callee
                         break
@@ -141,11 +168,14 @@ def analyse(path: Path, rel: str) -> list[str]:
                 continue
 
             line = raw.count("\n", 0, bstart + bind.start()) + 1
-            how = (
-                f"calls `Vfs::{direct.group(1)}`"
-                if direct is not None
-                else f"calls `{via}`, which reaches the VFS"
-            )
+            if direct is not None:
+                how = (
+                    f"calls `{direct.group(1)}`, which locks a mounted filesystem"
+                    if in_vfs
+                    else f"calls `Vfs::{direct.group(1)}`"
+                )
+            else:
+                how = f"calls `{via}`, which reaches the VFS"
             tag = " [self-test]" if "self_test" in fn or "test" == fn else ""
             findings.append(
                 f"{rel}:{line}: `{fn}` holds `{lock}` in `{guard}` and then {how}{tag}"
@@ -153,8 +183,123 @@ def analyse(path: Path, rel: str) -> list[str]:
     return findings
 
 
+# Fixtures for `--self-test`. Each is (name, path under kernel/src, source,
+# number of findings expected). The first is the shape lockdep caught at run
+# time on 2026-09-26, in a file this gate did not read: a module lock held in
+# vfs.rs while a same-file helper resolves the path's mount.
+SELF_TEST_CASES = (
+    (
+        "vfs.rs: a side table held across Self:: into resolve_mount is reported",
+        VFS_IMPL,
+        """
+static LOCK_TABLE: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+impl Vfs {
+    pub fn flock_resolved(path: &Path) -> KernelResult<()> {
+        let mut table = LOCK_TABLE.lock();
+        let id = Self::file_identity_resolved(path).unwrap_or(None);
+        table.push(0);
+        Ok(())
+    }
+    pub fn file_identity_resolved(path: &Path) -> KernelResult<Option<u64>> {
+        let (fs, _id, _opts, rel) = resolve_mount(path)?;
+        fs.lock().identity(&rel)
+    }
+}
+""",
+        1,
+    ),
+    (
+        "vfs.rs: the same table taken after the identity is resolved is clean",
+        VFS_IMPL,
+        """
+static LOCK_TABLE: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+impl Vfs {
+    pub fn flock_resolved(path: &Path) -> KernelResult<()> {
+        let id = Self::file_identity_resolved(path).unwrap_or(None);
+        let mut table = LOCK_TABLE.lock();
+        table.push(0);
+        Ok(())
+    }
+    pub fn file_identity_resolved(path: &Path) -> KernelResult<Option<u64>> {
+        let (fs, _id, _opts, rel) = resolve_mount(path)?;
+        fs.lock().identity(&rel)
+    }
+}
+""",
+        0,
+    ),
+    (
+        "vfs.rs: the mount table itself stays exempt",
+        VFS_IMPL,
+        """
+static VFS: Mutex<VfsInner> = Mutex::new(VfsInner::new());
+impl Vfs {
+    pub fn remount(path: &Path) -> KernelResult<()> {
+        let inner = VFS.lock();
+        let found = resolve_mount(path)?;
+        Ok(())
+    }
+}
+""",
+        0,
+    ),
+    (
+        "outside vfs.rs: a module lock held across Vfs:: is still reported",
+        "fs/handle.rs",
+        """
+static OPEN_FILES: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+pub fn read(h: u64) -> KernelResult<()> {
+    let files = OPEN_FILES.lock();
+    Vfs::read_at_resolved(h)?;
+    Ok(())
+}
+""",
+        1,
+    ),
+    (
+        "outside vfs.rs: resolve_mount is not the entry, so a local of that name is not flagged",
+        "net/route.rs",
+        """
+static ROUTES: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+fn resolve_mount(x: u64) -> u64 { x }
+pub fn pick(x: u64) -> u64 {
+    let r = ROUTES.lock();
+    resolve_mount(x)
+}
+""",
+        0,
+    ),
+)
+
+
+def self_test() -> int:
+    failed = 0
+    for name, rel, source, want in SELF_TEST_CASES:
+        got = analyse_text(source, rel)
+        ok = len(got) == want
+        print(f"  {'ok  ' if ok else 'FAIL'}  {name} ({len(got)} finding(s), want {want})")
+        if not ok:
+            failed += 1
+            for line in got:
+                print(f"          {line}")
+    print(f"check-vfs-under-lock: self-test {'passed' if not failed else 'FAILED'} "
+          f"({failed} failure(s))")
+    return 1 if failed else 0
+
+
 def main() -> int:
+    args = sys.argv[1:]
+    if args == ["--self-test"]:
+        return self_test()
     root = Path(__file__).resolve().parent.parent / "kernel" / "src"
+    if len(args) == 2 and args[0] == "--root":
+        # Another tree's kernel sources: for checking a change to this script
+        # from outside the tree it grades.
+        root = Path(args[1])
+    elif args:
+        print("usage: check-vfs-under-lock.py [--self-test | --root <kernel/src>]",
+              file=sys.stderr)
+        return 2
     if not root.is_dir():
         print(f"error: no such directory: {root}", file=sys.stderr)
         return 2

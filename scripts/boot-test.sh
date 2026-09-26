@@ -4841,6 +4841,19 @@ check_vfs_lock_order() {
         return 0
     fi
 
+    # Its own cases first.  It once passed a tree with an AB/BA inversion in it:
+    # vfs.rs was exempt wholesale, so `LOCK_TABLE.lock()` held across
+    # `Self::file_identity_resolved` (which locks a mounted filesystem) went
+    # unseen until lockdep caught it at run time.  A checker that has stopped
+    # recognising that shape reports a clean tree, which reads exactly like one.
+    if ! run_checker check-vfs-under-lock-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-vfs-under-lock.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-vfs-under-lock.py fails its own" >&2
+        echo "cases, so its verdict on this tree means nothing either way." >&2
+        exit 1
+    fi
+
     echo "=== Checking for module locks held across a call into the VFS ==="
     if run_checker check-vfs-under-lock "$py" "$PROJECT_ROOT/scripts/check-vfs-under-lock.py"; then
         return 0

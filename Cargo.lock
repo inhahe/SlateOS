@@ -2248,6 +2248,7 @@ dependencies = [
  "appearance",
  "guitk",
  "imagecodec",
+ "offloop",
  "oswindow",
  "pathcodec",
  "quoting",

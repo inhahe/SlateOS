@@ -1744,6 +1744,33 @@ struct ShownPicture {
     height: u32,
 }
 
+/// The worker that decodes the selected photograph off the window's thread:
+/// asked with the photograph and its file, answering with the photograph and
+/// its pixels or why there are none.
+type PictureLoader =
+    offloop::Latest<(PhotoId, std::path::PathBuf), (PhotoId, Result<imagecodec::Image, String>)>;
+
+/// Read and decode the photograph at `path`, or say why not.
+///
+/// Nothing here needs the application, so it runs on the loader's thread or,
+/// with no loader, on the window's -- and says the same either way.
+fn decode_photo(path: &std::path::Path) -> Result<imagecodec::Image, String> {
+    let read = safeio::read_capped(path, PhotoApp::MAX_PICTURE_BYTES)
+        .map_err(|e| format!("could not be read: {e}"))?;
+    if read.truncated {
+        // Refused rather than decoded. A picture's tail is not optional -- a
+        // JPEG's scan runs to the last byte of the file -- so a cut file
+        // decodes to something that is not the photograph, and would then be
+        // shown without a word about it.
+        return Err(format!(
+            "is larger than {} MiB",
+            PhotoApp::MAX_PICTURE_BYTES / (1024 * 1024)
+        ));
+    }
+    imagecodec::decode(&read.bytes, imagecodec::Limits::default())
+        .map_err(|e| format!("could not be decoded: {e}"))
+}
+
 /// A file's modification time, in seconds since the epoch, or zero.
 ///
 /// Zero for a file that cannot be stat'ed, and that is a usable key rather
@@ -1859,6 +1886,16 @@ pub struct PhotoApp {
     pending_images: Vec<app::ImageChange>,
     /// The photograph whose pixels are uploaded, once it has been decoded.
     shown_picture: Option<ShownPicture>,
+    /// The worker that decodes the selected photograph, once the window has
+    /// handed over a way to be woken (`App::attach_waker`).
+    ///
+    /// The decode ran inside `render`, so selecting a large photograph froze
+    /// the window -- every other photograph, every key -- for as long as it
+    /// took (`known-issues.md` ->
+    /// `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT`). With
+    /// no loader -- before the window exists, and in tests that give it no
+    /// waker -- the photograph is decoded where it is asked for, as it was.
+    picture_loader: Option<PictureLoader>,
     /// The photograph the two fields above were computed for, whether that
     /// ended in a picture or in a reason.
     ///
@@ -1947,6 +1984,7 @@ impl PhotoApp {
             shown_picture: None,
             picture_for: None,
             picture_error: None,
+            picture_loader: None,
             thumb_cache: thumbs::ThumbnailCache::default_capacity(),
             thumb_gen: thumbs::ThumbnailGenerator::new(),
             thumb_ready: HashMap::new(),
@@ -2333,32 +2371,31 @@ impl PhotoApp {
             return;
         };
 
-        let read = match safeio::read_capped(&path, Self::MAX_PICTURE_BYTES) {
-            Ok(read) => read,
-            Err(e) => {
-                self.picture_error = Some(format!("could not be read: {e}"));
-                return;
-            }
+        // Off the window's thread when there is a loader: the card shows the
+        // photograph's name and size until `on_wake` brings its pixels.
+        let asked = match self.picture_loader.as_mut() {
+            Some(loader) => loader.ask((pid, path)),
+            None => Err((pid, path)),
         };
-        if read.truncated {
-            // Refused rather than decoded. A picture's tail is not optional --
-            // a JPEG's scan runs to the last byte of the file -- so a cut file
-            // decodes to something that is not the photograph, and would then
-            // be shown without a word about it.
-            self.picture_error = Some(format!(
-                "is larger than {} MiB",
-                Self::MAX_PICTURE_BYTES / (1024 * 1024)
-            ));
-            return;
+        if let Err((pid, path)) = asked {
+            // No loader, or one whose thread has gone -- which only a panic
+            // does, and only a test's build survives one. The photograph is
+            // still wanted, and this thread can decode it.
+            self.picture_loader = None;
+            self.show_picture(pid, decode_photo(&path));
         }
-        let image = match imagecodec::decode(&read.bytes, imagecodec::Limits::default()) {
+    }
+
+    /// Put the decoded photograph `pid` up -- or, when it would not decode,
+    /// the reason where it would have been.
+    fn show_picture(&mut self, pid: PhotoId, decoded: Result<imagecodec::Image, String>) {
+        let image = match decoded {
             Ok(image) => image,
-            Err(e) => {
-                self.picture_error = Some(format!("could not be decoded: {e}"));
+            Err(why) => {
+                self.picture_error = Some(why);
                 return;
             }
         };
-
         self.shown_picture = Some(ShownPicture {
             photo: pid,
             width: image.width,
@@ -5117,6 +5154,39 @@ impl App for PhotoApp {
                 }
             }
         }
+    }
+
+    /// The selected photograph is decoded off the loop's thread, and the loop
+    /// woken when it is ready.
+    fn wants_waker(&self) -> bool {
+        true
+    }
+
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        // A worker that cannot be started leaves the decode on this thread,
+        // as it always was: slower to answer, never wrong.
+        self.picture_loader = offloop::Latest::start(
+            "photomanager-picture",
+            waker,
+            |(pid, path): (PhotoId, std::path::PathBuf)| (pid, decode_photo(&path)),
+        )
+        .ok();
+    }
+
+    /// The selected photograph is decoded: put it up. `on_wake` runs before
+    /// the frame, so its upload is drained into that frame by `take_images`.
+    fn on_wake(&mut self) -> Response {
+        let Some((pid, decoded)) = self.picture_loader.as_mut().and_then(offloop::Latest::take)
+        else {
+            return Response::Idle;
+        };
+        // The loader answers only the newest request, which is the selection
+        // unless that has since moved to nothing.
+        if self.picture_for != Some(pid) {
+            return Response::Idle;
+        }
+        self.show_picture(pid, decoded);
+        Response::Redraw
     }
 
     fn take_images(&mut self) -> Vec<app::ImageChange> {
@@ -8160,6 +8230,135 @@ mod tests {
             app.picture_error, first,
             "the file was opened a second time, so every frame re-reads it"
         );
+    }
+
+    /// The photo manager given a loader, as the window gives it one, and the
+    /// channel its wakes are said on.
+    fn with_a_loader(app: &mut PhotoApp) -> std::sync::mpsc::Receiver<()> {
+        assert!(app.wants_waker());
+        let (waker, heard) = offloop::channel_waker();
+        app.attach_waker(waker);
+        assert!(app.picture_loader.is_some(), "no loader was started");
+        heard
+    }
+
+    /// Run the window's side of the loader until the newest photograph is in:
+    /// wait for a wake, then do what the loop does with it.
+    fn until_decoded(app: &mut PhotoApp, heard: &std::sync::mpsc::Receiver<()>) -> usize {
+        let mut redraws: usize = 0;
+        while app
+            .picture_loader
+            .as_ref()
+            .is_some_and(offloop::Latest::busy)
+        {
+            heard
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the loader never woke the window");
+            if app.on_wake() == Response::Redraw {
+                redraws = redraws.saturating_add(1);
+            }
+        }
+        redraws
+    }
+
+    /// **The selected photograph is decoded off the window's thread** and
+    /// drawn when it wakes the window: the frame that asked for it is not held
+    /// up by it, and shows the card until it arrives.
+    #[test]
+    fn the_selected_photograph_is_decoded_off_the_window() {
+        let mut app = app_with_pictures("off-loop");
+        let heard = with_a_loader(&mut app);
+        app.selected_photo = app.photos.first().map(|p| p.id);
+        let tree = app.render(900.0, 700.0);
+        assert!(
+            app.take_images().is_empty(),
+            "decoded on the frame that asked"
+        );
+        let drawn = |tree: &RenderTree| {
+            tree.commands.iter().any(
+                |c| matches!(c, RenderCommand::Image { image_id, .. } if *image_id == PHOTO_IMAGE_ID),
+            )
+        };
+        assert!(!drawn(&tree), "drawn before it was decoded");
+        assert_eq!(until_decoded(&mut app, &heard), 1);
+        let queued = app.take_images();
+        assert!(
+            matches!(
+                queued.as_slice(),
+                [oswindow::app::ImageChange::Upload {
+                    id: PHOTO_IMAGE_ID,
+                    width: 6,
+                    height: 4,
+                    ..
+                }]
+            ),
+            "{} change(s)",
+            queued.len()
+        );
+        assert!(drawn(&app.render(900.0, 700.0)));
+    }
+
+    /// **A photograph moved past is never put up**: two selections before the
+    /// first decode is in, and only the second arrives.
+    #[test]
+    fn a_photograph_moved_past_is_never_put_up() {
+        let mut app = app_with_pictures("moved-past");
+        let heard = with_a_loader(&mut app);
+        let (first, second) = (app.photos[0].id, app.photos[1].id);
+        app.selected_photo = Some(first);
+        let _ = app.render(900.0, 700.0);
+        app.selected_photo = Some(second);
+        let _ = app.render(900.0, 700.0);
+        until_decoded(&mut app, &heard);
+        assert_eq!(app.shown_picture.map(|s| s.photo), Some(second));
+        let uploads = app
+            .take_images()
+            .iter()
+            .filter(|c| matches!(c, oswindow::app::ImageChange::Upload { .. }))
+            .count();
+        assert_eq!(uploads, 1, "the photograph moved past was uploaded too");
+    }
+
+    /// A photograph whose selection went while it decoded is not put up.
+    #[test]
+    fn a_photograph_deselected_while_decoding_is_not_put_up() {
+        let mut app = app_with_pictures("deselected");
+        let heard = with_a_loader(&mut app);
+        app.selected_photo = app.photos.first().map(|p| p.id);
+        let _ = app.render(900.0, 700.0);
+        app.selected_photo = None;
+        let _ = app.render(900.0, 700.0);
+        heard
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the loader never woke the window");
+        assert_eq!(app.on_wake(), Response::Idle, "nothing to draw");
+        assert!(app.shown_picture.is_none());
+        assert!(app.take_images().is_empty(), "uploaded for no selection");
+    }
+
+    /// A photograph that will not decode says why, off the window as on it.
+    #[test]
+    fn a_photograph_that_fails_off_the_window_says_why() {
+        let mut app = PhotoApp::new();
+        app.view_mode = ViewMode::Single;
+        let dir = std::env::temp_dir().join("slateos-photomanager-pictures");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("fails-off-the-window.png");
+        std::fs::write(&path, b"not a picture").expect("write");
+        app.import_from_disk(&path);
+        let heard = with_a_loader(&mut app);
+        app.selected_photo = app.photos.first().map(|p| p.id);
+        let _ = app.render(900.0, 700.0);
+        assert!(app.picture_error.is_none(), "an answer before the decode");
+        until_decoded(&mut app, &heard);
+        assert!(
+            app.picture_error
+                .as_deref()
+                .is_some_and(|r| r.contains("could not be decoded")),
+            "{:?}",
+            app.picture_error
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A second selection replaces the upload rather than queueing behind it.

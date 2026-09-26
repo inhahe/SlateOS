@@ -17,6 +17,11 @@ oswindow = { path = "../../gui/window" }
 # list it, and then drew a card with its name on it.
 imagecodec = { path = "../../gui/imagecodec" }
 
+# The selected photograph is decoded off the window's thread and handed back
+# through the waker the window gives it, so selecting a large one never
+# freezes the window.
+offloop = { path = "../offloop" }
+
 # The grid's thumbnails: generation, an LRU that owns the image ids, and the
 # eviction list the compositor must be told about. Extracted from the file
 # manager, which had all of it already -- above all the rule that drops are

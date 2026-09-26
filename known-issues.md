@@ -166624,19 +166624,20 @@ exit status from what happened to standard output and standard error --
 and a Rust program cannot see most of that through `println!` and
 `eprintln!`: the runtime reopens a closed descriptor on `/dev/null` before
 `main`, and Rust's `Stdout`/`Stderr` report a write to a closed descriptor
-as a success. `lsmem` now does what util-linux does (the `stdfdguard` and
-`ulclosestream` crates); `flock`, `getopt` and `logger` still write through
-`std`, so for them `>&-` and `2>&-` are invisible, and output that outgrows
-glibc's 4096-byte buffer before failing is reported with a reason where
-upstream gives none.
+as a success. `lsmem` and `getopt` now do what util-linux does (the
+`stdfdguard` and `ulclosestream` crates; `getopt-diff.sh` asks 44 cases of
+closed and full descriptors); `flock` and `logger` still write through `std`,
+so for them `>&-` and `2>&-` are invisible, and output that outgrows glibc's
+buffer before failing is reported with a reason where upstream gives none.
 
 **Where:** `userspace/flock/src/main.rs` (`Out`, which flushes through
-`io::stdout()`), `userspace/getopt/src/main.rs`, `userspace/logger/src/main.rs`
--- their stdout and diagnostic paths.
+`io::stdout()`), `userspace/logger/src/main.rs` -- their stdout and
+diagnostic paths.
 
-**How to see it:** `getopt -o a -- $(seq 3000 | sed 's/^/-a /') >&-` -- the
-output is larger than 4096 bytes, so upstream's write fails before the end
-and it exits 3 with `getopt: write error`; ours exits 0.
+**How to see it:** `flock --bogus 2>&-` -- upstream exits 1, not its usage
+status 64: the diagnostic could not be written, and `close_stdout` answers a
+lost diagnostic with `CLOSE_EXIT_CODE`. Ours exits 64. (`getopt -o a -- -x
+2>&-` was the same, 1 against upstream's 3, until getopt was converted.)
 
 **The proper fix:** in each, `stdfdguard::guard_std_fds!()` at module scope
 and `stdfdguard::restore()` first in `main`; stdout through

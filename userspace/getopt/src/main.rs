@@ -24,8 +24,15 @@
 //! | 0 | parsed |
 //! | 1 | `getopt(3)` refused something in the script's arguments |
 //! | 2 | getopt(1)'s own arguments were wrong |
-//! | 3 | the output could not be written |
+//! | 3 | the output could not be written, or a diagnostic could not be |
 //! | 4 | `-T`: this is the enhanced getopt |
+//!
+//! Status 3 is `close_stdout`'s (`CLOSE_EXIT_CODE`, which getopt sets to its
+//! `XALLOC_EXIT_CODE`), and so it is util-linux's rule, through
+//! `ulclosestream`: a write that failed before the end, or a final one that
+//! failed other than on a closed stdout, and a diagnostic that could not be
+//! written -- `getopt -o a -- -x 2>&-` is 3, not 1. A stdout the process was
+//! started without stays closed (`stdfdguard`), as upstream sees it.
 //!
 //! # What is not upstream's
 //!
@@ -41,8 +48,8 @@
 use getoptlong::{Opt, Program, Takes};
 use quoting::{escape_unprintable, os_bytes};
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Write};
 use std::process::ExitCode;
+use ulclosestream::{Stdout, stderr_write, warnx};
 
 /// `GETOPT_EXIT_CODE`: `getopt(3)` refused an option in the script's
 /// arguments.
@@ -121,10 +128,22 @@ impl Default for Ctl {
 #[derive(Debug, PartialEq, Eq)]
 struct Exit(u8);
 
+stdfdguard::guard_std_fds!();
+
 fn main() -> ExitCode {
+    // Before anything touches standard I/O: a descriptor the process was
+    // started without is closed again, as upstream would find it.
+    stdfdguard::restore();
     let argv: Vec<OsString> = std::env::args_os().collect();
-    let Exit(code) = run(&argv);
-    ExitCode::from(code)
+    let short = short_name(
+        argv.first()
+            .map_or(OsStr::new("getopt"), OsString::as_os_str),
+    );
+    let mut stdout = Stdout::new(CLOSE_EXIT_CODE);
+    let Exit(code) = run(&argv, &mut stdout);
+    // `close_stdout`, which upstream registers with `atexit`: every way out
+    // passes it.
+    ExitCode::from(stdout.close(code, &short))
 }
 
 /// `program_invocation_short_name`: argv[0] past its last `/`.
@@ -143,37 +162,25 @@ fn shown(text: &[u8]) -> String {
     escape_unprintable(text)
 }
 
-/// `warnx`: `NAME: MSG` on stderr, NAME being the short name.
-fn warnx(short: &[u8], msg: &str) {
-    let line = format!("{}: {msg}\n", shown(short));
-    // A diagnostic that cannot be written has nowhere else to go.
-    let _ = io::stderr().lock().write_all(line.as_bytes());
-}
-
 /// `parse_error`: MESSAGE (if any), then `errtryhelp(PARAMETER_EXIT_CODE)`.
 fn parse_error(short: &[u8], message: Option<&str>) -> Exit {
     if let Some(message) = message {
         warnx(short, message);
     }
     let line = format!("Try '{} --help' for more information.\n", shown(short));
-    // As in `warnx`: stderr is the last resort.
-    let _ = io::stderr().lock().write_all(line.as_bytes());
+    stderr_write(line.as_bytes());
     Exit(PARAMETER_EXIT_CODE)
 }
 
-/// `close_stdout_atexit`: write what was printed, or say why not. A reader
-/// that went away (`EPIPE`) is not an error, as upstream's `close_stdout`
-/// has it.
-fn finish(short: &[u8], out: &[u8], status: u8) -> Exit {
-    let mut stdout = io::stdout().lock();
-    match stdout.write_all(out).and_then(|()| stdout.flush()) {
-        Ok(()) => Exit(status),
-        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Exit(status),
-        Err(e) => {
-            warnx(short, &format!("write error: {}", errmsg::strerror(&e)));
-            Exit(CLOSE_EXIT_CODE)
-        }
-    }
+/// What was printed, into stdout as upstream's `printf`s put it there, and
+/// the status earned; `main`'s `close_stdout` judges both.
+///
+/// All at once rather than piece by piece is the same to the verdict: what
+/// decides it is whether the output outgrew stdio's buffer before the end,
+/// which the total decides.
+fn finish(stdout: &mut Stdout, out: &[u8], status: u8) -> Exit {
+    stdout.write(out);
+    Exit(status)
 }
 
 /// `usage()`, with upstream's text and the short name where it puts it.
@@ -209,7 +216,7 @@ fn usage(short: &[u8]) -> Vec<u8> {
 }
 
 /// `main()`.
-fn run(argv: &[OsString]) -> Exit {
+fn run(argv: &[OsString], stdout: &mut Stdout) -> Exit {
     let arg0: &OsStr = argv
         .first()
         .map_or(OsStr::new("getopt"), OsString::as_os_str);
@@ -221,7 +228,7 @@ fn run(argv: &[OsString]) -> Exit {
         if compatible {
             // "For some reason, the original getopt gave no error when there
             // were no arguments."
-            return finish(&short, b" --\n", 0);
+            return finish(stdout, b" --\n", 0);
         }
         return parse_error(&short, Some("missing optstring argument"));
     };
@@ -238,7 +245,7 @@ fn run(argv: &[OsString]) -> Exit {
             .count();
         ctl.optstr = Some(first_bytes.get(skip..).unwrap_or_default().to_vec());
         let params = argv.get(2..).unwrap_or_default();
-        return generate_output(&ctl, &os_bytes(arg0), &short, params);
+        return generate_output(&ctl, &os_bytes(arg0), params, stdout);
     }
 
     let own = argv.get(1..).unwrap_or_default();
@@ -253,8 +260,7 @@ fn run(argv: &[OsString]) -> Exit {
                 // glibc names the program by argv[0] as given; the referral
                 // that follows uses the short name.
                 let line = format!("{}: {}\n", shown(&os_bytes(arg0)), e.sentence);
-                // stderr is the last resort, as in `warnx`.
-                let _ = io::stderr().lock().write_all(line.as_bytes());
+                stderr_write(line.as_bytes());
                 return parse_error(&short, None);
             }
         };
@@ -290,9 +296,9 @@ fn run(argv: &[OsString]) -> Exit {
             (b'V', _) => {
                 let mut out = short.clone();
                 out.extend_from_slice(b" from util-linux 2.39.3\n");
-                return finish(&short, &out, 0);
+                return finish(stdout, &out, 0);
             }
-            (b'h', _) => return finish(&short, &usage(&short), 0),
+            (b'h', _) => return finish(stdout, &usage(&short), 0),
             _ => {
                 return parse_error(&short, Some("internal error, contact the author."));
             }
@@ -317,7 +323,7 @@ fn run(argv: &[OsString]) -> Exit {
         .name
         .clone()
         .unwrap_or_else(|| os_bytes(arg0).into_owned());
-    generate_output(&ctl, &name, &short, params)
+    generate_output(&ctl, &name, params, stdout)
 }
 
 /// The short option a long one of getopt's own stands for.
@@ -450,7 +456,7 @@ fn short_has_arg(optstr: &[u8], c: u8) -> bool {
 /// them normalized -- every option, with its argument, then `--`, then every
 /// operand -- or, with `-Q`, nothing. `name` is what the script's errors are
 /// reported under.
-fn generate_output(ctl: &Ctl, name: &[u8], short: &[u8], params: &[OsString]) -> Exit {
+fn generate_output(ctl: &Ctl, name: &[u8], params: &[OsString], stdout: &mut Stdout) -> Exit {
     let optstr: &[u8] = ctl.optstr.as_deref().unwrap_or_default();
     // glibc prints nothing when the option string, past its `+` or `-`,
     // begins with `:`; `-q` is `opterr = 0`.
@@ -489,8 +495,7 @@ fn generate_output(ctl: &Ctl, name: &[u8], short: &[u8], params: &[OsString]) ->
                 status = GETOPT_EXIT_CODE;
                 if !silent {
                     let line = format!("{}: {}\n", shown(name), e.sentence);
-                    // As in `warnx`: stderr is the last resort.
-                    let _ = io::stderr().lock().write_all(line.as_bytes());
+                    stderr_write(line.as_bytes());
                 }
             }
             Ok(Opt::Long(long, value)) => {
@@ -537,14 +542,14 @@ fn generate_output(ctl: &Ctl, name: &[u8], short: &[u8], params: &[OsString]) ->
         }
     }
     if ctl.quiet_output {
-        return finish(short, &[], status);
+        return finish(stdout, &[], status);
     }
     out.extend_from_slice(b" --");
     for word in remaining {
         print_normalized(&mut out, ctl, &os_bytes(word));
     }
     out.push(b'\n');
-    finish(short, &out, status)
+    finish(stdout, &out, status)
 }
 
 #[cfg(test)]

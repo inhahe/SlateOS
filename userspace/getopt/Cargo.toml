@@ -13,5 +13,9 @@ workspace = true
 getoptlong = { path = "../getoptlong" }
 # Argument bytes, and names in diagnostics with their control bytes escaped.
 quoting = { path = "../quoting" }
-# strerror's wording for a failed write of the output.
-errmsg = { path = "../errmsg" }
+# util-linux's close_stdout: stdout buffered as glibc buffers it, a lost
+# diagnostic counted, and status 3 (getopt's CLOSE_EXIT_CODE) for either.
+ulclosestream = { path = "../ulclosestream" }
+# A stdout or stderr the process was started without stays closed, as upstream
+# sees it, rather than the runtime's /dev/null.
+stdfdguard = { path = "../stdfdguard" }

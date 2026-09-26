@@ -239,6 +239,55 @@ if [ -w /dev/full ]; then
   full_case -V
 fi
 
+# --- standard descriptors that cannot be written -------------------------------------
+# util-linux's close_stdout decides the status from them: a write that failed
+# before the end (output past stdio's 4096 bytes), a final one that failed
+# other than on a closed stdout, and a diagnostic that could not be written
+# are all status 3, getopt's CLOSE_EXIT_CODE -- `-o a -- -x 2>&-` is 3, not 1.
+# The redirection is applied by the shell that execs getopt, since the
+# harness's own `diff_run` needs descriptor 2.
+run_redir() {
+  local side=$1 how=$2; shift 2
+  diff_run env LC_ALL=C.UTF-8 PATH="$bindir/$side:$PATH" timeout -k 2 20 \
+    bash -c "exec getopt \"\$@\" $how" getopt "$@"
+}
+redir_case() {
+  local how=$1 o_rc g_rc; shift
+  run_redir ours "$how" "$@" >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"; o_rc=$?
+  run_redir gnu "$how" "$@" >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"; g_rc=$?
+  if [ "$o_rc" = 124 ] || [ "$g_rc" = 124 ]; then
+    AGREED=broken
+  elif cmp -s "$DIFF_TMP/o.out" "$DIFF_TMP/g.out" && cmp -s "$DIFF_TMP/o.err" "$DIFF_TMP/g.err" \
+     && [ "$o_rc" = "$g_rc" ]; then
+    AGREED=yes
+  else
+    AGREED=no
+  fi
+  REPORT=$(printf '  ours (rc=%s): out %q err %q\n  gnu  (rc=%s): out %q err %q' \
+    "$o_rc" "$(head -c 300 "$DIFF_TMP/o.out")" "$(cat "$DIFF_TMP/o.err")" \
+    "$g_rc" "$(head -c 300 "$DIFF_TMP/g.out")" "$(cat "$DIFF_TMP/g.err")")
+  report "getopt $(printf '%q ' "$@")$how"
+}
+# 6 KB of output: past the 4096 bytes glibc buffers for a pipe or /dev/full,
+# so a write happens before the end -- but not past the 8192 (BUFSIZ) it
+# buffers on a closed stdout, whose final EBADF is then forgiven. 9 KB is
+# past both.
+mapfile -t MANY < <(for _ in {1..2000}; do printf -- '-a\n'; done)
+mapfile -t LOTS < <(for _ in {1..3000}; do printf -- '-a\n'; done)
+for how in '>&-' '>/dev/full' '2>&-' '2>/dev/full'; do
+  redir_case "$how" -o a -- -a x
+  redir_case "$how" -o a -- "${MANY[@]}"
+  redir_case "$how" -o a -- "${LOTS[@]}"
+  redir_case "$how" -o a -- -x
+  redir_case "$how" -q -o a -- -x
+  redir_case "$how" -o a -- -x "${MANY[@]}"
+  redir_case "$how" --bogus
+  redir_case "$how" -h
+  redir_case "$how" -V
+  redir_case "$how" -T
+  redir_case "$how" -Q -o a -- -a
+done
+
 # --- expected differences: control bytes in a name -------------------------------------
 xfail_case 'myscript: unrecognized option '"'"'--a\nb'"'" -o '' -n myscript -- $'--a\nb'
 xfail_case 'my\033[31mname: invalid option -- '"'"'x'"'" -n $'my\e[31mname' -o '' -- -x

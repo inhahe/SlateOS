@@ -1045,9 +1045,10 @@ dependencies = [
 name = "getopt"
 version = "0.1.0"
 dependencies = [
- "errmsg",
  "getoptlong",
  "quoting",
+ "stdfdguard",
+ "ulclosestream",
 ]
 
 [[package]]

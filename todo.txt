@@ -58840,3 +58840,19 @@ test of the fixture, not of the bound.
   a test that the setting reaches the cache. **Trigger:** 98dff3b7b (the
   `Rendering` type and `FontCache::set_rendering`) is on origin/main -- it
   cannot be referenced before then. Told by lane F, 2026-09-26.
+
+## Lane C — the start menu's Shut down button waits for programs to be asked to save (2026-09-26)
+
+- **Deferred: a one-click "Shut down" with the other power actions behind a
+  caret**, as the Aero reference draws it (`.aero-sm-power-main` beside
+  `.aero-sm-power-caret` in `Aero Desktop (offline).html`) and
+  `roadmap-detailed.md`'s start menu line lists. Today the start menu's
+  "Power" button opens the power menu, and shutting down is a second,
+  deliberate choice. Nothing yet asks a running program to save before the
+  machine goes down (`known-issues.md`
+  `TD-C-LOGGING-OUT-LEAVES-THE-USERS-PROGRAMS-RUNNING` -- there is no session
+  manager), so a one-click shutdown would make losing unsaved work one slip
+  of the pointer away. **Trigger:** programs are asked to close, and can
+  object, before a shutdown or log out. Then: split `power_button_rect` into
+  the main part (runs `PowerChoice::ShutDown`) and a caret (opens the power
+  menu), with the menu's own list unchanged.

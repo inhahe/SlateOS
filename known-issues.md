@@ -147004,7 +147004,9 @@ find it, and the test is the only thing standing over it.
 
 ## TD-C-THE-PANE-CLOSE-ANIMATION-TEST-IS-FLAKY-UNDER-LOAD
 
-**Date:** 2026-09-14. **Lane:** C. **OPEN.**
+**Date:** 2026-09-14. **Lane:** C. **FIXED 2026-09-26** -- a real-time tick
+inside the same pump, which the "ruled out" list below wrongly excluded; see
+**Found, 2026-09-26** at the end.
 
 **In short:** one test in the desktop suite fails occasionally and passes on a
 re-run, which is the worst kind of failure: it teaches whoever sees it to run
@@ -147063,7 +147065,9 @@ animation timing, and it means the "obvious" fix below would not have helped.
 **Ruled out, by reading rather than by guessing:**
 
 * *Frames advancing inside `pump`* -- it dispatches events and reconciles
-  revisions; it never calls `step_frame`.
+  revisions; it never calls `step_frame`. **Wrong, and the whole cause** --
+  see "Found, 2026-09-26" below: `pump` dispatches the ticks the loop
+  synthesises, and `dispatch` answers a tick with `step_frame`.
 * *An animation that raced ahead* -- `is_visible()` is true throughout
   `SlideOut`, so only `Hidden` fails the assertion.
 * *`reduced_motion`* -- this was the most promising lead, because
@@ -147107,6 +147111,32 @@ cases covering the message itself.
 **Priority, revised:** worth fixing properly the next time it is seen, rather
 than deferring indefinitely. The fix is described above; the tempting wrong one
 is still wrong.
+
+**Found, 2026-09-26.** `pump` does not call `step_frame` itself, but it hands
+`dispatch` every event `EventLoop::poll` returns, and `poll` *synthesises* an
+`Event::Tick` for any wake-up that has come due -- which `dispatch` answers with
+`step_frame(elapsed_ms)`, the elapsed time being real. The close key arms a
+wake-up 16 ms out (`begin_notifications_slide` -> `arm_next_frame`) *inside the
+same pump*, so a test thread descheduled for longer than 16 ms before the pump's
+next `poll` is handed a tick in that pump, and one descheduled for longer than
+200 ms -- the pane's whole slide, `anim_speed` 5.0 -- finds the slide finished:
+`Hidden`, exactly the state observed. The "drain" pump added to the test before
+did not help, because the wake-up that fires is the one the close itself arms.
+Nothing was wrong with the desktop: the time really passed, and a late frame
+*should* finish a slide (`a_late_pump_moves_an_animation_on_by_the_time_that_passed`
+pins that, by sleeping past the slide).
+
+Fixed in the tests: `pump` is now its two halves -- reading and dispatching, then
+`finish_batch` (the repaint, the grabs) -- and a test that looks at an animation
+part-way through hands its key over with `deliver` (dispatch, then
+`finish_batch`; no poll, so no clock). `frame` delivers its tick the same way.
+Eight more tests had the same exposure and use it too: the pane's opening slide,
+the overview's fade after Super+Tab (six) and the volume overlay's first frame --
+and every user of `frame`,
+whose own re-armed wake-up could ride along behind the tick it sent. The
+assertion was not loosened: the close is now checked to land on exactly
+`SlideOut(0.0)`, one frame to be part of the way out, and the rest to reach
+`Hidden`.
 
 ## TD-C-CREATING-A-FILE-THAT-ALREADY-EXISTS-DESTROYS-IT-SILENTLY
 

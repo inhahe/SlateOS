@@ -1756,6 +1756,25 @@ impl<T: Transport> ShellSession<T> {
             worked = true;
             self.dispatch(window, event)?;
         }
+        let finished = self.finish_batch()?;
+        Ok(worked || finished)
+    }
+
+    /// Everything a pump does once a batch of events has been handled: fold in
+    /// the window list and the tray, save what the batch changed, repaint, and
+    /// reconcile the keyboard grabs. Answers whether any of it had work to do.
+    ///
+    /// Its own function so that the two halves of a pump -- the events, which
+    /// come off the wire *and off the loop's clock*, and this -- can be told
+    /// apart: a test that must know exactly how much time has passed hands the
+    /// session its event directly and then calls this, and so runs every step
+    /// a pump runs except asking the loop for a wake-up that has come due.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::pump`].
+    fn finish_batch(&mut self) -> Result<bool, Error<T>> {
+        let mut worked = false;
 
         // *After* the input, deliberately. `poll` is also what reads the window
         // list off the wire, so by here the connection may already hold a newer

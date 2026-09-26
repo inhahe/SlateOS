@@ -2591,14 +2591,34 @@ fn super_tab() -> guitk::event::Event {
 /// frame before. A real tick consumes its wake-up on the way out — wake-ups are
 /// one-shot — and delivering one by hand does not, so without this every
 /// assertion about re-arming would pass whatever the shell did.
-fn frame(session: &mut Session, desktop: &Desktop, elapsed_ms: u64) {
+fn frame(session: &mut Session, elapsed_ms: u64) {
     let panel = session.panel().window();
+    // The wake-up this frame answers, taken as the loop takes it when it fires.
     session.events_mut().cancel_wake(panel);
-    desktop.borrow_mut().send_input(&[InputEvent::new(
-        panel,
-        guitk::event::Event::Tick { elapsed_ms },
-    )]);
-    session.pump().expect("pump");
+    deliver(session, panel, guitk::event::Event::Tick { elapsed_ms });
+}
+
+/// Hand `event` to the session as a pump would -- the same dispatch, then the
+/// same second half (`Session::finish_batch`: the repaint, the grabs) -- but
+/// without the event loop's clock.
+///
+/// For every test that looks at an animation part-way through. A pump reads
+/// the wire and then asks the loop for any wake-up that has come due, and the
+/// event it has just handled may have armed one 16 ms out: a test thread
+/// descheduled for longer than that before the pump's next poll is handed a
+/// real tick in the same pump, carrying however long it was away -- and one
+/// away for longer than an animation lasts finds it finished. For a desktop
+/// that is right, since the time really passed
+/// (`a_late_pump_moves_an_animation_on_by_the_time_that_passed`); it is how
+/// `closing_the_pane_slides_it_out_and_it_stays_out` failed under load for
+/// twelve days (`known-issues.md`
+/// `TD-C-THE-PANE-CLOSE-ANIMATION-TEST-IS-FLAKY-UNDER-LOAD`). Here time passes
+/// only when the test says so, through [`frame`] or `step_frame`.
+fn deliver(session: &mut Session, window: u64, event: guitk::event::Event) {
+    session.dispatch(window, event).expect("the event failed");
+    session
+        .finish_batch()
+        .expect("the second half of the pump failed");
 }
 
 #[test]
@@ -2615,12 +2635,9 @@ fn an_idle_desktop_asks_for_no_frames() {
 
 #[test]
 fn opening_the_overview_asks_for_a_frame() {
-    let (mut session, desktop, _turn) = session();
+    let (mut session, _desktop, _turn) = session();
     let panel = session.panel().window();
-    desktop
-        .borrow_mut()
-        .send_input(&[InputEvent::new(panel, super_tab())]);
-    session.pump().expect("pump");
+    deliver(&mut session, panel, super_tab());
 
     assert!(session.shell().overview.visible, "Super+Tab did nothing");
     assert!(
@@ -2647,10 +2664,7 @@ fn an_overview_whose_fade_never_runs_is_still_drawn_and_still_clickable() {
         .borrow_mut()
         .send_window_list(&[app(1, "Terminal"), app(2, "Editor")]);
     session.pump().expect("pump");
-    desktop
-        .borrow_mut()
-        .send_input(&[InputEvent::new(panel, super_tab())]);
-    session.pump().expect("pump");
+    deliver(&mut session, panel, super_tab());
     assert!(
         session.shell().overview.is_fading(),
         "the test's premise is wrong: no fade was started, so nothing is being \
@@ -2693,20 +2707,17 @@ fn an_overview_whose_fade_never_runs_is_still_drawn_and_still_clickable() {
 
 #[test]
 fn a_frame_advances_the_fade_and_the_last_one_stops_asking_for_more() {
-    let (mut session, desktop, _turn) = session();
+    let (mut session, _desktop, _turn) = session();
     let panel = session.panel().window();
     let fade_ms = session.shell().overview_config.fade_ms;
     assert!(fade_ms > 0, "the default overview has no fade to advance");
 
-    desktop
-        .borrow_mut()
-        .send_input(&[InputEvent::new(panel, super_tab())]);
-    session.pump().expect("pump");
+    deliver(&mut session, panel, super_tab());
     let opening = session.shell().overview.fade_opacity();
     assert!(opening < 1.0, "the fade began already finished: {opening}");
 
     // Half way: further on than it was, and still asking for frames.
-    frame(&mut session, &desktop, u64::from(fade_ms) / 2);
+    frame(&mut session, u64::from(fade_ms) / 2);
     let midway = session.shell().overview.fade_opacity();
     assert!(midway > opening, "a frame did not advance the fade");
     assert!(midway < 1.0, "half a fade's worth of time finished it");
@@ -2717,7 +2728,7 @@ fn a_frame_advances_the_fade_and_the_last_one_stops_asking_for_more() {
 
     // Past the end: fully open, and — the point of the whole design — no
     // wake-up left registered, so the loop parks unbounded again.
-    frame(&mut session, &desktop, u64::from(fade_ms));
+    frame(&mut session, u64::from(fade_ms));
     assert!(!session.shell().overview.is_fading());
     assert!(
         (session.shell().overview.fade_opacity() - 1.0).abs() < f32::EPSILON,
@@ -2739,10 +2750,7 @@ fn the_frame_that_finishes_the_fade_is_still_painted() {
     let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
     let fade_ms = session.shell().overview_config.fade_ms;
-    desktop
-        .borrow_mut()
-        .send_input(&[InputEvent::new(panel, super_tab())]);
-    session.pump().expect("pump");
+    deliver(&mut session, panel, super_tab());
 
     let popups = session.popups().window();
     let before = desktop
@@ -2752,7 +2760,7 @@ fn the_frame_that_finishes_the_fade_is_still_painted() {
         .filter(|(w, _)| *w == popups)
         .count();
     // One frame, long enough to run the fade past its end in a single step.
-    frame(&mut session, &desktop, u64::from(fade_ms) * 2);
+    frame(&mut session, u64::from(fade_ms) * 2);
     let after = desktop
         .borrow_mut()
         .drawn()
@@ -2767,11 +2775,11 @@ fn the_frame_that_finishes_the_fade_is_still_painted() {
 
 #[test]
 fn a_frame_with_nothing_moving_asks_for_no_more_frames() {
-    let (mut session, desktop, _turn) = session();
+    let (mut session, _desktop, _turn) = session();
     let panel = session.panel().window();
     // A tick can arrive with nothing to advance — the last frame of one
     // animation and a stray wake-up can race. It must not re-arm.
-    frame(&mut session, &desktop, 16);
+    frame(&mut session, 16);
     assert!(!session.events_mut().is_waking(panel));
 }
 
@@ -2803,12 +2811,9 @@ fn reduced_motion_opens_the_overview_without_a_fade_and_without_a_clock() {
 
 #[test]
 fn turning_reduced_motion_on_mid_fade_lands_on_fully_open() {
-    let (mut session, desktop, _turn) = session();
+    let (mut session, _desktop, _turn) = session();
     let panel = session.panel().window();
-    desktop
-        .borrow_mut()
-        .send_input(&[InputEvent::new(panel, super_tab())]);
-    session.pump().expect("pump");
+    deliver(&mut session, panel, super_tab());
     assert!(session.shell().overview.is_fading());
 
     session.set_reduced_motion(true);
@@ -2823,10 +2828,7 @@ fn closing_the_overview_takes_its_fade_with_it() {
     // screen.
     let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
-    desktop
-        .borrow_mut()
-        .send_input(&[InputEvent::new(panel, super_tab())]);
-    session.pump().expect("pump");
+    deliver(&mut session, panel, super_tab());
     assert!(session.shell().overview.is_fading());
 
     session.events_mut().cancel_wake(panel);
@@ -2852,7 +2854,7 @@ fn a_window_animation_runs_off_the_same_clock() {
     // manager — and a shell that armed the clock for one but not the other
     // would work until they were used apart.
     use crate::animations::WindowAnimation;
-    let (mut session, desktop, _turn) = session();
+    let (mut session, _desktop, _turn) = session();
     let panel = session.panel().window();
     assert!(!session.events_mut().is_waking(panel));
 
@@ -2863,7 +2865,7 @@ fn a_window_animation_runs_off_the_same_clock() {
         "an animation was started and no frame was asked for"
     );
 
-    frame(&mut session, &desktop, 200);
+    frame(&mut session, 200);
     assert_eq!(
         session.animations().active_count(),
         0,
@@ -3909,13 +3911,9 @@ fn opening_the_pane_from_a_key_rewinds_it_into_a_slide() {
     // The session is the caller that owns a clock, so it puts the pane back
     // where it started and lets the frame clock carry it. Every other caller
     // gets the pane fully open. See design-decisions.md 520 and 562.
-    let (mut session, desktop, _turn) = session();
+    let (mut session, _desktop, _turn) = session();
     let panel = session.panel().window();
-    desktop
-        .borrow_mut()
-        .send_input(&[InputEvent::new(panel, super_n())]);
-
-    session.pump().expect("the harness refused");
+    deliver(&mut session, panel, super_n());
 
     assert!(
         session.shell().notifications.is_sliding(),
@@ -3954,41 +3952,37 @@ fn the_slide_finishes_and_then_the_desktop_goes_quiet() {
 
 #[test]
 fn closing_the_pane_slides_it_out_and_it_stays_out() {
-    let (mut session, desktop, _turn) = session();
+    let (mut session, _desktop, _turn) = session();
     let panel = session.panel().window();
-    desktop
-        .borrow_mut()
-        .send_input(&[InputEvent::new(panel, super_n())]);
-    session.pump().expect("the harness refused");
+    deliver(&mut session, panel, super_n());
     for _ in 0..200 {
         session.step_frame(16).expect("a frame should not fail");
     }
+    assert_eq!(
+        session.shell().notifications.pane_state(),
+        crate::notif_pane::PaneState::Visible,
+        "the premise: the pane is fully open before it is closed"
+    );
 
-    // Drain whatever tick is due before asking for the close.
-    //
-    // `Event::Tick` carries *real* elapsed time -- `EventLoop` computes it as
-    // `now - since` for the window -- and `step_frame` deliberately saturates a
-    // long one to the end of every animation, "which is where a user returning
-    // after 49 days expects to find them". Both are right. Together they mean
-    // the delta this close is measured against is however long the 200
-    // iterations above took in wall-clock time, which under a full workspace
-    // run is long enough to finish the slide in one step. This test then failed
-    // with "the close snapped instead of sliding" while nothing was wrong.
-    //
-    // Draining first resets `since`, so the pump below carries a fresh tick
-    // rather than an accumulated one.
-    session.pump().expect("the harness refused");
+    // Delivered rather than pumped, so that no frame but the ones this test
+    // steps can move the pane: the close arms a wake-up 16 ms out, and a pump
+    // on a busy machine can be handed it, carrying real time, before it
+    // returns -- see `deliver`. That is how this test failed under load.
+    deliver(&mut session, panel, super_n());
+    assert_eq!(
+        session.shell().notifications.pane_state(),
+        crate::notif_pane::PaneState::SlideOut(0.0),
+        "the close snapped instead of sliding"
+    );
 
-    desktop
-        .borrow_mut()
-        .send_input(&[InputEvent::new(panel, super_n())]);
-    session.pump().expect("the harness refused");
+    // One frame in: still on screen, part of the way out.
+    session.step_frame(16).expect("a frame should not fail");
     assert!(
         matches!(
             session.shell().notifications.pane_state(),
-            crate::notif_pane::PaneState::SlideOut(_)
+            crate::notif_pane::PaneState::SlideOut(p) if p > 0.0 && p < 1.0
         ),
-        "the close snapped instead of sliding: {:?}",
+        "one frame did not move the slide, or finished it: {:?}",
         session.shell().notifications.pane_state()
     );
 
@@ -4001,6 +3995,38 @@ fn closing_the_pane_slides_it_out_and_it_stays_out() {
         crate::notif_pane::PaneState::Hidden
     );
     assert!(!session.anything_moving());
+}
+
+/// **A pump that runs late carries the time that passed** -- which is right
+/// for a desktop, and is why the tests above hand their keys over with
+/// [`deliver`] rather than pumping them.
+///
+/// The key arms a wake-up 16 ms out; the thread is then away for longer than
+/// the pane's whole slide; the pump that follows asks the loop what is due,
+/// is handed a tick carrying all of that time, and finishes the slide. On a
+/// loaded machine the same thing happened *inside* one pump, between the key
+/// and the pump's next poll, and `closing_the_pane_slides_it_out_and_it_stays_out`
+/// saw the pane `Hidden` straight after the close.
+#[test]
+fn a_late_pump_moves_an_animation_on_by_the_time_that_passed() {
+    let (mut session, _desktop, _turn) = session();
+    let panel = session.panel().window();
+    deliver(&mut session, panel, super_n());
+    assert!(
+        session.shell().notifications.is_sliding(),
+        "the premise: the pane has begun to slide in"
+    );
+    assert!(session.events_mut().is_waking(panel));
+
+    // Longer than the pane's whole slide, which is a fifth of a second.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    session.pump().expect("pump");
+
+    assert_eq!(
+        session.shell().notifications.pane_state(),
+        crate::notif_pane::PaneState::Visible,
+        "a pump a whole slide late did not finish the slide"
+    );
 }
 
 #[test]
@@ -4134,10 +4160,7 @@ fn showing_an_overlay_asks_for_a_frame_and_the_last_one_stops_asking() {
         "the test's premise is wrong: the desktop was not idle to begin with"
     );
 
-    desktop
-        .borrow_mut()
-        .send_input(&[InputEvent::new(panel, media(Key::VolumeUp))]);
-    session.pump().expect("pump");
+    deliver(&mut session, panel, media(Key::VolumeUp));
     assert!(
         session.events_mut().is_waking(panel),
         "an overlay was put on screen and no frame was asked for, so its \
@@ -4145,7 +4168,7 @@ fn showing_an_overlay_asks_for_a_frame_and_the_last_one_stops_asking() {
     );
 
     // Well short of the whole fade-in plus timeout plus fade-out.
-    frame(&mut session, &desktop, 500);
+    frame(&mut session, 500);
     assert!(
         session.shell().osd.has_visible(),
         "half a second retired it"
@@ -4159,7 +4182,7 @@ fn showing_an_overlay_asks_for_a_frame_and_the_last_one_stops_asking() {
     // whole design — no wake-up left, so the loop parks unbounded.
     let osd = session.osd().window();
     let before = desktop.borrow().seen.len();
-    frame(&mut session, &desktop, 10_000);
+    frame(&mut session, 10_000);
     assert!(
         !session.shell().osd.has_visible(),
         "ten seconds did not retire a two-second overlay"
@@ -4208,7 +4231,7 @@ fn an_overlay_and_a_menu_do_not_disturb_each_other() {
 
     // Now let the overlay expire, with the menu still open: the menu's surface
     // must not go with it.
-    frame(&mut session, &desktop, 10_000);
+    frame(&mut session, 10_000);
     assert!(!session.shell().osd.has_visible());
     assert!(
         !desktop.borrow().seen[before..].iter().any(|r| r.body

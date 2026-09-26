@@ -226,8 +226,8 @@ ONLINE = [
     ),
     (
         "a line that is not UTF-8 is emptied",
-        "        Ok(String::from_utf8(raw)",
-        "        Ok(String::from_utf8(raw).or_else(|_| Ok::<String, ()>(String::new()))",
+        "            .unwrap_or_else(|e| e.into_bytes().iter().map(|&b| char::from(b)).collect()))",
+        "            .unwrap_or_default())",
         [LATIN1],
     ),
     (

@@ -3874,12 +3874,12 @@ mod tests {
         Dictionary::new()
     }
 
-    /// A lookup that answers at once, from memory: "nowhere" has no entry
-    /// and two words near it, "offline" cannot be reached, and anything else
-    /// is a one-sense noun.
+    /// A lookup that answers at once, from memory: "nowhere" and "ker" have
+    /// no entry and two words near them, "offline" cannot be reached, and
+    /// anything else is a one-sense noun.
     fn answers(_server: &str, word: &str) -> Result<online::Answer, online::LookupError> {
         match word {
-            "nowhere" => Ok(online::Answer::NotFound {
+            "nowhere" | "ker" => Ok(online::Answer::NotFound {
                 suggestions: vec![String::from("nowise"), String::from("kernel")],
             }),
             "offline" => Err(online::LookupError::Network(std::io::Error::new(
@@ -4021,6 +4021,29 @@ mod tests {
             "a built-in word was sent to be looked up"
         );
         assert_eq!(d.word(d.current().expect("kernel opened")), "kernel");
+
+        // The selection is *moved* to the suggestions -- not merely left
+        // where the offer to look up was, which above is the same row. Here
+        // it starts on a result, above them.
+        let mut d = app();
+        d.lookup = answers;
+        search_for(&mut d, "ker");
+        assert_eq!(d.selected(Screen::Search), 0);
+        assert!(
+            d.rows(Screen::Search)
+                .first()
+                .and_then(Row::entry)
+                .is_some(),
+            "control: \"ker\" has built-in results above the offer"
+        );
+        d.look_up("ker");
+        settle(&mut d);
+        let rows = d.rows(Screen::Search);
+        assert_eq!(
+            rows.get(d.selected(Screen::Search)),
+            Some(&Row::Suggestion(String::from("nowise"))),
+            "the selection stayed on a result above the suggestions"
+        );
     }
 
     /// A lookup that fails says why, and adds nothing.

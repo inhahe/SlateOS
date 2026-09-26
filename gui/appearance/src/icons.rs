@@ -30,12 +30,27 @@
 //! larger than [`MAX_ICON_BYTES`], one that is not an SVG this renderer can
 //! read, or one that draws nothing is passed over for the next place to look,
 //! and an icon is never rendered larger than [`MAX_ICON_PX`] square.
+//!
+//! # Drawing one in a frame
+//!
+//! A render tree is commands, not pixels, so a program names an icon in it by
+//! an image id: [`IconRegistry::icon`] gives the id of a name drawn at a size
+//! in a colour -- the same id every time it is asked the same, under the
+//! [`ICON_ID_TAG`] that marks it an icon -- and remembers what it stands for.
+//! Before sending a frame, [`upload_missing`] draws and uploads each icon the
+//! frame names that its window does not hold yet, since a compositor draws
+//! nothing, silently, for an image id it has no pixels for. The desktop draws
+//! every one of its pictures this way, and any program can.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use guitk::color::Color;
+use guitk::render::RenderCommand;
 use guitk::svg::SvgDocument;
 
 use crate::themes::{self, ThemeDirs};
@@ -493,6 +508,111 @@ fn render_svg(svg: &str, size: u32, color: Color) -> Option<Icon> {
         return None;
     }
     Some(Icon { size, argb })
+}
+
+// ============================================================================
+// Naming icons in a frame
+// ============================================================================
+
+/// The bit that marks an image id an icon's: set in every id
+/// [`IconRegistry::icon`] gives, so a program's own pictures -- numbered from
+/// one upwards -- are never mistaken for one, and [`upload_missing`] leaves
+/// them alone.
+pub const ICON_ID_TAG: u64 = 1 << 62;
+/// The bits of an icon's id below the tag.
+const ICON_ID_MASK: u64 = ICON_ID_TAG - 1;
+
+/// An icon a render tree names by its image id: which, how many pixels
+/// square, and in what colour -- everything needed to draw and upload it
+/// before the frame that names it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IconRequest {
+    /// The icon's name, as an icon theme knows it (`folder`, `user-home`).
+    pub name: &'static str,
+    /// Its side, in pixels.
+    pub px: u32,
+    /// The colour a `currentColor` icon is drawn in; its alpha fades the
+    /// whole icon.
+    pub color: Color,
+}
+
+/// The icons a part of a program has drawn, by the image id each was given.
+///
+/// Each part that draws icons may keep one -- the desktop keeps one for its
+/// menus, one for its desktop icons, one for its overlays -- as long as
+/// whatever uploads can ask them all.
+#[derive(Debug, Default)]
+pub struct IconRegistry {
+    requests: RefCell<BTreeMap<u64, IconRequest>>,
+}
+
+impl IconRegistry {
+    /// The image id of `name` drawn `px` square in `color`, remembering the
+    /// request under it.
+    ///
+    /// The id is the request's hash under [`ICON_ID_TAG`]: the same icon asked
+    /// for again, in any frame, is the same id, so it is uploaded once.
+    pub fn icon(&self, name: &'static str, px: u32, color: Color) -> u64 {
+        let request = IconRequest { name, px, color };
+        let mut hasher = std::hash::DefaultHasher::new();
+        request.hash(&mut hasher);
+        let id = ICON_ID_TAG | (hasher.finish() & ICON_ID_MASK);
+        self.requests.borrow_mut().insert(id, request);
+        id
+    }
+
+    /// What was drawn under `id`, if anything was.
+    #[must_use]
+    pub fn request(&self, id: u64) -> Option<IconRequest> {
+        self.requests.borrow().get(&id).cloned()
+    }
+
+    /// Forget every request: the appearance changed, and every icon is drawn
+    /// again in new colours under new ids.
+    pub fn clear(&self) {
+        self.requests.borrow_mut().clear();
+    }
+}
+
+/// Upload each icon `commands` name that has not been sent yet: draw it from
+/// `theme` as `lookup` says it was asked for, and hand its pixels to `upload`.
+///
+/// `first_time(id)` answers whether `id` still needs sending -- and records
+/// that it has been, which is the caller's to keep per window, since each
+/// window holds its own images. An id that is not an icon's (no
+/// [`ICON_ID_TAG`]) is a picture the program uploads itself and is left alone.
+/// An icon `lookup` does not know, or one nothing draws, is recorded as sent
+/// all the same: the frame still names it and draws the rest, and asking
+/// again every frame would find nothing again every frame. So is one `upload`
+/// refuses -- that is the caller's to decide, by what it returns: an error
+/// stops here and is handed back.
+///
+/// # Errors
+///
+/// Whatever `upload` returns.
+pub fn upload_missing<E>(
+    commands: &[RenderCommand],
+    theme: &IconTheme,
+    lookup: impl Fn(u64) -> Option<IconRequest>,
+    mut first_time: impl FnMut(u64) -> bool,
+    mut upload: impl FnMut(u64, &Icon) -> Result<(), E>,
+) -> Result<(), E> {
+    for command in commands {
+        let RenderCommand::Image { image_id, .. } = command else {
+            continue;
+        };
+        let id = *image_id;
+        if id & ICON_ID_TAG == 0 || !first_time(id) {
+            continue;
+        }
+        let Some(request) = lookup(id) else {
+            continue;
+        };
+        if let Some(icon) = theme.render(request.name, request.px, request.color) {
+            upload(id, &icon)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

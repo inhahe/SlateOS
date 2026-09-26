@@ -136,7 +136,7 @@ fn the_users_icon_comes_before_the_systems_and_both_before_the_built_in() {
 /// default fill -- and a set drawn for another desktop did not drop in.
 #[test]
 fn an_icon_styled_as_breeze_writes_them_draws_in_the_colour_asked_for() {
-    const BREEZE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+    const BREEZE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
   <defs id="defs3051">
     <style type="text/css" id="current-color-scheme">
       .ColorScheme-Text {
@@ -145,7 +145,7 @@ fn an_icon_styled_as_breeze_writes_them_draws_in_the_colour_asked_for() {
     </style>
   </defs>
   <path style="fill:currentColor;fill-opacity:1;stroke:none" d="M2 2h12v12H2z" class="ColorScheme-Text"/>
-</svg>"##;
+</svg>"#;
     let fx = Fixture::new("breeze");
     fx.put("system", "breeze", "folder", BREEZE.as_bytes());
     let theme = IconTheme::named(OsStr::new("breeze"), fx.dirs());
@@ -154,6 +154,94 @@ fn an_icon_styled_as_breeze_writes_them_draws_in_the_colour_asked_for() {
     assert_eq!(icon.argb[(8 * 16 + 8) as usize], 0xFF20_80C0);
     // And its corner clear: the square is inset by two units.
     assert_eq!(icon.argb[0] >> 24, 0);
+}
+
+/// **An icon named in a frame is uploaded once, before it**: each icon id the
+/// commands name is drawn and handed to the upload once, a picture's own id is
+/// left alone, and an id nobody asked for, or one nothing draws, is passed
+/// over -- and all three recorded, so none is looked at again.
+#[test]
+fn a_frames_icons_are_uploaded_once_and_nothing_else_is() {
+    use guitk::render::RenderCommand;
+    let registry = IconRegistry::default();
+    let folder = registry.icon("folder", 16, INK);
+    let nothing = registry.icon("no-such-icon-anywhere", 16, INK);
+    assert_ne!(folder & ICON_ID_TAG, 0, "an icon's id carries the tag");
+    assert_eq!(
+        registry.icon("folder", 16, INK),
+        folder,
+        "the same icon, the same id"
+    );
+    assert_ne!(
+        registry.icon("folder", 24, INK),
+        folder,
+        "another size, another id"
+    );
+    let unknown = ICON_ID_TAG | 7;
+    let picture = 42_u64;
+    let image = |image_id: u64| RenderCommand::Image {
+        x: 0.0,
+        y: 0.0,
+        width: 16.0,
+        height: 16.0,
+        image_id,
+    };
+    let frame = [
+        image(folder),
+        image(picture),
+        image(nothing),
+        image(unknown),
+        image(folder),
+    ];
+    let theme = IconTheme::named(OsStr::new("no-such-theme"), Fixture::new("upload").dirs());
+    let mut sent = std::collections::BTreeSet::new();
+    let mut uploaded: Vec<(u64, u32)> = Vec::new();
+    let result: Result<(), ()> = upload_missing(
+        &frame,
+        &theme,
+        |id| registry.request(id),
+        |id| sent.insert(id),
+        |id, icon| {
+            uploaded.push((id, icon.size));
+            Ok(())
+        },
+    );
+    assert!(result.is_ok());
+    assert_eq!(uploaded, [(folder, 16)], "only the folder, once");
+    assert!(sent.contains(&nothing) && sent.contains(&unknown));
+    assert!(
+        !sent.contains(&picture),
+        "a picture's own id is not an icon's"
+    );
+
+    // The next frame naming it sends nothing again.
+    uploaded.clear();
+    let again: Result<(), ()> = upload_missing(
+        &frame,
+        &theme,
+        |id| registry.request(id),
+        |id| sent.insert(id),
+        |id, icon| {
+            uploaded.push((id, icon.size));
+            Ok(())
+        },
+    );
+    assert!(again.is_ok());
+    assert!(uploaded.is_empty());
+
+    // An upload's error stops the walk and comes back.
+    let failing: Result<(), &str> = upload_missing(
+        &[image(registry.icon("folder", 32, INK))],
+        &theme,
+        |id| registry.request(id),
+        |_| true,
+        |_, _| Err("refused"),
+    );
+    assert_eq!(failing, Err("refused"));
+
+    // Clearing forgets what was drawn.
+    registry.clear();
+    assert!(registry.request(folder).is_none());
 }
 
 /// A name the theme lacks falls back to shorter names -- in the theme first,

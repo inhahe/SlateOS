@@ -74,7 +74,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use appearance::Palette;
 use guitk::event::{Event, Key, Modifiers, MouseEvent, SettingsGroup};
-use guitk::render::{RenderCommand, RenderTree};
+use guitk::render::RenderTree;
 use oswindow::{
     BlurKind, ConnectionError, ConnectionTransport as Transport, Error, EventLoop, Layer,
     PixelFormat, Spec,
@@ -1893,50 +1893,40 @@ impl<T: Transport> ShellSession<T> {
     /// names it and draws its label beside the gap, and asking again every
     /// frame would only be refused again every frame.
     fn upload_icons(&mut self, window: u64, tree: &RenderTree) -> Result<(), Error<T>> {
-        for command in &tree.commands {
-            let RenderCommand::Image { image_id, .. } = command else {
-                continue;
-            };
-            let id = *image_id;
-            if id & crate::ICON_ID_TAG == 0 || self.icons_uploaded.contains(&(window, id)) {
-                continue;
-            }
-            self.icons_uploaded.insert((window, id));
+        let shell = &self.shell;
+        let login = self.login.as_ref();
+        let uploaded = &mut self.icons_uploaded;
+        let events = &mut self.events;
+        appearance::icons::upload_missing(
+            &tree.commands,
+            &shell.appearance.icon_theme,
             // The shell's parts, then the login screen, which the session
             // holds rather than the shell.
-            let Some(request) = self.shell.icon_request(id).or_else(|| {
-                self.login
-                    .as_ref()
-                    .and_then(|screen| screen.icon_request(id))
-            }) else {
-                continue;
-            };
-            let Some(icon) =
-                self.shell
-                    .appearance
-                    .icon_theme
-                    .render(request.name, request.px, request.color)
-            else {
-                continue;
-            };
-            let Some(mut handle) = self.events.window_mut(window) else {
-                continue;
-            };
-            let stride = icon.size.saturating_mul(4);
-            let bytes = guitk::canvas::WireBytes::from_le_argb(&icon.argb);
-            match handle.upload_image(
-                id,
-                icon.size,
-                icon.size,
-                stride,
-                PixelFormat::Argb8888,
-                bytes,
-            ) {
-                Ok(()) | Err(ConnectionError::Refused(_)) => {}
-                Err(other) => return Err(other),
-            }
-        }
-        Ok(())
+            |id| {
+                shell
+                    .icon_request(id)
+                    .or_else(|| login.and_then(|screen| screen.icon_request(id)))
+            },
+            |id| uploaded.insert((window, id)),
+            |id, icon| {
+                let Some(mut handle) = events.window_mut(window) else {
+                    return Ok(());
+                };
+                let stride = icon.size.saturating_mul(4);
+                let bytes = guitk::canvas::WireBytes::from_le_argb(&icon.argb);
+                match handle.upload_image(
+                    id,
+                    icon.size,
+                    icon.size,
+                    stride,
+                    PixelFormat::Argb8888,
+                    bytes,
+                ) {
+                    Ok(()) | Err(ConnectionError::Refused(_)) => Ok(()),
+                    Err(other) => Err(other),
+                }
+            },
+        )
     }
 
     /// Give back every icon uploaded, on every surface. A drop the compositor

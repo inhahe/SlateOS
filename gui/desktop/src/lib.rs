@@ -437,64 +437,9 @@ const START_LINK_ICON: f32 = 18.0;
 /// The gap between an icon and the words beside it.
 const START_LINK_ICON_GAP: f32 = 10.0;
 
-/// The image ids icons are uploaded under: a range of their own, so that no id
-/// the wallpaper or the greeter's picture is given can ever be one. See
-/// [`DesktopShell::icon_request`].
-pub const ICON_ID_TAG: u64 = 1 << 62;
-/// The bits of an icon's id below the tag.
-const ICON_ID_MASK: u64 = ICON_ID_TAG - 1;
-
-/// An icon a render tree names by its image id: which, how many pixels
-/// square, and in what colour -- everything the session needs to draw and
-/// upload it before the frame that names it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct IconRequest {
-    /// The icon's name, as an icon theme knows it (`folder`, `user-home`).
-    pub name: &'static str,
-    /// Its side, in pixels.
-    pub px: u32,
-    /// The colour a `currentColor` icon is drawn in.
-    pub color: Color,
-}
-
-/// The icons a part of the shell has drawn, by the image id each was given.
-///
-/// Each part that draws icons keeps one -- the shell for its menus, the
-/// desktop's icon layer for its icons -- and [`DesktopShell::icon_request`]
-/// answers for them all, which is what the session asks before uploading.
-#[derive(Debug, Default)]
-pub struct IconRegistry {
-    requests: core::cell::RefCell<std::collections::BTreeMap<u64, IconRequest>>,
-}
-
-impl IconRegistry {
-    /// The image id of `name` drawn `px` square in `color`, remembering the
-    /// request under it.
-    ///
-    /// The id is the request's hash under [`ICON_ID_TAG`]: the same icon asked
-    /// for again, in any frame, is the same id, so it is uploaded once.
-    pub fn icon(&self, name: &'static str, px: u32, color: Color) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let request = IconRequest { name, px, color };
-        let mut hasher = std::hash::DefaultHasher::new();
-        request.hash(&mut hasher);
-        let id = ICON_ID_TAG | (hasher.finish() & ICON_ID_MASK);
-        self.requests.borrow_mut().insert(id, request);
-        id
-    }
-
-    /// What was drawn under `id`, if anything was.
-    #[must_use]
-    pub fn request(&self, id: u64) -> Option<IconRequest> {
-        self.requests.borrow().get(&id).cloned()
-    }
-
-    /// Forget every request: the appearance changed, and every icon is drawn
-    /// again in new colours under new ids.
-    pub fn clear(&self) {
-        self.requests.borrow_mut().clear();
-    }
-}
+// The icon naming the shell's pictures use -- shared with every program, in
+// `appearance::icons` (design-decisions.md §880, §881).
+pub use appearance::icons::{ICON_ID_TAG, IconRegistry, IconRequest};
 
 // --- Power menu ------------------------------------------------------------
 

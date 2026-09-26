@@ -1851,6 +1851,10 @@ D's to act on once answered).
       before they write the answer, as Linux does, so a bad path is
       reported ahead of a NULL buffer; `statfs` sets `ST_VALID` (the
       twentieth pass).
+    * the module calls make Linux's checks and no others (the twenty-first
+      pass): `finit_module` refuses a descriptor it could not read the module
+      from, and `delete_module` no longer refuses names and flags Linux
+      accepts.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

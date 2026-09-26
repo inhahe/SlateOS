@@ -23999,6 +23999,26 @@ Linux 6.6's fs/statfs.c and glibc 2.39's `statvfs64.c` and `fstatvfs64.c`.
   `f_flags`, as Linux does on every answer. The host tests resolve the path
   as the target does; only the kernel's figures are defaults there.
 
+**Twenty-first pass, 2026-09-26 — `linux_module.rs` (4 sites), lane D.**
+Against Linux 6.6's kernel/module/main.c. Every call still ends in `ENOSYS`
+where Linux would start loading or unloading; what changed is which checks
+come before that.
+
+- **`init_module`, `finit_module`** answered a NULL parameter string with
+  `EFAULT`. Linux copies `uargs` only inside `load_module`, once the image
+  has been checked and accepted as a module -- past the point where these
+  calls end -- so it is no longer looked at. The image's NULL (`EFAULT`,
+  after the length checks) was right.
+- **`finit_module`** refused only a negative descriptor; one that was not
+  open, was `O_PATH`, or was not open for reading went on to `ENOSYS`.
+  Linux's `fdget` finds neither of the first two and
+  `idempotent_init_module` refuses the third, all with `EBADF`.
+- **`delete_module`**'s NULL (`EFAULT`, after `EPERM`) was right, but it
+  refused an empty name, a long one, one holding a `/`, and an unknown flag,
+  all with `EINVAL`. Linux refuses none of them: it looks any name up
+  (`ENOENT` when no module has it) and reads the flags only for a module it
+  finds in use. The four checks are gone.
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24012,9 +24032,9 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-twenty swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`, `sched.rs`,
-`mqueue.rs`, `linux_futex.rs`, `resolv.rs` and `statvfs.rs`; next are the
-other files at four.
+twenty-one swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`, `sched.rs`,
+`mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs` and
+`linux_module.rs`; next are the other files at four.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL

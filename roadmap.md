@@ -1847,6 +1847,10 @@ D's to act on once answered).
       `res_mkquery`, `res_send` and `res_querydomain` work -- `resolv.conf`
       into `_res`, glibc's name rules and search, UDP to every nameserver with
       a TCP fallback -- where they answered `ENOSYS`.
+    * `statvfs`/`statfs` and their descriptor forms find the filesystem
+      before they write the answer, as Linux does, so a bad path is
+      reported ahead of a NULL buffer; `statfs` sets `ST_VALID` (the
+      twentieth pass).
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

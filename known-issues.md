@@ -23982,6 +23982,23 @@ first (`ESRCH`, then `EINVAL`); `res_mkquery` answers -1, as glibc answers
 its own refusals; and `dn_expand`, `dn_comp` and `dn_skipname` set
 `EMSGSIZE` when they fail, as glibc's do.
 
+**Twentieth pass, 2026-09-26 — `statvfs.rs` (4 sites), lane D.** Against
+Linux 6.6's fs/statfs.c and glibc 2.39's `statvfs64.c` and `fstatvfs64.c`.
+
+- **`statvfs`, `statfs`** refused a NULL buffer before they looked at the
+  path. Linux finds the filesystem first (`user_statfs`) and copies the
+  answer out last (`do_statfs_native`, `EFAULT`); glibc's `statvfs` makes
+  that call into a local of its own and converts it afterwards. So an empty
+  path is `ENOENT`, and an overlong one `ENAMETOOLONG`, even beside a NULL
+  buffer. A NULL path stays `EFAULT` -- the kernel's `getname` faults on it.
+- **`fstatvfs`, `fstatfs`** already put `EBADF` first; the query of the
+  descriptor's stored path now comes before the buffer too, as `fd_statfs`
+  comes before the copy.
+- Beside them: every answer is written whole, so `statvfs` zeroes
+  `__f_spare` as glibc's conversion does, and `statfs` sets `ST_VALID` in
+  `f_flags`, as Linux does on every answer. The host tests resolve the path
+  as the target does; only the kernel's figures are defaults there.
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -23995,8 +24012,9 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-nineteen swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`, `sched.rs`,
-`mqueue.rs`, `linux_futex.rs` and `resolv.rs`; next are the files at four.
+twenty swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`, `sched.rs`,
+`mqueue.rs`, `linux_futex.rs`, `resolv.rs` and `statvfs.rs`; next are the
+other files at four.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL

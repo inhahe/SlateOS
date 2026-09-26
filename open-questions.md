@@ -308,7 +308,7 @@ costs the other two lanes their merges.
 the head-of-line witness entry: `socket.rs:356`, `netstack_client.rs:158`, and
 `services/netstack/src/main.rs:2594`.*
 
-## C-Q27 — [C] The start button should be the XOR logo, but the logo is not in the repository. Can you add it? — Status: OPEN (raised 2026-09-26)
+## C-Q28 — [C] The start button should be the XOR logo, but the logo is not in the repository. Can you add it? — Status: OPEN (raised 2026-09-26)
 
 **In short:** the design says the start button is "a round, shrunken version
 of the XOR logo (`xor2.png`)". No file of that name is in the repository, on

@@ -279,11 +279,6 @@ apps/filesearch/src/main.rs:is_searching
 # none is on a path a user can currently reach.
 apps/hexeditor/src/main.rs:last_match
 
-# apps/imageviewer --
-# Not yet triaged individually. Each is a value computed and discarded, and
-# none is on a path a user can currently reach.
-apps/imageviewer/src/main.rs:directory
-
 # apps/installer --
 # Not yet triaged individually. Each is a value computed and discarded, and
 # none is on a path a user can currently reach.

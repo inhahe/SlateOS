@@ -13,6 +13,11 @@
 //!
 //! ## BST Design
 //!
+//! - A red-black tree, glibc 2.39's (misc/tsearch.c): insertion splits and
+//!   rotates on the way down, deletion repairs on the way up, so every
+//!   operation is O(log n) whatever order the keys come in.  It was a plain
+//!   binary search tree until 2026-09-26, which keys inserted in order —
+//!   the usual case — turned into a linked list.
 //! - Nodes are allocated via `malloc` and freed via `free`.
 //! - The comparison function has the standard C prototype:
 //!   `int compar(const void *a, const void *b)`.
@@ -40,10 +45,14 @@ use crate::errno;
 // Node layout
 // ---------------------------------------------------------------------------
 
-/// A BST node.  Stored as a contiguous allocation:
-///   [key: *const u8][left: *mut Node][right: *mut Node]
+/// A node of the `tsearch` tree: a red-black tree, as glibc's is
+/// (misc/tsearch.c), so that insertion, lookup and deletion cost O(log n)
+/// whatever order the keys arrive in.
 ///
-/// We use repr(C) so the layout is predictable.
+/// `key` must stay the first field: `tsearch` and `tfind` return a pointer to
+/// the node, which the caller reads as a pointer to a pointer to its key.
+/// glibc keeps the colour in the low bit of `left`; a separate field costs a
+/// word per node and no pointer arithmetic.
 #[repr(C)]
 struct Node {
     /// Pointer to user data.
@@ -52,6 +61,8 @@ struct Node {
     left: *mut Node,
     /// Right child (keys greater than this node).
     right: *mut Node,
+    /// Red, or black.  A null child counts as black.
+    red: bool,
 }
 
 /// Comparison function type.
@@ -71,32 +82,112 @@ pub const LEAF: i32 = 3;
 /// Arguments: `(node_ptr, visit_order, depth)`.
 pub type TwalkFn = extern "C" fn(*const u8, i32, i32);
 
+/// Action callback type for `twalk_r`.
+///
+/// Arguments: `(node_ptr, visit_order, closure)`.
+pub type TwalkRFn = extern "C" fn(*const u8, i32, *mut u8);
+
 /// Free callback type for `tdestroy`.
 pub type TdestroyFn = extern "C" fn(*mut u8);
 
-// ---------------------------------------------------------------------------
-// Allocate / free a node
-// ---------------------------------------------------------------------------
+/// The most nodes `tdelete` can have above the one it removes.  A red-black
+/// tree of n nodes is at most `2 * log2(n + 1)` high, so 128 covers any tree
+/// an address space can hold; glibc grows its stack instead, which a valid
+/// tree never needs.
+const MAX_TREE_HEIGHT: usize = 128;
 
-fn alloc_node(key: *const u8) -> *mut Node {
-    let ptr = crate::malloc::malloc(core::mem::size_of::<Node>());
-    if ptr.is_null() {
-        return core::ptr::null_mut();
-    }
-    let node = ptr.cast::<Node>();
-    // SAFETY: we just allocated enough memory for a Node.
-    unsafe {
-        (*node).key = key;
-        (*node).left = core::ptr::null_mut();
-        (*node).right = core::ptr::null_mut();
-    }
-    node
+/// Red, for a node that may be null (a null child is black).
+///
+/// # Safety
+///
+/// `n` must be null or a live node.
+unsafe fn is_red(n: *mut Node) -> bool {
+    // SAFETY: the caller's contract.
+    !n.is_null() && unsafe { (*n).red }
 }
 
-fn free_node(node: *mut Node) {
-    if !node.is_null() {
-        unsafe {
-            crate::malloc::free(node.cast::<u8>());
+/// glibc's `maybe_split_for_insert`: on the way down, split a node with two
+/// red children (it turns red, they turn black), and repair two red edges in
+/// a row with one or two rotations.  `rootp` points at the lowest node
+/// visited, `parentp` and `gparentp` at its parent and grandparent (either
+/// may be null); `p_r` and `gp_r` are the comparisons that chose the way to
+/// `rootp`.  `force` skips the two-red-children test: the node just inserted
+/// is to be treated as split.
+///
+/// # Safety
+///
+/// Every non-null pointer must point at a live link of the tree, `*rootp`
+/// must be a live node, and `gparentp` must be non-null whenever `parentp`
+/// is and `*parentp` is red — which a valid tree guarantees, a red node never
+/// being the root.
+unsafe fn maybe_split_for_insert(
+    rootp: *mut *mut Node,
+    parentp: *mut *mut Node,
+    gparentp: *mut *mut Node,
+    p_r: i32,
+    gp_r: i32,
+    force: bool,
+) {
+    // SAFETY: the caller's contract covers every dereference below; the
+    // rotations only relink nodes that are already in the tree.
+    unsafe {
+        let root = *rootp;
+        let rp: *mut *mut Node = &raw mut (*root).right;
+        let rpn = (*root).right;
+        let lp: *mut *mut Node = &raw mut (*root).left;
+        let lpn = (*root).left;
+
+        if !(force || (is_red(rpn) && is_red(lpn))) {
+            return;
+        }
+        // This node becomes red, its children black.
+        (*root).red = true;
+        if !rpn.is_null() {
+            (*rpn).red = false;
+        }
+        if !lpn.is_null() {
+            (*lpn).red = false;
+        }
+
+        // If the parent is red too, rotate.
+        if parentp.is_null() || !is_red(*parentp) || gparentp.is_null() {
+            return;
+        }
+        let gp = *gparentp;
+        let p = *parentp;
+        if (p_r > 0) != (gp_r > 0) {
+            // The two red edges bend: the child goes to the top, with its
+            // parent and grandparent as its children.
+            (*p).red = true;
+            (*gp).red = true;
+            (*root).red = false;
+            if p_r < 0 {
+                // Child is left of parent.
+                (*p).left = rpn;
+                *rp = p;
+                (*gp).right = lpn;
+                *lp = gp;
+            } else {
+                // Child is right of parent.
+                (*p).right = lpn;
+                *lp = p;
+                (*gp).left = rpn;
+                *rp = gp;
+            }
+            *gparentp = root;
+        } else {
+            // Both edges go the same way: the parent goes to the top, with
+            // the grandparent and the child as its children.
+            *gparentp = p;
+            (*p).red = false;
+            (*gp).red = true;
+            if p_r < 0 {
+                (*gp).left = (*p).right;
+                (*p).right = gp;
+            } else {
+                (*gp).right = (*p).left;
+                (*p).left = gp;
+            }
         }
     }
 }
@@ -105,169 +196,312 @@ fn free_node(node: *mut Node) {
 // tsearch — insert or find a node
 // ---------------------------------------------------------------------------
 
-/// `tsearch` — search for or insert a node in the binary search tree.
+/// `tsearch` — find `key` in the tree at `*rootp`, inserting it if absent.
 ///
-/// If a matching node is found, returns a pointer to it.
-/// If not found, allocates a new node and inserts it.
-/// Returns null if allocation fails.
-///
-/// `rootp` is a pointer to the root pointer (i.e., `void **rootp`).
+/// Returns the node holding the key (read it as a pointer to a pointer to
+/// the key), or null if `rootp` is null or a new node cannot be allocated.
+/// glibc 2.39's top-down red-black insertion (misc/tsearch.c), so a tree
+/// built from keys in order stays O(log n) high; until 2026-09-26 this was an
+/// unbalanced tree, which sorted input made a linked list.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tsearch(key: *const u8, rootp: *mut *mut u8, compar: ComparFn) -> *mut u8 {
     if rootp.is_null() {
         return core::ptr::null_mut();
     }
+    let mut rootp: *mut *mut Node = rootp.cast();
+    let mut parentp: *mut *mut Node = core::ptr::null_mut();
+    let mut gparentp: *mut *mut Node = core::ptr::null_mut();
+    let (mut r, mut p_r, mut gp_r) = (0i32, 0i32, 0i32);
 
-    // Walk down the tree.
-    let mut slot: *mut *mut Node = rootp.cast::<*mut Node>();
-    loop {
-        let current = unsafe { *slot };
-        if current.is_null() {
-            // Insert here.
-            let new_node = alloc_node(key);
-            if new_node.is_null() {
-                errno::set_errno(errno::ENOMEM);
-                return core::ptr::null_mut();
-            }
-            unsafe {
-                *slot = new_node;
-            }
-            return new_node.cast::<u8>();
+    // SAFETY: `rootp` is the caller's root link, and every link followed
+    // below is a child field of a live node of the tree it roots.
+    unsafe {
+        // The root is always black; this saves tests below.
+        let root = *rootp;
+        if !root.is_null() {
+            (*root).red = false;
         }
 
-        let cmp = compar(key, unsafe { (*current).key });
-        match cmp.cmp(&0) {
-            core::cmp::Ordering::Less => {
-                slot = unsafe { &raw mut (*current).left };
+        let mut nextp = rootp;
+        while !(*nextp).is_null() {
+            let root = *rootp;
+            r = compar(key, (*root).key);
+            if r == 0 {
+                return root.cast();
             }
-            core::cmp::Ordering::Greater => {
-                slot = unsafe { &raw mut (*current).right };
+            maybe_split_for_insert(rootp, parentp, gparentp, p_r, gp_r, false);
+            // If that rotated, `parentp` and `gparentp` are stale; glibc's
+            // comment: they are never used again in that case.
+            nextp = if r < 0 {
+                &raw mut (*root).left
+            } else {
+                &raw mut (*root).right
+            };
+            if (*nextp).is_null() {
+                break;
             }
-            core::cmp::Ordering::Equal => {
-                // Found — return existing node.
-                return current.cast::<u8>();
-            }
+            gparentp = parentp;
+            parentp = rootp;
+            rootp = nextp;
+            gp_r = p_r;
+            p_r = r;
         }
+
+        let q = crate::malloc::malloc(core::mem::size_of::<Node>()).cast::<Node>();
+        if q.is_null() {
+            errno::set_errno(errno::ENOMEM);
+            return core::ptr::null_mut();
+        }
+        q.write(Node {
+            key,
+            left: core::ptr::null_mut(),
+            right: core::ptr::null_mut(),
+            red: true,
+        });
+        *nextp = q;
+        if nextp != rootp {
+            // Two red edges in a row are possible now; rotate them away.
+            maybe_split_for_insert(nextp, rootp, parentp, r, p_r, true);
+        }
+        q.cast()
     }
 }
 
-// ---------------------------------------------------------------------------
-// tfind — search without inserting
-// ---------------------------------------------------------------------------
-
-/// `tfind` — search for a node in the binary search tree.
+/// `tfind` — find `key` in the tree at `*rootp`, without inserting.
 ///
-/// Returns a pointer to the matching node, or null if not found.
-/// Does not modify the tree.
+/// Returns the node holding it, or null if it is absent or `rootp` is null.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tfind(key: *const u8, rootp: *const *mut u8, compar: ComparFn) -> *const u8 {
     if rootp.is_null() {
         return core::ptr::null();
     }
-
-    let mut current: *mut Node = unsafe { *rootp }.cast::<Node>();
-    while !current.is_null() {
-        let cmp = compar(key, unsafe { (*current).key });
-        match cmp.cmp(&0) {
-            core::cmp::Ordering::Less => current = unsafe { (*current).left },
-            core::cmp::Ordering::Greater => current = unsafe { (*current).right },
-            core::cmp::Ordering::Equal => return current.cast::<u8>(),
+    // SAFETY: `rootp` is the caller's root link; each node reached is live.
+    unsafe {
+        let mut node = (*rootp).cast::<Node>();
+        while !node.is_null() {
+            let r = compar(key, (*node).key);
+            if r == 0 {
+                return node.cast_const().cast();
+            }
+            node = if r < 0 { (*node).left } else { (*node).right };
         }
     }
-
     core::ptr::null()
 }
 
 // ---------------------------------------------------------------------------
-// tdelete — delete a node
+// tdelete — remove a node
 // ---------------------------------------------------------------------------
 
-/// `tdelete` — delete a node from the binary search tree.
+/// `tdelete` — remove `key` from the tree at `*rootp`.
 ///
-/// Removes the node matching `key` and returns a pointer to the
-/// parent of the deleted node (or the new root).  Returns null if
-/// the key was not found.
+/// Returns the parent of the node that held the key, or null if the key is
+/// absent or `rootp` is null.  When the key was at the root, POSIX leaves the
+/// result unspecified but non-null; glibc and musl return the root node —
+/// freed, if it was the one unchained — and this returns `rootp` itself,
+/// which is non-null and not freed memory.  (Until 2026-09-26 it returned the
+/// new root, which is null once the last node goes: success that read as
+/// "not found".)
+///
+/// glibc 2.39's deletion: the node's key is overwritten with its in-order
+/// successor's, the successor is unchained, and a black node lost is repaired
+/// on the way back up.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tdelete(key: *const u8, rootp: *mut *mut u8, compar: ComparFn) -> *mut u8 {
     if rootp.is_null() {
         return core::ptr::null_mut();
     }
+    let vrootp = rootp;
+    let mut rootp: *mut *mut Node = rootp.cast();
+    // The links above the node being removed, root first.
+    let mut stack: [*mut *mut Node; MAX_TREE_HEIGHT] = [core::ptr::null_mut(); MAX_TREE_HEIGHT];
+    let mut sp: usize = 0;
 
-    let mut parent: *mut Node = core::ptr::null_mut();
-    let mut slot: *mut *mut Node = rootp.cast::<*mut Node>();
-
-    loop {
-        let current = unsafe { *slot };
-        if current.is_null() {
-            return core::ptr::null_mut(); // Not found.
+    // SAFETY: `rootp` is the caller's root link; every link on `stack` is a
+    // child field of a live node of the tree, and every node dereferenced is
+    // live.  Rotations and relinks only move nodes that are in the tree.
+    unsafe {
+        let mut root = *rootp;
+        if root.is_null() {
+            return core::ptr::null_mut();
         }
-
-        let cmp = compar(key, unsafe { (*current).key });
-        match cmp.cmp(&0) {
-            core::cmp::Ordering::Less => {
-                parent = current;
-                slot = unsafe { &raw mut (*current).left };
-                continue;
+        let mut p = root;
+        loop {
+            let cmp = compar(key, (*root).key);
+            if cmp == 0 {
+                break;
             }
-            core::cmp::Ordering::Greater => {
-                parent = current;
-                slot = unsafe { &raw mut (*current).right };
-                continue;
-            }
-            core::cmp::Ordering::Equal => {}
-        }
-        {
-            // Found the node to delete.
-            let left = unsafe { (*current).left };
-            let right = unsafe { (*current).right };
-
-            if left.is_null() {
-                // Replace with right child.
-                unsafe {
-                    *slot = right;
-                }
-            } else if right.is_null() {
-                // Replace with left child.
-                unsafe {
-                    *slot = left;
-                }
+            let Some(slot) = stack.get_mut(sp) else {
+                // Deeper than any valid tree can be.
+                return core::ptr::null_mut();
+            };
+            *slot = rootp;
+            sp = sp.wrapping_add(1);
+            p = *rootp;
+            if cmp < 0 {
+                rootp = &raw mut (*p).left;
+                root = (*p).left;
             } else {
-                // Two children: find in-order successor (leftmost in right subtree).
-                let mut succ_parent = current;
-                let mut succ = right;
-                while !unsafe { (*succ).left }.is_null() {
-                    succ_parent = succ;
-                    succ = unsafe { (*succ).left };
+                rootp = &raw mut (*p).right;
+                root = (*p).right;
+            }
+            if root.is_null() {
+                return core::ptr::null_mut();
+            }
+        }
+        // `p` is the parent of the node holding the key -- or that node
+        // itself, when it is the root.
+        let retval: *mut u8 = if sp == 0 { vrootp.cast() } else { p.cast() };
+
+        // The node that holds the key is not unchained unless it has at most
+        // one child; otherwise its successor's key replaces its own, and the
+        // successor -- which has no left child -- is unchained instead.
+        let root = *rootp;
+        let unchained = if (*root).left.is_null() || (*root).right.is_null() {
+            root
+        } else {
+            let mut parentp = rootp;
+            let mut up: *mut *mut Node = &raw mut (*root).right;
+            loop {
+                let Some(slot) = stack.get_mut(sp) else {
+                    return core::ptr::null_mut();
+                };
+                *slot = parentp;
+                sp = sp.wrapping_add(1);
+                parentp = up;
+                let upn = *up;
+                if (*upn).left.is_null() {
+                    break;
                 }
-                // Replace current's key with successor's key.
-                unsafe {
-                    (*current).key = (*succ).key;
-                }
-                // Remove successor.
-                if succ_parent == current {
-                    unsafe {
-                        (*succ_parent).right = (*succ).right;
+                up = &raw mut (*upn).left;
+            }
+            *up
+        };
+
+        // One child of `unchained` is null; the other, `r`, takes its place.
+        let mut r = (*unchained).left;
+        if r.is_null() {
+            r = (*unchained).right;
+        }
+        if sp == 0 {
+            *rootp = r;
+        } else if let Some(&link) = stack.get(sp.wrapping_sub(1)) {
+            let q = *link;
+            if unchained == (*q).right {
+                (*q).right = r;
+            } else {
+                (*q).left = r;
+            }
+        }
+        if unchained != root {
+            (*root).key = (*unchained).key;
+        }
+
+        if !(*unchained).red {
+            // A black edge is gone, so paths through `r` are one black node
+            // short.  Repair upwards; null counts as black throughout.
+            while sp > 0 && !is_red(r) {
+                let Some(&pp) = stack.get(sp.wrapping_sub(1)) else {
+                    break;
+                };
+                let mut pp = pp;
+                let p = *pp;
+                if r == (*p).left {
+                    // Q is R's sibling, P their parent.
+                    let mut q = (*p).right;
+                    if is_red(q) {
+                        // Rotate P left, so that Q is black below.
+                        (*q).red = false;
+                        (*p).red = true;
+                        (*p).right = (*q).left;
+                        (*q).left = p;
+                        *pp = q;
+                        pp = &raw mut (*q).left;
+                        if let Some(slot) = stack.get_mut(sp) {
+                            *slot = pp;
+                        }
+                        sp = sp.wrapping_add(1);
+                        q = (*p).right;
+                    }
+                    // Q is black, and not null.
+                    if !is_red((*q).left) && !is_red((*q).right) {
+                        // Q's children are black: colour Q red and move up.
+                        (*q).red = true;
+                        r = p;
+                    } else {
+                        if !is_red((*q).right) {
+                            // Q's left child Q2 is red: it goes to the top.
+                            let q2 = (*q).left;
+                            (*q2).red = (*p).red;
+                            (*p).right = (*q2).left;
+                            (*q).left = (*q2).right;
+                            (*q2).right = q;
+                            (*q2).left = p;
+                            *pp = q2;
+                            (*p).red = false;
+                        } else {
+                            // Q's right child is red: rotate P left.
+                            (*q).red = (*p).red;
+                            (*p).red = false;
+                            (*(*q).right).red = false;
+                            (*p).right = (*q).left;
+                            (*q).left = p;
+                            *pp = q;
+                        }
+                        // Repaired.
+                        sp = 1;
+                        r = core::ptr::null_mut();
                     }
                 } else {
-                    unsafe {
-                        (*succ_parent).left = (*succ).right;
+                    // The mirror image.
+                    let mut q = (*p).left;
+                    if is_red(q) {
+                        (*q).red = false;
+                        (*p).red = true;
+                        (*p).left = (*q).right;
+                        (*q).right = p;
+                        *pp = q;
+                        pp = &raw mut (*q).right;
+                        if let Some(slot) = stack.get_mut(sp) {
+                            *slot = pp;
+                        }
+                        sp = sp.wrapping_add(1);
+                        q = (*p).left;
+                    }
+                    if !is_red((*q).right) && !is_red((*q).left) {
+                        (*q).red = true;
+                        r = p;
+                    } else {
+                        if !is_red((*q).left) {
+                            let q2 = (*q).right;
+                            (*q2).red = (*p).red;
+                            (*p).left = (*q2).right;
+                            (*q).right = (*q2).left;
+                            (*q2).left = q;
+                            (*q2).right = p;
+                            *pp = q2;
+                            (*p).red = false;
+                        } else {
+                            (*q).red = (*p).red;
+                            (*p).red = false;
+                            (*(*q).left).red = false;
+                            (*p).left = (*q).right;
+                            (*q).right = p;
+                            *pp = q;
+                        }
+                        sp = 1;
+                        r = core::ptr::null_mut();
                     }
                 }
-                free_node(succ);
-                // Return parent of the deleted node.
-                if parent.is_null() {
-                    return unsafe { *rootp };
-                }
-                return parent.cast::<u8>();
+                sp = sp.wrapping_sub(1);
             }
-
-            free_node(current);
-            // Return parent (or new root if parent is null).
-            if parent.is_null() {
-                return unsafe { *rootp };
+            if !r.is_null() {
+                (*r).red = false;
             }
-            return parent.cast::<u8>();
         }
+
+        crate::malloc::free(unchained.cast::<u8>());
+        retval
     }
 }
 
@@ -275,64 +509,107 @@ pub extern "C" fn tdelete(key: *const u8, rootp: *mut *mut u8, compar: ComparFn)
 // twalk — walk the tree
 // ---------------------------------------------------------------------------
 
-/// Recursive tree walk helper.
-fn twalk_recursive(node: *mut Node, action: TwalkFn, depth: i32) {
-    if node.is_null() {
-        return;
-    }
-
-    let left = unsafe { (*node).left };
-    let right = unsafe { (*node).right };
-
-    if left.is_null() && right.is_null() {
-        // Leaf node — visit once with LEAF.
-        action(node.cast::<u8>(), LEAF, depth);
-    } else {
-        // Internal node — visit three times.
-        action(node.cast::<u8>(), PREORDER, depth);
-        twalk_recursive(left, action, depth.wrapping_add(1));
-        action(node.cast::<u8>(), POSTORDER, depth);
-        twalk_recursive(right, action, depth.wrapping_add(1));
-        action(node.cast::<u8>(), ENDORDER, depth);
+/// Visit `node` and its subtree in `twalk`'s order: a leaf once, as
+/// [`LEAF`]; any other node three times — [`PREORDER`] before its left
+/// subtree, [`POSTORDER`] between, [`ENDORDER`] after its right.
+///
+/// # Safety
+///
+/// `node` must be a live node of a valid tree.
+unsafe fn walk_subtree(node: *mut Node, visit: &mut dyn FnMut(*const u8, i32, i32), depth: i32) {
+    // SAFETY: the caller's contract; the children of a live node are null or
+    // live.  The recursion is as deep as the tree is high: O(log n).
+    unsafe {
+        let (left, right) = ((*node).left, (*node).right);
+        let n = node.cast_const().cast::<u8>();
+        if left.is_null() && right.is_null() {
+            visit(n, LEAF, depth);
+            return;
+        }
+        visit(n, PREORDER, depth);
+        if !left.is_null() {
+            walk_subtree(left, visit, depth.saturating_add(1));
+        }
+        visit(n, POSTORDER, depth);
+        if !right.is_null() {
+            walk_subtree(right, visit, depth.saturating_add(1));
+        }
+        visit(n, ENDORDER, depth);
     }
 }
 
-/// `twalk` — walk the binary search tree.
-///
-/// Calls `action` for each node with the visit order (preorder,
-/// postorder, endorder for internal nodes; leaf for leaves) and
-/// the node depth.
+/// `twalk` — walk the tree rooted at `root`, calling `action` with each node,
+/// its visit ([`PREORDER`], [`POSTORDER`], [`ENDORDER`], [`LEAF`]) and its
+/// depth.  A null root or a null `action` walks nothing, as in glibc.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn twalk(root: *const u8, action: TwalkFn) {
+pub extern "C" fn twalk(root: *const u8, action: Option<TwalkFn>) {
+    let Some(action) = action else {
+        return;
+    };
     if root.is_null() {
         return;
     }
-    twalk_recursive(root as *mut Node, action, 0);
+    // SAFETY: a non-null `root` is the root of a tree built by `tsearch`.
+    unsafe {
+        walk_subtree(root.cast_mut().cast(), &mut |n, v, d| action(n, v, d), 0);
+    }
+}
+
+/// `twalk_r` — as [`twalk`], passing `closure` to `action` where `twalk`
+/// passes the depth (glibc 2.30).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn twalk_r(root: *const u8, action: Option<TwalkRFn>, closure: *mut u8) {
+    let Some(action) = action else {
+        return;
+    };
+    if root.is_null() {
+        return;
+    }
+    // SAFETY: as for `twalk`.
+    unsafe {
+        walk_subtree(
+            root.cast_mut().cast(),
+            &mut |n, v, _| action(n, v, closure),
+            0,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
 // tdestroy — destroy the entire tree
 // ---------------------------------------------------------------------------
 
-/// Recursive tree destruction helper.
-fn tdestroy_recursive(node: *mut Node, free_fn: TdestroyFn) {
+/// Free `node`'s subtree, children first, calling `free_fn` on each key.
+///
+/// # Safety
+///
+/// `node` must be null or a live node of a valid tree, which this frees.
+unsafe fn destroy_subtree(node: *mut Node, free_fn: Option<TdestroyFn>) {
     if node.is_null() {
         return;
     }
-    tdestroy_recursive(unsafe { (*node).left }, free_fn);
-    tdestroy_recursive(unsafe { (*node).right }, free_fn);
-    // Call the user's free function on the key.
-    free_fn(unsafe { (*node).key }.cast_mut());
-    free_node(node);
+    // SAFETY: the caller's contract; recursion is O(log n) deep.
+    unsafe {
+        destroy_subtree((*node).left, free_fn);
+        destroy_subtree((*node).right, free_fn);
+        if let Some(f) = free_fn {
+            f((*node).key.cast_mut());
+        }
+        crate::malloc::free(node.cast::<u8>());
+    }
 }
 
-/// `tdestroy` — destroy the entire binary search tree.
+/// `tdestroy` — free every node of the tree rooted at `root`, calling
+/// `free_fn` on each key first (glibc extension).
 ///
-/// glibc extension.  Calls `free_fn` on each node's key, then
-/// frees all nodes.
+/// glibc calls `free_fn` unconditionally, so a null one crashes there; here
+/// it frees the nodes and no keys, a null `extern "C" fn` being undefined
+/// behaviour in Rust before it is ever called.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tdestroy(root: *mut u8, free_fn: TdestroyFn) {
-    tdestroy_recursive(root.cast::<Node>(), free_fn);
+pub extern "C" fn tdestroy(root: *mut u8, free_fn: Option<TdestroyFn>) {
+    // SAFETY: `root` is null or the root of a tree built by `tsearch`, which
+    // the caller hands over.
+    unsafe { destroy_subtree(root.cast(), free_fn) };
 }
 
 // ===========================================================================
@@ -818,7 +1095,7 @@ mod tests {
         let not_found = tfind(99 as *const u8, &raw const root, int_compar);
         assert!(not_found.is_null(), "should not find non-existent key");
 
-        tdestroy(root, dummy_free);
+        tdestroy(root, Some(dummy_free));
     }
 
     #[test]
@@ -831,7 +1108,7 @@ mod tests {
         let ret2 = tsearch(10 as *const u8, &raw mut root, int_compar);
         assert_eq!(ret1, ret2, "duplicate insert should return same node");
 
-        tdestroy(root, dummy_free);
+        tdestroy(root, Some(dummy_free));
     }
 
     #[test]
@@ -841,7 +1118,7 @@ mod tests {
             let ret = tsearch(v as *const u8, &raw mut root, int_compar);
             if ret.is_null() {
                 // malloc failed — clean up and skip.
-                tdestroy(root, dummy_free);
+                tdestroy(root, Some(dummy_free));
                 return;
             }
         }
@@ -855,7 +1132,7 @@ mod tests {
         let nf = tfind(42 as *const u8, &raw const root, int_compar);
         assert!(nf.is_null());
 
-        tdestroy(root, dummy_free);
+        tdestroy(root, Some(dummy_free));
     }
 
     // -- tdelete --
@@ -879,7 +1156,7 @@ mod tests {
             "deleting non-existent key should return null"
         );
 
-        tdestroy(root, dummy_free);
+        tdestroy(root, Some(dummy_free));
     }
 
     #[test]
@@ -887,7 +1164,7 @@ mod tests {
         let mut root: *mut u8 = core::ptr::null_mut();
         for v in [50, 25, 75] {
             if tsearch(v as *const u8, &raw mut root, int_compar).is_null() {
-                tdestroy(root, dummy_free);
+                tdestroy(root, Some(dummy_free));
                 return;
             }
         }
@@ -898,7 +1175,7 @@ mod tests {
         assert!(!tfind(50 as *const u8, &raw const root, int_compar).is_null());
         assert!(!tfind(75 as *const u8, &raw const root, int_compar).is_null());
 
-        tdestroy(root, dummy_free);
+        tdestroy(root, Some(dummy_free));
     }
 
     #[test]
@@ -913,7 +1190,182 @@ mod tests {
             root.is_null(),
             "root should be null after deleting only node"
         );
-        let _ = ret;
+        // POSIX: an unspecified *non-null* pointer when the root goes.  It
+        // was the new root -- null here -- until 2026-09-26, which a caller
+        // testing for "not found" could not tell from failure.
+        assert_eq!(ret, (&raw mut root).cast::<u8>());
+    }
+
+    // -- the red-black tree --
+
+    /// Check the red-black invariants below `n` and return its black
+    /// height: no red node has a red child, every path has the same number
+    /// of black nodes, and the keys are in order.
+    fn check_rb(n: *mut Node, lo: i64, hi: i64) -> usize {
+        if n.is_null() {
+            return 1;
+        }
+        let (key, left, right, red) = unsafe { ((*n).key as i64, (*n).left, (*n).right, (*n).red) };
+        assert!(lo < key && key < hi, "key {key} out of order ({lo}, {hi})");
+        if red {
+            assert!(
+                !unsafe { is_red(left) } && !unsafe { is_red(right) },
+                "red {key} has a red child"
+            );
+        }
+        let bl = check_rb(left, lo, key);
+        let br = check_rb(right, key, hi);
+        assert_eq!(bl, br, "black heights differ below {key}");
+        bl + usize::from(!red)
+    }
+
+    fn height(n: *mut Node) -> usize {
+        if n.is_null() {
+            0
+        } else {
+            1 + height(unsafe { (*n).left }).max(height(unsafe { (*n).right }))
+        }
+    }
+
+    fn check_tree(root: *mut u8) {
+        let n = root.cast::<Node>();
+        assert!(!unsafe { is_red(n) }, "the root is black");
+        check_rb(n, i64::MIN, i64::MAX);
+    }
+
+    /// Keys in order made the old tree a list, n deep.  A red-black tree of
+    /// n nodes is at most 2 * log2(n + 1) deep.
+    #[test]
+    fn test_tsearch_sorted_input_stays_balanced() {
+        let mut root: *mut u8 = core::ptr::null_mut();
+        let n = 20_000usize;
+        for v in 1..=n {
+            assert!(!tsearch(v as *const u8, &raw mut root, int_compar).is_null());
+        }
+        check_tree(root);
+        let h = height(root.cast());
+        assert!(
+            h <= 2 * (usize::BITS - (n + 1).leading_zeros()) as usize,
+            "height {h}"
+        );
+        for v in (1..=n).rev().step_by(7) {
+            assert!(
+                !tfind(v as *const u8, &raw const root, int_compar).is_null(),
+                "{v}"
+            );
+        }
+        tdestroy(root, None);
+    }
+
+    /// Inserts and deletes in a scrambled order, the invariants checked
+    /// after every deletion, against a set that knows the answer.
+    #[test]
+    fn test_tdelete_keeps_the_tree_valid() {
+        let mut root: *mut u8 = core::ptr::null_mut();
+        let mut present = std::collections::BTreeSet::new();
+        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % 1000) as i64 + 1
+        };
+        for _ in 0..3000 {
+            let k = next();
+            assert!(!tsearch(k as *const u8, &raw mut root, int_compar).is_null());
+            present.insert(k);
+        }
+        check_tree(root);
+        for _ in 0..3000 {
+            let k = next();
+            let ret = tdelete(k as *const u8, &raw mut root, int_compar);
+            assert_eq!(!ret.is_null(), present.remove(&k), "delete {k}");
+            if !root.is_null() {
+                check_tree(root);
+            }
+        }
+        for k in 1..=1000i64 {
+            let found = !tfind(k as *const u8, &raw const root, int_compar).is_null();
+            assert_eq!(found, present.contains(&k), "find {k}");
+        }
+        // Down to nothing, in order, and each root deletion still non-null.
+        for k in present.clone() {
+            assert!(!tdelete(k as *const u8, &raw mut root, int_compar).is_null());
+            if !root.is_null() {
+                check_tree(root);
+            }
+        }
+        assert!(root.is_null());
+    }
+
+    /// `tdelete` answers with the deleted node's parent.
+    #[test]
+    fn test_tdelete_returns_the_parent() {
+        let mut root: *mut u8 = core::ptr::null_mut();
+        for v in [2, 1, 3] {
+            assert!(!tsearch(v as *const u8, &raw mut root, int_compar).is_null());
+        }
+        // 2 is the root, 1 and 3 its children.
+        let parent = tdelete(3 as *const u8, &raw mut root, int_compar);
+        assert_eq!(parent, root, "3's parent is the root");
+        assert_eq!(unsafe { (*parent.cast::<Node>()).key } as i64, 2);
+        tdestroy(root, None);
+    }
+
+    std::thread_local! {
+        /// `(key, visit, depth)` for each `twalk` callback on this thread.
+        static VISITS: core::cell::RefCell<std::vec::Vec<(i64, i32, i32)>> =
+            const { core::cell::RefCell::new(std::vec::Vec::new()) };
+    }
+
+    extern "C" fn record_visit(node: *const u8, visit: i32, depth: i32) {
+        let key = unsafe { *node.cast::<*const u8>() } as i64;
+        VISITS.with(|v| v.borrow_mut().push((key, visit, depth)));
+    }
+
+    extern "C" fn record_visit_r(node: *const u8, visit: i32, closure: *mut u8) {
+        let key = unsafe { *node.cast::<*const u8>() } as i64;
+        VISITS.with(|v| v.borrow_mut().push((key, visit, closure as i32)));
+    }
+
+    /// 1, 2, 3 in order: the root is 2, with 1 and 3 below it as leaves.
+    #[test]
+    fn test_twalk_visits_in_posix_order() {
+        let mut root: *mut u8 = core::ptr::null_mut();
+        for v in [1, 2, 3] {
+            assert!(!tsearch(v as *const u8, &raw mut root, int_compar).is_null());
+        }
+        VISITS.with(|v| v.borrow_mut().clear());
+        twalk(root, Some(record_visit));
+        let want = [
+            (2, PREORDER, 0),
+            (1, LEAF, 1),
+            (2, POSTORDER, 0),
+            (3, LEAF, 1),
+            (2, ENDORDER, 0),
+        ];
+        VISITS.with(|v| assert_eq!(v.borrow().as_slice(), want));
+        // twalk_r passes its closure where twalk passes the depth.
+        VISITS.with(|v| v.borrow_mut().clear());
+        twalk_r(root, Some(record_visit_r), 77 as *mut u8);
+        VISITS.with(|v| assert!(v.borrow().iter().all(|&(_, _, c)| c == 77)));
+        VISITS.with(|v| assert_eq!(v.borrow().len(), 5));
+        // A null action walks nothing, as in glibc.
+        twalk(root, None);
+        twalk_r(root, None, core::ptr::null_mut());
+        tdestroy(root, None);
+    }
+
+    /// A null free function frees the nodes and no keys.
+    #[test]
+    fn test_tdestroy_with_no_free_function() {
+        let mut root: *mut u8 = core::ptr::null_mut();
+        for v in 1..=100usize {
+            assert!(!tsearch(v as *const u8, &raw mut root, int_compar).is_null());
+        }
+        reset_destroy_count();
+        tdestroy(root, None);
+        assert_eq!(destroy_count(), 0);
     }
 
     // -- twalk --
@@ -956,7 +1408,7 @@ mod tests {
     #[test]
     fn test_twalk_empty() {
         reset_walk_count();
-        twalk(core::ptr::null(), count_walker);
+        twalk(core::ptr::null(), Some(count_walker));
         assert_eq!(walk_count(), 0);
     }
 
@@ -968,10 +1420,10 @@ mod tests {
         }
 
         reset_walk_count();
-        twalk(root, count_walker);
+        twalk(root, Some(count_walker));
         assert_eq!(walk_count(), 1, "single node = 1 leaf");
 
-        tdestroy(root, dummy_free);
+        tdestroy(root, Some(dummy_free));
     }
 
     #[test]
@@ -979,16 +1431,16 @@ mod tests {
         let mut root: *mut u8 = core::ptr::null_mut();
         for v in [50, 25, 75] {
             if tsearch(v as *const u8, &raw mut root, int_compar).is_null() {
-                tdestroy(root, dummy_free);
+                tdestroy(root, Some(dummy_free));
                 return;
             }
         }
 
         reset_walk_count();
-        twalk(root, count_walker);
+        twalk(root, Some(count_walker));
         assert_eq!(walk_count(), 3);
 
-        tdestroy(root, dummy_free);
+        tdestroy(root, Some(dummy_free));
     }
 
     // -- tdestroy --
@@ -1018,7 +1470,7 @@ mod tests {
     #[test]
     fn test_tdestroy_empty() {
         reset_destroy_count();
-        tdestroy(core::ptr::null_mut(), count_destroyer);
+        tdestroy(core::ptr::null_mut(), Some(count_destroyer));
         assert_eq!(destroy_count(), 0);
     }
 
@@ -1027,13 +1479,13 @@ mod tests {
         let mut root: *mut u8 = core::ptr::null_mut();
         for v in [50, 25, 75, 10, 90] {
             if tsearch(v as *const u8, &raw mut root, int_compar).is_null() {
-                tdestroy(root, dummy_free);
+                tdestroy(root, Some(dummy_free));
                 return;
             }
         }
 
         reset_destroy_count();
-        tdestroy(root, count_destroyer);
+        tdestroy(root, Some(count_destroyer));
         assert_eq!(
             destroy_count(),
             5,
@@ -1045,9 +1497,10 @@ mod tests {
 
     #[test]
     fn test_node_layout() {
-        // Node: key(*const u8) + left(*mut Node) + right(*mut Node)
-        // = 3 pointers = 24 bytes on 64-bit.
-        assert_eq!(core::mem::size_of::<Node>(), 24);
+        // `key` first: `tsearch`'s result is read as a pointer to the key.
+        assert_eq!(core::mem::offset_of!(Node, key), 0);
+        // Three pointers and the colour, padded: 32 bytes on 64-bit.
+        assert_eq!(core::mem::size_of::<Node>(), 32);
     }
 
     // ===================================================================

@@ -90,8 +90,8 @@
 //!   (C locale date/time formats, day/month names, codeset, etc.)
 //! - **Monetary Formatting**: `strfmon`, `strfmon_l` (C locale
 //!   decimal formatting with `%n`/`%i` specifiers)
-//! - **Search / Data Structures** (`<search.h>`): BST `tsearch`, `tfind`,
-//!   `tdelete`, `twalk`, `tdestroy`; hash table `hcreate`, `hdestroy`,
+//! - **Search / Data Structures** (`<search.h>`): red-black tree `tsearch`,
+//!   `tfind`, `tdelete`, `twalk`, `twalk_r`, `tdestroy`; hash table `hcreate`, `hdestroy`,
 //!   `hsearch`; linear search `lfind`, `lsearch`; linked list `insque`,
 //!   `remque`
 //! - **Resource Limits**: `getrlimit`, `setrlimit`, `getrusage`,

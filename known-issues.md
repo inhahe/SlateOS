@@ -165572,7 +165572,19 @@ glibc's `ftw_startup` makes it, instead of `EINVAL`. Symlink cycles without
 `FTW_PHYS` then need glibc's other half, the set of directories already walked
 (`find_object`), since `MAX_DEPTH` is what stops them today.
 
-### [D] TD-D-TSEARCH-IS-AN-UNBALANCED-TREE — 2026-09-26 — OPEN
+### [D] TD-D-TSEARCH-IS-AN-UNBALANCED-TREE — 2026-09-26 — FIXED 2026-09-26
+
+**Fix.** glibc 2.39's misc/tsearch.c, ported: `tsearch` splits and rotates on
+the way down, `tdelete` overwrites the key with its successor's, unchains the
+successor and repairs a lost black node on the way up, and `twalk` visits in
+the same order. `twalk_r` exists. Host tests check the red-black invariants
+(no red node with a red child, one black height, keys in order) after every
+deletion of a scrambled 3000-operation run, and a 20,000-key sorted build
+stays within `2 * log2(n + 1)` of height. Two answers differ from before:
+`tdelete` of the root now returns a non-null pointer (`rootp`) — it returned
+the new root, null once the last node went, which read as "not found" — and a
+null `twalk` action or `tdestroy` free function is accepted instead of being
+undefined behaviour at the call.
 
 **Where:** `posix/src/search.rs` — `tsearch`, `tfind`, `tdelete`, `twalk`,
 `tdestroy`.

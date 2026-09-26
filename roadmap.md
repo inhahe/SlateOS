@@ -1795,6 +1795,9 @@ D's to act on once answered).
       `nopenfd` levels down, and never deeper than 32), on one descriptor,
       each directory once; they are glibc's walker now, `FTW_ACTIONRETVAL`
       included (§1109).
+    * `tsearch`/`tfind`/`tdelete`/`twalk` are glibc's red-black tree (they
+      were an unbalanced one, which sorted input made a list), and `twalk_r`
+      exists.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

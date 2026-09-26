@@ -1320,11 +1320,17 @@ pub extern "C" fn pthread_getcpuclockid(
 
 /// Terminate the calling thread.
 ///
-/// Runs any registered thread-specific-data destructors for the calling
-/// thread, then issues `SYS_THREAD_EXIT` with the specified return value.
-/// If this is the last thread in the process, the process exits.
+/// Runs the calling thread's `thread_local` destructors, then its
+/// thread-specific-data destructors -- glibc's order -- then issues
+/// `SYS_THREAD_EXIT` with the specified return value.  If this is the last
+/// thread in the process, the process exits.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
+    // C++ `thread_local` destructors first, as glibc's `start_thread` calls
+    // `__call_tls_dtors` before it deallocates the TSD: a destructor may
+    // still use a key.
+    crate::exit_list::run_thread_dtors();
+
     // POSIX: run key destructors and release this thread's TSD storage
     // before the kernel reclaims the thread; also free its name slot.
     let self_tid = pthread_self();

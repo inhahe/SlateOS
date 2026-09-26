@@ -165,6 +165,13 @@ pub struct PerThread {
     /// A value was set since the last destructor sweep -- glibc's
     /// `specific_used`, which decides whether a sweep repeats.
     pub tsd_used: bool,
+
+    /// This thread's `thread_local` destructors, newest first: NULL, or the
+    /// head of a list of [`crate::exit_list`]'s nodes, each `malloc`ed by
+    /// `__cxa_thread_atexit_impl` and freed as it runs.  Run when the thread
+    /// ends and, for the thread calling it, by `exit` -- glibc's
+    /// `tls_dtor_list`.
+    pub tls_dtors: *mut u8,
 }
 
 /// Blocks of thread-specific data a thread can have: with `pthread`'s 32
@@ -193,6 +200,7 @@ impl PerThread {
         thread_slot: 0,
         tsd: [core::ptr::null_mut(); TSD_BLOCKS],
         tsd_used: false,
+        tls_dtors: core::ptr::null_mut(),
     };
 }
 

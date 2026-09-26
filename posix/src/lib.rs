@@ -359,6 +359,7 @@ pub mod err;
 pub mod errno;
 pub mod error;
 pub mod execinfo;
+pub(crate) mod exit_list;
 pub mod fcntl;
 pub mod fcntl_ops;
 pub mod fdtable;

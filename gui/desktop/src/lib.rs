@@ -367,6 +367,15 @@ const TASKBAR_TILE_GLOW_BLUR: f32 = 11.0;
 const TRAY_MIN_WIDTH: f32 = 120.0;
 /// Gap at the tray's outer edge and between the items inside it.
 const TRAY_PADDING: f32 = 8.0;
+/// Width of the "Show desktop" strip at the taskbar's right end: the Aero
+/// reference's 14.
+const SHOW_DESKTOP_WIDTH: f32 = 14.0;
+/// The strip's left edge, in the bar's text colour: the reference's 0.28.
+const SHOW_DESKTOP_EDGE: u8 = 71;
+/// The strip's fill at rest, in the bar's text colour: the reference's 0.05.
+const SHOW_DESKTOP_FILL: u8 = 13;
+/// The strip's fill under the pointer: the reference's 0.18.
+const SHOW_DESKTOP_FILL_LIT: u8 = 46;
 /// Width of the notification bell's slot in the tray.
 ///
 /// A fixed square rather than a measured one: the bell is a glyph, not a
@@ -651,6 +660,8 @@ enum TooltipKey {
     Pin(String),
     /// A window's tile.
     Window(WindowId),
+    /// The "Show desktop" strip.
+    ShowDesktop,
 }
 
 /// A place in the start menu's places column: the user's own folders, as the
@@ -958,6 +969,8 @@ pub enum Hit {
     TaskbarPanel,
     /// The tray clock, which opens the calendar popup.
     Clock,
+    /// The "Show desktop" strip at the taskbar's right end.
+    ShowDesktop,
     /// The tray's notification bell, which opens the notification pane.
     NotificationBell,
     /// The chevron at the left of the icon run, which lists the icons the
@@ -1187,6 +1200,10 @@ pub enum ShellAction {
     /// — the window closed between the list the button was drawn from and the
     /// click — needs no undo.
     Control(ShellRequest),
+    /// Several requests of the compositor, in this order -- a press that
+    /// names more than one window, as "Show desktop" does. Implies
+    /// [`Consumed`](Self::Consumed).
+    ControlAll(Vec<ShellRequest>),
     /// End the session: return to the login screen. Implies
     /// [`Consumed`](Self::Consumed).
     ///
@@ -1575,6 +1592,14 @@ pub struct DesktopShell {
     /// `aero-task:hover` is. Found by [`hit_test`](Self::hit_test), so the tile
     /// that lights is the tile a click would reach.
     hover_tile: Option<TaskbarSlot>,
+    /// Whether the pointer is on the "Show desktop" strip, which then lights.
+    show_desktop_lit: bool,
+    /// The windows the last "Show desktop" put away, bottom of the stack
+    /// first -- so the next brings them back as they were -- or `None` when
+    /// the next should put windows away. Forgotten the moment a window is
+    /// shown again on this desktop, by any means (`apply_window_list`): the
+    /// desktop is no longer what was shown.
+    desktop_shown: Option<Vec<WindowId>>,
     /// The popup listing icons the bar had no room for, and which icons
     /// those were when it opened.
     ///
@@ -2279,6 +2304,8 @@ impl DesktopShell {
             tooltip: None,
             hover_changed: false,
             hover_tile: None,
+            show_desktop_lit: false,
+            desktop_shown: None,
             alt_tab_active: false,
             alt_tab_index: 0,
             overview: overview::OverviewState::new(),
@@ -4087,6 +4114,9 @@ impl DesktopShell {
             // buttons never reach it (`taskbar_layout` subtracts the
             // tray), but the order is what makes that a fact rather than a
             // coincidence the two could stop sharing.
+            if self.show_desktop_rect().contains(x, y) {
+                return Hit::ShowDesktop;
+            }
             if self.clock_rect().contains(x, y) {
                 return Hit::Clock;
             }
@@ -4633,6 +4663,11 @@ impl DesktopShell {
             self.hover_tile = tile;
             self.hover_changed = true;
         }
+        let lit = matches!(hit, Hit::ShowDesktop);
+        if lit != self.show_desktop_lit {
+            self.show_desktop_lit = lit;
+            self.hover_changed = true;
+        }
         let over = match hit {
             Hit::TrayIcon(index) => self.ordered_tray_icons().get(index).and_then(|icon| {
                 // A program that registered no tooltip has given the shell
@@ -4654,6 +4689,8 @@ impl DesktopShell {
                     format!("{} — pinned (click to open)", app.display_name),
                 )
             }),
+            // The strip is a blank; the reference's `title` says what it does.
+            Hit::ShowDesktop => Some((TooltipKey::ShowDesktop, "Show desktop".to_string())),
             // A window's title is on its tile, but cut to what fits.
             Hit::TaskbarButton(id) => self
                 .windows
@@ -5072,6 +5109,14 @@ impl DesktopShell {
             Hit::Clock => {
                 self.toggle_calendar();
                 ShellAction::Consumed
+            }
+            Hit::ShowDesktop => {
+                let requests = self.show_desktop_requests();
+                if requests.is_empty() {
+                    ShellAction::Consumed
+                } else {
+                    ShellAction::ControlAll(requests)
+                }
             }
             Hit::NotificationBell => {
                 self.toggle_notifications();
@@ -5497,6 +5542,18 @@ impl DesktopShell {
         }
 
         self.windows = kept;
+        // A window shown again on this desktop -- restored from its tile,
+        // opened, or brought back by the second "Show desktop" itself -- means
+        // the desktop is no longer what was shown, and the next press puts
+        // windows away again.
+        if self.desktop_shown.is_some()
+            && self
+                .windows
+                .values()
+                .any(|w| w.on_glass() && w.desktop == self.current_desktop)
+        {
+            self.desktop_shown = None;
+        }
         // The taskbar's own order follows the list without taking its order:
         // a window that went leaves it, a window that arrived joins the end
         // -- several arriving together, in the order they were stacked,
@@ -6529,18 +6586,7 @@ impl DesktopShell {
             }
             // The one shortcut that names more than one window, and the reason
             // `handle_hotkey` cannot return a single request.
-            HotkeyAction::ShowDesktop => HotkeyOutcome::ask_all(
-                self.windows
-                    .values()
-                    // `on_glass`, not `mapped`: this is the one caller that
-                    // wants the narrower question. Asking a window that is
-                    // already minimised to minimise again is a request the
-                    // compositor would have to ignore, and one the user would
-                    // have to un-do twice.
-                    .filter(|w| w.on_glass() && w.desktop == self.current_desktop)
-                    .map(|w| ShellRequest::window(w.id, ShellControlAction::Minimize))
-                    .collect(),
-            ),
+            HotkeyAction::ShowDesktop => HotkeyOutcome::ask_all(self.show_desktop_requests()),
             HotkeyAction::SnapLeft => {
                 HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::SnapLeft))
             }
@@ -7181,7 +7227,7 @@ impl DesktopShell {
         // slack at the end instead of sliding the text sideways every minute.
         let time_str = self.current_clock_string();
         tree.text(
-            bar.w - padding - self.clock_width(),
+            self.tray_right() - padding - self.clock_width(),
             tray_text_y,
             &time_str,
             self.theme.taskbar_fg,
@@ -7303,6 +7349,25 @@ impl DesktopShell {
                 badge_size,
             );
         }
+
+        // "Show desktop", at the very end: a strip with an edge, brighter
+        // under the pointer -- the reference's `aero-showdesktop`.
+        let strip = self.show_desktop_rect();
+        let fill_alpha = if self.show_desktop_lit {
+            SHOW_DESKTOP_FILL_LIT
+        } else {
+            SHOW_DESKTOP_FILL
+        };
+        fill(
+            &mut tree,
+            strip,
+            with_alpha(self.theme.taskbar_fg, fill_alpha),
+        );
+        fill(
+            &mut tree,
+            Rect::new(strip.x, strip.y, self.scale(1.0).max(1.0), strip.h),
+            with_alpha(self.theme.taskbar_fg, SHOW_DESKTOP_EDGE),
+        );
 
         // Desktop indicator, at the tray's left edge.
         tree.text(
@@ -7834,6 +7899,42 @@ impl DesktopShell {
         );
     }
 
+    /// "Show desktop", from the strip at the taskbar's right end or its
+    /// shortcut: put away every window on this desktop -- or, when the last
+    /// press put them away and nothing has been shown since, bring those
+    /// back, bottom of the stack first, so the one that was in front is in
+    /// front again. As every taskbar's corner does.
+    fn show_desktop_requests(&mut self) -> Vec<ShellRequest> {
+        if let Some(hidden) = self.desktop_shown.take() {
+            // Activated, not restored: a maximised window put away comes back
+            // maximised, where `Restore` would also un-maximise it.
+            return hidden
+                .into_iter()
+                .filter(|id| self.windows.contains_key(id))
+                .map(|id| ShellRequest::window(id, ShellControlAction::Activate))
+                .collect();
+        }
+        // `on_glass`, not `mapped`: asking a window that is already minimised
+        // to minimise again is a request the compositor would have to ignore,
+        // and bringing it back after would show a window the user had put away
+        // themselves.
+        let mut shown: Vec<&ManagedWindow> = self
+            .windows
+            .values()
+            .filter(|w| w.on_glass() && w.desktop == self.current_desktop)
+            .collect();
+        shown.sort_by_key(|w| w.z_order);
+        let hidden: Vec<WindowId> = shown.iter().map(|w| w.id).collect();
+        let requests = hidden
+            .iter()
+            .map(|id| ShellRequest::window(*id, ShellControlAction::Minimize))
+            .collect();
+        if !hidden.is_empty() {
+            self.desktop_shown = Some(hidden);
+        }
+        requests
+    }
+
     /// The image id of `program`'s picture, `px` square in `color` -- or the
     /// generic program's, when the desktop does not know which program it is.
     fn picture_of(&self, program: Option<&AppEntry>, px: u32, color: Color) -> u64 {
@@ -8108,8 +8209,8 @@ impl DesktopShell {
             // the rightmost button would sit under them.
             + self.app_tray_width();
         // Padding at the right edge, between each pair of items, and at the
-        // left of the tray.
-        (content + padding * 4.0).max(self.scale(TRAY_MIN_WIDTH))
+        // left of the tray -- and the "Show desktop" strip right of it all.
+        (content + padding * 4.0).max(self.scale(TRAY_MIN_WIDTH)) + self.show_desktop_rect().w
     }
 
     /// The icons other programs have put in the tray, as the compositor
@@ -9160,7 +9261,7 @@ impl DesktopShell {
             + self.desktop_indicator_width()
             + self.layout_indicator_width()
             + padding * 4.0;
-        let mut x = (bar.w - shell_items - self.app_tray_width() + padding).max(0.0);
+        let mut x = (self.tray_right() - shell_items - self.app_tray_width() + padding).max(0.0);
         // The chevron, when there is one, sits at the *left* of the run: it is
         // the edge the run grows from, so the icons that do fit keep the same
         // position as icons appear and depart behind it.
@@ -9216,7 +9317,8 @@ impl DesktopShell {
                     + self.desktop_indicator_width()
                     + self.layout_indicator_width()
                     + padding * 4.0;
-                let x = (bar.w - shell_items - self.app_tray_width() + padding).max(0.0);
+                let x =
+                    (self.tray_right() - shell_items - self.app_tray_width() + padding).max(0.0);
                 Some(Rect::new(x, bar.y, slot, bar.h))
             }
         }
@@ -9245,6 +9347,23 @@ impl DesktopShell {
     // Calendar popup
     // ========================================================================
 
+    /// The "Show desktop" strip, at the very right end of the taskbar -- right
+    /// of the clock, where the Aero reference puts it and where the pointer
+    /// goes by throwing it into the corner.
+    #[must_use]
+    pub fn show_desktop_rect(&self) -> Rect {
+        let bar = self.taskbar_rect();
+        let width = self.scale(SHOW_DESKTOP_WIDTH).min(bar.w);
+        Rect::new(bar.x + bar.w - width, bar.y, width, bar.h)
+    }
+
+    /// Where the tray's items end on the right: the left edge of the "Show
+    /// desktop" strip, which everything in the tray is laid out leftwards
+    /// from.
+    fn tray_right(&self) -> f32 {
+        self.show_desktop_rect().x
+    }
+
     /// The clock's clickable area at the right end of the taskbar.
     ///
     /// The slot plus the padding to its right, and the bar's full height: the
@@ -9257,7 +9376,8 @@ impl DesktopShell {
         let bar = self.taskbar_rect();
         let padding = self.scale(TRAY_PADDING);
         let width = self.clock_width() + padding;
-        Rect::new((bar.w - width).max(0.0), bar.y, width.min(bar.w), bar.h)
+        let right = self.tray_right();
+        Rect::new((right - width).max(0.0), bar.y, width.min(right), bar.h)
     }
 
     /// The scale the popup is laid out at.
@@ -19195,6 +19315,189 @@ mod taskbar_pin_tests {
                 "lit after the pointer left"
             );
         });
+    }
+
+    // ---- "Show desktop" ----
+
+    /// A window of the current desktop, stacked `z`-th from the bottom.
+    fn stacked(id: u64, focused: bool) -> WindowInfo {
+        let mut window = window_of(id, "", &format!("window {id}"));
+        window.focused = focused;
+        window
+    }
+
+    /// **The strip is at the very end of the bar**, right of the clock, the
+    /// bar's height and the reference's width; the tray is laid out left of
+    /// it and the tiles stop short of the tray.
+    #[test]
+    fn the_show_desktop_strip_ends_the_bar() {
+        let mut shell = shell();
+        // A clock wide enough that the tray is sized by what is in it, not
+        // by its floor -- which would absorb a strip the width left out.
+        shell.datetime.show_day_of_week = true;
+        shell.datetime.show_date = true;
+        let bar = shell.taskbar_rect();
+        let strip = shell.show_desktop_rect();
+        assert!(
+            (strip.x + strip.w - (bar.x + bar.w)).abs() < 0.01,
+            "{strip:?}"
+        );
+        assert!((strip.w - shell.scale(super::SHOW_DESKTOP_WIDTH)).abs() < 0.01);
+        assert!((strip.h - bar.h).abs() < 0.01);
+        let clock = shell.clock_rect();
+        assert!(
+            clock.x + clock.w <= strip.x + 0.01,
+            "the clock runs under the strip"
+        );
+        assert!(
+            shell.tray_x() + shell.tray_width() <= bar.x + bar.w + 0.5,
+            "the tray runs off the bar"
+        );
+        // The tray's width counts the strip, or everything laid out from its
+        // left edge -- the desktop indicator, then the keyboard layout's --
+        // runs into the bell.
+        let pad = shell.scale(super::TRAY_PADDING);
+        assert!(
+            shell.tray_x()
+                + pad
+                + shell.desktop_indicator_width()
+                + pad
+                + shell.layout_indicator_width()
+                <= shell.bell_rect().x + 0.01,
+            "the tray's left-hand items run into the bell"
+        );
+        assert_eq!(
+            shell.hit_test(strip.x + strip.w / 2.0, strip.y + strip.h / 2.0),
+            super::Hit::ShowDesktop
+        );
+    }
+
+    /// **A press puts every window of this desktop away, and the next brings
+    /// them back** -- in the order they were stacked, so the one in front is
+    /// in front again -- as every taskbar's corner does.
+    #[test]
+    fn show_desktop_puts_the_windows_away_and_brings_them_back() {
+        use super::{ShellControlAction, ShellRequest, WindowId};
+        let mut shell = shell();
+        // Listed bottom to top: 2 below, 1 in front.
+        shell.apply_window_list(&WindowList::new(
+            0,
+            vec![stacked(2, false), stacked(1, true)],
+        ));
+        let strip = shell.show_desktop_rect();
+        let (x, y) = (strip.x + strip.w / 2.0, strip.y + strip.h / 2.0);
+        let press = |shell: &mut DesktopShell| {
+            shell.handle_mouse(&at(x, y, MouseEventKind::Press(MouseButton::Left)))
+        };
+        let each = |action: ShellControlAction, ids: &[u64]| {
+            ShellAction::ControlAll(
+                ids.iter()
+                    .map(|id| ShellRequest::window(WindowId(*id), action))
+                    .collect(),
+            )
+        };
+
+        assert_eq!(
+            press(&mut shell),
+            each(ShellControlAction::Minimize, &[2, 1])
+        );
+        // The compositor did as asked.
+        let mut down = [stacked(2, false), stacked(1, false)];
+        for window in &mut down {
+            window.minimized = true;
+        }
+        shell.apply_window_list(&WindowList::new(0, down.to_vec()));
+        assert_eq!(
+            press(&mut shell),
+            each(ShellControlAction::Activate, &[2, 1]),
+            "the second press did not bring them back, bottom first"
+        );
+    }
+
+    /// **A window shown again in between makes the next press put windows
+    /// away again**, rather than bring back ones the user has moved on from.
+    #[test]
+    fn a_window_shown_in_between_resets_show_desktop() {
+        use super::{ShellControlAction, ShellRequest, WindowId};
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(0, vec![stacked(1, true)]));
+        let strip = shell.show_desktop_rect();
+        let (x, y) = (strip.x + strip.w / 2.0, strip.y + strip.h / 2.0);
+        drop(shell.handle_mouse(&at(x, y, MouseEventKind::Press(MouseButton::Left))));
+        // The user opened another window meanwhile.
+        let mut first = stacked(1, false);
+        first.minimized = true;
+        shell.apply_window_list(&WindowList::new(0, vec![first, stacked(3, true)]));
+        assert_eq!(
+            shell.handle_mouse(&at(x, y, MouseEventKind::Press(MouseButton::Left))),
+            ShellAction::ControlAll(vec![ShellRequest::window(
+                WindowId(3),
+                ShellControlAction::Minimize
+            )]),
+            "brought back what was put away, over the window the user opened"
+        );
+    }
+
+    /// **The shortcut and the strip are one switch**: what the strip put away
+    /// the shortcut brings back.
+    #[test]
+    fn the_shortcut_and_the_strip_are_one_switch() {
+        use super::{ShellControlAction, ShellRequest, WindowId};
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(0, vec![stacked(1, true)]));
+        let strip = shell.show_desktop_rect();
+        drop(shell.handle_mouse(&at(
+            strip.x + strip.w / 2.0,
+            strip.y + strip.h / 2.0,
+            MouseEventKind::Press(MouseButton::Left),
+        )));
+        let mut first = stacked(1, false);
+        first.minimized = true;
+        shell.apply_window_list(&WindowList::new(0, vec![first]));
+        assert_eq!(
+            shell.show_desktop_requests(),
+            vec![ShellRequest::window(
+                WindowId(1),
+                ShellControlAction::Activate
+            )]
+        );
+    }
+
+    /// **The strip lights under the pointer and says what it does.**
+    #[test]
+    fn the_show_desktop_strip_lights_and_names_itself() {
+        use guitk::render::RenderCommand;
+        let mut shell = shell();
+        let strip = shell.show_desktop_rect();
+        let fill_alpha = |shell: &DesktopShell| {
+            shell
+                .render_taskbar()
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if (*x, *y, *width, *height) == (strip.x, strip.y, strip.w, strip.h) => {
+                        Some(color.a)
+                    }
+                    _ => None,
+                })
+                .expect("the strip is not drawn")
+        };
+        assert_eq!(fill_alpha(&shell), super::SHOW_DESKTOP_FILL);
+        rest_on(&mut shell, strip);
+        assert_eq!(
+            fill_alpha(&shell),
+            super::SHOW_DESKTOP_FILL_LIT,
+            "not lit under the pointer"
+        );
+        let tip = format!("{:?}", shell.render_tooltip().expect("no tooltip"));
+        assert!(tip.contains("Show desktop"), "{tip}");
     }
 
     /// Rest the pointer on `rect`'s middle, and let the tooltip's delay pass.

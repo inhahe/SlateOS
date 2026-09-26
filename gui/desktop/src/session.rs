@@ -3193,6 +3193,11 @@ impl<T: Transport> ShellSession<T> {
                 self.dirty = true;
             }
             ShellAction::Control(request) => self.request(request)?,
+            ShellAction::ControlAll(requests) => {
+                for request in requests {
+                    self.request(request)?;
+                }
+            }
             ShellAction::LogOut => self.log_out(),
         }
         Ok(())

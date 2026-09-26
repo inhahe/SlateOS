@@ -1859,6 +1859,13 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **"Show desktop" at the bar's end** -- done 2026-09-26
+  (`design-decisions.md` §1403). The reference's strip, right of the clock:
+  a press puts away every window on this desktop, the next brings the same
+  ones back as they were stacked, and a window shown in between resets it.
+  The Show Desktop shortcut is the same switch. It lights under the pointer
+  and its tooltip says what it does.
+
 - `[C]` **The start menu is in sections, with "Recently used"** -- done
   2026-09-26 (`design-decisions.md` §1402). "Pinned", "Recently used" and
   "All apps", each under a heading, as the Aero reference lists them. The

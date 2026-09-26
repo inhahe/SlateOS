@@ -654,6 +654,38 @@ fn a_program_started_from_its_pin_is_recently_used() {
     });
 }
 
+/// **"Show desktop" asks for every window**: a press on the strip sends the
+/// compositor one request per window, not the first alone.
+#[test]
+fn show_desktop_asks_for_every_window() {
+    let (mut session, desktop, _turn) = session();
+    let windows: Vec<WindowInfo> = (1..=2)
+        .map(|id| WindowInfo::new(id, id, format!("window {id}")))
+        .collect();
+    session
+        .shell_mut()
+        .apply_window_list(&guiremote::window_list::WindowList::new(0, windows));
+    session.pump().expect("pump");
+    let strip = session.shell().show_desktop_rect();
+    let before = controls(&desktop).len();
+
+    press_at(
+        &desktop,
+        session.panel(),
+        strip.x + strip.w / 2.0,
+        strip.y + strip.h / 2.0,
+    );
+    session.pump().expect("pump");
+
+    let mut minimised: Vec<u64> = controls(&desktop)[before..]
+        .iter()
+        .filter(|(_, action)| *action == ShellControlAction::Minimize)
+        .map(|(window, _)| *window)
+        .collect();
+    minimised.sort_unstable();
+    assert_eq!(minimised, [1, 2], "not every window was asked");
+}
+
 /// **The bar's own menu is put on the screen** -- the part list the
 /// surface is mapped from has it, which is the whole of what a menu needs to
 /// be seen (see `right_clicking_a_pinned_tile_draws_its_menu`).

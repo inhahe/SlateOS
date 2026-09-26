@@ -533,6 +533,10 @@ pub mod rename;
 pub mod setfields;
 pub mod shell;
 pub mod stdfd;
+/// `coreutils::guard_std_fds!()`, as every binary here writes it: the
+/// `stdfdguard` crate's since 2026-09-26, when it moved out of `stdfd` so the
+/// programs outside coreutils could have it.
+pub use stdfdguard::guard_std_fds;
 pub mod sum;
 pub mod tabstops;
 pub mod umask;

@@ -44,6 +44,10 @@
 //!
 //! ## Answering the first: [`crate::guard_std_fds!`]
 //!
+//! (This half is the `stdfdguard` crate since 2026-09-26, so that programs
+//! outside coreutils can have it; `coreutils::guard_std_fds!` and [`restore`]
+//! are that crate's, re-exported, and nothing a binary writes changed.)
+//!
 //! By the time any Rust code you wrote runs, the answer is already gone —
 //! `fcntl(1, F_GETFD)` succeeds, because 1 is now `/dev/null`. The one window
 //! in which the truth is still available is the ELF constructor array:
@@ -164,11 +168,9 @@ use crate::errmsg::strerror;
 #[cfg(target_os = "linux")]
 mod imp {
     use std::io;
-    use std::sync::atomic::{AtomicU8, Ordering};
 
     unsafe extern "C" {
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
-        fn close(fd: i32) -> i32;
         fn isatty(fd: i32) -> i32;
         // `*const c_void`, not `*const u8`: rustc's
         // `suspicious_runtime_symbol_definitions` lint compares this
@@ -179,51 +181,6 @@ mod imp {
         fn write(fd: i32, buf: *const core::ffi::c_void, count: usize) -> isize;
         // The same, and for the same reason, as `write` above.
         fn read(fd: i32, buf: *mut core::ffi::c_void, count: usize) -> isize;
-    }
-
-    const F_GETFD: i32 = 1;
-
-    /// Bit `n` is set if descriptor `n` was **not open** when the process
-    /// started. Written once, from an `.init_array` constructor, because by the
-    /// time `main` runs the answer is gone.
-    static CLOSED_AT_STARTUP: AtomicU8 = AtomicU8::new(0);
-
-    /// The constructor itself. Public only so the macro expansion in a binary
-    /// crate can name it; not part of the interface.
-    #[doc(hidden)]
-    pub extern "C" fn record_closed_std_fds() {
-        let mut mask: u8 = 0;
-        for fd in 0..3 {
-            // SAFETY: `F_GETFD` only reads a descriptor's flags and is defined
-            // for any `int` — it reports `EBADF` rather than misbehaving.
-            if unsafe { fcntl(fd, F_GETFD) } < 0 {
-                mask |= 1 << fd;
-            }
-        }
-        CLOSED_AT_STARTUP.store(mask, Ordering::Relaxed);
-    }
-
-    pub fn restore() {
-        let mask = CLOSED_AT_STARTUP.load(Ordering::Relaxed);
-        for fd in 0..3 {
-            if mask & (1 << fd) != 0 {
-                // SAFETY: the descriptor at `fd` is the `/dev/null` the runtime
-                // opened to stand in for a closed one. Callers are required to
-                // run this before touching standard I/O, so no Rust object owns
-                // it.
-                unsafe { close(fd) };
-            }
-        }
-    }
-
-    pub fn was_closed_at_startup(fd: i32) -> bool {
-        let Ok(n) = u32::try_from(fd) else {
-            return false;
-        };
-        if n >= 3 {
-            return false;
-        }
-        CLOSED_AT_STARTUP.load(Ordering::Relaxed) >> n & 1 == 1
     }
 
     pub fn is_tty(fd: i32) -> bool {
@@ -319,12 +276,6 @@ mod imp {
 mod imp {
     use std::io::{self, Write};
 
-    pub fn restore() {}
-
-    pub fn was_closed_at_startup(_fd: i32) -> bool {
-        false
-    }
-
     pub fn is_tty(_fd: i32) -> bool {
         // No `isatty` without libc, and the answer only decides buffering. The
         // conservative choice is the one that shows output soonest.
@@ -374,31 +325,6 @@ mod imp {
     }
 }
 
-#[cfg(target_os = "linux")]
-#[doc(hidden)]
-pub use imp::record_closed_std_fds as __record_closed_std_fds;
-
-/// Install the `.init_array` constructor that records which of descriptors 0,
-/// 1 and 2 were closed when the process began.
-///
-/// Write this once at module scope in a binary that calls [`restore`]:
-///
-/// ```ignore
-/// coreutils::guard_std_fds!();
-/// ```
-///
-/// Expands to nothing off Linux. See the module docs for why it is a macro.
-#[macro_export]
-macro_rules! guard_std_fds {
-    () => {
-        #[cfg(target_os = "linux")]
-        #[used]
-        #[unsafe(link_section = ".init_array")]
-        static __SLATE_RECORD_CLOSED_STD_FDS: extern "C" fn() =
-            $crate::stdfd::__record_closed_std_fds;
-    };
-}
-
 /// Undo the runtime's substitution, restoring the descriptor table the process
 /// was actually invoked with.
 ///
@@ -412,7 +338,7 @@ macro_rules! guard_std_fds {
 /// substituted descriptors outright and a live [`std::io::Stdout`] buffer
 /// pointed at one would then flush into whatever opened next.
 pub fn restore() {
-    imp::restore();
+    stdfdguard::restore();
 }
 
 /// Whether `fd` was closed when the process started — the question
@@ -422,7 +348,7 @@ pub fn restore() {
 /// Always `false` without [`crate::guard_std_fds!`], and off Linux.
 #[must_use]
 pub fn was_closed_at_startup(fd: i32) -> bool {
-    imp::was_closed_at_startup(fd)
+    stdfdguard::was_closed_at_startup(fd)
 }
 
 /// gnulib's `fd_safer`: keep a file a utility opened for its own purposes off

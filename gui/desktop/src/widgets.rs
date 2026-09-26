@@ -11,9 +11,12 @@
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
+use guitk::event::{Key, KeyEvent};
 use guitk::idseq::IdSeq;
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::textarea::{self, TextArea};
+use guitk::textinput::KeyEdit;
 use yamldoc::Document;
 
 // ============================================================================
@@ -683,7 +686,49 @@ pub struct DesktopWidgetManager {
     pub picker_open: bool,
     /// Currently selected widget for editing.
     pub selected_widget: Option<WidgetInstanceId>,
+    /// The note being written in, if one is: at most one at a time, as a
+    /// desktop has one keyboard.
+    note: Option<NoteEditor>,
+    /// How wide to draw a note's caret -- the user's accessibility setting,
+    /// passed in by the shell as it is to the icons' rename field.
+    caret_width: f32,
 }
+
+/// A note open for writing: which widget, and the field its text is in.
+///
+/// The text is copied back into the widget's `state_text` at every change,
+/// so the layout that is saved is never behind what is on screen, and closing
+/// the note has nothing left to write.
+struct NoteEditor {
+    id: WidgetInstanceId,
+    area: TextArea,
+}
+
+/// What a key did to the note open for writing. See
+/// [`DesktopWidgetManager::note_key`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoteKey {
+    /// No note is open; the key is somebody else's.
+    NotWriting,
+    /// The note took the key and its text is as it was.
+    Handled,
+    /// The note's text changed: the layout needs saving.
+    Changed,
+    /// Escape: the note is closed.
+    Closed,
+}
+
+/// The height of a widget's title bar, which is also where a widget is taken
+/// hold of to move it. A note's writing area is everything below it.
+const TITLE_HEIGHT: f32 = 24.0;
+/// The margin between a widget's sides and its content.
+const CONTENT_INSET: f32 = 8.0;
+/// The gap above and below the content.
+const CONTENT_GAP: f32 = 4.0;
+/// The size a note's text is written at.
+const NOTE_FONT_SIZE: f32 = 12.0;
+/// What an empty note says, which is what a click on it does.
+const NOTE_PLACEHOLDER: &str = "Click to add a note...";
 
 impl DesktopWidgetManager {
     pub fn new() -> Self {
@@ -696,7 +741,182 @@ impl DesktopWidgetManager {
             max_widgets: 20,
             picker_open: false,
             selected_widget: None,
+            note: None,
+            caret_width: guitk::textedit::CARET_WIDTH,
         }
+    }
+
+    /// How wide to draw a note's caret, from the user's settings.
+    pub fn set_caret_width(&mut self, width: f32) {
+        self.caret_width = width;
+    }
+
+    /// Where a widget is drawn: `(x, y, width, height)` in pixels.
+    fn frame(&self, w: &WidgetInstance) -> (f32, f32, f32, f32) {
+        let (x, y) = w.position.pixels(
+            self.grid.origin_x,
+            self.grid.origin_y,
+            self.grid.cell_width,
+            self.grid.cell_height,
+            self.grid.gap,
+        );
+        let (width, height) =
+            w.size
+                .pixels(self.grid.cell_width, self.grid.cell_height, self.grid.gap);
+        (x, y, width, height)
+    }
+
+    /// Where a widget's content is drawn, below its title bar: one answer for
+    /// the drawing and for the clicks on a note, so a caret cannot land a few
+    /// pixels from where the text is.
+    fn content_of(&self, w: &WidgetInstance) -> (f32, f32, f32, f32) {
+        let (x, y, width, height) = self.frame(w);
+        (
+            x + CONTENT_INSET,
+            y + TITLE_HEIGHT + CONTENT_GAP,
+            (width - 2.0 * CONTENT_INSET).max(0.0),
+            (height - TITLE_HEIGHT - 2.0 * CONTENT_GAP).max(0.0),
+        )
+    }
+
+    /// Where a widget's content is drawn, `(x, y, width, height)`, below its
+    /// title bar -- a note's writing area.
+    #[must_use]
+    pub fn content_rect(&self, id: WidgetInstanceId) -> Option<(f32, f32, f32, f32)> {
+        self.get(id).map(|w| self.content_of(w))
+    }
+
+    /// A note's writing area as the field sees it: its top-left, and the box
+    /// and font it is laid out in.
+    fn note_box(&self, id: WidgetInstanceId) -> Option<(f32, f32, textarea::Metrics)> {
+        let w = self.get(id)?;
+        let (x, y, width, height) = self.content_of(w);
+        Some((
+            x,
+            y,
+            textarea::Metrics {
+                width,
+                height,
+                font_size: NOTE_FONT_SIZE,
+                weight: FontWeightHint::Regular,
+            },
+        ))
+    }
+
+    /// The note, if any, whose writing area is at `(x, y)` -- its body, below
+    /// the title bar, which stays where a note is taken hold of to move it.
+    #[must_use]
+    pub fn note_body_at(&self, x: f32, y: f32) -> Option<WidgetInstanceId> {
+        let id = self.hit_test(x, y)?;
+        let w = self.get(id)?;
+        if !matches!(w.kind, WidgetKind::Notes) {
+            return None;
+        }
+        let (_, top, _, _) = self.frame(w);
+        (y >= top + TITLE_HEIGHT).then_some(id)
+    }
+
+    /// The note open for writing, if one is.
+    #[must_use]
+    pub fn writing_note(&self) -> Option<WidgetInstanceId> {
+        self.note.as_ref().map(|note| note.id)
+    }
+
+    /// A press on a note's writing area: open it for writing, if it is not
+    /// already, and put the caret where the press landed. `clicks` is two for
+    /// a double click, which selects the word. Answers whether the press was
+    /// on a note, which is whether it has been used.
+    pub fn note_press(&mut self, x: f32, y: f32, clicks: u8) -> bool {
+        let Some(id) = self.note_body_at(x, y) else {
+            return false;
+        };
+        if self.writing_note() != Some(id) {
+            let text = self
+                .get(id)
+                .map(|w| w.state_text.clone())
+                .unwrap_or_default();
+            self.note = Some(NoteEditor {
+                id,
+                area: TextArea::with_text(&text),
+            });
+        }
+        let Some((left, top, m)) = self.note_box(id) else {
+            return false;
+        };
+        if let Some(note) = self.note.as_mut() {
+            note.area.press(x - left, y - top, clicks, false, &m);
+        }
+        true
+    }
+
+    /// The pointer moved to `(x, y)` with the button held after a press on
+    /// the open note: the selection follows it.
+    pub fn note_drag(&mut self, x: f32, y: f32) {
+        let Some(id) = self.writing_note() else {
+            return;
+        };
+        let Some((left, top, m)) = self.note_box(id) else {
+            return;
+        };
+        if let Some(note) = self.note.as_mut() {
+            note.area.drag_to(x - left, y - top, &m);
+        }
+    }
+
+    /// The wheel over the open note: its text scrolls, `notches` as the
+    /// event counts them (positive away from the user). Answers whether the
+    /// pointer was over it. A note not open for writing shows its start.
+    pub fn note_scroll(&mut self, x: f32, y: f32, notches: f32) -> bool {
+        let Some(id) = self.writing_note() else {
+            return false;
+        };
+        if self.note_body_at(x, y) != Some(id) {
+            return false;
+        }
+        let Some((_, _, m)) = self.note_box(id) else {
+            return false;
+        };
+        let by = guitk::wheel::pixels(notches, m.line_height());
+        if let Some(note) = self.note.as_mut() {
+            note.area.scroll_by(by, &m);
+        }
+        true
+    }
+
+    /// Close the open note, if one is. Nothing is lost: its text is already
+    /// the widget's.
+    pub fn end_note(&mut self) -> bool {
+        self.note.take().is_some()
+    }
+
+    /// A key while a note is open. Escape closes it; every other key is the
+    /// note's -- typing, the arrows, Enter for a new line, the clipboard and
+    /// undo chords -- so that nothing typed into a note can reach the icons
+    /// beneath it.
+    pub fn note_key(&mut self, key: &KeyEvent) -> NoteKey {
+        let Some(id) = self.writing_note() else {
+            return NoteKey::NotWriting;
+        };
+        if key.pressed && key.key == Key::Escape {
+            self.note = None;
+            return NoteKey::Closed;
+        }
+        let Some((_, _, m)) = self.note_box(id) else {
+            // The widget has gone: nothing is open any more.
+            self.note = None;
+            return NoteKey::Closed;
+        };
+        let Some(note) = self.note.as_mut() else {
+            return NoteKey::NotWriting;
+        };
+        if note.area.edit_key(key, &m) != KeyEdit::Changed {
+            return NoteKey::Handled;
+        }
+        let text = note.area.text().to_string();
+        if let Some(w) = self.get_mut(id) {
+            w.state_text = text;
+        }
+        NoteKey::Changed
     }
 
     /// Add a widget. Returns the instance ID, or None if rejected.
@@ -721,6 +941,9 @@ impl DesktopWidgetManager {
         self.widgets.retain(|w| w.id != id);
         if self.selected_widget == Some(id) {
             self.selected_widget = None;
+        }
+        if self.writing_note() == Some(id) {
+            self.note = None;
         }
         self.widgets.len() < len_before
     }
@@ -874,6 +1097,11 @@ impl DesktopWidgetManager {
             doc.set_i64(&["widgets", &key, "cols"], i64::from(w.size.cols));
             doc.set_i64(&["widgets", &key, "rows"], i64::from(w.size.rows));
             doc.set_bool(&["widgets", &key, "visible"], w.visible);
+            // A note's text is the note: a layout that kept where a note is
+            // and not what it says would bring back an empty one.
+            if matches!(w.kind, WidgetKind::Notes) && !w.state_text.is_empty() {
+                doc.set_str(&["widgets", &key, "text"], &w.state_text);
+            }
         }
     }
 
@@ -925,6 +1153,12 @@ impl DesktopWidgetManager {
                 && let Some(w) = self.get_mut(id)
             {
                 w.visible = false;
+            }
+            if let Some(text) = doc.get_str(&["widgets", &key, "text"])
+                && let Some(w) = self.get_mut(id)
+                && matches!(w.kind, WidgetKind::Notes)
+            {
+                w.state_text = text;
             }
         }
     }
@@ -1063,16 +1297,7 @@ impl DesktopWidgetManager {
         live: &LiveReadings,
         commands: &mut Vec<RenderCommand>,
     ) {
-        let (x, y) = w.position.pixels(
-            self.grid.origin_x,
-            self.grid.origin_y,
-            self.grid.cell_width,
-            self.grid.cell_height,
-            self.grid.gap,
-        );
-        let (width, height) =
-            w.size
-                .pixels(self.grid.cell_width, self.grid.cell_height, self.grid.gap);
+        let (x, y, width, height) = self.frame(w);
         let cr = self.grid.corner_radius;
 
         // Shadow.
@@ -1113,12 +1338,11 @@ impl DesktopWidgetManager {
         }
 
         // Title bar.
-        let title_h = 24.0;
         commands.push(RenderCommand::FillRect {
             x,
             y,
             width,
-            height: title_h,
+            height: TITLE_HEIGHT,
             color: Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, w.bg_opacity),
             corner_radii: CornerRadii {
                 top_left: cr,
@@ -1161,15 +1385,14 @@ impl DesktopWidgetManager {
         });
 
         // Content area.
-        let content_y = y + title_h + 4.0;
-        let content_h = height - title_h - 8.0;
+        let (content_x, content_y, content_w, content_h) = self.content_of(w);
         self.render_widget_content(
             w,
             p,
             live,
-            x + 8.0,
+            content_x,
             content_y,
-            width - 16.0,
+            content_w,
             content_h,
             w.bg_opacity,
             commands,
@@ -1265,33 +1488,41 @@ impl DesktopWidgetManager {
                 }
             }
             WidgetKind::Notes => {
-                let display = if w.state_text.is_empty() {
-                    "Click to add a note..."
-                } else {
-                    &w.state_text
+                // The open note draws its own field -- caret, selection and
+                // scroll; a closed one draws its text the same way, from the
+                // top, so opening a note does not move a word of it.
+                let open = self.note.as_ref().filter(|note| note.id == w.id);
+                let closed;
+                let area = match open {
+                    Some(note) => &note.area,
+                    None => {
+                        closed = TextArea::with_text(&w.state_text);
+                        &closed
+                    }
                 };
-                commands.push(RenderCommand::Text {
-                    x,
-                    y,
-                    text: display.to_string(),
-                    font_size: 12.0,
-                    // One conditional, not three. Choosing the ink per
-                    // channel let a sweep move the red and leave the green and
-                    // blue behind, which produces a colour that is in no
-                    // palette at all -- and it read as three separate
-                    // decisions when it was always one.
-                    color: {
-                        let ink = if w.state_text.is_empty() {
-                            p.subtext0
-                        } else {
-                            p.text
-                        };
-                        Color::rgba(ink.r, ink.g, ink.b, alpha)
+                let ink = |c: Color| Color::rgba(c.r, c.g, c.b, alpha);
+                let mut tree = RenderTree::new();
+                textarea::draw(
+                    &mut tree,
+                    &textarea::MultiLine {
+                        area,
+                        x,
+                        y,
+                        metrics: textarea::Metrics {
+                            width,
+                            height,
+                            font_size: NOTE_FONT_SIZE,
+                            weight: FontWeightHint::Regular,
+                        },
+                        color: ink(p.text),
+                        selection_bg: p.accent,
+                        selection_fg: p.on_accent(),
+                        focused: open.is_some(),
+                        caret_width: self.caret_width,
+                        placeholder: Some((NOTE_PLACEHOLDER, ink(p.subtext0))),
                     },
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(width),
-                    overflow: TextOverflow::Ellipsis,
-                });
+                );
+                commands.extend(tree.commands);
             }
             WidgetKind::BatteryStatus => {
                 let b = &live.battery;
@@ -2106,6 +2337,9 @@ mod tests {
     /// at 12pt and again as the generic arm's placeholder at 32pt, and every
     /// kind's label appears in the picker as well as on the widget.
     fn texts_saying(cmds: &[RenderCommand], want: &str, size: f32) -> Vec<Color> {
+        // `RichText` too: a note's lines are drawn by its text field, which
+        // colours a selection by span and so draws every line that way. With
+        // no span over it, a line is text in the command's own colour.
         cmds.iter()
             .filter_map(|c| match c {
                 RenderCommand::Text {
@@ -2114,6 +2348,15 @@ mod tests {
                     color,
                     ..
                 } if text == want && (font_size - size).abs() < 0.01 => Some(*color),
+                RenderCommand::RichText {
+                    text,
+                    font_size,
+                    color,
+                    spans,
+                    ..
+                } if text == want && spans.is_empty() && (font_size - size).abs() < 0.01 => {
+                    Some(*color)
+                }
                 _ => None,
             })
             .collect()
@@ -2949,5 +3192,152 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- a note you can write in ---------------------------------------------
+
+    /// A note on its own, and the middle of its writing area.
+    fn one_note() -> (DesktopWidgetManager, WidgetInstanceId, (f32, f32)) {
+        let mut mgr = DesktopWidgetManager::new();
+        let id = mgr
+            .add_widget(WidgetKind::Notes, GridPos::new(0, 0))
+            .expect("the grid has room");
+        let w = mgr.get(id).expect("just added");
+        let (x, y, width, height) = mgr.content_of(w);
+        (mgr, id, (x + width / 2.0, y + height / 2.0))
+    }
+
+    fn typed(text: &str) -> KeyEvent {
+        KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: text.to_string(),
+        }
+    }
+
+    fn pressed(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    /// A note's words come back with it -- lines, and characters that are not
+    /// ASCII, included -- and an empty note writes no text at all.
+    #[test]
+    fn a_notes_text_is_kept_with_the_layout() {
+        let (mut mgr, id, _) = one_note();
+        mgr.get_mut(id).expect("placed").state_text = "milk\neggs — €3\n\nbread".to_string();
+        let empty = mgr
+            .add_widget(WidgetKind::Notes, GridPos::new(0, 3))
+            .expect("room for a second");
+        let mut doc = Document::parse("");
+        mgr.write_into(&mut doc);
+
+        let mut back = DesktopWidgetManager::new();
+        back.read_from(&doc);
+        let texts: Vec<&str> = back
+            .all_widgets()
+            .iter()
+            .map(|w| w.state_text.as_str())
+            .collect();
+        assert_eq!(texts, ["milk\neggs — €3\n\nbread", ""]);
+        let keys = doc.keys(&["widgets"]);
+        let with_text = keys
+            .iter()
+            .filter(|k| doc.get_str(&["widgets", k, "text"]).is_some())
+            .count();
+        assert_eq!(with_text, 1, "an empty note wrote a text: {empty:?}");
+    }
+
+    /// The title bar is where a note is taken hold of to move it; the rest is
+    /// where it is written in. Other widgets have no writing area at all.
+    #[test]
+    fn a_notes_body_is_for_writing_and_its_title_bar_for_moving() {
+        let (mut mgr, id, (bx, by)) = one_note();
+        assert_eq!(mgr.note_body_at(bx, by), Some(id));
+        let (x, y, _, _) = mgr.frame(mgr.get(id).expect("placed"));
+        assert_eq!(mgr.note_body_at(x + 20.0, y + TITLE_HEIGHT / 2.0), None);
+
+        let clock = mgr
+            .add_widget(WidgetKind::Clock, GridPos::new(4, 0))
+            .expect("room");
+        let (cx, cy, cw, ch) = mgr.content_of(mgr.get(clock).expect("placed"));
+        assert_eq!(mgr.note_body_at(cx + cw / 2.0, cy + ch / 2.0), None);
+    }
+
+    /// A press opens the note; what is typed is the note's text at once --
+    /// Enter included -- and Escape closes it with the words kept.
+    #[test]
+    fn writing_in_a_note_changes_it_and_escape_closes_it() {
+        let (mut mgr, id, (bx, by)) = one_note();
+        assert!(mgr.note_press(bx, by, 1));
+        assert_eq!(mgr.writing_note(), Some(id));
+
+        assert_eq!(mgr.note_key(&typed("h")), NoteKey::Changed);
+        assert_eq!(mgr.note_key(&typed("i")), NoteKey::Changed);
+        assert_eq!(mgr.note_key(&pressed(Key::Enter)), NoteKey::Changed);
+        assert_eq!(mgr.note_key(&typed("x")), NoteKey::Changed);
+        assert_eq!(mgr.get(id).expect("placed").state_text, "hi\nx");
+        assert_eq!(mgr.note_key(&pressed(Key::Left)), NoteKey::Handled);
+        // Every key is the note's while it is open, even one it does nothing
+        // with, so a Delete meant for a letter cannot reach an icon.
+        assert_eq!(mgr.note_key(&pressed(Key::Tab)), NoteKey::Handled);
+
+        assert_eq!(mgr.note_key(&pressed(Key::Escape)), NoteKey::Closed);
+        assert_eq!(mgr.writing_note(), None);
+        assert_eq!(mgr.get(id).expect("placed").state_text, "hi\nx");
+        assert_eq!(mgr.note_key(&typed("y")), NoteKey::NotWriting);
+    }
+
+    /// A note opened again starts from its saved words, not an empty field.
+    #[test]
+    fn opening_a_note_starts_from_what_it_says() {
+        let (mut mgr, id, (bx, by)) = one_note();
+        mgr.get_mut(id).expect("placed").state_text = "kept".to_string();
+        assert!(mgr.note_press(bx, by, 1));
+        mgr.note_key(&pressed(Key::End));
+        assert_eq!(mgr.note_key(&typed("!")), NoteKey::Changed);
+        assert_eq!(mgr.get(id).expect("placed").state_text, "kept!");
+    }
+
+    /// A note removed while it is open closes: a field left writing into a
+    /// widget that is gone would take the next keystrokes to nowhere.
+    #[test]
+    fn removing_the_open_note_closes_it() {
+        let (mut mgr, id, (bx, by)) = one_note();
+        assert!(mgr.note_press(bx, by, 1));
+        assert!(mgr.remove_widget(id));
+        assert_eq!(mgr.writing_note(), None);
+        assert_eq!(mgr.note_key(&typed("x")), NoteKey::NotWriting);
+    }
+
+    /// The open note has a caret; a closed one, and every other widget, has
+    /// none -- a caret says where the next keystroke goes.
+    #[test]
+    fn only_the_open_note_draws_a_caret() {
+        let carets = |mgr: &DesktopWidgetManager| {
+            mgr.render(&Palette::for_mode(false), &sample_readings())
+                .iter()
+                .filter(|c| matches!(c, RenderCommand::Line { .. }))
+                .count()
+        };
+        let (mut mgr, _, (bx, by)) = one_note();
+        let closed = carets(&mgr);
+        assert!(mgr.note_press(bx, by, 1));
+        assert_eq!(carets(&mgr), closed + 1);
+        mgr.end_note();
+        assert_eq!(carets(&mgr), closed);
+    }
+
+    /// A press elsewhere on the desktop is not a press on the note.
+    #[test]
+    fn a_press_off_every_note_opens_nothing() {
+        let (mut mgr, _, _) = one_note();
+        assert!(!mgr.note_press(5_000.0, 5_000.0, 1));
+        assert_eq!(mgr.writing_note(), None);
     }
 }

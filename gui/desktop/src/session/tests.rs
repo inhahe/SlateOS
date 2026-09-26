@@ -5061,3 +5061,71 @@ fn log_out_returns_to_the_login_screen() {
         "the returning user was not let back in"
     );
 }
+
+// ---- the desktop's notes ---------------------------------------------------------
+
+/// **A note is written in through the desktop's own surface, and is on disk as
+/// it is written.** The press and the keys arrive where a compositor would
+/// send them -- the background surface -- pass the shell's shortcuts, and
+/// reach the note; and `widgets.yaml` holds the words while the note is still
+/// open, because a desktop can end with a note open.
+#[test]
+fn a_note_is_written_through_the_desktop_and_saved_as_it_is_written() {
+    settingsfile::testing::with_scratch_config("desktop-note", |_root| {
+        let (mut session, desktop, _turn) = session();
+        let (id, body) = {
+            let shell = session.shell_mut();
+            shell.open_desktop_menu(800.0, 500.0);
+            let _ = shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_NOTE);
+            shell.dismiss_popups();
+            let id = shell
+                .widgets
+                .all_widgets()
+                .iter()
+                .find(|w| matches!(w.kind, crate::widgets::WidgetKind::Notes))
+                .map(|w| w.id)
+                .expect("the menu placed a note");
+            let (x, y, w, h) = shell.widgets.content_rect(id).expect("placed");
+            (id, (x + w / 2.0, y + h / 2.0))
+        };
+        session.pump().expect("pump");
+
+        let background = session.background();
+        press_at(&desktop, background, body.0, body.1);
+        release_at(&desktop, background, body.0, body.1);
+        session.pump().expect("pump");
+        assert_eq!(session.shell().widgets.writing_note(), Some(id));
+
+        let mut events = Vec::new();
+        for ch in "milk".chars() {
+            events.push(InputEvent::new(
+                background.window(),
+                guitk::event::Event::Key(KeyEvent {
+                    key: Key::A,
+                    pressed: true,
+                    modifiers: Modifiers::default(),
+                    text: ch.to_string(),
+                }),
+            ));
+        }
+        desktop.borrow_mut().send_input(&events);
+        session.pump().expect("pump");
+
+        assert_eq!(
+            session.shell().widgets.get(id).expect("placed").state_text,
+            "milk"
+        );
+        assert_eq!(
+            session.shell().widgets.writing_note(),
+            Some(id),
+            "still open"
+        );
+        let saved = appearance::config::load(DesktopShell::WIDGETS_CONFIG_NAME);
+        let texts: Vec<String> = saved
+            .keys(&["widgets"])
+            .iter()
+            .filter_map(|k| saved.get_str(&["widgets", k, "text"]))
+            .collect();
+        assert_eq!(texts, ["milk"], "the note is not on disk while it is open");
+    });
+}

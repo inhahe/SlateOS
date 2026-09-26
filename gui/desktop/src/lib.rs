@@ -151,6 +151,8 @@ pub mod window_peek;
 pub mod window_rules;
 
 #[cfg(test)]
+mod note_tests;
+#[cfg(test)]
 mod pointer_tests;
 
 use appearance::config;
@@ -1405,6 +1407,10 @@ pub struct DesktopShell {
     /// The offset is what stops a drag snapping the widget's corner to the
     /// pointer on the first pixel of movement.
     widget_drag: Option<(WidgetInstanceId, f32, f32)>,
+    /// A selection being dragged out in the open note: the press was on its
+    /// writing area and the button is still down. It owns the pointer until
+    /// the button comes up, as a widget drag does.
+    note_selecting: bool,
     /// Whether the widget layout has changed since it was last written.
     ///
     /// Set only where a change is *committed* -- a menu action, a drag that
@@ -1930,6 +1936,7 @@ impl DesktopShell {
             menu_widget: None,
             menu_icon: None,
             widget_drag: None,
+            note_selecting: false,
             widgets_dirty: false,
             // `appearance::watcher`, not a plain one: an edit to the chosen
             // theme's own file changes the colours without changing a byte of
@@ -2033,6 +2040,7 @@ impl DesktopShell {
         // the caller has to remember is a door somebody forgets.
         self.run_dialog.set_caret_width(appearance.caret_width());
         self.icons.set_caret_width(appearance.caret_width());
+        self.widgets.set_caret_width(appearance.caret_width());
         // The icon size goes to the layer that draws icons, for the same
         // reason: it was a setting with a working control and no reader --
         // `known-issues.md` TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-
@@ -3333,6 +3341,29 @@ impl DesktopShell {
             }
             self.icons_dirty |= self.icons.commit_rename();
         }
+        // An open note, likewise: presses on its writing area place its caret
+        // (below, where a press on a note is handled), and a press anywhere
+        // else puts the note down before doing whatever it does. Its words are
+        // already saved -- every change was.
+        if let Some(open) = self.widgets.writing_note()
+            && let MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) = event.kind
+            && self.widgets.note_body_at(event.x, event.y) != Some(open)
+        {
+            self.widgets.end_note();
+        }
+        if self.note_selecting {
+            match event.kind {
+                MouseEventKind::Move => {
+                    self.widgets.note_drag(event.x, event.y);
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Release(_) => {
+                    self.note_selecting = false;
+                    return ShellAction::Consumed;
+                }
+                _ => {}
+            }
+        }
 
         // The desktop menu first, for the same reason the Run box's chooser is
         // first below: it is drawn over everything, so a press either landed on
@@ -3479,6 +3510,25 @@ impl DesktopShell {
                 }
                 MouseEventKind::Release(_) => return self.finish_tray_press(),
                 _ => return ShellAction::Consumed,
+            }
+        }
+        // A left press on a note's writing area opens it for writing, and a
+        // double click there selects a word. Before the widget drag below,
+        // which would otherwise take hold of the note: its title bar is still
+        // where it is moved from.
+        if let MouseEventKind::Press(MouseButton::Left)
+        | MouseEventKind::DoubleClick(MouseButton::Left) = event.kind
+            && !self.any_popup_open()
+            && !self.taskbar_rect().contains(event.x, event.y)
+        {
+            let clicks = if matches!(event.kind, MouseEventKind::DoubleClick(_)) {
+                2
+            } else {
+                1
+            };
+            if self.widgets.note_press(event.x, event.y, clicks) {
+                self.note_selecting = true;
+                return ShellAction::Consumed;
             }
         }
         // A left press on a widget takes hold of it. Before the right-click
@@ -4323,6 +4373,11 @@ impl DesktopShell {
         if self.overview.visible {
             let action = overview::on_mouse_scroll(&mut self.overview, dy);
             return self.act_on_overview(action);
+        }
+        // The open note scrolls its own text; the wheel over a closed one is
+        // the desktop's.
+        if !self.any_popup_open() && self.widgets.note_scroll(x, y, dy) {
+            return ShellAction::Consumed;
         }
         // Asked of the hit test rather than of `start_menu_rect` directly, so
         // that a wheel over the power menu — which covers part of the list —
@@ -8138,6 +8193,7 @@ impl DesktopShell {
     const MENU_AUTO_ARRANGE: u64 = 6;
     const MENU_ALIGN_TO_GRID: u64 = 7;
     const MENU_SORT_BY_NAME: u64 = 8;
+    const MENU_ADD_NOTE: u64 = 9;
     const MENU_ADD_WIDGET_SUBMENU: u64 = 100;
     const MENU_VIEW_SUBMENU: u64 = 101;
     // An icon's own menu, opened by a right-click on the icon.
@@ -8232,6 +8288,7 @@ impl DesktopShell {
                     item(Self::MENU_ADD_CLOCK, "Clock", None),
                     item(Self::MENU_ADD_CALENDAR, "Calendar", None),
                     item(Self::MENU_ADD_SYSTEM_MONITOR, "System monitor", None),
+                    item(Self::MENU_ADD_NOTE, "Note", None),
                 ],
             },
             MenuItem::Separator,
@@ -8830,6 +8887,7 @@ impl DesktopShell {
             Self::MENU_ADD_CLOCK => Some(WidgetKind::Clock),
             Self::MENU_ADD_CALENDAR => Some(WidgetKind::Calendar),
             Self::MENU_ADD_SYSTEM_MONITOR => Some(WidgetKind::SystemMonitor),
+            Self::MENU_ADD_NOTE => Some(WidgetKind::Notes),
             Self::MENU_REMOVE_ONE_WIDGET => {
                 // `menu_widget` rather than a fresh hit test: see the field.
                 return self
@@ -8993,6 +9051,19 @@ impl DesktopShell {
     pub fn handle_desktop_key(&mut self, key: &KeyEvent) -> ShellAction {
         if !key.pressed {
             return ShellAction::Pass;
+        }
+        // An open note takes every key, for the reason a rename does: a
+        // Delete meant for a letter must not remove an icon. Its words are
+        // saved with the layout at every change -- a keystroke is a change the
+        // user made, not a step of a gesture still under way, and a note is
+        // the thing on a desktop most worth not losing.
+        match self.widgets.note_key(key) {
+            widgets::NoteKey::NotWriting => {}
+            widgets::NoteKey::Changed => {
+                self.widgets_dirty = true;
+                return ShellAction::Consumed;
+            }
+            widgets::NoteKey::Handled | widgets::NoteKey::Closed => return ShellAction::Consumed,
         }
         // While a name is being edited every key is the field's, so that a
         // Delete meant for a letter cannot remove the icon being renamed.

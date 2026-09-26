@@ -1775,6 +1775,20 @@ live.
   until there is a session manager
   (`TD-C-LOGGING-OUT-LEAVES-THE-USERS-PROGRAMS-RUNNING`).
 
+- `[C]` **A multi-line text field in the toolkit, and notes on the desktop
+  written with it** -- done 2026-09-25 (`design-decisions.md` §878).
+  `guitk::textarea::TextArea` is the multi-line half of `roadmap-detailed.md`
+  §3.5's "single-line and multiline": a caret and selection over wrapped
+  lines (right-to-left lines included), Up and Down that hold their column,
+  Page Up and Down, click, drag and double click, a view the wheel scrolls,
+  undo and redo a word at a time, and word wrap that can be turned off. Its
+  lines come from `text::wrap_ranges`, `wrap_hard`'s breaks as byte ranges.
+  The desktop's first use: "Add widget > Note" -- the note widget was defined
+  and drawn but never offered and never editable -- written in where it sits,
+  moved by its title bar, and saved with the layout at every change. The apps
+  that edit text (`apps/notes`, whose body can only be typed at the end,
+  `apps/stickynotes`, `apps/email`) are lane E's to move onto it.
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's

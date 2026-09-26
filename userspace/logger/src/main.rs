@@ -1,1571 +1,943 @@
-//! logger — send messages to the system log for Slate OS
+//! logger -- enter messages into the system log.
 //!
-//! Compatible with POSIX/BSD logger(1). Appends each entry to the system log
-//! file, `/var/log/syslog`.
+//! A port of util-linux 2.39.3's `misc-utils/logger.c`, function by function
+//! and with upstream's names, built as the distributions build it (with
+//! libsystemd): `--journald` exists, and the automatic socket-error mode also
+//! turns on when the system was booted with systemd. Measured against
+//! `logger from util-linux 2.39.3` by `scripts/logger-diff.sh`.
 //!
-//! Not to `/dev/log`, where util-linux sends: a Unix-domain socket cannot be
-//! bound to a path on SlateOS yet, so nothing listens there. See
-//! `known-issues.md` -> TD-B-NOTHING-RECEIVES-SYSLOG-MESSAGES.
+//! # The modules
+//!
+//! | module | upstream |
+//! |---|---|
+//! | [`priority`] | `pencode`, `decode`, glibc's `facilitynames`/`prioritynames` |
+//! | [`frame`] | the three headers and `rfc3164_current_time` |
+//! | [`sd`] | RFC 5424 structured data |
+//! | [`input`] | `logger_command_line`, `logger_stdin` |
+//! | [`output`] | the frame `write_output` assembles |
+//! | [`deliver`] | `unix_socket`, `inet_socket`, the send |
+//! | [`sys`] | the libc calls std does not wrap |
+//!
+//! # What is not upstream's
+//!
+//! * **Where a local message goes on SlateOS.** `/dev/log` cannot exist there
+//!   yet -- the platform has no path-bound Unix-domain sockets -- so where
+//!   every attempt on it fails with `EAFNOSUPPORT` the message becomes a
+//!   journal record instead of being dropped; see [`deliver`]. `--journald`
+//!   writes the same journal, since there is no journald.
+//! * **A socket or file name in a diagnostic is quoted when it needs to be**
+//!   (`quoting::quotef`), where upstream pastes it: a name holding a newline
+//!   must not be able to forge a second diagnostic line (design-decisions
+//!   §370). For every ordinary name the two are byte-identical.
+//! * **`-S 0` with input from stdin** is one empty message per line; upstream
+//!   loops forever ([`input`]).
+//! * **`SCM_CREDENTIALS`**: upstream lets root claim another live process's
+//!   PID for a local message with `--id=PID`, by attaching credentials to the
+//!   datagram. Not implemented: std has no stable ancillary-data API, SlateOS
+//!   has no Unix sockets for it to matter on, and it could not be tested here
+//!   (no root in the harness). A root `--id` still writes the PID into the
+//!   frame, as every caller's does.
 
-use std::env;
-use std::ffi::{OsStr, OsString};
-use std::fmt;
-use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
-use std::process;
+mod deliver;
+mod frame;
+mod input;
+mod output;
+mod priority;
+mod sd;
+mod sys;
+
+use getoptlong::{Opt, Program, Takes};
+use localtime::Zone;
+use quoting::{os_bytes, quoteaf_os, quotef, quotef_os};
+use std::ffi::OsString;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-// ── Syslog facilities ────────────────────────────────────────────
+use deliver::{ALL_TYPES, Conn, OpenError, PATH_DEVLOG, Parts, TYPE_TCP, TYPE_UDP};
+use frame::{Header, NILVALUE, TimeVal};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[repr(u8)]
-enum Facility {
-    Kern = 0,
-    User = 1,
-    Mail = 2,
-    Daemon = 3,
-    Auth = 4,
-    Syslog = 5,
-    Lpr = 6,
-    News = 7,
-    Uucp = 8,
-    Cron = 9,
-    Authpriv = 10,
-    Ftp = 11,
-    Local0 = 16,
-    Local1 = 17,
-    Local2 = 18,
-    Local3 = 19,
-    Local4 = 20,
-    Local5 = 21,
-    Local6 = 22,
-    Local7 = 23,
-    /// `mark`, which is `LOG_NFACILITIES << 3` (192) in `syslog.h` and sits in
-    /// util-linux's facility table like any other name. Kept because the
-    /// reference accepts both `-p mark.1` and `-p 192.1`, and inventing a
-    /// refusal for a value upstream defines would be our divergence, not its.
-    Mark = 24,
-}
+/// Every refusal here is `errx`/`err` with `EXIT_FAILURE`, and getopt's with
+/// the referral to `--help` (`errtryhelp(EXIT_FAILURE)`).
+const LOGGER: Program = Program::new("logger", 1);
 
-impl Facility {
-    fn from_name(name: &str) -> Option<Self> {
-        match name.to_lowercase().as_str() {
-            "kern" | "kernel" => Some(Self::Kern),
-            "user" => Some(Self::User),
-            "mail" => Some(Self::Mail),
-            "daemon" => Some(Self::Daemon),
-            "auth" | "security" => Some(Self::Auth),
-            "syslog" => Some(Self::Syslog),
-            "lpr" => Some(Self::Lpr),
-            "news" => Some(Self::News),
-            "uucp" => Some(Self::Uucp),
-            "cron" => Some(Self::Cron),
-            "authpriv" => Some(Self::Authpriv),
-            "ftp" => Some(Self::Ftp),
-            "local0" => Some(Self::Local0),
-            "local1" => Some(Self::Local1),
-            "local2" => Some(Self::Local2),
-            "local3" => Some(Self::Local3),
-            "local4" => Some(Self::Local4),
-            "local5" => Some(Self::Local5),
-            "local6" => Some(Self::Local6),
-            "local7" => Some(Self::Local7),
-            // In util-linux's table and not guessable from the others: the
-            // internal pseudo-facility. (`security`, the deprecated spelling
-            // of `auth`, is already an alias on the `auth` arm above.)
-            "mark" => Some(Self::Mark),
-            _ => None,
-        }
-    }
+/// upstream's `getopt_long` option string.
+const SHORTS: &str = "ef:ip:S:st:u:dTn:P:Vh";
 
-    /// The facility whose *wire* value is `n`, or `None`.
-    ///
-    /// util-linux's table stores values already shifted -- `LOG_USER` is 8, not
-    /// 1 -- and its numeric lookup compares against those, so `-p 8.5` is
-    /// `user.notice`. The table is not contiguous: it runs 0..=88 in steps of
-    /// eight, then jumps to 128 (`local0`) and ends at 184 (`local7`), plus 192
-    /// for `mark`. `-p 96.1` is refused by the reference for exactly that
-    /// reason, and so is refused here.
-    fn from_value(n: u32) -> Option<Self> {
-        if !n.is_multiple_of(8) {
-            return None;
-        }
-        match n / 8 {
-            0 => Some(Self::Kern),
-            1 => Some(Self::User),
-            2 => Some(Self::Mail),
-            3 => Some(Self::Daemon),
-            4 => Some(Self::Auth),
-            5 => Some(Self::Syslog),
-            6 => Some(Self::Lpr),
-            7 => Some(Self::News),
-            8 => Some(Self::Uucp),
-            9 => Some(Self::Cron),
-            10 => Some(Self::Authpriv),
-            11 => Some(Self::Ftp),
-            16 => Some(Self::Local0),
-            17 => Some(Self::Local1),
-            18 => Some(Self::Local2),
-            19 => Some(Self::Local3),
-            20 => Some(Self::Local4),
-            21 => Some(Self::Local5),
-            22 => Some(Self::Local6),
-            23 => Some(Self::Local7),
-            24 => Some(Self::Mark),
-            _ => None,
-        }
-    }
+/// upstream's `longopts[]`, IN ITS ORDER: the order is observable, in the
+/// candidates `getopt_long` lists for an ambiguous abbreviation (`--pri`:
+/// `'--priority' '--prio-prefix'`). `socket-errors` is declared
+/// `required_argument` there although the help shows its argument as
+/// optional; the table is what getopt obeys.
+const LONGS: &[(&str, Takes)] = &[
+    ("id", Takes::Optional),
+    ("stderr", Takes::Nothing),
+    ("file", Takes::Required),
+    ("no-act", Takes::Nothing),
+    ("priority", Takes::Required),
+    ("tag", Takes::Required),
+    ("socket", Takes::Required),
+    ("socket-errors", Takes::Required),
+    ("udp", Takes::Nothing),
+    ("tcp", Takes::Nothing),
+    ("server", Takes::Required),
+    ("port", Takes::Required),
+    ("version", Takes::Nothing),
+    ("help", Takes::Nothing),
+    ("octet-count", Takes::Nothing),
+    ("prio-prefix", Takes::Nothing),
+    ("rfc3164", Takes::Nothing),
+    ("rfc5424", Takes::Optional),
+    ("size", Takes::Required),
+    ("msgid", Takes::Required),
+    ("skip-empty", Takes::Nothing),
+    ("sd-id", Takes::Required),
+    ("sd-param", Takes::Required),
+    ("journald", Takes::Optional),
+];
 
-    fn name(self) -> &'static str {
-        match self {
-            Self::Kern => "kern",
-            Self::User => "user",
-            Self::Mail => "mail",
-            Self::Daemon => "daemon",
-            Self::Auth => "auth",
-            Self::Syslog => "syslog",
-            Self::Lpr => "lpr",
-            Self::News => "news",
-            Self::Uucp => "uucp",
-            Self::Cron => "cron",
-            Self::Authpriv => "authpriv",
-            Self::Ftp => "ftp",
-            Self::Local0 => "local0",
-            Self::Local1 => "local1",
-            Self::Local2 => "local2",
-            Self::Local3 => "local3",
-            Self::Local4 => "local4",
-            Self::Local5 => "local5",
-            Self::Local6 => "local6",
-            Self::Local7 => "local7",
-            Self::Mark => "mark",
-        }
-    }
-}
+/// `print_version`.
+const VERSION: &str = "logger from util-linux 2.39.3\n";
 
-// ── Syslog severities ────────────────────────────────────────────
+/// `usage()`, byte for byte as util-linux 2.39.3 prints it (captured, not
+/// retyped).
+const HELP: &str = include_str!("help.txt");
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[repr(u8)]
-enum Severity {
-    Emerg = 0,
-    Alert = 1,
-    Crit = 2,
-    Err = 3,
-    Warning = 4,
-    Notice = 5,
-    Info = 6,
-    Debug = 7,
-}
+/// `LOG_USER | LOG_NOTICE`.
+const DEFAULT_PRI: i32 = (1 << 3) | 5;
 
-impl Severity {
-    fn from_name(name: &str) -> Option<Self> {
-        match name.to_lowercase().as_str() {
-            "emerg" | "panic" => Some(Self::Emerg),
-            "alert" => Some(Self::Alert),
-            "crit" | "critical" => Some(Self::Crit),
-            "err" | "error" => Some(Self::Err),
-            "warning" | "warn" => Some(Self::Warning),
-            "notice" => Some(Self::Notice),
-            "info" => Some(Self::Info),
-            "debug" => Some(Self::Debug),
-            _ => None,
-        }
-    }
+/// The program's end: the status to exit with, everything already printed.
+#[derive(Debug, PartialEq, Eq)]
+struct Exit(u8);
 
-    /// The severity whose value is `n`, or `None`.
-    ///
-    /// Unlike the facility table these are unshifted and contiguous, 0..=7, so
-    /// `-p 5` is `notice` and `-p 8` is refused -- 8 is a facility value, and
-    /// a bare number is looked up in the PRIORITY table only.
-    fn from_value(n: u32) -> Option<Self> {
-        match n {
-            0 => Some(Self::Emerg),
-            1 => Some(Self::Alert),
-            2 => Some(Self::Crit),
-            3 => Some(Self::Err),
-            4 => Some(Self::Warning),
-            5 => Some(Self::Notice),
-            6 => Some(Self::Info),
-            7 => Some(Self::Debug),
-            _ => None,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Emerg => "emerg",
-            Self::Alert => "alert",
-            Self::Crit => "crit",
-            Self::Err => "err",
-            Self::Warning => "warning",
-            Self::Notice => "notice",
-            Self::Info => "info",
-            Self::Debug => "debug",
-        }
-    }
-}
-
-// ── Priority parsing ─────────────────────────────────────────────
-
-/// Why a `-p` argument was refused, worded as util-linux 2.39.3 words it.
+/// Print `logger: MSG` to stderr -- `warnx`, and the printing half of `errx`.
 ///
-/// An `Option` cannot carry this and that is the whole reason this type
-/// exists: the reference names the FACILITY for `-p nosuch.zz`
-/// ("unknown facility name: nosuch") and the PRIORITY for `-p user.nosuch`
-/// ("unknown priority name: nosuch"). A caller holding only "it did not parse"
-/// has no choice but to echo the whole argument, which is what this program
-/// used to do -- `logger: unknown priority: 'nosuch.zz'` names the wrong half
-/// and quotes a string the reference does not quote.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PriorityError {
-    UnknownFacility(String),
-    UnknownPriority(String),
+/// A diagnostic that cannot be written has nowhere else to go; upstream's
+/// `warnx` ignores the failure the same way.
+fn diag(msg: &str) {
+    let line = format!("logger: {msg}\n");
+    // Nothing useful can be done if stderr itself is gone.
+    let _ = io::stderr().lock().write_all(line.as_bytes());
 }
 
-impl fmt::Display for PriorityError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnknownFacility(name) => write!(f, "unknown facility name: {name}"),
-            Self::UnknownPriority(name) => write!(f, "unknown priority name: {name}"),
-        }
+/// `errx(EXIT_FAILURE, ...)`.
+fn die(msg: &str) -> Exit {
+    diag(msg);
+    Exit(1)
+}
+
+/// `struct logger_ctl`.
+struct Ctl {
+    conn: Conn,
+    pri: i32,
+    /// `pid_t`: 0 when no id is wanted; `--id` values past `INT_MAX` wrap,
+    /// as the C assignment does.
+    pid: i32,
+    hdr: Vec<u8>,
+    tag: Vec<u8>,
+    msgid: Option<Vec<u8>>,
+    unix_socket: Option<OsString>,
+    server: Option<OsString>,
+    port: Option<OsString>,
+    socket_type: u8,
+    max_message_size: usize,
+    user_sds: Vec<sd::Element>,
+    reserved_sds: Vec<sd::Element>,
+    header: Option<Header>,
+    unix_socket_errors: bool,
+    noact: bool,
+    prio_prefix: bool,
+    stderr_printout: bool,
+    rfc5424_time: bool,
+    rfc5424_tq: bool,
+    rfc5424_host: bool,
+    skip_empty_lines: bool,
+    octet_count: bool,
+    zone: Zone,
+}
+
+/// Where the lines come from when there are no message operands.
+enum Input {
+    Stdin,
+    File(File),
+}
+
+/// `AF_UNIX_ERRORS_*`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SocketErrors {
+    Off,
+    On,
+    Auto,
+}
+
+fn main() -> ExitCode {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    match run(&args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(Exit(code)) => ExitCode::from(code),
     }
 }
 
-/// Look a token up in a table the way util-linux's `decode()` does.
-///
-/// A token that STARTS with a digit is a number and only a number: it is
-/// parsed whole (a trailing non-digit is a refusal, not a prefix match) and
-/// then accepted only if it is a value the table actually contains. Anything
-/// else is a case-insensitive name.
-///
-/// The "only if the table contains it" half is the part that is easy to miss
-/// and that this program got wrong: it used to read a bare `-p 34` as a packed
-/// wire value, `facility << 3 | severity`, and answer `auth.crit`. The
-/// reference refuses it -- a bare number is looked up in the PRIORITY table,
-/// where the values are 0..=7, so 34 is not there. `-p 32.2` is how you ask
-/// for `auth.crit`, and it is accepted by both.
-fn decode<T>(
-    token: &str,
-    by_value: fn(u32) -> Option<T>,
-    by_name: fn(&str) -> Option<T>,
-) -> Option<T> {
-    if token.starts_with(|c: char| c.is_ascii_digit()) {
-        // `str::parse` already refuses a trailing non-digit, which is the
-        // behaviour wanted: util-linux checks `*end` and rejects `12x`.
-        return token.parse::<u32>().ok().and_then(by_value);
-    }
-    by_name(token)
-}
-
-/// Parse a `-p` argument as util-linux 2.39.3 parses it.
-///
-/// `facility.priority` splits on the first dot; without a dot the whole token
-/// is a PRIORITY and the facility defaults to `user`. That default is why
-/// `-p user` is an error rather than a facility selection -- measured, not
-/// assumed: the reference answers `unknown priority name: user`.
-fn parse_priority(s: &str) -> Result<(Facility, Severity), PriorityError> {
-    let (facility, level) = match s.split_once('.') {
-        Some((fac, rest)) => {
-            let facility = decode(fac, Facility::from_value, Facility::from_name)
-                .ok_or_else(|| PriorityError::UnknownFacility(fac.to_string()))?;
-            (facility, rest)
-        }
-        None => (Facility::User, s),
+/// `main()`.
+fn run(args: &[OsString]) -> Result<(), Exit> {
+    let mut ctl = Ctl {
+        conn: Conn::None,
+        pri: DEFAULT_PRI,
+        pid: 0,
+        hdr: Vec::new(),
+        tag: Vec::new(),
+        msgid: None,
+        unix_socket: None,
+        server: None,
+        port: None,
+        socket_type: ALL_TYPES,
+        max_message_size: 1024,
+        user_sds: Vec::new(),
+        reserved_sds: Vec::new(),
+        header: None,
+        unix_socket_errors: false,
+        noact: false,
+        prio_prefix: false,
+        stderr_printout: false,
+        rfc5424_time: true,
+        rfc5424_tq: true,
+        rfc5424_host: true,
+        skip_empty_lines: false,
+        octet_count: false,
+        zone: Zone::from_env(),
     };
-    let severity = decode(level, Severity::from_value, Severity::from_name)
-        .ok_or_else(|| PriorityError::UnknownPriority(level.to_string()))?;
-    Ok((facility, severity))
-}
+    let mut tag: Option<Vec<u8>> = None;
+    let mut input = Input::Stdin;
+    let mut stdin_reopened = false;
+    let mut journald: Option<Input> = None;
+    let mut errors_mode = SocketErrors::Auto;
+    let mut operands: Vec<&OsString> = Vec::new();
 
-// ── Timestamp formatting ─────────────────────────────────────────
-
-/// The current time as `gettimeofday`'s `tv_sec`, which is what util-linux
-/// formats: whole seconds since the epoch.
-fn now_secs() -> i64 {
-    unix_secs(SystemTime::now())
-}
-
-/// [`now_secs`] for a given instant, so its rounding can be tested.
-///
-/// Rounded DOWN, as `struct timeval` is: its `tv_usec` is never negative, so
-/// an instant half a second before 1970 is second -1 plus 500 000 us, not
-/// second 0. The version this replaced clamped everything before 1970 to 0.
-fn unix_secs(t: SystemTime) -> i64 {
-    match t.duration_since(UNIX_EPOCH) {
-        Ok(after) => i64::try_from(after.as_secs()).unwrap_or(i64::MAX),
-        Err(e) => {
-            let before = e.duration();
-            let whole = i64::try_from(before.as_secs()).unwrap_or(i64::MAX);
-            whole
-                .saturating_add(i64::from(before.subsec_nanos() > 0))
-                .saturating_neg()
-        }
-    }
-}
-
-/// util-linux's `rfc3164_current_time`: the syslog TIMESTAMP, `Mmm dd
-/// hh:mm:ss`, for instant `t` in `zone`.
-///
-/// **Local time**, because that is what the field means. RFC 3164 gives it no
-/// zone marker, so a receiver can only read it as local, and util-linux
-/// writes `localtime_r` of the current time. This wrote UTC until 2026-09-26,
-/// which in any other zone is a different hour with nothing in the line to
-/// show it -- `known-issues.md` ->
-/// TD-B-EVERY-SYSLOG-TIMESTAMP-WE-WRITE-IS-UTC-WHERE-SYSLOG-MEANS-LOCAL-TIME.
-///
-/// The month names are upstream's own English table rather than `%b`, so the
-/// field does not change with the locale, and the day is padded with a space,
-/// which is RFC 3164's rule.
-fn rfc3164_time(zone: &localtime::Zone, t: i64) -> String {
-    const MONTHNAMES: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    // Upstream does not check `localtime_r` and formats whatever the
-    // uninitialised `tm` holds when it fails. It fails only when the year
-    // overflows an `int`, which the current time cannot do; `local`, which
-    // saturates instead of failing, is at least a defined answer.
-    let [mon, mday, hour, min, sec] = zone.localtime_r(t).map_or_else(
-        || {
-            let tm = zone.local(t, 0);
-            [tm.month.saturating_sub(1), tm.day, tm.hour, tm.minute, tm.second].map(i64::from)
-        },
-        |tm| [tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec].map(i64::from),
-    );
-    let month = usize::try_from(mon)
-        .ok()
-        .and_then(|m| MONTHNAMES.get(m))
-        .copied()
-        .unwrap_or("???");
-    format!("{month} {mday:2} {hour:02}:{min:02}:{sec:02}")
-}
-
-/// `--rfc3339`, which is this program's own -- util-linux has `--rfc5424`
-/// instead: instant `t` in UTC, marked `Z`. Unlike the RFC 3164 field it says
-/// which reading it means, so UTC is simply true here.
-fn format_rfc3339(t: i64) -> String {
-    let tm = localtime::Zone::utc().local(t, 0);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        tm.year, tm.month, tm.day, tm.hour, tm.minute, tm.second
-    )
-}
-
-// ── JSON-lines format ────────────────────────────────────────────
-
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
+    for item in LOGGER.parse(args, SHORTS, LONGS) {
+        let item = item.map_err(|e| die(&e.message()))?;
+        let (flag, value) = match &item {
+            Opt::Operand(word) => {
+                operands.push(word);
+                continue;
             }
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-// ── Options ──────────────────────────────────────────────────────
-
-struct Options {
-    tag: Option<String>,
-    priority: (Facility, Severity),
-    log_file: PathBuf,
-    stderr: bool,
-    id: bool,
-    pid_override: Option<u32>,
-    socket: Option<PathBuf>,
-    rfc3339: bool,
-    json: bool,
-    size_limit: Option<usize>,
-    message_parts: Vec<String>,
-    read_stdin: bool,
-    /// `-e`. Empty lines are logged by DEFAULT; this suppresses them.
-    skip_empty: bool,
-    /// One message per line, from `-f`. Kept apart from `message_parts`
-    /// because those are argv words that get joined into a single message,
-    /// and a file's lines are not words -- they are separate messages.
-    line_messages: Vec<String>,
-}
-
-/// The line util-linux prints after an OPTION error, and only after one.
-///
-/// Measured rather than assumed, in both directions: `logger -Q` and
-/// `logger --zzq` each print it, while `logger -p nosuch.zz` and
-/// `logger -u /nonexistent/sock` print their diagnostic and stop. It belongs
-/// to getopt's failure path, not to every failure -- so a caller cannot read
-/// "there is a --help" as advice about a bad priority, which is what printing
-/// it everywhere would imply.
-fn usage_hint() {
-    eprintln!("Try 'logger --help' for more information.");
-}
-
-fn print_help() {
-    println!("Usage: logger [OPTIONS] [MESSAGE...]");
-    println!();
-    println!("Write messages to the system log.");
-    println!();
-    println!("Options:");
-    println!("  -p, --priority PRIORITY   specify priority (facility.severity or numeric)");
-    println!("                            default: user.notice");
-    println!("  -t, --tag TAG             mark message with TAG (default: username)");
-    println!("  -i, --id                  log the process ID with each line");
-    println!("  -f, --file FILE           log the contents of FILE");
-    println!("  -s, --stderr              output to stderr as well as syslog");
-    println!("  -e, --skip-empty          do not log empty lines from -f or stdin");
-    println!("  -u, --socket SOCKET       write to SOCKET instead of /dev/log");
-    println!("  -n, --server HOST         ignored (compatibility)");
-    println!("  -P, --port PORT           ignored (compatibility)");
-    println!("  --rfc3339                 use RFC 3339 timestamp format");
-    println!("  --json                    output in JSON-lines format");
-    println!("  --size SIZE               max message size in bytes (default: 1024)");
-    println!("  --pid PID                 override PID in log entry");
-    println!("  -h, --help                display this help and exit");
-    println!("  --version                 output version information and exit");
-    println!();
-    println!("If no MESSAGE is given, standard input is logged line by line.");
-    println!();
-    println!("Priority format: facility.severity (e.g., user.info, daemon.err)");
-    println!();
-    println!("Facilities: kern, user, mail, daemon, auth, syslog, lpr, news,");
-    println!("            uucp, cron, authpriv, ftp, local0-local7");
-    println!();
-    println!("Severities: emerg, alert, crit, err, warning, notice, info, debug");
-}
-
-/// One word of the message, as text.
-///
-/// **A message that is not valid UTF-8 is REFUSED, not decoded.** `logger`
-/// writes into the system log, and both output shapes here are text: the
-/// syslog line and the JSON object. `to_string_lossy` would put U+FFFD where
-/// the caller's bytes were, so the log would record something nobody wrote --
-/// in the one file that exists to be evidence of what happened. Refusing is
-/// loud, and the caller still has its bytes; a corrupted entry is silent and
-/// permanent.
-///
-/// Before 2026-09-14 this could not arise, because `env::args()` unwrapped and
-/// the process died first. Refusing is strictly the better of the two.
-///
-/// Logging the bytes verbatim would be better still on the syslog path, and is
-/// not done here only because the JSON path cannot represent them without an
-/// escaping decision this change is not the place to make. Recorded in
-/// known-issues.md.
-fn decode_message_part(arg: &OsStr) -> String {
-    match arg.to_str() {
-        Some(s) => s.to_string(),
-        None => {
-            eprintln!(
-                "logger: message is not valid UTF-8: {}",
-                quoting::quoteaf_os(arg)
-            );
-            process::exit(1);
-        }
-    }
-}
-
-fn parse_args(args: &[OsString]) -> Options {
-    let mut opts = Options {
-        tag: None,
-        priority: (Facility::User, Severity::Notice),
-        log_file: PathBuf::from("/var/log/syslog"),
-        stderr: false,
-        id: false,
-        pid_override: None,
-        socket: None,
-        rfc3339: false,
-        json: false,
-        size_limit: Some(1024),
-        message_parts: Vec::new(),
-        read_stdin: false,
-        skip_empty: false,
-        line_messages: Vec::new(),
-    };
-
-    let mut i = 0;
-    let mut file_to_log: Option<PathBuf> = None;
-
-    while i < args.len() {
-        let arg = &args[i];
-        // `""` for a word that is not valid Unicode. Option names are ASCII,
-        // so such a word matches none of them and reaches the message arm --
-        // where `decode_message_part` decides what to do about it.
-        let s: &str = arg.to_str().unwrap_or("");
-        match s {
-            "-p" | "--priority" => {
-                i += 1;
-                if i < args.len() {
-                    match parse_priority(args[i].to_str().unwrap_or("")) {
-                        Ok(p) => opts.priority = p,
-                        Err(err) => {
-                            eprintln!("logger: {err}");
-                            process::exit(1);
-                        }
-                    }
-                }
-            }
-            "-t" | "--tag" => {
-                i += 1;
-                if i < args.len() {
-                    // A syslog tag is an ASCII identifier; one that does
-                    // not decode is not a tag, and an empty one falls back to
-                    // the user name exactly as an absent `-t` does.
-                    opts.tag = Some(args[i].to_str().unwrap_or("").to_string());
-                }
-            }
-            "-i" | "--id" => {
-                opts.id = true;
-            }
-            "-f" | "--file" => {
-                i += 1;
-                if i < args.len() {
-                    // A path, so it stays bytes.
-                    file_to_log = Some(PathBuf::from(args[i].to_str().unwrap_or("")));
-                }
-            }
-            "-s" | "--stderr" => {
-                opts.stderr = true;
-            }
-            "-u" | "--socket" => {
-                i += 1;
-                if i < args.len() {
-                    // A socket PATH, so it stays bytes.
-                    opts.socket = Some(PathBuf::from(&args[i]));
-                }
-            }
-            "-n" | "--server" | "-P" | "--port" => {
-                // Compatibility: skip the argument
-                i += 1;
-            }
-            "--rfc3339" => {
-                opts.rfc3339 = true;
-            }
-            "--json" => {
-                opts.json = true;
-            }
-            "-e" | "--skip-empty" => {
-                opts.skip_empty = true;
-            }
-            "--size" => {
-                i += 1;
-                if i < args.len()
-                    && let Ok(n) = args[i].to_str().unwrap_or("").parse::<usize>()
-                {
-                    opts.size_limit = Some(n);
-                }
-            }
-            "--pid" => {
-                i += 1;
-                if i < args.len()
-                    && let Ok(pid) = args[i].to_str().unwrap_or("").parse::<u32>()
-                {
-                    opts.pid_override = Some(pid);
-                }
-            }
-            "-h" | "--help" => {
-                print_help();
-                process::exit(0);
-            }
-            "--version" => {
-                println!("logger (Slate OS) 0.1.0");
-                process::exit(0);
-            }
-            _ if s.starts_with("--priority=") => {
-                let val = s.strip_prefix("--priority=").unwrap_or("");
-                match parse_priority(val) {
-                    Ok(p) => opts.priority = p,
-                    Err(err) => {
-                        eprintln!("logger: {err}");
-                        process::exit(1);
-                    }
-                }
-            }
-            _ if s.starts_with("--tag=") => {
-                opts.tag = Some(s.strip_prefix("--tag=").unwrap_or("").to_string());
-            }
-            _ if s.starts_with("--socket=") => {
-                opts.socket = Some(PathBuf::from(s.strip_prefix("--socket=").unwrap_or("")));
-            }
-            _ if s.starts_with("--size=") => {
-                let val = s.strip_prefix("--size=").unwrap_or("");
-                if let Ok(n) = val.parse::<usize>() {
-                    opts.size_limit = Some(n);
-                }
-            }
-            _ if s.starts_with("--pid=") => {
-                let val = s.strip_prefix("--pid=").unwrap_or("");
-                if let Ok(pid) = val.parse::<u32>() {
-                    opts.pid_override = Some(pid);
-                }
-            }
-            // On the decoded view: a short cluster is ASCII flags, so a
-            // word that does not decode is not one and falls to the
-            // message arm below.
-            _ if s.starts_with('-') && s.len() > 1 && !s.starts_with("--") => {
-                // Handle combined short flags
-                let chars: Vec<char> = s.get(1..).unwrap_or("").chars().collect();
-                let mut j = 0;
-                while j < chars.len() {
-                    match chars[j] {
-                        'i' => opts.id = true,
-                        's' => opts.stderr = true,
-                        'p' => {
-                            i += 1;
-                            if i < args.len() {
-                                match parse_priority(args[i].to_str().unwrap_or("")) {
-                                    Ok(p) => opts.priority = p,
-                                    Err(err) => {
-                                        eprintln!("logger: {err}");
-                                        process::exit(1);
-                                    }
-                                }
-                            }
-                        }
-                        't' => {
-                            i += 1;
-                            if i < args.len() {
-                                opts.tag = Some(args[i].to_str().unwrap_or("").to_string());
-                            }
-                        }
-                        'f' => {
-                            i += 1;
-                            if i < args.len() {
-                                file_to_log = Some(PathBuf::from(&args[i]));
-                            }
-                        }
-                        'u' => {
-                            i += 1;
-                            if i < args.len() {
-                                opts.socket = Some(PathBuf::from(&args[i]));
-                            }
-                        }
-                        'h' => {
-                            print_help();
-                            process::exit(0);
-                        }
-                        _ => {
-                            // `quoteaf`, not hand-written quotes: the letter
-                            // is argv's, so it can be a newline, and `'{}'`
-                            // would put that newline into stderr raw. For any
-                            // ordinary letter the two print the same `'Q'`
-                            // util-linux prints.
-                            let mut utf8 = [0u8; 4];
-                            let flag = chars[j].encode_utf8(&mut utf8);
-                            eprintln!(
-                                "logger: invalid option -- {}",
-                                quoting::quoteaf(flag.as_bytes())
-                            );
-                            usage_hint();
-                            process::exit(1);
-                        }
-                    }
-                    j += 1;
-                }
-            }
-            // `--` ends option parsing, so `logger -- --weird` logs a
-            // message that begins with a dash.
-            "--" => {
-                for rest in &args[i + 1..] {
-                    opts.message_parts.push(decode_message_part(rest));
-                }
-                break;
-            }
-            // A long option this program does not have. Short ones were
-            // already refused a few arms up; long ones fell into the
-            // catch-all below and became the *message*, so `logger --zzq`
-            // wrote "--zzq" to the system log and exited 0. The log then
-            // holds a line nobody meant to write, attributed to the user who
-            // mistyped.
-            _ if s.starts_with("--") => {
-                eprintln!("logger: unrecognized option {}", quoting::quoteaf_os(arg));
-                usage_hint();
-                process::exit(1);
-            }
-            _ => {
-                opts.message_parts.push(decode_message_part(arg));
-            }
-        }
-        i += 1;
-    }
-
-    // If -f was given, each LINE of that file is its own message.
-    //
-    // It used to push them into `message_parts`, which `main` joins with
-    // spaces -- so a six-line file became one log entry reading
-    // `one two three` instead of six entries. And it dropped empty lines
-    // unconditionally, which is `-e` behaviour applied whether or not `-e`
-    // was given; the reference logs an empty line as an empty message and
-    // skips it only on request.
-    if let Some(file_path) = file_to_log {
-        match fs::read_to_string(&file_path) {
-            Ok(content) => {
-                for line in content.lines() {
-                    if !(opts.skip_empty && line.is_empty()) {
-                        opts.line_messages.push(line.to_string());
-                    }
-                }
-            }
-            Err(e) => {
-                // The path as the caller gave it, escaped only for display.
-                eprintln!("logger: {}: {}", quoting::quoteaf_os(&file_path), e);
-                process::exit(1);
-            }
-        }
-    }
-
-    // Only with no message at all -- neither argv words nor a `-f` file.
-    if opts.message_parts.is_empty() && opts.line_messages.is_empty() {
-        opts.read_stdin = true;
-    }
-
-    opts
-}
-
-// ── Log entry formatting ─────────────────────────────────────────
-
-fn get_hostname() -> String {
-    // Try /etc/hostname, fall back to "localhost"
-    fs::read_to_string("/etc/hostname")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "localhost".to_string())
-}
-
-/// The default syslog tag: who is logging, when `-t` did not say.
-///
-/// # This is not the escalation shape, and the difference is worth stating
-///
-/// `-t` accepts any tag at all, so a caller can already write `logger -t root`
-/// and nothing here can or should stop them. The tag is not an enforced
-/// identity field. So unlike `sudo`'s `$USER` or `wall`'s banner, reading the
-/// environment here was not a way to claim to be someone else -- that way was
-/// already open and is meant to be.
-///
-/// What was wrong is the FALLBACK. It was `"root"`, so a caller this build
-/// could not identify was labelled the superuser in the system log -- the one
-/// name an operator reading syslog treats as significant. An unidentifiable
-/// caller is not root; it is unidentifiable.
-///
-/// The chain now degrades truthfully: the real login name, else the real uid,
-/// else this program's own name. Every step says something that is so.
-fn get_username() -> String {
-    let Some(uid) = authlib::identity::caller_uid() else {
-        // No uid at all. `logger` is the truthful answer: this line came from
-        // the logger utility and we cannot say more than that.
-        return "logger".to_string();
-    };
-    userdb::UserDb::load(userdb::DEFAULT_PATH)
-        .ok()
-        .and_then(|db| db.find_uid(uid).and_then(userdb::Record::username))
-        .unwrap_or_else(|| format!("uid{uid}"))
-}
-
-fn get_pid() -> u32 {
-    // Read /proc/self/stat for PID
-    if let Ok(stat) = fs::read_to_string("/proc/self/stat")
-        && let Some(pid_str) = stat.split_whitespace().next()
-        && let Ok(pid) = pid_str.parse::<u32>()
-    {
-        return pid;
-    }
-    // Fallback
-    0
-}
-
-/// Frame a message the way util-linux frames a LOCAL one.
-///
-/// There is no hostname field, and that is not an omission. util-linux emits
-/// one only on the network path, where RFC 3164 requires it because the
-/// receiving daemon cannot otherwise know who sent the datagram; for a local
-/// message the daemon is on the same machine and fills it in itself. Measured:
-///
-///     $ logger -s -p 0 hi
-///     <8>Sep 16 07:24:18 inhahe: hi
-///
-/// This program emitted `<8>Sep 16 07:24:18 localhost inhahe: hi` -- a field
-/// the reference does not write, whose value was the literal `localhost`
-/// whenever `/etc/hostname` was absent. `-n/--server` here is accepted and
-/// ignored, so there is no network path for the field to be right on.
-///
-/// `--json` keeps its hostname: that output is this program's own, not a
-/// syslog frame, and a log line that has left the machine benefits from it.
-///
-/// `timestamp` is the caller's, so that one reading of the clock serves the
-/// whole entry and a test can pin it.
-fn format_syslog_entry(
-    opts: &Options,
-    timestamp: &str,
-    message: &str,
-    tag: &str,
-    pid: u32,
-) -> String {
-    let pri = (opts.priority.0 as u32) * 8 + (opts.priority.1 as u32);
-
-    let pid_part = if opts.id {
-        format!("[{}]", opts.pid_override.unwrap_or(pid))
-    } else {
-        String::new()
-    };
-
-    let msg = if let Some(limit) = opts.size_limit {
-        if message.len() > limit {
-            &message[..limit]
-        } else {
-            message
-        }
-    } else {
-        message
-    };
-
-    format!("<{pri}>{timestamp} {tag}{pid_part}: {msg}")
-}
-
-fn format_json_entry(
-    opts: &Options,
-    timestamp: &str,
-    message: &str,
-    hostname: &str,
-    tag: &str,
-    pid: u32,
-) -> String {
-    let pri = (opts.priority.0 as u32) * 8 + (opts.priority.1 as u32);
-
-    let msg = if let Some(limit) = opts.size_limit {
-        if message.len() > limit {
-            &message[..limit]
-        } else {
-            message
-        }
-    } else {
-        message
-    };
-
-    let mut json = String::with_capacity(256);
-    json.push_str("{\"timestamp\":\"");
-    json.push_str(&json_escape(timestamp));
-    json.push_str("\",\"hostname\":\"");
-    json.push_str(&json_escape(hostname));
-    json.push_str("\",\"facility\":\"");
-    json.push_str(opts.priority.0.name());
-    json.push_str("\",\"severity\":\"");
-    json.push_str(opts.priority.1.name());
-    json.push_str("\",\"priority\":");
-    json.push_str(&pri.to_string());
-    json.push_str(",\"tag\":\"");
-    json.push_str(&json_escape(tag));
-    json.push('"');
-    if opts.id {
-        json.push_str(",\"pid\":");
-        json.push_str(&opts.pid_override.unwrap_or(pid).to_string());
-    }
-    json.push_str(",\"message\":\"");
-    json.push_str(&json_escape(msg));
-    json.push_str("\"}");
-
-    json
-}
-
-// ── Log writing ──────────────────────────────────────────────────
-
-fn write_log_entry(opts: &Options, entry: &str) {
-    // Try writing to log file
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&opts.log_file)
-    {
-        let _ = writeln!(file, "{}", entry);
-    } else {
-        // If we can't write to the log file, output to stdout as fallback
-        println!("{}", entry);
-    }
-
-    // Also output to stderr if -s flag is set
-    if opts.stderr {
-        eprintln!("{}", entry);
-    }
-}
-
-fn log_message(
-    opts: &Options,
-    zone: &localtime::Zone,
-    message: &str,
-    hostname: &str,
-    tag: &str,
-    pid: u32,
-) {
-    // One reading of the clock per entry: upstream regenerates its header,
-    // and with it the time, once per message.
-    let now = now_secs();
-    let entry = if opts.json {
-        format_json_entry(opts, &format_rfc3339(now), message, hostname, tag, pid)
-    } else {
-        let timestamp = if opts.rfc3339 {
-            format_rfc3339(now)
-        } else {
-            rfc3164_time(zone, now)
+            Opt::Short(c, v) => (Flag::Short(*c), v.as_ref()),
+            Opt::Long(name, v) => (Flag::Long(name), v.as_ref()),
         };
-        format_syslog_entry(opts, &timestamp, message, tag, pid)
-    };
-
-    write_log_entry(opts, &entry);
-}
-
-// ── main ─────────────────────────────────────────────────────────
-
-fn main() {
-    // `args_os`, not `args`: the latter's iterator unwraps, so `logger` died
-    // with a Rust panic on a message or a `-f` path holding a byte that is not
-    // valid Unicode -- and it is one of only three binaries on the image that
-    // had this defect.
-    let args: Vec<OsString> = env::args_os().skip(1).collect();
-    let opts = parse_args(&args);
-
-    let hostname = get_hostname();
-    let tag = opts.tag.clone().unwrap_or_else(get_username);
-    let pid = get_pid();
-    // `TZ` and `/etc/localtime` are read at the first conversion and not
-    // again, as glibc's `localtime_r` reads them.
-    let zone = localtime::Zone::from_env();
-
-    if !opts.line_messages.is_empty() {
-        // `-f`: one entry per line of the file, in order.
-        for msg in &opts.line_messages {
-            log_message(&opts, &zone, msg, &hostname, &tag, pid);
-        }
-    } else if opts.read_stdin {
-        // Each line read is its own message, as with `-f`.
-        let stdin = io::stdin();
-        for line in stdin.lock().lines() {
-            match line {
-                Ok(msg) => {
-                    if !(opts.skip_empty && msg.is_empty()) {
-                        log_message(&opts, &zone, &msg, &hostname, &tag, pid);
+        let arg = || value.cloned().unwrap_or_default();
+        match flag.name() {
+            "file" => {
+                let path = arg();
+                match File::open(&path) {
+                    Ok(f) => input = Input::File(f),
+                    Err(e) => {
+                        return Err(die(&format!(
+                            "file {}: {}",
+                            quotef_os(&path),
+                            errmsg::strerror(&e)
+                        )));
                     }
                 }
-                Err(e) => {
-                    eprintln!("logger: read error: {}", e);
-                    process::exit(1);
+                stdin_reopened = true;
+            }
+            "skip-empty" => ctl.skip_empty_lines = true,
+            "i" => ctl.pid = getpid(),
+            "id" => {
+                ctl.pid = match value {
+                    // Upstream steps a pointer past a leading `=` and then
+                    // parses `optarg` anyway, so `--id==5` is refused naming
+                    // `'=5'`. Reproduced: it is what a script sees.
+                    Some(v) => match ulstrutils::ul_strtou64(&os_bytes(v), 10) {
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            reason = "strtoul's unsigned long assigned to a pid_t: the wrap is upstream's"
+                        )]
+                        Ok(n) => n as i32,
+                        Err(e) => {
+                            return Err(die(&ulstrutils::num_error_message(
+                                "failed to parse id",
+                                v,
+                                e,
+                            )));
+                        }
+                    },
+                    None => getpid(),
+                };
+            }
+            "priority" => {
+                ctl.pri = priority::pencode(&os_bytes(&arg())).map_err(|e| match e {
+                    priority::PriorityError::Facility(name) => {
+                        die(&format!("unknown facility name: {}", quotef(&name)))
+                    }
+                    priority::PriorityError::Priority(name) => {
+                        die(&format!("unknown priority name: {}", quotef(&name)))
+                    }
+                })?;
+            }
+            "stderr" => ctl.stderr_printout = true,
+            "tag" => tag = Some(os_bytes(&arg()).into_owned()),
+            "socket" => ctl.unix_socket = Some(arg()),
+            "size" => {
+                let v = arg();
+                ctl.max_message_size = ulstrutils::parse_size(&os_bytes(&v))
+                    .map(|n| usize::try_from(n).unwrap_or(usize::MAX))
+                    .map_err(|e| {
+                        die(&ulstrutils::size_error_message(
+                            "failed to parse message size",
+                            &v,
+                            e,
+                        ))
+                    })?;
+            }
+            "udp" => ctl.socket_type = TYPE_UDP,
+            "tcp" => ctl.socket_type = TYPE_TCP,
+            "server" => ctl.server = Some(arg()),
+            "port" => ctl.port = Some(arg()),
+            "octet-count" => ctl.octet_count = true,
+            "prio-prefix" => ctl.prio_prefix = true,
+            "rfc3164" => ctl.header = Some(Header::Rfc3164),
+            "rfc5424" => {
+                ctl.header = Some(Header::Rfc5424);
+                if let Some(v) = value {
+                    parse_rfc5424_flags(&mut ctl, &os_bytes(v));
                 }
             }
+            "msgid" => {
+                let v = os_bytes(&arg()).into_owned();
+                if v.contains(&b' ') {
+                    return Err(die("--msgid cannot contain space"));
+                }
+                ctl.msgid = Some(v);
+            }
+            "journald" => {
+                journald = Some(match value {
+                    Some(v) => Input::File(File::open(v).map_err(|e| {
+                        die(&format!(
+                            "cannot open {}: {}",
+                            quotef_os(v),
+                            errmsg::strerror(&e)
+                        ))
+                    })?),
+                    None => Input::Stdin,
+                });
+            }
+            "socket-errors" => errors_mode = parse_unix_socket_errors_flags(&os_bytes(&arg())),
+            "no-act" => ctl.noact = true,
+            "sd-id" => {
+                let v = arg();
+                let id = os_bytes(&v).into_owned();
+                if !sd::valid_id(&id) {
+                    return Err(die(&format!(
+                        "invalid structured data ID: {}",
+                        quoteaf_os(&v)
+                    )));
+                }
+                if ctl.user_sds.iter().any(|e| e.id == id) {
+                    return Err(die(&format!(
+                        "structured data ID {} is not unique",
+                        quoteaf_os(&v)
+                    )));
+                }
+                ctl.user_sds.push(sd::Element {
+                    id,
+                    params: Vec::new(),
+                });
+            }
+            "sd-param" => {
+                let v = arg();
+                let param = os_bytes(&v).into_owned();
+                if !sd::valid_param(&param) {
+                    return Err(die(&format!(
+                        "invalid structured data parameter: {}",
+                        quoteaf_os(&v)
+                    )));
+                }
+                match ctl.user_sds.last_mut() {
+                    Some(e) => e.params.push(param),
+                    None => {
+                        return Err(die(&format!(
+                            "--sd-id was not specified for --sd-param {}",
+                            quotef_os(&v)
+                        )));
+                    }
+                }
+            }
+            "version" => return print_and_close(VERSION),
+            "help" => return print_and_close(HELP),
+            _ => {}
         }
+    }
+
+    if stdin_reopened && !operands.is_empty() {
+        // Upstream's words; it then logs the MESSAGE and ignores the file,
+        // the opposite of what it says, and so does this.
+        diag("--file <file> and <message> are mutually exclusive, message is ignored");
+    }
+
+    if let Some(source) = journald {
+        return journald_entry(&ctl, source);
+    }
+
+    // A user-supplied timeQuality element replaces the built-in one.
+    if ctl.user_sds.iter().any(|e| e.id == b"timeQuality") {
+        ctl.rfc5424_tq = false;
+    }
+
+    ctl.unix_socket_errors = match errors_mode {
+        SocketErrors::Off => false,
+        SocketErrors::On => true,
+        SocketErrors::Auto => ctl.noact || ctl.stderr_printout || sd_booted(),
+    };
+
+    logger_open(&mut ctl, tag)?;
+    if operands.is_empty() {
+        logger_stdin(&mut ctl, input)
     } else {
-        // Argv words ARE joined -- `logger hello world` is one message.
-        let message = opts.message_parts.join(" ");
-        log_message(&opts, &zone, &message, &hostname, &tag, pid);
+        generate_syslog_header(&mut ctl)?;
+        logger_command_line(&mut ctl, &operands)
+    }
+    // `logger_close`: dropping the connection closes it. Upstream reports a
+    // failed `close()` of the socket, which does not fail for a socket in
+    // any case this program reaches.
+}
+
+/// A short or long option, named the way the dispatch reads it.
+enum Flag<'a> {
+    Short(u8),
+    Long(&'a str),
+}
+
+impl Flag<'_> {
+    /// The long name a short option shares its case with in upstream's
+    /// switch; `-i` has none (`--id` differs: it takes an optional value).
+    fn name(&self) -> &str {
+        match self {
+            Flag::Long(name) => name,
+            Flag::Short(c) => match c {
+                b'e' => "skip-empty",
+                b'f' => "file",
+                b'i' => "i",
+                b'p' => "priority",
+                b'S' => "size",
+                b's' => "stderr",
+                b't' => "tag",
+                b'u' => "socket",
+                b'd' => "udp",
+                b'T' => "tcp",
+                b'n' => "server",
+                b'P' => "port",
+                b'V' => "version",
+                b'h' => "help",
+                _ => "",
+            },
+        }
     }
 }
 
-// ── Tests ────────────────────────────────────────────────────────
+/// `logger_getpid`, as the `pid_t` it is.
+fn getpid() -> i32 {
+    i32::try_from(std::process::id()).unwrap_or(i32::MAX)
+}
+
+/// `parse_rfc5424_flags`: `strtok` on `,`, so empty items vanish.
+fn parse_rfc5424_flags(ctl: &mut Ctl, s: &[u8]) {
+    for tok in s.split(|&b| b == b',').filter(|t| !t.is_empty()) {
+        match tok {
+            b"notime" => {
+                ctl.rfc5424_time = false;
+                ctl.rfc5424_tq = false;
+            }
+            b"notq" => ctl.rfc5424_tq = false,
+            b"nohost" => ctl.rfc5424_host = false,
+            _ => diag(&format!(
+                "ignoring unknown option argument: {}",
+                quotef(tok)
+            )),
+        }
+    }
+}
+
+/// `parse_unix_socket_errors_flags`.
+fn parse_unix_socket_errors_flags(s: &[u8]) -> SocketErrors {
+    match s {
+        b"off" => SocketErrors::Off,
+        b"on" => SocketErrors::On,
+        b"auto" => SocketErrors::Auto,
+        _ => {
+            diag(&format!(
+                "invalid argument: {}: using automatic errors",
+                quotef(s)
+            ));
+            SocketErrors::Auto
+        }
+    }
+}
+
+/// libsystemd's `sd_booted()`: `/run/systemd/system/` exists.
+fn sd_booted() -> bool {
+    std::fs::symlink_metadata("/run/systemd/system/").is_ok()
+}
+
+/// `-V` and `-h`, then `close_stdout_atexit`: a stdout that could not take
+/// the text is `write error`, exit 1 (a closed pipe excepted).
+fn print_and_close(text: &str) -> Result<(), Exit> {
+    let mut out = io::stdout().lock();
+    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+        Ok(()) => Err(Exit(0)),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Err(Exit(0)),
+        Err(e) => Err(die(&format!("write error: {}", errmsg::strerror(&e)))),
+    }
+}
+
+/// `logger_open`.
+fn logger_open(ctl: &mut Ctl, tag: Option<Vec<u8>>) -> Result<(), Exit> {
+    ctl.conn = open_conn(ctl)?;
+    if ctl.header.is_none() {
+        ctl.header = Some(if ctl.server.is_some() {
+            Header::Rfc5424
+        } else {
+            Header::Local
+        });
+    }
+    ctl.tag = tag
+        .or_else(sys::xgetlogin)
+        .unwrap_or_else(|| b"<someone>".to_vec());
+    Ok(())
+}
+
+/// `__logger_open`.
+fn open_conn(ctl: &mut Ctl) -> Result<Conn, Exit> {
+    let opened = match &ctl.server {
+        Some(server) => deliver::inet_socket(server, ctl.port.as_deref(), &mut ctl.socket_type),
+        None => {
+            let path = ctl
+                .unix_socket
+                .clone()
+                .unwrap_or_else(|| OsString::from(PATH_DEVLOG));
+            deliver::unix_socket(&path, &mut ctl.socket_type, ctl.unix_socket_errors)
+        }
+    };
+    opened.map_err(|e| {
+        die(&match e {
+            OpenError::PathTooLong(p) => format!("openlog {}: pathname too long", quotef_os(&p)),
+            OpenError::Socket(p, err) => {
+                format!("socket {}: {}", quotef_os(&p), errmsg::strerror(&err))
+            }
+            OpenError::Resolve(s, p, text) => {
+                format!(
+                    "failed to resolve name {} port {}: {text}",
+                    quotef_os(&s),
+                    quotef_os(&p)
+                )
+            }
+            OpenError::Connect(s, p) => format!(
+                "failed to connect to {} port {}",
+                quotef_os(&s),
+                quotef_os(&p)
+            ),
+        })
+    })
+}
+
+/// `logger_reopen`.
+fn logger_reopen(ctl: &mut Ctl) -> Result<(), Exit> {
+    ctl.conn = Conn::None;
+    ctl.conn = open_conn(ctl)?;
+    Ok(())
+}
+
+/// `logger_gettimeofday`.
+fn now() -> TimeVal {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => TimeVal {
+            sec: i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+            usec: d.subsec_micros(),
+        },
+        // Before 1970: `timeval` keeps `tv_usec` non-negative, so the second
+        // is the one below.
+        Err(e) => {
+            let d = e.duration();
+            let whole = i64::try_from(d.as_secs()).unwrap_or(i64::MAX);
+            let micros = d.subsec_micros();
+            if micros == 0 {
+                TimeVal {
+                    sec: whole.saturating_neg(),
+                    usec: 0,
+                }
+            } else {
+                TimeVal {
+                    sec: whole.saturating_add(1).saturating_neg(),
+                    usec: 1_000_000u32.saturating_sub(micros),
+                }
+            }
+        }
+    }
+}
+
+/// `generate_syslog_header`.
+fn generate_syslog_header(ctl: &mut Ctl) -> Result<(), Exit> {
+    ctl.hdr = match ctl.header.unwrap_or(Header::Local) {
+        Header::Local => frame::local_header(
+            ctl.pri,
+            &frame::rfc3164_time(&ctl.zone, now().sec),
+            &ctl.tag,
+            ctl.pid,
+        ),
+        Header::Rfc3164 => {
+            let host = sys::hostname();
+            frame::rfc3164_header(
+                ctl.pri,
+                &frame::rfc3164_time(&ctl.zone, now().sec),
+                host.as_deref(),
+                &ctl.tag,
+                ctl.pid,
+            )
+        }
+        Header::Rfc5424 => rfc5424_header(ctl)?,
+    };
+    Ok(())
+}
+
+/// `syslog_rfc5424_header`, with its checks.
+fn rfc5424_header(ctl: &mut Ctl) -> Result<Vec<u8>, Exit> {
+    let time = if ctl.rfc5424_time {
+        frame::rfc5424_time(&ctl.zone, now()).ok_or_else(|| die("localtime() failed"))?
+    } else {
+        NILVALUE.to_vec()
+    };
+    let hostname = if ctl.rfc5424_host {
+        let name = sys::hostname().unwrap_or_else(|| NILVALUE.to_vec());
+        if name.len() > 255 {
+            return Err(die(&format!(
+                "hostname {} is too long",
+                quoteaf_os(quoting::os_from_bytes(&name))
+            )));
+        }
+        name
+    } else {
+        NILVALUE.to_vec()
+    };
+    if ctl.tag.len() > 48 {
+        return Err(die(&format!(
+            "tag {} is too long",
+            quoteaf_os(quoting::os_from_bytes(&ctl.tag))
+        )));
+    }
+    let procid = if ctl.pid == 0 {
+        NILVALUE.to_vec()
+    } else {
+        ctl.pid.to_string().into_bytes()
+    };
+    let msgid = ctl.msgid.clone().unwrap_or_else(|| NILVALUE.to_vec());
+
+    // The time-quality element is added once, on the first header, and
+    // reused after: every later line's header carries the first line's
+    // reading of the clock's state, as upstream's does.
+    if ctl.rfc5424_tq && !ctl.reserved_sds.iter().any(|e| e.id == b"timeQuality") {
+        let mut params = vec![b"tzKnown=\"1\"".to_vec()];
+        match sys::synced_maxerror() {
+            Some(maxerror) => {
+                params.push(b"isSynced=\"1\"".to_vec());
+                params.push(format!("syncAccuracy=\"{maxerror}\"").into_bytes());
+            }
+            None => params.push(b"isSynced=\"0\"".to_vec()),
+        }
+        ctl.reserved_sds.push(sd::Element {
+            id: b"timeQuality".to_vec(),
+            params,
+        });
+    }
+    let structured =
+        sd::render(&ctl.reserved_sds, &ctl.user_sds).unwrap_or_else(|| NILVALUE.to_vec());
+
+    Ok(frame::rfc5424_header(
+        ctl.pri,
+        [&time, &hostname, &ctl.tag, &procid, &msgid, &structured],
+    ))
+}
+
+/// `write_output`.
+fn write_output(ctl: &mut Ctl, msg: &[u8]) -> Result<(), Exit> {
+    if !ctl.noact && !ctl.conn.is_connected() {
+        logger_reopen(ctl)?;
+    }
+    let connected = !ctl.noact && ctl.conn.is_connected();
+    let tcp_newline = connected && ctl.socket_type == TYPE_TCP && !ctl.octet_count;
+    let f = output::frame(&ctl.hdr, msg, ctl.octet_count, tcp_newline);
+    if connected {
+        let parts = Parts {
+            pri: ctl.pri,
+            tag: &ctl.tag,
+            pid: ctl.pid,
+            msg,
+        };
+        if deliver::send(&mut ctl.conn, &f.wire, parts).is_err() {
+            logger_reopen(ctl)?;
+            let parts = Parts {
+                pri: ctl.pri,
+                tag: &ctl.tag,
+                pid: ctl.pid,
+                msg,
+            };
+            if let Err(e) = deliver::send(&mut ctl.conn, &f.wire, parts) {
+                diag(&format!("send message failed: {}", errmsg::strerror(&e)));
+            }
+        }
+    }
+    if ctl.stderr_printout {
+        // `ignore_result(writev(STDERR_FILENO, ...))`, as upstream.
+        let _ = io::stderr().lock().write_all(&f.stderr);
+    }
+    Ok(())
+}
+
+/// `logger_command_line`: one header for every chunk.
+fn logger_command_line(ctl: &mut Ctl, operands: &[&OsString]) -> Result<(), Exit> {
+    let words: Vec<Vec<u8>> = operands.iter().map(|w| os_bytes(w).into_owned()).collect();
+    let refs: Vec<&[u8]> = words.iter().map(Vec::as_slice).collect();
+    let mut result = Ok(());
+    input::command_line(&refs, ctl.max_message_size, &mut |msg| {
+        if result.is_ok() {
+            result = write_output(ctl, msg);
+        }
+    });
+    result
+}
+
+/// `logger_stdin`: a fresh header for every message.
+fn logger_stdin(ctl: &mut Ctl, source: Input) -> Result<(), Exit> {
+    let reader: Box<dyn Read> = match source {
+        Input::Stdin => Box::new(io::stdin().lock()),
+        Input::File(f) => Box::new(f),
+    };
+    // `getchar()` returns EOF on a read error as on end of input.
+    let bytes = BufReader::new(reader).bytes().map_while(Result::ok);
+    let mut pri = ctl.pri;
+    let (max, prefix, skip) = (ctl.max_message_size, ctl.prio_prefix, ctl.skip_empty_lines);
+    let mut result = Ok(());
+    input::stdin_messages(bytes, max, prefix, skip, &mut pri, &mut |p, msg| {
+        if result.is_ok() {
+            ctl.pri = p;
+            result = generate_syslog_header(ctl).and_then(|()| write_output(ctl, msg));
+        }
+    });
+    result
+}
+
+/// `journald_entry`: `KEY=VALUE` lines up to the first empty one, repeated
+/// `MESSAGE=` lines joined by newlines into the first, sent as one entry.
+///
+/// There is no journald on SlateOS; the entry goes to the journal
+/// `journalctl` reads, its `MESSAGE`, `PRIORITY` and `SYSLOG_IDENTIFIER`
+/// becoming the record's own fields and every other field kept beside them.
+fn journald_entry(ctl: &Ctl, source: Input) -> Result<(), Exit> {
+    let reader: Box<dyn BufRead> = match source {
+        Input::Stdin => Box::new(io::stdin().lock()),
+        Input::File(f) => Box::new(BufReader::new(f)),
+    };
+    let mut lines: Vec<Vec<u8>> = Vec::new();
+    let mut msgline: Option<usize> = None;
+    for line in reader.split(b'\n') {
+        let Ok(mut line) = line else { break };
+        // `rtrim_whitespace`: C's isspace, from the end.
+        while line.last().is_some_and(|&b| ulstrutils::c_isspace(b)) {
+            line.pop();
+        }
+        if line.is_empty() {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix(b"MESSAGE=") {
+            match msgline {
+                None => msgline = Some(lines.len()),
+                Some(i) => {
+                    if let Some(first) = lines.get_mut(i) {
+                        first.push(b'\n');
+                        first.extend_from_slice(rest);
+                    }
+                    continue;
+                }
+            }
+        }
+        lines.push(line);
+    }
+
+    let written = if ctl.noact {
+        Ok(())
+    } else {
+        journald_record(&lines).and_then(|r| deliver::append_record(&r))
+    };
+    if ctl.stderr_printout {
+        let mut err = io::stderr().lock();
+        for line in &lines {
+            // `fprintf(stderr, ...)`, unchecked upstream.
+            let _ = err.write_all(line).and_then(|()| err.write_all(b"\n"));
+        }
+    }
+    written.map_err(|_| die("journald entry could not be written"))
+}
+
+/// The record `sd_journal_sendv` would have made of `fields`.
+fn journald_record(fields: &[Vec<u8>]) -> io::Result<journalrec::Record> {
+    let mut record = journalrec::Record {
+        ts: u64::try_from(now().sec).unwrap_or(0),
+        level: "info".to_string(),
+        service: String::new(),
+        msg: String::new(),
+        pid: Some(std::process::id()),
+        extra: Vec::new(),
+    };
+    for field in fields {
+        let text =
+            std::str::from_utf8(field).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        // journald refuses a field with no `=`.
+        let (key, value) = text
+            .split_once('=')
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        match key {
+            "MESSAGE" => record.msg = value.to_string(),
+            "SYSLOG_IDENTIFIER" => record.service = value.to_string(),
+            "PRIORITY" => {
+                record.level = value
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|p| journalrec::PRIORITY_NAMES.get(p))
+                    .map_or_else(|| value.to_string(), |n| (*n).to_string());
+            }
+            _ => record.extra.push((key.to_string(), value.to_string())),
+        }
+    }
+    Ok(record)
+}
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 
-    // Priority parsing
-    #[test]
-    fn test_parse_priority_named() {
-        let (fac, sev) = parse_priority("user.info").unwrap();
-        assert_eq!(fac, Facility::User);
-        assert_eq!(sev, Severity::Info);
+    fn args(words: &[&str]) -> Vec<OsString> {
+        words.iter().map(OsString::from).collect()
     }
 
     #[test]
-    fn a_bare_number_is_a_priority_not_a_packed_wire_value() {
-        // This program used to read `-p 14` as `facility << 3 | severity` and
-        // answer `user.info`. util-linux 2.39.3 looks a bare number up in the
-        // PRIORITY table, whose values are 0..=7, so 14 is simply not in it:
-        //     $ logger -p 14 hi
-        //     logger: unknown priority name: 14
-        assert_eq!(
-            parse_priority("14"),
-            Err(PriorityError::UnknownPriority("14".to_string()))
-        );
-        // The way to ask for `auth.crit` is the facility's own wire value, and
-        // the reference does accept that spelling -- measured, not assumed:
-        //     $ logger -s -p 32.2 hi
-        //     <34>Sep 16 07:24:19 inhahe: hi
-        assert_eq!(parse_priority("32.2"), Ok((Facility::Auth, Severity::Crit)));
-    }
-
-    #[test]
-    fn test_parse_priority_daemon_err() {
-        let (fac, sev) = parse_priority("daemon.err").unwrap();
-        assert_eq!(fac, Facility::Daemon);
-        assert_eq!(sev, Severity::Err);
-    }
-
-    #[test]
-    fn test_parse_priority_kern_emerg() {
-        let (fac, sev) = parse_priority("kern.emerg").unwrap();
-        assert_eq!(fac, Facility::Kern);
-        assert_eq!(sev, Severity::Emerg);
-    }
-
-    #[test]
-    fn test_parse_priority_local7_debug() {
-        let (fac, sev) = parse_priority("local7.debug").unwrap();
-        assert_eq!(fac, Facility::Local7);
-        assert_eq!(sev, Severity::Debug);
-    }
-
-    #[test]
-    fn test_parse_priority_severity_only() {
-        let (fac, sev) = parse_priority("err").unwrap();
-        assert_eq!(fac, Facility::User);
-        assert_eq!(sev, Severity::Err);
-    }
-
-    #[test]
-    fn test_parse_priority_invalid() {
-        assert!(parse_priority("invalid.bogus").is_err());
-    }
-
-    #[test]
-    fn the_diagnostic_names_the_half_that_was_actually_wrong() {
-        // The whole reason `parse_priority` returns a `Result` and not an
-        // `Option`: these two arguments are wrong in different halves, and the
-        // reference says so.
-        assert_eq!(
-            parse_priority("nosuch.zz"),
-            Err(PriorityError::UnknownFacility("nosuch".to_string()))
-        );
-        assert_eq!(
-            parse_priority("user.nosuch"),
-            Err(PriorityError::UnknownPriority("nosuch".to_string()))
-        );
-        // Worded as the reference words it, and UNQUOTED as the reference
-        // leaves it -- this program used to print `unknown priority: 'x'`,
-        // which names the wrong half and adds quotes of its own.
-        assert_eq!(
-            PriorityError::UnknownFacility("nosuch".to_string()).to_string(),
-            "unknown facility name: nosuch"
-        );
-        assert_eq!(
-            PriorityError::UnknownPriority("nosuch".to_string()).to_string(),
-            "unknown priority name: nosuch"
-        );
-    }
-
-    #[test]
-    fn a_bare_number_takes_the_default_user_facility() {
-        // 0 is a valid priority (emerg) so this parses -- but the facility is
-        // the default `user`, NOT `kern`. The old packed reading made `0` mean
-        // `kern.emerg`; the reference emits <8>, which is user(1)<<3 | 0:
-        //     $ logger -s -p 0 hi
-        //     <8>Sep 16 07:24:18 inhahe: hi
-        assert_eq!(parse_priority("0"), Ok((Facility::User, Severity::Emerg)));
-        // <13> = user<<3 | notice.
-        assert_eq!(parse_priority("5"), Ok((Facility::User, Severity::Notice)));
-        // 8 is a FACILITY value, so it is not a priority and there is no
-        // second table to fall back to.
-        assert_eq!(
-            parse_priority("8"),
-            Err(PriorityError::UnknownPriority("8".to_string()))
-        );
-        // A bare FACILITY name is an error for the same reason: without a dot
-        // the token is looked up as a priority only.
-        assert_eq!(
-            parse_priority("user"),
-            Err(PriorityError::UnknownPriority("user".to_string()))
-        );
-    }
-
-    #[test]
-    fn numeric_facilities_are_shifted_and_their_table_has_a_hole_in_it() {
-        assert_eq!(
-            parse_priority("8.5"),
-            Ok((Facility::User, Severity::Notice))
-        );
-        assert_eq!(
-            parse_priority("16.5"),
-            Ok((Facility::Mail, Severity::Notice))
-        );
-        assert_eq!(parse_priority("88.1"), Ok((Facility::Ftp, Severity::Alert)));
-        assert_eq!(
-            parse_priority("128.1"),
-            Ok((Facility::Local0, Severity::Alert))
-        );
-        assert_eq!(
-            parse_priority("184.1"),
-            Ok((Facility::Local7, Severity::Alert))
-        );
-        // `mark` is LOG_NFACILITIES << 3, and both spellings reach it:
-        //     $ logger -s -p mark.1 hi
-        //     <193>Sep 16 07:24:19 inhahe: hi
-        assert_eq!(
-            parse_priority("192.1"),
-            Ok((Facility::Mark, Severity::Alert))
-        );
-        assert_eq!(
-            parse_priority("mark.1"),
-            Ok((Facility::Mark, Severity::Alert))
-        );
-        // Between ftp (88) and local0 (128) the table is EMPTY, so 96 is not a
-        // facility even though it is a tidy multiple of eight...
-        assert_eq!(
-            parse_priority("96.1"),
-            Err(PriorityError::UnknownFacility("96".to_string()))
-        );
-        // ...and a value that is not a multiple of eight is not one either.
-        assert_eq!(
-            parse_priority("9.1"),
-            Err(PriorityError::UnknownFacility("9".to_string()))
-        );
-    }
-
-    #[test]
-    fn a_number_with_a_trailing_non_digit_is_not_a_name_either() {
-        // util-linux checks `*end` after `strtol` and refuses outright; it does
-        // not fall back to a name lookup. So `5x` is an error, and crucially it
-        // is the NUMERIC refusal -- a fallback would have reported it as an
-        // unknown name after trying both, which reads the same but is a
-        // different code path and would accept `5x` if a name ever matched.
-        assert_eq!(
-            parse_priority("5x"),
-            Err(PriorityError::UnknownPriority("5x".to_string()))
-        );
-    }
-
-    // Facility names
-    #[test]
-    fn test_facility_names() {
-        assert_eq!(Facility::from_name("kern"), Some(Facility::Kern));
-        assert_eq!(Facility::from_name("kernel"), Some(Facility::Kern));
-        assert_eq!(Facility::from_name("mail"), Some(Facility::Mail));
-        assert_eq!(Facility::from_name("cron"), Some(Facility::Cron));
-        assert_eq!(Facility::from_name("local0"), Some(Facility::Local0));
-        assert_eq!(Facility::from_name("bogus"), None);
-    }
-
-    // Severity names
-    #[test]
-    fn test_severity_names() {
-        assert_eq!(Severity::from_name("emerg"), Some(Severity::Emerg));
-        assert_eq!(Severity::from_name("panic"), Some(Severity::Emerg));
-        assert_eq!(Severity::from_name("warn"), Some(Severity::Warning));
-        assert_eq!(Severity::from_name("warning"), Some(Severity::Warning));
-        assert_eq!(Severity::from_name("error"), Some(Severity::Err));
-        assert_eq!(Severity::from_name("bogus"), None);
-    }
-
-    // Facility display names
-    #[test]
-    fn test_facility_display() {
-        assert_eq!(Facility::Kern.name(), "kern");
-        assert_eq!(Facility::User.name(), "user");
-        assert_eq!(Facility::Local7.name(), "local7");
-    }
-
-    // Severity display names
-    #[test]
-    fn test_severity_display() {
-        assert_eq!(Severity::Emerg.name(), "emerg");
-        assert_eq!(Severity::Info.name(), "info");
-        assert_eq!(Severity::Debug.name(), "debug");
-    }
-
-    // Timestamp formatting
-
-    /// US Eastern as a POSIX rule, so the test needs no zoneinfo database.
-    fn eastern() -> localtime::Zone {
-        localtime::Zone::from_tz(Some(b"EST5EDT,M3.2.0,M11.1.0".as_slice()))
-    }
-
-    /// The TIMESTAMP is local time. The same instant in UTC is what this
-    /// printed, in every zone, until 2026-09-26.
-    #[test]
-    fn the_rfc3164_timestamp_is_local_time() {
-        // 2020-01-20 06:00:00 UTC is 01:00 EST.
-        assert_eq!(rfc3164_time(&eastern(), 1_579_500_000), "Jan 20 01:00:00");
-        // 2020-03-08 09:00:00 UTC is 05:00 EDT, that morning's change having
-        // come at 07:00 UTC -- and the 8th is padded with a space, not a zero.
-        assert_eq!(rfc3164_time(&eastern(), 1_583_658_000), "Mar  8 05:00:00");
-        assert_eq!(
-            rfc3164_time(&localtime::Zone::utc(), 1_583_658_000),
-            "Mar  8 09:00:00"
-        );
-    }
-
-    /// A zone east of Greenwich by a fraction of an hour moves the minutes
-    /// too, and can move the date: 2020-12-31 20:00 UTC is New Year's Day
-    /// in India.
-    #[test]
-    fn a_half_hour_zone_moves_the_minutes_and_the_date() {
-        let india = localtime::Zone::from_tz(Some(b"IST-5:30".as_slice()));
-        assert_eq!(rfc3164_time(&india, 1_609_444_800), "Jan  1 01:30:00");
-    }
-
-    #[test]
-    fn the_clock_rounds_down_before_1970_as_gettimeofday_does() {
-        use std::time::Duration;
-        assert_eq!(unix_secs(UNIX_EPOCH), 0);
-        assert_eq!(unix_secs(UNIX_EPOCH + Duration::from_millis(1500)), 1);
-        assert_eq!(unix_secs(UNIX_EPOCH - Duration::from_millis(500)), -1);
-        assert_eq!(unix_secs(UNIX_EPOCH - Duration::from_secs(1)), -1);
-        assert_eq!(unix_secs(UNIX_EPOCH - Duration::from_millis(1500)), -2);
-    }
-
-    #[test]
-    fn rfc3339_is_utc_and_says_so() {
-        assert_eq!(format_rfc3339(0), "1970-01-01T00:00:00Z");
-        assert_eq!(format_rfc3339(1_704_067_200), "2024-01-01T00:00:00Z");
-        // A leap day.
-        assert_eq!(format_rfc3339(1_709_164_800), "2024-02-29T00:00:00Z");
-        assert_eq!(format_rfc3339(1_583_658_000), "2020-03-08T09:00:00Z");
-    }
-
-    // JSON escaping
-    #[test]
-    fn test_json_escape_simple() {
-        assert_eq!(json_escape("hello"), "hello");
-    }
-
-    #[test]
-    fn test_json_escape_quotes() {
-        assert_eq!(json_escape("say \"hi\""), "say \\\"hi\\\"");
-    }
-
-    #[test]
-    fn test_json_escape_backslash() {
-        assert_eq!(json_escape("a\\b"), "a\\\\b");
-    }
-
-    #[test]
-    fn test_json_escape_newline() {
-        assert_eq!(json_escape("line1\nline2"), "line1\\nline2");
-    }
-
-    #[test]
-    fn test_json_escape_tab() {
-        assert_eq!(json_escape("a\tb"), "a\\tb");
-    }
-
-    #[test]
-    fn test_json_escape_control_char() {
-        let s = String::from_utf8(vec![0x01]).unwrap();
-        assert_eq!(json_escape(&s), "\\u0001");
-    }
-
-    // Syslog entry formatting
-    #[test]
-    fn test_format_syslog_basic() {
-        let opts = Options {
-            tag: None,
-            priority: (Facility::User, Severity::Notice),
-            log_file: PathBuf::from("/var/log/syslog"),
-            stderr: false,
-            id: false,
-            pid_override: None,
-            socket: None,
-            rfc3339: false,
-            json: false,
-            size_limit: Some(1024),
-            message_parts: Vec::new(),
-            read_stdin: false,
-            skip_empty: false,
-            line_messages: Vec::new(),
-        };
-        let entry = format_syslog_entry(&opts, "Mar  8 05:00:00", "test message", "mytag", 1234);
-        assert_eq!(entry, "<13>Mar  8 05:00:00 mytag: test message");
-        // Priority: user(1)*8 + notice(5) = 13
-        assert!(entry.starts_with("<13>"));
-        assert!(entry.contains("mytag"));
-        assert!(entry.contains("test message"));
-        // No hostname field: util-linux writes one only on the network path,
-        // and this program has none. The check is that the tag follows the
-        // timestamp DIRECTLY, which a `contains` could not tell apart from a
-        // hostname that merely happened to equal the tag.
-        assert!(entry.ends_with(" mytag: test message"), "{entry}");
-    }
-
-    #[test]
-    fn test_format_syslog_with_pid() {
-        let opts = Options {
-            tag: None,
-            priority: (Facility::Daemon, Severity::Err),
-            log_file: PathBuf::from("/var/log/syslog"),
-            stderr: false,
-            id: true,
-            pid_override: None,
-            socket: None,
-            rfc3339: false,
-            json: false,
-            size_limit: Some(1024),
-            message_parts: Vec::new(),
-            read_stdin: false,
-            skip_empty: false,
-            line_messages: Vec::new(),
-        };
-        let entry = format_syslog_entry(&opts, "Jan 20 01:00:00", "error", "daemon", 5678);
-        // Priority: daemon(3)*8 + err(3) = 27
-        assert!(entry.starts_with("<27>"));
-        assert!(entry.contains("[5678]"));
-    }
-
-    #[test]
-    fn test_format_syslog_pid_override() {
-        let opts = Options {
-            tag: None,
-            priority: (Facility::User, Severity::Info),
-            log_file: PathBuf::from("/var/log/syslog"),
-            stderr: false,
-            id: true,
-            pid_override: Some(9999),
-            socket: None,
-            rfc3339: false,
-            json: false,
-            size_limit: Some(1024),
-            message_parts: Vec::new(),
-            read_stdin: false,
-            skip_empty: false,
-            line_messages: Vec::new(),
-        };
-        let entry = format_syslog_entry(&opts, "Jan 20 01:00:00", "msg", "tag", 1111);
-        assert!(entry.contains("[9999]"));
-        assert!(!entry.contains("[1111]"));
-    }
-
-    #[test]
-    fn test_format_syslog_size_limit() {
-        let opts = Options {
-            tag: None,
-            priority: (Facility::User, Severity::Info),
-            log_file: PathBuf::from("/var/log/syslog"),
-            stderr: false,
-            id: false,
-            pid_override: None,
-            socket: None,
-            rfc3339: false,
-            json: false,
-            size_limit: Some(10),
-            message_parts: Vec::new(),
-            read_stdin: false,
-            skip_empty: false,
-            line_messages: Vec::new(),
-        };
-        let entry = format_syslog_entry(
-            &opts,
-            "Jan 20 01:00:00",
-            "this is a very long message",
-            "t",
-            0,
-        );
-        assert!(entry.contains("this is a "));
-        assert!(!entry.contains("very long"));
-    }
-
-    // JSON entry formatting
-    #[test]
-    fn test_format_json_basic() {
-        let opts = Options {
-            tag: None,
-            priority: (Facility::User, Severity::Info),
-            log_file: PathBuf::from("/var/log/syslog"),
-            stderr: false,
-            id: false,
-            pid_override: None,
-            socket: None,
-            rfc3339: false,
-            json: true,
-            size_limit: Some(1024),
-            message_parts: Vec::new(),
-            read_stdin: false,
-            skip_empty: false,
-            line_messages: Vec::new(),
-        };
-        let entry = format_json_entry(
-            &opts,
-            "2020-03-08T09:00:00Z",
-            "test msg",
-            "myhost",
-            "mytag",
-            42,
-        );
-        assert!(entry.starts_with("{\"timestamp\":\"2020-03-08T09:00:00Z\","));
-        assert!(entry.starts_with('{'));
-        assert!(entry.ends_with('}'));
-        assert!(entry.contains("\"facility\":\"user\""));
-        assert!(entry.contains("\"severity\":\"info\""));
-        assert!(entry.contains("\"message\":\"test msg\""));
-        assert!(entry.contains("\"hostname\":\"myhost\""));
-        assert!(entry.contains("\"tag\":\"mytag\""));
-        // priority: user(1)*8 + info(6) = 14
-        assert!(entry.contains("\"priority\":14"));
-    }
-
-    #[test]
-    fn test_format_json_with_pid() {
-        let opts = Options {
-            tag: None,
-            priority: (Facility::User, Severity::Info),
-            log_file: PathBuf::from("/var/log/syslog"),
-            stderr: false,
-            id: true,
-            pid_override: None,
-            socket: None,
-            rfc3339: false,
-            json: true,
-            size_limit: Some(1024),
-            message_parts: Vec::new(),
-            read_stdin: false,
-            skip_empty: false,
-            line_messages: Vec::new(),
-        };
-        let entry = format_json_entry(&opts, "2020-03-08T09:00:00Z", "msg", "h", "t", 42);
-        assert!(entry.contains("\"pid\":42"));
-    }
-
-    // Argument parsing
-    #[test]
-    fn test_parse_args_defaults() {
-        let opts = parse_args(&[]);
-        assert_eq!(opts.priority, (Facility::User, Severity::Notice));
-        assert!(opts.tag.is_none());
-        assert!(!opts.id);
-        assert!(!opts.stderr);
-        assert!(!opts.rfc3339);
-        assert!(!opts.json);
-        assert!(opts.read_stdin);
-    }
-
-    #[test]
-    fn test_parse_args_priority() {
-        let args = vec!["-p".into(), "daemon.err".into(), "msg".into()];
-        let opts = parse_args(&args);
-        assert_eq!(opts.priority, (Facility::Daemon, Severity::Err));
-        assert_eq!(opts.message_parts, vec!["msg"]);
-    }
-
-    #[test]
-    fn test_parse_args_tag() {
-        let args = vec!["-t".into(), "myapp".into(), "hello".into()];
-        let opts = parse_args(&args);
-        assert_eq!(opts.tag, Some("myapp".to_string()));
-    }
-
-    #[test]
-    fn test_parse_args_flags() {
-        let args = vec!["-is".into(), "test".into()];
-        let opts = parse_args(&args);
-        assert!(opts.id);
-        assert!(opts.stderr);
-    }
-
-    #[test]
-    fn test_parse_args_rfc3339() {
-        let args = vec!["--rfc3339".into(), "test".into()];
-        let opts = parse_args(&args);
-        assert!(opts.rfc3339);
-    }
-
-    #[test]
-    fn test_parse_args_json() {
-        let args = vec!["--json".into(), "test".into()];
-        let opts = parse_args(&args);
-        assert!(opts.json);
-    }
-
-    #[test]
-    fn test_parse_args_message() {
-        let args = vec!["hello".into(), "world".into()];
-        let opts = parse_args(&args);
-        assert_eq!(opts.message_parts, vec!["hello", "world"]);
-        assert!(!opts.read_stdin);
-    }
-
-    /// Write `body` to a uniquely named temp file and hand back the path.
-    ///
-    /// Named from the test's own name plus the pid, because two of this
-    /// crate's tests using one fixed filename would race under `cargo test`'s
-    /// thread pool -- the same defect as
-    /// `c-b-two-audit-tests-share-one-env-var-and-race`.
-    fn temp_with(name: &str, body: &str) -> PathBuf {
-        let path = env::temp_dir().join(format!("logger-{name}-{}.txt", process::id()));
-        fs::write(&path, body).expect("write fixture");
-        path
-    }
-
-    #[test]
-    fn dash_f_logs_one_message_per_line_and_keeps_the_blank_ones() {
-        // This read a six-line file into `message_parts`, which `main` joins
-        // with spaces, so the whole file became ONE entry reading
-        // `one two three`. The reference emits six, blanks included:
-        //     $ logger -s -t T -f blanks.txt
-        //     <13>... T: one
-        //     <13>... T:
-        //     <13>... T: two      (and so on)
-        let path = temp_with(
-            "perline",
-            "one
-
-two
-
-
-three
-",
-        );
-        let args = vec!["-f".into(), OsString::from(&path)];
-        let opts = parse_args(&args);
-        assert_eq!(
-            opts.line_messages,
-            vec!["one", "", "two", "", "", "three"],
-            "a file's lines are separate messages; a blank line is an empty one"
-        );
-        // `message_parts` must stay empty: anything in it would be joined
-        // into the argv message and logged a second time.
-        assert!(opts.message_parts.is_empty());
-        // ...and stdin must NOT be read, or a `-f` run would block.
-        assert!(!opts.read_stdin);
-        let _ = fs::remove_file(&path);
-    }
-
-    #[test]
-    fn dash_e_is_what_drops_the_blank_lines_and_it_is_off_by_default() {
-        let path = temp_with(
-            "skipempty",
-            "one
-
-two
-",
-        );
-        let args = vec!["-e".into(), "-f".into(), OsString::from(&path)];
-        let opts = parse_args(&args);
-        assert!(opts.skip_empty);
-        assert_eq!(opts.line_messages, vec!["one", "two"]);
-
-        // The control arm, which is the half that was broken: WITHOUT -e the
-        // blank survives. Asserting only the -e case would have passed
-        // against the old code, which dropped blanks unconditionally.
-        let args = vec!["-f".into(), OsString::from(&path)];
-        let opts = parse_args(&args);
-        assert!(!opts.skip_empty);
-        assert_eq!(opts.line_messages, vec!["one", "", "two"]);
-        let _ = fs::remove_file(&path);
-    }
-
-    #[test]
-    fn argv_words_are_still_joined_into_one_message() {
-        // The counterpart to the rule above: a file's LINES are separate
-        // messages, but argv WORDS are one. `logger hello world` logs
-        // "hello world", not two entries.
-        let args = vec!["hello".into(), "world".into()];
-        let opts = parse_args(&args);
-        assert!(opts.line_messages.is_empty());
-        assert_eq!(opts.message_parts.join(" "), "hello world");
-    }
-
-    #[test]
-    fn skip_empty_has_both_spellings() {
-        for spelling in ["-e", "--skip-empty"] {
-            let args = vec![OsString::from(spelling), "hi".into()];
-            assert!(parse_args(&args).skip_empty, "{spelling}");
+    fn a_short_option_and_its_long_form_share_their_case() {
+        for (c, name) in [
+            (b'e', "skip-empty"),
+            (b'p', "priority"),
+            (b'S', "size"),
+            (b'u', "socket"),
+            (b'T', "tcp"),
+        ] {
+            assert_eq!(Flag::Short(c).name(), name);
         }
+        // `-i` is not `--id`: it takes no value.
+        assert_eq!(Flag::Short(b'i').name(), "i");
+    }
+
+    #[test]
+    fn rfc5424_flags_are_strtok_items() {
+        let mut ctl = test_ctl();
+        parse_rfc5424_flags(&mut ctl, b",notq,,nohost,");
+        assert!(ctl.rfc5424_time && !ctl.rfc5424_tq && !ctl.rfc5424_host);
+        let mut ctl = test_ctl();
+        parse_rfc5424_flags(&mut ctl, b"notime");
+        assert!(!ctl.rfc5424_time && !ctl.rfc5424_tq && ctl.rfc5424_host);
+    }
+
+    #[test]
+    fn socket_error_modes() {
+        assert_eq!(parse_unix_socket_errors_flags(b"on"), SocketErrors::On);
+        assert_eq!(parse_unix_socket_errors_flags(b"off"), SocketErrors::Off);
+        assert_eq!(parse_unix_socket_errors_flags(b"maybe"), SocketErrors::Auto);
+    }
+
+    #[test]
+    fn option_errors_end_the_run_with_status_1() {
+        assert_eq!(run(&args(&["-Q", "x"])), Err(Exit(1)));
+        assert_eq!(run(&args(&["--id=abc", "x"])), Err(Exit(1)));
+        assert_eq!(run(&args(&["--id==5", "x"])), Err(Exit(1)));
+        assert_eq!(run(&args(&["-S", "1.9", "x"])), Err(Exit(1)));
+        assert_eq!(run(&args(&["--msgid", "a b", "x"])), Err(Exit(1)));
+        assert_eq!(run(&args(&["--sd-id", "bad", "x"])), Err(Exit(1)));
+        assert_eq!(run(&args(&["--sd-param", "x=\"y\"", "x"])), Err(Exit(1)));
+        assert_eq!(run(&args(&["-p", "nosuch.x", "x"])), Err(Exit(1)));
+        // Ambiguous: `--priority` and `--prio-prefix`.
+        assert_eq!(run(&args(&["--pri", "user.err", "x"])), Err(Exit(1)));
+    }
+
+    #[test]
+    fn journald_fields_become_a_record() {
+        let fields: Vec<Vec<u8>> = [
+            "MESSAGE=hello\nworld",
+            "PRIORITY=3",
+            "SYSLOG_IDENTIFIER=app",
+            "CODE_LINE=12",
+        ]
+        .iter()
+        .map(|s| s.as_bytes().to_vec())
+        .collect();
+        let r = journald_record(&fields).unwrap();
+        assert_eq!(
+            (r.level.as_str(), r.service.as_str(), r.msg.as_str()),
+            ("err", "app", "hello\nworld")
+        );
+        assert_eq!(r.extra, [("CODE_LINE".to_string(), "12".to_string())]);
+        assert!(journald_record(&[b"NOEQUALS".to_vec()]).is_err());
+    }
+
+    fn test_ctl() -> Ctl {
+        Ctl {
+            conn: Conn::None,
+            pri: DEFAULT_PRI,
+            pid: 0,
+            hdr: Vec::new(),
+            tag: b"t".to_vec(),
+            msgid: None,
+            unix_socket: None,
+            server: None,
+            port: None,
+            socket_type: ALL_TYPES,
+            max_message_size: 1024,
+            user_sds: Vec::new(),
+            reserved_sds: Vec::new(),
+            header: None,
+            unix_socket_errors: false,
+            noact: true,
+            prio_prefix: false,
+            stderr_printout: false,
+            rfc5424_time: true,
+            rfc5424_tq: true,
+            rfc5424_host: true,
+            skip_empty_lines: false,
+            octet_count: false,
+            zone: Zone::utc(),
+        }
+    }
+
+    /// With a user `timeQuality` element there is no built-in one, and the
+    /// header carries the user's.
+    #[test]
+    fn a_user_time_quality_element_replaces_the_built_in_one() {
+        let mut ctl = test_ctl();
+        ctl.rfc5424_tq = false;
+        ctl.rfc5424_time = false;
+        ctl.rfc5424_host = false;
+        ctl.user_sds.push(sd::Element {
+            id: b"timeQuality".to_vec(),
+            params: vec![b"tzKnown=\"0\"".to_vec()],
+        });
+        let h = rfc5424_header(&mut ctl).unwrap();
+        assert_eq!(h, br#"<13>1 - - t - - [timeQuality tzKnown="0"] "#);
+    }
+
+    #[test]
+    fn a_tag_over_48_bytes_ends_an_rfc5424_run() {
+        let mut ctl = test_ctl();
+        ctl.tag = vec![b'x'; 49];
+        assert_eq!(rfc5424_header(&mut ctl), Err(Exit(1)));
     }
 }

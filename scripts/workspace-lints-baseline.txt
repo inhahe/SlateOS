@@ -106,7 +106,6 @@ userspace/lex
 userspace/libservicebus
 userspace/locale
 userspace/localectl  # bare deny(clippy::all)
-userspace/logger
 userspace/login
 userspace/loginctl  # bare deny(clippy::all)
 userspace/logrotate  # bare deny(clippy::all)

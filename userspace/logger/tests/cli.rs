@@ -1,3 +1,6 @@
+// A test harness: a failed spawn or a missing exit code is a test failure.
+#![allow(clippy::expect_used)]
+
 //! `logger`'s command line, run as a program: what a user types, what comes
 //! back on stderr, and the exit status.
 //!

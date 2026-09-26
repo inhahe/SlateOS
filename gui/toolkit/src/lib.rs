@@ -74,6 +74,7 @@ pub mod svg;
 pub mod table;
 pub mod tabs;
 pub mod text;
+pub mod textarea;
 pub mod textedit;
 pub mod textinput;
 pub mod textview;

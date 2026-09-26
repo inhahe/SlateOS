@@ -165380,3 +165380,32 @@ dark-mode colours some colour fonts carry for text on a dark background.
 
 **How to see it.** `target/fontcheck` draws emoji lines from any font given
 it; `target/colr_compare.py` compares with Edge.
+
+### [F] Text is never hinted: the `hinting` font setting changes nothing -- 2026-09-26
+
+**Status:** OPEN — lane F's.
+
+**In short:** the appearance settings have a "hinting" switch, on by default,
+and nothing reads it: glyph outlines are rasterized exactly as designed, never
+nudged onto the pixel grid. At small sizes that leaves stems and horizontal
+bars straddling two pixels, so text looks softer than it does in programs that
+hint. (Smoothing and the subpixel order, the setting's two neighbours, are
+honoured: design-decisions §1324.)
+
+**Where:** `gui/font/src/raster.rs` (the rasterizer takes outlines as they
+come), `gui/compositor/src/lib.rs` `font_rendering` (which maps the other two
+settings and says why not this one).
+
+**The proper fix, and the choice in it:**
+1. **A light autohinter** -- snap each glyph's horizontal features (baseline,
+   x-height, cap height, horizontal stems) to whole pixels vertically, leave
+   the horizontal axis alone. This is what FreeType's "light" mode and
+   DirectWrite's ClearType natural mode do, needs no font data, and works on
+   CFF and TrueType alike. The better first step.
+2. **The TrueType instruction interpreter** -- run each font's own hinting
+   program. Exactly what the font's designer intended, but a large virtual
+   machine (FreeType's is some eight thousand lines of C), and useless for CFF
+   fonts and for the many modern fonts shipped unhinted.
+
+**How to see it.** `target/fontcheck modes` draws a line in each rendering
+mode; compare a small size against the same text in Chrome.

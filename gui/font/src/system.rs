@@ -34,7 +34,7 @@ use crate::bidi::{self, Base, Level};
 use crate::colr::ColourImage;
 use crate::itemize::{self, Faces};
 use crate::lang::Lang;
-use crate::raster::GlyphMask;
+use crate::raster::{GlyphMask, Rendering};
 use crate::scaled::{
     ScaledFont, ScaledFontError, Target, blit_image, blit_mask, byte_levels, pixel_coord,
 };
@@ -518,6 +518,18 @@ impl SystemFont {
         font.colour_glyph(key.gid(), foreground | 0xFF00_0000)
     }
 
+    /// Rasterize glyphs `rendering`'s way from now on -- anti-aliased or
+    /// not, grey or subpixel -- in this font's own face and every fallback.
+    /// The built-in bitmap face has one way to draw and ignores it.
+    pub fn set_rendering(&mut self, rendering: Rendering) {
+        if let Backend::Outline(f) = &mut self.backend {
+            f.set_rendering(rendering);
+        }
+        for font in &mut self.fallbacks {
+            font.set_rendering(rendering);
+        }
+    }
+
     /// The outline face behind this font, if there is one.
     ///
     /// Exposed for callers that need something only the scalable path has —
@@ -630,6 +642,9 @@ pub struct FontCache {
     /// The faces every installed face falls back to, in order. See
     /// [`FontCache::set_fallbacks`].
     fallbacks: Vec<Arc<Face>>,
+    /// How every font this cache builds rasterizes. See
+    /// [`FontCache::set_rendering`].
+    rendering: Rendering,
 }
 
 impl FontCache {
@@ -704,6 +719,22 @@ impl FontCache {
         &self.fallbacks
     }
 
+    /// Rasterize every font's glyphs `rendering`'s way -- the appearance
+    /// settings' smoothing and subpixel order -- the fonts built already and
+    /// those built later alike.
+    pub fn set_rendering(&mut self, rendering: Rendering) {
+        self.rendering = rendering;
+        for font in self.fonts.values_mut() {
+            font.set_rendering(rendering);
+        }
+    }
+
+    /// How this cache's fonts rasterize.
+    #[must_use]
+    pub fn rendering(&self) -> Rendering {
+        self.rendering
+    }
+
     /// The font for `px`, `weight` and `family`, building it on first use.
     ///
     /// A family with no face installed falls back to the built-in bitmap face
@@ -728,6 +759,7 @@ impl FontCache {
         let key = round_px(px);
         let size = key_px(key);
         let fallbacks = &self.fallbacks;
+        let rendering = self.rendering;
         self.fonts.entry((key, weight, family)).or_insert_with(|| {
             let axes: &[([u8; 4], f32)] = match weight {
                 Weight::Regular => &[],
@@ -736,12 +768,15 @@ impl FontCache {
             // An installed face that will not scale to this size is a
             // per-size failure, not a reason to stop using the face: fall
             // back for this entry and leave the face installed.
-            face.and_then(|f| SystemFont::from_shared(f, size).ok())
+            let mut font = face
+                .and_then(|f| SystemFont::from_shared(f, size).ok())
                 .map(|font| font.with_fallbacks(fallbacks, axes))
                 .unwrap_or_else(|| match weight {
                     Weight::Regular => SystemFont::builtin(size),
                     Weight::Bold => SystemFont::builtin_bold(size),
-                })
+                });
+            font.set_rendering(rendering);
+            font
         })
     }
 
@@ -875,6 +910,7 @@ fn mask_from_bitmap(glyph: &GlyphBitmap) -> GlyphMask {
         left: 0,
         top,
         coverage,
+        lcd: None,
     }
 }
 
@@ -1537,5 +1573,81 @@ mod tests {
         let mut builtin = SystemFont::builtin(16.0);
         let key = builtin.shape("A").glyphs()[0].key;
         assert!(builtin.glyph_image(key, 0xFF00_0000).is_none());
+    }
+
+    #[test]
+    fn a_rendering_mode_reaches_every_font_and_changes_the_pixels() {
+        use crate::raster::{Rendering, Subpixel};
+        let lcd = Rendering {
+            smoothing: true,
+            subpixel: Subpixel::Rgb,
+        };
+        let mut cache = FontCache::new();
+        let face = Arc::new(Face::parse(build_test_font()).unwrap());
+        cache.set_face(Family::Ui, Weight::Regular, face);
+        let greek = Arc::new(Face::parse(build_test_font_at(0x03B1, false)).unwrap());
+        cache.set_fallbacks(alloc::vec![greek]);
+        // A font built before the change, and one after.
+        let before = cache
+            .get(40.0, Weight::Regular, Family::Ui)
+            .shape("A")
+            .glyphs()[0]
+            .key;
+        cache.set_rendering(lcd);
+        assert_eq!(cache.rendering(), lcd);
+        let font = cache.get(40.0, Weight::Regular, Family::Ui);
+        assert!(font.glyph_mask(before).unwrap().lcd.is_some());
+        // The fallback face too.
+        let alpha = font.shape("\u{03B1}").glyphs()[0].key;
+        assert_eq!(alpha.face(), 1);
+        assert!(font.glyph_mask(alpha).unwrap().lcd.is_some());
+        let later = cache.get(24.0, Weight::Regular, Family::Ui);
+        let key = later.shape("B").glyphs()[0].key;
+        assert!(later.glyph_mask(key).unwrap().lcd.is_some());
+        // Back to grey: the cached LCD masks are dropped, not reused.
+        cache.set_rendering(Rendering::default());
+        let font = cache.get(40.0, Weight::Regular, Family::Ui);
+        assert!(font.glyph_mask(before).unwrap().lcd.is_none());
+    }
+
+    #[test]
+    fn subpixel_text_fringes_its_edges_in_colour_and_grey_text_does_not() {
+        use crate::raster::{Rendering, Subpixel};
+        // Black text on white; the fixture's `A` is a square, whose vertical
+        // edges are where subpixel rendering shows. At 100 px to the em its
+        // left edge is at x 10.3 -- a third of the way into a pixel.
+        let draw = |rendering: Rendering| {
+            let face = Arc::new(Face::parse(build_test_font()).unwrap());
+            let mut font = SystemFont::from_shared(face, 100.0).unwrap();
+            font.set_rendering(rendering);
+            let (w, h) = (40_u32, 30_u32);
+            let mut buf = alloc::vec![0xFFFF_FFFF_u32; (w * h) as usize];
+            let mut target = Target {
+                buffer: &mut buf,
+                stride: w,
+                height: h,
+                color: 0xFF00_0000,
+            };
+            font.draw_text("A", &mut target, 0.3, 20.0);
+            buf
+        };
+        let coloured = |buf: &[u32]| {
+            buf.iter()
+                .filter(|&&p| {
+                    let [_, r, g, b] = p.to_be_bytes();
+                    r != g || g != b
+                })
+                .count()
+        };
+        let lcd = draw(Rendering {
+            smoothing: true,
+            subpixel: Subpixel::Rgb,
+        });
+        assert!(coloured(&lcd) > 0, "no colour fringe at all");
+        let grey = draw(Rendering::default());
+        assert_eq!(coloured(&grey), 0);
+        // Inside the square both are black.
+        assert_eq!(lcd[(15 * 40 + 15) as usize], 0xFF00_0000);
+        assert_eq!(grey[(15 * 40 + 15) as usize], 0xFF00_0000);
     }
 }

@@ -2182,6 +2182,37 @@ impl Framebuffer {
 
     /// Blend a pixel with alpha onto the back buffer at the given position.
     #[inline]
+    /// [`blend_pixel`](Self::blend_pixel) with a coverage per channel: an LCD
+    /// glyph covers each of a pixel's three stripes by its own amount, and each
+    /// channel blends at `src_color`'s alpha times the window opacity times its
+    /// own coverage.
+    pub fn blend_pixel_lcd(
+        &mut self,
+        x: u32,
+        y: u32,
+        src_color: u32,
+        window_opacity: f32,
+        cover: [u8; 3],
+    ) {
+        if !self.clip_allows(x, y) {
+            return;
+        }
+        let idx = Self::pixel_index(self.width as usize, x as usize, y as usize);
+        let Some(&dst) = self.back.get(idx) else {
+            return;
+        };
+        let base = f32::from((src_color >> 24) as u8) * window_opacity;
+        // The same clamp-and-truncate `effective_alpha` uses, per channel.
+        let alpha = |c: u8| (base * f32::from(c) / 255.0).clamp(0.0, 255.0) as u8;
+        let [r, g, b] = cover;
+        let out_r = Self::blend_channel((src_color >> 16) as u8, (dst >> 16) as u8, alpha(r));
+        let out_g = Self::blend_channel((src_color >> 8) as u8, (dst >> 8) as u8, alpha(g));
+        let out_b = Self::blend_channel(src_color as u8, dst as u8, alpha(b));
+        if let Some(pixel) = self.back.get_mut(idx) {
+            *pixel = 0xFF_00_00_00 | (out_r << 16) | (out_g << 8) | out_b;
+        }
+    }
+
     pub fn blend_pixel(&mut self, x: u32, y: u32, src_color: u32, window_opacity: f32) {
         if !self.clip_allows(x, y) {
             return;
@@ -2813,7 +2844,13 @@ impl RenderTarget for Framebuffer {
                     continue;
                 }
                 // `blend_pixel` clamps and discards anything outside the
-                // framebuffer.
+                // framebuffer. An LCD mask blends each channel at its own
+                // stripe's coverage.
+                if mask.lcd.is_some() {
+                    let cover = mask.lcd_at(col, row);
+                    self.blend_pixel_lcd(fx as u32, fy as u32, color, opacity, cover);
+                    continue;
+                }
                 let alpha = opacity * (coverage as f32 / 255.0);
                 self.blend_pixel(fx as u32, fy as u32, color, alpha);
             }
@@ -3998,6 +4035,23 @@ impl TranslateStack {
 // ---------------------------------------------------------------------------
 // Text rendering
 // ---------------------------------------------------------------------------
+
+/// How glyphs are rasterized, from the appearance settings: `smoothing` and
+/// the subpixel order. (`hinting` has nothing to act on yet: see
+/// known-issues.md, "Text is never hinted".)
+fn font_rendering(settings: &AppearanceSettings) -> osfont::raster::Rendering {
+    use osfont::raster::Subpixel;
+    osfont::raster::Rendering {
+        smoothing: settings.fonts.smoothing,
+        subpixel: match settings.fonts.subpixel {
+            appearance::SubpixelMode::None => Subpixel::None,
+            appearance::SubpixelMode::Rgb => Subpixel::Rgb,
+            appearance::SubpixelMode::Bgr => Subpixel::Bgr,
+            appearance::SubpixelMode::VRgb => Subpixel::VRgb,
+            appearance::SubpixelMode::VBgr => Subpixel::VBgr,
+        },
+    }
+}
 
 /// Straight `0xAARRGGBB` from premultiplied, rounding to nearest.
 ///
@@ -5738,7 +5792,17 @@ impl Compositor {
             drag_preview: None,
             last_title_press: None,
             double_click_interval: Duration::from_millis(u64::from(DEFAULT_DOUBLE_CLICK_MS)),
-            render_engine: RenderEngine::new(),
+            render_engine: {
+                // Glyphs rasterized as the default settings say -- in the
+                // default, subpixel order RGB. `set_appearance` does it again
+                // for the user's file, but returns early when that file *is*
+                // the defaults, so the defaults have to be applied here.
+                let mut engine = RenderEngine::new();
+                engine
+                    .fonts
+                    .set_rendering(font_rendering(&AppearanceSettings::default()));
+                engine
+            },
             theme: DecorationTheme::default(),
             palette: appearance::Palette::from_settings(&AppearanceSettings::default()),
             // The defaults, not the user's file: a constructor that read
@@ -5835,6 +5899,9 @@ impl Compositor {
         // One resolve, then everything derived from it. Two lines that each
         // resolved their own palette is what the resolution counter caught the
         // first time it was asserted on.
+        self.render_engine
+            .fonts
+            .set_rendering(font_rendering(&self.appearance));
         self.palette = appearance::Palette::from_settings(&self.appearance);
         self.theme = DecorationTheme::from_settings_with(&self.appearance, &self.palette);
         self.full_recomposite = true;
@@ -11906,6 +11973,39 @@ mod tests {
     }
 
     #[test]
+    fn the_font_settings_choose_how_text_is_rasterized() {
+        use osfont::raster::{Rendering, Subpixel};
+        // From the start: the default settings are smoothing on, subpixel RGB,
+        // and `set_appearance` with those same defaults changes nothing -- so
+        // the constructor is what must have applied them.
+        let mut comp = Compositor::new(640, 480, 60).expect("compositor");
+        assert_eq!(
+            comp.render_engine.fonts.rendering(),
+            Rendering {
+                smoothing: true,
+                subpixel: Subpixel::Rgb,
+            }
+        );
+        let mut settings = AppearanceSettings::default();
+        settings.fonts.subpixel = appearance::SubpixelMode::VBgr;
+        comp.set_appearance(settings.clone());
+        assert_eq!(
+            comp.render_engine.fonts.rendering().subpixel,
+            Subpixel::VBgr
+        );
+        settings.fonts.subpixel = appearance::SubpixelMode::None;
+        settings.fonts.smoothing = false;
+        comp.set_appearance(settings);
+        assert_eq!(
+            comp.render_engine.fonts.rendering(),
+            Rendering {
+                smoothing: false,
+                subpixel: Subpixel::None,
+            }
+        );
+    }
+
+    #[test]
     fn test_create_and_destroy_window() {
         let mut comp = Compositor::new(800, 600, 60).unwrap();
         let id = comp.create_window("Test".to_string(), 400, 300, 42);
@@ -16001,6 +16101,7 @@ mod tests {
                 coverage: (0..MW * MH)
                     .map(|i| if i % 3 == 0 { 0 } else { 128 })
                     .collect(),
+                lcd: None,
             };
             let covered = mask.coverage.iter().filter(|&&c| c != 0).count();
             let clip = Rect {

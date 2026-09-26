@@ -113,7 +113,15 @@ pub struct GlyphMask {
     /// (so it is normally negative — the ink is above the baseline).
     pub top: i32,
     /// Row-major coverage, one byte per pixel, 0 = clear, 255 = solid.
+    ///
+    /// Always present. For a mask with [`lcd`](Self::lcd) planes it is their
+    /// mean, so that a consumer blending one alpha a pixel still draws the
+    /// glyph correctly -- in grey, as if subpixel rendering were off.
     pub coverage: Vec<u8>,
+    /// Coverage per subpixel for LCD rendering: `[red, green, blue]` for each
+    /// pixel, row-major like `coverage`, the panel's subpixel order already
+    /// applied. `None` for grey anti-aliasing. See [`Subpixel`].
+    pub lcd: Option<Vec<[u8; 3]>>,
 }
 
 impl GlyphMask {
@@ -127,6 +135,25 @@ impl GlyphMask {
             .checked_mul(self.width as usize)
             .and_then(|r| r.checked_add(x as usize));
         idx.and_then(|i| self.coverage.get(i)).copied().unwrap_or(0)
+    }
+
+    /// Coverage of each of pixel `(x, y)`'s three subpixels, `[red, green,
+    /// blue]`: the LCD planes where the mask has them, the grey coverage three
+    /// times where it does not, 0 outside the bitmap.
+    #[must_use]
+    pub fn lcd_at(&self, x: u32, y: u32) -> [u8; 3] {
+        let Some(lcd) = &self.lcd else {
+            return [self.at(x, y); 3];
+        };
+        if x >= self.width || y >= self.height {
+            return [0; 3];
+        }
+        (y as usize)
+            .checked_mul(self.width as usize)
+            .and_then(|r| r.checked_add(x as usize))
+            .and_then(|i| lcd.get(i))
+            .copied()
+            .unwrap_or([0; 3])
     }
 
     /// True when the glyph produced no pixels (a space, for instance).
@@ -550,8 +577,8 @@ struct Bounds {
 /// # Errors
 ///
 /// [`RasterError::NonFiniteCoordinate`] if any point is NaN or infinite.
-fn outline_bounds(outline: &Outline, scale: f32) -> Result<Option<Bounds>, RasterError> {
-    let to_px = |p: Point| Point::new(p.x * scale, -p.y * scale);
+fn outline_bounds(outline: &Outline, sx: f32, sy: f32) -> Result<Option<Bounds>, RasterError> {
+    let to_px = |p: Point| Point::new(p.x * sx, -p.y * sy);
 
     let mut b = Bounds {
         min_x: f32::INFINITY,
@@ -668,7 +695,14 @@ fn flatten_cubic_into(
 /// infinity, and [`RasterError::TooLarge`] when the result would exceed
 /// [`MAX_GLYPH_PIXELS`].
 pub fn rasterize(outline: &Outline, scale: f32) -> Result<GlyphMask, RasterError> {
-    if !scale.is_finite() || scale <= 0.0 {
+    rasterize_xy(outline, scale, scale)
+}
+
+/// [`rasterize`] with separate horizontal and vertical scales: what LCD
+/// rendering needs, which rasterizes at three times the resolution along the
+/// panel's subpixels.
+fn rasterize_xy(outline: &Outline, sx: f32, sy: f32) -> Result<GlyphMask, RasterError> {
+    if !sx.is_finite() || sx <= 0.0 || !sy.is_finite() || sy <= 0.0 {
         return Err(RasterError::InvalidScale);
     }
     if outline.is_empty() {
@@ -677,9 +711,9 @@ pub fn rasterize(outline: &Outline, scale: f32) -> Result<GlyphMask, RasterError
 
     // Scale into pixels and flip y in one pass, so nothing downstream has to
     // remember which convention it is in.
-    let to_px = |p: Point| Point::new(p.x * scale, -p.y * scale);
+    let to_px = |p: Point| Point::new(p.x * sx, -p.y * sy);
 
-    let Some(bounds) = outline_bounds(outline, scale)? else {
+    let Some(bounds) = outline_bounds(outline, sx, sy)? else {
         return Ok(GlyphMask::default());
     };
 
@@ -763,6 +797,209 @@ pub fn rasterize(outline: &Outline, scale: f32) -> Result<GlyphMask, RasterError
         left: i32::try_from(left).map_err(|_| RasterError::TooLarge)?,
         top: i32::try_from(top).map_err(|_| RasterError::TooLarge)?,
         coverage,
+        lcd: None,
+    })
+}
+
+/// The order of a panel's subpixels, for LCD ("subpixel") rendering.
+///
+/// An LCD pixel is three coloured stripes side by side, and a renderer that
+/// knows which is where can place a glyph's edges to a third of a pixel by
+/// lighting some stripes of an edge pixel and not others -- sharper text at
+/// the cost of faint colour fringes. Wrong for a panel whose order is not the
+/// one named (the fringes double), and pointless on one that has no stripes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Subpixel {
+    /// No subpixel rendering: grey anti-aliasing, the pixel the smallest unit.
+    #[default]
+    None,
+    /// Red, green, blue, left to right: most LCD monitors.
+    Rgb,
+    /// Blue, green, red, left to right.
+    Bgr,
+    /// Red, green, blue, top to bottom: a panel turned on its side.
+    VRgb,
+    /// Blue, green, red, top to bottom.
+    VBgr,
+}
+
+/// How glyph outlines become pixels: the appearance settings' `smoothing` and
+/// `subpixel`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Rendering {
+    /// Anti-aliasing. Off, every pixel is either the text colour or not --
+    /// crisp and jagged, which some people prefer at small sizes.
+    pub smoothing: bool,
+    /// Subpixel rendering and the panel's subpixel order. Ignored with
+    /// `smoothing` off: there is no partial pixel to split.
+    pub subpixel: Subpixel,
+}
+
+impl Default for Rendering {
+    fn default() -> Self {
+        Self {
+            smoothing: true,
+            subpixel: Subpixel::None,
+        }
+    }
+}
+
+/// [`rasterize`], the way `rendering` says: grey coverage, LCD planes, or on
+/// and off pixels.
+///
+/// # Errors
+///
+/// As [`rasterize`].
+pub fn rasterize_with(
+    outline: &Outline,
+    scale: f32,
+    rendering: Rendering,
+) -> Result<GlyphMask, RasterError> {
+    if !rendering.smoothing {
+        let mut mask = rasterize(outline, scale)?;
+        // Half covered or more is on: the pixel centre is inside the shape
+        // for a straight edge, which is the rule a bilevel rasterizer uses.
+        for c in &mut mask.coverage {
+            *c = if *c >= 128 { 255 } else { 0 };
+        }
+        return Ok(mask);
+    }
+    match rendering.subpixel {
+        Subpixel::None => rasterize(outline, scale),
+        order => rasterize_lcd(outline, scale, order),
+    }
+}
+
+/// FreeType's default LCD filter (`FT_LCD_FILTER_DEFAULT`), in 256ths.
+///
+/// Lighting single stripes makes colour fringes; spreading each stripe's
+/// coverage over its neighbours trades a little of the sharpness back for
+/// fringes the eye does not see. These weights sum to 256, so a solid run
+/// stays solid, and they are FreeType's so that text looks as it does in the
+/// programs people compare against.
+const LCD_FILTER: [u32; 5] = [8, 77, 86, 77, 8];
+
+/// LCD rendering: rasterize at three times the resolution along the panel's
+/// stripes, filter along that axis, and fold each three samples into one
+/// pixel's red, green and blue.
+fn rasterize_lcd(outline: &Outline, scale: f32, order: Subpixel) -> Result<GlyphMask, RasterError> {
+    let horizontal = matches!(order, Subpixel::Rgb | Subpixel::Bgr);
+    let reversed = matches!(order, Subpixel::Bgr | Subpixel::VBgr);
+    let fine = if horizontal {
+        rasterize_xy(outline, scale * 3.0, scale)?
+    } else {
+        rasterize_xy(outline, scale, scale * 3.0)?
+    };
+    if fine.is_empty() {
+        return Ok(GlyphMask::default());
+    }
+    let (fw, fh) = (
+        usize::try_from(fine.width).map_err(|_| RasterError::TooLarge)?,
+        usize::try_from(fine.height).map_err(|_| RasterError::TooLarge)?,
+    );
+    // Along the stripes: `n` fine samples from fine coordinate `o`; across
+    // them, `lines` rows (or columns) to filter one at a time.
+    let (n, lines, o) = if horizontal {
+        (fw, fh, i64::from(fine.left))
+    } else {
+        (fh, fw, i64::from(fine.top))
+    };
+    let n_i = i64::try_from(n).map_err(|_| RasterError::TooLarge)?;
+    // The filter reaches two samples either side; the pixels that touches.
+    let lo = o.saturating_sub(2).div_euclid(3);
+    let hi = o.saturating_add(n_i).saturating_add(4).div_euclid(3);
+    let px = usize::try_from(hi.saturating_sub(lo)).map_err(|_| RasterError::TooLarge)?;
+    let total = px.checked_mul(lines).ok_or(RasterError::TooLarge)?;
+    if total > MAX_GLYPH_PIXELS {
+        return Err(RasterError::TooLarge);
+    }
+    let sample = |line: usize, s: i64| -> u32 {
+        let Ok(s) = usize::try_from(s) else { return 0 };
+        if s >= n {
+            return 0;
+        }
+        let i = if horizontal {
+            line.checked_mul(fw).and_then(|r| r.checked_add(s))
+        } else {
+            s.checked_mul(fw).and_then(|r| r.checked_add(line))
+        };
+        i.and_then(|i| fine.coverage.get(i))
+            .map_or(0, |&c| u32::from(c))
+    };
+    // Laid out along-major while it is built: `planes[line * px + p]`.
+    let mut planes = alloc::vec![[0u8; 3]; total];
+    for line in 0..lines {
+        for p in 0..px {
+            let Ok(p_i) = i64::try_from(p) else { break };
+            let pixel = lo.saturating_add(p_i);
+            let mut rgb = [0u8; 3];
+            for c in 0..3u8 {
+                // The fine coordinate of this stripe, then as an index into
+                // the line's samples.
+                let f = pixel.saturating_mul(3).saturating_add(i64::from(c));
+                let mut acc = 0u32;
+                for (k, &w) in (-2i64..).zip(&LCD_FILTER) {
+                    acc = acc.saturating_add(
+                        w.saturating_mul(sample(line, f.saturating_add(k).saturating_sub(o))),
+                    );
+                }
+                let value = u8::try_from(acc.saturating_add(128) / 256).unwrap_or(u8::MAX);
+                let channel = if reversed { 2u8.saturating_sub(c) } else { c };
+                if let Some(slot) = rgb.get_mut(usize::from(channel)) {
+                    *slot = value;
+                }
+            }
+            if let Some(slot) = line
+                .checked_mul(px)
+                .and_then(|r| r.checked_add(p))
+                .and_then(|i| planes.get_mut(i))
+            {
+                *slot = rgb;
+            }
+        }
+    }
+    // Row-major, as a mask is: already so for horizontal stripes; transposed
+    // for vertical ones, whose lines were columns.
+    let (width, height, lcd) = if horizontal {
+        (px, lines, planes)
+    } else {
+        let mut t = alloc::vec![[0u8; 3]; total];
+        for line in 0..lines {
+            for p in 0..px {
+                let from = line.checked_mul(px).and_then(|r| r.checked_add(p));
+                let to = p.checked_mul(lines).and_then(|r| r.checked_add(line));
+                if let (Some(v), Some(slot)) = (
+                    from.and_then(|i| planes.get(i)).copied(),
+                    to.and_then(|i| t.get_mut(i)),
+                ) {
+                    *slot = v;
+                }
+            }
+        }
+        (lines, px, t)
+    };
+    let coverage = lcd
+        .iter()
+        .map(|[r, g, b]| {
+            let sum = u16::from(*r)
+                .saturating_add(u16::from(*g))
+                .saturating_add(u16::from(*b));
+            u8::try_from(sum.saturating_add(1) / 3).unwrap_or(u8::MAX)
+        })
+        .collect();
+    let lo = i32::try_from(lo).map_err(|_| RasterError::TooLarge)?;
+    let (left, top) = if horizontal {
+        (lo, fine.top)
+    } else {
+        (fine.left, lo)
+    };
+    Ok(GlyphMask {
+        width: u32::try_from(width).map_err(|_| RasterError::TooLarge)?,
+        height: u32::try_from(height).map_err(|_| RasterError::TooLarge)?,
+        left,
+        top,
+        coverage,
+        lcd: Some(lcd),
     })
 }
 
@@ -1154,5 +1391,97 @@ mod tests {
             (area - 16.0).abs() < 0.5,
             "expected 16 px of ink, got {area}"
         );
+    }
+
+    fn lcd(order: Subpixel) -> Rendering {
+        Rendering {
+            smoothing: true,
+            subpixel: order,
+        }
+    }
+
+    #[test]
+    fn an_lcd_mask_keeps_a_solid_run_solid_and_fringes_only_its_edges() {
+        let square = Outline {
+            commands: rect(0.0, 0.0, 10.0, 10.0),
+        };
+        let m = rasterize_with(&square, 1.0, lcd(Subpixel::Rgb)).unwrap();
+        // The filter reaches two stripes past each edge: one pixel of fringe
+        // either side, and no taller.
+        assert_eq!((m.left, m.top, m.width, m.height), (-1, -10, 12, 10));
+        let planes = m.lcd.as_ref().unwrap();
+        let px = |x: u32, y: u32| planes[(y * m.width + x) as usize];
+        // Inside, every stripe fully covered -- once the filter's reach is
+        // past: it spreads each edge two stripes either way, softening the
+        // square's own first stripes as well as lighting the pixel beside it.
+        for x in 2..=9 {
+            assert_eq!(px(x, 5), [255, 255, 255], "column {x}");
+        }
+        assert_eq!(px(1, 5), [170, 247, 255]);
+        assert_eq!(px(10, 5), [255, 247, 170]);
+        // FreeType's filter over one edge: the pixel left of the square gets
+        // the tails of its first two stripes -- 77 + 8 of 256 on its blue
+        // stripe, 8 on its green -- and the right fringe mirrors it.
+        assert_eq!(px(0, 5), [0, 8, 85]);
+        assert_eq!(px(11, 5), [85, 8, 0]);
+        // `coverage` is the stripes' mean, for a consumer blending in grey.
+        assert_eq!(m.at(0, 5), 31);
+        assert_eq!(m.at(5, 5), 255);
+        // BGR: the same stripes, the channels the other way round.
+        let m = rasterize_with(&square, 1.0, lcd(Subpixel::Bgr)).unwrap();
+        assert_eq!(m.lcd_at(0, 5), [85, 8, 0]);
+        assert_eq!(m.lcd_at(11, 5), [0, 8, 85]);
+    }
+
+    #[test]
+    fn a_vertical_panel_fringes_top_and_bottom() {
+        let square = Outline {
+            commands: rect(0.0, 0.0, 10.0, 10.0),
+        };
+        let m = rasterize_with(&square, 1.0, lcd(Subpixel::VRgb)).unwrap();
+        assert_eq!((m.left, m.top, m.width, m.height), (0, -11, 10, 12));
+        // Red on top: the row above the square gets its bottom stripes' tails.
+        assert_eq!(m.lcd_at(5, 0), [0, 8, 85]);
+        assert_eq!(m.lcd_at(5, 11), [85, 8, 0]);
+        assert_eq!(m.lcd_at(5, 5), [255, 255, 255]);
+        let m = rasterize_with(&square, 1.0, lcd(Subpixel::VBgr)).unwrap();
+        assert_eq!(m.lcd_at(5, 0), [85, 8, 0]);
+    }
+
+    #[test]
+    fn grey_rendering_is_the_rasterizer_unchanged_and_bilevel_is_on_or_off() {
+        let shape = Outline {
+            commands: rect(0.5, 0.25, 9.25, 7.75),
+        };
+        let grey = rasterize(&shape, 1.0).unwrap();
+        assert_eq!(
+            rasterize_with(&shape, 1.0, Rendering::default()).unwrap(),
+            grey
+        );
+        assert!(grey.lcd.is_none());
+        // Smoothing off: every pixel full or empty, a half-covered one on.
+        let off = Rendering {
+            smoothing: false,
+            subpixel: Subpixel::Rgb,
+        };
+        let m = rasterize_with(&shape, 1.0, off).unwrap();
+        assert!(m.lcd.is_none(), "no subpixels without anti-aliasing");
+        assert!(m.coverage.iter().all(|&c| c == 0 || c == 255));
+        for (bilevel, smooth) in m.coverage.iter().zip(&grey.coverage) {
+            assert_eq!(*bilevel == 255, *smooth >= 128);
+        }
+    }
+
+    #[test]
+    fn lcd_at_reads_grey_masks_as_three_equal_stripes() {
+        let m = rasterize(
+            &Outline {
+                commands: rect(0.0, 0.0, 2.0, 2.0),
+            },
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(m.lcd_at(0, 0), [255; 3]);
+        assert_eq!(m.lcd_at(9, 9), [0; 3]);
     }
 }

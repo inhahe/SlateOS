@@ -44,7 +44,7 @@ use crate::lang::Lang;
 use crate::norm;
 use crate::norm::{Ignorable, Piece};
 use crate::phase::{Phase, Timer};
-use crate::raster::{GlyphMask, rasterize};
+use crate::raster::{GlyphMask, Rendering, rasterize_with};
 use crate::script::{self, ScriptTags};
 use crate::sfnt::{Face, PathCmd, SfntError};
 use crate::shape::{GlyphKey, ShapedGlyph, ShapedRun, TAB_WIDTH_IN_SPACES};
@@ -138,6 +138,10 @@ pub struct ScaledFont {
     /// the default instance, so nothing downstream needs to special-case a
     /// static font.
     coords: var::Coords,
+    /// How glyphs are turned into pixels: anti-aliased or not, subpixel or
+    /// grey. A property of the font rather than of each draw because every
+    /// cached glyph was rasterized under it.
+    rendering: Rendering,
     metrics: FontMetrics,
     /// Keyed by glyph id, not character: two characters that map to the same
     /// glyph (and there are many — the space-like codepoints, the various
@@ -307,6 +311,7 @@ impl ScaledFont {
             px_per_em,
             scale,
             coords,
+            rendering: Rendering::default(),
             metrics,
             cache: BTreeMap::new(),
             order: Vec::new(),
@@ -339,6 +344,25 @@ impl ScaledFont {
         self.coords = coords;
         self.clear_cache();
         self.metrics = Self::derive_metrics(&self.face, self.scale, &self.coords);
+    }
+
+    /// How this font's glyphs are rasterized.
+    #[must_use]
+    pub fn rendering(&self) -> Rendering {
+        self.rendering
+    }
+
+    /// Rasterize glyphs `rendering`'s way from now on -- the appearance
+    /// settings' smoothing and subpixel order. Every cached mask is dropped,
+    /// since each was made the other way; asking for the mode the font is
+    /// already in drops nothing.
+    pub fn set_rendering(&mut self, rendering: Rendering) {
+        if self.rendering == rendering {
+            return;
+        }
+        self.rendering = rendering;
+        self.cache.clear();
+        self.order.clear();
     }
 
     /// Move to the instance named by `(tag, value)` pairs, leaving axes the
@@ -638,7 +662,7 @@ impl ScaledFont {
         // advance, or every following glyph on the line shifts left. Draw
         // nothing, keep the space — exactly what a blank glyph does.
         // (`InvalidScale` cannot occur at all here; `new` validated it.)
-        let mask = rasterize(&outline, self.scale).unwrap_or_default();
+        let mask = rasterize_with(&outline, self.scale, self.rendering).unwrap_or_default();
         Ok(Glyph { mask, advance })
     }
 
@@ -2547,12 +2571,6 @@ pub fn blit_mask(mask: &GlyphMask, target: &mut Target<'_>, x: i32, y: i32) {
             if px < 0 || px >= max_x {
                 continue;
             }
-            // Coverage scales the colour's own alpha: a 50%-covered pixel of
-            // a 50%-transparent colour is 25% opaque.
-            let alpha = src_alpha.saturating_mul(coverage) / 255;
-            if alpha == 0 {
-                continue;
-            }
             let (Ok(px), Ok(py)) = (u32::try_from(px), u32::try_from(py)) else {
                 continue;
             };
@@ -2567,10 +2585,16 @@ pub fn blit_mask(mask: &GlyphMask, target: &mut Target<'_>, x: i32, y: i32) {
                 continue;
             };
             let under = Channels::from_argb(*dest);
+            // Coverage scales the colour's own alpha: a 50%-covered pixel of
+            // a 50%-transparent colour is 25% opaque. An LCD mask covers each
+            // of the pixel's three stripes by its own amount, so each channel
+            // blends at its own alpha -- the whole point of the planes.
+            let [r, g, b] = mask.lcd_at(col, row);
+            let alpha = |c: u8| src_alpha.saturating_mul(u32::from(c)) / 255;
             *dest = 0xFF00_0000
-                | (blend_channel(src.red, under.red, alpha) << 16)
-                | (blend_channel(src.green, under.green, alpha) << 8)
-                | blend_channel(src.blue, under.blue, alpha);
+                | (blend_channel(src.red, under.red, alpha(r)) << 16)
+                | (blend_channel(src.green, under.green, alpha(g)) << 8)
+                | blend_channel(src.blue, under.blue, alpha(b));
         }
     }
 }
@@ -3531,6 +3555,7 @@ mod tests {
             left: 0,
             top: 0,
             coverage: alloc::vec![128],
+            lcd: None,
         };
         let mut buf = alloc::vec![0xFF00_0000_u32; 4];
         let mut target = Target {

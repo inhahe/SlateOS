@@ -149,8 +149,8 @@ pub(crate) use process_global;
 /// ## Why a lock and not a per-slot atomic
 ///
 /// A `compare_exchange` on a per-slot `in_use` flag would make the *simple*
-/// pools safe, but not the *compound* ones.  `sysv_msg::alloc_queue(key)`,
-/// `sysv_sem::alloc_set(key, …)` and `sysv_shm::alloc_segment(key, …)` first
+/// pools safe, but not the *compound* ones.  `msgget`, `semget` and
+/// `sysv_shm::alloc_segment(key, …)` first
 /// scan for an existing entry with a matching key and only allocate if there
 /// is none; an atomic per-slot claim would still let two threads each create
 /// a segment for the same key, because the lookup and the claim have to be

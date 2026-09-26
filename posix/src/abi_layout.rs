@@ -606,6 +606,34 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
+        crate::sysv_sem::SemidDs,
+        "struct semid_ds",
+        "sys/sem.h",
+        sem_perm,
+        sem_otime,
+        sem_ctime,
+        sem_nsems
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::sysv_sem::Seminfo,
+        "struct seminfo",
+        "sys/sem.h",
+        semmap,
+        semmni,
+        semmns,
+        semmnu,
+        semmsl,
+        semopm,
+        semume,
+        semusz,
+        semvmx,
+        semaem
+    );
+    abi!(
+        out,
+        hdrs,
         crate::unistd::Mntent,
         "struct mntent",
         "mntent.h",

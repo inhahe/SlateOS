@@ -2628,6 +2628,7 @@ pub mod sys_xattr;
 pub mod syscall;
 pub mod sysexits;
 pub mod syslog;
+pub(crate) mod sysv_ipc;
 pub mod sysv_msg;
 pub mod sysv_sem;
 pub mod sysv_shm;

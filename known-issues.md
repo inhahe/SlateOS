@@ -24068,6 +24068,21 @@ sysdeps/posix/) and Linux 6.6's `do_mknodat` (fs/namei.c).
   or `S_IFREG` -- answered `ENOSYS` where Linux's `vfs_create` makes it. It
   is made now, through `openat(O_CREAT | O_EXCL)`.
 
+**Twenty-fifth pass, 2026-09-26 — `sysv_sem.rs` (3 sites), lane D.** Against
+Linux 6.6's ipc/sem.c (`ksys_semtimedop`, `do_semtimedop`, `semctl_main`) and
+glibc 2.39's `__semctl64`.
+
+- **`semop`, `semtimedop`** refused a NULL operation array before the count.
+  Linux judges the count first -- more than `SEMOPM` (500) is `E2BIG`, none
+  is `EINVAL` (it was `E2BIG`) -- and only then copies the array (`EFAULT`).
+- **`GETALL`, `SETALL`** reach their array after the lookup and the
+  permission, as `semctl_main` does: a bad id is `EINVAL` whatever the
+  array. They were separate functions `semctl` could not reach -- the
+  finding below.
+- Beside them, the finding of the pass: `semctl` took three arguments, so
+  C's fourth never arrived, and `semtimedop`'s timeout was read as a date --
+  `B-D-SYSV-SEM-SEMCTL-TIMEOUT-AND-LIMITS` (new, fixed with it).
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24081,10 +24096,13 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-twenty-four swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
+twenty-five swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
 `sched.rs`, `mqueue.rs`, `linux_futex.rs`, `resolv.rs`, `statvfs.rs`,
-`linux_module.rs`, `sysv_msg.rs`, `sys_sysctl.rs` and `stat.rs`; next are
-the other files at four.
+`linux_module.rs`, `sysv_msg.rs`, `sys_sysctl.rs`, `stat.rs` and
+`sysv_sem.rs`. That finishes the files at four: `pwd.rs`, `dirent.rs` and
+`signal.rs` needed nothing at their NULLs -- `pwd.rs`'s database did
+(`B-D-PWD-KNEW-ONLY-ROOT`). Next are the files at three:
+`linux_aio_abi.rs`, `linux_seccomp.rs`, `mman.rs` and `resource.rs`.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
@@ -165945,6 +165963,38 @@ Host tests cover the attribute reading, the layout arithmetic, the table's
 growth and the sentinels; `services/ctest-pthread` checks it all in ring 3,
 once lane A runs it (`requests/d-a-run-the-ctest-pthread-fixture.md`).
 Design choices in `design-decisions.md` §1111.
+
+### [D] B-D-SYSV-SEM-SEMCTL-TIMEOUT-AND-LIMITS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/sysv_sem.rs`; the plumbing it shares with
+`sysv_msg.rs` is the new `posix/src/sysv_ipc.rs`.
+
+**What it was.** `semctl` was declared with three arguments, so the fourth a
+C program passes -- `SETVAL`'s value, `GETALL`'s and `SETALL`'s array,
+`IPC_STAT`'s buffer -- never arrived: `semctl(id, 0, SETVAL, 1)`, the way
+every program sets a semaphore up, did not set it, and `IPC_STAT`,
+`IPC_SET`, `GETALL` and `SETALL` were reachable only through extra functions
+no C program calls. `semtimedop` read its timeout as a `CLOCK_REALTIME`
+deadline, so "wait five seconds" had passed in 1970 and every timed wait
+failed at once with `EAGAIN`. One `IPC_NOWAIT` anywhere in a batch made
+every operation in it non-blocking. The sets were a static pool of 16 sets
+of 32 semaphores; `GETPID`, `GETNCNT` and `GETZCNT` were always 0; a blocked
+call spun without yielding; permissions were not checked; `IPC_INFO`,
+`SEM_INFO` and `SEM_STAT` did not exist.
+
+**Fix.** Linux 6.6's ipc/sem.c behind glibc's `semctl`, inside one process:
+`semctl` takes `union semun`; `semtimedop`'s timeout is relative;
+operations apply in order, all or none, the one that cannot proceed
+deciding between `EAGAIN` and a sleep; Linux's limits (`SEMMSL` 32000,
+`SEMMNI` 32000, `SEMOPM` 500) and error orders; `SEM_UNDO`'s range;
+`GETPID`, `GETNCNT` and `GETZCNT` counted as Linux counts them; `IPC_INFO`,
+`SEM_INFO`, `SEM_STAT` and `SEM_STAT_ANY`; futex waits and `EIDRM`. Ids,
+permissions and the table of slots moved into `sysv_ipc.rs`, which
+`sysv_msg.rs` now uses too.
+
+**What remains.** The sets are one process's (D-Q3), so `SEM_UNDO`'s
+adjustment is kept but never applied: nothing outlives the process to undo.
+The ring-3 check is `services/ctest-sysvipc`, its rung requested of lane A.
 
 ### [D] B-D-PWD-KNEW-ONLY-ROOT — 2026-09-26 — FIXED 2026-09-26
 

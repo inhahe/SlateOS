@@ -21,7 +21,8 @@
 //!   of the queue's mode, chosen by the caller's effective ids, with
 //!   `CAP_IPC_OWNER` granting any; `msgget` on an existing key asks for the
 //!   bits in its flags. `IPC_SET` and `IPC_RMID` are the owner's or the
-//!   creator's, or need `CAP_SYS_ADMIN` (`EPERM`).
+//!   creator's, or need `CAP_SYS_ADMIN` (`EPERM`). Ids, permissions and the
+//!   table of slots are [`crate::sysv_ipc`]'s, shared with the semaphores.
 //! - **Errors come in the kernel's order.** `msgsnd` reads the message type
 //!   before anything else, so a NULL buffer is `EFAULT` first, then judges
 //!   the size, the id and the type. `msgrcv` judges the id, the permission
@@ -78,7 +79,10 @@
 use crate::errno;
 use crate::linux_ipc::{IPC_INFO, IpcPerm};
 use crate::perprocess::process_global;
-use core::sync::atomic::{AtomicI32, Ordering};
+use crate::sysv_ipc::{
+    Caller, Perm, S_IRUGO, S_IWUGO, SEQ_MASK, Slots, Waits, caller, decode_id, encode_id,
+    may_control, now_secs, permits,
+};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -135,10 +139,6 @@ const MSGSEG: u16 = {
     let segs = (MSGPOOL as usize * 1024) / MSGSSZ as usize;
     if segs <= 0xffff { segs as u16 } else { 0xffff }
 };
-
-/// `ipcperms`'s requests: read and write, in all three classes.
-const S_IRUGO: u32 = 0o444;
-const S_IWUGO: u32 = 0o222;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -229,16 +229,8 @@ fn text_of(m: *mut Msg) -> *mut u8 {
 
 struct Queue {
     live: bool,
-    key: i32,
-    /// This slot's reuse count, part of every id naming it: an id outlives
-    /// its queue only as an id that no longer resolves.
-    seq: u32,
-    uid: u32,
-    gid: u32,
-    cuid: u32,
-    cgid: u32,
-    /// The permission bits (`0o777` of them).
-    mode: u32,
+    /// Key, the slot's reuse count, owner, creator and mode.
+    perm: Perm,
     qbytes: usize,
     cbytes: usize,
     qnum: usize,
@@ -255,13 +247,7 @@ struct Queue {
 impl Queue {
     const EMPTY: Self = Self {
         live: false,
-        key: 0,
-        seq: 0,
-        uid: 0,
-        gid: 0,
-        cuid: 0,
-        cgid: 0,
-        mode: 0,
+        perm: Perm::EMPTY,
         qbytes: 0,
         cbytes: 0,
         qnum: 0,
@@ -275,16 +261,9 @@ impl Queue {
     };
 }
 
-/// The queue table, grown as needed.  Slots are stable; the array moves.
+/// The queues, and the messages and bytes on them (`MSG_INFO`).
 struct Tables {
-    queues: *mut Queue,
-    cap: usize,
-    /// The slots below `cap` holding no queue, as a stack of `nfree`.
-    free: *mut usize,
-    nfree: usize,
-    /// Queues, messages and bytes in use, for `msgget`'s limit and
-    /// `MSG_INFO`.
-    live: usize,
+    slots: Slots<Queue>,
     msgs: usize,
     bytes: usize,
 }
@@ -294,27 +273,14 @@ process_global! {
     ///
     /// Per-thread on the host, for test isolation: a test that counts
     /// queues is broken by any concurrent one, and no lock fixes that.
-    fn tables() -> Tables = Tables {
-        queues: core::ptr::null_mut(),
-        cap: 0,
-        free: core::ptr::null_mut(),
-        nfree: 0,
-        live: 0,
-        msgs: 0,
-        bytes: 0,
-    };
+    fn tables() -> Tables = Tables { slots: Slots::EMPTY, msgs: 0, bytes: 0 };
 
     /// Serialises every use of the tables, with the same scope as they have
     /// (see [`crate::perprocess::PoolLock`]).
     fn msg_lock() -> crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
 
-    /// Advanced by every change a blocked call could be waiting for; they
-    /// sleep on it.
-    fn changes() -> AtomicI32 = AtomicI32::new(0);
-
-    /// Calls asleep on [`changes`], so a change nobody waits for costs no
-    /// syscall.
-    fn sleepers() -> AtomicI32 = AtomicI32::new(0);
+    /// What blocked calls sleep on.
+    fn waits() -> Waits = Waits::new();
 }
 
 /// Holds the tables' lock; the tables are reached through it.
@@ -339,22 +305,20 @@ impl Locked {
     }
 
     fn queue(&mut self, slot: usize) -> Option<&mut Queue> {
-        let t = self.tables();
-        // SAFETY: the lock is held; `queues` holds `cap` entries.
-        (slot < t.cap).then(|| unsafe { &mut *t.queues.add(slot) })
+        self.tables().slots.get(slot)
     }
 
     /// The id naming the queue in `slot` now.
     fn id_of(&mut self, slot: usize) -> i32 {
-        let seq = self.queue(slot).map_or(0, |q| q.seq);
-        encode_msqid(slot, seq)
+        let seq = self.queue(slot).map_or(0, |q| q.perm.seq);
+        encode_id(slot, seq)
     }
 
     /// The slot of the live queue `msqid` names.
     fn resolve(&mut self, msqid: i32) -> Option<usize> {
-        let (slot, seq) = decode_msqid(msqid)?;
+        let (slot, seq) = decode_id(msqid)?;
         self.queue(slot)
-            .is_some_and(|q| q.live && q.seq & SEQ_MASK == seq)
+            .is_some_and(|q| q.live && q.perm.seq & SEQ_MASK == seq)
             .then_some(slot)
     }
 
@@ -365,62 +329,31 @@ impl Locked {
     }
 
     fn find_key(&mut self, key: i32) -> Option<usize> {
-        let cap = self.tables().cap;
-        (0..cap).find(|&i| self.queue(i).is_some_and(|q| q.live && q.key == key))
-    }
-
-    /// A slot for a new queue, growing the table when none is free.
-    fn claim_slot(&mut self) -> Option<usize> {
-        let t = self.tables();
-        if t.nfree == 0 {
-            let old = t.cap;
-            let cap = old.checked_mul(2)?.clamp(8, MSGMNI);
-            if cap <= old {
-                return None;
-            }
-            // SAFETY: the lock is held; `grow` keeps the old entries, and
-            // the free stack gets room for every slot.
-            unsafe {
-                t.queues = grow(t.queues, old, cap, || Queue::EMPTY)?;
-                t.free = grow(t.free, t.nfree, cap, || 0)?;
-            }
-            t.cap = cap;
-            // The new slots, lowest on top.
-            for slot in (old..cap).rev() {
-                // SAFETY: `free` holds `cap` entries and `nfree < cap`.
-                unsafe { t.free.add(t.nfree).write(slot) };
-                t.nfree += 1;
-            }
-        }
-        t.nfree -= 1;
-        // SAFETY: `nfree` indexes a pushed entry.
-        Some(unsafe { t.free.add(t.nfree).read() })
+        let cap = self.tables().slots.cap();
+        (0..cap).find(|&i| self.queue(i).is_some_and(|q| q.live && q.perm.key == key))
     }
 
     /// Linux's `newque`: a queue keyed `key`, with `msgflg`'s permission
     /// bits, owned and created by `who`.
     fn alloc_queue(&mut self, key: i32, msgflg: i32, who: Caller) -> Result<usize, i32> {
-        if self.tables().live >= MSGMNI {
+        let t = self.tables();
+        if t.slots.live() >= MSGMNI {
             return Err(errno::ENOSPC);
         }
-        let slot = self.claim_slot().ok_or(errno::ENOMEM)?;
+        let slot = t
+            .slots
+            .claim(MSGMNI, || Queue::EMPTY)
+            .ok_or(errno::ENOMEM)?;
         let now = now_secs();
         let q = self.queue(slot).ok_or(errno::ENOMEM)?;
-        let seq = q.seq;
+        let seq = q.perm.seq;
         *q = Queue {
             live: true,
-            key,
-            seq,
-            uid: who.euid,
-            gid: who.egid,
-            cuid: who.euid,
-            cgid: who.egid,
-            mode: (msgflg as u32) & 0o777,
+            perm: Perm::new(key, seq, msgflg, who),
             qbytes: MSGMNB,
             ctime: now,
             ..Queue::EMPTY
         };
-        self.tables().live += 1;
         Ok(slot)
     }
 
@@ -435,24 +368,20 @@ impl Locked {
             free_msg(m);
             m = next;
         }
-        let seq = q.seq.wrapping_add(1);
+        let seq = q.perm.seq.wrapping_add(1);
         *q = Queue {
-            seq,
+            perm: Perm { seq, ..Perm::EMPTY },
             ..Queue::EMPTY
         };
         let t = self.tables();
-        t.live -= 1;
+        t.slots.release(slot);
         t.msgs -= msgs;
         t.bytes -= bytes;
-        // SAFETY: the stack has room for every slot below `cap`, and this
-        // one was not on it.
-        unsafe { t.free.add(t.nfree).write(slot) };
-        t.nfree += 1;
     }
 
     /// `msgctl_info`: the figures, and the highest index in use (0 if none).
     fn info(&mut self, current: bool) -> (Msginfo, i32) {
-        let cap = self.tables().cap;
+        let cap = self.tables().slots.cap();
         let max_idx = (0..cap)
             .rev()
             .find(|&i| self.queue(i).is_some_and(|q| q.live))
@@ -461,7 +390,11 @@ impl Locked {
         let t = self.tables();
         let clamp = |n: usize| i32::try_from(n).unwrap_or(i32::MAX);
         let info = Msginfo {
-            msgpool: if current { clamp(t.live) } else { MSGPOOL },
+            msgpool: if current {
+                clamp(t.slots.live())
+            } else {
+                MSGPOOL
+            },
             msgmap: if current { clamp(t.msgs) } else { MSGMAP },
             msgmax: MSGMAX as i32,
             msgmnb: MSGMNB as i32,
@@ -473,30 +406,6 @@ impl Locked {
         };
         (info, max_idx)
     }
-}
-
-/// `realloc` `old_len` entries at `p` to `new_len`, filling the new ones.
-///
-/// # Safety
-///
-/// `p` is null or a `malloc` block holding `old_len` valid `T`s.
-unsafe fn grow<T>(
-    p: *mut T,
-    old_len: usize,
-    new_len: usize,
-    fill: impl Fn() -> T,
-) -> Option<*mut T> {
-    let bytes = new_len.checked_mul(size_of::<T>())?;
-    // SAFETY: the caller's contract; realloc(NULL, n) is malloc.
-    let q = unsafe { crate::malloc::realloc(p.cast::<u8>(), bytes) }.cast::<T>();
-    if q.is_null() {
-        return None;
-    }
-    for i in old_len..new_len {
-        // SAFETY: `q` holds `new_len` entries.
-        unsafe { q.add(i).write(fill()) };
-    }
-    Some(q)
 }
 
 /// A message block of type `mtype` holding `len` bytes copied from `text`,
@@ -531,107 +440,26 @@ fn free_msg(m: *mut Msg) {
 }
 
 // ---------------------------------------------------------------------------
-// Ids, callers and permissions
-// ---------------------------------------------------------------------------
-
-/// The bits of a slot's reuse count an id carries.
-const SEQ_MASK: u32 = 0x7FFF;
-
-/// The id of the queue in `slot` at reuse count `seq`: always positive, and
-/// different for every reuse of the slot until the count wraps.
-fn encode_msqid(slot: usize, seq: u32) -> i32 {
-    let s = ((slot as u32) & 0xFFFF).wrapping_add(1);
-    (((seq & SEQ_MASK) << 16) | s) as i32
-}
-
-fn decode_msqid(msqid: i32) -> Option<(usize, u32)> {
-    if msqid <= 0 {
-        return None;
-    }
-    let u = msqid as u32;
-    let slot = ((u & 0xFFFF) as usize).checked_sub(1)?;
-    Some((slot, (u >> 16) & SEQ_MASK))
-}
-
-/// The caller's effective ids, as `ipcperms` reads them.
-#[derive(Clone, Copy)]
-struct Caller {
-    euid: u32,
-    egid: u32,
-}
-
-fn caller() -> Caller {
-    Caller {
-        euid: crate::unistd::geteuid(),
-        egid: crate::unistd::getegid(),
-    }
-}
-
-/// The mode bits of `q` that apply to `who`: its owner's when `who` is the
-/// owner or the creator, else its group's when `who`'s group is either
-/// group, else the rest's -- in the low three bits.
-fn granted_bits(q: &Queue, who: Caller) -> u32 {
-    if who.euid == q.cuid || who.euid == q.uid {
-        (q.mode >> 6) & 0o7
-    } else if who.egid == q.cgid || who.egid == q.gid {
-        // `in_group_p`: the caller has no supplementary groups here
-        // (`getgroups` reports none), so its group is its effective one.
-        (q.mode >> 3) & 0o7
-    } else {
-        q.mode & 0o7
-    }
-}
-
-/// Linux's `ipcperms`: may `who` have what `flag` asks for -- its bits in
-/// any class, folded together, as `msgget`'s flags or `S_IRUGO` ask --
-/// with `CAP_IPC_OWNER` granting anything the mode does not?
-fn permits(q: &Queue, who: Caller, flag: u32) -> bool {
-    let requested = ((flag >> 6) | (flag >> 3) | flag) & 0o7;
-    requested & !granted_bits(q, who) == 0
-        || crate::sys_capability::has_capability(crate::sys_capability::CAP_IPC_OWNER)
-}
-
-/// `ipcctl_obtain_check`: `IPC_SET` and `IPC_RMID` are the owner's and the
-/// creator's, or need `CAP_SYS_ADMIN`.
-fn may_control(q: &Queue, who: Caller) -> bool {
-    who.euid == q.cuid
-        || who.euid == q.uid
-        || crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN)
-}
-
-/// Seconds since the epoch, for the queue's timestamps.
-fn now_secs() -> i64 {
-    crate::lowlevellock::now_on(crate::time::CLOCK_REALTIME).tv_sec
-}
-
-// ---------------------------------------------------------------------------
 // Waiting
 // ---------------------------------------------------------------------------
 
 /// Tell the calls asleep on the queues that something changed.
 fn changed() {
-    // SAFETY: this process's words.
-    let (seq, sleeping) = unsafe { (&*changes(), &*sleepers()) };
-    seq.fetch_add(1, Ordering::SeqCst);
-    if sleeping.load(Ordering::SeqCst) > 0 {
-        crate::lowlevellock::futex_wake_all(seq);
-    }
+    // SAFETY: this process's counter.
+    unsafe { &*waits() }.changed();
 }
 
 /// Sleep until the queues change from `seen`.
 fn wait_for_change(seen: i32) {
-    // SAFETY: this process's words.
-    let (seq, sleeping) = unsafe { (&*changes(), &*sleepers()) };
-    sleeping.fetch_add(1, Ordering::SeqCst);
-    crate::lowlevellock::futex_wait(seq, seen);
-    sleeping.fetch_sub(1, Ordering::SeqCst);
+    // SAFETY: this process's counter.
+    unsafe { &*waits() }.wait(seen, None);
 }
 
-/// The counter a waiter compares against, read -- with the lock held --
+/// The count a waiter compares against, read -- with the lock held --
 /// before it looks at a queue.
 fn change_seen() -> i32 {
-    // SAFETY: this process's word.
-    unsafe { &*changes() }.load(Ordering::SeqCst)
+    // SAFETY: this process's counter.
+    unsafe { &*waits() }.seen()
 }
 
 // ---------------------------------------------------------------------------
@@ -655,7 +483,7 @@ pub extern "C" fn msgget(key: i32, msgflg: i32) -> i32 {
             Err(errno::EEXIST)
         } else if t
             .queue(slot)
-            .is_some_and(|q| permits(q, who, msgflg as u32))
+            .is_some_and(|q| permits(&q.perm, who, msgflg as u32))
         {
             Ok(slot)
         } else {
@@ -749,7 +577,7 @@ fn enqueue(
     loop {
         let seen = change_seen();
         let q = t.queue(slot).ok_or(errno::EIDRM)?;
-        if !permits(q, who, S_IWUGO) {
+        if !permits(&q.perm, who, S_IWUGO) {
             return Err(errno::EACCES);
         }
         if fits(q, len) {
@@ -934,7 +762,7 @@ fn receive(
     let taken = loop {
         let seen = change_seen();
         let q = t.queue(slot).ok_or(errno::EIDRM)?;
-        if !permits(q, who, S_IRUGO) {
+        if !permits(&q.perm, who, S_IRUGO) {
             return Err(errno::EACCES);
         }
         if let Some((prev, m)) = find_msg(q, typ, mode) {
@@ -1082,20 +910,11 @@ fn stat(msqid: i32, cmd: i32) -> Result<(MsqidDs, i32), i32> {
     }
     .ok_or(errno::EINVAL)?;
     let q = t.queue(slot).ok_or(errno::EINVAL)?;
-    if cmd != MSG_STAT_ANY && !permits(q, who, S_IRUGO) {
+    if cmd != MSG_STAT_ANY && !permits(&q.perm, who, S_IRUGO) {
         return Err(errno::EACCES);
     }
     let ds = MsqidDs {
-        msg_perm: IpcPerm {
-            __ipc_perm_key: q.key,
-            uid: q.uid,
-            gid: q.gid,
-            cuid: q.cuid,
-            cgid: q.cgid,
-            mode: q.mode,
-            __ipc_perm_seq: (q.seq & SEQ_MASK) as i32,
-            ..IpcPerm::default()
-        },
+        msg_perm: q.perm.to_ipc_perm(),
         msg_stime: q.stime,
         msg_rtime: q.rtime,
         msg_ctime: q.ctime,
@@ -1116,7 +935,7 @@ fn set(msqid: i32, ds: &MsqidDs) -> Result<(), i32> {
     let mut t = lock();
     let slot = t.resolve(msqid).ok_or(errno::EINVAL)?;
     let q = t.queue(slot).ok_or(errno::EINVAL)?;
-    if !may_control(q, who) {
+    if !may_control(&q.perm, who) {
         return Err(errno::EPERM);
     }
     // Linux passes `msg_qbytes` on as an `int`: a value past `INT_MAX`
@@ -1128,13 +947,8 @@ fn set(msqid: i32, ds: &MsqidDs) -> Result<(), i32> {
     {
         return Err(errno::EPERM);
     }
-    // `ipc_update_perm`: -1 is no user or group.
-    if ds.msg_perm.uid == u32::MAX || ds.msg_perm.gid == u32::MAX {
-        return Err(errno::EINVAL);
-    }
-    q.uid = ds.msg_perm.uid;
-    q.gid = ds.msg_perm.gid;
-    q.mode = ds.msg_perm.mode & 0o777;
+    q.perm
+        .update(ds.msg_perm.uid, ds.msg_perm.gid, ds.msg_perm.mode)?;
     q.qbytes = i64::from(qbytes) as usize;
     q.ctime = now_secs();
     drop(t);
@@ -1149,7 +963,7 @@ fn rmid(msqid: i32) -> Result<(), i32> {
     let who = caller();
     let mut t = lock();
     let slot = t.resolve(msqid).ok_or(errno::EINVAL)?;
-    if !t.queue(slot).is_some_and(|q| may_control(q, who)) {
+    if !t.queue(slot).is_some_and(|q| may_control(&q.perm, who)) {
         return Err(errno::EPERM);
     }
     t.remove(slot);
@@ -1237,7 +1051,7 @@ mod tests {
     }
 
     fn slot_of(q: i32) -> usize {
-        decode_msqid(q).unwrap().0
+        decode_id(q).unwrap().0
     }
 
     fn fail(r: i64) -> i32 {
@@ -1330,24 +1144,6 @@ mod tests {
     }
 
     // -- ids --
-
-    #[test]
-    fn ids_round_trip() {
-        for slot in [0, 1, 7, 31_999] {
-            for seq in [0u32, 1, 0x7FFF] {
-                let id = encode_msqid(slot, seq);
-                assert!(id > 0);
-                assert_eq!(decode_msqid(id), Some((slot, seq)));
-            }
-        }
-    }
-
-    #[test]
-    fn test_msqid_decode_rejects_zero_and_negative() {
-        assert!(decode_msqid(0).is_none());
-        assert!(decode_msqid(-1).is_none());
-        assert!(decode_msqid(0x0001_0000).is_none(), "slot field 0");
-    }
 
     #[test]
     fn a_removed_queues_id_stops_resolving_even_when_its_slot_is_reused() {
@@ -1923,8 +1719,8 @@ mod tests {
         {
             let mut t = lock();
             let qq = t.queue(slot_of(q)).unwrap();
-            qq.uid = 1000;
-            qq.cuid = 1000;
+            qq.perm.uid = 1000;
+            qq.perm.cuid = 1000;
         }
         {
             let _g = without(crate::sys_capability::CAP_SYS_ADMIN);
@@ -2206,68 +2002,6 @@ mod tests {
     }
 
     // -- the pieces --
-
-    #[test]
-    fn granted_bits_follow_owner_then_group_then_other() {
-        let mut q = Queue {
-            mode: 0o751,
-            uid: 10,
-            cuid: 11,
-            gid: 20,
-            cgid: 21,
-            ..Queue::EMPTY
-        };
-        let who = |euid, egid| Caller { euid, egid };
-        assert_eq!(granted_bits(&q, who(10, 0)), 0o7, "the owner");
-        assert_eq!(granted_bits(&q, who(11, 0)), 0o7, "the creator");
-        assert_eq!(granted_bits(&q, who(1, 20)), 0o5, "the group");
-        assert_eq!(granted_bits(&q, who(1, 21)), 0o5, "the creator's group");
-        assert_eq!(granted_bits(&q, who(1, 2)), 0o1, "the rest");
-        // The owner's bits apply to the owner even when the group's are wider.
-        q.mode = 0o070;
-        assert_eq!(granted_bits(&q, who(10, 20)), 0);
-    }
-
-    #[test]
-    fn permits_folds_the_request_across_classes() {
-        let _g = without(crate::sys_capability::CAP_IPC_OWNER);
-        let q = Queue {
-            mode: 0o640,
-            uid: 10,
-            cuid: 10,
-            gid: 20,
-            cgid: 20,
-            ..Queue::EMPTY
-        };
-        let owner = Caller { euid: 10, egid: 0 };
-        let group = Caller { euid: 1, egid: 20 };
-        let other = Caller { euid: 1, egid: 2 };
-        assert!(permits(&q, owner, 0o666), "rw asked; the owner has rw");
-        assert!(!permits(&q, group, 0o666), "the group has only r");
-        assert!(permits(&q, group, S_IRUGO));
-        assert!(!permits(&q, other, S_IRUGO));
-        assert!(permits(&q, other, 0), "nothing asked");
-        assert!(
-            permits(&q, owner, (0o600 | IPC_CREAT | IPC_EXCL) as u32),
-            "flags above 0777 ask nothing"
-        );
-    }
-
-    #[test]
-    fn may_control_is_owner_or_creator_or_cap_sys_admin() {
-        let q = Queue {
-            uid: 10,
-            cuid: 11,
-            ..Queue::EMPTY
-        };
-        let who = |euid| Caller { euid, egid: 0 };
-        let caps = without(crate::sys_capability::CAP_SYS_ADMIN);
-        assert!(may_control(&q, who(10)));
-        assert!(may_control(&q, who(11)));
-        assert!(!may_control(&q, who(12)));
-        drop(caps);
-        assert!(may_control(&q, who(12)));
-    }
 
     #[test]
     fn convert_mode_is_linuxs() {

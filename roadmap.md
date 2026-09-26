@@ -1871,6 +1871,13 @@ D's to act on once answered).
       and `/etc/shadow` as glibc's `nss_files` does, where they were one
       built-in root -- still the answer for a missing file (§1113);
       `getpwent_r` and `getgrent_r` exist.
+    * System V semaphores are Linux's (the twenty-fifth pass): `semctl`
+      receives C's fourth argument -- `SETVAL` had never set anything from
+      C -- `semtimedop`'s timeout is relative, `IPC_NOWAIT` belongs to the
+      operation that would block, and `GETPID`/`GETNCNT`/`GETZCNT`, the
+      info commands, permissions, futex waits and `EIDRM` are there. The
+      queues and the semaphores share `sysv_ipc.rs`; the ring-3 check of
+      both is `services/ctest-sysvipc`, run by lane A on request.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

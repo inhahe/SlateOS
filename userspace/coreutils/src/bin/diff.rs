@@ -1985,7 +1985,7 @@ fn header_field(path: &Path) -> Vec<u8> {
     let tm = localtime::Zone::from_env().local(secs, nanos);
     let mut out = qname(path);
     out.push(b'\t');
-    out.extend_from_slice(&localtime::strftime(b"%Y-%m-%d %H:%M:%S.%N %z", &tm));
+    out.extend_from_slice(&localtime::nstrftime(b"%Y-%m-%d %H:%M:%S.%N %z", &tm));
     out
 }
 

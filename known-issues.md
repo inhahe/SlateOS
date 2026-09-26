@@ -166229,7 +166229,7 @@ avoids the affected `TZ` values until then, and says so in its header.
 `TZ` values that are empty, invalid, or one of four legacy names -- and `TZ=`
 is plausible in a script.
 
-## TD-B-LOCALTIME-STRFTIME-DOES-NOT-PAD-YEARS (lane B, 2026-09-25) — **open**
+## TD-B-LOCALTIME-STRFTIME-DOES-NOT-PAD-YEARS (lane B, 2026-09-25) — FIXED 2026-09-26
 
 **In short:** `date -d 0021-06-15 +%F` prints `21-06-15` where GNU prints
 `0021-06-15`, and `date -d 10000-01-01 +%F` prints `10000-01-01` where GNU
@@ -166254,3 +166254,13 @@ as a recursive call that forgets the flags. `date-diff.sh`'s
 **Severity: low.** Years before 1000 and after 9999 only -- but silently wrong
 where it applies, and ISO 8601 (`%F`) is the format a script is most likely to
 parse back.
+
+**How it was closed.** Not by patching `%Y`: the year was the visible end of a
+formatter that was neither upstream's. The GNU programs this tree reimplements
+use *two* -- gnulib's `nstrftime` (coreutils, diffutils) and the C library's
+`strftime` (findutils, procps, tar, `pinky`, bash) -- which differ on years,
+`%N`, `%q`, `%:z`, the `+` flag and what `-` does to a width. `localtime`'s
+`strftime` module now ports both from source, glibc 2.39's `strftime_l.c` and
+coreutils 9.4's `nstrftime.c`, and each caller uses its upstream's. The
+`date-diff.sh` rows are `run_case`s again, and `scripts/strftime-diff.sh`
+checks every conversion under every flag, width and modifier against both.

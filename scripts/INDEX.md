@@ -342,6 +342,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/stderr-exit-zero-sweep.py` | Find a program that reports a failure on stderr and then exits 0. |
 | `scripts/stdin-hang-sweep.sh` | Does any test binary hang when its stdin is an OPEN PIPE that never delivers? |
 | `scripts/straddle-check.py` | Report which loops in a kernel binary straddle a 4 KiB guest page. |
+| `scripts/strftime-diff.sh` | strftime-diff.sh — both of GNU's time formatters, ours against theirs. |
 | `scripts/strings-diff.sh` | Differential test: our `strings` against GNU binutils `strings`. |
 | `scripts/sum-diff.sh` | sum-diff.sh — compare our `sum` against GNU's, inside WSL. |
 | `scripts/symbolize.py` | Turn the raw addresses in a kernel panic into `symbol+offset`. |
@@ -417,4 +418,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_407 scripts._
+_408 scripts._

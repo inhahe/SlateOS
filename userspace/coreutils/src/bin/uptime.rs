@@ -69,7 +69,7 @@ use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{Opt, Program, Takes};
 use coreutils::stdfd;
-use localtime::{Zone, strftime};
+use localtime::{Zone, nstrftime};
 use std::fs;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -218,7 +218,7 @@ fn since(total_secs: f64) -> Option<String> {
         .checked_sub(total_secs.max(0.0) as i64)?;
     let zone = Zone::from_env();
     let tm = zone.local(boot, 0);
-    String::from_utf8(strftime(b"%Y-%m-%d %H:%M:%S", &tm)).ok()
+    String::from_utf8(nstrftime(b"%Y-%m-%d %H:%M:%S", &tm)).ok()
 }
 
 /// procps-ng 4.0.4's `--help`, byte for byte -- 241 bytes.
@@ -419,7 +419,7 @@ fn status_line(clock: &str, total_secs: f64, users: u64, load: (f64, f64, f64)) 
 fn time_of_day(now_secs: i64) -> Option<String> {
     let zone = Zone::from_env();
     let tm = zone.local(now_secs, 0);
-    String::from_utf8(strftime(b"%H:%M:%S", &tm)).ok()
+    String::from_utf8(nstrftime(b"%H:%M:%S", &tm)).ok()
 }
 
 /// The three load averages, or zeros.

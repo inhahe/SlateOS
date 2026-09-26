@@ -177,13 +177,13 @@ run_case -d @1000000000 '+a%Yb%mc'
 
 # --- years outside 1000-9999 ----------------------------------------------------------------------------
 # gnulib's `nstrftime` pads a year to four digits (`%Y` of year 21 is `0021`),
-# and `%F` is `%+4Y-%m-%d`, which also signs a year past 9999 (`+10000`). Ours
-# printed the bare number; the date parser port made these reachable
-# (`date -d 0021-06-15`), and `parse-datetime-diff.sh` found them.
-known_bug_case TD-B-LOCALTIME-STRFTIME-DOES-NOT-PAD-YEARS -d 0021-06-15 +%Y
-known_bug_case TD-B-LOCALTIME-STRFTIME-DOES-NOT-PAD-YEARS -d 0021-06-15 +%F
-known_bug_case TD-B-LOCALTIME-STRFTIME-DOES-NOT-PAD-YEARS -d 0021-06-15 +%G
-known_bug_case TD-B-LOCALTIME-STRFTIME-DOES-NOT-PAD-YEARS -d 10000-01-01 +%F
+# and `%F` is `%+4Y-%m-%d`, which also signs a year past 9999 (`+10000`).
+# `parse-datetime-diff.sh` found ours printing the bare number; every
+# conversion under every flag and width is now `strftime-diff.sh`'s.
+run_case -d 0021-06-15 +%Y
+run_case -d 0021-06-15 +%F
+run_case -d 0021-06-15 +%G
+run_case -d 10000-01-01 +%F
 run_case -d 10000-01-01 +%Y
 run_case -d 10000-01-01 +%C
 run_case -d 0021-06-15 +%C

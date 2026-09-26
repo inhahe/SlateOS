@@ -50,7 +50,7 @@ use coreutils::parse_datetime::{Timespec, parse_datetime2};
 use coreutils::posixtm::{self, Syntax};
 use coreutils::quote::{os_bytes, quote, quote_os, quotef_os};
 use coreutils::stdfd;
-use localtime::{Zone, strftime};
+use localtime::{Zone, nstrftime_z};
 use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
@@ -684,7 +684,7 @@ impl Session<'_> {
         }
         let nanos = u32::try_from(when.tv_nsec).unwrap_or(0);
         let tm = self.tz.local(when.tv_sec, nanos);
-        let mut out = strftime(self.format, &tm);
+        let mut out = nstrftime_z(self.format, &tm, self.tz);
         out.push(b'\n');
         let mut stdout = io::stdout().lock();
         // A failed write is caught when stdout is closed at exit; upstream's

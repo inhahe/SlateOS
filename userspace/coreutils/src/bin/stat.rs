@@ -60,7 +60,7 @@
 use coreutils::diag;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{self, Style};
-use localtime::{Zone, strftime};
+use localtime::{Zone, nstrftime};
 use modechange::{S_IFBLK, S_IFCHR, S_IFMT, S_IFREG, file_type_name, mode_string};
 use std::ffi::OsString;
 
@@ -208,7 +208,7 @@ const fn is_device(mode: u32) -> bool {
 /// and `touch` agree about what time it is; the version this replaces printed
 /// a hard-coded `+0000` because it predated that crate.
 fn human_time(zone: &Zone, secs: i64, nsec: u32) -> Vec<u8> {
-    strftime(b"%Y-%m-%d %H:%M:%S.%N %z", &zone.local(secs, nsec))
+    nstrftime(b"%Y-%m-%d %H:%M:%S.%N %z", &zone.local(secs, nsec))
 }
 
 // ===========================================================================

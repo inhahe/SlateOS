@@ -1395,7 +1395,7 @@ impl<W: Write> Pr<W> {
         // `int` counting from 1900, and upstream then prints the seconds.
         let fits = (INT_MIN + 1900..=INT_MAX + 1900).contains(&tm.year);
         self.date_text = if fits {
-            localtime::strftime(&self.date_format, &tm)
+            localtime::nstrftime(&self.date_format, &tm)
         } else {
             format!("{sec}.{ns:09}").into_bytes()
         };

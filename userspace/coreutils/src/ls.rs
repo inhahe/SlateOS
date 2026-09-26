@@ -2528,7 +2528,7 @@ struct Times {
 /// ```
 fn long_time_expected_width(cfg: &Config, zone: &localtime::Zone) -> usize {
     let format = cfg.long_time_format.first().map_or(&[][..], Vec::as_slice);
-    let text = localtime::strftime(format, &zone.local(0, 0));
+    let text = localtime::nstrftime(format, &zone.local(0, 0));
     mbs_width(&text).unwrap_or(0)
 }
 
@@ -2605,7 +2605,7 @@ impl Times {
                 .long_time_format
                 .get(usize::from(recent))
                 .map_or(&[][..], Vec::as_slice);
-            out.extend_from_slice(&localtime::strftime(format, &tm));
+            out.extend_from_slice(&localtime::nstrftime(format, &tm));
             out.push(b' ');
             return;
         }

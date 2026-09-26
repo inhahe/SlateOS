@@ -68,9 +68,9 @@ use ulstrutils::{
 /// `TABCHAR_CELLS`: the tab stops the list modes align to.
 const TABCHAR_CELLS: usize = 8;
 
-/// `ENOENT` and `EILSEQ`: what upstream's `errno` holds after a locale was
-/// loaded, and after a line did not decode. Only whether `errno` is zero is
-/// ever read.
+/// `ENOENT`, for a failed open with no number of its own, and `EILSEQ`,
+/// what upstream's `errno` holds after a line did not decode. Only whether
+/// `errno` is zero is ever read.
 const ENOENT: i32 = 2;
 const EILSEQ: i32 = 84;
 
@@ -251,34 +251,6 @@ fn usage(short: &[u8]) -> Vec<u8> {
     text.extend_from_slice(format!("{:<34}{}\n", " -V, --version", "display version").as_bytes());
     text.extend_from_slice(b"\nFor more details see column(1).\n");
     text
-}
-
-/// Whether `setlocale(LC_ALL, "")` leaves `errno` set. Measured on glibc
-/// 2.39: it does whenever some category's locale has to be loaded -- a
-/// name other than `C` and `POSIX`, from `LC_ALL`, the category's own
-/// variable or `LANG`, the first set and not empty -- and not otherwise.
-fn setlocale_sets_errno() -> bool {
-    const CATEGORIES: [&str; 12] = [
-        "LC_CTYPE",
-        "LC_NUMERIC",
-        "LC_TIME",
-        "LC_COLLATE",
-        "LC_MONETARY",
-        "LC_MESSAGES",
-        "LC_PAPER",
-        "LC_NAME",
-        "LC_ADDRESS",
-        "LC_TELEPHONE",
-        "LC_MEASUREMENT",
-        "LC_IDENTIFICATION",
-    ];
-    let get = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
-    CATEGORIES.iter().any(|&category| {
-        get("LC_ALL")
-            .or_else(|| get(category))
-            .or_else(|| get("LANG"))
-            .is_some_and(|name| name != "C" && name != "POSIX")
-    })
 }
 
 /// `mbs_to_wcs(s)`: the wide characters of `s`, or `None` when it does not
@@ -942,9 +914,8 @@ fn run(argv: &[OsString], short: &[u8], out: &mut Stdout) -> u8 {
         .first()
         .map_or(OsStr::new("column"), OsString::as_os_str);
     let mut ctl = Ctl::new(smartcols::tty::codeset_is_utf8());
-    if setlocale_sets_errno() {
-        ctl.errno = ENOENT;
-    }
+    // `setlocale(LC_ALL, "")`.
+    ctl.errno = smartcols::tty::setlocale_errno();
     let mut excl_st = [0i32; 3];
     let mut files: Vec<&OsString> = Vec::new();
 

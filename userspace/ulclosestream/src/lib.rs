@@ -152,6 +152,15 @@ impl Stdout {
         }
     }
 
+    /// `exit` in a program that never registers `close_stdout` (`lsirq`):
+    /// glibc's own flush of what is held, whose failure nobody hears of --
+    /// no message, and the status is the program's.
+    pub fn flush_at_exit(mut self) {
+        let held = std::mem::take(&mut self.held);
+        // Unreported by glibc's exit, and so here.
+        let _ = sys::write_all(sys::STDOUT, &held);
+    }
+
     /// `close_stdout`: flush what is held, report a failure as util-linux
     /// does, then judge stderr. Returns the status to exit with -- `status`,
     /// or `CLOSE_EXIT_CODE`.

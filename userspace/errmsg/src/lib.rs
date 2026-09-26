@@ -171,6 +171,11 @@ pub fn filesystem_loop() -> Error {
 #[cfg(unix)]
 fn errno_text(e: &Error) -> Option<&'static str> {
     match e.raw_os_error()? {
+        // No error at all: what `warn()` prints when the `errno` it reads was
+        // never set -- util-linux's `lsirq` on an empty `/proc/interrupts` in
+        // the C locale says `cannot read /proc/interrupts: Success`. glibc's
+        // text, so that it does not depend on the host's.
+        0 => Some("Success"),
         // EPERM. `ErrorKind` folds it in with EACCES as `PermissionDenied`,
         // but POSIX words the two differently and so does every utility this
         // crate imitates: measured, `tar` extracting a device node as a
@@ -206,6 +211,12 @@ mod tests {
             !strerror(&e).contains("os error"),
             "the host's error number is not part of the message"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_error_is_success() {
+        assert_eq!(strerror(&Error::from_raw_os_error(0)), "Success");
     }
 
     #[test]

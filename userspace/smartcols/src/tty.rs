@@ -89,6 +89,42 @@ pub fn env_int(name: &str) -> Option<usize> {
     }
 }
 
+/// What `setlocale(LC_ALL, "")` leaves in `errno`: `ENOENT` when some
+/// category's locale has to be loaded -- a name other than `C` and `POSIX`,
+/// from `LC_ALL`, the category's own variable or `LANG`, the first set and
+/// not empty -- and 0 otherwise. Measured on glibc 2.39, where loading a
+/// locale leaves the `ENOENT` of a failed lookup behind even when it
+/// succeeds; a util-linux program that later reports an `errno` nothing had
+/// set prints it -- `lsirq` on an empty `/proc/interrupts` says `cannot
+/// read /proc/interrupts: No such file or directory` in C.UTF-8 and
+/// `...: Success` in C.
+#[must_use]
+pub fn setlocale_errno() -> i32 {
+    const ENOENT: i32 = 2;
+    const CATEGORIES: [&str; 12] = [
+        "LC_CTYPE",
+        "LC_NUMERIC",
+        "LC_TIME",
+        "LC_COLLATE",
+        "LC_MONETARY",
+        "LC_MESSAGES",
+        "LC_PAPER",
+        "LC_NAME",
+        "LC_ADDRESS",
+        "LC_TELEPHONE",
+        "LC_MEASUREMENT",
+        "LC_IDENTIFICATION",
+    ];
+    let get = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
+    let loads = CATEGORIES.iter().any(|&category| {
+        get("LC_ALL")
+            .or_else(|| get(category))
+            .or_else(|| get("LANG"))
+            .is_some_and(|name| name != "C" && name != "POSIX")
+    });
+    if loads { ENOENT } else { 0 }
+}
+
 /// `isatty(STDOUT_FILENO)`.
 #[must_use]
 pub fn stdout_is_tty() -> bool {

@@ -1619,7 +1619,11 @@ mod tests {
         let mut tx2 = Timex::zeroed();
         errno::set_errno(0);
         assert_eq!(clock_adjtime(11, &mut tx2), -1);
-        assert_eq!(errno::get_errno(), errno::EOPNOTSUPP, "TAI has no clock_adj");
+        assert_eq!(
+            errno::get_errno(),
+            errno::EOPNOTSUPP,
+            "TAI has no clock_adj"
+        );
     }
 
     #[test]

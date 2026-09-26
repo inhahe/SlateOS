@@ -1538,7 +1538,13 @@ mod tests {
         assert!(fd > 0);
         assert_eq!(mq_timedsend(fd, b"x".as_ptr(), 1, 0, core::ptr::null()), 0);
         let mut buf = [0u8; 64];
-        let r = mq_timedreceive(fd, buf.as_mut_ptr(), buf.len(), core::ptr::null_mut(), core::ptr::null());
+        let r = mq_timedreceive(
+            fd,
+            buf.as_mut_ptr(),
+            buf.len(),
+            core::ptr::null_mut(),
+            core::ptr::null(),
+        );
         assert_eq!(r, 1);
         assert_eq!(buf[0], b'x');
         assert_eq!(mq_close(fd), 0);

@@ -320,7 +320,9 @@ mod tests {
         expect_enosys("negative band", || putpmsg(5, p, null, -1, MSG_BAND));
         expect_enosys("band 256", || putpmsg(5, p, null, 256, MSG_BAND));
         expect_enosys("unknown flag", || putpmsg(5, p, null, 0, 0x40));
-        expect_enosys("high priority with a band", || putpmsg(5, p, null, 1, MSG_HIPRI));
+        expect_enosys("high priority with a band", || {
+            putpmsg(5, p, null, 1, MSG_HIPRI)
+        });
     }
 
     #[test]
@@ -329,7 +331,9 @@ mod tests {
         let mut flags: i32 = 0;
         expect_enosys("well formed", || getmsg(5, null, null, &raw mut flags));
         expect_enosys("negative fd", || getmsg(-1, null, null, &raw mut flags));
-        expect_enosys("NULL flagsp", || getmsg(5, null, null, core::ptr::null_mut()));
+        expect_enosys("NULL flagsp", || {
+            getmsg(5, null, null, core::ptr::null_mut())
+        });
         assert_eq!(flags, 0, "nothing is written through flagsp");
     }
 
@@ -338,13 +342,27 @@ mod tests {
         let null = core::ptr::null_mut();
         let mut band: i32 = 7;
         let mut flags: i32 = MSG_ANY;
-        expect_enosys("well formed", || getpmsg(5, null, null, &raw mut band, &raw mut flags));
-        expect_enosys("negative fd", || getpmsg(-1, null, null, &raw mut band, &raw mut flags));
-        expect_enosys("NULL bandp", || getpmsg(5, null, null, core::ptr::null_mut(), &raw mut flags));
-        expect_enosys("NULL flagsp", || getpmsg(5, null, null, &raw mut band, core::ptr::null_mut()));
+        expect_enosys("well formed", || {
+            getpmsg(5, null, null, &raw mut band, &raw mut flags)
+        });
+        expect_enosys("negative fd", || {
+            getpmsg(-1, null, null, &raw mut band, &raw mut flags)
+        });
+        expect_enosys("NULL bandp", || {
+            getpmsg(5, null, null, core::ptr::null_mut(), &raw mut flags)
+        });
+        expect_enosys("NULL flagsp", || {
+            getpmsg(5, null, null, &raw mut band, core::ptr::null_mut())
+        });
         let mut unknown: i32 = 0x80;
-        expect_enosys("unknown flag", || getpmsg(5, null, null, &raw mut band, &raw mut unknown));
-        assert_eq!((band, flags, unknown), (7, MSG_ANY, 0x80), "nothing is written");
+        expect_enosys("unknown flag", || {
+            getpmsg(5, null, null, &raw mut band, &raw mut unknown)
+        });
+        assert_eq!(
+            (band, flags, unknown),
+            (7, MSG_ANY, 0x80),
+            "nothing is written"
+        );
     }
 
     #[test]
@@ -400,7 +418,9 @@ mod tests {
         // fallback disables the STREAMS code path and uses sockets.
         let ctl_buf = [0u8; 32];
         let data_buf = [0u8; 256];
-        expect_enosys("putmsg", || putmsg(5, ctl_buf.as_ptr(), data_buf.as_ptr(), 0));
+        expect_enosys("putmsg", || {
+            putmsg(5, ctl_buf.as_ptr(), data_buf.as_ptr(), 0)
+        });
     }
 
     #[test]
@@ -411,7 +431,9 @@ mod tests {
         let mut band: i32 = 0;
         let mut flag: i32 = MSG_ANY;
         let null = core::ptr::null_mut();
-        expect_enosys("getpmsg", || getpmsg(7, null, null, &raw mut band, &raw mut flag));
+        expect_enosys("getpmsg", || {
+            getpmsg(7, null, null, &raw mut band, &raw mut flag)
+        });
     }
 
     #[test]

@@ -800,7 +800,11 @@ fn scandir_tail(
             }
         }
         if cnt == vsize {
-            let grown = if vsize == 0 { 10 } else { vsize.saturating_mul(2) };
+            let grown = if vsize == 0 {
+                10
+            } else {
+                vsize.saturating_mul(2)
+            };
             let bytes = grown.checked_mul(core::mem::size_of::<*mut Dirent>());
             // SAFETY: `v` is NULL or this function's own allocation.
             let new = bytes.map_or(core::ptr::null_mut(), |b| unsafe {
@@ -1391,8 +1395,10 @@ fn emit_linux_dirent(out: &mut [u8], ino: u64, off: i64, dtype: u8, name: &[u8])
     slot.fill(0);
     slot.get_mut(0..8)?.copy_from_slice(&ino.to_le_bytes());
     slot.get_mut(8..16)?.copy_from_slice(&off.to_le_bytes());
-    slot.get_mut(16..18)?.copy_from_slice(&reclen_u16.to_le_bytes());
-    slot.get_mut(LINUX_DIRENT_HEADER..name_end)?.copy_from_slice(name);
+    slot.get_mut(16..18)?
+        .copy_from_slice(&reclen_u16.to_le_bytes());
+    slot.get_mut(LINUX_DIRENT_HEADER..name_end)?
+        .copy_from_slice(name);
     *slot.last_mut()? = dtype;
     Some(reclen)
 }
@@ -1461,7 +1467,9 @@ fn fill_dirent_batch(
         };
         let dtype = kernel_type_to_dt(entry.kernel_type);
         let emitted = match record {
-            DirentRecord::Linux64 => emit_linux_dirent64(remaining, entry.ino, off, dtype, entry.name),
+            DirentRecord::Linux64 => {
+                emit_linux_dirent64(remaining, entry.ino, off, dtype, entry.name)
+            }
             DirentRecord::Legacy => emit_linux_dirent(remaining, entry.ino, off, dtype, entry.name),
         };
         let Some(reclen) = emitted else {
@@ -1531,7 +1539,9 @@ unsafe fn drain_getdents_cache(
                 // `filldir64` asks before it writes -- and faults.
                 let mut probe = [0u8; GETDENTS_PROBE];
                 let out: &mut [u8] = if dirp.is_null() {
-                    probe.get_mut(..count.min(GETDENTS_PROBE)).unwrap_or(&mut [])
+                    probe
+                        .get_mut(..count.min(GETDENTS_PROBE))
+                        .unwrap_or(&mut [])
                 } else {
                     // SAFETY (inner): the caller guarantees a non-NULL
                     // `dirp` is writable for `count` bytes.
@@ -1985,7 +1995,12 @@ mod tests {
         let one = 19 + 5 + 1usize;
         let one_padded = (one + 7) & !7usize;
         let mut out = [0u8; 256];
-        let (written, next) = fill_dirent_batch(&records[..n], 0, &mut out[..one_padded], DirentRecord::Linux64);
+        let (written, next) = fill_dirent_batch(
+            &records[..n],
+            0,
+            &mut out[..one_padded],
+            DirentRecord::Linux64,
+        );
         assert_eq!(written, one_padded);
         assert_eq!(
             u64::from_le_bytes(out[0..8].try_into().expect("8 bytes")),
@@ -1994,7 +2009,8 @@ mod tests {
 
         // Resuming from `next` yields the second entry and nothing else.
         let mut out2 = [0u8; 256];
-        let (written2, next2) = fill_dirent_batch(&records[..n], next, &mut out2, DirentRecord::Linux64);
+        let (written2, next2) =
+            fill_dirent_batch(&records[..n], next, &mut out2, DirentRecord::Linux64);
         assert!(written2 > 0);
         assert_eq!(next2, n);
         assert_eq!(
@@ -2003,7 +2019,8 @@ mod tests {
         );
 
         // And a third call at end-of-listing writes nothing.
-        let (written3, next3) = fill_dirent_batch(&records[..n], next2, &mut out2, DirentRecord::Linux64);
+        let (written3, next3) =
+            fill_dirent_batch(&records[..n], next2, &mut out2, DirentRecord::Linux64);
         assert_eq!(written3, 0);
         assert_eq!(next3, n);
     }
@@ -2060,7 +2077,8 @@ mod tests {
         let n = packed_record(&mut records, KERNEL_TYPE_FILE, b"ok", 0, 5);
         let truncated = n - 1;
         let mut out = [0u8; 128];
-        let (written, next) = fill_dirent_batch(&records[..truncated], 0, &mut out, DirentRecord::Linux64);
+        let (written, next) =
+            fill_dirent_batch(&records[..truncated], 0, &mut out, DirentRecord::Linux64);
         assert_eq!(written, 0);
         assert_eq!(next, truncated);
     }
@@ -2432,9 +2450,18 @@ mod tests {
     #[test]
     fn test_scandir_null_namelist() {
         errno::set_errno(0);
-        let ret = scandir(b"/nonexistent-scandir\0".as_ptr(), core::ptr::null_mut(), None, None);
+        let ret = scandir(
+            b"/nonexistent-scandir\0".as_ptr(),
+            core::ptr::null_mut(),
+            None,
+            None,
+        );
         assert_eq!(ret, -1);
-        assert_ne!(errno::get_errno(), errno::EFAULT, "the open's error, not the NULL namelist");
+        assert_ne!(
+            errno::get_errno(),
+            errno::EFAULT,
+            "the open's error, not the NULL namelist"
+        );
     }
 
     // -- fdopendir error handling --
@@ -2573,7 +2600,10 @@ mod tests {
     /// The descriptor outranks the count and the buffer (fs/readdir.c:401).
     #[test]
     fn test_getdents64_bad_fd_outranks_count_and_buffer() {
-        for (dirp, count) in [(core::ptr::null_mut(), 0usize), (core::ptr::null_mut(), 4096)] {
+        for (dirp, count) in [
+            (core::ptr::null_mut(), 0usize),
+            (core::ptr::null_mut(), 4096),
+        ] {
             crate::errno::set_errno(0);
             assert_eq!(getdents64(9999, dirp, count), -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
@@ -2653,7 +2683,6 @@ mod tests {
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
-
 
     #[test]
     fn test_getdents64_invalid_fd_ebadf() {
@@ -2790,7 +2819,11 @@ mod tests {
         for count in [0, 23] {
             crate::errno::set_errno(0);
             assert_eq!(getdents(fd, buf.as_mut_ptr(), count), -1, "count {count}");
-            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL, "count {count}");
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EINVAL,
+                "count {count}"
+            );
         }
         crate::errno::set_errno(0);
         assert_eq!(getdents(fd, core::ptr::null_mut(), 256), -1);
@@ -2817,7 +2850,11 @@ mod tests {
         assert_eq!(&buf[18..23], b"a\0\0\0\0", "name, NUL, padding");
         assert_eq!(buf[23], kernel_type_to_dt(KERNEL_TYPE_FILE), "d_type");
         assert_eq!(buf[24], 0xAA, "nothing past the record");
-        assert_eq!(getdents(fd, buf.as_mut_ptr(), buf.len()), 0, "end of directory");
+        assert_eq!(
+            getdents(fd, buf.as_mut_ptr(), buf.len()),
+            0,
+            "end of directory"
+        );
         let _ = crate::fdtable::close_fd(fd);
     }
 
@@ -2827,7 +2864,11 @@ mod tests {
         let fd = dir_fd_with_one_entry(236);
         let mut buf = [0u8; 64];
         assert_eq!(getdents64(fd, buf.as_mut_ptr(), buf.len()), 24);
-        assert_eq!(buf[18], kernel_type_to_dt(KERNEL_TYPE_FILE), "getdents64's d_type");
+        assert_eq!(
+            buf[18],
+            kernel_type_to_dt(KERNEL_TYPE_FILE),
+            "getdents64's d_type"
+        );
         assert_eq!(getdents(fd, buf.as_mut_ptr(), buf.len()), 0, "already read");
         let _ = crate::fdtable::close_fd(fd);
     }
@@ -2964,7 +3005,11 @@ mod tests {
         let mut buf = [0u8; 256];
         let ret = getdents(3, buf.as_mut_ptr(), 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF, "fd 3 is not open here");
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EBADF,
+            "fd 3 is not open here"
+        );
     }
 
     #[test]

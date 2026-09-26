@@ -5748,11 +5748,23 @@ mod tests {
     /// is still EINVAL.
     #[test]
     fn test_timer_create_unarmable_clocks_eopnotsupp() {
-        for clock in [CLOCK_MONOTONIC_RAW, CLOCK_REALTIME_COARSE, CLOCK_MONOTONIC_COARSE] {
+        for clock in [
+            CLOCK_MONOTONIC_RAW,
+            CLOCK_REALTIME_COARSE,
+            CLOCK_MONOTONIC_COARSE,
+        ] {
             let mut id: TimerT = 0;
             crate::errno::set_errno(0);
-            assert_eq!(timer_create(clock, core::ptr::null(), &raw mut id), -1, "clock {clock}");
-            assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP, "clock {clock}");
+            assert_eq!(
+                timer_create(clock, core::ptr::null(), &raw mut id),
+                -1,
+                "clock {clock}"
+            );
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EOPNOTSUPP,
+                "clock {clock}"
+            );
         }
         let mut id: TimerT = 0;
         crate::errno::set_errno(0);

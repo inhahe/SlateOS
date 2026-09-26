@@ -530,11 +530,7 @@ pub extern "C" fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const Cp
         // SAFETY: the caller's contract makes `mask` readable for
         // `cpusetsize >= copy` bytes, and `local` holds a whole `CpuSetT`.
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                mask.cast::<u8>(),
-                (&raw mut local).cast::<u8>(),
-                copy,
-            );
+            core::ptr::copy_nonoverlapping(mask.cast::<u8>(), (&raw mut local).cast::<u8>(), copy);
         }
     }
     if pid < 0 {

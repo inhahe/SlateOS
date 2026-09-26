@@ -606,6 +606,8 @@ pub struct Face {
     /// (version 0) or a paint graph (version 1). `None` for a face with no
     /// colour glyphs of this kind.
     colr: Option<Span>,
+    /// The `CPAL` table: the palettes `COLR`'s colours index.
+    cpal: Option<Span>,
     /// Whether the face carries colour *bitmaps* (`CBDT` or `sbix`).
     bitmap_colour: bool,
 }
@@ -715,6 +717,7 @@ impl Face {
         let mut mvar_span = None;
         let mut has_cff2 = false;
         let mut colr = None;
+        let mut cpal = None;
         let mut bitmap_colour = false;
 
         for i in 0..usize::from(num_tables) {
@@ -757,6 +760,7 @@ impl Face {
                 b"MVAR" => mvar_span = Some(span),
                 b"CFF2" => has_cff2 = true,
                 b"COLR" => colr = Some(span),
+                b"CPAL" => cpal = Some(span),
                 // Colour bitmaps: Google's `CBDT` and Apple's `sbix`. Noted
                 // rather than kept, since nothing here draws them yet; what
                 // face fallback needs is only to know the face is a colour
@@ -948,6 +952,7 @@ impl Face {
             mvar,
             gdef_store,
             colr,
+            cpal,
             bitmap_colour,
             data,
         })
@@ -1166,6 +1171,13 @@ impl Face {
     #[must_use]
     pub fn has_colour_glyphs(&self) -> bool {
         self.colr.is_some() || self.bitmap_colour
+    }
+
+    /// The bytes of `COLR`, and of `CPAL` if the face has one, for
+    /// [`colr`](crate::colr) to read. `None` without `COLR`.
+    pub(crate) fn colour_tables(&self) -> Option<(&[u8], Option<&[u8]>)> {
+        let table = |span: Span| self.data.get(span.off..span.off.checked_add(span.len)?);
+        Some((table(self.colr?)?, self.cpal.and_then(table)))
     }
 
     /// The scale factor from font units to pixels at `px_per_em`.
@@ -3651,6 +3663,15 @@ pub(crate) mod tests {
 
     fn face() -> Face {
         Face::parse(build_test_font()).expect("synthetic font must parse")
+    }
+
+    /// The fixture with `extra` tables added -- a `COLR` and a `CPAL`, say,
+    /// for a colour glyph test that needs outlines whose every coordinate it
+    /// knows.
+    pub(crate) fn build_test_font_with(extra: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
+        let mut tables = build_test_tables(TRUE_LSB_3);
+        tables.extend(extra);
+        assemble(&tables)
     }
 
     /// The fixture with its three glyphs at `first`, `first + 1` and

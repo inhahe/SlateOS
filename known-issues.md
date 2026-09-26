@@ -165358,3 +165358,41 @@ every one): progressive 3.1 -> 1.7.
 cycles, the minimum of N) and Pillow's `Image.open(...).load()` measured
 with `QueryThreadCycleTime`; `target/jpeg_wip/jpeg_fuzz.py` holds any change
 to libjpeg-turbo's C build.
+
+### [F] Colour glyphs: bitmap emoji draw blank, and variable or dark-palette `COLR` draws at its defaults -- 2026-09-26
+
+**Status:** OPEN — lane F's.
+
+**In short:** emoji from a vector colour font (`COLR`, which Noto Color
+Emoji's vector build is) are drawn in colour, as Chrome draws them. Emoji
+from a *bitmap* colour font -- Noto Color Emoji's default build (`CBDT`),
+Apple's (`sbix`) -- come out blank: face fallback picks such a face for an
+emoji, as it should, and then there is nothing to draw, since the glyph's
+outline is empty. And a vector colour font drawn at a variation instance, or
+with a palette other than its first (a dark-mode one), draws at its defaults.
+
+**Where:** `gui/font/src/colr.rs` (the renderer), `sfnt::Face::has_colour_glyphs`
+(which counts `CBDT`/`sbix` as colour faces), `itemize.rs` (which prefers
+them for emoji).
+
+**What is missing, and the proper fix:**
+1. **`CBDT`/`CBLC` and `sbix`**: find the strike nearest the requested size,
+   decode the glyph's PNG (`gui/imagecodec` has the decoder), scale it to
+   the size, return it as a `ColourImage` through the same cache and the same
+   `glyph_image` -- nothing downstream needs to know which kind it was.
+   Until then an installed bitmap-only emoji font is worse than none; the
+   OS image should ship the `COLR` build (the fonts request,
+   `requests/f-cd-the-os-image-ships-no-fonts...`, names it).
+2. **Variation deltas**: the `Var` paint formats' fields and the clip boxes
+   read at their default values; apply `COLR`'s `ItemVariationStore` (the
+   crate's `varstore` reads the same structure for `HVAR`) through the
+   `DeltaSetIndexMap`.
+3. **Palette choice**: `CPAL` version 1 marks palettes usable on light or
+   dark backgrounds; `render` takes palette 0. A `palette` argument, chosen
+   by the caller from the theme.
+4. **`PaintColrGlyph`'s clip box**: the referenced glyph's `ClipBox` should
+   clip its graph; it is ignored (the outer canvas still bounds it).
+
+**How to see it.** `target/fontcheck` draws emoji lines from
+`target/fonts/notoemoji__Noto-COLRv1.ttf` (drawn) and
+`target/fonts/notocoloremoji__NotoColorEmoji-Regular.ttf` (blank).

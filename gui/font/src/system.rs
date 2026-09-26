@@ -31,10 +31,13 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::bidi::{self, Base, Level};
+use crate::colr::ColourImage;
 use crate::itemize::{self, Faces};
 use crate::lang::Lang;
 use crate::raster::GlyphMask;
-use crate::scaled::{ScaledFont, ScaledFontError, Target, blit_mask, byte_levels, pixel_coord};
+use crate::scaled::{
+    ScaledFont, ScaledFontError, Target, blit_image, blit_mask, byte_levels, pixel_coord,
+};
 use crate::sfnt::{Face, SfntError};
 use crate::shape::{GlyphKey, ShapedGlyph, ShapedRun, TAB_WIDTH_IN_SPACES};
 use crate::{FONT_HEIGHT, Font, FontMetrics, GlyphBitmap};
@@ -409,6 +412,20 @@ impl SystemFont {
         let drawn: Vec<ShapedGlyph> = run.draw_order().copied().collect();
         for shaped in &drawn {
             let advance = shaped.advance;
+            // A colour glyph -- an emoji -- is drawn as a picture, its own
+            // colours with the text's alpha as its opacity; see `glyph_image`.
+            if let Some(image) = self.glyph_image(shaped.key, target.color) {
+                #[allow(clippy::cast_precision_loss)]
+                let placed = (
+                    pixel_coord(pen + shaped.offset.0 + image.left as f32),
+                    pixel_coord(y - shaped.offset.1 + image.top as f32),
+                );
+                if let (Some(gx), Some(gy)) = placed {
+                    blit_image(image, target, gx, gy);
+                }
+                pen += advance;
+                continue;
+            }
             let Some(mask) = self.glyph_mask(shaped.key) else {
                 pen += advance;
                 continue;
@@ -473,6 +490,32 @@ impl SystemFont {
                 Some(masks.entry(ch).or_insert_with(|| mask_from_bitmap(glyph)))
             }
         }
+    }
+
+    /// The colour image for a shaped glyph, if its face paints it in colour
+    /// -- an emoji from a face with a `COLR` table. `None` means the glyph is
+    /// drawn from its coverage mask ([`glyph_mask`](Self::glyph_mask)) in the
+    /// text colour, as every glyph of an ordinary face, and of the built-in
+    /// bitmap face, is.
+    ///
+    /// `foreground` is the text colour, which a colour glyph may paint parts
+    /// of itself in. Only its colour is used, never its alpha: the image is
+    /// drawn as for opaque text, and a caller drawing translucent text applies
+    /// the alpha to the whole image, as [`blit_image`] does -- a glyph that
+    /// painted with a half-transparent text colour and was then drawn half
+    /// transparent would come out a quarter opaque where it used it.
+    ///
+    /// Placed as a mask is, by `left` and `top` from the pen position on the
+    /// baseline, y down. The pixels are premultiplied `0xAARRGGBB`.
+    pub fn glyph_image(&mut self, key: GlyphKey, foreground: u32) -> Option<&ColourImage> {
+        let Backend::Outline(f) = &mut self.backend else {
+            return None;
+        };
+        let font = match usize::from(key.face()) {
+            0 => f,
+            face => self.fallbacks.get_mut(face.checked_sub(1)?)?,
+        };
+        font.colour_glyph(key.gid(), foreground | 0xFF00_0000)
     }
 
     /// The outline face behind this font, if there is one.
@@ -1436,5 +1479,63 @@ mod tests {
             buf.iter().all(|p| p & 0x00FF_FFFF == 0),
             "off-surface text leaked into the buffer"
         );
+    }
+
+    #[test]
+    fn a_colour_glyph_is_drawn_in_its_own_colours_at_the_texts_opacity() {
+        let face = Arc::new(Face::parse(crate::colr::tests::colour_fixture()).unwrap());
+        let mut font = SystemFont::from_shared(face, 100.0).unwrap();
+        let (w, h) = (40_u32, 30_u32);
+        let draw = |font: &mut SystemFont, text: &str, color: u32| {
+            let mut buf = alloc::vec![0xFFFF_FFFF_u32; (w * h) as usize];
+            let mut target = Target {
+                buffer: &mut buf,
+                stride: w,
+                height: h,
+                color,
+            };
+            font.draw_text(text, &mut target, 0.0, 20.0);
+            buf
+        };
+        // `A` is a red square from x 10 to 20, and from the baseline at 20 up
+        // to 10: red in black text, and not black anywhere.
+        let buf = draw(&mut font, "A", 0xFF00_0000);
+        assert_eq!(buf[(15 * w + 15) as usize], 0xFFFF_0000);
+        assert!(!buf.contains(&0xFF00_0000));
+        // In half-transparent text, half-transparent over the white.
+        let buf = draw(&mut font, "A", 0x8000_0000);
+        assert_eq!(buf[(15 * w + 15) as usize], 0xFFFF_7F7F);
+        // `B` paints in the text colour, whichever it is.
+        let buf = draw(&mut font, "B", 0xFF00_00FF);
+        assert_eq!(buf[(18 * w + 5) as usize], 0xFF00_00FF);
+        let buf = draw(&mut font, "B", 0xFF00_FF00);
+        assert_eq!(buf[(18 * w + 5) as usize], 0xFF00_FF00);
+        // `C` has no colour recipe: a mask, in the text colour.
+        let c = font.shape("C").glyphs()[0].key;
+        assert!(font.glyph_image(c, 0xFF00_0000).is_none());
+        assert!(font.glyph_mask(c).is_some());
+    }
+
+    #[test]
+    fn a_colour_glyph_from_a_fallback_face_is_drawn_from_that_face() {
+        // The Greek fixture first, with `COLR` second: `A` is in both, so the
+        // font's own face draws it -- in outline -- and a key naming the
+        // colour face gets the colour face's picture.
+        let face = Arc::new(Face::parse(build_test_font_at(0x03B1, false)).unwrap());
+        let colour = Arc::new(Face::parse(crate::colr::tests::colour_fixture()).unwrap());
+        let mut font = SystemFont::from_shared(face, 100.0)
+            .unwrap()
+            .with_fallbacks(&[colour], &[]);
+        let own = font.shape("\u{03B1}").glyphs()[0].key;
+        assert_eq!(own.face(), 0);
+        assert!(font.glyph_image(own, 0xFF00_0000).is_none());
+        let a = font.shape("A").glyphs()[0].key;
+        assert_eq!((a.face(), a.gid()), (1, 1));
+        let image = font.glyph_image(a, 0xFF00_0000).unwrap();
+        assert!(image.pixels.iter().all(|&p| p == 0xFFFF_0000));
+        // The bitmap face has no colour glyphs at all.
+        let mut builtin = SystemFont::builtin(16.0);
+        let key = builtin.shape("A").glyphs()[0].key;
+        assert!(builtin.glyph_image(key, 0xFF00_0000).is_none());
     }
 }

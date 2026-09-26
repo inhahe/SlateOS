@@ -41,6 +41,7 @@ extern crate alloc;
 pub mod bidi;
 mod bidi_tables;
 pub mod cff;
+pub mod colr;
 mod context;
 pub mod deadkey;
 mod device;
@@ -82,6 +83,8 @@ pub mod shape;
 mod skip;
 mod syllabic;
 pub mod system;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 mod thai;
 mod universal;
 mod universal_machine;

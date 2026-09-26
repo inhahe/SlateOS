@@ -1,129 +1,59 @@
-//! date — print a date and time.
+//! date — print or set the system date and time.
 //!
 //! ```text
-//! date [-u] [-d SPEC | -r FILE | -f FILE] [-R | -I[SPEC] | --rfc-3339=SPEC | +FORMAT]
+//! date [OPTION]... [+FORMAT]
+//! date [-u|--utc|--universal] [MMDDhhmm[[CC]YY][.ss]]
 //! ```
 //!
-//! # It used to answer a different question from the one it was asked
+//! A port of GNU coreutils 9.4's `date.c`: its `main`, `batch_convert` and
+//! `show_date`, in that order below, with the same decisions made in the same
+//! order — which matters, because several of them are errors, and which error
+//! a bad command line gets is decided by which check runs first.
 //!
-//! This program read the clock, formatted it one way, and printed it —
-//! whatever the command line said:
+//! # Where the instant comes from
 //!
-//! ```text
-//! $ date -d @0
-//! ours   Fri Sep 11 23:45:44 UTC 2026     <- the current time
-//! GNU    Thu Jan  1 00:00:00 UTC 1970
-//! ```
+//! | source | how |
+//! |---|---|
+//! | nothing | the clock |
+//! | `-d STRING`, `-s STRING` | [`coreutils::parse_datetime`], GNU's own parser |
+//! | `-f FILE` | the same, once per line, printing as it goes |
+//! | `-r FILE` | the file's modification time, nanoseconds included |
+//! | `--resolution` | the clock's resolution, as an instant |
+//! | an operand that is not `+FORMAT` | POSIX's `MMDDhhmm[[CC]YY][.ss]`, which also *sets* the clock |
 //!
-//! Both exited 0. `scripts/date-diff.sh` scored it **3 of 121**, and the three
-//! were the cases where the answer happens not to depend on the arguments.
-//! That is worse than an unimplemented option and worse than the refusing stub
-//! §1006 forbids, because a refusal at least tells the caller it did not get
-//! what it asked for; `date -d @0 +%s` in a script did not fail, it returned
-//! today.
+//! `-d` used to be a hand-written subset of GNU's date language, grown form by
+//! form against `scripts/probe-date-d-grammar.sh` and refusing what it had not
+//! measured. It was careful and it was still a different language: it could
+//! not say `12:30 -5`, which GNU reads as half past twelve at UTC-5, because
+//! the rule that decides that is a shift/reduce conflict in GNU's Bison
+//! grammar and not a rule anyone wrote down. `parse_datetime` is that grammar,
+//! so the question of which forms are implemented no longer arises.
 //!
-//! # Why this is mostly wiring
+//! # `--debug`
 //!
-//! The hard part of `date` is the formatter, and the tree already has one:
-//! [`localtime::strftime`] implements the whole specifier set — `%a %A %b %B
-//! %c %C %d %D %e %F %g %G %h %H %I %j %k %l %m %M %n %N %p %P %q %r %R %s %S %t
-//! %T %u %U %V %w %W %x %X %y %Y %z %Z %%` — against a [`localtime::Tm`] that
-//! knows its zone. So this file decides *which instant*, *which zone* and
-//! *which format string*, and hands all three to code that already works.
+//! Upstream's parser explains itself under `--debug` — each part it
+//! recognised, the zone it read the string in, every warning about
+//! questionable input — and `date` adds the output format and a note when
+//! repeated `-d` or `-s` options were discarded. All of it is here.
 //!
-//! The previous version carried its own `unix_secs_to_datetime`, which is the
-//! fourth copy of that arithmetic this tree has had to remove.
+//! # `-s`
 //!
-//! # The `-d` language: measured, then implemented, and still bounded
-//!
-//! This entry used to read "`-d` with anything but `@EPOCH` is refused", on the
-//! reasoning that guessing at a date language would reintroduce the defect
-//! above in a subtler form — a date that is plausible and wrong. That reasoning
-//! is right and is why the language was **measured** before any of it was
-//! written: `scripts/probe-date-d-grammar.sh` against GNU 9.4. Three of its
-//! results contradict what a careful guess would have produced:
-//!
-//! * **`epoch` is not a keyword.** `date -d epoch` is an error.
-//! * **`@0 + 1 day` is an error.** `@SECONDS` does not combine with relative
-//!   items at all.
-//! * **`-d ''` is not an error** — an empty or all-blank operand means *today
-//!   at midnight*, while a bare time like `05:06:07` means *today at that
-//!   time*. Two different rules that look like one.
-//!
-//! What is implemented is exactly what that probe confirmed: `@SECONDS`;
-//! `YYYY-MM-DD` with an optional `T`/space time and an optional `UTC`/`±HHMM`
-//! zone; spelled-out months in GNU's three orders; slashed dates, including the
-//! US `MM/DD/YYYY` reading of a bare one; bare times; and `now`, `today`,
-//! `tomorrow`, `yesterday`.
-//!
-//! **Relative displacements were added on 2026-09-16**, the same way: measured
-//! first. `3 days`, `+3 days`, `3 days ago`, `next week`, `last year`, the
-//! `sec`/`min` abbreviations and `fortnight`, alone or applied to an absolute
-//! date. Two of the rules are not what reasoning produces, and both are pinned
-//! by tests:
-//!
-//! * **`ago` negates only the term immediately before it.** `1 day 2 hours
-//!   ago` is *plus* one day and *minus* two hours; `1 day ago 2 hours` is the
-//!   other way round. Treating it as flipping everything seen so far puts both
-//!   a day out.
-//! * **Month arithmetic carries rather than clamping.** `2021-01-31 1 month`
-//!   is **March 3rd**, because February 31st carries — not February 28th,
-//!   which is what a library that clamps would answer.
-//!
-//! **Weekday names followed**, and they have three rules of their own, all
-//! measured on a Wednesday — the one weekday that can tell them apart:
-//!
-//! * a **bare** weekday includes *today*: `Wednesday`, on a Wednesday, is
-//!   today. On any other day `Wednesday` and `next Wednesday` agree, so a
-//!   wrong rule here looks right six days in seven.
-//! * `next` forces strictly forward (+7 when it is today) and `last` strictly
-//!   backward (−7).
-//! * the result is at **midnight**, where `next week` keeps the current time
-//!   of day. Two rules that look like one.
-//!
-//! And beside an absolute date a weekday is **ignored** rather than checked or
-//! applied — `2021-06-15 12:00:00 Monday` is Tuesday June 15th, unchanged.
-//!
-//! **A day keyword with a time** (`yesterday 09:00`) and the **twelve-hour
-//! clock** (`12 am`, `1 pm`, `12:30 pm`) followed. The twelves are the only
-//! hard part: 12 am is midnight and 12 pm is noon, so the rule is not "add
-//! twelve for pm" — a version that simply adds twelve is right for ten hours
-//! in twelve and wrong at both ends of the day. `noon` and `midnight` are not
-//! keywords, which was measured rather than assumed: GNU refuses both.
-//!
-//! With that, every one of the 38 forms in the grammar probe is accepted —
-//! ours took 13 of them before 2026-09-16.
-//!
-//! The one form still refused is a signed relative straight after a bare time,
-//! because there GNU reads the sign as a time-zone offset and not as a
-//! displacement —
-//! `TD-B-DATE-A-SIGNED-RELATIVE-AFTER-A-BARE-TIME-IS-A-ZONE-TO-GNU`. It is
-//! refused rather than approximated, which is the same choice as everywhere
-//! else in this file: a visible refusal beats a plausible wrong instant.
-//!
-//! Out-of-range components are *refused*, not normalised: `date -d 2021-03-32`
-//! is an error even though the `mktime` underneath would carry it into April.
-//!
-//! # What is refused rather than approximated
-//!
-//! * **`-s`/`--set`**, which sets the system clock.
-//! * **`--debug`, `--resolution`.**
-//!
-//! Each says so. The table below still carries all sixteen of GNU's long
-//! options, because the table is what decides whether an abbreviation is
-//! ambiguous — `uname` paid for that lesson, where a missing name made every
-//! abbreviation of it resolve to some *other* option.
+//! Sets the clock through `clock_settime`, falling back to `settimeofday` as
+//! gnulib's `settime` does, and prints the date either way. Without the
+//! privilege to set it, that is `cannot set date: Operation not permitted` and
+//! status 1 — the same as GNU for anyone but root.
 
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{Opt, Program, Takes};
-use coreutils::quote::{os_bytes, quote_os, quotef_os};
+use coreutils::parse_datetime::{Timespec, parse_datetime2};
+use coreutils::posixtm::{self, Syntax};
+use coreutils::quote::{os_bytes, quote, quote_os, quotef_os};
 use coreutils::stdfd;
-use localtime::{Civil, Tm, Zone, strftime};
+use localtime::{Zone, strftime};
 use std::ffi::OsString;
-use std::fs;
+use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// GNU `date` exits 1 on a usage error.
 const DATE: Program = Program::new("date", 1);
@@ -154,73 +84,34 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("version", Takes::Nothing),
 ];
 
-/// The long names that are ONE option wearing three spellings.
+/// The long names that are ONE option wearing several spellings.
 ///
 /// Named `ALIASES` and not `LONG_ALIASES`: `scripts/getopt-ambiguity-check.py`
 /// matches the former exactly, so a table declared under the other spelling is
-/// invisible to it. `chmod.rs` and `chown.rs` both use `LONG_ALIASES` and are
-/// therefore unchecked on this axis -- recorded in `known-issues.md`.
+/// invisible to it.
 ///
 /// GNU's `struct option` carries a `val`, and `getopt_long` judges ambiguity by
 /// that rather than by the name: two spellings sharing a `val` are one option,
 /// so a prefix matching both of them RESOLVES instead of failing. `--uct`,
-/// `--utc` and `--universal` share one, which is why `date --u` works in GNU
-/// and would be "ambiguous" against a faithful-looking name-only table.
-///
-/// Found by `scripts/getopt-ambiguity-check.py` refusing the push, not by
-/// reading: *"date: `--u` we say ambiguous, GNU resolves it; matches ['uct',
-/// 'utc', 'universal']: a missing ALIASES entry"*. The same shape as `rmdir`'s
-/// `--path`/`--parents`, which is the case that gate was written for.
+/// `--utc` and `--universal` share one, which is why `date --u` works in GNU,
+/// and `--rfc-822` and `--rfc-2822` share `--rfc-email`'s, which is why `date
+/// --rfc` lists only two possibilities.
 const ALIASES: &[(&str, &str)] = &[
     ("uct", "utc"),
     ("universal", "utc"),
-    // `--rfc-822` and `--rfc-2822` are the obsolete spellings of `--rfc-email`
-    // and share its `val`, so `--rfc` has only TWO possibilities in GNU, not
-    // four. Measured: `date --rfc` answers
-    //     option '--rfc' is ambiguous; possibilities: '--rfc-email' '--rfc-3339'
-    // where a name-only table lists all four and is wrong in the same way
-    // `--u` was before the two rows above were added.
     ("rfc-822", "rfc-email"),
     ("rfc-2822", "rfc-email"),
 ];
 
-/// GNU's default output, measured: `Sun Sep  9 01:46:40 UTC 2001`.
+/// `nl_langinfo (_DATE_FMT)` in the C locale, which is what GNU prints with no
+/// format: `Sun Sep  9 01:46:40 UTC 2001`.
 const DEFAULT_FORMAT: &[u8] = b"%a %b %e %H:%M:%S %Z %Y";
 /// `-R`, measured: `Sun, 09 Sep 2001 01:46:40 +0000`.
 const RFC_EMAIL_FORMAT: &[u8] = b"%a, %d %b %Y %H:%M:%S %z";
+/// `--resolution`'s default format.
+const RESOLUTION_FORMAT: &[u8] = b"%s.%N";
 
-/// Which instant to print.
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-enum When {
-    Now,
-    /// `-d SPEC`, held UNPARSED.
-    ///
-    /// The language `-d` accepts resolves bare dates in the LOCAL zone, and
-    /// the zone is not settled until every option has been read, because `-u`
-    /// changes it. Parsing here would also report a bad date before a bad
-    /// option, where GNU reports the option first.
-    Spec(OsString),
-    /// `-r FILE`: the file's modification time, as `(secs, nanos)`.
-    File(OsString),
-    /// `-f FILE`: one `-d` spec per line. `-` is stdin.
-    Lines(OsString),
-}
-
-/// What to print it as.
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-enum Shape {
-    Default,
-    /// A `+FORMAT` operand, without its leading `+`.
-    Custom(Vec<u8>),
-    RfcEmail,
-    /// `-I[SPEC]` and `--rfc-3339=SPEC` share a rendering and differ by the
-    /// character between the date and the time: `T` for ISO, a space for 3339.
-    Iso(Precision, u8),
-}
-
-/// How much of the time `-I`/`--rfc-3339` prints.
-// `Copy` and `PartialEq` unconditionally: the formatter compares and copies
-// these outside the test build too. Only `Debug` is test-only.
+/// How much of the time `-I`/`--rfc-3339` prints: upstream's `Time_spec`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]
 enum Precision {
@@ -232,10 +123,8 @@ enum Precision {
 }
 
 /// `-I`'s argument table, **in GNU's order**, which is the order the
-/// "Valid arguments are:" list prints in — `hours` and `minutes` first, which
-/// is gnulib's table order and not alphabetical or logical.
-///
-/// Measured: `date -Ibogus` lists hours, minutes, date, seconds, ns.
+/// "Valid arguments are:" list prints in — `hours` and `minutes` first, since
+/// they are not valid for `--rfc-3339`, which takes the rest of the table.
 const ISO_PRECISIONS: &[(&str, Precision)] = &[
     ("hours", Precision::Hours),
     ("minutes", Precision::Minutes),
@@ -244,995 +133,333 @@ const ISO_PRECISIONS: &[(&str, Precision)] = &[
     ("ns", Precision::Ns),
 ];
 
-/// `--rfc-3339`'s argument table. It does **not** accept `hours` or `minutes`;
-/// `-I` does. Measured: `date --rfc-3339=bogus` lists only date, seconds, ns.
+/// `--rfc-3339`'s argument table: `time_spec_string + 2`.
 const RFC3339_PRECISIONS: &[(&str, Precision)] = &[
     ("date", Precision::Date),
     ("seconds", Precision::Seconds),
     ("ns", Precision::Ns),
 ];
 
-/// Which option named the instant to print.
-///
-/// Tracked so a *second, different* one can be refused. Repeats of the same
-/// option are fine and the last wins — measured, `date -d @0 -d @1` prints the
-/// second — so this is about the kind, not the count.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DateSource {
-    Date,
-    Reference,
-    Lines,
-}
-
-/// Build the format string for `-I`/`--rfc-3339`.
-///
-/// The zone suffix is `%:z` — the colon form, `+00:00` — which is what both
-/// spellings use and which is *not* what plain `%z` produces (`+0000`).
-/// Measured: `date -Iseconds` gives `2001-09-09T01:46:40+00:00`.
-fn iso_format(p: Precision, sep: u8) -> Vec<u8> {
-    let mut f = b"%Y-%m-%d".to_vec();
-    if p == Precision::Date {
-        return f;
+/// Upstream's `iso_8601_format[]`: the date, then `T`, then the time to the
+/// precision asked for, then the zone with a colon.
+fn iso_8601_format(p: Precision) -> &'static [u8] {
+    match p {
+        Precision::Date => b"%Y-%m-%d",
+        Precision::Seconds => b"%Y-%m-%dT%H:%M:%S%:z",
+        Precision::Ns => b"%Y-%m-%dT%H:%M:%S,%N%:z",
+        Precision::Hours => b"%Y-%m-%dT%H%:z",
+        Precision::Minutes => b"%Y-%m-%dT%H:%M%:z",
     }
-    f.push(sep);
-    f.extend_from_slice(match p {
-        Precision::Hours => b"%H".as_slice(),
-        Precision::Minutes => b"%H:%M".as_slice(),
-        Precision::Seconds => b"%H:%M:%S".as_slice(),
-        // ISO uses a comma before the fraction and RFC 3339 a full stop; the
-        // caller's separator tells them apart, since only ISO passes `T`.
-        Precision::Ns if sep == b'T' => b"%H:%M:%S,%N".as_slice(),
-        _ => b"%H:%M:%S.%N".as_slice(),
-    });
-    f.extend_from_slice(b"%:z");
-    f
 }
 
-/// A parsed command line.
-#[cfg_attr(test, derive(Debug))]
+/// Upstream's `rfc_3339_format[]`: a space instead of the `T`, and a full stop
+/// before the nanoseconds.
+fn rfc_3339_format(p: Precision) -> &'static [u8] {
+    match p {
+        Precision::Seconds => b"%Y-%m-%d %H:%M:%S%:z",
+        Precision::Ns => b"%Y-%m-%d %H:%M:%S.%N%:z",
+        // `hours` and `minutes` are not in `--rfc-3339`'s table.
+        _ => b"%Y-%m-%d",
+    }
+}
+
+/// `date`'s command line, as upstream's `main` holds it once `getopt_long` is
+/// done: which options were seen, and what they said.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+#[derive(Default)]
 struct Config {
-    when: When,
-    shape: Shape,
+    /// `-d`: the last one.
+    datestr: Option<OsString>,
+    /// More than one `-d` was given.
+    discarded_datestr: bool,
+    /// `-s`: the last one.
+    set_datestr: Option<OsString>,
+    /// More than one `-s` was given.
+    discarded_set_datestr: bool,
+    /// `-f`.
+    batch_file: Option<OsString>,
+    /// `-r`.
+    reference: Option<OsString>,
+    /// `--resolution`.
+    get_resolution: bool,
+    /// `--debug`.
+    debug: bool,
+    /// `-u`, which upstream implements as `putenv ("TZ=UTC0")`.
     utc: bool,
+    /// `-I`, `-R`, `--rfc-3339` or `+FORMAT`, of which there may be one.
+    format: Option<Vec<u8>>,
+    /// The operands, in order.
+    operands: Vec<OsString>,
 }
 
-fn help_text() -> String {
+/// What the command line asks for.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum Request {
+    Help,
+    Version,
+    Run(Config),
+}
+
+/// A command-line error: the message, printed after `date: `, and the exit.
+/// Every one of `date`'s exits 1.
+type Failure = String;
+
+fn help_text() -> &'static str {
     "\
 Usage: date [OPTION]... [+FORMAT]
-Display the current time in the given FORMAT.
+  or:  date [-u|--utc|--universal] [MMDDhhmm[[CC]YY][.ss]]
+Display date and time in the given FORMAT.
+With -s, or with [MMDDhhmm[[CC]YY][.ss]], set the date and time.
 
-  -d, --date=STRING          display time described by STRING (only @EPOCH here)
-  -I[FMT], --iso-8601[=FMT]  output date/time in ISO 8601 format
-  -R, --rfc-email            output date and time in RFC 5322 format
-      --rfc-3339=FMT         output date/time in RFC 3339 format
-  -r, --reference=FILE       display last modification time of FILE
-  -u, --utc, --universal     print Coordinated Universal Time (UTC)
-      --help                 display this help and exit
-      --version              output version information and exit
+Mandatory arguments to long options are mandatory for short options too.
+  -d, --date=STRING          display time described by STRING, not 'now'
+      --debug                annotate the parsed date,
+                              and warn about questionable usage to stderr
+  -f, --file=DATEFILE        like --date; once for each line of DATEFILE
+  -I[FMT], --iso-8601[=FMT]  output date/time in ISO 8601 format.
+                               FMT='date' for date only (the default),
+                               'hours', 'minutes', 'seconds', or 'ns'
+                               for date and time to the indicated precision.
+                               Example: 2006-08-14T02:34:56-06:00
+  --resolution               output the available resolution of timestamps
+                               Example: 0.000000001
+  -R, --rfc-email            output date and time in RFC 5322 format.
+                               Example: Mon, 14 Aug 2006 02:34:56 -0600
+      --rfc-3339=FMT         output date/time in RFC 3339 format.
+                               FMT='date', 'seconds', or 'ns'
+                               for date and time to the indicated precision.
+                               Example: 2006-08-14 02:34:56-06:00
+  -r, --reference=FILE       display the last modification time of FILE
+  -s, --set=STRING           set time described by STRING
+  -u, --utc, --universal     print or set Coordinated Universal Time (UTC)
+      --help        display this help and exit
+      --version     output version information and exit
+
+All options that specify the date to display are mutually exclusive.
+I.e.: --date, --file, --reference, --resolution.
+
+FORMAT controls the output.  Interpreted sequences are:
+
+  %%   a literal %
+  %a   locale's abbreviated weekday name (e.g., Sun)
+  %A   locale's full weekday name (e.g., Sunday)
+  %b   locale's abbreviated month name (e.g., Jan)
+  %B   locale's full month name (e.g., January)
+  %c   locale's date and time (e.g., Thu Mar  3 23:05:25 2005)
+  %C   century; like %Y, except omit last two digits (e.g., 20)
+  %d   day of month (e.g., 01)
+  %D   date; same as %m/%d/%y
+  %e   day of month, space padded; same as %_d
+  %F   full date; like %+4Y-%m-%d
+  %g   last two digits of year of ISO week number (see %G)
+  %G   year of ISO week number (see %V); normally useful only with %V
+  %h   same as %b
+  %H   hour (00..23)
+  %I   hour (01..12)
+  %j   day of year (001..366)
+  %k   hour, space padded ( 0..23); same as %_H
+  %l   hour, space padded ( 1..12); same as %_I
+  %m   month (01..12)
+  %M   minute (00..59)
+  %n   a newline
+  %N   nanoseconds (000000000..999999999)
+  %p   locale's equivalent of either AM or PM; blank if not known
+  %P   like %p, but lower case
+  %q   quarter of year (1..4)
+  %r   locale's 12-hour clock time (e.g., 11:11:04 PM)
+  %R   24-hour hour and minute; same as %H:%M
+  %s   seconds since the Epoch (1970-01-01 00:00 UTC)
+  %S   second (00..60)
+  %t   a tab
+  %T   time; same as %H:%M:%S
+  %u   day of week (1..7); 1 is Monday
+  %U   week number of year, with Sunday as first day of week (00..53)
+  %V   ISO week number, with Monday as first day of week (01..53)
+  %w   day of week (0..6); 0 is Sunday
+  %W   week number of year, with Monday as first day of week (00..53)
+  %x   locale's date representation (e.g., 12/31/99)
+  %X   locale's time representation (e.g., 23:13:48)
+  %y   last two digits of year (00..99)
+  %Y   year
+  %z   +hhmm numeric time zone (e.g., -0400)
+  %:z  +hh:mm numeric time zone (e.g., -04:00)
+  %::z  +hh:mm:ss numeric time zone (e.g., -04:00:00)
+  %:::z  numeric time zone with : to necessary precision (e.g., -04, +05:30)
+  %Z   alphabetic time zone abbreviation (e.g., EDT)
+
+By default, date pads numeric fields with zeroes.
+The following optional flags may follow '%':
+
+  -  (hyphen) do not pad the field
+  _  (underscore) pad with spaces
+  0  (zero) pad with zeros
+  +  pad with zeros, and put '+' before future years with >4 digits
+  ^  use upper case if possible
+  #  use opposite case if possible
+
+After any flags comes an optional field width, as a decimal number;
+then an optional modifier, which is either
+E to use the locale's alternate representations if available, or
+O to use the locale's alternate numeric symbols if available.
+
+Examples:
+Convert seconds since the Epoch (1970-01-01 UTC) to a date
+  $ date --date='@2147483647'
+
+Show the time on the west coast of the US (use tzselect(1) to find TZ)
+  $ TZ='America/Los_Angeles' date
+
+Show the local time for 9AM next Friday on the west coast of the US
+  $ date --date='TZ=\"America/Los_Angeles\" 09:00 next Fri'
 "
-    .to_string()
 }
 
-/// Parse `date`'s argv.
+/// Upstream's `getopt_long` loop.
+///
+/// Only what upstream decides *inside* the loop is decided here: getopt's own
+/// errors, an `-I`/`--rfc-3339` argument that is not in its table, and a
+/// second output format. Everything else — conflicting options, operands —
+/// is [`check_options`], which runs after the loop as upstream's does, so
+/// that `date -d x -r y --bogus` reports `--bogus`.
 ///
 /// # Errors
 ///
-/// An unknown option, an ambiguous abbreviation, a second `+FORMAT`, an operand
-/// that is not a format, or one of the options this does not implement.
-fn parse_args(args: &[OsString]) -> Result<Config, String> {
-    let mut cfg = Config {
-        when: When::Now,
-        shape: Shape::Default,
-        utc: false,
-    };
-    let mut seen_format = false;
-    let mut source: Option<DateSource> = None;
-
+/// Those three, as the message to print after `date: `.
+fn parse_args(args: &[OsString]) -> Result<Request, Failure> {
+    let mut cfg = Config::default();
     for item in DATE.parse_aliased(args, SHORT_OPTIONS, LONG_OPTIONS, ALIASES) {
+        let mut new_format: Option<Vec<u8>> = None;
         match item.map_err(|e| e.message())? {
-            Opt::Long("utc" | "universal" | "uct", _) | Opt::Short(b'u', _) => cfg.utc = true,
-            Opt::Long("rfc-email" | "rfc-822" | "rfc-2822", _) | Opt::Short(b'R', _) => {
-                cfg.shape = Shape::RfcEmail;
-            }
             Opt::Long("date", v) | Opt::Short(b'd', v) => {
-                claim_source(&mut source, DateSource::Date)?;
-                cfg.when = When::Spec(v.unwrap_or_default());
+                cfg.discarded_datestr |= cfg.datestr.is_some();
+                cfg.datestr = Some(v.unwrap_or_default());
             }
-            Opt::Long("reference", v) | Opt::Short(b'r', v) => {
-                claim_source(&mut source, DateSource::Reference)?;
-                cfg.when = When::File(v.unwrap_or_default());
+            Opt::Long("debug", _) => cfg.debug = true,
+            Opt::Long("file", v) | Opt::Short(b'f', v) => {
+                cfg.batch_file = Some(v.unwrap_or_default());
             }
-            Opt::Long("iso-8601", v) | Opt::Short(b'I', v) => {
-                let spec = v.unwrap_or_else(|| OsString::from("date"));
-                // `argmatch` rather than an exact match: GNU accepts any
-                // unambiguous prefix here, so `-Isec` works, and it renders
-                // the "Valid arguments are:" list from this same table. The
-                // hand-rolled version did neither.
-                let p = DATE
-                    .argmatch(&os_bytes(&spec), "--iso-8601", ISO_PRECISIONS)
-                    .map_err(|e| e.message())?;
-                cfg.shape = Shape::Iso(p, b'T');
-            }
+            Opt::Long("resolution", _) => cfg.get_resolution = true,
             Opt::Long("rfc-3339", v) => {
                 let spec = v.unwrap_or_default();
                 let p = DATE
                     .argmatch(&os_bytes(&spec), "--rfc-3339", RFC3339_PRECISIONS)
                     .map_err(|e| e.message())?;
-                cfg.shape = Shape::Iso(p, b' ');
+                new_format = Some(rfc_3339_format(p).to_vec());
             }
-            Opt::Long("file", v) | Opt::Short(b'f', v) => {
-                claim_source(&mut source, DateSource::Lines)?;
-                cfg.when = When::Lines(v.unwrap_or_default());
+            Opt::Long("iso-8601", v) | Opt::Short(b'I', v) => {
+                let p = match v {
+                    Some(spec) => DATE
+                        .argmatch(&os_bytes(&spec), "--iso-8601", ISO_PRECISIONS)
+                        .map_err(|e| e.message())?,
+                    None => Precision::Date,
+                };
+                new_format = Some(iso_8601_format(p).to_vec());
             }
-            // Refused rather than approximated -- see the module docs.
-            Opt::Long(name @ ("set" | "debug" | "resolution"), _) => {
-                return Err(DATE
-                    .usage_referring(format!("option '--{name}' is not implemented"))
-                    .message());
+            Opt::Long("reference", v) | Opt::Short(b'r', v) => {
+                cfg.reference = Some(v.unwrap_or_default());
             }
-            Opt::Short(b's', _) => {
-                return Err(DATE
-                    .usage_referring("option '-s' is not implemented".to_string())
-                    .message());
+            Opt::Long("rfc-email" | "rfc-822" | "rfc-2822", _) | Opt::Short(b'R', _) => {
+                new_format = Some(RFC_EMAIL_FORMAT.to_vec());
             }
-            Opt::Long("help", _) => return Err(HELP_SENTINEL.to_string()),
-            Opt::Long("version", _) => return Err(VERSION_SENTINEL.to_string()),
+            Opt::Long("set", v) | Opt::Short(b's', v) => {
+                cfg.discarded_set_datestr |= cfg.set_datestr.is_some();
+                cfg.set_datestr = Some(v.unwrap_or_default());
+            }
+            Opt::Long("utc" | "universal" | "uct", _) | Opt::Short(b'u', _) => cfg.utc = true,
+            Opt::Long("help", _) => return Ok(Request::Help),
+            Opt::Long("version", _) => return Ok(Request::Version),
             Opt::Long(other, _) => {
                 return Err(DATE
                     .usage_referring(format!("option '--{other}' is unhandled"))
                     .message());
             }
             Opt::Short(other, _) => return Err(DATE.invalid_option(other).message()),
-            Opt::Operand(arg) => {
-                let bytes = os_bytes(arg);
-                let Some(fmt) = bytes.strip_prefix(b"+") else {
-                    // Three different messages, measured, and the difference
-                    // is which of them the caller has already supplied:
-                    //
-                    //   date extra           -> invalid date ‘extra’
-                    //   date +%F extra       -> extra operand ‘extra’
-                    //   date -d @0 extra     -> the argument … lacks a leading '+'
-                    //
-                    // The middle one is "you have given me a format already";
-                    // the last is "you have told me WHICH date, so a bare word
-                    // cannot be one". With neither, a bare word is GNU's
-                    // obsolete set-the-clock form and fails as a bad date.
-                    if seen_format {
-                        return Err(DATE
-                            .usage_referring(format!("extra operand {}", quote_os(arg)))
-                            .message());
-                    }
-                    if source.is_some() {
-                        return Err(DATE
-                            .usage_referring(format!(
-                                "the argument {} lacks a leading '+';\n\
-                                 when using an option to specify date(s), any non-option\n\
-                                 argument must be a format string beginning with '+'",
-                                quote_os(arg)
-                            ))
-                            .message());
-                    }
-                    // `usage`, not `usage_referring`: measured, this one
-                    // carries no `Try 'date --help'` line.
-                    return Err(DATE
-                        .usage(format!("invalid date {}", quote_os(arg)))
-                        .message());
-                };
-                if seen_format {
-                    return Err(DATE
-                        .usage_referring(format!("extra operand {}", quote_os(arg)))
-                        .message());
-                }
-                seen_format = true;
-                cfg.shape = Shape::Custom(fmt.to_vec());
+            Opt::Operand(arg) => cfg.operands.push(arg.clone()),
+        }
+        if let Some(f) = new_format {
+            if cfg.format.is_some() {
+                // `error (EXIT_FAILURE, …)`: no referral.
+                return Err(DATE
+                    .usage("multiple output formats specified".to_string())
+                    .message());
             }
+            cfg.format = Some(f);
         }
     }
-    Ok(cfg)
+    Ok(Request::Run(cfg))
 }
 
-/// Record which option named the instant, refusing a second *different* one.
-///
-/// `date -d @0 -r file` used to print the reference file's time and say
-/// nothing, silently discarding one of two contradictory instructions — the
-/// same "accepted and not honoured" shape as the flags surveyed in
-/// `B-A-SURVEY-OF-FLAGS-WE-ACCEPT-AND-DO-NOT-HONOUR`. GNU refuses.
-///
-/// Repeats of the *same* option are not a conflict and the last wins,
-/// measured: `date -d @0 -d @1` prints the second.
+/// What upstream decides between the option loop and the work: which options
+/// conflict, what the operands are, and the `--debug` notes about discarded
+/// options. Returns the `-s`-style operand, if the one operand is that.
 ///
 /// # Errors
 ///
-/// A second date-source option of a different kind from the first.
-fn claim_source(seen: &mut Option<DateSource>, now: DateSource) -> Result<(), String> {
-    match seen {
-        Some(prev) if *prev != now => Err(DATE
+/// A conflict or a bad operand, as the message to print after `date: `.
+fn check_options(cfg: &mut Config) -> Result<Option<OsString>, Failure> {
+    let option_specified_date = [
+        cfg.datestr.is_some(),
+        cfg.batch_file.is_some(),
+        cfg.reference.is_some(),
+        cfg.get_resolution,
+    ]
+    .iter()
+    .filter(|&&given| given)
+    .count();
+    if option_specified_date > 1 {
+        return Err(DATE
             .usage_referring(
                 "the options to specify dates for printing are mutually exclusive".to_string(),
             )
-            .message()),
-        _ => {
-            *seen = Some(now);
-            Ok(())
-        }
+            .message());
     }
-}
-
-/// `--help` and `--version` travel back through the error channel because they
-/// are the only two non-error early exits, and a second success variant would
-/// have to be threaded through every arm above to carry them.
-const HELP_SENTINEL: &str = "\u{1}help";
-const VERSION_SENTINEL: &str = "\u{1}version";
-
-// ---------------------------------------------------------------------------
-// The -d language
-// ---------------------------------------------------------------------------
-//
-// Implemented against `scripts/probe-date-d-grammar.sh`, which measured GNU
-// 9.4 rather than reading its documentation. Forms outside what that probe
-// confirmed are REFUSED, not approximated — the module header explains why,
-// and three measurements say the intuition to approximate from would have been
-// wrong:
-//
-//   * `epoch` is NOT a keyword. `date -d epoch` is an error.
-//   * `@0 + 1 day` is an error too: `@SECONDS` does not combine with relative
-//     items at all.
-//   * `-d ''` is not an error — an empty or all-blank string means TODAY AT
-//     MIDNIGHT.
-
-/// Month names, lowercased. GNU accepts the full name or a three-letter
-/// prefix, so `Mar`, `mar` and `March` are one month and `Marc` is not.
-const MONTH_NAMES: [&str; 12] = [
-    "january",
-    "february",
-    "march",
-    "april",
-    "may",
-    "june",
-    "july",
-    "august",
-    "september",
-    "october",
-    "november",
-    "december",
-];
-
-fn month_from_name(tok: &str) -> Option<i64> {
-    let lower = tok.to_ascii_lowercase();
-    MONTH_NAMES.iter().enumerate().find_map(|(i, name)| {
-        (*name == lower || (lower.len() == 3 && name.starts_with(&lower)))
-            .then(|| i64::try_from(i).unwrap_or(0).saturating_add(1))
-    })
-}
-
-const fn is_leap(y: i64) -> bool {
-    (y.rem_euclid(4) == 0 && y.rem_euclid(100) != 0) || y.rem_euclid(400) == 0
-}
-
-/// Length of a month, so an impossible day can be refused.
-///
-/// Needed because GNU *validates* rather than normalising here:
-/// `date -d 2021-03-32` is an error, even though the `mktime` underneath would
-/// happily carry it into April. `Zone::epoch` normalises, so without this the
-/// 32nd of March would silently become the 1st of April.
-const fn days_in_month(y: i64, m: i64) -> i64 {
-    match m {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap(y) => 29,
-        2 => 28,
-        _ => 0,
+    let set_date = cfg.set_datestr.is_some();
+    if set_date && option_specified_date > 0 {
+        return Err(DATE
+            .usage_referring(
+                "the options to print and set the time may not be used together".to_string(),
+            )
+            .message());
     }
-}
 
-fn num(tok: &str) -> Option<i64> {
-    // No sign: a leading `-` here is a separator or an offset, never a number.
-    tok.bytes()
-        .all(|b| b.is_ascii_digit())
-        .then(|| tok.parse().ok())
-        .flatten()
-}
+    if cfg.discarded_datestr && cfg.debug {
+        diag!("date: only using last of multiple -d options");
+    }
+    if cfg.discarded_set_datestr && cfg.debug {
+        diag!("date: only using last of multiple -s options");
+    }
 
-/// `YYYY-MM-DD`, `YYYY/MM/DD`, or `MM/DD/YYYY`.
-fn parse_ymd(tok: &str) -> Option<(i64, i64, i64)> {
-    let parts: Vec<&str> = if tok.contains('-') {
-        tok.split('-').collect()
-    } else if tok.contains('/') {
-        tok.split('/').collect()
-    } else {
-        return None;
+    let mut operands = cfg.operands.iter();
+    let Some(first) = operands.next() else {
+        return Ok(None);
     };
-    let [a, b, c] = parts.as_slice() else {
-        return None;
-    };
-    let (a, b, c) = (num(a)?, num(b)?, num(c)?);
-    if tok.contains('-') {
-        return Some((a, b, c));
+    if let Some(second) = operands.next() {
+        return Err(DATE
+            .usage_referring(format!("extra operand {}", quote_os(second)))
+            .message());
     }
-    // A slashed date is ambiguous and GNU resolves it by position: a bare
-    // `03/04/2021` is MONTH/DAY/YEAR — US order, measured as 2021-03-04 — while
-    // `2021/03/04` is year first. The four-digit component decides.
-    if a > 31 {
-        Some((a, b, c))
-    } else {
-        Some((c, a, b))
-    }
-}
-
-/// `HH:MM` or `HH:MM:SS`, range-checked.
-fn parse_hms(tok: &str) -> Option<(i64, i64, i64)> {
-    let parts: Vec<&str> = tok.split(':').collect();
-    let (h, m, s) = match parts.as_slice() {
-        [h, m] => (num(h)?, num(m)?, 0),
-        [h, m, s] => (num(h)?, num(m)?, num(s)?),
-        _ => return None,
-    };
-    // Measured: `date -d 25:00:00` is an error, so this is validation rather
-    // than normalisation. 60 is allowed for a leap second, as C's tm_sec is.
-    if !(0..=23).contains(&h) || !(0..=59).contains(&m) || !(0..=60).contains(&s) {
-        return None;
-    }
-    Some((h, m, s))
-}
-
-/// `UTC`, `GMT`, `Z`, or `±HHMM` / `±HH:MM`, as seconds east of Greenwich.
-fn parse_zone_token(tok: &str) -> Option<i64> {
-    let upper = tok.to_ascii_uppercase();
-    if matches!(upper.as_str(), "UTC" | "GMT" | "Z") {
-        return Some(0);
-    }
-    let (sign, rest) = match tok.as_bytes().first()? {
-        b'+' => (1i64, tok.get(1..)?),
-        b'-' => (-1i64, tok.get(1..)?),
-        _ => return None,
-    };
-    let digits: String = rest.chars().filter(|c| *c != ':').collect();
-    if digits.len() != 4 {
-        return None;
-    }
-    let hh = num(digits.get(..2)?)?;
-    let mm = num(digits.get(2..)?)?;
-    if hh > 23 || mm > 59 {
-        return None;
-    }
-    Some(
-        sign.saturating_mul(
-            hh.saturating_mul(3600)
-                .saturating_add(mm.saturating_mul(60)),
-        ),
-    )
-}
-
-/// `now`, `today`, `tomorrow`, `yesterday` — and nothing else.
-///
-/// `tomorrow` moves the CALENDAR day rather than adding 86 400 seconds. The
-/// two differ across a daylight-saving change, and GNU does the calendar one
-/// (it adds to `tm_mday` and calls `mktime`), so this does too.
-fn keyword_instant(tok: &str, zone: &Zone, now: i64) -> Option<i64> {
-    let shift = match tok.to_ascii_lowercase().as_str() {
-        // Measured: `today` is NOT midnight, it is the current instant, the
-        // same as `now`.
-        "now" | "today" => return Some(now),
-        "tomorrow" => 1,
-        "yesterday" => -1,
-        _ => return None,
-    };
-    let tm = zone.local(now, 0);
-    Some(
-        zone.epoch(&Civil {
-            year: tm.year,
-            month: i64::from(tm.month),
-            day: i64::from(tm.day).saturating_add(shift),
-            hour: i64::from(tm.hour),
-            minute: i64::from(tm.minute),
-            second: i64::from(tm.second),
-        })
-        .0,
-    )
-}
-
-/// Remove a `... am` / `... pm` time from `toks`, returning it as 24-hour.
-///
-/// Both shapes GNU takes: a bare hour (`1 pm`) and a full clock time
-/// (`12:30 pm`). Measured:
-///
-/// | operand | GNU |
-/// |---|---|
-/// | `12 am` | 00:00 |
-/// | `12 pm` | 12:00 |
-/// | `1 pm` | 13:00 |
-/// | `11 am` | 11:00 |
-/// | `12:30 pm` | 12:30 |
-///
-/// The twelves are the whole reason this is a function and not an `if`: 12 am
-/// is midnight and 12 pm is noon, so the conversion is not "add twelve for pm"
-/// — it is "12 becomes 0, then add twelve for pm". Getting that backwards
-/// gives a result that is right for ten hours in twelve.
-///
-/// `noon` and `midnight` are NOT keywords here, which was also measured:
-/// `date -d noon` is an error in GNU, so they are not accepted.
-fn take_meridiem_time(toks: &mut Vec<&str>) -> Option<(i64, i64, i64)> {
-    for i in 0..toks.len() {
-        let suffix = toks[i].to_ascii_lowercase();
-        let pm = match suffix.as_str() {
-            "am" => false,
-            "pm" => true,
-            _ => continue,
-        };
-        let prev = i.checked_sub(1).map(|p| toks[p])?;
-        // Either `H:M[:S]` or a bare hour.
-        let (h, m, s) = parse_hms(prev).or_else(|| prev.parse::<i64>().ok().map(|h| (h, 0, 0)))?;
-        if !(1..=12).contains(&h) {
-            return None;
+    let bytes = os_bytes(first);
+    if let Some(fmt) = bytes.strip_prefix(b"+") {
+        if cfg.format.is_some() {
+            return Err(DATE
+                .usage("multiple output formats specified".to_string())
+                .message());
         }
-        let hour = match (h, pm) {
-            (12, false) => 0,
-            (12, true) => 12,
-            (_, true) => h.saturating_add(12),
-            (_, false) => h,
-        };
-        toks.drain(i.saturating_sub(1)..=i);
-        return Some((hour, m, s));
+        cfg.format = Some(fmt.to_vec());
+        return Ok(None);
     }
-    None
-}
-
-/// `[next|last] WEEKDAY`: which day, and whether the word forced a direction.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct WeekdayTerm {
-    /// Days since Sunday, matching [`Tm::wday`].
-    target: i64,
-    /// `0` bare, `1` for `next`, `-1` for `last`.
-    force: i64,
-}
-
-/// A weekday name to its [`Tm::wday`] number, or `None`.
-///
-/// The three-letter abbreviations plus `tues`, `thur` and `thurs`, which GNU
-/// accepts and a table built from the full names alone would refuse.
-fn weekday_from_name(word: &str) -> Option<i64> {
-    Some(match word.to_ascii_lowercase().as_str() {
-        "sunday" | "sun" => 0,
-        "monday" | "mon" => 1,
-        "tuesday" | "tue" | "tues" => 2,
-        "wednesday" | "wed" => 3,
-        "thursday" | "thu" | "thur" | "thurs" => 4,
-        "friday" | "fri" => 5,
-        "saturday" | "sat" => 6,
-        _ => return None,
-    })
-}
-
-/// Remove a weekday term from `toks`, if one is there.
-///
-/// Only the FIRST is taken; `date -d 'Monday Tuesday'` is not a form worth
-/// inventing a meaning for, and leaving the second token in place means the
-/// operand is refused rather than silently half-read.
-fn take_weekday_term(toks: &mut Vec<&str>) -> Option<WeekdayTerm> {
-    for i in 0..toks.len() {
-        let Some(target) = weekday_from_name(toks[i]) else {
-            continue;
-        };
-        // A preceding `next`/`last` belongs to this term.
-        let force = match i.checked_sub(1).map(|p| toks[p]) {
-            Some(p) if p.eq_ignore_ascii_case("next") => 1,
-            Some(p) if p.eq_ignore_ascii_case("last") => -1,
-            _ => 0,
-        };
-        let from = if force == 0 { i } else { i.saturating_sub(1) };
-        toks.drain(from..=i);
-        return Some(WeekdayTerm { target, force });
+    if set_date || option_specified_date > 0 {
+        return Err(DATE
+            .usage_referring(format!(
+                "the argument {} lacks a leading '+';\n\
+                 when using an option to specify date(s), any non-option\n\
+                 argument must be a format string beginning with '+'",
+                quote_os(first)
+            ))
+            .message());
     }
-    None
-}
-
-/// The day-of-month `now` must move to for a weekday term, at MIDNIGHT.
-///
-/// Measured against GNU 9.4 on a Wednesday, which is the only day that can
-/// distinguish the three rules:
-///
-/// | operand | result | rule |
-/// |---|---|---|
-/// | `Wednesday` | **today** | a bare weekday INCLUDES today |
-/// | `next Wednesday` | +7 | `next` forces strictly forward |
-/// | `last Wednesday` | −7 | `last` forces strictly backward |
-/// | `Tuesday` | +6 | forward, never backward |
-/// | `last Tuesday` | −1 | backward |
-///
-/// The bare case is the one worth measuring on the right day: on any other
-/// weekday `Wednesday` and `next Wednesday` agree, so a rule that is wrong
-/// about "today" looks right six days in seven.
-///
-/// The time is set to midnight, which is NOT what the other relative forms do
-/// — `next week` keeps the current time of day and `next Monday` does not.
-fn weekday_offset(term: WeekdayTerm, today: i64) -> i64 {
-    let forward = (term.target.saturating_sub(today)).rem_euclid(7);
-    match term.force {
-        1 if forward == 0 => 7,
-        -1 => {
-            let back = (today.saturating_sub(term.target)).rem_euclid(7);
-            if back == 0 { -7 } else { -back }
-        }
-        _ => forward,
-    }
-}
-
-/// Apply a [`Shift`]'s months and days to a civil date, leaving the result
-/// possibly out of range for its month.
-///
-/// Out of range ON PURPOSE. GNU does not clamp a month-end: measured,
-/// `date -d '2026-01-31 1 month'` is **March 3rd**, not February 28th, because
-/// it adds one to the month field and lets `mktime` carry February 31st
-/// forward. `date -d '2026-03-31 1 month ago'` is March 3rd for the same
-/// reason. Clamping — the behaviour most date libraries choose, and the one
-/// that looks more correct — would disagree with GNU on every month-end.
-fn shift_civil(year: i64, month: i64, day: i64, sh: Shift) -> (i64, i64, i64) {
-    // Months are exact arithmetic, so they are normalised here; the day is
-    // left alone for `Zone::epoch`/`days_from_civil` to carry.
-    let total = year
-        .saturating_mul(12)
-        .saturating_add(month.saturating_sub(1))
-        .saturating_add(sh.months);
-    (
-        total.div_euclid(12),
-        total.rem_euclid(12).saturating_add(1),
-        day.saturating_add(sh.days),
-    )
-}
-
-/// A relative displacement, kept in CALENDAR fields rather than seconds.
-///
-/// Months cannot be seconds and days cannot be either, once a time zone is in
-/// play: "1 month" from January 31st is not 2 678 400 seconds later, and "1
-/// day" across a daylight-saving change is not 86 400. Carrying the three
-/// separately and letting [`Zone::epoch`] normalise the result is what makes
-/// both come out where GNU puts them.
-#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
-struct Shift {
-    months: i64,
-    days: i64,
-    seconds: i64,
-}
-
-/// One unit word to its field, e.g. `weeks` -> 7 days.
-///
-/// The abbreviations are the ones GNU accepts, measured rather than assumed:
-/// `sec`, `secs`, `min`, `mins` and the singular of every plural all work, and
-/// `fortnight` is a real unit in this grammar.
-fn unit_shift(word: &str, n: i64) -> Option<Shift> {
-    let w = word.to_ascii_lowercase();
-    let w = w.as_str();
-    let s = |seconds: i64| Shift {
-        seconds,
-        ..Shift::default()
-    };
-    let d = |days: i64| Shift {
-        days,
-        ..Shift::default()
-    };
-    let m = |months: i64| Shift {
-        months,
-        ..Shift::default()
-    };
-    Some(match w {
-        "sec" | "secs" | "second" | "seconds" => s(n),
-        "min" | "mins" | "minute" | "minutes" => s(n.saturating_mul(60)),
-        "hour" | "hours" => s(n.saturating_mul(3_600)),
-        "day" | "days" => d(n),
-        "week" | "weeks" => d(n.saturating_mul(7)),
-        "fortnight" | "fortnights" => d(n.saturating_mul(14)),
-        "month" | "months" => m(n),
-        "year" | "years" => m(n.saturating_mul(12)),
-        _ => return None,
-    })
-}
-
-impl Shift {
-    fn add(self, other: Self) -> Self {
-        Self {
-            months: self.months.saturating_add(other.months),
-            days: self.days.saturating_add(other.days),
-            seconds: self.seconds.saturating_add(other.seconds),
-        }
-    }
-
-    fn negate(self) -> Self {
-        Self {
-            months: self.months.saturating_neg(),
-            days: self.days.saturating_neg(),
-            seconds: self.seconds.saturating_neg(),
-        }
-    }
-
-    fn is_zero(self) -> bool {
-        self == Self::default()
-    }
-}
-
-/// Remove every relative term from `toks`, returning their sum.
-///
-/// Recognised, all measured against GNU date 9.x:
-///
-/// | form | meaning |
-/// |---|---|
-/// | `3 days`, `+3 days`, `-3 days` | the sign belongs to that term alone |
-/// | `3 days ago` | the term is negated |
-/// | `next week`, `last year` | ±1 of that unit |
-///
-/// **`ago` negates only the term immediately before it**, which is the rule
-/// reasoning gets wrong. Measured: `1 day 2 hours ago` is +1 day and MINUS 2
-/// hours, and `1 day ago 2 hours` is minus 1 day and PLUS 2 hours. Treating
-/// `ago` as negating the whole accumulated relative set — the obvious
-/// reading, and what this was first written as — puts both of those a day out.
-fn take_relative_terms(toks: &mut Vec<&str>) -> Shift {
-    // Terms are collected rather than summed as they are found, because `ago`
-    // has to reach back and flip the one before it. Summing eagerly would mean
-    // undoing a term already folded into the total, which is arithmetic that
-    // works and does not read like the rule it implements.
-    let mut terms: Vec<Shift> = Vec::new();
-    let mut kept: Vec<&str> = Vec::with_capacity(toks.len());
-    let mut i = 0usize;
-
-    while i < toks.len() {
-        let tok = toks[i];
-        // `ago` negates the previous term, and only that one.
-        if tok.eq_ignore_ascii_case("ago")
-            && let Some(prev) = terms.pop()
-        {
-            terms.push(prev.negate());
-            i = i.saturating_add(1);
-            continue;
-        }
-        // `today` / `tomorrow` / `yesterday` as a DAY term, which is what
-        // makes `yesterday 09:00` work: the keyword moves the calendar day and
-        // the time token that follows replaces the time of day.
-        //
-        // Single-token operands never reach here -- `keyword_instant` above
-        // answers them and returns -- so this changes nothing about bare
-        // `yesterday`, which keeps the current time of day rather than going
-        // to midnight. Two spellings, two rules, and the early return is what
-        // keeps them apart.
-        if let Some(days) = match tok.to_ascii_lowercase().as_str() {
-            "today" => Some(0),
-            "tomorrow" => Some(1),
-            "yesterday" => Some(-1),
-            _ => None,
-        } {
-            terms.push(Shift {
-                days,
-                ..Shift::default()
-            });
-            i = i.saturating_add(1);
-            continue;
-        }
-        // `next UNIT` / `last UNIT`.
-        if (tok.eq_ignore_ascii_case("next") || tok.eq_ignore_ascii_case("last"))
-            && let Some(next_tok) = toks.get(i.saturating_add(1))
-        {
-            let n = if tok.eq_ignore_ascii_case("next") {
-                1
-            } else {
-                -1
-            };
-            if let Some(sh) = unit_shift(next_tok, n) {
-                terms.push(sh);
-                i = i.saturating_add(2);
-                continue;
-            }
-        }
-        // `[+-]?N UNIT`.
-        //
-        // A SIGNED number directly after a bare time is left alone, because
-        // there it is not a relative at all. Measured:
-        //
-        //     2021-06-15 12:00:00 +1 day  ->  Jun 16 11:00 UTC
-        //     2021-06-15 12:00:00 -1 day  ->  Jun 16 13:00 UTC
-        //
-        // Both are one day LATER, an hour either side. GNU reads the `+1` as a
-        // zone offset in hours and the bare `day` as one day, so the sign
-        // belongs to the zone and never to the displacement. With a zone
-        // already present -- `12:00:00 UTC +1 day` -- it is an ordinary
-        // relative again and lands on Jun 16 12:00.
-        //
-        // Reproducing that needs zone and relative parsing interleaved, which
-        // this two-pass shape cannot express. So the form is REFUSED here
-        // rather than answered differently: before this function existed it
-        // was refused too, and a refusal a caller can see beats a number that
-        // is a day and an hour from the one GNU gives. Tracked as
-        // `TD-B-DATE-A-SIGNED-RELATIVE-AFTER-A-BARE-TIME-IS-A-ZONE-TO-GNU`.
-        let signed = tok.starts_with('+') || tok.starts_with('-');
-        if signed && kept.last().is_some_and(|p| parse_hms(p).is_some()) {
-            kept.push(tok);
-            i = i.saturating_add(1);
-            continue;
-        }
-        if let Ok(n) = tok.parse::<i64>()
-            && let Some(next_tok) = toks.get(i.saturating_add(1))
-            && let Some(sh) = unit_shift(next_tok, n)
-        {
-            terms.push(sh);
-            i = i.saturating_add(2);
-            continue;
-        }
-        kept.push(tok);
-        i = i.saturating_add(1);
-    }
-
-    *toks = kept;
-    terms.into_iter().fold(Shift::default(), Shift::add)
-}
-
-/// Resolve a `-d` operand to an instant, or `None` if it is not a date.
-///
-/// `now` is passed in rather than read here so the clock-relative forms are
-/// testable: every keyword and the bare-time form depend on it.
-fn parse_date_spec(raw: &[u8], zone: &Zone, now: i64) -> Option<i64> {
-    let text = std::str::from_utf8(raw).ok()?;
-    // A trailing comma is dropped so `March 4, 2021` tokenises like the others.
-    let toks: Vec<&str> = text
-        .split_whitespace()
-        .map(|t| t.trim_end_matches(','))
-        .filter(|t| !t.is_empty())
-        .collect();
-
-    // Empty or all blank: today at midnight, local.
-    if toks.is_empty() {
-        let tm = zone.local(now, 0);
-        return Some(
-            zone.epoch(&Civil {
-                year: tm.year,
-                month: i64::from(tm.month),
-                day: i64::from(tm.day),
-                ..Civil::default()
-            })
-            .0,
-        );
-    }
-
-    if let [only] = toks.as_slice() {
-        if let Some(t) = keyword_instant(only, zone, now) {
-            return Some(t);
-        }
-        // `@SECONDS`, and only as the whole operand: `@0 + 1 day` is an error
-        // in GNU, so this deliberately does not survive into the token loop.
-        if let Some(rest) = only.strip_prefix('@') {
-            return rest.parse::<i64>().ok();
-        }
-    }
-
-    // Relative terms come out BEFORE the rest is parsed, so `2026-01-02 +1 day`
-    // reaches the date parser as `2026-01-02` and the displacement is applied
-    // to whatever it resolves to.
-    //
-    // Deliberately AFTER the `@SECONDS` branch above, and that ordering is
-    // measured rather than tidy: `date -d '@0 + 1 day'` is an ERROR in GNU, so
-    // `@` must not survive into a form that accepts relatives. Extracting
-    // first would have made it work here and diverge there.
-    let mut toks = toks;
-    let shift = take_relative_terms(&mut toks);
-
-    // A weekday name is taken out here and applied only if nothing else
-    // remains. When an absolute date IS given, GNU ignores the weekday
-    // entirely rather than checking it or moving to it -- measured,
-    // `2021-06-15 12:00:00 Monday` answers Tuesday June 15th, unchanged. So
-    // removing it and not looking at it again is exactly right, and the
-    // branch below simply never fires for that operand.
-    let weekday = take_weekday_term(&mut toks);
-
-    if toks.is_empty()
-        && let Some(term) = weekday
-    {
-        let tm = zone.local(now, 0);
-        let day = i64::from(tm.day).saturating_add(weekday_offset(term, i64::from(tm.wday)));
-        let (y, m, d) = shift_civil(tm.year, i64::from(tm.month), day, shift);
-        return Some(
-            zone.epoch(&Civil {
-                year: y,
-                month: m,
-                day: d,
-                // Midnight, not the current time of day. `next week` keeps the
-                // clock and `next Monday` does not; the two look like one rule
-                // and are two.
-                hour: 0,
-                minute: 0,
-                second: shift.seconds,
-            })
-            .0,
-        );
-    }
-
-    // Relatives with nothing else: displace the current instant. Note `now`
-    // and not midnight -- `date -d '1 day'` is measured to keep the current
-    // time of day, where `date -d ''` is midnight. The two look like one rule
-    // and are two.
-    if toks.is_empty() && !shift.is_zero() {
-        let tm = zone.local(now, 0);
-        let (y, m, d) = shift_civil(tm.year, i64::from(tm.month), i64::from(tm.day), shift);
-        return Some(
-            zone.epoch(&Civil {
-                year: y,
-                month: m,
-                day: d,
-                hour: i64::from(tm.hour),
-                minute: i64::from(tm.minute),
-                second: i64::from(tm.second).saturating_add(shift.seconds),
-            })
-            .0,
-        );
-    }
-
-    // `1 pm` is taken out before the loop below, which would otherwise read
-    // the `1` as a bare number and refuse the `pm` outright.
-    let meridiem = take_meridiem_time(&mut toks);
-
-    let mut ymd: Option<(i64, i64, i64)> = None;
-    let mut hms: Option<(i64, i64, i64)> = meridiem;
-    let mut named_month: Option<i64> = None;
-    let mut offset: Option<i64> = None;
-    let mut bare: Vec<i64> = Vec::new();
-
-    for tok in &toks {
-        // `2021-03-04T05:06:07` carries both halves in one token.
-        if let Some((d, t)) = tok.split_once('T')
-            && !d.is_empty()
-            && !t.is_empty()
-            && let Some(date) = parse_ymd(d)
-            && let Some(time) = parse_hms(t)
-        {
-            if ymd.is_some() || hms.is_some() {
-                return None;
-            }
-            ymd = Some(date);
-            hms = Some(time);
-            continue;
-        }
-        if let Some(v) = parse_ymd(tok) {
-            if ymd.replace(v).is_some() {
-                return None;
-            }
-        } else if let Some(v) = parse_hms(tok) {
-            if hms.replace(v).is_some() {
-                return None;
-            }
-        } else if let Some(m) = month_from_name(tok) {
-            if named_month.replace(m).is_some() {
-                return None;
-            }
-        } else if let Some(z) = parse_zone_token(tok) {
-            if offset.replace(z).is_some() {
-                return None;
-            }
-        } else {
-            // `?` rather than `if let ... else { return None }`: the two are
-            // the same control flow, and `clippy::question_mark` is
-            // deny-level here through `clippy::all`.
-            bare.push(num(tok)?);
-        }
-    }
-
-    let (year, month, day) = match (ymd, named_month) {
-        // Both a numeric date and a month name is not a form GNU has.
-        (Some(_), Some(_)) => return None,
-        (Some(v), None) if bare.is_empty() => v,
-        (Some(_), None) => return None,
-        (None, Some(m)) => {
-            // `Mar 4 2021` and `4 March 2021` differ only in order, and the
-            // year is the component that cannot be a day.
-            let [a, b] = bare.as_slice() else {
-                return None;
-            };
-            if *a > 31 { (*a, m, *b) } else { (*b, m, *a) }
-        }
-        // A time with no date means today, local — measured.
-        (None, None) if bare.is_empty() && hms.is_some() => {
-            let tm = zone.local(now, 0);
-            (tm.year, i64::from(tm.month), i64::from(tm.day))
-        }
-        (None, None) => return None,
-    };
-
-    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
-        return None;
-    }
-    let (hour, minute, second) = hms.unwrap_or((0, 0, 0));
-
-    // The literal date was validated above against its own month; the shift is
-    // applied afterwards and is allowed to carry out of range, which is what
-    // GNU does. `2021-03-32` is still refused and `2021-03-31 1 day` is still
-    // April 1st — a bad date and a displaced good one are different things.
-    let (year, month, day) = shift_civil(year, month, day, shift);
-    let second = second.saturating_add(shift.seconds);
-
-    match offset {
-        // An explicit offset makes the wall clock absolute, so the local zone
-        // must not be consulted at all: convert as if UTC, then step back by
-        // the offset.
-        Some(z) => Some(
-            localtime::days_from_civil(year, month, day)
-                .saturating_mul(86_400)
-                .saturating_add(hour.saturating_mul(3_600))
-                .saturating_add(minute.saturating_mul(60))
-                .saturating_add(second)
-                .saturating_sub(z),
-        ),
-        None => Some(
-            zone.epoch(&Civil {
-                year,
-                month,
-                day,
-                hour,
-                minute,
-                second,
-            })
-            .0,
-        ),
-    }
-}
-
-/// The instant a [`When`] names, as `(seconds, nanoseconds)`.
-fn resolve(when: &When, zone: &Zone) -> Result<(i64, u32), String> {
-    match when {
-        When::Now => {
-            let d = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|_| "date: the system clock is before the epoch".to_string())?;
-            let secs = i64::try_from(d.as_secs())
-                .map_err(|_| "date: the system clock is out of range".to_string())?;
-            Ok((secs, d.subsec_nanos()))
-        }
-        When::Spec(raw) => {
-            // `now` is read once and handed to the parser, so that every
-            // clock-relative form in one operand agrees about what "now" is.
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|_| "date: the system clock is before the epoch".to_string())
-                .and_then(|d| {
-                    i64::try_from(d.as_secs())
-                        .map_err(|_| "date: the system clock is out of range".to_string())
-                })?;
-            parse_date_spec(&os_bytes(raw), zone, now)
-                .map(|s| (s, 0))
-                // GNU's wording exactly, and with no `Try '… --help'` referral
-                // -- measured.
-                .ok_or_else(|| format!("date: invalid date {}", quote_os(raw)))
-        }
-        // `-f` produces MANY instants, so `main` handles it before reaching
-        // here. This arm returns an error rather than panicking: an
-        // unreachable branch that a later edit makes reachable should
-        // misbehave visibly and recoverably, not abort the process.
-        When::Lines(_) => Err("date: internal: -f is resolved per line".to_string()),
-        When::File(path) => {
-            let meta = fs::metadata(path)
-                .map_err(|e| format!("date: {}: {}", quotef_os(path), strerror(&e)))?;
-            let mtime = meta
-                .modified()
-                .map_err(|e| format!("date: {}: {}", quotef_os(path), strerror(&e)))?;
-            match mtime.duration_since(UNIX_EPOCH) {
-                Ok(d) => {
-                    let secs = i64::try_from(d.as_secs())
-                        .map_err(|_| "date: that timestamp is out of range".to_string())?;
-                    Ok((secs, d.subsec_nanos()))
-                }
-                // Before the epoch: representable, and the duration is the
-                // distance backwards.
-                Err(e) => {
-                    let d = e.duration();
-                    let secs = i64::try_from(d.as_secs())
-                        .map_err(|_| "date: that timestamp is out of range".to_string())?;
-                    Ok((-secs, 0))
-                }
-            }
-        }
-    }
-}
-
-fn format_for(shape: &Shape) -> Vec<u8> {
-    match shape {
-        Shape::Default => DEFAULT_FORMAT.to_vec(),
-        Shape::RfcEmail => RFC_EMAIL_FORMAT.to_vec(),
-        Shape::Custom(f) => f.clone(),
-        Shape::Iso(p, sep) => iso_format(*p, *sep),
-    }
+    // `MMDDhhmm[[CC]YY][.ss]`: POSIX's way of setting the clock.
+    Ok(Some(first.clone()))
 }
 
 fn main() -> ExitCode {
@@ -1241,142 +468,396 @@ fn main() -> ExitCode {
 
 fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let cfg = match parse_args(&args) {
-        Ok(c) => c,
-        Err(m) if m == HELP_SENTINEL => {
+    let mut cfg = match parse_args(&args) {
+        Ok(Request::Run(cfg)) => cfg,
+        Ok(Request::Help) => {
             print!("{}", help_text());
             return ExitCode::SUCCESS;
         }
-        Err(m) if m == VERSION_SENTINEL => {
+        Ok(Request::Version) => {
             println!("date (SlateOS coreutils)");
             return ExitCode::SUCCESS;
         }
         Err(m) => {
-            // `date: `, because every error reaching here came from
-            // `parse_args`/`parse_when` as a bare `Error::message()`, which is
-            // the sentence *without* the program name — `Program::report` is
-            // the thing that normally supplies it, and converting to `String`
-            // early skips it. Five harness cases were a missing prefix alone:
-            // `invalid option -- 'Q'` against GNU's `date: invalid option --
-            // 'Q'`, and the same for `--nosuchoption`, `--set`, `-r` and `-f`.
-            //
-            // Not applied at the `resolve` site below: those messages build
-            // their own prefix (`date: the system clock is before the epoch`),
-            // and adding one here would double it.
+            diag!("date: {}", m);
+            return ExitCode::FAILURE;
+        }
+    };
+    let posix_operand = match check_options(&mut cfg) {
+        Ok(operand) => operand,
+        Err(m) => {
             diag!("date: {}", m);
             return ExitCode::FAILURE;
         }
     };
 
-    // The zone is settled first: `-d` resolves bare dates in it, so it is an
-    // input to resolution and not merely to rendering.
-    let zone = if cfg.utc {
-        Zone::utc()
+    let format = cfg.format.clone().unwrap_or_else(|| {
+        if cfg.get_resolution {
+            RESOLUTION_FORMAT.to_vec()
+        } else {
+            DEFAULT_FORMAT.to_vec()
+        }
+    });
+    let format = adjust_resolution(&format).unwrap_or(format);
+
+    // `-u` is `putenv ("TZ=UTC0")`, so it is also what `--debug` reports as
+    // the zone's source.
+    let tzstring: Option<Vec<u8>> = if cfg.utc {
+        Some(b"UTC0".to_vec())
     } else {
-        Zone::from_env()
+        std::env::var_os("TZ").map(|v| os_bytes(&v).into_owned())
+    };
+    let tz = Zone::from_tz(tzstring.as_deref());
+    let session = Session {
+        format: &format,
+        tz: &tz,
+        tzstring: tzstring.as_deref(),
+        debug: cfg.debug,
     };
 
-    // Written as bytes: a format string may contain any byte, and a `%` that
-    // `strftime` does not recognise is passed through unchanged, so the result
-    // is not necessarily UTF-8 even when the format was.
-    use std::io::Write;
-    let format = format_for(&cfg.shape);
-    let mut stdout = std::io::stdout().lock();
-    let emit = |secs: i64, nanos: u32, out: &mut std::io::StdoutLock<'_>| -> bool {
-        let tm: Tm = zone.local(secs, nanos);
-        out.write_all(&strftime(&format, &tm))
-            .and_then(|()| out.write_all(b"\n"))
-            .is_ok()
-    };
-
-    if let When::Lines(path) = &cfg.when {
-        let text = match read_date_lines(path) {
-            Ok(t) => t,
+    let ok = if let Some(batch) = &cfg.batch_file {
+        match session.batch_convert(batch) {
+            Ok(ok) => ok,
             Err(m) => {
-                diag!("{}", m);
+                diag!("date: {}", m);
                 return ExitCode::FAILURE;
             }
-        };
-        let now = match clock_now() {
-            Ok(n) => n,
-            Err(m) => {
-                diag!("{}", m);
-                return ExitCode::FAILURE;
-            }
-        };
-        // A bad line is reported and the rest are still processed, with the
-        // failure carried to the exit status. Measured: GNU prints the good
-        // lines either side of a bad one and still exits 1.
-        let mut worst = ExitCode::SUCCESS;
-        // `split(b'\n')` rather than `lines()`, and the trailing empty piece
-        // is dropped: a file ending in a newline must not gain a blank final
-        // line, but a file NOT ending in one must still have its last line
-        // read. Measured, both ways.
-        let mut pieces: Vec<&[u8]> = text.split(|&b| b == b'\n').collect();
-        if pieces.last().is_some_and(|p| p.is_empty()) {
-            pieces.pop();
         }
-        for line in pieces {
-            match parse_date_spec(line, &zone, now) {
-                Some(secs) => {
-                    if !emit(secs, 0, &mut stdout) {
-                        return ExitCode::FAILURE;
-                    }
+    } else {
+        match session.single(&cfg, posix_operand) {
+            Ok(ok) => ok,
+            Err(m) => {
+                diag!("date: {}", m);
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// What every instant is printed with.
+struct Session<'a> {
+    format: &'a [u8],
+    tz: &'a Zone,
+    tzstring: Option<&'a [u8]>,
+    debug: bool,
+}
+
+impl Session<'_> {
+    /// `parse_datetime2` with this session's zone and `--debug` setting.
+    fn parse(&self, text: &[u8]) -> Option<Timespec> {
+        if self.debug {
+            let mut err = io::stderr().lock();
+            parse_datetime2(text, None, Some(&mut err), self.tz, self.tzstring)
+        } else {
+            parse_datetime2(text, None, None, self.tz, self.tzstring)
+        }
+    }
+
+    /// Everything upstream's `main` does when there is no `-f`: find the one
+    /// instant, set the clock if asked, and print it. `Ok(false)` is "printed
+    /// what it could, exit 1".
+    ///
+    /// # Errors
+    ///
+    /// A fatal error — an unreadable `-r` file or a date that does not parse —
+    /// as the message to print after `date: `.
+    fn single(&self, cfg: &Config, posix_operand: Option<OsString>) -> Result<bool, Failure> {
+        let mut ok = true;
+        let mut set_date = cfg.set_datestr.is_some();
+        let (when, datestr) = if let Some(operand) = posix_operand {
+            // Setting the clock from POSIX's digit string.
+            set_date = true;
+            let syntax = Syntax::TRAILING_YEAR
+                .with(Syntax::CENTURY)
+                .with(Syntax::SECONDS);
+            let now = Timespec::now().tv_sec;
+            let when =
+                posixtm::posixtime(&os_bytes(&operand), syntax, self.tz, now).map(|t| Timespec {
+                    tv_sec: t,
+                    tv_nsec: 0,
+                });
+            (when, Some(operand))
+        } else if let Some(reference) = &cfg.reference {
+            let meta = std::fs::metadata(reference)
+                .map_err(|e| format!("{}: {}", quotef_os(reference), strerror(&e)))?;
+            let mtime = meta
+                .modified()
+                .map_err(|e| format!("{}: {}", quotef_os(reference), strerror(&e)))?;
+            (Some(Timespec::from_system_time(mtime)), None)
+        } else if cfg.get_resolution {
+            let res = gettime_res();
+            let when = Timespec {
+                tv_sec: res / 1_000_000_000,
+                tv_nsec: i32::try_from(res % 1_000_000_000).unwrap_or(0),
+            };
+            (Some(when), None)
+        } else if let Some(text) = cfg.set_datestr.as_ref().or(cfg.datestr.as_ref()) {
+            (self.parse(&os_bytes(text)), Some(text.clone()))
+        } else {
+            (Some(Timespec::now()), None)
+        };
+
+        let Some(when) = when else {
+            let text = datestr.unwrap_or_default();
+            return Err(format!("invalid date {}", quote_os(&text)));
+        };
+
+        if set_date {
+            // Set the clock, then print the date whether or not that worked.
+            if let Err(e) = settime(when) {
+                diag!("date: cannot set date: {}", strerror(&e));
+                ok = false;
+            }
+        }
+        Ok(self.show_date(when) && ok)
+    }
+
+    /// Upstream's `batch_convert`: every line of `input` as a date, printed
+    /// as it is read. A line that is not a date is reported and the rest are
+    /// still converted; the result is `false` if any failed.
+    ///
+    /// # Errors
+    ///
+    /// The file not opening, or a read error, as the message to print after
+    /// `date: `.
+    fn batch_convert(&self, input: &OsString) -> Result<bool, Failure> {
+        let bytes = os_bytes(input);
+        let stdin;
+        let file;
+        let (mut reader, name): (Box<dyn BufRead>, String) = if bytes.as_ref() == b"-" {
+            stdin = io::stdin();
+            (Box::new(stdin.lock()), "standard input".to_string())
+        } else {
+            file = std::fs::File::open(input)
+                .and_then(stdfd::fd_safer)
+                .map_err(|e| format!("{}: {}", quotef_os(input), strerror(&e)))?;
+            (Box::new(io::BufReader::new(file)), quotef_os(input))
+        };
+
+        let mut ok = true;
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e) => {
+                    let what = if bytes.as_ref() == b"-" {
+                        "standard input".to_string()
+                    } else {
+                        name.clone()
+                    };
+                    return Err(format!("{what}: read error: {}", strerror(&e)));
                 }
+            }
+            // The line is a C string to upstream: it ends at a NUL.
+            let text = line.split(|&b| b == 0).next().unwrap_or(&[]);
+            match self.parse(text) {
+                Some(when) => ok &= self.show_date(when),
                 None => {
-                    // `quote` on the raw BYTES, not a decoded string: a line of a
-                    // file is arbitrary bytes, and it escapes control
-                    // characters, so a newline inside one cannot forge a
-                    // second diagnostic line.
-                    diag!("date: invalid date {}", coreutils::quote::quote(line));
-                    worst = ExitCode::FAILURE;
+                    let shown = text.strip_suffix(b"\n").unwrap_or(text);
+                    diag!("date: invalid date {}", quote(shown));
+                    ok = false;
                 }
             }
         }
-        return worst;
+        Ok(ok)
     }
 
-    let (secs, nanos) = match resolve(&cfg.when, &zone) {
-        Ok(v) => v,
-        Err(m) => {
-            diag!("{}", m);
-            return ExitCode::FAILURE;
+    /// Upstream's `show_date`: print `when` in the format, or say that it is
+    /// out of range.
+    fn show_date(&self, when: Timespec) -> bool {
+        if self.debug {
+            diag!("date: output format: {}", quote(self.format));
         }
+        if self.tz.localtime_r(when.tv_sec).is_none() {
+            diag!(
+                "date: time {} is out of range",
+                quote(when.tv_sec.to_string().as_bytes())
+            );
+            return false;
+        }
+        let nanos = u32::try_from(when.tv_nsec).unwrap_or(0);
+        let tm = self.tz.local(when.tv_sec, nanos);
+        let mut out = strftime(self.format, &tm);
+        out.push(b'\n');
+        let mut stdout = io::stdout().lock();
+        // A failed write is caught when stdout is closed at exit; upstream's
+        // `close_stdout` reports it there, and so does `stdfd::close_stderr`.
+        stdout.write_all(&out).is_ok()
+    }
+}
+
+/// Upstream's `adjust_resolution`: a copy of `format` with each `%-N` made
+/// `%9N`, `%6N` or whatever the clock's resolution supports, or `None` if
+/// there is no `%-N`.
+fn adjust_resolution(format: &[u8]) -> Option<Vec<u8>> {
+    let mut copy: Option<Vec<u8>> = None;
+    let mut i = 0usize;
+    while i < format.len() {
+        if format.get(i) == Some(&b'%') {
+            match (
+                format.get(i.saturating_add(1)),
+                format.get(i.saturating_add(2)),
+            ) {
+                (Some(b'-'), Some(b'N')) => {
+                    let c = copy.get_or_insert_with(|| format.to_vec());
+                    if let Some(slot) = c.get_mut(i.saturating_add(1)) {
+                        // `res_width` is 0-9, so this is a digit.
+                        *slot = b'0'.saturating_add(res_width(gettime_res()));
+                    }
+                    i = i.saturating_add(2);
+                }
+                (Some(b'%'), _) => i = i.saturating_add(1),
+                _ => {}
+            }
+        }
+        i = i.saturating_add(1);
+    }
+    copy
+}
+
+/// Upstream's `res_width`: the digits a nanosecond count needs to show a
+/// resolution of `res` nanoseconds without losing information.
+fn res_width(res: i64) -> u8 {
+    let mut digits = 9u8;
+    let mut r: i64 = 1;
+    loop {
+        r = r.saturating_mul(10);
+        if r > res {
+            break;
+        }
+        digits = digits.saturating_sub(1);
+    }
+    digits
+}
+
+/// Euclid's algorithm, for `gettime_res`.
+fn gcd(mut a: i64, mut b: i64) -> i64 {
+    while b != 0 {
+        let t = a.checked_rem(b).unwrap_or(0);
+        a = b;
+        b = t;
+    }
+    a
+}
+
+/// gnulib's `gettime_res`: the clock's resolution in nanoseconds — what
+/// `clock_getres` claims, refined by sampling the clock, since some systems
+/// report the timer interval instead.
+fn gettime_res() -> i64 {
+    const HZ: i64 = 1_000_000_000;
+    let (sec, nsec) = clock_getres_realtime().unwrap_or((1, 0));
+    let mut r = if nsec <= 0 { HZ } else { nsec };
+    r = if sec < i64::MAX.saturating_sub(r) / HZ {
+        r.saturating_add(sec.saturating_mul(HZ))
+    } else {
+        i64::MAX
     };
-    if !emit(secs, nanos, &mut stdout) {
-        return ExitCode::FAILURE;
+    for _ in 0..32 {
+        if r <= 1 {
+            break;
+        }
+        let now = Timespec::now();
+        r = gcd(
+            r,
+            if now.tv_nsec != 0 {
+                i64::from(now.tv_nsec)
+            } else {
+                HZ
+            },
+        );
     }
-    ExitCode::SUCCESS
+    r
 }
 
-/// The bytes of `-f`'s file, or stdin when it is `-`.
-///
-/// # Errors
-///
-/// The file not being readable, reported the way GNU reports it.
-fn read_date_lines(path: &OsString) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-    if os_bytes(path).as_ref() == b"-" {
-        let mut buf = Vec::new();
-        return std::io::stdin()
-            .lock()
-            .read_to_end(&mut buf)
-            .map(|_| buf)
-            .map_err(|e| format!("date: -: {}", strerror(&e)));
-    }
-    fs::read(path).map_err(|e| format!("date: {}: {}", quotef_os(path), strerror(&e)))
+/// `struct timespec` as the C library lays it out on every target we build.
+#[cfg(unix)]
+#[repr(C)]
+struct CTimespec {
+    tv_sec: i64,
+    tv_nsec: i64,
 }
 
-/// The current time as epoch seconds.
-///
-/// # Errors
-///
-/// A clock outside the representable range.
-fn clock_now() -> Result<i64, String> {
-    let d = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| "date: the system clock is before the epoch".to_string())?;
-    i64::try_from(d.as_secs()).map_err(|_| "date: the system clock is out of range".to_string())
+/// `clock_getres (CLOCK_REALTIME)`.
+#[cfg(unix)]
+fn clock_getres_realtime() -> Option<(i64, i64)> {
+    unsafe extern "C" {
+        fn clock_getres(clk: i32, res: *mut CTimespec) -> i32;
+    }
+    const CLOCK_REALTIME: i32 = 0;
+    let mut res = CTimespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `res` is a valid, writable `struct timespec` for the duration
+    // of the call, which retains no pointer to it.
+    let rc = unsafe { clock_getres(CLOCK_REALTIME, &mut res) };
+    (rc == 0).then_some((res.tv_sec, res.tv_nsec))
+}
+
+/// The development host has no `clock_getres`; `SystemTime` there counts in
+/// 100 ns units.
+#[cfg(not(unix))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the unix arm can fail, and the two must share a signature"
+)]
+fn clock_getres_realtime() -> Option<(i64, i64)> {
+    Some((0, 100))
+}
+
+/// gnulib's `settime`: `clock_settime`, and `settimeofday` if that failed for
+/// any reason but a lack of permission.
+#[cfg(unix)]
+fn settime(ts: Timespec) -> io::Result<()> {
+    #[repr(C)]
+    struct CTimeval {
+        tv_sec: i64,
+        tv_usec: i64,
+    }
+    unsafe extern "C" {
+        fn clock_settime(clk: i32, tp: *const CTimespec) -> i32;
+        fn settimeofday(tv: *const CTimeval, tz: *const core::ffi::c_void) -> i32;
+    }
+    const CLOCK_REALTIME: i32 = 0;
+    const EPERM: i32 = 1;
+
+    let spec = CTimespec {
+        tv_sec: ts.tv_sec,
+        tv_nsec: i64::from(ts.tv_nsec),
+    };
+    // SAFETY: `spec` is a valid `struct timespec` for the duration of the
+    // call, which only reads it.
+    if unsafe { clock_settime(CLOCK_REALTIME, &spec) } == 0 {
+        return Ok(());
+    }
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() == Some(EPERM) {
+        return Err(err);
+    }
+    let tv = CTimeval {
+        tv_sec: ts.tv_sec,
+        tv_usec: i64::from(ts.tv_nsec / 1000),
+    };
+    // SAFETY: `tv` is a valid `struct timeval` for the duration of the call,
+    // and a null zone pointer is the documented "no zone" argument.
+    if unsafe { settimeofday(&tv, std::ptr::null()) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// The development host cannot set its clock from here.
+#[cfg(not(unix))]
+fn settime(_ts: Timespec) -> io::Result<()> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
 #[cfg(test)]
@@ -1388,138 +869,193 @@ mod tests {
         OsString::from(s)
     }
 
-    #[test]
-    fn iso_formats_match_the_measured_gnu_strings() {
-        // Measured with `date -I… -d @1000000000` against GNU 9.4, TZ=UTC:
-        //   -I          2001-09-09
-        //   -Iseconds   2001-09-09T01:46:40+00:00
-        //   -Ins        2001-09-09T01:46:40,000000000+00:00
-        assert_eq!(iso_format(Precision::Date, b'T'), b"%Y-%m-%d");
-        assert_eq!(iso_format(Precision::Hours, b'T'), b"%Y-%m-%dT%H%:z");
-        assert_eq!(
-            iso_format(Precision::Seconds, b'T'),
-            b"%Y-%m-%dT%H:%M:%S%:z"
-        );
-        assert_eq!(iso_format(Precision::Ns, b'T'), b"%Y-%m-%dT%H:%M:%S,%N%:z");
+    fn config(args: &[&str]) -> Config {
+        let args: Vec<OsString> = args.iter().map(|a| os(a)).collect();
+        match parse_args(&args) {
+            Ok(Request::Run(cfg)) => cfg,
+            other => panic!("{args:?} gave {other:?}"),
+        }
+    }
+
+    /// The error `check_options` gives, for a command line `parse_args`
+    /// accepts.
+    fn conflict(args: &[&str]) -> String {
+        let mut cfg = config(args);
+        check_options(&mut cfg).unwrap_err()
     }
 
     #[test]
-    fn rfc_3339_uses_a_space_and_a_full_stop() {
-        // The two spellings differ in exactly two characters, and both were
-        // measured: `--rfc-3339=ns` gives `2001-09-09 01:46:40.000000000+00:00`
-        // where `-Ins` gives a `T` and a comma.
+    fn iso_formats_match_the_measured_gnu_strings() {
+        assert_eq!(config(&["-I"]).format.unwrap(), b"%Y-%m-%d");
         assert_eq!(
-            iso_format(Precision::Seconds, b' '),
-            b"%Y-%m-%d %H:%M:%S%:z"
+            config(&["-Iseconds"]).format.unwrap(),
+            b"%Y-%m-%dT%H:%M:%S%:z"
         );
-        assert_eq!(iso_format(Precision::Ns, b' '), b"%Y-%m-%d %H:%M:%S.%N%:z");
+        assert_eq!(
+            config(&["-Ins"]).format.unwrap(),
+            b"%Y-%m-%dT%H:%M:%S,%N%:z"
+        );
+        assert_eq!(config(&["-Ihours"]).format.unwrap(), b"%Y-%m-%dT%H%:z");
+        assert_eq!(
+            config(&["--rfc-3339=ns"]).format.unwrap(),
+            b"%Y-%m-%d %H:%M:%S.%N%:z"
+        );
     }
 
     #[test]
     fn rfc_3339_refuses_hours_and_minutes_but_iso_accepts_them() {
-        // Not symmetric, and not guessable: GNU's --rfc-3339 takes only date,
-        // seconds and ns. Asserted against the tables `argmatch` is driven by,
-        // so the rule and the thing enforcing it cannot drift apart.
-        let iso: Vec<&str> = ISO_PRECISIONS.iter().map(|&(n, _)| n).collect();
-        let rfc: Vec<&str> = RFC3339_PRECISIONS.iter().map(|&(n, _)| n).collect();
-        // The ORDER is not cosmetic: it is the order GNU prints in its
-        // "Valid arguments are:" list, measured from `date -Ibogus`, and it is
-        // neither alphabetical nor logical.
-        assert_eq!(iso, ["hours", "minutes", "date", "seconds", "ns"]);
-        assert_eq!(rfc, ["date", "seconds", "ns"]);
-
-        assert!(parse_args(&[os("-Ihours")]).is_ok());
         assert!(parse_args(&[os("--rfc-3339=hours")]).is_err());
-        assert!(parse_args(&[os("--rfc-3339=seconds")]).is_ok());
+        assert!(parse_args(&[os("-Iminutes")]).is_ok());
     }
 
     #[test]
     fn precision_arguments_accept_an_unambiguous_prefix() {
-        // GNU's argmatch does prefix matching: `date -Isec` works. The
-        // hand-rolled exact match this replaced refused it.
-        assert!(parse_args(&[os("-Isec")]).is_ok());
-        assert!(parse_args(&[os("--rfc-3339=sec")]).is_ok());
-        // `s` is ambiguous between `seconds` and nothing else in the 3339
-        // table, but in the ISO table it is unambiguous too; `n` vs `ns`
-        // likewise. The interesting refusal is a word matching nothing.
-        assert!(parse_args(&[os("-Ibogus")]).is_err());
+        assert_eq!(config(&["-Isec"]).format.unwrap(), b"%Y-%m-%dT%H:%M:%S%:z");
     }
 
     #[test]
-    fn date_sources_are_mutually_exclusive_but_repeats_are_not() {
-        // Measured: `date -d @0 -r file` refuses, while `date -d @0 -d @1`
-        // takes the second. Before this, the first case silently printed the
-        // reference file's time and discarded the -d.
-        let e = parse_args(&[os("-d"), os("@0"), os("-r"), os("f")]).unwrap_err();
-        assert!(e.contains("mutually exclusive"), "{e}");
-        let e = parse_args(&[os("-r"), os("f"), os("-d"), os("@0")]).unwrap_err();
-        assert!(e.contains("mutually exclusive"), "{e}");
-
-        let cfg = parse_args(&[os("-d"), os("@0"), os("-d"), os("@1")]).unwrap();
-        assert_eq!(cfg.when, When::Spec(os("@1")));
-    }
-
-    #[test]
-    fn a_bare_operand_gets_one_of_three_measured_messages() {
-        // Which one depends on what the caller has already supplied.
-        let e = parse_args(&[os("extra")]).unwrap_err();
-        assert!(e.contains("invalid date"), "{e}");
-        // ...and that one carries no `Try …` referral.
-        assert!(!e.contains("--help"), "{e}");
-
-        let e = parse_args(&[os("+%F"), os("extra")]).unwrap_err();
-        assert!(e.contains("extra operand"), "{e}");
-
-        let e = parse_args(&[os("-d"), os("@0"), os("extra")]).unwrap_err();
-        assert!(e.contains("lacks a leading '+'"), "{e}");
-        assert!(
-            e.contains("must be a format string beginning with '+'"),
-            "{e}"
+    fn a_second_output_format_is_an_error_even_the_same_one() {
+        for args in [
+            vec!["-R", "-I"],
+            vec!["-R", "-R"],
+            vec!["-Iseconds", "--rfc-3339=date"],
+        ] {
+            let args: Vec<OsString> = args.iter().map(|a| os(a)).collect();
+            let e = parse_args(&args).unwrap_err();
+            assert_eq!(e, "multiple output formats specified", "{args:?}");
+        }
+        // A +FORMAT operand after an option format, too -- checked after the
+        // loop.
+        assert_eq!(
+            conflict(&["-R", "+%s"]),
+            "multiple output formats specified"
         );
     }
 
-    /// A pinned "now": 2021-06-15 12:00:00 UTC.
+    #[test]
+    fn date_sources_are_mutually_exclusive_after_the_loop() {
+        for args in [
+            vec!["-f", "a", "-d", "@0"],
+            vec!["-d", "@0", "-f", "a"],
+            vec!["-f", "a", "-r", "b"],
+            vec!["-d", "@0", "--resolution"],
+        ] {
+            let e = conflict(&args);
+            assert!(e.contains("mutually exclusive"), "{args:?} gave {e}");
+        }
+        // Repeats of one source are not a conflict: the last wins.
+        let mut cfg = config(&["-d", "@0", "-d", "@1"]);
+        assert!(check_options(&mut cfg).is_ok());
+        assert_eq!(cfg.datestr, Some(os("@1")));
+        assert!(cfg.discarded_datestr);
+        // Setting and printing do not mix.
+        let e = conflict(&["-s", "@0", "-d", "@1"]);
+        assert!(e.contains("may not be used together"), "{e}");
+    }
+
+    #[test]
+    fn a_getopt_error_comes_before_a_conflict() {
+        let e = parse_args(&[os("-d"), os("@0"), os("-r"), os("x"), os("-Q")]).unwrap_err();
+        assert!(e.contains("invalid option"), "{e}");
+    }
+
+    #[test]
+    fn the_operands_get_one_of_four_measured_answers() {
+        // A +FORMAT.
+        let mut cfg = config(&["+%Y"]);
+        assert_eq!(check_options(&mut cfg).unwrap(), None);
+        assert_eq!(cfg.format.unwrap(), b"%Y");
+        // Two operands: the SECOND is named.
+        let e = conflict(&["+%F", "extra"]);
+        assert!(e.starts_with("extra operand"), "{e}");
+        assert!(e.contains("extra"), "{e}");
+        // An operand beside a date option must be a format.
+        let e = conflict(&["-d", "@0", "extra"]);
+        assert!(e.contains("lacks a leading '+'"), "{e}");
+        // Alone, it is POSIX's clock-setting form.
+        let mut cfg = config(&["0101000070"]);
+        assert_eq!(check_options(&mut cfg).unwrap(), Some(os("0101000070")));
+    }
+
+    #[test]
+    fn utc_has_three_spellings_and_a_short_one() {
+        for a in ["-u", "--utc", "--universal", "--uct", "--u"] {
+            assert!(config(&[a]).utc, "{a} should select UTC");
+        }
+    }
+
+    #[test]
+    fn rfc_email_has_three_spellings() {
+        for a in ["-R", "--rfc-email", "--rfc-822", "--rfc-2822"] {
+            assert_eq!(config(&[a]).format.unwrap(), RFC_EMAIL_FORMAT, "{a}");
+        }
+    }
+
+    #[test]
+    fn every_option_is_implemented() {
+        let cfg = config(&["--debug", "--resolution"]);
+        assert!(cfg.debug && cfg.get_resolution);
+        let cfg = config(&["--set=@0"]);
+        assert_eq!(cfg.set_datestr, Some(os("@0")));
+        let cfg = config(&["--file=x"]);
+        assert_eq!(cfg.batch_file, Some(os("x")));
+    }
+
+    #[test]
+    fn a_dash_n_takes_the_clocks_resolution() {
+        // `%-N` becomes a width; `%%-N` is a literal and is left alone.
+        let adjusted = adjust_resolution(b"%s.%-N %%-N").unwrap();
+        assert!(adjusted.starts_with(b"%s.%"));
+        assert_eq!(adjusted.get(5), Some(&b'N'));
+        assert!(adjusted.get(4).is_some_and(u8::is_ascii_digit));
+        assert!(adjusted.ends_with(b" %%-N"));
+        assert_eq!(adjust_resolution(b"%s.%N"), None);
+    }
+
+    #[test]
+    fn res_width_counts_the_digits_a_resolution_needs() {
+        assert_eq!(res_width(1), 9);
+        assert_eq!(res_width(100), 7);
+        assert_eq!(res_width(1_000), 6);
+        assert_eq!(res_width(999), 7);
+        assert_eq!(res_width(1_000_000_000), 0);
+    }
+
+    /// 2021-06-15 12:00:00 UTC, a Tuesday.
     ///
-    /// Pinned rather than read from the clock so the keyword and bare-time
-    /// forms are deterministic. `scripts/date-diff.sh` cannot test those at
-    /// all -- both sides read their own clock and race -- so this is the only
-    /// place `now`, `tomorrow` and `05:06:07` get checked against a known
-    /// answer rather than against whatever the two processes happened to see.
+    /// These are the measurements the hand-written `-d` parser was built
+    /// against, read off GNU 9.4 (`date -u -d '2021-06-15 12:00:00 <form>'
+    /// +%s`, or `scripts/probe-date-d-grammar.sh`). They are kept as a check
+    /// that the port answers what GNU answered.
     const TEST_NOW: i64 = 1_623_758_400;
 
     fn spec(s: &str) -> Option<i64> {
-        parse_date_spec(s.as_bytes(), &Zone::utc(), TEST_NOW)
+        let now = Timespec {
+            tv_sec: TEST_NOW,
+            tv_nsec: 0,
+        };
+        parse_datetime2(s.as_bytes(), Some(now), None, &Zone::utc(), Some(b"UTC0"))
+            .map(|t| t.tv_sec)
     }
 
     #[test]
     fn d_accepts_the_measured_absolute_forms() {
-        // Every expected value here came from GNU 9.4 via
-        // scripts/probe-date-d-grammar.sh, not from computing what it ought
-        // to be with the same arithmetic the code under test uses.
         assert_eq!(spec("@0"), Some(0));
         assert_eq!(spec("@1000000000"), Some(1_000_000_000));
         assert_eq!(spec("@-1"), Some(-1));
-
         assert_eq!(spec("2021-03-04 05:06:07"), Some(1_614_834_367));
         assert_eq!(spec("2021-03-04T05:06:07"), Some(1_614_834_367));
         assert_eq!(spec("2021-03-04"), Some(1_614_816_000));
         assert_eq!(spec("1970-01-01 00:00:00 UTC"), Some(0));
-
-        // Spelled-out months, in all three orders GNU accepts.
         assert_eq!(spec("Mar 4 2021"), Some(1_614_816_000));
         assert_eq!(spec("4 March 2021"), Some(1_614_816_000));
         assert_eq!(spec("March 4, 2021"), Some(1_614_816_000));
-
-        // Slashes: year-first, and the US month/day order for a bare one.
         assert_eq!(spec("2021/03/04"), Some(1_614_816_000));
         assert_eq!(spec("03/04/2021"), Some(1_614_816_000));
     }
 
     #[test]
     fn d_applies_an_explicit_zone_offset() {
-        // +0200 means the wall clock is two hours AHEAD, so the instant is two
-        // hours EARLIER -- the sign that is easy to invert and that the
-        // measured value pins down.
         assert_eq!(spec("2021-03-04 05:06:07 UTC"), Some(1_614_834_367));
         assert_eq!(spec("2021-03-04 05:06:07 +0200"), Some(1_614_827_167));
         assert_eq!(spec("2021-03-04 05:06:07 -0500"), Some(1_614_852_367));
@@ -1532,19 +1068,14 @@ mod tests {
     #[test]
     fn d_clock_relative_forms() {
         assert_eq!(spec("now"), Some(TEST_NOW));
-        // Measured: `today` is the current INSTANT, not midnight.
         assert_eq!(spec("today"), Some(TEST_NOW));
         assert_eq!(spec("tomorrow"), Some(TEST_NOW + 86_400));
         assert_eq!(spec("yesterday"), Some(TEST_NOW - 86_400));
         assert_eq!(spec("TOMORROW"), Some(TEST_NOW + 86_400));
     }
 
-    /// `TEST_NOW` is 2021-06-15 12:00:00 UTC, so every expected value below
-    /// was read off GNU 9.4 as `date -u -d '2021-06-15 12:00:00 <form>' +%s`
-    /// rather than computed here with the same arithmetic as the code.
     #[test]
     fn d_accepts_the_measured_relative_forms() {
-        // Plain displacement, both directions, in each unit family.
         assert_eq!(spec("1 day"), Some(1_623_844_800));
         assert_eq!(spec("2 days ago"), Some(1_623_585_600));
         assert_eq!(spec("3 weeks ago"), Some(1_621_944_000));
@@ -1553,140 +1084,71 @@ mod tests {
         assert_eq!(spec("2 hours"), Some(1_623_765_600));
         assert_eq!(spec("30 minutes"), Some(1_623_760_200));
         assert_eq!(spec("1 fortnight"), Some(1_624_968_000));
-
-        // `next`/`last` are ±1 of a unit.
         assert_eq!(spec("next day"), Some(1_623_844_800));
         assert_eq!(spec("last week"), Some(1_623_153_600));
         assert_eq!(spec("next month"), Some(1_626_350_400));
         assert_eq!(spec("last year"), Some(1_592_222_400));
-
-        // The abbreviations GNU takes.
         assert_eq!(spec("1 sec"), spec("1 second"));
         assert_eq!(spec("2 mins"), spec("2 minutes"));
-
-        // `ago` negates ONLY the term before it. Both of these are wrong by a
-        // day under the obvious reading, where `ago` flips everything seen so
-        // far -- which is what this was first written as.
         assert_eq!(spec("1 day 2 hours ago"), Some(1_623_837_600));
         assert_eq!(spec("1 day ago 2 hours"), Some(1_623_679_200));
-
-        // Anchored to an absolute date rather than to the clock.
         assert_eq!(spec("2021-06-15 12:00:00 1 day"), Some(1_623_844_800));
-
-        // Month arithmetic OVERFLOWS, it does not clamp: January 31st plus a
-        // month is March 3rd, because February 31st carries. Both spellings
-        // land on the same instant, which is the check that the carry is real
-        // and not a special case.
         assert_eq!(spec("2021-01-31 1 month"), Some(1_614_729_600));
         assert_eq!(spec("2021-03-31 1 month ago"), Some(1_614_729_600));
-
-        // A signed relative straight after a bare time is GNU's ZONE OFFSET,
-        // not a displacement, so it is refused rather than answered
-        // differently. `-90 seconds` there is refused by GNU too, so that one
-        // matches exactly.
-        assert_eq!(spec("2021-06-15 12:00:00 +1 day"), None);
+        // A signed number straight after a bare time is a ZONE OFFSET: noon
+        // at UTC+1, a day later. The hand-written parser refused this; GNU's
+        // grammar decides it by a shift/reduce conflict, which the port
+        // inherits.
+        assert_eq!(spec("2021-06-15 12:00:00 +1 day"), Some(1_623_841_200));
+        // -90 is not a valid offset (more than 24 hours), so GNU refuses.
         assert_eq!(spec("2021-06-15 12:00:00 -90 seconds"), None);
-        // ...and the forms it must not disturb: a real zone offset, and an
-        // unsigned relative in the same position.
         assert_eq!(spec("2021-06-15 12:00:00 +0100"), Some(1_623_754_800));
         assert_eq!(spec("2021-06-15 +1 day"), Some(1_623_801_600));
-
-        // `@SECONDS` still does not combine with relatives -- measured, GNU
-        // errors on `@0 + 1 day`, and the extraction is placed after the `@`
-        // branch so it cannot start working here.
         assert_eq!(spec("@0 1 day"), None);
-
-        // The control: a word that looks relative but is not a unit stays
-        // refused, so extraction cannot quietly swallow a bad operand.
         assert_eq!(spec("1 banana"), None);
         assert_eq!(spec("next banana"), None);
     }
 
-    /// `TEST_NOW` is **Tuesday** 2021-06-15 12:00:00 UTC.
-    ///
-    /// The target dates and their weekdays were read off GNU
-    /// (`date -u -d 2021-06-22 +%A +%s`), and the RULE the offsets implement
-    /// was measured live against GNU on a Wednesday — the one weekday on
-    /// which `Wednesday` and `next Wednesday` disagree. Neither number here is
-    /// computed by the arithmetic under test.
     #[test]
     fn d_accepts_the_measured_weekday_forms() {
-        // A bare weekday INCLUDES today: Tuesday, on a Tuesday, is today —
-        // at MIDNIGHT, not at `TEST_NOW`'s noon.
         assert_eq!(spec("Tuesday"), Some(1_623_715_200));
-        // `next` forces strictly forward, so on a Tuesday it is +7.
         assert_eq!(spec("next Tuesday"), Some(1_624_320_000));
-        // `last` forces strictly backward: -7, not 0.
         assert_eq!(spec("last Tuesday"), Some(1_623_110_400));
-
-        // A different weekday goes forward, never backward.
         assert_eq!(spec("Wednesday"), Some(1_623_801_600));
         assert_eq!(spec("Monday"), Some(1_624_233_600));
         assert_eq!(spec("last Monday"), Some(1_623_628_800));
         assert_eq!(spec("Friday"), Some(1_623_974_400));
         assert_eq!(spec("last Friday"), Some(1_623_369_600));
-
-        // `next X` and bare `X` agree when X is not today, which is why the
-        // Tuesday rows above are the ones that actually pin the rule.
         assert_eq!(spec("next Wednesday"), spec("Wednesday"));
-
-        // Abbreviations and case, all of which GNU takes.
         assert_eq!(spec("tue"), spec("Tuesday"));
         assert_eq!(spec("TUESDAY"), spec("Tuesday"));
         assert_eq!(spec("tues"), spec("Tuesday"));
         assert_eq!(spec("thurs"), spec("Thursday"));
         assert_eq!(spec("thur"), spec("Thursday"));
         assert_eq!(spec("mon"), spec("Monday"));
-
-        // With an absolute date present GNU IGNORES the weekday rather than
-        // moving to it or checking it — measured, and the reason the branch
-        // that applies one only fires when nothing else is left.
         assert_eq!(
             spec("2021-06-15 12:00:00 Monday"),
             spec("2021-06-15 12:00:00")
         );
-
-        // Controls: a non-weekday word is still refused, and a weekday twice
-        // is refused rather than half-read.
         assert_eq!(spec("Blursday"), None);
         assert_eq!(spec("Monday Tuesday"), None);
     }
 
-    /// `TEST_NOW` is 2021-06-15 12:00:00 UTC; every expected instant below was
-    /// converted by GNU (`date -u -d '2021-06-14 09:00:00' +%s`).
     #[test]
     fn d_accepts_a_day_keyword_with_a_time_and_a_twelve_hour_clock() {
-        // A day keyword moves the calendar day and the time REPLACES the time
-        // of day. Bare `yesterday` keeps the clock instead, and still does --
-        // `keyword_instant` answers the single-token spelling before the
-        // relative extraction is ever reached.
         assert_eq!(spec("yesterday 09:00"), Some(1_623_661_200));
         assert_eq!(spec("tomorrow 17:30"), Some(1_623_864_600));
         assert_eq!(spec("today 09:00"), Some(1_623_747_600));
-        assert_eq!(spec("yesterday"), Some(TEST_NOW - 86_400));
-
-        // The twelves are the whole difficulty: 12 am is MIDNIGHT and 12 pm is
-        // NOON, so the rule is not "add twelve for pm". A version that just
-        // added twelve is right for ten hours in twelve and wrong at both ends
-        // of the day.
         assert_eq!(spec("12 am"), Some(1_623_715_200));
         assert_eq!(spec("12 pm"), Some(1_623_758_400));
         assert_eq!(spec("1 pm"), Some(1_623_762_000));
         assert_eq!(spec("11 am"), Some(1_623_754_800));
         assert_eq!(spec("12:30 pm"), Some(1_623_760_200));
-
-        // Beside a date, and the date wins for the day.
         assert_eq!(spec("2021-06-15 3 pm"), Some(1_623_769_200));
-
-        // Controls, all refused by GNU too: an hour outside 1-12, and the
-        // words that look like they should be keywords and are not.
         assert_eq!(spec("13 pm"), None);
         assert_eq!(spec("0 am"), None);
         assert_eq!(spec("noon"), None);
         assert_eq!(spec("midnight"), None);
-
-        // A bare time means TODAY at that time; an empty operand means today
-        // at MIDNIGHT. Both measured, and they are different rules.
         assert_eq!(spec("05:06:07"), Some(1_623_733_567));
         assert_eq!(spec(""), Some(1_623_715_200));
         assert_eq!(spec("   "), Some(1_623_715_200));
@@ -1694,87 +1156,18 @@ mod tests {
 
     #[test]
     fn d_refuses_what_gnu_refuses() {
-        // These three are the surprises, and each is a harness case:
-        //   `epoch` is not a keyword, `@N` does not combine with relative
-        //   items, and a plain sentence is not a date.
         assert_eq!(spec("epoch"), None);
         assert_eq!(spec("@0 + 1 day"), None);
         assert_eq!(spec("not a date at all"), None);
-
-        // Out-of-range components are REFUSED, not normalised -- the reason
-        // days_in_month exists, since the mktime underneath would carry them.
         assert_eq!(spec("2021-13-04"), None);
         assert_eq!(spec("2021-03-32"), None);
         assert_eq!(spec("2021-02-29"), None, "2021 is not a leap year");
         assert_eq!(spec("2020-02-29"), Some(1_582_934_400), "2020 is");
         assert_eq!(spec("25:00:00"), None);
         assert_eq!(spec("05:60:00"), None);
-
         assert_eq!(spec("@"), None);
         assert_eq!(spec("@notanumber"), None);
         assert_eq!(spec("2021-03-04 2022-03-04"), None, "two dates");
         assert_eq!(spec("05:06:07 08:09:10"), None, "two times");
-    }
-
-    #[test]
-    fn a_plus_operand_is_the_format_and_anything_else_is_an_error() {
-        let cfg = parse_args(&[os("+%Y")]).unwrap();
-        assert_eq!(cfg.shape, Shape::Custom(b"%Y".to_vec()));
-        // A bare operand is not a format.
-        assert!(parse_args(&[os("%Y")]).is_err());
-        // A second one is an error even though the first was valid.
-        assert!(parse_args(&[os("+%Y"), os("+%m")]).is_err());
-    }
-
-    #[test]
-    fn utc_has_three_spellings_and_a_short_one() {
-        for a in ["-u", "--utc", "--universal", "--uct"] {
-            assert!(parse_args(&[os(a)]).unwrap().utc, "{a} should select UTC");
-        }
-        assert!(!parse_args(&[os("+%Y")]).unwrap().utc);
-    }
-
-    #[test]
-    fn rfc_email_has_three_spellings() {
-        for a in ["-R", "--rfc-email", "--rfc-822", "--rfc-2822"] {
-            assert_eq!(parse_args(&[os(a)]).unwrap().shape, Shape::RfcEmail, "{a}");
-        }
-    }
-
-    #[test]
-    fn the_unimplemented_options_say_so_rather_than_doing_nothing() {
-        // `--file` left this list on 2026-09-14: it is implemented now, and
-        // this test is what said so out loud rather than letting the old
-        // refusal sit behind a working option.
-        for a in ["--set=x", "--debug", "--resolution"] {
-            let e = parse_args(&[os(a)]).unwrap_err();
-            assert!(e.contains("not implemented"), "{a} gave {e}");
-        }
-        let cfg = parse_args(&[os("--file=x")]).unwrap();
-        assert_eq!(cfg.when, When::Lines(os("x")));
-    }
-
-    #[test]
-    fn f_is_a_date_source_and_collides_with_the_others() {
-        // Measured: all three pairings refuse, in both orders.
-        for args in [
-            vec![os("-f"), os("a"), os("-d"), os("@0")],
-            vec![os("-d"), os("@0"), os("-f"), os("a")],
-            vec![os("-f"), os("a"), os("-r"), os("b")],
-        ] {
-            let e = parse_args(&args).unwrap_err();
-            assert!(e.contains("mutually exclusive"), "{args:?} gave {e}");
-        }
-    }
-
-    #[test]
-    fn epoch_resolves_without_consulting_the_clock() {
-        // The whole defect this file existed to fix: -d @0 must not be "now".
-        let utc = Zone::utc();
-        assert_eq!(resolve(&When::Spec(os("@0")), &utc).unwrap(), (0, 0));
-        assert_eq!(
-            resolve(&When::Spec(os("@1000000000")), &utc).unwrap(),
-            (1_000_000_000, 0)
-        );
     }
 }

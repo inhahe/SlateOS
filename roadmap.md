@@ -4107,15 +4107,23 @@ _Port ext4 first. Don't write a custom filesystem._
     **Nothing of GNU 9.4 is missing** that has something here to act on. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
     `LD_PRELOAD` into a dynamically linked program). `[` is `test` under another name and needs only the image alias. None
     ships until lane D lists it: `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.
-- [ ] `[B]` The gaps *inside* ported programs, found 2026-09-25 while making `POSIXLY_CORRECT` stop option parsing
+- [x] `[B]` The gaps *inside* ported programs, found 2026-09-25 while making `POSIXLY_CORRECT` stop option parsing
   where glibc's getopt stops it (done: `known-issues.md` → `TD-B-COREUTILS-GETOPT-IGNORED-POSIXLY-CORRECT`). Each is
-  tracked in `known-issues.md`. Still open: `touch -d` refused as unimplemented
-  (`TD-B-TOUCH-REFUSES-DASH-T-AND-DASH-D` -- gnulib's `parse-datetime.y` as a shared module, replacing the measured
-  subsets `date -d` and `find -newerXt` carry). Done the same day: `touch -t` through `coreutils::posixtm`; `tail +N`
+  tracked in `known-issues.md`. The last, `touch -d` (`TD-B-TOUCH-REFUSES-DASH-T-AND-DASH-D`), closed with gnulib's
+  `parse-datetime.y` as `coreutils::parse_datetime` -- GNU's own Bison tables, and glibc's `mktime` in `localtime`
+  (`design-decisions.md` §1031) -- which also replaced the measured subsets `date -d` and `find -newerXt` carried and
+  let `date` take `--debug`, `--resolution` and `-s`; checked by `scripts/parse-datetime-diff.sh`. Done the same day:
+  `touch -t` through `coreutils::posixtm`; `tail +N`
   and the pre-2001 bare `-`/`-c` follow `_POSIX2_VERSION`; `touch` asks the kernel for *now* rather than writing the
   clock, so a writer who does not own a file can stamp it (`B-TOUCH-WROTE-NOW-AS-A-CHOSEN-TIME`); `diff`, `patch` and
   `hostname` are on the shared `getopt` (`TD-B-DIFF-PATCH-HOSTNAME-PARSE-ARGV-BY-EXACT-MATCH`), which also fixed
   `patch ORIGFILE PATCHFILE` doing nothing (`B-PATCH-ORIGFILE-PATCHFILE-EXITS-0-HAVING-DONE-NOTHING`).
+- [ ] `[B]` What the date parser's harness found in `localtime`, beneath it: `strftime` prints a year outside
+  1000-9999 bare where gnulib's `nstrftime` pads and signs it (`TD-B-LOCALTIME-STRFTIME-DOES-NOT-PAD-YEARS`), and `TZ`
+  is resolved unlike glibc -- empty is not UTC, a POSIX rule is tried before a zoneinfo file, a rule that half-parses
+  is refused rather than kept, `posixrules` is not consulted, and a rule's transitions before 1970 are the year's own
+  rather than 1970's (`TD-B-LOCALTIME-RESOLVES-TZ-DIFFERENTLY-FROM-GLIBC`). Every program that prints a time reads
+  both.
 - [x] Port rsync (replaces robocopy need) — Rust implementation: recursive, archive mode, checksums, delete, exclude/include, dry-run, progress, stats
 - [x] Port curl — Rust HTTP/1.1 client: GET/POST/PUT/DELETE/HEAD/PATCH, auth, cookies, redirects, chunked, progress, -o/-O, verbose
 - [x] Port ssh/sshd — Rust SSH-2 client: version exchange, key exchange, password auth, interactive session, host key verification; exits with the *remote* command's status and writes remote stderr to local stderr, per `ssh(1)` (2026-08-21 — both were silently discarded before; `known-issues.md` → `B-SSH-CLIENT-DISCARDED-THE-REMOTE-EXIT-STATUS-AND-ALL-OF-STDERR`). "Host key verification" became true on 2026-08-21: the client now verifies the server's `ssh-ed25519` signature over the exchange hash (`posix::ed25519`) *before* consulting `known_hosts`, refuses any host-key algorithm it cannot verify, range-checks the server's DH value per RFC 4253 §8, and draws both the DH private exponent and the KEXINIT cookie from `posix::random`. Previously it read the signature blob and threw it away unread, prompted about the fingerprint before the exchange hash even existed, and derived its DH exponent from two compile-time constants — identical in every copy of the binary — so the whole `known_hosts` mechanism was decorative and the session key was public. `known-issues.md` → `B-THE-SSH-STACK-AUTHENTICATED-NOBODY`. Interactive shell sessions depend on the *server* having a pty — see the sshd line further down.

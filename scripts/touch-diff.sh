@@ -48,15 +48,11 @@
 #
 # ## Cases that differ on purpose
 #
-# The family's two — `--help` omits the GNU project's `Report bugs to:` block
-# (and the `-d`/`-t` lines, which this implementation does not have), and
-# `--version` names SlateOS — and then one per option GNU has and this `touch`
-# has not. That second group is an inventory, not a permission: `xfail_case`
-# reports an XPASS the moment one starts agreeing, which is what will force it
-# to be promoted to a real case when `-d` and `-t` land. `touch.rs`'s module
-# docs explain why those two are *refused* rather than ignored — ignoring `-d`
-# stamps the file with now instead of with the time that was asked for, which
-# is precisely the state the caller was trying to leave.
+# The family's two: `--help` omits the GNU project's `Report bugs to:` block,
+# and `--version` names SlateOS. There were once more -- one per option GNU
+# had and this `touch` did not -- and each was an `xfail_case` so that it
+# would XPASS, and be promoted to a real case, the moment it started agreeing.
+# `-t` and `-d` both have; none is left.
 #
 # ## The reference is built, not found
 #
@@ -320,7 +316,6 @@ xfail_case() {
   return 0
 }
 
-missing() { xfail_case "not implemented by this touch" "$@"; }
 
 echo "touch-diff:"
 echo "  ours: $OURS"
@@ -610,23 +605,46 @@ run_case -a /dev/null
 run_case -m /dev/null
 run_case -t 202001010000 /dev/null
 
-# `-d` still needs the rest of gnulib's `parse_datetime` (`known-issues.md` →
-# `TD-B-TOUCH-REFUSES-DASH-T-AND-DASH-D`). The value is passed even though the
-# option is refused, because `-d` is declared as taking one: that is what makes
-# `touch -d` answer `option requires an argument` rather than jumping to the
-# refusal, and what stops the `2001-01-01` in `touch -d 2001-01-01 f` being left
-# behind to be created as a file.
-
-missing -d now file
-missing --date=now file
-missing --date now file
-missing -d '@1000000000' newfile
+# `-d` is gnulib's `parse_datetime`, ported as `coreutils::parse_datetime`.
+# The language itself is `parse-datetime-diff.sh`'s subject; these rows are
+# `touch`'s use of it. Both halves and one half; nanoseconds kept; relative to
+# `-r`'s times rather than the clock's, one half at a time; the last `-d`
+# winning; `-d` with `-t` refused; and `-d now`, which upstream turns back into
+# the kernel's *now* when both halves are set -- so that, like a bare `touch`,
+# it needs only write permission, and succeeds on `/dev/null` where an
+# explicit time, even one a second old, needs the owner.
+run_case -d now file
+run_case --date=now file
+run_case --date now file
+run_case -d '@1000000000' newfile
+run_case -d '@1000000000.123456789' file
+run_case -d '2001-02-03 04:05:06.5' file
+run_case -a -d '@1000000000' file
+run_case -m -d '@1000000000' file
+run_case -d '@1' -d '@1000000000' file
+run_case -r file -d '+1 day' newfile
+run_case -a -r file -d '1 hour ago' newfile
+run_case -m -r file -d '@1000000000' newfile
+run_case -d bogus file
+run_case -d bogus
+run_case -d now /dev/null
+run_case -d today /dev/null
+run_case -a -d now /dev/null
+run_case -d '1 second ago' /dev/null
+run_case -d now -t 202001010000 file
+run_case -t 202001010000 -d now file
+ENVV=(TZ=America/New_York); run_case -d '2021-11-07 01:30' file
+ENVV=(TZ=America/New_York); run_case -d '2021-03-14 02:30' file
+ENVV=(TZ=UTC0); run_case -d 'TZ="Asia/Tokyo" 2021-06-15 09:00' file
+# `-d now` beside the obsolete operand: *now* is not `date_set`, so the operand
+# is still read as a date.
+ENVV=(_POSIX2_VERSION=199209); run_case -d now 0101000070 file
 
 # =============================================================================
 # 12. --help and --version
 # =============================================================================
 
-xfail_case 'help omits the -d line and GNU bug-report block' --help
+xfail_case 'help omits the GNU bug-report block' --help
 xfail_case 'version names SlateOS' --version
 # Measured: an option *after* `--help` is never looked at, while one before it
 # is an error. Both sides agree on the second, so it is a real case.

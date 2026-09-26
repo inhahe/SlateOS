@@ -1645,19 +1645,24 @@ fn to_timespec(when: When) -> CTimespec {
         },
         Err(before) => {
             let back = before.duration();
-            let secs = i64::try_from(back.as_secs()).unwrap_or(i64::MAX);
+            // `0 - secs` exactly: 2^63 seconds back is `i64::MIN`, which
+            // negating an `i64` cannot produce.
+            let whole = 0i64
+                .checked_sub_unsigned(back.as_secs())
+                .unwrap_or(i64::MIN);
             let nanos = i64::from(back.subsec_nanos());
             if nanos == 0 {
                 CTimespec {
-                    tv_sec: secs.checked_neg().unwrap_or(i64::MIN),
+                    tv_sec: whole,
                     tv_nsec: 0,
                 }
             } else {
                 // Borrow a second so `tv_nsec` stays non-negative: 0.5 s before
                 // the epoch is (-1 s, +500_000_000 ns), not (0 s, -500_000_000).
                 CTimespec {
-                    tv_sec: secs.saturating_add(1).checked_neg().unwrap_or(i64::MIN),
-                    tv_nsec: 1_000_000_000 - nanos,
+                    tv_sec: whole.saturating_sub(1),
+                    // `nanos` is 1..1e9 here, so this is too.
+                    tv_nsec: 1_000_000_000_i64.saturating_sub(nanos),
                 }
             }
         }
@@ -1762,6 +1767,32 @@ mod tests {
         let pair = to_timespecs(Times::now());
         assert_eq!(pair[0].tv_nsec, UTIME_NOW);
         assert_eq!(pair[1].tv_nsec, UTIME_NOW);
+    }
+
+    /// The most negative instant is `i64::MIN` seconds, one past what negating
+    /// an `i64` reaches -- `touch -d @-9223372036854775808` asks for it, and
+    /// the kernel, not this conversion, is what clamps it to the filesystem's
+    /// range. Only a 64-bit `timespec` `SystemTime` can hold it.
+    #[cfg(unix)]
+    #[test]
+    fn the_most_negative_instant_converts_exactly() {
+        let back = Duration::from_secs(i64::MIN.unsigned_abs());
+        let at = SystemTime::UNIX_EPOCH.checked_sub(back).unwrap();
+        assert_eq!(
+            to_timespec(When::Set(at)),
+            CTimespec {
+                tv_sec: i64::MIN,
+                tv_nsec: 0,
+            }
+        );
+        let later = at.checked_add(Duration::new(0, 250_000_000)).unwrap();
+        assert_eq!(
+            to_timespec(When::Set(later)),
+            CTimespec {
+                tv_sec: i64::MIN,
+                tv_nsec: 250_000_000,
+            }
+        );
     }
 
     /// An omitted time is the `UTIME_OMIT` sentinel, which is what makes

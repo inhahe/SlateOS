@@ -1243,6 +1243,15 @@ says so. 21 of the remaining 42 are those refusals.
 > `@0 + 1 day` is an error, and `-d ''` means today at midnight. Anything the
 > probe did not confirm (`2 weeks ago`, `next Friday`) is still refused.
 > `-s`, `--debug` and `--resolution` remain refused.
+>
+> **Superseded again 2026-09-25 -- nothing is refused.** `-d` and `-f` are
+> gnulib's own `parse-datetime.y` (`coreutils::parse_datetime`), so there is no
+> longer a list of forms the probe confirmed; `--debug` prints upstream's
+> annotations, `--resolution` the clock's, and `-s` sets the clock through
+> `clock_settime` (an ordinary user gets GNU's `cannot set date: Operation not
+> permitted`, and the date is printed anyway). `date.rs`'s `main` is now
+> `date.c`'s, check for check, so a bad command line gets GNU's error in GNU's
+> order.
 
 *`scripts/check-argv-ignored.py`'s baseline is now empty* — both bins it was
 written for are fixed, and the gate stands as a ratchet against the next one.
@@ -149295,7 +149304,7 @@ move together.
 
 ---
 
-## TD-B-DATE-A-SIGNED-RELATIVE-AFTER-A-BARE-TIME-IS-A-ZONE-TO-GNU (lane B, 2026-09-16) — **open**
+## TD-B-DATE-A-SIGNED-RELATIVE-AFTER-A-BARE-TIME-IS-A-ZONE-TO-GNU (lane B, 2026-09-16) — FIXED 2026-09-25
 
 **In short:** `date -d '2021-06-15 12:00:00 +1 day'` works on GNU and is
 refused by ours. The `+1` there is not "plus one" — GNU reads a signed number
@@ -149338,6 +149347,13 @@ control that the fix did not disturb the forms that already work.
 **Severity: low.** One operand shape, refused rather than mis-answered, with
 three spellings that do work (`1 day` unsigned, `UTC +1 day`, and any relative
 on a date with no time).
+
+**How it was closed.** Not by interleaving the two passes, but by replacing the
+hand-written parser with GNU's: `coreutils::parse_datetime` runs the Bison
+tables of `parse-datetime.y`, where this is a shift/reduce conflict resolved in
+favour of the zone, so every row of the table above now agrees with GNU. The
+harness row is a `run_case` again, with its `-1 day` and `UTC +1 day`
+neighbours beside it.
 
 ---
 
@@ -166087,7 +166103,7 @@ upstream has and it does not, instead of calling them invalid.
   system cannot yet answer) and net-tools' way of refusing -- usage on stdout
   and exit 255 -- which this `hostname` does not copy.
 
-## TD-B-TOUCH-REFUSES-DASH-T-AND-DASH-D (lane B, 2026-09-25) — **open** for `-d`; `-t` fixed 2026-09-25
+## TD-B-TOUCH-REFUSES-DASH-T-AND-DASH-D (lane B, 2026-09-25) — FIXED 2026-09-25 (`-t` and `-d`)
 
 **In short:** `touch -d '2020-01-01 12:00' f` -- one of the two ways to give a
 file a chosen time rather than now -- answers `option -d is not implemented by
@@ -166121,6 +166137,20 @@ lost. `touch -r FILE -d REL` then needs the reference time's nanoseconds kept
 through the relative items, as upstream's `date_relative` keeps them, and `-d
 now` needs upstream's special case that turns it back into `UTIME_NOW`.
 
+**How `-d` was closed.** Exactly as above: `coreutils::parse_datetime` is
+gnulib's `parse-datetime.y` -- the Bison tables coreutils 9.4 ships, copied by
+`gen_tables.py`, with `yacc.c`'s driver, the actions, the lexer and
+`parse_datetime_body`, over a port of glibc's `mktime` in `localtime`
+(`design-decisions.md` §1031). `touch` reads `-d` after the options, as upstream
+does: relative to each of `-r`'s times when `-r` is given, else to the clock,
+nanoseconds kept, and `-d now` turned back into the kernel's *now* when both
+halves are set -- checked by a second parse against a clock one second away, as
+upstream checks it. `-d` with `-t` is `cannot specify times from more than one
+source`. `date -d` and `find -newerXt` dropped their subsets for the same
+module. Pinned by `scripts/parse-datetime-diff.sh` (the corpus through `touch
+-r REF -d`, `date -d`, `date --debug` and `date -f`, in five zones) and the new
+`-d` rows of `touch-diff.sh`.
+
 ## B-TOUCH-WROTE-NOW-AS-A-CHOSEN-TIME (lane B, 2026-09-25) — FIXED 2026-09-25
 
 **In short:** `touch f` on a file its user may write but does not own --
@@ -166141,3 +166171,86 @@ was given. The descriptor path (`touch -`) calls `futimens` directly, because
 `std`'s `File::set_times` has no way to say *now*; the Windows arm reads the
 clock, which loses only a permission rule that host does not have. Pinned by
 `touch-diff.sh`'s `/dev/null` rows and `fsattr`'s `now_is_the_other_sentinel`.
+
+## TD-B-LOCALTIME-RESOLVES-TZ-DIFFERENTLY-FROM-GLIBC (lane B, 2026-09-25) — **open**
+
+**In short:** every program that prints a time reads `TZ` through
+`localtime::Zone::resolve`, whose module docs say it follows glibc's four
+rules. Two of them are not glibc's. `TZ=` (set but empty) is *UTC* to glibc,
+spelled `Universal`; ours reads `/etc/localtime`. And for a value that is both
+a zoneinfo file and a POSIX rule -- `EST5EDT`, `CST6CDT`, `MST7MDT`, `PST8PDT`
+-- glibc tries the **file first**; ours parses the rule first. So `TZ= date`
+prints the machine's zone instead of UTC, and `TZ=EST5EDT date -d
+'2000-03-20 12:00'` says EDT (2007's rules) where GNU says EST (the file's
+history).
+
+**Measured** in WSL (glibc 2.39, `/etc/localtime` → America/New_York):
+
+| command | GNU | ours |
+|---|---|---|
+| `TZ= date +%Z%z` | `Universal+0000` | `EDT-0400` |
+| `TZ=EST5EDT date -d '2000-03-20 12:00' +%Z` | `EST` | `EDT` |
+| `TZ=EST5EDT,M3.2.0,M11.1.0 date -d '2000-03-20 12:00' +%Z` | `EDT` | `EDT` |
+
+**What glibc actually does** (`time/tzset.c`, `tzset_internal` and
+`__tzset_parse_tz`; `time/tzfile.c`, `__tzfile_read`):
+
+1. Unset: `/etc/localtime`; if that cannot be read, UTC named `UTC`.
+2. Empty: the name `Universal`, then as below.
+3. A leading `:` is dropped.
+4. **A file is tried first**, as `TZDIR/NAME` (or the absolute path).
+5. Only if there is none, the POSIX rule -- and a rule that fails part-way
+   keeps what it parsed: a standard name of three or more letters survives an
+   offset that does not parse (`TZ=Foo/Bar` is UTC *named `Foo`*), and a rule
+   with a DST name but no transition dates takes them from `posixrules` if
+   that file exists, else the US rules. Measured: `TZ=AAA3BBB` follows New
+   York's *history* (1974's year-round DST, 1990's April start), and after the
+   file's last transition uses New York's own footer, names and offsets
+   included -- `TZ=AAA3BBB date -d 2040-07-01` says `EDT -0400`.
+6. A POSIX rule's transitions for any year up to 1970 are computed from
+   1970-01-01 (`compute_change`: `if (year > 1970) … else t = 0`), so under a
+   northern rule no instant before 1970 is daylight time, and under a southern
+   one every such instant is. `TZ='CET-1CEST,M3.5.0,M10.5.0/3' date -d
+   0021-06-15` is CET to glibc and CEST to us -- and the instant differs by the
+   hour. `localtime` computes each year's own transitions.
+
+**Where:** `userspace/localtime/src/lib.rs`, `Zone::resolve` (rules 1 and 3 of
+its module docs), and `tzrules::Tz::parse`, which refuses rather than keeps a
+partial rule (and refuses an hour over 24 where glibc clamps it).
+
+**The proper fix** is to make `resolve` glibc's order -- empty is `Universal`,
+file before rule -- and to give it glibc's fallback for a rule that does not
+fully parse. The part that lives in `tzrules` is not lane B's (it is no lane's;
+A-Q11), so the partial-rule fallback belongs in `localtime`, built from
+`tzrules`' pieces, unless its owner takes it. `scripts/parse-datetime-diff.sh`
+avoids the affected `TZ` values until then, and says so in its header.
+
+**Severity: medium.** Silent and wrong rather than refused, but confined to
+`TZ` values that are empty, invalid, or one of four legacy names -- and `TZ=`
+is plausible in a script.
+
+## TD-B-LOCALTIME-STRFTIME-DOES-NOT-PAD-YEARS (lane B, 2026-09-25) — **open**
+
+**In short:** `date -d 0021-06-15 +%F` prints `21-06-15` where GNU prints
+`0021-06-15`, and `date -d 10000-01-01 +%F` prints `10000-01-01` where GNU
+prints `+10000-01-01`. Every year from 1000 to 9999 is unaffected, which is
+why nothing noticed until `date -d` could reach year 21 at all.
+
+**Where:** `userspace/localtime/src/lib.rs`, `strftime`: `%Y` and `%G` are
+`push_int` (the bare number, no width, no padding), and `%F` is
+`strftime("%Y-%m-%d")`. gnulib's `nstrftime` -- which coreutils uses instead of
+the C library's -- formats every year through `DO_YEARISH`: at least four
+digits, zero-padded, a sign when negative, and under the `+` flag a `+` for a
+year that needs more digits than the width. `%F` is `%+4Y-%m-%d`, run as a
+sub-format that inherits the caller's flags and width (`%_12F`), and `%C`,
+`%y` and `%g` are `DO_YEARISH (2, …)` with their own sign rules.
+
+**The proper fix** is to port `DO_YEARISH` and the sign-and-padding step it
+shares with `DO_NUMBER` (`do_number_sign_and_padding`), and to run `%F` (and
+`%D`, `%T`, `%R`, `%r`, `%c`, `%x`, `%X`) as nstrftime's sub-formats rather than
+as a recursive call that forgets the flags. `date-diff.sh`'s
+`TD-B-LOCALTIME-STRFTIME-DOES-NOT-PAD-YEARS` rows turn green when it is right.
+
+**Severity: low.** Years before 1000 and after 9999 only -- but silently wrong
+where it applies, and ISO 8601 (`%F`) is the format a script is most likely to
+parse back.

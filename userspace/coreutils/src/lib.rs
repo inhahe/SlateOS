@@ -473,6 +473,9 @@
 //! - [`ls`] — `ls`, `dir` and `vdir`: `ls.c` built three times.
 //! - [`mbswidth`] — gnulib's `mbswidth`, the columns a string occupies, for
 //!   `df`'s column widths and `pr`'s centred page header.
+//! - [`parse_datetime`] — gnulib's `parse-datetime`, the date language of
+//!   `date -d`, `touch -d` and `find -newermt`: upstream's Bison tables and
+//!   actions, not a reimplementation of the forms they accept.
 //! - [`posixtm`] — gnulib's `posixtm`, the `[[CC]YY]MMDDhhmm[.ss]` stamps
 //!   of `touch -t` and the obsolete `touch MMDDhhmm[YY]` operand.
 //! - [`posixver`] — gnulib's `posix2_version`, the POSIX edition
@@ -511,6 +514,7 @@ pub mod locale;
 pub mod ls;
 pub mod mbswidth;
 pub mod overwrite;
+pub mod parse_datetime;
 pub mod pathname;
 pub mod posixtm;
 pub mod posixver;

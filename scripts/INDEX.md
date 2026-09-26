@@ -245,6 +245,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/osh-diff.sh` | osh-diff.sh — run the shell corpus against *glibc* bash, inside WSL. |
 | `scripts/p37-check.sh` | _(no summary line)_ |
 | `scripts/p38-check.sh` | Path Z Part 38 — separate compilation validation against the IMAGE's tcc. |
+| `scripts/parse-datetime-diff.sh` | parse-datetime-diff.sh — GNU's date language, ours against coreutils 9.4's. |
 | `scripts/paste-diff.sh` | Differential test: our paste against GNU paste. |
 | `scripts/paste-probe.py` | Ad-hoc measurement of GNU `paste`. Not part of the build; kept only so the |
 | `scripts/patch-diff.sh` | Differential test: our `patch` against GNU patch. |
@@ -416,4 +417,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_406 scripts._
+_407 scripts._

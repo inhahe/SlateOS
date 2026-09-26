@@ -175,6 +175,21 @@ run_case -d @1000000000 '+%'
 run_case -d @1000000000 '+%Q'
 run_case -d @1000000000 '+a%Yb%mc'
 
+# --- years outside 1000-9999 ----------------------------------------------------------------------------
+# gnulib's `nstrftime` pads a year to four digits (`%Y` of year 21 is `0021`),
+# and `%F` is `%+4Y-%m-%d`, which also signs a year past 9999 (`+10000`). Ours
+# printed the bare number; the date parser port made these reachable
+# (`date -d 0021-06-15`), and `parse-datetime-diff.sh` found them.
+known_bug_case TD-B-LOCALTIME-STRFTIME-DOES-NOT-PAD-YEARS -d 0021-06-15 +%Y
+known_bug_case TD-B-LOCALTIME-STRFTIME-DOES-NOT-PAD-YEARS -d 0021-06-15 +%F
+known_bug_case TD-B-LOCALTIME-STRFTIME-DOES-NOT-PAD-YEARS -d 0021-06-15 +%G
+known_bug_case TD-B-LOCALTIME-STRFTIME-DOES-NOT-PAD-YEARS -d 10000-01-01 +%F
+run_case -d 10000-01-01 +%Y
+run_case -d 10000-01-01 +%C
+run_case -d 0021-06-15 +%C
+run_case -d 0021-06-15 +%y
+run_case -d 0021-06-15 +%g
+
 # --- the canned formats -----------------------------------------------------------------
 run_case -R -d @1000000000
 run_case --rfc-email -d @1000000000
@@ -240,11 +255,13 @@ run_case -d '2021-01-31 1 month' +%s
 run_case -d '2021-03-31 1 month ago' +%s
 # A signed relative after a BARE time is a zone offset to GNU, not a
 # displacement: `12:00:00 +1 day` is one day later at UTC+1, and
-# `12:00:00 -1 day` is also one day LATER, at UTC-1. We refuse both rather
-# than answer a different number, so this row is a known bug and not an xfail
-# -- we intend to close it, which is what makes it debt.
-known_bug_case TD-B-DATE-A-SIGNED-RELATIVE-AFTER-A-BARE-TIME-IS-A-ZONE-TO-GNU \
-  -d '2021-06-15 12:00:00 +1 day' +%s
+# `12:00:00 -1 day` is also one day LATER, at UTC-1. The hand-written parser
+# refused both (TD-B-DATE-A-SIGNED-RELATIVE-AFTER-A-BARE-TIME-IS-A-ZONE-TO-GNU);
+# GNU's own grammar decides it by a shift/reduce conflict, which the port of
+# `parse-datetime.y` inherits.
+run_case -d '2021-06-15 12:00:00 +1 day' +%s
+run_case -d '2021-06-15 12:00:00 -1 day' +%s
+run_case -d '2021-06-15 12:00:00 UTC +1 day' +%s
 # The neighbours that must NOT move: `-90 seconds` there is refused by GNU too,
 # a real zone offset still parses, and without a time the relative works.
 run_case -d '2021-06-15 12:00:00 -90 seconds' +%s
@@ -291,13 +308,58 @@ run_case -f empty.txt
 run_case -f /nosuch
 run_case -f
 
-# --- refusals -------------------------------------------------------------------------------------
+# --- refusals, in upstream's order ---------------------------------------------------------------
 run_case -Q
 run_case --nosuchoption
 run_case -d @0 extra
 run_case '+%F' extra
+run_case '+%F' extra more
+run_case extra more
 run_case --set
 run_case -d @0 -r stamped.txt
+run_case -d @0 --resolution
+run_case -f dates.txt -r stamped.txt
+# A getopt error is reported before a conflict, which is checked after the loop.
+run_case -d @0 -r stamped.txt -Q
+# A second output format is refused where it appears -- even the same one.
+run_case -R -I
+run_case -R -R
+run_case -Iseconds --rfc-3339=date
+run_case -R -d @0 '+%s'
+# Printing and setting do not mix.
+run_case -s @0 -d @0
+run_case -s @0 -r stamped.txt
+# An instant `localtime` cannot hold.
+run_case -d @99999999999999999
+run_case -d @99999999999999999 +%s
+
+# --- --debug, on instants that do not read the clock ------------------------------------------------
+run_case --debug -d '2021-06-15 12:00:00' +%s
+run_case --debug -d '2021-06-15 12:00:00 +0530' +%s
+run_case --debug -d '2021-01-31 12:00 1 month' +%s
+run_case --debug -d '@1.5' +%s
+run_case --debug -d 'junk' +%s
+run_case --debug -d '2021-02-29' +%s
+run_case --debug -d 1 -d @0 +%s
+run_case --debug -r stamped.txt
+run_case --debug -f dates.txt
+
+# --- --resolution and %-N -------------------------------------------------------------------------------
+run_case --resolution
+run_case --resolution +%N
+run_case -d @1.5 '+%-N'
+run_case -d @1.5 '+%%-N %-N'
+
+# --- -s, which an ordinary user may not do: both refuse, and both print the date anyway ---------------
+# Never as root, where it would set the clock.
+if [ "$(id -u)" != 0 ]; then
+  run_case -s @0
+  run_case -s '2021-06-15 12:00' +%s
+  run_case -s junk
+  run_case 0101000070
+  run_case -u 010100002021.30
+fi
+run_case 13010000
 
 # --- long-option abbreviation -----------------------------------------------------------------------
 run_case --dat=@0

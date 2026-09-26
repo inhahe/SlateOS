@@ -546,6 +546,22 @@ touches_nl='
 
 # Decide how `touches` will answer for this push: `none` (nothing is being
 # published), `list` (from `touches_paths`), or `git` (ask on every call).
+# Every path a commit of this push changes, one per line, from one git process:
+# the published commits (reachable from $pushed_shas and from no ref of the
+# remote), each against its parent. --root: a root commit's paths count, as
+# rev-list counts them, whatever log.showRoot says. --no-renames: a rename
+# changes both of its paths. core.quotePath=false: only names git cannot print
+# as themselves are quoted. Merge commits list no paths: what a merge brings in
+# was judged where it was written. Shared by `touches_prepare` and the
+# paired-suite gate, so the two cannot drift apart again.
+pushed_paths() {
+    [ -n "$pushed_shas" ] || return 0
+    # shellcheck disable=SC2086
+    git -c core.quotePath=false log $pushed_shas \
+        --no-renames --root --name-only --format= \
+        --not --remotes="$remote_name" -- 2>/dev/null
+}
+
 touches_prepare() {
     touches_mode=git
     if [ -z "$pushed_shas" ]; then
@@ -561,10 +577,7 @@ touches_prepare() {
     # log.showRoot says. --no-renames: a rename changes both of its paths.
     # core.quotePath=false: only names git cannot print as themselves are
     # quoted, and those send the push to git below.
-    # shellcheck disable=SC2086
-    touches_paths=$(git -c core.quotePath=false log $pushed_shas \
-                        --no-renames --root --name-only --format= \
-                        --not --remotes="$remote_name" -- 2>/dev/null) || return 0
+    touches_paths=$(pushed_paths) || return 0
     touches_paths="$touches_nl$touches_paths$touches_nl"
     case $touches_paths in
         *"$touches_nl\""*) touches_paths=""; return 0 ;;
@@ -1253,11 +1266,20 @@ note_gate tooling-suites "$skip_suites"
 suites_failed=0
 suites_ran=""
 if [ "$skip_suites" != "1" ]; then
-    # The same revision range `touches` uses, turned into file names.
-    # `git diff` does not understand `--not --remotes`; that is rev-list
-    # syntax, so the commits are listed first and then asked for their paths.
-    # shellcheck disable=SC2086
-    changed_scripts=$(git rev-list $pushed_shas --not --remotes="$remote_name"                           2>/dev/null                       | xargs -r git diff-tree --no-commit-id --name-only -r                           2>/dev/null                       | grep -E '^scripts/' | sort -u)
+    # The same revision range `touches` uses, turned into file names -- by the
+    # same command `touches_prepare` uses (`pushed_paths`), which lists every
+    # published commit's paths in one process.
+    #
+    # It used to be `git rev-list ... | xargs -r git diff-tree ...`, which is
+    # right for ONE commit and wrong for more: `git diff-tree A B` compares two
+    # trees rather than each commit with its parent, and with three or more it
+    # is a usage error. Both were silenced by `2>/dev/null`, so every push of
+    # two or more commits found "no scripts/*.py in this push has a paired
+    # test suite" and ran none -- this gate's whole promise, off, on the pushes
+    # that carry the most change. Found 2026-09-26 on a six-commit push whose
+    # new suite (test-check-release-staleness.py) never ran here;
+    # scripts/test-pre-push-suites-scope.py holds it now.
+    changed_scripts=$(pushed_paths | grep -E '^scripts/' | sort -u)
     # PAIRED BY STEM, NOT BY EXTENSION.
     #
     # `scripts/foo.py`, `scripts/foo.sh` and an extensionless `scripts/hooks/foo`
@@ -1310,8 +1332,7 @@ if [ "$skip_suites" != "1" ]; then
     # follow `test-<basename>`: the subject is `pre-push` and they are
     # `test-pre-push-gates`, `-fmt-gate`, `-doclinks-gate`, `-identity-gate`,
     # `-unixhalf-gate` and `-run-checker`.
-    # shellcheck disable=SC2086
-    if git rev-list $pushed_shas --not --remotes="$remote_name" 2>/dev/null         | xargs -r git diff-tree --no-commit-id --name-only -r 2>/dev/null         | grep -q '^scripts/hooks/pre-push$'
+    if pushed_paths | grep -q '^scripts/hooks/pre-push$'
     then
         for suite in "${repo_root:-.}"/scripts/test-pre-push-*.py; do
             [ -f "$suite" ] || continue

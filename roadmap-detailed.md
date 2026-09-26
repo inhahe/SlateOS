@@ -596,6 +596,15 @@ _Four workload profiles: Desktop (default, interactive/responsive), Database (hi
 - [x] Process/thread pause while running
 - [x] Process/thread resume while running
 - [x] Process/thread priority change while running
+- [ ] **A default priority per program, remembered.** _Proposed by the operator, 2026-09-26; `design.txt` already asks for per-application I/O priorities kept "in the registry" and overridable by the user._ The user can attach a default priority — CPU, and the I/O priority `resource.io_priority` governs — to:
+  - an **executable** (by path, and also by package identity, so the rule survives an update that moves the file);
+  - an **application** as a whole (every executable a package installs);
+  - a **launcher entry** — a desktop icon, pinned taskbar app or Start menu item (§3.4; whatever form those entries take, they are where a "link file" setting belongs);
+  - a **launch parameter** — a `--priority` on the shell's launch command and a field in the program-launch API, for one launch only.
+  - [ ] **One precedence order**, most specific first: launch parameter > launcher entry > the user's rule for the executable > the user's rule for the application > a system-wide rule > the application's own declared default > inherited from the parent.
+  - [ ] **Applied where every launch passes**, at process creation, so it holds however the program is started — shell, desktop, or another program — and not only from the launchers that know about it.
+  - [ ] **Lowering is always allowed; raising is not free.** A rule that sets a priority above normal, or into the realtime band, is accepted only if the user setting it holds the grant that level needs (`proc.priority_other`, and the elevated grant for realtime) — a rule file must not become a way to launder priority.
+  - [ ] **Set it where the priority is seen:** Settings → per-app priority, and in the task manager next to the running process ("Always use this priority for this program"). Precedents: Windows' per-executable `PerfOptions` (`CpuPriorityClass`, `IoPriority`) and Process Lasso's remembered priorities; on Linux, `ananicy`, and systemd units' `Nice=`/`CPUWeight=`.
 - [x] Workload profile presets for scheduler parameters
 - [x] Benchmark: pick_next_task must be O(1) or O(log n), never O(n)
 - [x] Benchmark: context switch target < 5us (Linux: 1-3us) — measured 67ns WHPX, 398ns TCG
@@ -872,6 +881,8 @@ _Scoping mechanics: the grant carries a list of extension strings (or `*` if the
 - [ ] `access.automate` — emulate mouse/keyboard input to other programs
 - [ ] `access.read_screen` — read screen content of other windows
 - [ ] `access.window_control` — move/resize/close other windows
+- [ ] `automation.headless` — create private headless sessions and launch programs into them; `automation.headless_frames` / `automation.headless_input` — read the rendered frames of, and inject input into, a headless session the grantee controls (§4.13 → Headless Sessions)
+- [ ] `automation.background` — drive a program in the user's visible session through its widget tree without taking the user's focus or pointer; the target always shows a "being automated" indicator (§4.13 → Headless Sessions)
 - [ ] Dedicated accessibility capability class — ensure capability model doesn't block accessibility tools
 
 #### Capability Types — Resource Limits
@@ -1480,9 +1491,12 @@ a direct user gesture and needs none of them._
   osh as the exact-bash escape hatch and the intended on-device differential
   oracle (§305).
 - [ ] Port Nushell as default interactive shell (Rust, structured data piping)
+- [ ] **xonsh as an optional shell** (<https://xon.sh> — a Python-powered shell: Python and shell syntax in one language). _Proposed by the operator, 2026-09-26._ An installable package, not a default — Nushell stays the default and Oils the POSIX shell. xonsh is pure Python (plus `prompt_toolkit`, also pure Python), so once its prerequisites exist the port is mostly packaging, and it is a useful stress test of them:
+  - **Interactive CPython.** xonsh evaluates the Python typed at its prompt at run time, so it needs a real interpreter; fastpy's ahead-of-time pure mode cannot host it. CPython 3.12.3 already runs on SlateOS, but interactive use has not yet been verified (`roadmap.md`).
+  - **Job control and terminal handling** in the POSIX layer — process groups, `tcsetpgrp`, stop/continue, `termios`, a pty — which Oils needs as well.
 - [ ] **Windows-shell familiarity layer: a `cmd.exe` emulator (and, stretch, a PowerShell emulator).** For users migrating from Windows, provide a shell that accepts classic `cmd.exe` syntax — the builtin commands (`dir`, `copy`, `move`, `del`, `ren`, `type`, `cd`/`chdir`, `md`/`mkdir`, `rd`/`rmdir`, `cls`, `echo`, `set`, `path`, `where`, `for`, `if`, `goto`, `call`, `start`, `title`, `%VAR%`/`%ERRORLEVEL%` expansion, `&`/`&&`/`||`/`|` operators, `.bat`/`.cmd` batch-file execution) — mapping them onto native filesystem/process/env syscalls so muscle-memory and existing `.bat` scripts work. It is an *emulation/compat layer*, not the default shell (Nushell stays default); it lives alongside Oils the same way. **Stretch goal: a PowerShell emulator** — much larger scope (a real object pipeline, cmdlets, .NET-esque type system). Two realistic paths, to be decided when tackled: (a) port PowerShell Core (open-source, MIT) via the .NET/CoreCLR runtime once that's available on the OS — the faithful option; or (b) a *subset* emulator covering the most common cmdlets (`Get-ChildItem`/`gci`, `Get-Content`, `Set-Location`, `Copy-Item`, `Where-Object`, `ForEach-Object`, `Select-Object`, `$_`, object pipeline basics) mapped onto Nushell's already-structured pipeline where semantics align. Record as an open question which path to take before starting PowerShell specifically; the `cmd.exe` emulator is the committed near-term deliverable and does not depend on it.
 
-_Nushell as default interactive shell (structured data, Rust-native). Oils for POSIX/bash compatibility (replaces bash). A `cmd.exe` emulator (and stretch PowerShell emulator) ships as a Windows-familiarity compat layer, not as a default shell._
+_Nushell as default interactive shell (structured data, Rust-native). Oils for POSIX/bash compatibility (replaces bash). A `cmd.exe` emulator (and stretch PowerShell emulator) ships as a Windows-familiarity compat layer, not as a default shell. xonsh is an optional installable shell for Python users._
 
 #### Core Utilities
 - [ ] Port coreutils (ls, cp, mv, rm, mkdir, cat, etc.)
@@ -2679,6 +2693,58 @@ authors never wrote a single automation handler.
 - [ ] `automate` CLI and the `on`/`invoke` shell builtins gain widget-tree
   subcommands (e.g. `automate ui <program> tree|find|invoke`) so widget
   automation is scriptable exactly like declared actions.
+
+#### Headless Sessions — Control Without Interfering With the User
+
+_Proposed by the operator, 2026-09-26._ A program holding the right capabilities
+can run another application **headless** — launched into a private session whose
+windows never appear on the user's displays — and drive it through the widget
+tree above, and through its rendered pixels where a tree is not enough. The
+clients this is for are automation agents — test runners, RPA-style scripts, and
+AI agents the user chooses to install — that must work inside an app *while the
+user keeps using the machine*: no stolen focus, no windows appearing, no pointer
+moving under the user's hand. (The OS supplies the mechanism, not an agent, so
+this is consistent with "no AI features in the OS": an agent is an ordinary
+third-party program with ordinary grants.) Precedents, each covering part of it:
+Windows UI Automation (the structured tree, which the widget tree above already
+matches), separate Windows desktops/sessions (`CreateDesktop`, RDP) for invisible
+execution, headless Wayland/Xvfb on Linux, and Android's per-app
+`VirtualDisplay`.
+
+- [ ] **A headless session is a compositor session with no display.** Its windows
+  get real surfaces, rendered but never composited onto a user display. It has
+  its own focus and input queue, its own clipboard, and its own notification and
+  audio sinks (delivered to the controller, muted by default), so nothing in it
+  can reach the user's screen, steal focus, or make a sound. Frames are rendered
+  on demand — when the controller asks for one — so an idle headless app costs
+  close to nothing.
+- [ ] **Launching into one.** `automation.headless` — create a headless session
+  and launch programs into it. A program launched headless keeps exactly its
+  own capabilities: running headless grants it nothing and costs it nothing. The
+  session, and every process in it, ends when the controller releases it or
+  exits.
+- [ ] **Driving it semantically first.** The widget tree above — `ui.tree`,
+  `ui.find`, `ui.get`, and invoking a widget's own action — works identically
+  against a headless instance, and is the preferred way to control one: no
+  pixels, no coordinates, and the app's own validation and enabled-state rules
+  apply to every action.
+- [ ] **...and graphically where needed.** For canvas-drawn apps, games, and
+  checking what the user *would* see: read the session's rendered frames
+  (`automation.headless_frames`) and inject pointer and keyboard input into that
+  session only (`automation.headless_input`) — never into the user's session,
+  which is what `access.automate` covers and which stays a separate grant.
+- [ ] **Working in an app the user already has open, without disturbing them.**
+  Driving a visible instance through the widget tree without moving the user's
+  pointer or focus is a distinct and more sensitive grant than driving a headless
+  instance the controller launched itself: it needs the widget tree's own
+  interaction grants on that app (`automation.invoke` + `automation.ui_control`)
+  *and* `automation.background`, and the compositor marks the target
+  window with a persistent "being automated" indicator (the same posture as a
+  screen-recording indicator). "Invisible" means *not interfering*, never
+  *undetectable*.
+- [ ] Secure-entry fields stay unreadable in a headless session exactly as they
+  do elsewhere (see the password-field rule above), and every headless grant is
+  per controller and audit-logged like the rest of the automation grants.
 
 #### Shell Integration
 

@@ -36,7 +36,6 @@ CHOSEN = "a_picture_chosen_in_the_dialog_opens"
 TILES = "the_layout_tiles_the_window"
 CENTRED = "the_strip_is_centred_on_the_current_picture"
 DOUBLE = "a_double_click_on_a_button_does_not_zoom"
-KEYS = "every_advertised_key_does_something"
 
 MUTATIONS = [
     # -- the layout ---------------------------------------------------------
@@ -62,7 +61,9 @@ MUTATIONS = [
         "the picture runs under the info panel",
         "        let image_width = if self.show_info_panel {\n            self.window_width - INFO_PANEL_WIDTH",
         "        let image_width = if self.show_info_panel {\n            self.window_width",
-        [TILES, PAN],
+        # Not PAN: the panel moves out with the picture's edge, off the
+        # window, so a press where it was is still outside the picture.
+        [TILES],
     ),
     (
         "the picture is over only by its left and top",
@@ -141,7 +142,7 @@ MUTATIONS = [
     (
         "the strip starts at the first picture",
         "        let start = self.current_index.saturating_sub(room / 2);",
-        "        let start = 0;",
+        "        let start: usize = 0;",
         [CENTRED],
     ),
     (

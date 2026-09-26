@@ -1917,8 +1917,8 @@ _Minimal hotkey defaults: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen. Eve
     *cancelled* (revert), so apps can preview without persisting. The same
     tentative-vs-committed event pattern generalizes to the color picker and other
     attribute-choosing dialogs where live preview is useful.
-- [ ] Scroll bars (auto-hide when nothing to scroll)
-- [ ] Tooltips
+- [x] Scroll bars (auto-hide when nothing to scroll) — *verified 2026-09-26: `gui/toolkit/src/scrollbar.rs` holds the shared arithmetic -- `needed(total, capacity)` is the auto-hide rule, `thumb_of` places the thumb -- and the file dialog, menus, menu bar, tree view, the shell's start menu and `apps/dictionary`/`explorer` draw theirs with it. `apps/spreadsheet` keeps its own, generic over the axis, as that module's doc explains.*
+- [x] Tooltips — *verified 2026-09-26: `guitk::menu::Tooltip`, shown after a hover delay (500 ms by default), wrapped to a maximum width and kept on screen; the taskbar's tray draws its tooltips with it.*
 - [x] Modal and non-modal dialogs — `gui/toolkit/src/modal.rs`: `ModalOverlay`,
   `AlertDialog`, `InputDialog`, `ProgressDialog`, `NonModalDialog`. Keyboard
   (Tab/Enter/Escape) and mouse both work; a dialog records where it drew itself

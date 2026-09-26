@@ -2537,6 +2537,7 @@ pub mod netinet;
 pub mod netinet_in;
 pub mod netinet_tcp;
 pub mod nl_types;
+pub(crate) mod nss_files;
 pub mod paths;
 pub(crate) mod perprocess;
 pub mod perthread;

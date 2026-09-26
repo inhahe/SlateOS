@@ -1,22 +1,42 @@
-//! POSIX user/group database lookups.
+//! POSIX user and group databases (`<pwd.h>`, `<grp.h>`): `/etc/passwd` and
+//! `/etc/group`, read as glibc 2.39's `nss_files` reads them.
 //!
-//! Implements `getpwnam`, `getpwuid`, `getgrnam`, `getgrgid` and related
-//! functions.
+//! On SlateOS `/etc/users.yaml` is the account store, and `/etc/passwd` and
+//! `/etc/group` are generated from it on every change (design-decisions
+//! §353). This is the C library's view of those two files, as a glibc
+//! program expects it:
 //!
-//! ## Implementation
+//! - **Lookups** by name or id take the first matching line, skipping the NIS
+//!   `+`/`-` lines, as `nss_files` does; enumeration returns every entry,
+//!   those included. The line syntax is [`crate::nss_files`]'.
+//! - **The `_r` functions** copy the entry into the caller's buffer (`ERANGE`
+//!   when it does not fit) and return 0 both when they found it and when
+//!   there is none -- `*result` tells them apart -- setting `errno` to what
+//!   they return, as glibc's do. The others keep the entry in this process's
+//!   storage, growing it as needed, and return NULL with `errno` 0 for "no
+//!   such entry".
+//! - **`getgrouplist`** is the primary group, then every group whose member
+//!   list names the user, as `nss_files`' `initgroups_dyn` finds them.
 //!
-//! Our OS doesn't have a real user database.  All lookups return a
-//! single "root" user with UID/GID 0 and home directory "/".  This
-//! satisfies programs that do mandatory user lookups (bash, Python,
-//! coreutils `id`/`whoami`).
+//! A database that does not exist is answered from a built-in `root` entry --
+//! uid and gid 0, home `/`, shell `/bin/sh` -- so a system image without the
+//! files still knows its one user (design-decisions §1113). One that exists
+//! and cannot be read is an error. A NULL pointer glibc would dereference is
+//! `EFAULT` (design-decisions §303).
 //!
-//! ## Limitations
+//! ## What changed on 2026-09-26
 //!
-//! - Only one user ("root", UID 0) and one group ("root", GID 0).
-//! - `getpwent`/`setpwent`/`endpwent` enumeration works but only
-//!   yields the single root entry.
-//! - Not thread-safe (uses static storage, matching POSIX spec).
+//! The databases were that built-in entry and nothing else: a lookup of any
+//! other user or group failed, whatever `/etc/passwd` and `/etc/group` held.
+//! A reentrant group lookup assumed the caller's buffer was 8-byte aligned,
+//! and `getpwent_r` and `getgrent_r` did not exist.
+//! (`known-issues.md` -> `B-D-PWD-KNEW-ONLY-ROOT`.)
 
+use crate::errno;
+use crate::nss_files::{
+    Cursor, Fields, Held, Room, Which, c_bytes, enumerated, hold, is_compat, is_space, lines,
+    lookup_result, next_entry, reentrant, string_or_null, with_text,
+};
 use crate::perprocess::process_global;
 use crate::types::*;
 
@@ -29,7 +49,7 @@ use crate::types::*;
 pub struct Passwd {
     /// Username.
     pub pw_name: *const u8,
-    /// Encrypted password (not used).
+    /// Encrypted password, or `x` for "in `/etc/shadow`".
     pub pw_passwd: *const u8,
     /// User ID.
     pub pw_uid: UidT,
@@ -48,7 +68,7 @@ pub struct Passwd {
 pub struct Group {
     /// Group name.
     pub gr_name: *const u8,
-    /// Encrypted group password (not used).
+    /// Encrypted group password.
     pub gr_passwd: *const u8,
     /// Group ID.
     pub gr_gid: GidT,
@@ -56,249 +76,200 @@ pub struct Group {
     pub gr_mem: *const *const u8,
 }
 
-// SAFETY: Passwd and Group contain raw pointers to static byte strings.
-// The data they point to is 'static and immutable, so sharing across
-// threads is safe.
-unsafe impl Sync for Passwd {}
-unsafe impl Sync for Group {}
+impl Passwd {
+    const EMPTY: Self = Self {
+        pw_name: core::ptr::null(),
+        pw_passwd: core::ptr::null(),
+        pw_uid: 0,
+        pw_gid: 0,
+        pw_gecos: core::ptr::null(),
+        pw_dir: core::ptr::null(),
+        pw_shell: core::ptr::null(),
+    };
+}
 
-// ---------------------------------------------------------------------------
-// Static entries
-// ---------------------------------------------------------------------------
-
-/// The single "root" user entry.
-static ROOT_PASSWD: Passwd = Passwd {
-    pw_name: c"root".as_ptr().cast::<u8>(),
-    pw_passwd: c"x".as_ptr().cast::<u8>(),
-    pw_uid: 0,
-    pw_gid: 0,
-    pw_gecos: c"root".as_ptr().cast::<u8>(),
-    pw_dir: c"/".as_ptr().cast::<u8>(),
-    pw_shell: c"/bin/sh".as_ptr().cast::<u8>(),
-};
-
-/// Empty null-terminated member list for `gr_mem`.
-///
-/// POSIX requires `gr_mem` to point to a null-terminated array of
-/// member name pointers.  A null pointer for the array itself would
-/// crash programs that iterate `grp->gr_mem[i]` without null-checking.
-/// Wrapper is needed because `*const u8` is not `Sync`.
-#[repr(transparent)]
-struct SyncMemberList([*const u8; 1]);
-
-// SAFETY: Contains only a null pointer — immutable, no data to race on.
-unsafe impl Sync for SyncMemberList {}
-
-static EMPTY_MEM: SyncMemberList = SyncMemberList([core::ptr::null()]);
-
-/// The single "root" group entry.
-static ROOT_GROUP: Group = Group {
-    gr_name: c"root".as_ptr().cast::<u8>(),
-    gr_passwd: c"x".as_ptr().cast::<u8>(),
-    gr_gid: 0,
-    gr_mem: EMPTY_MEM.0.as_ptr(),
-};
-
-process_global! {
-    /// Enumeration cursor for `getpwent`/`setpwent`/`endpwent`.
-    fn pw_pos_ptr() -> i32 = 0;
-
-    /// Enumeration cursor for `getgrent`/`setgrent`/`endgrent`.
-    fn gr_pos_ptr() -> i32 = 0;
+impl Group {
+    const EMPTY: Self = Self {
+        gr_name: core::ptr::null(),
+        gr_passwd: core::ptr::null(),
+        gr_gid: 0,
+        gr_mem: core::ptr::null(),
+    };
 }
 
 // ---------------------------------------------------------------------------
-// Password database lookups
+// The databases' built-in text
 // ---------------------------------------------------------------------------
 
-/// Look up a user by name.
-///
-/// Returns a pointer to a static Passwd struct, or null if not found.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn getpwnam(name: *const u8) -> *const Passwd {
-    if name.is_null() {
-        return core::ptr::null();
-    }
+/// `/etc/passwd` when there is none: its one user.
+const ROOT_PASSWD_TEXT: &[u8] = b"root:x:0:0:root:/:/bin/sh\n";
 
-    // Check if the name matches "root".
-    let len = unsafe { crate::string::strlen(name) };
-    if len == 4 && matches_root(name) {
-        return &raw const ROOT_PASSWD;
-    }
-
-    core::ptr::null()
-}
-
-/// Look up a user by UID.
-///
-/// Returns a pointer to a static Passwd struct, or null if not found.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getpwuid(uid: UidT) -> *const Passwd {
-    if uid == 0 {
-        return &raw const ROOT_PASSWD;
-    }
-    core::ptr::null()
-}
-
-/// Rewind the password database to the beginning.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setpwent() {
-    // SAFETY: Single-threaded access.
-    unsafe {
-        pw_pos_ptr().write(0);
-    }
-}
-
-/// Read the next entry from the password database.
-///
-/// Returns null when all entries have been read.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getpwent() -> *const Passwd {
-    let pos = unsafe { *pw_pos_ptr() };
-    if pos == 0 {
-        unsafe {
-            pw_pos_ptr().write(1);
-        }
-        return &raw const ROOT_PASSWD;
-    }
-    core::ptr::null()
-}
-
-/// Close the password database.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn endpwent() {
-    unsafe {
-        pw_pos_ptr().write(0);
-    }
-}
+/// `/etc/group` when there is none: its one group, with no members.
+const ROOT_GROUP_TEXT: &[u8] = b"root:x:0:\n";
 
 // ---------------------------------------------------------------------------
-// Group database lookups
+// Parsing
 // ---------------------------------------------------------------------------
 
-/// Look up a group by name.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn getgrnam(name: *const u8) -> *const Group {
-    if name.is_null() {
-        return core::ptr::null();
-    }
-
-    let len = unsafe { crate::string::strlen(name) };
-    if len == 4 && matches_root(name) {
-        return &raw const ROOT_GROUP;
-    }
-
-    core::ptr::null()
+/// One `/etc/passwd` entry, borrowed from its line. `None` fields are the
+/// NULL pointers of a bare `+`/`-` line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PwEntry<'a> {
+    name: &'a [u8],
+    passwd: Option<&'a [u8]>,
+    uid: u32,
+    gid: u32,
+    gecos: Option<&'a [u8]>,
+    dir: Option<&'a [u8]>,
+    shell: Option<&'a [u8]>,
 }
 
-/// Look up a group by GID.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getgrgid(gid: GidT) -> *const Group {
-    if gid == 0 {
-        return &raw const ROOT_GROUP;
+/// glibc's passwd `LINE_PARSER`: `None` for a line that is no entry.
+fn parse_pw(line: &[u8]) -> Option<PwEntry<'_>> {
+    let mut f = Fields::new(line);
+    let name = f.string();
+    let compat = is_compat(name);
+    if compat && f.at_end() {
+        return Some(PwEntry {
+            name,
+            passwd: None,
+            uid: 0,
+            gid: 0,
+            gecos: None,
+            dir: None,
+            shell: None,
+        });
     }
-    core::ptr::null()
+    let passwd = f.string();
+    let (uid, gid) = if compat {
+        let uid = f.int_or_empty().ok()?.unwrap_or(0);
+        (uid, f.int_or_empty().ok()?.unwrap_or(0))
+    } else {
+        let uid = f.int()?;
+        (uid, f.int()?)
+    };
+    let gecos = f.string();
+    let dir = f.string();
+    Some(PwEntry {
+        name,
+        passwd: Some(passwd),
+        uid,
+        gid,
+        gecos: Some(gecos),
+        dir: Some(dir),
+        shell: Some(f.rest()),
+    })
 }
 
-/// Rewind the group database.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setgrent() {
-    unsafe {
-        gr_pos_ptr().write(0);
-    }
+/// One `/etc/group` entry, borrowed from its line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GrEntry<'a> {
+    name: &'a [u8],
+    passwd: Option<&'a [u8]>,
+    gid: u32,
+    /// The member list as written; [`members`] takes it apart.
+    members: &'a [u8],
 }
 
-/// Read the next entry from the group database.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getgrent() -> *const Group {
-    let pos = unsafe { *gr_pos_ptr() };
-    if pos == 0 {
-        unsafe {
-            gr_pos_ptr().write(1);
-        }
-        return &raw const ROOT_GROUP;
-    }
-    core::ptr::null()
+/// glibc's group `LINE_PARSER`: `None` for a line that is no entry.
+fn parse_gr(line: &[u8]) -> Option<GrEntry<'_>> {
+    let mut f = Fields::new(line);
+    let name = f.string();
+    let compat = is_compat(name);
+    let (passwd, gid) = if compat && f.at_end() {
+        (None, 0)
+    } else {
+        let passwd = f.string();
+        let gid = if compat {
+            f.int_or_empty().ok()?.unwrap_or(0)
+        } else {
+            f.int()?
+        };
+        (Some(passwd), gid)
+    };
+    Some(GrEntry {
+        name,
+        passwd,
+        gid,
+        members: f.rest(),
+    })
 }
 
-/// Close the group database.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn endgrent() {
-    unsafe {
-        gr_pos_ptr().write(0);
-    }
+/// `parse_list`'s members: split at `,`, each without its leading white
+/// space, the empty ones dropped.
+fn members(list: &[u8]) -> impl Iterator<Item = &[u8]> {
+    list.split(|&b| b == b',').filter_map(|m| {
+        let start = m.iter().position(|&b| !is_space(b))?;
+        m.get(start..)
+    })
 }
 
 // ---------------------------------------------------------------------------
-// getgrouplist / initgroups
+// Filling the caller's structures
 // ---------------------------------------------------------------------------
 
-/// Get list of groups to which a user belongs.
-///
-/// Fills `groups` with up to `*ngroups` GIDs.  Always includes `group`
-/// (the caller-provided primary group).
-///
-/// Our stub OS only knows about GID 0 (root).  If the user is "root",
-/// we return GID 0.  Otherwise we just return the supplied primary group.
-///
-/// Returns the total number of groups on success.  If `*ngroups` is too
-/// small, `*ngroups` is set to the required count and -1 is returned.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getgrouplist(
-    _user: *const u8,
-    group: GidT,
-    groups: *mut GidT,
-    ngroups: *mut i32,
-) -> i32 {
-    if ngroups.is_null() {
-        return -1;
-    }
-
-    let max = unsafe { *ngroups };
-    // We always have exactly 1 group (the primary).
-    let needed = 1;
-
-    if max < needed {
-        unsafe {
-            *ngroups = needed;
-        }
-        return -1;
-    }
-
-    if !groups.is_null() {
-        unsafe {
-            *groups = group;
-        }
-    }
-    unsafe {
-        *ngroups = needed;
-    }
-    needed
+fn fill_pw(e: &PwEntry<'_>, room: &mut Room) -> Result<Passwd, i32> {
+    Ok(Passwd {
+        pw_name: room.string(e.name)?.cast_const(),
+        pw_passwd: string_or_null(room, e.passwd)?,
+        pw_uid: e.uid,
+        pw_gid: e.gid,
+        pw_gecos: string_or_null(room, e.gecos)?,
+        pw_dir: string_or_null(room, e.dir)?,
+        pw_shell: string_or_null(room, e.shell)?,
+    })
 }
 
-/// Initialize the supplementary group access list.
-///
-/// Sets the supplementary group IDs for the calling process to the
-/// groups that `user` belongs to, plus `group`.
-///
-/// Stub: always succeeds (single-user OS, groups not enforced).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn initgroups(_user: *const u8, _group: GidT) -> i32 {
-    0
+fn fill_gr(e: &GrEntry<'_>, room: &mut Room) -> Result<Group, i32> {
+    let name = room.string(e.name)?.cast_const();
+    let passwd = string_or_null(room, e.passwd)?;
+    let n = members(e.members).count();
+    // The NULL-terminated vector, then each member's string.
+    let vector = room.pointers(n.checked_add(1).ok_or(errno::ERANGE)?)?;
+    for (i, m) in members(e.members).enumerate() {
+        let s = room.string(m)?;
+        // SAFETY: `vector` holds `n + 1` pointers and `i < n`.
+        unsafe { vector.add(i).write(s.cast_const()) };
+    }
+    Ok(Group {
+        gr_name: name,
+        gr_passwd: passwd,
+        gr_gid: e.gid,
+        gr_mem: vector.cast_const(),
+    })
+}
+
+/// The first entry of `which`'s text that `pick` chooses, filled into `room`
+/// -- or `None`.
+fn find_pw(room: &mut Room, pick: impl Fn(&PwEntry<'_>) -> bool) -> Result<Option<Passwd>, i32> {
+    with_text(Which::Passwd, ROOT_PASSWD_TEXT, |text| {
+        lines(text, 0)
+            .filter_map(|(line, _)| parse_pw(line))
+            .find(|e| !is_compat(e.name) && pick(e))
+            .map(|e| fill_pw(&e, room))
+            .transpose()
+    })?
+}
+
+fn find_gr(room: &mut Room, pick: impl Fn(&GrEntry<'_>) -> bool) -> Result<Option<Group>, i32> {
+    with_text(Which::Group, ROOT_GROUP_TEXT, |text| {
+        lines(text, 0)
+            .filter_map(|(line, _)| parse_gr(line))
+            .find(|e| !is_compat(e.name) && pick(e))
+            .map(|e| fill_gr(&e, room))
+            .transpose()
+    })?
 }
 
 // ---------------------------------------------------------------------------
-// Reentrant password/group lookups
+// Reentrant lookups
 // ---------------------------------------------------------------------------
 
 /// Look up a user by name (reentrant).
 ///
-/// Copies the result into caller-provided `pwd` and `buf`.  On success,
-/// `*result` is set to `pwd`; if the user is not found, `*result` is
-/// NULL and 0 is returned.
-///
-/// Returns 0 on success, or an error code (`ERANGE` if `buflen` is
-/// too small).
+/// Returns 0 with `*result = pwd` when found, 0 with `*result = NULL` when
+/// not, `ERANGE` when `buf` is too small, `EFAULT` for a NULL argument, or
+/// the error reading `/etc/passwd`; `errno` is set to the same.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getpwnam_r(
     name: *const u8,
@@ -307,30 +278,22 @@ pub unsafe extern "C" fn getpwnam_r(
     buflen: usize,
     result: *mut *const Passwd,
 ) -> i32 {
-    if result.is_null() || pwd.is_null() || buf.is_null() {
-        return crate::errno::EFAULT;
-    }
-
-    // Default: not found.
-    unsafe {
-        *result = core::ptr::null();
-    }
-
     if name.is_null() {
-        return 0;
+        // glibc reads the name before anything else.
+        errno::set_errno(errno::EFAULT);
+        return errno::EFAULT;
     }
-
-    let len = unsafe { crate::string::strlen(name) };
-    if len == 4 && matches_root(name) {
-        return fill_passwd_r(pwd, buf, buflen, result);
+    // SAFETY: `name` is non-null and the caller's NUL-terminated string.
+    let name = unsafe { c_bytes(name) };
+    // SAFETY: the other pointers are the caller's, as documented.
+    unsafe {
+        reentrant(pwd, buf, buflen, result, |room| {
+            find_pw(room, |e| e.name == name)
+        })
     }
-
-    0
 }
 
-/// Look up a user by UID (reentrant).
-///
-/// Same semantics as `getpwnam_r`.
+/// Look up a user by UID (reentrant). Same results as [`getpwnam_r`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getpwuid_r(
     uid: UidT,
@@ -339,22 +302,15 @@ pub unsafe extern "C" fn getpwuid_r(
     buflen: usize,
     result: *mut *const Passwd,
 ) -> i32 {
-    if result.is_null() || pwd.is_null() || buf.is_null() {
-        return crate::errno::EFAULT;
-    }
-
+    // SAFETY: the pointers are the caller's, as documented.
     unsafe {
-        *result = core::ptr::null();
+        reentrant(pwd, buf, buflen, result, |room| {
+            find_pw(room, |e| e.uid == uid)
+        })
     }
-
-    if uid == 0 {
-        return fill_passwd_r(pwd, buf, buflen, result);
-    }
-
-    0
 }
 
-/// Look up a group by name (reentrant).
+/// Look up a group by name (reentrant). Same results as [`getpwnam_r`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getgrnam_r(
     name: *const u8,
@@ -363,27 +319,21 @@ pub unsafe extern "C" fn getgrnam_r(
     buflen: usize,
     result: *mut *const Group,
 ) -> i32 {
-    if result.is_null() || grp.is_null() || buf.is_null() {
-        return crate::errno::EFAULT;
-    }
-
-    unsafe {
-        *result = core::ptr::null();
-    }
-
     if name.is_null() {
-        return 0;
+        errno::set_errno(errno::EFAULT);
+        return errno::EFAULT;
     }
-
-    let len = unsafe { crate::string::strlen(name) };
-    if len == 4 && matches_root(name) {
-        return fill_group_r(grp, buf, buflen, result);
+    // SAFETY: as in `getpwnam_r`.
+    let name = unsafe { c_bytes(name) };
+    // SAFETY: as in `getpwnam_r`.
+    unsafe {
+        reentrant(grp, buf, buflen, result, |room| {
+            find_gr(room, |e| e.name == name)
+        })
     }
-
-    0
 }
 
-/// Look up a group by GID (reentrant).
+/// Look up a group by GID (reentrant). Same results as [`getpwnam_r`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getgrgid_r(
     gid: GidT,
@@ -392,114 +342,234 @@ pub unsafe extern "C" fn getgrgid_r(
     buflen: usize,
     result: *mut *const Group,
 ) -> i32 {
-    if result.is_null() || grp.is_null() || buf.is_null() {
-        return crate::errno::EFAULT;
-    }
-
+    // SAFETY: as in `getpwnam_r`.
     unsafe {
-        *result = core::ptr::null();
+        reentrant(grp, buf, buflen, result, |room| {
+            find_gr(room, |e| e.gid == gid)
+        })
     }
-
-    if gid == 0 {
-        return fill_group_r(grp, buf, buflen, result);
-    }
-
-    0
 }
 
-/// Fill in a Passwd struct with root user data, copying strings into `buf`.
-///
-/// String layout in buf: "root\0x\0root\0/\0/bin/sh\0" = 24 bytes.
-fn fill_passwd_r(pwd: *mut Passwd, buf: *mut u8, buflen: usize, result: *mut *const Passwd) -> i32 {
-    // Strings: "root\0" (5) + "x\0" (2) + "root\0" (5) + "/\0" (2) + "/bin/sh\0" (8) = 22
-    const NEEDED: usize = 22;
-    if buflen < NEEDED {
-        return crate::errno::ERANGE;
-    }
+// ---------------------------------------------------------------------------
+// This process's storage for the non-reentrant functions
+// ---------------------------------------------------------------------------
 
-    // Copy strings into buf.
-    let strings: &[u8] = b"root\0x\0root\0/\0/bin/sh\0";
-    let mut i: usize = 0;
-    while i < NEEDED {
-        // SAFETY: i < NEEDED <= buflen, buf is valid.  i < NEEDED = 22
-        // which is less than the byte-string length.
-        let byte = strings.get(i).copied().unwrap_or(0);
-        unsafe {
-            *buf.add(i) = byte;
-        }
-        i = i.wrapping_add(1);
-    }
-
-    // Fill the struct with pointers into buf.
-    // SAFETY: pwd is non-null (checked by caller).
-    unsafe {
-        (*pwd).pw_name = buf; // "root" at offset 0
-        (*pwd).pw_passwd = buf.add(5); // "x" at offset 5
-        (*pwd).pw_uid = 0;
-        (*pwd).pw_gid = 0;
-        (*pwd).pw_gecos = buf.add(7); // "root" at offset 7
-        (*pwd).pw_dir = buf.add(12); // "/" at offset 12
-        (*pwd).pw_shell = buf.add(14); // "/bin/sh" at offset 14
-        *result = pwd;
-    }
-
-    0
+process_global! {
+    fn held_pw() -> Held<Passwd> = Held::new(Passwd::EMPTY);
+    fn held_gr() -> Held<Group> = Held::new(Group::EMPTY);
+    fn held_pwent() -> Held<Passwd> = Held::new(Passwd::EMPTY);
+    fn held_grent() -> Held<Group> = Held::new(Group::EMPTY);
 }
 
-/// Fill in a Group struct with root group data, copying strings into `buf`.
-///
-/// String layout: "root\0x\0" + null pointer for gr_mem = 7 + 8 = 15 bytes.
-fn fill_group_r(grp: *mut Group, buf: *mut u8, buflen: usize, result: *mut *const Group) -> i32 {
-    // Strings: "root\0" (5) + "x\0" (2) = 7 bytes for strings.
-    // Plus 8 bytes for a null pointer (gr_mem entry), aligned to 8 bytes.
-    // We need strings + alignment padding + one null pointer.
-    const STR_BYTES: usize = 7;
-    // Align up to 8 for the pointer.
-    const ALIGN: usize = 8;
-    const PTR_START: usize = (STR_BYTES + ALIGN - 1) & !(ALIGN - 1); // = 8
-    const NEEDED: usize = PTR_START + ALIGN; // 8 + 8 = 16
+// ---------------------------------------------------------------------------
+// Lookups
+// ---------------------------------------------------------------------------
 
-    if buflen < NEEDED {
-        return crate::errno::ERANGE;
-    }
+/// Look up a user by name: the entry, or NULL -- `errno` 0 for no such user.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn getpwnam(name: *const u8) -> *const Passwd {
+    // SAFETY: `name` is passed on as given; the rest is this process's.
+    lookup_result(hold(held_pw(), |p, b, l, r| unsafe {
+        getpwnam_r(name, p, b, l, r)
+    }))
+}
 
-    // Copy strings.
-    let strings: &[u8] = b"root\0x\0";
-    let mut i: usize = 0;
-    while i < STR_BYTES {
-        let byte = strings.get(i).copied().unwrap_or(0);
-        unsafe {
-            *buf.add(i) = byte;
-        }
-        i = i.wrapping_add(1);
-    }
+/// Look up a user by UID: the entry, or NULL -- `errno` 0 for no such user.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getpwuid(uid: UidT) -> *const Passwd {
+    // SAFETY: this process's storage.
+    lookup_result(hold(held_pw(), |p, b, l, r| unsafe {
+        getpwuid_r(uid, p, b, l, r)
+    }))
+}
 
-    // Write a null pointer for gr_mem (empty member list).
-    // Zero the padding and pointer bytes.
-    i = STR_BYTES;
-    while i < NEEDED {
-        unsafe {
-            *buf.add(i) = 0;
-        }
-        i = i.wrapping_add(1);
-    }
+/// Look up a group by name: the entry, or NULL -- `errno` 0 for none.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn getgrnam(name: *const u8) -> *const Group {
+    // SAFETY: as in `getpwnam`.
+    lookup_result(hold(held_gr(), |p, b, l, r| unsafe {
+        getgrnam_r(name, p, b, l, r)
+    }))
+}
 
+/// Look up a group by GID: the entry, or NULL -- `errno` 0 for none.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getgrgid(gid: GidT) -> *const Group {
+    // SAFETY: as in `getpwuid`.
+    lookup_result(hold(held_gr(), |p, b, l, r| unsafe {
+        getgrgid_r(gid, p, b, l, r)
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Enumeration
+// ---------------------------------------------------------------------------
+
+process_global! {
+    fn pw_cursor() -> Cursor = Cursor::CLOSED;
+    fn gr_cursor() -> Cursor = Cursor::CLOSED;
+}
+
+/// Rewind the password database: the next [`getpwent`] reads it afresh.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn setpwent() {
+    // SAFETY: this process's cursor.
+    unsafe { *pw_cursor() = Cursor::CLOSED };
+}
+
+/// The next password entry into the caller's buffer: 0, `ENOENT` at the end,
+/// or `ERANGE` (the same entry comes next time).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn getpwent_r(
+    pwd: *mut Passwd,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const Passwd,
+) -> i32 {
+    // SAFETY: the pointers are the caller's, as documented.
     unsafe {
-        (*grp).gr_name = buf; // "root" at offset 0
-        (*grp).gr_passwd = buf.add(5); // "x" at offset 5
-        (*grp).gr_gid = 0;
-        // gr_mem points to the null pointer we wrote at PTR_START.
-        // SAFETY: buf is from caller's buffer; at PTR_START it's 8-byte
-        // aligned because PTR_START = 8 and buf came from the stack or
-        // a caller-allocated buffer.  We wrote all-zeroes at that offset,
-        // forming a valid null pointer for gr_mem's array.
-        #[allow(clippy::cast_ptr_alignment)]
-        {
-            (*grp).gr_mem = buf.add(PTR_START).cast::<*const u8>();
-        }
-        *result = grp;
+        next_entry(
+            pw_cursor(),
+            Which::Passwd,
+            ROOT_PASSWD_TEXT,
+            |line, room| parse_pw(line).map(|e| fill_pw(&e, room)),
+            pwd,
+            buf,
+            buflen,
+            result,
+        )
     }
+}
 
+/// The next password entry, or NULL at the end (`errno` untouched there).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getpwent() -> *const Passwd {
+    // SAFETY: this process's storage.
+    enumerated(hold(held_pwent(), |p, b, l, r| unsafe {
+        getpwent_r(p, b, l, r)
+    }))
+}
+
+/// Close the password database.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn endpwent() {
+    // SAFETY: this process's cursor.
+    unsafe { *pw_cursor() = Cursor::CLOSED };
+}
+
+/// Rewind the group database.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn setgrent() {
+    // SAFETY: this process's cursor.
+    unsafe { *gr_cursor() = Cursor::CLOSED };
+}
+
+/// The next group entry into the caller's buffer; as [`getpwent_r`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn getgrent_r(
+    grp: *mut Group,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const Group,
+) -> i32 {
+    // SAFETY: the pointers are the caller's, as documented.
+    unsafe {
+        next_entry(
+            gr_cursor(),
+            Which::Group,
+            ROOT_GROUP_TEXT,
+            |line, room| parse_gr(line).map(|e| fill_gr(&e, room)),
+            grp,
+            buf,
+            buflen,
+            result,
+        )
+    }
+}
+
+/// The next group entry, or NULL at the end.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getgrent() -> *const Group {
+    // SAFETY: this process's storage.
+    enumerated(hold(held_grent(), |p, b, l, r| unsafe {
+        getgrent_r(p, b, l, r)
+    }))
+}
+
+/// Close the group database.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn endgrent() {
+    // SAFETY: this process's cursor.
+    unsafe { *gr_cursor() = Cursor::CLOSED };
+}
+
+// ---------------------------------------------------------------------------
+// getgrouplist / initgroups
+// ---------------------------------------------------------------------------
+
+/// The groups `user` belongs to: `group` first, then each group whose member
+/// list names `user` -- other than `group` itself -- in `/etc/group`'s order,
+/// as `nss_files`' `initgroups_dyn` finds them.
+///
+/// Up to `*ngroups` of them are written to `groups`, and `*ngroups` becomes
+/// how many there are. Returns that count, or -1 when `*ngroups` was too
+/// small for it (glibc's `getgrouplist`). A group database that cannot be
+/// read contributes nothing, as an unavailable service does. A NULL `user`
+/// is a member of no group; a NULL `ngroups`, or a NULL `groups` that would
+/// be written to, is -1 with `EFAULT`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getgrouplist(
+    user: *const u8,
+    group: GidT,
+    groups: *mut GidT,
+    ngroups: *mut i32,
+) -> i32 {
+    if ngroups.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: `ngroups` is non-null and the caller's.
+    let room = usize::try_from(unsafe { *ngroups }).unwrap_or(0);
+    if groups.is_null() && room > 0 {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    let user: Option<&[u8]> = if user.is_null() {
+        None
+    } else {
+        // SAFETY: the caller's NUL-terminated string.
+        Some(unsafe { c_bytes(user) })
+    };
+    let mut total = 0usize;
+    let mut add = |gid: GidT| {
+        if total < room {
+            // SAFETY: `groups` holds `room` entries (the caller's `*ngroups`).
+            unsafe { groups.add(total).write(gid) };
+        }
+        total = total.saturating_add(1);
+    };
+    add(group);
+    // An unreadable database contributes nothing: `initgroups_dyn` is then
+    // an unavailable service, and glibc goes on with what it has.
+    let _ = with_text(Which::Group, ROOT_GROUP_TEXT, |text| {
+        for (line, _) in lines(text, 0) {
+            let Some(e) = parse_gr(line) else { continue };
+            if e.gid != group && user.is_some_and(|u| members(e.members).any(|m| m == u)) {
+                add(e.gid);
+            }
+        }
+    });
+    let count = i32::try_from(total).unwrap_or(i32::MAX);
+    // SAFETY: as above.
+    unsafe { *ngroups = count };
+    if total > room { -1 } else { count }
+}
+
+/// Initialize the supplementary group access list.
+///
+/// Stub: always succeeds (the kernel keeps no supplementary groups yet).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn initgroups(_user: *const u8, _group: GidT) -> i32 {
     0
 }
 
@@ -521,703 +591,661 @@ pub extern "C" fn getlogin() -> *const u8 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getlogin_r(buf: *mut u8, bufsize: usize) -> i32 {
     if buf.is_null() || bufsize < 5 {
-        crate::errno::set_errno(crate::errno::ERANGE);
+        errno::set_errno(errno::ERANGE);
         return -1;
     }
-
-    // Write "root\0".
-    let name = b"root\0";
-    let mut i: usize = 0;
-    while i < 5 {
-        if let Some(&b) = name.get(i) {
-            // SAFETY: i < 5 <= bufsize.
-            unsafe {
-                *buf.add(i) = b;
-            }
-        }
-        i = i.wrapping_add(1);
-    }
-
+    // SAFETY: `buf` holds at least 5 bytes.
+    unsafe { core::ptr::copy_nonoverlapping(b"root\0".as_ptr(), buf, 5) };
     0
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Check if a 4-byte string is "root".
-fn matches_root(s: *const u8) -> bool {
-    unsafe { *s == b'r' && *s.add(1) == b'o' && *s.add(2) == b'o' && *s.add(3) == b't' }
-}
-
-// ---------------------------------------------------------------------------
-// Unit tests (run with `cargo test -p posix -- --test-threads=1`)
+// Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::errno;
+    use crate::nss_files::set_test_text;
+    use std::vec::Vec;
 
-    // Helper: reset global enumeration state between tests.
-    fn reset_state() {
-        unsafe {
-            pw_pos_ptr().write(0);
-            gr_pos_ptr().write(0);
+    /// A C string's bytes.
+    fn s(p: *const u8) -> Vec<u8> {
+        assert!(!p.is_null(), "expected a string, got NULL");
+        // SAFETY: the library hands out NUL-terminated strings.
+        unsafe { c_bytes(p) }.to_vec()
+    }
+
+    /// The entry behind `p`, which must not be NULL.
+    fn found<T>(p: *const T) -> &'static T {
+        assert!(
+            !p.is_null(),
+            "expected an entry, got NULL (errno {})",
+            errno::get_errno()
+        );
+        // SAFETY: non-null, and the library's entry.
+        unsafe { &*p }
+    }
+
+    /// `gr_mem`, as names.
+    fn mem(g: &Group) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        loop {
+            // SAFETY: `gr_mem` is a NULL-terminated vector.
+            let p = unsafe { *g.gr_mem.add(i) };
+            if p.is_null() {
+                return out;
+            }
+            out.push(s(p));
+            i += 1;
         }
     }
 
-    // -----------------------------------------------------------------------
-    // getpwnam
-    // -----------------------------------------------------------------------
+    const PASSWD: &[u8] = b"\
+# the accounts
+root:x:0:0:root:/root:/bin/bash
+  daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+
+alice:x:1000:1000:Alice Liddell,,,:/home/alice:/bin/sh
+bad:x:notanumber:5:::
+bob:x:1001:100:::/bin/sh:with:colons
++nis
+alice:x:2000:2000:the second alice:/:/bin/false
+";
+
+    const GROUP: &[u8] = b"\
+root:x:0:
+wheel:x:10:root, alice
+users:x:100:alice,bob,,  carol
+alice:x:1000:
+noise:x:x:alice
+staff:x:50:bob,alice
++:::
+";
+
+    fn with_passwd(text: &'static [u8]) {
+        set_test_text(Which::Passwd, Some(text));
+    }
+
+    fn with_group(text: &'static [u8]) {
+        set_test_text(Which::Group, Some(text));
+    }
+
+    // -- parsing --
 
     #[test]
-    fn getpwnam_root_found() {
-        reset_state();
-        let pw = unsafe { getpwnam(b"root\0".as_ptr()) };
-        assert!(!pw.is_null());
-        let pw = unsafe { &*pw };
-        assert_eq!(pw.pw_uid, 0);
-        assert_eq!(pw.pw_gid, 0);
-        // Verify the name is "root".
-        let name = unsafe { core::ffi::CStr::from_ptr(pw.pw_name.cast()) };
-        assert_eq!(name.to_bytes(), b"root");
+    fn parse_pw_takes_a_line_apart_as_glibc_does() {
+        let e = parse_pw(b"alice:x:1000:1000:Alice:/home/alice:/bin/sh").unwrap();
+        assert_eq!(
+            (e.name, e.passwd, e.uid, e.gid, e.gecos, e.dir, e.shell),
+            (
+                &b"alice"[..],
+                Some(&b"x"[..]),
+                1000,
+                1000,
+                Some(&b"Alice"[..]),
+                Some(&b"/home/alice"[..]),
+                Some(&b"/bin/sh"[..])
+            )
+        );
+        // The shell is the rest of the line, colons and all.
+        assert_eq!(
+            parse_pw(b"b:x:1:2:g:d:sh:x:y").unwrap().shell,
+            Some(&b"sh:x:y"[..])
+        );
+        // Missing trailing fields are empty.
+        let short = parse_pw(b"c:x:3:4").unwrap();
+        assert_eq!(
+            (short.gecos, short.dir, short.shell),
+            (Some(&b""[..]), Some(&b""[..]), Some(&b""[..]))
+        );
     }
 
     #[test]
-    fn getpwnam_nonroot_returns_null() {
-        reset_state();
-        let pw = unsafe { getpwnam(b"nobody\0".as_ptr()) };
-        assert!(pw.is_null());
+    fn parse_pw_refuses_what_glibc_skips() {
+        assert_eq!(
+            parse_pw(b"x:x:nan:0::/:/bin/sh"),
+            None,
+            "a uid that is no number"
+        );
+        assert_eq!(parse_pw(b"x:x::0::/:/bin/sh"), None, "an empty uid");
+        assert_eq!(parse_pw(b"x:x:5a:0::/:/bin/sh"), None, "junk after the uid");
+        assert_eq!(parse_pw(b"justaname"), None);
+        // Numbers are strtoul's: signs and clamping.
+        assert_eq!(
+            parse_pw(b"x:x:-1:+2:::").map(|e| (e.uid, e.gid)),
+            Some((u32::MAX, 2))
+        );
     }
 
     #[test]
-    fn getpwnam_null_name_returns_null() {
-        reset_state();
-        let pw = unsafe { getpwnam(core::ptr::null()) };
-        assert!(pw.is_null());
-    }
-
-    // -----------------------------------------------------------------------
-    // getpwuid
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn getpwuid_zero_returns_root() {
-        reset_state();
-        let pw = getpwuid(0);
-        assert!(!pw.is_null());
-        let pw = unsafe { &*pw };
-        assert_eq!(pw.pw_uid, 0);
-        assert_eq!(pw.pw_gid, 0);
+    fn parse_pw_keeps_nis_compat_lines_as_glibc_does() {
+        let bare = parse_pw(b"+").unwrap();
+        assert_eq!(
+            (bare.name, bare.passwd, bare.shell),
+            (&b"+"[..], None, None)
+        );
+        // A compat line may leave its numbers empty.
+        let e = parse_pw(b"-someone::::::").unwrap();
+        assert_eq!((e.uid, e.gid, e.passwd), (0, 0, Some(&b""[..])));
     }
 
     #[test]
-    fn getpwuid_nonzero_returns_null() {
-        reset_state();
-        assert!(getpwuid(1).is_null());
+    fn parse_gr_and_its_members() {
+        let e = parse_gr(b"users:x:100:alice,bob,,  carol").unwrap();
+        assert_eq!(
+            (e.name, e.passwd, e.gid),
+            (&b"users"[..], Some(&b"x"[..]), 100)
+        );
+        assert_eq!(
+            members(e.members).collect::<Vec<_>>(),
+            [&b"alice"[..], b"bob", b"carol"]
+        );
+        assert_eq!(members(b"").count(), 0);
+        assert_eq!(
+            members(b" , ,").count(),
+            0,
+            "white space alone is no member"
+        );
+        assert_eq!(parse_gr(b"g:x:nan:a"), None);
+        assert_eq!(parse_gr(b"+").map(|e| (e.passwd, e.gid)), Some((None, 0)));
+    }
+
+    // -- lookups against a database --
+
+    #[test]
+    fn getpwnam_reads_etc_passwd() {
+        with_passwd(PASSWD);
+        // SAFETY: a NUL-terminated name.
+        let p = unsafe { getpwnam(c"alice".as_ptr().cast()) };
+        assert!(!p.is_null());
+        // SAFETY: the library's entry.
+        let p = unsafe { &*p };
+        assert_eq!(
+            (p.pw_uid, p.pw_gid),
+            (1000, 1000),
+            "the first alice, not the second"
+        );
+        assert_eq!(s(p.pw_gecos), b"Alice Liddell,,,");
+        assert_eq!(s(p.pw_dir), b"/home/alice");
+        assert_eq!(s(p.pw_shell), b"/bin/sh");
+        assert_eq!(errno::get_errno(), 0);
+        // Leading white space is not part of the name.
+        // SAFETY: as above.
+        assert!(!unsafe { getpwnam(c"daemon".as_ptr().cast()) }.is_null());
+    }
+
+    #[test]
+    fn a_user_not_there_is_null_with_errno_zero() {
+        with_passwd(PASSWD);
+        errno::set_errno(errno::EBADF);
+        // SAFETY: a NUL-terminated name.
+        assert!(unsafe { getpwnam(c"nobody".as_ptr().cast()) }.is_null());
+        assert_eq!(errno::get_errno(), 0);
+        errno::set_errno(errno::EBADF);
+        assert!(getpwuid(4242).is_null());
+        assert_eq!(errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn lookups_skip_bad_lines_and_nis_entries() {
+        with_passwd(PASSWD);
+        // SAFETY: NUL-terminated names.
+        unsafe {
+            assert!(
+                getpwnam(c"bad".as_ptr().cast()).is_null(),
+                "its uid is no number"
+            );
+            assert!(getpwnam(c"+nis".as_ptr().cast()).is_null());
+        }
+        // SAFETY: the library's entry.
+        let bob = found(getpwuid(1001));
+        assert_eq!(s(bob.pw_shell), b"/bin/sh:with:colons");
+    }
+
+    #[test]
+    fn getpwuid_takes_the_first_line_with_the_uid() {
+        with_passwd(PASSWD);
+        // SAFETY: the library's entry.
+        let root = found(getpwuid(0));
+        assert_eq!(s(root.pw_name), b"root");
+        assert_eq!(
+            s(root.pw_dir),
+            b"/root",
+            "the file's root, not the built-in one"
+        );
+        // SAFETY: as above.
+        assert_eq!(s(found(getpwuid(2000)).pw_gecos), b"the second alice");
+    }
+
+    #[test]
+    fn a_missing_database_is_the_builtin_root() {
+        set_test_text(Which::Passwd, None);
+        set_test_text(Which::Group, None);
+        // SAFETY: the library's entries.
+        let root = found(getpwuid(0));
+        assert_eq!(
+            (s(root.pw_name), s(root.pw_dir), s(root.pw_shell)),
+            (b"root".to_vec(), b"/".to_vec(), b"/bin/sh".to_vec())
+        );
+        // SAFETY: a NUL-terminated name.
+        assert!(!unsafe { getpwnam(c"root".as_ptr().cast()) }.is_null());
         assert!(getpwuid(1000).is_null());
-        assert!(getpwuid(u32::MAX).is_null());
+        // SAFETY: the library's entry.
+        let g = found(getgrgid(0));
+        assert_eq!(s(g.gr_name), b"root");
+        assert!(mem(g).is_empty());
     }
 
-    // -----------------------------------------------------------------------
-    // getpwent / setpwent / endpwent enumeration
-    // -----------------------------------------------------------------------
+    #[test]
+    fn getgrnam_and_getgrgid_read_etc_group() {
+        with_group(GROUP);
+        // SAFETY: the library's entry.
+        let wheel = found(getgrgid(10));
+        assert_eq!(s(wheel.gr_name), b"wheel");
+        assert_eq!(mem(wheel), [b"root".to_vec(), b"alice".to_vec()]);
+        // SAFETY: a NUL-terminated name; the library's entry.
+        let users = found(unsafe { getgrnam(c"users".as_ptr().cast()) });
+        assert_eq!(users.gr_gid, 100);
+        assert_eq!(
+            mem(users),
+            [b"alice".to_vec(), b"bob".to_vec(), b"carol".to_vec()]
+        );
+        // SAFETY: a NUL-terminated name.
+        assert!(
+            unsafe { getgrnam(c"noise".as_ptr().cast()) }.is_null(),
+            "its gid is no number"
+        );
+    }
 
     #[test]
-    fn pwent_enumeration() {
-        reset_state();
+    fn a_null_name_is_efault() {
+        with_passwd(PASSWD);
+        // SAFETY: NULL is what is being tested.
+        assert!(unsafe { getpwnam(core::ptr::null()) }.is_null());
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        // SAFETY: as above.
+        assert!(unsafe { getgrnam(core::ptr::null()) }.is_null());
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // -- the reentrant forms --
+
+    #[test]
+    fn getpwnam_r_fills_the_callers_buffer() {
+        with_passwd(PASSWD);
+        let mut pwd = Passwd::EMPTY;
+        let mut buf = [0u8; 256];
+        let mut result: *const Passwd = core::ptr::null();
+        // SAFETY: the caller's objects.
+        let rc = unsafe {
+            getpwnam_r(
+                c"bob".as_ptr().cast(),
+                &mut pwd,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(result, &raw const pwd);
+        assert_eq!(s(pwd.pw_name), b"bob");
+        let range = buf.as_ptr_range();
+        assert!(
+            range.contains(&pwd.pw_shell),
+            "strings live in the caller's buffer"
+        );
+    }
+
+    #[test]
+    fn getpwnam_r_not_found_is_zero_with_a_null_result() {
+        with_passwd(PASSWD);
+        let mut pwd = Passwd::EMPTY;
+        let mut buf = [0u8; 256];
+        let mut result: *const Passwd = &raw const pwd;
+        // SAFETY: the caller's objects.
+        let rc = unsafe {
+            getpwnam_r(
+                c"zed".as_ptr().cast(),
+                &mut pwd,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
+        };
+        assert_eq!((rc, result), (0, core::ptr::null()));
+        assert_eq!(errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn a_short_buffer_is_erange_and_the_long_path_grows() {
+        with_passwd(PASSWD);
+        let mut pwd = Passwd::EMPTY;
+        let mut buf = [0u8; 8];
+        let mut result: *const Passwd = core::ptr::null();
+        // SAFETY: the caller's objects.
+        let rc = unsafe {
+            getpwnam_r(
+                c"alice".as_ptr().cast(),
+                &mut pwd,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
+        };
+        assert_eq!((rc, result), (errno::ERANGE, core::ptr::null()));
+        assert_eq!(errno::get_errno(), errno::ERANGE);
+        // A GECOS field longer than glibc's 1024-byte first buffer.
+        static LONG: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+        let text = LONG.get_or_init(|| {
+            let mut t = b"long:x:7:7:".to_vec();
+            t.extend(core::iter::repeat_n(b'g', 5000));
+            t.extend_from_slice(b":/:/bin/sh\n");
+            t
+        });
+        with_passwd(text);
+        // SAFETY: the library's entry.
+        let e = found(getpwuid(7));
+        assert_eq!(s(e.pw_gecos).len(), 5000);
+    }
+
+    #[test]
+    fn getgrgid_r_aligns_the_member_vector_whatever_the_buffer() {
+        with_group(GROUP);
+        let mut backing = [0u64; 32];
+        for skew in 0..8 {
+            let mut grp = Group::EMPTY;
+            let mut result: *const Group = core::ptr::null();
+            let buf = backing.as_mut_ptr().cast::<u8>().wrapping_add(skew);
+            // SAFETY: `buf` has 256 - skew writable bytes.
+            let rc = unsafe { getgrgid_r(100, &mut grp, buf, 256 - skew, &mut result) };
+            assert_eq!(rc, 0, "skew {skew}");
+            assert_eq!(
+                grp.gr_mem as usize % align_of::<*const u8>(),
+                0,
+                "skew {skew}"
+            );
+            assert_eq!(mem(&grp).len(), 3);
+        }
+    }
+
+    #[test]
+    fn the_r_forms_refuse_null_outputs() {
+        with_passwd(PASSWD);
+        let mut pwd = Passwd::EMPTY;
+        let mut buf = [0u8; 64];
+        let mut result: *const Passwd = core::ptr::null();
+        let name = c"root".as_ptr().cast();
+        // SAFETY: NULLs are what is being tested.
+        unsafe {
+            assert_eq!(
+                getpwnam_r(
+                    name,
+                    core::ptr::null_mut(),
+                    buf.as_mut_ptr(),
+                    64,
+                    &mut result
+                ),
+                errno::EFAULT
+            );
+            assert_eq!(
+                getpwnam_r(name, &mut pwd, core::ptr::null_mut(), 64, &mut result),
+                errno::EFAULT
+            );
+            assert_eq!(
+                getpwnam_r(name, &mut pwd, buf.as_mut_ptr(), 64, core::ptr::null_mut()),
+                errno::EFAULT
+            );
+            assert_eq!(
+                getpwnam_r(
+                    core::ptr::null(),
+                    &mut pwd,
+                    buf.as_mut_ptr(),
+                    64,
+                    &mut result
+                ),
+                errno::EFAULT
+            );
+            assert_eq!(
+                getpwuid_r(0, core::ptr::null_mut(), buf.as_mut_ptr(), 64, &mut result),
+                errno::EFAULT
+            );
+        }
+    }
+
+    // -- enumeration --
+
+    #[test]
+    fn getpwent_walks_every_entry_nis_lines_included() {
+        with_passwd(PASSWD);
         setpwent();
+        let mut names = Vec::new();
+        loop {
+            let p = getpwent();
+            if p.is_null() {
+                break;
+            }
+            // SAFETY: the library's entry.
+            names.push(s(unsafe { &*p }.pw_name));
+        }
+        endpwent();
+        let want: [&[u8]; 6] = [b"root", b"daemon", b"alice", b"bob", b"+nis", b"alice"];
+        assert_eq!(names, want.map(<[u8]>::to_vec));
+    }
 
-        // First call returns root.
-        let pw = getpwent();
-        assert!(!pw.is_null());
-        let pw = unsafe { &*pw };
-        assert_eq!(pw.pw_uid, 0);
+    #[test]
+    fn getpwent_r_gives_the_same_entry_again_after_erange() {
+        with_passwd(PASSWD);
+        setpwent();
+        let mut pwd = Passwd::EMPTY;
+        let mut small = [0u8; 4];
+        let mut big = [0u8; 256];
+        let mut result: *const Passwd = core::ptr::null();
+        // SAFETY: the caller's objects.
+        unsafe {
+            assert_eq!(
+                getpwent_r(&mut pwd, small.as_mut_ptr(), 4, &mut result),
+                errno::ERANGE
+            );
+            assert_eq!(getpwent_r(&mut pwd, big.as_mut_ptr(), 256, &mut result), 0);
+        }
+        assert_eq!(s(pwd.pw_name), b"root", "the entry that did not fit");
+        endpwent();
+    }
 
-        // Second call returns null (only one entry).
+    #[test]
+    fn enumeration_ends_with_enoent_and_setpwent_rewinds() {
+        with_passwd(b"one:x:1:1:::\ntwo:x:2:2:::\n");
+        setpwent();
+        let mut pwd = Passwd::EMPTY;
+        let mut buf = [0u8; 128];
+        let mut result: *const Passwd = core::ptr::null();
+        // SAFETY: the caller's objects.
+        unsafe {
+            assert_eq!(getpwent_r(&mut pwd, buf.as_mut_ptr(), 128, &mut result), 0);
+            assert_eq!(getpwent_r(&mut pwd, buf.as_mut_ptr(), 128, &mut result), 0);
+            assert_eq!(
+                getpwent_r(&mut pwd, buf.as_mut_ptr(), 128, &mut result),
+                errno::ENOENT
+            );
+            assert!(result.is_null());
+        }
+        errno::set_errno(errno::EBADF);
         assert!(getpwent().is_null());
-
-        // setpwent resets enumeration.
+        assert_eq!(
+            errno::get_errno(),
+            errno::EBADF,
+            "the end leaves errno alone"
+        );
         setpwent();
-        let pw2 = getpwent();
-        assert!(!pw2.is_null());
-        let pw2 = unsafe { &*pw2 };
-        assert_eq!(pw2.pw_uid, 0);
-
-        // endpwent also resets.
-        endpwent();
-        let pw3 = getpwent();
-        assert!(!pw3.is_null());
-    }
-
-    // -----------------------------------------------------------------------
-    // getgrnam
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn getgrnam_root_found() {
-        reset_state();
-        let gr = unsafe { getgrnam(b"root\0".as_ptr()) };
-        assert!(!gr.is_null());
-        let gr = unsafe { &*gr };
-        assert_eq!(gr.gr_gid, 0);
-        let name = unsafe { core::ffi::CStr::from_ptr(gr.gr_name.cast()) };
-        assert_eq!(name.to_bytes(), b"root");
-    }
-
-    #[test]
-    fn getgrnam_nonroot_returns_null() {
-        reset_state();
-        let gr = unsafe { getgrnam(b"wheel\0".as_ptr()) };
-        assert!(gr.is_null());
-    }
-
-    #[test]
-    fn getgrnam_null_name_returns_null() {
-        reset_state();
-        let gr = unsafe { getgrnam(core::ptr::null()) };
-        assert!(gr.is_null());
-    }
-
-    // -----------------------------------------------------------------------
-    // getgrgid
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn getgrgid_zero_returns_root() {
-        reset_state();
-        let gr = getgrgid(0);
-        assert!(!gr.is_null());
-        let gr = unsafe { &*gr };
-        assert_eq!(gr.gr_gid, 0);
-    }
-
-    #[test]
-    fn getgrgid_nonzero_returns_null() {
-        reset_state();
-        assert!(getgrgid(1).is_null());
-        assert!(getgrgid(100).is_null());
-        assert!(getgrgid(u32::MAX).is_null());
-    }
-
-    // -----------------------------------------------------------------------
-    // getgrent / setgrent / endgrent enumeration
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn grent_enumeration() {
-        reset_state();
-        setgrent();
-
-        // First call returns root group.
-        let gr = getgrent();
-        assert!(!gr.is_null());
-        let gr = unsafe { &*gr };
-        assert_eq!(gr.gr_gid, 0);
-
-        // Second call returns null.
-        assert!(getgrent().is_null());
-
-        // setgrent resets.
-        setgrent();
-        let gr2 = getgrent();
-        assert!(!gr2.is_null());
-
-        // endgrent also resets.
-        endgrent();
-        let gr3 = getgrent();
-        assert!(!gr3.is_null());
-    }
-
-    // -----------------------------------------------------------------------
-    // getpwnam_r
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn getpwnam_r_root_found() {
-        reset_state();
-        let mut pwd: Passwd = unsafe { core::mem::zeroed() };
-        let mut buf = [0u8; 128];
-        let mut result: *const Passwd = core::ptr::null();
-
-        let ret = unsafe {
-            getpwnam_r(
-                b"root\0".as_ptr(),
-                &mut pwd,
-                buf.as_mut_ptr(),
-                buf.len(),
-                &mut result,
-            )
-        };
-
-        assert_eq!(ret, 0);
-        assert!(!result.is_null());
-        assert_eq!(pwd.pw_uid, 0);
-        assert_eq!(pwd.pw_gid, 0);
-
-        // Verify strings were copied into buf.
-        let name = unsafe { core::ffi::CStr::from_ptr(pwd.pw_name.cast()) };
-        assert_eq!(name.to_bytes(), b"root");
-        let shell = unsafe { core::ffi::CStr::from_ptr(pwd.pw_shell.cast()) };
-        assert_eq!(shell.to_bytes(), b"/bin/sh");
-        let dir = unsafe { core::ffi::CStr::from_ptr(pwd.pw_dir.cast()) };
-        assert_eq!(dir.to_bytes(), b"/");
-        let gecos = unsafe { core::ffi::CStr::from_ptr(pwd.pw_gecos.cast()) };
-        assert_eq!(gecos.to_bytes(), b"root");
-    }
-
-    #[test]
-    fn getpwnam_r_nonroot_result_null() {
-        reset_state();
-        let mut pwd: Passwd = unsafe { core::mem::zeroed() };
-        let mut buf = [0u8; 128];
-        let mut result: *const Passwd = core::ptr::null();
-
-        let ret = unsafe {
-            getpwnam_r(
-                b"nobody\0".as_ptr(),
-                &mut pwd,
-                buf.as_mut_ptr(),
-                buf.len(),
-                &mut result,
-            )
-        };
-
-        assert_eq!(ret, 0);
-        assert!(result.is_null());
-    }
-
-    #[test]
-    fn getpwnam_r_buffer_too_small() {
-        reset_state();
-        let mut pwd: Passwd = unsafe { core::mem::zeroed() };
-        let mut buf = [0u8; 4]; // Way too small (need 22 bytes).
-        let mut result: *const Passwd = core::ptr::null();
-
-        let ret = unsafe {
-            getpwnam_r(
-                b"root\0".as_ptr(),
-                &mut pwd,
-                buf.as_mut_ptr(),
-                buf.len(),
-                &mut result,
-            )
-        };
-
-        assert_eq!(ret, errno::ERANGE);
-        assert!(result.is_null());
-    }
-
-    #[test]
-    fn getpwnam_r_null_args_efault() {
-        reset_state();
-        let mut pwd: Passwd = unsafe { core::mem::zeroed() };
-        let mut buf = [0u8; 128];
-        let mut result: *const Passwd = core::ptr::null();
-
-        // Null result pointer.
-        let ret = unsafe {
-            getpwnam_r(
-                b"root\0".as_ptr(),
-                &mut pwd,
-                buf.as_mut_ptr(),
-                buf.len(),
-                core::ptr::null_mut(),
-            )
-        };
-        assert_eq!(ret, errno::EFAULT);
-
-        // Null pwd pointer.
-        let ret = unsafe {
-            getpwnam_r(
-                b"root\0".as_ptr(),
-                core::ptr::null_mut(),
-                buf.as_mut_ptr(),
-                buf.len(),
-                &mut result,
-            )
-        };
-        assert_eq!(ret, errno::EFAULT);
-
-        // Null buf pointer.
-        let ret = unsafe {
-            getpwnam_r(
-                b"root\0".as_ptr(),
-                &mut pwd,
-                core::ptr::null_mut(),
-                buf.len(),
-                &mut result,
-            )
-        };
-        assert_eq!(ret, errno::EFAULT);
-    }
-
-    #[test]
-    fn getpwnam_r_null_name_not_found() {
-        reset_state();
-        let mut pwd: Passwd = unsafe { core::mem::zeroed() };
-        let mut buf = [0u8; 128];
-        let mut result: *const Passwd = core::ptr::null();
-
-        let ret = unsafe {
-            getpwnam_r(
-                core::ptr::null(),
-                &mut pwd,
-                buf.as_mut_ptr(),
-                buf.len(),
-                &mut result,
-            )
-        };
-
-        // Null name is not an error, just "not found".
-        assert_eq!(ret, 0);
-        assert!(result.is_null());
-    }
-
-    // -----------------------------------------------------------------------
-    // getpwuid_r
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn getpwuid_r_zero_found() {
-        reset_state();
-        let mut pwd: Passwd = unsafe { core::mem::zeroed() };
-        let mut buf = [0u8; 128];
-        let mut result: *const Passwd = core::ptr::null();
-
-        let ret = unsafe { getpwuid_r(0, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) };
-
-        assert_eq!(ret, 0);
-        assert!(!result.is_null());
-        assert_eq!(pwd.pw_uid, 0);
-        assert_eq!(pwd.pw_gid, 0);
-    }
-
-    #[test]
-    fn getpwuid_r_nonzero_result_null() {
-        reset_state();
-        let mut pwd: Passwd = unsafe { core::mem::zeroed() };
-        let mut buf = [0u8; 128];
-        let mut result: *const Passwd = core::ptr::null();
-
-        let ret = unsafe { getpwuid_r(999, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) };
-
-        assert_eq!(ret, 0);
-        assert!(result.is_null());
-    }
-
-    #[test]
-    fn getpwuid_r_buffer_too_small() {
-        reset_state();
-        let mut pwd: Passwd = unsafe { core::mem::zeroed() };
-        let mut buf = [0u8; 2];
-        let mut result: *const Passwd = core::ptr::null();
-
-        let ret = unsafe { getpwuid_r(0, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) };
-
-        assert_eq!(ret, errno::ERANGE);
-        assert!(result.is_null());
-    }
-
-    // -----------------------------------------------------------------------
-    // getgrnam_r
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn getgrnam_r_root_found() {
-        reset_state();
-        let mut grp: Group = unsafe { core::mem::zeroed() };
-        // Need 16 bytes (7 string bytes + 1 padding + 8 null pointer).
-        let mut buf = [0u8; 128];
-        let mut result: *const Group = core::ptr::null();
-
-        let ret = unsafe {
-            getgrnam_r(
-                b"root\0".as_ptr(),
-                &mut grp,
-                buf.as_mut_ptr(),
-                buf.len(),
-                &mut result,
-            )
-        };
-
-        assert_eq!(ret, 0);
-        assert!(!result.is_null());
-        assert_eq!(grp.gr_gid, 0);
-        let name = unsafe { core::ffi::CStr::from_ptr(grp.gr_name.cast()) };
-        assert_eq!(name.to_bytes(), b"root");
-    }
-
-    #[test]
-    fn getgrnam_r_buffer_too_small() {
-        reset_state();
-        let mut grp: Group = unsafe { core::mem::zeroed() };
-        let mut buf = [0u8; 4]; // Need 16 bytes.
-        let mut result: *const Group = core::ptr::null();
-
-        let ret = unsafe {
-            getgrnam_r(
-                b"root\0".as_ptr(),
-                &mut grp,
-                buf.as_mut_ptr(),
-                buf.len(),
-                &mut result,
-            )
-        };
-
-        assert_eq!(ret, errno::ERANGE);
-        assert!(result.is_null());
-    }
-
-    // -----------------------------------------------------------------------
-    // getgrgid_r
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn getgrgid_r_zero_found() {
-        reset_state();
-        let mut grp: Group = unsafe { core::mem::zeroed() };
-        let mut buf = [0u8; 128];
-        let mut result: *const Group = core::ptr::null();
-
-        let ret = unsafe { getgrgid_r(0, &mut grp, buf.as_mut_ptr(), buf.len(), &mut result) };
-
-        assert_eq!(ret, 0);
-        assert!(!result.is_null());
-        assert_eq!(grp.gr_gid, 0);
-    }
-
-    #[test]
-    fn getgrgid_r_buffer_too_small() {
-        reset_state();
-        let mut grp: Group = unsafe { core::mem::zeroed() };
-        let mut buf = [0u8; 2];
-        let mut result: *const Group = core::ptr::null();
-
-        let ret = unsafe { getgrgid_r(0, &mut grp, buf.as_mut_ptr(), buf.len(), &mut result) };
-
-        assert_eq!(ret, errno::ERANGE);
-        assert!(result.is_null());
-    }
-
-    // -----------------------------------------------------------------------
-    // getlogin / getlogin_r
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn getlogin_returns_root() {
-        let login = getlogin();
-        assert!(!login.is_null());
-        let name = unsafe { core::ffi::CStr::from_ptr(login.cast()) };
-        assert_eq!(name.to_bytes(), b"root");
-    }
-
-    #[test]
-    fn getlogin_r_writes_root() {
-        let mut buf = [0u8; 32];
-        let ret = getlogin_r(buf.as_mut_ptr(), buf.len());
-        assert_eq!(ret, 0);
-        // Verify "root\0" was written.
-        assert_eq!(&buf[..5], b"root\0");
-    }
-
-    #[test]
-    fn getlogin_r_buffer_too_small() {
-        let mut buf = [0u8; 3]; // Need 5 bytes for "root\0".
-        let ret = getlogin_r(buf.as_mut_ptr(), buf.len());
-        assert_eq!(ret, -1);
-    }
-
-    #[test]
-    fn getlogin_r_null_buf_returns_error() {
-        let ret = getlogin_r(core::ptr::null_mut(), 100);
-        assert_eq!(ret, -1);
-    }
-
-    // -----------------------------------------------------------------------
-    // ROOT_PASSWD static
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn root_passwd_static_fields() {
-        let pw = &ROOT_PASSWD;
-        assert_eq!(pw.pw_uid, 0);
-        assert_eq!(pw.pw_gid, 0);
-
-        let name = unsafe { core::ffi::CStr::from_ptr(pw.pw_name.cast()) };
-        assert_eq!(name.to_bytes(), b"root");
-
-        let passwd = unsafe { core::ffi::CStr::from_ptr(pw.pw_passwd.cast()) };
-        assert_eq!(passwd.to_bytes(), b"x");
-
-        let gecos = unsafe { core::ffi::CStr::from_ptr(pw.pw_gecos.cast()) };
-        assert_eq!(gecos.to_bytes(), b"root");
-
-        let dir = unsafe { core::ffi::CStr::from_ptr(pw.pw_dir.cast()) };
-        assert_eq!(dir.to_bytes(), b"/");
-
-        let shell = unsafe { core::ffi::CStr::from_ptr(pw.pw_shell.cast()) };
-        assert_eq!(shell.to_bytes(), b"/bin/sh");
-    }
-
-    // -----------------------------------------------------------------------
-    // ROOT_GROUP static
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn root_group_static_fields() {
-        let gr = &ROOT_GROUP;
-        assert_eq!(gr.gr_gid, 0);
-
-        let name = unsafe { core::ffi::CStr::from_ptr(gr.gr_name.cast()) };
-        assert_eq!(name.to_bytes(), b"root");
-
-        let passwd = unsafe { core::ffi::CStr::from_ptr(gr.gr_passwd.cast()) };
-        assert_eq!(passwd.to_bytes(), b"x");
-
-        // gr_mem is non-null and first element is null (empty member list).
-        assert!(!gr.gr_mem.is_null());
-        let first_member = unsafe { *gr.gr_mem };
-        assert!(first_member.is_null());
-    }
-
-    // -----------------------------------------------------------------------
-    // Struct layout (size checks for x86_64)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    #[cfg(target_pointer_width = "64")]
-    fn passwd_struct_size() {
-        // 5 pointers (8 bytes each) + 2 u32 fields (packed together) = 48 bytes.
-        assert_eq!(core::mem::size_of::<Passwd>(), 48);
-    }
-
-    #[test]
-    #[cfg(target_pointer_width = "64")]
-    fn group_struct_size() {
-        // 2 pointers (8 each) + 1 u32 + 4 padding + 1 pointer (8) = 32 bytes.
-        assert_eq!(core::mem::size_of::<Group>(), 32);
-    }
-
-    // -------------------------------------------------------------------
-    // Password database enumeration
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn test_setpwent_getpwent_endpwent() {
-        // Reset enumeration state.
-        setpwent();
-
-        // First call returns the root entry.
-        let p1 = getpwent();
-        assert!(!p1.is_null());
-        let uid = unsafe { (*p1).pw_uid };
-        assert_eq!(uid, 0); // root
-
-        // Second call returns null (only one entry).
-        let p2 = getpwent();
-        assert!(p2.is_null());
-
-        // Close and re-open: should get root again.
-        endpwent();
-        setpwent();
-        let p3 = getpwent();
-        assert!(!p3.is_null());
-        assert_eq!(unsafe { (*p3).pw_uid }, 0);
-
+        // SAFETY: the library's entry.
+        assert_eq!(s(found(getpwent()).pw_name), b"one");
         endpwent();
     }
 
-    // -------------------------------------------------------------------
-    // Group database enumeration
-    // -------------------------------------------------------------------
+    #[test]
+    fn getgrent_walks_the_groups() {
+        with_group(GROUP);
+        setgrent();
+        let mut names = Vec::new();
+        loop {
+            let g = getgrent();
+            if g.is_null() {
+                break;
+            }
+            // SAFETY: the library's entry.
+            names.push(s(unsafe { &*g }.gr_name));
+        }
+        endgrent();
+        let want: [&[u8]; 6] = [b"root", b"wheel", b"users", b"alice", b"staff", b"+"];
+        assert_eq!(names, want.map(<[u8]>::to_vec));
+    }
 
     #[test]
-    fn test_setgrent_getgrent_endgrent() {
-        setgrent();
-
-        let g1 = getgrent();
-        assert!(!g1.is_null());
-        assert_eq!(unsafe { (*g1).gr_gid }, 0); // root
-
-        let g2 = getgrent();
-        assert!(g2.is_null());
-
-        endgrent();
-        setgrent();
-        let g3 = getgrent();
-        assert!(!g3.is_null());
-        assert_eq!(unsafe { (*g3).gr_gid }, 0);
-
-        endgrent();
+    fn a_missing_database_enumerates_the_builtin_root() {
+        set_test_text(Which::Passwd, None);
+        setpwent();
+        // SAFETY: the library's entry.
+        assert_eq!(s(found(getpwent()).pw_name), b"root");
+        assert!(getpwent().is_null());
+        endpwent();
     }
 
     // -- getgrouplist --
 
+    fn grouplist(user: &core::ffi::CStr, group: GidT, room: i32) -> (i32, i32, Vec<GidT>) {
+        let mut groups = std::vec![GidT::MAX; usize::try_from(room.max(0)).unwrap()];
+        let mut n = room;
+        let r = getgrouplist(user.as_ptr().cast(), group, groups.as_mut_ptr(), &mut n);
+        (r, n, groups)
+    }
+
     #[test]
-    fn test_getgrouplist_basic() {
-        let mut groups = [0i32; 4];
-        let mut ngroups: i32 = 4;
-        let ret = getgrouplist(
-            b"root\0".as_ptr(),
-            0,
-            groups.as_mut_ptr() as *mut GidT,
-            &mut ngroups,
+    fn getgrouplist_is_the_primary_then_each_group_naming_the_user() {
+        with_group(GROUP);
+        let (r, n, groups) = grouplist(c"alice", 1000, 8);
+        assert_eq!((r, n), (4, 4));
+        assert_eq!(
+            groups[..4],
+            [1000, 10, 100, 50],
+            "file order; `alice` (1000) not twice"
         );
-        assert_eq!(ret, 1);
-        assert_eq!(ngroups, 1);
-        assert_eq!(groups[0], 0);
+        let (r, _, groups) = grouplist(c"carol", 7, 8);
+        assert_eq!((r, groups[..2].to_vec()), (2, std::vec![7, 100]));
     }
 
     #[test]
-    fn test_getgrouplist_nonroot_user() {
-        let mut groups = [0i32; 4];
-        let mut ngroups: i32 = 4;
-        let ret = getgrouplist(
-            b"nobody\0".as_ptr(),
-            1000,
-            groups.as_mut_ptr() as *mut GidT,
-            &mut ngroups,
+    fn getgrouplist_too_small_is_minus_one_with_the_count() {
+        with_group(GROUP);
+        let (r, n, groups) = grouplist(c"alice", 1000, 2);
+        assert_eq!((r, n), (-1, 4));
+        assert_eq!(groups, [1000, 10], "the first ones that fit");
+        // The count-query idiom: no room at all, and a NULL vector.
+        let mut n = 0;
+        assert_eq!(
+            getgrouplist(
+                c"alice".as_ptr().cast(),
+                1000,
+                core::ptr::null_mut(),
+                &mut n
+            ),
+            -1
         );
-        assert_eq!(ret, 1);
-        assert_eq!(ngroups, 1);
-        assert_eq!(groups[0], 1000);
+        assert_eq!(n, 4);
     }
 
     #[test]
-    fn test_getgrouplist_buffer_too_small() {
-        let mut ngroups: i32 = 0;
-        let ret = getgrouplist(b"root\0".as_ptr(), 0, core::ptr::null_mut(), &mut ngroups);
-        assert_eq!(ret, -1);
-        assert_eq!(ngroups, 1);
-    }
-
-    #[test]
-    fn test_getgrouplist_null_ngroups() {
-        let ret = getgrouplist(
-            b"root\0".as_ptr(),
-            0,
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
+    fn getgrouplist_null_arguments() {
+        with_group(GROUP);
+        let mut groups = [0; 4];
+        errno::set_errno(0);
+        assert_eq!(
+            getgrouplist(
+                c"alice".as_ptr().cast(),
+                1,
+                groups.as_mut_ptr(),
+                core::ptr::null_mut()
+            ),
+            -1
         );
-        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        let mut n = 4;
+        assert_eq!(
+            getgrouplist(core::ptr::null(), 9, groups.as_mut_ptr(), &mut n),
+            1,
+            "in no group"
+        );
+        assert_eq!(groups[0], 9);
+        let mut n = 4;
+        assert_eq!(
+            getgrouplist(c"alice".as_ptr().cast(), 1, core::ptr::null_mut(), &mut n),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
-    // -- initgroups --
+    #[test]
+    fn getgrouplist_with_no_group_file_is_the_primary_alone() {
+        set_test_text(Which::Group, None);
+        let (r, n, groups) = grouplist(c"root", 0, 4);
+        assert_eq!((r, n, groups[0]), (1, 1, 0));
+    }
+
+    // -- the rest --
+
+    #[test]
+    fn getlogin_returns_root() {
+        assert_eq!(s(getlogin()), b"root");
+        let mut buf = [0xAAu8; 8];
+        assert_eq!(getlogin_r(buf.as_mut_ptr(), 8), 0);
+        assert_eq!(&buf[..5], b"root\0");
+        assert_eq!(getlogin_r(buf.as_mut_ptr(), 4), -1);
+        assert_eq!(errno::get_errno(), errno::ERANGE);
+        assert_eq!(getlogin_r(core::ptr::null_mut(), 8), -1);
+    }
+
+    #[test]
+    fn passwd_and_group_are_the_c_structures() {
+        assert_eq!(size_of::<Passwd>(), 48);
+        assert_eq!(size_of::<Group>(), 32);
+    }
 
     #[test]
     fn test_initgroups_succeeds() {
-        assert_eq!(initgroups(b"root\0".as_ptr(), 0), 0);
+        assert_eq!(initgroups(c"root".as_ptr().cast(), 0), 0);
     }
 
     #[test]
-    fn test_initgroups_nonroot() {
-        assert_eq!(initgroups(b"nobody\0".as_ptr(), 1000), 0);
+    fn an_unreadable_database_is_its_error() {
+        crate::nss_files::set_test_error(Which::Passwd, errno::EIO);
+        // SAFETY: a NUL-terminated name.
+        assert!(unsafe { getpwnam(c"root".as_ptr().cast()) }.is_null());
+        assert_eq!(errno::get_errno(), errno::EIO);
+        let mut pwd = Passwd::EMPTY;
+        let mut buf = [0u8; 64];
+        let mut result: *const Passwd = core::ptr::null();
+        // SAFETY: the caller's objects.
+        assert_eq!(
+            unsafe { getpwuid_r(0, &mut pwd, buf.as_mut_ptr(), 64, &mut result) },
+            errno::EIO
+        );
+        setpwent();
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { getpwent_r(&mut pwd, buf.as_mut_ptr(), 64, &mut result) },
+            errno::ENOENT
+        );
+        endpwent();
+        set_test_text(Which::Passwd, None);
     }
 
     #[test]
-    fn test_initgroups_null_user() {
-        assert_eq!(initgroups(core::ptr::null(), 0), 0);
+    fn getgrouplist_goes_on_without_an_unreadable_group_file() {
+        crate::nss_files::set_test_error(Which::Group, errno::EACCES);
+        let (r, n, groups) = grouplist(c"alice", 1000, 4);
+        assert_eq!((r, n, groups[0]), (1, 1, 1000));
+        set_test_text(Which::Group, None);
     }
 }

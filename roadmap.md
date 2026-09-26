@@ -1867,6 +1867,10 @@ D's to act on once answered).
       `mkfifo` and `mkfifoat` are glibc's calls through `mknodat`, checked
       in glibc's then Linux's order; FIFOs and devices still wait on the
       filesystem.
+    * the user, group and shadow databases read `/etc/passwd`, `/etc/group`
+      and `/etc/shadow` as glibc's `nss_files` does, where they were one
+      built-in root -- still the answer for a missing file (§1113);
+      `getpwent_r` and `getgrent_r` exist.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

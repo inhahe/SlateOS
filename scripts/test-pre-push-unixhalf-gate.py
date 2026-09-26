@@ -257,17 +257,19 @@ def build_fixture(tmp: str) -> tuple[str, str]:
         write_crate(work, cdir, with_cfg)
     git(work, "add", "a.txt", "scripts", "userspace")
     git(work, "commit", "--quiet", "-m", "clean commit")
-    # The seed push needs the stub's environment like every other push here:
-    # this commit adds `scripts/coreutils-check.sh`, so it is in the gate's own
-    # scope and the gate fires on it. Without the environment the stub dies on
-    # `set -u`, the gate refuses, and -- the part worth naming, because it is
-    # how this was found -- the seed commit stays *unpushed* and rides along in
-    # the next case's push, silently widening that case's scope past what it is
-    # about. A fixture whose setup is refused does not fail; it lies.
-    env = gitenv.clean_env()
-    env["UNIXHALF_STUB_RC"] = "0"
-    env["UNIXHALF_STUB_LOG"] = stub_log
-    seed = git(work, "push", "--quiet", "origin", "main", env=env)
+    # The seed is the remote's starting state, not a push under test, so it is
+    # published without the hook: `--no-verify`. It used to go through the hook,
+    # and needed the stub's environment to get past it: this commit adds
+    # `scripts/coreutils-check.sh`, so it is in the gate's own scope and the
+    # gate fired on it. Without the environment the stub died on `set -u`, the
+    # gate refused, and -- the part worth naming, because it is how this was
+    # found -- the seed commit stayed *unpushed* and rode along in the next
+    # case's push, silently widening that case's scope past what it is about. A
+    # fixture whose setup is refused does not fail; it lies. Skipping the hook
+    # removes that route, and the full gate run it cost (from 23 s to three
+    # minutes on a loaded host, measured 2026-09-25); the check below stays for
+    # every other way a push can fail.
+    seed = git(work, "push", "--quiet", "--no-verify", "origin", "main")
     if seed.returncode != 0:
         raise RuntimeError("fixture seed push was refused:\n"
                            + seed.stdout + seed.stderr)

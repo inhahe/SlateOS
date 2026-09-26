@@ -174,7 +174,17 @@ def build_fixture(tmp: str) -> str:
     write(work, "a.txt", "one\n")
     git(work, "add", "--", "a.txt")
     git(work, "commit", "--quiet", "-m", "clean commit")
-    git(work, "push", "--quiet", "origin", "main")
+    # The seed is the remote's starting state, not a push under test, so it is
+    # published without the hook: `--no-verify`. Through the hook it cost a full
+    # run of every gate -- from 23 s to three minutes each on a loaded host,
+    # measured 2026-09-25 -- for a verdict nothing read. And a refused seed does
+    # not fail, it lies: the commit stays unpublished and rides along in the
+    # next push, widening that push past what its case is about
+    # (test-pre-push-unixhalf-gate.py found that the hard way). Hence the check.
+    seed = git(work, "push", "--quiet", "--no-verify", "origin", "main")
+    if seed.returncode != 0:
+        raise RuntimeError("fixture seed push failed:\n"
+                           + seed.stdout + seed.stderr)
     return work
 
 

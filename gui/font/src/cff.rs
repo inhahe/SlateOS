@@ -63,7 +63,9 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use crate::sfnt::{Outline, PathCmd, Point, SfntError, Transform};
+use crate::sfnt::{
+    CffPen, CffPoints, Exact, Outline, PathCmd, SfntError, TaggedOutline, Transform,
+};
 
 /// Every structural complaint about this table reads the same way.
 const ERR: SfntError = SfntError::MalformedTable("CFF ");
@@ -75,7 +77,8 @@ const MAX_SUBR_DEPTH: u8 = 10;
 /// The Type 2 operand stack is 48 entries in the specification.
 const STACK_LIMIT: usize = 48;
 
-/// Ceiling on the path commands one glyph may emit.
+/// Ceiling on the drawing operations one charstring may perform -- per
+/// charstring, so a `seac` glyph, which runs three, may draw three times it.
 ///
 /// A charstring is a program, so "how much can one glyph draw" is not bounded
 /// by the file's size the way a `glyf` entry is: a short subroutine invoked
@@ -670,7 +673,7 @@ impl Cff {
     pub fn outline(&self, data: &[u8], gid: u16) -> Result<Outline, SfntError> {
         let d = self.table(data)?;
         let mut out = Outline::default();
-        self.outline_into(d, gid, &mut out, 0)?;
+        self.draw(d, gid, &mut out, Exact::default(), false)?;
         if let Some(t) = self.matrix {
             let mut scaled = Outline::default();
             scaled.commands.reserve(out.commands.len());
@@ -690,71 +693,62 @@ impl Cff {
         Ok(out)
     }
 
-    /// Draw `gid` into `out`. `d` is the table slice.
-    fn outline_into(
+    /// A glyph's points as FreeType's CFF loader stores them, for the
+    /// auto-hinter: exact, where [`outline`](Self::outline)'s are narrowed to
+    /// `f32`, and without the points FreeType drops (see [`CffPoints`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`outline`](Self::outline).
+    pub(crate) fn tagged_outline(&self, data: &[u8], gid: u16) -> Result<TaggedOutline, SfntError> {
+        let d = self.table(data)?;
+        let mut points = CffPoints::default();
+        self.draw(d, gid, &mut points, Exact::default(), false)?;
+        let mut out = points.finish();
+        if let Some(t) = self.matrix {
+            out.transform(&t);
+        }
+        Ok(out)
+    }
+
+    /// Draw `gid` on `pen`, its pen starting at `origin`. `d` is the table
+    /// slice; `component` says this glyph is itself part of a `seac` glyph.
+    fn draw<P: CffPen>(
         &self,
         d: &[u8],
         gid: u16,
-        out: &mut Outline,
-        depth: u8,
+        pen: &mut P,
+        origin: Exact,
+        component: bool,
     ) -> Result<(), SfntError> {
         if usize::from(gid) >= self.char_strings.count {
             return Err(SfntError::GlyphOutOfRange);
         }
         let local = self.local_subrs(d, gid)?;
-        let mut interp = Interp {
-            cff: self,
-            data: d,
-            local,
-            stack: [0.0; STACK_LIMIT],
-            sp: 0,
-            n_stems: 0,
-            x: 0.0,
-            y: 0.0,
-            open: false,
-            out,
-            seac: None,
-        };
+        let mut interp = Interp::new(self, d, local, pen, origin);
         interp.run(self.char_strings.get(d, usize::from(gid))?, 0)?;
         interp.close_contour();
-        let seac = interp.seac;
-
-        if let Some([adx, ady, bchar, achar]) = seac {
-            // The deprecated four-argument `endchar`: draw a base glyph and an
-            // accent from StandardEncoding, the accent shifted by (adx, ady).
-            // Composition can nest — an accent is a real glyph and could in
-            // principle be composed itself — so it is depth-limited the same
-            // way `glyf` composites are.
-            if depth >= MAX_SUBR_DEPTH {
-                return Err(ERR);
-            }
-            let base = self.seac_gid(d, bchar)?;
-            let accent = self.seac_gid(d, achar)?;
-            self.outline_into(d, base, out, depth.saturating_add(1))?;
-            let mut acc = Outline::default();
-            self.outline_into(d, accent, &mut acc, depth.saturating_add(1))?;
-            let shift = Transform {
-                e: adx,
-                f: ady,
-                ..Transform::IDENTITY
-            };
-            for cmd in &acc.commands {
-                out.commands.push(match *cmd {
-                    PathCmd::MoveTo(p) => PathCmd::MoveTo(shift.apply(p)),
-                    PathCmd::LineTo(p) => PathCmd::LineTo(shift.apply(p)),
-                    PathCmd::QuadTo(c, p) => PathCmd::QuadTo(shift.apply(c), shift.apply(p)),
-                    PathCmd::CurveTo(a, b, p) => {
-                        PathCmd::CurveTo(shift.apply(a), shift.apply(b), shift.apply(p))
-                    }
-                    PathCmd::Close => PathCmd::Close,
-                });
-            }
+        let Some([adx, ady, bchar, achar]) = interp.seac else {
+            return Ok(());
+        };
+        // The deprecated four-argument `endchar`: a base glyph and an accent
+        // from StandardEncoding, the accent's pen starting at (adx, ady) --
+        // as FreeType draws it. That is not the same as drawing the accent at
+        // the origin and moving it: where each point lands in device space,
+        // and so which of its lines have no length there, depends on where
+        // the accent is (see `CffPoints`). A component composed in turn is
+        // malformed, as FreeType has it, which also bounds the recursion.
+        if component {
+            return Err(ERR);
         }
-        Ok(())
+        let base = self.seac_gid(d, bchar)?;
+        let accent = self.seac_gid(d, achar)?;
+        self.draw(d, base, pen, Exact::default(), true)?;
+        self.draw(d, accent, pen, Exact::new(adx, ady), true)
     }
 
     /// Resolve a `seac` StandardEncoding code to a glyph id.
-    fn seac_gid(&self, d: &[u8], code: f32) -> Result<u16, SfntError> {
+    fn seac_gid(&self, d: &[u8], code: f64) -> Result<u16, SfntError> {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         // A charstring operand is an integer in this position; anything
         // outside a byte is not a StandardEncoding code and is rejected below.
@@ -907,29 +901,70 @@ fn em_transform(m: [f64; 6], units_per_em: u16) -> Option<Transform> {
 // The Type 2 charstring interpreter
 // ---------------------------------------------------------------------------
 
-struct Interp<'a> {
+/// A charstring's arithmetic is done in `f64`, and only the pen narrows a
+/// finished point to an outline's `f32` -- or, drawing the hinter's points,
+/// does not (see [`CffPen`]).
+///
+/// Type 2 operands are integers or 16.16 fixed point, and a pen position is
+/// their running sum -- all of which `f64` holds exactly, as FreeType's own
+/// 16.16 arithmetic does. `f32` does not: a 16.16 value needs 32 bits and
+/// `f32` has 24, so a font with fractional operands drifted as it drew, and a
+/// contour that returns to its start in the font arrived a few millionths
+/// away from it here. Harmless to a rasterizer; not to the auto-hinter, which
+/// has to see the glyph's points exactly as FreeType's does (see
+/// [`crate::hint`]).
+struct Interp<'a, P: CffPen> {
     cff: &'a Cff,
     data: &'a [u8],
     local: Option<Index>,
-    stack: [f32; STACK_LIMIT],
+    stack: [f64; STACK_LIMIT],
     sp: usize,
     /// Stem count, kept only so that `hintmask` skips the right number of
     /// mask bytes — one bit per stem, rounded up to a byte.
     n_stems: usize,
-    x: f32,
-    y: f32,
+    x: f64,
+    y: f64,
     /// Whether a contour is currently open, so that a `moveto` knows to close
     /// the previous one. CFF contours are implicitly closed; there is no
     /// `closepath` in Type 2.
     open: bool,
-    out: &'a mut Outline,
+    pen: &'a mut P,
+    /// Drawing operations so far, against [`MAX_COMMANDS`].
+    drawn: usize,
     /// Set by a four-argument `endchar`; acted on by the caller, which is the
     /// only place that can recurse into another glyph.
-    seac: Option<[f32; 4]>,
+    seac: Option<[f64; 4]>,
 }
 
-impl Interp<'_> {
-    fn push(&mut self, v: f32) -> Result<(), SfntError> {
+impl<'a, P: CffPen> Interp<'a, P> {
+    /// An interpreter for one charstring, drawing on `pen` from `origin`.
+    fn new(
+        cff: &'a Cff,
+        data: &'a [u8],
+        local: Option<Index>,
+        pen: &'a mut P,
+        origin: Exact,
+    ) -> Self {
+        pen.start(origin);
+        Self {
+            cff,
+            data,
+            local,
+            stack: [0.0; STACK_LIMIT],
+            sp: 0,
+            n_stems: 0,
+            x: origin.x,
+            y: origin.y,
+            open: false,
+            pen,
+            drawn: 0,
+            seac: None,
+        }
+    }
+}
+
+impl<P: CffPen> Interp<'_, P> {
+    fn push(&mut self, v: f64) -> Result<(), SfntError> {
         if self.sp >= STACK_LIMIT {
             return Err(ERR);
         }
@@ -938,7 +973,7 @@ impl Interp<'_> {
         Ok(())
     }
 
-    fn args(&self) -> Result<&[f32], SfntError> {
+    fn args(&self) -> Result<&[f64], SfntError> {
         self.stack.get(..self.sp).ok_or(ERR)
     }
 
@@ -956,7 +991,7 @@ impl Interp<'_> {
     /// Returning an array rather than a slice lets each operator destructure
     /// its operands by name, so an arity mismatch is a compile error instead of
     /// an index that could be out of range at run time.
-    fn last<const N: usize>(&self) -> Result<[f32; N], SfntError> {
+    fn last<const N: usize>(&self) -> Result<[f64; N], SfntError> {
         let start = self.sp.checked_sub(N).ok_or(ERR)?;
         let s = self.stack.get(start..self.sp).ok_or(ERR)?;
         s.try_into().map_err(|_| ERR)
@@ -969,51 +1004,71 @@ impl Interp<'_> {
     /// Copying the group out per step rather than holding a borrow of the stack
     /// is what keeps those loops borrow-checkable, and it bounds-checks the
     /// whole group in one place.
-    fn run_of<const N: usize>(&self, k: usize) -> Result<[f32; N], SfntError> {
+    fn run_of<const N: usize>(&self, k: usize) -> Result<[f64; N], SfntError> {
         let end = add(k, N)?;
         let s = self.args()?.get(k..end).ok_or(ERR)?;
         s.try_into().map_err(|_| ERR)
     }
 
-    fn emit(&mut self, cmd: PathCmd) -> Result<(), SfntError> {
-        if self.out.commands.len() >= MAX_COMMANDS {
+    /// Count one drawing operation against the charstring's ceiling.
+    fn spend(&mut self) -> Result<(), SfntError> {
+        if self.drawn >= MAX_COMMANDS {
             return Err(ERR);
         }
-        self.out.commands.push(cmd);
+        self.drawn = self.drawn.saturating_add(1);
         Ok(())
     }
 
     fn close_contour(&mut self) {
         if self.open {
-            self.out.commands.push(PathCmd::Close);
+            self.pen.close();
             self.open = false;
         }
     }
 
-    fn move_to(&mut self, dx: f32, dy: f32) -> Result<(), SfntError> {
+    fn move_to(&mut self, dx: f64, dy: f64) -> Result<(), SfntError> {
+        self.spend()?;
         self.close_contour();
         self.x += dx;
         self.y += dy;
-        self.emit(PathCmd::MoveTo(Point::new(self.x, self.y)))?;
+        self.pen.move_to(Exact::new(self.x, self.y));
         self.open = true;
         Ok(())
     }
 
-    fn line_to(&mut self, dx: f32, dy: f32) -> Result<(), SfntError> {
+    fn line_to(&mut self, dx: f64, dy: f64) -> Result<(), SfntError> {
+        self.spend()?;
         self.x += dx;
         self.y += dy;
-        self.emit(PathCmd::LineTo(Point::new(self.x, self.y)))
+        self.pen.line_to(Exact::new(self.x, self.y));
+        Ok(())
     }
 
     /// A cubic given as three successive deltas, which is how every Type 2
     /// curve operator ultimately expresses itself.
-    fn curve_to(&mut self, d: [f32; 6]) -> Result<(), SfntError> {
-        let c1 = Point::new(self.x + d[0], self.y + d[1]);
-        let c2 = Point::new(c1.x + d[2], c1.y + d[3]);
-        let p = Point::new(c2.x + d[4], c2.y + d[5]);
-        self.x = p.x;
-        self.y = p.y;
-        self.emit(PathCmd::CurveTo(c1, c2, p))
+    fn curve_to(&mut self, d: [f64; 6]) -> Result<(), SfntError> {
+        let c1 = (self.x + d[0], self.y + d[1]);
+        let c2 = (c1.0 + d[2], c1.1 + d[3]);
+        let p = (c2.0 + d[4], c2.1 + d[5]);
+        self.curve_through(c1, c2, p)
+    }
+
+    /// A cubic to `p` with controls `c1` and `c2`, all absolute, leaving the
+    /// pen at `p`.
+    fn curve_through(
+        &mut self,
+        c1: (f64, f64),
+        c2: (f64, f64),
+        p: (f64, f64),
+    ) -> Result<(), SfntError> {
+        self.spend()?;
+        (self.x, self.y) = p;
+        self.pen.curve_to(
+            Exact::new(c1.0, c1.1),
+            Exact::new(c2.0, c2.1),
+            Exact::new(p.0, p.1),
+        );
+        Ok(())
     }
 
     /// Count the stems an operator declares and clear the stack.
@@ -1039,9 +1094,9 @@ impl Interp<'_> {
                 28 => {
                     let v = i16::from_be_bytes([u8_at(code, i)?, u8_at(code, add(i, 1)?)?]);
                     i = add(i, 2)?;
-                    self.push(f32::from(v))?;
+                    self.push(f64::from(v))?;
                 }
-                32..=246 => self.push(f32::from(i16::from(b0).saturating_sub(139)))?,
+                32..=246 => self.push(f64::from(i16::from(b0).saturating_sub(139)))?,
                 247..=250 => {
                     let b1 = i32::from(u8_at(code, i)?);
                     i = add(i, 1)?;
@@ -1050,9 +1105,7 @@ impl Interp<'_> {
                         .saturating_mul(256)
                         .saturating_add(b1)
                         .saturating_add(108);
-                    #[allow(clippy::cast_precision_loss)]
-                    // Bounded by 1131; exact in f32.
-                    self.push(v as f32)?;
+                    self.push(f64::from(v))?;
                 }
                 251..=254 => {
                     let b1 = i32::from(u8_at(code, i)?);
@@ -1062,9 +1115,7 @@ impl Interp<'_> {
                         .saturating_mul(-256)
                         .saturating_sub(b1)
                         .saturating_sub(108);
-                    #[allow(clippy::cast_precision_loss)]
-                    // Bounded by -1131; exact in f32.
-                    self.push(v as f32)?;
+                    self.push(f64::from(v))?;
                 }
                 255 => {
                     // 16.16 fixed point — the only fractional operand form.
@@ -1075,10 +1126,8 @@ impl Interp<'_> {
                         u8_at(code, add(i, 3)?)?,
                     ]);
                     i = add(i, 4)?;
-                    #[allow(clippy::cast_precision_loss)]
-                    // A 16.16 value's magnitude is within f32's exact range for
-                    // every coordinate a font can express in an em square.
-                    self.push(v as f32 / 65536.0)?;
+                    // Exact in f64, as every sum of such values is.
+                    self.push(f64::from(v) / 65536.0)?;
                 }
 
                 // --- hints ------------------------------------------------
@@ -1180,7 +1229,7 @@ impl Interp<'_> {
                     // deltas are constrained to one axis, with an optional
                     // leading cross-axis delta applied to the first curve only.
                     let mut k = 0usize;
-                    let mut cross = 0.0_f32;
+                    let mut cross = 0.0_f64;
                     if self.sp % 4 == 1 {
                         cross = *self.args()?.first().ok_or(ERR)?;
                         k = 1;
@@ -1308,33 +1357,28 @@ impl Interp<'_> {
                 self.sp = 0;
                 let start_y = self.y;
                 self.curve_to([dx1, dy1, dx2, dy2, dx3, 0.0])?;
-                let c1 = Point::new(self.x + dx4, self.y);
-                let c2 = Point::new(c1.x + dx5, c1.y + dy5);
-                let p = Point::new(c2.x + dx6, start_y);
-                self.x = p.x;
-                self.y = p.y;
-                self.emit(PathCmd::CurveTo(c1, c2, p))?;
+                let c1 = (self.x + dx4, self.y);
+                let c2 = (c1.0 + dx5, c1.1 + dy5);
+                self.curve_through(c1, c2, (c2.0 + dx6, start_y))?;
             }
             // flex1: the last delta is given on one axis only; which axis is
             // decided by whichever direction the flex travelled further in,
             // and the other coordinate returns to where the flex started.
             37 => {
-                let v: [f32; 11] = self.last()?;
+                let v: [f64; 11] = self.last()?;
                 self.sp = 0;
                 let (start_x, start_y) = (self.x, self.y);
                 let dx = v[0] + v[2] + v[4] + v[6] + v[8];
                 let dy = v[1] + v[3] + v[5] + v[7] + v[9];
                 self.curve_to([v[0], v[1], v[2], v[3], v[4], v[5]])?;
-                let c1 = Point::new(self.x + v[6], self.y + v[7]);
-                let c2 = Point::new(c1.x + v[8], c1.y + v[9]);
+                let c1 = (self.x + v[6], self.y + v[7]);
+                let c2 = (c1.0 + v[8], c1.1 + v[9]);
                 let p = if dx.abs() > dy.abs() {
-                    Point::new(c2.x + v[10], start_y)
+                    (c2.0 + v[10], start_y)
                 } else {
-                    Point::new(start_x, c2.y + v[10])
+                    (start_x, c2.1 + v[10])
                 };
-                self.x = p.x;
-                self.y = p.y;
-                self.emit(PathCmd::CurveTo(c1, c2, p))?;
+                self.curve_through(c1, c2, p)?;
             }
             _ => return Err(SfntError::CffUnsupported("Type 2 arithmetic operator")),
         }
@@ -1356,6 +1400,7 @@ impl Interp<'_> {
 )]
 mod tests {
     use super::*;
+    use crate::sfnt::Point;
 
     /// Encode a charstring integer the way a real font would.
     fn int(v: i32) -> Vec<u8> {
@@ -1386,19 +1431,7 @@ mod tests {
             matrix: None,
         };
         let mut out = Outline::default();
-        let mut interp = Interp {
-            cff: &cff,
-            data: &[],
-            local: None,
-            stack: [0.0; STACK_LIMIT],
-            sp: 0,
-            n_stems: 0,
-            x: 0.0,
-            y: 0.0,
-            open: false,
-            out: &mut out,
-            seac: None,
-        };
+        let mut interp = Interp::new(&cff, &[], None, &mut out, Exact::default());
         interp.run(code, 0).unwrap();
         interp.close_contour();
         out
@@ -1406,6 +1439,161 @@ mod tests {
 
     fn pt(x: f32, y: f32) -> Point {
         Point::new(x, y)
+    }
+
+    /// Encode a charstring's 16.16 fixed-point operand.
+    fn fixed(v: f64) -> Vec<u8> {
+        let mut out = vec![255u8];
+        out.extend_from_slice(&((v * 65536.0).round() as i32).to_be_bytes());
+        out
+    }
+
+    /// An INDEX of `entries`, with two-byte offsets.
+    fn index(entries: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = (entries.len() as u16).to_be_bytes().to_vec();
+        if entries.is_empty() {
+            return out;
+        }
+        out.push(2);
+        let mut off = 1u16;
+        out.extend_from_slice(&off.to_be_bytes());
+        for e in entries {
+            off += e.len() as u16;
+            out.extend_from_slice(&off.to_be_bytes());
+        }
+        for e in entries {
+            out.extend_from_slice(e);
+        }
+        out
+    }
+
+    /// A whole `CFF ` table whose charstrings are `glyphs`, under the
+    /// predefined charset: glyph `n` carries SID `n`.
+    fn table(glyphs: &[Vec<u8>]) -> Vec<u8> {
+        let header = [1u8, 0, 4, 1];
+        let names = index(&[b"T".to_vec()]);
+        let empty = index(&[]);
+        // The Top DICT's one entry is the CharStrings offset, written as a
+        // five-byte integer so that the DICT's size does not depend on it.
+        let top_len = index(&[vec![0; 6]]).len();
+        let at = header.len() + names.len() + top_len + 2 * empty.len();
+        let mut top = vec![29u8];
+        top.extend_from_slice(&(at as i32).to_be_bytes());
+        top.push(17);
+        let mut out = header.to_vec();
+        out.extend(names);
+        out.extend(index(&[top]));
+        out.extend_from_slice(&empty); // strings
+        out.extend_from_slice(&empty); // global subroutines
+        assert_eq!(out.len(), at);
+        out.extend(index(glyphs));
+        out
+    }
+
+    /// Run a charstring in isolation, as [`run_bare`] does, recording the
+    /// points FreeType would store.
+    fn run_points(code: &[u8]) -> TaggedOutline {
+        let cff = Cff {
+            base: 0,
+            len: 0,
+            char_strings: Index::default(),
+            global_subrs: Index::default(),
+            locals: Locals::Single(None),
+            charset: Charset::Predefined,
+            matrix: None,
+        };
+        let mut points = CffPoints::default();
+        let mut interp = Interp::new(&cff, &[], None, &mut points, Exact::default());
+        interp.run(code, 0).unwrap();
+        interp.close_contour();
+        points.finish()
+    }
+
+    #[test]
+    fn the_hinters_points_keep_a_charstrings_fractions_exactly() {
+        // 13107/65536 needs all sixteen of 16.16's fraction bits, and 500
+        // plus it needs 25 bits of mantissa -- one more than f32 has. Three
+        // lines that return to the start in 16.16 return to it exactly here,
+        // so the closing point folds as FreeType folds it.
+        let d = 13107.0 / 65536.0;
+        let code = cs(&[
+            &int(500),
+            &int(500),
+            &[21],
+            &fixed(d),
+            &int(100),
+            &fixed(2.0 * d),
+            &int(-50),
+            &fixed(-3.0 * d),
+            &int(-50),
+            &[5],
+        ]);
+        let t = run_points(&code);
+        assert_eq!(t.ends, [3]);
+        assert_eq!(
+            t.points,
+            [
+                Exact::new(500.0, 500.0),
+                Exact::new(500.0 + d, 600.0),
+                Exact::new(500.0 + 3.0 * d, 550.0)
+            ]
+        );
+        // The path narrows the same points to f32.
+        let o = run_bare(&code);
+        assert_eq!(
+            o.commands[1],
+            PathCmd::LineTo(Point::new((500.0 + d) as f32, 600.0))
+        );
+    }
+
+    #[test]
+    fn a_seac_accent_is_drawn_from_its_offset() {
+        // StandardEncoding's `A` (65) is SID 34 and `acute` (194) SID 125,
+        // which the predefined charset makes glyphs 34 and 125.
+        let mut glyphs = vec![vec![14u8]; 126];
+        let triangle = |size: i32| {
+            cs(&[
+                &int(0),
+                &int(0),
+                &[21],
+                &int(size),
+                &int(0),
+                &int(0),
+                &int(size),
+                &[5],
+                &[14],
+            ])
+        };
+        glyphs[34] = triangle(100);
+        glyphs[125] = triangle(10);
+        // The accent 50.5 units right and 200 up: a fraction, so that where
+        // its pen starts matters to the points.
+        glyphs[1] = cs(&[&fixed(50.5), &int(200), &int(65), &int(194), &[14]]);
+        let d = table(&glyphs);
+        let cff = Cff::parse(&d, 0, d.len(), 1000).unwrap();
+        let t = cff.tagged_outline(&d, 1).unwrap();
+        assert_eq!(t.ends, [3, 6]);
+        assert_eq!(
+            &t.points[3..],
+            [
+                Exact::new(50.5, 200.0),
+                Exact::new(60.5, 200.0),
+                Exact::new(60.5, 210.0)
+            ]
+        );
+        // The path agrees: the base's move, two lines and close, then the
+        // accent's.
+        let o = cff.outline(&d, 1).unwrap();
+        assert_eq!(o.commands[4], PathCmd::MoveTo(pt(50.5, 200.0)));
+        assert_eq!(o.commands[6], PathCmd::LineTo(pt(60.5, 210.0)));
+
+        // A component that is itself composed is malformed, as FreeType has
+        // it -- here the base names itself, which would otherwise recurse.
+        glyphs[34] = cs(&[&int(0), &int(0), &int(65), &int(194), &[14]]);
+        let d = table(&glyphs);
+        let cff = Cff::parse(&d, 0, d.len(), 1000).unwrap();
+        assert_eq!(cff.outline(&d, 1).unwrap_err(), ERR);
+        assert_eq!(cff.tagged_outline(&d, 1).unwrap_err(), ERR);
     }
 
     #[test]
@@ -1643,19 +1831,7 @@ mod tests {
             matrix: None,
         };
         let mut out = Outline::default();
-        let mut interp = Interp {
-            cff: &cff,
-            data: &[],
-            local: None,
-            stack: [0.0; STACK_LIMIT],
-            sp: 0,
-            n_stems: 0,
-            x: 0.0,
-            y: 0.0,
-            open: false,
-            out: &mut out,
-            seac: None,
-        };
+        let mut interp = Interp::new(&cff, &[], None, &mut out, Exact::default());
         // 12 10 is `add`, which this module deliberately does not implement.
         let err = interp.run(&[12, 10], 0).unwrap_err();
         assert_eq!(err, SfntError::CffUnsupported("Type 2 arithmetic operator"));
@@ -1772,19 +1948,7 @@ mod tests {
             matrix: None,
         };
         let mut out = Outline::default();
-        let mut interp = Interp {
-            cff: &cff,
-            data: &[],
-            local: None,
-            stack: [0.0; STACK_LIMIT],
-            sp: 0,
-            n_stems: 0,
-            x: 0.0,
-            y: 0.0,
-            open: false,
-            out: &mut out,
-            seac: None,
-        };
+        let mut interp = Interp::new(&cff, &[], None, &mut out, Exact::default());
         assert_eq!(interp.run(&prog, 0).unwrap_err(), ERR);
         assert!(out.commands.len() <= MAX_COMMANDS + 1);
     }

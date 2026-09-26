@@ -97,9 +97,36 @@ fn the_tables_have_the_shape_bison_declared() {
 
 #[test]
 fn a_timespec_round_trips_through_system_time() {
+    // Every value here is a whole number of 100 ns ticks, because that is the
+    // resolution of the host build's `SystemTime` on Windows (a `FILETIME`);
+    // the nanosecond-exact cases are below, for the targets that have them.
     for t in [
         Timespec::default(),
         NOW,
+        Timespec {
+            tv_sec: 1_623_758_400,
+            tv_nsec: 123_456_700,
+        },
+        Timespec {
+            tv_sec: -1,
+            tv_nsec: 999_999_900,
+        },
+        Timespec {
+            tv_sec: -2,
+            tv_nsec: 500_000_000,
+        },
+    ] {
+        let st = t.to_system_time().unwrap();
+        assert_eq!(Timespec::from_system_time(st), t);
+    }
+}
+
+/// On a `timespec` `SystemTime` -- Linux, and SlateOS -- the round trip is
+/// exact to the nanosecond, which `touch -d` and `find -newermt` rely on.
+#[cfg(unix)]
+#[test]
+fn a_timespec_round_trips_to_the_nanosecond() {
+    for t in [
         Timespec {
             tv_sec: 1_623_758_400,
             tv_nsec: 123_456_789,
@@ -107,10 +134,6 @@ fn a_timespec_round_trips_through_system_time() {
         Timespec {
             tv_sec: -1,
             tv_nsec: 999_999_999,
-        },
-        Timespec {
-            tv_sec: -2,
-            tv_nsec: 500_000_000,
         },
     ] {
         let st = t.to_system_time().unwrap();

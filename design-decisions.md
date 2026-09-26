@@ -81038,3 +81038,17 @@ check was done wrong.
 **Where this bites:** `CLAUDE.md` "Branch Strategy" and `roadmap.md` rule 6
 still state the strict rule; this entry is the exception, cited from each
 publish that uses it.
+
+**Publishes under this rule.**
+
+| date | published | boot | red rungs (owner, tracked by) | on `main` too? | lane A's own |
+|---|---|---|---|---|---|
+| 2026-09-26 | `6fe46eec2` (`d3741b26b` + its boot-history row), `main` fast-forwarded from `d2f434288` | integration, debug, BOOT_OK after 1212 s | `ctest-python-repl` exit 4 (lane D: `execl` passes no environment, `requests/a-d-execv-execvp-execl-execlp-start-the-new-program-with-no-environment.md`); Path-Z CMake exit -8 (lane D: `__cxa_atexit`, `requests/a-d-cxa-atexit-drops-the-object-so-static-destructors-run-on-null.md`) | yes: the REPL rung is worse there (exit 8, no grant), and the `__cxa_atexit` stub is on `main` | 0 -- lockdep 0 real, kshell self_test PASSED (rung 21 included), 21 spawn_ex2 probes OK, no panics |
+
+That push also carried `ALLOW_STALE_RELEASE=1`, and it is recorded here so that
+it is not a silent waiver. The release-staleness gate counted 101
+"kernel-touching" commits against a threshold of 100. Its 101st was the
+boot-history row of the very boot being published: the gate counted `bench/`,
+and 29 of the 101 were boot records. Only 72 touched `kernel/`. The gate now
+excludes records (`6ff91aa8a`), and lane E's release-profile boot of `main` is
+the one that resets the baseline.

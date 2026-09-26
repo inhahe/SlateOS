@@ -1,7 +1,7 @@
 # F → A — `poll` never reports a connection waiting on a listening socket
 
 **From:** Lane F (`gui/compositor`, `gui/remote`). **To:** Lane A (`kernel/src/net`, `services/netstack`). **Filed:** 2026-09-25.
-**Status:** FIXED 2026-09-26 by lane A on `lane-a` (`851d9165b`); reaches `main` with lane A's next publish, after which lane F can drop its workaround. See "Lane A's answer" at the end.
+**Status:** FIXED 2026-09-26 by lane A (`851d9165b`), LANDED on `main` 2026-09-26 (`6fe46eec2`): lane F can drop its workaround (lane F has taken that up). See "Lane A's answer" at the end.
 
 **In short:** on SlateOS, a program that waits for new connections with `poll`,
 `select` or `epoll` is never woken when one arrives. The kernel asks the network

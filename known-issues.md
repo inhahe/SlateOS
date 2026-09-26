@@ -23970,6 +23970,18 @@ Linux 6.6's kernel/futex/ (`SYSCALL_DEFINE6(futex)`, `do_futex`,
 - Beside them, the finding of the pass: `FUTEX_WAIT_BITSET` was `ENOSYS` --
   `B-D-FUTEX-WAIT-BITSET-WAS-ENOSYS` (new, fixed with it).
 
+**Nineteenth pass, 2026-09-26 — `resolv.rs` (5 sites), lane D.** The query
+calls were stubs that checked their arguments and answered `ENOSYS`, and two
+of the checks were inventions: `""` refused as `EINVAL` (it is the root name)
+and `res_send` judging the query's length (glibc judges the answer buffer's,
+after "no nameserver"). So the pass became the resolver --
+`B-D-RES-QUERY-WAS-ENOSYS` (new, fixed with it). Its NULLs now fall where
+glibc's would: a NULL name or answer is `EFAULT` with `h_errno`
+`NETDB_INTERNAL`, since glibc faults; `res_send` makes glibc's two checks
+first (`ESRCH`, then `EINVAL`); `res_mkquery` answers -1, as glibc answers
+its own refusals; and `dn_expand`, `dn_comp` and `dn_skipname` set
+`EMSGSIZE` when they fail, as glibc's do.
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -23983,9 +23995,8 @@ goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 the eleventh pass showed it cannot be retired by sampling: it needs the
 file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
 files — about a dozen of them classified by that pass. Passes twelve to
-eighteen swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`, `sched.rs`,
-`mqueue.rs` and `linux_futex.rs`; next is `resolv.rs` at five, then the
-files at four, in that order.
+nineteen swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`, `sched.rs`,
+`mqueue.rs`, `linux_futex.rs` and `resolv.rs`; next are the files at four.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL
@@ -165846,6 +165857,33 @@ Host tests cover the attribute reading, the layout arithmetic, the table's
 growth and the sentinels; `services/ctest-pthread` checks it all in ring 3,
 once lane A runs it (`requests/d-a-run-the-ctest-pthread-fixture.md`).
 Design choices in `design-decisions.md` §1111.
+
+### [D] B-D-RES-QUERY-WAS-ENOSYS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/resolv.rs`.
+
+**What it was.** `res_query`, `res_search`, `res_mkquery` and `res_send`
+checked their arguments and returned `ENOSYS`: a program looking up anything
+but an address -- a mail exchanger, a service record, a text record -- got
+nothing. `getaddrinfo` works only because the kernel's network stack
+answers address lookups itself (`SYS_DNS_RESOLVE`). Beside them, `dn_comp`
+wrote no compression pointers and ignored its table, `dn_expand` did not
+escape special characters and refused a compression pointer that pointed
+forward, and neither set `errno`.
+
+**Fix.** A resolver: `resolv.conf` read into `_res` (`__res_state()`) as
+glibc reads it; names converted by glibc's `ns_name_*` rules, `dn_comp`
+compressing against its table; `res_mkquery` building glibc's query;
+`res_send` asking every nameserver over UDP, again at intervals, waiting past
+`SERVFAIL`/`NOTIMP`/`REFUSED` as glibc moves past them, and asking again over
+TCP when the answer is truncated -- musl's transport; `res_query` and
+`res_search` reporting through `h_errno` as glibc does. The transport is
+tested against a scripted network; everything else is pure and tested on the
+host.
+
+**What remains.** IPv6 nameservers are read and skipped; `sortlist`, EDNS0,
+`HOSTALIASES` and DNSSEC are not done. Nothing has queried a live server yet:
+that needs a ring-3 fixture against the boot's network.
 
 ### [D] B-D-FUTEX-WAIT-BITSET-WAS-ENOSYS — 2026-09-26 — FIXED 2026-09-26
 

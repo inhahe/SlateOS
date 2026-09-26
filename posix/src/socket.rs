@@ -4405,7 +4405,7 @@ pub extern "C" fn __h_errno_location() -> *mut i32 {
 }
 
 /// Set the calling thread's resolver error.
-fn set_h_errno(val: i32) {
+pub(crate) fn set_h_errno(val: i32) {
     // SAFETY: as in `__h_errno_location`.
     unsafe {
         (*crate::perthread::current()).h_errno = val;
@@ -4414,7 +4414,7 @@ fn set_h_errno(val: i32) {
 
 /// Read the calling thread's resolver error.
 #[must_use]
-fn get_h_errno() -> i32 {
+pub(crate) fn get_h_errno() -> i32 {
     // SAFETY: as in `__h_errno_location`.
     unsafe { (*crate::perthread::current()).h_errno }
 }

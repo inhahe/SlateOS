@@ -1843,6 +1843,10 @@ D's to act on once answered).
     * `futex()`: `FUTEX_WAIT_BITSET`/`FUTEX_WAKE_BITSET`, which Rust's std
       sleeps and wakes with -- they were `ENOSYS`, so every contended Rust
       lock spun -- and Linux's argument order (the eighteenth pass).
+    * the resolver (the nineteenth pass): `res_query`, `res_search`,
+      `res_mkquery`, `res_send` and `res_querydomain` work -- `resolv.conf`
+      into `_res`, glibc's name rules and search, UDP to every nameserver with
+      a TCP fallback -- where they answered `ENOSYS`.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

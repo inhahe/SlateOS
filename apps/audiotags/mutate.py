@@ -653,14 +653,8 @@ MUTATIONS = [
     ),
     (
         "a data chunk's size is believed",
-        "        let bytes = if size == u32::MAX {\n            there\n        } else {\n            u64::from(size).min(there)\n        };",
+        "        let bytes = u64::from(size).min(there);",
         "        let bytes = u64::from(size);",
-        [WAVCUT],
-    ),
-    (
-        "an unknown length is taken as four gigabytes",
-        "        let bytes = if size == u32::MAX {",
-        "        let bytes = if false {",
         [WAVCUT],
     ),
     (

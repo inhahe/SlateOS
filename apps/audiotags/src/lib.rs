@@ -1137,11 +1137,9 @@ fn read_wav<R: Read + Seek>(r: &mut R, len: u64) -> io::Result<(AudioInfo, Tags)
         // and `FFFFFFFF` is a writer that did not know the length when it
         // began, streaming. Either way the sound is what is there.
         let there = len.saturating_sub(at);
-        let bytes = if size == u32::MAX {
-            there
-        } else {
-            u64::from(size).min(there)
-        };
+        // `FFFFFFFF` is larger than any file this reads, so the smaller of it
+        // and what is there is what is there: one rule covers both.
+        let bytes = u64::from(size).min(there);
         if byte_rate > 0 {
             info.duration_secs = seconds(bytes, byte_rate);
             info.bitrate_kbps = Some(kbps_of_bits(byte_rate.saturating_mul(8)));
@@ -1728,10 +1726,11 @@ mod tests {
 
         // An odd-length INFO value takes a pad byte; the chunk after it is
         // still found.
-        let wav = crate::testing::wav(8000, 2, 8, 1, &[(b"INAM", "Odd"), (b"IART", "Even")]);
+        // "Odds" and its NUL are five bytes: a pad byte, and IART after it.
+        let wav = crate::testing::wav(8000, 2, 8, 1, &[(b"INAM", "Odds"), (b"IART", "Even")]);
         let (info, tags) = read_bytes(&wav);
         assert_eq!(info.duration_secs, Some(1.0));
-        assert_eq!(tags.title.as_deref(), Some("Odd"));
+        assert_eq!(tags.title.as_deref(), Some("Odds"));
         assert_eq!(tags.artist.as_deref(), Some("Even"));
 
         let mp3 = crate::testing::mp3(

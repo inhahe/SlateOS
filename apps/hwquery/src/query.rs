@@ -254,8 +254,10 @@ impl Default for SyscallProvider {
 }
 
 impl SyscallProvider {
-    /// A provider reading under `root` instead of `/`. **Tests only.**
-    #[cfg(test)]
+    /// A provider reading under `root` instead of `/`: a fixture tree.
+    /// **Tests only** -- this crate's, and, through the `testing` feature,
+    /// those of the programs that read hardware through it.
+    #[cfg(any(test, feature = "testing"))]
     pub fn at(root: &str) -> Self {
         Self {
             file_cache: HashMap::new(),
@@ -537,7 +539,7 @@ impl SyscallProvider {
 /// One PCI function, from its file under [`SYSDEV_PCI`]: `name` is the
 /// file's name (`BB:DD.F`, which is the address) and `text` what it holds.
 /// `None` for a name that is not an address or a file without both ids.
-pub(crate) fn pci_function(name: &str, text: &str) -> Option<PciDeviceInfo> {
+pub fn pci_function(name: &str, text: &str) -> Option<PciDeviceInfo> {
     let (bus, device, function) = parse_bdf(name)?;
     let fields = key_values(text);
     let hex = |key: &str| {

@@ -1251,6 +1251,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hwquery"
+version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
+
+[[package]]
 name = "iconv"
 version = "0.1.0"
 dependencies = [
@@ -3128,6 +3135,7 @@ dependencies = [
  "appearance",
  "civildate",
  "guitk",
+ "hwquery",
  "oswindow",
  "pathtext",
  "procinfo",

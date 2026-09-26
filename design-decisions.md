@@ -80423,7 +80423,7 @@ input path.
 - ~~**The option to hide windows' titles**~~ -- done the same day, §1401.
 - **A window asking for attention** -- the reference's amber `is-alert`: a window
   cannot yet say it wants attention; that is a field in the window list, lane
-  F's protocol.
+  F's protocol, asked for in `requests/c-f-a-window-cannot-ask-for-attention.md`.
 - **The start orb** -- the reference's round, 64-pixel start button filled with a
   picture.
 

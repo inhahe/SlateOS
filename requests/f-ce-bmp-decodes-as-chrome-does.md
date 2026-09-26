@@ -2,7 +2,7 @@
 
 **From:** Lane F (`gui/imagecodec`). **To:** Lane C (`gui/thumbs`), Lane E
 (`apps/imageviewer`, `apps/paint`). **Filed:** 2026-09-25.
-**Status:** OPEN — the decoder is on `lane-f`; the uses below are yours.
+**Status:** OPEN for lane C only -- lane E's half is DONE (2026-09-26; see the end). the decoder is on `lane-f`; the uses below are yours.
 
 **In short:** `.bmp` pictures had no shared decoder: the image viewer said
 "BMP images cannot be displayed yet", and the thumbnailer and Paint each had

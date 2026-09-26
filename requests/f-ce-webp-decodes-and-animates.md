@@ -3,7 +3,7 @@
 **From:** Lane F (`gui/imagecodec`). **To:** Lane C (`gui/thumbs`), Lane E
 (`apps/imageviewer`, `apps/photomanager`, `apps/explorer`). **Filed:**
 2026-09-25.
-**Status:** OPEN — the decoder is on `lane-f`; the uses below are yours.
+**Status:** OPEN for lane C only -- lane E's half is DONE (2026-09-26; see the end). the decoder is on `lane-f`; the uses below are yours.
 
 **In short:** WebP pictures -- the format browsers save most images in --
 had no decoder here. `imagecodec` now decodes every kind: lossless, lossy (photographs), with transparency,

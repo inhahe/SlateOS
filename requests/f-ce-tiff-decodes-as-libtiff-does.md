@@ -2,7 +2,7 @@
 
 **From:** Lane F (`gui/imagecodec`). **To:** Lane C (`gui/thumbs`), Lane E
 (`apps/imageviewer`, `apps/explorer`, `apps/photomanager`).
-**Filed:** 2026-09-25. **Status:** OPEN — the decoder is on `lane-f`; the
+**Filed:** 2026-09-25. **Status:** OPEN for lane C only -- lane E's half is DONE (2026-09-26; see the end). the decoder is on `lane-f`; the
 follow-ups below are yours.
 
 **In short:** `imagecodec::decode`, `decode_scaled` and `dimensions` now read

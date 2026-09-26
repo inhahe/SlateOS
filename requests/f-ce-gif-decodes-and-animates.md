@@ -3,7 +3,7 @@
 **From:** Lane F (`gui/imagecodec`). **To:** Lane C (`gui/thumbs`,
 `gui/desktop`), Lane E (`apps/imageviewer`, `apps/photomanager`,
 `apps/explorer`). **Filed:** 2026-09-25.
-**Status:** OPEN — the decoder is on `lane-f`; the uses below are yours.
+**Status:** OPEN for lane C only -- lane E's half is DONE (2026-09-26; see the end). the decoder is on `lane-f`; the uses below are yours.
 
 **In short:** GIFs used to show as a plain coloured rectangle in the file
 manager and could not be opened in the image viewer, because nothing decoded

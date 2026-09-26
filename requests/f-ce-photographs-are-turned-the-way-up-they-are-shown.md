@@ -3,7 +3,7 @@
 **From:** Lane F (`gui/imagecodec`). **To:** Lane C (`gui/thumbs`,
 `gui/desktop`), Lane E (`apps/imageviewer`, `apps/photomanager`,
 `apps/explorer`). **Filed:** 2026-09-25.
-**Status:** OPEN — the change is on `lane-f`; the follow-ups below are yours.
+**Status:** OPEN for lane C only -- lane E's half is DONE (2026-09-26; see the end). the change is on `lane-f`; the follow-ups below are yours.
 
 **In short:** a photograph from a phone stores its pixels as the sensor saw
 them and notes, in its EXIF, which way up it belongs. Nothing read that note,

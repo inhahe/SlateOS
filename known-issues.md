@@ -165811,10 +165811,11 @@ waiting to happen.
 `testing` feature on -- which only a dev-dependency turns on -- `store` could
 refuse outright unless a `with_scratch_config` turn is held, panicking with a
 message that names the fix. Every app test that saves would then fail loudly
-the first time it forgot, instead of writing somebody's home. Not filed as a
-request yet: whether a feature-gated panic in a shared crate is acceptable is
-lane C's call, and the six files above should be looked at by whoever owns
-the apps that wrote them first.
+the first time it forgot, instead of writing somebody's home. Asked of lane C
+on 2026-09-26: `requests/e-c-settingsfile-refuses-a-store-outside-a-scratch-config-in-tests.md`
+(whether a feature-gated panic in a shared crate is acceptable is its call).
+The six files above should be looked at by whoever owns the apps that wrote
+them.
 
 **A second defence, per app (2026-09-25, `apps/habits`).** An app can make
 keeping opt-in: `HabitTrackerApp::new`, which every test uses, is backed by
